@@ -2,11 +2,16 @@
 //!
 //! v0.1 ships a typed `QuerySet<T>` that builds an `AND`-joined `WHERE`
 //! clause and compiles to the dialect-neutral `SelectQuery` IR in
-//! `rustango-core`. The dynamic resolver lands in week 5.
+//! `rustango-core`. `UpdateBuilder<T>` mirrors the same shape for `UPDATE`,
+//! and `QuerySet<T>` itself is the input to bulk delete. The dynamic
+//! resolver lands in week 5.
 
 use std::marker::PhantomData;
 
-use rustango_core::{Filter, Model, ModelSchema, Op, QueryError, SelectQuery, SqlValue};
+use rustango_core::{
+    Assignment, DeleteQuery, Filter, Model, ModelSchema, Op, QueryError, SelectQuery, SqlValue,
+    UpdateQuery,
+};
 
 /// A lazy builder for a `SELECT` over `T`.
 ///
@@ -21,6 +26,12 @@ pub struct QuerySet<T: Model> {
 struct RawFilter {
     field: String,
     op: Op,
+    value: SqlValue,
+}
+
+#[derive(Debug, Clone)]
+struct RawAssignment {
+    field: String,
     value: SqlValue,
 }
 
@@ -68,16 +79,86 @@ impl<T: Model> QuerySet<T> {
     /// value's type does not match the field's declared type.
     pub fn compile(self) -> Result<SelectQuery, QueryError> {
         let model: &'static ModelSchema = T::SCHEMA;
-        let filters = self
-            .filters
-            .into_iter()
-            .map(|raw| resolve(model, raw))
-            .collect::<Result<Vec<_>, _>>()?;
+        let filters = resolve_filters(model, self.filters)?;
         Ok(SelectQuery { model, filters })
+    }
+
+    /// Lower this queryset to a `DeleteQuery` — same filters, no projection.
+    ///
+    /// # Errors
+    /// As [`QuerySet::compile`].
+    pub fn compile_delete(self) -> Result<DeleteQuery, QueryError> {
+        let model: &'static ModelSchema = T::SCHEMA;
+        let filters = resolve_filters(model, self.filters)?;
+        Ok(DeleteQuery { model, filters })
+    }
+
+    /// Start an `UpdateBuilder` carrying this queryset's filters as the WHERE clause.
+    #[must_use]
+    pub fn update(self) -> UpdateBuilder<T> {
+        UpdateBuilder {
+            qs: self,
+            set: Vec::new(),
+        }
     }
 }
 
-fn resolve(model: &'static ModelSchema, raw: RawFilter) -> Result<Filter, QueryError> {
+/// Accumulates `SET column = value` assignments, then compiles to an `UpdateQuery`.
+///
+/// Constructed via [`QuerySet::update`]. The queryset's filters become the
+/// WHERE clause; an empty queryset produces an unfiltered update affecting
+/// every row.
+pub struct UpdateBuilder<T: Model> {
+    qs: QuerySet<T>,
+    set: Vec<RawAssignment>,
+}
+
+impl<T: Model> UpdateBuilder<T> {
+    /// Append a `SET field = value` assignment. Last write wins for repeated fields.
+    #[must_use]
+    pub fn set(mut self, field: impl Into<String>, value: impl Into<SqlValue>) -> Self {
+        self.set.push(RawAssignment {
+            field: field.into(),
+            value: value.into(),
+        });
+        self
+    }
+
+    /// Validate against `T::SCHEMA` and lower to an `UpdateQuery`.
+    ///
+    /// # Errors
+    /// Returns [`QueryError::UnknownField`] if any `set` or filter names an
+    /// unknown field, and [`QueryError::TypeMismatch`] if any bound value's
+    /// type doesn't match the field's declared type.
+    pub fn compile(self) -> Result<UpdateQuery, QueryError> {
+        let model: &'static ModelSchema = T::SCHEMA;
+
+        let assignments = self
+            .set
+            .into_iter()
+            .map(|raw| resolve_assignment(model, raw))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let filters = resolve_filters(model, self.qs.filters)?;
+
+        Ok(UpdateQuery {
+            model,
+            set: assignments,
+            filters,
+        })
+    }
+}
+
+fn resolve_filters(
+    model: &'static ModelSchema,
+    raws: Vec<RawFilter>,
+) -> Result<Vec<Filter>, QueryError> {
+    raws.into_iter()
+        .map(|raw| resolve_filter(model, raw))
+        .collect()
+}
+
+fn resolve_filter(model: &'static ModelSchema, raw: RawFilter) -> Result<Filter, QueryError> {
     let field = model
         .field(&raw.field)
         .ok_or_else(|| QueryError::UnknownField {
@@ -106,6 +187,34 @@ fn resolve(model: &'static ModelSchema, raw: RawFilter) -> Result<Filter, QueryE
     Ok(Filter {
         column: field.column,
         op: raw.op,
+        value: raw.value,
+    })
+}
+
+fn resolve_assignment(
+    model: &'static ModelSchema,
+    raw: RawAssignment,
+) -> Result<Assignment, QueryError> {
+    let field = model
+        .field(&raw.field)
+        .ok_or_else(|| QueryError::UnknownField {
+            model: model.name,
+            field: raw.field.clone(),
+        })?;
+
+    if let Some(value_ty) = raw.value.field_type() {
+        if value_ty != field.ty {
+            return Err(QueryError::TypeMismatch {
+                model: model.name,
+                field: raw.field,
+                expected: field.ty,
+                actual: value_ty,
+            });
+        }
+    }
+
+    Ok(Assignment {
+        column: field.column,
         value: raw.value,
     })
 }

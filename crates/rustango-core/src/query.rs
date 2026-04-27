@@ -52,3 +52,31 @@ pub struct InsertQuery {
     pub columns: Vec<&'static str>,
     pub values: Vec<SqlValue>,
 }
+
+/// One `column = value` pair in an `UPDATE ... SET ...` clause.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Assignment {
+    pub column: &'static str,
+    pub value: SqlValue,
+}
+
+/// Compiled `UPDATE`.
+///
+/// `set` are emitted in order before `WHERE`, so their placeholders come first.
+/// An empty `filters` runs an unfiltered update affecting every row — the
+/// caller is responsible for that being intentional.
+#[derive(Debug, Clone)]
+pub struct UpdateQuery {
+    pub model: &'static ModelSchema,
+    pub set: Vec<Assignment>,
+    pub filters: Vec<Filter>,
+}
+
+/// Compiled `DELETE`.
+///
+/// As with `UpdateQuery`, an empty `filters` deletes every row.
+#[derive(Debug, Clone)]
+pub struct DeleteQuery {
+    pub model: &'static ModelSchema,
+    pub filters: Vec<Filter>,
+}

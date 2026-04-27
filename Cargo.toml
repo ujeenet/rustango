@@ -22,7 +22,7 @@ rustango-sql     = { version = "0.1.0", path = "crates/rustango-sql" }
 rustango-migrate = { version = "0.1.0", path = "crates/rustango-migrate" }
 
 # Async runtime
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 
 # DB
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "uuid"] }

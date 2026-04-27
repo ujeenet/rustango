@@ -15,7 +15,7 @@ mod postgres;
 pub use compiled::CompiledStatement;
 pub use dialect::Dialect;
 pub use error::{ExecError, SqlError};
-pub use executor::{insert, Fetcher};
+pub use executor::{delete, insert, update, Deleter, Fetcher, Updater};
 pub use postgres::Postgres;
 
 /// Re-exported so `#[derive(Model)]` output can name `sqlx` types without

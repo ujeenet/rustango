@@ -24,6 +24,10 @@ pub enum SqlError {
     /// `InsertQuery.columns.len() != InsertQuery.values.len()`.
     #[error("INSERT columns ({columns}) and values ({values}) length mismatch")]
     InsertShapeMismatch { columns: usize, values: usize },
+
+    /// `UpdateQuery` had no assignments — `UPDATE ... SET` requires at least one.
+    #[error("UPDATE requires at least one assignment in `set`")]
+    EmptyUpdateSet,
 }
 
 /// Raised while compiling, writing, or executing a query end-to-end.

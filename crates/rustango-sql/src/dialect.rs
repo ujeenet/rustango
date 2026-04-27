@@ -1,6 +1,6 @@
 //! The `Dialect` trait — one implementation per database backend.
 
-use rustango_core::{InsertQuery, SelectQuery};
+use rustango_core::{DeleteQuery, InsertQuery, SelectQuery, UpdateQuery};
 
 use crate::{CompiledStatement, SqlError};
 
@@ -16,6 +16,20 @@ pub trait Dialect {
     /// Lower an `InsertQuery` to a `CompiledStatement` for this dialect.
     ///
     /// # Errors
-    /// Returns [`SqlError::EmptyInsert`] if no columns were supplied.
+    /// Returns [`SqlError::EmptyInsert`] if no columns were supplied, or
+    /// [`SqlError::InsertShapeMismatch`] if `columns` and `values` differ in length.
     fn compile_insert(&self, query: &InsertQuery) -> Result<CompiledStatement, SqlError>;
+
+    /// Lower an `UpdateQuery` to a `CompiledStatement` for this dialect.
+    ///
+    /// # Errors
+    /// Returns [`SqlError::EmptyUpdateSet`] if `set` is empty, or any filter
+    /// error from the WHERE clause.
+    fn compile_update(&self, query: &UpdateQuery) -> Result<CompiledStatement, SqlError>;
+
+    /// Lower a `DeleteQuery` to a `CompiledStatement` for this dialect.
+    ///
+    /// # Errors
+    /// Returns [`SqlError`] for filter-shape errors in the WHERE clause.
+    fn compile_delete(&self, query: &DeleteQuery) -> Result<CompiledStatement, SqlError>;
 }

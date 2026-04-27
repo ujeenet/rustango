@@ -1,6 +1,8 @@
 //! End-to-end check of the `QuerySet` → `SelectQuery` → Postgres SQL pipeline.
 
-use rustango::core::{InsertQuery, Model as _, Op, SqlValue};
+use rustango::core::{
+    Assignment, DeleteQuery, Filter, InsertQuery, Model as _, Op, SqlValue, UpdateQuery,
+};
 use rustango::sql::{Dialect, Postgres, SqlError};
 use rustango::Model;
 
@@ -213,4 +215,205 @@ fn insert_with_mismatched_lengths_is_rejected() {
             values: 2
         }
     ));
+}
+
+// ---------------- UPDATE ----------------
+
+fn eq_filter(column: &'static str, value: SqlValue) -> Filter {
+    Filter {
+        column,
+        op: Op::Eq,
+        value,
+    }
+}
+
+#[test]
+fn update_single_set_no_where_runs_table_wide() {
+    let query = UpdateQuery {
+        model: User::SCHEMA,
+        set: vec![Assignment {
+            column: "is_active",
+            value: SqlValue::Bool(false),
+        }],
+        filters: vec![],
+    };
+    let stmt = pg().compile_update(&query).unwrap();
+    assert_eq!(stmt.sql, r#"UPDATE "user" SET "is_active" = $1"#);
+    assert_eq!(stmt.params, vec![SqlValue::Bool(false)]);
+}
+
+#[test]
+fn update_multi_set_with_where_orders_set_then_filter_placeholders() {
+    let query = UpdateQuery {
+        model: User::SCHEMA,
+        set: vec![
+            Assignment {
+                column: "name",
+                value: SqlValue::String("ALICE".into()),
+            },
+            Assignment {
+                column: "is_active",
+                value: SqlValue::Bool(false),
+            },
+        ],
+        filters: vec![eq_filter("id", SqlValue::I64(7))],
+    };
+    let stmt = pg().compile_update(&query).unwrap();
+    assert_eq!(
+        stmt.sql,
+        r#"UPDATE "user" SET "name" = $1, "is_active" = $2 WHERE "id" = $3"#,
+    );
+    assert_eq!(
+        stmt.params,
+        vec![
+            SqlValue::String("ALICE".into()),
+            SqlValue::Bool(false),
+            SqlValue::I64(7),
+        ],
+    );
+}
+
+#[test]
+fn update_with_multiple_filters_chains_with_and() {
+    let query = UpdateQuery {
+        model: User::SCHEMA,
+        set: vec![Assignment {
+            column: "is_active",
+            value: SqlValue::Bool(true),
+        }],
+        filters: vec![
+            eq_filter("name", SqlValue::String("alice".into())),
+            Filter {
+                column: "id",
+                op: Op::Gt,
+                value: SqlValue::I64(0),
+            },
+        ],
+    };
+    let stmt = pg().compile_update(&query).unwrap();
+    assert_eq!(
+        stmt.sql,
+        r#"UPDATE "user" SET "is_active" = $1 WHERE "name" = $2 AND "id" > $3"#,
+    );
+}
+
+#[test]
+fn update_with_empty_set_is_rejected() {
+    let query = UpdateQuery {
+        model: User::SCHEMA,
+        set: vec![],
+        filters: vec![eq_filter("id", SqlValue::I64(1))],
+    };
+    let err = pg().compile_update(&query).unwrap_err();
+    assert!(matches!(err, SqlError::EmptyUpdateSet));
+}
+
+#[test]
+fn update_propagates_filter_errors() {
+    // `Op::In` with a non-list — same error path that compile_select uses.
+    let query = UpdateQuery {
+        model: User::SCHEMA,
+        set: vec![Assignment {
+            column: "is_active",
+            value: SqlValue::Bool(false),
+        }],
+        filters: vec![Filter {
+            column: "id",
+            op: Op::In,
+            value: SqlValue::I64(1),
+        }],
+    };
+    let err = pg().compile_update(&query).unwrap_err();
+    assert!(matches!(err, SqlError::InRequiresList));
+}
+
+// ---------------- DELETE ----------------
+
+#[test]
+fn delete_with_no_filters_runs_table_wide() {
+    let query = DeleteQuery {
+        model: User::SCHEMA,
+        filters: vec![],
+    };
+    let stmt = pg().compile_delete(&query).unwrap();
+    assert_eq!(stmt.sql, r#"DELETE FROM "user""#);
+    assert!(stmt.params.is_empty());
+}
+
+#[test]
+fn delete_with_single_filter() {
+    let query = DeleteQuery {
+        model: User::SCHEMA,
+        filters: vec![eq_filter("id", SqlValue::I64(42))],
+    };
+    let stmt = pg().compile_delete(&query).unwrap();
+    assert_eq!(stmt.sql, r#"DELETE FROM "user" WHERE "id" = $1"#);
+    assert_eq!(stmt.params, vec![SqlValue::I64(42)]);
+}
+
+#[test]
+fn delete_with_multiple_filters_chains_with_and() {
+    let query = DeleteQuery {
+        model: User::SCHEMA,
+        filters: vec![
+            eq_filter("name", SqlValue::String("alice".into())),
+            eq_filter("is_active", SqlValue::Bool(false)),
+        ],
+    };
+    let stmt = pg().compile_delete(&query).unwrap();
+    assert_eq!(
+        stmt.sql,
+        r#"DELETE FROM "user" WHERE "name" = $1 AND "is_active" = $2"#,
+    );
+    assert_eq!(
+        stmt.params,
+        vec![SqlValue::String("alice".into()), SqlValue::Bool(false)],
+    );
+}
+
+#[test]
+fn delete_with_in_list_expands_placeholders() {
+    let query = DeleteQuery {
+        model: User::SCHEMA,
+        filters: vec![Filter {
+            column: "id",
+            op: Op::In,
+            value: SqlValue::List(vec![SqlValue::I64(1), SqlValue::I64(2), SqlValue::I64(3)]),
+        }],
+    };
+    let stmt = pg().compile_delete(&query).unwrap();
+    assert_eq!(stmt.sql, r#"DELETE FROM "user" WHERE "id" IN ($1, $2, $3)"#);
+    assert_eq!(
+        stmt.params,
+        vec![SqlValue::I64(1), SqlValue::I64(2), SqlValue::I64(3)],
+    );
+}
+
+#[test]
+fn delete_with_is_null_does_not_consume_placeholder() {
+    let query = DeleteQuery {
+        model: User::SCHEMA,
+        filters: vec![Filter {
+            column: "name",
+            op: Op::IsNull,
+            value: SqlValue::Bool(true),
+        }],
+    };
+    let stmt = pg().compile_delete(&query).unwrap();
+    assert_eq!(stmt.sql, r#"DELETE FROM "user" WHERE "name" IS NULL"#);
+    assert!(stmt.params.is_empty());
+}
+
+#[test]
+fn delete_propagates_filter_errors() {
+    let query = DeleteQuery {
+        model: User::SCHEMA,
+        filters: vec![Filter {
+            column: "id",
+            op: Op::In,
+            value: SqlValue::List(vec![]),
+        }],
+    };
+    let err = pg().compile_delete(&query).unwrap_err();
+    assert!(matches!(err, SqlError::EmptyInList));
 }

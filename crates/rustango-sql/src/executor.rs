@@ -1,7 +1,7 @@
 //! Async executor — binds a `CompiledStatement` to sqlx and runs it.
 
-use rustango_core::{InsertQuery, Model, SqlValue};
-use rustango_query::QuerySet;
+use rustango_core::{DeleteQuery, InsertQuery, Model, SqlValue, UpdateQuery};
+use rustango_query::{QuerySet, UpdateBuilder};
 use sqlx::postgres::{PgArguments, PgPool, PgRow};
 use sqlx::query::{Query, QueryAs};
 
@@ -55,6 +55,76 @@ pub async fn insert(pool: &PgPool, query: &InsertQuery) -> Result<(), ExecError>
     }
     q.execute(pool).await?;
     Ok(())
+}
+
+/// Run an `UpdateQuery` against a Postgres pool. Returns rows affected.
+///
+/// # Errors
+/// Returns [`ExecError`] for SQL-writing or driver failures.
+pub async fn update(pool: &PgPool, query: &UpdateQuery) -> Result<u64, ExecError> {
+    let stmt = Postgres.compile_update(query)?;
+    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+    for value in stmt.params {
+        q = bind_query(q, value);
+    }
+    let result = q.execute(pool).await?;
+    Ok(result.rows_affected())
+}
+
+/// Run a `DeleteQuery` against a Postgres pool. Returns rows affected.
+///
+/// # Errors
+/// Returns [`ExecError`] for SQL-writing or driver failures.
+pub async fn delete(pool: &PgPool, query: &DeleteQuery) -> Result<u64, ExecError> {
+    let stmt = Postgres.compile_delete(query)?;
+    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+    for value in stmt.params {
+        q = bind_query(q, value);
+    }
+    let result = q.execute(pool).await?;
+    Ok(result.rows_affected())
+}
+
+/// Extension trait that drives a `QuerySet` to a bulk `DELETE`.
+///
+/// Pulled in via `use rustango::sql::Deleter;`.
+pub trait Deleter<T: Model + Send> {
+    /// Delete every row matching the queryset's filters. Returns rows affected.
+    ///
+    /// # Errors
+    /// Returns [`ExecError`] for schema, SQL-writing, or driver failures.
+    fn delete(
+        self,
+        pool: &PgPool,
+    ) -> impl std::future::Future<Output = Result<u64, ExecError>> + Send;
+}
+
+impl<T: Model + Send> Deleter<T> for QuerySet<T> {
+    async fn delete(self, pool: &PgPool) -> Result<u64, ExecError> {
+        let query = self.compile_delete()?;
+        delete(pool, &query).await
+    }
+}
+
+/// Extension trait that drives an `UpdateBuilder` to a bulk `UPDATE`.
+///
+/// Pulled in via `use rustango::sql::Updater;`.
+pub trait Updater<T: Model + Send> {
+    /// Compile and execute the update. Returns rows affected.
+    ///
+    /// # Errors
+    /// Returns [`ExecError`] for schema, SQL-writing, or driver failures.
+    fn execute(
+        self,
+        pool: &PgPool,
+    ) -> impl std::future::Future<Output = Result<u64, ExecError>> + Send;
+}
+
+impl<T: Model + Send> Updater<T> for UpdateBuilder<T> {
+    async fn execute(self, pool: &PgPool) -> Result<u64, ExecError> {
+        let query = self.compile()?;
+        update(pool, &query).await
+    }
 }
 
 /// Match on `SqlValue` and bind to a sqlx query builder. Used twice below for

@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use rustango_core::{Filter, InsertQuery, Op, SelectQuery, SqlValue};
+use rustango_core::{DeleteQuery, Filter, InsertQuery, Op, SelectQuery, SqlValue, UpdateQuery};
 
 use crate::{CompiledStatement, Dialect, SqlError};
 
@@ -30,17 +30,7 @@ impl Dialect for Postgres {
         sql.push_str(" FROM ");
         write_ident(&mut sql, query.model.table);
 
-        if !query.filters.is_empty() {
-            sql.push_str(" WHERE ");
-            let mut first_filter = true;
-            for filter in &query.filters {
-                if !first_filter {
-                    sql.push_str(" AND ");
-                }
-                first_filter = false;
-                write_filter(&mut sql, &mut params, filter)?;
-            }
-        }
+        write_where(&mut sql, &mut params, &query.filters)?;
 
         Ok(CompiledStatement { sql, params })
     }
@@ -84,6 +74,62 @@ impl Dialect for Postgres {
 
         Ok(CompiledStatement { sql, params })
     }
+
+    fn compile_update(&self, query: &UpdateQuery) -> Result<CompiledStatement, SqlError> {
+        if query.set.is_empty() {
+            return Err(SqlError::EmptyUpdateSet);
+        }
+
+        let mut sql = String::from("UPDATE ");
+        let mut params: Vec<SqlValue> = Vec::new();
+        write_ident(&mut sql, query.model.table);
+        sql.push_str(" SET ");
+
+        let mut first = true;
+        for assignment in &query.set {
+            if !first {
+                sql.push_str(", ");
+            }
+            first = false;
+            write_ident(&mut sql, assignment.column);
+            sql.push_str(" = ");
+            push_param(&mut sql, &mut params, assignment.value.clone());
+        }
+
+        write_where(&mut sql, &mut params, &query.filters)?;
+
+        Ok(CompiledStatement { sql, params })
+    }
+
+    fn compile_delete(&self, query: &DeleteQuery) -> Result<CompiledStatement, SqlError> {
+        let mut sql = String::from("DELETE FROM ");
+        let mut params: Vec<SqlValue> = Vec::new();
+        write_ident(&mut sql, query.model.table);
+
+        write_where(&mut sql, &mut params, &query.filters)?;
+
+        Ok(CompiledStatement { sql, params })
+    }
+}
+
+fn write_where(
+    sql: &mut String,
+    params: &mut Vec<SqlValue>,
+    filters: &[Filter],
+) -> Result<(), SqlError> {
+    if filters.is_empty() {
+        return Ok(());
+    }
+    sql.push_str(" WHERE ");
+    let mut first = true;
+    for filter in filters {
+        if !first {
+            sql.push_str(" AND ");
+        }
+        first = false;
+        write_filter(sql, params, filter)?;
+    }
+    Ok(())
 }
 
 fn write_filter(

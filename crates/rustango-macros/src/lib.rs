@@ -43,25 +43,80 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         parse_container_attrs(input)?.unwrap_or_else(|| to_snake_case(&struct_name.to_string()));
     let model_name = struct_name.to_string();
 
-    let mut field_schemas: Vec<TokenStream2> = Vec::with_capacity(named.named.len());
-    let mut from_row_inits: Vec<TokenStream2> = Vec::with_capacity(named.named.len());
-    let mut insert_columns: Vec<TokenStream2> = Vec::with_capacity(named.named.len());
-    let mut insert_values: Vec<TokenStream2> = Vec::with_capacity(named.named.len());
+    let collected = collect_fields(named)?;
+
+    let model_impl = model_impl_tokens(struct_name, &model_name, &table, &collected.field_schemas);
+    let inherent_impl = inherent_impl_tokens(
+        struct_name,
+        &collected.insert_columns,
+        &collected.insert_values,
+        collected.primary_key.as_ref(),
+    );
+    let from_row_impl = from_row_impl_tokens(struct_name, &collected.from_row_inits);
+
+    Ok(quote! {
+        #model_impl
+        #inherent_impl
+        #from_row_impl
+
+        ::rustango::core::inventory::submit! {
+            ::rustango::core::ModelEntry {
+                schema: <#struct_name as ::rustango::core::Model>::SCHEMA,
+            }
+        }
+    })
+}
+
+struct CollectedFields {
+    field_schemas: Vec<TokenStream2>,
+    from_row_inits: Vec<TokenStream2>,
+    insert_columns: Vec<TokenStream2>,
+    insert_values: Vec<TokenStream2>,
+    primary_key: Option<(syn::Ident, String)>,
+}
+
+fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
+    let cap = named.named.len();
+    let mut out = CollectedFields {
+        field_schemas: Vec::with_capacity(cap),
+        from_row_inits: Vec::with_capacity(cap),
+        insert_columns: Vec::with_capacity(cap),
+        insert_values: Vec::with_capacity(cap),
+        primary_key: None,
+    };
+
     for field in &named.named {
         let info = process_field(field)?;
-        field_schemas.push(info.schema);
-        from_row_inits.push(info.from_row_init);
-        let column = &info.column;
+        out.field_schemas.push(info.schema);
+        out.from_row_inits.push(info.from_row_init);
+        let column = info.column.as_str();
         let ident = info.ident;
-        insert_columns.push(quote!(#column));
-        insert_values.push(quote! {
+        out.insert_columns.push(quote!(#column));
+        out.insert_values.push(quote! {
             ::core::convert::Into::<::rustango::core::SqlValue>::into(
                 ::core::clone::Clone::clone(&self.#ident)
             )
         });
+        if info.primary_key {
+            if out.primary_key.is_some() {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "only one field may be marked `#[rustango(primary_key)]`",
+                ));
+            }
+            out.primary_key = Some((ident.clone(), info.column.clone()));
+        }
     }
+    Ok(out)
+}
 
-    Ok(quote! {
+fn model_impl_tokens(
+    struct_name: &syn::Ident,
+    model_name: &str,
+    table: &str,
+    field_schemas: &[TokenStream2],
+) -> TokenStream2 {
+    quote! {
         impl ::rustango::core::Model for #struct_name {
             const SCHEMA: &'static ::rustango::core::ModelSchema = &::rustango::core::ModelSchema {
                 name: #model_name,
@@ -69,7 +124,47 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 fields: &[ #(#field_schemas),* ],
             };
         }
+    }
+}
 
+fn inherent_impl_tokens(
+    struct_name: &syn::Ident,
+    insert_columns: &[TokenStream2],
+    insert_values: &[TokenStream2],
+    primary_key: Option<&(syn::Ident, String)>,
+) -> TokenStream2 {
+    let pk_methods = primary_key.map(|(pk_ident, pk_column)| {
+        let pk_column_lit = pk_column.as_str();
+        quote! {
+            /// Delete the row identified by this instance's primary key.
+            ///
+            /// Returns the number of rows affected (0 or 1).
+            ///
+            /// # Errors
+            /// Returns [`::rustango::sql::ExecError`] for SQL-writing or
+            /// driver failures.
+            pub async fn delete(
+                &self,
+                pool: &::rustango::sql::sqlx::PgPool,
+            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                let query = ::rustango::core::DeleteQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    filters: ::std::vec![
+                        ::rustango::core::Filter {
+                            column: #pk_column_lit,
+                            op: ::rustango::core::Op::Eq,
+                            value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
+                            ),
+                        }
+                    ],
+                };
+                ::rustango::sql::delete(pool, &query).await
+            }
+        }
+    });
+
+    quote! {
         impl #struct_name {
             /// Start a new `QuerySet` over this model.
             #[must_use]
@@ -93,8 +188,14 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 };
                 ::rustango::sql::insert(pool, &query).await
             }
-        }
 
+            #pk_methods
+        }
+    }
+}
+
+fn from_row_impl_tokens(struct_name: &syn::Ident, from_row_inits: &[TokenStream2]) -> TokenStream2 {
+    quote! {
         impl<'r> ::rustango::sql::sqlx::FromRow<'r, ::rustango::sql::sqlx::postgres::PgRow>
             for #struct_name
         {
@@ -106,13 +207,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 })
             }
         }
-
-        ::rustango::core::inventory::submit! {
-            ::rustango::core::ModelEntry {
-                schema: <#struct_name as ::rustango::core::Model>::SCHEMA,
-            }
-        }
-    })
+    }
 }
 
 fn parse_container_attrs(input: &DeriveInput) -> syn::Result<Option<String>> {
@@ -187,6 +282,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
 struct FieldInfo<'a> {
     ident: &'a syn::Ident,
     column: String,
+    primary_key: bool,
     schema: TokenStream2,
     from_row_init: TokenStream2,
 }
@@ -222,6 +318,7 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
     Ok(FieldInfo {
         ident,
         column,
+        primary_key,
         schema,
         from_row_init,
     })
