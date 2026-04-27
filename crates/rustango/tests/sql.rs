@@ -1,6 +1,6 @@
 //! End-to-end check of the `QuerySet` → `SelectQuery` → Postgres SQL pipeline.
 
-use rustango::core::{Op, SqlValue};
+use rustango::core::{InsertQuery, Model as _, Op, SqlValue};
 use rustango::sql::{Dialect, Postgres, SqlError};
 use rustango::Model;
 
@@ -159,4 +159,58 @@ fn is_null_with_non_bool_is_rejected() {
         )
         .unwrap_err();
     assert!(matches!(err, SqlError::IsNullRequiresBool));
+}
+
+#[test]
+fn insert_emits_columns_and_placeholders() {
+    let query = InsertQuery {
+        model: User::SCHEMA,
+        columns: vec!["id", "name", "is_active"],
+        values: vec![
+            SqlValue::I64(7),
+            SqlValue::String("alice".into()),
+            SqlValue::Bool(true),
+        ],
+    };
+    let stmt = pg().compile_insert(&query).unwrap();
+    assert_eq!(
+        stmt.sql,
+        r#"INSERT INTO "user" ("id", "name", "is_active") VALUES ($1, $2, $3)"#,
+    );
+    assert_eq!(
+        stmt.params,
+        vec![
+            SqlValue::I64(7),
+            SqlValue::String("alice".into()),
+            SqlValue::Bool(true),
+        ],
+    );
+}
+
+#[test]
+fn insert_with_no_columns_is_rejected() {
+    let query = InsertQuery {
+        model: User::SCHEMA,
+        columns: vec![],
+        values: vec![],
+    };
+    let err = pg().compile_insert(&query).unwrap_err();
+    assert!(matches!(err, SqlError::EmptyInsert));
+}
+
+#[test]
+fn insert_with_mismatched_lengths_is_rejected() {
+    let query = InsertQuery {
+        model: User::SCHEMA,
+        columns: vec!["id"],
+        values: vec![SqlValue::I64(1), SqlValue::I64(2)],
+    };
+    let err = pg().compile_insert(&query).unwrap_err();
+    assert!(matches!(
+        err,
+        SqlError::InsertShapeMismatch {
+            columns: 1,
+            values: 2
+        }
+    ));
 }

@@ -45,13 +45,28 @@ async fn end_to_end_pipeline_against_postgres() {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO rustango_live_user (id, user_name, is_active) \
-         VALUES (1, 'alice', true), (2, 'bob', false), (3, 'carol', true)",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+
+    // Seed three rows via the derive-generated `insert()` rather than raw SQL —
+    // exercises the write path, the FromRow path follows on read.
+    for user in [
+        LiveUser {
+            id: 1,
+            name: "alice".into(),
+            is_active: true,
+        },
+        LiveUser {
+            id: 2,
+            name: "bob".into(),
+            is_active: false,
+        },
+        LiveUser {
+            id: 3,
+            name: "carol".into(),
+            is_active: true,
+        },
+    ] {
+        user.insert(&pool).await.unwrap();
+    }
 
     // 1. Equality filter — pulls active users.
     let actives: Vec<LiveUser> = LiveUser::objects()

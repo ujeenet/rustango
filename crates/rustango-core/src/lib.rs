@@ -11,7 +11,7 @@ mod value;
 
 pub use error::QueryError;
 pub use field_type::FieldType;
-pub use query::{Filter, Op, SelectQuery};
+pub use query::{Filter, InsertQuery, Op, SelectQuery};
 pub use schema::{FieldSchema, Model, ModelEntry, ModelSchema, Relation};
 pub use value::SqlValue;
 

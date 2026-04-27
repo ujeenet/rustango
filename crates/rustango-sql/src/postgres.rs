@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use rustango_core::{Filter, Op, SelectQuery, SqlValue};
+use rustango_core::{Filter, InsertQuery, Op, SelectQuery, SqlValue};
 
 use crate::{CompiledStatement, Dialect, SqlError};
 
@@ -41,6 +41,46 @@ impl Dialect for Postgres {
                 write_filter(&mut sql, &mut params, filter)?;
             }
         }
+
+        Ok(CompiledStatement { sql, params })
+    }
+
+    fn compile_insert(&self, query: &InsertQuery) -> Result<CompiledStatement, SqlError> {
+        if query.columns.is_empty() {
+            return Err(SqlError::EmptyInsert);
+        }
+        if query.columns.len() != query.values.len() {
+            return Err(SqlError::InsertShapeMismatch {
+                columns: query.columns.len(),
+                values: query.values.len(),
+            });
+        }
+
+        let mut sql = String::new();
+        let mut params: Vec<SqlValue> = Vec::with_capacity(query.values.len());
+
+        sql.push_str("INSERT INTO ");
+        write_ident(&mut sql, query.model.table);
+
+        sql.push_str(" (");
+        let mut first = true;
+        for col in &query.columns {
+            if !first {
+                sql.push_str(", ");
+            }
+            first = false;
+            write_ident(&mut sql, col);
+        }
+        sql.push_str(") VALUES (");
+        let mut first = true;
+        for value in &query.values {
+            if !first {
+                sql.push_str(", ");
+            }
+            first = false;
+            push_param(&mut sql, &mut params, value.clone());
+        }
+        sql.push(')');
 
         Ok(CompiledStatement { sql, params })
     }

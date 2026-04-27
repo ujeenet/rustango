@@ -45,10 +45,20 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
     let mut field_schemas: Vec<TokenStream2> = Vec::with_capacity(named.named.len());
     let mut from_row_inits: Vec<TokenStream2> = Vec::with_capacity(named.named.len());
+    let mut insert_columns: Vec<TokenStream2> = Vec::with_capacity(named.named.len());
+    let mut insert_values: Vec<TokenStream2> = Vec::with_capacity(named.named.len());
     for field in &named.named {
-        let (schema, init) = process_field(field)?;
-        field_schemas.push(schema);
-        from_row_inits.push(init);
+        let info = process_field(field)?;
+        field_schemas.push(info.schema);
+        from_row_inits.push(info.from_row_init);
+        let column = &info.column;
+        let ident = info.ident;
+        insert_columns.push(quote!(#column));
+        insert_values.push(quote! {
+            ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                ::core::clone::Clone::clone(&self.#ident)
+            )
+        });
     }
 
     Ok(quote! {
@@ -65,6 +75,23 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             #[must_use]
             pub fn objects() -> ::rustango::query::QuerySet<#struct_name> {
                 ::rustango::query::QuerySet::new()
+            }
+
+            /// Insert this row into its table.
+            ///
+            /// # Errors
+            /// Returns [`::rustango::sql::ExecError`] for SQL-writing or
+            /// driver failures.
+            pub async fn insert(
+                &self,
+                pool: &::rustango::sql::sqlx::PgPool,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                let query = ::rustango::core::InsertQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    columns: ::std::vec![ #( #insert_columns ),* ],
+                    values: ::std::vec![ #( #insert_values ),* ],
+                };
+                ::rustango::sql::insert(pool, &query).await
             }
         }
 
@@ -157,8 +184,14 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
     Ok(out)
 }
 
-/// Emit `(field_schema, from_row_init)` for a single struct field.
-fn process_field(field: &syn::Field) -> syn::Result<(TokenStream2, TokenStream2)> {
+struct FieldInfo<'a> {
+    ident: &'a syn::Ident,
+    column: String,
+    schema: TokenStream2,
+    from_row_init: TokenStream2,
+}
+
+fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
     let attrs = parse_field_attrs(field)?;
     let ident = field
         .ident
@@ -169,11 +202,12 @@ fn process_field(field: &syn::Field) -> syn::Result<(TokenStream2, TokenStream2)
     let primary_key = attrs.primary_key;
     let (ty_tokens, nullable) = detect_type(&field.ty)?;
     let relation = relation_tokens(field, &attrs)?;
+    let column_lit = column.as_str();
 
     let schema = quote! {
         ::rustango::core::FieldSchema {
             name: #name,
-            column: #column,
+            column: #column_lit,
             ty: #ty_tokens,
             nullable: #nullable,
             primary_key: #primary_key,
@@ -181,11 +215,16 @@ fn process_field(field: &syn::Field) -> syn::Result<(TokenStream2, TokenStream2)
         }
     };
 
-    let init = quote! {
-        #ident: ::rustango::sql::sqlx::Row::try_get(row, #column)?
+    let from_row_init = quote! {
+        #ident: ::rustango::sql::sqlx::Row::try_get(row, #column_lit)?
     };
 
-    Ok((schema, init))
+    Ok(FieldInfo {
+        ident,
+        column,
+        schema,
+        from_row_init,
+    })
 }
 
 fn relation_tokens(field: &syn::Field, attrs: &FieldAttrs) -> syn::Result<TokenStream2> {

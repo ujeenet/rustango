@@ -16,6 +16,14 @@ pub enum SqlError {
     /// `Op::In` with an empty list — Postgres does not accept `IN ()`.
     #[error("empty `IN` list is not supported")]
     EmptyInList,
+
+    /// `InsertQuery` had no columns — Postgres does not accept zero-column inserts.
+    #[error("INSERT requires at least one column")]
+    EmptyInsert,
+
+    /// `InsertQuery.columns.len() != InsertQuery.values.len()`.
+    #[error("INSERT columns ({columns}) and values ({values}) length mismatch")]
+    InsertShapeMismatch { columns: usize, values: usize },
 }
 
 /// Raised while compiling, writing, or executing a query end-to-end.
