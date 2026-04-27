@@ -1,0 +1,12 @@
+//! rustango — a Django-inspired ORM for Rust.
+//!
+//! v0.1 status: scaffolding only. See the workspace plan for milestones.
+
+pub use rustango_core as core;
+pub use rustango_macros as macros;
+pub use rustango_migrate as migrate;
+pub use rustango_query as query;
+pub use rustango_sql as sql;
+
+/// `#[derive(Model)]` — see [`macros`] for the supported attributes.
+pub use rustango_macros::Model;
