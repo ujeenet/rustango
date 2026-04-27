@@ -20,6 +20,7 @@ rustango-macros  = { version = "0.1.0", path = "crates/rustango-macros" }
 rustango-query   = { version = "0.1.0", path = "crates/rustango-query" }
 rustango-sql     = { version = "0.1.0", path = "crates/rustango-sql" }
 rustango-migrate = { version = "0.1.0", path = "crates/rustango-migrate" }
+rustango-admin   = { version = "0.1.0", path = "crates/rustango-admin" }
 
 # Async runtime
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
@@ -41,6 +42,11 @@ uuid   = { version = "1", features = ["serde", "v4"] }
 
 # Errors
 thiserror = "1"
+
+# Admin (HTTP)
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 # Macro deps
 syn          = { version = "2", features = ["full", "extra-traits"] }

@@ -1,0 +1,24 @@
+[package]
+name = "rustango-admin"
+description = "Auto-generated CRUD admin UI for rustango models, served via axum."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rustango-core    = { workspace = true }
+rustango-sql     = { workspace = true }
+rustango-migrate = { workspace = true }
+axum             = { workspace = true }
+chrono           = { workspace = true }
+uuid             = { workspace = true }
+serde_json       = { workspace = true }
