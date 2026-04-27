@@ -45,9 +45,13 @@ where
 
 /// Run an `InsertQuery` against a Postgres pool.
 ///
+/// Validates each value against the declared field bounds (`max_length`,
+/// `min`, `max`) before opening the connection.
+///
 /// # Errors
-/// Returns [`ExecError`] for SQL-writing or driver failures.
+/// Returns [`ExecError`] for validation, SQL-writing, or driver failures.
 pub async fn insert(pool: &PgPool, query: &InsertQuery) -> Result<(), ExecError> {
+    query.validate()?;
     let stmt = Postgres.compile_insert(query)?;
     let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
     for value in stmt.params {
@@ -59,9 +63,13 @@ pub async fn insert(pool: &PgPool, query: &InsertQuery) -> Result<(), ExecError>
 
 /// Run an `UpdateQuery` against a Postgres pool. Returns rows affected.
 ///
+/// Validates each `SET` value against the declared field bounds before
+/// opening the connection.
+///
 /// # Errors
-/// Returns [`ExecError`] for SQL-writing or driver failures.
+/// Returns [`ExecError`] for validation, SQL-writing, or driver failures.
 pub async fn update(pool: &PgPool, query: &UpdateQuery) -> Result<u64, ExecError> {
+    query.validate()?;
     let stmt = Postgres.compile_update(query)?;
     let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
     for value in stmt.params {

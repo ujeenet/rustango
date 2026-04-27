@@ -234,6 +234,9 @@ struct FieldAttrs {
     fk: Option<String>,
     o2o: Option<String>,
     on: Option<String>,
+    max_length: Option<u32>,
+    min: Option<i64>,
+    max: Option<i64>,
 }
 
 fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
@@ -243,6 +246,9 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         fk: None,
         o2o: None,
         on: None,
+        max_length: None,
+        min: None,
+        max: None,
     };
     for attr in &field.attrs {
         if !attr.path().is_ident("rustango") {
@@ -273,10 +279,54 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 out.on = Some(s.value());
                 return Ok(());
             }
+            if meta.path.is_ident("max_length") {
+                let lit: syn::LitInt = meta.value()?.parse()?;
+                out.max_length = Some(lit.base10_parse::<u32>()?);
+                return Ok(());
+            }
+            if meta.path.is_ident("min") {
+                out.min = Some(parse_signed_i64(&meta)?);
+                return Ok(());
+            }
+            if meta.path.is_ident("max") {
+                out.max = Some(parse_signed_i64(&meta)?);
+                return Ok(());
+            }
             Err(meta.error("unknown rustango field attribute"))
         })?;
     }
     Ok(out)
+}
+
+/// Parse a signed integer literal, accepting optional leading `-`.
+fn parse_signed_i64(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<i64> {
+    let expr: syn::Expr = meta.value()?.parse()?;
+    match expr {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Int(lit),
+            ..
+        }) => lit.base10_parse::<i64>(),
+        syn::Expr::Unary(syn::ExprUnary {
+            op: syn::UnOp::Neg(_),
+            expr,
+            ..
+        }) => {
+            if let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Int(lit),
+                ..
+            }) = *expr
+            {
+                let v: i64 = lit.base10_parse()?;
+                Ok(-v)
+            } else {
+                Err(syn::Error::new_spanned(expr, "expected integer literal"))
+            }
+        }
+        other => Err(syn::Error::new_spanned(
+            other,
+            "expected integer literal (signed)",
+        )),
+    }
 }
 
 struct FieldInfo<'a> {
@@ -296,9 +346,14 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
     let name = ident.to_string();
     let column = attrs.column.clone().unwrap_or_else(|| name.clone());
     let primary_key = attrs.primary_key;
-    let (ty_tokens, nullable) = detect_type(&field.ty)?;
+    let (kind, nullable) = detect_type(&field.ty)?;
+    check_bound_compatibility(field, &attrs, kind)?;
     let relation = relation_tokens(field, &attrs)?;
     let column_lit = column.as_str();
+    let ty_tokens = kind.variant_tokens();
+    let max_length = optional_u32(attrs.max_length);
+    let min = optional_i64(attrs.min);
+    let max = optional_i64(attrs.max);
 
     let schema = quote! {
         ::rustango::core::FieldSchema {
@@ -308,6 +363,9 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
             nullable: #nullable,
             primary_key: #primary_key,
             relation: #relation,
+            max_length: #max_length,
+            min: #min,
+            max: #max,
         }
     };
 
@@ -322,6 +380,50 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
         schema,
         from_row_init,
     })
+}
+
+fn check_bound_compatibility(
+    field: &syn::Field,
+    attrs: &FieldAttrs,
+    kind: DetectedKind,
+) -> syn::Result<()> {
+    if attrs.max_length.is_some() && kind != DetectedKind::String {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`max_length` is only valid on `String` fields (or `Option<String>`)",
+        ));
+    }
+    if (attrs.min.is_some() || attrs.max.is_some()) && !kind.is_integer() {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`min` / `max` are only valid on integer fields (`i32`, `i64`, optionally Option-wrapped)",
+        ));
+    }
+    if let (Some(min), Some(max)) = (attrs.min, attrs.max) {
+        if min > max {
+            return Err(syn::Error::new_spanned(
+                field,
+                format!("`min` ({min}) is greater than `max` ({max})"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn optional_u32(value: Option<u32>) -> TokenStream2 {
+    if let Some(v) = value {
+        quote!(::core::option::Option::Some(#v))
+    } else {
+        quote!(::core::option::Option::None)
+    }
+}
+
+fn optional_i64(value: Option<i64>) -> TokenStream2 {
+    if let Some(v) = value {
+        quote!(::core::option::Option::Some(#v))
+    } else {
+        quote!(::core::option::Option::None)
+    }
 }
 
 fn relation_tokens(field: &syn::Field, attrs: &FieldAttrs) -> syn::Result<TokenStream2> {
@@ -354,7 +456,45 @@ fn relation_tokens(field: &syn::Field, attrs: &FieldAttrs) -> syn::Result<TokenS
     }
 }
 
-fn detect_type(ty: &Type) -> syn::Result<(TokenStream2, bool)> {
+/// Mirrors `rustango_core::FieldType`. Local copy so the macro can reason
+/// about kinds without depending on `rustango-core` (which would require a
+/// proc-macro/normal split it doesn't have today).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DetectedKind {
+    I32,
+    I64,
+    F32,
+    F64,
+    Bool,
+    String,
+    DateTime,
+    Date,
+    Uuid,
+    Json,
+}
+
+impl DetectedKind {
+    fn variant_tokens(self) -> TokenStream2 {
+        match self {
+            Self::I32 => quote!(::rustango::core::FieldType::I32),
+            Self::I64 => quote!(::rustango::core::FieldType::I64),
+            Self::F32 => quote!(::rustango::core::FieldType::F32),
+            Self::F64 => quote!(::rustango::core::FieldType::F64),
+            Self::Bool => quote!(::rustango::core::FieldType::Bool),
+            Self::String => quote!(::rustango::core::FieldType::String),
+            Self::DateTime => quote!(::rustango::core::FieldType::DateTime),
+            Self::Date => quote!(::rustango::core::FieldType::Date),
+            Self::Uuid => quote!(::rustango::core::FieldType::Uuid),
+            Self::Json => quote!(::rustango::core::FieldType::Json),
+        }
+    }
+
+    fn is_integer(self) -> bool {
+        matches!(self, Self::I32 | Self::I64)
+    }
+}
+
+fn detect_type(ty: &Type) -> syn::Result<(DetectedKind, bool)> {
     let Type::Path(TypePath { path, qself: None }) = ty else {
         return Err(syn::Error::new_spanned(ty, "unsupported field type"));
     };
@@ -378,27 +518,27 @@ fn detect_type(ty: &Type) -> syn::Result<(TokenStream2, bool)> {
                 _ => None,
             })
             .ok_or_else(|| syn::Error::new_spanned(ty, "Option<T> requires a type argument"))?;
-        let (variant, already_nullable) = detect_type(inner)?;
+        let (kind, already_nullable) = detect_type(inner)?;
         if already_nullable {
             return Err(syn::Error::new_spanned(
                 ty,
                 "nested Option is not supported",
             ));
         }
-        return Ok((variant, true));
+        return Ok((kind, true));
     }
 
-    let variant = match last.ident.to_string().as_str() {
-        "i32" => quote!(::rustango::core::FieldType::I32),
-        "i64" => quote!(::rustango::core::FieldType::I64),
-        "f32" => quote!(::rustango::core::FieldType::F32),
-        "f64" => quote!(::rustango::core::FieldType::F64),
-        "bool" => quote!(::rustango::core::FieldType::Bool),
-        "String" => quote!(::rustango::core::FieldType::String),
-        "DateTime" => quote!(::rustango::core::FieldType::DateTime),
-        "NaiveDate" => quote!(::rustango::core::FieldType::Date),
-        "Uuid" => quote!(::rustango::core::FieldType::Uuid),
-        "Value" => quote!(::rustango::core::FieldType::Json),
+    let kind = match last.ident.to_string().as_str() {
+        "i32" => DetectedKind::I32,
+        "i64" => DetectedKind::I64,
+        "f32" => DetectedKind::F32,
+        "f64" => DetectedKind::F64,
+        "bool" => DetectedKind::Bool,
+        "String" => DetectedKind::String,
+        "DateTime" => DetectedKind::DateTime,
+        "NaiveDate" => DetectedKind::Date,
+        "Uuid" => DetectedKind::Uuid,
+        "Value" => DetectedKind::Json,
         other => {
             return Err(syn::Error::new_spanned(
                 ty,
@@ -406,7 +546,7 @@ fn detect_type(ty: &Type) -> syn::Result<(TokenStream2, bool)> {
             ));
         }
     };
-    Ok((variant, false))
+    Ok((kind, false))
 }
 
 fn to_snake_case(s: &str) -> String {

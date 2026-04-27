@@ -4,7 +4,7 @@
 //! The SQL crate then walks that IR and writes a parameterized statement
 //! per dialect. Anything in this module is therefore visible to both.
 
-use crate::{ModelSchema, SqlValue};
+use crate::{validate::validate_value, ModelSchema, QueryError, SqlValue};
 
 /// Comparison operator on a single column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +53,29 @@ pub struct InsertQuery {
     pub values: Vec<SqlValue>,
 }
 
+impl InsertQuery {
+    /// Walk each `(column, value)` pair and check it against the field's
+    /// declared bounds (`max_length`, `min`, `max`).
+    ///
+    /// # Errors
+    /// Returns [`QueryError::MaxLengthExceeded`] or [`QueryError::OutOfRange`]
+    /// for any violating value, or [`QueryError::UnknownField`] if a column
+    /// in the IR doesn't correspond to any field in `model`.
+    pub fn validate(&self) -> Result<(), QueryError> {
+        for (column, value) in self.columns.iter().zip(self.values.iter()) {
+            let field =
+                self.model
+                    .field_by_column(column)
+                    .ok_or_else(|| QueryError::UnknownField {
+                        model: self.model.name,
+                        field: (*column).to_owned(),
+                    })?;
+            validate_value(self.model.name, field, value)?;
+        }
+        Ok(())
+    }
+}
+
 /// One `column = value` pair in an `UPDATE ... SET ...` clause.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
@@ -70,6 +93,28 @@ pub struct UpdateQuery {
     pub model: &'static ModelSchema,
     pub set: Vec<Assignment>,
     pub filters: Vec<Filter>,
+}
+
+impl UpdateQuery {
+    /// Walk each `SET column = value` and check it against the field's
+    /// declared bounds. Filters are not checked — they compare against
+    /// existing rows, not write targets.
+    ///
+    /// # Errors
+    /// As [`InsertQuery::validate`].
+    pub fn validate(&self) -> Result<(), QueryError> {
+        for assignment in &self.set {
+            let field = self
+                .model
+                .field_by_column(assignment.column)
+                .ok_or_else(|| QueryError::UnknownField {
+                    model: self.model.name,
+                    field: assignment.column.to_owned(),
+                })?;
+            validate_value(self.model.name, field, &assignment.value)?;
+        }
+        Ok(())
+    }
 }
 
 /// Compiled `DELETE`.

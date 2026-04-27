@@ -15,4 +15,23 @@ pub enum QueryError {
         expected: FieldType,
         actual: FieldType,
     },
+
+    #[error("field `{model}.{field}` exceeds max_length {max} (got {actual})")]
+    MaxLengthExceeded {
+        model: &'static str,
+        field: String,
+        max: u32,
+        actual: u32,
+    },
+
+    #[error(
+        "field `{model}.{field}` value {value} is out of range (min = {min:?}, max = {max:?})"
+    )]
+    OutOfRange {
+        model: &'static str,
+        field: String,
+        value: i64,
+        min: Option<i64>,
+        max: Option<i64>,
+    },
 }

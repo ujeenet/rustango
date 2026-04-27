@@ -3,6 +3,11 @@
 use crate::FieldType;
 
 /// Static description of a single column on a model.
+///
+/// `max_length`, `min`, `max` carry per-field bounds populated from
+/// `#[rustango(max_length = …, min = …, max = …)]`. The query layer
+/// uses them to validate writes; a future migration writer will use
+/// them to emit `VARCHAR(N)` and `CHECK` constraints.
 #[derive(Debug, Clone, Copy)]
 pub struct FieldSchema {
     pub name: &'static str,
@@ -11,6 +16,12 @@ pub struct FieldSchema {
     pub nullable: bool,
     pub primary_key: bool,
     pub relation: Option<Relation>,
+    /// Maximum string length in characters. Only meaningful for `FieldType::String`.
+    pub max_length: Option<u32>,
+    /// Inclusive integer lower bound. Only meaningful for `I32`/`I64`.
+    pub min: Option<i64>,
+    /// Inclusive integer upper bound. Only meaningful for `I32`/`I64`.
+    pub max: Option<i64>,
 }
 
 /// Static description of a relation to another model.
@@ -44,6 +55,12 @@ impl ModelSchema {
     #[must_use]
     pub fn field(&self, name: &str) -> Option<&'static FieldSchema> {
         self.fields.iter().find(|f| f.name == name)
+    }
+
+    /// Look up a field by its SQL column name.
+    #[must_use]
+    pub fn field_by_column(&self, column: &str) -> Option<&'static FieldSchema> {
+        self.fields.iter().find(|f| f.column == column)
     }
 
     /// The primary-key field, if any. Returns the first `primary_key = true` field.

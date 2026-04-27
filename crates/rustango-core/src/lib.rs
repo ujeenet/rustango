@@ -7,12 +7,14 @@ mod error;
 mod field_type;
 mod query;
 mod schema;
+mod validate;
 mod value;
 
 pub use error::QueryError;
 pub use field_type::FieldType;
 pub use query::{Assignment, DeleteQuery, Filter, InsertQuery, Op, SelectQuery, UpdateQuery};
 pub use schema::{FieldSchema, Model, ModelEntry, ModelSchema, Relation};
+pub use validate::validate_value;
 pub use value::SqlValue;
 
 /// Re-exported so `#[derive(Model)]` output can name `inventory` without
