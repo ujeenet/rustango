@@ -12,7 +12,7 @@ use rustango::Model;
 
 #[derive(Model)]
 #[allow(dead_code)]
-struct User {
+pub struct User {
     #[rustango(primary_key)]
     id: i64,
     #[rustango(max_length = 8)]

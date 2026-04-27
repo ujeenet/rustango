@@ -10,16 +10,31 @@ use std::marker::PhantomData;
 
 use rustango_core::{
     Assignment, DeleteQuery, Filter, Model, ModelSchema, Op, QueryError, SelectQuery, SqlValue,
-    UpdateQuery,
+    TypedAssignment, TypedFilter, UpdateQuery,
 };
 
 /// A lazy builder for a `SELECT` over `T`.
 ///
 /// Filters are accumulated in insertion order; nothing touches the schema
 /// until `compile` is called, so the builder never panics on bad input.
+///
+/// Two filter shapes are accepted and may be mixed freely:
+/// * [`Self::filter`] / [`Self::eq`] — string-keyed, validated at
+///   `compile` time.
+/// * [`Self::where_`] — typed (`User::id.gt(10)`); the column is already
+///   resolved, so it bypasses the schema lookup at compile time.
 pub struct QuerySet<T: Model> {
-    filters: Vec<RawFilter>,
+    pending: Vec<PendingFilter>,
     _model: PhantomData<fn() -> T>,
+}
+
+/// Filter accumulator entry — keeps insertion order across string-keyed and
+/// typed filter calls.
+enum PendingFilter {
+    /// String-keyed; resolved against the schema at `compile` time.
+    Raw(RawFilter),
+    /// Already resolved by a typed [`Column`](rustango_core::Column).
+    Resolved(Filter),
 }
 
 #[derive(Debug, Clone)]
@@ -45,7 +60,7 @@ impl<T: Model> QuerySet<T> {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            filters: Vec::new(),
+            pending: Vec::new(),
             _model: PhantomData,
         }
     }
@@ -56,11 +71,11 @@ impl<T: Model> QuerySet<T> {
     /// schema at compile time.
     #[must_use]
     pub fn filter(mut self, field: impl Into<String>, op: Op, value: impl Into<SqlValue>) -> Self {
-        self.filters.push(RawFilter {
+        self.pending.push(PendingFilter::Raw(RawFilter {
             field: field.into(),
             op,
             value: value.into(),
-        });
+        }));
         self
     }
 
@@ -68,6 +83,15 @@ impl<T: Model> QuerySet<T> {
     #[must_use]
     pub fn eq(self, field: impl Into<String>, value: impl Into<SqlValue>) -> Self {
         self.filter(field, Op::Eq, value)
+    }
+
+    /// Append a typed predicate built via a [`Column`](rustango_core::Column)
+    /// reference (e.g. `User::id.gt(10)`).
+    #[must_use]
+    pub fn where_(mut self, predicate: TypedFilter<T>) -> Self {
+        self.pending
+            .push(PendingFilter::Resolved(predicate.into_filter()));
+        self
     }
 
     /// Validate the accumulated filters against `T::SCHEMA` and lower to
@@ -79,7 +103,7 @@ impl<T: Model> QuerySet<T> {
     /// value's type does not match the field's declared type.
     pub fn compile(self) -> Result<SelectQuery, QueryError> {
         let model: &'static ModelSchema = T::SCHEMA;
-        let filters = resolve_filters(model, self.filters)?;
+        let filters = resolve_pending(model, self.pending)?;
         Ok(SelectQuery { model, filters })
     }
 
@@ -89,7 +113,7 @@ impl<T: Model> QuerySet<T> {
     /// As [`QuerySet::compile`].
     pub fn compile_delete(self) -> Result<DeleteQuery, QueryError> {
         let model: &'static ModelSchema = T::SCHEMA;
-        let filters = resolve_filters(model, self.filters)?;
+        let filters = resolve_pending(model, self.pending)?;
         Ok(DeleteQuery { model, filters })
     }
 
@@ -110,17 +134,30 @@ impl<T: Model> QuerySet<T> {
 /// every row.
 pub struct UpdateBuilder<T: Model> {
     qs: QuerySet<T>,
-    set: Vec<RawAssignment>,
+    set: Vec<PendingAssignment>,
+}
+
+enum PendingAssignment {
+    Raw(RawAssignment),
+    Resolved(Assignment),
 }
 
 impl<T: Model> UpdateBuilder<T> {
     /// Append a `SET field = value` assignment. Last write wins for repeated fields.
     #[must_use]
     pub fn set(mut self, field: impl Into<String>, value: impl Into<SqlValue>) -> Self {
-        self.set.push(RawAssignment {
+        self.set.push(PendingAssignment::Raw(RawAssignment {
             field: field.into(),
             value: value.into(),
-        });
+        }));
+        self
+    }
+
+    /// Append a typed `SET column = value` from a [`Column`](rustango_core::Column).
+    #[must_use]
+    pub fn set_typed(mut self, assignment: TypedAssignment<T>) -> Self {
+        self.set
+            .push(PendingAssignment::Resolved(assignment.into_assignment()));
         self
     }
 
@@ -136,10 +173,13 @@ impl<T: Model> UpdateBuilder<T> {
         let assignments = self
             .set
             .into_iter()
-            .map(|raw| resolve_assignment(model, raw))
+            .map(|p| match p {
+                PendingAssignment::Raw(raw) => resolve_assignment(model, raw),
+                PendingAssignment::Resolved(assignment) => Ok(assignment),
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let filters = resolve_filters(model, self.qs.filters)?;
+        let filters = resolve_pending(model, self.qs.pending)?;
 
         Ok(UpdateQuery {
             model,
@@ -149,12 +189,16 @@ impl<T: Model> UpdateBuilder<T> {
     }
 }
 
-fn resolve_filters(
+fn resolve_pending(
     model: &'static ModelSchema,
-    raws: Vec<RawFilter>,
+    pending: Vec<PendingFilter>,
 ) -> Result<Vec<Filter>, QueryError> {
-    raws.into_iter()
-        .map(|raw| resolve_filter(model, raw))
+    pending
+        .into_iter()
+        .map(|p| match p {
+            PendingFilter::Raw(raw) => resolve_filter(model, raw),
+            PendingFilter::Resolved(filter) => Ok(filter),
+        })
         .collect()
 }
 

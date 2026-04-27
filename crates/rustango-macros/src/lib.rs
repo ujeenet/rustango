@@ -46,18 +46,23 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let collected = collect_fields(named)?;
 
     let model_impl = model_impl_tokens(struct_name, &model_name, &table, &collected.field_schemas);
+    let module_ident = column_module_ident(struct_name);
+    let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
     let inherent_impl = inherent_impl_tokens(
         struct_name,
         &collected.insert_columns,
         &collected.insert_values,
         collected.primary_key.as_ref(),
+        &column_consts,
     );
+    let column_module = column_module_tokens(&module_ident, struct_name, &collected.column_entries);
     let from_row_impl = from_row_impl_tokens(struct_name, &collected.from_row_inits);
 
     Ok(quote! {
         #model_impl
         #inherent_impl
         #from_row_impl
+        #column_module
 
         ::rustango::core::inventory::submit! {
             ::rustango::core::ModelEntry {
@@ -67,12 +72,27 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     })
 }
 
+struct ColumnEntry {
+    /// The struct field ident, used both for the inherent const name on
+    /// the model and for the inner column type's name.
+    ident: syn::Ident,
+    /// The struct's field type, used as `Column::Value`.
+    value_ty: Type,
+    /// Rust-side field name (e.g. `"id"`).
+    name: String,
+    /// SQL-side column name (e.g. `"user_id"`).
+    column: String,
+    /// `::rustango::core::FieldType::I64` etc.
+    field_type_tokens: TokenStream2,
+}
+
 struct CollectedFields {
     field_schemas: Vec<TokenStream2>,
     from_row_inits: Vec<TokenStream2>,
     insert_columns: Vec<TokenStream2>,
     insert_values: Vec<TokenStream2>,
     primary_key: Option<(syn::Ident, String)>,
+    column_entries: Vec<ColumnEntry>,
 }
 
 fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
@@ -83,6 +103,7 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
         insert_columns: Vec::with_capacity(cap),
         insert_values: Vec::with_capacity(cap),
         primary_key: None,
+        column_entries: Vec::with_capacity(cap),
     };
 
     for field in &named.named {
@@ -106,6 +127,13 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
             }
             out.primary_key = Some((ident.clone(), info.column.clone()));
         }
+        out.column_entries.push(ColumnEntry {
+            ident: ident.clone(),
+            value_ty: info.value_ty.clone(),
+            name: ident.to_string(),
+            column: info.column.clone(),
+            field_type_tokens: info.field_type_tokens,
+        });
     }
     Ok(out)
 }
@@ -132,6 +160,7 @@ fn inherent_impl_tokens(
     insert_columns: &[TokenStream2],
     insert_values: &[TokenStream2],
     primary_key: Option<&(syn::Ident, String)>,
+    column_consts: &TokenStream2,
 ) -> TokenStream2 {
     let pk_methods = primary_key.map(|(pk_ident, pk_column)| {
         let pk_column_lit = pk_column.as_str();
@@ -190,8 +219,69 @@ fn inherent_impl_tokens(
             }
 
             #pk_methods
+
+            #column_consts
         }
     }
+}
+
+/// Emit `pub const id: …Id = …Id;` per field, inside the inherent impl.
+fn column_const_tokens(module_ident: &syn::Ident, entries: &[ColumnEntry]) -> TokenStream2 {
+    let lines = entries.iter().map(|e| {
+        let ident = &e.ident;
+        let col_ty = column_type_ident(ident);
+        quote! {
+            #[allow(non_upper_case_globals)]
+            pub const #ident: #module_ident::#col_ty = #module_ident::#col_ty;
+        }
+    });
+    quote! { #(#lines)* }
+}
+
+/// Emit a hidden per-model module carrying one zero-sized type per field,
+/// each with a `Column` impl pointing back at the model.
+fn column_module_tokens(
+    module_ident: &syn::Ident,
+    struct_name: &syn::Ident,
+    entries: &[ColumnEntry],
+) -> TokenStream2 {
+    let items = entries.iter().map(|e| {
+        let col_ty = column_type_ident(&e.ident);
+        let value_ty = &e.value_ty;
+        let name = &e.name;
+        let column = &e.column;
+        let field_type_tokens = &e.field_type_tokens;
+        quote! {
+            #[derive(::core::clone::Clone, ::core::marker::Copy)]
+            pub struct #col_ty;
+
+            impl ::rustango::core::Column for #col_ty {
+                type Model = super::#struct_name;
+                type Value = #value_ty;
+                const NAME: &'static str = #name;
+                const COLUMN: &'static str = #column;
+                const FIELD_TYPE: ::rustango::core::FieldType = #field_type_tokens;
+            }
+        }
+    });
+    quote! {
+        #[doc(hidden)]
+        #[allow(non_camel_case_types, non_snake_case)]
+        pub mod #module_ident {
+            #(#items)*
+        }
+    }
+}
+
+fn column_type_ident(field_ident: &syn::Ident) -> syn::Ident {
+    syn::Ident::new(&format!("{field_ident}_col"), field_ident.span())
+}
+
+fn column_module_ident(struct_name: &syn::Ident) -> syn::Ident {
+    syn::Ident::new(
+        &format!("__rustango_cols_{struct_name}"),
+        struct_name.span(),
+    )
 }
 
 fn from_row_impl_tokens(struct_name: &syn::Ident, from_row_inits: &[TokenStream2]) -> TokenStream2 {
@@ -333,6 +423,11 @@ struct FieldInfo<'a> {
     ident: &'a syn::Ident,
     column: String,
     primary_key: bool,
+    /// The original field type, e.g. `i64` or `Option<String>`. Emitted as
+    /// the `Column::Value` associated type for typed-column tokens.
+    value_ty: &'a Type,
+    /// `FieldType` variant tokens (`::rustango::core::FieldType::I64`).
+    field_type_tokens: TokenStream2,
     schema: TokenStream2,
     from_row_init: TokenStream2,
 }
@@ -350,7 +445,7 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
     check_bound_compatibility(field, &attrs, kind)?;
     let relation = relation_tokens(field, &attrs)?;
     let column_lit = column.as_str();
-    let ty_tokens = kind.variant_tokens();
+    let field_type_tokens = kind.variant_tokens();
     let max_length = optional_u32(attrs.max_length);
     let min = optional_i64(attrs.min);
     let max = optional_i64(attrs.max);
@@ -359,7 +454,7 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
         ::rustango::core::FieldSchema {
             name: #name,
             column: #column_lit,
-            ty: #ty_tokens,
+            ty: #field_type_tokens,
             nullable: #nullable,
             primary_key: #primary_key,
             relation: #relation,
@@ -377,6 +472,8 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
         ident,
         column,
         primary_key,
+        value_ty: &field.ty,
+        field_type_tokens,
         schema,
         from_row_init,
     })

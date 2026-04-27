@@ -6,7 +6,7 @@ use rustango::Model;
 
 #[derive(Model)]
 #[allow(dead_code)]
-struct User {
+pub struct User {
     #[rustango(primary_key)]
     id: i64,
     name: String,
@@ -15,7 +15,7 @@ struct User {
 
 #[derive(Model)]
 #[allow(dead_code)]
-struct BlogPost {
+pub struct BlogPost {
     #[rustango(primary_key)]
     id: i64,
     title: String,
@@ -25,7 +25,7 @@ struct BlogPost {
 
 #[derive(Model)]
 #[allow(dead_code)]
-struct UserProfile {
+pub struct UserProfile {
     #[rustango(primary_key)]
     id: i64,
     #[rustango(o2o = "user")]

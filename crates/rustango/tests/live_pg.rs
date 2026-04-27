@@ -9,14 +9,14 @@
 
 use std::sync::OnceLock;
 
-use rustango::core::{Op, QueryError, SqlValue};
+use rustango::core::{Column as _, Op, QueryError, SqlValue};
 use rustango::sql::{sqlx, Deleter, ExecError, Fetcher, Updater};
 use rustango::Model;
 use tokio::sync::Mutex;
 
 #[derive(Model, Debug, PartialEq, Eq, Clone)]
 #[rustango(table = "rustango_live_user")]
-struct LiveUser {
+pub struct LiveUser {
     #[rustango(primary_key)]
     id: i64,
     #[rustango(column = "user_name")]
@@ -303,7 +303,7 @@ async fn instance_delete_targets_only_that_pk() {
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "rustango_live_bounded")]
 #[allow(dead_code)]
-struct BoundedUser {
+pub struct BoundedUser {
     #[rustango(primary_key)]
     id: i64,
     #[rustango(max_length = 8)]
@@ -535,6 +535,79 @@ async fn filter_with_long_string_still_works_at_runtime() {
         .await
         .unwrap();
     assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn typed_columns_drive_full_pipeline() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+
+    // Read with typed filters.
+    let actives: Vec<LiveUser> = LiveUser::objects()
+        .where_(LiveUser::is_active.eq(true))
+        .fetch(&pool)
+        .await
+        .unwrap();
+    let mut names: Vec<&str> = actives.iter().map(|u| u.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["alice", "carol"]);
+
+    // Typed IN.
+    let picked: Vec<LiveUser> = LiveUser::objects()
+        .where_(LiveUser::id.is_in([1_i64, 3]))
+        .fetch(&pool)
+        .await
+        .unwrap();
+    assert_eq!(picked.len(), 2);
+
+    // Typed update.
+    let affected = LiveUser::objects()
+        .where_(LiveUser::id.eq(2_i64))
+        .update()
+        .set_typed(LiveUser::is_active.set(true))
+        .set_typed(LiveUser::name.set("BOB"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(affected, 1);
+
+    let bob: Vec<LiveUser> = LiveUser::objects()
+        .where_(LiveUser::id.eq(2_i64))
+        .fetch(&pool)
+        .await
+        .unwrap();
+    assert_eq!(bob[0].name, "BOB");
+    assert!(bob[0].is_active);
+
+    // Typed delete.
+    let affected = LiveUser::objects()
+        .where_(LiveUser::id.eq(2_i64))
+        .delete(&pool)
+        .await
+        .unwrap();
+    assert_eq!(affected, 1);
+    assert_eq!(count(&pool).await, 2);
+}
+
+#[tokio::test]
+async fn typed_filter_validates_at_compile_runtime_match() {
+    // Smoke test that mixing typed and string filters in one queryset works
+    // end-to-end against the database.
+    let _g = live_lock().lock().await;
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+
+    let rows: Vec<LiveUser> = LiveUser::objects()
+        .where_(LiveUser::is_active.eq(true))
+        .filter("name", Op::Like, "alic%")
+        .fetch(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "alice");
 }
 
 #[tokio::test]

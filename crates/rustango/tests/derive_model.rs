@@ -7,7 +7,7 @@ use rustango::Model;
 #[derive(Model)]
 #[rustango(table = "auth_user")]
 #[allow(dead_code)]
-struct User {
+pub struct User {
     #[rustango(primary_key)]
     id: i64,
     #[rustango(column = "user_name")]
@@ -18,7 +18,7 @@ struct User {
 
 #[derive(Model)]
 #[allow(dead_code)]
-struct BlogPost {
+pub struct BlogPost {
     #[rustango(primary_key)]
     id: i64,
     title: String,

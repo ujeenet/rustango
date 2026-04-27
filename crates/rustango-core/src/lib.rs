@@ -3,6 +3,7 @@
 //! This crate is dependency-light on purpose: no async, no DB drivers, no proc-macros.
 //! Anything that needs to be referenced by both the macro output and the runtime lives here.
 
+mod column;
 mod error;
 mod field_type;
 mod query;
@@ -10,6 +11,7 @@ mod schema;
 mod validate;
 mod value;
 
+pub use column::{Column, TypedAssignment, TypedFilter};
 pub use error::QueryError;
 pub use field_type::FieldType;
 pub use query::{Assignment, DeleteQuery, Filter, InsertQuery, Op, SelectQuery, UpdateQuery};
