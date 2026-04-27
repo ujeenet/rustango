@@ -1,0 +1,26 @@
+[package]
+name = "rustango-sql"
+description = "SQL compilation and dialect dispatch for rustango."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["postgres"]
+postgres = ["sqlx/postgres"]
+
+[dependencies]
+rustango-core  = { workspace = true }
+rustango-query = { workspace = true }
+sqlx           = { workspace = true }
+indexmap       = { workspace = true }
+thiserror      = { workspace = true }
