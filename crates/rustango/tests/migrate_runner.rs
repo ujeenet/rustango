@@ -682,6 +682,230 @@ async fn unapply_then_reapply_round_trip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------- migrate_to / downgrade (Slice 5) ----------
+
+/// Build three sequential schema-only migrations creating tables A, B, C.
+/// Returns `(dir, mig_names, table_names)` — caller cleans up.
+fn three_migrations() -> (PathBuf, [String; 3], [String; 3]) {
+    let suffix = unique_table("mt").to_string();
+    let dir = fresh_dir("migrate_to");
+    let names = [
+        format!("0001_{suffix}_a"),
+        format!("0002_{suffix}_b"),
+        format!("0003_{suffix}_c"),
+    ];
+    let tables = [
+        format!("mt_a_{suffix}"),
+        format!("mt_b_{suffix}"),
+        format!("mt_c_{suffix}"),
+    ];
+    let mut prev: Option<String> = None;
+    for (i, name) in names.iter().enumerate() {
+        write_migration(
+            &dir,
+            &Migration {
+                name: name.clone(),
+                created_at: "2026-04-28T00:00:00Z".into(),
+                prev: prev.clone(),
+                atomic: true,
+                snapshot: snapshot_with_table(&tables[i]),
+                forward: vec![Operation::Schema(SchemaChange::CreateTable(
+                    tables[i].clone(),
+                ))],
+            },
+        );
+        prev = Some(name.clone());
+    }
+    (dir, names, tables)
+}
+
+async fn cleanup(pool: &PgPool, names: &[String], tables: &[String], dir: &std::path::Path) {
+    for n in names {
+        delete_ledger_entry(pool, n).await;
+    }
+    for t in tables {
+        drop_table(pool, t).await;
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn migrate_to_unknown_target_is_validation_error() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let dir = fresh_dir("migrate_to_unknown");
+    let _ = std::fs::create_dir_all(&dir);
+    let err = migrate::migrate_to(&pool, &dir, "0042_does_not_exist")
+        .await
+        .unwrap_err();
+    assert!(format!("{err}").contains("0042_does_not_exist"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn migrate_to_target_already_head_is_noop() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let (dir, names, tables) = three_migrations();
+    cleanup(&pool, &names, &tables, &dir).await;
+    let _ = std::fs::create_dir_all(&dir);
+    // Re-write because cleanup removed the dir.
+    let (dir, names, tables) = three_migrations();
+
+    migrate::migrate(&pool, &dir).await.unwrap();
+    let touched = migrate::migrate_to(&pool, &dir, &names[2]).await.unwrap();
+    assert!(touched.is_empty(), "target == head should be a no-op");
+    cleanup(&pool, &names, &tables, &dir).await;
+}
+
+#[tokio::test]
+async fn migrate_to_forward_applies_pending_subset() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let (dir, names, tables) = three_migrations();
+    cleanup(&pool, &names, &tables, &dir).await;
+    let (dir, names, tables) = three_migrations();
+
+    // Nothing applied yet; migrate_to(0002) should apply 0001 and 0002 only.
+    let touched = migrate::migrate_to(&pool, &dir, &names[1]).await.unwrap();
+    assert_eq!(touched.len(), 2);
+    assert_eq!(touched[0].name, names[0]);
+    assert_eq!(touched[1].name, names[1]);
+
+    let applied = migrate::applied_set(&pool).await.unwrap();
+    assert!(applied.contains(&names[0]));
+    assert!(applied.contains(&names[1]));
+    assert!(!applied.contains(&names[2]), "0003 should still be pending");
+
+    // Sanity: tables A and B exist, C doesn't.
+    for (i, t) in tables.iter().enumerate() {
+        let exists: bool = sqlx::query(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
+        )
+        .bind(t)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .try_get(0)
+        .unwrap();
+        if i < 2 {
+            assert!(exists, "{t} should exist after migrate_to({})", names[1]);
+        } else {
+            assert!(!exists, "{t} should NOT exist yet");
+        }
+    }
+
+    cleanup(&pool, &names, &tables, &dir).await;
+}
+
+#[tokio::test]
+async fn migrate_to_backward_unapplies_in_reverse() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let (dir, names, tables) = three_migrations();
+    cleanup(&pool, &names, &tables, &dir).await;
+    let (dir, names, tables) = three_migrations();
+
+    // Apply all three.
+    migrate::migrate(&pool, &dir).await.unwrap();
+
+    // Roll back to 0001 — should unapply 0003 then 0002.
+    let touched = migrate::migrate_to(&pool, &dir, &names[0]).await.unwrap();
+    assert_eq!(touched.len(), 2);
+    assert_eq!(touched[0].name, names[2], "0003 first (reverse order)");
+    assert_eq!(touched[1].name, names[1], "0002 second");
+
+    let applied = migrate::applied_set(&pool).await.unwrap();
+    assert!(applied.contains(&names[0]));
+    assert!(!applied.contains(&names[1]));
+    assert!(!applied.contains(&names[2]));
+
+    cleanup(&pool, &names, &tables, &dir).await;
+}
+
+#[tokio::test]
+async fn migrate_to_zero_unapplies_everything() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let (dir, names, tables) = three_migrations();
+    cleanup(&pool, &names, &tables, &dir).await;
+    let (dir, names, tables) = three_migrations();
+
+    migrate::migrate(&pool, &dir).await.unwrap();
+    let touched = migrate::migrate_to(&pool, &dir, "zero").await.unwrap();
+    assert_eq!(touched.len(), 3);
+    // Reverse-order: C, B, A.
+    assert_eq!(touched[0].name, names[2]);
+    assert_eq!(touched[1].name, names[1]);
+    assert_eq!(touched[2].name, names[0]);
+
+    let applied = migrate::applied_set(&pool).await.unwrap();
+    for n in &names {
+        assert!(!applied.contains(n), "{n} should be gone");
+    }
+
+    cleanup(&pool, &names, &tables, &dir).await;
+}
+
+#[tokio::test]
+async fn downgrade_one_step_unapplies_head() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let (dir, names, tables) = three_migrations();
+    cleanup(&pool, &names, &tables, &dir).await;
+    let (dir, names, tables) = three_migrations();
+
+    migrate::migrate(&pool, &dir).await.unwrap();
+    let touched = migrate::downgrade(&pool, &dir, 1).await.unwrap();
+    assert_eq!(touched.len(), 1);
+    assert_eq!(touched[0].name, names[2]);
+
+    let applied = migrate::applied_set(&pool).await.unwrap();
+    assert!(applied.contains(&names[0]));
+    assert!(applied.contains(&names[1]));
+    assert!(!applied.contains(&names[2]));
+
+    cleanup(&pool, &names, &tables, &dir).await;
+}
+
+#[tokio::test]
+async fn downgrade_more_steps_than_applied_unapplies_all() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let (dir, names, tables) = three_migrations();
+    cleanup(&pool, &names, &tables, &dir).await;
+    let (dir, names, tables) = three_migrations();
+
+    migrate::migrate(&pool, &dir).await.unwrap();
+    let touched = migrate::downgrade(&pool, &dir, 99).await.unwrap();
+    assert_eq!(touched.len(), 3);
+
+    let applied = migrate::applied_set(&pool).await.unwrap();
+    for n in &names {
+        assert!(!applied.contains(n));
+    }
+    cleanup(&pool, &names, &tables, &dir).await;
+}
+
+#[tokio::test]
+async fn downgrade_zero_steps_is_noop() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let dir = fresh_dir("downgrade_zero");
+    let _ = std::fs::create_dir_all(&dir);
+    let touched = migrate::downgrade(&pool, &dir, 0).await.unwrap();
+    assert!(touched.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------- applied_set helper ----------
 
 #[tokio::test]

@@ -29,7 +29,7 @@ pub use file::{DataOp, Migration, Operation};
 pub use invert::invert;
 pub use make::{make_migrations, make_migrations_from};
 pub use runner::{
-    applied_set, apply_all, drop_all, ensure_ledger, migrate, registered_models, unapply,
-    LEDGER_TABLE,
+    applied_set, apply_all, downgrade, drop_all, ensure_ledger, migrate, migrate_to,
+    registered_models, unapply, LEDGER_TABLE,
 };
 pub use snapshot::{FieldSnapshot, RelationSnapshot, SchemaSnapshot, TableSnapshot};

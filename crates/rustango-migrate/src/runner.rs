@@ -175,6 +175,167 @@ async fn apply_atomic(pool: &PgPool, mig: &Migration) -> Result<(), MigrateError
     Ok(())
 }
 
+/// Move the database to a specific migration target — forward or back.
+///
+/// Compares `target` to the current head (lex-greatest applied
+/// migration name in `dir`) and walks the right direction:
+///
+/// * `target > head` → apply pending migrations whose name lies in
+///   `(head, target]`, in lex order.
+/// * `target == head` → no-op.
+/// * `target < head` → unapply migrations whose name lies in
+///   `(target, head]`, in **reverse** lex order.
+/// * `target == "zero"` → unapply every applied migration. Special-
+///   cased so users have a stable way to wipe the schema's migration
+///   state without having to think about which file is "earliest".
+///
+/// Returns the migrations that were applied or unapplied (the caller
+/// can compare against [`applied_set`] before/after to infer
+/// direction). Returns an empty `Vec` if the target was already the
+/// current head.
+///
+/// # Errors
+/// * [`MigrateError::Validation`] if `target` doesn't match any file
+///   in `dir` (and isn't `"zero"`).
+/// * Any error [`migrate`] or [`unapply`] would raise.
+pub async fn migrate_to(
+    pool: &PgPool,
+    dir: &Path,
+    target: &str,
+) -> Result<Vec<Migration>, MigrateError> {
+    ensure_ledger(pool).await?;
+    let all = file::list_dir(dir)?;
+    let applied = applied_set(pool).await?;
+
+    if target == "zero" {
+        return unapply_all_in_order(pool, dir, &all, &applied).await;
+    }
+
+    if !all.iter().any(|m| m.name == target) {
+        return Err(MigrateError::Validation(format!(
+            "target migration `{target}` not found in {}",
+            dir.display()
+        )));
+    }
+
+    let head = all
+        .iter()
+        .rev()
+        .find(|m| applied.contains(&m.name))
+        .map(|m| m.name.clone());
+
+    let mut touched = Vec::new();
+    match head {
+        None => {
+            // Nothing applied — forward up to and including target.
+            for mig in all.into_iter().filter(|m| m.name.as_str() <= target) {
+                apply_one(pool, &mig).await?;
+                touched.push(mig);
+            }
+        }
+        Some(h) => {
+            use std::cmp::Ordering;
+            match target.cmp(h.as_str()) {
+                Ordering::Equal => {}
+                Ordering::Greater => {
+                    for mig in all.into_iter().filter(|m| {
+                        m.name.as_str() > h.as_str()
+                            && m.name.as_str() <= target
+                            && !applied.contains(&m.name)
+                    }) {
+                        apply_one(pool, &mig).await?;
+                        touched.push(mig);
+                    }
+                }
+                Ordering::Less => {
+                    let mut to_unapply: Vec<Migration> = all
+                        .into_iter()
+                        .filter(|m| {
+                            m.name.as_str() > target
+                                && m.name.as_str() <= h.as_str()
+                                && applied.contains(&m.name)
+                        })
+                        .collect();
+                    to_unapply.reverse();
+                    for mig in to_unapply {
+                        unapply(pool, dir, &mig.name).await?;
+                        touched.push(mig);
+                    }
+                }
+            }
+        }
+    }
+    Ok(touched)
+}
+
+/// Step back `steps` applied migrations (Alembic's `downgrade -N`).
+///
+/// `downgrade(pool, dir, 1)` rolls back the most recently applied
+/// migration. `downgrade(pool, dir, n)` rolls back the `n` most
+/// recent. If `n` exceeds the number of applied migrations, every
+/// applied migration is rolled back. `n == 0` is a no-op.
+///
+/// # Errors
+/// As [`unapply`] for each step.
+pub async fn downgrade(
+    pool: &PgPool,
+    dir: &Path,
+    steps: usize,
+) -> Result<Vec<Migration>, MigrateError> {
+    if steps == 0 {
+        return Ok(Vec::new());
+    }
+    ensure_ledger(pool).await?;
+    let all = file::list_dir(dir)?;
+    let applied = applied_set(pool).await?;
+
+    let applied_in_order: Vec<Migration> = all
+        .into_iter()
+        .filter(|m| applied.contains(&m.name))
+        .collect();
+    if applied_in_order.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let n = steps.min(applied_in_order.len());
+    let to_unapply: Vec<Migration> = applied_in_order.into_iter().rev().take(n).collect();
+
+    let mut touched = Vec::with_capacity(to_unapply.len());
+    for mig in to_unapply {
+        unapply(pool, dir, &mig.name).await?;
+        touched.push(mig);
+    }
+    Ok(touched)
+}
+
+async fn apply_one(pool: &PgPool, mig: &Migration) -> Result<(), MigrateError> {
+    if mig.atomic {
+        apply_atomic(pool, mig).await
+    } else {
+        apply_loose(pool, mig).await
+    }
+}
+
+async fn unapply_all_in_order(
+    pool: &PgPool,
+    dir: &Path,
+    all: &[Migration],
+    applied: &HashSet<String>,
+) -> Result<Vec<Migration>, MigrateError> {
+    let mut to_unapply: Vec<Migration> = all
+        .iter()
+        .filter(|m| applied.contains(&m.name))
+        .cloned()
+        .collect();
+    to_unapply.reverse();
+    let mut touched = Vec::with_capacity(to_unapply.len());
+    for mig in to_unapply {
+        unapply(pool, dir, &mig.name).await?;
+        touched.push(mig);
+    }
+    Ok(touched)
+}
+
 /// Roll back a single applied migration.
 ///
 /// Loads `dir/{name}.json`, looks up its predecessor (or empty for
