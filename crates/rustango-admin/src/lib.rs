@@ -29,23 +29,27 @@
 //! * `POST /<table>/<pk>`              — submit edit
 //! * `POST /<table>/<pk>/delete`       — submit delete
 
+mod auth;
 mod forms;
 mod render;
+
+pub use auth::protect_with_basic_auth;
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use axum::extract::{Form, Path, State};
+use axum::extract::{Form, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use rustango_core::{
-    inventory, DeleteQuery, FieldSchema, Filter, InsertQuery, ModelEntry, ModelSchema, Op,
-    SelectQuery, SqlValue, UpdateQuery,
+    inventory, CountQuery, DeleteQuery, FieldSchema, Filter, InsertQuery, ModelEntry, ModelSchema,
+    Op, SelectQuery, SqlValue, UpdateQuery,
 };
 use rustango_sql::sqlx::{self, PgPool};
+use serde::Deserialize;
 
 use forms::FormError;
 
@@ -101,37 +105,63 @@ async fn index() -> Html<String> {
 
 // ============================================================== LIST
 
+const PAGE_SIZE: i64 = 50;
+
+#[derive(Deserialize, Default)]
+struct PageParams {
+    /// 1-based page number; clamped to `>= 1` on read.
+    page: Option<i64>,
+}
+
 async fn table_view(
     Path(table): Path<String>,
+    Query(params): Query<PageParams>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
     let model = lookup_model(&table).ok_or(AdminError::TableNotFound { table })?;
     let pk_field = model.primary_key();
+    let page = params.page.unwrap_or(1).max(1);
+    let offset = (page - 1) * PAGE_SIZE;
 
+    // One COUNT(*) for the pager, one SELECT for the visible page.
+    let total = rustango_sql::count_rows(
+        &state.pool,
+        &CountQuery {
+            model,
+            filters: vec![],
+        },
+    )
+    .await?;
     let rows = rustango_sql::select_rows(
         &state.pool,
         &SelectQuery {
             model,
             filters: vec![],
+            limit: Some(PAGE_SIZE),
+            offset: Some(offset),
         },
     )
-    .await
-    .map_err(AdminError::from)?;
+    .await?;
+
+    let last_page = if total == 0 {
+        1
+    } else {
+        ((total - 1) / PAGE_SIZE) + 1
+    };
 
     let mut html = String::from(PAGE_HEAD);
     let name = render::escape(model.name);
     let table_q = render::escape(model.table);
-    let count = rows.len();
-    let plural = if count == 1 { "" } else { "s" };
+    let plural = if total == 1 { "" } else { "s" };
     let _ = write!(
         html,
         r#"<p><a href="/">&larr; admin home</a></p><h1>{name}</h1>
-<p>Table: <code>{table_q}</code> &mdash; {count} row{plural}
+<p>Table: <code>{table_q}</code> &mdash; {total} row{plural}
 &nbsp;&middot;&nbsp; <a href="/{table_q}/new">+ new {name}</a></p>"#,
     );
 
     if rows.is_empty() {
-        html.push_str("<p><em>No rows.</em></p>");
+        html.push_str("<p><em>No rows on this page.</em></p>");
     } else {
         html.push_str("<table><thead><tr>");
         for f in model.scalar_fields() {
@@ -149,7 +179,6 @@ async fn table_view(
                 let value = render::render_value(row, f);
                 let _ = write!(html, "<td>{value}</td>");
             }
-            // Action column: detail link if we have a PK.
             html.push_str("<td>");
             if let Some(pk) = pk_field {
                 let pk_str = render::render_value_for_input(row, pk);
@@ -159,6 +188,31 @@ async fn table_view(
             html.push_str("</td></tr>");
         }
         html.push_str("</tbody></table>");
+    }
+
+    // Pager.
+    if last_page > 1 {
+        html.push_str(r#"<p class="pager">"#);
+        if page > 1 {
+            let _ = write!(
+                html,
+                r#"<a href="/{table_q}?page={prev}">&larr; prev</a> &middot; "#,
+                prev = page - 1,
+            );
+        } else {
+            html.push_str(r#"<span class="muted">&larr; prev</span> &middot; "#);
+        }
+        let _ = write!(html, "page {page} of {last_page}");
+        if page < last_page {
+            let _ = write!(
+                html,
+                r#" &middot; <a href="/{table_q}?page={next}">next &rarr;</a>"#,
+                next = page + 1,
+            );
+        } else {
+            html.push_str(r#" &middot; <span class="muted">next &rarr;</span>"#);
+        }
+        html.push_str("</p>");
     }
     html.push_str(PAGE_FOOT);
     Ok(Html(html))
@@ -187,6 +241,8 @@ async fn detail_view(
                 op: Op::Eq,
                 value: pk_value,
             }],
+            limit: None,
+            offset: None,
         },
     )
     .await?
@@ -293,6 +349,8 @@ async fn edit_form(
                 op: Op::Eq,
                 value: pk_value,
             }],
+            limit: None,
+            offset: None,
         },
     )
     .await?

@@ -2,7 +2,9 @@
 
 use std::fmt::Write as _;
 
-use rustango_core::{DeleteQuery, Filter, InsertQuery, Op, SelectQuery, SqlValue, UpdateQuery};
+use rustango_core::{
+    CountQuery, DeleteQuery, Filter, InsertQuery, Op, SelectQuery, SqlValue, UpdateQuery,
+};
 
 use crate::{CompiledStatement, Dialect, SqlError};
 
@@ -32,6 +34,21 @@ impl Dialect for Postgres {
 
         write_where(&mut sql, &mut params, &query.filters)?;
 
+        if let Some(limit) = query.limit {
+            let _ = write!(sql, " LIMIT {limit}");
+        }
+        if let Some(offset) = query.offset {
+            let _ = write!(sql, " OFFSET {offset}");
+        }
+
+        Ok(CompiledStatement { sql, params })
+    }
+
+    fn compile_count(&self, query: &CountQuery) -> Result<CompiledStatement, SqlError> {
+        let mut sql = String::from("SELECT COUNT(*) FROM ");
+        let mut params: Vec<SqlValue> = Vec::new();
+        write_ident(&mut sql, query.model.table);
+        write_where(&mut sql, &mut params, &query.filters)?;
         Ok(CompiledStatement { sql, params })
     }
 

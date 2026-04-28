@@ -36,10 +36,14 @@ pub struct Filter {
 ///
 /// v0.1 selects all scalar fields of `model` and joins filters with `AND`.
 /// `OR` and explicit projections land in v0.2.
+///
+/// `limit` and `offset` are `None` by default and emit no clauses.
 #[derive(Debug, Clone)]
 pub struct SelectQuery {
     pub model: &'static ModelSchema,
     pub filters: Vec<Filter>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
 }
 
 /// Compiled `INSERT` of a single row.
@@ -122,6 +126,14 @@ impl UpdateQuery {
 /// As with `UpdateQuery`, an empty `filters` deletes every row.
 #[derive(Debug, Clone)]
 pub struct DeleteQuery {
+    pub model: &'static ModelSchema,
+    pub filters: Vec<Filter>,
+}
+
+/// Compiled `SELECT COUNT(*)` — same shape as a `DeleteQuery` (model +
+/// filters); the writer emits `COUNT(*)` projection and no `LIMIT`/`OFFSET`.
+#[derive(Debug, Clone)]
+pub struct CountQuery {
     pub model: &'static ModelSchema,
     pub filters: Vec<Filter>,
 }

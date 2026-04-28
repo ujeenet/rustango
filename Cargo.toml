@@ -44,9 +44,10 @@ uuid   = { version = "1", features = ["serde", "v4"] }
 thiserror = "1"
 
 # Admin (HTTP)
-axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form"] }
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+base64 = "0.22"
 
 # Macro deps
 syn          = { version = "2", features = ["full", "extra-traits"] }

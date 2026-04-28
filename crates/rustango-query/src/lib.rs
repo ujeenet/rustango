@@ -25,6 +25,8 @@ use rustango_core::{
 ///   resolved, so it bypasses the schema lookup at compile time.
 pub struct QuerySet<T: Model> {
     pending: Vec<PendingFilter>,
+    limit: Option<i64>,
+    offset: Option<i64>,
     _model: PhantomData<fn() -> T>,
 }
 
@@ -61,8 +63,24 @@ impl<T: Model> QuerySet<T> {
     pub fn new() -> Self {
         Self {
             pending: Vec::new(),
+            limit: None,
+            offset: None,
             _model: PhantomData,
         }
+    }
+
+    /// Cap the number of returned rows. `None` removes any previously set limit.
+    #[must_use]
+    pub fn limit(mut self, n: i64) -> Self {
+        self.limit = Some(n);
+        self
+    }
+
+    /// Skip the first `n` rows. Pair with [`limit`](Self::limit) for paging.
+    #[must_use]
+    pub fn offset(mut self, n: i64) -> Self {
+        self.offset = Some(n);
+        self
     }
 
     /// Append a `WHERE field <op> value` predicate.
@@ -104,7 +122,12 @@ impl<T: Model> QuerySet<T> {
     pub fn compile(self) -> Result<SelectQuery, QueryError> {
         let model: &'static ModelSchema = T::SCHEMA;
         let filters = resolve_pending(model, self.pending)?;
-        Ok(SelectQuery { model, filters })
+        Ok(SelectQuery {
+            model,
+            filters,
+            limit: self.limit,
+            offset: self.offset,
+        })
     }
 
     /// Lower this queryset to a `DeleteQuery` — same filters, no projection.

@@ -14,7 +14,9 @@ mod value;
 pub use column::{Column, TypedAssignment, TypedFilter};
 pub use error::QueryError;
 pub use field_type::FieldType;
-pub use query::{Assignment, DeleteQuery, Filter, InsertQuery, Op, SelectQuery, UpdateQuery};
+pub use query::{
+    Assignment, CountQuery, DeleteQuery, Filter, InsertQuery, Op, SelectQuery, UpdateQuery,
+};
 pub use schema::{FieldSchema, Model, ModelEntry, ModelSchema, Relation};
 pub use validate::validate_value;
 pub use value::SqlValue;

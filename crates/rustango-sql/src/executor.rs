@@ -1,6 +1,8 @@
 //! Async executor — binds a `CompiledStatement` to sqlx and runs it.
 
-use rustango_core::{DeleteQuery, InsertQuery, Model, SelectQuery, SqlValue, UpdateQuery};
+use rustango_core::{
+    CountQuery, DeleteQuery, InsertQuery, Model, SelectQuery, SqlValue, UpdateQuery,
+};
 use rustango_query::{QuerySet, UpdateBuilder};
 use sqlx::postgres::{PgArguments, PgPool, PgRow};
 use sqlx::query::{Query, QueryAs};
@@ -123,6 +125,47 @@ pub async fn select_one_row(
         q = bind_query(q, value);
     }
     Ok(q.fetch_optional(pool).await?)
+}
+
+/// Run a `CountQuery` and return the row count.
+///
+/// # Errors
+/// Returns [`ExecError`] for SQL-writing or driver failures.
+pub async fn count_rows(pool: &PgPool, query: &CountQuery) -> Result<i64, ExecError> {
+    let stmt = Postgres.compile_count(query)?;
+    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+    for value in stmt.params {
+        q = bind_query(q, value);
+    }
+    let row = q.fetch_one(pool).await?;
+    Ok(sqlx::Row::try_get::<i64, _>(&row, 0)?)
+}
+
+/// Extension trait that runs a `SELECT COUNT(*)` against the queryset's
+/// filters. Pulled in via `use rustango::sql::Counter;`.
+pub trait Counter<T: Model + Send> {
+    /// Count rows matching the queryset's filters.
+    ///
+    /// # Errors
+    /// Returns [`ExecError`] for schema, SQL-writing, or driver failures.
+    fn count(
+        self,
+        pool: &PgPool,
+    ) -> impl std::future::Future<Output = Result<i64, ExecError>> + Send;
+}
+
+impl<T: Model + Send> Counter<T> for QuerySet<T> {
+    async fn count(self, pool: &PgPool) -> Result<i64, ExecError> {
+        let select = self.compile()?;
+        count_rows(
+            pool,
+            &CountQuery {
+                model: select.model,
+                filters: select.filters,
+            },
+        )
+        .await
+    }
 }
 
 /// Extension trait that drives a `QuerySet` to a bulk `DELETE`.

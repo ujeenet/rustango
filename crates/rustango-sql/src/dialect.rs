@@ -1,6 +1,6 @@
 //! The `Dialect` trait — one implementation per database backend.
 
-use rustango_core::{DeleteQuery, InsertQuery, SelectQuery, UpdateQuery};
+use rustango_core::{CountQuery, DeleteQuery, InsertQuery, SelectQuery, UpdateQuery};
 
 use crate::{CompiledStatement, SqlError};
 
@@ -32,4 +32,10 @@ pub trait Dialect {
     /// # Errors
     /// Returns [`SqlError`] for filter-shape errors in the WHERE clause.
     fn compile_delete(&self, query: &DeleteQuery) -> Result<CompiledStatement, SqlError>;
+
+    /// Lower a `CountQuery` to a `SELECT COUNT(*) … WHERE …` statement.
+    ///
+    /// # Errors
+    /// Returns [`SqlError`] for filter-shape errors in the WHERE clause.
+    fn compile_count(&self, query: &CountQuery) -> Result<CompiledStatement, SqlError>;
 }

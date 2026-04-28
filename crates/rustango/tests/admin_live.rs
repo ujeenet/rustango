@@ -5,11 +5,11 @@
 //! make HTTP requests against it.
 
 use axum::body::Body;
-use axum::http::{Method, Request, StatusCode, header};
+use axum::http::{header, Method, Request, StatusCode};
 use http_body_util::BodyExt;
-use rustango::Model;
 use rustango::migrate;
 use rustango::sql::sqlx;
+use rustango::Model;
 use sqlx::Row;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
@@ -597,4 +597,263 @@ async fn list_view_has_new_link_and_per_row_view_link() {
     );
 
     migrate::drop_all(&pool).await.unwrap();
+}
+
+// ============================================================ pagination
+
+async fn seed_n(pool: &sqlx::PgPool, n: i64) {
+    migrate::drop_all(pool).await.unwrap();
+    migrate::apply_all(pool).await.unwrap();
+    for i in 1..=n {
+        AdminUser {
+            id: i,
+            name: format!("u{i}"),
+            age: 30,
+            is_active: true,
+        }
+        .insert(pool)
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn list_view_pages_at_50_rows_per_page() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed_n(&pool, 60).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(response).await;
+    assert!(body.contains("60 rows"), "missing total: {body}");
+    assert!(body.contains("page 1 of 2"), "missing pager: {body}");
+    assert!(
+        body.contains(r#"href="/admin_user?page=2""#),
+        "missing next link: {body}",
+    );
+    assert!(
+        body.contains(r#"href="/admin_user/50""#),
+        "missing row 50: {body}",
+    );
+    assert!(
+        !body.contains(r#"href="/admin_user/51""#),
+        "row 51 leaked onto page 1: {body}",
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn list_view_page_2_shows_remaining_rows() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed_n(&pool, 60).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user?page=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(response).await;
+    assert!(body.contains("page 2 of 2"), "missing pager: {body}");
+    assert!(
+        body.contains(r#"href="/admin_user/51""#),
+        "missing row 51: {body}",
+    );
+    assert!(
+        body.contains(r#"href="/admin_user/60""#),
+        "missing row 60: {body}",
+    );
+    assert!(
+        body.contains(r#"href="/admin_user?page=1""#),
+        "missing prev link: {body}",
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn list_view_no_pager_when_under_one_page() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed_n(&pool, 5).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(response).await;
+    assert!(body.contains("5 rows"), "missing total: {body}");
+    assert!(!body.contains("page 1 of"), "should not show pager: {body}");
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+// ============================================================ basic auth
+
+#[tokio::test]
+async fn unprotected_router_lets_requests_through() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn protected_router_returns_401_without_credentials() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::protect_with_basic_auth(
+        rustango::admin::router(pool.clone()),
+        "admin",
+        "secret",
+    );
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let www_authenticate = response
+        .headers()
+        .get(header::WWW_AUTHENTICATE)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        www_authenticate.contains("Basic"),
+        "missing Basic challenge: {www_authenticate}",
+    );
+    assert!(
+        www_authenticate.contains("rustango admin"),
+        "missing realm: {www_authenticate}",
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn protected_router_rejects_wrong_credentials() {
+    use base64::Engine;
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::protect_with_basic_auth(
+        rustango::admin::router(pool.clone()),
+        "admin",
+        "secret",
+    );
+    let creds = base64::engine::general_purpose::STANDARD.encode(b"admin:wrong");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::AUTHORIZATION, format!("Basic {creds}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn protected_router_accepts_correct_credentials() {
+    use base64::Engine;
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::protect_with_basic_auth(
+        rustango::admin::router(pool.clone()),
+        "admin",
+        "secret",
+    );
+    let creds = base64::engine::general_purpose::STANDARD.encode(b"admin:secret");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::AUTHORIZATION, format!("Basic {creds}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_string(response).await;
+    assert!(body.contains("rustango admin"), "missing title: {body}");
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn protected_router_rejects_malformed_authorization() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+
+    let app = rustango::admin::protect_with_basic_auth(
+        rustango::admin::router(pool.clone()),
+        "admin",
+        "secret",
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::AUTHORIZATION, "Basic !!!not-base64!!!")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }

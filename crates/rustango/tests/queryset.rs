@@ -221,3 +221,32 @@ fn update_builder_with_no_filters_compiles() {
     assert!(query.filters.is_empty());
     assert_eq!(query.set.len(), 1);
 }
+
+// ---------------- limit / offset ----------------
+
+#[test]
+fn limit_lands_on_select_query() {
+    let q = User::objects().limit(10).compile().unwrap();
+    assert_eq!(q.limit, Some(10));
+    assert_eq!(q.offset, None);
+}
+
+#[test]
+fn offset_lands_on_select_query() {
+    let q = User::objects().offset(20).compile().unwrap();
+    assert_eq!(q.offset, Some(20));
+    assert_eq!(q.limit, None);
+}
+
+#[test]
+fn limit_and_offset_chain() {
+    let q = User::objects().limit(5).offset(10).compile().unwrap();
+    assert_eq!(q.limit, Some(5));
+    assert_eq!(q.offset, Some(10));
+}
+
+#[test]
+fn last_limit_wins() {
+    let q = User::objects().limit(5).limit(99).compile().unwrap();
+    assert_eq!(q.limit, Some(99));
+}

@@ -6,7 +6,7 @@
 use std::fmt::Write as _;
 
 use rustango_core::{FieldSchema, FieldType};
-use rustango_sql::sqlx::{self, Postgres, Row, postgres::PgRow};
+use rustango_sql::sqlx::{self, postgres::PgRow, Postgres, Row};
 
 /// Escape a string for safe inclusion in HTML body or attribute context.
 pub(crate) fn escape(s: &str) -> String {

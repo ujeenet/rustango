@@ -10,7 +10,7 @@
 use std::sync::OnceLock;
 
 use rustango::core::{Column as _, Op, QueryError, SqlValue};
-use rustango::sql::{sqlx, Deleter, ExecError, Fetcher, Updater};
+use rustango::sql::{sqlx, Counter, Deleter, ExecError, Fetcher, Updater};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -663,4 +663,86 @@ async fn full_crud_round_trip() {
         .await
         .unwrap();
     assert!(gone.is_empty());
+}
+
+// ---------------- limit / offset / count against real Postgres ----------------
+
+#[tokio::test]
+async fn limit_caps_returned_rows() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+
+    let users = LiveUser::objects().limit(2).fetch(&pool).await.unwrap();
+    assert_eq!(users.len(), 2);
+}
+
+#[tokio::test]
+async fn offset_skips_rows() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+
+    // 3 seeded rows; offset 2 → just 1 left.
+    let users = LiveUser::objects().offset(2).fetch(&pool).await.unwrap();
+    assert_eq!(users.len(), 1);
+}
+
+#[tokio::test]
+async fn limit_and_offset_compose_for_paging() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+
+    let page1 = LiveUser::objects()
+        .limit(2)
+        .offset(0)
+        .fetch(&pool)
+        .await
+        .unwrap();
+    let page2 = LiveUser::objects()
+        .limit(2)
+        .offset(2)
+        .fetch(&pool)
+        .await
+        .unwrap();
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page2.len(), 1);
+}
+
+#[tokio::test]
+async fn count_returns_total_with_no_filter() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+    let n = LiveUser::objects().count(&pool).await.unwrap();
+    assert_eq!(n, 3);
+}
+
+#[tokio::test]
+async fn count_respects_filters_and_ignores_limit() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+
+    let actives = LiveUser::objects()
+        .eq("is_active", true)
+        .count(&pool)
+        .await
+        .unwrap();
+    assert_eq!(actives, 2);
+
+    // limit/offset on the queryset don't affect COUNT(*).
+    let n = LiveUser::objects()
+        .limit(1)
+        .offset(0)
+        .count(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 3);
 }

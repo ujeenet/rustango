@@ -1,7 +1,8 @@
 //! End-to-end check of the `QuerySet` → `SelectQuery` → Postgres SQL pipeline.
 
 use rustango::core::{
-    Assignment, DeleteQuery, Filter, InsertQuery, Model as _, Op, SqlValue, UpdateQuery,
+    Assignment, CountQuery, DeleteQuery, Filter, InsertQuery, Model as _, Op, SelectQuery,
+    SqlValue, UpdateQuery,
 };
 use rustango::sql::{Dialect, Postgres, SqlError};
 use rustango::Model;
@@ -415,5 +416,127 @@ fn delete_propagates_filter_errors() {
         }],
     };
     let err = pg().compile_delete(&query).unwrap_err();
+    assert!(matches!(err, SqlError::EmptyInList));
+}
+
+// ---------------- LIMIT / OFFSET on SelectQuery ----------------
+
+fn empty_select() -> SelectQuery {
+    SelectQuery {
+        model: User::SCHEMA,
+        filters: vec![],
+        limit: None,
+        offset: None,
+    }
+}
+
+#[test]
+fn select_emits_limit_when_set() {
+    let q = SelectQuery {
+        limit: Some(10),
+        ..empty_select()
+    };
+    let stmt = pg().compile_select(&q).unwrap();
+    assert_eq!(
+        stmt.sql,
+        r#"SELECT "id", "name", "is_active" FROM "user" LIMIT 10"#,
+    );
+}
+
+#[test]
+fn select_emits_offset_when_set() {
+    let q = SelectQuery {
+        offset: Some(20),
+        ..empty_select()
+    };
+    let stmt = pg().compile_select(&q).unwrap();
+    assert_eq!(
+        stmt.sql,
+        r#"SELECT "id", "name", "is_active" FROM "user" OFFSET 20"#,
+    );
+}
+
+#[test]
+fn select_emits_both_in_canonical_order() {
+    let q = SelectQuery {
+        limit: Some(5),
+        offset: Some(10),
+        ..empty_select()
+    };
+    let stmt = pg().compile_select(&q).unwrap();
+    assert_eq!(
+        stmt.sql,
+        r#"SELECT "id", "name", "is_active" FROM "user" LIMIT 5 OFFSET 10"#,
+    );
+}
+
+#[test]
+fn select_with_filters_and_limit_orders_clauses() {
+    let q = SelectQuery {
+        filters: vec![Filter {
+            column: "is_active",
+            op: Op::Eq,
+            value: SqlValue::Bool(true),
+        }],
+        limit: Some(3),
+        offset: Some(0),
+        ..empty_select()
+    };
+    let stmt = pg().compile_select(&q).unwrap();
+    assert_eq!(
+        stmt.sql,
+        r#"SELECT "id", "name", "is_active" FROM "user" WHERE "is_active" = $1 LIMIT 3 OFFSET 0"#,
+    );
+}
+
+// ---------------- COUNT ----------------
+
+#[test]
+fn count_with_no_filters() {
+    let q = CountQuery {
+        model: User::SCHEMA,
+        filters: vec![],
+    };
+    let stmt = pg().compile_count(&q).unwrap();
+    assert_eq!(stmt.sql, r#"SELECT COUNT(*) FROM "user""#);
+    assert!(stmt.params.is_empty());
+}
+
+#[test]
+fn count_with_filters() {
+    let q = CountQuery {
+        model: User::SCHEMA,
+        filters: vec![
+            Filter {
+                column: "is_active",
+                op: Op::Eq,
+                value: SqlValue::Bool(true),
+            },
+            Filter {
+                column: "id",
+                op: Op::Gt,
+                value: SqlValue::I64(0),
+            },
+        ],
+    };
+    let stmt = pg().compile_count(&q).unwrap();
+    assert_eq!(
+        stmt.sql,
+        r#"SELECT COUNT(*) FROM "user" WHERE "is_active" = $1 AND "id" > $2"#,
+    );
+    assert_eq!(stmt.params, vec![SqlValue::Bool(true), SqlValue::I64(0)]);
+}
+
+#[test]
+fn count_propagates_filter_errors() {
+    let q = CountQuery {
+        model: User::SCHEMA,
+        filters: vec![Filter {
+            column: "id",
+            op: Op::In,
+            value: SqlValue::List(vec![]),
+        }],
+    };
+    let err = pg().compile_count(&q).unwrap_err();
     assert!(matches!(err, SqlError::EmptyInList));
 }
