@@ -120,6 +120,37 @@ fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
         [SchemaChange::DropTable(t)] => format!("drop_{t}"),
         [SchemaChange::AddColumn { table, column }] => format!("add_{column}_to_{table}"),
         [SchemaChange::DropColumn { table, column }] => format!("drop_{column}_from_{table}"),
+        [SchemaChange::AlterColumnType {
+            table,
+            column,
+            from,
+            to,
+        }] => format!("alter_{column}_on_{table}_{from}_to_{to}"),
+        [SchemaChange::AlterColumnNullable {
+            table,
+            column,
+            nullable,
+        }] => {
+            if *nullable {
+                format!("make_{column}_on_{table}_nullable")
+            } else {
+                format!("make_{column}_on_{table}_not_null")
+            }
+        }
+        [SchemaChange::AlterColumnDefault { table, column, .. }] => {
+            format!("alter_default_of_{column}_on_{table}")
+        }
+        [SchemaChange::AlterColumnMaxLength { table, column, .. }] => {
+            format!("alter_max_length_of_{column}_on_{table}")
+        }
+        [SchemaChange::RenameTable { old_name, new_name }] => {
+            format!("rename_{old_name}_to_{new_name}")
+        }
+        [SchemaChange::RenameColumn {
+            table,
+            old_column,
+            new_column,
+        }] => format!("rename_{old_column}_to_{new_column}_on_{table}"),
         many if is_first
             && many
                 .iter()

@@ -87,6 +87,63 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
                 column: column.clone(),
             }))
         }
+        Operation::Schema(SchemaChange::AlterColumnType {
+            table,
+            column,
+            from,
+            to,
+        }) => Ok(Operation::Schema(SchemaChange::AlterColumnType {
+            table: table.clone(),
+            column: column.clone(),
+            from: to.clone(),
+            to: from.clone(),
+        })),
+        Operation::Schema(SchemaChange::AlterColumnNullable {
+            table,
+            column,
+            nullable,
+        }) => Ok(Operation::Schema(SchemaChange::AlterColumnNullable {
+            table: table.clone(),
+            column: column.clone(),
+            nullable: !*nullable,
+        })),
+        Operation::Schema(SchemaChange::AlterColumnDefault {
+            table,
+            column,
+            from,
+            to,
+        }) => Ok(Operation::Schema(SchemaChange::AlterColumnDefault {
+            table: table.clone(),
+            column: column.clone(),
+            from: to.clone(),
+            to: from.clone(),
+        })),
+        Operation::Schema(SchemaChange::AlterColumnMaxLength {
+            table,
+            column,
+            from,
+            to,
+        }) => Ok(Operation::Schema(SchemaChange::AlterColumnMaxLength {
+            table: table.clone(),
+            column: column.clone(),
+            from: *to,
+            to: *from,
+        })),
+        Operation::Schema(SchemaChange::RenameTable { old_name, new_name }) => {
+            Ok(Operation::Schema(SchemaChange::RenameTable {
+                old_name: new_name.clone(),
+                new_name: old_name.clone(),
+            }))
+        }
+        Operation::Schema(SchemaChange::RenameColumn {
+            table,
+            old_column,
+            new_column,
+        }) => Ok(Operation::Schema(SchemaChange::RenameColumn {
+            table: table.clone(),
+            old_column: new_column.clone(),
+            new_column: old_column.clone(),
+        })),
         Operation::Data(d) => {
             if !d.reversible {
                 return Err(MigrateError::Validation(format!(

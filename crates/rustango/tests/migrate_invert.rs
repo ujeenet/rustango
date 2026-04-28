@@ -241,3 +241,117 @@ fn invert_fails_fast_on_first_irreversible_op() {
     let err = invert(&forward, &empty()).unwrap_err();
     assert!(format!("{err}").contains("ALTER USER"));
 }
+
+// ---------------- AlterField + Rename inverts (v0.4 Slice 3) ----------------
+
+#[test]
+fn invert_alter_column_type_swaps_from_and_to() {
+    let forward = vec![Operation::Schema(SchemaChange::AlterColumnType {
+        table: "user".into(),
+        column: "age".into(),
+        from: "i32".into(),
+        to: "i64".into(),
+    })];
+    let out = invert(&forward, &empty()).unwrap();
+    assert_eq!(
+        out,
+        vec![Operation::Schema(SchemaChange::AlterColumnType {
+            table: "user".into(),
+            column: "age".into(),
+            from: "i64".into(),
+            to: "i32".into(),
+        })]
+    );
+}
+
+#[test]
+fn invert_alter_column_nullable_flips_the_flag() {
+    let forward = vec![Operation::Schema(SchemaChange::AlterColumnNullable {
+        table: "user".into(),
+        column: "name".into(),
+        nullable: true,
+    })];
+    let out = invert(&forward, &empty()).unwrap();
+    assert_eq!(
+        out,
+        vec![Operation::Schema(SchemaChange::AlterColumnNullable {
+            table: "user".into(),
+            column: "name".into(),
+            nullable: false,
+        })]
+    );
+}
+
+#[test]
+fn invert_alter_column_default_swaps_from_and_to() {
+    let forward = vec![Operation::Schema(SchemaChange::AlterColumnDefault {
+        table: "user".into(),
+        column: "is_active".into(),
+        from: None,
+        to: Some("true".into()),
+    })];
+    let out = invert(&forward, &empty()).unwrap();
+    assert_eq!(
+        out,
+        vec![Operation::Schema(SchemaChange::AlterColumnDefault {
+            table: "user".into(),
+            column: "is_active".into(),
+            from: Some("true".into()),
+            to: None,
+        })]
+    );
+}
+
+#[test]
+fn invert_alter_column_max_length_swaps_from_and_to() {
+    let forward = vec![Operation::Schema(SchemaChange::AlterColumnMaxLength {
+        table: "user".into(),
+        column: "name".into(),
+        from: Some(32),
+        to: Some(64),
+    })];
+    let out = invert(&forward, &empty()).unwrap();
+    assert_eq!(
+        out,
+        vec![Operation::Schema(SchemaChange::AlterColumnMaxLength {
+            table: "user".into(),
+            column: "name".into(),
+            from: Some(64),
+            to: Some(32),
+        })]
+    );
+}
+
+#[test]
+fn invert_rename_table_swaps_old_and_new() {
+    let forward = vec![Operation::Schema(SchemaChange::RenameTable {
+        old_name: "user".into(),
+        new_name: "account".into(),
+    })];
+    let out = invert(&forward, &empty()).unwrap();
+    assert_eq!(
+        out,
+        vec![Operation::Schema(SchemaChange::RenameTable {
+            old_name: "account".into(),
+            new_name: "user".into(),
+        })]
+    );
+}
+
+#[test]
+fn invert_rename_column_swaps_old_and_new() {
+    let forward = vec![Operation::Schema(SchemaChange::RenameColumn {
+        table: "user".into(),
+        old_column: "name".into(),
+        new_column: "username".into(),
+    })];
+    let out = invert(&forward, &empty()).unwrap();
+    assert_eq!(
+        out,
+        vec![Operation::Schema(SchemaChange::RenameColumn {
+            table: "user".into(),
+            old_column: "username".into(),
+            new_column: "name".into(),
+        })]
+    );
+}

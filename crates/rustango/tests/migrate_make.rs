@@ -414,7 +414,7 @@ fn prev_field_is_predecessor_name() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// ---------- v0.3.1: metadata-change rejection ----------
+// ---------- v0.4: AlterField autogeneration (was v0.3.1 hard error) ----------
 
 fn user_table_with_age_i32() -> TableSnapshot {
     serde_json::from_value(serde_json::json!({
@@ -438,53 +438,70 @@ fn user_table_with_age_i64() -> TableSnapshot {
     })).unwrap()
 }
 
-fn assert_metadata_error(err: MigrateError, needles: &[&str]) {
-    let msg = match err {
-        MigrateError::Validation(m) => m,
-        other => panic!("expected Validation, got {other:?}"),
-    };
-    assert!(
-        msg.contains("AlterField"),
-        "expected v0.4 deferral hint, got: {msg}"
-    );
-    for n in needles {
-        assert!(msg.contains(n), "expected `{n}` in: {msg}");
-    }
-}
-
 #[test]
-fn type_change_is_rejected_with_alter_field_hint() {
-    // i32 → i64 on the same column: silent no-op without this guard.
+fn type_change_emits_alter_column_type_op() {
+    // v0.4 Slice 3: i32 → i64 used to be the v0.3.1 hard error;
+    // now `make_migrations_from` produces a concrete `AlterColumnType` op.
     let dir = fresh_dir("type_change");
     let prev = snapshot_with(vec![user_table_with_age_i32()]);
     make_migrations_from(&dir, &prev, None).unwrap().unwrap();
 
     let next = snapshot_with(vec![user_table_with_age_i64()]);
-    let err = make_migrations_from(&dir, &next, None).unwrap_err();
-    assert_metadata_error(err, &["snap_user.age", "i32", "i64", "type changed"]);
+    let mig = make_migrations_from(&dir, &next, None).unwrap().unwrap();
+    assert_eq!(mig.forward.len(), 1);
+    match &mig.forward[0] {
+        Operation::Schema(SchemaChange::AlterColumnType {
+            table,
+            column,
+            from,
+            to,
+        }) => {
+            assert_eq!(table, "snap_user");
+            assert_eq!(column, "age");
+            assert_eq!(from, "i32");
+            assert_eq!(to, "i64");
+        }
+        other => panic!("expected AlterColumnType, got {other:?}"),
+    }
+    assert_eq!(mig.name, "0002_alter_age_on_snap_user_i32_to_i64");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn nullability_flip_is_rejected() {
+fn nullability_flip_emits_alter_column_nullable_op() {
     let dir = fresh_dir("null_flip");
     let prev = snapshot_with(vec![user_table()]);
     make_migrations_from(&dir, &prev, None).unwrap().unwrap();
 
     let mut next_t = user_table();
-    let name_field = next_t
+    next_t
         .fields
         .iter_mut()
         .find(|f| f.column == "name")
+        .unwrap()
+        .nullable = true;
+    let mig = make_migrations_from(&dir, &snapshot_with(vec![next_t]), None)
+        .unwrap()
         .unwrap();
-    name_field.nullable = true;
-    let err = make_migrations_from(&dir, &snapshot_with(vec![next_t]), None).unwrap_err();
-    assert_metadata_error(err, &["snap_user.name", "nullable changed"]);
+    assert_eq!(mig.forward.len(), 1);
+    match &mig.forward[0] {
+        Operation::Schema(SchemaChange::AlterColumnNullable {
+            table,
+            column,
+            nullable,
+        }) => {
+            assert_eq!(table, "snap_user");
+            assert_eq!(column, "name");
+            assert!(*nullable);
+        }
+        other => panic!("expected AlterColumnNullable, got {other:?}"),
+    }
+    assert_eq!(mig.name, "0002_make_name_on_snap_user_nullable");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn max_length_change_is_rejected() {
+fn max_length_change_emits_alter_column_max_length_op() {
     let dir = fresh_dir("max_length");
     let prev = snapshot_with(vec![user_table()]);
     make_migrations_from(&dir, &prev, None).unwrap().unwrap();
@@ -496,32 +513,75 @@ fn max_length_change_is_rejected() {
         .find(|f| f.column == "name")
         .unwrap()
         .max_length = Some(64);
-    let err = make_migrations_from(&dir, &snapshot_with(vec![next_t]), None).unwrap_err();
-    assert_metadata_error(err, &["snap_user.name", "max_length changed"]);
+    let mig = make_migrations_from(&dir, &snapshot_with(vec![next_t]), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(mig.forward.len(), 1);
+    match &mig.forward[0] {
+        Operation::Schema(SchemaChange::AlterColumnMaxLength {
+            table,
+            column,
+            from,
+            to,
+        }) => {
+            assert_eq!(table, "snap_user");
+            assert_eq!(column, "name");
+            assert_eq!(*from, Some(32));
+            assert_eq!(*to, Some(64));
+        }
+        other => panic!("expected AlterColumnMaxLength, got {other:?}"),
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn metadata_change_blocks_even_with_other_real_changes() {
-    // If the user changes a type AND adds a new table at the same time,
-    // we must still surface the metadata change rather than write a
-    // migration that silently ignores it.
+fn alter_combined_with_create_table_in_one_migration() {
+    // Mixed-shape diff: type alter on existing table + new table.
+    // Both end up in one migration; the v0.3.1 hard-error workaround
+    // is gone now that AlterColumn is a real op.
     let dir = fresh_dir("mixed_meta_and_create");
     let prev = snapshot_with(vec![user_table_with_age_i32()]);
     make_migrations_from(&dir, &prev, None).unwrap().unwrap();
 
     let next = snapshot_with(vec![user_table_with_age_i64(), post_table()]);
-    let err = make_migrations_from(&dir, &next, None).unwrap_err();
-    assert_metadata_error(err, &["snap_user.age", "type changed"]);
-    // No 0002 file should have been written.
-    let any_0002 = std::fs::read_dir(&dir)
+    let mig = make_migrations_from(&dir, &next, None).unwrap().unwrap();
+    assert_eq!(mig.forward.len(), 2);
+    let kinds: Vec<&'static str> = mig
+        .forward
+        .iter()
+        .map(|op| match op {
+            Operation::Schema(SchemaChange::CreateTable(_)) => "CreateTable",
+            Operation::Schema(SchemaChange::AlterColumnType { .. }) => "AlterColumnType",
+            _ => "other",
+        })
+        .collect();
+    // CreateTable comes before AlterColumn* by detect_changes' order.
+    assert_eq!(kinds, vec!["CreateTable", "AlterColumnType"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn primary_key_change_still_hits_the_hard_error() {
+    // PK alters need a dedicated slice; they still surface as the
+    // detect_unsupported_field_changes hard error. Same for min/max
+    // (CHECK), FK, and Auto add/remove.
+    let dir = fresh_dir("pk_change");
+    let mut t = user_table();
+    t.fields.iter_mut().find(|f| f.column == "id").unwrap().primary_key = true;
+    make_migrations_from(&dir, &snapshot_with(vec![t.clone()]), None)
         .unwrap()
-        .filter_map(Result::ok)
-        .any(|e| e.file_name().to_string_lossy().starts_with("0002"));
-    assert!(
-        !any_0002,
-        "no migration should be written when metadata change is rejected"
-    );
+        .unwrap();
+
+    // Flip primary_key off — change isn't supported by AlterColumn
+    // ops, so we expect the hard error.
+    let mut t2 = t.clone();
+    t2.fields.iter_mut().find(|f| f.column == "id").unwrap().primary_key = false;
+    let err = make_migrations_from(&dir, &snapshot_with(vec![t2]), None).unwrap_err();
+    let msg = match err {
+        MigrateError::Validation(m) => m,
+        other => panic!("expected Validation, got {other:?}"),
+    };
+    assert!(msg.contains("primary_key changed"), "{msg}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

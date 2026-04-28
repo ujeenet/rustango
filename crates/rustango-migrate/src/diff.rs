@@ -33,11 +33,83 @@ use crate::snapshot::{FieldSnapshot, SchemaSnapshot, TableSnapshot};
 pub enum SchemaChange {
     CreateTable(String /* table name */),
     DropTable(String /* table name */),
-    AddColumn { table: String, column: String },
-    DropColumn { table: String, column: String },
+    AddColumn {
+        table: String,
+        column: String,
+    },
+    DropColumn {
+        table: String,
+        column: String,
+    },
+    /// Change a column's underlying type — `i32 → i64`, `String → Uuid`, etc.
+    /// Carried as the dialect-neutral name string (matches `FieldSnapshot.ty`
+    /// rather than the closed `FieldType` enum so externally-supplied
+    /// migration files don't break when v0.4+ adds new types). Render emits
+    /// `ALTER TABLE ... ALTER COLUMN ... TYPE <pg_type> USING <col>::<pg_type>`.
+    AlterColumnType {
+        table: String,
+        column: String,
+        from: String,
+        to: String,
+    },
+    /// Toggle a column between nullable and NOT NULL. `nullable` is the
+    /// **new** state. Render emits `SET NOT NULL` (when false) or
+    /// `DROP NOT NULL` (when true).
+    AlterColumnNullable {
+        table: String,
+        column: String,
+        nullable: bool,
+    },
+    /// Change a column's `DEFAULT` clause. `Some(expr)` sets the default
+    /// to the given Postgres expression; `None` drops the default.
+    /// `from`/`to` is enough to invert without consulting a snapshot.
+    AlterColumnDefault {
+        table: String,
+        column: String,
+        from: Option<String>,
+        to: Option<String>,
+    },
+    /// Change a String column's `max_length` (VARCHAR(N) ↔ TEXT, or
+    /// between two VARCHAR sizes). Render emits `TYPE VARCHAR(N)` or
+    /// `TYPE TEXT` accordingly.
+    AlterColumnMaxLength {
+        table: String,
+        column: String,
+        from: Option<u32>,
+        to: Option<u32>,
+    },
+    /// Rename a table. Not emitted by `detect_changes` — rename vs
+    /// drop+add is ambiguous from a snapshot diff (Django's reasoning).
+    /// Authored manually via `manage makemigrations --empty <name>`
+    /// then editing the JSON.
+    RenameTable {
+        old_name: String,
+        new_name: String,
+    },
+    /// Rename a column. Same authoring constraint as `RenameTable`.
+    RenameColumn {
+        table: String,
+        old_column: String,
+        new_column: String,
+    },
 }
 
 /// Compute the ordered list of changes from `prev` → `current`.
+///
+/// Order:
+/// 1. `CreateTable` (new tables)
+/// 2. `AddColumn` (new columns on existing tables)
+/// 3. `AlterColumn*` (metadata changes on same-named columns)
+/// 4. `DropColumn` (dropped columns on remaining tables)
+/// 5. `DropTable` (dropped tables)
+///
+/// Renames (`RenameTable`, `RenameColumn`) are **never** emitted by
+/// `detect_changes` — rename vs drop+add is ambiguous from a
+/// snapshot diff (Django's reasoning). Authors hand-write rename
+/// migrations via `manage makemigrations --empty <name>` and edit
+/// the JSON directly. Likewise, FK/PK/CHECK changes still surface
+/// the v0.3.1 polish #3 hard error today; full FK/CHECK alters land
+/// in a follow-up.
 #[must_use]
 pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<SchemaChange> {
     let mut changes = Vec::new();
@@ -60,6 +132,20 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
                     column: f.column.clone(),
                 });
             }
+        }
+    }
+    // Metadata changes on same-named columns. Replaces the v0.3.1
+    // polish hard error: type/nullable/default/max_length changes
+    // now produce concrete AlterColumn ops instead of bailing.
+    for ct in &current.tables {
+        let Some(pt) = prev.table(&ct.name) else {
+            continue;
+        };
+        for cf in &ct.fields {
+            let Some(pf) = pt.field(&cf.column) else {
+                continue;
+            };
+            push_alter_changes(&ct.name, pf, cf, &mut changes);
         }
     }
     // Dropped columns on remaining tables.
@@ -85,17 +171,61 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     changes
 }
 
-/// Detect column metadata changes that v0.3's schema-change set can't
-/// represent — type changes, nullability flips, default changes,
-/// `max_length` changes, FK target changes, primary-key changes,
-/// `min`/`max` (CHECK) changes. Same-named columns in same-named
-/// tables only; renames live with `AlterField` and ship in v0.4.
+fn push_alter_changes(
+    table: &str,
+    pf: &FieldSnapshot,
+    cf: &FieldSnapshot,
+    out: &mut Vec<SchemaChange>,
+) {
+    if pf.ty != cf.ty {
+        out.push(SchemaChange::AlterColumnType {
+            table: table.to_owned(),
+            column: cf.column.clone(),
+            from: pf.ty.clone(),
+            to: cf.ty.clone(),
+        });
+    }
+    if pf.nullable != cf.nullable {
+        out.push(SchemaChange::AlterColumnNullable {
+            table: table.to_owned(),
+            column: cf.column.clone(),
+            nullable: cf.nullable,
+        });
+    }
+    if pf.default != cf.default {
+        out.push(SchemaChange::AlterColumnDefault {
+            table: table.to_owned(),
+            column: cf.column.clone(),
+            from: pf.default.clone(),
+            to: cf.default.clone(),
+        });
+    }
+    if pf.max_length != cf.max_length {
+        out.push(SchemaChange::AlterColumnMaxLength {
+            table: table.to_owned(),
+            column: cf.column.clone(),
+            from: pf.max_length,
+            to: cf.max_length,
+        });
+    }
+    // primary_key, min, max, fk, auto changes still reach
+    // `detect_unsupported_field_changes` and surface as the v0.3.1
+    // hard error — ALTER PRIMARY KEY and CHECK manipulation are
+    // dialect-fiddly and need a follow-up slice.
+}
+
+/// Detect column metadata changes that even v0.4 can't yet represent
+/// — primary-key flips, `min`/`max` (CHECK) changes, FK target
+/// changes, `Auto<T>` add/remove. v0.4 added concrete `AlterColumn*`
+/// variants for type/nullable/default/max_length, so those are now
+/// handled by `detect_changes` and don't surface here. The remaining
+/// items still warrant a clear hard-error pointing at a future slice.
 ///
 /// Returns one human-readable diff line per detected change. Empty on
 /// success. `make_migrations_from` rejects any non-empty result —
 /// otherwise these changes would silently no-op (the field still
 /// exists so `detect_changes` skips it; the metadata diff is invisible
-/// without explicit `AlterField`/`RenameField` ops).
+/// without explicit ops).
 #[must_use]
 pub fn detect_unsupported_field_changes(
     prev: &SchemaSnapshot,
@@ -118,28 +248,15 @@ pub fn detect_unsupported_field_changes(
 
 fn push_field_diffs(table: &str, pf: &FieldSnapshot, cf: &FieldSnapshot, out: &mut Vec<String>) {
     let col = &cf.column;
-    if pf.ty != cf.ty {
-        out.push(format!(
-            "`{table}.{col}` type changed: {} → {}",
-            pf.ty, cf.ty
-        ));
-    }
-    if pf.nullable != cf.nullable {
-        out.push(format!(
-            "`{table}.{col}` nullable changed: {} → {}",
-            pf.nullable, cf.nullable
-        ));
-    }
+    // type / nullable / default / max_length are handled by
+    // `detect_changes` as `AlterColumn*` ops in v0.4 — don't
+    // re-surface them here. The remaining items still need a
+    // dedicated slice (PK alters, CHECK alters, FK alters, Auto
+    // wrap/unwrap on existing columns).
     if pf.primary_key != cf.primary_key {
         out.push(format!(
             "`{table}.{col}` primary_key changed: {} → {}",
             pf.primary_key, cf.primary_key
-        ));
-    }
-    if pf.max_length != cf.max_length {
-        out.push(format!(
-            "`{table}.{col}` max_length changed: {:?} → {:?}",
-            pf.max_length, cf.max_length
         ));
     }
     if pf.min != cf.min {
@@ -152,12 +269,6 @@ fn push_field_diffs(table: &str, pf: &FieldSnapshot, cf: &FieldSnapshot, out: &m
         out.push(format!(
             "`{table}.{col}` max changed: {:?} → {:?}",
             pf.max, cf.max
-        ));
-    }
-    if pf.default != cf.default {
-        out.push(format!(
-            "`{table}.{col}` default changed: {:?} → {:?}",
-            pf.default, cf.default
         ));
     }
     if pf.fk != cf.fk {
@@ -263,9 +374,93 @@ pub fn render_changes_split(
                 out.immediate
                     .push(format!(r#"DROP TABLE "{name}" CASCADE"#));
             }
+            SchemaChange::AlterColumnType {
+                table,
+                column,
+                from: _,
+                to,
+            } => {
+                let pg_to = pg_type_for_ty_name(to);
+                out.immediate.push(format!(
+                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
+                ));
+            }
+            SchemaChange::AlterColumnNullable {
+                table,
+                column,
+                nullable,
+            } => {
+                let action = if *nullable { "DROP NOT NULL" } else { "SET NOT NULL" };
+                out.immediate.push(format!(
+                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" {action}"#,
+                ));
+            }
+            SchemaChange::AlterColumnDefault {
+                table,
+                column,
+                from: _,
+                to,
+            } => match to {
+                Some(expr) => out.immediate.push(format!(
+                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {expr}"#,
+                )),
+                None => out.immediate.push(format!(
+                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" DROP DEFAULT"#,
+                )),
+            },
+            SchemaChange::AlterColumnMaxLength {
+                table,
+                column,
+                from: _,
+                to,
+            } => {
+                let pg_to = match to {
+                    Some(n) => format!("VARCHAR({n})"),
+                    None => "TEXT".into(),
+                };
+                out.immediate.push(format!(
+                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
+                ));
+            }
+            SchemaChange::RenameTable { old_name, new_name } => {
+                out.immediate.push(format!(
+                    r#"ALTER TABLE "{old_name}" RENAME TO "{new_name}""#,
+                ));
+            }
+            SchemaChange::RenameColumn {
+                table,
+                old_column,
+                new_column,
+            } => {
+                out.immediate.push(format!(
+                    r#"ALTER TABLE "{table}" RENAME COLUMN "{old_column}" TO "{new_column}""#,
+                ));
+            }
         }
     }
     Ok(out)
+}
+
+/// Map a `FieldSnapshot.ty` name (matches `FieldType::as_str` in
+/// rustango-core, but kept loose here for forward-compat with future
+/// types externally-supplied migration files might carry) to its
+/// Postgres column type. Used by `AlterColumnType`. For String,
+/// returns `TEXT` — `AlterColumnMaxLength` is the dedicated
+/// `VARCHAR(N)` rename op.
+fn pg_type_for_ty_name(ty: &str) -> String {
+    match ty {
+        "i32" => "INTEGER".into(),
+        "i64" => "BIGINT".into(),
+        "f32" => "REAL".into(),
+        "f64" => "DOUBLE PRECISION".into(),
+        "bool" => "BOOLEAN".into(),
+        "string" => "TEXT".into(),
+        "datetime" => "TIMESTAMPTZ".into(),
+        "date" => "DATE".into(),
+        "uuid" => "UUID".into(),
+        "json" => "JSONB".into(),
+        other => other.to_uppercase(),
+    }
 }
 
 fn create_table_sql_from_snapshot(t: &TableSnapshot) -> String {

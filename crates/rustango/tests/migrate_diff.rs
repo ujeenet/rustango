@@ -390,3 +390,173 @@ fn table_snapshot_field_lookup_by_column() {
     assert_eq!(t.field("name").unwrap().column, "name");
     assert!(t.field("ghost").is_none());
 }
+
+// ---------------- AlterField + Rename DDL (v0.4 Slice 3) ----------------
+
+fn empty_snap() -> SchemaSnapshot {
+    SchemaSnapshot { tables: vec![] }
+}
+
+#[test]
+fn render_alter_column_type_emits_alter_with_using_cast() {
+    let changes = vec![SchemaChange::AlterColumnType {
+        table: "u".into(),
+        column: "age".into(),
+        from: "i32".into(),
+        to: "i64".into(),
+    }];
+    let ddl = render_changes(&changes, &empty_snap()).unwrap();
+    assert_eq!(
+        ddl,
+        vec![r#"ALTER TABLE "u" ALTER COLUMN "age" TYPE BIGINT USING "age"::BIGINT"#]
+    );
+}
+
+#[test]
+fn render_alter_column_nullable_set_not_null_when_false() {
+    let changes = vec![SchemaChange::AlterColumnNullable {
+        table: "u".into(),
+        column: "name".into(),
+        nullable: false,
+    }];
+    let ddl = render_changes(&changes, &empty_snap()).unwrap();
+    assert_eq!(
+        ddl,
+        vec![r#"ALTER TABLE "u" ALTER COLUMN "name" SET NOT NULL"#]
+    );
+}
+
+#[test]
+fn render_alter_column_nullable_drop_not_null_when_true() {
+    let changes = vec![SchemaChange::AlterColumnNullable {
+        table: "u".into(),
+        column: "name".into(),
+        nullable: true,
+    }];
+    let ddl = render_changes(&changes, &empty_snap()).unwrap();
+    assert_eq!(
+        ddl,
+        vec![r#"ALTER TABLE "u" ALTER COLUMN "name" DROP NOT NULL"#]
+    );
+}
+
+#[test]
+fn render_alter_column_default_set_emits_set_default() {
+    let changes = vec![SchemaChange::AlterColumnDefault {
+        table: "u".into(),
+        column: "is_active".into(),
+        from: None,
+        to: Some("true".into()),
+    }];
+    let ddl = render_changes(&changes, &empty_snap()).unwrap();
+    assert_eq!(
+        ddl,
+        vec![r#"ALTER TABLE "u" ALTER COLUMN "is_active" SET DEFAULT true"#]
+    );
+}
+
+#[test]
+fn render_alter_column_default_drop_emits_drop_default() {
+    let changes = vec![SchemaChange::AlterColumnDefault {
+        table: "u".into(),
+        column: "is_active".into(),
+        from: Some("true".into()),
+        to: None,
+    }];
+    let ddl = render_changes(&changes, &empty_snap()).unwrap();
+    assert_eq!(
+        ddl,
+        vec![r#"ALTER TABLE "u" ALTER COLUMN "is_active" DROP DEFAULT"#]
+    );
+}
+
+#[test]
+fn render_alter_column_max_length_emits_varchar_or_text() {
+    let to_varchar = vec![SchemaChange::AlterColumnMaxLength {
+        table: "u".into(),
+        column: "name".into(),
+        from: None,
+        to: Some(64),
+    }];
+    let ddl = render_changes(&to_varchar, &empty_snap()).unwrap();
+    assert_eq!(
+        ddl,
+        vec![r#"ALTER TABLE "u" ALTER COLUMN "name" TYPE VARCHAR(64) USING "name"::VARCHAR(64)"#]
+    );
+
+    let to_text = vec![SchemaChange::AlterColumnMaxLength {
+        table: "u".into(),
+        column: "name".into(),
+        from: Some(64),
+        to: None,
+    }];
+    let ddl = render_changes(&to_text, &empty_snap()).unwrap();
+    assert_eq!(
+        ddl,
+        vec![r#"ALTER TABLE "u" ALTER COLUMN "name" TYPE TEXT USING "name"::TEXT"#]
+    );
+}
+
+#[test]
+fn render_rename_table_emits_rename_to() {
+    let changes = vec![SchemaChange::RenameTable {
+        old_name: "user".into(),
+        new_name: "account".into(),
+    }];
+    let ddl = render_changes(&changes, &empty_snap()).unwrap();
+    assert_eq!(ddl, vec![r#"ALTER TABLE "user" RENAME TO "account""#]);
+}
+
+#[test]
+fn render_rename_column_emits_rename_column() {
+    let changes = vec![SchemaChange::RenameColumn {
+        table: "user".into(),
+        old_column: "name".into(),
+        new_column: "username".into(),
+    }];
+    let ddl = render_changes(&changes, &empty_snap()).unwrap();
+    assert_eq!(
+        ddl,
+        vec![r#"ALTER TABLE "user" RENAME COLUMN "name" TO "username""#]
+    );
+}
+
+#[test]
+fn detect_changes_emits_alter_column_type_for_metadata_diff() {
+    let prev = SchemaSnapshot {
+        tables: vec![serde_json::from_value(serde_json::json!({
+            "name": "u",
+            "model": "U",
+            "fields": [
+                {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true},
+                {"name": "age", "column": "age", "ty": "i32", "nullable": false, "primary_key": false}
+            ]
+        })).unwrap()],
+    };
+    let current = SchemaSnapshot {
+        tables: vec![serde_json::from_value(serde_json::json!({
+            "name": "u",
+            "model": "U",
+            "fields": [
+                {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true},
+                {"name": "age", "column": "age", "ty": "i64", "nullable": true, "primary_key": false, "default": "0"}
+            ]
+        })).unwrap()],
+    };
+    let changes = detect_changes(&prev, &current);
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c, SchemaChange::AlterColumnType { .. }))
+    );
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c, SchemaChange::AlterColumnNullable { .. }))
+    );
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c, SchemaChange::AlterColumnDefault { .. }))
+    );
+}

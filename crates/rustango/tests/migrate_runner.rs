@@ -1021,6 +1021,191 @@ async fn applied_set_returns_recorded_names() {
     delete_ledger_entry(&pool, &unique).await;
 }
 
+// ---------- v0.4 Slice 3: AlterField + Rename round-trip ----------
+
+#[tokio::test]
+async fn alter_column_type_applies_and_unapplies_round_trip() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let table = unique_table("alter_type");
+    let create_name = unique_migration("alter_type_create", 1);
+    let alter_name = unique_migration("alter_type_alter", 2);
+    let dir = fresh_dir("alter_type");
+
+    // 0001: create table with `age` as INTEGER (i32).
+    let mut create_snap = snapshot_with_table(&table);
+    create_snap.tables[0].fields.push(
+        serde_json::from_value(serde_json::json!({
+            "name": "age", "column": "age", "ty": "i32", "nullable": false, "primary_key": false
+        }))
+        .unwrap(),
+    );
+    write_migration(
+        &dir,
+        &Migration {
+            name: create_name.clone(),
+            created_at: "2026-04-28T00:00:00Z".into(),
+            prev: None,
+            atomic: true,
+            snapshot: create_snap.clone(),
+            forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
+        },
+    );
+
+    // 0002: ALTER age i32 → i64.
+    let mut alter_snap = create_snap.clone();
+    alter_snap.tables[0]
+        .fields
+        .iter_mut()
+        .find(|f| f.column == "age")
+        .unwrap()
+        .ty = "i64".into();
+    write_migration(
+        &dir,
+        &Migration {
+            name: alter_name.clone(),
+            created_at: "2026-04-28T00:00:00Z".into(),
+            prev: Some(create_name.clone()),
+            atomic: true,
+            snapshot: alter_snap,
+            forward: vec![Operation::Schema(SchemaChange::AlterColumnType {
+                table: table.clone(),
+                column: "age".into(),
+                from: "i32".into(),
+                to: "i64".into(),
+            })],
+        },
+    );
+
+    drop_table(&pool, &table).await;
+    delete_ledger_entry(&pool, &create_name).await;
+    delete_ledger_entry(&pool, &alter_name).await;
+
+    migrate::migrate(&pool, &dir).await.unwrap();
+
+    // After apply: column type is bigint.
+    let pg_type: String = sqlx::query(
+        "SELECT data_type FROM information_schema.columns \
+         WHERE table_name = $1 AND column_name = 'age'",
+    )
+    .bind(&table)
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .try_get(0)
+    .unwrap();
+    assert_eq!(pg_type, "bigint", "column should be BIGINT after alter");
+
+    // Unapply 0002 → column reverts to integer.
+    migrate::unapply(&pool, &dir, &alter_name).await.unwrap();
+    let pg_type: String = sqlx::query(
+        "SELECT data_type FROM information_schema.columns \
+         WHERE table_name = $1 AND column_name = 'age'",
+    )
+    .bind(&table)
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .try_get(0)
+    .unwrap();
+    assert_eq!(pg_type, "integer", "unapply should restore INTEGER");
+
+    drop_table(&pool, &table).await;
+    delete_ledger_entry(&pool, &create_name).await;
+    delete_ledger_entry(&pool, &alter_name).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn rename_column_applies_and_unapplies() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let table = unique_table("rename_col");
+    let create_name = unique_migration("rename_col_create", 1);
+    let rename_name = unique_migration("rename_col_rename", 2);
+    let dir = fresh_dir("rename_col");
+
+    let mut create_snap = snapshot_with_table(&table);
+    create_snap.tables[0].fields.push(
+        serde_json::from_value(serde_json::json!({
+            "name": "name", "column": "name", "ty": "string", "nullable": false, "primary_key": false, "max_length": 32
+        }))
+        .unwrap(),
+    );
+    write_migration(
+        &dir,
+        &Migration {
+            name: create_name.clone(),
+            created_at: "2026-04-28T00:00:00Z".into(),
+            prev: None,
+            atomic: true,
+            snapshot: create_snap.clone(),
+            forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
+        },
+    );
+
+    let mut renamed = create_snap.clone();
+    renamed.tables[0]
+        .fields
+        .iter_mut()
+        .find(|f| f.column == "name")
+        .unwrap()
+        .column = "username".into();
+    write_migration(
+        &dir,
+        &Migration {
+            name: rename_name.clone(),
+            created_at: "2026-04-28T00:00:00Z".into(),
+            prev: Some(create_name.clone()),
+            atomic: true,
+            snapshot: renamed,
+            forward: vec![Operation::Schema(SchemaChange::RenameColumn {
+                table: table.clone(),
+                old_column: "name".into(),
+                new_column: "username".into(),
+            })],
+        },
+    );
+
+    drop_table(&pool, &table).await;
+    delete_ledger_entry(&pool, &create_name).await;
+    delete_ledger_entry(&pool, &rename_name).await;
+
+    migrate::migrate(&pool, &dir).await.unwrap();
+
+    let exists: bool = sqlx::query(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+         WHERE table_name = $1 AND column_name = 'username')",
+    )
+    .bind(&table)
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .try_get(0)
+    .unwrap();
+    assert!(exists, "renamed column should exist");
+
+    migrate::unapply(&pool, &dir, &rename_name).await.unwrap();
+    let exists: bool = sqlx::query(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+         WHERE table_name = $1 AND column_name = 'name')",
+    )
+    .bind(&table)
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .try_get(0)
+    .unwrap();
+    assert!(exists, "original column name should be back");
+
+    drop_table(&pool, &table).await;
+    delete_ledger_entry(&pool, &create_name).await;
+    delete_ledger_entry(&pool, &rename_name).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------- v0.4: migrate_dry_run ----------
 
 #[tokio::test]
