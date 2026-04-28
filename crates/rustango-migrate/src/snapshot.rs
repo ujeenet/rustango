@@ -35,6 +35,9 @@ pub struct FieldSnapshot {
     pub min: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub max: Option<i64>,
+    /// Raw SQL fragment for `DEFAULT` if the model declared one.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub default: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub fk: Option<RelationSnapshot>,
 }
@@ -109,6 +112,7 @@ impl FieldSnapshot {
             max_length: f.max_length,
             min: f.min,
             max: f.max,
+            default: f.default.map(str::to_owned),
             fk,
         }
     }

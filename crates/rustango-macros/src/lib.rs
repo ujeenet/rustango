@@ -371,6 +371,7 @@ struct FieldAttrs {
     max_length: Option<u32>,
     min: Option<i64>,
     max: Option<i64>,
+    default: Option<String>,
 }
 
 fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
@@ -383,6 +384,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         max_length: None,
         min: None,
         max: None,
+        default: None,
     };
     for attr in &field.attrs {
         if !attr.path().is_ident("rustango") {
@@ -424,6 +426,11 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
             }
             if meta.path.is_ident("max") {
                 out.max = Some(parse_signed_i64(&meta)?);
+                return Ok(());
+            }
+            if meta.path.is_ident("default") {
+                let s: LitStr = meta.value()?.parse()?;
+                out.default = Some(s.value());
                 return Ok(());
             }
             Err(meta.error("unknown rustango field attribute"))
@@ -493,6 +500,7 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
     let max_length = optional_u32(attrs.max_length);
     let min = optional_i64(attrs.min);
     let max = optional_i64(attrs.max);
+    let default = optional_str(attrs.default.as_deref());
 
     let schema = quote! {
         ::rustango::core::FieldSchema {
@@ -505,6 +513,7 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
             max_length: #max_length,
             min: #min,
             max: #max,
+            default: #default,
         }
     };
 
@@ -560,6 +569,14 @@ fn optional_u32(value: Option<u32>) -> TokenStream2 {
 }
 
 fn optional_i64(value: Option<i64>) -> TokenStream2 {
+    if let Some(v) = value {
+        quote!(::core::option::Option::Some(#v))
+    } else {
+        quote!(::core::option::Option::None)
+    }
+}
+
+fn optional_str(value: Option<&str>) -> TokenStream2 {
     if let Some(v) = value {
         quote!(::core::option::Option::Some(#v))
     } else {

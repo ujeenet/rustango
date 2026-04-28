@@ -112,6 +112,49 @@ fn only_max_emits_single_sided_check() {
     );
 }
 
+// ---------------- defaults ----------------
+
+#[derive(Model)]
+#[allow(dead_code)]
+#[rustango(table = "ddl_defaults")]
+pub struct Defaults {
+    #[rustango(primary_key)]
+    id: i64,
+    #[rustango(default = "0")]
+    score: i32,
+    #[rustango(max_length = 16, default = "'draft'")]
+    status: String,
+    #[rustango(default = "true")]
+    is_active: bool,
+    #[rustango(default = "NOW()")]
+    created: chrono::DateTime<chrono::Utc>,
+    nickname: Option<String>,
+}
+
+#[test]
+fn default_emits_after_type_before_not_null() {
+    let sql = create_table_sql(Defaults::SCHEMA);
+    assert!(
+        sql.contains(r#""score" INTEGER DEFAULT 0 NOT NULL"#),
+        "{sql}",
+    );
+    assert!(
+        sql.contains(r#""status" VARCHAR(16) DEFAULT 'draft' NOT NULL"#),
+        "{sql}",
+    );
+    assert!(
+        sql.contains(r#""is_active" BOOLEAN DEFAULT true NOT NULL"#),
+        "{sql}",
+    );
+    assert!(
+        sql.contains(r#""created" TIMESTAMPTZ DEFAULT NOW() NOT NULL"#),
+        "{sql}",
+    );
+    // Untouched field has no DEFAULT clause.
+    assert!(sql.contains(r#""nickname" TEXT"#), "{sql}");
+    assert!(!sql.contains(r#""nickname" TEXT DEFAULT"#), "{sql}");
+}
+
 // ---------------- foreign keys ----------------
 
 #[derive(Model)]

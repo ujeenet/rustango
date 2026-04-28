@@ -11,6 +11,12 @@
 //! ADD COLUMNs (so a new table referenced by a new column already
 //! exists), and DROP COLUMNs come before DROP TABLEs for the same
 //! reason. FK constraints for new tables are emitted last.
+//!
+//! `ADD COLUMN ... NOT NULL` is supported only when the field carries
+//! a `default` (rendered as `DEFAULT <expr>` so Postgres can backfill
+//! existing rows). Without a default, `AddColumn` of a non-null field
+//! is rejected with an explanatory error pointing at the two fixes:
+//! make the field `Option<T>`, or set `#[rustango(default = "…")]`.
 
 use std::fmt::Write as _;
 
@@ -107,9 +113,9 @@ pub fn render_changes(
                 let f = t.field(column).ok_or_else(|| {
                     format!("AddColumn for `{table}.{column}` but field missing in snapshot")
                 })?;
-                if !f.nullable {
+                if !f.nullable && f.default.is_none() {
                     return Err(format!(
-                        "AddColumn `{table}.{column}` is NOT NULL — adding non-null columns to existing tables needs a default; not supported in v0.2",
+                        "AddColumn `{table}.{column}` is NOT NULL with no `default` — Postgres can't backfill existing rows. Make the field `Option<…>` or set `#[rustango(default = \"…\")]`.",
                     ));
                 }
                 out.push(add_column_sql(table, f));
@@ -132,6 +138,9 @@ fn create_table_sql_from_snapshot(t: &TableSnapshot) -> String {
         }
         first = false;
         let _ = write!(sql, r#""{}" {}"#, f.column, sql_type(f));
+        if let Some(expr) = &f.default {
+            let _ = write!(sql, " DEFAULT {expr}");
+        }
         if !f.nullable {
             sql.push_str(" NOT NULL");
         }
@@ -179,7 +188,12 @@ fn add_column_sql(table: &str, f: &FieldSnapshot) -> String {
         f.column,
         sql_type(f)
     );
-    // Nullable column → no constraints needed (we already require nullable).
+    if let Some(expr) = &f.default {
+        let _ = write!(sql, " DEFAULT {expr}");
+    }
+    if !f.nullable {
+        sql.push_str(" NOT NULL");
+    }
     if f.min.is_some() || f.max.is_some() {
         sql.push_str(" CHECK (");
         let mut wrote = false;

@@ -33,6 +33,21 @@ pub struct DisplayedPost {
     title: String,
 }
 
+#[derive(Model)]
+#[rustango(table = "default_demo")]
+#[allow(dead_code)]
+pub struct DefaultDemo {
+    #[rustango(primary_key)]
+    id: i64,
+    #[rustango(default = "0")]
+    score: i32,
+    #[rustango(max_length = 16, default = "'draft'")]
+    status: String,
+    #[rustango(default = "true")]
+    is_active: bool,
+    name: String,
+}
+
 #[test]
 fn schema_reflects_attributes() {
     let s = User::SCHEMA;
@@ -76,6 +91,21 @@ fn display_defaults_to_primary_key_when_unset() {
     let f = BlogPost::SCHEMA.display_field().unwrap();
     assert_eq!(f.name, "id");
     assert!(f.primary_key);
+}
+
+#[test]
+fn default_attribute_lands_in_schema() {
+    let s = DefaultDemo::SCHEMA;
+    assert_eq!(s.field("score").unwrap().default, Some("0"));
+    assert_eq!(s.field("status").unwrap().default, Some("'draft'"));
+    assert_eq!(s.field("is_active").unwrap().default, Some("true"));
+}
+
+#[test]
+fn default_unset_remains_none() {
+    assert_eq!(DefaultDemo::SCHEMA.field("name").unwrap().default, None);
+    // Sanity: unrelated models are untouched.
+    assert_eq!(BlogPost::SCHEMA.field("title").unwrap().default, None);
 }
 
 #[test]

@@ -228,6 +228,92 @@ fn render_drop_column_emits_alter() {
 }
 
 #[test]
+fn render_add_not_null_with_default_is_permitted() {
+    let mut current = SchemaSnapshot {
+        tables: vec![user_table()],
+    };
+    current.tables[0].fields.push(
+        serde_json::from_value(serde_json::json!({
+            "name": "score", "column": "score", "ty": "i32",
+            "nullable": false, "primary_key": false,
+            "default": "0"
+        }))
+        .unwrap(),
+    );
+
+    let ddl = render_changes(
+        &[SchemaChange::AddColumn {
+            table: "snap_user".into(),
+            column: "score".into(),
+        }],
+        &current,
+    )
+    .unwrap();
+    assert_eq!(
+        ddl,
+        vec![r#"ALTER TABLE "snap_user" ADD COLUMN "score" INTEGER DEFAULT 0 NOT NULL"#]
+    );
+}
+
+#[test]
+fn render_create_table_with_default_emits_default_clause() {
+    let mut current = SchemaSnapshot {
+        tables: vec![user_table()],
+    };
+    // Simulate a fresh `snap_post` with `status` carrying a default.
+    let post: TableSnapshot = serde_json::from_value(serde_json::json!({
+        "name": "snap_post",
+        "model": "SnapPost",
+        "fields": [
+            {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true},
+            {
+                "name": "status", "column": "status", "ty": "string",
+                "nullable": false, "primary_key": false,
+                "max_length": 16, "default": "'draft'"
+            }
+        ]
+    }))
+    .unwrap();
+    current.tables.push(post);
+
+    let ddl = render_changes(&[SchemaChange::CreateTable("snap_post".into())], &current).unwrap();
+    assert!(
+        ddl[0].contains(r#""status" VARCHAR(16) DEFAULT 'draft' NOT NULL"#),
+        "expected DEFAULT in CREATE TABLE, got: {}",
+        ddl[0]
+    );
+}
+
+#[test]
+fn render_add_not_null_without_default_still_rejected() {
+    // Regression: only the *combination* of NOT NULL + no default is the error.
+    let mut current = SchemaSnapshot {
+        tables: vec![user_table()],
+    };
+    current.tables[0].fields.push(
+        serde_json::from_value(serde_json::json!({
+            "name": "score", "column": "score", "ty": "i32",
+            "nullable": false, "primary_key": false
+        }))
+        .unwrap(),
+    );
+
+    let err = render_changes(
+        &[SchemaChange::AddColumn {
+            table: "snap_user".into(),
+            column: "score".into(),
+        }],
+        &current,
+    )
+    .unwrap_err();
+    assert!(err.contains("NOT NULL"), "got: {err}");
+    assert!(
+        err.contains("default"),
+        "expected hint about default, got: {err}"
+    );
+}
+
+#[test]
 fn render_create_with_fk_emits_alter_after() {
     let mut current = SchemaSnapshot {
         tables: vec![user_table()],

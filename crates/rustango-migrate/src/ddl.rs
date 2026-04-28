@@ -20,6 +20,7 @@
 //! * `nullable: false`  → `NOT NULL`
 //! * `primary_key: true` → `PRIMARY KEY`
 //! * `min` / `max`      → `CHECK ("col" >= N AND "col" <= M)`
+//! * `default`          → `DEFAULT <raw expression>`
 //! * `Relation::Fk` / `Relation::O2O` → emitted via [`create_constraints_sql`]
 
 use std::fmt::Write as _;
@@ -102,6 +103,9 @@ fn write_column_def(s: &mut String, field: &FieldSchema) {
     write_ident(s, field.column);
     s.push(' ');
     s.push_str(&sql_type(field));
+    if let Some(expr) = field.default {
+        let _ = write!(s, " DEFAULT {expr}");
+    }
     if !field.nullable {
         s.push_str(" NOT NULL");
     }

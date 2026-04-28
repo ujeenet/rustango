@@ -6,8 +6,14 @@ use crate::FieldType;
 ///
 /// `max_length`, `min`, `max` carry per-field bounds populated from
 /// `#[rustango(max_length = …, min = …, max = …)]`. The query layer
-/// uses them to validate writes; a future migration writer will use
-/// them to emit `VARCHAR(N)` and `CHECK` constraints.
+/// uses them to validate writes; the migration writer uses them to
+/// emit `VARCHAR(N)` and `CHECK` constraints.
+///
+/// `default` is the raw SQL fragment placed after `DEFAULT` in DDL
+/// (e.g. `"0"`, `"'draft'"`, `"NOW()"`). Set via
+/// `#[rustango(default = "…")]`. The string is inserted verbatim — it
+/// is the developer's responsibility to write a valid Postgres
+/// expression and to quote string literals themselves.
 #[derive(Debug, Clone, Copy)]
 pub struct FieldSchema {
     pub name: &'static str,
@@ -22,6 +28,8 @@ pub struct FieldSchema {
     pub min: Option<i64>,
     /// Inclusive integer upper bound. Only meaningful for `I32`/`I64`.
     pub max: Option<i64>,
+    /// Raw SQL expression for the column's `DEFAULT` clause, if any.
+    pub default: Option<&'static str>,
 }
 
 /// Static description of a relation to another model.
