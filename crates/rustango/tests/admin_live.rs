@@ -857,3 +857,292 @@ async fn protected_router_rejects_malformed_authorization() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ============================================================ permissions
+
+#[tokio::test]
+async fn show_only_filters_index_to_listed_tables() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    // Allowlist a non-existent table → admin_user is hidden from the index.
+    let app = rustango::admin::Builder::new(pool.clone())
+        .show_only(["nope"])
+        .build();
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = body_string(response).await;
+    assert!(
+        !body.contains("AdminUser"),
+        "AdminUser leaked through allowlist: {body}",
+    );
+    assert!(
+        body.contains("No models registered"),
+        "expected empty index: {body}",
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn show_only_returns_404_for_filtered_table() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::Builder::new(pool.clone())
+        .show_only(["nope"])
+        .build();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn show_only_admits_listed_tables() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::Builder::new(pool.clone())
+        .show_only(["admin_user"])
+        .build();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_string(response).await;
+    assert!(body.contains("AdminUser"), "missing model name: {body}");
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn read_only_hides_new_button_in_list() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::Builder::new(pool.clone())
+        .read_only(["admin_user"])
+        .build();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(response).await;
+    assert!(
+        !body.contains(r#"href="/admin_user/new""#),
+        "new link leaked on read-only table: {body}",
+    );
+    assert!(
+        body.contains("read-only"),
+        "missing read-only marker: {body}"
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn read_only_hides_edit_and_delete_on_detail() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::Builder::new(pool.clone())
+        .read_only(["admin_user"])
+        .build();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user/1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(response).await;
+    assert!(
+        !body.contains(r#"href="/admin_user/1/edit""#),
+        "edit link leaked: {body}",
+    );
+    assert!(
+        !body.contains(r#"action="/admin_user/1/delete""#),
+        "delete form leaked: {body}",
+    );
+    assert!(body.contains("read-only"), "missing read-only note: {body}");
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn read_only_blocks_create_with_403() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::Builder::new(pool.clone())
+        .read_only(["admin_user"])
+        .build();
+    let response = app
+        .oneshot(form_request(
+            Method::POST,
+            "/admin_user",
+            "id=99&name=z&age=20&is_active=true",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = body_string(response).await;
+    assert!(
+        body.contains("read-only"),
+        "missing read-only error: {body}",
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn read_only_blocks_update_with_403() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::Builder::new(pool.clone())
+        .read_only(["admin_user"])
+        .build();
+    let response = app
+        .oneshot(form_request(
+            Method::POST,
+            "/admin_user/1",
+            "id=1&name=ALICE&age=30&is_active=true",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn read_only_blocks_delete_with_403() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::Builder::new(pool.clone())
+        .read_only(["admin_user"])
+        .build();
+    let response = app
+        .oneshot(form_request(Method::POST, "/admin_user/1/delete", ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn read_only_blocks_new_form_with_403() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::Builder::new(pool.clone())
+        .read_only(["admin_user"])
+        .build();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user/new")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn show_only_and_read_only_compose() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    // Both: visible AND read-only.
+    let app = rustango::admin::Builder::new(pool.clone())
+        .show_only(["admin_user"])
+        .read_only(["admin_user"])
+        .build();
+
+    // Visible (200) but new is forbidden (403).
+    let view = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(view.status(), StatusCode::OK);
+
+    let new_form = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user/new")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(new_form.status(), StatusCode::FORBIDDEN);
+
+    migrate::drop_all(&pool).await.unwrap();
+}

@@ -35,8 +35,9 @@ mod render;
 
 pub use auth::protect_with_basic_auth;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use axum::extract::{Form, Path, Query, State};
 use axum::http::StatusCode;
@@ -55,28 +56,110 @@ use forms::FormError;
 
 /// Mount the admin under any prefix using axum's nesting:
 /// `Router::new().nest("/admin", rustango_admin::router(pool))`.
+///
+/// Equivalent to `Builder::new(pool).build()`. For finer control (model
+/// allowlist, read-only tables) use [`Builder`].
 pub fn router(pool: PgPool) -> Router {
-    Router::new()
-        .route("/", get(index))
-        .route("/{table}", get(table_view).post(create_submit))
-        .route("/{table}/new", get(create_form))
-        .route("/{table}/{pk}", get(detail_view).post(update_submit))
-        .route("/{table}/{pk}/edit", get(edit_form))
-        .route("/{table}/{pk}/delete", post(delete_submit))
-        .with_state(AppState { pool })
+    Builder::new(pool).build()
+}
+
+/// Configurable admin builder.
+///
+/// ```ignore
+/// let app = admin::Builder::new(pool)
+///     .show_only(["user", "post", "audit_log"])
+///     .read_only(["audit_log"])
+///     .build();
+/// ```
+#[must_use]
+pub struct Builder {
+    pool: PgPool,
+    config: Config,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct Config {
+    /// Tables visible in the admin. `None` = every registered model.
+    pub(crate) allowed_tables: Option<HashSet<String>>,
+    /// Tables whose mutating routes are blocked and whose write-buttons
+    /// are hidden in HTML.
+    pub(crate) read_only_tables: HashSet<String>,
+}
+
+impl Builder {
+    pub fn new(pool: PgPool) -> Self {
+        Self {
+            pool,
+            config: Config::default(),
+        }
+    }
+
+    /// Restrict the admin to these tables. Models not in the list are
+    /// hidden from the index and return 404 on direct hits.
+    pub fn show_only<I, S>(mut self, tables: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.config.allowed_tables = Some(tables.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Mark these tables read-only. List/detail still render; create,
+    /// edit, and delete routes return 403, and the corresponding buttons
+    /// are hidden in the HTML.
+    pub fn read_only<I, S>(mut self, tables: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.config
+            .read_only_tables
+            .extend(tables.into_iter().map(Into::into));
+        self
+    }
+
+    pub fn build(self) -> Router {
+        Router::new()
+            .route("/", get(index))
+            .route("/{table}", get(table_view).post(create_submit))
+            .route("/{table}/new", get(create_form))
+            .route("/{table}/{pk}", get(detail_view).post(update_submit))
+            .route("/{table}/{pk}/edit", get(edit_form))
+            .route("/{table}/{pk}/delete", post(delete_submit))
+            .with_state(AppState {
+                pool: self.pool,
+                config: Arc::new(self.config),
+            })
+    }
 }
 
 #[derive(Clone)]
 struct AppState {
     pool: PgPool,
+    config: Arc<Config>,
+}
+
+impl AppState {
+    fn is_visible(&self, table: &str) -> bool {
+        self.config
+            .allowed_tables
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(table))
+    }
+
+    fn is_read_only(&self, table: &str) -> bool {
+        self.config.read_only_tables.contains(table)
+    }
 }
 
 // ============================================================== INDEX
 
-async fn index() -> Html<String> {
+async fn index(State(state): State<AppState>) -> Html<String> {
     let mut models: Vec<&'static ModelSchema> = inventory::iter::<ModelEntry>
         .into_iter()
         .map(|e| e.schema)
+        .filter(|m| state.is_visible(m.table))
         .collect();
     models.sort_by_key(|m| m.name);
 
@@ -118,7 +201,7 @@ async fn table_view(
     Query(params): Query<PageParams>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
-    let model = lookup_model(&table).ok_or(AdminError::TableNotFound { table })?;
+    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound { table })?;
     let pk_field = model.primary_key();
     let page = params.page.unwrap_or(1).max(1);
     let offset = (page - 1) * PAGE_SIZE;
@@ -153,11 +236,16 @@ async fn table_view(
     let name = render::escape(model.name);
     let table_q = render::escape(model.table);
     let plural = if total == 1 { "" } else { "s" };
+    let read_only = state.is_read_only(model.table);
+    let new_link = if read_only {
+        String::from(" &nbsp;&middot;&nbsp; <em>read-only</em>")
+    } else {
+        format!(r#" &nbsp;&middot;&nbsp; <a href="/{table_q}/new">+ new {name}</a>"#)
+    };
     let _ = write!(
         html,
         r#"<p><a href="/">&larr; admin home</a></p><h1>{name}</h1>
-<p>Table: <code>{table_q}</code> &mdash; {total} row{plural}
-&nbsp;&middot;&nbsp; <a href="/{table_q}/new">+ new {name}</a></p>"#,
+<p>Table: <code>{table_q}</code> &mdash; {total} row{plural}{new_link}</p>"#,
     );
 
     if rows.is_empty() {
@@ -224,7 +312,7 @@ async fn detail_view(
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
-    let model = lookup_model(&table).ok_or(AdminError::TableNotFound {
+    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound {
         table: table.clone(),
     })?;
     let pk_field = model.primary_key().ok_or_else(|| {
@@ -267,12 +355,16 @@ async fn detail_view(
         let _ = write!(html, "<dt>{label}</dt><dd>{value}</dd>");
     }
     html.push_str("</dl>");
-    let _ = write!(
-        html,
-        r#"<p><a href="/{table_q}/{pk_esc}/edit">edit</a> &middot;
+    if state.is_read_only(model.table) {
+        html.push_str("<p><em>This table is read-only.</em></p>");
+    } else {
+        let _ = write!(
+            html,
+            r#"<p><a href="/{table_q}/{pk_esc}/edit">edit</a> &middot;
 <form method="post" action="/{table_q}/{pk_esc}/delete" style="display:inline" onsubmit="return confirm('Delete this row?')">
 <button type="submit">delete</button></form></p>"#,
-    );
+        );
+    }
     html.push_str(PAGE_FOOT);
     Ok(Html(html))
 }
@@ -281,9 +373,14 @@ async fn detail_view(
 
 async fn create_form(
     Path(table): Path<String>,
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
-    let model = lookup_model(&table).ok_or(AdminError::TableNotFound { table })?;
+    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound { table })?;
+    if state.is_read_only(model.table) {
+        return Err(AdminError::ReadOnly {
+            table: model.table.to_owned(),
+        });
+    }
     Ok(Html(render_form(
         model, None, /* pk_locked */ false, None,
     )))
@@ -294,9 +391,14 @@ async fn create_submit(
     State(state): State<AppState>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Result<Response, AdminError> {
-    let model = lookup_model(&table).ok_or(AdminError::TableNotFound {
+    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound {
         table: table.clone(),
     })?;
+    if state.is_read_only(model.table) {
+        return Err(AdminError::ReadOnly {
+            table: model.table.to_owned(),
+        });
+    }
 
     let collected = match forms::collect_values(model, &form, &[]) {
         Ok(v) => v,
@@ -332,7 +434,7 @@ async fn edit_form(
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
-    let model = lookup_model(&table).ok_or(AdminError::TableNotFound {
+    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound {
         table: table.clone(),
     })?;
     let pk_field = model.primary_key().ok_or_else(|| {
@@ -371,9 +473,14 @@ async fn update_submit(
     State(state): State<AppState>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Result<Response, AdminError> {
-    let model = lookup_model(&table).ok_or(AdminError::TableNotFound {
+    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound {
         table: table.clone(),
     })?;
+    if state.is_read_only(model.table) {
+        return Err(AdminError::ReadOnly {
+            table: model.table.to_owned(),
+        });
+    }
     let pk_field = model.primary_key().ok_or_else(|| {
         AdminError::Internal(format!("model `{}` has no primary key", model.name))
     })?;
@@ -414,9 +521,14 @@ async fn delete_submit(
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Response, AdminError> {
-    let model = lookup_model(&table).ok_or(AdminError::TableNotFound {
+    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound {
         table: table.clone(),
     })?;
+    if state.is_read_only(model.table) {
+        return Err(AdminError::ReadOnly {
+            table: model.table.to_owned(),
+        });
+    }
     let pk_field = model.primary_key().ok_or_else(|| {
         AdminError::Internal(format!("model `{}` has no primary key", model.name))
     })?;
@@ -440,7 +552,14 @@ async fn delete_submit(
 
 // ============================================================== HELPERS
 
-fn lookup_model(table: &str) -> Option<&'static ModelSchema> {
+/// Resolve `table` to a `ModelSchema`, but only if the admin is configured
+/// to expose it. A model that exists but is filtered out via `show_only`
+/// returns `None` here, which surfaces to users as a 404 — same response
+/// as a genuinely missing table.
+fn lookup_model(state: &AppState, table: &str) -> Option<&'static ModelSchema> {
+    if !state.is_visible(table) {
+        return None;
+    }
     inventory::iter::<ModelEntry>
         .into_iter()
         .find(|e| e.schema.table == table)
@@ -523,6 +642,7 @@ fn render_form_row(html: &mut String, field: &FieldSchema, value: &str, pk_locke
 enum AdminError {
     TableNotFound { table: String },
     RowNotFound { table: String, pk: String },
+    ReadOnly { table: String },
     Form(FormError),
     Internal(String),
 }
@@ -550,6 +670,11 @@ impl IntoResponse for AdminError {
             Self::RowNotFound { table, pk } => (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({ "error": "row not found", "table": table, "pk": pk })),
+            )
+                .into_response(),
+            Self::ReadOnly { table } => (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": "table is read-only", "table": table })),
             )
                 .into_response(),
             Self::Form(e) => (
