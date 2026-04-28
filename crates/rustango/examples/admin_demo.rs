@@ -11,6 +11,13 @@
 //! cargo run --example admin_demo
 //! ```
 //!
+//! If `cargo` complains "rustc 1.86.0 is not supported", a Homebrew
+//! `rust` install is shadowing rustup's 1.88 on your `PATH`. Run with:
+//!
+//! ```text
+//! PATH="$HOME/.cargo/bin:$PATH" cargo run --example admin_demo
+//! ```
+//!
 //! Open <http://127.0.0.1:8080/> in a browser. Login with
 //! `admin` / `secret`.
 //!
