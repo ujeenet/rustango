@@ -28,7 +28,7 @@
 //! }
 //! ```
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -120,6 +120,46 @@ pub fn write(path: &Path, migration: &Migration) -> Result<(), MigrateError> {
     let raw = serde_json::to_string_pretty(migration)?;
     std::fs::write(path, raw)?;
     Ok(())
+}
+
+/// Load every `*.json` migration in `dir`, sorted lexicographically by
+/// file name (which is the canonical apply order).
+///
+/// A non-existent `dir` is treated as an empty list — useful for
+/// `make_migrations` against a fresh project. Each file is fully
+/// validated via [`load`].
+///
+/// # Errors
+/// Returns [`MigrateError::Io`] on read failure, [`MigrateError::Json`]
+/// on parse failure, or [`MigrateError::Validation`] if any file is
+/// internally inconsistent.
+pub fn list_dir(dir: &Path) -> Result<Vec<Migration>, MigrateError> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+        .collect();
+    paths.sort();
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        out.push(load(&p)?);
+    }
+    Ok(out)
+}
+
+/// Extract the leading numeric prefix from a migration name
+/// (e.g. `0042_add_slug` → `42`).
+#[must_use]
+pub fn extract_index(name: &str) -> Option<u32> {
+    let prefix: String = name.chars().take_while(char::is_ascii_digit).collect();
+    if prefix.is_empty() {
+        None
+    } else {
+        prefix.parse().ok()
+    }
 }
 
 fn validate(mig: &Migration) -> Result<(), MigrateError> {

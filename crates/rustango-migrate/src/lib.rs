@@ -18,11 +18,13 @@ pub mod ddl;
 pub mod diff;
 mod error;
 pub mod file;
+pub mod make;
 mod runner;
 pub mod snapshot;
 
 pub use diff::{detect_changes, render_changes, SchemaChange};
 pub use error::MigrateError;
 pub use file::{DataOp, Migration, Operation};
+pub use make::{make_migrations, make_migrations_from};
 pub use runner::{apply_all, drop_all, registered_models};
 pub use snapshot::{FieldSnapshot, RelationSnapshot, SchemaSnapshot, TableSnapshot};
