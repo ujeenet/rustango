@@ -238,3 +238,117 @@ fn names_lex_sort_correctly_for_apply_order() {
         ]
     );
 }
+
+// ---------- additional edge cases ----------
+
+#[test]
+fn migration_with_empty_forward_round_trips() {
+    let mig = Migration {
+        name: "0001_marker".into(),
+        created_at: "2026-04-28T00:00:00Z".into(),
+        prev: None,
+        atomic: true,
+        snapshot: empty_snapshot(),
+        forward: vec![],
+    };
+    let json = serde_json::to_string(&mig).unwrap();
+    let back: Migration = serde_json::from_str(&json).unwrap();
+    assert_eq!(mig, back);
+}
+
+#[test]
+fn migration_prev_explicit_null_parses_as_none() {
+    let raw = serde_json::json!({
+        "name": "0001_x",
+        "created_at": "2026-04-28T00:00:00Z",
+        "prev": null,
+        "snapshot": {"tables": []},
+        "forward": []
+    });
+    let mig: Migration = serde_json::from_value(raw).unwrap();
+    assert!(mig.prev.is_none());
+}
+
+#[test]
+fn migration_atomic_explicit_false_parses_as_false() {
+    let raw = serde_json::json!({
+        "name": "0001_x",
+        "created_at": "2026-04-28T00:00:00Z",
+        "atomic": false,
+        "snapshot": {"tables": []},
+        "forward": []
+    });
+    let mig: Migration = serde_json::from_value(raw).unwrap();
+    assert!(!mig.atomic);
+}
+
+#[test]
+fn data_op_explicit_irreversible_with_no_reverse_sql_is_valid() {
+    // Explicit `reversible: false` means the migration is intentionally
+    // one-way; no reverse_sql required.
+    let raw = serde_json::json!({
+        "sql": "DELETE FROM events WHERE created < NOW() - INTERVAL '90 days'",
+        "reversible": false
+    });
+    let d: DataOp = serde_json::from_value(raw).unwrap();
+    assert!(!d.reversible);
+    assert!(d.reverse_sql.is_none());
+}
+
+#[test]
+fn unknown_top_level_fields_are_ignored() {
+    // Forward-compat: a future field on Migration shouldn't break older readers.
+    let raw = serde_json::json!({
+        "name": "0001_x",
+        "created_at": "2026-04-28T00:00:00Z",
+        "snapshot": {"tables": []},
+        "forward": [],
+        "future_field_that_does_not_exist_yet": {"hello": "world"}
+    });
+    let mig: Migration = serde_json::from_value(raw).unwrap();
+    assert_eq!(mig.name, "0001_x");
+}
+
+#[test]
+fn list_dir_propagates_malformed_file_as_json_error() {
+    let dir = tmp_path("malformed");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("0001_bad.json"), "{not valid json").unwrap();
+    let err = file::list_dir(&dir).unwrap_err();
+    let _ = std::fs::remove_dir_all(&dir);
+    matches!(err, MigrateError::Json(_));
+}
+
+#[test]
+fn extract_index_handles_overflow_gracefully() {
+    // u32::MAX = 4_294_967_295. Anything larger should not panic; it
+    // returns None because the parse fails.
+    assert_eq!(file::extract_index("99999999999_overflow"), None);
+}
+
+#[test]
+fn extract_index_handles_leading_zeros() {
+    assert_eq!(file::extract_index("00000001_x"), Some(1));
+    assert_eq!(file::extract_index("00000000_zero"), Some(0));
+}
+
+#[test]
+fn list_dir_skips_subdirectories() {
+    let dir = tmp_path("list_dir_subdirs");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("nested")).unwrap();
+    let mig = Migration {
+        name: "0001_x".into(),
+        created_at: "now".into(),
+        prev: None,
+        atomic: true,
+        snapshot: empty_snapshot(),
+        forward: vec![],
+    };
+    file::write(&dir.join("0001_x.json"), &mig).unwrap();
+
+    let migs = file::list_dir(&dir).unwrap();
+    assert_eq!(migs.len(), 1, "subdirectories should be ignored");
+    let _ = std::fs::remove_dir_all(&dir);
+}

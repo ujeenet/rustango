@@ -67,8 +67,7 @@ pub fn make_migrations_from(
         return Ok(None);
     }
 
-    let suffix = name_override
-        .map_or_else(|| auto_name(&changes, prior.is_empty()), str::to_owned);
+    let suffix = name_override.map_or_else(|| auto_name(&changes, prior.is_empty()), str::to_owned);
     let name = format!("{next_index:04}_{suffix}");
     let created_at = chrono::Utc::now().to_rfc3339();
 

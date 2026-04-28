@@ -265,3 +265,159 @@ fn list_dir_ignores_non_json_files() {
     assert_eq!(migs[0].name, "0001_real");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------- additional heuristic edge cases ----------
+
+#[test]
+fn name_override_beats_heuristic_even_for_initial() {
+    let dir = fresh_dir("override_initial");
+    let initial = snapshot_with(vec![user_table(), post_table()]);
+    let mig = make_migrations_from(&dir, &initial, Some("startup"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(mig.name, "0001_startup");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn multiple_create_tables_after_initial_falls_back_to_auto() {
+    let dir = fresh_dir("multi_create");
+    let initial = snapshot_with(vec![user_table()]);
+    make_migrations_from(&dir, &initial, None).unwrap().unwrap();
+
+    // Add post AND a third table at once.
+    let extra: rustango::migrate::TableSnapshot = serde_json::from_value(serde_json::json!({
+        "name": "extra", "model": "Extra",
+        "fields": [
+            {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true}
+        ]
+    }))
+    .unwrap();
+
+    let next = snapshot_with(vec![user_table(), post_table(), extra]);
+    let mig = make_migrations_from(&dir, &next, None).unwrap().unwrap();
+    assert_eq!(mig.name, "0002_auto");
+    assert_eq!(mig.forward.len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn multiple_add_columns_falls_back_to_auto() {
+    let dir = fresh_dir("multi_addcol");
+    let initial = snapshot_with(vec![user_table()]);
+    make_migrations_from(&dir, &initial, None).unwrap().unwrap();
+
+    let mut user = user_table();
+    for col in ["bio", "score"] {
+        user.fields.push(
+            serde_json::from_value(serde_json::json!({
+                "name": col, "column": col, "ty": "string",
+                "nullable": true, "primary_key": false
+            }))
+            .unwrap(),
+        );
+    }
+    user.fields.sort_by(|a, b| a.column.cmp(&b.column));
+
+    let next = snapshot_with(vec![user]);
+    let mig = make_migrations_from(&dir, &next, None).unwrap().unwrap();
+    assert_eq!(mig.name, "0002_auto");
+    assert_eq!(mig.forward.len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn create_plus_drop_table_falls_back_to_auto() {
+    let dir = fresh_dir("create_and_drop");
+    let initial = snapshot_with(vec![user_table(), post_table()]);
+    make_migrations_from(&dir, &initial, None).unwrap().unwrap();
+
+    let comment: rustango::migrate::TableSnapshot = serde_json::from_value(serde_json::json!({
+        "name": "comment", "model": "Comment",
+        "fields": [
+            {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true}
+        ]
+    }))
+    .unwrap();
+    // post is dropped, comment is created.
+    let next = snapshot_with(vec![user_table(), comment]);
+    let mig = make_migrations_from(&dir, &next, None).unwrap().unwrap();
+    assert_eq!(mig.name, "0002_auto");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn generated_migration_has_rfc3339_timestamp() {
+    let dir = fresh_dir("rfc3339");
+    let mig = make_migrations_from(&dir, &snapshot_with(vec![user_table()]), None)
+        .unwrap()
+        .unwrap();
+    // Loose check: contains "T" and either "Z" or "+" (offset marker).
+    let ts = &mig.created_at;
+    assert!(ts.contains('T'), "expected 'T' in {ts}");
+    assert!(
+        ts.contains('Z') || ts.contains('+') || ts.contains('-'),
+        "expected timezone marker in {ts}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn generated_migration_forward_is_only_schema_ops() {
+    let dir = fresh_dir("only_schema_ops");
+    let mig = make_migrations_from(&dir, &snapshot_with(vec![user_table()]), None)
+        .unwrap()
+        .unwrap();
+    for op in &mig.forward {
+        assert!(
+            matches!(op, rustango::migrate::Operation::Schema(_)),
+            "make_migrations should never emit data ops automatically"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn single_drop_column_picks_drop_from_name() {
+    let dir = fresh_dir("drop_col_name");
+    // user has id + name initially.
+    let initial = snapshot_with(vec![user_table()]);
+    make_migrations_from(&dir, &initial, None).unwrap().unwrap();
+
+    // Drop `name` from user.
+    let mut user = user_table();
+    user.fields.retain(|f| f.column != "name");
+    let next = snapshot_with(vec![user]);
+
+    let mig = make_migrations_from(&dir, &next, None).unwrap().unwrap();
+    assert_eq!(mig.name, "0002_drop_name_from_snap_user");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn prev_field_is_predecessor_name() {
+    let dir = fresh_dir("prev_links");
+    let initial = snapshot_with(vec![user_table()]);
+    let m1 = make_migrations_from(&dir, &initial, None).unwrap().unwrap();
+    assert!(m1.prev.is_none());
+
+    let next = snapshot_with(vec![user_table(), post_table()]);
+    let m2 = make_migrations_from(&dir, &next, None).unwrap().unwrap();
+    assert_eq!(m2.prev.as_deref(), Some(m1.name.as_str()));
+
+    // Drop post → 0003. Should chain to 0002.
+    let m3 = make_migrations_from(&dir, &snapshot_with(vec![user_table()]), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(m3.prev.as_deref(), Some(m2.name.as_str()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn snapshot_in_generated_migration_matches_input() {
+    let dir = fresh_dir("snapshot_match");
+    let want = snapshot_with(vec![user_table(), post_table()]);
+    let mig = make_migrations_from(&dir, &want, None).unwrap().unwrap();
+    assert_eq!(mig.snapshot, want);
+    let _ = std::fs::remove_dir_all(&dir);
+}

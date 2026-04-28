@@ -87,7 +87,16 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
 
 /// Render a list of [`SchemaChange`]s as Postgres DDL strings ready to
 /// execute. The `current` snapshot is consulted to read field metadata
-/// for each `AddColumn` (so we know its type / nullability / bounds).
+/// for each `AddColumn` and `CreateTable` (so we know type, nullability,
+/// bounds, defaults, etc.).
+///
+/// **Order is preserved** — this function is order-preserving: changes
+/// come out in the same order they came in, with the single exception
+/// that FK constraint ALTERs for new tables are appended at the end (so
+/// they run after every CREATE TABLE in the batch). Callers that care
+/// about dependency-safe ordering (CREATE before ADD COLUMN, DROP COLUMN
+/// before DROP TABLE) should hand the changes in already in that order.
+/// [`detect_changes`] does that by construction.
 ///
 /// # Errors
 /// Returns an error string describing any unsupported change shape (e.g.

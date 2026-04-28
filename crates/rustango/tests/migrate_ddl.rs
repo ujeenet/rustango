@@ -251,3 +251,109 @@ fn identifiers_are_double_quoted() {
     let sql = create_table_sql(Quoted::SCHEMA);
     assert!(sql.contains(r#""weird name" TEXT NOT NULL"#), "{sql}");
 }
+
+// ---------------- additional coverage ----------------
+
+#[derive(Model)]
+#[allow(dead_code)]
+#[rustango(table = "ddl_multi_fk")]
+pub struct MultiFk {
+    #[rustango(primary_key)]
+    id: i64,
+    #[rustango(fk = "ddl_user", on = "id")]
+    author_id: i64,
+    #[rustango(fk = "ddl_post", on = "id")]
+    post_id: i64,
+}
+
+#[test]
+fn multi_fk_emits_one_constraint_per_relation() {
+    let constraints = create_constraints_sql(MultiFk::SCHEMA);
+    assert_eq!(constraints.len(), 2);
+    assert!(constraints.iter().any(|c| c.contains("author_id_fkey")));
+    assert!(constraints.iter().any(|c| c.contains("post_id_fkey")));
+}
+
+#[test]
+fn drop_table_if_exists_only() {
+    let sql = drop_table_sql(MultiFk::SCHEMA, true, false);
+    assert_eq!(sql, r#"DROP TABLE IF EXISTS "ddl_multi_fk""#);
+}
+
+#[test]
+fn drop_table_cascade_only() {
+    let sql = drop_table_sql(MultiFk::SCHEMA, false, true);
+    assert_eq!(sql, r#"DROP TABLE "ddl_multi_fk" CASCADE"#);
+}
+
+#[derive(Model)]
+#[allow(dead_code)]
+#[rustango(table = "ddl_no_check")]
+pub struct NoCheck {
+    #[rustango(primary_key)]
+    id: i64,
+    untouched: i32,
+}
+
+#[test]
+fn no_min_or_max_means_no_check_clause() {
+    let sql = create_table_sql(NoCheck::SCHEMA);
+    assert!(!sql.contains("CHECK"), "no min/max → no CHECK: {sql}");
+}
+
+#[derive(Model)]
+#[allow(dead_code)]
+#[rustango(table = "ddl_default_nullable")]
+pub struct DefaultNullable {
+    #[rustango(primary_key)]
+    id: i64,
+    #[rustango(default = "0")]
+    score: Option<i32>,
+}
+
+#[test]
+fn default_works_on_nullable_column_too() {
+    let sql = create_table_sql(DefaultNullable::SCHEMA);
+    // Column is nullable AND has a default — no NOT NULL, but DEFAULT present.
+    assert!(sql.contains(r#""score" INTEGER DEFAULT 0"#), "{sql}");
+    assert!(
+        !sql.contains(r#""score" INTEGER DEFAULT 0 NOT NULL"#),
+        "{sql}"
+    );
+}
+
+#[derive(Model)]
+#[allow(dead_code)]
+#[rustango(table = "ddl_bool_default")]
+pub struct BoolDefault {
+    #[rustango(primary_key)]
+    id: i64,
+    #[rustango(default = "false")]
+    flag: bool,
+}
+
+#[test]
+fn bool_default_emits_keyword_not_quoted() {
+    let sql = create_table_sql(BoolDefault::SCHEMA);
+    assert!(
+        sql.contains(r#""flag" BOOLEAN DEFAULT false NOT NULL"#),
+        "{sql}",
+    );
+}
+
+#[derive(Model)]
+#[allow(dead_code)]
+#[rustango(table = "ddl_min_only")]
+pub struct MinOnly {
+    #[rustango(primary_key)]
+    id: i64,
+    #[rustango(min = -100)]
+    floor_only: i32,
+}
+
+#[test]
+fn min_only_uses_signed_value_in_check() {
+    let sql = create_table_sql(MinOnly::SCHEMA);
+    assert!(sql.contains(r#"CHECK ("floor_only" >= -100)"#), "{sql}",);
+    assert!(!sql.contains("AND"), "no AND for single-sided check: {sql}");
+}
