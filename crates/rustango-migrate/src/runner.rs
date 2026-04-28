@@ -193,6 +193,89 @@ pub async fn ensure_ledger(pool: &PgPool) -> Result<(), MigrateError> {
     Ok(())
 }
 
+/// One pending migration the dry-run would apply.
+///
+/// `statements` is the literal SQL the runner would execute, in
+/// order: each `SchemaChange` op's immediate DDL, each `DataOp`'s
+/// `sql`, then any deferred FK ALTERs, then the
+/// `INSERT INTO __rustango_migrations__` ledger row. Atomic
+/// migrations also get synthetic `BEGIN`/`COMMIT` markers so the
+/// reader can see where the transaction boundary is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationPreview {
+    pub name: String,
+    /// `true` if the migration would run inside a transaction (the
+    /// `atomic` flag on the file).
+    pub atomic: bool,
+    pub statements: Vec<String>,
+}
+
+/// Compute the SQL `migrate(pool, dir)` would execute, without
+/// running any of it. Reads the ledger to know what's pending; never
+/// writes. Output is one [`MigrationPreview`] per pending migration,
+/// in apply order.
+///
+/// Used by `manage migrate --dry-run`.
+///
+/// # Errors
+/// As [`migrate`] minus the SQL execution — file I/O, JSON parse,
+/// chain validation, plus the `applied_set` read.
+pub async fn migrate_dry_run(
+    pool: &PgPool,
+    dir: &Path,
+) -> Result<Vec<MigrationPreview>, MigrateError> {
+    ensure_ledger(pool).await?;
+    let all = file::list_dir(dir)?;
+    let applied = applied_set(pool).await?;
+    let pending: Vec<Migration> = all
+        .into_iter()
+        .filter(|m| !applied.contains(&m.name))
+        .collect();
+
+    let mut out = Vec::with_capacity(pending.len());
+    for mig in pending {
+        out.push(preview_migration(&mig)?);
+    }
+    Ok(out)
+}
+
+/// Build a [`MigrationPreview`] for a single migration. Pure —
+/// no DB access. Same render path as `apply_atomic` / `apply_loose`
+/// but the statements stream into a `Vec<String>` instead of a tx.
+fn preview_migration(mig: &Migration) -> Result<MigrationPreview, MigrateError> {
+    let mut statements = Vec::new();
+    let mut deferred_fks: Vec<String> = Vec::new();
+    if mig.atomic {
+        statements.push("BEGIN".to_string());
+    }
+    for op in &mig.forward {
+        match op {
+            Operation::Schema(change) => {
+                let batch = render_changes_split(std::slice::from_ref(change), &mig.snapshot)
+                    .map_err(MigrateError::Validation)?;
+                statements.extend(batch.immediate);
+                deferred_fks.extend(batch.deferred_fks);
+            }
+            Operation::Data(d) => {
+                statements.push(d.sql.clone());
+            }
+        }
+    }
+    statements.extend(deferred_fks);
+    statements.push(format!(
+        "INSERT INTO __rustango_migrations__ (name) VALUES ('{}')",
+        mig.name.replace('\'', "''")
+    ));
+    if mig.atomic {
+        statements.push("COMMIT".to_string());
+    }
+    Ok(MigrationPreview {
+        name: mig.name.clone(),
+        atomic: mig.atomic,
+        statements,
+    })
+}
+
 async fn apply_atomic(pool: &PgPool, mig: &Migration) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (atomic)");
     let mut tx = pool.begin().await?;

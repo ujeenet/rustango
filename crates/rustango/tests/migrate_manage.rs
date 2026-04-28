@@ -406,6 +406,74 @@ async fn run_with_writer_captures_help_text() {
 }
 
 #[tokio::test]
+async fn migrate_dry_run_subcommand_prints_sql_no_writes() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let table = unique_table("dry_subcmd");
+    let mig_name = unique_migration("dry_subcmd", 1);
+    let dir = fresh_dir("dry_subcmd");
+
+    write_migration(
+        &dir,
+        &Migration {
+            name: mig_name.clone(),
+            created_at: "2026-04-28T00:00:00Z".into(),
+            prev: None,
+            atomic: true,
+            snapshot: snapshot_with_table(&table),
+            forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
+        },
+    );
+
+    drop_table(&pool, &table).await;
+    delete_ledger_entry(&pool, &mig_name).await;
+
+    let mut buf: Vec<u8> = Vec::new();
+    manage::run_with_writer(&pool, &dir, args(&["migrate", "--dry-run"]), &mut buf)
+        .await
+        .unwrap();
+    let out = String::from_utf8(buf).unwrap();
+
+    assert!(
+        out.contains("DRY RUN"),
+        "expected DRY RUN banner, got: {out}"
+    );
+    assert!(out.contains(&mig_name), "expected migration name, got: {out}");
+    assert!(out.contains("CREATE TABLE"), "expected DDL, got: {out}");
+    assert!(out.contains("BEGIN"), "atomic migration should show BEGIN, got: {out}");
+
+    // No side effects.
+    let exists: bool = sqlx::query(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
+    )
+    .bind(&table)
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .try_get(0)
+    .unwrap();
+    assert!(!exists, "dry-run subcommand must not create the table");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn migrate_dry_run_subcommand_with_target_is_rejected() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let dir = fresh_dir("dry_run_target");
+    let _ = std::fs::create_dir_all(&dir);
+
+    let err = manage::run(&pool, &dir, args(&["migrate", "0001_x", "--dry-run"]))
+        .await
+        .unwrap_err();
+    assert!(format!("{err}").contains("dry-run"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn run_with_writer_captures_migrate_output() {
     let Some(pool) = pool().await else {
         return;

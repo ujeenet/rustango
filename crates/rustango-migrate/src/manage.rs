@@ -132,6 +132,12 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         "      Forward or back to <target>. `zero` unapplies every"
     )?;
     writeln!(w, "      applied migration.\n")?;
+    writeln!(w, "  migrate --dry-run")?;
+    writeln!(
+        w,
+        "      Print the SQL each pending migration would run; never"
+    )?;
+    writeln!(w, "      writes. Reads the ledger so the preview is accurate.\n")?;
     writeln!(w, "  downgrade [N]")?;
     writeln!(
         w,
@@ -207,24 +213,83 @@ async fn migrate<W: Write>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
-    if args.is_empty() {
-        let applied = runner::migrate(pool, dir).await?;
-        if applied.is_empty() {
+    let mut dry_run = false;
+    let mut positional: Option<&str> = None;
+    for arg in args {
+        match arg.as_str() {
+            "--dry-run" => dry_run = true,
+            "--help" | "-h" => {
+                writeln!(
+                    w,
+                    "migrate                    apply pending migrations\n\
+                     migrate <target>           forward or back to <target> (`zero` wipes)\n\
+                     migrate --dry-run          preview the SQL without writing"
+                )?;
+                return Ok(());
+            }
+            other if other.starts_with('-') => {
+                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+            }
+            other => {
+                if positional.is_some() {
+                    return Err(MigrateError::Validation(format!(
+                        "unexpected positional argument: {other}"
+                    )));
+                }
+                positional = Some(other);
+            }
+        }
+    }
+
+    if dry_run {
+        if positional.is_some() {
+            return Err(MigrateError::Validation(
+                "`migrate <target> --dry-run` is not supported in v0.4 — use plain `--dry-run` to preview pending forward migrations".into(),
+            ));
+        }
+        let preview = runner::migrate_dry_run(pool, dir).await?;
+        if preview.is_empty() {
             writeln!(w, "nothing to migrate (already up to date)")?;
         } else {
-            for m in &applied {
-                writeln!(w, "  applied {}", m.name)?;
+            writeln!(
+                w,
+                "-- DRY RUN: {} pending migration(s); no SQL will be executed",
+                preview.len()
+            )?;
+            for p in &preview {
+                writeln!(w)?;
+                writeln!(
+                    w,
+                    "-- {} ({})",
+                    p.name,
+                    if p.atomic { "atomic" } else { "non-atomic" }
+                )?;
+                for stmt in &p.statements {
+                    writeln!(w, "{stmt};")?;
+                }
             }
         }
         return Ok(());
     }
-    let target = &args[0];
-    let touched = runner::migrate_to(pool, dir, target).await?;
-    if touched.is_empty() {
-        writeln!(w, "already at {target}")?;
+
+    if let Some(target) = positional {
+        let touched = runner::migrate_to(pool, dir, target).await?;
+        if touched.is_empty() {
+            writeln!(w, "already at {target}")?;
+        } else {
+            for m in &touched {
+                writeln!(w, "  touched {}", m.name)?;
+            }
+        }
+        return Ok(());
+    }
+
+    let applied = runner::migrate(pool, dir).await?;
+    if applied.is_empty() {
+        writeln!(w, "nothing to migrate (already up to date)")?;
     } else {
-        for m in &touched {
-            writeln!(w, "  touched {}", m.name)?;
+        for m in &applied {
+            writeln!(w, "  applied {}", m.name)?;
         }
     }
     Ok(())

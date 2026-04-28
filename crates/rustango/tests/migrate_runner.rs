@@ -1021,6 +1021,111 @@ async fn applied_set_returns_recorded_names() {
     delete_ledger_entry(&pool, &unique).await;
 }
 
+// ---------- v0.4: migrate_dry_run ----------
+
+#[tokio::test]
+async fn dry_run_returns_pending_sql_without_executing() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let table = unique_table("dry_run");
+    let mig_name = unique_migration("dry_run", 1);
+    let dir = fresh_dir("dry_run");
+
+    let mig = Migration {
+        name: mig_name.clone(),
+        created_at: "2026-04-28T00:00:00Z".into(),
+        prev: None,
+        atomic: true,
+        snapshot: snapshot_with_table(&table),
+        forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
+    };
+    write_migration(&dir, &mig);
+
+    drop_table(&pool, &table).await;
+    delete_ledger_entry(&pool, &mig_name).await;
+
+    let preview = migrate::migrate_dry_run(&pool, &dir).await.unwrap();
+    assert_eq!(preview.len(), 1);
+    let p = &preview[0];
+    assert_eq!(p.name, mig_name);
+    assert!(p.atomic);
+    // Sanity: BEGIN, CREATE TABLE..., INSERT INTO __rustango_migrations__, COMMIT.
+    assert_eq!(p.statements.first().map(String::as_str), Some("BEGIN"));
+    assert_eq!(p.statements.last().map(String::as_str), Some("COMMIT"));
+    assert!(
+        p.statements.iter().any(|s| s.contains("CREATE TABLE")),
+        "{:?}",
+        p.statements
+    );
+    assert!(
+        p.statements
+            .iter()
+            .any(|s| s.contains("__rustango_migrations__")),
+        "{:?}",
+        p.statements
+    );
+
+    // The table must NOT exist — dry-run never writes.
+    let exists: bool = sqlx::query(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
+    )
+    .bind(&table)
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .try_get(0)
+    .unwrap();
+    assert!(!exists, "dry-run must never create tables");
+
+    // Ledger must NOT contain the migration.
+    let count: i64 = sqlx::query("SELECT COUNT(*) FROM __rustango_migrations__ WHERE name = $1")
+        .bind(&mig_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .try_get(0)
+        .unwrap();
+    assert_eq!(count, 0, "dry-run must never insert into ledger");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn dry_run_skips_already_applied_migrations() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let (dir, names, tables) = three_migrations();
+    cleanup(&pool, &names, &tables, &dir).await;
+    let (dir, names, tables) = three_migrations();
+
+    // Apply 0001 + 0002. Dry-run should preview only 0003.
+    migrate::migrate_to(&pool, &dir, &names[1]).await.unwrap();
+
+    let preview = migrate::migrate_dry_run(&pool, &dir).await.unwrap();
+    assert_eq!(preview.len(), 1);
+    assert_eq!(preview[0].name, names[2]);
+
+    cleanup(&pool, &names, &tables, &dir).await;
+}
+
+#[tokio::test]
+async fn dry_run_returns_empty_when_up_to_date() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let (dir, names, tables) = three_migrations();
+    cleanup(&pool, &names, &tables, &dir).await;
+    let (dir, names, tables) = three_migrations();
+
+    migrate::migrate(&pool, &dir).await.unwrap();
+    let preview = migrate::migrate_dry_run(&pool, &dir).await.unwrap();
+    assert!(preview.is_empty(), "no pending migrations means empty");
+
+    cleanup(&pool, &names, &tables, &dir).await;
+}
+
 // ---------- v0.3.1: unapply head check ----------
 
 #[tokio::test]
