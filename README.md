@@ -187,27 +187,68 @@ auto-escaped.
 
 ## Migrations
 
+The high-level UX is Django-shaped: drop a tiny `src/bin/manage.rs`
+into your project, then run `cargo run --bin manage -- <subcommand>`.
+
 ```rust
-use rustango::migrate;
+// src/bin/manage.rs
+use rustango::sql::sqlx::PgPool;
 
-// Bootstrap a fresh schema.
-migrate::apply_all(&pool).await?;
-
-// v0.2: snapshot + diff.
-let prev: migrate::SchemaSnapshot =
-    serde_json::from_str(&std::fs::read_to_string("migrations/0001.json")?)?;
-let current = migrate::SchemaSnapshot::from_registry();
-let changes = migrate::detect_changes(&prev, &current);
-let ddl = migrate::render_changes(&changes, &current)?;
-for stmt in ddl {
-    sqlx::query(&stmt).execute(&pool).await?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use my_app::models::*;   // pulls user models into this binary so
+                             // `inventory` registers them
+    let pool = PgPool::connect(&std::env::var("DATABASE_URL")?).await?;
+    let dir: &std::path::Path = "./migrations".as_ref();
+    rustango::migrate::manage::run(&pool, dir, std::env::args().skip(1)).await?;
+    Ok(())
 }
 ```
 
-What the diff covers in v0.2: new/dropped tables, new/dropped columns,
-FK constraints. Type changes, constraint changes, and renames are
-deliberately deferred — renames in particular need explicit `Rename`
-operations à la Django (snapshot diffs can't tell rename from drop+add).
+Subcommands:
+
+| command | what it does |
+|---------|--------------|
+| `makemigrations [name]`      | Diff registry against latest snapshot, write next file. |
+| `makemigrations --empty <name>` | Empty scaffold for hand-authored data migrations. |
+| `migrate`                    | Apply every pending migration in order. |
+| `migrate <target>`           | Forward or back to `<target>`. `zero` wipes everything. |
+| `downgrade [N]`              | Step back N applied migrations (default 1). |
+| `showmigrations`             | List applied / pending migrations. |
+
+Migration files live in `./migrations/*.json`, committed to git.
+Each file carries the full schema snapshot at that point plus an
+ordered list of operations — schema changes (`AddColumn`,
+`CreateTable`, …) and data ops (raw SQL with optional `reverse_sql`)
+interleaved, so the canonical "add nullable → backfill → set NOT NULL"
+recipe lives in one file.
+
+The library API is also available directly without the dispatcher:
+
+```rust
+use rustango::migrate;
+
+// First-run bootstrap from the registry (no migration files involved).
+migrate::apply_all(&pool).await?;
+
+// File-driven flow.
+let dir: &std::path::Path = "./migrations".as_ref();
+migrate::make_migrations(dir, None)?;          // diff + write next file
+migrate::migrate(&pool, dir).await?;           // apply all pending
+migrate::migrate_to(&pool, dir, "0003_initial_data").await?;  // jump to a target
+migrate::downgrade(&pool, dir, 1).await?;      // roll back one step
+migrate::unapply(&pool, dir, "0042_oops").await?;  // roll back a specific one
+```
+
+What's covered: new/dropped tables, new/dropped columns, FK
+constraints, the `default` attribute (so `ADD COLUMN ... NOT NULL
+DEFAULT '…'` works), forward + reverse, persistent tracking via
+`__rustango_migrations__`, and per-migration `atomic: false` opt-out
+for things like `CREATE INDEX CONCURRENTLY`.
+
+What's deferred: type / constraint changes and renames (need
+explicit `Rename`/`AlterField` operations à la Django — snapshot
+diffs can't tell a rename from a drop+add).
 
 ## Status
 

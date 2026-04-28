@@ -20,6 +20,7 @@ mod error;
 pub mod file;
 pub mod invert;
 pub mod make;
+pub mod manage;
 mod runner;
 pub mod snapshot;
 
