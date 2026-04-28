@@ -41,6 +41,16 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 /// rustango::migrate::migrate_embedded(&pool, EMBEDDED).await?;
 /// ```
 ///
+/// **Compile-time guarantees** (rustango v0.4+, slice 5): every JSON
+/// file's `name` field must equal its file stem, every `prev`
+/// reference must point to another migration in the same directory,
+/// and the JSON must parse. A broken chain — orphan `prev`, missing
+/// predecessor, malformed file — fails at macro-expansion time with
+/// a clear `compile_error!`. *No other Django-shape Rust framework
+/// validates migration chains at compile time*: Cot's migrations are
+/// imperative Rust code (no static chain), Loco's are SeaORM
+/// up/down (same), Rwf's are raw SQL (no chain at all).
+///
 /// Each migration is included via `include_str!` so cargo's rebuild
 /// detection picks up file *content* changes. **Caveat:** cargo
 /// doesn't watch directory listings, so adding or removing a
@@ -94,6 +104,86 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
         }
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Compile-time chain validation: read each migration's JSON,
+    // pull `name` and `prev` (file-stem-keyed for the chain check),
+    // and verify every `prev` points to another migration in the
+    // slice. Mismatches between the file stem and the embedded
+    // `name` field — and broken `prev` chains — fail at MACRO
+    // EXPANSION time so a misshapen migration set never compiles.
+    //
+    // This is the v0.4 Slice 5 distinguisher: rustango's JSON
+    // migrations + a Rust proc-macro that reads them is the unique
+    // combo nothing else in the Django-shape Rust camp can match
+    // (Cot's are imperative Rust code, Loco's are SeaORM up/down,
+    // Rwf's are raw SQL — none have a static chain to validate).
+    let mut chain_names: Vec<String> = Vec::with_capacity(entries.len());
+    let mut prev_refs: Vec<(String, Option<String>)> = Vec::with_capacity(entries.len());
+    for (stem, path) in &entries {
+        let raw = std::fs::read_to_string(path).map_err(|e| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "embed_migrations!: cannot read {} for chain validation: {e}",
+                    path.display()
+                ),
+            )
+        })?;
+        let json: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "embed_migrations!: {} is not valid JSON: {e}",
+                    path.display()
+                ),
+            )
+        })?;
+        let name = json
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "embed_migrations!: {} is missing the `name` field",
+                        path.display()
+                    ),
+                )
+            })?
+            .to_owned();
+        if name != *stem {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "embed_migrations!: file stem `{stem}` does not match the migration's \
+                     `name` field `{name}` — rename the file or fix the JSON",
+                ),
+            ));
+        }
+        let prev = json
+            .get("prev")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        chain_names.push(name.clone());
+        prev_refs.push((name, prev));
+    }
+
+    let name_set: std::collections::HashSet<&str> =
+        chain_names.iter().map(String::as_str).collect();
+    for (name, prev) in &prev_refs {
+        if let Some(p) = prev {
+            if !name_set.contains(p.as_str()) {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "embed_migrations!: broken migration chain — `{name}` declares \
+                         prev=`{p}` but no migration with that name exists in {}",
+                        abs.display()
+                    ),
+                ));
+            }
+        }
+    }
 
     let pairs: Vec<TokenStream2> = entries
         .iter()

@@ -264,6 +264,35 @@ fn embed_migrations_entries_round_trip_through_parse() {
 }
 
 #[test]
+fn embed_migrations_chain_is_validated_at_compile_time() {
+    // The fact that this binary compiles is itself the test: the
+    // `embed_migrations!("./tests/migrations_fixture")` invocation at
+    // the top of this file walks the chain at macro-expansion time
+    // (slice 5: v0.4) and would emit a `compile_error!` for a broken
+    // `prev` reference, a missing/orphaned predecessor, or a file
+    // stem that disagreed with the embedded `name`. The fixture's
+    // `0002_marker` declares prev="0001_initial" which exists, so
+    // expansion succeeds. Manually flip the `prev` field to a
+    // non-existent name to verify: `cargo build` fails with the
+    // chain-validation message.
+    assert_eq!(EMBEDDED_FIXTURE.len(), 2);
+    let prev_field = EMBEDDED_FIXTURE
+        .iter()
+        .map(|(_name, json)| {
+            file::parse(json)
+                .expect("fixture parses")
+                .prev
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(prev_field[0], None, "0001 has no prev");
+    assert_eq!(
+        prev_field[1].as_deref(),
+        Some("0001_initial"),
+        "0002 chains to 0001"
+    );
+}
+
+#[test]
 #[allow(clippy::const_is_empty)] // Whole point of this test is verifying the const came out empty.
 fn embed_migrations_default_path_compiles() {
     // Just verifies that calling embed_migrations!() with no argument
