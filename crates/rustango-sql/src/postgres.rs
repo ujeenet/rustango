@@ -93,7 +93,12 @@ impl Dialect for Postgres {
     }
 
     fn compile_insert(&self, query: &InsertQuery) -> Result<CompiledStatement, SqlError> {
-        if query.columns.is_empty() {
+        // `columns.is_empty()` is OK when every column is being filled
+        // by a server-side default — typically an `Auto<T>`-only model.
+        // In that case we emit `INSERT INTO t DEFAULT VALUES`. Without
+        // `RETURNING`, a fully-empty insert is a footgun, so we still
+        // reject it.
+        if query.columns.is_empty() && query.returning.is_empty() {
             return Err(SqlError::EmptyInsert);
         }
         if query.columns.len() != query.values.len() {
@@ -109,25 +114,41 @@ impl Dialect for Postgres {
         sql.push_str("INSERT INTO ");
         write_ident(&mut sql, query.model.table);
 
-        sql.push_str(" (");
-        let mut first = true;
-        for col in &query.columns {
-            if !first {
-                sql.push_str(", ");
+        if query.columns.is_empty() {
+            sql.push_str(" DEFAULT VALUES");
+        } else {
+            sql.push_str(" (");
+            let mut first = true;
+            for col in &query.columns {
+                if !first {
+                    sql.push_str(", ");
+                }
+                first = false;
+                write_ident(&mut sql, col);
             }
-            first = false;
-            write_ident(&mut sql, col);
-        }
-        sql.push_str(") VALUES (");
-        let mut first = true;
-        for value in &query.values {
-            if !first {
-                sql.push_str(", ");
+            sql.push_str(") VALUES (");
+            let mut first = true;
+            for value in &query.values {
+                if !first {
+                    sql.push_str(", ");
+                }
+                first = false;
+                push_param(&mut sql, &mut params, value.clone());
             }
-            first = false;
-            push_param(&mut sql, &mut params, value.clone());
+            sql.push(')');
         }
-        sql.push(')');
+
+        if !query.returning.is_empty() {
+            sql.push_str(" RETURNING ");
+            let mut first = true;
+            for col in &query.returning {
+                if !first {
+                    sql.push_str(", ");
+                }
+                first = false;
+                write_ident(&mut sql, col);
+            }
+        }
 
         Ok(CompiledStatement { sql, params })
     }

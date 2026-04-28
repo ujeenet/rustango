@@ -8,7 +8,7 @@
 use rustango::core::Column as _;
 use rustango::migrate;
 use rustango::sql::{sqlx, Fetcher};
-use rustango::Model;
+use rustango::{Auto, Model};
 use tokio::sync::Mutex;
 
 #[derive(Model, Debug, PartialEq, Eq, Clone)]
@@ -21,6 +21,15 @@ pub struct MigUser {
     #[rustango(min = 0, max = 150)]
     age: i32,
     is_active: bool,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "mig_auto_user")]
+pub struct AutoUser {
+    #[rustango(primary_key)]
+    id: rustango::Auto<i64>,
+    #[rustango(max_length = 32)]
+    name: String,
 }
 
 #[derive(Model, Debug, PartialEq, Eq, Clone)]
@@ -184,6 +193,72 @@ async fn registered_models_returns_what_we_defined() {
     // Linker order isn't guaranteed; just check both are present.
     assert!(names.contains(&"MigUser"), "missing MigUser: {names:?}");
     assert!(names.contains(&"MigPost"), "missing MigPost: {names:?}");
+}
+
+#[tokio::test]
+async fn auto_pk_insert_populates_id_from_sequence() {
+    // `Auto::Unset` on insert should drop the column from the INSERT
+    // (so BIGSERIAL fires) and read the assigned value back via
+    // RETURNING. The `&mut self` insert mutates the field in place.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+
+    let mut alice = AutoUser {
+        id: Auto::default(),
+        name: "alice".into(),
+    };
+    assert!(alice.id.is_unset());
+    alice.insert(&pool).await.unwrap();
+    assert!(alice.id.is_set(), "id must be populated after insert");
+    let alice_id = *alice.id.get().unwrap();
+    assert!(
+        alice_id > 0,
+        "BIGSERIAL should assign a positive id, got {alice_id}"
+    );
+
+    let mut bob = AutoUser {
+        id: Auto::Unset,
+        name: "bob".into(),
+    };
+    bob.insert(&pool).await.unwrap();
+    let bob_id = *bob.id.get().unwrap();
+    assert!(
+        bob_id > alice_id,
+        "second insert should get a strictly-greater id; got alice={alice_id}, bob={bob_id}"
+    );
+
+    let users: Vec<AutoUser> = AutoUser::objects().fetch(&pool).await.unwrap();
+    assert_eq!(users.len(), 2);
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn auto_pk_set_value_is_honored() {
+    // `Auto::Set(N)` should bypass the sequence and use the supplied
+    // value verbatim — useful for fixtures, replication, idempotent
+    // re-inserts.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+
+    let mut explicit = AutoUser {
+        id: Auto::Set(9999),
+        name: "explicit".into(),
+    };
+    explicit.insert(&pool).await.unwrap();
+    assert_eq!(*explicit.id.get().unwrap(), 9999);
+
+    migrate::drop_all(&pool).await.unwrap();
 }
 
 #[tokio::test]

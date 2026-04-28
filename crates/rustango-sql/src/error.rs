@@ -41,4 +41,9 @@ pub enum ExecError {
 
     #[error(transparent)]
     Driver(#[from] sqlx::Error),
+
+    /// `insert_returning` was called with an `InsertQuery` carrying no
+    /// `RETURNING` columns. Use `insert` for those.
+    #[error("`insert_returning` requires `query.returning` to be non-empty; use `insert` instead")]
+    EmptyReturning,
 }

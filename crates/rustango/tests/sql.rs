@@ -185,6 +185,7 @@ fn insert_emits_columns_and_placeholders() {
             SqlValue::String("alice".into()),
             SqlValue::Bool(true),
         ],
+        returning: Vec::new(),
     };
     let stmt = pg().compile_insert(&query).unwrap();
     assert_eq!(
@@ -207,6 +208,7 @@ fn insert_with_no_columns_is_rejected() {
         model: User::SCHEMA,
         columns: vec![],
         values: vec![],
+        returning: Vec::new(),
     };
     let err = pg().compile_insert(&query).unwrap_err();
     assert!(matches!(err, SqlError::EmptyInsert));
@@ -218,6 +220,7 @@ fn insert_with_mismatched_lengths_is_rejected() {
         model: User::SCHEMA,
         columns: vec!["id"],
         values: vec![SqlValue::I64(1), SqlValue::I64(2)],
+        returning: Vec::new(),
     };
     let err = pg().compile_insert(&query).unwrap_err();
     assert!(matches!(

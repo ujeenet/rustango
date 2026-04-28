@@ -63,6 +63,33 @@ pub async fn insert(pool: &PgPool, query: &InsertQuery) -> Result<(), ExecError>
     Ok(())
 }
 
+/// Run an `InsertQuery` and return the row created by the
+/// `RETURNING` clause.
+///
+/// Used by macro-generated insert paths for models with `Auto<T>` PKs:
+/// the column is omitted from the INSERT (so Postgres' BIGSERIAL
+/// sequence fires) and the assigned value is read back via `RETURNING`.
+/// Caller pulls each returned column out via `sqlx::Row::try_get` —
+/// e.g. `Auto<i64>::decode` rebuilds an `Auto::Set(value)`.
+///
+/// # Errors
+/// Returns [`ExecError::EmptyReturning`] if `query.returning` is empty
+/// (use [`insert`] for those); validation, SQL-writing, or driver
+/// failures otherwise.
+pub async fn insert_returning(pool: &PgPool, query: &InsertQuery) -> Result<PgRow, ExecError> {
+    if query.returning.is_empty() {
+        return Err(ExecError::EmptyReturning);
+    }
+    query.validate()?;
+    let stmt = Postgres.compile_insert(query)?;
+    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+    for value in stmt.params {
+        q = bind_query(q, value);
+    }
+    let row = q.fetch_one(pool).await?;
+    Ok(row)
+}
+
 /// Run an `UpdateQuery` against a Postgres pool. Returns rows affected.
 ///
 /// Validates each `SET` value against the declared field bounds before

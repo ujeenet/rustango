@@ -83,12 +83,19 @@ pub struct SearchClause {
 /// Compiled `INSERT` of a single row.
 ///
 /// `columns` and `values` are positional: `values[i]` binds to `columns[i]`.
-/// v0.1 only emits single-row inserts; bulk inserts land in v0.2.
+/// `returning` names columns the writer should append after `RETURNING` —
+/// used for `Auto<T>` PKs, where the row is inserted with the column
+/// omitted so Postgres' sequence DEFAULT fires, and the assigned value
+/// is then read back into the model.
 #[derive(Debug, Clone)]
 pub struct InsertQuery {
     pub model: &'static ModelSchema,
     pub columns: Vec<&'static str>,
     pub values: Vec<SqlValue>,
+    /// Columns to emit in a `RETURNING` clause. Empty = no clause; the
+    /// executor uses `execute()`. Non-empty = the executor uses
+    /// `fetch_one()` and the caller reads the returned row.
+    pub returning: Vec<&'static str>,
 }
 
 impl InsertQuery {

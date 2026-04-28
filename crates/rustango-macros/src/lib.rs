@@ -157,8 +157,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
     let inherent_impl = inherent_impl_tokens(
         struct_name,
-        &collected.insert_columns,
-        &collected.insert_values,
+        &collected,
         collected.primary_key.as_ref(),
         &column_consts,
     );
@@ -196,8 +195,25 @@ struct ColumnEntry {
 struct CollectedFields {
     field_schemas: Vec<TokenStream2>,
     from_row_inits: Vec<TokenStream2>,
+    /// Static column-name list — used by the simple insert path
+    /// (no `Auto<T>` fields). Aligned with `insert_values`.
     insert_columns: Vec<TokenStream2>,
+    /// Static `Into<SqlValue>` expressions, one per field. Aligned
+    /// with `insert_columns`. Used by the simple insert path only.
     insert_values: Vec<TokenStream2>,
+    /// Per-field push expressions for the dynamic (Auto-aware)
+    /// insert path. Each statement either unconditionally pushes
+    /// `(column, value)` or, for an `Auto<T>` field, conditionally
+    /// pushes only when `Auto::Set(_)`. Built only when `has_auto`.
+    insert_pushes: Vec<TokenStream2>,
+    /// SQL columns for `RETURNING` — one per `Auto<T>` field. Empty
+    /// when `has_auto == false`.
+    returning_cols: Vec<TokenStream2>,
+    /// `self.<field> = Row::try_get(&row, "<col>")?;` for each Auto
+    /// field. Run after `insert_returning` to populate the model.
+    auto_assigns: Vec<TokenStream2>,
+    /// `true` if any field on the struct is `Auto<T>`.
+    has_auto: bool,
     primary_key: Option<(syn::Ident, String)>,
     column_entries: Vec<ColumnEntry>,
     /// Rust-side field names, in declaration order. Used to validate
@@ -212,6 +228,10 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
         from_row_inits: Vec::with_capacity(cap),
         insert_columns: Vec::with_capacity(cap),
         insert_values: Vec::with_capacity(cap),
+        insert_pushes: Vec::with_capacity(cap),
+        returning_cols: Vec::new(),
+        auto_assigns: Vec::new(),
+        has_auto: false,
         primary_key: None,
         column_entries: Vec::with_capacity(cap),
         field_names: Vec::with_capacity(cap),
@@ -230,6 +250,28 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
                 ::core::clone::Clone::clone(&self.#ident)
             )
         });
+        if info.auto {
+            out.has_auto = true;
+            out.returning_cols.push(quote!(#column));
+            out.auto_assigns.push(quote! {
+                self.#ident = ::rustango::sql::sqlx::Row::try_get(&_returning_row, #column)?;
+            });
+            out.insert_pushes.push(quote! {
+                if let ::rustango::sql::Auto::Set(_v) = &self.#ident {
+                    _columns.push(#column);
+                    _values.push(::core::convert::Into::<::rustango::core::SqlValue>::into(
+                        ::core::clone::Clone::clone(_v)
+                    ));
+                }
+            });
+        } else {
+            out.insert_pushes.push(quote! {
+                _columns.push(#column);
+                _values.push(::core::convert::Into::<::rustango::core::SqlValue>::into(
+                    ::core::clone::Clone::clone(&self.#ident)
+                ));
+            });
+        }
         if info.primary_key {
             if out.primary_key.is_some() {
                 return Err(syn::Error::new_spanned(
@@ -276,8 +318,7 @@ fn model_impl_tokens(
 
 fn inherent_impl_tokens(
     struct_name: &syn::Ident,
-    insert_columns: &[TokenStream2],
-    insert_values: &[TokenStream2],
+    fields: &CollectedFields,
     primary_key: Option<&(syn::Ident, String)>,
     column_consts: &TokenStream2,
 ) -> TokenStream2 {
@@ -312,14 +353,43 @@ fn inherent_impl_tokens(
         }
     });
 
-    quote! {
-        impl #struct_name {
-            /// Start a new `QuerySet` over this model.
-            #[must_use]
-            pub fn objects() -> ::rustango::query::QuerySet<#struct_name> {
-                ::rustango::query::QuerySet::new()
+    let insert_method = if fields.has_auto {
+        let pushes = &fields.insert_pushes;
+        let returning_cols = &fields.returning_cols;
+        let auto_assigns = &fields.auto_assigns;
+        quote! {
+            /// Insert this row into its table. Skips columns whose
+            /// `Auto<T>` value is `Unset` so Postgres' SERIAL/BIGSERIAL
+            /// sequence fills them in, then reads each `Auto` column
+            /// back via `RETURNING` and stores it on `self`.
+            ///
+            /// # Errors
+            /// Returns [`::rustango::sql::ExecError`] for SQL-writing or
+            /// driver failures.
+            pub async fn insert(
+                &mut self,
+                pool: &::rustango::sql::sqlx::PgPool,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                let mut _columns: ::std::vec::Vec<&'static str> =
+                    ::std::vec::Vec::new();
+                let mut _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                    ::std::vec::Vec::new();
+                #( #pushes )*
+                let query = ::rustango::core::InsertQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    columns: _columns,
+                    values: _values,
+                    returning: ::std::vec![ #( #returning_cols ),* ],
+                };
+                let _returning_row = ::rustango::sql::insert_returning(pool, &query).await?;
+                #( #auto_assigns )*
+                ::core::result::Result::Ok(())
             }
-
+        }
+    } else {
+        let insert_columns = &fields.insert_columns;
+        let insert_values = &fields.insert_values;
+        quote! {
             /// Insert this row into its table.
             ///
             /// # Errors
@@ -333,9 +403,22 @@ fn inherent_impl_tokens(
                     model: <Self as ::rustango::core::Model>::SCHEMA,
                     columns: ::std::vec![ #( #insert_columns ),* ],
                     values: ::std::vec![ #( #insert_values ),* ],
+                    returning: ::std::vec::Vec::new(),
                 };
                 ::rustango::sql::insert(pool, &query).await
             }
+        }
+    };
+
+    quote! {
+        impl #struct_name {
+            /// Start a new `QuerySet` over this model.
+            #[must_use]
+            pub fn objects() -> ::rustango::query::QuerySet<#struct_name> {
+                ::rustango::query::QuerySet::new()
+            }
+
+            #insert_method
 
             #pk_methods
 
@@ -562,6 +645,10 @@ struct FieldInfo<'a> {
     ident: &'a syn::Ident,
     column: String,
     primary_key: bool,
+    /// `true` when the Rust type was `Auto<T>` — the INSERT path will
+    /// skip this column when `Auto::Unset` and emit it under
+    /// `RETURNING` so Postgres' sequence DEFAULT fills in the value.
+    auto: bool,
     /// The original field type, e.g. `i64` or `Option<String>`. Emitted as
     /// the `Column::Value` associated type for typed-column tokens.
     value_ty: &'a Type,
@@ -631,6 +718,7 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
         ident,
         column,
         primary_key,
+        auto,
         value_ty: &field.ty,
         field_type_tokens,
         schema,
