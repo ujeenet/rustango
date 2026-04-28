@@ -13,7 +13,7 @@ derive populates, so a brand-new struct gets a browseable list/detail/edit/
 delete page the moment it compiles.
 
 ```rust
-use rustango::{Model, admin, migrate};
+use rustango::{Auto, Model, admin, migrate};
 use rustango::core::Column as _;
 use rustango::sql::{Fetcher, sqlx::PgPool};
 
@@ -21,7 +21,7 @@ use rustango::sql::{Fetcher, sqlx::PgPool};
 #[rustango(table = "user", display = "username")]
 struct User {
     #[rustango(primary_key)]
-    id: i64,
+    id: Auto<i64>,                  // BIGSERIAL — sequence assigns the PK
     #[rustango(max_length = 32)]
     username: String,
     #[rustango(min = 0, max = 150)]
@@ -33,6 +33,16 @@ struct User {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPool::connect(&std::env::var("DATABASE_URL")?).await?;
     migrate::apply_all(&pool).await?;
+
+    // Insert with a server-assigned id — `id` is populated in place.
+    let mut alice = User {
+        id: Auto::default(),
+        username: "alice".into(),
+        age: 30,
+        is_active: true,
+    };
+    alice.insert(&pool).await?;
+    println!("alice got id {}", alice.id.get().unwrap());
 
     // Typed query.
     let actives: Vec<User> = User::objects()
@@ -50,6 +60,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+## What's distinct
+
+- **Zero-wiring auto-admin.** Every `#[derive(Model)]` is admin-visible the moment it compiles — no per-model registration. (Cot needs four opt-in steps; Loco has [no admin yet](https://github.com/loco-rs/loco/issues/819).)
+- **Migrations as data.** JSON files with full per-step `SchemaSnapshot`, mechanically diff-able, language-agnostic. `embed_migrations!` validates the chain at **compile time** — a broken `prev` reference fails `cargo build`, not runtime.
+- **`manage migrate --dry-run`** prints every DDL/DML the next migrate would run, no side effects.
+- **`DataOp` interleaved with `SchemaChange`** in one migration — Django's "add nullable + backfill + set NOT NULL" recipe lives in one file.
+- Postgres-only by design. Single dev hobby project; for multi-DB ORMs use [Diesel](https://diesel.rs) or [SeaORM](https://www.sea-ql.org).
 
 ## Try the demo
 

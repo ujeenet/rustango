@@ -2,20 +2,38 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
-## [Unreleased] — v0.3.1 polish pass
+## [Unreleased] — v0.4
 
-Hardening pass after the v0.3 review. Plugs the loud-failure-mode footguns surfaced when slicing 0-7 were exercised end to end. No new public surface beyond `unapply_force`, `detect_unsupported_field_changes`, and `manage::run_with_writer`.
+ORM ergonomics + migration tooling — closes the day-2 gaps surfaced by the [Cot](https://cot.rs) and [Loco](https://loco.rs) framework comparisons (see `memory/framework-landscape.md` in the dev memory). Six slices, all merged.
 
 ### Added
-- **Concurrent-migrate advisory lock.** `migrate`, `migrate_to`, `unapply`, `downgrade`, and `migrate_embedded` serialize through `pg_advisory_lock(MIGRATE_LOCK_KEY)` so peer boots no longer race into PK violations on the ledger.
-- **Prev-chain validation in `file::list_dir` and `migrate_embedded`.** A migration declaring `prev: "0001_missing"` whose predecessor isn't in the directory now fails at load time with a clear "broken migration chain" error rather than surfacing as an opaque failure deep inside `unapply`.
-- **`migrate::detect_unsupported_field_changes`** + matching guard in `make_migrations_from`. Type changes (`i32 → i64`), nullability flips, default changes, `max_length` changes, FK target changes, primary-key changes, and `min`/`max` (CHECK) changes used to silently produce no diff. They now return `MigrateError::Validation` with one diff line per change, naming the column and the v0.4 `AlterField` deferral.
-- **`unapply` head check + `unapply_force` escape.** Refusing to unapply a non-head migration prevents leaving the schema with newer migrations still applied on top of a rolled-back predecessor. `unapply_force` bypasses for surgical correction.
-- **`tracing` integration** at apply/unapply boundaries (`info!` per migration with `migration` field). Optional dependency, surfaces in any `tracing-subscriber` setup.
-- **`manage::run_with_writer`** — same dispatcher as `manage::run` but writes to a caller-supplied `&mut W: Write + Send` for testable / capturable / redirectable output. `manage::run` is now a thin wrapper around `run_with_writer(&mut std::io::stdout())`.
+- **`Auto<T>` server-assigned PK wrapper.** `id: Auto<i64>` → `BIGSERIAL`; `Auto<i32>` → `SERIAL`. `Auto::default()` lets the database fill the value via the sequence; `Auto::Set(v)` honors a caller-supplied value. `&mut self.insert(&pool)` reads the assigned id back through `RETURNING` and stores it in place. Re-exported as `rustango::Auto`. (Slice 1)
+- **`Model::bulk_insert(rows, &pool)`** — multi-row INSERT, one round-trip for N rows. Non-Auto models take `&[Self]`; Auto-bearing models take `&mut [Self]` and populate each row's PK from `RETURNING` in input order. Mixed `Auto::Set`/`Auto::Unset` within one batch is rejected (`SqlError::BulkAutoMixed`) — column lists must be uniform; use single-row `insert` for that case. (Slice 2)
+- **`AlterField` + `Rename` operations.** Six new `SchemaChange` variants — `AlterColumnType`, `AlterColumnNullable`, `AlterColumnDefault`, `AlterColumnMaxLength`, `RenameTable`, `RenameColumn` — with full render, invert, and (for the four alters) autodetection in `detect_changes`. Renames are not auto-detected (rename vs drop+add is ambiguous, same Django reasoning); author them via `manage makemigrations --empty <name>` and edit the JSON. The v0.3.1 polish #3 hard-error narrows to PK / min / max / FK / Auto add-remove changes, which still need a follow-up slice. (Slice 3)
+- **`manage migrate --dry-run`** + **`migrate::migrate_dry_run(pool, dir) -> Vec<MigrationPreview>`**. Print every DDL/DML statement the next `migrate` would run, without executing any of it. Reads the ledger so the preview reflects the actual pending set. Atomic migrations show synthetic `BEGIN`/`COMMIT` markers; the ledger INSERT is included verbatim. **No other Django-shape Rust framework has this** — Cot and Loco can't, and Django's `sqlmigrate` only previews one migration at a time. (Slice 4)
+- **Compile-time `embed_migrations!` chain validation.** The proc-macro now reads each JSON at expansion time, parses out `name` and `prev`, and emits a `compile_error!` for any broken chain, orphan predecessor, file-stem-vs-name mismatch, or malformed JSON. **The only Rust ORM where a broken migration set fails to compile** — Cot's migrations are imperative Rust code with no static chain to validate, Loco's are SeaORM up/down (same), Rwf's are raw SQL. (Slice 5)
+
+### Changed
+- **`InsertQuery` gains `returning: Vec<&'static str>`.** Empty (default) preserves existing behavior; non-empty triggers `RETURNING` emission and the new `executor::insert_returning` path.
+- **`SchemaChange` enum becomes non-exhaustive in spirit** — six new variants land. JSON migration files written by v0.3 still parse; the new variants only appear when authors hand-write them or when `make_migrations` detects metadata changes.
+- **`detect_unsupported_field_changes` narrows** to PK / min / max / FK / Auto add-remove. Type / nullable / default / max_length now produce `AlterColumn*` ops via `detect_changes` rather than the v0.3.1 hard error.
+
+### Removed (effective for users hitting the v0.3.1 hard error)
+- The "field metadata changed but v0.3 has no AlterField operation" error message no longer fires for type / nullable / default / max_length changes — those are real ops now.
 
 ### Documentation
-- This `CHANGELOG.md` for v0.2 → v0.3.
+- README headline snippet now shows `id: Auto<i64>` + the in-place insert pattern. New "What's distinct" section calls out the four genuine differentiators against Cot/Loco/Rwf — registry-driven admin, JSON migrations, `migrate --dry-run`, and interleaved `DataOp`/`SchemaChange`.
+
+## [0.3.1] — pre-release
+
+Hardening pass merged into the v0.4 unreleased section above. Originally:
+
+- Concurrent-migrate `pg_advisory_lock`.
+- Prev-chain validation in `file::list_dir` + `migrate_embedded` (slice 5 of v0.4 promoted this to compile-time for `embed_migrations!`).
+- Metadata-change detection (slice 3 of v0.4 turned the hard error into real ops for the common cases).
+- `unapply` head check + `unapply_force` escape.
+- `tracing::info!` at apply/unapply boundaries.
+- `manage::run_with_writer` for capturable output.
 
 ## [0.3.0] — 2026-04-28
 
