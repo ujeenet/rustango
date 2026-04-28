@@ -6,12 +6,14 @@
 //! ships Postgres only; `SQLite` and `MySQL` slot in as additional
 //! `Dialect` arms in v0.2+.
 
+mod auto;
 mod compiled;
 mod dialect;
 mod error;
 mod executor;
 mod postgres;
 
+pub use auto::Auto;
 pub use compiled::CompiledStatement;
 pub use dialect::Dialect;
 pub use error::{ExecError, SqlError};

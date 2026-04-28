@@ -580,8 +580,25 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
     let name = ident.to_string();
     let column = attrs.column.clone().unwrap_or_else(|| name.clone());
     let primary_key = attrs.primary_key;
-    let (kind, nullable) = detect_type(&field.ty)?;
+    let DetectedType {
+        kind,
+        nullable,
+        auto,
+    } = detect_type(&field.ty)?;
     check_bound_compatibility(field, &attrs, kind)?;
+    if auto && !primary_key {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`Auto<T>` is only valid on a `#[rustango(primary_key)]` field",
+        ));
+    }
+    if auto && attrs.default.is_some() {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`#[rustango(default = \"…\")]` is redundant on an `Auto<T>` field — \
+             SERIAL / BIGSERIAL already supplies a default sequence.",
+        ));
+    }
     let relation = relation_tokens(field, &attrs)?;
     let column_lit = column.as_str();
     let field_type_tokens = kind.variant_tokens();
@@ -602,6 +619,7 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
             min: #min,
             max: #max,
             default: #default,
+            auto: #auto,
         }
     };
 
@@ -740,7 +758,17 @@ impl DetectedKind {
     }
 }
 
-fn detect_type(ty: &Type) -> syn::Result<(DetectedKind, bool)> {
+/// Result of walking a field's Rust type. `kind` is the underlying
+/// `FieldType`; `nullable` is set by an outer `Option<T>`; `auto` is
+/// set by an outer `Auto<T>` (server-assigned PK).
+#[derive(Clone, Copy)]
+struct DetectedType {
+    kind: DetectedKind,
+    nullable: bool,
+    auto: bool,
+}
+
+fn detect_type(ty: &Type) -> syn::Result<DetectedType> {
     let Type::Path(TypePath { path, qself: None }) = ty else {
         return Err(syn::Error::new_spanned(ty, "unsupported field type"));
     };
@@ -750,28 +778,51 @@ fn detect_type(ty: &Type) -> syn::Result<(DetectedKind, bool)> {
         .ok_or_else(|| syn::Error::new_spanned(ty, "empty type path"))?;
 
     if last.ident == "Option" {
-        let PathArguments::AngleBracketed(args) = &last.arguments else {
-            return Err(syn::Error::new_spanned(
-                ty,
-                "Option requires a generic argument",
-            ));
-        };
-        let inner = args
-            .args
-            .iter()
-            .find_map(|a| match a {
-                GenericArgument::Type(t) => Some(t),
-                _ => None,
-            })
-            .ok_or_else(|| syn::Error::new_spanned(ty, "Option<T> requires a type argument"))?;
-        let (kind, already_nullable) = detect_type(inner)?;
-        if already_nullable {
+        let inner = generic_inner(ty, &last.arguments, "Option")?;
+        let inner_det = detect_type(inner)?;
+        if inner_det.nullable {
             return Err(syn::Error::new_spanned(
                 ty,
                 "nested Option is not supported",
             ));
         }
-        return Ok((kind, true));
+        if inner_det.auto {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "`Option<Auto<T>>` is not supported — Auto fields are server-assigned and cannot be NULL",
+            ));
+        }
+        return Ok(DetectedType {
+            nullable: true,
+            ..inner_det
+        });
+    }
+
+    if last.ident == "Auto" {
+        let inner = generic_inner(ty, &last.arguments, "Auto")?;
+        let inner_det = detect_type(inner)?;
+        if inner_det.auto {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "nested Auto is not supported",
+            ));
+        }
+        if inner_det.nullable {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "`Auto<Option<T>>` is not supported — Auto fields are server-assigned and cannot be NULL",
+            ));
+        }
+        if !matches!(inner_det.kind, DetectedKind::I32 | DetectedKind::I64) {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "`Auto<T>` only supports integer types (`i32` → SERIAL, `i64` → BIGSERIAL)",
+            ));
+        }
+        return Ok(DetectedType {
+            auto: true,
+            ..inner_det
+        });
     }
 
     let kind = match last.ident.to_string().as_str() {
@@ -788,11 +839,37 @@ fn detect_type(ty: &Type) -> syn::Result<(DetectedKind, bool)> {
         other => {
             return Err(syn::Error::new_spanned(
                 ty,
-                format!("unsupported field type `{other}`; v0.1 supports i32/i64/f32/f64/bool/String/DateTime/NaiveDate/Uuid/serde_json::Value, optionally wrapped in Option"),
+                format!("unsupported field type `{other}`; v0.1 supports i32/i64/f32/f64/bool/String/DateTime/NaiveDate/Uuid/serde_json::Value, optionally wrapped in Option or Auto (Auto only on integers)"),
             ));
         }
     };
-    Ok((kind, false))
+    Ok(DetectedType {
+        kind,
+        nullable: false,
+        auto: false,
+    })
+}
+
+fn generic_inner<'a>(
+    ty: &'a Type,
+    arguments: &'a PathArguments,
+    wrapper: &str,
+) -> syn::Result<&'a Type> {
+    let PathArguments::AngleBracketed(args) = arguments else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            format!("{wrapper} requires a generic argument"),
+        ));
+    };
+    args.args
+        .iter()
+        .find_map(|a| match a {
+            GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            syn::Error::new_spanned(ty, format!("{wrapper}<T> requires a type argument"))
+        })
 }
 
 fn to_snake_case(s: &str) -> String {

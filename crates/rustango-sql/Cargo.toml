@@ -24,3 +24,7 @@ rustango-query = { workspace = true }
 sqlx           = { workspace = true }
 indexmap       = { workspace = true }
 thiserror      = { workspace = true }
+serde          = { workspace = true }
+
+[dev-dependencies]
+serde_json     = { workspace = true }

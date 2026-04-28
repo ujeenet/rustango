@@ -166,6 +166,12 @@ fn push_field_diffs(table: &str, pf: &FieldSnapshot, cf: &FieldSnapshot, out: &m
             pf.fk, cf.fk
         ));
     }
+    if pf.auto != cf.auto {
+        out.push(format!(
+            "`{table}.{col}` auto changed: {} → {}",
+            pf.auto, cf.auto
+        ));
+    }
 }
 
 /// Render a list of [`SchemaChange`]s as Postgres DDL strings ready to
@@ -346,6 +352,13 @@ fn add_column_sql(table: &str, f: &FieldSnapshot) -> String {
 }
 
 fn sql_type(f: &FieldSnapshot) -> String {
+    if f.auto {
+        return match f.ty.as_str() {
+            "i32" => "SERIAL".into(),
+            "i64" => "BIGSERIAL".into(),
+            other => other.to_uppercase(),
+        };
+    }
     match f.ty.as_str() {
         "i32" => "INTEGER".into(),
         "i64" => "BIGINT".into(),

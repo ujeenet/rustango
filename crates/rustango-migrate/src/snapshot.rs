@@ -38,8 +38,18 @@ pub struct FieldSnapshot {
     /// Raw SQL fragment for `DEFAULT` if the model declared one.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub default: Option<String>,
+    /// `true` for fields whose Rust type is `Auto<T>` — server-assigned
+    /// PKs that translate to `BIGSERIAL` / `SERIAL` in DDL. Skipped on
+    /// serialize when `false` so older snapshots stay diff-clean.
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub auto: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub fk: Option<RelationSnapshot>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -113,6 +123,7 @@ impl FieldSnapshot {
             min: f.min,
             max: f.max,
             default: f.default.map(str::to_owned),
+            auto: f.auto,
             fk,
         }
     }

@@ -137,6 +137,15 @@ fn write_check_constraint(s: &mut String, field: &FieldSchema) {
 }
 
 fn sql_type(field: &FieldSchema) -> String {
+    if field.auto {
+        return match field.ty {
+            FieldType::I32 => "SERIAL".into(),
+            FieldType::I64 => "BIGSERIAL".into(),
+            // Macro rejects non-integer Auto<T> at derive time; this is
+            // unreachable for any model that compiled.
+            other => unreachable!("Auto<{other}> should have failed at derive time"),
+        };
+    }
     match field.ty {
         FieldType::I32 => "INTEGER".into(),
         FieldType::I64 => "BIGINT".into(),

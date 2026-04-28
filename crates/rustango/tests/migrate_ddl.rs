@@ -357,3 +357,44 @@ fn min_only_uses_signed_value_in_check() {
     assert!(sql.contains(r#"CHECK ("floor_only" >= -100)"#), "{sql}",);
     assert!(!sql.contains("AND"), "no AND for single-sided check: {sql}");
 }
+
+// ---------------- Auto<T> primary keys ----------------
+
+#[derive(Model)]
+#[allow(dead_code)]
+#[rustango(table = "ddl_auto_big")]
+pub struct AutoBig {
+    #[rustango(primary_key)]
+    id: rustango::Auto<i64>,
+    name: String,
+}
+
+#[test]
+fn auto_i64_pk_emits_bigserial() {
+    let sql = create_table_sql(AutoBig::SCHEMA);
+    assert!(
+        sql.contains(r#""id" BIGSERIAL"#),
+        "expected BIGSERIAL, got: {sql}"
+    );
+    assert!(sql.contains("PRIMARY KEY"), "{sql}");
+}
+
+#[derive(Model)]
+#[allow(dead_code)]
+#[rustango(table = "ddl_auto_small")]
+pub struct AutoSmall {
+    #[rustango(primary_key)]
+    id: rustango::Auto<i32>,
+    label: String,
+}
+
+#[test]
+fn auto_i32_pk_emits_serial() {
+    let sql = create_table_sql(AutoSmall::SCHEMA);
+    assert!(
+        sql.contains(r#""id" SERIAL"#),
+        "expected SERIAL, got: {sql}"
+    );
+    // Don't false-match BIGSERIAL.
+    assert!(!sql.contains("BIGSERIAL"), "{sql}");
+}

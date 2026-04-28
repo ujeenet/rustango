@@ -30,6 +30,12 @@ pub struct FieldSchema {
     pub max: Option<i64>,
     /// Raw SQL expression for the column's `DEFAULT` clause, if any.
     pub default: Option<&'static str>,
+    /// `true` for fields whose Rust type is `Auto<T>` — server-assigned
+    /// PKs that translate to `BIGSERIAL` / `SERIAL` and skip the column
+    /// from explicit INSERTs when `Auto::Unset` so Postgres' DEFAULT
+    /// fires. The migration writer reads this; the `Auto::Unset → SQL
+    /// DEFAULT` translation happens in the macro-generated INSERT path.
+    pub auto: bool,
 }
 
 /// Static description of a relation to another model.
