@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{% block title %}rustango admin{% endblock title %}</title>
+<style>
+body { font-family: -apple-system, system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #ccc; padding: .35rem .6rem; text-align: left; vertical-align: top; }
+th { background: #f4f4f4; }
+a { color: #0a4; text-decoration: none; }
+a:hover { text-decoration: underline; }
+small { color: #888; font-weight: normal; }
+em { color: #888; }
+input[type=text], input[type=number], input[type=date], input[type=datetime-local], input[type=search], textarea { width: 100%; box-sizing: border-box; padding: .25rem .4rem; font: inherit; }
+textarea { min-height: 4rem; }
+.error { background: #fee; border: 1px solid #f88; padding: .5rem .75rem; border-radius: 4px; }
+.muted { color: #aaa; }
+.search { display: flex; gap: .5rem; align-items: center; margin: .5rem 0; }
+.search input[type=search] { flex: 1; }
+.active-filters { color: #666; font-size: .9em; margin: .5rem 0; }
+.active-filters code { background: #eef; padding: .1rem .35rem; border-radius: 3px; }
+.pager { margin-top: 1rem; }
+button { padding: .4rem 1rem; font: inherit; cursor: pointer; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; }
+dt { font-weight: bold; }
+</style>
+</head>
+<body>
+{% block body %}{% endblock body %}
+</body>
+</html>

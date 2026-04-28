@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}{{ model.name }} — rustango admin{% endblock title %}
+{% block body %}
+<p><a href="/">&larr; admin home</a></p>
+<h1>{{ model.name }}</h1>
+<p>Table: <code>{{ model.table }}</code> &mdash; {{ total }} row{{ plural }}
+{% if read_only %}
+  &nbsp;&middot;&nbsp; <em>read-only</em>
+{% else %}
+  &nbsp;&middot;&nbsp; <a href="/{{ model.table }}/new">+ new {{ model.name }}</a>
+{% endif %}
+</p>
+
+{% if has_searchable %}
+<form method="get" action="/{{ model.table }}" class="search">
+  <input type="search" name="q" value="{{ q }}" placeholder="search&hellip;">
+  <button type="submit">go</button>
+  {% for f in active_filters %}
+    <input type="hidden" name="{{ f.key }}" value="{{ f.value }}">
+  {% endfor %}
+</form>
+{% endif %}
+
+{% if q or active_filters | length > 0 %}
+<p class="active-filters">filtered by:
+  {% if q %}<code>q={{ q }}</code> {% endif %}
+  {% for f in active_filters %}<code>{{ f.key }}={{ f.value }}</code> {% endfor %}
+  &middot; <a href="/{{ model.table }}">clear</a>
+</p>
+{% endif %}
+
+{% if rows | length == 0 %}
+<p><em>No rows on this page.</em></p>
+{% else %}
+<table>
+  <thead>
+    <tr>
+    {% for col in columns %}
+      <th>{{ col.label | safe }}</th>
+    {% endfor %}
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for row in rows %}
+    <tr>
+      {% for cell in row.cells %}<td>{{ cell | safe }}</td>{% endfor %}
+      <td>{% if row.pk %}<a href="/{{ model.table }}/{{ row.pk }}">view</a>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if last_page > 1 %}
+<p class="pager">
+  {% if page > 1 %}
+    <a href="/{{ model.table }}?page={{ page - 1 }}{{ pager_suffix | safe }}">&larr; prev</a>
+  {% else %}
+    <span class="muted">&larr; prev</span>
+  {% endif %}
+  &middot; page {{ page }} of {{ last_page }} &middot;
+  {% if page < last_page %}
+    <a href="/{{ model.table }}?page={{ page + 1 }}{{ pager_suffix | safe }}">next &rarr;</a>
+  {% else %}
+    <span class="muted">next &rarr;</span>
+  {% endif %}
+</p>
+{% endif %}
+{% endblock body %}

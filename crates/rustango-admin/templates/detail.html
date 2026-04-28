@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}{{ model.name }} #{{ pk }} — rustango admin{% endblock title %}
+{% block body %}
+<p><a href="/">admin</a> &rsaquo; <a href="/{{ model.table }}">{{ model.name }}</a> &rsaquo; <strong>{{ pk }}</strong></p>
+<h1>{{ model.name }} #{{ pk }}</h1>
+<dl>
+{% for cell in cells %}
+  <dt>{{ cell.label }}</dt>
+  <dd>{{ cell.value | safe }}</dd>
+{% endfor %}
+</dl>
+{% if read_only %}
+<p><em>This table is read-only.</em></p>
+{% else %}
+<p>
+  <a href="/{{ model.table }}/{{ pk }}/edit">edit</a> &middot;
+  <form method="post" action="/{{ model.table }}/{{ pk }}/delete" style="display:inline" onsubmit="return confirm('Delete this row?')">
+    <button type="submit">delete</button>
+  </form>
+</p>
+{% endif %}
+{% endblock body %}

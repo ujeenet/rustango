@@ -37,7 +37,7 @@ pub use auth::protect_with_basic_auth;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::extract::{Form, Path, Query, State};
 use axum::http::StatusCode;
@@ -52,6 +52,35 @@ use rustango_core::{
 use rustango_sql::sqlx::{self, PgPool};
 
 use forms::FormError;
+
+/// Lazily-initialized Tera registry holding the four bundled templates.
+/// `include_str!` baked into the binary at compile time → no runtime
+/// filesystem dependency.
+fn templates() -> &'static tera::Tera {
+    static T: OnceLock<tera::Tera> = OnceLock::new();
+    T.get_or_init(|| {
+        let mut tera = tera::Tera::default();
+        tera.add_raw_templates([
+            ("base.html", include_str!("../templates/base.html")),
+            ("index.html", include_str!("../templates/index.html")),
+            ("list.html", include_str!("../templates/list.html")),
+            ("detail.html", include_str!("../templates/detail.html")),
+            ("form.html", include_str!("../templates/form.html")),
+        ])
+        .expect("admin templates compile");
+        tera
+    })
+}
+
+/// Render a bundled template with a serde-serializable context. Panics
+/// if the template is missing or the context fails to serialize — both
+/// are programmer bugs caught in tests.
+fn render(template: &str, ctx: &serde_json::Value) -> String {
+    let tera_ctx = tera::Context::from_serialize(ctx).expect("admin context serializes");
+    templates()
+        .render(template, &tera_ctx)
+        .expect("admin template renders")
+}
 
 /// Mount the admin under any prefix using axum's nesting:
 /// `Router::new().nest("/admin", rustango_admin::router(pool))`.
@@ -162,27 +191,20 @@ async fn index(State(state): State<AppState>) -> Html<String> {
         .collect();
     models.sort_by_key(|m| m.name);
 
-    let mut html = String::from(PAGE_HEAD);
-    html.push_str("<h1>rustango admin</h1>");
-    if models.is_empty() {
-        html.push_str("<p><em>No models registered.</em></p>");
-    } else {
-        html.push_str(
-            "<table><thead><tr><th>Model</th><th>Table</th><th>Fields</th></tr></thead><tbody>",
-        );
-        for m in models {
-            let name = render::escape(m.name);
-            let table = render::escape(m.table);
-            let count = m.scalar_fields().count();
-            let _ = write!(
-                html,
-                "<tr><td><a href=\"/{table}\">{name}</a></td><td>{table}</td><td>{count}</td></tr>",
-            );
-        }
-        html.push_str("</tbody></table>");
-    }
-    html.push_str(PAGE_FOOT);
-    Html(html)
+    let models_ctx: Vec<serde_json::Value> = models
+        .into_iter()
+        .map(|m| {
+            serde_json::json!({
+                "name": m.name,
+                "table": m.table,
+                "field_count": m.scalar_fields().count(),
+            })
+        })
+        .collect();
+    Html(render(
+        "index.html",
+        &serde_json::json!({ "models": models_ctx }),
+    ))
 }
 
 // ============================================================== LIST
@@ -279,119 +301,59 @@ async fn table_view(
     } else {
         ((total - 1) / PAGE_SIZE) + 1
     };
-
-    let mut html = String::from(PAGE_HEAD);
-    let name = render::escape(model.name);
-    let table_q = render::escape(model.table);
-    let plural = if total == 1 { "" } else { "s" };
     let read_only = state.is_read_only(model.table);
-    let new_link = if read_only {
-        String::from(" &nbsp;&middot;&nbsp; <em>read-only</em>")
-    } else {
-        format!(r#" &nbsp;&middot;&nbsp; <a href="/{table_q}/new">+ new {name}</a>"#)
-    };
-    let _ = write!(
-        html,
-        r#"<p><a href="/">&larr; admin home</a></p><h1>{name}</h1>
-<p>Table: <code>{table_q}</code> &mdash; {total} row{plural}{new_link}</p>"#,
-    );
 
-    // Search box (when at least one searchable field exists).
-    if model.searchable_fields().next().is_some() {
-        let q_val = render::escape(q.as_deref().unwrap_or(""));
-        let _ = write!(
-            html,
-            r#"<form method="get" action="/{table_q}" class="search">
-<input type="search" name="q" value="{q_val}" placeholder="search&hellip;">
-<button type="submit">go</button>"#,
-        );
-        // Carry active field filters through the form so submitting search
-        // doesn't drop them.
-        for (k, v) in &active_field_filters {
-            let _ = write!(
-                html,
-                r#"<input type="hidden" name="{}" value="{}">"#,
-                render::escape(k),
-                render::escape(v),
-            );
-        }
-        html.push_str("</form>");
-    }
-
-    // Active-filter badges + clear-all link.
-    if !active_field_filters.is_empty() || q.is_some() {
-        html.push_str(r#"<p class="active-filters">filtered by: "#);
-        if let Some(qs) = &q {
-            let _ = write!(html, "<code>q={}</code> ", render::escape(qs));
-        }
-        for (k, v) in &active_field_filters {
-            let _ = write!(
-                html,
-                "<code>{}={}</code> ",
-                render::escape(k),
-                render::escape(v),
-            );
-        }
-        let _ = write!(html, r#"&middot; <a href="/{table_q}">clear</a></p>"#);
-    }
-
-    if rows.is_empty() {
-        html.push_str("<p><em>No rows on this page.</em></p>");
-    } else {
-        html.push_str("<table><thead><tr>");
-        for f in model.scalar_fields() {
+    // Per-column header label. PK gets a `<small>(pk)</small>` suffix; the
+    // template marks the value `| safe` so this raw HTML survives.
+    let columns_ctx: Vec<serde_json::Value> = model
+        .scalar_fields()
+        .map(|f| {
             let label = if f.primary_key {
                 format!("{} <small>(pk)</small>", render::escape(f.name))
             } else {
                 render::escape(f.name)
             };
-            let _ = write!(html, "<th>{label}</th>");
-        }
-        html.push_str("<th></th></tr></thead><tbody>");
-        for row in &rows {
-            html.push_str("<tr>");
-            for f in model.scalar_fields() {
-                let value = render_cell(row, f, &fk_map);
-                let _ = write!(html, "<td>{value}</td>");
-            }
-            html.push_str("<td>");
-            if let Some(pk) = pk_field {
-                let pk_str = render::render_value_for_input(row, pk);
-                let pk_esc = render::escape(&pk_str);
-                let _ = write!(html, r#"<a href="/{table_q}/{pk_esc}">view</a>"#);
-            }
-            html.push_str("</td></tr>");
-        }
-        html.push_str("</tbody></table>");
-    }
+            serde_json::json!({ "label": label })
+        })
+        .collect();
 
-    // Pager. Pager URLs preserve q + field filters via a query-string suffix.
-    if last_page > 1 {
-        let suffix = pager_suffix(q.as_deref(), &active_field_filters);
-        html.push_str(r#"<p class="pager">"#);
-        if page > 1 {
-            let _ = write!(
-                html,
-                r#"<a href="/{table_q}?page={prev}{suffix}">&larr; prev</a> &middot; "#,
-                prev = page - 1,
-            );
-        } else {
-            html.push_str(r#"<span class="muted">&larr; prev</span> &middot; "#);
-        }
-        let _ = write!(html, "page {page} of {last_page}");
-        if page < last_page {
-            let _ = write!(
-                html,
-                r#" &middot; <a href="/{table_q}?page={next}{suffix}">next &rarr;</a>"#,
-                next = page + 1,
-            );
-        } else {
-            html.push_str(r#" &middot; <span class="muted">next &rarr;</span>"#);
-        }
-        html.push_str("</p>");
-    }
-    html.push_str(PAGE_FOOT);
-    Ok(Html(html))
+    // Per-row payload. Each cell is pre-rendered HTML (FK link or escaped
+    // scalar) and `pk` carries the row's URL fragment for the action link.
+    let rows_ctx: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|row| {
+            let cells: Vec<String> = model
+                .scalar_fields()
+                .map(|f| render_cell(row, f, &fk_map))
+                .collect();
+            let pk = pk_field.map(|pk| render::escape(&render::render_value_for_input(row, pk)));
+            serde_json::json!({ "cells": cells, "pk": pk })
+        })
+        .collect();
+
+    let active_filters_ctx: Vec<serde_json::Value> = active_field_filters
+        .iter()
+        .map(|(k, v)| serde_json::json!({ "key": k, "value": v }))
+        .collect();
+    let pager_suffix_str = pager_suffix(q.as_deref(), &active_field_filters);
+
+    Ok(Html(render(
+        "list.html",
+        &serde_json::json!({
+            "model": { "name": model.name, "table": model.table },
+            "total": total,
+            "plural": if total == 1 { "" } else { "s" },
+            "read_only": read_only,
+            "has_searchable": model.searchable_fields().next().is_some(),
+            "q": q.unwrap_or_default(),
+            "active_filters": active_filters_ctx,
+            "columns": columns_ctx,
+            "rows": rows_ctx,
+            "page": page,
+            "last_page": last_page,
+            "pager_suffix": pager_suffix_str,
+        }),
+    )))
 }
 
 // ============================================================== DETAIL
@@ -431,33 +393,24 @@ async fn detail_view(
     // Resolve any FK display values for this single row before rendering.
     let fk_map = resolve_fk_displays(&state, model, std::slice::from_ref(&row)).await?;
 
-    let mut html = String::from(PAGE_HEAD);
-    let name = render::escape(model.name);
-    let table_q = render::escape(model.table);
-    let pk_esc = render::escape(&pk_raw);
-    let _ = write!(
-        html,
-        r#"<p><a href="/">admin</a> &rsaquo; <a href="/{table_q}">{name}</a> &rsaquo; <strong>{pk_esc}</strong></p>
-<h1>{name} #{pk_esc}</h1>
-<dl>"#,
+    let cells_ctx: Vec<serde_json::Value> = model
+        .scalar_fields()
+        .map(|f| {
+            serde_json::json!({
+                "label": f.name,
+                "value": render_cell(&row, f, &fk_map),
+            })
+        })
+        .collect();
+    let html = render(
+        "detail.html",
+        &serde_json::json!({
+            "model": { "name": model.name, "table": model.table },
+            "pk": pk_raw,
+            "cells": cells_ctx,
+            "read_only": state.is_read_only(model.table),
+        }),
     );
-    for f in model.scalar_fields() {
-        let label = render::escape(f.name);
-        let value = render_cell(&row, f, &fk_map);
-        let _ = write!(html, "<dt>{label}</dt><dd>{value}</dd>");
-    }
-    html.push_str("</dl>");
-    if state.is_read_only(model.table) {
-        html.push_str("<p><em>This table is read-only.</em></p>");
-    } else {
-        let _ = write!(
-            html,
-            r#"<p><a href="/{table_q}/{pk_esc}/edit">edit</a> &middot;
-<form method="post" action="/{table_q}/{pk_esc}/delete" style="display:inline" onsubmit="return confirm('Delete this row?')">
-<button type="submit">delete</button></form></p>"#,
-        );
-    }
-    html.push_str(PAGE_FOOT);
     Ok(Html(html))
 }
 
@@ -794,74 +747,62 @@ fn render_cell(row: &sqlx::postgres::PgRow, field: &FieldSchema, fk_map: &FkMap)
     render::render_value(row, field)
 }
 
-/// Render a create or edit form. Pre-fill values come from `prefill` (keyed
-/// by Rust field name); pass `None` for an empty create form. `pk_locked`
-/// makes the PK input read-only (edit mode). `error_msg`, when present, is
-/// shown above the form.
+/// Render a create or edit form via the `form.html` template. Pre-fill
+/// values come from `prefill` (keyed by Rust field name); pass `None` for
+/// an empty create form. `pk_locked` makes the PK input read-only (edit
+/// mode). `error_msg`, when present, is shown above the form.
 fn render_form(
     model: &'static ModelSchema,
     prefill: Option<&HashMap<String, String>>,
     pk_locked: bool,
     error_msg: Option<&str>,
 ) -> String {
-    let mut html = String::from(PAGE_HEAD);
-    let name = render::escape(model.name);
-    let table = render::escape(model.table);
     let action = if pk_locked {
-        // Update form: POST back to /{table}/{pk}
         let pk_field = model.primary_key().expect("pk_locked requires a PK");
         let pk_value = prefill
             .and_then(|m| m.get(pk_field.name).cloned())
             .unwrap_or_default();
         format!("/{}/{}", model.table, render::escape(&pk_value))
     } else {
-        // Create form: POST to /{table}
         format!("/{}", model.table)
     };
     let title = if pk_locked {
-        format!("Edit {name}")
+        format!("Edit {}", model.name)
     } else {
-        format!("New {name}")
+        format!("New {}", model.name)
     };
-    let _ = write!(
-        html,
-        r#"<p><a href="/">admin</a> &rsaquo; <a href="/{table}">{name}</a></p>
-<h1>{title}</h1>"#,
-    );
-    if let Some(err) = error_msg {
-        let _ = write!(html, r#"<p class="error">{}</p>"#, render::escape(err));
-    }
-    let _ = write!(
-        html,
-        r#"<form method="post" action="{action}"><table>"#,
-        action = render::escape(&action),
-    );
-    for f in model.scalar_fields() {
-        let value = prefill
-            .and_then(|m| m.get(f.name))
-            .map_or("", String::as_str);
-        render_form_row(&mut html, f, value, pk_locked);
-    }
-    html.push_str("</table>");
-    let _ = write!(html, r#"<p><button type="submit">save</button></p></form>"#,);
-    html.push_str(PAGE_FOOT);
-    html
-}
 
-fn render_form_row(html: &mut String, field: &FieldSchema, value: &str, pk_locked: bool) {
-    let label = render::escape(field.name);
-    let extra = if field.primary_key {
-        " <small>(pk)</small>"
-    } else if !field.nullable {
-        " <small>required</small>"
-    } else {
-        ""
-    };
-    let input = render::render_input(field, value, pk_locked);
-    let _ = write!(
-        html,
-        r#"<tr><th><label for="{label}">{label}{extra}</label></th><td>{input}</td></tr>"#,
-    );
+    let rows_ctx: Vec<serde_json::Value> = model
+        .scalar_fields()
+        .map(|f| {
+            let value = prefill
+                .and_then(|m| m.get(f.name))
+                .map_or("", String::as_str);
+            let extra = if f.primary_key {
+                " <small>(pk)</small>"
+            } else if !f.nullable {
+                " <small>required</small>"
+            } else {
+                ""
+            };
+            serde_json::json!({
+                "label": f.name,
+                "extra": extra,
+                "input": render::render_input(f, value, pk_locked),
+            })
+        })
+        .collect();
+
+    render(
+        "form.html",
+        &serde_json::json!({
+            "model": { "name": model.name, "table": model.table },
+            "title": title,
+            "action": action,
+            "error": error_msg,
+            "rows": rows_ctx,
+        }),
+    )
 }
 
 // ============================================================== ERRORS
@@ -918,30 +859,3 @@ impl IntoResponse for AdminError {
         }
     }
 }
-
-const PAGE_HEAD: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>rustango admin</title>
-<style>
-body { font-family: -apple-system, system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
-table { border-collapse: collapse; width: 100%; }
-th, td { border: 1px solid #ccc; padding: .35rem .6rem; text-align: left; vertical-align: top; }
-th { background: #f4f4f4; }
-a { color: #0a4; text-decoration: none; }
-a:hover { text-decoration: underline; }
-small { color: #888; font-weight: normal; }
-em { color: #888; }
-input[type=text], input[type=number], input[type=date], input[type=datetime-local], textarea { width: 100%; box-sizing: border-box; padding: .25rem .4rem; font: inherit; }
-textarea { min-height: 4rem; }
-.error { background: #fee; border: 1px solid #f88; padding: .5rem .75rem; border-radius: 4px; }
-button { padding: .4rem 1rem; font: inherit; cursor: pointer; }
-dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; }
-dt { font-weight: bold; }
-</style>
-</head>
-<body>
-"#;
-
-const PAGE_FOOT: &str = "\n</body>\n</html>";

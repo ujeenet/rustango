@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} — rustango admin{% endblock title %}
+{% block body %}
+<p><a href="/">admin</a> &rsaquo; <a href="/{{ model.table }}">{{ model.name }}</a></p>
+<h1>{{ title }}</h1>
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+<form method="post" action="{{ action }}">
+  <table>
+  {% for row in rows %}
+    <tr>
+      <th><label for="{{ row.label }}">{{ row.label }}{{ row.extra | safe }}</label></th>
+      <td>{{ row.input | safe }}</td>
+    </tr>
+  {% endfor %}
+  </table>
+  <p><button type="submit">save</button></p>
+</form>
+{% endblock body %}

@@ -48,6 +48,7 @@ axum = { version = "0.8", default-features = false, features = ["tokio", "http1"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 base64 = "0.22"
+tera = { version = "1.20", default-features = false }
 
 # Macro deps
 syn          = { version = "2", features = ["full", "extra-traits"] }

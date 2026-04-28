@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>rustango admin</h1>
+{% if models | length == 0 %}
+<p><em>No models registered.</em></p>
+{% else %}
+<table>
+  <thead>
+    <tr><th>Model</th><th>Table</th><th>Fields</th></tr>
+  </thead>
+  <tbody>
+  {% for m in models %}
+    <tr>
+      <td><a href="/{{ m.table }}">{{ m.name }}</a></td>
+      <td>{{ m.table }}</td>
+      <td>{{ m.field_count }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock body %}
