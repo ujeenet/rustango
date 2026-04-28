@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 #[derive(Model, Debug, Clone)]
-#[rustango(table = "admin_user")]
+#[rustango(table = "admin_user", display = "name")]
 pub struct AdminUser {
     #[rustango(primary_key)]
     id: i64,
@@ -24,6 +24,17 @@ pub struct AdminUser {
     #[rustango(min = 0, max = 150)]
     age: i32,
     is_active: bool,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "admin_post", display = "title")]
+pub struct AdminPost {
+    #[rustango(primary_key)]
+    id: i64,
+    #[rustango(max_length = 200)]
+    title: String,
+    #[rustango(fk = "admin_user", on = "id")]
+    author_id: i64,
 }
 
 fn live_lock() -> &'static Mutex<()> {
@@ -1143,6 +1154,193 @@ async fn show_only_and_read_only_compose() {
         .await
         .unwrap();
     assert_eq!(new_form.status(), StatusCode::FORBIDDEN);
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+// ============================================================ FK display
+
+async fn seed_blog(pool: &sqlx::PgPool) {
+    migrate::drop_all(pool).await.unwrap();
+    migrate::apply_all(pool).await.unwrap();
+    AdminUser {
+        id: 1,
+        name: "alice".into(),
+        age: 30,
+        is_active: true,
+    }
+    .insert(pool)
+    .await
+    .unwrap();
+    AdminUser {
+        id: 2,
+        name: "bob".into(),
+        age: 45,
+        is_active: false,
+    }
+    .insert(pool)
+    .await
+    .unwrap();
+    AdminPost {
+        id: 10,
+        title: "hello".into(),
+        author_id: 1,
+    }
+    .insert(pool)
+    .await
+    .unwrap();
+    AdminPost {
+        id: 11,
+        title: "second".into(),
+        author_id: 2,
+    }
+    .insert(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn list_renders_fk_as_link_to_display_value() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed_blog(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_post")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_string(response).await;
+
+    // Each post row should link author_id to /admin_user/<id> with the
+    // displayed alice/bob — not the raw integer.
+    assert!(
+        body.contains(r#"<a href="/admin_user/1">alice</a>"#),
+        "post 10 should link to alice: {body}",
+    );
+    assert!(
+        body.contains(r#"<a href="/admin_user/2">bob</a>"#),
+        "post 11 should link to bob: {body}",
+    );
+    // Raw integer should NOT appear in the FK cell.
+    assert!(
+        !body.contains("<td>1</td>") || body.contains("<td>1</td><td><a"),
+        "raw author_id 1 leaked: {body}",
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn detail_renders_fk_as_link_to_display_value() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed_blog(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_post/10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_string(response).await;
+    assert!(
+        body.contains(r#"<dd><a href="/admin_user/1">alice</a></dd>"#),
+        "detail should show alice link: {body}",
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn fk_falls_back_to_raw_when_target_hidden() {
+    // If admin_user is filtered out via show_only, post.author_id has
+    // no resolvable display — should render the raw value, not crash.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed_blog(&pool).await;
+
+    let app = rustango::admin::Builder::new(pool.clone())
+        .show_only(["admin_post"])
+        .build();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_post")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(response).await;
+    // No link to /admin_user
+    assert!(
+        !body.contains(r#"href="/admin_user/"#),
+        "FK link leaked despite hidden target: {body}",
+    );
+    // Raw author_id renders.
+    assert!(
+        body.contains(">1<") || body.contains(">2<"),
+        "raw author_id missing: {body}",
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn fk_falls_back_to_raw_when_target_row_missing() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+
+    // Insert a post with no matching author. We bypass FK enforcement
+    // by inserting via raw SQL after dropping the constraint.
+    sqlx::query("ALTER TABLE admin_post DROP CONSTRAINT admin_post_author_id_fkey")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO admin_post (id, title, author_id) VALUES (99, 'orphan', 999)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_post")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(response).await;
+    // Should render the raw 999 (no link), not crash and not show alice.
+    assert!(
+        !body.contains(r#"<a href="/admin_user/999""#),
+        "should not link to missing target: {body}",
+    );
+    assert!(body.contains(">999<"), "raw 999 should render: {body}");
 
     migrate::drop_all(&pool).await.unwrap();
 }

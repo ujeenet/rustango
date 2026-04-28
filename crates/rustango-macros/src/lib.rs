@@ -39,13 +39,32 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         ));
     };
 
-    let table =
-        parse_container_attrs(input)?.unwrap_or_else(|| to_snake_case(&struct_name.to_string()));
+    let container = parse_container_attrs(input)?;
+    let table = container
+        .table
+        .unwrap_or_else(|| to_snake_case(&struct_name.to_string()));
     let model_name = struct_name.to_string();
 
     let collected = collect_fields(named)?;
 
-    let model_impl = model_impl_tokens(struct_name, &model_name, &table, &collected.field_schemas);
+    // Validate that #[rustango(display = "…")] names a real field.
+    if let Some((ref display, span)) = container.display {
+        if !collected.field_names.iter().any(|n| n == display) {
+            return Err(syn::Error::new(
+                span,
+                format!("`display = \"{display}\"` does not match any field on this struct"),
+            ));
+        }
+    }
+    let display = container.display.map(|(name, _)| name);
+
+    let model_impl = model_impl_tokens(
+        struct_name,
+        &model_name,
+        &table,
+        display.as_deref(),
+        &collected.field_schemas,
+    );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
     let inherent_impl = inherent_impl_tokens(
@@ -93,6 +112,9 @@ struct CollectedFields {
     insert_values: Vec<TokenStream2>,
     primary_key: Option<(syn::Ident, String)>,
     column_entries: Vec<ColumnEntry>,
+    /// Rust-side field names, in declaration order. Used to validate
+    /// container attributes like `display = "…"`.
+    field_names: Vec<String>,
 }
 
 fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
@@ -104,10 +126,12 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
         insert_values: Vec::with_capacity(cap),
         primary_key: None,
         column_entries: Vec::with_capacity(cap),
+        field_names: Vec::with_capacity(cap),
     };
 
     for field in &named.named {
         let info = process_field(field)?;
+        out.field_names.push(info.ident.to_string());
         out.field_schemas.push(info.schema);
         out.from_row_inits.push(info.from_row_init);
         let column = info.column.as_str();
@@ -142,14 +166,21 @@ fn model_impl_tokens(
     struct_name: &syn::Ident,
     model_name: &str,
     table: &str,
+    display: Option<&str>,
     field_schemas: &[TokenStream2],
 ) -> TokenStream2 {
+    let display_tokens = if let Some(name) = display {
+        quote!(::core::option::Option::Some(#name))
+    } else {
+        quote!(::core::option::Option::None)
+    };
     quote! {
         impl ::rustango::core::Model for #struct_name {
             const SCHEMA: &'static ::rustango::core::ModelSchema = &::rustango::core::ModelSchema {
                 name: #model_name,
                 table: #table,
                 fields: &[ #(#field_schemas),* ],
+                display: #display_tokens,
             };
         }
     }
@@ -300,8 +331,16 @@ fn from_row_impl_tokens(struct_name: &syn::Ident, from_row_inits: &[TokenStream2
     }
 }
 
-fn parse_container_attrs(input: &DeriveInput) -> syn::Result<Option<String>> {
-    let mut table = None;
+struct ContainerAttrs {
+    table: Option<String>,
+    display: Option<(String, proc_macro2::Span)>,
+}
+
+fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
+    let mut out = ContainerAttrs {
+        table: None,
+        display: None,
+    };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
             continue;
@@ -309,13 +348,18 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<Option<String>> {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("table") {
                 let s: LitStr = meta.value()?.parse()?;
-                table = Some(s.value());
+                out.table = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("display") {
+                let s: LitStr = meta.value()?.parse()?;
+                out.display = Some((s.value(), s.span()));
                 return Ok(());
             }
             Err(meta.error("unknown rustango container attribute"))
         })?;
     }
-    Ok(table)
+    Ok(out)
 }
 
 struct FieldAttrs {

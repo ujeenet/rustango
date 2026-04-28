@@ -47,7 +47,7 @@ use axum::Json;
 use axum::Router;
 use rustango_core::{
     inventory, CountQuery, DeleteQuery, FieldSchema, Filter, InsertQuery, ModelEntry, ModelSchema,
-    Op, SelectQuery, SqlValue, UpdateQuery,
+    Op, Relation, SelectQuery, SqlValue, UpdateQuery,
 };
 use rustango_sql::sqlx::{self, PgPool};
 use serde::Deserialize;
@@ -226,6 +226,8 @@ async fn table_view(
     )
     .await?;
 
+    let fk_map = resolve_fk_displays(&state, model, &rows).await?;
+
     let last_page = if total == 0 {
         1
     } else {
@@ -264,7 +266,7 @@ async fn table_view(
         for row in &rows {
             html.push_str("<tr>");
             for f in model.scalar_fields() {
-                let value = render::render_value(row, f);
+                let value = render_cell(row, f, &fk_map);
                 let _ = write!(html, "<td>{value}</td>");
             }
             html.push_str("<td>");
@@ -339,6 +341,9 @@ async fn detail_view(
         pk: pk_raw.clone(),
     })?;
 
+    // Resolve any FK display values for this single row before rendering.
+    let fk_map = resolve_fk_displays(&state, model, std::slice::from_ref(&row)).await?;
+
     let mut html = String::from(PAGE_HEAD);
     let name = render::escape(model.name);
     let table_q = render::escape(model.table);
@@ -351,7 +356,7 @@ async fn detail_view(
     );
     for f in model.scalar_fields() {
         let label = render::escape(f.name);
-        let value = render::render_value(&row, f);
+        let value = render_cell(&row, f, &fk_map);
         let _ = write!(html, "<dt>{label}</dt><dd>{value}</dd>");
     }
     html.push_str("</dl>");
@@ -564,6 +569,105 @@ fn lookup_model(state: &AppState, table: &str) -> Option<&'static ModelSchema> {
         .into_iter()
         .find(|e| e.schema.table == table)
         .map(|e| e.schema)
+}
+
+/// Map of `(target_table, source_value_string) → display_value_html`. Built
+/// once per page load; rendering then looks up FK display values from it
+/// instead of issuing one query per row.
+type FkMap = HashMap<(String, String), String>;
+
+/// For every FK / O2O column on `model`, batch-fetch the target rows and
+/// build a map keyed by `(target_table, source_value_as_string)`. Targets
+/// that aren't visible (filtered via `show_only`) or whose row is missing
+/// just don't appear in the map — `render_cell` then falls back to the
+/// raw value.
+async fn resolve_fk_displays(
+    state: &AppState,
+    model: &'static ModelSchema,
+    rows: &[sqlx::postgres::PgRow],
+) -> Result<FkMap, AdminError> {
+    let mut map: FkMap = HashMap::new();
+    for field in model.scalar_fields() {
+        let Some(rel) = field.relation else { continue };
+        let (to, on) = match rel {
+            Relation::Fk { to, on } | Relation::O2O { to, on } => (to, on),
+            Relation::M2M { .. } => continue,
+        };
+        let Some(target) = lookup_model(state, to) else {
+            continue;
+        };
+        let Some(display_field) = target.display_field() else {
+            continue;
+        };
+        let Some(on_field) = target.field_by_column(on) else {
+            continue;
+        };
+
+        // Distinct FK values from the visible rows.
+        let mut seen = HashSet::new();
+        let mut fk_values: Vec<SqlValue> = Vec::new();
+        for row in rows {
+            let Some(s) = render::read_value_as_string(row, field) else {
+                continue;
+            };
+            if seen.insert(s.clone()) {
+                if let Some(v) = render::read_value_as_sqlvalue(row, field) {
+                    fk_values.push(v);
+                }
+            }
+        }
+        if fk_values.is_empty() {
+            continue;
+        }
+
+        let target_rows = rustango_sql::select_rows(
+            &state.pool,
+            &SelectQuery {
+                model: target,
+                filters: vec![Filter {
+                    column: on,
+                    op: Op::In,
+                    value: SqlValue::List(fk_values),
+                }],
+                limit: None,
+                offset: None,
+            },
+        )
+        .await?;
+
+        for trow in &target_rows {
+            let Some(key) = render::read_value_as_string(trow, on_field) else {
+                continue;
+            };
+            let display = render::render_value(trow, display_field);
+            map.insert((to.to_owned(), key), display);
+        }
+    }
+    Ok(map)
+}
+
+/// Render one cell. For FK columns this resolves to a link into the target
+/// table; everything else delegates to [`render::render_value`].
+fn render_cell(row: &sqlx::postgres::PgRow, field: &FieldSchema, fk_map: &FkMap) -> String {
+    if let Some(rel) = field.relation {
+        let to = match rel {
+            Relation::Fk { to, .. } | Relation::O2O { to, .. } => Some(to),
+            Relation::M2M { .. } => None,
+        };
+        if let Some(to) = to {
+            let Some(raw_value) = render::read_value_as_string(row, field) else {
+                return "<em>NULL</em>".to_owned();
+            };
+            let raw_esc = render::escape(&raw_value);
+            let to_esc = render::escape(to);
+            return match fk_map.get(&(to.to_owned(), raw_value)) {
+                Some(display) => format!(r#"<a href="/{to_esc}/{raw_esc}">{display}</a>"#),
+                // Target hidden by show_only or row genuinely missing — show raw.
+                None => raw_esc,
+            };
+        }
+    }
+    render::render_value(row, field)
 }
 
 /// Render a create or edit form. Pre-fill values come from `prefill` (keyed

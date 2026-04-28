@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-use rustango_core::{FieldSchema, FieldType};
+use rustango_core::{FieldSchema, FieldType, SqlValue};
 use rustango_sql::sqlx::{self, postgres::PgRow, Postgres, Row};
 
 /// Escape a string for safe inclusion in HTML body or attribute context.
@@ -175,5 +175,64 @@ pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) ->
         FieldType::Json => format!(
             r#"<textarea name="{name}" id="{name}" disabled>JSON editing disabled in v0.1</textarea>"#
         ),
+    }
+}
+
+// ============================================================== FK helpers
+
+/// Read a column value as a string, for use as a hash-map key or URL
+/// fragment. Returns `None` for `NULL` and for value types we don't
+/// support as PKs/FKs.
+pub(crate) fn read_value_as_string(row: &PgRow, field: &FieldSchema) -> Option<String> {
+    match field.ty {
+        FieldType::I32 => row
+            .try_get::<Option<i32>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string()),
+        FieldType::I64 => row
+            .try_get::<Option<i64>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string()),
+        FieldType::String => row
+            .try_get::<Option<String>, _>(field.column)
+            .ok()
+            .flatten(),
+        FieldType::Uuid => row
+            .try_get::<Option<uuid::Uuid>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string()),
+        _ => None,
+    }
+}
+
+/// Read a column value as an owned `SqlValue`, for re-binding in an
+/// `IN (...)` clause. Same shape as [`read_value_as_string`] — returns
+/// `None` for `NULL` or unsupported types.
+pub(crate) fn read_value_as_sqlvalue(row: &PgRow, field: &FieldSchema) -> Option<SqlValue> {
+    match field.ty {
+        FieldType::I32 => row
+            .try_get::<Option<i32>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(SqlValue::I32),
+        FieldType::I64 => row
+            .try_get::<Option<i64>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(SqlValue::I64),
+        FieldType::String => row
+            .try_get::<Option<String>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(SqlValue::String),
+        FieldType::Uuid => row
+            .try_get::<Option<uuid::Uuid>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(SqlValue::Uuid),
+        _ => None,
     }
 }

@@ -24,6 +24,15 @@ pub struct BlogPost {
     title: String,
 }
 
+#[derive(Model)]
+#[rustango(display = "title")]
+#[allow(dead_code)]
+pub struct DisplayedPost {
+    #[rustango(primary_key)]
+    id: i64,
+    title: String,
+}
+
 #[test]
 fn schema_reflects_attributes() {
     let s = User::SCHEMA;
@@ -52,6 +61,21 @@ fn schema_reflects_attributes() {
 #[test]
 fn default_table_is_snake_case() {
     assert_eq!(BlogPost::SCHEMA.table, "blog_post");
+}
+
+#[test]
+fn display_attribute_lands_in_schema() {
+    assert_eq!(DisplayedPost::SCHEMA.display, Some("title"));
+    let f = DisplayedPost::SCHEMA.display_field().unwrap();
+    assert_eq!(f.name, "title");
+}
+
+#[test]
+fn display_defaults_to_primary_key_when_unset() {
+    assert_eq!(BlogPost::SCHEMA.display, None);
+    let f = BlogPost::SCHEMA.display_field().unwrap();
+    assert_eq!(f.name, "id");
+    assert!(f.primary_key);
 }
 
 #[test]

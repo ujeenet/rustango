@@ -43,11 +43,18 @@ pub enum Relation {
 }
 
 /// Static description of a model.
+///
+/// `display` is the Rust-side field name that should be used when
+/// rendering this model as the *target* of a foreign key — admin UIs
+/// and any future "select" widgets render `display`'s value rather than
+/// the raw PK. Set via `#[rustango(display = "field")]`; defaults to
+/// `None`, in which case callers fall back to the primary key.
 #[derive(Debug, Clone, Copy)]
 pub struct ModelSchema {
     pub name: &'static str,
     pub table: &'static str,
     pub fields: &'static [FieldSchema],
+    pub display: Option<&'static str>,
 }
 
 impl ModelSchema {
@@ -74,6 +81,19 @@ impl ModelSchema {
         self.fields
             .iter()
             .filter(|f| !matches!(f.relation, Some(Relation::M2M { .. })))
+    }
+
+    /// Field used to render this model as a foreign-key target.
+    ///
+    /// Returns the field declared via `#[rustango(display = "…")]`, or
+    /// the primary key if no display is set. Returns `None` only for the
+    /// (unusual) model with neither a `display` attribute nor a primary key.
+    #[must_use]
+    pub fn display_field(&self) -> Option<&'static FieldSchema> {
+        if let Some(name) = self.display {
+            return self.field(name);
+        }
+        self.primary_key()
     }
 }
 
