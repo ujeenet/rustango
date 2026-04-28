@@ -23,6 +23,94 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
         .into()
 }
 
+/// Bake every `*.json` migration file in a directory into the binary
+/// at compile time. Returns a `&'static [(&'static str, &'static str)]`
+/// of `(name, json_content)` pairs, lex-sorted by file stem.
+///
+/// Pair with `rustango::migrate::migrate_embedded` at runtime — same
+/// behaviour as `migrate(pool, dir)` but with no filesystem access.
+/// The path is interpreted relative to the user's `CARGO_MANIFEST_DIR`
+/// (i.e. the crate that invokes the macro). Default is
+/// `"./migrations"` if no argument is supplied.
+///
+/// ```ignore
+/// const EMBEDDED: &[(&str, &str)] = rustango::embed_migrations!();
+/// // or:
+/// const EMBEDDED: &[(&str, &str)] = rustango::embed_migrations!("./migrations");
+///
+/// rustango::migrate::migrate_embedded(&pool, EMBEDDED).await?;
+/// ```
+///
+/// Each migration is included via `include_str!` so cargo's rebuild
+/// detection picks up file *content* changes. **Caveat:** cargo
+/// doesn't watch directory listings, so adding or removing a
+/// migration file inside the dir won't auto-trigger a rebuild — run
+/// `cargo clean` (or just bump any other source file) when you add
+/// new migrations during embedded development.
+#[proc_macro]
+pub fn embed_migrations(input: TokenStream) -> TokenStream {
+    expand_embed_migrations(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
+    // Default to "./migrations" if invoked without args.
+    let path_str = if input.is_empty() {
+        "./migrations".to_string()
+    } else {
+        let lit: LitStr = syn::parse2(input)?;
+        lit.value()
+    };
+
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").map_err(|_| {
+        syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "embed_migrations! must be invoked during a Cargo build (CARGO_MANIFEST_DIR not set)",
+        )
+    })?;
+    let abs = std::path::Path::new(&manifest).join(&path_str);
+
+    let mut entries: Vec<(String, std::path::PathBuf)> = Vec::new();
+    if abs.is_dir() {
+        let read = std::fs::read_dir(&abs).map_err(|e| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("embed_migrations!: cannot read {}: {e}", abs.display()),
+            )
+        })?;
+        for entry in read.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            entries.push((stem.to_owned(), path));
+        }
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let pairs: Vec<TokenStream2> = entries
+        .iter()
+        .map(|(name, path)| {
+            let path_lit = path.display().to_string();
+            quote! { (#name, ::core::include_str!(#path_lit)) }
+        })
+        .collect();
+
+    Ok(quote! {
+        {
+            const __RUSTANGO_EMBEDDED: &[(&'static str, &'static str)] = &[#(#pairs),*];
+            __RUSTANGO_EMBEDDED
+        }
+    })
+}
+
 fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let struct_name = &input.ident;
 

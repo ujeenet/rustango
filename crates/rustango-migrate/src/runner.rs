@@ -273,6 +273,61 @@ pub async fn migrate_to(
     Ok(touched)
 }
 
+/// Apply pending migrations from an in-memory `&[(name, json)]` slice.
+///
+/// Built for deployments where shipping a `migrations/` folder
+/// alongside the binary is awkward (Docker images, single-binary
+/// distribution). Pair with the [`embed_migrations!`] proc-macro from
+/// `rustango-macros` (re-exported as `rustango::embed_migrations!`),
+/// which scans a directory at compile time and emits the slice via
+/// `include_str!` per file. The macro emits content in lex-sorted
+/// order, but this function re-sorts defensively.
+///
+/// Each entry's first item must equal the migration's `name` field
+/// — a divergence would mean the slice was hand-built incorrectly.
+///
+/// [`embed_migrations!`]: https://docs.rs/rustango/0.1/rustango/macro.embed_migrations.html
+///
+/// # Errors
+/// As [`migrate`], plus [`MigrateError::Validation`] when an entry
+/// key doesn't match the migration's own name.
+pub async fn migrate_embedded(
+    pool: &PgPool,
+    embedded: &[(&str, &str)],
+) -> Result<Vec<Migration>, MigrateError> {
+    ensure_ledger(pool).await?;
+
+    let mut all: Vec<Migration> = Vec::with_capacity(embedded.len());
+    for (name, json) in embedded {
+        let mig = file::parse(json)?;
+        if mig.name != *name {
+            return Err(MigrateError::Validation(format!(
+                "embedded entry key `{name}` doesn't match migration `name` field `{}`",
+                mig.name,
+            )));
+        }
+        all.push(mig);
+    }
+    all.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let applied = applied_set(pool).await?;
+    let pending: Vec<Migration> = all
+        .into_iter()
+        .filter(|m| !applied.contains(&m.name))
+        .collect();
+
+    let mut newly = Vec::with_capacity(pending.len());
+    for mig in pending {
+        if mig.atomic {
+            apply_atomic(pool, &mig).await?;
+        } else {
+            apply_loose(pool, &mig).await?;
+        }
+        newly.push(mig);
+    }
+    Ok(newly)
+}
+
 /// Step back `steps` applied migrations (Alembic's `downgrade -N`).
 ///
 /// `downgrade(pool, dir, 1)` rolls back the most recently applied

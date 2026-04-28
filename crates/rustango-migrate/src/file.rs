@@ -105,7 +105,18 @@ fn default_reversible() -> bool {
 /// `reversible == true` but `reverse_sql` is missing.
 pub fn load(path: &Path) -> Result<Migration, MigrateError> {
     let raw = std::fs::read_to_string(path)?;
-    let mig: Migration = serde_json::from_str(&raw)?;
+    parse(&raw)
+}
+
+/// Parse + validate a migration from an in-memory JSON string. Used
+/// by [`load`] (after `read_to_string`) and by `migrate_embedded`
+/// (which gets the bytes via `include_str!`).
+///
+/// # Errors
+/// Returns [`MigrateError::Json`] on parse failure or
+/// [`MigrateError::Validation`] on internal-consistency failures.
+pub fn parse(raw: &str) -> Result<Migration, MigrateError> {
+    let mig: Migration = serde_json::from_str(raw)?;
     validate(&mig)?;
     Ok(mig)
 }

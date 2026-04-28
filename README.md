@@ -246,6 +246,17 @@ DEFAULT '…'` works), forward + reverse, persistent tracking via
 `__rustango_migrations__`, and per-migration `atomic: false` opt-out
 for things like `CREATE INDEX CONCURRENTLY`.
 
+For deployments where shipping a `migrations/` folder alongside the
+binary is awkward (Docker images, single-binary distribution),
+`embed_migrations!` bakes the JSON files in at compile time:
+
+```rust
+const EMBEDDED: &[(&str, &str)] = rustango::embed_migrations!("./migrations");
+
+// At runtime — same shape as `migrate(pool, dir)`, no filesystem access.
+rustango::migrate::migrate_embedded(&pool, EMBEDDED).await?;
+```
+
 What's deferred: type / constraint changes and renames (need
 explicit `Rename`/`AlterField` operations à la Django — snapshot
 diffs can't tell a rename from a drop+add).
