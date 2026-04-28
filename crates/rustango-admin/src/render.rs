@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-use rustango_core::{FieldSchema, FieldType, SqlValue};
+use rustango_core::{FieldSchema, FieldType};
 use rustango_sql::sqlx::{self, postgres::PgRow, Postgres, Row};
 
 /// Escape a string for safe inclusion in HTML body or attribute context.
@@ -208,31 +208,62 @@ pub(crate) fn read_value_as_string(row: &PgRow, field: &FieldSchema) -> Option<S
     }
 }
 
-/// Read a column value as an owned `SqlValue`, for re-binding in an
-/// `IN (...)` clause. Same shape as [`read_value_as_string`] — returns
-/// `None` for `NULL` or unsupported types.
-pub(crate) fn read_value_as_sqlvalue(row: &PgRow, field: &FieldSchema) -> Option<SqlValue> {
-    match field.ty {
+/// Read a joined column from a row produced by a `LEFT JOIN`. The column
+/// name in the result set is `<alias>__<field.column>`. Returns the value
+/// as already-HTML-escaped text suitable for templating, or `None` for
+/// `NULL` (LEFT JOIN miss) and unsupported types.
+pub(crate) fn read_joined_value_as_html(
+    row: &PgRow,
+    alias: &str,
+    field: &FieldSchema,
+) -> Option<String> {
+    let prefixed = format!("{}__{}", alias, field.column);
+    let text: Option<String> = match field.ty {
         FieldType::I32 => row
-            .try_get::<Option<i32>, _>(field.column)
+            .try_get::<Option<i32>, _>(prefixed.as_str())
             .ok()
             .flatten()
-            .map(SqlValue::I32),
+            .map(|v| v.to_string()),
         FieldType::I64 => row
-            .try_get::<Option<i64>, _>(field.column)
+            .try_get::<Option<i64>, _>(prefixed.as_str())
             .ok()
             .flatten()
-            .map(SqlValue::I64),
+            .map(|v| v.to_string()),
+        FieldType::F32 => row
+            .try_get::<Option<f32>, _>(prefixed.as_str())
+            .ok()
+            .flatten()
+            .map(|v| v.to_string()),
+        FieldType::F64 => row
+            .try_get::<Option<f64>, _>(prefixed.as_str())
+            .ok()
+            .flatten()
+            .map(|v| v.to_string()),
+        FieldType::Bool => row
+            .try_get::<Option<bool>, _>(prefixed.as_str())
+            .ok()
+            .flatten()
+            .map(|v| v.to_string()),
         FieldType::String => row
-            .try_get::<Option<String>, _>(field.column)
+            .try_get::<Option<String>, _>(prefixed.as_str())
             .ok()
-            .flatten()
-            .map(SqlValue::String),
+            .flatten(),
         FieldType::Uuid => row
-            .try_get::<Option<uuid::Uuid>, _>(field.column)
+            .try_get::<Option<uuid::Uuid>, _>(prefixed.as_str())
             .ok()
             .flatten()
-            .map(SqlValue::Uuid),
-        _ => None,
-    }
+            .map(|v| v.to_string()),
+        FieldType::Date => row
+            .try_get::<Option<chrono::NaiveDate>, _>(prefixed.as_str())
+            .ok()
+            .flatten()
+            .map(|v| v.to_string()),
+        FieldType::DateTime => row
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(prefixed.as_str())
+            .ok()
+            .flatten()
+            .map(|v| v.to_string()),
+        FieldType::Json => None,
+    };
+    text.map(|s| escape(&s))
 }

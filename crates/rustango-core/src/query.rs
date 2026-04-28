@@ -39,14 +39,35 @@ pub struct Filter {
 ///
 /// `limit` and `offset` are `None` by default and emit no clauses.
 /// `search`, when present, adds a parenthesized `(col ILIKE $N OR …)`
-/// clause AND-joined with `filters`.
+/// clause AND-joined with `filters`. `joins` adds `LEFT JOIN` clauses
+/// and pulls extra columns into the projection under aliased names.
 #[derive(Debug, Clone)]
 pub struct SelectQuery {
     pub model: &'static ModelSchema,
     pub filters: Vec<Filter>,
     pub search: Option<SearchClause>,
+    pub joins: Vec<Join>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+/// A `LEFT JOIN` against a target model.
+///
+/// The writer emits `LEFT JOIN "<target.table>" AS "<alias>" ON
+/// "<main>"."<on_local>" = "<alias>"."<on_remote>"`, and includes each
+/// `project` column in the SELECT list aliased as
+/// `"<alias>"."<col>" AS "<alias>__<col>"`. Callers read joined values
+/// from the resulting `PgRow` by the suffixed name.
+///
+/// When a `SelectQuery` has any joins, the writer also qualifies the
+/// main table's columns as `"<table>"."<col>"` to avoid ambiguity.
+#[derive(Debug, Clone)]
+pub struct Join {
+    pub target: &'static ModelSchema,
+    pub on_local: &'static str,
+    pub on_remote: &'static str,
+    pub alias: &'static str,
+    pub project: Vec<&'static str>,
 }
 
 /// `(col1 ILIKE %q% OR col2 ILIKE %q% …)` — single-parameter case-insensitive

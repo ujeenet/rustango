@@ -46,8 +46,8 @@ use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use rustango_core::{
-    inventory, CountQuery, DeleteQuery, FieldSchema, Filter, InsertQuery, ModelEntry, ModelSchema,
-    Op, Relation, SearchClause, SelectQuery, SqlValue, UpdateQuery,
+    inventory, CountQuery, DeleteQuery, FieldSchema, Filter, InsertQuery, Join, ModelEntry,
+    ModelSchema, Op, Relation, SearchClause, SelectQuery, SqlValue, UpdateQuery,
 };
 use rustango_sql::sqlx::{self, PgPool};
 
@@ -282,19 +282,21 @@ async fn table_view(
     .await?;
     // NOTE: count_rows ignores the search clause; counts are approximate
     // when ?q is set. Acceptable for a v0.2 admin pager.
+    let joins = build_fk_joins(&state, model);
     let rows = rustango_sql::select_rows(
         &state.pool,
         &SelectQuery {
             model,
             filters: filters.clone(),
             search: search.clone(),
+            joins,
             limit: Some(PAGE_SIZE),
             offset: Some(offset),
         },
     )
     .await?;
 
-    let fk_map = resolve_fk_displays(&state, model, &rows).await?;
+    let fk_map = fk_map_from_joined_rows(&state, model, &rows);
 
     let last_page = if total == 0 {
         1
@@ -380,6 +382,7 @@ async fn detail_view(
                 value: pk_value,
             }],
             search: None,
+            joins: build_fk_joins(&state, model),
             limit: None,
             offset: None,
         },
@@ -390,8 +393,8 @@ async fn detail_view(
         pk: pk_raw.clone(),
     })?;
 
-    // Resolve any FK display values for this single row before rendering.
-    let fk_map = resolve_fk_displays(&state, model, std::slice::from_ref(&row)).await?;
+    // Read joined FK display values from the same row — no extra queries.
+    let fk_map = fk_map_from_joined_rows(&state, model, std::slice::from_ref(&row));
 
     let cells_ctx: Vec<serde_json::Value> = model
         .scalar_fields()
@@ -497,6 +500,7 @@ async fn edit_form(
                 value: pk_value,
             }],
             search: None,
+            joins: vec![],
             limit: None,
             offset: None,
         },
@@ -612,22 +616,16 @@ fn lookup_model(state: &AppState, table: &str) -> Option<&'static ModelSchema> {
         .map(|e| e.schema)
 }
 
-/// Map of `(target_table, source_value_string) → display_value_html`. Built
-/// once per page load; rendering then looks up FK display values from it
-/// instead of issuing one query per row.
+/// Map of `(target_table, source_value_string) → display_value_html`.
+/// Populated from joined rows so list/detail rendering needs no extra
+/// per-FK queries.
 type FkMap = HashMap<(String, String), String>;
 
-/// For every FK / O2O column on `model`, batch-fetch the target rows and
-/// build a map keyed by `(target_table, source_value_as_string)`. Targets
-/// that aren't visible (filtered via `show_only`) or whose row is missing
-/// just don't appear in the map — `render_cell` then falls back to the
-/// raw value.
-async fn resolve_fk_displays(
-    state: &AppState,
-    model: &'static ModelSchema,
-    rows: &[sqlx::postgres::PgRow],
-) -> Result<FkMap, AdminError> {
-    let mut map: FkMap = HashMap::new();
+/// Build one [`Join`] per FK / O2O column on `model` whose target is
+/// visible and has a display field. The join's `project` carries only
+/// the target's display column — that's all the admin renders.
+fn build_fk_joins(state: &AppState, model: &'static ModelSchema) -> Vec<Join> {
+    let mut joins = Vec::new();
     for field in model.scalar_fields() {
         let Some(rel) = field.relation else { continue };
         let (to, on) = match rel {
@@ -640,52 +638,53 @@ async fn resolve_fk_displays(
         let Some(display_field) = target.display_field() else {
             continue;
         };
-        let Some(on_field) = target.field_by_column(on) else {
+        joins.push(Join {
+            target,
+            on_local: field.column,
+            on_remote: on,
+            // `field.name` is a valid SQL identifier and unique within the
+            // model (it's a Rust struct field), so it makes a clean alias.
+            alias: field.name,
+            project: vec![display_field.column],
+        });
+    }
+    joins
+}
+
+/// Walk a row set produced with `joins` set, and for each row build the
+/// `(target_table, source_value_string) → display_html` map entry. Rows
+/// where the joined display value is `NULL` (LEFT JOIN miss — target row
+/// not present) are skipped, so `render_cell` falls back to the raw value.
+fn fk_map_from_joined_rows(
+    state: &AppState,
+    model: &'static ModelSchema,
+    rows: &[sqlx::postgres::PgRow],
+) -> FkMap {
+    let mut map: FkMap = HashMap::new();
+    for field in model.scalar_fields() {
+        let Some(rel) = field.relation else { continue };
+        let to = match rel {
+            Relation::Fk { to, .. } | Relation::O2O { to, .. } => to,
+            Relation::M2M { .. } => continue,
+        };
+        let Some(target) = lookup_model(state, to) else {
             continue;
         };
-
-        // Distinct FK values from the visible rows.
-        let mut seen = HashSet::new();
-        let mut fk_values: Vec<SqlValue> = Vec::new();
-        for row in rows {
-            let Some(s) = render::read_value_as_string(row, field) else {
-                continue;
-            };
-            if seen.insert(s.clone()) {
-                if let Some(v) = render::read_value_as_sqlvalue(row, field) {
-                    fk_values.push(v);
-                }
-            }
-        }
-        if fk_values.is_empty() {
+        let Some(display_field) = target.display_field() else {
             continue;
-        }
-
-        let target_rows = rustango_sql::select_rows(
-            &state.pool,
-            &SelectQuery {
-                model: target,
-                filters: vec![Filter {
-                    column: on,
-                    op: Op::In,
-                    value: SqlValue::List(fk_values),
-                }],
-                search: None,
-                limit: None,
-                offset: None,
-            },
-        )
-        .await?;
-
-        for trow in &target_rows {
-            let Some(key) = render::read_value_as_string(trow, on_field) else {
+        };
+        for row in rows {
+            let Some(source) = render::read_value_as_string(row, field) else {
                 continue;
             };
-            let display = render::render_value(trow, display_field);
-            map.insert((to.to_owned(), key), display);
+            let Some(display) = render::read_joined_value_as_html(row, field.name, display_field)
+            else {
+                continue;
+            };
+            map.insert((to.to_owned(), source), display);
         }
     }
-    Ok(map)
+    map
 }
 
 /// Render one cell. For FK columns this resolves to a link into the target

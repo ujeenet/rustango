@@ -19,21 +19,60 @@ impl Dialect for Postgres {
     fn compile_select(&self, query: &SelectQuery) -> Result<CompiledStatement, SqlError> {
         let mut sql = String::new();
         let mut params: Vec<SqlValue> = Vec::new();
+        let qualify = !query.joins.is_empty();
 
         sql.push_str("SELECT ");
         let mut first_col = true;
+        // Main table columns. Qualified when joins are present so column
+        // names don't collide with joined ones.
         for field in query.model.scalar_fields() {
             if !first_col {
                 sql.push_str(", ");
             }
             first_col = false;
+            if qualify {
+                write_ident(&mut sql, query.model.table);
+                sql.push('.');
+            }
             write_ident(&mut sql, field.column);
+        }
+        // Joined columns, aliased as `<alias>__<col>`.
+        for join in &query.joins {
+            for col in &join.project {
+                sql.push_str(", ");
+                write_ident(&mut sql, join.alias);
+                sql.push('.');
+                write_ident(&mut sql, col);
+                sql.push_str(" AS ");
+                write_ident(&mut sql, &format!("{}__{}", join.alias, col));
+            }
         }
 
         sql.push_str(" FROM ");
         write_ident(&mut sql, query.model.table);
 
-        write_where_with_search(&mut sql, &mut params, &query.filters, query.search.as_ref())?;
+        for join in &query.joins {
+            sql.push_str(" LEFT JOIN ");
+            write_ident(&mut sql, join.target.table);
+            sql.push_str(" AS ");
+            write_ident(&mut sql, join.alias);
+            sql.push_str(" ON ");
+            write_ident(&mut sql, query.model.table);
+            sql.push('.');
+            write_ident(&mut sql, join.on_local);
+            sql.push_str(" = ");
+            write_ident(&mut sql, join.alias);
+            sql.push('.');
+            write_ident(&mut sql, join.on_remote);
+        }
+
+        write_where_with_search_qualified(
+            &mut sql,
+            &mut params,
+            &query.filters,
+            query.search.as_ref(),
+            qualify.then_some(query.model.table),
+        )?;
 
         if let Some(limit) = query.limit {
             let _ = write!(sql, " LIMIT {limit}");
@@ -150,15 +189,20 @@ fn write_where(
     Ok(())
 }
 
-/// Like [`write_where`] but additionally appends a parenthesized
-/// `(col1 ILIKE $N OR col2 ILIKE $N …)` clause when `search` is `Some`
-/// with non-empty `columns` and a non-empty `query`. The same parameter
-/// position is reused across all OR-ed columns.
-fn write_where_with_search(
+/// Append a parenthesized `(col1 ILIKE $N OR col2 ILIKE $N …)` clause
+/// when `search` is `Some` with non-empty `columns` and a non-empty
+/// `query`. The same parameter position is reused across all OR-ed
+/// columns. When `qualify_with` is `Some(table)`, every column reference
+/// is prefixed with `"<table>"."…"` so the WHERE survives joins.
+/// column references with `"<table>"."…"` when `qualify_with` is `Some`.
+/// Used by `compile_select` when joins are active so the WHERE clause
+/// disambiguates main-table columns from joined ones.
+fn write_where_with_search_qualified(
     sql: &mut String,
     params: &mut Vec<SqlValue>,
     filters: &[Filter],
     search: Option<&SearchClause>,
+    qualify_with: Option<&str>,
 ) -> Result<(), SqlError> {
     let has_search = search.is_some_and(|s| !s.columns.is_empty() && !s.query.is_empty());
     if filters.is_empty() && !has_search {
@@ -171,7 +215,7 @@ fn write_where_with_search(
             sql.push_str(" AND ");
         }
         first = false;
-        write_filter(sql, params, filter)?;
+        write_filter_qualified(sql, params, filter, qualify_with)?;
     }
     if has_search {
         let s = search.expect("checked above");
@@ -184,6 +228,10 @@ fn write_where_with_search(
         for (i, col) in s.columns.iter().enumerate() {
             if i > 0 {
                 sql.push_str(" OR ");
+            }
+            if let Some(table) = qualify_with {
+                write_ident(sql, table);
+                sql.push('.');
             }
             write_ident(sql, col);
             let _ = write!(sql, " ILIKE ${placeholder}");
@@ -198,6 +246,19 @@ fn write_filter(
     params: &mut Vec<SqlValue>,
     filter: &Filter,
 ) -> Result<(), SqlError> {
+    write_filter_qualified(sql, params, filter, None)
+}
+
+fn write_filter_qualified(
+    sql: &mut String,
+    params: &mut Vec<SqlValue>,
+    filter: &Filter,
+    qualify_with: Option<&str>,
+) -> Result<(), SqlError> {
+    if let Some(table) = qualify_with {
+        write_ident(sql, table);
+        sql.push('.');
+    }
     write_ident(sql, filter.column);
 
     match filter.op {

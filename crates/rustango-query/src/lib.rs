@@ -126,6 +126,7 @@ impl<T: Model> QuerySet<T> {
             model,
             filters,
             search: None,
+            joins: vec![],
             limit: self.limit,
             offset: self.offset,
         })

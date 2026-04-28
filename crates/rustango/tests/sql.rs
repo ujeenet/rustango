@@ -1,7 +1,7 @@
 //! End-to-end check of the `QuerySet` → `SelectQuery` → Postgres SQL pipeline.
 
 use rustango::core::{
-    Assignment, CountQuery, DeleteQuery, Filter, InsertQuery, Model as _, Op, SearchClause,
+    Assignment, CountQuery, DeleteQuery, Filter, InsertQuery, Join, Model as _, Op, SearchClause,
     SelectQuery, SqlValue, UpdateQuery,
 };
 use rustango::sql::{Dialect, Postgres, SqlError};
@@ -14,6 +14,17 @@ pub struct User {
     id: i64,
     name: String,
     is_active: bool,
+}
+
+#[derive(Model)]
+#[rustango(table = "post")]
+#[allow(dead_code)]
+pub struct Post {
+    #[rustango(primary_key)]
+    id: i64,
+    title: String,
+    #[rustango(fk = "user", on = "id")]
+    author_id: i64,
 }
 
 fn pg() -> Postgres {
@@ -426,6 +437,7 @@ fn empty_select() -> SelectQuery {
         model: User::SCHEMA,
         filters: vec![],
         search: None,
+        joins: vec![],
         limit: None,
         offset: None,
     }
@@ -629,4 +641,121 @@ fn search_with_limit_offset_orders_clauses_correctly() {
         stmt.sql,
         r#"SELECT "id", "name", "is_active" FROM "user" WHERE ("name" ILIKE $1) LIMIT 10 OFFSET 20"#,
     );
+}
+
+// ---------------- LEFT JOIN ----------------
+
+fn empty_post_select() -> SelectQuery {
+    SelectQuery {
+        model: Post::SCHEMA,
+        filters: vec![],
+        search: None,
+        joins: vec![],
+        limit: None,
+        offset: None,
+    }
+}
+
+#[test]
+fn join_qualifies_main_columns_and_aliases_joined_ones() {
+    let q = SelectQuery {
+        joins: vec![Join {
+            target: User::SCHEMA,
+            on_local: "author_id",
+            on_remote: "id",
+            alias: "author_id",
+            project: vec!["name"],
+        }],
+        ..empty_post_select()
+    };
+    let stmt = pg().compile_select(&q).unwrap();
+    assert_eq!(
+        stmt.sql,
+        r#"SELECT "post"."id", "post"."title", "post"."author_id", "author_id"."name" AS "author_id__name" FROM "post" LEFT JOIN "user" AS "author_id" ON "post"."author_id" = "author_id"."id""#,
+    );
+    assert!(stmt.params.is_empty());
+}
+
+#[test]
+fn join_with_filter_qualifies_filter_column() {
+    let q = SelectQuery {
+        filters: vec![Filter {
+            column: "title",
+            op: Op::Eq,
+            value: SqlValue::String("hi".into()),
+        }],
+        joins: vec![Join {
+            target: User::SCHEMA,
+            on_local: "author_id",
+            on_remote: "id",
+            alias: "author_id",
+            project: vec!["name"],
+        }],
+        ..empty_post_select()
+    };
+    let stmt = pg().compile_select(&q).unwrap();
+    assert!(
+        stmt.sql.contains(r#"WHERE "post"."title" = $1"#),
+        "filter column not qualified: {}",
+        stmt.sql,
+    );
+    assert!(stmt.sql.contains(r#"LEFT JOIN "user" AS "author_id""#));
+}
+
+#[test]
+fn join_with_search_qualifies_search_columns() {
+    let q = SelectQuery {
+        search: Some(SearchClause {
+            columns: vec!["title"],
+            query: "hi".into(),
+        }),
+        joins: vec![Join {
+            target: User::SCHEMA,
+            on_local: "author_id",
+            on_remote: "id",
+            alias: "author_id",
+            project: vec!["name"],
+        }],
+        ..empty_post_select()
+    };
+    let stmt = pg().compile_select(&q).unwrap();
+    assert!(
+        stmt.sql.contains(r#"WHERE ("post"."title" ILIKE $1)"#),
+        "search column not qualified: {}",
+        stmt.sql,
+    );
+}
+
+#[test]
+fn no_joins_keeps_unqualified_select_shape() {
+    // Backwards compatibility: when `joins` is empty, the SELECT must match
+    // the existing unqualified shape so existing tests + admin output don't
+    // shift around.
+    let q = empty_post_select();
+    let stmt = pg().compile_select(&q).unwrap();
+    assert_eq!(stmt.sql, r#"SELECT "id", "title", "author_id" FROM "post""#,);
+}
+
+#[test]
+fn join_with_limit_and_offset_orders_clauses() {
+    let q = SelectQuery {
+        joins: vec![Join {
+            target: User::SCHEMA,
+            on_local: "author_id",
+            on_remote: "id",
+            alias: "author_id",
+            project: vec!["name"],
+        }],
+        limit: Some(10),
+        offset: Some(20),
+        ..empty_post_select()
+    };
+    let stmt = pg().compile_select(&q).unwrap();
+    // LIMIT/OFFSET come after the WHERE-less LEFT JOIN.
+    assert!(
+        stmt.sql.ends_with("LIMIT 10 OFFSET 20"),
+        "tail wrong: {}",
+        stmt.sql
+    );
+    assert!(stmt.sql.contains("LEFT JOIN"));
 }
