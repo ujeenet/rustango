@@ -20,10 +20,16 @@
 
 use std::fmt::Write as _;
 
+use serde::{Deserialize, Serialize};
+
 use crate::snapshot::{FieldSnapshot, SchemaSnapshot, TableSnapshot};
 
 /// One thing that should change to move from `prev` to `current`.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serializes externally-tagged: `{"CreateTable": "foo"}`,
+/// `{"AddColumn": {"table": "foo", "column": "bar"}}`. That's what
+/// migration files store under `Operation::Schema`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SchemaChange {
     CreateTable(String /* table name */),
     DropTable(String /* table name */),
