@@ -216,4 +216,3 @@ fn sql_type(f: &FieldSnapshot) -> String {
         other => other.to_uppercase(),
     }
 }
-
