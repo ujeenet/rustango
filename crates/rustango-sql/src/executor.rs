@@ -1,6 +1,6 @@
 //! Async executor — binds a `CompiledStatement` to sqlx and runs it.
 
-use rustango_core::{DeleteQuery, InsertQuery, Model, SqlValue, UpdateQuery};
+use rustango_core::{DeleteQuery, InsertQuery, Model, SelectQuery, SqlValue, UpdateQuery};
 use rustango_query::{QuerySet, UpdateBuilder};
 use sqlx::postgres::{PgArguments, PgPool, PgRow};
 use sqlx::query::{Query, QueryAs};
@@ -91,6 +91,38 @@ pub async fn delete(pool: &PgPool, query: &DeleteQuery) -> Result<u64, ExecError
     }
     let result = q.execute(pool).await?;
     Ok(result.rows_affected())
+}
+
+/// Run a `SelectQuery` and return raw `PgRow`s — for tooling that needs to
+/// render or inspect rows without statically knowing the row type
+/// (e.g. the admin UI).
+///
+/// # Errors
+/// Returns [`ExecError`] for SQL-writing or driver failures.
+pub async fn select_rows(pool: &PgPool, query: &SelectQuery) -> Result<Vec<PgRow>, ExecError> {
+    let stmt = Postgres.compile_select(query)?;
+    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+    for value in stmt.params {
+        q = bind_query(q, value);
+    }
+    Ok(q.fetch_all(pool).await?)
+}
+
+/// Run a `SelectQuery` and return at most one raw `PgRow`. Used by detail
+/// views and PK lookups.
+///
+/// # Errors
+/// Returns [`ExecError`] for SQL-writing or driver failures.
+pub async fn select_one_row(
+    pool: &PgPool,
+    query: &SelectQuery,
+) -> Result<Option<PgRow>, ExecError> {
+    let stmt = Postgres.compile_select(query)?;
+    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+    for value in stmt.params {
+        q = bind_query(q, value);
+    }
+    Ok(q.fetch_optional(pool).await?)
 }
 
 /// Extension trait that drives a `QuerySet` to a bulk `DELETE`.

@@ -5,11 +5,12 @@
 //! make HTTP requests against it.
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
+use rustango::Model;
 use rustango::migrate;
 use rustango::sql::sqlx;
-use rustango::Model;
+use sqlx::Row;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 
@@ -214,6 +215,385 @@ async fn html_escapes_user_provided_strings() {
     assert!(
         !body.contains(">script<"),
         "unescaped script element: {body}",
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+// ============================================================ CRUD forms
+
+fn form_request(method: Method, uri: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body.to_owned()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn detail_view_renders_full_row() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user/1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_string(response).await;
+    assert!(body.contains("AdminUser #1"), "missing heading: {body}");
+    assert!(body.contains("alice"), "missing alice: {body}");
+    assert!(body.contains(">30<"), "missing age 30: {body}");
+    assert!(body.contains(">true<"), "missing active true: {body}");
+    assert!(
+        body.contains(r#"href="/admin_user/1/edit""#),
+        "missing edit link: {body}",
+    );
+    assert!(
+        body.contains(r#"action="/admin_user/1/delete""#),
+        "missing delete form: {body}",
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn detail_view_unknown_pk_returns_404() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user/9999")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = body_string(response).await;
+    assert!(body.contains("row not found"), "missing 404 body: {body}");
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn detail_view_unparseable_pk_returns_400() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user/not-a-number")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn create_form_shows_one_input_per_field() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user/new")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_string(response).await;
+    assert!(body.contains("New AdminUser"), "missing title: {body}");
+    assert!(body.contains(r#"name="id""#), "missing id input: {body}");
+    assert!(
+        body.contains(r#"name="name""#),
+        "missing name input: {body}"
+    );
+    assert!(body.contains(r#"name="age""#), "missing age input: {body}");
+    assert!(
+        body.contains(r#"name="is_active""#),
+        "missing is_active input: {body}",
+    );
+    // max_length=32 surfaces on the input
+    assert!(
+        body.contains(r#"maxlength="32""#),
+        "missing maxlength: {body}"
+    );
+    // min/max from age surface on the number input
+    assert!(body.contains(r#"min="0""#), "missing min: {body}");
+    assert!(body.contains(r#"max="150""#), "missing max: {body}");
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn create_submit_inserts_row_and_redirects() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(form_request(
+            Method::POST,
+            "/admin_user",
+            "id=42&name=zelda&age=27&is_active=true",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(location, "/admin_user/42");
+
+    // Verify the row landed via direct sqlx.
+    let row = sqlx::query("SELECT name, age, is_active FROM admin_user WHERE id = 42")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.try_get::<String, _>("name").unwrap(), "zelda");
+    assert_eq!(row.try_get::<i32, _>("age").unwrap(), 27);
+    assert!(row.try_get::<bool, _>("is_active").unwrap());
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn create_submit_unchecked_checkbox_is_false() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+
+    // Browser omits unchecked checkbox keys entirely.
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(form_request(
+            Method::POST,
+            "/admin_user",
+            "id=43&name=quiet&age=20",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+    let row = sqlx::query("SELECT is_active FROM admin_user WHERE id = 43")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!row.try_get::<bool, _>("is_active").unwrap());
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn create_submit_validation_error_re_renders_form() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+
+    // age=200 violates the max=150 bound.
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(form_request(
+            Method::POST,
+            "/admin_user",
+            "id=44&name=oldie&age=200&is_active=true",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_string(response).await;
+    assert!(
+        body.contains("out of range"),
+        "missing validation error: {body}",
+    );
+    // The submitted values should be preserved in the re-rendered form.
+    assert!(body.contains(r#"value="oldie""#), "lost name: {body}");
+    assert!(body.contains(r#"value="200""#), "lost age: {body}");
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn edit_form_pre_populates_with_pk_readonly() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user/1/edit")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_string(response).await;
+    assert!(body.contains("Edit AdminUser"), "missing title: {body}");
+    assert!(body.contains(r#"value="1""#), "missing pk value: {body}");
+    assert!(
+        body.contains(r#"value="alice""#),
+        "missing prefilled name: {body}"
+    );
+    assert!(
+        body.contains(r#"value="30""#),
+        "missing prefilled age: {body}"
+    );
+    // PK input should be readonly in edit mode.
+    assert!(
+        body.contains("name=\"id\"") && body.contains("readonly"),
+        "id should be readonly: {body}",
+    );
+    // is_active was true → checkbox checked.
+    assert!(body.contains("checked"), "missing checkbox check: {body}");
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn edit_submit_updates_row_and_redirects() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(form_request(
+            Method::POST,
+            "/admin_user/1",
+            "id=1&name=ALICE&age=31&is_active=true",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response.headers().get(header::LOCATION).unwrap(),
+        "/admin_user/1",
+    );
+
+    let row = sqlx::query("SELECT name, age FROM admin_user WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.try_get::<String, _>("name").unwrap(), "ALICE");
+    assert_eq!(row.try_get::<i32, _>("age").unwrap(), 31);
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn delete_submit_removes_row_and_redirects() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(form_request(Method::POST, "/admin_user/1/delete", ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response.headers().get(header::LOCATION).unwrap(),
+        "/admin_user",
+    );
+
+    let count: i64 = sqlx::query("SELECT COUNT(*) FROM admin_user")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .try_get(0)
+        .unwrap();
+    assert_eq!(count, 1); // bob remains
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn list_view_has_new_link_and_per_row_view_link() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(response).await;
+    assert!(
+        body.contains(r#"href="/admin_user/new""#),
+        "missing + new: {body}"
+    );
+    assert!(
+        body.contains(r#"href="/admin_user/1""#),
+        "missing alice link: {body}"
+    );
+    assert!(
+        body.contains(r#"href="/admin_user/2""#),
+        "missing bob link: {body}"
     );
 
     migrate::drop_all(&pool).await.unwrap();
