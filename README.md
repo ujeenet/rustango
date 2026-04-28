@@ -100,18 +100,46 @@ struct User {
 
 ## Query API
 
-```rust
-use rustango::core::Column as _;
+Two filter shapes, same builder. Mix freely; multiple predicates `AND`
+together (no `.or(...)` yet).
 
-// Typed: typos and wrong types caught at compile time.
+**Typed — `where_`.** The derive emits a `Column` per field; typos and
+wrong types fail at compile time.
+
+```rust
+use rustango::core::Column as _;   // brings .eq / .gt / .like / .is_in into scope
+
 let actives: Vec<User> = User::objects()
-    .where_(User::is_active.eq(true))
-    .where_(User::age.gte(18))
-    .where_(User::name.like("ali%"))
-    .where_(User::id.is_in([1, 2, 3]))
+    .where_(User::is_active.eq(true))      // = $1
+    .where_(User::age.gte(18))             // >= $1
+    .where_(User::age.lt(65))              // <  $1
+    .where_(User::name.like("ali%"))       // LIKE $1
+    .where_(User::id.is_in([1, 2, 3]))     // IN ($1, $2, $3)
     .limit(20)
     .fetch(&pool).await?;
+```
 
+**String-keyed — `filter` / `eq`.** Field name is a string, validated at
+`compile`-time against the schema. Use this when the column is dynamic
+(e.g. admin search params); prefer `where_` everywhere else.
+
+```rust
+use rustango::core::Op;
+
+let actives: Vec<User> = User::objects()
+    .eq("is_active", true)                 // sugar for filter(_, Op::Eq, _)
+    .filter("age", Op::Gte, 18_i32)
+    .filter("name", Op::Like, "ali%")
+    .fetch(&pool).await?;
+```
+
+Wrong field → `QueryError::UnknownField`; wrong value type →
+`QueryError::TypeMismatch`. Available `Op`s: `Eq`, `Ne`, `Lt`, `Lte`,
+`Gt`, `Gte`, `Like`, `In`.
+
+**Bulk update / delete / count / per-instance.**
+
+```rust
 // Bulk update.
 let n = User::objects()
     .where_(User::age.lt(13))
