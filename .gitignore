@@ -5,3 +5,5 @@
 .idea/
 .vscode/
 .claude/settings.local.json
+# manage_demo example writes its migrations here at runtime
+/manage_demo_migrations/

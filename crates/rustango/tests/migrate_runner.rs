@@ -682,6 +682,99 @@ async fn unapply_then_reapply_round_trip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------- regression: FK between sibling CreateTables in one migration ----------
+
+#[tokio::test]
+async fn migration_with_two_create_tables_one_having_fk_to_other_applies() {
+    // Regression for the bug where the runner emitted FK ALTERs
+    // immediately after their CREATE TABLE — failing because the
+    // referenced sibling table hadn't been created yet. Fixed by
+    // deferring all FK ALTERs to the end of the migration's forward
+    // execution.
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let suffix = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    let parent = format!("fkx_parent_{pid}_{suffix}");
+    let child = format!("fkx_child_{pid}_{suffix}");
+    let mig_name = format!("0001_fkx_{pid}_{suffix}");
+    let dir = fresh_dir("fk_cross");
+
+    // Build a snapshot containing both tables, child with an FK to parent.
+    let parent_t: TableSnapshot = serde_json::from_value(serde_json::json!({
+        "name": parent.clone(),
+        "model": "P",
+        "fields": [
+            {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true}
+        ]
+    }))
+    .unwrap();
+    let child_t: TableSnapshot = serde_json::from_value(serde_json::json!({
+        "name": child.clone(),
+        "model": "C",
+        "fields": [
+            {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true},
+            {
+                "name": "parent_id", "column": "parent_id", "ty": "i64",
+                "nullable": false, "primary_key": false,
+                "fk": {"kind": "fk", "to": parent.clone(), "on": "id"}
+            }
+        ]
+    }))
+    .unwrap();
+    let snapshot = SchemaSnapshot {
+        tables: vec![child_t, parent_t], // child first → exposes the bug
+    };
+
+    let mig = Migration {
+        name: mig_name.clone(),
+        created_at: "2026-04-28T00:00:00Z".into(),
+        prev: None,
+        atomic: true,
+        snapshot,
+        forward: vec![
+            // Same lex order make_migrations would produce: child < parent.
+            Operation::Schema(SchemaChange::CreateTable(child.clone())),
+            Operation::Schema(SchemaChange::CreateTable(parent.clone())),
+        ],
+    };
+    write_migration(&dir, &mig);
+
+    drop_table(&pool, &child).await;
+    drop_table(&pool, &parent).await;
+    delete_ledger_entry(&pool, &mig_name).await;
+
+    migrate::migrate(&pool, &dir).await.unwrap();
+
+    // Both tables exist…
+    for t in [&child, &parent] {
+        let exists: bool = sqlx::query(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
+        )
+        .bind(t)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .try_get(0)
+        .unwrap();
+        assert!(exists, "{t} should exist after migrate");
+    }
+
+    // …and the FK is real (Postgres rejects orphan inserts).
+    let insert_orphan = sqlx::query(&format!(
+        r#"INSERT INTO "{child}" (id, parent_id) VALUES (1, 999)"#
+    ))
+    .execute(&pool)
+    .await;
+    assert!(insert_orphan.is_err(), "FK constraint must be live");
+
+    drop_table(&pool, &child).await;
+    drop_table(&pool, &parent).await;
+    delete_ledger_entry(&pool, &mig_name).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------- migrate_to / downgrade (Slice 5) ----------
 
 /// Build three sequential schema-only migrations creating tables A, B, C.

@@ -17,7 +17,7 @@ use std::path::Path;
 use rustango_core::{inventory, ModelEntry, ModelSchema};
 use rustango_sql::sqlx::{self, PgPool, Row};
 
-use crate::diff::render_changes;
+use crate::diff::render_changes_split;
 use crate::file::{self, Migration, Operation};
 use crate::invert::invert;
 use crate::snapshot::SchemaSnapshot;
@@ -153,19 +153,24 @@ pub async fn ensure_ledger(pool: &PgPool) -> Result<(), MigrateError> {
 
 async fn apply_atomic(pool: &PgPool, mig: &Migration) -> Result<(), MigrateError> {
     let mut tx = pool.begin().await?;
+    let mut deferred_fks: Vec<String> = Vec::new();
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let ddl = render_changes(std::slice::from_ref(change), &mig.snapshot)
+                let batch = render_changes_split(std::slice::from_ref(change), &mig.snapshot)
                     .map_err(MigrateError::Validation)?;
-                for stmt in ddl {
+                for stmt in batch.immediate {
                     sqlx::query(&stmt).execute(&mut *tx).await?;
                 }
+                deferred_fks.extend(batch.deferred_fks);
             }
             Operation::Data(d) => {
                 sqlx::query(&d.sql).execute(&mut *tx).await?;
             }
         }
+    }
+    for stmt in deferred_fks {
+        sqlx::query(&stmt).execute(&mut *tx).await?;
     }
     sqlx::query("INSERT INTO __rustango_migrations__ (name) VALUES ($1)")
         .bind(&mig.name)
@@ -401,19 +406,24 @@ async fn unapply_atomic(
     snapshot: &SchemaSnapshot,
 ) -> Result<(), MigrateError> {
     let mut tx = pool.begin().await?;
+    let mut deferred_fks: Vec<String> = Vec::new();
     for op in inverted {
         match op {
             Operation::Schema(change) => {
-                let ddl = render_changes(std::slice::from_ref(change), snapshot)
+                let batch = render_changes_split(std::slice::from_ref(change), snapshot)
                     .map_err(MigrateError::Validation)?;
-                for stmt in ddl {
+                for stmt in batch.immediate {
                     sqlx::query(&stmt).execute(&mut *tx).await?;
                 }
+                deferred_fks.extend(batch.deferred_fks);
             }
             Operation::Data(d) => {
                 sqlx::query(&d.sql).execute(&mut *tx).await?;
             }
         }
+    }
+    for stmt in deferred_fks {
+        sqlx::query(&stmt).execute(&mut *tx).await?;
     }
     sqlx::query("DELETE FROM __rustango_migrations__ WHERE name = $1")
         .bind(&target.name)
@@ -429,19 +439,24 @@ async fn unapply_loose(
     inverted: &[Operation],
     snapshot: &SchemaSnapshot,
 ) -> Result<(), MigrateError> {
+    let mut deferred_fks: Vec<String> = Vec::new();
     for op in inverted {
         match op {
             Operation::Schema(change) => {
-                let ddl = render_changes(std::slice::from_ref(change), snapshot)
+                let batch = render_changes_split(std::slice::from_ref(change), snapshot)
                     .map_err(MigrateError::Validation)?;
-                for stmt in ddl {
+                for stmt in batch.immediate {
                     sqlx::query(&stmt).execute(pool).await?;
                 }
+                deferred_fks.extend(batch.deferred_fks);
             }
             Operation::Data(d) => {
                 sqlx::query(&d.sql).execute(pool).await?;
             }
         }
+    }
+    for stmt in deferred_fks {
+        sqlx::query(&stmt).execute(pool).await?;
     }
     sqlx::query("DELETE FROM __rustango_migrations__ WHERE name = $1")
         .bind(&target.name)
@@ -451,19 +466,24 @@ async fn unapply_loose(
 }
 
 async fn apply_loose(pool: &PgPool, mig: &Migration) -> Result<(), MigrateError> {
+    let mut deferred_fks: Vec<String> = Vec::new();
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let ddl = render_changes(std::slice::from_ref(change), &mig.snapshot)
+                let batch = render_changes_split(std::slice::from_ref(change), &mig.snapshot)
                     .map_err(MigrateError::Validation)?;
-                for stmt in ddl {
+                for stmt in batch.immediate {
                     sqlx::query(&stmt).execute(pool).await?;
                 }
+                deferred_fks.extend(batch.deferred_fks);
             }
             Operation::Data(d) => {
                 sqlx::query(&d.sql).execute(pool).await?;
             }
         }
+    }
+    for stmt in deferred_fks {
+        sqlx::query(&stmt).execute(pool).await?;
     }
     sqlx::query("INSERT INTO __rustango_migrations__ (name) VALUES ($1)")
         .bind(&mig.name)

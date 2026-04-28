@@ -106,20 +106,55 @@ pub fn render_changes(
     changes: &[SchemaChange],
     current: &SchemaSnapshot,
 ) -> Result<Vec<String>, String> {
-    let mut out = Vec::new();
-    let mut new_table_constraints: Vec<String> = Vec::new();
+    let RenderedBatch {
+        mut immediate,
+        deferred_fks,
+    } = render_changes_split(changes, current)?;
+    immediate.extend(deferred_fks);
+    Ok(immediate)
+}
 
+/// DDL rendered for one batch of [`SchemaChange`]s, with FK
+/// constraint ALTERs split out from the immediate statements.
+///
+/// Callers that apply changes one-at-a-time (e.g. the runner walking
+/// a `Migration::forward` list interleaved with data ops) need this
+/// to defer FK ALTERs until **all** sibling `CreateTable`s in the
+/// migration have run — otherwise an early `CreateTable` would emit
+/// its FK ALTER referencing a table that hasn't been created yet.
+#[derive(Debug, Default)]
+pub struct RenderedBatch {
+    /// DDL to execute now, in the order it appears here.
+    pub immediate: Vec<String>,
+    /// FK `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` statements
+    /// for new tables in this batch. Run them after every other
+    /// migration op has executed so the referenced tables exist.
+    pub deferred_fks: Vec<String>,
+}
+
+/// Same as [`render_changes`] but keeps FK ALTER constraints in a
+/// separate bucket so callers can defer them.
+///
+/// # Errors
+/// As [`render_changes`].
+pub fn render_changes_split(
+    changes: &[SchemaChange],
+    current: &SchemaSnapshot,
+) -> Result<RenderedBatch, String> {
+    let mut out = RenderedBatch::default();
     for change in changes {
         match change {
             SchemaChange::CreateTable(name) => {
                 let table = current.table(name).ok_or_else(|| {
                     format!("CreateTable for `{name}` but no snapshot entry for it")
                 })?;
-                out.push(create_table_sql_from_snapshot(table));
-                new_table_constraints.extend(constraints_sql_from_snapshot(table));
+                out.immediate.push(create_table_sql_from_snapshot(table));
+                out.deferred_fks
+                    .extend(constraints_sql_from_snapshot(table));
             }
             SchemaChange::DropColumn { table, column } => {
-                out.push(format!(r#"ALTER TABLE "{table}" DROP COLUMN "{column}""#,));
+                out.immediate
+                    .push(format!(r#"ALTER TABLE "{table}" DROP COLUMN "{column}""#,));
             }
             SchemaChange::AddColumn { table, column } => {
                 let t = current.table(table).ok_or_else(|| {
@@ -133,14 +168,14 @@ pub fn render_changes(
                         "AddColumn `{table}.{column}` is NOT NULL with no `default` — Postgres can't backfill existing rows. Make the field `Option<…>` or set `#[rustango(default = \"…\")]`.",
                     ));
                 }
-                out.push(add_column_sql(table, f));
+                out.immediate.push(add_column_sql(table, f));
             }
             SchemaChange::DropTable(name) => {
-                out.push(format!(r#"DROP TABLE "{name}" CASCADE"#));
+                out.immediate
+                    .push(format!(r#"DROP TABLE "{name}" CASCADE"#));
             }
         }
     }
-    out.extend(new_table_constraints);
     Ok(out)
 }
 
