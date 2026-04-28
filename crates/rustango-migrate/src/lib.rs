@@ -26,5 +26,7 @@ pub use diff::{detect_changes, render_changes, SchemaChange};
 pub use error::MigrateError;
 pub use file::{DataOp, Migration, Operation};
 pub use make::{make_migrations, make_migrations_from};
-pub use runner::{apply_all, drop_all, registered_models};
+pub use runner::{
+    applied_set, apply_all, drop_all, ensure_ledger, migrate, registered_models, LEDGER_TABLE,
+};
 pub use snapshot::{FieldSnapshot, RelationSnapshot, SchemaSnapshot, TableSnapshot};
