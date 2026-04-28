@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use rustango::migrate::{
-    file, make_migrations_from, Operation, SchemaChange, SchemaSnapshot, TableSnapshot,
+    file, make_migrations_from, MigrateError, Operation, SchemaChange, SchemaSnapshot,
+    TableSnapshot,
 };
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -410,6 +411,117 @@ fn prev_field_is_predecessor_name() {
         .unwrap()
         .unwrap();
     assert_eq!(m3.prev.as_deref(), Some(m2.name.as_str()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------- v0.3.1: metadata-change rejection ----------
+
+fn user_table_with_age_i32() -> TableSnapshot {
+    serde_json::from_value(serde_json::json!({
+        "name": "snap_user",
+        "model": "SnapUser",
+        "fields": [
+            {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true},
+            {"name": "age", "column": "age", "ty": "i32", "nullable": false, "primary_key": false}
+        ]
+    })).unwrap()
+}
+
+fn user_table_with_age_i64() -> TableSnapshot {
+    serde_json::from_value(serde_json::json!({
+        "name": "snap_user",
+        "model": "SnapUser",
+        "fields": [
+            {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true},
+            {"name": "age", "column": "age", "ty": "i64", "nullable": false, "primary_key": false}
+        ]
+    })).unwrap()
+}
+
+fn assert_metadata_error(err: MigrateError, needles: &[&str]) {
+    let msg = match err {
+        MigrateError::Validation(m) => m,
+        other => panic!("expected Validation, got {other:?}"),
+    };
+    assert!(
+        msg.contains("AlterField"),
+        "expected v0.4 deferral hint, got: {msg}"
+    );
+    for n in needles {
+        assert!(msg.contains(n), "expected `{n}` in: {msg}");
+    }
+}
+
+#[test]
+fn type_change_is_rejected_with_alter_field_hint() {
+    // i32 → i64 on the same column: silent no-op without this guard.
+    let dir = fresh_dir("type_change");
+    let prev = snapshot_with(vec![user_table_with_age_i32()]);
+    make_migrations_from(&dir, &prev, None).unwrap().unwrap();
+
+    let next = snapshot_with(vec![user_table_with_age_i64()]);
+    let err = make_migrations_from(&dir, &next, None).unwrap_err();
+    assert_metadata_error(err, &["snap_user.age", "i32", "i64", "type changed"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn nullability_flip_is_rejected() {
+    let dir = fresh_dir("null_flip");
+    let prev = snapshot_with(vec![user_table()]);
+    make_migrations_from(&dir, &prev, None).unwrap().unwrap();
+
+    let mut next_t = user_table();
+    let name_field = next_t
+        .fields
+        .iter_mut()
+        .find(|f| f.column == "name")
+        .unwrap();
+    name_field.nullable = true;
+    let err = make_migrations_from(&dir, &snapshot_with(vec![next_t]), None).unwrap_err();
+    assert_metadata_error(err, &["snap_user.name", "nullable changed"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn max_length_change_is_rejected() {
+    let dir = fresh_dir("max_length");
+    let prev = snapshot_with(vec![user_table()]);
+    make_migrations_from(&dir, &prev, None).unwrap().unwrap();
+
+    let mut next_t = user_table();
+    next_t
+        .fields
+        .iter_mut()
+        .find(|f| f.column == "name")
+        .unwrap()
+        .max_length = Some(64);
+    let err = make_migrations_from(&dir, &snapshot_with(vec![next_t]), None).unwrap_err();
+    assert_metadata_error(err, &["snap_user.name", "max_length changed"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn metadata_change_blocks_even_with_other_real_changes() {
+    // If the user changes a type AND adds a new table at the same time,
+    // we must still surface the metadata change rather than write a
+    // migration that silently ignores it.
+    let dir = fresh_dir("mixed_meta_and_create");
+    let prev = snapshot_with(vec![user_table_with_age_i32()]);
+    make_migrations_from(&dir, &prev, None).unwrap().unwrap();
+
+    let next = snapshot_with(vec![user_table_with_age_i64(), post_table()]);
+    let err = make_migrations_from(&dir, &next, None).unwrap_err();
+    assert_metadata_error(err, &["snap_user.age", "type changed"]);
+    // No 0002 file should have been written.
+    let any_0002 = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|e| e.file_name().to_string_lossy().starts_with("0002"));
+    assert!(
+        !any_0002,
+        "no migration should be written when metadata change is rejected"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

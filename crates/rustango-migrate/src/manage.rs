@@ -38,6 +38,7 @@
 //! | `showmigrations` / `status` | List migrations with `[X]`/`[ ]` applied marker. |
 //! | `--help` / `-h` / `help` | Print usage. |
 
+use std::io::Write;
 use std::path::Path;
 
 use rustango_sql::sqlx::PgPool;
@@ -49,70 +50,114 @@ use crate::runner;
 use crate::snapshot::SchemaSnapshot;
 
 /// Parse argv (no binary name) and dispatch to the right subcommand.
+/// All output is written to stdout. Use [`run_with_writer`] when you
+/// need to capture the output (tests, structured logging, custom UIs).
 ///
 /// `dir` is the migrations directory (e.g. `./migrations`).
 ///
 /// # Errors
 /// Returns whatever the underlying migration function returns, plus
-/// [`MigrateError::Validation`] for unknown subcommands or bad argv.
+/// [`MigrateError::Validation`] for unknown subcommands or bad argv,
+/// or [`MigrateError::Io`] if writing to stdout fails (broken pipe).
 pub async fn run(
     pool: &PgPool,
     dir: &Path,
     args: impl IntoIterator<Item = String>,
+) -> Result<(), MigrateError> {
+    let mut stdout = std::io::stdout();
+    run_with_writer(pool, dir, args, &mut stdout).await
+}
+
+/// Same as [`run`] but writes user-facing output to `writer`. Useful
+/// for tests (`Vec<u8>`), captured logs, or piping the dispatcher's
+/// output through a custom formatter.
+///
+/// # Errors
+/// As [`run`] — including [`MigrateError::Io`] from any failed
+/// `writer.write` (the writer's surface).
+pub async fn run_with_writer<W: Write + Send>(
+    pool: &PgPool,
+    dir: &Path,
+    args: impl IntoIterator<Item = String>,
+    writer: &mut W,
 ) -> Result<(), MigrateError> {
     let args: Vec<String> = args.into_iter().collect();
     let cmd = args.first().map_or("", String::as_str);
 
     match cmd {
         "" | "--help" | "-h" | "help" => {
-            print_help();
+            print_help(writer)?;
             Ok(())
         }
-        "makemigrations" => makemigrations(dir, &args[1..]),
-        "migrate" => migrate(pool, dir, &args[1..]).await,
-        "downgrade" => downgrade(pool, dir, &args[1..]).await,
-        "showmigrations" | "status" => showmigrations(pool, dir).await,
+        "makemigrations" => makemigrations(dir, &args[1..], writer),
+        "migrate" => migrate(pool, dir, &args[1..], writer).await,
+        "downgrade" => downgrade(pool, dir, &args[1..], writer).await,
+        "showmigrations" | "status" => showmigrations(pool, dir, writer).await,
         other => Err(MigrateError::Validation(format!(
             "unknown subcommand: `{other}` (run with --help for usage)"
         ))),
     }
 }
 
-fn print_help() {
-    println!("rustango::manage — Django-style migration runner\n");
-    println!("USAGE:");
-    println!("  manage <COMMAND> [args]\n");
-    println!("COMMANDS:");
-    println!("  makemigrations [name]");
-    println!("      Diff the inventory registry against the latest snapshot");
-    println!("      and write the next migration file. `name` overrides the");
-    println!("      auto-derived suffix.\n");
-    println!("  makemigrations --empty <name>");
-    println!("      Write an empty migration scaffold (`forward: []`) for");
-    println!("      hand-authored data migrations. Edit the JSON to add");
-    println!("      `data` ops with sql + reverse_sql.\n");
-    println!("  migrate");
-    println!("      Apply every pending migration in lex order.\n");
-    println!("  migrate <target>");
-    println!("      Forward or back to <target>. `zero` unapplies every");
-    println!("      applied migration.\n");
-    println!("  downgrade [N]");
-    println!("      Step back N applied migrations (default 1).\n");
-    println!("  showmigrations | status");
-    println!("      List migrations with [X]/[ ] applied marker.");
+fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
+    writeln!(w, "rustango::manage — Django-style migration runner\n")?;
+    writeln!(w, "USAGE:")?;
+    writeln!(w, "  manage <COMMAND> [args]\n")?;
+    writeln!(w, "COMMANDS:")?;
+    writeln!(w, "  makemigrations [name]")?;
+    writeln!(
+        w,
+        "      Diff the inventory registry against the latest snapshot"
+    )?;
+    writeln!(
+        w,
+        "      and write the next migration file. `name` overrides the"
+    )?;
+    writeln!(w, "      auto-derived suffix.\n")?;
+    writeln!(w, "  makemigrations --empty <name>")?;
+    writeln!(
+        w,
+        "      Write an empty migration scaffold (`forward: []`) for"
+    )?;
+    writeln!(
+        w,
+        "      hand-authored data migrations. Edit the JSON to add"
+    )?;
+    writeln!(w, "      `data` ops with sql + reverse_sql.\n")?;
+    writeln!(w, "  migrate")?;
+    writeln!(w, "      Apply every pending migration in lex order.\n")?;
+    writeln!(w, "  migrate <target>")?;
+    writeln!(
+        w,
+        "      Forward or back to <target>. `zero` unapplies every"
+    )?;
+    writeln!(w, "      applied migration.\n")?;
+    writeln!(w, "  downgrade [N]")?;
+    writeln!(
+        w,
+        "      Step back N applied migrations (default 1).\n"
+    )?;
+    writeln!(w, "  showmigrations | status")?;
+    writeln!(w, "      List migrations with [X]/[ ] applied marker.")?;
+    Ok(())
 }
 
-fn makemigrations(dir: &Path, args: &[String]) -> Result<(), MigrateError> {
+fn makemigrations<W: Write>(
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
     let mut empty = false;
     let mut name: Option<String> = None;
     for arg in args {
         match arg.as_str() {
             "--empty" => empty = true,
             "--help" | "-h" => {
-                println!(
+                writeln!(
+                    w,
                     "makemigrations [name]            generate next migration\n\
                      makemigrations --empty <name>    empty scaffold for data ops"
-                );
+                )?;
                 return Ok(());
             }
             other if other.starts_with('-') => {
@@ -136,33 +181,39 @@ fn makemigrations(dir: &Path, args: &[String]) -> Result<(), MigrateError> {
             ));
         };
         let mig = make_empty(dir, &n)?;
-        println!(
+        writeln!(
+            w,
             "wrote {} (empty scaffold — fill in `forward` with data ops)",
             file_path(dir, &mig.name).display()
-        );
+        )?;
         return Ok(());
     }
 
     match make_migrations(dir, name.as_deref())? {
         Some(mig) => {
-            println!("wrote {}", file_path(dir, &mig.name).display());
+            writeln!(w, "wrote {}", file_path(dir, &mig.name).display())?;
             for op in &mig.forward {
-                println!("    + {}", describe_op(op));
+                writeln!(w, "    + {}", describe_op(op))?;
             }
         }
-        None => println!("no changes — registry matches latest snapshot"),
+        None => writeln!(w, "no changes — registry matches latest snapshot")?,
     }
     Ok(())
 }
 
-async fn migrate(pool: &PgPool, dir: &Path, args: &[String]) -> Result<(), MigrateError> {
+async fn migrate<W: Write>(
+    pool: &PgPool,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
     if args.is_empty() {
         let applied = runner::migrate(pool, dir).await?;
         if applied.is_empty() {
-            println!("nothing to migrate (already up to date)");
+            writeln!(w, "nothing to migrate (already up to date)")?;
         } else {
             for m in &applied {
-                println!("  applied {}", m.name);
+                writeln!(w, "  applied {}", m.name)?;
             }
         }
         return Ok(());
@@ -170,16 +221,21 @@ async fn migrate(pool: &PgPool, dir: &Path, args: &[String]) -> Result<(), Migra
     let target = &args[0];
     let touched = runner::migrate_to(pool, dir, target).await?;
     if touched.is_empty() {
-        println!("already at {target}");
+        writeln!(w, "already at {target}")?;
     } else {
         for m in &touched {
-            println!("  touched {}", m.name);
+            writeln!(w, "  touched {}", m.name)?;
         }
     }
     Ok(())
 }
 
-async fn downgrade(pool: &PgPool, dir: &Path, args: &[String]) -> Result<(), MigrateError> {
+async fn downgrade<W: Write>(
+    pool: &PgPool,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
     let steps: usize = if let Some(arg) = args.first() {
         arg.parse().map_err(|_| {
             MigrateError::Validation(format!(
@@ -191,32 +247,36 @@ async fn downgrade(pool: &PgPool, dir: &Path, args: &[String]) -> Result<(), Mig
     };
     let touched = runner::downgrade(pool, dir, steps).await?;
     if touched.is_empty() {
-        println!("nothing to downgrade");
+        writeln!(w, "nothing to downgrade")?;
     } else {
         for m in &touched {
-            println!("  rolled back {}", m.name);
+            writeln!(w, "  rolled back {}", m.name)?;
         }
     }
     Ok(())
 }
 
-async fn showmigrations(pool: &PgPool, dir: &Path) -> Result<(), MigrateError> {
+async fn showmigrations<W: Write>(
+    pool: &PgPool,
+    dir: &Path,
+    w: &mut W,
+) -> Result<(), MigrateError> {
     runner::ensure_ledger(pool).await?;
     let all = file::list_dir(dir)?;
     let applied = runner::applied_set(pool).await?;
 
     if all.is_empty() {
-        println!("(no migrations in {})", dir.display());
+        writeln!(w, "(no migrations in {})", dir.display())?;
         return Ok(());
     }
-    println!("Migrations in {}:", dir.display());
+    writeln!(w, "Migrations in {}:", dir.display())?;
     for m in &all {
         let mark = if applied.contains(&m.name) {
             "[X]"
         } else {
             "[ ]"
         };
-        println!("  {mark} {}", m.name);
+        writeln!(w, "  {mark} {}", m.name)?;
     }
     Ok(())
 }

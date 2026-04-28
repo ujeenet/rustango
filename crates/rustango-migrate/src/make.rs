@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use crate::diff::{detect_changes, SchemaChange};
+use crate::diff::{detect_changes, detect_unsupported_field_changes, SchemaChange};
 use crate::error::MigrateError;
 use crate::file::{self, extract_index, Migration, Operation};
 use crate::snapshot::SchemaSnapshot;
@@ -61,6 +61,22 @@ pub fn make_migrations_from(
         .last()
         .and_then(|m| extract_index(&m.name))
         .map_or(1, |n| n + 1);
+
+    // Reject metadata-only changes that v0.3's `SchemaChange` set can't
+    // represent (type swaps, nullability flips, default/CHECK/FK
+    // tweaks, etc.). Without this guard `make_migrations` would
+    // silently produce `Ok(None)` and the user would think the schema
+    // was already up to date. v0.4 will introduce `AlterField` ops to
+    // close this gap; until then, surface the change as a clear error.
+    let unsupported = detect_unsupported_field_changes(&prev_snapshot, current);
+    if !unsupported.is_empty() {
+        return Err(MigrateError::Validation(format!(
+            "field metadata changed but v0.3 has no AlterField operation \
+             (deferred to v0.4); the following changes need explicit migration \
+             authoring:\n  - {}",
+            unsupported.join("\n  - "),
+        )));
+    }
 
     let changes = detect_changes(&prev_snapshot, current);
     if changes.is_empty() {

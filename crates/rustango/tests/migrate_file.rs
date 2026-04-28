@@ -334,6 +334,63 @@ fn extract_index_handles_leading_zeros() {
 }
 
 #[test]
+fn list_dir_rejects_broken_prev_chain() {
+    // 0002 declares prev=0001 but 0001 isn't in the dir → load-time error.
+    let dir = tmp_path("broken_chain");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mig = Migration {
+        name: "0002_orphan".into(),
+        created_at: "2026-04-28T00:00:00Z".into(),
+        prev: Some("0001_initial".into()),
+        atomic: true,
+        snapshot: empty_snapshot(),
+        forward: vec![],
+    };
+    file::write(&dir.join("0002_orphan.json"), &mig).unwrap();
+
+    let err = file::list_dir(&dir).unwrap_err();
+    let _ = std::fs::remove_dir_all(&dir);
+    match err {
+        MigrateError::Validation(msg) => {
+            assert!(msg.contains("broken migration chain"), "got: {msg}");
+            assert!(msg.contains("0002_orphan"), "got: {msg}");
+            assert!(msg.contains("0001_initial"), "got: {msg}");
+        }
+        other => panic!("expected Validation error, got: {other:?}"),
+    }
+}
+
+#[test]
+fn list_dir_accepts_well_formed_chain() {
+    let dir = tmp_path("good_chain");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let m1 = Migration {
+        name: "0001_initial".into(),
+        created_at: "2026-04-28T00:00:00Z".into(),
+        prev: None,
+        atomic: true,
+        snapshot: empty_snapshot(),
+        forward: vec![],
+    };
+    let m2 = Migration {
+        name: "0002_next".into(),
+        created_at: "2026-04-28T00:00:00Z".into(),
+        prev: Some("0001_initial".into()),
+        atomic: true,
+        snapshot: empty_snapshot(),
+        forward: vec![],
+    };
+    file::write(&dir.join("0001_initial.json"), &m1).unwrap();
+    file::write(&dir.join("0002_next.json"), &m2).unwrap();
+
+    let migs = file::list_dir(&dir).unwrap();
+    assert_eq!(migs.len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn list_dir_skips_subdirectories() {
     let dir = tmp_path("list_dir_subdirs");
     let _ = std::fs::remove_dir_all(&dir);

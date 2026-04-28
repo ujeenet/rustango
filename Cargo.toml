@@ -43,6 +43,9 @@ uuid   = { version = "1", features = ["serde", "v4"] }
 # Errors
 thiserror = "1"
 
+# Logging
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+
 # Admin (HTTP)
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }
 tower = { version = "0.5", features = ["util"] }

@@ -85,6 +85,89 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     changes
 }
 
+/// Detect column metadata changes that v0.3's schema-change set can't
+/// represent — type changes, nullability flips, default changes,
+/// `max_length` changes, FK target changes, primary-key changes,
+/// `min`/`max` (CHECK) changes. Same-named columns in same-named
+/// tables only; renames live with `AlterField` and ship in v0.4.
+///
+/// Returns one human-readable diff line per detected change. Empty on
+/// success. `make_migrations_from` rejects any non-empty result —
+/// otherwise these changes would silently no-op (the field still
+/// exists so `detect_changes` skips it; the metadata diff is invisible
+/// without explicit `AlterField`/`RenameField` ops).
+#[must_use]
+pub fn detect_unsupported_field_changes(
+    prev: &SchemaSnapshot,
+    current: &SchemaSnapshot,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for ct in &current.tables {
+        let Some(pt) = prev.table(&ct.name) else {
+            continue;
+        };
+        for cf in &ct.fields {
+            let Some(pf) = pt.field(&cf.column) else {
+                continue;
+            };
+            push_field_diffs(&ct.name, pf, cf, &mut out);
+        }
+    }
+    out
+}
+
+fn push_field_diffs(table: &str, pf: &FieldSnapshot, cf: &FieldSnapshot, out: &mut Vec<String>) {
+    let col = &cf.column;
+    if pf.ty != cf.ty {
+        out.push(format!(
+            "`{table}.{col}` type changed: {} → {}",
+            pf.ty, cf.ty
+        ));
+    }
+    if pf.nullable != cf.nullable {
+        out.push(format!(
+            "`{table}.{col}` nullable changed: {} → {}",
+            pf.nullable, cf.nullable
+        ));
+    }
+    if pf.primary_key != cf.primary_key {
+        out.push(format!(
+            "`{table}.{col}` primary_key changed: {} → {}",
+            pf.primary_key, cf.primary_key
+        ));
+    }
+    if pf.max_length != cf.max_length {
+        out.push(format!(
+            "`{table}.{col}` max_length changed: {:?} → {:?}",
+            pf.max_length, cf.max_length
+        ));
+    }
+    if pf.min != cf.min {
+        out.push(format!(
+            "`{table}.{col}` min changed: {:?} → {:?}",
+            pf.min, cf.min
+        ));
+    }
+    if pf.max != cf.max {
+        out.push(format!(
+            "`{table}.{col}` max changed: {:?} → {:?}",
+            pf.max, cf.max
+        ));
+    }
+    if pf.default != cf.default {
+        out.push(format!(
+            "`{table}.{col}` default changed: {:?} → {:?}",
+            pf.default, cf.default
+        ));
+    }
+    if pf.fk != cf.fk {
+        out.push(format!(
+            "`{table}.{col}` fk changed: {:?} → {:?}",
+            pf.fk, cf.fk
+        ));
+    }
+}
+
 /// Render a list of [`SchemaChange`]s as Postgres DDL strings ready to
 /// execute. The `current` snapshot is consulted to read field metadata
 /// for each `AddColumn` and `CreateTable` (so we know type, nullability,

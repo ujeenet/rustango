@@ -195,6 +195,39 @@ async fn migrate_embedded_sorts_entries_lexicographically() {
 }
 
 #[tokio::test]
+async fn migrate_embedded_rejects_broken_prev_chain() {
+    // Same chain validation as `file::list_dir`: an embedded entry
+    // declaring `prev` against a sibling that isn't in the slice
+    // fails fast with a clear error, before any DB work.
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let suffix = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    let table = format!("emb_chain_{pid}_{suffix}");
+    let orphan = format!("0002_orphan_{pid}_{suffix}");
+
+    let mig = Migration {
+        name: orphan.clone(),
+        created_at: "2026-04-28T00:00:00Z".into(),
+        prev: Some("0001_missing_predecessor".into()),
+        atomic: true,
+        snapshot: snapshot_with_table(&table),
+        forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
+    };
+    let json = serde_json::to_string(&mig).unwrap();
+
+    let embedded: &[(&str, &str)] = &[(&orphan, &json)];
+    let err = migrate::migrate_embedded(&pool, embedded)
+        .await
+        .unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("broken migration chain"), "got: {msg}");
+    assert!(msg.contains(&orphan), "got: {msg}");
+    assert!(msg.contains("0001_missing_predecessor"), "got: {msg}");
+}
+
+#[tokio::test]
 async fn migrate_embedded_empty_slice_is_safe_noop() {
     let Some(pool) = pool().await else {
         return;

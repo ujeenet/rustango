@@ -138,12 +138,17 @@ pub fn write(path: &Path, migration: &Migration) -> Result<(), MigrateError> {
 ///
 /// A non-existent `dir` is treated as an empty list — useful for
 /// `make_migrations` against a fresh project. Each file is fully
-/// validated via [`load`].
+/// validated via [`load`], and the cross-file `prev` chain is
+/// validated via [`validate_chain`] — a migration declaring
+/// `prev: "0002_missing"` whose predecessor isn't present fails at
+/// load time with a clear "broken migration chain" error rather than
+/// surfacing as a confusing failure deep inside `unapply` or
+/// `migrate_to`.
 ///
 /// # Errors
 /// Returns [`MigrateError::Io`] on read failure, [`MigrateError::Json`]
 /// on parse failure, or [`MigrateError::Validation`] if any file is
-/// internally inconsistent.
+/// internally inconsistent or the chain is broken.
 pub fn list_dir(dir: &Path) -> Result<Vec<Migration>, MigrateError> {
     if !dir.exists() {
         return Ok(Vec::new());
@@ -158,7 +163,29 @@ pub fn list_dir(dir: &Path) -> Result<Vec<Migration>, MigrateError> {
     for p in paths {
         out.push(load(&p)?);
     }
+    validate_chain(&out, &dir.display().to_string())?;
     Ok(out)
+}
+
+/// Verify every migration's `prev` reference points to another
+/// migration in the slice. Caller passes `origin` (a dir path or a
+/// label like `"embedded slice"`) so the error message names where
+/// the migrations came from.
+///
+/// # Errors
+/// Returns [`MigrateError::Validation`] on the first broken link.
+pub(crate) fn validate_chain(migrations: &[Migration], origin: &str) -> Result<(), MigrateError> {
+    for mig in migrations {
+        if let Some(prev) = &mig.prev {
+            if !migrations.iter().any(|m| &m.name == prev) {
+                return Err(MigrateError::Validation(format!(
+                    "broken migration chain: `{}` declares prev=`{prev}` but that migration is missing from {origin}",
+                    mig.name,
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Extract the leading numeric prefix from a migration name

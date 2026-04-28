@@ -1020,3 +1020,108 @@ async fn applied_set_returns_recorded_names() {
 
     delete_ledger_entry(&pool, &unique).await;
 }
+
+// ---------- v0.3.1: unapply head check ----------
+
+#[tokio::test]
+async fn unapply_refuses_non_head_target() {
+    // Apply 0001 → 0002 → 0003. Try to `unapply` 0001 directly.
+    // It is not the head, so the call must error before any DB write.
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let (dir, names, tables) = three_migrations();
+    cleanup(&pool, &names, &tables, &dir).await;
+    let (dir, names, tables) = three_migrations();
+
+    migrate::migrate(&pool, &dir).await.unwrap();
+
+    let err = migrate::unapply(&pool, &dir, &names[0]).await.unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("out of order"), "got: {msg}");
+    assert!(msg.contains(&names[0]), "got: {msg}");
+    assert!(msg.contains(&names[2]), "head should be named: {msg}");
+
+    // All three are still in the ledger; nothing was rolled back.
+    let applied = migrate::applied_set(&pool).await.unwrap();
+    for n in &names {
+        assert!(applied.contains(n), "{n} must remain applied");
+    }
+
+    cleanup(&pool, &names, &tables, &dir).await;
+}
+
+#[tokio::test]
+async fn unapply_force_bypasses_head_check() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let (dir, names, tables) = three_migrations();
+    cleanup(&pool, &names, &tables, &dir).await;
+    let (dir, names, tables) = three_migrations();
+
+    migrate::migrate(&pool, &dir).await.unwrap();
+
+    // Forcefully drop the middle migration's table even though 0003
+    // is still in place. (Schema state is inconsistent afterward —
+    // exactly why the default refuses; we only test the bypass here.)
+    let target = migrate::unapply_force(&pool, &dir, &names[1])
+        .await
+        .unwrap();
+    assert_eq!(target.name, names[1]);
+
+    let applied = migrate::applied_set(&pool).await.unwrap();
+    assert!(applied.contains(&names[0]));
+    assert!(!applied.contains(&names[1]), "0002 should be unapplied");
+    assert!(applied.contains(&names[2]), "0003 still in ledger");
+
+    cleanup(&pool, &names, &tables, &dir).await;
+}
+
+// ---------- v0.3.1: concurrent-migrate advisory lock ----------
+
+#[tokio::test]
+async fn concurrent_migrate_calls_serialize_via_advisory_lock() {
+    // Without the advisory lock around `migrate`, peers querying
+    // `applied_set` simultaneously both see the same pending list, both
+    // try to apply, and one loses with either a PK violation on the
+    // ledger INSERT or a `relation already exists` from the CREATE.
+    // With the lock, peers serialize: across N concurrent calls every
+    // migration is applied exactly once and every call returns Ok.
+    let Some(pool) = pool().await else {
+        return;
+    };
+
+    let (dir, names, tables) = three_migrations();
+    cleanup(&pool, &names, &tables, &dir).await;
+    let (dir, names, tables) = three_migrations();
+
+    let n_tasks = 5_usize;
+    let mut handles = Vec::with_capacity(n_tasks);
+    for _ in 0..n_tasks {
+        let pool = pool.clone();
+        let dir = dir.clone();
+        handles.push(tokio::spawn(async move {
+            migrate::migrate(&pool, &dir).await
+        }));
+    }
+
+    let mut total_applied = 0_usize;
+    for h in handles {
+        let res = h.await.expect("task did not panic");
+        let applied = res.expect("each migrate call must succeed under the lock");
+        total_applied += applied.len();
+    }
+    assert_eq!(
+        total_applied,
+        names.len(),
+        "every migration must be applied exactly once across all peers"
+    );
+
+    let applied = migrate::applied_set(&pool).await.unwrap();
+    for n in &names {
+        assert!(applied.contains(n), "{n} must be in the ledger");
+    }
+
+    cleanup(&pool, &names, &tables, &dir).await;
+}

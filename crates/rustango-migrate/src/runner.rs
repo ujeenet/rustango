@@ -31,6 +31,16 @@ const CREATE_LEDGER_SQL: &str = "CREATE TABLE IF NOT EXISTS __rustango_migration
     name TEXT PRIMARY KEY, \
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())";
 
+/// Postgres advisory-lock key used to serialize concurrent
+/// `migrate` / `migrate_to` / `unapply` / `downgrade` /
+/// `migrate_embedded` calls across processes. Without this lock,
+/// peer boots both query `applied_set`, both see the same pending
+/// list, both try to apply it, and one loses the race with a
+/// `relation already exists` or PK violation on the ledger INSERT.
+///
+/// "RUSTMIGT" in ASCII hex.
+const MIGRATE_LOCK_KEY: i64 = 0x5255_5354_4d49_4754;
+
 /// Collect every registered model's schema into a `Vec`. Order is the
 /// order of registration (linker order); callers that care should sort.
 #[must_use]
@@ -93,24 +103,56 @@ pub async fn drop_all(pool: &PgPool) -> Result<(), MigrateError> {
 /// for file problems, [`MigrateError::Driver`] for SQL failures.
 pub async fn migrate(pool: &PgPool, dir: &Path) -> Result<Vec<Migration>, MigrateError> {
     ensure_ledger(pool).await?;
+    with_migrate_lock(pool, async {
+        let all = file::list_dir(dir)?;
+        let applied = applied_set(pool).await?;
+        let pending: Vec<Migration> = all
+            .into_iter()
+            .filter(|m| !applied.contains(&m.name))
+            .collect();
 
-    let all = file::list_dir(dir)?;
-    let applied = applied_set(pool).await?;
-    let pending: Vec<Migration> = all
-        .into_iter()
-        .filter(|m| !applied.contains(&m.name))
-        .collect();
-
-    let mut newly = Vec::with_capacity(pending.len());
-    for mig in pending {
-        if mig.atomic {
-            apply_atomic(pool, &mig).await?;
-        } else {
-            apply_loose(pool, &mig).await?;
+        let mut newly = Vec::with_capacity(pending.len());
+        for mig in pending {
+            if mig.atomic {
+                apply_atomic(pool, &mig).await?;
+            } else {
+                apply_loose(pool, &mig).await?;
+            }
+            newly.push(mig);
         }
-        newly.push(mig);
-    }
-    Ok(newly)
+        Ok(newly)
+    })
+    .await
+}
+
+/// Hold the migrate advisory lock for the duration of `body`, then
+/// release it (best-effort) before returning. Peers calling any
+/// migrate-shaped operation block until the holder releases.
+///
+/// The lock is **session-scoped**, so we acquire a dedicated
+/// connection from the pool, hold it for the whole body, and
+/// explicitly unlock before dropping it back to the pool. (Dropping
+/// alone wouldn't release, since pooled connections survive between
+/// uses.)
+async fn with_migrate_lock<F, R>(pool: &PgPool, body: F) -> Result<R, MigrateError>
+where
+    F: std::future::Future<Output = Result<R, MigrateError>>,
+{
+    let mut lock_conn = pool.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(MIGRATE_LOCK_KEY)
+        .execute(&mut *lock_conn)
+        .await?;
+    let result = body.await;
+    // Always try to release. If unlock fails (e.g. connection died),
+    // Postgres releases on session close so we won't deadlock peers
+    // forever — and we want the original error from `result` to
+    // propagate, not a noisy unlock error.
+    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(MIGRATE_LOCK_KEY)
+        .execute(&mut *lock_conn)
+        .await;
+    result
 }
 
 /// Set of migration names already recorded in the ledger.
@@ -152,6 +194,7 @@ pub async fn ensure_ledger(pool: &PgPool) -> Result<(), MigrateError> {
 }
 
 async fn apply_atomic(pool: &PgPool, mig: &Migration) -> Result<(), MigrateError> {
+    tracing::info!(migration = %mig.name, "applying (atomic)");
     let mut tx = pool.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in &mig.forward {
@@ -209,68 +252,71 @@ pub async fn migrate_to(
     target: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
     ensure_ledger(pool).await?;
-    let all = file::list_dir(dir)?;
-    let applied = applied_set(pool).await?;
+    with_migrate_lock(pool, async {
+        let all = file::list_dir(dir)?;
+        let applied = applied_set(pool).await?;
 
-    if target == "zero" {
-        return unapply_all_in_order(pool, dir, &all, &applied).await;
-    }
-
-    if !all.iter().any(|m| m.name == target) {
-        return Err(MigrateError::Validation(format!(
-            "target migration `{target}` not found in {}",
-            dir.display()
-        )));
-    }
-
-    let head = all
-        .iter()
-        .rev()
-        .find(|m| applied.contains(&m.name))
-        .map(|m| m.name.clone());
-
-    let mut touched = Vec::new();
-    match head {
-        None => {
-            // Nothing applied — forward up to and including target.
-            for mig in all.into_iter().filter(|m| m.name.as_str() <= target) {
-                apply_one(pool, &mig).await?;
-                touched.push(mig);
-            }
+        if target == "zero" {
+            return unapply_all_in_order(pool, dir, &all, &applied).await;
         }
-        Some(h) => {
-            use std::cmp::Ordering;
-            match target.cmp(h.as_str()) {
-                Ordering::Equal => {}
-                Ordering::Greater => {
-                    for mig in all.into_iter().filter(|m| {
-                        m.name.as_str() > h.as_str()
-                            && m.name.as_str() <= target
-                            && !applied.contains(&m.name)
-                    }) {
-                        apply_one(pool, &mig).await?;
-                        touched.push(mig);
-                    }
-                }
-                Ordering::Less => {
-                    let mut to_unapply: Vec<Migration> = all
-                        .into_iter()
-                        .filter(|m| {
-                            m.name.as_str() > target
-                                && m.name.as_str() <= h.as_str()
-                                && applied.contains(&m.name)
-                        })
-                        .collect();
-                    to_unapply.reverse();
-                    for mig in to_unapply {
-                        unapply(pool, dir, &mig.name).await?;
-                        touched.push(mig);
-                    }
+
+        if !all.iter().any(|m| m.name == target) {
+            return Err(MigrateError::Validation(format!(
+                "target migration `{target}` not found in {}",
+                dir.display()
+            )));
+        }
+
+        let head = all
+            .iter()
+            .rev()
+            .find(|m| applied.contains(&m.name))
+            .map(|m| m.name.clone());
+
+        let mut touched = Vec::new();
+        match head {
+            None => {
+                // Nothing applied — forward up to and including target.
+                for mig in all.into_iter().filter(|m| m.name.as_str() <= target) {
+                    apply_one(pool, &mig).await?;
+                    touched.push(mig);
                 }
             }
+            Some(h) => {
+                use std::cmp::Ordering;
+                match target.cmp(h.as_str()) {
+                    Ordering::Equal => {}
+                    Ordering::Greater => {
+                        for mig in all.into_iter().filter(|m| {
+                            m.name.as_str() > h.as_str()
+                                && m.name.as_str() <= target
+                                && !applied.contains(&m.name)
+                        }) {
+                            apply_one(pool, &mig).await?;
+                            touched.push(mig);
+                        }
+                    }
+                    Ordering::Less => {
+                        let mut to_unapply: Vec<Migration> = all
+                            .into_iter()
+                            .filter(|m| {
+                                m.name.as_str() > target
+                                    && m.name.as_str() <= h.as_str()
+                                    && applied.contains(&m.name)
+                            })
+                            .collect();
+                        to_unapply.reverse();
+                        for mig in to_unapply {
+                            unapply_locked(pool, dir, &mig.name).await?;
+                            touched.push(mig);
+                        }
+                    }
+                }
+            }
         }
-    }
-    Ok(touched)
+        Ok(touched)
+    })
+    .await
 }
 
 /// Apply pending migrations from an in-memory `&[(name, json)]` slice.
@@ -296,36 +342,39 @@ pub async fn migrate_embedded(
     embedded: &[(&str, &str)],
 ) -> Result<Vec<Migration>, MigrateError> {
     ensure_ledger(pool).await?;
-
-    let mut all: Vec<Migration> = Vec::with_capacity(embedded.len());
-    for (name, json) in embedded {
-        let mig = file::parse(json)?;
-        if mig.name != *name {
-            return Err(MigrateError::Validation(format!(
-                "embedded entry key `{name}` doesn't match migration `name` field `{}`",
-                mig.name,
-            )));
+    with_migrate_lock(pool, async {
+        let mut all: Vec<Migration> = Vec::with_capacity(embedded.len());
+        for (name, json) in embedded {
+            let mig = file::parse(json)?;
+            if mig.name != *name {
+                return Err(MigrateError::Validation(format!(
+                    "embedded entry key `{name}` doesn't match migration `name` field `{}`",
+                    mig.name,
+                )));
+            }
+            all.push(mig);
         }
-        all.push(mig);
-    }
-    all.sort_by(|a, b| a.name.cmp(&b.name));
+        all.sort_by(|a, b| a.name.cmp(&b.name));
+        file::validate_chain(&all, "embedded slice")?;
 
-    let applied = applied_set(pool).await?;
-    let pending: Vec<Migration> = all
-        .into_iter()
-        .filter(|m| !applied.contains(&m.name))
-        .collect();
+        let applied = applied_set(pool).await?;
+        let pending: Vec<Migration> = all
+            .into_iter()
+            .filter(|m| !applied.contains(&m.name))
+            .collect();
 
-    let mut newly = Vec::with_capacity(pending.len());
-    for mig in pending {
-        if mig.atomic {
-            apply_atomic(pool, &mig).await?;
-        } else {
-            apply_loose(pool, &mig).await?;
+        let mut newly = Vec::with_capacity(pending.len());
+        for mig in pending {
+            if mig.atomic {
+                apply_atomic(pool, &mig).await?;
+            } else {
+                apply_loose(pool, &mig).await?;
+            }
+            newly.push(mig);
         }
-        newly.push(mig);
-    }
-    Ok(newly)
+        Ok(newly)
+    })
+    .await
 }
 
 /// Step back `steps` applied migrations (Alembic's `downgrade -N`).
@@ -346,26 +395,29 @@ pub async fn downgrade(
         return Ok(Vec::new());
     }
     ensure_ledger(pool).await?;
-    let all = file::list_dir(dir)?;
-    let applied = applied_set(pool).await?;
+    with_migrate_lock(pool, async {
+        let all = file::list_dir(dir)?;
+        let applied = applied_set(pool).await?;
 
-    let applied_in_order: Vec<Migration> = all
-        .into_iter()
-        .filter(|m| applied.contains(&m.name))
-        .collect();
-    if applied_in_order.is_empty() {
-        return Ok(Vec::new());
-    }
+        let applied_in_order: Vec<Migration> = all
+            .into_iter()
+            .filter(|m| applied.contains(&m.name))
+            .collect();
+        if applied_in_order.is_empty() {
+            return Ok(Vec::new());
+        }
 
-    let n = steps.min(applied_in_order.len());
-    let to_unapply: Vec<Migration> = applied_in_order.into_iter().rev().take(n).collect();
+        let n = steps.min(applied_in_order.len());
+        let to_unapply: Vec<Migration> = applied_in_order.into_iter().rev().take(n).collect();
 
-    let mut touched = Vec::with_capacity(to_unapply.len());
-    for mig in to_unapply {
-        unapply(pool, dir, &mig.name).await?;
-        touched.push(mig);
-    }
-    Ok(touched)
+        let mut touched = Vec::with_capacity(to_unapply.len());
+        for mig in to_unapply {
+            unapply_locked(pool, dir, &mig.name).await?;
+            touched.push(mig);
+        }
+        Ok(touched)
+    })
+    .await
 }
 
 async fn apply_one(pool: &PgPool, mig: &Migration) -> Result<(), MigrateError> {
@@ -390,7 +442,10 @@ async fn unapply_all_in_order(
     to_unapply.reverse();
     let mut touched = Vec::with_capacity(to_unapply.len());
     for mig in to_unapply {
-        unapply(pool, dir, &mig.name).await?;
+        // Caller already holds the migrate lock; use `unapply_locked`
+        // to avoid re-acquiring (which would deadlock on a different
+        // pooled connection / session).
+        unapply_locked(pool, dir, &mig.name).await?;
         touched.push(mig);
     }
     Ok(touched)
@@ -404,6 +459,12 @@ async fn unapply_all_in_order(
 /// transaction (or loose if the original `atomic: false`). Removes
 /// the entry from `__rustango_migrations__` on success.
 ///
+/// **Refuses to unapply a non-head migration** — leaving an applied
+/// migration newer than the rolled-back one would put the schema in
+/// an inconsistent state (the newer one still thinks its predecessor
+/// is in place). Use [`downgrade`] or [`migrate_to`] for ordered
+/// rollback, or [`unapply_force`] to bypass.
+///
 /// **What "roll back" means here:** schema reversal restores shape,
 /// not data — `DropColumn` then `unapply` does NOT bring back the
 /// column's row values. Data reversal is only as good as the
@@ -414,12 +475,73 @@ async fn unapply_all_in_order(
 /// fail fast before any DB write, with an error that names the op.
 ///
 /// # Errors
-/// * [`MigrateError::Validation`] — irreversible op, missing
-///   migration file, missing predecessor.
+/// * [`MigrateError::Validation`] — non-head target, irreversible
+///   op, missing migration file, missing predecessor.
 /// * [`MigrateError::Driver`] — SQL failure during rollback.
 pub async fn unapply(pool: &PgPool, dir: &Path, name: &str) -> Result<Migration, MigrateError> {
     ensure_ledger(pool).await?;
+    with_migrate_lock(pool, async {
+        check_is_head(pool, dir, name).await?;
+        unapply_locked(pool, dir, name).await
+    })
+    .await
+}
 
+/// Roll back any applied migration, even out of order.
+///
+/// Same body as [`unapply`] but skips the head check — the caller
+/// accepts responsibility for the resulting schema state. Use only
+/// when you genuinely need to drop an arbitrary applied migration
+/// (e.g. surgical correction of a bad migration mid-history); in
+/// most cases [`downgrade`] or [`migrate_to`] is what you want.
+///
+/// # Errors
+/// As [`unapply`], minus the head-mismatch check.
+pub async fn unapply_force(
+    pool: &PgPool,
+    dir: &Path,
+    name: &str,
+) -> Result<Migration, MigrateError> {
+    ensure_ledger(pool).await?;
+    with_migrate_lock(pool, unapply_locked(pool, dir, name)).await
+}
+
+/// Verify `name` is the lex-greatest currently-applied migration.
+/// Silent pass-through if the migration isn't applied at all — that
+/// case will surface as a clearer error from `unapply_locked`
+/// ("migration not found in dir" or similar).
+async fn check_is_head(pool: &PgPool, dir: &Path, name: &str) -> Result<(), MigrateError> {
+    let applied = applied_set(pool).await?;
+    if !applied.contains(name) {
+        return Ok(());
+    }
+    let all = file::list_dir(dir)?;
+    let head = all
+        .iter()
+        .rev()
+        .find(|m| applied.contains(&m.name))
+        .map(|m| m.name.as_str());
+    match head {
+        Some(h) if h == name => Ok(()),
+        Some(h) => Err(MigrateError::Validation(format!(
+            "refusing to unapply `{name}` out of order: current head is `{h}`. \
+             Use `downgrade(pool, dir, n)` / `migrate_to(pool, dir, target)` for \
+             ordered rollback, or `unapply_force` to bypass.",
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Body of [`unapply`] without acquiring the migrate lock — for
+/// reuse by `migrate_to` and `downgrade`, which already hold the
+/// lock for the whole operation. Acquiring the lock recursively on
+/// a different pooled connection would block forever (each
+/// `pool.acquire()` is a fresh session).
+async fn unapply_locked(
+    pool: &PgPool,
+    dir: &Path,
+    name: &str,
+) -> Result<Migration, MigrateError> {
     let all = file::list_dir(dir)?;
     let target = all
         .iter()
@@ -460,6 +582,7 @@ async fn unapply_atomic(
     inverted: &[Operation],
     snapshot: &SchemaSnapshot,
 ) -> Result<(), MigrateError> {
+    tracing::info!(migration = %target.name, "unapplying (atomic)");
     let mut tx = pool.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in inverted {
@@ -494,6 +617,7 @@ async fn unapply_loose(
     inverted: &[Operation],
     snapshot: &SchemaSnapshot,
 ) -> Result<(), MigrateError> {
+    tracing::info!(migration = %target.name, "unapplying (non-atomic)");
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in inverted {
         match op {
@@ -521,6 +645,7 @@ async fn unapply_loose(
 }
 
 async fn apply_loose(pool: &PgPool, mig: &Migration) -> Result<(), MigrateError> {
+    tracing::info!(migration = %mig.name, "applying (non-atomic)");
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in &mig.forward {
         match op {

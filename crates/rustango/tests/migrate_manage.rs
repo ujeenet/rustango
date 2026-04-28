@@ -385,6 +385,63 @@ async fn showmigrations_subcommand_runs_on_empty_dir() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------------- v0.3.1: capturable output via run_with_writer ----------------
+
+#[tokio::test]
+async fn run_with_writer_captures_help_text() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let dir = fresh_dir("capture_help");
+    let mut buf: Vec<u8> = Vec::new();
+    manage::run_with_writer(&pool, &dir, args(&["--help"]), &mut buf)
+        .await
+        .unwrap();
+    let out = String::from_utf8(buf).unwrap();
+    // Sanity-check the writer received something help-shaped — no
+    // stdout bypass.
+    assert!(out.contains("rustango::manage"), "got: {out}");
+    assert!(out.contains("makemigrations"), "got: {out}");
+    assert!(out.contains("downgrade"), "got: {out}");
+}
+
+#[tokio::test]
+async fn run_with_writer_captures_migrate_output() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let table = unique_table("capture_mig");
+    let mig_name = unique_migration("capture_mig", 1);
+    let dir = fresh_dir("capture_migrate");
+
+    write_migration(
+        &dir,
+        &Migration {
+            name: mig_name.clone(),
+            created_at: "2026-04-28T00:00:00Z".into(),
+            prev: None,
+            atomic: true,
+            snapshot: snapshot_with_table(&table),
+            forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
+        },
+    );
+
+    drop_table(&pool, &table).await;
+    delete_ledger_entry(&pool, &mig_name).await;
+
+    let mut buf: Vec<u8> = Vec::new();
+    manage::run_with_writer(&pool, &dir, args(&["migrate"]), &mut buf)
+        .await
+        .unwrap();
+    let out = String::from_utf8(buf).unwrap();
+    assert!(out.contains("applied"), "got: {out}");
+    assert!(out.contains(&mig_name), "got: {out}");
+
+    drop_table(&pool, &table).await;
+    delete_ledger_entry(&pool, &mig_name).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn makemigrations_empty_via_run_writes_scaffold() {
     let Some(pool) = pool().await else {
