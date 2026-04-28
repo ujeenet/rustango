@@ -121,6 +121,52 @@ impl InsertQuery {
     }
 }
 
+/// Compiled multi-row `INSERT` — one round-trip for N rows.
+///
+/// `rows[i]` is positional against `columns`: every row supplies the
+/// same column list in the same order. `returning` works the same way
+/// as on [`InsertQuery`]; non-empty means the executor uses
+/// `fetch_all` and returns one row per input row.
+///
+/// Mixed-shape inserts (some rows opting a column out via the
+/// Postgres `DEFAULT` keyword) are not supported in v0.4 — every row
+/// must carry a value for every column. Models with `Auto<T>` PKs
+/// can either pass `Auto::Unset` for every row (the macro drops the
+/// Auto column from `columns` entirely and the sequence fires) or
+/// `Auto::Set(v)` for every row (the column is included with the
+/// supplied value). Mixed Set/Unset within one bulk_insert is
+/// rejected by the macro at validate time.
+#[derive(Debug, Clone)]
+pub struct BulkInsertQuery {
+    pub model: &'static ModelSchema,
+    pub columns: Vec<&'static str>,
+    pub rows: Vec<Vec<SqlValue>>,
+    pub returning: Vec<&'static str>,
+}
+
+impl BulkInsertQuery {
+    /// Walk every `(column, value)` pair in every row and check it
+    /// against the field's declared bounds.
+    ///
+    /// # Errors
+    /// As [`InsertQuery::validate`].
+    pub fn validate(&self) -> Result<(), QueryError> {
+        for row in &self.rows {
+            for (column, value) in self.columns.iter().zip(row.iter()) {
+                let field =
+                    self.model
+                        .field_by_column(column)
+                        .ok_or_else(|| QueryError::UnknownField {
+                            model: self.model.name,
+                            field: (*column).to_owned(),
+                        })?;
+                validate_value(self.model.name, field, value)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One `column = value` pair in an `UPDATE ... SET ...` clause.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {

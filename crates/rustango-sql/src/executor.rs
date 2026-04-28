@@ -1,7 +1,8 @@
 //! Async executor — binds a `CompiledStatement` to sqlx and runs it.
 
 use rustango_core::{
-    CountQuery, DeleteQuery, InsertQuery, Model, SelectQuery, SqlValue, UpdateQuery,
+    BulkInsertQuery, CountQuery, DeleteQuery, InsertQuery, Model, SelectQuery, SqlValue,
+    UpdateQuery,
 };
 use rustango_query::{QuerySet, UpdateBuilder};
 use sqlx::postgres::{PgArguments, PgPool, PgRow};
@@ -88,6 +89,35 @@ pub async fn insert_returning(pool: &PgPool, query: &InsertQuery) -> Result<PgRo
     }
     let row = q.fetch_one(pool).await?;
     Ok(row)
+}
+
+/// Run a `BulkInsertQuery` against a Postgres pool — one round-trip
+/// for every row. Returns the rows produced by the `RETURNING`
+/// clause (one per input row), or an empty `Vec` if the query
+/// requested no `RETURNING`.
+///
+/// Used by macro-generated `Model::bulk_insert(pool, &mut rows)`.
+/// Validates each row against the model's bounds before opening
+/// the connection.
+///
+/// # Errors
+/// Returns [`ExecError`] for validation, SQL-writing, or driver failures.
+pub async fn bulk_insert(
+    pool: &PgPool,
+    query: &BulkInsertQuery,
+) -> Result<Vec<PgRow>, ExecError> {
+    query.validate()?;
+    let stmt = Postgres.compile_bulk_insert(query)?;
+    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+    for value in stmt.params {
+        q = bind_query(q, value);
+    }
+    if query.returning.is_empty() {
+        q.execute(pool).await?;
+        Ok(Vec::new())
+    } else {
+        Ok(q.fetch_all(pool).await?)
+    }
 }
 
 /// Run an `UpdateQuery` against a Postgres pool. Returns rows affected.

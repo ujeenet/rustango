@@ -262,6 +262,152 @@ async fn auto_pk_set_value_is_honored() {
 }
 
 #[tokio::test]
+async fn bulk_insert_non_auto_model_writes_n_rows_one_round_trip() {
+    // Non-Auto model — fields written verbatim, no RETURNING needed.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+
+    let rows: Vec<MigUser> = (1..=10_i64)
+        .map(|i| MigUser {
+            id: i,
+            name: format!("user_{i}"),
+            age: 20 + i as i32,
+            is_active: i % 2 == 0,
+        })
+        .collect();
+
+    MigUser::bulk_insert(&rows, &pool).await.unwrap();
+
+    let fetched: Vec<MigUser> = MigUser::objects().fetch(&pool).await.unwrap();
+    assert_eq!(fetched.len(), 10, "all 10 rows should be present");
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn bulk_insert_auto_model_unset_path_populates_each_pk() {
+    // Auto model, all rows Auto::Unset → sequence assigns each PK,
+    // RETURNING populates `id` on every row in input order.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+
+    let mut rows: Vec<AutoUser> = (1..=5)
+        .map(|i| AutoUser {
+            id: Auto::Unset,
+            name: format!("bulk_{i}"),
+        })
+        .collect();
+
+    AutoUser::bulk_insert(&mut rows, &pool).await.unwrap();
+
+    // Every row's id is now Set, in strictly-ascending order.
+    let mut last: i64 = 0;
+    for r in &rows {
+        let v = *r.id.get().expect("Auto::Set after bulk_insert");
+        assert!(v > last, "ids must be ascending; got {v} after {last}");
+        last = v;
+    }
+
+    let fetched: Vec<AutoUser> = AutoUser::objects().fetch(&pool).await.unwrap();
+    assert_eq!(fetched.len(), 5);
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn bulk_insert_auto_model_all_set_path_honors_supplied_ids() {
+    // Auto model, all rows Auto::Set(N) → sequence is bypassed, the
+    // user-supplied ids are stored verbatim.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+
+    let mut rows: Vec<AutoUser> = (100..=102)
+        .map(|i: i64| AutoUser {
+            id: Auto::Set(i),
+            name: format!("explicit_{i}"),
+        })
+        .collect();
+
+    AutoUser::bulk_insert(&mut rows, &pool).await.unwrap();
+
+    for (i, r) in rows.iter().enumerate() {
+        assert_eq!(*r.id.get().unwrap(), 100 + i as i64);
+    }
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn bulk_insert_auto_model_mixed_set_unset_is_rejected() {
+    // Mixing Set and Unset within one bulk_insert is rejected before
+    // any DB work — the column list can't differ across rows.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+
+    let mut rows = vec![
+        AutoUser {
+            id: Auto::Unset,
+            name: "first".into(),
+        },
+        AutoUser {
+            id: Auto::Set(42),
+            name: "second".into(),
+        },
+    ];
+
+    let err = AutoUser::bulk_insert(&mut rows, &pool).await.unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("mixed Set/Unset") || msg.contains("Auto"), "got: {msg}");
+
+    // No rows should have been inserted.
+    let fetched: Vec<AutoUser> = AutoUser::objects().fetch(&pool).await.unwrap();
+    assert_eq!(fetched.len(), 0);
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn bulk_insert_empty_slice_is_noop() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+
+    let mut empty: Vec<AutoUser> = Vec::new();
+    AutoUser::bulk_insert(&mut empty, &pool).await.unwrap();
+    let empty_non_auto: Vec<MigUser> = Vec::new();
+    MigUser::bulk_insert(&empty_non_auto, &pool).await.unwrap();
+
+    let fetched: Vec<AutoUser> = AutoUser::objects().fetch(&pool).await.unwrap();
+    assert_eq!(fetched.len(), 0);
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
 async fn apply_all_is_safe_to_call_after_drop_all() {
     let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {

@@ -18,8 +18,8 @@ pub use compiled::CompiledStatement;
 pub use dialect::Dialect;
 pub use error::{ExecError, SqlError};
 pub use executor::{
-    count_rows, delete, insert, insert_returning, select_one_row, select_rows, update, Counter,
-    Deleter, Fetcher, Updater,
+    bulk_insert, count_rows, delete, insert, insert_returning, select_one_row, select_rows, update,
+    Counter, Deleter, Fetcher, Updater,
 };
 pub use postgres::Postgres;
 

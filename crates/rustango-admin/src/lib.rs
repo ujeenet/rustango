@@ -462,6 +462,7 @@ async fn create_submit(
         model,
         columns,
         values,
+        returning: Vec::new(),
     };
     if let Err(e) = rustango_sql::insert(&state.pool, &query).await {
         let html = render_form(model, Some(&form), false, Some(&e.to_string()));

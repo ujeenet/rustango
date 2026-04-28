@@ -212,6 +212,31 @@ struct CollectedFields {
     /// `self.<field> = Row::try_get(&row, "<col>")?;` for each Auto
     /// field. Run after `insert_returning` to populate the model.
     auto_assigns: Vec<TokenStream2>,
+    /// `(ident, column_literal)` pairs for every Auto field. Used by
+    /// the bulk_insert codegen to rebuild assigns against `_row_mut`
+    /// instead of `self`.
+    auto_field_idents: Vec<(syn::Ident, String)>,
+    /// Bulk-insert per-row pushes for **non-Auto fields only**. Used
+    /// by the all-Auto-Unset bulk path (Auto cols dropped from
+    /// `columns`).
+    bulk_pushes_no_auto: Vec<TokenStream2>,
+    /// Bulk-insert per-row pushes for **all fields including Auto**.
+    /// Used by the all-Auto-Set bulk path (Auto col included with the
+    /// caller-supplied value).
+    bulk_pushes_all: Vec<TokenStream2>,
+    /// Column-name literals for non-Auto fields only (paired with
+    /// `bulk_pushes_no_auto`).
+    bulk_columns_no_auto: Vec<TokenStream2>,
+    /// Column-name literals for every field including Auto (paired
+    /// with `bulk_pushes_all`).
+    bulk_columns_all: Vec<TokenStream2>,
+    /// `let _i_unset_<n> = matches!(rows[0].<auto_field>, Auto::Unset);`
+    /// + the loop that asserts every row matches. One pair per Auto
+    /// field. Empty when `has_auto == false`.
+    bulk_auto_uniformity: Vec<TokenStream2>,
+    /// Identifier of the first Auto field, used as the witness for
+    /// "all rows agree on Set vs Unset". Set only when `has_auto`.
+    first_auto_ident: Option<syn::Ident>,
     /// `true` if any field on the struct is `Auto<T>`.
     has_auto: bool,
     primary_key: Option<(syn::Ident, String)>,
@@ -231,6 +256,13 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
         insert_pushes: Vec::with_capacity(cap),
         returning_cols: Vec::new(),
         auto_assigns: Vec::new(),
+        auto_field_idents: Vec::new(),
+        bulk_pushes_no_auto: Vec::with_capacity(cap),
+        bulk_pushes_all: Vec::with_capacity(cap),
+        bulk_columns_no_auto: Vec::with_capacity(cap),
+        bulk_columns_all: Vec::with_capacity(cap),
+        bulk_auto_uniformity: Vec::new(),
+        first_auto_ident: None,
         has_auto: false,
         primary_key: None,
         column_entries: Vec::with_capacity(cap),
@@ -252,7 +284,12 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
         });
         if info.auto {
             out.has_auto = true;
+            if out.first_auto_ident.is_none() {
+                out.first_auto_ident = Some(ident.clone());
+            }
             out.returning_cols.push(quote!(#column));
+            out.auto_field_idents
+                .push((ident.clone(), info.column.clone()));
             out.auto_assigns.push(quote! {
                 self.#ident = ::rustango::sql::sqlx::Row::try_get(&_returning_row, #column)?;
             });
@@ -264,6 +301,29 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
                     ));
                 }
             });
+            // Bulk: Auto fields appear only in the all-Set path,
+            // never in the Unset path (we drop them from `columns`).
+            out.bulk_columns_all.push(quote!(#column));
+            out.bulk_pushes_all.push(quote! {
+                _row_vals.push(::core::convert::Into::<::rustango::core::SqlValue>::into(
+                    ::core::clone::Clone::clone(&_row.#ident)
+                ));
+            });
+            // Uniformity check: every row's Auto state must match the
+            // first row's. Mixed Set/Unset within one bulk_insert is
+            // rejected here so the column list stays consistent.
+            let ident_clone = ident.clone();
+            out.bulk_auto_uniformity.push(quote! {
+                for _r in rows.iter().skip(1) {
+                    if matches!(_r.#ident_clone, ::rustango::sql::Auto::Unset) != _first_unset {
+                        return ::core::result::Result::Err(
+                            ::rustango::sql::ExecError::Sql(
+                                ::rustango::sql::SqlError::BulkAutoMixed
+                            )
+                        );
+                    }
+                }
+            });
         } else {
             out.insert_pushes.push(quote! {
                 _columns.push(#column);
@@ -271,6 +331,16 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
                     ::core::clone::Clone::clone(&self.#ident)
                 ));
             });
+            // Bulk: non-Auto fields appear in BOTH paths.
+            out.bulk_columns_no_auto.push(quote!(#column));
+            out.bulk_columns_all.push(quote!(#column));
+            let push_expr = quote! {
+                _row_vals.push(::core::convert::Into::<::rustango::core::SqlValue>::into(
+                    ::core::clone::Clone::clone(&_row.#ident)
+                ));
+            };
+            out.bulk_pushes_no_auto.push(push_expr.clone());
+            out.bulk_pushes_all.push(push_expr);
         }
         if info.primary_key {
             if out.primary_key.is_some() {
@@ -410,6 +480,130 @@ fn inherent_impl_tokens(
         }
     };
 
+    let bulk_insert_method = if fields.has_auto {
+        let cols_no_auto = &fields.bulk_columns_no_auto;
+        let cols_all = &fields.bulk_columns_all;
+        let pushes_no_auto = &fields.bulk_pushes_no_auto;
+        let pushes_all = &fields.bulk_pushes_all;
+        let returning_cols = &fields.returning_cols;
+        let auto_assigns_for_row = bulk_auto_assigns_for_row(fields);
+        let uniformity = &fields.bulk_auto_uniformity;
+        let first_auto_ident = fields
+            .first_auto_ident
+            .as_ref()
+            .expect("has_auto implies first_auto_ident is Some");
+        quote! {
+            /// Bulk-insert `rows` in a single round-trip. Every row's
+            /// `Auto<T>` PK fields must uniformly be `Auto::Unset`
+            /// (sequence fills them in) or uniformly `Auto::Set(_)`
+            /// (caller-supplied values). Mixed Set/Unset is rejected
+            /// — call `insert` per row for that case.
+            ///
+            /// Empty slice is a no-op. Each row's `Auto` fields are
+            /// populated from the `RETURNING` clause in input order
+            /// before this returns.
+            ///
+            /// # Errors
+            /// Returns [`::rustango::sql::ExecError`] for validation,
+            /// SQL-writing, mixed-Auto rejection, or driver failures.
+            pub async fn bulk_insert(
+                rows: &mut [Self],
+                pool: &::rustango::sql::sqlx::PgPool,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                if rows.is_empty() {
+                    return ::core::result::Result::Ok(());
+                }
+                let _first_unset = matches!(
+                    rows[0].#first_auto_ident,
+                    ::rustango::sql::Auto::Unset
+                );
+                #( #uniformity )*
+
+                let mut _all_rows: ::std::vec::Vec<
+                    ::std::vec::Vec<::rustango::core::SqlValue>,
+                > = ::std::vec::Vec::with_capacity(rows.len());
+                let _columns: ::std::vec::Vec<&'static str> = if _first_unset {
+                    for _row in rows.iter() {
+                        let mut _row_vals: ::std::vec::Vec<::rustango::core::SqlValue> =
+                            ::std::vec::Vec::new();
+                        #( #pushes_no_auto )*
+                        _all_rows.push(_row_vals);
+                    }
+                    ::std::vec![ #( #cols_no_auto ),* ]
+                } else {
+                    for _row in rows.iter() {
+                        let mut _row_vals: ::std::vec::Vec<::rustango::core::SqlValue> =
+                            ::std::vec::Vec::new();
+                        #( #pushes_all )*
+                        _all_rows.push(_row_vals);
+                    }
+                    ::std::vec![ #( #cols_all ),* ]
+                };
+
+                let _query = ::rustango::core::BulkInsertQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    columns: _columns,
+                    rows: _all_rows,
+                    returning: ::std::vec![ #( #returning_cols ),* ],
+                };
+                let _returned = ::rustango::sql::bulk_insert(pool, &_query).await?;
+                if _returned.len() != rows.len() {
+                    return ::core::result::Result::Err(
+                        ::rustango::sql::ExecError::Sql(
+                            ::rustango::sql::SqlError::BulkInsertReturningMismatch {
+                                expected: rows.len(),
+                                actual: _returned.len(),
+                            }
+                        )
+                    );
+                }
+                for (_returning_row, _row_mut) in _returned.iter().zip(rows.iter_mut()) {
+                    #auto_assigns_for_row
+                }
+                ::core::result::Result::Ok(())
+            }
+        }
+    } else {
+        let cols_all = &fields.bulk_columns_all;
+        let pushes_all = &fields.bulk_pushes_all;
+        quote! {
+            /// Bulk-insert `rows` in a single round-trip. Every row's
+            /// fields are written verbatim — there are no `Auto<T>`
+            /// fields on this model.
+            ///
+            /// Empty slice is a no-op.
+            ///
+            /// # Errors
+            /// Returns [`::rustango::sql::ExecError`] for validation,
+            /// SQL-writing, or driver failures.
+            pub async fn bulk_insert(
+                rows: &[Self],
+                pool: &::rustango::sql::sqlx::PgPool,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                if rows.is_empty() {
+                    return ::core::result::Result::Ok(());
+                }
+                let mut _all_rows: ::std::vec::Vec<
+                    ::std::vec::Vec<::rustango::core::SqlValue>,
+                > = ::std::vec::Vec::with_capacity(rows.len());
+                for _row in rows.iter() {
+                    let mut _row_vals: ::std::vec::Vec<::rustango::core::SqlValue> =
+                        ::std::vec::Vec::new();
+                    #( #pushes_all )*
+                    _all_rows.push(_row_vals);
+                }
+                let _query = ::rustango::core::BulkInsertQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    columns: ::std::vec![ #( #cols_all ),* ],
+                    rows: _all_rows,
+                    returning: ::std::vec::Vec::new(),
+                };
+                let _ = ::rustango::sql::bulk_insert(pool, &_query).await?;
+                ::core::result::Result::Ok(())
+            }
+        }
+    };
+
     quote! {
         impl #struct_name {
             /// Start a new `QuerySet` over this model.
@@ -420,11 +614,29 @@ fn inherent_impl_tokens(
 
             #insert_method
 
+            #bulk_insert_method
+
             #pk_methods
 
             #column_consts
         }
     }
+}
+
+/// Per-row Auto-field assigns for `bulk_insert` — equivalent to
+/// `auto_assigns` but reading from `_returning_row` and writing to
+/// `_row_mut` instead of `self`.
+fn bulk_auto_assigns_for_row(fields: &CollectedFields) -> TokenStream2 {
+    let lines = fields.auto_field_idents.iter().map(|(ident, column)| {
+        let col_lit = column.as_str();
+        quote! {
+            _row_mut.#ident = ::rustango::sql::sqlx::Row::try_get(
+                _returning_row,
+                #col_lit,
+            )?;
+        }
+    });
+    quote! { #( #lines )* }
 }
 
 /// Emit `pub const id: …Id = …Id;` per field, inside the inherent impl.

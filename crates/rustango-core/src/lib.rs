@@ -15,8 +15,8 @@ pub use column::{Column, TypedAssignment, TypedFilter};
 pub use error::QueryError;
 pub use field_type::FieldType;
 pub use query::{
-    Assignment, CountQuery, DeleteQuery, Filter, InsertQuery, Join, Op, SearchClause, SelectQuery,
-    UpdateQuery,
+    Assignment, BulkInsertQuery, CountQuery, DeleteQuery, Filter, InsertQuery, Join, Op,
+    SearchClause, SelectQuery, UpdateQuery,
 };
 pub use schema::{FieldSchema, Model, ModelEntry, ModelSchema, Relation};
 pub use validate::validate_value;

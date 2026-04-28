@@ -28,6 +28,23 @@ pub enum SqlError {
     /// `UpdateQuery` had no assignments — `UPDATE ... SET` requires at least one.
     #[error("UPDATE requires at least one assignment in `set`")]
     EmptyUpdateSet,
+
+    /// `BulkInsertQuery` had no rows — caller should short-circuit.
+    #[error("bulk INSERT requires at least one row")]
+    EmptyBulkInsert,
+
+    /// Macro-generated `Model::bulk_insert` was called with rows that
+    /// disagree on whether their `Auto<T>` PKs are `Set` or `Unset`.
+    /// Mixed-shape inserts aren't supported in v0.4 — the column list
+    /// must be consistent across the batch. Either set every PK or
+    /// leave every PK unset; for surgical mixes, call `insert` per row.
+    #[error("bulk INSERT requires every row's `Auto<T>` PKs to agree on Set vs Unset; mixed Set/Unset is not supported")]
+    BulkAutoMixed,
+
+    /// `bulk_insert` returned a different number of rows than were
+    /// requested — sanity check before populating Auto fields.
+    #[error("bulk INSERT RETURNING returned {actual} rows but {expected} were inserted")]
+    BulkInsertReturningMismatch { expected: usize, actual: usize },
 }
 
 /// Raised while compiling, writing, or executing a query end-to-end.

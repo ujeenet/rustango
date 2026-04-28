@@ -1,8 +1,8 @@
 //! End-to-end check of the `QuerySet` → `SelectQuery` → Postgres SQL pipeline.
 
 use rustango::core::{
-    Assignment, CountQuery, DeleteQuery, Filter, InsertQuery, Join, Model as _, Op, SearchClause,
-    SelectQuery, SqlValue, UpdateQuery,
+    Assignment, BulkInsertQuery, CountQuery, DeleteQuery, Filter, InsertQuery, Join, Model as _,
+    Op, SearchClause, SelectQuery, SqlValue, UpdateQuery,
 };
 use rustango::sql::{Dialect, Postgres, SqlError};
 use rustango::Model;
@@ -230,6 +230,77 @@ fn insert_with_mismatched_lengths_is_rejected() {
             values: 2
         }
     ));
+}
+
+// ---------------- bulk INSERT ----------------
+
+#[test]
+fn bulk_insert_emits_one_values_tuple_per_row() {
+    let query = BulkInsertQuery {
+        model: User::SCHEMA,
+        columns: vec!["id", "name", "is_active"],
+        rows: vec![
+            vec![
+                SqlValue::I64(1),
+                SqlValue::String("alice".into()),
+                SqlValue::Bool(true),
+            ],
+            vec![
+                SqlValue::I64(2),
+                SqlValue::String("bob".into()),
+                SqlValue::Bool(false),
+            ],
+        ],
+        returning: Vec::new(),
+    };
+    let stmt = pg().compile_bulk_insert(&query).unwrap();
+    assert_eq!(
+        stmt.sql,
+        r#"INSERT INTO "user" ("id", "name", "is_active") VALUES ($1, $2, $3), ($4, $5, $6)"#,
+    );
+    assert_eq!(stmt.params.len(), 6);
+}
+
+#[test]
+fn bulk_insert_with_returning_appends_clause() {
+    let query = BulkInsertQuery {
+        model: User::SCHEMA,
+        columns: vec!["name", "is_active"],
+        rows: vec![
+            vec![SqlValue::String("alice".into()), SqlValue::Bool(true)],
+            vec![SqlValue::String("bob".into()), SqlValue::Bool(false)],
+        ],
+        returning: vec!["id"],
+    };
+    let stmt = pg().compile_bulk_insert(&query).unwrap();
+    assert!(stmt.sql.ends_with(r#"RETURNING "id""#), "{}", stmt.sql);
+}
+
+#[test]
+fn bulk_insert_empty_rows_is_rejected() {
+    let query = BulkInsertQuery {
+        model: User::SCHEMA,
+        columns: vec!["name"],
+        rows: vec![],
+        returning: Vec::new(),
+    };
+    let err = pg().compile_bulk_insert(&query).unwrap_err();
+    assert!(matches!(err, SqlError::EmptyBulkInsert));
+}
+
+#[test]
+fn bulk_insert_row_shape_mismatch_is_rejected() {
+    let query = BulkInsertQuery {
+        model: User::SCHEMA,
+        columns: vec!["id", "name"],
+        rows: vec![
+            vec![SqlValue::I64(1), SqlValue::String("alice".into())],
+            vec![SqlValue::I64(2)],
+        ],
+        returning: Vec::new(),
+    };
+    let err = pg().compile_bulk_insert(&query).unwrap_err();
+    assert!(matches!(err, SqlError::InsertShapeMismatch { .. }));
 }
 
 // ---------------- UPDATE ----------------

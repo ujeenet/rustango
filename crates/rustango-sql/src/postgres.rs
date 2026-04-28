@@ -3,8 +3,8 @@
 use std::fmt::Write as _;
 
 use rustango_core::{
-    CountQuery, DeleteQuery, Filter, InsertQuery, Op, SearchClause, SelectQuery, SqlValue,
-    UpdateQuery,
+    BulkInsertQuery, CountQuery, DeleteQuery, Filter, InsertQuery, Op, SearchClause, SelectQuery,
+    SqlValue, UpdateQuery,
 };
 
 use crate::{CompiledStatement, Dialect, SqlError};
@@ -136,6 +136,101 @@ impl Dialect for Postgres {
                 push_param(&mut sql, &mut params, value.clone());
             }
             sql.push(')');
+        }
+
+        if !query.returning.is_empty() {
+            sql.push_str(" RETURNING ");
+            let mut first = true;
+            for col in &query.returning {
+                if !first {
+                    sql.push_str(", ");
+                }
+                first = false;
+                write_ident(&mut sql, col);
+            }
+        }
+
+        Ok(CompiledStatement { sql, params })
+    }
+
+    fn compile_bulk_insert(
+        &self,
+        query: &BulkInsertQuery,
+    ) -> Result<CompiledStatement, SqlError> {
+        if query.rows.is_empty() {
+            return Err(SqlError::EmptyBulkInsert);
+        }
+        if query.columns.is_empty() && query.returning.is_empty() {
+            return Err(SqlError::EmptyInsert);
+        }
+        for row in &query.rows {
+            if row.len() != query.columns.len() {
+                return Err(SqlError::InsertShapeMismatch {
+                    columns: query.columns.len(),
+                    values: row.len(),
+                });
+            }
+        }
+
+        let mut sql = String::new();
+        let mut params: Vec<SqlValue> = Vec::with_capacity(query.columns.len() * query.rows.len());
+
+        sql.push_str("INSERT INTO ");
+        write_ident(&mut sql, query.model.table);
+
+        if query.columns.is_empty() {
+            // All-Auto-Unset bulk: every row is just `DEFAULT VALUES`.
+            // Postgres requires one such clause per row, separated by
+            // commas — so emit `INSERT INTO t SELECT … UNION ALL …`?
+            // Simpler: VALUES with no parens-group is illegal. We
+            // can't construct a no-column multi-row insert with
+            // `DEFAULT VALUES`. Emit one `INSERT … DEFAULT VALUES`
+            // per row would mean N round-trips; defeats the purpose.
+            // Instead, emit `INSERT INTO t (pk) VALUES (DEFAULT), …`
+            // referencing the first returning column as the
+            // "placeholder" — Postgres treats DEFAULT as the
+            // sequence-driven value the same way.
+            let pk = query.returning.first().copied().ok_or(SqlError::EmptyInsert)?;
+            sql.push_str(" (");
+            write_ident(&mut sql, pk);
+            sql.push_str(") VALUES ");
+            let mut first_row = true;
+            for _ in &query.rows {
+                if !first_row {
+                    sql.push_str(", ");
+                }
+                first_row = false;
+                sql.push_str("(DEFAULT)");
+            }
+        } else {
+            sql.push_str(" (");
+            let mut first = true;
+            for col in &query.columns {
+                if !first {
+                    sql.push_str(", ");
+                }
+                first = false;
+                write_ident(&mut sql, col);
+            }
+            sql.push_str(") VALUES ");
+
+            let mut first_row = true;
+            for row in &query.rows {
+                if !first_row {
+                    sql.push_str(", ");
+                }
+                first_row = false;
+                sql.push('(');
+                let mut first_v = true;
+                for value in row {
+                    if !first_v {
+                        sql.push_str(", ");
+                    }
+                    first_v = false;
+                    push_param(&mut sql, &mut params, value.clone());
+                }
+                sql.push(')');
+            }
         }
 
         if !query.returning.is_empty() {

@@ -1,6 +1,8 @@
 //! The `Dialect` trait — one implementation per database backend.
 
-use rustango_core::{CountQuery, DeleteQuery, InsertQuery, SelectQuery, UpdateQuery};
+use rustango_core::{
+    BulkInsertQuery, CountQuery, DeleteQuery, InsertQuery, SelectQuery, UpdateQuery,
+};
 
 use crate::{CompiledStatement, SqlError};
 
@@ -19,6 +21,20 @@ pub trait Dialect {
     /// Returns [`SqlError::EmptyInsert`] if no columns were supplied, or
     /// [`SqlError::InsertShapeMismatch`] if `columns` and `values` differ in length.
     fn compile_insert(&self, query: &InsertQuery) -> Result<CompiledStatement, SqlError>;
+
+    /// Lower a `BulkInsertQuery` (multi-row INSERT) to one
+    /// `CompiledStatement` whose VALUES list has one tuple per input row.
+    ///
+    /// # Errors
+    /// Returns [`SqlError::EmptyBulkInsert`] if `rows` is empty (the
+    /// caller should short-circuit), [`SqlError::EmptyInsert`] when
+    /// `columns` is empty without `returning`, or
+    /// [`SqlError::InsertShapeMismatch`] when any row's value count
+    /// disagrees with `columns.len()`.
+    fn compile_bulk_insert(
+        &self,
+        query: &BulkInsertQuery,
+    ) -> Result<CompiledStatement, SqlError>;
 
     /// Lower an `UpdateQuery` to a `CompiledStatement` for this dialect.
     ///
