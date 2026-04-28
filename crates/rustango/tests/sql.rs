@@ -1,8 +1,8 @@
 //! End-to-end check of the `QuerySet` → `SelectQuery` → Postgres SQL pipeline.
 
 use rustango::core::{
-    Assignment, CountQuery, DeleteQuery, Filter, InsertQuery, Model as _, Op, SelectQuery,
-    SqlValue, UpdateQuery,
+    Assignment, CountQuery, DeleteQuery, Filter, InsertQuery, Model as _, Op, SearchClause,
+    SelectQuery, SqlValue, UpdateQuery,
 };
 use rustango::sql::{Dialect, Postgres, SqlError};
 use rustango::Model;
@@ -425,6 +425,7 @@ fn empty_select() -> SelectQuery {
     SelectQuery {
         model: User::SCHEMA,
         filters: vec![],
+        search: None,
         limit: None,
         offset: None,
     }
@@ -539,4 +540,93 @@ fn count_propagates_filter_errors() {
     };
     let err = pg().compile_count(&q).unwrap_err();
     assert!(matches!(err, SqlError::EmptyInList));
+}
+
+// ---------------- SEARCH ----------------
+
+#[test]
+fn search_alone_emits_or_chain_with_one_param() {
+    let q = SelectQuery {
+        search: Some(SearchClause {
+            columns: vec!["name", "is_active"],
+            query: "ali".into(),
+        }),
+        ..empty_select()
+    };
+    let stmt = pg().compile_select(&q).unwrap();
+    assert_eq!(
+        stmt.sql,
+        r#"SELECT "id", "name", "is_active" FROM "user" WHERE ("name" ILIKE $1 OR "is_active" ILIKE $1)"#,
+    );
+    assert_eq!(stmt.params, vec![SqlValue::String("%ali%".into())]);
+}
+
+#[test]
+fn search_combined_with_filter_uses_and() {
+    let q = SelectQuery {
+        filters: vec![Filter {
+            column: "is_active",
+            op: Op::Eq,
+            value: SqlValue::Bool(true),
+        }],
+        search: Some(SearchClause {
+            columns: vec!["name"],
+            query: "ali".into(),
+        }),
+        ..empty_select()
+    };
+    let stmt = pg().compile_select(&q).unwrap();
+    assert_eq!(
+        stmt.sql,
+        r#"SELECT "id", "name", "is_active" FROM "user" WHERE "is_active" = $1 AND ("name" ILIKE $2)"#,
+    );
+    assert_eq!(
+        stmt.params,
+        vec![SqlValue::Bool(true), SqlValue::String("%ali%".into())],
+    );
+}
+
+#[test]
+fn empty_search_query_emits_no_clause() {
+    let q = SelectQuery {
+        search: Some(SearchClause {
+            columns: vec!["name"],
+            query: String::new(),
+        }),
+        ..empty_select()
+    };
+    let stmt = pg().compile_select(&q).unwrap();
+    assert_eq!(stmt.sql, r#"SELECT "id", "name", "is_active" FROM "user""#);
+    assert!(stmt.params.is_empty());
+}
+
+#[test]
+fn empty_search_columns_emits_no_clause() {
+    let q = SelectQuery {
+        search: Some(SearchClause {
+            columns: vec![],
+            query: "anything".into(),
+        }),
+        ..empty_select()
+    };
+    let stmt = pg().compile_select(&q).unwrap();
+    assert_eq!(stmt.sql, r#"SELECT "id", "name", "is_active" FROM "user""#);
+}
+
+#[test]
+fn search_with_limit_offset_orders_clauses_correctly() {
+    let q = SelectQuery {
+        search: Some(SearchClause {
+            columns: vec!["name"],
+            query: "x".into(),
+        }),
+        limit: Some(10),
+        offset: Some(20),
+        ..empty_select()
+    };
+    let stmt = pg().compile_select(&q).unwrap();
+    assert_eq!(
+        stmt.sql,
+        r#"SELECT "id", "name", "is_active" FROM "user" WHERE ("name" ILIKE $1) LIMIT 10 OFFSET 20"#,
+    );
 }

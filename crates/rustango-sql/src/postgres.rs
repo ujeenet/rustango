@@ -3,7 +3,8 @@
 use std::fmt::Write as _;
 
 use rustango_core::{
-    CountQuery, DeleteQuery, Filter, InsertQuery, Op, SelectQuery, SqlValue, UpdateQuery,
+    CountQuery, DeleteQuery, Filter, InsertQuery, Op, SearchClause, SelectQuery, SqlValue,
+    UpdateQuery,
 };
 
 use crate::{CompiledStatement, Dialect, SqlError};
@@ -32,7 +33,7 @@ impl Dialect for Postgres {
         sql.push_str(" FROM ");
         write_ident(&mut sql, query.model.table);
 
-        write_where(&mut sql, &mut params, &query.filters)?;
+        write_where_with_search(&mut sql, &mut params, &query.filters, query.search.as_ref())?;
 
         if let Some(limit) = query.limit {
             let _ = write!(sql, " LIMIT {limit}");
@@ -145,6 +146,49 @@ fn write_where(
         }
         first = false;
         write_filter(sql, params, filter)?;
+    }
+    Ok(())
+}
+
+/// Like [`write_where`] but additionally appends a parenthesized
+/// `(col1 ILIKE $N OR col2 ILIKE $N …)` clause when `search` is `Some`
+/// with non-empty `columns` and a non-empty `query`. The same parameter
+/// position is reused across all OR-ed columns.
+fn write_where_with_search(
+    sql: &mut String,
+    params: &mut Vec<SqlValue>,
+    filters: &[Filter],
+    search: Option<&SearchClause>,
+) -> Result<(), SqlError> {
+    let has_search = search.is_some_and(|s| !s.columns.is_empty() && !s.query.is_empty());
+    if filters.is_empty() && !has_search {
+        return Ok(());
+    }
+    sql.push_str(" WHERE ");
+    let mut first = true;
+    for filter in filters {
+        if !first {
+            sql.push_str(" AND ");
+        }
+        first = false;
+        write_filter(sql, params, filter)?;
+    }
+    if has_search {
+        let s = search.expect("checked above");
+        if !first {
+            sql.push_str(" AND ");
+        }
+        params.push(SqlValue::String(format!("%{}%", s.query)));
+        let placeholder = params.len();
+        sql.push('(');
+        for (i, col) in s.columns.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(" OR ");
+            }
+            write_ident(sql, col);
+            let _ = write!(sql, " ILIKE ${placeholder}");
+        }
+        sql.push(')');
     }
     Ok(())
 }

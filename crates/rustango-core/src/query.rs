@@ -38,12 +38,25 @@ pub struct Filter {
 /// `OR` and explicit projections land in v0.2.
 ///
 /// `limit` and `offset` are `None` by default and emit no clauses.
+/// `search`, when present, adds a parenthesized `(col ILIKE $N OR …)`
+/// clause AND-joined with `filters`.
 #[derive(Debug, Clone)]
 pub struct SelectQuery {
     pub model: &'static ModelSchema,
     pub filters: Vec<Filter>,
+    pub search: Option<SearchClause>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+/// `(col1 ILIKE %q% OR col2 ILIKE %q% …)` — single-parameter case-insensitive
+/// substring match across multiple columns. Used by the admin's `?q=…` box.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchClause {
+    /// SQL columns to search across. Empty = no clause emitted.
+    pub columns: Vec<&'static str>,
+    /// User-supplied query text. The writer wraps it in `%…%` for `ILIKE`.
+    pub query: String,
 }
 
 /// Compiled `INSERT` of a single row.

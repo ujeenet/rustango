@@ -95,6 +95,16 @@ impl ModelSchema {
         }
         self.primary_key()
     }
+
+    /// Fields that should participate in free-text search (`?q=…` in the
+    /// admin). Heuristic: a `String` field with a `max_length` cap is
+    /// likely a name/title/short label; long, uncapped strings (bodies,
+    /// descriptions) are excluded so search stays cheap.
+    pub fn searchable_fields(&self) -> impl Iterator<Item = &'static FieldSchema> {
+        self.fields.iter().filter(|f| {
+            matches!(f.ty, FieldType::String) && f.max_length.is_some() && f.relation.is_none()
+        })
+    }
 }
 
 /// Trait every `#[derive(Model)]` struct implements.

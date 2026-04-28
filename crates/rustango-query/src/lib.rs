@@ -125,6 +125,7 @@ impl<T: Model> QuerySet<T> {
         Ok(SelectQuery {
             model,
             filters,
+            search: None,
             limit: self.limit,
             offset: self.offset,
         })

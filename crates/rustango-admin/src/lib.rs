@@ -47,10 +47,9 @@ use axum::Json;
 use axum::Router;
 use rustango_core::{
     inventory, CountQuery, DeleteQuery, FieldSchema, Filter, InsertQuery, ModelEntry, ModelSchema,
-    Op, Relation, SelectQuery, SqlValue, UpdateQuery,
+    Op, Relation, SearchClause, SelectQuery, SqlValue, UpdateQuery,
 };
 use rustango_sql::sqlx::{self, PgPool};
-use serde::Deserialize;
 
 use forms::FormError;
 
@@ -190,36 +189,83 @@ async fn index(State(state): State<AppState>) -> Html<String> {
 
 const PAGE_SIZE: i64 = 50;
 
-#[derive(Deserialize, Default)]
-struct PageParams {
-    /// 1-based page number; clamped to `>= 1` on read.
-    page: Option<i64>,
-}
+/// Reserved query parameters; everything else is treated as a per-field filter.
+const RESERVED_PARAMS: &[&str] = &["page", "q"];
 
+#[allow(clippy::too_many_lines)] // mostly linear HTML emission; splitting hurts readability
 async fn table_view(
     Path(table): Path<String>,
-    Query(params): Query<PageParams>,
+    Query(params): Query<HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
     let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound { table })?;
     let pk_field = model.primary_key();
-    let page = params.page.unwrap_or(1).max(1);
+    let page = params
+        .get("page")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(1)
+        .max(1);
     let offset = (page - 1) * PAGE_SIZE;
+    let q = params
+        .get("q")
+        .map(String::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
 
-    // One COUNT(*) for the pager, one SELECT for the visible page.
+    // Build per-field filters from extra query params. Unknown fields and
+    // unparseable values are silently dropped — bad URLs shouldn't 500.
+    let mut filters: Vec<Filter> = Vec::new();
+    let mut active_field_filters: Vec<(&'static str, String)> = Vec::new();
+    for (key, value) in &params {
+        if RESERVED_PARAMS.contains(&key.as_str()) {
+            continue;
+        }
+        if value.is_empty() {
+            continue;
+        }
+        let Some(field) = model.field(key) else {
+            continue;
+        };
+        let Ok(v) = forms::parse_form_value(field, Some(value)) else {
+            continue;
+        };
+        filters.push(Filter {
+            column: field.column,
+            op: Op::Eq,
+            value: v,
+        });
+        active_field_filters.push((field.name, value.clone()));
+    }
+
+    // Build the search clause from String fields with max_length set.
+    let search = q.as_ref().and_then(|qstr| {
+        let cols: Vec<&'static str> = model.searchable_fields().map(|f| f.column).collect();
+        if cols.is_empty() {
+            None
+        } else {
+            Some(SearchClause {
+                columns: cols,
+                query: qstr.clone(),
+            })
+        }
+    });
+
     let total = rustango_sql::count_rows(
         &state.pool,
         &CountQuery {
             model,
-            filters: vec![],
+            filters: filters.clone(),
         },
     )
     .await?;
+    // NOTE: count_rows ignores the search clause; counts are approximate
+    // when ?q is set. Acceptable for a v0.2 admin pager.
     let rows = rustango_sql::select_rows(
         &state.pool,
         &SelectQuery {
             model,
-            filters: vec![],
+            filters: filters.clone(),
+            search: search.clone(),
             limit: Some(PAGE_SIZE),
             offset: Some(offset),
         },
@@ -249,6 +295,45 @@ async fn table_view(
         r#"<p><a href="/">&larr; admin home</a></p><h1>{name}</h1>
 <p>Table: <code>{table_q}</code> &mdash; {total} row{plural}{new_link}</p>"#,
     );
+
+    // Search box (when at least one searchable field exists).
+    if model.searchable_fields().next().is_some() {
+        let q_val = render::escape(q.as_deref().unwrap_or(""));
+        let _ = write!(
+            html,
+            r#"<form method="get" action="/{table_q}" class="search">
+<input type="search" name="q" value="{q_val}" placeholder="search&hellip;">
+<button type="submit">go</button>"#,
+        );
+        // Carry active field filters through the form so submitting search
+        // doesn't drop them.
+        for (k, v) in &active_field_filters {
+            let _ = write!(
+                html,
+                r#"<input type="hidden" name="{}" value="{}">"#,
+                render::escape(k),
+                render::escape(v),
+            );
+        }
+        html.push_str("</form>");
+    }
+
+    // Active-filter badges + clear-all link.
+    if !active_field_filters.is_empty() || q.is_some() {
+        html.push_str(r#"<p class="active-filters">filtered by: "#);
+        if let Some(qs) = &q {
+            let _ = write!(html, "<code>q={}</code> ", render::escape(qs));
+        }
+        for (k, v) in &active_field_filters {
+            let _ = write!(
+                html,
+                "<code>{}={}</code> ",
+                render::escape(k),
+                render::escape(v),
+            );
+        }
+        let _ = write!(html, r#"&middot; <a href="/{table_q}">clear</a></p>"#);
+    }
 
     if rows.is_empty() {
         html.push_str("<p><em>No rows on this page.</em></p>");
@@ -280,13 +365,14 @@ async fn table_view(
         html.push_str("</tbody></table>");
     }
 
-    // Pager.
+    // Pager. Pager URLs preserve q + field filters via a query-string suffix.
     if last_page > 1 {
+        let suffix = pager_suffix(q.as_deref(), &active_field_filters);
         html.push_str(r#"<p class="pager">"#);
         if page > 1 {
             let _ = write!(
                 html,
-                r#"<a href="/{table_q}?page={prev}">&larr; prev</a> &middot; "#,
+                r#"<a href="/{table_q}?page={prev}{suffix}">&larr; prev</a> &middot; "#,
                 prev = page - 1,
             );
         } else {
@@ -296,7 +382,7 @@ async fn table_view(
         if page < last_page {
             let _ = write!(
                 html,
-                r#" &middot; <a href="/{table_q}?page={next}">next &rarr;</a>"#,
+                r#" &middot; <a href="/{table_q}?page={next}{suffix}">next &rarr;</a>"#,
                 next = page + 1,
             );
         } else {
@@ -331,6 +417,7 @@ async fn detail_view(
                 op: Op::Eq,
                 value: pk_value,
             }],
+            search: None,
             limit: None,
             offset: None,
         },
@@ -456,6 +543,7 @@ async fn edit_form(
                 op: Op::Eq,
                 value: pk_value,
             }],
+            search: None,
             limit: None,
             offset: None,
         },
@@ -629,6 +717,7 @@ async fn resolve_fk_displays(
                     op: Op::In,
                     value: SqlValue::List(fk_values),
                 }],
+                search: None,
                 limit: None,
                 offset: None,
             },
@@ -648,6 +737,41 @@ async fn resolve_fk_displays(
 
 /// Render one cell. For FK columns this resolves to a link into the target
 /// table; everything else delegates to [`render::render_value`].
+/// Build a `&q=…&<field>=<v>…` tail for prev/next pager URLs so the
+/// active search and filters survive page navigation. Each value is
+/// percent-encoded via a tiny ASCII-safe escaper good enough for the
+/// admin's expected inputs.
+fn pager_suffix(q: Option<&str>, filters: &[(&'static str, String)]) -> String {
+    let mut out = String::new();
+    if let Some(qs) = q {
+        out.push_str("&q=");
+        out.push_str(&url_encode(qs));
+    }
+    for (k, v) in filters {
+        out.push('&');
+        out.push_str(k);
+        out.push('=');
+        out.push_str(&url_encode(v));
+    }
+    out
+}
+
+/// Minimal URL-encoder for ASCII inputs. Escapes characters that have
+/// special meaning in a query string. Multibyte UTF-8 is percent-encoded
+/// byte-by-byte — Postgres handles the bytes the same on the way back.
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        let safe = byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~');
+        if safe {
+            out.push(byte as char);
+        } else {
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
 fn render_cell(row: &sqlx::postgres::PgRow, field: &FieldSchema, fk_map: &FkMap) -> String {
     if let Some(rel) = field.relation {
         let to = match rel {

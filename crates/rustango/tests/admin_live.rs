@@ -1344,3 +1344,238 @@ async fn fk_falls_back_to_raw_when_target_row_missing() {
 
     migrate::drop_all(&pool).await.unwrap();
 }
+
+// ============================================================ search + filters
+
+#[tokio::test]
+async fn list_view_renders_search_box_when_searchable_field_exists() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(response).await;
+    assert!(
+        body.contains(r#"<input type="search" name="q""#),
+        "missing search box: {body}",
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn search_filters_to_matching_rows() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user?q=ali")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_string(response).await;
+    assert!(body.contains("alice"), "alice should match: {body}");
+    assert!(!body.contains("bob"), "bob should not match: {body}");
+    // Active filter badge surfaces the query
+    assert!(
+        body.contains("filtered by:"),
+        "missing active filters note: {body}",
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn search_is_case_insensitive() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user?q=ALICE")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(response).await;
+    assert!(
+        body.contains("alice"),
+        "case-insensitive match failed: {body}"
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn field_filter_keeps_only_matching_rows() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user?is_active=false")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(response).await;
+    assert!(body.contains("bob"), "bob should match: {body}");
+    assert!(!body.contains("alice"), "alice should not match: {body}");
+    assert!(
+        body.contains("<code>is_active=false</code>"),
+        "missing filter badge: {body}",
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn unknown_filter_field_is_silently_ignored() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user?nope=42")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Bad URL params should not 500 — we just render the unfiltered view.
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_string(response).await;
+    assert!(body.contains("alice"), "missing alice: {body}");
+    assert!(body.contains("bob"), "missing bob: {body}");
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn search_and_filter_compose() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    // Add a third row so search + filter can each independently narrow.
+    seed(&pool).await;
+    AdminUser {
+        id: 3,
+        name: "alfred".into(),
+        age: 50,
+        is_active: false,
+    }
+    .insert(&pool)
+    .await
+    .unwrap();
+
+    let app = rustango::admin::router(pool.clone());
+    // ?q=al matches alice + alfred; ?is_active=true narrows to alice.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user?q=al&is_active=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(response).await;
+    assert!(body.contains("alice"), "alice should match: {body}");
+    assert!(
+        !body.contains("alfred"),
+        "alfred should be filtered out: {body}"
+    );
+    assert!(!body.contains("bob"), "bob should not match: {body}");
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn pager_links_preserve_search_and_filters() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+    // 60 active alphas + 60 inactive betas → exactly 60 active rows = 2 pages
+    for i in 1..=60 {
+        AdminUser {
+            id: i,
+            name: format!("alpha{i}"),
+            age: 25,
+            is_active: true,
+        }
+        .insert(&pool)
+        .await
+        .unwrap();
+    }
+    for i in 100..160 {
+        AdminUser {
+            id: i,
+            name: format!("beta{i}"),
+            age: 25,
+            is_active: false,
+        }
+        .insert(&pool)
+        .await
+        .unwrap();
+    }
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user?is_active=true&q=alpha")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(response).await;
+    // Next link must carry both q and is_active forward
+    assert!(
+        body.contains("page=2") && body.contains("q=alpha") && body.contains("is_active=true"),
+        "pager dropped filters: {body}",
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
