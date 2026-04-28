@@ -19,6 +19,8 @@ use rustango_sql::sqlx::{self, PgPool, Row};
 
 use crate::diff::render_changes;
 use crate::file::{self, Migration, Operation};
+use crate::invert::invert;
+use crate::snapshot::SchemaSnapshot;
 use crate::{ddl, MigrateError};
 
 /// Name of the bookkeeping table — stores one row per applied
@@ -170,6 +172,120 @@ async fn apply_atomic(pool: &PgPool, mig: &Migration) -> Result<(), MigrateError
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    Ok(())
+}
+
+/// Roll back a single applied migration.
+///
+/// Loads `dir/{name}.json`, looks up its predecessor (or empty for
+/// the first migration) for snapshot context, computes the inverse
+/// op list via [`crate::invert::invert`], and executes it in a
+/// transaction (or loose if the original `atomic: false`). Removes
+/// the entry from `__rustango_migrations__` on success.
+///
+/// **What "roll back" means here:** schema reversal restores shape,
+/// not data — `DropColumn` then `unapply` does NOT bring back the
+/// column's row values. Data reversal is only as good as the
+/// `reverse_sql` you wrote in the migration file; if you wrote
+/// `reverse_sql: "DELETE FROM x"`, that's what runs.
+///
+/// **Irreversible migrations** (`reversible: false` on any data op)
+/// fail fast before any DB write, with an error that names the op.
+///
+/// # Errors
+/// * [`MigrateError::Validation`] — irreversible op, missing
+///   migration file, missing predecessor.
+/// * [`MigrateError::Driver`] — SQL failure during rollback.
+pub async fn unapply(pool: &PgPool, dir: &Path, name: &str) -> Result<Migration, MigrateError> {
+    ensure_ledger(pool).await?;
+
+    let all = file::list_dir(dir)?;
+    let target = all
+        .iter()
+        .find(|m| m.name == name)
+        .cloned()
+        .ok_or_else(|| {
+            MigrateError::Validation(format!("migration `{name}` not found in {}", dir.display()))
+        })?;
+
+    let prev_snapshot = match &target.prev {
+        None => SchemaSnapshot { tables: vec![] },
+        Some(prev_name) => all
+            .iter()
+            .find(|m| &m.name == prev_name)
+            .map(|m| m.snapshot.clone())
+            .ok_or_else(|| {
+                MigrateError::Validation(format!(
+                    "migration `{name}` declares prev=`{prev_name}` but that file is missing in {}",
+                    dir.display()
+                ))
+            })?,
+    };
+
+    let inverted = invert(&target.forward, &prev_snapshot)?;
+
+    if target.atomic {
+        unapply_atomic(pool, &target, &inverted, &prev_snapshot).await?;
+    } else {
+        unapply_loose(pool, &target, &inverted, &prev_snapshot).await?;
+    }
+
+    Ok(target)
+}
+
+async fn unapply_atomic(
+    pool: &PgPool,
+    target: &Migration,
+    inverted: &[Operation],
+    snapshot: &SchemaSnapshot,
+) -> Result<(), MigrateError> {
+    let mut tx = pool.begin().await?;
+    for op in inverted {
+        match op {
+            Operation::Schema(change) => {
+                let ddl = render_changes(std::slice::from_ref(change), snapshot)
+                    .map_err(MigrateError::Validation)?;
+                for stmt in ddl {
+                    sqlx::query(&stmt).execute(&mut *tx).await?;
+                }
+            }
+            Operation::Data(d) => {
+                sqlx::query(&d.sql).execute(&mut *tx).await?;
+            }
+        }
+    }
+    sqlx::query("DELETE FROM __rustango_migrations__ WHERE name = $1")
+        .bind(&target.name)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn unapply_loose(
+    pool: &PgPool,
+    target: &Migration,
+    inverted: &[Operation],
+    snapshot: &SchemaSnapshot,
+) -> Result<(), MigrateError> {
+    for op in inverted {
+        match op {
+            Operation::Schema(change) => {
+                let ddl = render_changes(std::slice::from_ref(change), snapshot)
+                    .map_err(MigrateError::Validation)?;
+                for stmt in ddl {
+                    sqlx::query(&stmt).execute(pool).await?;
+                }
+            }
+            Operation::Data(d) => {
+                sqlx::query(&d.sql).execute(pool).await?;
+            }
+        }
+    }
+    sqlx::query("DELETE FROM __rustango_migrations__ WHERE name = $1")
+        .bind(&target.name)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

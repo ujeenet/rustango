@@ -1,0 +1,243 @@
+//! Pure unit tests for `migrate::invert`.
+
+use rustango::migrate::{invert, DataOp, Operation, SchemaChange, SchemaSnapshot, TableSnapshot};
+
+fn empty() -> SchemaSnapshot {
+    SchemaSnapshot { tables: vec![] }
+}
+
+fn user_table() -> TableSnapshot {
+    serde_json::from_value(serde_json::json!({
+        "name": "user",
+        "model": "U",
+        "fields": [
+            {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true},
+            {"name": "name", "column": "name", "ty": "string", "nullable": false, "primary_key": false, "max_length": 32}
+        ]
+    })).unwrap()
+}
+
+// ---------------- empty input ----------------
+
+#[test]
+fn invert_empty_is_empty() {
+    let out = invert(&[], &empty()).unwrap();
+    assert!(out.is_empty());
+}
+
+// ---------------- create ↔ drop table ----------------
+
+#[test]
+fn invert_create_table_yields_drop_table() {
+    let forward = vec![Operation::Schema(SchemaChange::CreateTable("foo".into()))];
+    let out = invert(&forward, &empty()).unwrap();
+    assert_eq!(
+        out,
+        vec![Operation::Schema(SchemaChange::DropTable("foo".into()))]
+    );
+}
+
+#[test]
+fn invert_drop_table_yields_create_table_when_in_prev() {
+    // Inverting a DropTable requires the table to be in `prev`, since
+    // the runner needs to render CREATE TABLE for the inverted op.
+    let prev = SchemaSnapshot {
+        tables: vec![user_table()],
+    };
+    let forward = vec![Operation::Schema(SchemaChange::DropTable("user".into()))];
+    let out = invert(&forward, &prev).unwrap();
+    assert_eq!(
+        out,
+        vec![Operation::Schema(SchemaChange::CreateTable("user".into()))]
+    );
+}
+
+#[test]
+fn invert_drop_table_missing_in_prev_is_validation_error() {
+    let forward = vec![Operation::Schema(SchemaChange::DropTable("ghost".into()))];
+    let err = invert(&forward, &empty()).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("DropTable"), "{msg}");
+    assert!(msg.contains("ghost"), "{msg}");
+}
+
+// ---------------- add ↔ drop column ----------------
+
+#[test]
+fn invert_add_column_yields_drop_column() {
+    let forward = vec![Operation::Schema(SchemaChange::AddColumn {
+        table: "user".into(),
+        column: "bio".into(),
+    })];
+    let out = invert(&forward, &empty()).unwrap();
+    assert_eq!(
+        out,
+        vec![Operation::Schema(SchemaChange::DropColumn {
+            table: "user".into(),
+            column: "bio".into(),
+        })]
+    );
+}
+
+#[test]
+fn invert_drop_column_yields_add_column_using_prev_metadata() {
+    // To recreate a dropped column, the column must exist in `prev`
+    // so the runner can pull its type/nullability when rendering.
+    let prev = SchemaSnapshot {
+        tables: vec![user_table()],
+    };
+    let forward = vec![Operation::Schema(SchemaChange::DropColumn {
+        table: "user".into(),
+        column: "name".into(),
+    })];
+    let out = invert(&forward, &prev).unwrap();
+    assert_eq!(
+        out,
+        vec![Operation::Schema(SchemaChange::AddColumn {
+            table: "user".into(),
+            column: "name".into(),
+        })]
+    );
+}
+
+#[test]
+fn invert_drop_column_missing_table_in_prev_is_error() {
+    let forward = vec![Operation::Schema(SchemaChange::DropColumn {
+        table: "ghost".into(),
+        column: "x".into(),
+    })];
+    let err = invert(&forward, &empty()).unwrap_err();
+    assert!(format!("{err}").contains("ghost"));
+}
+
+#[test]
+fn invert_drop_column_missing_column_in_prev_is_error() {
+    let prev = SchemaSnapshot {
+        tables: vec![user_table()],
+    };
+    // user has `id` and `name`, NOT `phantom`.
+    let forward = vec![Operation::Schema(SchemaChange::DropColumn {
+        table: "user".into(),
+        column: "phantom".into(),
+    })];
+    let err = invert(&forward, &prev).unwrap_err();
+    assert!(format!("{err}").contains("phantom"));
+}
+
+// ---------------- data ops ----------------
+
+#[test]
+fn invert_data_uses_reverse_sql_as_new_sql() {
+    let forward = vec![Operation::Data(DataOp {
+        sql: "UPDATE x SET y = 1".into(),
+        reverse_sql: Some("UPDATE x SET y = 0".into()),
+        reversible: true,
+    })];
+    let out = invert(&forward, &empty()).unwrap();
+    assert_eq!(
+        out,
+        vec![Operation::Data(DataOp {
+            sql: "UPDATE x SET y = 0".into(),
+            reverse_sql: None,
+            reversible: false,
+        })]
+    );
+}
+
+#[test]
+fn invert_irreversible_data_op_is_validation_error() {
+    let forward = vec![Operation::Data(DataOp {
+        sql: "DELETE FROM events WHERE older_than 90 days".into(),
+        reverse_sql: None,
+        reversible: false,
+    })];
+    let err = invert(&forward, &empty()).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("reversible"), "{msg}");
+    assert!(
+        msg.contains("DELETE"),
+        "should include offending sql: {msg}"
+    );
+}
+
+#[test]
+fn invert_data_with_reversible_true_but_no_reverse_sql_is_error() {
+    // file::load already rejects this, but invert defends in depth.
+    let forward = vec![Operation::Data(DataOp {
+        sql: "UPDATE x SET y = 1".into(),
+        reverse_sql: None,
+        reversible: true,
+    })];
+    let err = invert(&forward, &empty()).unwrap_err();
+    assert!(format!("{err}").contains("reverse_sql"));
+}
+
+// ---------------- ordering ----------------
+
+#[test]
+fn invert_walks_forward_in_reverse_order() {
+    let prev = SchemaSnapshot {
+        tables: vec![user_table()],
+    };
+    let forward = vec![
+        Operation::Schema(SchemaChange::AddColumn {
+            table: "user".into(),
+            column: "bio".into(),
+        }),
+        Operation::Data(DataOp {
+            sql: "UPDATE user SET bio = ''".into(),
+            reverse_sql: Some("UPDATE user SET bio = NULL".into()),
+            reversible: true,
+        }),
+        Operation::Schema(SchemaChange::DropColumn {
+            table: "user".into(),
+            column: "name".into(),
+        }),
+    ];
+
+    let out = invert(&forward, &prev).unwrap();
+    assert_eq!(out.len(), 3);
+
+    // Reverse order: last-applied is first-rolled-back.
+    // Forward[2] = DropColumn(name) → out[0] = AddColumn(name)
+    assert_eq!(
+        out[0],
+        Operation::Schema(SchemaChange::AddColumn {
+            table: "user".into(),
+            column: "name".into(),
+        })
+    );
+    // Forward[1] = Data(UPDATE bio = '') → out[1] = Data(UPDATE bio = NULL)
+    if let Operation::Data(d) = &out[1] {
+        assert!(d.sql.contains("bio = NULL"));
+    } else {
+        panic!("expected Data at out[1], got {:?}", out[1]);
+    }
+    // Forward[0] = AddColumn(bio) → out[2] = DropColumn(bio)
+    assert_eq!(
+        out[2],
+        Operation::Schema(SchemaChange::DropColumn {
+            table: "user".into(),
+            column: "bio".into(),
+        })
+    );
+}
+
+// ---------------- short-circuit on irreversible ----------------
+
+#[test]
+fn invert_fails_fast_on_first_irreversible_op() {
+    // Even though the second op is fine, the irreversible second op
+    // makes the whole list non-rollbackable. The error names the
+    // offending op.
+    let forward = vec![
+        Operation::Schema(SchemaChange::CreateTable("foo".into())),
+        Operation::Data(DataOp {
+            sql: "ALTER USER admin RENAME TO root".into(),
+            reverse_sql: None,
+            reversible: false,
+        }),
+    ];
+    let err = invert(&forward, &empty()).unwrap_err();
+    assert!(format!("{err}").contains("ALTER USER"));
+}

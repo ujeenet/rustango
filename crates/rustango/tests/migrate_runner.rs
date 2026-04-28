@@ -397,6 +397,291 @@ async fn non_atomic_migration_runs_outside_a_tx() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------- unapply (Slice 4) ----------
+
+#[tokio::test]
+async fn unapply_round_trips_a_schema_only_migration() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let table = unique_table("unapply_schema");
+    let mig_name = unique_migration("unapply_schema", 1);
+    let dir = fresh_dir("unapply_schema");
+
+    write_migration(
+        &dir,
+        &Migration {
+            name: mig_name.clone(),
+            created_at: "2026-04-28T00:00:00Z".into(),
+            prev: None,
+            atomic: true,
+            snapshot: snapshot_with_table(&table),
+            forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
+        },
+    );
+
+    drop_table(&pool, &table).await;
+    delete_ledger_entry(&pool, &mig_name).await;
+
+    // Apply.
+    migrate::migrate(&pool, &dir).await.unwrap();
+    let exists_after_apply: bool = sqlx::query(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
+    )
+    .bind(&table)
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .try_get(0)
+    .unwrap();
+    assert!(exists_after_apply);
+
+    // Unapply.
+    let target = migrate::unapply(&pool, &dir, &mig_name).await.unwrap();
+    assert_eq!(target.name, mig_name);
+
+    let exists_after_unapply: bool = sqlx::query(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
+    )
+    .bind(&table)
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .try_get(0)
+    .unwrap();
+    assert!(!exists_after_unapply, "table must be dropped after unapply");
+
+    // Ledger entry is gone.
+    let count: i64 = sqlx::query("SELECT COUNT(*) FROM __rustango_migrations__ WHERE name = $1")
+        .bind(&mig_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .try_get(0)
+        .unwrap();
+    assert_eq!(count, 0, "ledger entry must be removed");
+
+    delete_ledger_entry(&pool, &mig_name).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn unapply_data_op_uses_reverse_sql() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let table = unique_table("unapply_data");
+    let create_name = unique_migration("unapply_create", 1);
+    let data_name = unique_migration("unapply_data", 2);
+    let dir = fresh_dir("unapply_data");
+
+    // 0001: create table.
+    write_migration(
+        &dir,
+        &Migration {
+            name: create_name.clone(),
+            created_at: "2026-04-28T00:00:00Z".into(),
+            prev: None,
+            atomic: true,
+            snapshot: snapshot_with_table(&table),
+            forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
+        },
+    );
+
+    // 0002: insert a row, with reverse_sql to delete it.
+    write_migration(
+        &dir,
+        &Migration {
+            name: data_name.clone(),
+            created_at: "2026-04-28T00:00:00Z".into(),
+            prev: Some(create_name.clone()),
+            atomic: true,
+            snapshot: snapshot_with_table(&table),
+            forward: vec![Operation::Data(DataOp {
+                sql: format!(r#"INSERT INTO "{table}" (id) VALUES (7)"#),
+                reverse_sql: Some(format!(r#"DELETE FROM "{table}" WHERE id = 7"#)),
+                reversible: true,
+            })],
+        },
+    );
+
+    drop_table(&pool, &table).await;
+    delete_ledger_entry(&pool, &create_name).await;
+    delete_ledger_entry(&pool, &data_name).await;
+
+    // Apply both.
+    migrate::migrate(&pool, &dir).await.unwrap();
+    let count: i64 = sqlx::query(&format!(r#"SELECT COUNT(*) FROM "{table}""#))
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .try_get(0)
+        .unwrap();
+    assert_eq!(count, 1, "row should be present after data migration");
+
+    // Unapply only the data migration.
+    migrate::unapply(&pool, &dir, &data_name).await.unwrap();
+
+    let count: i64 = sqlx::query(&format!(r#"SELECT COUNT(*) FROM "{table}""#))
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .try_get(0)
+        .unwrap();
+    assert_eq!(count, 0, "reverse_sql must have deleted the row");
+
+    // Table still exists (we only rolled back the data migration).
+    let exists: bool = sqlx::query(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
+    )
+    .bind(&table)
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .try_get(0)
+    .unwrap();
+    assert!(exists, "schema migration was untouched");
+
+    drop_table(&pool, &table).await;
+    delete_ledger_entry(&pool, &create_name).await;
+    delete_ledger_entry(&pool, &data_name).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn unapply_irreversible_migration_fails_fast_no_db_writes() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let table = unique_table("unapply_irrev");
+    let create_name = unique_migration("unapply_irrev_create", 1);
+    let bad_name = unique_migration("unapply_irrev_bad", 2);
+    let dir = fresh_dir("unapply_irrev");
+
+    // 0001: create table.
+    write_migration(
+        &dir,
+        &Migration {
+            name: create_name.clone(),
+            created_at: "2026-04-28T00:00:00Z".into(),
+            prev: None,
+            atomic: true,
+            snapshot: snapshot_with_table(&table),
+            forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
+        },
+    );
+
+    // 0002: irreversible data op.
+    write_migration(
+        &dir,
+        &Migration {
+            name: bad_name.clone(),
+            created_at: "2026-04-28T00:00:00Z".into(),
+            prev: Some(create_name.clone()),
+            atomic: true,
+            snapshot: snapshot_with_table(&table),
+            forward: vec![Operation::Data(DataOp {
+                sql: format!(r#"INSERT INTO "{table}" (id) VALUES (1)"#),
+                reverse_sql: None,
+                reversible: false,
+            })],
+        },
+    );
+
+    drop_table(&pool, &table).await;
+    delete_ledger_entry(&pool, &create_name).await;
+    delete_ledger_entry(&pool, &bad_name).await;
+
+    migrate::migrate(&pool, &dir).await.unwrap();
+
+    // Try to unapply 0002 → should fail fast.
+    let err = migrate::unapply(&pool, &dir, &bad_name).await.unwrap_err();
+    assert!(format!("{err}").contains("reversible"), "got: {err}");
+
+    // Ledger entry for the bad migration is still present (we never deleted it).
+    let count: i64 = sqlx::query("SELECT COUNT(*) FROM __rustango_migrations__ WHERE name = $1")
+        .bind(&bad_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .try_get(0)
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "irreversible unapply must NOT have removed the ledger entry"
+    );
+
+    drop_table(&pool, &table).await;
+    delete_ledger_entry(&pool, &create_name).await;
+    delete_ledger_entry(&pool, &bad_name).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn unapply_unknown_migration_returns_validation_error() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let dir = fresh_dir("unapply_unknown");
+    let _ = std::fs::create_dir_all(&dir);
+
+    let err = migrate::unapply(&pool, &dir, "0042_does_not_exist")
+        .await
+        .unwrap_err();
+    assert!(format!("{err}").contains("0042_does_not_exist"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn unapply_then_reapply_round_trip() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let table = unique_table("rt_cycle");
+    let mig_name = unique_migration("rt_cycle", 1);
+    let dir = fresh_dir("rt_cycle");
+
+    write_migration(
+        &dir,
+        &Migration {
+            name: mig_name.clone(),
+            created_at: "2026-04-28T00:00:00Z".into(),
+            prev: None,
+            atomic: true,
+            snapshot: snapshot_with_table(&table),
+            forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
+        },
+    );
+
+    drop_table(&pool, &table).await;
+    delete_ledger_entry(&pool, &mig_name).await;
+
+    migrate::migrate(&pool, &dir).await.unwrap();
+    migrate::unapply(&pool, &dir, &mig_name).await.unwrap();
+    // Apply again — should be idempotent (table re-created).
+    let applied = migrate::migrate(&pool, &dir).await.unwrap();
+    assert_eq!(
+        applied.len(),
+        1,
+        "after unapply, migration is pending again"
+    );
+
+    let exists: bool = sqlx::query(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
+    )
+    .bind(&table)
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .try_get(0)
+    .unwrap();
+    assert!(exists);
+
+    drop_table(&pool, &table).await;
+    delete_ledger_entry(&pool, &mig_name).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------- applied_set helper ----------
 
 #[tokio::test]
