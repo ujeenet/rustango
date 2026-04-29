@@ -1,6 +1,6 @@
 [package]
 name = "rustango"
-description = "A Django-inspired ORM for Rust. Facade crate."
+description = "A Django-inspired ORM + admin + multi-tenancy for Rust. One crate, opt in via features."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,29 +11,85 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 # Drop runnable demos + integration-test files from the published
-# tarball — they're useful in-repo but only inflate `crates.io`
-# downloads and pull in heavy dev-deps (axum, tower, etc.) for users
-# who only depend on the library facade.
+# tarball. `src/admin/templates/` and `src/tenancy/{templates,static}/`
+# stay — they're baked into the binary via include_str! / include_bytes!.
 exclude = ["examples/", "tests/"]
 
 [lints]
 workspace = true
 
 [features]
-default = ["postgres"]
-postgres = ["rustango-sql/postgres"]
+# Out of the box: ORM + auto-admin + Postgres. Opt in to multi-
+# tenancy with `features = ["tenancy"]`. Drop `default-features` to
+# get the bare ORM (core + query + sql + migrate) only.
+default = ["postgres", "admin"]
+postgres = ["sqlx/postgres"]
+
+# Auto-admin HTTP layer (`rustango::admin`). Pulls in axum + Tera +
+# the supporting middleware deps.
+admin = [
+    "dep:axum",
+    "dep:tera",
+    "dep:base64",
+    "dep:http",
+    "dep:http-body-util",
+]
+
+# Multi-tenancy module (`rustango::tenancy`). Implies `admin` (the
+# tenant admin builder wraps `rustango::admin`). Pulls in Argon2 +
+# HMAC-SHA256 + cookie + tower for the per-tenant + operator
+# authentication paths.
+tenancy = [
+    "admin",
+    "dep:async-trait",
+    "dep:argon2",
+    "dep:cookie",
+    "dep:hmac",
+    "dep:password-hash",
+    "dep:rand",
+    "dep:rpassword",
+    "dep:serde_urlencoded",
+    "dep:sha2",
+    "dep:subtle",
+    "dep:tokio",
+    "dep:tower",
+]
 
 [dependencies]
-rustango-core    = { workspace = true }
-rustango-macros  = { workspace = true }
-rustango-query   = { workspace = true }
-rustango-sql     = { workspace = true }
-rustango-migrate = { workspace = true }
-rustango-admin   = { workspace = true }
-# rustango-tenancy is intentionally NOT a dep of the facade — it
-# depends on the facade itself (so the `#[derive(Model)]` macro's
-# `::rustango::core` paths resolve), which would be a cycle. Users
-# wanting tenancy add `rustango-tenancy` to their own Cargo.toml.
+# Proc-macros — separate by Rust language requirement.
+rustango-macros = { version = "0.7.0", path = "../rustango-macros" }
+
+# Always-on: core ORM + query layer + SQL writer + migration runner.
+chrono     = { workspace = true }
+indexmap   = { workspace = true }
+inventory  = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+sqlx       = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+uuid       = { workspace = true }
+
+# `admin` feature deps — optional.
+axum           = { workspace = true, optional = true }
+base64         = { workspace = true, optional = true }
+http           = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+tera           = { workspace = true, optional = true }
+
+# `tenancy` feature deps — optional.
+argon2           = { workspace = true, optional = true }
+async-trait      = { workspace = true, optional = true }
+cookie           = { workspace = true, optional = true }
+hmac             = { workspace = true, optional = true }
+password-hash    = { workspace = true, optional = true }
+rand             = { workspace = true, optional = true }
+rpassword        = { workspace = true, optional = true }
+serde_urlencoded = { workspace = true, optional = true }
+sha2             = { workspace = true, optional = true }
+subtle           = { workspace = true, optional = true }
+tokio            = { workspace = true, optional = true }
+tower            = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio          = { workspace = true }
@@ -44,6 +100,8 @@ tower          = { workspace = true }
 http-body-util = { workspace = true }
 axum           = { workspace = true }
 base64         = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy        = { workspace = true }
 
 # Multi-file example demonstrating the Django-shape models / views /
 # urls split for downstream user projects (slice 6c). Single-file
@@ -52,3 +110,13 @@ base64         = { workspace = true }
 [[example]]
 name = "project_layout"
 path = "examples/project_layout/main.rs"
+
+[[example]]
+name = "multitenant_demo"
+path = "examples/multitenant_demo.rs"
+required-features = ["tenancy"]
+
+[[example]]
+name = "tenancy_manage"
+path = "examples/tenancy_manage.rs"
+required-features = ["tenancy"]

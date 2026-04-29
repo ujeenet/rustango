@@ -72,15 +72,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **Day-2 ORM ergonomics** (v0.7) — `model.save(&pool)` insert-or-update via `Auto<T>` PK dispatch, `ForeignKey<T>` lazy-load (`post.author.get(&pool).await?`), OR / nested-expr `where_(A.or(B.and(C)))`, and per-app migration ledger naming (`migrate::Builder::new().ledger("__myapp__")`) so two rustango apps share one DB without colliding on the bookkeeping table.
 - Postgres-only by design. Single dev hobby project; for multi-DB ORMs use [Diesel](https://diesel.rs) or [SeaORM](https://www.sea-ql.org).
 
-## Multi-tenancy (v0.5, opt-in via `rustango-tenancy`)
+## Multi-tenancy (v0.5, opt-in via the `tenancy` feature)
 
-> **The Django footgun fix.** Django's `DATABASES` dict in `settings.py` requires every database to be declared at boot — adding a tenant means edit + restart + redeploy. `rustango-tenancy` makes tenants first-class **rows in a Postgres table**, resolved per-request from an `OrgResolver` chain.
+> **The Django footgun fix.** Django's `DATABASES` dict in `settings.py` requires every database to be declared at boot — adding a tenant means edit + restart + redeploy. The `tenancy` feature makes tenants first-class **rows in a Postgres table**, resolved per-request from an `OrgResolver` chain.
 
 ```toml
 # Cargo.toml
 [dependencies]
-rustango = "0.7"
-rustango-tenancy = "0.7"   # opt-in
+# v0.7+ ships as one crate with feature flags. Default features
+# include `postgres` + `admin`. Add `tenancy` for the multi-tenant
+# resolver / pools / per-tenant auth pieces.
+rustango = { version = "0.7", features = ["tenancy"] }
 ```
 
 > The fastest path: drop a 5-line `src/bin/manage.rs` and run
@@ -93,7 +95,7 @@ rustango-tenancy = "0.7"   # opt-in
 ```rust
 use std::sync::Arc;
 use rustango::sql::sqlx::PgPool;
-use rustango_tenancy::{
+use rustango::tenancy::{
     admin::TenantAdminBuilder,
     operator_console::{self, SessionSecret},
     ChainResolver, TenantPools,
@@ -168,11 +170,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 **Provision tenants from the `manage` runner**:
 
 > The snippets below assume **your own project** has a `src/bin/manage.rs`
-> (5-line wrapper around `rustango_tenancy::manage::run` — see
-> `crates/rustango-tenancy/examples/tenancy_manage.rs`). To exercise the
+> (5-line wrapper around `rustango::tenancy::manage::run` — see
+> `crates/rustango/examples/tenancy_manage.rs`). To exercise the
 > CLI **in this repo without writing your own binary**, swap
 > `cargo run --bin manage --` for
-> `cargo run --example tenancy_manage -p rustango-tenancy --`.
+> `cargo run --example tenancy_manage --features tenancy --`.
 
 ```sh
 # First-run bootstrap. Writes packaged migrations into ./migrations
@@ -240,7 +242,7 @@ tenant — a cookie minted at `acme.localhost` can't authenticate at
 single `RUSTANGO_SESSION_SECRET` env var covers everything.
 
 ```rust
-use rustango_tenancy::{
+use rustango::tenancy::{
     admin::TenantAdminBuilder,
     operator_console::SessionSecret,
 };
@@ -252,7 +254,7 @@ let tenant = TenantAdminBuilder::new(pools, registry_url, resolver)
 ```
 
 The operator UI at the apex ships its own login form via
-`rustango_tenancy::operator_console::router(registry, secret)` —
+`rustango::tenancy::operator_console::router(registry, secret)` —
 form-based, sidebar layout, read-only `/operators` and `/orgs` views,
 embedded `rustango.png` brand asset. Mutations stay on the CLI so
 side-effects (CREATE SCHEMA, migrations) happen atomically.
@@ -330,27 +332,35 @@ Then visit <http://127.0.0.1:8082/> for the landing page; it links to
 the auto-admin (`/admin`), a couple of custom JSON views, and the
 healthz probe.
 
-The framework's own crates follow the same convention internally:
+The framework's own modules follow the same convention internally:
 
-* [`rustango-admin`](crates/rustango-admin/src/) splits into
+* [`rustango::admin`](crates/rustango/src/admin/) splits into
   `urls.rs` (the route table) + `views.rs` (handlers) +
   `templates.rs` + `helpers.rs` + `errors.rs`.
-* [`rustango-tenancy/src/manage/`](crates/rustango-tenancy/src/manage/)
+* [`rustango::tenancy::manage`](crates/rustango/src/tenancy/manage/)
   is a directory module with one file per command group:
   `tenants.rs`, `users.rs`, `migrations.rs`, `server.rs`, plus shared
   `args.rs`.
 
 ## What's in the box
 
-| crate              | role                                                                       |
-| ------------------ | -------------------------------------------------------------------------- |
-| `rustango`         | facade — re-exports the others; what users depend on                        |
-| `rustango-core`    | schema, query IR, value types, validation, error types — dep-light, no async |
-| `rustango-macros`  | `#[derive(Model)]` — emits Model impl, `objects()`, typed columns, FromRow, insert/delete |
-| `rustango-query`   | `QuerySet<T>` with `filter` / `where_` / `update` / `compile` / `limit` / `offset` |
-| `rustango-sql`     | Postgres dialect writer (SELECT/INSERT/UPDATE/DELETE/COUNT, LEFT JOIN), executor traits |
-| `rustango-migrate` | `apply_all` for fresh DBs, `SchemaSnapshot` + diff for evolving schemas    |
-| `rustango-admin`   | axum Router that walks the registry → list / detail / CRUD forms / search / pagination / basic auth / Tera templates |
+v0.7+ ships as one library crate (`rustango`) plus the proc-macro
+crate that Rust requires to live separately (`rustango-macros`). The
+single `rustango` crate exposes its layers as feature-gated modules:
+
+| module                | gated by feature | role |
+| --------------------- | --------------- | ---- |
+| `rustango::core`      | always on       | schema, query IR, value types, validation, error types — dep-light, no async |
+| `rustango::query`     | always on       | `QuerySet<T>` with `filter` / `where_` / `update` / `compile` / `limit` / `offset` |
+| `rustango::sql`       | always on       | Postgres dialect writer (SELECT/INSERT/UPDATE/DELETE/COUNT, LEFT JOIN), executor traits |
+| `rustango::migrate`   | always on       | `apply_all` for fresh DBs, `SchemaSnapshot` + diff, `Builder` ledger naming |
+| `rustango::admin`     | `admin` *(default)* | axum Router that walks the registry → list / detail / CRUD forms / search / pagination / basic auth / Tera templates |
+| `rustango::tenancy`   | `tenancy`       | multi-tenant resolver chain, `TenantPools`, scoped migrations, per-tenant auth, operator console |
+| `rustango_macros::*`  | always on       | `#[derive(Model)]`, `embed_migrations!` — re-exported from the facade as `rustango::Model` etc. |
+
+Drop `default-features` to get the bare ORM (`core` + `query` + `sql`
++ `migrate`) without axum/Tera; opt into `tenancy` for multi-tenant
+projects.
 
 ## Field attributes
 
@@ -512,7 +522,7 @@ fields with a `max_length`), `?<field>=<value>` per-field filters, and
 filter state forward.
 
 HTML is rendered through Tera templates bundled at compile time
-(`crates/rustango-admin/templates/`). User-supplied strings are
+(`crates/rustango/src/admin/templates/`). User-supplied strings are
 auto-escaped.
 
 ## Migrations

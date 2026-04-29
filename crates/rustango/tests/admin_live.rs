@@ -1,4 +1,4 @@
-//! Integration test for `rustango_admin::router`.
+//! Integration test for `rustango::admin::router`.
 //!
 //! Reads `DATABASE_URL`. If unset, every test returns silently. We boot
 //! the router via `tower::ServiceExt::oneshot` (no socket required) and
