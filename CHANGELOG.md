@@ -12,6 +12,14 @@ ORM ergonomics catch-up. v0.6 closed the multi-tenancy production gap; v0.7 is t
 - **Manually-managed PKs** (e.g. `id: i64` with caller-supplied values) are intentionally not given a `save()` — there's no way to infer insert-vs-update from the in-memory value, so the caller must use `insert` or the QuerySet update builder explicitly.
 - 3 live tests in `crates/rustango/tests/save_live.rs` cover insert-on-unset (PK populated), update-on-set (PK preserved, every non-PK column written), and silent-ok on no-match.
 
+### Added — per-app migration ledger naming (slice 2)
+
+- **`migrate::Builder`** — fluent config object that overrides the migration ledger table name. `Builder::default()` keeps the default `__rustango_migrations__`; `Builder::new().ledger("__myapp_migrations__")` swaps it. Two rustango apps in one Postgres database can now coexist by picking distinct ledgers — previously the shared ledger meant either app applying its migrations would mark the other's as "already applied" or otherwise tangle bookkeeping.
+- **Verbs mirrored** on the Builder: `migrate`, `migrate_to`, `migrate_embedded`, `migrate_dry_run`, `downgrade`, `unapply`, `unapply_force`, `applied_set`, `ensure_ledger`. Each delegates to a private `*_with_ledger` helper that threads the configured name through every internal SQL statement (`CREATE TABLE`, `INSERT INTO`, `DELETE FROM`, `SELECT FROM`).
+- **Free functions unchanged.** `migrate::migrate(&pool, dir)` and friends thunk through `Builder::default()`, so existing call sites (the manage CLI, tenancy's `migrate_registry` / `migrate_tenants`, downstream apps) keep working without edits.
+- **Ledger-name validation.** `Builder::ledger` panics if the name isn't a valid SQL identifier (`[A-Za-z_][A-Za-z0-9_]*`, ≤ 63 bytes). Configuration error caught at construction time, not deep in a SQL call.
+- 3 live tests in `crates/rustango/tests/migrate_builder_live.rs` cover two-builder isolation (each ledger sees only its own entries; default `applied_set` doesn't see custom-ledger rows), default-Builder parity with the free functions, and synchronous validation panic on a quote-injection name.
+
 ## [v0.6] — Unreleased
 
 Production-readiness for multi-tenancy. v0.5 shipped the headline (tenants as rows, no `DATABASES` dict); v0.6 fills the gaps that block real deployments: form-based login on both consoles, packaged bootstrap migrations, scope-aware `manage migrate`, hard-delete companion to soft-delete, and `is_superuser` gating in the tenant admin. Seven steps, all merged.

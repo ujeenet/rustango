@@ -23,13 +23,191 @@ use crate::invert::invert;
 use crate::snapshot::SchemaSnapshot;
 use crate::{ddl, MigrateError};
 
-/// Name of the bookkeeping table — stores one row per applied
-/// migration. Double-underscored to avoid colliding with user tables.
+/// Default bookkeeping-table name — stores one row per applied
+/// migration. Double-underscored to avoid colliding with user
+/// tables. Override per-app via `Builder::ledger`.
 pub const LEDGER_TABLE: &str = "__rustango_migrations__";
 
-const CREATE_LEDGER_SQL: &str = "CREATE TABLE IF NOT EXISTS __rustango_migrations__ (\
-    name TEXT PRIMARY KEY, \
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())";
+/// Per-app migration runner config. Lets two rustango apps live in
+/// the same Postgres database without colliding on the default
+/// `__rustango_migrations__` ledger table — each app picks its own
+/// ledger name and the runners stay independent.
+///
+/// All verbs are mirrored on the `Builder` so a custom-ledger app
+/// has the same surface as the default free functions:
+///
+/// ```ignore
+/// let mine = Builder::default().ledger("__myapp_migrations__");
+/// mine.migrate(&pool, dir).await?;
+/// mine.applied_set(&pool).await?;
+/// ```
+///
+/// Ledger names must be valid SQL identifiers (`[A-Za-z_][A-Za-z0-9_]*`,
+/// ≤ 63 bytes). `.ledger("…")` panics if not — this is a programming
+/// error caught at config time, not a runtime input.
+#[derive(Debug, Clone, Copy)]
+pub struct Builder {
+    ledger: &'static str,
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self {
+            ledger: LEDGER_TABLE,
+        }
+    }
+}
+
+impl Builder {
+    /// Equivalent to `Builder::default()`. Provided for symmetry with
+    /// the rest of the workspace's builder constructors.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Override the ledger table name. Must be a valid SQL
+    /// identifier (`[A-Za-z_][A-Za-z0-9_]*`, ≤ 63 bytes).
+    ///
+    /// # Panics
+    /// Panics if `name` isn't a valid SQL identifier — the ledger
+    /// name is interpolated into DDL (`CREATE TABLE`, `INSERT INTO`,
+    /// `SELECT FROM`) so we refuse anything that could escape
+    /// quoting.
+    #[must_use]
+    pub fn ledger(mut self, name: &'static str) -> Self {
+        validate_ledger_name(name);
+        self.ledger = name;
+        self
+    }
+
+    /// The configured ledger table name.
+    #[must_use]
+    pub fn ledger_name(&self) -> &'static str {
+        self.ledger
+    }
+
+    /// As [`migrate`], with this builder's ledger.
+    ///
+    /// # Errors
+    /// As [`migrate`].
+    pub async fn migrate(
+        &self,
+        pool: &PgPool,
+        dir: &Path,
+    ) -> Result<Vec<Migration>, MigrateError> {
+        migrate_with_ledger(pool, dir, self.ledger).await
+    }
+
+    /// As [`migrate_to`], with this builder's ledger.
+    ///
+    /// # Errors
+    /// As [`migrate_to`].
+    pub async fn migrate_to(
+        &self,
+        pool: &PgPool,
+        dir: &Path,
+        target: &str,
+    ) -> Result<Vec<Migration>, MigrateError> {
+        migrate_to_with_ledger(pool, dir, target, self.ledger).await
+    }
+
+    /// As [`migrate_embedded`], with this builder's ledger.
+    ///
+    /// # Errors
+    /// As [`migrate_embedded`].
+    pub async fn migrate_embedded(
+        &self,
+        pool: &PgPool,
+        embedded: &[(&str, &str)],
+    ) -> Result<Vec<Migration>, MigrateError> {
+        migrate_embedded_with_ledger(pool, embedded, self.ledger).await
+    }
+
+    /// As [`migrate_dry_run`], with this builder's ledger.
+    ///
+    /// # Errors
+    /// As [`migrate_dry_run`].
+    pub async fn migrate_dry_run(
+        &self,
+        pool: &PgPool,
+        dir: &Path,
+    ) -> Result<Vec<MigrationPreview>, MigrateError> {
+        migrate_dry_run_with_ledger(pool, dir, self.ledger).await
+    }
+
+    /// As [`downgrade`], with this builder's ledger.
+    ///
+    /// # Errors
+    /// As [`downgrade`].
+    pub async fn downgrade(
+        &self,
+        pool: &PgPool,
+        dir: &Path,
+        steps: usize,
+    ) -> Result<Vec<Migration>, MigrateError> {
+        downgrade_with_ledger(pool, dir, steps, self.ledger).await
+    }
+
+    /// As [`unapply`], with this builder's ledger.
+    ///
+    /// # Errors
+    /// As [`unapply`].
+    pub async fn unapply(
+        &self,
+        pool: &PgPool,
+        dir: &Path,
+        name: &str,
+    ) -> Result<Migration, MigrateError> {
+        unapply_with_ledger(pool, dir, name, self.ledger).await
+    }
+
+    /// As [`unapply_force`], with this builder's ledger.
+    ///
+    /// # Errors
+    /// As [`unapply_force`].
+    pub async fn unapply_force(
+        &self,
+        pool: &PgPool,
+        dir: &Path,
+        name: &str,
+    ) -> Result<Migration, MigrateError> {
+        unapply_force_with_ledger(pool, dir, name, self.ledger).await
+    }
+
+    /// As [`applied_set`], with this builder's ledger.
+    ///
+    /// # Errors
+    /// As [`applied_set`].
+    pub async fn applied_set(&self, pool: &PgPool) -> Result<HashSet<String>, MigrateError> {
+        applied_set_for(pool, self.ledger).await
+    }
+
+    /// As [`ensure_ledger`], with this builder's ledger.
+    ///
+    /// # Errors
+    /// As [`ensure_ledger`].
+    pub async fn ensure_ledger(&self, pool: &PgPool) -> Result<(), MigrateError> {
+        ensure_ledger_for(pool, self.ledger).await
+    }
+}
+
+fn validate_ledger_name(name: &str) {
+    // SQL identifier syntax: leading letter or `_`, then letters /
+    // digits / `_`. Postgres limits identifiers to 63 bytes.
+    let bytes = name.as_bytes();
+    let valid = !bytes.is_empty()
+        && bytes.len() <= 63
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_');
+    assert!(
+        valid,
+        "Builder::ledger({name:?}) is not a valid SQL identifier — \
+         must match [A-Za-z_][A-Za-z0-9_]* and be ≤ 63 bytes"
+    );
+}
 
 /// Postgres advisory-lock key used to serialize concurrent
 /// `migrate` / `migrate_to` / `unapply` / `downgrade` /
@@ -102,10 +280,18 @@ pub async fn drop_all(pool: &PgPool) -> Result<(), MigrateError> {
 /// Returns [`MigrateError::Io`]/[`MigrateError::Json`]/[`MigrateError::Validation`]
 /// for file problems, [`MigrateError::Driver`] for SQL failures.
 pub async fn migrate(pool: &PgPool, dir: &Path) -> Result<Vec<Migration>, MigrateError> {
-    ensure_ledger(pool).await?;
+    Builder::default().migrate(pool, dir).await
+}
+
+async fn migrate_with_ledger(
+    pool: &PgPool,
+    dir: &Path,
+    ledger: &str,
+) -> Result<Vec<Migration>, MigrateError> {
+    ensure_ledger_for(pool, ledger).await?;
     with_migrate_lock(pool, async {
         let all = file::list_dir(dir)?;
-        let applied = applied_set(pool).await?;
+        let applied = applied_set_for(pool, ledger).await?;
         let pending: Vec<Migration> = all
             .into_iter()
             .filter(|m| !applied.contains(&m.name))
@@ -113,11 +299,7 @@ pub async fn migrate(pool: &PgPool, dir: &Path) -> Result<Vec<Migration>, Migrat
 
         let mut newly = Vec::with_capacity(pending.len());
         for mig in pending {
-            if mig.atomic {
-                apply_atomic(pool, &mig).await?;
-            } else {
-                apply_loose(pool, &mig).await?;
-            }
+            apply_one(pool, &mig, ledger).await?;
             newly.push(mig);
         }
         Ok(newly)
@@ -155,13 +337,22 @@ where
     result
 }
 
-/// Set of migration names already recorded in the ledger.
+/// Set of migration names already recorded in the default ledger
+/// table (`__rustango_migrations__`). For a custom ledger, build a
+/// [`Builder`] with `.ledger("…")` and call its `applied_set` method.
 ///
 /// # Errors
 /// Returns [`MigrateError::Driver`] for any sqlx failure (including a
 /// missing ledger table — call [`ensure_ledger`] first).
 pub async fn applied_set(pool: &PgPool) -> Result<HashSet<String>, MigrateError> {
-    let rows = sqlx::query("SELECT name FROM __rustango_migrations__")
+    applied_set_for(pool, LEDGER_TABLE).await
+}
+
+async fn applied_set_for(
+    pool: &PgPool,
+    ledger: &str,
+) -> Result<HashSet<String>, MigrateError> {
+    let rows = sqlx::query(&format!("SELECT name FROM {ledger}"))
         .fetch_all(pool)
         .await?;
     let mut out = HashSet::with_capacity(rows.len());
@@ -171,16 +362,23 @@ pub async fn applied_set(pool: &PgPool) -> Result<HashSet<String>, MigrateError>
     Ok(out)
 }
 
-/// Bootstrap the ledger table if it doesn't exist. Idempotent and
-/// safe to run from concurrent processes — Postgres' `CREATE TABLE
-/// IF NOT EXISTS` is *not* race-free against concurrent creators
-/// (they can both pass the existence check and then collide on the
-/// catalog), so the bootstrap is serialized via a transaction-scoped
-/// advisory lock.
+/// Bootstrap the default ledger table (`__rustango_migrations__`)
+/// if it doesn't exist. Idempotent and safe to run from concurrent
+/// processes — Postgres' `CREATE TABLE IF NOT EXISTS` is *not*
+/// race-free against concurrent creators (they can both pass the
+/// existence check and then collide on the catalog), so the
+/// bootstrap is serialized via a transaction-scoped advisory lock.
+///
+/// For a custom ledger, build a [`Builder`] with `.ledger("…")` and
+/// call its `ensure_ledger` method.
 ///
 /// # Errors
 /// Returns [`MigrateError::Driver`] for any sqlx failure.
 pub async fn ensure_ledger(pool: &PgPool) -> Result<(), MigrateError> {
+    ensure_ledger_for(pool, LEDGER_TABLE).await
+}
+
+async fn ensure_ledger_for(pool: &PgPool, ledger: &str) -> Result<(), MigrateError> {
     // Stable arbitrary key — must be the same every call. "RUST" in ASCII hex.
     const LOCK_KEY: i64 = 0x5255_5354;
     let mut tx = pool.begin().await?;
@@ -188,7 +386,12 @@ pub async fn ensure_ledger(pool: &PgPool) -> Result<(), MigrateError> {
         .bind(LOCK_KEY)
         .execute(&mut *tx)
         .await?;
-    sqlx::query(CREATE_LEDGER_SQL).execute(&mut *tx).await?;
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS {ledger} (\
+         name TEXT PRIMARY KEY, \
+         applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+    );
+    sqlx::query(&create_sql).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -224,9 +427,17 @@ pub async fn migrate_dry_run(
     pool: &PgPool,
     dir: &Path,
 ) -> Result<Vec<MigrationPreview>, MigrateError> {
-    ensure_ledger(pool).await?;
+    Builder::default().migrate_dry_run(pool, dir).await
+}
+
+async fn migrate_dry_run_with_ledger(
+    pool: &PgPool,
+    dir: &Path,
+    ledger: &str,
+) -> Result<Vec<MigrationPreview>, MigrateError> {
+    ensure_ledger_for(pool, ledger).await?;
     let all = file::list_dir(dir)?;
-    let applied = applied_set(pool).await?;
+    let applied = applied_set_for(pool, ledger).await?;
     let pending: Vec<Migration> = all
         .into_iter()
         .filter(|m| !applied.contains(&m.name))
@@ -234,7 +445,7 @@ pub async fn migrate_dry_run(
 
     let mut out = Vec::with_capacity(pending.len());
     for mig in pending {
-        out.push(preview_migration(&mig)?);
+        out.push(preview_migration(&mig, ledger)?);
     }
     Ok(out)
 }
@@ -242,7 +453,7 @@ pub async fn migrate_dry_run(
 /// Build a [`MigrationPreview`] for a single migration. Pure —
 /// no DB access. Same render path as `apply_atomic` / `apply_loose`
 /// but the statements stream into a `Vec<String>` instead of a tx.
-fn preview_migration(mig: &Migration) -> Result<MigrationPreview, MigrateError> {
+fn preview_migration(mig: &Migration, ledger: &str) -> Result<MigrationPreview, MigrateError> {
     let mut statements = Vec::new();
     let mut deferred_fks: Vec<String> = Vec::new();
     if mig.atomic {
@@ -263,7 +474,7 @@ fn preview_migration(mig: &Migration) -> Result<MigrationPreview, MigrateError> 
     }
     statements.extend(deferred_fks);
     statements.push(format!(
-        "INSERT INTO __rustango_migrations__ (name) VALUES ('{}')",
+        "INSERT INTO {ledger} (name) VALUES ('{}')",
         mig.name.replace('\'', "''")
     ));
     if mig.atomic {
@@ -276,7 +487,11 @@ fn preview_migration(mig: &Migration) -> Result<MigrationPreview, MigrateError> 
     })
 }
 
-async fn apply_atomic(pool: &PgPool, mig: &Migration) -> Result<(), MigrateError> {
+async fn apply_atomic(
+    pool: &PgPool,
+    mig: &Migration,
+    ledger: &str,
+) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (atomic)");
     let mut tx = pool.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
@@ -298,7 +513,7 @@ async fn apply_atomic(pool: &PgPool, mig: &Migration) -> Result<(), MigrateError
     for stmt in deferred_fks {
         sqlx::query(&stmt).execute(&mut *tx).await?;
     }
-    sqlx::query("INSERT INTO __rustango_migrations__ (name) VALUES ($1)")
+    sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES ($1)"))
         .bind(&mig.name)
         .execute(&mut *tx)
         .await?;
@@ -334,13 +549,22 @@ pub async fn migrate_to(
     dir: &Path,
     target: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
-    ensure_ledger(pool).await?;
+    Builder::default().migrate_to(pool, dir, target).await
+}
+
+async fn migrate_to_with_ledger(
+    pool: &PgPool,
+    dir: &Path,
+    target: &str,
+    ledger: &str,
+) -> Result<Vec<Migration>, MigrateError> {
+    ensure_ledger_for(pool, ledger).await?;
     with_migrate_lock(pool, async {
         let all = file::list_dir(dir)?;
-        let applied = applied_set(pool).await?;
+        let applied = applied_set_for(pool, ledger).await?;
 
         if target == "zero" {
-            return unapply_all_in_order(pool, dir, &all, &applied).await;
+            return unapply_all_in_order(pool, dir, &all, &applied, ledger).await;
         }
 
         if !all.iter().any(|m| m.name == target) {
@@ -361,7 +585,7 @@ pub async fn migrate_to(
             None => {
                 // Nothing applied — forward up to and including target.
                 for mig in all.into_iter().filter(|m| m.name.as_str() <= target) {
-                    apply_one(pool, &mig).await?;
+                    apply_one(pool, &mig, ledger).await?;
                     touched.push(mig);
                 }
             }
@@ -375,7 +599,7 @@ pub async fn migrate_to(
                                 && m.name.as_str() <= target
                                 && !applied.contains(&m.name)
                         }) {
-                            apply_one(pool, &mig).await?;
+                            apply_one(pool, &mig, ledger).await?;
                             touched.push(mig);
                         }
                     }
@@ -390,7 +614,7 @@ pub async fn migrate_to(
                             .collect();
                         to_unapply.reverse();
                         for mig in to_unapply {
-                            unapply_locked(pool, dir, &mig.name).await?;
+                            unapply_locked(pool, dir, &mig.name, ledger).await?;
                             touched.push(mig);
                         }
                     }
@@ -424,7 +648,15 @@ pub async fn migrate_embedded(
     pool: &PgPool,
     embedded: &[(&str, &str)],
 ) -> Result<Vec<Migration>, MigrateError> {
-    ensure_ledger(pool).await?;
+    Builder::default().migrate_embedded(pool, embedded).await
+}
+
+async fn migrate_embedded_with_ledger(
+    pool: &PgPool,
+    embedded: &[(&str, &str)],
+    ledger: &str,
+) -> Result<Vec<Migration>, MigrateError> {
+    ensure_ledger_for(pool, ledger).await?;
     with_migrate_lock(pool, async {
         let mut all: Vec<Migration> = Vec::with_capacity(embedded.len());
         for (name, json) in embedded {
@@ -440,7 +672,7 @@ pub async fn migrate_embedded(
         all.sort_by(|a, b| a.name.cmp(&b.name));
         file::validate_chain(&all, "embedded slice")?;
 
-        let applied = applied_set(pool).await?;
+        let applied = applied_set_for(pool, ledger).await?;
         let pending: Vec<Migration> = all
             .into_iter()
             .filter(|m| !applied.contains(&m.name))
@@ -448,11 +680,7 @@ pub async fn migrate_embedded(
 
         let mut newly = Vec::with_capacity(pending.len());
         for mig in pending {
-            if mig.atomic {
-                apply_atomic(pool, &mig).await?;
-            } else {
-                apply_loose(pool, &mig).await?;
-            }
+            apply_one(pool, &mig, ledger).await?;
             newly.push(mig);
         }
         Ok(newly)
@@ -474,13 +702,22 @@ pub async fn downgrade(
     dir: &Path,
     steps: usize,
 ) -> Result<Vec<Migration>, MigrateError> {
+    Builder::default().downgrade(pool, dir, steps).await
+}
+
+async fn downgrade_with_ledger(
+    pool: &PgPool,
+    dir: &Path,
+    steps: usize,
+    ledger: &str,
+) -> Result<Vec<Migration>, MigrateError> {
     if steps == 0 {
         return Ok(Vec::new());
     }
-    ensure_ledger(pool).await?;
+    ensure_ledger_for(pool, ledger).await?;
     with_migrate_lock(pool, async {
         let all = file::list_dir(dir)?;
-        let applied = applied_set(pool).await?;
+        let applied = applied_set_for(pool, ledger).await?;
 
         let applied_in_order: Vec<Migration> = all
             .into_iter()
@@ -495,7 +732,7 @@ pub async fn downgrade(
 
         let mut touched = Vec::with_capacity(to_unapply.len());
         for mig in to_unapply {
-            unapply_locked(pool, dir, &mig.name).await?;
+            unapply_locked(pool, dir, &mig.name, ledger).await?;
             touched.push(mig);
         }
         Ok(touched)
@@ -503,11 +740,11 @@ pub async fn downgrade(
     .await
 }
 
-async fn apply_one(pool: &PgPool, mig: &Migration) -> Result<(), MigrateError> {
+async fn apply_one(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
     if mig.atomic {
-        apply_atomic(pool, mig).await
+        apply_atomic(pool, mig, ledger).await
     } else {
-        apply_loose(pool, mig).await
+        apply_loose(pool, mig, ledger).await
     }
 }
 
@@ -516,6 +753,7 @@ async fn unapply_all_in_order(
     dir: &Path,
     all: &[Migration],
     applied: &HashSet<String>,
+    ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
     let mut to_unapply: Vec<Migration> = all
         .iter()
@@ -528,7 +766,7 @@ async fn unapply_all_in_order(
         // Caller already holds the migrate lock; use `unapply_locked`
         // to avoid re-acquiring (which would deadlock on a different
         // pooled connection / session).
-        unapply_locked(pool, dir, &mig.name).await?;
+        unapply_locked(pool, dir, &mig.name, ledger).await?;
         touched.push(mig);
     }
     Ok(touched)
@@ -562,10 +800,19 @@ async fn unapply_all_in_order(
 ///   op, missing migration file, missing predecessor.
 /// * [`MigrateError::Driver`] — SQL failure during rollback.
 pub async fn unapply(pool: &PgPool, dir: &Path, name: &str) -> Result<Migration, MigrateError> {
-    ensure_ledger(pool).await?;
+    Builder::default().unapply(pool, dir, name).await
+}
+
+async fn unapply_with_ledger(
+    pool: &PgPool,
+    dir: &Path,
+    name: &str,
+    ledger: &str,
+) -> Result<Migration, MigrateError> {
+    ensure_ledger_for(pool, ledger).await?;
     with_migrate_lock(pool, async {
-        check_is_head(pool, dir, name).await?;
-        unapply_locked(pool, dir, name).await
+        check_is_head(pool, dir, name, ledger).await?;
+        unapply_locked(pool, dir, name, ledger).await
     })
     .await
 }
@@ -585,16 +832,30 @@ pub async fn unapply_force(
     dir: &Path,
     name: &str,
 ) -> Result<Migration, MigrateError> {
-    ensure_ledger(pool).await?;
-    with_migrate_lock(pool, unapply_locked(pool, dir, name)).await
+    Builder::default().unapply_force(pool, dir, name).await
+}
+
+async fn unapply_force_with_ledger(
+    pool: &PgPool,
+    dir: &Path,
+    name: &str,
+    ledger: &str,
+) -> Result<Migration, MigrateError> {
+    ensure_ledger_for(pool, ledger).await?;
+    with_migrate_lock(pool, unapply_locked(pool, dir, name, ledger)).await
 }
 
 /// Verify `name` is the lex-greatest currently-applied migration.
 /// Silent pass-through if the migration isn't applied at all — that
 /// case will surface as a clearer error from `unapply_locked`
 /// ("migration not found in dir" or similar).
-async fn check_is_head(pool: &PgPool, dir: &Path, name: &str) -> Result<(), MigrateError> {
-    let applied = applied_set(pool).await?;
+async fn check_is_head(
+    pool: &PgPool,
+    dir: &Path,
+    name: &str,
+    ledger: &str,
+) -> Result<(), MigrateError> {
+    let applied = applied_set_for(pool, ledger).await?;
     if !applied.contains(name) {
         return Ok(());
     }
@@ -624,6 +885,7 @@ async fn unapply_locked(
     pool: &PgPool,
     dir: &Path,
     name: &str,
+    ledger: &str,
 ) -> Result<Migration, MigrateError> {
     let all = file::list_dir(dir)?;
     let target = all
@@ -651,9 +913,9 @@ async fn unapply_locked(
     let inverted = invert(&target.forward, &prev_snapshot)?;
 
     if target.atomic {
-        unapply_atomic(pool, &target, &inverted, &prev_snapshot).await?;
+        unapply_atomic(pool, &target, &inverted, &prev_snapshot, ledger).await?;
     } else {
-        unapply_loose(pool, &target, &inverted, &prev_snapshot).await?;
+        unapply_loose(pool, &target, &inverted, &prev_snapshot, ledger).await?;
     }
 
     Ok(target)
@@ -664,6 +926,7 @@ async fn unapply_atomic(
     target: &Migration,
     inverted: &[Operation],
     snapshot: &SchemaSnapshot,
+    ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %target.name, "unapplying (atomic)");
     let mut tx = pool.begin().await?;
@@ -686,7 +949,7 @@ async fn unapply_atomic(
     for stmt in deferred_fks {
         sqlx::query(&stmt).execute(&mut *tx).await?;
     }
-    sqlx::query("DELETE FROM __rustango_migrations__ WHERE name = $1")
+    sqlx::query(&format!("DELETE FROM {ledger} WHERE name = $1"))
         .bind(&target.name)
         .execute(&mut *tx)
         .await?;
@@ -699,6 +962,7 @@ async fn unapply_loose(
     target: &Migration,
     inverted: &[Operation],
     snapshot: &SchemaSnapshot,
+    ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %target.name, "unapplying (non-atomic)");
     let mut deferred_fks: Vec<String> = Vec::new();
@@ -720,14 +984,14 @@ async fn unapply_loose(
     for stmt in deferred_fks {
         sqlx::query(&stmt).execute(pool).await?;
     }
-    sqlx::query("DELETE FROM __rustango_migrations__ WHERE name = $1")
+    sqlx::query(&format!("DELETE FROM {ledger} WHERE name = $1"))
         .bind(&target.name)
         .execute(pool)
         .await?;
     Ok(())
 }
 
-async fn apply_loose(pool: &PgPool, mig: &Migration) -> Result<(), MigrateError> {
+async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (non-atomic)");
     let mut deferred_fks: Vec<String> = Vec::new();
     for op in &mig.forward {
@@ -748,7 +1012,7 @@ async fn apply_loose(pool: &PgPool, mig: &Migration) -> Result<(), MigrateError>
     for stmt in deferred_fks {
         sqlx::query(&stmt).execute(pool).await?;
     }
-    sqlx::query("INSERT INTO __rustango_migrations__ (name) VALUES ($1)")
+    sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES ($1)"))
         .bind(&mig.name)
         .execute(pool)
         .await?;

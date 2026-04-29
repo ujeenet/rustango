@@ -33,7 +33,7 @@ pub use invert::invert;
 pub use make::{make_migrations, make_migrations_from};
 pub use runner::{
     applied_set, apply_all, downgrade, drop_all, ensure_ledger, migrate, migrate_dry_run,
-    migrate_embedded, migrate_to, registered_models, unapply, unapply_force, MigrationPreview,
-    LEDGER_TABLE,
+    migrate_embedded, migrate_to, registered_models, unapply, unapply_force, Builder,
+    MigrationPreview, LEDGER_TABLE,
 };
 pub use snapshot::{FieldSnapshot, RelationSnapshot, SchemaSnapshot, TableSnapshot};
