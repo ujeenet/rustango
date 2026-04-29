@@ -1,0 +1,24 @@
+[package]
+name = "cargo-rustango"
+description = "`cargo rustango new <name>` — Django-style project scaffolder for the rustango framework."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords            = ["orm", "django", "scaffolder", "cli", "postgres"]
+categories          = ["database", "command-line-utilities", "development-tools"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "cargo-rustango"
+path = "src/main.rs"
+
+[dependencies]
+# Standalone — does not depend on the `rustango` library crate. The
+# scaffolder writes user-project source files; it doesn't link to
+# any rustango runtime types.
