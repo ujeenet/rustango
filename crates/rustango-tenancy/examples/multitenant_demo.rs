@@ -187,24 +187,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "letmein",
     );
 
-    // Operator routes mount at `/operator/*` and take precedence;
-    // everything else falls through to the tenant-aware admin (which
-    // does its own resolver dispatch). `fallback_service` is the
-    // axum idiom for "if no specific route matched, hand off to this
-    // sub-Router" — needed because TenantAdminBuilder uses a global
-    // fallback internally.
-    let app = axum::Router::new()
-        .nest("/operator", operator_admin)
-        .fallback_service(tenant_admin);
+    // Host-based dispatch — matches the production routing story
+    // exactly: bare apex (`localhost` here, `app.example.com` in
+    // prod) hosts the operator UI; subdomains (`acme.localhost`,
+    // `globex.localhost`) host tenant UIs.
+    //
+    // Why not `nest("/operator", ...)`? The bundled
+    // `rustango-admin` templates emit absolute paths like
+    // `<a href="/rustango_orgs">`, which don't include any nest
+    // prefix. Mounting the operator under `/operator` means
+    // every admin link breaks (404s the tenant fallback). Host
+    // dispatch sidesteps the issue and is what production should
+    // do anyway.
+    let app = axum::Router::new().fallback_service(tower::service_fn({
+        let operator = operator_admin.clone();
+        let tenants = tenant_admin.clone();
+        let apex = "localhost".to_owned();
+        move |req: axum::http::Request<axum::body::Body>| {
+            let mut operator = operator.clone();
+            let mut tenants = tenants.clone();
+            let apex = apex.clone();
+            async move {
+                use tower::ServiceExt as _;
+                let host = req
+                    .headers()
+                    .get(axum::http::header::HOST)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.split(':').next().unwrap_or(s).to_owned())
+                    .unwrap_or_default();
+                let response = if host == apex {
+                    operator.as_service().oneshot(req).await
+                } else {
+                    tenants.as_service().oneshot(req).await
+                };
+                response.map_err(|e| -> std::convert::Infallible {
+                    panic!("axum router service is Infallible: {e}")
+                })
+            }
+        }
+    }));
 
     println!();
     println!("==> serving on 0.0.0.0:8080");
     println!("    http://acme.localhost:8080/post     ACME's posts");
     println!("    http://globex.localhost:8080/post   Globex's posts");
     println!("    http://other.localhost:8080/post    404 (no tenant)");
-    println!("    http://localhost:8080/operator      operator UI (basic auth: operator/letmein)");
-    println!("        — note: NO trailing slash. axum's `nest()` doesn't");
-    println!("          rewrite `/operator/` to the inner admin's `/`.");
+    println!("    http://localhost:8080/              operator UI (basic auth: operator/letmein)");
+    println!("        — operator lives at the apex (no subdomain).");
+    println!("          subdomains route to tenant UIs via the resolver.");
     println!("    curl  http://localhost:8080/post -H 'X-Org: acme'");
     println!();
 
