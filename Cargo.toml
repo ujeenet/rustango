@@ -54,6 +54,10 @@ async-trait = "0.1"
 # HTTP types — used by rustango-tenancy resolvers to inspect request parts
 http = "1"
 
+# Password hashing for the 2-domain auth (Operator + per-tenant User)
+argon2        = "0.5"
+password-hash = "0.5"
+
 # Admin (HTTP)
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }
 tower = { version = "0.5", features = ["util"] }

@@ -39,13 +39,17 @@
 //! the full design and slice plan.
 
 pub mod admin;
+pub mod auth;
 mod error;
 pub mod manage;
 pub mod migrate;
 mod org;
+pub mod password;
 mod pools;
 mod resolver;
 mod secrets;
+
+pub use auth::{authenticate_operator, authenticate_user, Operator, User};
 
 pub use error::TenancyError;
 pub use migrate::{migrate_registry, migrate_tenants, TenantMigrationOutcome, TenantMigrationReport};
