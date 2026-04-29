@@ -20,6 +20,29 @@ ORM ergonomics catch-up. v0.6 closed the multi-tenancy production gap; v0.7 is t
 - **Ledger-name validation.** `Builder::ledger` panics if the name isn't a valid SQL identifier (`[A-Za-z_][A-Za-z0-9_]*`, ≤ 63 bytes). Configuration error caught at construction time, not deep in a SQL call.
 - 3 live tests in `crates/rustango/tests/migrate_builder_live.rs` cover two-builder isolation (each ledger sees only its own entries; default `applied_set` doesn't see custom-ledger rows), default-Builder parity with the free functions, and synchronous validation panic on a quote-injection name.
 
+### Added — `ForeignKey<T>` lazy-load (slice 3)
+
+- **`rustango::sql::ForeignKey<T>`** — new wrapper type that stores a parent's PK alongside an optional cached `Box<T>`. Replaces the v0.1 `i64` + `#[rustango(fk = "users")]` form for fields that want lazy-load ergonomics:
+
+  ```rust
+  #[derive(Model)]
+  struct Book {
+      #[rustango(primary_key)] id: Auto<i64>,
+      title: String,
+      author: ForeignKey<Author>,   // no attr — type carries the target
+  }
+
+  let mut book: Book = Book::objects().filter("id", Op::Eq, 1).fetch(&pool).await?[0].clone();
+  let alice: &Author = book.author.get(&pool).await?;   // lazy-load + cache
+  ```
+- **State machine.** Just-decoded rows hold `ForeignKey::Unloaded(pk)` (sqlx `Decode` reads `BIGINT`); the first `.get(&pool)` swaps to `ForeignKey::Loaded { pk, value }` with a `Box<T>` cache, so subsequent `.get()` calls are zero-SQL. Constructors: `ForeignKey::unloaded(pk)`, `ForeignKey::loaded(pk, parent)`, plus `From<i64>` for `pk.into()`.
+- **Write path.** `From<ForeignKey<T>> for SqlValue` extracts the PK regardless of state, so INSERT / UPDATE on the parent row keeps writing the FK column as a plain `BIGINT` — no schema change for the FK column itself (DDL stays `BIGINT … REFERENCES …`).
+- **Type-driven schema.** When the macro sees `ForeignKey<T>`, the generated `Relation::Fk { to, on }` reads `to` from `<T as Model>::SCHEMA.table` at compile time, so the user no longer has to repeat the table name in an attribute. `#[rustango(on = "user_uuid")]` still overrides the default `"id"` PK column. `Auto<ForeignKey<T>>` and `ForeignKey<T>` on a `#[rustango(primary_key)]` field are rejected with clear messages.
+- **Macro hygiene.** The hidden `__rustango_cols_<Model>` submodule now opens with `use super::*;` so field types referencing sibling models (`ForeignKey<Author>` from inside `Book`'s codegen) resolve under the proc-macro derive resolution rules.
+- **New `ExecError` variants**: `ForeignKeyTargetMissing { table, pk }` (FK pk not in target table — e.g. parent deleted under a non-CASCADE constraint) and `MissingPrimaryKey { table }` (target model has no PK; programming error).
+- **v1 limitation**: target's PK must be `i64` (or `Auto<i64>`). `i32` PK targets and the rest of the type matrix are deferred until asked for.
+- 5 unit tests in `crates/rustango-sql/src/foreign_key.rs` (constructors, `pk()`, `Into<SqlValue>`, `into_value`) plus 3 live tests in `crates/rustango/tests/foreign_key_live.rs` (round-trip lazy-load, `loaded()` constructor skips select, missing-target named error).
+
 ## [v0.6] — Unreleased
 
 Production-readiness for multi-tenancy. v0.5 shipped the headline (tenants as rows, no `DATABASES` dict); v0.6 fills the gaps that block real deployments: form-based login on both consoles, packaged bootstrap migrations, scope-aware `manage migrate`, hard-delete companion to soft-delete, and `is_superuser` gating in the tenant admin. Seven steps, all merged.

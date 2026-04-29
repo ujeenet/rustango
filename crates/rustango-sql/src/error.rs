@@ -63,4 +63,23 @@ pub enum ExecError {
     /// `RETURNING` columns. Use `insert` for those.
     #[error("`insert_returning` requires `query.returning` to be non-empty; use `insert` instead")]
     EmptyReturning,
+
+    /// `ForeignKey::get` resolved a PK that didn't match any row in
+    /// the target table. Means the parent was deleted under a
+    /// non-CASCADE constraint, or the FK was constructed by hand with
+    /// an out-of-band value.
+    #[error("foreign-key target `{table}` has no row with primary key {pk}")]
+    ForeignKeyTargetMissing {
+        table: &'static str,
+        pk: i64,
+    },
+
+    /// Used when traversing schema metadata to resolve a foreign key
+    /// or build a `WHERE pk = …` filter — the target model declares
+    /// no `#[rustango(primary_key)]` field. Programming error;
+    /// surfaces only if a model deriving `Model` somehow lacks a PK.
+    #[error("model `{table}` has no `#[rustango(primary_key)]` field — required for FK lookup")]
+    MissingPrimaryKey {
+        table: &'static str,
+    },
 }

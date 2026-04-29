@@ -846,6 +846,12 @@ fn column_module_tokens(
         #[doc(hidden)]
         #[allow(non_camel_case_types, non_snake_case)]
         pub mod #module_ident {
+            // Re-import the parent scope so field types referencing
+            // sibling models (e.g. `ForeignKey<Author>`) resolve
+            // inside this submodule. Without this we'd hit
+            // `proc_macro_derive_resolution_fallback` warnings.
+            #[allow(unused_imports)]
+            use super::*;
             #(#items)*
         }
     }
@@ -1047,6 +1053,7 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
         kind,
         nullable,
         auto,
+        fk_inner,
     } = detect_type(&field.ty)?;
     check_bound_compatibility(field, &attrs, kind)?;
     if auto && !primary_key {
@@ -1062,7 +1069,14 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
              SERIAL / BIGSERIAL already supplies a default sequence.",
         ));
     }
-    let relation = relation_tokens(field, &attrs)?;
+    if fk_inner.is_some() && primary_key {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`ForeignKey<T>` is not allowed on a primary-key field — \
+             a row's PK is its own identity, not a reference to a parent.",
+        ));
+    }
+    let relation = relation_tokens(field, &attrs, fk_inner)?;
     let column_lit = column.as_str();
     let field_type_tokens = kind.variant_tokens();
     let max_length = optional_u32(attrs.max_length);
@@ -1154,7 +1168,27 @@ fn optional_str(value: Option<&str>) -> TokenStream2 {
     }
 }
 
-fn relation_tokens(field: &syn::Field, attrs: &FieldAttrs) -> syn::Result<TokenStream2> {
+fn relation_tokens(
+    field: &syn::Field,
+    attrs: &FieldAttrs,
+    fk_inner: Option<&syn::Type>,
+) -> syn::Result<TokenStream2> {
+    if let Some(inner) = fk_inner {
+        if attrs.fk.is_some() || attrs.o2o.is_some() {
+            return Err(syn::Error::new_spanned(
+                field,
+                "`ForeignKey<T>` already declares the FK target via the type parameter — \
+                 remove the `fk = \"…\"` / `o2o = \"…\"` attribute.",
+            ));
+        }
+        let on = attrs.on.as_deref().unwrap_or("id");
+        return Ok(quote! {
+            ::core::option::Option::Some(::rustango::core::Relation::Fk {
+                to: <#inner as ::rustango::core::Model>::SCHEMA.table,
+                on: #on,
+            })
+        });
+    }
     match (&attrs.fk, &attrs.o2o) {
         (Some(_), Some(_)) => Err(syn::Error::new_spanned(
             field,
@@ -1224,15 +1258,18 @@ impl DetectedKind {
 
 /// Result of walking a field's Rust type. `kind` is the underlying
 /// `FieldType`; `nullable` is set by an outer `Option<T>`; `auto` is
-/// set by an outer `Auto<T>` (server-assigned PK).
+/// set by an outer `Auto<T>` (server-assigned PK); `fk_inner` is
+/// `Some(<T>)` when the field was `ForeignKey<T>` (or
+/// `Option<ForeignKey<T>>`), letting the codegen reach `T::SCHEMA`.
 #[derive(Clone, Copy)]
-struct DetectedType {
+struct DetectedType<'a> {
     kind: DetectedKind,
     nullable: bool,
     auto: bool,
+    fk_inner: Option<&'a syn::Type>,
 }
 
-fn detect_type(ty: &Type) -> syn::Result<DetectedType> {
+fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
     let Type::Path(TypePath { path, qself: None }) = ty else {
         return Err(syn::Error::new_spanned(ty, "unsupported field type"));
     };
@@ -1277,6 +1314,12 @@ fn detect_type(ty: &Type) -> syn::Result<DetectedType> {
                 "`Auto<Option<T>>` is not supported — Auto fields are server-assigned and cannot be NULL",
             ));
         }
+        if inner_det.fk_inner.is_some() {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "`Auto<ForeignKey<T>>` is not supported — Auto is for server-assigned PKs, ForeignKey is for parent references",
+            ));
+        }
         if !matches!(inner_det.kind, DetectedKind::I32 | DetectedKind::I64) {
             return Err(syn::Error::new_spanned(
                 ty,
@@ -1286,6 +1329,20 @@ fn detect_type(ty: &Type) -> syn::Result<DetectedType> {
         return Ok(DetectedType {
             auto: true,
             ..inner_det
+        });
+    }
+
+    if last.ident == "ForeignKey" {
+        let inner = generic_inner(ty, &last.arguments, "ForeignKey")?;
+        // `ForeignKey<T>` is stored as BIGINT — same column shape as
+        // the v0.1 `i64` + `#[rustango(fk = …)]` form. The macro does
+        // not recurse into `T` because `T` is a Model struct, not a
+        // primitive — its identity is opaque to schema detection.
+        return Ok(DetectedType {
+            kind: DetectedKind::I64,
+            nullable: false,
+            auto: false,
+            fk_inner: Some(inner),
         });
     }
 
@@ -1311,6 +1368,7 @@ fn detect_type(ty: &Type) -> syn::Result<DetectedType> {
         kind,
         nullable: false,
         auto: false,
+        fk_inner: None,
     })
 }
 

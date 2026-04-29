@@ -11,6 +11,7 @@ mod compiled;
 mod dialect;
 mod error;
 mod executor;
+mod foreign_key;
 mod postgres;
 
 pub use auto::Auto;
@@ -21,6 +22,7 @@ pub use executor::{
     bulk_insert, count_rows, delete, insert, insert_returning, select_one_row, select_rows, update,
     Counter, Deleter, Fetcher, Updater,
 };
+pub use foreign_key::ForeignKey;
 pub use postgres::Postgres;
 
 /// Re-exported so `#[derive(Model)]` output can name `sqlx` types without
