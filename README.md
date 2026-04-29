@@ -69,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **`DataOp` interleaved with `SchemaChange`** in one migration — Django's "add nullable + backfill + set NOT NULL" recipe lives in one file.
 - **Multi-tenancy without a `DATABASES` dict** (v0.5) — adding a tenant is `INSERT INTO rustango_orgs (...)`, no restart, no config edit, no redeploy. See below.
 - **Per-tenant auth + `is_superuser` gating out of the box** (v0.6) — superusers get read/write admin, non-superusers see read-only views, anon traffic redirects to `/__login`. Same HMAC-SHA256 session for the operator console at the apex.
+- **Day-2 ORM ergonomics** (v0.7) — `model.save(&pool)` insert-or-update via `Auto<T>` PK dispatch, `ForeignKey<T>` lazy-load (`post.author.get(&pool).await?`), OR / nested-expr `where_(A.or(B.and(C)))`, and per-app migration ledger naming (`migrate::Builder::new().ledger("__myapp__")`) so two rustango apps share one DB without colliding on the bookkeeping table.
 - Postgres-only by design. Single dev hobby project; for multi-DB ORMs use [Diesel](https://diesel.rs) or [SeaORM](https://www.sea-ql.org).
 
 ## Multi-tenancy (v0.5, opt-in via `rustango-tenancy`)
@@ -78,8 +79,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```toml
 # Cargo.toml
 [dependencies]
-rustango = "0.6"
-rustango-tenancy = "0.6"   # opt-in
+rustango = "0.7"
+rustango-tenancy = "0.7"   # opt-in
 ```
 
 > The fastest path: drop a 5-line `src/bin/manage.rs` and run
@@ -281,6 +282,14 @@ Open <http://127.0.0.1:8080/>, login `admin` / `secret`. Walk through:
 - `AuditLog` is mounted read-only — visible, no edit / delete buttons,
   direct POST returns 403
 
+For a CLI-only walk through the v0.7 ergonomic additions (`save()`,
+`ForeignKey<T>` lazy-load, OR / nested filters, per-app migration
+ledger naming):
+
+```sh
+cargo run --example v07_ergonomics_demo
+```
+
 If `cargo` complains *"rustc 1.86.0 is not supported"* a Homebrew `rust`
 install is shadowing rustup's 1.88. Run `PATH="$HOME/.cargo/bin:$PATH"
 cargo run --example admin_demo` instead.
@@ -300,23 +309,35 @@ cargo run --example admin_demo` instead.
 ## Field attributes
 
 ```rust
+use rustango::{Auto, Model};
+use rustango::sql::ForeignKey;
+
 #[derive(Model)]
 #[rustango(table = "user", display = "username")]   // override table; pick which field FK references render
 struct User {
-    #[rustango(primary_key)]                         id: i64,
+    #[rustango(primary_key)]                         id: Auto<i64>,        // → BIGSERIAL; sequence assigns the PK
     #[rustango(column = "user_name")]                name: String,
-    #[rustango(max_length = 32)]                     username: String,    // → VARCHAR(32) + form maxlength
-    #[rustango(min = 0, max = 150)]                  age: i32,            // → CHECK + form min/max
-    #[rustango(fk = "user", on = "id")]              author_id: i64,      // → FOREIGN KEY + admin link rendering
+    #[rustango(max_length = 32)]                     username: String,     // → VARCHAR(32) + form maxlength
+    #[rustango(min = 0, max = 150)]                  age: i32,             // → CHECK + form min/max
     is_active: bool,
                                                      email: Option<String>, // nullable
+}
+
+#[derive(Model)]
+struct Post {
+    #[rustango(primary_key)] id: Auto<i64>,
+    title: String,
+    author: ForeignKey<User>,        // → BIGINT REFERENCES "user"("id"); lazy-load via .get(&pool)
+    // Legacy form is still supported when you don't want the wrapper:
+    //   #[rustango(fk = "user", on = "id")] author_id: i64,
 }
 ```
 
 ## Query API
 
-Two filter shapes, same builder. Mix freely; multiple predicates `AND`
-together (no `.or(...)` yet).
+Two filter shapes, same builder. Mix freely. Successive predicates
+`AND` together at the top level; `OR` and nested expressions are
+contained inside a single `.where_()` argument (v0.7).
 
 **Typed — `where_`.** The derive emits a `Column` per field; typos and
 wrong types fail at compile time.
@@ -350,7 +371,32 @@ let actives: Vec<User> = User::objects()
 
 Wrong field → `QueryError::UnknownField`; wrong value type →
 `QueryError::TypeMismatch`. Available `Op`s: `Eq`, `Ne`, `Lt`, `Lte`,
-`Gt`, `Gte`, `Like`, `In`.
+`Gt`, `Gte`, `Like`, `In`, `IsNull`.
+
+**OR / nested expressions** (v0.7). Predicates compose with `.and()` /
+`.or()` into a typed `WhereExpr`. The Postgres writer is precedence-
+aware: nested composites are parenthesized so SQL grouping survives.
+
+```rust
+// (name = "alice" OR name = "bob") AND age >= 18
+let candidates: Vec<User> = User::objects()
+    .where_(User::name.eq("alice").or(User::name.eq("bob")))
+    .where_(User::age.gte(18))
+    .fetch(&pool).await?;
+// → WHERE ("user_name" = $1 OR "user_name" = $2) AND "age" >= $3
+
+// Nested: (age >= 40 AND active = false) OR name = "alice"
+let mixed: Vec<User> = User::objects()
+    .where_(
+        User::age.gte(40)
+            .and(User::is_active.eq(false))
+            .or(User::name.eq("alice")),
+    )
+    .fetch(&pool).await?;
+```
+
+A bare `User::name.eq("alice")` flows into `.where_()` via `Into<TypedExpr<User>>`,
+so existing single-predicate call sites are unchanged.
 
 **Bulk update / delete / count / per-instance.**
 
@@ -371,10 +417,33 @@ let n = User::objects()
 use rustango::sql::Counter;
 let n = User::objects().eq("is_active", true).count(&pool).await?;
 
-// Per-instance.
-User { id: 1, username: "alice".into(), age: 30, is_active: true }
-    .insert(&pool).await?;
+// Per-instance — explicit insert / delete.
+let mut alice = User {
+    id: Auto::default(),
+    username: "alice".into(),
+    age: 30,
+    is_active: true,
+};
+alice.insert(&pool).await?;          // BIGSERIAL fills in `id`
 user.delete(&pool).await?;
+
+// Per-instance — `save()` (v0.7) dispatches on `Auto<T>` PK.
+//   Auto::Unset → INSERT … RETURNING (populates the PK)
+//   Auto::Set(_) → UPDATE … SET <every-non-pk-col> WHERE pk = ?
+let mut bob = User {
+    id: Auto::default(),
+    username: "bob".into(),
+    age: 41,
+    is_active: true,
+};
+bob.save(&pool).await?;              // INSERT (PK was Unset)
+bob.age = 42;
+bob.save(&pool).await?;              // UPDATE (PK is now Set)
+
+// Lazy-load a parent through a `ForeignKey<T>` field.
+let mut post = Post::objects().eq("id", 1_i64).fetch(&pool).await?
+    .into_iter().next().unwrap();
+let author: &User = post.author.get(&pool).await?;   // resolves once, cached
 ```
 
 ## Admin
@@ -461,6 +530,27 @@ DEFAULT '…'` works), forward + reverse, persistent tracking via
 `__rustango_migrations__`, and per-migration `atomic: false` opt-out
 for things like `CREATE INDEX CONCURRENTLY`.
 
+**Per-app ledger naming** (v0.7). Two rustango apps in the same
+Postgres database used to collide on the shared
+`__rustango_migrations__` table. `migrate::Builder` carries an
+opt-in ledger override:
+
+```rust
+use rustango::migrate;
+
+let mine = migrate::Builder::new().ledger("__myapp_migrations__");
+mine.migrate(&pool, dir).await?;          // applies pending migrations into the custom ledger
+mine.applied_set(&pool).await?;
+mine.downgrade(&pool, dir, 1).await?;
+```
+
+`Builder::default()` keeps the legacy default — every existing call
+site (the `manage` CLI, `migrate::migrate(&pool, dir)`, tenancy's
+`migrate_registry` / `migrate_tenants`) thunks through it without
+edits. The ledger name is validated at config time
+(`[A-Za-z_][A-Za-z0-9_]*`, ≤ 63 bytes); a quote-injection attempt
+panics there, not deep in a SQL call.
+
 For deployments where shipping a `migrations/` folder alongside the
 binary is awkward (Docker images, single-binary distribution),
 `embed_migrations!` bakes the JSON files in at compile time:
@@ -479,14 +569,17 @@ diffs can't tell a rename from a drop+add).
 ## Status
 
 This is a hobbyist project. The shape is novel for Rust ORMs (registry-
-driven admin, Django-style API), the test count is high (~250 unit +
-live integration including the v0.6 multi-tenancy + auth paths), and
-the demo works in a real browser. v0.6 closed the multi-tenancy gaps
-(form login on both consoles, packaged bootstrap migrations,
-scope-aware `migrate`, `purge-tenant`, `is_superuser` gating). It is
-still **not** production-ready: no SQLite/MySQL, no streaming queries,
-no benchmarks against the mature alternatives, and session revocation
-is whole-secret rotation only. For real workloads today, use
+driven admin, Django-style API), the test count is high (~270 unit +
+live integration including the v0.6 multi-tenancy + auth paths and the
+v0.7 ORM ergonomics), and the demo works in a real browser. v0.6
+closed the multi-tenancy gaps (form login on both consoles, packaged
+bootstrap migrations, scope-aware `migrate`, `purge-tenant`,
+`is_superuser` gating). v0.7 closed the day-2 ORM gaps (`save()`
+insert-or-update, `ForeignKey<T>` lazy-load, OR / nested filters,
+per-app migration ledger naming). It is still **not**
+production-ready: no SQLite/MySQL, no streaming queries, no
+benchmarks against the mature alternatives, and session revocation is
+whole-secret rotation only. For real workloads today, use
 [Diesel](https://diesel.rs) or [SeaORM](https://www.sea-ql.org/SeaORM/).
 
 If you want a Django-shaped admin in Rust, this is the only thing that

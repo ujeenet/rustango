@@ -66,6 +66,23 @@ ORM ergonomics catch-up. v0.6 closed the multi-tenancy production gap; v0.7 is t
 - **New `SqlError::EmptyOrBranch`** variant. Raised when the writer encounters a `WhereExpr::Or(vec![])`.
 - 5 live tests in `crates/rustango/tests/where_expr_live.rs`: two-branch OR matches either, OR-then-AND grouping, nested `(A AND B) OR C`, multiple `.where_()` calls keep AND'ing at top level, empty-OR rejected by writer.
 
+### Added — README + demo close-out (slice 5)
+
+- **README** updated end-to-end for v0.7:
+  - New "Day-2 ORM ergonomics" bullet in **What's distinct** covering all four slice 1–4 additions.
+  - **Field attributes** snippet now shows `ForeignKey<User>` (with the legacy `#[rustango(fk = "user", on = "id")] author_id: i64` form noted as still-supported).
+  - **Query API** drops the "no `.or(...)` yet" caveat. Adds an OR / nested-expr example (`User::name.eq("alice").or(User::name.eq("bob"))`) plus a Postgres-grouping note.
+  - **Per-instance** section grew a `save()` example showing `Auto::Unset` → INSERT then `Auto::Set(_)` → UPDATE dispatch, plus a `ForeignKey<T>::get` lazy-load snippet.
+  - **Migrations** section gained a "Per-app ledger naming" subsection covering `migrate::Builder::new().ledger("__myapp__")` and the validation panic.
+  - **Status** mentions v0.7's headline closures.
+  - Cargo dep snippet bumped to `rustango = "0.7"`.
+- **`crates/rustango/examples/v07_ergonomics_demo.rs`** — new ~150-line walk through all four v0.7 features against a fresh DB. `cargo run --example v07_ergonomics_demo` performs `save()` (INSERT then UPDATE), constructs a `ForeignKey<Author>`, lazy-loads it, runs an OR-then-AND query, runs a nested `(active OR (carol AND id > 0))` query, and configures two `migrate::Builder`s with distinct ledger names against the same database. Re-runnable; cleans up after itself.
+
+### Notes
+
+- v0.7 is content-complete on the working tree as of slice 5; ready for a `v0.7` release tag whenever the repo is ready to publish.
+- The previous-version `[v0.6] — Unreleased` block stays as-is below: v0.6 was content-complete + close-outed but never tagged. A future release tag will cover both v0.6 and v0.7 in one go (or split, at the user's call).
+
 ## [v0.6] — Unreleased
 
 Production-readiness for multi-tenancy. v0.5 shipped the headline (tenants as rows, no `DATABASES` dict); v0.6 fills the gaps that block real deployments: form-based login on both consoles, packaged bootstrap migrations, scope-aware `manage migrate`, hard-delete companion to soft-delete, and `is_superuser` gating in the tenant admin. Seven steps, all merged.
