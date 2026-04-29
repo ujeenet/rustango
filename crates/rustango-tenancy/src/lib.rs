@@ -38,6 +38,7 @@
 //! See `memory/v05-multitenancy-roadmap.md` in the project memory for
 //! the full design and slice plan.
 
+pub mod admin;
 mod error;
 pub mod migrate;
 mod org;

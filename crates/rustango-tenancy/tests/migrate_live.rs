@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustango::sql::{sqlx, Auto};
 use rustango::migrate as rmig;
-use rustango::Model as _;
 use rustango_tenancy::{
     migrate_registry, migrate_tenants, Org, StorageMode, TenantPools,
 };
