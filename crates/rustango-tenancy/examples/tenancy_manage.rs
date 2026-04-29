@@ -38,6 +38,12 @@
 //! # rustango-migrate manage runner against the registry pool:
 //! cargo run --example tenancy_manage -p rustango-tenancy -- showmigrations
 //! cargo run --example tenancy_manage -p rustango-tenancy -- migrate
+//!
+//! # Boot the operator console + tenant admin (Ctrl-C to stop):
+//! cargo run --example tenancy_manage -p rustango-tenancy -- run-server
+//! # Listens on RUSTANGO_BIND (default 0.0.0.0:8080) and routes apex →
+//! # operator console, *.<RUSTANGO_APEX_DOMAIN> → tenant admin.
+//! # `runserver` is an alias for `run-server` (matches Django muscle memory).
 //! ```
 //!
 //! ## What it bootstraps on first run

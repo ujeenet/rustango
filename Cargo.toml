@@ -25,7 +25,7 @@ rustango-tenancy = { version = "0.1.0", path = "crates/rustango-tenancy" }
 rustango         = { version = "0.1.0", path = "crates/rustango" }
 
 # Async runtime
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
 
 # DB
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "uuid"] }

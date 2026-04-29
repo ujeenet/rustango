@@ -50,6 +50,7 @@ pub mod password;
 mod pools;
 mod resolver;
 mod secrets;
+pub mod server;
 
 pub use auth::{authenticate_operator, authenticate_user, Operator, User};
 
