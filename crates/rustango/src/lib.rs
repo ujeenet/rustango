@@ -54,3 +54,10 @@ pub use sql::Auto;
 /// compile time, for shipping a single-binary distribution. Pair
 /// with [`migrate::migrate_embedded`].
 pub use rustango_macros::embed_migrations;
+
+/// `#[derive(Form)]` — populates `forms::FormStruct` so a struct
+/// can be parsed directly from an HTTP form payload (slice 8.4B).
+/// Re-exported only when the `forms` feature is on so the proc-
+/// macro reference doesn't pull a missing trait into scope.
+#[cfg(feature = "forms")]
+pub use rustango_macros::Form;

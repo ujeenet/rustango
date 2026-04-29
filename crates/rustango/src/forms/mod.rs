@@ -33,6 +33,27 @@ use std::collections::HashMap;
 
 use crate::core::{FieldSchema, FieldType, SqlValue};
 
+/// Trait every `#[derive(Form)]` struct implements (slice 8.4B).
+///
+/// `parse` consumes a string-keyed HashMap (the shape axum's
+/// `Form<HashMap<String, String>>` extractor produces) and returns
+/// either the typed struct or a [`FormError`] describing which field
+/// failed and why.
+///
+/// The macro generates the parse body — users normally never name
+/// this trait, they call `MyForm::parse(&form_map)?` directly.
+pub trait FormStruct: Sized {
+    /// Parse a payload into the struct. Returns the first failure
+    /// encountered (one error at a time, like Django's
+    /// `form.is_valid()`). v0.8 ships single-error-mode; v0.9 may
+    /// add a multi-error variant if it earns its keep.
+    ///
+    /// # Errors
+    /// Returns [`FormError`] for missing required fields, type-parse
+    /// failures, or validator violations.
+    fn parse(form: &std::collections::HashMap<String, String>) -> Result<Self, FormError>;
+}
+
 /// Errors raised while turning a form payload into IR values.
 ///
 /// Public surface (slice 8.4A); admin's previous internal `FormError`

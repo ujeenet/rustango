@@ -23,6 +23,41 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
         .into()
 }
 
+/// Derive `rustango::forms::FormStruct` (slice 8.4B). Generates a
+/// `parse(&HashMap<String, String>) -> Result<Self, FormError>` impl
+/// that walks every named field and:
+///
+/// * Parses the string value into the field's Rust type (`String`,
+///   `i32`, `i64`, `f32`, `f64`, `bool`, plus `Option<T>` for the
+///   nullable case).
+/// * Applies any `#[form(min = ..)]` / `#[form(max = ..)]` /
+///   `#[form(min_length = ..)]` / `#[form(max_length = ..)]`
+///   validators in declaration order, returning `FormError::Parse`
+///   on the first failure.
+///
+/// Example:
+///
+/// ```ignore
+/// #[derive(Form)]
+/// pub struct CreateItemForm {
+///     #[form(min_length = 1, max_length = 64)]
+///     pub name: String,
+///     #[form(min = 0, max = 150)]
+///     pub age: i32,
+///     pub active: bool,
+///     pub email: Option<String>,
+/// }
+///
+/// let parsed = CreateItemForm::parse(&form_map)?;
+/// ```
+#[proc_macro_derive(Form, attributes(form))]
+pub fn derive_form(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    expand_form(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 /// Bake every `*.json` migration file in a directory into the binary
 /// at compile time. Returns a `&'static [(&'static str, &'static str)]`
 /// of `(name, json_content)` pairs, lex-sorted by file stem.
@@ -1407,4 +1442,388 @@ fn to_snake_case(s: &str) -> String {
         }
     }
     out
+}
+
+// ============================================================
+//  #[derive(Form)]  —  slice 8.4B
+// ============================================================
+
+/// Per-field `#[form(...)]` attributes recognised by the derive.
+#[derive(Default)]
+struct FormFieldAttrs {
+    min: Option<i64>,
+    max: Option<i64>,
+    min_length: Option<u32>,
+    max_length: Option<u32>,
+}
+
+/// Detected shape of a form field's Rust type.
+#[derive(Clone, Copy)]
+enum FormFieldKind {
+    String,
+    I32,
+    I64,
+    F32,
+    F64,
+    Bool,
+}
+
+impl FormFieldKind {
+    fn parse_method(self) -> &'static str {
+        match self {
+            Self::I32 => "i32",
+            Self::I64 => "i64",
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+            // String + Bool don't go through `str::parse`; the codegen
+            // handles them inline.
+            Self::String | Self::Bool => "",
+        }
+    }
+}
+
+fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
+    let struct_name = &input.ident;
+
+    let Data::Struct(data) = &input.data else {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            "Form can only be derived on structs",
+        ));
+    };
+    let Fields::Named(named) = &data.fields else {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            "Form requires a struct with named fields",
+        ));
+    };
+
+    let mut field_blocks: Vec<TokenStream2> = Vec::with_capacity(named.named.len());
+    let mut field_idents: Vec<&syn::Ident> = Vec::with_capacity(named.named.len());
+
+    for field in &named.named {
+        let ident = field
+            .ident
+            .as_ref()
+            .ok_or_else(|| syn::Error::new(field.span(), "tuple structs are not supported"))?;
+        let attrs = parse_form_field_attrs(field)?;
+        let (kind, nullable) = detect_form_field(&field.ty, field.span())?;
+
+        let name_lit = ident.to_string();
+        let parse_block = render_form_field_parse(ident, &name_lit, kind, nullable, &attrs);
+        field_blocks.push(parse_block);
+        field_idents.push(ident);
+    }
+
+    Ok(quote! {
+        impl ::rustango::forms::FormStruct for #struct_name {
+            fn parse(
+                form: &::std::collections::HashMap<::std::string::String, ::std::string::String>,
+            ) -> ::core::result::Result<Self, ::rustango::forms::FormError> {
+                #( #field_blocks )*
+                ::core::result::Result::Ok(Self {
+                    #( #field_idents ),*
+                })
+            }
+        }
+    })
+}
+
+fn parse_form_field_attrs(field: &syn::Field) -> syn::Result<FormFieldAttrs> {
+    let mut out = FormFieldAttrs::default();
+    for attr in &field.attrs {
+        if !attr.path().is_ident("form") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("min") {
+                let lit: syn::LitInt = meta.value()?.parse()?;
+                out.min = Some(lit.base10_parse::<i64>()?);
+                return Ok(());
+            }
+            if meta.path.is_ident("max") {
+                let lit: syn::LitInt = meta.value()?.parse()?;
+                out.max = Some(lit.base10_parse::<i64>()?);
+                return Ok(());
+            }
+            if meta.path.is_ident("min_length") {
+                let lit: syn::LitInt = meta.value()?.parse()?;
+                out.min_length = Some(lit.base10_parse::<u32>()?);
+                return Ok(());
+            }
+            if meta.path.is_ident("max_length") {
+                let lit: syn::LitInt = meta.value()?.parse()?;
+                out.max_length = Some(lit.base10_parse::<u32>()?);
+                return Ok(());
+            }
+            Err(meta.error(
+                "unknown form attribute (supported: `min`, `max`, `min_length`, `max_length`)",
+            ))
+        })?;
+    }
+    Ok(out)
+}
+
+fn detect_form_field(ty: &Type, span: proc_macro2::Span) -> syn::Result<(FormFieldKind, bool)> {
+    let Type::Path(TypePath { path, qself: None }) = ty else {
+        return Err(syn::Error::new(
+            span,
+            "Form field must be a simple typed path (e.g. `String`, `i32`, `Option<String>`)",
+        ));
+    };
+    let last = path
+        .segments
+        .last()
+        .ok_or_else(|| syn::Error::new(span, "empty type path"))?;
+
+    if last.ident == "Option" {
+        let inner = generic_inner(ty, &last.arguments, "Option")?;
+        let (kind, nested) = detect_form_field(inner, span)?;
+        if nested {
+            return Err(syn::Error::new(
+                span,
+                "nested Option in Form fields is not supported",
+            ));
+        }
+        return Ok((kind, true));
+    }
+
+    let kind = match last.ident.to_string().as_str() {
+        "String" => FormFieldKind::String,
+        "i32" => FormFieldKind::I32,
+        "i64" => FormFieldKind::I64,
+        "f32" => FormFieldKind::F32,
+        "f64" => FormFieldKind::F64,
+        "bool" => FormFieldKind::Bool,
+        other => {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "Form field type `{other}` is not supported in v0.8 — use String / \
+                     i32 / i64 / f32 / f64 / bool, optionally wrapped in Option<…>"
+                ),
+            ));
+        }
+    };
+    Ok((kind, false))
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_form_field_parse(
+    ident: &syn::Ident,
+    name_lit: &str,
+    kind: FormFieldKind,
+    nullable: bool,
+    attrs: &FormFieldAttrs,
+) -> TokenStream2 {
+    // Common helper: pull the raw &str out of the form. Bool's
+    // checkbox semantics (absent = false) are handled inline; every
+    // other type errors with `Missing` for absent required fields,
+    // or yields `None` for absent nullable Option<T> fields.
+    let lookup = quote! {
+        let __raw: ::core::option::Option<&::std::string::String> = form.get(#name_lit);
+    };
+
+    let parsed_value = match kind {
+        FormFieldKind::Bool => quote! {
+            // HTML checkbox: absent = false, anything-non-empty = true,
+            // except literal "false"/"0"/"off"/"no".
+            let __v: bool = match __raw {
+                ::core::option::Option::None => false,
+                ::core::option::Option::Some(__s) => !matches!(
+                    __s.to_ascii_lowercase().as_str(),
+                    "" | "false" | "0" | "off" | "no"
+                ),
+            };
+        },
+        FormFieldKind::String => {
+            if nullable {
+                quote! {
+                    let __v: ::core::option::Option<::std::string::String> = match __raw {
+                        ::core::option::Option::None => ::core::option::Option::None,
+                        ::core::option::Option::Some(__s) if __s.is_empty() => {
+                            ::core::option::Option::None
+                        }
+                        ::core::option::Option::Some(__s) => {
+                            ::core::option::Option::Some(::core::clone::Clone::clone(__s))
+                        }
+                    };
+                }
+            } else {
+                quote! {
+                    let __v: ::std::string::String = match __raw {
+                        ::core::option::Option::Some(__s) if !__s.is_empty() => {
+                            ::core::clone::Clone::clone(__s)
+                        }
+                        _ => {
+                            return ::core::result::Result::Err(
+                                ::rustango::forms::FormError::Missing {
+                                    field: ::std::string::String::from(#name_lit),
+                                }
+                            );
+                        }
+                    };
+                }
+            }
+        }
+        FormFieldKind::I32 | FormFieldKind::I64 | FormFieldKind::F32 | FormFieldKind::F64 => {
+            let parse_ty = syn::Ident::new(kind.parse_method(), proc_macro2::Span::call_site());
+            let ty_lit = kind.parse_method();
+            let parse_expr = quote! {
+                __s.parse::<#parse_ty>().map_err(|__e| {
+                    ::rustango::forms::FormError::Parse {
+                        field: ::std::string::String::from(#name_lit),
+                        ty: #ty_lit,
+                        value: ::core::clone::Clone::clone(__s),
+                        detail: ::std::string::ToString::to_string(&__e),
+                    }
+                })
+            };
+            if nullable {
+                quote! {
+                    let __v: ::core::option::Option<#parse_ty> = match __raw {
+                        ::core::option::Option::None => ::core::option::Option::None,
+                        ::core::option::Option::Some(__s) if __s.is_empty() => {
+                            ::core::option::Option::None
+                        }
+                        ::core::option::Option::Some(__s) => {
+                            ::core::option::Option::Some(#parse_expr?)
+                        }
+                    };
+                }
+            } else {
+                quote! {
+                    let __v: #parse_ty = match __raw {
+                        ::core::option::Option::Some(__s) if !__s.is_empty() => {
+                            #parse_expr?
+                        }
+                        _ => {
+                            return ::core::result::Result::Err(
+                                ::rustango::forms::FormError::Missing {
+                                    field: ::std::string::String::from(#name_lit),
+                                }
+                            );
+                        }
+                    };
+                }
+            }
+        }
+    };
+
+    // Validator emission. min / max only make sense on numeric kinds;
+    // min_length / max_length only on String. We silently ignore
+    // wrong-shape combinations for now (a future commit can validate
+    // attribute-vs-type at macro time).
+    let validators = render_form_validators(name_lit, kind, nullable, attrs);
+
+    quote! {
+        let #ident = {
+            #lookup
+            #parsed_value
+            #validators
+            __v
+        };
+    }
+}
+
+fn render_form_validators(
+    name_lit: &str,
+    kind: FormFieldKind,
+    nullable: bool,
+    attrs: &FormFieldAttrs,
+) -> TokenStream2 {
+    let mut checks: Vec<TokenStream2> = Vec::new();
+
+    let val_ref = if nullable {
+        // Validate the inner value when Some; skip when None.
+        quote! { __v.as_ref() }
+    } else {
+        quote! { ::core::option::Option::Some(&__v) }
+    };
+
+    let is_string = matches!(kind, FormFieldKind::String);
+    let is_numeric = matches!(
+        kind,
+        FormFieldKind::I32 | FormFieldKind::I64 | FormFieldKind::F32 | FormFieldKind::F64
+    );
+
+    if is_string {
+        if let Some(min_len) = attrs.min_length {
+            let min_len_usize = min_len as usize;
+            checks.push(quote! {
+                if let ::core::option::Option::Some(__s) = #val_ref {
+                    if __s.len() < #min_len_usize {
+                        return ::core::result::Result::Err(
+                            ::rustango::forms::FormError::Parse {
+                                field: ::std::string::String::from(#name_lit),
+                                ty: "String",
+                                value: ::core::clone::Clone::clone(__s),
+                                detail: ::std::format!(
+                                    "shorter than min_length {}", #min_len_usize
+                                ),
+                            }
+                        );
+                    }
+                }
+            });
+        }
+        if let Some(max_len) = attrs.max_length {
+            let max_len_usize = max_len as usize;
+            checks.push(quote! {
+                if let ::core::option::Option::Some(__s) = #val_ref {
+                    if __s.len() > #max_len_usize {
+                        return ::core::result::Result::Err(
+                            ::rustango::forms::FormError::Parse {
+                                field: ::std::string::String::from(#name_lit),
+                                ty: "String",
+                                value: ::core::clone::Clone::clone(__s),
+                                detail: ::std::format!(
+                                    "longer than max_length {}", #max_len_usize
+                                ),
+                            }
+                        );
+                    }
+                }
+            });
+        }
+    }
+
+    if is_numeric {
+        if let Some(min) = attrs.min {
+            checks.push(quote! {
+                if let ::core::option::Option::Some(__n) = #val_ref {
+                    let __nf = (*__n) as f64;
+                    if __nf < (#min as f64) {
+                        return ::core::result::Result::Err(
+                            ::rustango::forms::FormError::Parse {
+                                field: ::std::string::String::from(#name_lit),
+                                ty: "numeric",
+                                value: ::std::string::ToString::to_string(__n),
+                                detail: ::std::format!("less than min {}", #min),
+                            }
+                        );
+                    }
+                }
+            });
+        }
+        if let Some(max) = attrs.max {
+            checks.push(quote! {
+                if let ::core::option::Option::Some(__n) = #val_ref {
+                    let __nf = (*__n) as f64;
+                    if __nf > (#max as f64) {
+                        return ::core::result::Result::Err(
+                            ::rustango::forms::FormError::Parse {
+                                field: ::std::string::String::from(#name_lit),
+                                ty: "numeric",
+                                value: ::std::string::ToString::to_string(__n),
+                                detail: ::std::format!("greater than max {}", #max),
+                            }
+                        );
+                    }
+                }
+            });
+        }
+    }
+
+    quote! { #( #checks )* }
 }
