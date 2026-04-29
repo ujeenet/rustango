@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -15,14 +15,14 @@ categories = ["database"]
 
 [workspace.dependencies]
 # Internal
-rustango-core    = { version = "0.1.0", path = "crates/rustango-core" }
-rustango-macros  = { version = "0.1.0", path = "crates/rustango-macros" }
-rustango-query   = { version = "0.1.0", path = "crates/rustango-query" }
-rustango-sql     = { version = "0.1.0", path = "crates/rustango-sql" }
-rustango-migrate = { version = "0.1.0", path = "crates/rustango-migrate" }
-rustango-admin   = { version = "0.1.0", path = "crates/rustango-admin" }
-rustango-tenancy = { version = "0.1.0", path = "crates/rustango-tenancy" }
-rustango         = { version = "0.1.0", path = "crates/rustango" }
+rustango-core    = { version = "0.7.0", path = "crates/rustango-core" }
+rustango-macros  = { version = "0.7.0", path = "crates/rustango-macros" }
+rustango-query   = { version = "0.7.0", path = "crates/rustango-query" }
+rustango-sql     = { version = "0.7.0", path = "crates/rustango-sql" }
+rustango-migrate = { version = "0.7.0", path = "crates/rustango-migrate" }
+rustango-admin   = { version = "0.7.0", path = "crates/rustango-admin" }
+rustango-tenancy = { version = "0.7.0", path = "crates/rustango-tenancy" }
+rustango         = { version = "0.7.0", path = "crates/rustango" }
 
 # Async runtime
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }

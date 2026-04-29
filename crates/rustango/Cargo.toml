@@ -10,6 +10,11 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+# Drop runnable demos + integration-test files from the published
+# tarball — they're useful in-repo but only inflate `crates.io`
+# downloads and pull in heavy dev-deps (axum, tower, etc.) for users
+# who only depend on the library facade.
+exclude = ["examples/", "tests/"]
 
 [lints]
 workspace = true

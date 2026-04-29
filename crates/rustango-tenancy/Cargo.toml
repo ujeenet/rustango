@@ -10,6 +10,10 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+# Drop the runnable demos + live integration tests from the
+# published tarball. `templates/` and `static/` stay — they're baked
+# into the binary via `include_str!` / `include_bytes!`.
+exclude = ["examples/", "tests/"]
 
 [lints]
 workspace = true
