@@ -39,3 +39,11 @@ tower          = { workspace = true }
 http-body-util = { workspace = true }
 axum           = { workspace = true }
 base64         = { workspace = true }
+
+# Multi-file example demonstrating the Django-shape models / views /
+# urls split for downstream user projects (slice 6c). Single-file
+# examples are auto-detected by Cargo; multi-file ones need this
+# explicit declaration.
+[[example]]
+name = "project_layout"
+path = "examples/project_layout/main.rs"

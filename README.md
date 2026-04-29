@@ -294,6 +294,52 @@ If `cargo` complains *"rustc 1.86.0 is not supported"* a Homebrew `rust`
 install is shadowing rustup's 1.88. Run `PATH="$HOME/.cargo/bin:$PATH"
 cargo run --example admin_demo` instead.
 
+## Project layout
+
+rustango projects follow Django's `models / views / urls` shape. The
+recommended structure for a downstream binary:
+
+```text
+your-app/
+├── Cargo.toml
+└── src/
+    ├── main.rs        — boots the binary, ties everything together
+    ├── models.rs      — every #[derive(Model)] lives here; populates
+    │                    the `inventory` registry the admin walks
+    ├── views.rs       — request handlers (Django-style "views"); take
+    │                    axum extractors, return Html / Json / Redirect
+    └── urls.rs        — single `pub fn router(pool) -> Router` that
+                         maps paths → handlers and nests the auto-admin
+```
+
+Every `#[derive(Model)]` you put in `models.rs` shows up in the auto-
+admin without any extra wiring — adding a new model = one struct,
+done. Custom HTTP endpoints (a JSON API, a published-posts feed, a
+custom dashboard) live in `views.rs` and get wired in `urls.rs`
+alongside `rustango::admin::router(pool).nest("/admin", …)`.
+
+The runnable reference for this shape is bundled as a multi-file
+example: [`crates/rustango/examples/project_layout/`](crates/rustango/examples/project_layout/).
+Spin it up with:
+
+```sh
+cargo run --example project_layout
+```
+
+Then visit <http://127.0.0.1:8082/> for the landing page; it links to
+the auto-admin (`/admin`), a couple of custom JSON views, and the
+healthz probe.
+
+The framework's own crates follow the same convention internally:
+
+* [`rustango-admin`](crates/rustango-admin/src/) splits into
+  `urls.rs` (the route table) + `views.rs` (handlers) +
+  `templates.rs` + `helpers.rs` + `errors.rs`.
+* [`rustango-tenancy/src/manage/`](crates/rustango-tenancy/src/manage/)
+  is a directory module with one file per command group:
+  `tenants.rs`, `users.rs`, `migrations.rs`, `server.rs`, plus shared
+  `args.rs`.
+
 ## What's in the box
 
 | crate              | role                                                                       |
