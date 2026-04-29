@@ -41,6 +41,7 @@
 
 mod args;
 mod migrations;
+mod scaffold;
 mod server;
 mod tenants;
 mod users;
@@ -104,6 +105,13 @@ pub async fn run_with_writer<W: Write + Send>(
             server::run_server_cmd(pools, registry_url, &args[1..], writer).await
         }
         "init-tenancy" => migrations::init_tenancy_cmd(dir, writer),
+        // Intercepted before fall-through: tenancy ships its own
+        // manage.rs template in `--with-manage-bin`, wiring
+        // `rustango_tenancy::manage::run` instead of the single-tenant
+        // dispatcher. Plain models/views/urls files are identical
+        // across both crates, so the heavy lifting still runs through
+        // `rustango::migrate::scaffold::startapp`.
+        "startapp" => scaffold::startapp_cmd(&args[1..], writer),
         // Plain `migrate` is scope-aware here — registry-scoped
         // migrations apply to the registry pool first, then tenant-
         // scoped ones fan out across active orgs. Direct fall-through

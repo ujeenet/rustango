@@ -20,6 +20,43 @@ ORM ergonomics catch-up. v0.6 closed the multi-tenancy production gap; v0.7 is t
 - **Ledger-name validation.** `Builder::ledger` panics if the name isn't a valid SQL identifier (`[A-Za-z_][A-Za-z0-9_]*`, ≤ 63 bytes). Configuration error caught at construction time, not deep in a SQL call.
 - 3 live tests in `crates/rustango/tests/migrate_builder_live.rs` cover two-builder isolation (each ledger sees only its own entries; default `applied_set` doesn't see custom-ledger rows), default-Builder parity with the free functions, and synchronous validation panic on a quote-injection name.
 
+### Added — `manage startapp` scaffolder (slice 7)
+
+- **`rustango::migrate::scaffold`** — new public module with
+  `startapp(project_root, opts) -> StartAppReport`. Materializes a
+  Django-shape app module under `src/<name>/`:
+
+  ```text
+  src/<name>/
+    mod.rs       — re-exports models / views / urls
+    models.rs    — starter `#[derive(Model)]` (admin-visible)
+    views.rs     — landing page + healthz handler stubs
+    urls.rs      — `pub fn router(pool) -> Router` nesting the auto-admin
+  ```
+
+  Idempotent: existing files are reported as `skipped` and left
+  untouched. Parent directories created on demand. App name is
+  validated against `[A-Za-z_][A-Za-z0-9_]*`.
+
+- **`manage startapp <name> [--with-manage-bin]`** — new verb in
+  `rustango::migrate::manage`. With `--with-manage-bin`, additionally
+  writes `src/bin/manage.rs` carrying the standard 5-line dispatcher
+  boilerplate (`rustango::migrate::manage::run`).
+
+- **`rustango_tenancy::manage startapp …`** — sister verb in the
+  tenancy dispatcher. Same models/views/urls files (delegates to
+  `rustango::migrate::scaffold::startapp`) but the
+  `--with-manage-bin` template wires `rustango_tenancy::manage::run`
+  + `TenantPools::new(...)` instead of the single-tenant dispatcher,
+  so the resulting binary recognizes `create-tenant` /
+  `migrate-tenants` / `run-server` / etc.
+
+- 5 unit tests in `crates/rustango-migrate/src/scaffold.rs` (writes,
+  idempotency, manage-bin template, name validation, mod template
+  shape). End-to-end smoke against the docker postgres — both the
+  single-tenant and tenancy flavors generate the expected file tree
+  and re-run cleanly with all entries reported as skipped.
+
 ### Added — `ForeignKey<T>` lazy-load (slice 3)
 
 - **`rustango::sql::ForeignKey<T>`** — new wrapper type that stores a parent's PK alongside an optional cached `Box<T>`. Replaces the v0.1 `i64` + `#[rustango(fk = "users")]` form for fields that want lazy-load ergonomics:

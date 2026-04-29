@@ -93,6 +93,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "migrate" => migrate(pool, dir, &args[1..], writer).await,
         "downgrade" => downgrade(pool, dir, &args[1..], writer).await,
         "showmigrations" | "status" => showmigrations(pool, dir, writer).await,
+        "startapp" => startapp(&args[1..], writer),
         other => Err(MigrateError::Validation(format!(
             "unknown subcommand: `{other}` (run with --help for usage)"
         ))),
@@ -144,7 +145,21 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         "      Step back N applied migrations (default 1).\n"
     )?;
     writeln!(w, "  showmigrations | status")?;
-    writeln!(w, "      List migrations with [X]/[ ] applied marker.")?;
+    writeln!(w, "      List migrations with [X]/[ ] applied marker.\n")?;
+    writeln!(w, "  startapp <name> [--with-manage-bin]")?;
+    writeln!(
+        w,
+        "      Scaffold a Django-shape app module under src/<name>/"
+    )?;
+    writeln!(
+        w,
+        "      (models.rs + views.rs + urls.rs + mod.rs). Idempotent;"
+    )?;
+    writeln!(
+        w,
+        "      existing files are left untouched. With --with-manage-bin,"
+    )?;
+    writeln!(w, "      also writes src/bin/manage.rs.")?;
     Ok(())
 }
 
@@ -401,4 +416,84 @@ fn describe_op(op: &Operation) -> String {
             format!("data: {head}{ellipsis}")
         }
     }
+}
+
+/// `startapp <name> [--with-manage-bin]` — scaffold a Django-shape app
+/// module under `src/<name>/` (`models.rs` + `views.rs` + `urls.rs` +
+/// `mod.rs`). Idempotent — files that already exist are reported as
+/// skipped. With `--with-manage-bin`, also writes `src/bin/manage.rs`
+/// with the standard single-tenant dispatcher boilerplate.
+fn startapp<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let mut iter = args.iter();
+    let app_name = iter
+        .next()
+        .cloned()
+        .ok_or_else(|| MigrateError::Validation(usage()))?;
+    let mut with_manage_bin = false;
+    for arg in iter {
+        match arg.as_str() {
+            "--with-manage-bin" => with_manage_bin = true,
+            "--help" | "-h" => {
+                writeln!(w, "{}", usage())?;
+                return Ok(());
+            }
+            other => {
+                return Err(MigrateError::Validation(format!(
+                    "startapp: unknown argument `{other}` (run --help for usage)"
+                )));
+            }
+        }
+    }
+    let opts = crate::scaffold::StartAppOptions {
+        app_name: app_name.clone(),
+        manage_bin: with_manage_bin.then_some(crate::scaffold::SINGLE_TENANT_MANAGE_BIN),
+    };
+    // Project root = current working directory. Most users run
+    // `cargo run --bin manage -- startapp …` from the project root,
+    // which is exactly where Cargo.toml lives. Document this in the
+    // help string so non-default invocations are an explicit `cd`.
+    let cwd = std::env::current_dir()?;
+    let report = crate::scaffold::startapp(&cwd, &opts)?;
+    write_startapp_report(w, &app_name, &report)
+}
+
+fn write_startapp_report<W: Write>(
+    w: &mut W,
+    app_name: &str,
+    report: &crate::scaffold::StartAppReport,
+) -> Result<(), MigrateError> {
+    if report.written.is_empty() && report.skipped.is_empty() {
+        writeln!(w, "startapp: nothing to do")?;
+        return Ok(());
+    }
+    writeln!(w, "startapp `{app_name}`")?;
+    for path in &report.written {
+        writeln!(w, "  + wrote {path}")?;
+    }
+    for path in &report.skipped {
+        writeln!(w, "  · {path} already exists — left untouched")?;
+    }
+    if !report.written.is_empty() {
+        writeln!(w, "next:")?;
+        writeln!(
+            w,
+            "  add `mod {app_name};` to src/main.rs (or src/lib.rs) so the"
+        )?;
+        writeln!(
+            w,
+            "  derive macros' `inventory` registrations are pulled in."
+        )?;
+    }
+    Ok(())
+}
+
+fn usage() -> String {
+    "startapp <name> [--with-manage-bin]\n  \
+     Scaffold a Django-shape app module under src/<name>/ (mod.rs +\n  \
+     models.rs + views.rs + urls.rs). Idempotent: existing files\n  \
+     are left untouched. <name> must be a valid Rust identifier.\n\n  \
+     --with-manage-bin\n  \
+     Also write src/bin/manage.rs with the single-tenant dispatcher\n  \
+     boilerplate. Skipped if the file already exists."
+        .to_owned()
 }
