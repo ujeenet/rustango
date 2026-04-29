@@ -2,7 +2,17 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
-## [Unreleased] — v0.6
+## [Unreleased] — v0.7
+
+ORM ergonomics catch-up. v0.6 closed the multi-tenancy production gap; v0.7 is the day-2 ORM polish — `save()` insert-or-update, OR / nested-expr query filters, `ForeignKey<T>` lazy-load, and per-app migration namespacing. Tracked slice-by-slice.
+
+### Added — `Model::save()` insert-or-update (slice 1)
+
+- **`save(&mut self, &PgPool)`** — derived for any model whose primary key is `Auto<T>`. Dispatches on the in-memory PK: `Auto::Unset` → `INSERT … RETURNING <pk>` (populates the PK from the returned row, same shape as `insert`); `Auto::Set(_)` → `UPDATE … SET <every-non-pk-col> WHERE <pk> = …`. UPDATE matching no row returns `Ok(())` silently (matches Django's `save()` default).
+- **Manually-managed PKs** (e.g. `id: i64` with caller-supplied values) are intentionally not given a `save()` — there's no way to infer insert-vs-update from the in-memory value, so the caller must use `insert` or the QuerySet update builder explicitly.
+- 3 live tests in `crates/rustango/tests/save_live.rs` cover insert-on-unset (PK populated), update-on-set (PK preserved, every non-PK column written), and silent-ok on no-match.
+
+## [v0.6] — Unreleased
 
 Production-readiness for multi-tenancy. v0.5 shipped the headline (tenants as rows, no `DATABASES` dict); v0.6 fills the gaps that block real deployments: form-based login on both consoles, packaged bootstrap migrations, scope-aware `manage migrate`, hard-delete companion to soft-delete, and `is_superuser` gating in the tenant admin. Seven steps, all merged.
 

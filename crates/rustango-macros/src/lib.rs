@@ -329,6 +329,13 @@ struct CollectedFields {
     first_auto_ident: Option<syn::Ident>,
     /// `true` if any field on the struct is `Auto<T>`.
     has_auto: bool,
+    /// `true` when the primary-key field's Rust type is `Auto<T>`.
+    /// Gates `save()` codegen — only Auto PKs let us infer
+    /// insert-vs-update from the in-memory value.
+    pk_is_auto: bool,
+    /// `Assignment` constructors for every non-PK column. Drives the
+    /// UPDATE branch of `save()`.
+    update_assignments: Vec<TokenStream2>,
     primary_key: Option<(syn::Ident, String)>,
     column_entries: Vec<ColumnEntry>,
     /// Rust-side field names, in declaration order. Used to validate
@@ -354,6 +361,8 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
         bulk_auto_uniformity: Vec::new(),
         first_auto_ident: None,
         has_auto: false,
+        pk_is_auto: false,
+        update_assignments: Vec::with_capacity(cap),
         primary_key: None,
         column_entries: Vec::with_capacity(cap),
         field_names: Vec::with_capacity(cap),
@@ -440,6 +449,18 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
                 ));
             }
             out.primary_key = Some((ident.clone(), info.column.clone()));
+            if info.auto {
+                out.pk_is_auto = true;
+            }
+        } else {
+            out.update_assignments.push(quote! {
+                ::rustango::core::Assignment {
+                    column: #column,
+                    value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                        ::core::clone::Clone::clone(&self.#ident)
+                    ),
+                }
+            });
         }
         out.column_entries.push(ColumnEntry {
             ident: ident.clone(),
@@ -482,6 +503,57 @@ fn inherent_impl_tokens(
     primary_key: Option<&(syn::Ident, String)>,
     column_consts: &TokenStream2,
 ) -> TokenStream2 {
+    let save_method = if fields.pk_is_auto {
+        let (pk_ident, pk_column) = primary_key
+            .expect("pk_is_auto implies primary_key is Some");
+        let pk_column_lit = pk_column.as_str();
+        let assignments = &fields.update_assignments;
+        Some(quote! {
+            /// Insert this row if its `Auto<T>` primary key is
+            /// `Unset`, otherwise update the existing row matching the
+            /// PK. Mirrors Django's `save()` — caller doesn't need to
+            /// pick `insert` vs the bulk-update path manually.
+            ///
+            /// On the insert branch, populates the PK from `RETURNING`
+            /// (same behavior as `insert`). On the update branch,
+            /// writes every non-PK column back; if no row matches the
+            /// PK, returns `Ok(())` silently.
+            ///
+            /// Only generated when the primary key is declared as
+            /// `Auto<T>`. Models with a manually-managed PK must use
+            /// `insert` or the QuerySet update builder.
+            ///
+            /// # Errors
+            /// Returns [`::rustango::sql::ExecError`] for SQL-writing
+            /// or driver failures.
+            pub async fn save(
+                &mut self,
+                pool: &::rustango::sql::sqlx::PgPool,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                if matches!(self.#pk_ident, ::rustango::sql::Auto::Unset) {
+                    return self.insert(pool).await;
+                }
+                let _query = ::rustango::core::UpdateQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    set: ::std::vec![ #( #assignments ),* ],
+                    filters: ::std::vec![
+                        ::rustango::core::Filter {
+                            column: #pk_column_lit,
+                            op: ::rustango::core::Op::Eq,
+                            value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
+                            ),
+                        }
+                    ],
+                };
+                let _ = ::rustango::sql::update(pool, &_query).await?;
+                ::core::result::Result::Ok(())
+            }
+        })
+    } else {
+        None
+    };
+
     let pk_methods = primary_key.map(|(pk_ident, pk_column)| {
         let pk_column_lit = pk_column.as_str();
         quote! {
@@ -705,6 +777,8 @@ fn inherent_impl_tokens(
             #insert_method
 
             #bulk_insert_method
+
+            #save_method
 
             #pk_methods
 
