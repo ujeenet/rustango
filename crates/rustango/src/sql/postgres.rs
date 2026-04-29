@@ -45,6 +45,24 @@ impl Dialect for Postgres {
         true
     }
 
+    fn acquire_session_lock_sql(&self) -> Option<String> {
+        Some(format!("SELECT pg_advisory_lock({})", self.placeholder(1)))
+    }
+
+    fn release_session_lock_sql(&self) -> Option<String> {
+        Some(format!(
+            "SELECT pg_advisory_unlock({})",
+            self.placeholder(1)
+        ))
+    }
+
+    fn acquire_xact_lock_sql(&self) -> Option<String> {
+        Some(format!(
+            "SELECT pg_advisory_xact_lock({})",
+            self.placeholder(1)
+        ))
+    }
+
     fn compile_select(&self, query: &SelectQuery) -> Result<CompiledStatement, SqlError> {
         let mut sql = String::new();
         let mut params: Vec<SqlValue> = Vec::new();

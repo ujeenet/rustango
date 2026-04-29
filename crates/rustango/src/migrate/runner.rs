@@ -320,20 +320,30 @@ async fn with_migrate_lock<F, R>(pool: &PgPool, body: F) -> Result<R, MigrateErr
 where
     F: std::future::Future<Output = Result<R, MigrateError>>,
 {
+    use crate::sql::{Dialect as _, Postgres};
+    // Dialect dispatch: Postgres returns the `pg_advisory_lock` SQL;
+    // SQLite (when added in slice 10.5) returns `None` and the body
+    // runs without a session lock (SQLite's single-writer model
+    // achieves the same exclusion via `BEGIN EXCLUSIVE`).
+    let dialect = Postgres;
     let mut lock_conn = pool.acquire().await?;
-    sqlx::query("SELECT pg_advisory_lock($1)")
-        .bind(MIGRATE_LOCK_KEY)
-        .execute(&mut *lock_conn)
-        .await?;
+    if let Some(acquire_sql) = dialect.acquire_session_lock_sql() {
+        sqlx::query(&acquire_sql)
+            .bind(MIGRATE_LOCK_KEY)
+            .execute(&mut *lock_conn)
+            .await?;
+    }
     let result = body.await;
     // Always try to release. If unlock fails (e.g. connection died),
     // Postgres releases on session close so we won't deadlock peers
     // forever — and we want the original error from `result` to
     // propagate, not a noisy unlock error.
-    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
-        .bind(MIGRATE_LOCK_KEY)
-        .execute(&mut *lock_conn)
-        .await;
+    if let Some(release_sql) = dialect.release_session_lock_sql() {
+        let _ = sqlx::query(&release_sql)
+            .bind(MIGRATE_LOCK_KEY)
+            .execute(&mut *lock_conn)
+            .await;
+    }
     result
 }
 
@@ -379,13 +389,19 @@ pub async fn ensure_ledger(pool: &PgPool) -> Result<(), MigrateError> {
 }
 
 async fn ensure_ledger_for(pool: &PgPool, ledger: &str) -> Result<(), MigrateError> {
+    use crate::sql::{Dialect as _, Postgres};
     // Stable arbitrary key — must be the same every call. "RUST" in ASCII hex.
     const LOCK_KEY: i64 = 0x5255_5354;
+    let dialect = Postgres;
     let mut tx = pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(LOCK_KEY)
-        .execute(&mut *tx)
-        .await?;
+    // Postgres returns `pg_advisory_xact_lock(...)`. SQLite returns
+    // `None` (its `BEGIN` already gates concurrent CREATE TABLE).
+    if let Some(xact_lock_sql) = dialect.acquire_xact_lock_sql() {
+        sqlx::query(&xact_lock_sql)
+            .bind(LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
+    }
     let create_sql = format!(
         "CREATE TABLE IF NOT EXISTS {ledger} (\
          name TEXT PRIMARY KEY, \

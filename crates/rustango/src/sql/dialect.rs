@@ -103,6 +103,45 @@ pub trait Dialect {
         false
     }
 
+    // ====== Advisory locks ======
+    //
+    // The migration runner serialises concurrent `migrate` /
+    // `migrate_to` / `unapply` / `downgrade` calls behind two locks:
+    // a session-scoped one held for the whole pending-list apply, and
+    // a transaction-scoped one held while creating the ledger table.
+    // Each dialect picks the spelling: Postgres uses
+    // `pg_advisory_lock` / `pg_advisory_xact_lock`; MySQL would use
+    // `GET_LOCK`; SQLite has no native advisory lock but its
+    // single-writer model + `BEGIN EXCLUSIVE` emulates the same
+    // exclusion (the SQLite impl will return `None` for both
+    // session-lock methods and rely on the driver's serialisation).
+
+    /// SQL to acquire a session-scoped advisory lock for `key`.
+    /// `key` is the placeholder slot — `placeholder(1)` for Postgres,
+    /// for example. Return `None` to skip the lock (SQLite); return
+    /// `Some(stmt)` to have the runner execute it on a dedicated
+    /// connection. Default returns `None` so dialects that don't
+    /// override it just don't take the lock.
+    fn acquire_session_lock_sql(&self) -> Option<String> {
+        None
+    }
+
+    /// SQL to release a session-scoped lock acquired via
+    /// [`acquire_session_lock_sql`]. Default `None`. Errors during
+    /// release are logged but never propagated — the original
+    /// migration error is the one users care about.
+    fn release_session_lock_sql(&self) -> Option<String> {
+        None
+    }
+
+    /// SQL to acquire a transaction-scoped advisory lock for `key`,
+    /// auto-released at COMMIT/ROLLBACK. Used by the ledger
+    /// bootstrap so two peers don't both pass `CREATE TABLE IF NOT
+    /// EXISTS` and then collide on the catalog. Default `None`.
+    fn acquire_xact_lock_sql(&self) -> Option<String> {
+        None
+    }
+
     // ====== Compilation (always overridden) ======
 
 
