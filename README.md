@@ -68,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **`manage migrate --dry-run`** prints every DDL/DML the next migrate would run, no side effects.
 - **`DataOp` interleaved with `SchemaChange`** in one migration — Django's "add nullable + backfill + set NOT NULL" recipe lives in one file.
 - **Multi-tenancy without a `DATABASES` dict** (v0.5) — adding a tenant is `INSERT INTO rustango_orgs (...)`, no restart, no config edit, no redeploy. See below.
+- **Per-tenant auth + `is_superuser` gating out of the box** (v0.6) — superusers get read/write admin, non-superusers see read-only views, anon traffic redirects to `/__login`. Same HMAC-SHA256 session for the operator console at the apex.
 - Postgres-only by design. Single dev hobby project; for multi-DB ORMs use [Diesel](https://diesel.rs) or [SeaORM](https://www.sea-ql.org).
 
 ## Multi-tenancy (v0.5, opt-in via `rustango-tenancy`)
@@ -77,15 +78,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```toml
 # Cargo.toml
 [dependencies]
-rustango = "0.5"
-rustango-tenancy = "0.5"   # opt-in
+rustango = "0.6"
+rustango-tenancy = "0.6"   # opt-in
 ```
+
+> The fastest path: drop a 5-line `src/bin/manage.rs` and run
+> `cargo run --bin manage -- run-server`. That ships the recommended
+> wiring (operator console at the apex, tenant admin at every
+> subdomain, host-based dispatch, signal-driven shutdown) with one
+> command. The snippet below is the manual form for projects that
+> need a custom router shape.
 
 ```rust
 use std::sync::Arc;
 use rustango::sql::sqlx::PgPool;
 use rustango_tenancy::{
-    admin::TenantAdminBuilder, ChainResolver, TenantPools,
+    admin::TenantAdminBuilder,
+    operator_console::{self, SessionSecret},
+    ChainResolver, TenantPools,
 };
 
 #[tokio::main]
@@ -102,16 +112,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // in if you can't get wildcard DNS / TLS).
     let resolver = ChainResolver::standard("app.example.com");
 
-    // Tenant admin under each subdomain.
+    // One signing key for both consoles (distinct cookie names keep
+    // them isolated). Reads RUSTANGO_SESSION_SECRET (base64, ≥32 bytes)
+    // or falls back to a random key with a tracing::warn.
+    let secret = SessionSecret::from_env_or_random();
+
+    // Tenant admin under each subdomain — with per-tenant auth.
     let tenant = TenantAdminBuilder::new(pools.clone(), registry_url, resolver)
         .read_only(["audit_log"])
+        .with_session(secret.clone())
         .build();
 
-    // Operator UI bypasses the resolver — `/operator/*` reaches the
-    // registry directly so main-app admins can manage every tenant.
-    let app = axum::Router::new()
-        .nest("/operator", rustango::admin::router(registry.clone()))
-        .merge(tenant);
+    // Operator console at the apex: form-based login, sidebar layout,
+    // read-only operator + org views.
+    let operator = operator_console::router(registry.clone(), secret);
+
+    // Host-based dispatch: apex (no subdomain) → operator, anything
+    // else → tenant admin. This sidesteps axum's nest-vs-absolute-href
+    // gotcha and matches the production routing story.
+    let app = axum::Router::new().fallback_service(tower::service_fn({
+        let operator = operator.clone();
+        let tenants = tenant.clone();
+        let apex = "app.example.com".to_owned();
+        move |req: axum::http::Request<axum::body::Body>| {
+            let mut operator = operator.clone();
+            let mut tenants = tenants.clone();
+            let apex = apex.clone();
+            async move {
+                use tower::ServiceExt as _;
+                let host = req
+                    .headers()
+                    .get(axum::http::header::HOST)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.split(':').next().unwrap_or(s).to_owned())
+                    .unwrap_or_default();
+                let resp = if host == apex {
+                    operator.as_service().oneshot(req).await
+                } else {
+                    tenants.as_service().oneshot(req).await
+                };
+                resp.map_err(|e| -> std::convert::Infallible {
+                    panic!("axum router service is Infallible: {e}")
+                })
+            }
+        }
+    }));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     axum::serve(listener, app).await?;
@@ -129,7 +174,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 > `cargo run --example tenancy_manage -p rustango-tenancy --`.
 
 ```sh
-# Hand out a slug + storage mode.
+# First-run bootstrap. Writes packaged migrations into ./migrations
+# and applies the registry-scoped one (creates rustango_orgs +
+# rustango_operators with UNIQUE constraints). Idempotent — re-runs
+# leave existing files alone.
+cargo run --bin manage -- init-tenancy
+cargo run --bin manage -- migrate
+
+# Hand out a slug + storage mode. Without --no-migrate, the packaged
+# tenant bootstrap runs against the new schema so rustango_users
+# exists from the start.
 RUSTANGO_APEX_DOMAIN=app.example.com cargo run --bin manage -- \
     create-tenant acme --mode schema
 
@@ -142,6 +196,13 @@ cargo run --bin manage -- list-tenants
 cargo run --bin manage -- migrate-tenants
 cargo run --bin manage -- create-operator admin --password ...
 cargo run --bin manage -- create-user acme alice --password ... --superuser
+
+# Soft-delete a tenant (data preserved, sets active=false).
+cargo run --bin manage -- drop-tenant acme --confirm acme
+
+# Hard-delete (UNRECOVERABLE — drops the schema CASCADE).
+# Database-mode tenants additionally require --purge-database.
+cargo run --bin manage -- purge-tenant acme --confirm acme
 
 # Boot the operator console + tenant admin (Ctrl-C to stop):
 cargo run --bin manage -- run-server
@@ -164,6 +225,36 @@ each session.
 - `database` — tenant data lives in a fully separate Postgres database (different host is fine). Strong isolation, per-tenant pool. The connection URL goes through a pluggable `SecretsResolver` — `env://VAR_NAME` works out of the box; HashiCorp Vault / AWS Secrets Manager / Azure Key Vault adapters land as separate crates implementing the trait.
 
 **Hard wall between identity domains.** Operators (`rustango_operators`, registry) and per-tenant Users (`rustango_users` in the tenant's storage) are strictly separate. Argon2id-hashed passwords. An operator's credentials never authenticate against a tenant; a tenant superuser's credentials never reach `/operator`. Browser cookie isolation by subdomain plus the in-code wall gives defense in depth.
+
+**Per-tenant auth + `is_superuser` gating** (v0.6). Opt in via
+`TenantAdminBuilder::with_session(SessionSecret)` and the tenant admin
+gets HMAC-SHA256 session cookies + a login form at `/__login`. Anon
+traffic to a tenant URL → `303 → /__login?next=<path>`. Authenticated
+**superusers** see full read/write admin; **non-superusers** see a
+read-only admin (list/detail render, mutating routes 403,
+write-buttons hidden). The cookie's `slug` field binds it to one
+tenant — a cookie minted at `acme.localhost` can't authenticate at
+`globex.localhost`. The same `SessionSecret` signs both consoles
+(different cookie names + payload shapes keep them isolated), so a
+single `RUSTANGO_SESSION_SECRET` env var covers everything.
+
+```rust
+use rustango_tenancy::{
+    admin::TenantAdminBuilder,
+    operator_console::SessionSecret,
+};
+
+let secret = SessionSecret::from_env_or_random();
+let tenant = TenantAdminBuilder::new(pools, registry_url, resolver)
+    .with_session(secret)            // ← anon redirect, non-su read-only
+    .build();
+```
+
+The operator UI at the apex ships its own login form via
+`rustango_tenancy::operator_console::router(registry, secret)` —
+form-based, sidebar layout, read-only `/operators` and `/orgs` views,
+embedded `rustango.png` brand asset. Mutations stay on the CLI so
+side-effects (CREATE SCHEMA, migrations) happen atomically.
 
 **Subdomain-first routing**, with `*.localhost` for dev:
 
@@ -388,12 +479,15 @@ diffs can't tell a rename from a drop+add).
 ## Status
 
 This is a hobbyist project. The shape is novel for Rust ORMs (registry-
-driven admin, Django-style API), the test count is high (~200 unit +
-live integration), and the demo works in a real browser. It is
-**not** production-ready: there is no per-user auth, no SQLite/MySQL,
-no streaming queries, and no benchmarks against the mature alternatives.
-For real workloads today, use [Diesel](https://diesel.rs) or
-[SeaORM](https://www.sea-ql.org/SeaORM/).
+driven admin, Django-style API), the test count is high (~250 unit +
+live integration including the v0.6 multi-tenancy + auth paths), and
+the demo works in a real browser. v0.6 closed the multi-tenancy gaps
+(form login on both consoles, packaged bootstrap migrations,
+scope-aware `migrate`, `purge-tenant`, `is_superuser` gating). It is
+still **not** production-ready: no SQLite/MySQL, no streaming queries,
+no benchmarks against the mature alternatives, and session revocation
+is whole-secret rotation only. For real workloads today, use
+[Diesel](https://diesel.rs) or [SeaORM](https://www.sea-ql.org/SeaORM/).
 
 If you want a Django-shaped admin in Rust, this is the only thing that
 exists.
