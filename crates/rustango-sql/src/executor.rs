@@ -218,7 +218,7 @@ impl<T: Model + Send> Counter<T> for QuerySet<T> {
             pool,
             &CountQuery {
                 model: select.model,
-                filters: select.filters,
+                where_clause: select.where_clause,
             },
         )
         .await

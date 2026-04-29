@@ -10,7 +10,7 @@ use std::marker::PhantomData;
 
 use rustango_core::{
     Assignment, DeleteQuery, Filter, Model, ModelSchema, Op, QueryError, SelectQuery, SqlValue,
-    TypedAssignment, TypedFilter, UpdateQuery,
+    TypedAssignment, TypedExpr, UpdateQuery, WhereExpr,
 };
 
 /// A lazy builder for a `SELECT` over `T`.
@@ -31,12 +31,17 @@ pub struct QuerySet<T: Model> {
 }
 
 /// Filter accumulator entry — keeps insertion order across string-keyed and
-/// typed filter calls.
+/// typed filter calls. Each entry contributes one node to the final
+/// `WhereExpr::And` clause.
 enum PendingFilter {
     /// String-keyed; resolved against the schema at `compile` time.
     Raw(RawFilter),
     /// Already resolved by a typed [`Column`](rustango_core::Column).
     Resolved(Filter),
+    /// Typed sub-expression (built via `.and()` / `.or()` on the
+    /// typed-column API). Already validated; contributes a whole
+    /// sub-tree to the WHERE clause.
+    Expr(WhereExpr),
 }
 
 #[derive(Debug, Clone)]
@@ -103,12 +108,26 @@ impl<T: Model> QuerySet<T> {
         self.filter(field, Op::Eq, value)
     }
 
-    /// Append a typed predicate built via a [`Column`](rustango_core::Column)
-    /// reference (e.g. `User::id.gt(10)`).
+    /// Append a typed predicate or boolean expression built via the
+    /// [`Column`](rustango_core::Column) API. Accepts either a single
+    /// [`TypedFilter`](rustango_core::TypedFilter) (`User::id.gt(10)`)
+    /// or a composed [`TypedExpr`] (`User::id.eq(1).or(User::id.eq(2))`).
+    /// Every `.where_()` call AND-joins its argument into the
+    /// queryset's accumulated WHERE clause.
     #[must_use]
-    pub fn where_(mut self, predicate: TypedFilter<T>) -> Self {
-        self.pending
-            .push(PendingFilter::Resolved(predicate.into_filter()));
+    pub fn where_<E: Into<TypedExpr<T>>>(mut self, predicate: E) -> Self {
+        let expr = predicate.into().into_expr();
+        // Hoist a bare predicate into the legacy `Resolved` slot so
+        // the resulting WhereExpr stays a flat AND-of-predicates for
+        // simple chains — preserves the v0.6 `as_flat_and()` shape.
+        match expr {
+            WhereExpr::Predicate(filter) => {
+                self.pending.push(PendingFilter::Resolved(filter));
+            }
+            other => {
+                self.pending.push(PendingFilter::Expr(other));
+            }
+        }
         self
     }
 
@@ -121,10 +140,10 @@ impl<T: Model> QuerySet<T> {
     /// value's type does not match the field's declared type.
     pub fn compile(self) -> Result<SelectQuery, QueryError> {
         let model: &'static ModelSchema = T::SCHEMA;
-        let filters = resolve_pending(model, self.pending)?;
+        let where_clause = resolve_pending(model, self.pending)?;
         Ok(SelectQuery {
             model,
-            filters,
+            where_clause,
             search: None,
             joins: vec![],
             limit: self.limit,
@@ -132,14 +151,17 @@ impl<T: Model> QuerySet<T> {
         })
     }
 
-    /// Lower this queryset to a `DeleteQuery` — same filters, no projection.
+    /// Lower this queryset to a `DeleteQuery` — same WHERE clause, no projection.
     ///
     /// # Errors
     /// As [`QuerySet::compile`].
     pub fn compile_delete(self) -> Result<DeleteQuery, QueryError> {
         let model: &'static ModelSchema = T::SCHEMA;
-        let filters = resolve_pending(model, self.pending)?;
-        Ok(DeleteQuery { model, filters })
+        let where_clause = resolve_pending(model, self.pending)?;
+        Ok(DeleteQuery {
+            model,
+            where_clause,
+        })
     }
 
     /// Start an `UpdateBuilder` carrying this queryset's filters as the WHERE clause.
@@ -204,12 +226,12 @@ impl<T: Model> UpdateBuilder<T> {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let filters = resolve_pending(model, self.qs.pending)?;
+        let where_clause = resolve_pending(model, self.qs.pending)?;
 
         Ok(UpdateQuery {
             model,
             set: assignments,
-            filters,
+            where_clause,
         })
     }
 }
@@ -217,14 +239,22 @@ impl<T: Model> UpdateBuilder<T> {
 fn resolve_pending(
     model: &'static ModelSchema,
     pending: Vec<PendingFilter>,
-) -> Result<Vec<Filter>, QueryError> {
-    pending
-        .into_iter()
-        .map(|p| match p {
-            PendingFilter::Raw(raw) => resolve_filter(model, raw),
-            PendingFilter::Resolved(filter) => Ok(filter),
-        })
-        .collect()
+) -> Result<WhereExpr, QueryError> {
+    let mut nodes: Vec<WhereExpr> = Vec::with_capacity(pending.len());
+    for entry in pending {
+        match entry {
+            PendingFilter::Raw(raw) => {
+                nodes.push(WhereExpr::Predicate(resolve_filter(model, raw)?));
+            }
+            PendingFilter::Resolved(filter) => {
+                nodes.push(WhereExpr::Predicate(filter));
+            }
+            PendingFilter::Expr(expr) => {
+                nodes.push(expr);
+            }
+        }
+    }
+    Ok(WhereExpr::And(nodes))
 }
 
 fn resolve_filter(model: &'static ModelSchema, raw: RawFilter) -> Result<Filter, QueryError> {

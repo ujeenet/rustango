@@ -8,7 +8,7 @@
 
 use std::marker::PhantomData;
 
-use crate::{Assignment, Filter, Model, Op, SqlValue};
+use crate::{Assignment, Filter, Model, Op, SqlValue, WhereExpr};
 
 /// A typed reference to a single scalar column on `Self::Model`.
 ///
@@ -116,6 +116,112 @@ impl<M: Model> TypedFilter<M> {
     #[must_use]
     pub fn into_filter(self) -> Filter {
         self.inner
+    }
+
+    /// Compose with another predicate or expression via SQL `AND`.
+    /// Returns a [`TypedExpr`] so further `.and()` / `.or()` calls
+    /// can chain on the result.
+    #[must_use]
+    pub fn and<E: Into<TypedExpr<M>>>(self, rhs: E) -> TypedExpr<M> {
+        TypedExpr::from(self).and(rhs)
+    }
+
+    /// Compose with another predicate or expression via SQL `OR`.
+    /// Returns a [`TypedExpr`] so further `.and()` / `.or()` calls
+    /// can chain on the result.
+    #[must_use]
+    pub fn or<E: Into<TypedExpr<M>>>(self, rhs: E) -> TypedExpr<M> {
+        TypedExpr::from(self).or(rhs)
+    }
+}
+
+impl<M: Model> From<TypedFilter<M>> for TypedExpr<M> {
+    fn from(tf: TypedFilter<M>) -> Self {
+        Self {
+            inner: WhereExpr::Predicate(tf.inner),
+            _model: PhantomData,
+        }
+    }
+}
+
+/// Typed boolean expression — a [`TypedFilter`] tree composed with
+/// `.and()` / `.or()`. Constructed implicitly from any `TypedFilter`
+/// via `Into`, so callers usually never name this type:
+///
+/// ```ignore
+/// User::objects()
+///     .where_(User::name.eq("alice").or(User::name.eq("bob")))
+///     .where_(User::active.eq(true))
+///     .fetch(&pool).await?;
+/// // → WHERE ("name" = $1 OR "name" = $2) AND "active" = $3
+/// ```
+///
+/// Each `.where_(…)` call AND-joins its expression into the
+/// queryset's accumulated WHERE clause; OR is contained inside the
+/// expression you pass to a single `.where_()` call.
+pub struct TypedExpr<M: Model> {
+    pub(crate) inner: WhereExpr,
+    _model: PhantomData<fn() -> M>,
+}
+
+impl<M: Model> TypedExpr<M> {
+    /// Unwrap to the dialect-neutral expression form.
+    #[must_use]
+    pub fn into_expr(self) -> WhereExpr {
+        self.inner
+    }
+
+    /// Compose with `AND`. Adjacent `And` nodes are flattened so the
+    /// resulting tree stays shallow:
+    /// `a.and(b).and(c)` → `And(vec![a, b, c])`, not `And(And(a, b), c)`.
+    #[must_use]
+    pub fn and<E: Into<Self>>(self, rhs: E) -> Self {
+        let rhs = rhs.into();
+        let inner = match (self.inner, rhs.inner) {
+            (WhereExpr::And(mut a), WhereExpr::And(b)) => {
+                a.extend(b);
+                WhereExpr::And(a)
+            }
+            (WhereExpr::And(mut a), b) => {
+                a.push(b);
+                WhereExpr::And(a)
+            }
+            (a, WhereExpr::And(mut b)) => {
+                b.insert(0, a);
+                WhereExpr::And(b)
+            }
+            (a, b) => WhereExpr::And(vec![a, b]),
+        };
+        Self {
+            inner,
+            _model: PhantomData,
+        }
+    }
+
+    /// Compose with `OR`. Adjacent `Or` nodes are flattened so the
+    /// resulting tree stays shallow.
+    #[must_use]
+    pub fn or<E: Into<Self>>(self, rhs: E) -> Self {
+        let rhs = rhs.into();
+        let inner = match (self.inner, rhs.inner) {
+            (WhereExpr::Or(mut a), WhereExpr::Or(b)) => {
+                a.extend(b);
+                WhereExpr::Or(a)
+            }
+            (WhereExpr::Or(mut a), b) => {
+                a.push(b);
+                WhereExpr::Or(a)
+            }
+            (a, WhereExpr::Or(mut b)) => {
+                b.insert(0, a);
+                WhereExpr::Or(b)
+            }
+            (a, b) => WhereExpr::Or(vec![a, b]),
+        };
+        Self {
+            inner,
+            _model: PhantomData,
+        }
     }
 }
 

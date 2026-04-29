@@ -1,7 +1,7 @@
 //! Covers FK/O2O attributes, the inherent `objects()` shortcut, and
 //! `QuerySet::compile()` validation against the schema.
 
-use rustango::core::{FieldType, Model as _, Op, QueryError, Relation, SqlValue};
+use rustango::core::{FieldType, Filter, Model as _, Op, QueryError, Relation, SqlValue};
 use rustango::Model;
 
 #[derive(Model)]
@@ -66,12 +66,13 @@ fn objects_compiles_with_resolved_columns() {
         .unwrap();
 
     assert_eq!(q.model.name, "User");
-    assert_eq!(q.filters.len(), 2);
-    assert_eq!(q.filters[0].column, "name");
-    assert_eq!(q.filters[0].op, Op::Eq);
-    assert_eq!(q.filters[0].value, SqlValue::String("alice".into()));
-    assert_eq!(q.filters[1].column, "is_active");
-    assert_eq!(q.filters[1].value, SqlValue::Bool(true));
+    let filters: Vec<&Filter> = q.where_clause.as_flat_and().unwrap();
+    assert_eq!(filters.len(), 2);
+    assert_eq!(filters[0].column, "name");
+    assert_eq!(filters[0].op, Op::Eq);
+    assert_eq!(filters[0].value, SqlValue::String("alice".into()));
+    assert_eq!(filters[1].column, "is_active");
+    assert_eq!(filters[1].value, SqlValue::Bool(true));
 }
 
 #[test]
@@ -106,7 +107,7 @@ fn null_value_skips_type_check() {
         .filter("name", Op::Eq, Option::<String>::None)
         .compile()
         .unwrap();
-    assert_eq!(q.filters[0].value, SqlValue::Null);
+    assert_eq!(q.where_clause.as_flat_and().unwrap()[0].value, SqlValue::Null);
 }
 
 // ---------------- compile_delete ----------------
@@ -118,15 +119,16 @@ fn compile_delete_resolves_filter_columns() {
         .compile_delete()
         .unwrap();
     assert_eq!(query.model.name, "User");
-    assert_eq!(query.filters.len(), 1);
-    assert_eq!(query.filters[0].column, "name");
-    assert_eq!(query.filters[0].value, SqlValue::String("alice".into()));
+    let filters = query.where_clause.as_flat_and().unwrap();
+    assert_eq!(filters.len(), 1);
+    assert_eq!(filters[0].column, "name");
+    assert_eq!(filters[0].value, SqlValue::String("alice".into()));
 }
 
 #[test]
 fn compile_delete_with_no_filters_is_valid() {
     let query = User::objects().compile_delete().unwrap();
-    assert!(query.filters.is_empty());
+    assert!(query.where_clause.is_empty());
 }
 
 #[test]
@@ -162,8 +164,9 @@ fn update_builder_accumulates_set_assignments() {
     assert_eq!(query.set[1].column, "name");
     assert_eq!(query.set[1].value, SqlValue::String("ALICE".into()));
 
-    assert_eq!(query.filters.len(), 1);
-    assert_eq!(query.filters[0].column, "name");
+    let filters = query.where_clause.as_flat_and().unwrap();
+    assert_eq!(filters.len(), 1);
+    assert_eq!(filters[0].column, "name");
 }
 
 #[test]
@@ -218,7 +221,7 @@ fn update_builder_with_no_filters_compiles() {
         .set("is_active", false)
         .compile()
         .unwrap();
-    assert!(query.filters.is_empty());
+    assert!(query.where_clause.is_empty());
     assert_eq!(query.set.len(), 1);
 }
 

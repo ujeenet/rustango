@@ -43,6 +43,29 @@ ORM ergonomics catch-up. v0.6 closed the multi-tenancy production gap; v0.7 is t
 - **v1 limitation**: target's PK must be `i64` (or `Auto<i64>`). `i32` PK targets and the rest of the type matrix are deferred until asked for.
 - 5 unit tests in `crates/rustango-sql/src/foreign_key.rs` (constructors, `pk()`, `Into<SqlValue>`, `into_value`) plus 3 live tests in `crates/rustango/tests/foreign_key_live.rs` (round-trip lazy-load, `loaded()` constructor skips select, missing-target named error).
 
+### Added — OR / nested-expr query filters (slice 4)
+
+- **`WhereExpr` IR** in `rustango-core` — replaces the flat `filters: Vec<Filter>` field on `SelectQuery` / `UpdateQuery` / `DeleteQuery` / `CountQuery` with a `where_clause: WhereExpr` tree:
+  - `WhereExpr::Predicate(Filter)` — leaf.
+  - `WhereExpr::And(Vec<WhereExpr>)` — conjunction. Empty list = no `WHERE` emitted (the unfiltered default).
+  - `WhereExpr::Or(Vec<WhereExpr>)` — disjunction. Empty list rejected at SQL-write time (`SqlError::EmptyOrBranch`) to avoid silently matching nothing.
+- **`TypedExpr<M>`** in `rustango-core` — typed sub-expression with `.and()` / `.or()` combinators. `TypedFilter::and()` / `.or()` lift a single predicate into a `TypedExpr`; chaining is shallow-flattened so `a.and(b).and(c)` produces `And([a,b,c])` rather than `And(And(a,b),c)`.
+- **`QuerySet::where_(impl Into<TypedExpr<T>>)`** — accepts both single `TypedFilter`s (existing v0.6 ergonomics) and composed `TypedExpr`s. Successive `.where_()` calls AND-join their arguments at the top level; OR is contained inside the expression argument:
+
+  ```rust
+  // (name = "alice" OR name = "bob") AND active = true
+  Person::objects()
+      .where_(Person::name.eq("alice").or(Person::name.eq("bob")))
+      .where_(Person::active.eq(true))
+      .fetch(&pool).await?;
+  ```
+- **Postgres writer** renders the tree precedence-aware: top-level expressions emit bare; nested composite children are parenthesized so `And(Predicate(a), Or(Predicate(b), Predicate(c)))` becomes `a AND (b OR c)` instead of the SQL-default-precedence-ambiguous `a AND b OR c`. Single-element AND/OR collapses to its child.
+- **`WhereExpr::as_flat_and(&self) -> Option<Vec<&Filter>>`** — backwards-compat introspection for legacy AND-only WHERE clauses. Returns `Some(predicates)` only when the tree is a flat AND (or single predicate); returns `None` if any `Or` or nesting is present.
+- **`WhereExpr::and_predicates(filters)`** — convenience constructor for the legacy "list of AND-joined predicates" shape, used by callers that build up a `Vec<Filter>` directly (admin pager, the `manage` CLI, downstream apps).
+- **Migrated call sites**: `rustango-admin` (list pager + edit/update/delete row lookups), the macro-generated `delete()` / `save()` codegen, and ~30 tests across `sql.rs` / `queryset.rs` / `typed_columns.rs` / `validation.rs` now build `WhereExpr` instead of `Vec<Filter>`. The string-keyed `.filter("col", Op, val)` API is unchanged in shape.
+- **New `SqlError::EmptyOrBranch`** variant. Raised when the writer encounters a `WhereExpr::Or(vec![])`.
+- 5 live tests in `crates/rustango/tests/where_expr_live.rs`: two-branch OR matches either, OR-then-AND grouping, nested `(A AND B) OR C`, multiple `.where_()` calls keep AND'ing at top level, empty-OR rejected by writer.
+
 ## [v0.6] — Unreleased
 
 Production-readiness for multi-tenancy. v0.5 shipped the headline (tenants as rows, no `DATABASES` dict); v0.6 fills the gaps that block real deployments: form-based login on both consoles, packaged bootstrap migrations, scope-aware `manage migrate`, hard-delete companion to soft-delete, and `is_superuser` gating in the tenant admin. Seven steps, all merged.

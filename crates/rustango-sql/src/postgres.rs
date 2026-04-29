@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use rustango_core::{
     BulkInsertQuery, CountQuery, DeleteQuery, FieldType, Filter, InsertQuery, ModelSchema, Op,
-    SearchClause, SelectQuery, SqlValue, UpdateQuery,
+    SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
 
 use crate::{CompiledStatement, Dialect, SqlError};
@@ -69,7 +69,7 @@ impl Dialect for Postgres {
         write_where_with_search_qualified(
             &mut sql,
             &mut params,
-            &query.filters,
+            &query.where_clause,
             query.search.as_ref(),
             qualify.then_some(query.model.table),
             Some(query.model),
@@ -89,7 +89,7 @@ impl Dialect for Postgres {
         let mut sql = String::from("SELECT COUNT(*) FROM ");
         let mut params: Vec<SqlValue> = Vec::new();
         write_ident(&mut sql, query.model.table);
-        write_where(&mut sql, &mut params, &query.filters, Some(query.model))?;
+        write_where(&mut sql, &mut params, &query.where_clause, Some(query.model))?;
         Ok(CompiledStatement { sql, params })
     }
 
@@ -273,7 +273,7 @@ impl Dialect for Postgres {
             push_param_typed(&mut sql, &mut params, assignment.value.clone(), cast);
         }
 
-        write_where(&mut sql, &mut params, &query.filters, Some(query.model))?;
+        write_where(&mut sql, &mut params, &query.where_clause, Some(query.model))?;
 
         Ok(CompiledStatement { sql, params })
     }
@@ -283,7 +283,7 @@ impl Dialect for Postgres {
         let mut params: Vec<SqlValue> = Vec::new();
         write_ident(&mut sql, query.model.table);
 
-        write_where(&mut sql, &mut params, &query.filters, Some(query.model))?;
+        write_where(&mut sql, &mut params, &query.where_clause, Some(query.model))?;
 
         Ok(CompiledStatement { sql, params })
     }
@@ -292,22 +292,85 @@ impl Dialect for Postgres {
 fn write_where(
     sql: &mut String,
     params: &mut Vec<SqlValue>,
-    filters: &[Filter],
+    where_clause: &WhereExpr,
     model: Option<&'static ModelSchema>,
 ) -> Result<(), SqlError> {
-    if filters.is_empty() {
+    if where_clause.is_empty() {
         return Ok(());
     }
     sql.push_str(" WHERE ");
+    write_where_expr(sql, params, where_clause, None, model)
+}
+
+/// Render a [`WhereExpr`] at the top of a `WHERE` clause — no outer
+/// parens. Children that are themselves composites get parenthesized
+/// in [`write_where_expr`] so precedence between AND and OR survives
+/// nesting.
+fn write_where_expr(
+    sql: &mut String,
+    params: &mut Vec<SqlValue>,
+    expr: &WhereExpr,
+    qualify_with: Option<&str>,
+    model: Option<&'static ModelSchema>,
+) -> Result<(), SqlError> {
+    match expr {
+        WhereExpr::Predicate(filter) => {
+            write_filter_qualified(sql, params, filter, qualify_with, model)
+        }
+        WhereExpr::And(items) => {
+            write_joined(sql, params, items, " AND ", qualify_with, model)
+        }
+        WhereExpr::Or(items) => {
+            if items.is_empty() {
+                return Err(SqlError::EmptyOrBranch);
+            }
+            write_joined(sql, params, items, " OR ", qualify_with, model)
+        }
+    }
+}
+
+fn write_joined(
+    sql: &mut String,
+    params: &mut Vec<SqlValue>,
+    items: &[WhereExpr],
+    sep: &str,
+    qualify_with: Option<&str>,
+    model: Option<&'static ModelSchema>,
+) -> Result<(), SqlError> {
     let mut first = true;
-    for filter in filters {
+    for child in items {
         if !first {
-            sql.push_str(" AND ");
+            sql.push_str(sep);
         }
         first = false;
-        write_filter(sql, params, filter, model)?;
+        write_child(sql, params, child, qualify_with, model)?;
     }
     Ok(())
+}
+
+/// Render a sub-expression. Predicates emit bare; `And`/`Or` get
+/// wrapped in parens so a mixed tree like
+/// `And(Predicate(a), Or(Predicate(b), Predicate(c)))` becomes
+/// `a AND (b OR c)` instead of `a AND b OR c` (which SQL would
+/// regroup as `a AND b OR c` = `(a AND b) OR c`).
+fn write_child(
+    sql: &mut String,
+    params: &mut Vec<SqlValue>,
+    expr: &WhereExpr,
+    qualify_with: Option<&str>,
+    model: Option<&'static ModelSchema>,
+) -> Result<(), SqlError> {
+    match expr {
+        WhereExpr::Predicate(filter) => {
+            write_filter_qualified(sql, params, filter, qualify_with, model)
+        }
+        WhereExpr::And(_) | WhereExpr::Or(_) => {
+            sql.push('(');
+            write_where_expr(sql, params, expr, qualify_with, model)?;
+            sql.push(')');
+            Ok(())
+        }
+    }
 }
 
 /// Append a parenthesized `(col1 ILIKE $N OR col2 ILIKE $N …)` clause
@@ -321,27 +384,23 @@ fn write_where(
 fn write_where_with_search_qualified(
     sql: &mut String,
     params: &mut Vec<SqlValue>,
-    filters: &[Filter],
+    where_clause: &WhereExpr,
     search: Option<&SearchClause>,
     qualify_with: Option<&str>,
     model: Option<&'static ModelSchema>,
 ) -> Result<(), SqlError> {
     let has_search = search.is_some_and(|s| !s.columns.is_empty() && !s.query.is_empty());
-    if filters.is_empty() && !has_search {
+    let has_where = !where_clause.is_empty();
+    if !has_where && !has_search {
         return Ok(());
     }
     sql.push_str(" WHERE ");
-    let mut first = true;
-    for filter in filters {
-        if !first {
-            sql.push_str(" AND ");
-        }
-        first = false;
-        write_filter_qualified(sql, params, filter, qualify_with, model)?;
+    if has_where {
+        write_where_expr(sql, params, where_clause, qualify_with, model)?;
     }
     if has_search {
         let s = search.expect("checked above");
-        if !first {
+        if has_where {
             sql.push_str(" AND ");
         }
         params.push(SqlValue::String(format!("%{}%", s.query)));
@@ -361,15 +420,6 @@ fn write_where_with_search_qualified(
         sql.push(')');
     }
     Ok(())
-}
-
-fn write_filter(
-    sql: &mut String,
-    params: &mut Vec<SqlValue>,
-    filter: &Filter,
-    model: Option<&'static ModelSchema>,
-) -> Result<(), SqlError> {
-    write_filter_qualified(sql, params, filter, None, model)
 }
 
 fn write_filter_qualified(

@@ -536,7 +536,7 @@ fn inherent_impl_tokens(
                 let _query = ::rustango::core::UpdateQuery {
                     model: <Self as ::rustango::core::Model>::SCHEMA,
                     set: ::std::vec![ #( #assignments ),* ],
-                    filters: ::std::vec![
+                    where_clause: ::rustango::core::WhereExpr::Predicate(
                         ::rustango::core::Filter {
                             column: #pk_column_lit,
                             op: ::rustango::core::Op::Eq,
@@ -544,7 +544,7 @@ fn inherent_impl_tokens(
                                 ::core::clone::Clone::clone(&self.#pk_ident)
                             ),
                         }
-                    ],
+                    ),
                 };
                 let _ = ::rustango::sql::update(pool, &_query).await?;
                 ::core::result::Result::Ok(())
@@ -570,7 +570,7 @@ fn inherent_impl_tokens(
             ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
                 let query = ::rustango::core::DeleteQuery {
                     model: <Self as ::rustango::core::Model>::SCHEMA,
-                    filters: ::std::vec![
+                    where_clause: ::rustango::core::WhereExpr::Predicate(
                         ::rustango::core::Filter {
                             column: #pk_column_lit,
                             op: ::rustango::core::Op::Eq,
@@ -578,7 +578,7 @@ fn inherent_impl_tokens(
                                 ::core::clone::Clone::clone(&self.#pk_ident)
                             ),
                         }
-                    ],
+                    ),
                 };
                 ::rustango::sql::delete(pool, &query).await
             }

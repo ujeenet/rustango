@@ -47,7 +47,7 @@ use axum::Json;
 use axum::Router;
 use rustango_core::{
     inventory, CountQuery, DeleteQuery, FieldSchema, Filter, InsertQuery, Join, ModelEntry,
-    ModelSchema, Op, Relation, SearchClause, SelectQuery, SqlValue, UpdateQuery,
+    ModelSchema, Op, Relation, SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
 use rustango_sql::sqlx::{self, PgPool};
 
@@ -287,11 +287,12 @@ async fn table_view(
         }
     });
 
+    let where_clause = WhereExpr::and_predicates(filters.clone());
     let total = rustango_sql::count_rows(
         &state.pool,
         &CountQuery {
             model,
-            filters: filters.clone(),
+            where_clause: where_clause.clone(),
         },
     )
     .await?;
@@ -302,7 +303,7 @@ async fn table_view(
         &state.pool,
         &SelectQuery {
             model,
-            filters: filters.clone(),
+            where_clause,
             search: search.clone(),
             joins,
             limit: Some(PAGE_SIZE),
@@ -391,11 +392,11 @@ async fn detail_view(
         &state.pool,
         &SelectQuery {
             model,
-            filters: vec![Filter {
+            where_clause: WhereExpr::Predicate(Filter {
                 column: pk_field.column,
                 op: Op::Eq,
                 value: pk_value,
-            }],
+            }),
             search: None,
             joins: build_fk_joins(&state, model),
             limit: None,
@@ -510,11 +511,11 @@ async fn edit_form(
         &state.pool,
         &SelectQuery {
             model,
-            filters: vec![Filter {
+            where_clause: WhereExpr::Predicate(Filter {
                 column: pk_field.column,
                 op: Op::Eq,
                 value: pk_value,
-            }],
+            }),
             search: None,
             joins: vec![],
             limit: None,
@@ -568,11 +569,11 @@ async fn update_submit(
     let query = UpdateQuery {
         model,
         set: assignments,
-        filters: vec![Filter {
+        where_clause: WhereExpr::Predicate(Filter {
             column: pk_field.column,
             op: Op::Eq,
             value: pk_value,
-        }],
+        }),
     };
     if let Err(e) = rustango_sql::update(&state.pool, &query).await {
         let html = render_form(model, Some(&form), true, Some(&e.to_string()));
@@ -604,11 +605,11 @@ async fn delete_submit(
         &state.pool,
         &DeleteQuery {
             model,
-            filters: vec![Filter {
+            where_clause: WhereExpr::Predicate(Filter {
                 column: pk_field.column,
                 op: Op::Eq,
                 value: pk_value,
-            }],
+            }),
         },
     )
     .await?;

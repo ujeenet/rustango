@@ -2,7 +2,7 @@
 
 use rustango::core::{
     Assignment, BulkInsertQuery, CountQuery, DeleteQuery, Filter, InsertQuery, Join, Model as _,
-    Op, SearchClause, SelectQuery, SqlValue, UpdateQuery,
+    Op, SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
 use rustango::sql::{Dialect, Postgres, SqlError};
 use rustango::Model;
@@ -321,7 +321,7 @@ fn update_single_set_no_where_runs_table_wide() {
             column: "is_active",
             value: SqlValue::Bool(false),
         }],
-        filters: vec![],
+        where_clause: WhereExpr::And(vec![]),
     };
     let stmt = pg().compile_update(&query).unwrap();
     assert_eq!(stmt.sql, r#"UPDATE "user" SET "is_active" = $1"#);
@@ -342,7 +342,7 @@ fn update_multi_set_with_where_orders_set_then_filter_placeholders() {
                 value: SqlValue::Bool(false),
             },
         ],
-        filters: vec![eq_filter("id", SqlValue::I64(7))],
+        where_clause: WhereExpr::Predicate(eq_filter("id", SqlValue::I64(7))),
     };
     let stmt = pg().compile_update(&query).unwrap();
     assert_eq!(
@@ -367,14 +367,14 @@ fn update_with_multiple_filters_chains_with_and() {
             column: "is_active",
             value: SqlValue::Bool(true),
         }],
-        filters: vec![
+        where_clause: WhereExpr::and_predicates(vec![
             eq_filter("name", SqlValue::String("alice".into())),
             Filter {
                 column: "id",
                 op: Op::Gt,
                 value: SqlValue::I64(0),
             },
-        ],
+        ]),
     };
     let stmt = pg().compile_update(&query).unwrap();
     assert_eq!(
@@ -388,7 +388,7 @@ fn update_with_empty_set_is_rejected() {
     let query = UpdateQuery {
         model: User::SCHEMA,
         set: vec![],
-        filters: vec![eq_filter("id", SqlValue::I64(1))],
+        where_clause: WhereExpr::Predicate(eq_filter("id", SqlValue::I64(1))),
     };
     let err = pg().compile_update(&query).unwrap_err();
     assert!(matches!(err, SqlError::EmptyUpdateSet));
@@ -403,11 +403,11 @@ fn update_propagates_filter_errors() {
             column: "is_active",
             value: SqlValue::Bool(false),
         }],
-        filters: vec![Filter {
+        where_clause: WhereExpr::Predicate(Filter {
             column: "id",
             op: Op::In,
             value: SqlValue::I64(1),
-        }],
+        }),
     };
     let err = pg().compile_update(&query).unwrap_err();
     assert!(matches!(err, SqlError::InRequiresList));
@@ -419,7 +419,7 @@ fn update_propagates_filter_errors() {
 fn delete_with_no_filters_runs_table_wide() {
     let query = DeleteQuery {
         model: User::SCHEMA,
-        filters: vec![],
+        where_clause: WhereExpr::And(vec![]),
     };
     let stmt = pg().compile_delete(&query).unwrap();
     assert_eq!(stmt.sql, r#"DELETE FROM "user""#);
@@ -430,7 +430,7 @@ fn delete_with_no_filters_runs_table_wide() {
 fn delete_with_single_filter() {
     let query = DeleteQuery {
         model: User::SCHEMA,
-        filters: vec![eq_filter("id", SqlValue::I64(42))],
+        where_clause: WhereExpr::Predicate(eq_filter("id", SqlValue::I64(42))),
     };
     let stmt = pg().compile_delete(&query).unwrap();
     assert_eq!(stmt.sql, r#"DELETE FROM "user" WHERE "id" = $1"#);
@@ -441,10 +441,10 @@ fn delete_with_single_filter() {
 fn delete_with_multiple_filters_chains_with_and() {
     let query = DeleteQuery {
         model: User::SCHEMA,
-        filters: vec![
+        where_clause: WhereExpr::and_predicates(vec![
             eq_filter("name", SqlValue::String("alice".into())),
             eq_filter("is_active", SqlValue::Bool(false)),
-        ],
+        ]),
     };
     let stmt = pg().compile_delete(&query).unwrap();
     assert_eq!(
@@ -461,11 +461,11 @@ fn delete_with_multiple_filters_chains_with_and() {
 fn delete_with_in_list_expands_placeholders() {
     let query = DeleteQuery {
         model: User::SCHEMA,
-        filters: vec![Filter {
+        where_clause: WhereExpr::Predicate(Filter {
             column: "id",
             op: Op::In,
             value: SqlValue::List(vec![SqlValue::I64(1), SqlValue::I64(2), SqlValue::I64(3)]),
-        }],
+        }),
     };
     let stmt = pg().compile_delete(&query).unwrap();
     assert_eq!(stmt.sql, r#"DELETE FROM "user" WHERE "id" IN ($1, $2, $3)"#);
@@ -479,11 +479,11 @@ fn delete_with_in_list_expands_placeholders() {
 fn delete_with_is_null_does_not_consume_placeholder() {
     let query = DeleteQuery {
         model: User::SCHEMA,
-        filters: vec![Filter {
+        where_clause: WhereExpr::Predicate(Filter {
             column: "name",
             op: Op::IsNull,
             value: SqlValue::Bool(true),
-        }],
+        }),
     };
     let stmt = pg().compile_delete(&query).unwrap();
     assert_eq!(stmt.sql, r#"DELETE FROM "user" WHERE "name" IS NULL"#);
@@ -494,11 +494,11 @@ fn delete_with_is_null_does_not_consume_placeholder() {
 fn delete_propagates_filter_errors() {
     let query = DeleteQuery {
         model: User::SCHEMA,
-        filters: vec![Filter {
+        where_clause: WhereExpr::Predicate(Filter {
             column: "id",
             op: Op::In,
             value: SqlValue::List(vec![]),
-        }],
+        }),
     };
     let err = pg().compile_delete(&query).unwrap_err();
     assert!(matches!(err, SqlError::EmptyInList));
@@ -509,7 +509,7 @@ fn delete_propagates_filter_errors() {
 fn empty_select() -> SelectQuery {
     SelectQuery {
         model: User::SCHEMA,
-        filters: vec![],
+        where_clause: WhereExpr::And(vec![]),
         search: None,
         joins: vec![],
         limit: None,
@@ -560,11 +560,11 @@ fn select_emits_both_in_canonical_order() {
 #[test]
 fn select_with_filters_and_limit_orders_clauses() {
     let q = SelectQuery {
-        filters: vec![Filter {
+        where_clause: WhereExpr::Predicate(Filter {
             column: "is_active",
             op: Op::Eq,
             value: SqlValue::Bool(true),
-        }],
+        }),
         limit: Some(3),
         offset: Some(0),
         ..empty_select()
@@ -582,7 +582,7 @@ fn select_with_filters_and_limit_orders_clauses() {
 fn count_with_no_filters() {
     let q = CountQuery {
         model: User::SCHEMA,
-        filters: vec![],
+        where_clause: WhereExpr::And(vec![]),
     };
     let stmt = pg().compile_count(&q).unwrap();
     assert_eq!(stmt.sql, r#"SELECT COUNT(*) FROM "user""#);
@@ -593,7 +593,7 @@ fn count_with_no_filters() {
 fn count_with_filters() {
     let q = CountQuery {
         model: User::SCHEMA,
-        filters: vec![
+        where_clause: WhereExpr::and_predicates(vec![
             Filter {
                 column: "is_active",
                 op: Op::Eq,
@@ -604,7 +604,7 @@ fn count_with_filters() {
                 op: Op::Gt,
                 value: SqlValue::I64(0),
             },
-        ],
+        ]),
     };
     let stmt = pg().compile_count(&q).unwrap();
     assert_eq!(
@@ -618,11 +618,11 @@ fn count_with_filters() {
 fn count_propagates_filter_errors() {
     let q = CountQuery {
         model: User::SCHEMA,
-        filters: vec![Filter {
+        where_clause: WhereExpr::Predicate(Filter {
             column: "id",
             op: Op::In,
             value: SqlValue::List(vec![]),
-        }],
+        }),
     };
     let err = pg().compile_count(&q).unwrap_err();
     assert!(matches!(err, SqlError::EmptyInList));
@@ -650,11 +650,11 @@ fn search_alone_emits_or_chain_with_one_param() {
 #[test]
 fn search_combined_with_filter_uses_and() {
     let q = SelectQuery {
-        filters: vec![Filter {
+        where_clause: WhereExpr::Predicate(Filter {
             column: "is_active",
             op: Op::Eq,
             value: SqlValue::Bool(true),
-        }],
+        }),
         search: Some(SearchClause {
             columns: vec!["name"],
             query: "ali".into(),
@@ -722,7 +722,7 @@ fn search_with_limit_offset_orders_clauses_correctly() {
 fn empty_post_select() -> SelectQuery {
     SelectQuery {
         model: Post::SCHEMA,
-        filters: vec![],
+        where_clause: WhereExpr::And(vec![]),
         search: None,
         joins: vec![],
         limit: None,
@@ -753,11 +753,11 @@ fn join_qualifies_main_columns_and_aliases_joined_ones() {
 #[test]
 fn join_with_filter_qualifies_filter_column() {
     let q = SelectQuery {
-        filters: vec![Filter {
+        where_clause: WhereExpr::Predicate(Filter {
             column: "title",
             op: Op::Eq,
             value: SqlValue::String("hi".into()),
-        }],
+        }),
         joins: vec![Join {
             target: User::SCHEMA,
             on_local: "author_id",

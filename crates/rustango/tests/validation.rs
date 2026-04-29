@@ -6,7 +6,7 @@
 
 use rustango::core::{
     validate_value, Assignment, Filter, InsertQuery, Model as _, Op, QueryError, SqlValue,
-    UpdateQuery,
+    UpdateQuery, WhereExpr,
 };
 use rustango::Model;
 
@@ -235,11 +235,11 @@ fn update_validate_checks_set_values_only() {
             column: "name",
             value: SqlValue::String("a".repeat(20)),
         }],
-        filters: vec![Filter {
+        where_clause: WhereExpr::Predicate(Filter {
             column: "name",
             op: Op::Eq,
             value: SqlValue::String("a".repeat(50)), // not validated
-        }],
+        }),
     };
     let err = q.validate().unwrap_err();
     assert!(matches!(err, QueryError::MaxLengthExceeded { .. }));
@@ -259,7 +259,7 @@ fn update_validate_allows_in_bounds_set() {
                 value: SqlValue::I32(25),
             },
         ],
-        filters: vec![],
+        where_clause: WhereExpr::And(vec![]),
     };
     assert!(q.validate().is_ok());
 }
@@ -272,7 +272,7 @@ fn update_validate_rejects_out_of_range_set() {
             column: "age",
             value: SqlValue::I32(-5),
         }],
-        filters: vec![],
+        where_clause: WhereExpr::And(vec![]),
     };
     let err = q.validate().unwrap_err();
     assert!(matches!(err, QueryError::OutOfRange { value: -5, .. }));

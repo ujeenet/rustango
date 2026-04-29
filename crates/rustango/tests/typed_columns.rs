@@ -25,7 +25,7 @@ fn typed_eq_is_equivalent_to_string_eq() {
         .compile()
         .unwrap();
     let string_keyed = User::objects().eq("name", "alice").compile().unwrap();
-    assert_eq!(typed.filters, string_keyed.filters);
+    assert_eq!(typed.where_clause, string_keyed.where_clause);
 }
 
 #[test]
@@ -38,9 +38,10 @@ fn typed_ne_lt_lte_gt_gte() {
         .where_(User::id.gte(-2_i64))
         .compile()
         .unwrap();
-    let ops: Vec<Op> = q.filters.iter().map(|f| f.op).collect();
+    let filters = q.where_clause.as_flat_and().unwrap();
+    let ops: Vec<Op> = filters.iter().map(|f| f.op).collect();
     assert_eq!(ops, vec![Op::Ne, Op::Lt, Op::Lte, Op::Gt, Op::Gte]);
-    assert!(q.filters.iter().all(|f| f.column == "id"));
+    assert!(filters.iter().all(|f| f.column == "id"));
 }
 
 #[test]
@@ -49,9 +50,10 @@ fn typed_like_on_string_field() {
         .where_(User::name.like("ali%"))
         .compile()
         .unwrap();
-    assert_eq!(q.filters[0].column, "name");
-    assert_eq!(q.filters[0].op, Op::Like);
-    assert_eq!(q.filters[0].value, SqlValue::String("ali%".into()));
+    let filters = q.where_clause.as_flat_and().unwrap();
+    assert_eq!(filters[0].column, "name");
+    assert_eq!(filters[0].op, Op::Like);
+    assert_eq!(filters[0].value, SqlValue::String("ali%".into()));
 }
 
 #[test]
@@ -61,10 +63,11 @@ fn typed_is_null_and_is_not_null() {
         .where_(User::email.is_not_null())
         .compile()
         .unwrap();
-    assert_eq!(q.filters[0].op, Op::IsNull);
-    assert_eq!(q.filters[0].value, SqlValue::Bool(true));
-    assert_eq!(q.filters[1].op, Op::IsNull);
-    assert_eq!(q.filters[1].value, SqlValue::Bool(false));
+    let filters = q.where_clause.as_flat_and().unwrap();
+    assert_eq!(filters[0].op, Op::IsNull);
+    assert_eq!(filters[0].value, SqlValue::Bool(true));
+    assert_eq!(filters[1].op, Op::IsNull);
+    assert_eq!(filters[1].value, SqlValue::Bool(false));
 }
 
 #[test]
@@ -73,10 +76,11 @@ fn typed_is_in_expands_to_list() {
         .where_(User::id.is_in([1_i64, 2, 3]))
         .compile()
         .unwrap();
-    assert_eq!(q.filters[0].column, "id");
-    assert_eq!(q.filters[0].op, Op::In);
+    let filters = q.where_clause.as_flat_and().unwrap();
+    assert_eq!(filters[0].column, "id");
+    assert_eq!(filters[0].op, Op::In);
     assert_eq!(
-        q.filters[0].value,
+        filters[0].value,
         SqlValue::List(vec![SqlValue::I64(1), SqlValue::I64(2), SqlValue::I64(3)]),
     );
 }
@@ -89,10 +93,11 @@ fn typed_filters_can_be_mixed_with_string_keyed_in_order() {
         .filter("id", Op::Gt, 0_i64)
         .compile()
         .unwrap();
-    assert_eq!(q.filters.len(), 3);
-    assert_eq!(q.filters[0].column, "name");
-    assert_eq!(q.filters[1].column, "is_active");
-    assert_eq!(q.filters[2].column, "id");
+    let filters = q.where_clause.as_flat_and().unwrap();
+    assert_eq!(filters.len(), 3);
+    assert_eq!(filters[0].column, "name");
+    assert_eq!(filters[1].column, "is_active");
+    assert_eq!(filters[2].column, "id");
 }
 
 #[test]
@@ -134,7 +139,7 @@ fn typed_set_is_equivalent_to_string_set() {
         .compile()
         .unwrap();
     assert_eq!(typed.set, string_keyed.set);
-    assert_eq!(typed.filters, string_keyed.filters);
+    assert_eq!(typed.where_clause, string_keyed.where_clause);
 }
 
 #[test]

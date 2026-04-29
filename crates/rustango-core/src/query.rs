@@ -24,7 +24,8 @@ pub enum Op {
     IsNull,
 }
 
-/// One predicate in a `WHERE` clause: `column <op> value`.
+/// One predicate in a `WHERE` clause: `column <op> value`. Always
+/// the leaf of a [`WhereExpr`] tree.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Filter {
     pub column: &'static str,
@@ -32,19 +33,146 @@ pub struct Filter {
     pub value: SqlValue,
 }
 
-/// Compiled `SELECT` over a single model with zero or more `AND`-joined filters.
+/// Boolean expression in a `WHERE` clause — leaf [`Filter`]s composed
+/// with `AND` / `OR` to arbitrary depth.
 ///
-/// v0.1 selects all scalar fields of `model` and joins filters with `AND`.
-/// `OR` and explicit projections land in v0.2.
+/// ```ignore
+/// // a AND (b OR c)
+/// WhereExpr::And(vec![
+///     WhereExpr::Predicate(a),
+///     WhereExpr::Or(vec![WhereExpr::Predicate(b), WhereExpr::Predicate(c)]),
+/// ])
+/// ```
+///
+/// Empty conjunctions and disjunctions are valid. By convention they
+/// represent SQL `TRUE` and `FALSE` respectively, but you should
+/// usually avoid building them — `WhereExpr::And(vec![])` is the
+/// "no filters" case used internally to represent a query with an
+/// unfiltered WHERE clause; the writer skips emitting `WHERE` for it.
+/// `WhereExpr::Or(vec![])` is rejected by the writer as it would
+/// silently match nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WhereExpr {
+    /// Leaf — a single column predicate.
+    Predicate(Filter),
+    /// All children must match. Empty list = vacuously true (no
+    /// `WHERE` emitted by the writer).
+    And(Vec<WhereExpr>),
+    /// Any child must match. Empty list = vacuously false (rejected
+    /// by the writer).
+    Or(Vec<WhereExpr>),
+}
+
+impl WhereExpr {
+    /// `true` when this expression carries no predicates (i.e. an
+    /// empty `And`). Used by the writer to skip emitting `WHERE`.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::And(items) if items.is_empty())
+    }
+
+    /// Build an AND of leaf filters. Convenience for the common case
+    /// of "a list of predicates joined with AND" (the legacy
+    /// `Vec<Filter>` shape).
+    #[must_use]
+    pub fn and_predicates(filters: Vec<Filter>) -> Self {
+        Self::And(filters.into_iter().map(Self::Predicate).collect())
+    }
+
+    /// Append an AND predicate. If `self` is already `And(_)`, the
+    /// child is pushed in place; otherwise `self` is wrapped in a new
+    /// `And` together with the new child.
+    pub fn push_and(&mut self, child: Self) {
+        match self {
+            Self::And(items) => items.push(child),
+            _ => {
+                let prev = std::mem::replace(self, Self::And(Vec::new()));
+                if let Self::And(items) = self {
+                    items.push(prev);
+                    items.push(child);
+                }
+            }
+        }
+    }
+
+    /// If this expression is a flat AND of leaf predicates (or a
+    /// single `Predicate`), return the predicate list. Returns `None`
+    /// for any tree containing `Or` or nested `And`. Useful for
+    /// callers that want to inspect a legacy "AND-only" WHERE without
+    /// pattern-matching the full tree.
+    #[must_use]
+    pub fn as_flat_and(&self) -> Option<Vec<&Filter>> {
+        match self {
+            Self::Predicate(f) => Some(vec![f]),
+            Self::And(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    match item {
+                        Self::Predicate(f) => out.push(f),
+                        _ => return None,
+                    }
+                }
+                Some(out)
+            }
+            Self::Or(_) => None,
+        }
+    }
+
+    /// Walk the tree and validate every leaf predicate against `model`.
+    ///
+    /// # Errors
+    /// Returns [`QueryError::UnknownField`] for a predicate whose
+    /// column is missing from the model, propagated up through
+    /// composite nodes.
+    pub fn validate(&self, model: &'static ModelSchema) -> Result<(), QueryError> {
+        match self {
+            Self::Predicate(f) => {
+                if model.field_by_column(f.column).is_none() {
+                    return Err(QueryError::UnknownField {
+                        model: model.name,
+                        field: f.column.to_owned(),
+                    });
+                }
+                Ok(())
+            }
+            Self::And(items) | Self::Or(items) => {
+                for child in items {
+                    child.validate(model)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Default for WhereExpr {
+    fn default() -> Self {
+        Self::And(Vec::new())
+    }
+}
+
+impl From<Filter> for WhereExpr {
+    fn from(f: Filter) -> Self {
+        Self::Predicate(f)
+    }
+}
+
+/// Compiled `SELECT` over a single model with an optional WHERE
+/// clause expressed as a [`WhereExpr`] tree.
+///
+/// v0.7 ships full AND/OR/nested support. The legacy "flat AND of
+/// predicates" shape is `WhereExpr::and_predicates(filters)` for
+/// callers who built up a `Vec<Filter>` directly.
 ///
 /// `limit` and `offset` are `None` by default and emit no clauses.
 /// `search`, when present, adds a parenthesized `(col ILIKE $N OR …)`
-/// clause AND-joined with `filters`. `joins` adds `LEFT JOIN` clauses
-/// and pulls extra columns into the projection under aliased names.
+/// clause AND-joined with `where_clause`. `joins` adds `LEFT JOIN`
+/// clauses and pulls extra columns into the projection under aliased
+/// names.
 #[derive(Debug, Clone)]
 pub struct SelectQuery {
     pub model: &'static ModelSchema,
-    pub filters: Vec<Filter>,
+    pub where_clause: WhereExpr,
     pub search: Option<SearchClause>,
     pub joins: Vec<Join>,
     pub limit: Option<i64>,
@@ -176,14 +304,15 @@ pub struct Assignment {
 
 /// Compiled `UPDATE`.
 ///
-/// `set` are emitted in order before `WHERE`, so their placeholders come first.
-/// An empty `filters` runs an unfiltered update affecting every row — the
-/// caller is responsible for that being intentional.
+/// `set` are emitted in order before `WHERE`, so their placeholders
+/// come first. An empty `where_clause` (the default `WhereExpr::And(vec![])`)
+/// runs an unfiltered update affecting every row — the caller is
+/// responsible for that being intentional.
 #[derive(Debug, Clone)]
 pub struct UpdateQuery {
     pub model: &'static ModelSchema,
     pub set: Vec<Assignment>,
-    pub filters: Vec<Filter>,
+    pub where_clause: WhereExpr,
 }
 
 impl UpdateQuery {
@@ -210,17 +339,18 @@ impl UpdateQuery {
 
 /// Compiled `DELETE`.
 ///
-/// As with `UpdateQuery`, an empty `filters` deletes every row.
+/// As with `UpdateQuery`, an empty `where_clause` deletes every row.
 #[derive(Debug, Clone)]
 pub struct DeleteQuery {
     pub model: &'static ModelSchema,
-    pub filters: Vec<Filter>,
+    pub where_clause: WhereExpr,
 }
 
 /// Compiled `SELECT COUNT(*)` — same shape as a `DeleteQuery` (model +
-/// filters); the writer emits `COUNT(*)` projection and no `LIMIT`/`OFFSET`.
+/// where clause); the writer emits `COUNT(*)` projection and no
+/// `LIMIT`/`OFFSET`.
 #[derive(Debug, Clone)]
 pub struct CountQuery {
     pub model: &'static ModelSchema,
-    pub filters: Vec<Filter>,
+    pub where_clause: WhereExpr,
 }

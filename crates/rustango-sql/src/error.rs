@@ -45,6 +45,14 @@ pub enum SqlError {
     /// requested — sanity check before populating Auto fields.
     #[error("bulk INSERT RETURNING returned {actual} rows but {expected} were inserted")]
     BulkInsertReturningMismatch { expected: usize, actual: usize },
+
+    /// `WhereExpr::Or(vec![])` — a disjunction with no children
+    /// matches no rows. The writer rejects it so the user catches the
+    /// programming error instead of silently fetching an empty
+    /// result. (`WhereExpr::And(vec![])` is fine — represents
+    /// "no filters" and is the default.)
+    #[error("`WhereExpr::Or` with an empty branch list matches no rows; was that intentional?")]
+    EmptyOrBranch,
 }
 
 /// Raised while compiling, writing, or executing a query end-to-end.
