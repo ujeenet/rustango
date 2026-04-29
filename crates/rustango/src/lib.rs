@@ -30,6 +30,9 @@ pub mod admin;
 #[cfg(feature = "config")]
 pub mod config;
 
+#[cfg(feature = "forms")]
+pub mod forms;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 

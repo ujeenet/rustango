@@ -19,19 +19,28 @@ exclude = ["examples/", "tests/"]
 workspace = true
 
 [features]
-# Out of the box: ORM + auto-admin + Postgres + layered config.
-# Opt in to multi-tenancy with `features = ["tenancy"]`. Drop
-# `default-features` for the bare ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config"]
+# Out of the box: ORM + auto-admin + Postgres + layered config +
+# public forms framework. Opt in to multi-tenancy with
+# `features = ["tenancy"]`. Drop `default-features` for the bare
+# ORM (core + query + sql + migrate).
+default = ["postgres", "admin", "config", "forms"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
 # → `config/{env}.toml` → env-var overrides. Slice 8.3.
 config = ["dep:toml"]
 
+# Public forms framework (`rustango::forms`) — value parsing for HTML
+# form payloads, shared between admin and user route handlers. Slice
+# 8.4A. v0.8 ships parsers only; `#[derive(Form)]` + CSRF + multipart
+# land in slice 8.4B and 8.4C.
+forms = []
+
 # Auto-admin HTTP layer (`rustango::admin`). Pulls in axum + Tera +
-# the supporting middleware deps.
+# the supporting middleware deps. Implies `forms` so admin's CRUD
+# handlers reuse the shared parsers.
 admin = [
+    "forms",
     "dep:axum",
     "dep:tera",
     "dep:base64",
