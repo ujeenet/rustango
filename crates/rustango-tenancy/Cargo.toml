@@ -19,11 +19,13 @@ workspace = true
 # `::rustango::core` / `::rustango::sql` paths resolve. The facade
 # does NOT re-export rustango-tenancy (cycle would form), so users
 # pulling in tenancy add `rustango-tenancy` separately.
-rustango   = { workspace = true }
-chrono     = { workspace = true }
-serde      = { workspace = true }
-thiserror  = { workspace = true }
-tracing    = { workspace = true }
+rustango     = { workspace = true }
+chrono       = { workspace = true }
+serde        = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+async-trait  = { workspace = true }
+http         = { workspace = true }
 
 [dev-dependencies]
 tokio       = { workspace = true }

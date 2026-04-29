@@ -48,6 +48,12 @@ thiserror = "1"
 # Logging
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 
+# Async-trait for dyn-dispatchable async traits (e.g. OrgResolver)
+async-trait = "0.1"
+
+# HTTP types — used by rustango-tenancy resolvers to inspect request parts
+http = "1"
+
 # Admin (HTTP)
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }
 tower = { version = "0.5", features = ["util"] }

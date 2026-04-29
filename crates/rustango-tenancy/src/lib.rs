@@ -40,6 +40,11 @@
 
 mod error;
 mod org;
+mod resolver;
 
 pub use error::TenancyError;
 pub use org::{Org, StorageMode};
+pub use resolver::{
+    ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver, PortResolver,
+    SubdomainResolver,
+};
