@@ -33,6 +33,9 @@ use std::collections::HashMap;
 
 use crate::core::{FieldSchema, FieldType, SqlValue};
 
+#[cfg(feature = "csrf")]
+pub mod csrf;
+
 /// Trait every `#[derive(Form)]` struct implements (slice 8.4B).
 ///
 /// `parse` consumes a string-keyed HashMap (the shape axum's

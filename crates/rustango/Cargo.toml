@@ -32,15 +32,24 @@ config = ["dep:toml"]
 
 # Public forms framework (`rustango::forms`) — value parsing for HTML
 # form payloads, shared between admin and user route handlers. Slice
-# 8.4A. v0.8 ships parsers only; `#[derive(Form)]` + CSRF + multipart
-# land in slice 8.4B and 8.4C.
+# 8.4A ships the parsers; slice 8.4B added `#[derive(Form)]`. Slice
+# 8.4C lights up CSRF protection behind the `csrf` sub-feature so
+# parser-only users don't pay the cookie/rand cost.
 forms = []
 
+# CSRF protection (`rustango::forms::csrf`) — double-submit-cookie
+# axum middleware. Lives behind its own flag so `forms`-only users
+# (parsers without CSRF) don't pull cookie + rand + tower
+# transitively.
+csrf = ["forms", "dep:axum", "dep:base64", "dep:cookie", "dep:rand", "dep:tower"]
+
 # Auto-admin HTTP layer (`rustango::admin`). Pulls in axum + Tera +
-# the supporting middleware deps. Implies `forms` so admin's CRUD
-# handlers reuse the shared parsers.
+# the supporting middleware deps. Implies `forms` + `csrf` so the
+# admin's CRUD handlers reuse the shared parsers and ship CSRF on
+# every mutation by default.
 admin = [
     "forms",
+    "csrf",
     "dep:axum",
     "dep:tera",
     "dep:base64",
