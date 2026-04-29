@@ -180,7 +180,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .show_only(["post"])
         .build();
 
-    let operator_admin = rustango::admin::router(registry.clone());
+    // Operator admin is registry-scoped — it manages the org table
+    // and operator accounts. Tenant-scoped models (`rustango_users`,
+    // `post`) are HIDDEN from the operator's model list because:
+    //
+    //  1. `migrate::apply_all` created their tables in the registry's
+    //     `public` schema (alongside the tenant schemas), so they
+    //     show up in inventory and would render as empty tables in
+    //     the operator admin — confusing, wrong place to look.
+    //  2. The design (locked: "no cross-tenant aggregations") says
+    //     the operator NEVER sees an aggregate of all tenants' users.
+    //     If an operator wants tenant acme's users, they navigate
+    //     to acme.localhost:8080 (the tenant admin).
+    //
+    // `show_only` is the v0.4 admin allowlist; we use it here to
+    // pin the operator surface to the two registry tables.
+    let operator_admin = rustango::admin::Builder::new(registry.clone())
+        .show_only(["rustango_orgs", "rustango_operators"])
+        .build();
     let operator_admin = rustango::admin::protect_with_basic_auth(
         operator_admin,
         "operator",
