@@ -39,12 +39,20 @@
 //! the full design and slice plan.
 
 mod error;
+pub mod migrate;
 mod org;
+mod pools;
 mod resolver;
+mod secrets;
 
 pub use error::TenancyError;
+pub use migrate::{migrate_registry, migrate_tenants, TenantMigrationOutcome, TenantMigrationReport};
 pub use org::{Org, StorageMode};
+pub use pools::{TenantConn, TenantPool, TenantPools, TenantPoolsConfig};
 pub use resolver::{
     ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver, PortResolver,
     SubdomainResolver,
+};
+pub use secrets::{
+    ChainSecretsResolver, EnvSecretsResolver, LiteralSecretsResolver, SecretsError, SecretsResolver,
 };

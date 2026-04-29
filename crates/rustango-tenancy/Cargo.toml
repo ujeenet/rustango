@@ -26,6 +26,7 @@ thiserror    = { workspace = true }
 tracing      = { workspace = true }
 async-trait  = { workspace = true }
 http         = { workspace = true }
+tokio        = { workspace = true }
 
 [dev-dependencies]
 tokio       = { workspace = true }
