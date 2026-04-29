@@ -43,6 +43,7 @@ pub mod auth;
 mod error;
 pub mod manage;
 pub mod migrate;
+pub mod operator_console;
 mod org;
 pub mod password;
 mod pools;

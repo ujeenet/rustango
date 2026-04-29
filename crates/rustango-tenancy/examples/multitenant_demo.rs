@@ -36,8 +36,10 @@ use rustango::sql::sqlx::{self, PgPool};
 use rustango::sql::Fetcher;
 use rustango::{migrate as rmig, Model};
 use rustango_tenancy::{
-    admin::TenantAdminBuilder, manage, ChainResolver, HeaderResolver, Org, SubdomainResolver,
-    TenantPools,
+    admin::TenantAdminBuilder,
+    manage,
+    operator_console::{self, SessionSecret},
+    ChainResolver, HeaderResolver, Org, SubdomainResolver, TenantPools,
 };
 
 /// Per-tenant Post model. Lives in the tenant's schema in this demo.
@@ -180,29 +182,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .show_only(["post"])
         .build();
 
-    // Operator admin is registry-scoped — it manages the org table
-    // and operator accounts. Tenant-scoped models (`rustango_users`,
-    // `post`) are HIDDEN from the operator's model list because:
-    //
-    //  1. `migrate::apply_all` created their tables in the registry's
-    //     `public` schema (alongside the tenant schemas), so they
-    //     show up in inventory and would render as empty tables in
-    //     the operator admin — confusing, wrong place to look.
-    //  2. The design (locked: "no cross-tenant aggregations") says
-    //     the operator NEVER sees an aggregate of all tenants' users.
-    //     If an operator wants tenant acme's users, they navigate
-    //     to acme.localhost:8080 (the tenant admin).
-    //
-    // `show_only` is the v0.4 admin allowlist; we use it here to
-    // pin the operator surface to the two registry tables.
-    let operator_admin = rustango::admin::Builder::new(registry.clone())
-        .show_only(["rustango_orgs", "rustango_operators"])
-        .build();
-    let operator_admin = rustango::admin::protect_with_basic_auth(
-        operator_admin,
-        "operator",
-        "letmein",
-    );
+    // Bootstrap a default operator so login works out of the box.
+    // Real deployments use `manage create-operator <user> --password
+    // <p>` — for the demo we make sure `admin / letmein` exists.
+    {
+        let mut buf: Vec<u8> = Vec::new();
+        // create-operator is idempotent only by check-then-insert;
+        // ignore "already exists" so re-runs don't break.
+        let res = manage::run_with_writer(
+            &pools,
+            &registry_url,
+            std::path::Path::new(""),
+            vec![
+                "create-operator".into(),
+                "admin".into(),
+                "--password".into(),
+                "letmein".into(),
+            ],
+            &mut buf,
+        )
+        .await;
+        match res {
+            Ok(()) => print!("{}", String::from_utf8_lossy(&buf)),
+            Err(e) if e.to_string().contains("already exists") => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    // Operator console: form-based login + sidebar layout. Replaces
+    // the previous HTTP-Basic-on-rustango-admin combination. The
+    // session secret comes from `RUSTANGO_SESSION_SECRET` (base64
+    // 32+ bytes) or a random fallback (warned at boot).
+    let session_secret = SessionSecret::from_env_or_random();
+    let operator_admin = operator_console::router(registry.clone(), session_secret);
 
     // Host-based dispatch — matches the production routing story
     // exactly: bare apex (`localhost` here, `app.example.com` in
@@ -249,7 +261,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("    http://acme.localhost:8080/post     ACME's posts");
     println!("    http://globex.localhost:8080/post   Globex's posts");
     println!("    http://other.localhost:8080/post    404 (no tenant)");
-    println!("    http://localhost:8080/              operator UI (basic auth: operator/letmein)");
+    println!("    http://localhost:8080/              operator console");
+    println!("        sign in with admin / letmein at /login");
     println!("        — operator lives at the apex (no subdomain).");
     println!("          subdomains route to tenant UIs via the resolver.");
     println!("    curl  http://localhost:8080/post -H 'X-Org: acme'");

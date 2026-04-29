@@ -1,0 +1,36 @@
+{% extends "op_layout.html" %}
+{% block title %}Organizations — rustango operator console{% endblock %}
+{% block content %}
+<h1>Organizations</h1>
+<p>Tenants the registry knows about. Mutations go through
+<code>manage create-tenant</code> / <code>manage drop-tenant</code>.</p>
+{% if orgs | length == 0 %}
+  <div class="empty">No tenants yet — provision one with
+  <code>manage create-tenant &lt;slug&gt;</code>.</div>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>slug</th>
+      <th>display name</th>
+      <th>mode</th>
+      <th>host pattern</th>
+      <th>active</th>
+      <th>created</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for org in orgs %}
+    <tr>
+      <td><strong>{{ org.slug }}</strong></td>
+      <td>{{ org.display_name }}</td>
+      <td>{{ org.storage_mode }}</td>
+      <td>{% if org.host_pattern %}{{ org.host_pattern }}{% else %}<em style="color:#aaa">—</em>{% endif %}</td>
+      <td>{% if org.active %}✓{% else %}—{% endif %}</td>
+      <td>{{ org.created_at }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

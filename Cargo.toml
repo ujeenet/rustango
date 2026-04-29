@@ -58,6 +58,13 @@ http = "1"
 argon2        = "0.5"
 password-hash = "0.5"
 
+# Session cookie crypto for the operator console
+hmac    = "0.12"
+sha2    = "0.10"
+subtle  = "2"      # constant-time eq for MAC verify
+cookie  = "0.18"
+rand    = "0.8"    # session-secret auto-gen fallback
+
 # Admin (HTTP)
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }
 tower = { version = "0.5", features = ["util"] }

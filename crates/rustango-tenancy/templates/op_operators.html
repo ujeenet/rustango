@@ -1,0 +1,27 @@
+{% extends "op_layout.html" %}
+{% block title %}Operators — rustango operator console{% endblock %}
+{% block content %}
+<h1>Operators</h1>
+<p>Registry-scoped administrators. Mutations go through
+<code>manage create-operator &lt;username&gt; --password &lt;p&gt;</code>.</p>
+{% if operators | length == 0 %}
+  <div class="empty">No operators yet — create one with
+  <code>manage create-operator</code>.</div>
+{% else %}
+<table>
+  <thead>
+    <tr><th>id</th><th>username</th><th>active</th><th>created</th></tr>
+  </thead>
+  <tbody>
+    {% for op in operators %}
+    <tr>
+      <td>{{ op.id }}</td>
+      <td>{{ op.username }}</td>
+      <td>{% if op.active %}✓{% else %}—{% endif %}</td>
+      <td>{{ op.created_at }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}
