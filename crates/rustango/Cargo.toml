@@ -79,7 +79,7 @@ tenancy = [
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.7.0", path = "../rustango-macros" }
+rustango-macros = { version = "0.8.0", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono     = { workspace = true }

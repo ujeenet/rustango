@@ -2,6 +2,50 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [Unreleased] — v0.8
+
+Absorb-the-field release. After a deep competitive review of Cot, Loco, and Reinhardt, v0.8 closes the four highest-impact gaps every reviewer notices in week 1: a `Dialect` seam for multi-DB, a `cargo rustango new` project scaffolder, layered TOML config, and a public forms framework with CSRF middleware. v0.9 (API-first surface — serializers, ViewSets, OpenAPI, browsable API, multi-auth) and v0.10 (operations + multi-DB — jobs, mail, cache, test harness, SQLite + MySQL) follow.
+
+### Added — `Dialect` trait promotion + multi-DB seam (slice 8.1)
+
+- **`sql::Dialect` extended with seven new methods** so SQLite + MySQL impls can slot in via v0.10 with minimal extra ceremony: `name()`, `quote_ident(name)`, `placeholder(n)`, `serial_type(field_type)`, `bool_literal(b)`, `supports_concurrent_index()`, `supports_returning()`. Default impls return ANSI-leaning shapes (`"foo"` quoting, `?` placeholders, `BIGINT`/`INTEGER`, `TRUE`/`FALSE`, no concurrent index, no RETURNING). `Postgres` overrides what diverges (`$N` placeholders, `BIGSERIAL`/`SERIAL`, supports both).
+- **Lock dispatch through the dialect.** `migrate::runner`'s `with_migrate_lock` and `ensure_ledger_for` no longer inline `pg_advisory_lock` SQL — they ask the dialect for `acquire_session_lock_sql()` / `release_session_lock_sql()` / `acquire_xact_lock_sql()`. Default returns `None` (skip lock — SQLite's single-writer model + `BEGIN EXCLUSIVE` provides equivalent exclusion); Postgres returns the existing `pg_advisory_*` calls parameterised through `placeholder(1)`.
+- Behaviour-preserving for Postgres: the SQL strings emitted are byte-for-byte identical to v0.7's hardcoded versions. Workspace tests pass with `--features tenancy --test-threads=1`; every `migrate_*_live` test green.
+
+### Added — `cargo rustango new` project scaffolder (slice 8.2)
+
+- **New `cargo-rustango` crate** (`cargo install cargo-rustango`) with a `cargo rustango new <name> [--template api|fullstack|tenant]` verb. Three templates:
+  - **`api`** — bare ORM + axum, no admin (JSON-only services). `rustango = { version = "0.8", default-features = false, features = ["postgres"] }`.
+  - **`fullstack`** (default) — ORM + auto-admin. `rustango = "0.8"`.
+  - **`tenant`** — multi-tenancy enabled, `tenancy_manage`-style dispatcher in `src/bin/manage.rs`. `rustango = { version = "0.8", features = ["tenancy"] }`.
+- Each template scaffolds `Cargo.toml`, `.env.example`, `.gitignore`, `docker-compose.yml`, `README.md`, `migrations/`, `src/{main,models,views,urls}.rs`, and `src/bin/manage.rs`. Templates live as `const &str` in the binary — zero runtime filesystem dependency.
+- Smoke-tested: each template `cargo check`s cleanly when patched against the local v0.8 in-development rustango.
+
+### Added — `rustango::config` layered TOML Settings (slice 8.3)
+
+- **New `config` feature** (in `default = ["postgres", "admin", "config", "forms"]`) gating a `rustango::config::Settings` loader that merges three layers in order: `config/default.toml` → `config/{env}.toml` → `RUSTANGO__SECTION__KEY` env-var overrides (double-underscore is the path separator, lowercased).
+- **Typed sections** (each `#[serde(default)]` so missing keys never error and new fields stay forward-compatible): `database` (url, pool sizing), `secret_key`, `admin` (allowed_tables, read_only_tables), `tenancy` (apex_domain), `cache` (backend, redis_url), `jobs` (backend, concurrency), `mail` (backend, smtp_host, from_address). The cache/jobs/mail sections are placeholders for v0.10 slices that will read from them.
+- **Hand-rolled merger** — `toml = "0.8"` parser-only plus ~200 lines of merger / env-var grafter. Env-var values type-coerce automatically through TOML's own scalar lexer (`RUSTANGO__ADMIN__ALLOWED_TABLES='["user","post"]'` → `Vec<String>` with no manual coercion).
+- 7 unit tests covering default-only load, file overlay, env-var override of a string, typed-int env-var override, nested section graft, missing default file errors, parse error includes file path.
+
+### Added — public forms framework + `#[derive(Form)]` + CSRF (slice 8.4)
+
+- **`rustango::forms`** — promoted from admin-internal `pub(crate)` to a public module. `FormError`, `parse_pk_string`, `parse_form_value`, `collect_values` all available to user route handlers. Admin's existing CRUD code re-exports from here.
+- **`#[derive(Form)]`** in `rustango-macros` — generates `rustango::forms::FormStruct::parse(&HashMap<String, String>) -> Result<Self, FormError>` for any struct with named fields. Supported field types: `String`, `i32`, `i64`, `f32`, `f64`, `bool`, plus `Option<T>` for any of those. Per-field `#[form(min, max, min_length, max_length)]` validators apply in declaration order; first failure short-circuits.
+  - Bool field semantics match HTML checkbox shape: absent = `false`; non-empty = `true` except literal `"false"` / `"0"` / `"off"` / `"no"`.
+  - Empty string + `Option<T>` = `None`; empty string + non-null = `FormError::Missing`.
+- **`rustango::forms::csrf::layer()`** — axum tower `Layer` enforcing double-submit-cookie CSRF. Safe methods (GET/HEAD/OPTIONS/TRACE) pass through and seed a fresh `rustango_csrf` cookie; unsafe methods (POST/PUT/PATCH/DELETE) require the cookie value to match an `X-CSRF-Token` header (constant-time compare). Mismatch / absent → 403 Forbidden.
+  - 32-byte tokens from `OsRng`, base64url-encoded (no padding). Cookie: `SameSite=Lax`, `HttpOnly` off (SPA must read it), `Secure` configurable via `CsrfConfig`.
+  - Cookie name `rustango_csrf` deliberately distinct from tenancy's `rustango_session` / `rustango_tenant_session` so the two flows don't collide on the same domain.
+- **New feature flags:** `forms` (in default), `csrf` (in default via `admin`). `admin` now implies both. `csrf` pulls `cookie + rand + base64 + tower + axum`. Forms-only users (parsers without CSRF) skip those deps.
+- 9 unit tests for `#[derive(Form)]` (minimal payload, full payload, empty Optional, missing required, unparseable int, all four validators, checkbox falsy aliases) + 5 integration tests for the CSRF layer (cookie seed on GET, 403 on tokenless POST, 403 on mismatched tokens, 403 on cookie-only no-header, pass with matching cookie + header).
+
+### Notes
+
+- v0.8 is content-complete on the working tree. v0.9 (API-first surface — serializers, ViewSets, OpenAPI, browsable API, multi-auth) and v0.10 (operations + multi-DB — jobs, mail, cache, test harness, SQLite + MySQL via the v0.8 Dialect seam) are queued per the absorb-the-field roadmap.
+- **Multipart file uploads** (originally part of slice 8.4C's "+ multipart" piece) are deferred to v0.9. They need a follow-up design pass on the `UploadedFile` extractor + the `#[derive(Form)]` macro field-type detection for `Vec<u8>` / `UploadedFile` — neither blocks v0.8's "missing 30%" theme.
+- The `Dialect` advisory-lock dispatch (slice 8.1B) currently still hardcodes `Postgres` inside `migrate::runner` via `let dialect = Postgres;`. v0.10's slice 10.5 will replace these with a generic dispatch (or a `Builder::dialect(...)` knob) once `SqliteDialect` / `MySqlDialect` exist. The seam itself is clean; only the call sites are still type-bound.
+
 ## [Unreleased] — v0.7
 
 ORM ergonomics catch-up. v0.6 closed the multi-tenancy production gap; v0.7 is the day-2 ORM polish — `save()` insert-or-update, OR / nested-expr query filters, `ForeignKey<T>` lazy-load, and per-app migration namespacing. Tracked slice-by-slice.

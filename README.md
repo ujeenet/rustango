@@ -70,7 +70,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **Multi-tenancy without a `DATABASES` dict** (v0.5) — adding a tenant is `INSERT INTO rustango_orgs (...)`, no restart, no config edit, no redeploy. See below.
 - **Per-tenant auth + `is_superuser` gating out of the box** (v0.6) — superusers get read/write admin, non-superusers see read-only views, anon traffic redirects to `/__login`. Same HMAC-SHA256 session for the operator console at the apex.
 - **Day-2 ORM ergonomics** (v0.7) — `model.save(&pool)` insert-or-update via `Auto<T>` PK dispatch, `ForeignKey<T>` lazy-load (`post.author.get(&pool).await?`), OR / nested-expr `where_(A.or(B.and(C)))`, and per-app migration ledger naming (`migrate::Builder::new().ledger("__myapp__")`) so two rustango apps share one DB without colliding on the bookkeeping table.
-- Postgres-only by design. Single dev hobby project; for multi-DB ORMs use [Diesel](https://diesel.rs) or [SeaORM](https://www.sea-ql.org).
+- **Foundations + the missing 30%** (v0.8) — `cargo rustango new <name> --template api|fullstack|tenant` (Cargo-installable project scaffolder), `rustango::config::Settings` (layered TOML: `default.toml` → `{env}.toml` → `RUSTANGO__*` env-vars), `#[derive(Form)]` + CSRF middleware (`rustango::forms::csrf::layer()`), and a `Dialect` seam ready for SQLite + MySQL (lighting up in v0.10).
+- Postgres-only by design today; SQLite + MySQL ride in via v0.10's `Dialect` impls. For multi-DB ORMs available right now, use [Diesel](https://diesel.rs) or [SeaORM](https://www.sea-ql.org).
 
 ## Multi-tenancy (v0.5, opt-in via the `tenancy` feature)
 
@@ -80,9 +81,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 # Cargo.toml
 [dependencies]
 # v0.7+ ships as one crate with feature flags. Default features
-# include `postgres` + `admin`. Add `tenancy` for the multi-tenant
-# resolver / pools / per-tenant auth pieces.
-rustango = { version = "0.7", features = ["tenancy"] }
+# include `postgres + admin + config + forms`. Add `tenancy` for
+# the multi-tenant resolver / pools / per-tenant auth pieces.
+rustango = { version = "0.8", features = ["tenancy"] }
 ```
 
 > The fastest path: drop a 5-line `src/bin/manage.rs` and run
@@ -352,15 +353,20 @@ single `rustango` crate exposes its layers as feature-gated modules:
 | --------------------- | --------------- | ---- |
 | `rustango::core`      | always on       | schema, query IR, value types, validation, error types — dep-light, no async |
 | `rustango::query`     | always on       | `QuerySet<T>` with `filter` / `where_` / `update` / `compile` / `limit` / `offset` |
-| `rustango::sql`       | always on       | Postgres dialect writer (SELECT/INSERT/UPDATE/DELETE/COUNT, LEFT JOIN), executor traits |
-| `rustango::migrate`   | always on       | `apply_all` for fresh DBs, `SchemaSnapshot` + diff, `Builder` ledger naming |
+| `rustango::sql`       | always on       | dialect-pluggable SQL writer (Postgres ships in v0.8; SQLite + MySQL in v0.10), executor traits |
+| `rustango::migrate`   | always on       | `apply_all` for fresh DBs, `SchemaSnapshot` + diff, `Builder` ledger naming, `scaffold::startapp` |
+| `rustango::config`    | `config` *(default)* | layered TOML loader — `config/default.toml` → `config/{env}.toml` → `RUSTANGO__*` env-var overrides |
+| `rustango::forms`     | `forms` *(default)* | form-payload parsers + `#[derive(Form)]` + per-field validators — shared by admin and user routes |
+| `rustango::forms::csrf` | `csrf` *(default via `admin`)* | double-submit-cookie CSRF middleware (`csrf::layer()`) for axum |
 | `rustango::admin`     | `admin` *(default)* | axum Router that walks the registry → list / detail / CRUD forms / search / pagination / basic auth / Tera templates |
 | `rustango::tenancy`   | `tenancy`       | multi-tenant resolver chain, `TenantPools`, scoped migrations, per-tenant auth, operator console |
-| `rustango_macros::*`  | always on       | `#[derive(Model)]`, `embed_migrations!` — re-exported from the facade as `rustango::Model` etc. |
+| `rustango_macros::*`  | always on       | `#[derive(Model)]`, `#[derive(Form)]`, `embed_migrations!` — re-exported from the facade as `rustango::Model` / `rustango::Form` etc. |
+| `cargo-rustango` (binary) | separate crate | `cargo rustango new <name>` project scaffolder — three templates (api / fullstack / tenant) |
 
 Drop `default-features` to get the bare ORM (`core` + `query` + `sql`
 + `migrate`) without axum/Tera; opt into `tenancy` for multi-tenant
-projects.
+projects. The full default set is `["postgres", "admin", "config",
+"forms"]` (and `csrf` is pulled transitively via `admin`).
 
 ## Field attributes
 
