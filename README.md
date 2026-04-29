@@ -121,6 +121,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 **Provision tenants from the `manage` runner**:
 
+> The snippets below assume **your own project** has a `src/bin/manage.rs`
+> (5-line wrapper around `rustango_tenancy::manage::run` — see
+> `crates/rustango-tenancy/examples/tenancy_manage.rs`). To exercise the
+> CLI **in this repo without writing your own binary**, swap
+> `cargo run --bin manage --` for
+> `cargo run --example tenancy_manage -p rustango-tenancy --`.
+
 ```sh
 # Hand out a slug + storage mode.
 RUSTANGO_APEX_DOMAIN=app.example.com cargo run --bin manage -- \
@@ -135,7 +142,21 @@ cargo run --bin manage -- list-tenants
 cargo run --bin manage -- migrate-tenants
 cargo run --bin manage -- create-operator admin --password ...
 cargo run --bin manage -- create-user acme alice --password ... --superuser
+
+# Boot the operator console + tenant admin (Ctrl-C to stop):
+cargo run --bin manage -- run-server
 ```
+
+**Interactive prompts.** Required positional args and `--password` flags
+are prompted for when stdin is a TTY. So `cargo run … -- create-tenant`
+asks `Tenant slug:`, `create-operator alice` asks for password with
+hidden echo, and `drop-tenant acme` asks you to retype `acme` to confirm
+(skip `--confirm`).
+
+**`.env` auto-load.** The example binary loads `./.env` (or any ancestor)
+on startup — drop your `DATABASE_URL`, `RUSTANGO_APEX_DOMAIN`, and
+`RUSTANGO_SESSION_SECRET` there once and you don't need to re-export them
+each session.
 
 **Two storage modes per tenant, choose per row:**
 
