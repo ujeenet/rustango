@@ -108,14 +108,21 @@ pub async fn run<W: Write + Send>(
         // the server is up).
     }
 
-    // --- Operator console at the apex ---
+    // --- Shared signing key for operator + tenant cookies ---
+    // Both consoles use HMAC-SHA256 over distinct cookie names + payload
+    // shapes; sharing the key is safe and lets a single
+    // RUSTANGO_SESSION_SECRET cover both surfaces.
     let session_secret = SessionSecret::from_env_or_random();
-    let operator_console = operator_console::router(pools.registry().clone(), session_secret);
 
-    // --- Tenant admin at subdomains ---
+    // --- Operator console at the apex ---
+    let operator_console =
+        operator_console::router(pools.registry().clone(), session_secret.clone());
+
+    // --- Tenant admin at subdomains (with per-tenant auth) ---
     let resolver = ChainResolver::standard(config.apex_domain.clone());
-    let tenant_admin =
-        TenantAdminBuilder::new(pools.clone(), registry_url, resolver).build();
+    let tenant_admin = TenantAdminBuilder::new(pools.clone(), registry_url, resolver)
+        .with_session(session_secret)
+        .build();
 
     // --- Host-based dispatch (matches multitenant_demo's design) ---
     let apex = config.apex_domain.clone();

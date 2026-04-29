@@ -198,8 +198,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .push(SubdomainResolver::new("localhost"))
         .push(HeaderResolver::default());
 
+    // Per-tenant auth: signed-in superusers get full read/write,
+    // non-superusers see read-only views, anon → /__login.
+    // The demo seeds `alice / hunter2` as a superuser per tenant;
+    // try logging in as them at acme.localhost:8080.
+    let session_secret_for_tenant = SessionSecret::from_env_or_random();
     let tenant_admin = TenantAdminBuilder::new(pools.clone(), registry_url.clone(), resolver)
         .show_only(["post"])
+        .with_session(session_secret_for_tenant)
         .build();
 
     // Bootstrap a default operator so login works out of the box.
@@ -285,6 +291,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("        sign in with admin / letmein at /login");
     println!("        — operator lives at the apex (no subdomain).");
     println!("          subdomains route to tenant UIs via the resolver.");
+    println!("    Tenant login: per-tenant auth is on. Visit any tenant URL");
+    println!("        and you'll land on /__login. Sign in as alice / hunter2;");
+    println!("        alice is a superuser, so you'll see read/write admin.");
+    println!("        A non-superuser would see read-only views.");
     println!("    curl  http://localhost:8080/post -H 'X-Org: acme'");
     println!();
 

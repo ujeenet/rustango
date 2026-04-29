@@ -40,6 +40,7 @@ cookie         = { workspace = true }
 rand           = { workspace = true }
 tera           = { workspace = true }
 serde_json     = { workspace = true }
+serde_urlencoded = { workspace = true }
 rpassword      = { workspace = true }
 
 [dev-dependencies]

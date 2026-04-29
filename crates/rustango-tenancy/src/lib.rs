@@ -52,6 +52,7 @@ mod pools;
 mod resolver;
 mod secrets;
 pub mod server;
+pub mod tenant_console;
 
 pub use auth::{authenticate_operator, authenticate_user, Operator, User};
 pub use bootstrap::{

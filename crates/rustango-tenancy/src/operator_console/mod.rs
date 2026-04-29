@@ -30,7 +30,7 @@
 //! let app = axum::Router::new().merge(console);
 //! ```
 
-mod session;
+pub(crate) mod session;
 
 use axum::body::Body;
 use axum::extract::{Form, Query, State};

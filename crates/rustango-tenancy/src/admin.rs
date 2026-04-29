@@ -38,22 +38,34 @@
 //!   model that avoids the per-request pool build.
 //! * 1 small allocator hit for the inner Router construction.
 //!
-//! ## What's NOT in slice 4
+//! ## Per-tenant auth (v0.6 step 7)
 //!
-//! * Per-tenant auth — slice 6.
-//! * Operator UI bypass at the apex — caller composes via
-//!   `Router::nest("/operator", admin::router(registry))` themselves.
-//! * Schema-mode connection caching — slice 4 builds + drops per
-//!   request. Acceptable for the demo audience; v0.6 will optimize.
+//! Opt-in via `TenantAdminBuilder::with_session(SessionSecret)`:
+//!
+//! * Anon traffic redirected to `/__login` (303).
+//! * `POST /__login` calls `auth::authenticate_user` against the
+//!   resolved tenant's pool; on success issues a signed cookie.
+//! * `is_superuser = true` tenants get full read/write admin.
+//! * `is_superuser = false` tenants get a `read_only_all` admin —
+//!   list/detail render but every mutating route 403s and
+//!   write-buttons are hidden.
+//!
+//! Operator UI bypass at the apex remains the caller's
+//! responsibility — compose via host-based dispatch (see
+//! `multitenant_demo`).
 
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::Router;
+use cookie::time::Duration as CookieDuration;
+use cookie::{Cookie, SameSite};
 use rustango::admin as rustango_admin;
 use rustango::sql::sqlx::postgres::{PgPool, PgPoolOptions};
+use rustango::sql::sqlx::Row;
+use tera::{Context, Tera};
 use tower::ServiceExt;
 use tracing::warn;
 
@@ -61,6 +73,7 @@ use crate::error::TenancyError;
 use crate::org::{Org, StorageMode};
 use crate::pools::TenantPools;
 use crate::resolver::OrgResolver;
+use crate::tenant_console::{self, TenantSessionPayload};
 
 /// Builder for the tenant-aware admin router.
 pub struct TenantAdminBuilder {
@@ -69,6 +82,12 @@ pub struct TenantAdminBuilder {
     resolver: Arc<dyn OrgResolver>,
     show_only: Option<Vec<String>>,
     read_only: Vec<String>,
+    session: Option<Arc<TenantSessionConfig>>,
+}
+
+struct TenantSessionConfig {
+    secret: tenant_console::SessionSecret,
+    tera: Tera,
 }
 
 impl TenantAdminBuilder {
@@ -90,7 +109,30 @@ impl TenantAdminBuilder {
             resolver: Arc::new(resolver),
             show_only: None,
             read_only: Vec::new(),
+            session: None,
         }
+    }
+
+    /// Enable per-tenant auth. Anon traffic gets redirected to
+    /// `/__login`; `POST /__login` verifies credentials against
+    /// `rustango_users` in the resolved tenant; non-superusers see
+    /// a read-only admin (mutations 403). The same `SessionSecret`
+    /// can be shared with the operator console — different cookie
+    /// names keep the two domains isolated.
+    ///
+    /// Without this opt-in, the tenant admin remains unauthenticated
+    /// (the v0.5 behavior — useful for demos and trusted intranet
+    /// deployments).
+    #[must_use]
+    pub fn with_session(mut self, secret: tenant_console::SessionSecret) -> Self {
+        let mut tera = Tera::default();
+        tera.add_raw_template(
+            "tenant_login.html",
+            include_str!("../templates/tenant_login.html"),
+        )
+        .expect("tenant_login.html parses");
+        self.session = Some(Arc::new(TenantSessionConfig { secret, tera }));
+        self
     }
 
     /// Restrict the admin to these tables. Same semantics as
@@ -127,6 +169,7 @@ impl TenantAdminBuilder {
         let resolver = self.resolver;
         let show_only = Arc::new(self.show_only);
         let read_only = Arc::new(self.read_only);
+        let session = self.session;
 
         Router::new().fallback(move |req: Request<Body>| {
             let pools = pools.clone();
@@ -134,8 +177,18 @@ impl TenantAdminBuilder {
             let resolver = resolver.clone();
             let show_only = show_only.clone();
             let read_only = read_only.clone();
+            let session = session.clone();
             async move {
-                handle_request(req, &pools, &registry_url, &*resolver, &show_only, &read_only).await
+                handle_request(
+                    req,
+                    &pools,
+                    &registry_url,
+                    &*resolver,
+                    &show_only,
+                    &read_only,
+                    session.as_deref(),
+                )
+                .await
             }
         })
     }
@@ -148,6 +201,7 @@ async fn handle_request(
     resolver: &dyn OrgResolver,
     show_only: &Option<Vec<String>>,
     read_only: &[String],
+    session: Option<&TenantSessionConfig>,
 ) -> Response {
     let (parts, body) = req.into_parts();
     let org = match resolver.resolve(&parts, pools.registry()).await {
@@ -172,7 +226,55 @@ async fn handle_request(
         }
     };
 
-    let admin_router = build_inner_admin_router(pool.pg_pool().clone(), show_only, read_only);
+    // Per-tenant auth opt-in. Without `with_session`, the v0.5 path
+    // still applies — every request goes straight to the inner admin.
+    let mut force_read_only = false;
+    if let Some(cfg) = session {
+        let path = parts.uri.path().to_owned();
+        let method = parts.method.clone();
+
+        // Public surface — `/__login*`, `/__logout`, `/__static__/rustango.png`.
+        // These bypass the session check.
+        if path == "/__static__/rustango.png" {
+            return rustango_png_response();
+        }
+        if path == "/__login" {
+            return match method {
+                axum::http::Method::GET => {
+                    login_form(&org, cfg, parts.uri.query()).into_response()
+                }
+                axum::http::Method::POST => {
+                    login_submit(&org, cfg, pool.pg_pool(), parts.headers, body).await
+                }
+                _ => (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response(),
+            };
+        }
+        if path == "/__logout" && method == axum::http::Method::POST {
+            return logout_response();
+        }
+
+        // Private surface — require a valid session cookie.
+        match validate_session(&parts.headers, cfg, &org, pool.pg_pool()).await {
+            SessionCheck::Authenticated { is_superuser } => {
+                if !is_superuser {
+                    force_read_only = true;
+                }
+            }
+            SessionCheck::Anonymous => {
+                return redirect_to_tenant_login(&path).into_response();
+            }
+            SessionCheck::Error(msg) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
+            }
+        }
+    }
+
+    let admin_router = build_inner_admin_router(
+        pool.pg_pool().clone(),
+        show_only,
+        read_only,
+        force_read_only,
+    );
 
     let inner_req = Request::from_parts(parts, body);
     let response = match admin_router.oneshot(inner_req).await {
@@ -185,6 +287,274 @@ async fn handle_request(
     // cached.
     drop(pool);
     response
+}
+
+// ----------------------------- session helpers
+
+enum SessionCheck {
+    Authenticated { is_superuser: bool },
+    Anonymous,
+    Error(String),
+}
+
+async fn validate_session(
+    headers: &HeaderMap,
+    cfg: &TenantSessionConfig,
+    org: &Org,
+    tenant_pool: &PgPool,
+) -> SessionCheck {
+    let Some(cookie_value) = read_cookie(headers, tenant_console::COOKIE_NAME) else {
+        return SessionCheck::Anonymous;
+    };
+    let payload = match tenant_console::decode(&cfg.secret, &org.slug, &cookie_value) {
+        Ok(p) => p,
+        Err(_) => return SessionCheck::Anonymous,
+    };
+    // Look up the user in the tenant's storage; this gives us a
+    // fresh `is_superuser` and `active` flag (operator can toggle
+    // either mid-session). The query mirrors `auth::authenticate_user`
+    // but without the password verify.
+    match rustango::sql::sqlx::query(
+        "SELECT is_superuser, active FROM rustango_users WHERE id = $1",
+    )
+    .bind(payload.uid)
+    .fetch_optional(tenant_pool)
+    .await
+    {
+        Ok(Some(row)) => {
+            let active: bool = row.try_get("active").unwrap_or(false);
+            if !active {
+                return SessionCheck::Anonymous;
+            }
+            let is_superuser: bool = row.try_get("is_superuser").unwrap_or(false);
+            SessionCheck::Authenticated { is_superuser }
+        }
+        Ok(None) => SessionCheck::Anonymous,
+        Err(e) => {
+            warn!(
+                target: "rustango_tenancy::admin",
+                slug = %org.slug,
+                error = %e,
+                "tenant user lookup failed during session validation",
+            );
+            SessionCheck::Error("session lookup failed".into())
+        }
+    }
+}
+
+fn redirect_to_tenant_login(next_path: &str) -> Redirect {
+    let next = if next_path == "/__login" || next_path.starts_with("/__logout") {
+        "/".to_string()
+    } else {
+        next_path.to_string()
+    };
+    let location = format!("/__login?next={}", urlencoding_lite(&next));
+    Redirect::to(&location)
+}
+
+fn login_form(org: &Org, cfg: &TenantSessionConfig, query: Option<&str>) -> axum::response::Html<String> {
+    let mut next: Option<String> = None;
+    let mut error: Option<String> = None;
+    if let Some(q) = query {
+        for pair in q.split('&') {
+            let Some((k, v)) = pair.split_once('=') else {
+                continue;
+            };
+            let v = url_decode_lite(v);
+            match k {
+                "next" => next = Some(v),
+                "error" => error = Some(v),
+                _ => {}
+            }
+        }
+    }
+    let mut ctx = Context::new();
+    ctx.insert("tenant_slug", &org.slug);
+    ctx.insert("tenant_name", &org.display_name);
+    ctx.insert("next", &next.unwrap_or_else(|| "/".into()));
+    ctx.insert("error", &error);
+    axum::response::Html(cfg.tera.render("tenant_login.html", &ctx).unwrap_or_default())
+}
+
+#[derive(serde::Deserialize)]
+struct LoginSubmitForm {
+    username: String,
+    password: String,
+    #[serde(default)]
+    next: Option<String>,
+}
+
+async fn login_submit(
+    org: &Org,
+    cfg: &TenantSessionConfig,
+    tenant_pool: &PgPool,
+    _headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let bytes = match http_body_util::BodyExt::collect(body).await {
+        Ok(b) => b.to_bytes(),
+        Err(_) => return (StatusCode::BAD_REQUEST, "could not read body").into_response(),
+    };
+    let form: LoginSubmitForm = match serde_urlencoded::from_bytes(&bytes) {
+        Ok(f) => f,
+        Err(_) => return (StatusCode::BAD_REQUEST, "malformed login form").into_response(),
+    };
+    let next = sanitize_next(form.next.as_deref());
+
+    // Hand-write the auth check against the tenant pool. We can't
+    // call `auth::authenticate_user` because that takes a
+    // `&mut PgConnection`; here we have a `&PgPool` and want to run
+    // a single query.
+    let row = match rustango::sql::sqlx::query(
+        "SELECT id, password_hash, is_superuser, active FROM rustango_users \
+         WHERE username = $1",
+    )
+    .bind(&form.username)
+    .fetch_optional(tenant_pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(target: "rustango_tenancy::admin", error = %e, "login query");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
+        }
+    };
+    let bad_creds = || -> Response {
+        Redirect::to(&format!(
+            "/__login?error=Invalid+credentials&next={}",
+            urlencoding_lite(&next)
+        ))
+        .into_response()
+    };
+    let Some(row) = row else {
+        return bad_creds();
+    };
+    let active: bool = row.try_get("active").unwrap_or(false);
+    if !active {
+        return bad_creds();
+    }
+    let hash: String = match row.try_get("password_hash") {
+        Ok(h) => h,
+        Err(_) => return bad_creds(),
+    };
+    let ok = match crate::password::verify(&form.password, &hash) {
+        Ok(b) => b,
+        Err(_) => false,
+    };
+    if !ok {
+        return bad_creds();
+    }
+    let uid: i64 = match row.try_get("id") {
+        Ok(v) => v,
+        Err(_) => return bad_creds(),
+    };
+    let payload = TenantSessionPayload::new(uid, &org.slug, tenant_console::SESSION_TTL_SECS);
+    let cookie_value = tenant_console::encode(&cfg.secret, &payload);
+    let cookie = Cookie::build((tenant_console::COOKIE_NAME, cookie_value))
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .max_age(CookieDuration::seconds(tenant_console::SESSION_TTL_SECS))
+        .build();
+    let mut resp = Redirect::to(&next).into_response();
+    resp.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&cookie.to_string()).expect("cookie is ascii"),
+    );
+    resp
+}
+
+fn logout_response() -> Response {
+    let clear = Cookie::build((tenant_console::COOKIE_NAME, ""))
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .max_age(CookieDuration::seconds(0))
+        .build();
+    let mut resp = Redirect::to("/__login").into_response();
+    resp.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&clear.to_string()).expect("cookie is ascii"),
+    );
+    resp
+}
+
+fn rustango_png_response() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/png")
+        .header(header::CACHE_CONTROL, "public, max-age=86400")
+        .body(Body::from(tenant_console::RUSTANGO_PNG))
+        .expect("response builds")
+}
+
+fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    for piece in raw.split(';') {
+        let piece = piece.trim();
+        if let Some(value) = piece.strip_prefix(&format!("{name}=")) {
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
+fn urlencoding_lite(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+fn url_decode_lite(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push(((hi << 4) | lo) as u8);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn sanitize_next(next: Option<&str>) -> String {
+    match next {
+        Some(s)
+            if s.starts_with('/')
+                && !s.starts_with("//")
+                && !s.contains("://")
+                && !s.starts_with("/__login")
+                && !s.starts_with("/__logout") =>
+        {
+            s.to_owned()
+        }
+        _ => "/".to_owned(),
+    }
 }
 
 /// Wrapper around the tenant's PgPool that owns the schema-mode
@@ -277,6 +647,7 @@ fn build_inner_admin_router(
     pool: PgPool,
     show_only: &Option<Vec<String>>,
     read_only: &[String],
+    force_read_only_all: bool,
 ) -> Router {
     let mut builder = rustango_admin::Builder::new(pool);
     if let Some(allow) = show_only {
@@ -284,6 +655,9 @@ fn build_inner_admin_router(
     }
     if !read_only.is_empty() {
         builder = builder.read_only(read_only.iter().cloned());
+    }
+    if force_read_only_all {
+        builder = builder.read_only_all();
     }
     builder.build()
 }

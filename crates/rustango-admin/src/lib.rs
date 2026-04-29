@@ -112,6 +112,11 @@ pub(crate) struct Config {
     /// Tables whose mutating routes are blocked and whose write-buttons
     /// are hidden in HTML.
     pub(crate) read_only_tables: HashSet<String>,
+    /// Global read-only mode — when true, **every** visible table is
+    /// treated as read-only regardless of `read_only_tables`. Used by
+    /// `rustango-tenancy` to gate non-superuser tenant users without
+    /// having to enumerate every table at request time.
+    pub(crate) read_only_all: bool,
 }
 
 impl Builder {
@@ -147,6 +152,16 @@ impl Builder {
         self
     }
 
+    /// Mark **every** table read-only — the admin renders list/detail
+    /// views but every mutating route returns 403 and write-buttons
+    /// are hidden. Used by callers (e.g. `rustango-tenancy` for
+    /// non-superuser tenant users) that gate by a runtime flag and
+    /// don't want to enumerate every table per request.
+    pub fn read_only_all(mut self) -> Self {
+        self.config.read_only_all = true;
+        self
+    }
+
     pub fn build(self) -> Router {
         Router::new()
             .route("/", get(index))
@@ -177,7 +192,7 @@ impl AppState {
     }
 
     fn is_read_only(&self, table: &str) -> bool {
-        self.config.read_only_tables.contains(table)
+        self.config.read_only_all || self.config.read_only_tables.contains(table)
     }
 }
 

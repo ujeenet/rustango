@@ -43,6 +43,12 @@ pub enum SessionError {
     BadSignature,
     #[error("session expired")]
     Expired,
+    /// Cookie's tenant slug doesn't match the resolved tenant — used
+    /// by the tenant console to defend against cross-tenant cookie
+    /// replay (cookie issued for `acme` should not authenticate at
+    /// `globex`'s subdomain).
+    #[error("session is bound to a different tenant")]
+    WrongTenant,
 }
 
 /// Principal payload carried inside the cookie. Compact field names
@@ -71,7 +77,11 @@ impl SessionPayload {
 }
 
 /// Server-held signing key. Wrap `Vec<u8>` so callers can't
-/// accidentally print it.
+/// accidentally print it. `Clone` is opt-in so the same secret can
+/// be handed to both the operator console and the tenant admin —
+/// they use different cookie names + payload shapes, so sharing
+/// the key is safe.
+#[derive(Clone)]
 pub struct SessionSecret(Vec<u8>);
 
 impl SessionSecret {
@@ -112,7 +122,9 @@ impl SessionSecret {
         Self(bytes)
     }
 
-    fn key(&self) -> &[u8] {
+    /// Raw key material — only callers inside the tenancy crate should
+    /// reach into this; external callers go through encode/decode.
+    pub(crate) fn key(&self) -> &[u8] {
         &self.0
     }
 }
@@ -154,7 +166,10 @@ pub fn decode(secret: &SessionSecret, value: &str) -> Result<SessionPayload, Ses
     Ok(payload)
 }
 
-fn sign(secret: &SessionSecret, msg: &[u8]) -> [u8; 32] {
+/// HMAC-SHA256(secret, msg), truncated to 32 bytes (the full SHA256
+/// length). Crate-visible so the tenant console can share the same
+/// MAC primitive without duplicating crypto.
+pub(crate) fn sign(secret: &SessionSecret, msg: &[u8]) -> [u8; 32] {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.key())
         .expect("HMAC accepts any key length");
     mac.update(msg);
