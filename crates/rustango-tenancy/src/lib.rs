@@ -42,6 +42,7 @@ pub mod admin;
 pub mod auth;
 mod error;
 pub mod manage;
+mod manage_interactive;
 pub mod migrate;
 pub mod operator_console;
 mod org;

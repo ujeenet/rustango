@@ -227,10 +227,17 @@ async fn create_tenant<W: Write + Send>(
 
 fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, TenancyError> {
     let mut iter = args.iter();
-    let slug = iter
-        .next()
-        .ok_or_else(|| TenancyError::Validation("create-tenant requires a slug positional argument".into()))?
-        .clone();
+    let slug_arg = iter.next().cloned();
+    let slug = match slug_arg {
+        Some(s) => s,
+        None => crate::manage_interactive::ask("Tenant slug: ")
+            .map_err(TenancyError::Io)?
+            .ok_or_else(|| {
+                TenancyError::Validation(
+                    "create-tenant requires a slug positional argument".into(),
+                )
+            })?,
+    };
     let mut out = CreateTenantArgs {
         slug,
         mode: StorageMode::Schema,
@@ -298,12 +305,7 @@ async fn drop_tenant<W: Write + Send>(
     w: &mut W,
 ) -> Result<(), TenancyError> {
     let mut iter = args.iter();
-    let slug = iter
-        .next()
-        .ok_or_else(|| {
-            TenancyError::Validation("drop-tenant requires a slug positional argument".into())
-        })?
-        .clone();
+    let slug_arg = iter.next().cloned();
     let mut confirm: Option<String> = None;
     while let Some(flag) = iter.next() {
         match flag.as_str() {
@@ -312,9 +314,10 @@ async fn drop_tenant<W: Write + Send>(
             }
             "--help" | "-h" => {
                 return Err(TenancyError::Validation(
-                    "drop-tenant <slug> --confirm <slug>\n  \
+                    "drop-tenant <slug> [--confirm <slug>]\n  \
                      Soft-delete: sets active=false. Data is preserved.\n  \
-                     `--confirm` must repeat the slug verbatim — guard against typos.".into(),
+                     `--confirm` must repeat the slug verbatim — interactive\n  \
+                     terminals can omit it and answer the prompt instead.".into(),
                 ));
             }
             other => {
@@ -324,14 +327,34 @@ async fn drop_tenant<W: Write + Send>(
             }
         }
     }
-    let confirm = confirm.ok_or_else(|| {
-        TenancyError::Validation(format!(
-            "drop-tenant requires `--confirm {slug}` (repeat the slug verbatim)"
-        ))
-    })?;
+    let slug = match slug_arg {
+        Some(s) => s,
+        None => crate::manage_interactive::ask("Tenant slug to drop: ")
+            .map_err(TenancyError::Io)?
+            .ok_or_else(|| {
+                TenancyError::Validation(
+                    "drop-tenant requires a slug positional argument".into(),
+                )
+            })?,
+    };
+    let confirm = match confirm {
+        Some(c) => c,
+        None => {
+            // Interactive confirmation — make the user retype the
+            // slug to prove they meant THIS tenant.
+            let prompt = format!("Type `{slug}` to confirm soft-delete: ");
+            crate::manage_interactive::ask(&prompt)
+                .map_err(TenancyError::Io)?
+                .ok_or_else(|| {
+                    TenancyError::Validation(format!(
+                        "drop-tenant requires `--confirm {slug}` (repeat the slug verbatim)"
+                    ))
+                })?
+        }
+    };
     if confirm != slug {
         return Err(TenancyError::Validation(format!(
-            "drop-tenant: --confirm value `{confirm}` does not match slug `{slug}`"
+            "drop-tenant: confirmation `{confirm}` does not match slug `{slug}` — aborted"
         )));
     }
 
@@ -455,14 +478,7 @@ async fn create_operator_cmd<W: Write + Send>(
     w: &mut W,
 ) -> Result<(), TenancyError> {
     let mut iter = args.iter();
-    let username = iter
-        .next()
-        .ok_or_else(|| {
-            TenancyError::Validation(
-                "create-operator requires a username positional argument".into(),
-            )
-        })?
-        .clone();
+    let username_arg = iter.next().cloned();
     let mut password: Option<String> = None;
     while let Some(flag) = iter.next() {
         match flag.as_str() {
@@ -479,9 +495,27 @@ async fn create_operator_cmd<W: Write + Send>(
             }
         }
     }
-    let plain = password.ok_or_else(|| {
-        TenancyError::Validation("create-operator requires --password".into())
-    })?;
+    // Prompt for missing values when stdin is a TTY; programmatic
+    // callers that pass `None` on a non-interactive stream still get
+    // the original Validation error.
+    let username = match username_arg {
+        Some(u) => u,
+        None => crate::manage_interactive::ask("Username: ")
+            .map_err(TenancyError::Io)?
+            .ok_or_else(|| {
+                TenancyError::Validation(
+                    "create-operator requires a username positional argument".into(),
+                )
+            })?,
+    };
+    let plain = match password {
+        Some(p) => p,
+        None => crate::manage_interactive::ask_password("Password: ")
+            .map_err(TenancyError::Io)?
+            .ok_or_else(|| {
+                TenancyError::Validation("create-operator requires --password".into())
+            })?,
+    };
 
     // Reject duplicate username up front.
     let existing: Vec<crate::Operator> = crate::Operator::objects()
@@ -516,22 +550,8 @@ async fn create_user_cmd<W: Write + Send>(
     w: &mut W,
 ) -> Result<(), TenancyError> {
     let mut iter = args.iter();
-    let slug = iter
-        .next()
-        .ok_or_else(|| {
-            TenancyError::Validation(
-                "create-user requires a tenant slug as the first positional argument".into(),
-            )
-        })?
-        .clone();
-    let username = iter
-        .next()
-        .ok_or_else(|| {
-            TenancyError::Validation(
-                "create-user requires a username as the second positional argument".into(),
-            )
-        })?
-        .clone();
+    let slug_arg = iter.next().cloned();
+    let username_arg = iter.next().cloned();
     let mut password: Option<String> = None;
     let mut is_superuser = false;
     while let Some(flag) = iter.next() {
@@ -550,9 +570,34 @@ async fn create_user_cmd<W: Write + Send>(
             }
         }
     }
-    let plain = password.ok_or_else(|| {
-        TenancyError::Validation("create-user requires --password".into())
-    })?;
+    let slug = match slug_arg {
+        Some(s) => s,
+        None => crate::manage_interactive::ask("Tenant slug: ")
+            .map_err(TenancyError::Io)?
+            .ok_or_else(|| {
+                TenancyError::Validation(
+                    "create-user requires a tenant slug as the first positional argument".into(),
+                )
+            })?,
+    };
+    let username = match username_arg {
+        Some(u) => u,
+        None => crate::manage_interactive::ask("Username: ")
+            .map_err(TenancyError::Io)?
+            .ok_or_else(|| {
+                TenancyError::Validation(
+                    "create-user requires a username as the second positional argument".into(),
+                )
+            })?,
+    };
+    let plain = match password {
+        Some(p) => p,
+        None => crate::manage_interactive::ask_password("Password: ")
+            .map_err(TenancyError::Io)?
+            .ok_or_else(|| {
+                TenancyError::Validation("create-user requires --password".into())
+            })?,
+    };
 
     // Look up the tenant.
     let orgs: Vec<crate::Org> = crate::Org::objects()

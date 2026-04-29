@@ -61,6 +61,13 @@ use rustango_tenancy::TenantPools;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Auto-load `.env` (in the working dir or any ancestor) before
+    // reading env vars, so users don't need to `source ./.env` or
+    // re-export DATABASE_URL / RUSTANGO_APEX_DOMAIN / RUSTANGO_SESSION_SECRET
+    // each session. `.env` is gitignored by convention; if it
+    // doesn't exist we fall through silently.
+    let _ = dotenvy::dotenv();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

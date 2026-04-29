@@ -40,8 +40,12 @@ cookie         = { workspace = true }
 rand           = { workspace = true }
 tera           = { workspace = true }
 serde_json     = { workspace = true }
+rpassword      = { workspace = true }
 
 [dev-dependencies]
 serde_json         = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono             = { workspace = true }
+# Example-only: tenancy_manage CLI auto-loads `.env` so DATABASE_URL
+# / RUSTANGO_APEX_DOMAIN don't have to be re-exported each session.
+dotenvy            = { workspace = true }
