@@ -44,4 +44,9 @@ pub enum TenancyError {
     /// SQL or pool-management failure (raw sqlx error).
     #[error(transparent)]
     Driver(#[from] sqlx::Error),
+
+    /// I/O failure when writing user-facing output through the
+    /// `manage` runner's writer (broken pipe etc.).
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }

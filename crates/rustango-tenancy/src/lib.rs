@@ -40,6 +40,7 @@
 
 pub mod admin;
 mod error;
+pub mod manage;
 pub mod migrate;
 mod org;
 mod pools;
