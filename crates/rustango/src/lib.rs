@@ -27,6 +27,9 @@ pub mod sql;
 #[cfg(feature = "admin")]
 pub mod admin;
 
+#[cfg(feature = "config")]
+pub mod config;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 

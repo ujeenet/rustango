@@ -19,11 +19,15 @@ exclude = ["examples/", "tests/"]
 workspace = true
 
 [features]
-# Out of the box: ORM + auto-admin + Postgres. Opt in to multi-
-# tenancy with `features = ["tenancy"]`. Drop `default-features` to
-# get the bare ORM (core + query + sql + migrate) only.
-default = ["postgres", "admin"]
+# Out of the box: ORM + auto-admin + Postgres + layered config.
+# Opt in to multi-tenancy with `features = ["tenancy"]`. Drop
+# `default-features` for the bare ORM (core + query + sql + migrate).
+default = ["postgres", "admin", "config"]
 postgres = ["sqlx/postgres"]
+
+# Layered TOML config (`rustango::config`). Loads `config/default.toml`
+# → `config/{env}.toml` → env-var overrides. Slice 8.3.
+config = ["dep:toml"]
 
 # Auto-admin HTTP layer (`rustango::admin`). Pulls in axum + Tera +
 # the supporting middleware deps.
@@ -69,6 +73,9 @@ sqlx       = { workspace = true }
 thiserror  = { workspace = true }
 tracing    = { workspace = true }
 uuid       = { workspace = true }
+
+# `config` feature dep — optional.
+toml = { workspace = true, optional = true }
 
 # `admin` feature deps — optional.
 axum           = { workspace = true, optional = true }
