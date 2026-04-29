@@ -67,7 +67,92 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **Migrations as data.** JSON files with full per-step `SchemaSnapshot`, mechanically diff-able, language-agnostic. `embed_migrations!` validates the chain at **compile time** — a broken `prev` reference fails `cargo build`, not runtime.
 - **`manage migrate --dry-run`** prints every DDL/DML the next migrate would run, no side effects.
 - **`DataOp` interleaved with `SchemaChange`** in one migration — Django's "add nullable + backfill + set NOT NULL" recipe lives in one file.
+- **Multi-tenancy without a `DATABASES` dict** (v0.5) — adding a tenant is `INSERT INTO rustango_orgs (...)`, no restart, no config edit, no redeploy. See below.
 - Postgres-only by design. Single dev hobby project; for multi-DB ORMs use [Diesel](https://diesel.rs) or [SeaORM](https://www.sea-ql.org).
+
+## Multi-tenancy (v0.5, opt-in via `rustango-tenancy`)
+
+> **The Django footgun fix.** Django's `DATABASES` dict in `settings.py` requires every database to be declared at boot — adding a tenant means edit + restart + redeploy. `rustango-tenancy` makes tenants first-class **rows in a Postgres table**, resolved per-request from an `OrgResolver` chain.
+
+```toml
+# Cargo.toml
+[dependencies]
+rustango = "0.5"
+rustango-tenancy = "0.5"   # opt-in
+```
+
+```rust
+use std::sync::Arc;
+use rustango::sql::sqlx::PgPool;
+use rustango_tenancy::{
+    admin::TenantAdminBuilder, ChainResolver, TenantPools,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let registry_url = std::env::var("DATABASE_URL")?;
+    let registry = PgPool::connect(&registry_url).await?;
+
+    // Lazy tenant pool registry. Schema-mode tenants share `registry`;
+    // database-mode tenants get a dedicated pool, lazy-built and cached.
+    let pools = Arc::new(TenantPools::new(registry.clone()));
+
+    // Subdomain-first by design: `acme.app.example.com` → tenant `acme`.
+    // X-Org header is the API fallback. Path-prefix is opt-in (drop it
+    // in if you can't get wildcard DNS / TLS).
+    let resolver = ChainResolver::standard("app.example.com");
+
+    // Tenant admin under each subdomain.
+    let tenant = TenantAdminBuilder::new(pools.clone(), registry_url, resolver)
+        .read_only(["audit_log"])
+        .build();
+
+    // Operator UI bypasses the resolver — `/operator/*` reaches the
+    // registry directly so main-app admins can manage every tenant.
+    let app = axum::Router::new()
+        .nest("/operator", rustango::admin::router(registry.clone()))
+        .merge(tenant);
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+```
+
+**Provision tenants from the `manage` runner**:
+
+```sh
+# Hand out a slug + storage mode.
+RUSTANGO_APEX_DOMAIN=app.example.com cargo run --bin manage -- \
+    create-tenant acme --mode schema
+
+# Or a fully isolated database tenant pointing at a separate DB.
+cargo run --bin manage -- \
+    create-tenant globex --mode database \
+    --database-url postgres://...:5432/globex_data
+
+cargo run --bin manage -- list-tenants
+cargo run --bin manage -- migrate-tenants
+cargo run --bin manage -- create-operator admin --password ...
+cargo run --bin manage -- create-user acme alice --password ... --superuser
+```
+
+**Two storage modes per tenant, choose per row:**
+
+- `schema` — tenant data lives in a Postgres schema in the registry DB. Cheap (one connection budget for all tenants); good for many small tenants.
+- `database` — tenant data lives in a fully separate Postgres database (different host is fine). Strong isolation, per-tenant pool. The connection URL goes through a pluggable `SecretsResolver` — `env://VAR_NAME` works out of the box; HashiCorp Vault / AWS Secrets Manager / Azure Key Vault adapters land as separate crates implementing the trait.
+
+**Hard wall between identity domains.** Operators (`rustango_operators`, registry) and per-tenant Users (`rustango_users` in the tenant's storage) are strictly separate. Argon2id-hashed passwords. An operator's credentials never authenticate against a tenant; a tenant superuser's credentials never reach `/operator`. Browser cookie isolation by subdomain plus the in-code wall gives defense in depth.
+
+**Subdomain-first routing**, with `*.localhost` for dev:
+
+```
+acme.app.example.com/admin/...   → ACME's admin (production)
+acme.localhost:8080/admin/...    → ACME's admin (dev — Chrome/Firefox/Safari
+                                    resolve `*.localhost` to 127.0.0.1
+                                    automatically; no /etc/hosts edits)
+app.example.com/operator/...     → operator UI (no subdomain → no tenant)
+```
 
 ## Try the demo
 
