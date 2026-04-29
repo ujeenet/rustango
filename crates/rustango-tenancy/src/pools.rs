@@ -230,6 +230,28 @@ impl TenantPools {
         cache.remove(slug);
     }
 
+    /// Resolve `org.database_url` through the configured
+    /// [`SecretsResolver`] and return the literal connection URL.
+    /// Called by `purge-tenant --purge-database` so it can reach the
+    /// admin URL needed to issue `DROP DATABASE`. Schema-mode orgs
+    /// have no database_url — passing one returns
+    /// [`TenancyError::Validation`].
+    ///
+    /// # Errors
+    /// * [`TenancyError::Validation`] when `org.database_url` is `None`.
+    /// * [`TenancyError::Secrets`] when the secret reference fails to
+    ///   resolve.
+    pub async fn resolved_database_url(&self, org: &Org) -> Result<String, TenancyError> {
+        let reference = org.database_url.as_deref().ok_or_else(|| {
+            TenancyError::Validation(format!(
+                "org `{}` has no `database_url` to resolve (schema mode?)",
+                org.slug
+            ))
+        })?;
+        let url = self.secrets.resolve(reference).await?;
+        Ok(url)
+    }
+
     /// Number of database-mode pools currently cached. Schema-mode
     /// tenants don't count.
     pub async fn cached_database_pool_count(&self) -> usize {

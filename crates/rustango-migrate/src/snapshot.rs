@@ -72,6 +72,19 @@ impl SchemaSnapshot {
         Self { tables }
     }
 
+    /// Capture an explicit list of model schemas — the inventory-
+    /// agnostic counterpart of [`from_registry`]. Used by callers that
+    /// want a curated snapshot rather than every linked model (e.g.
+    /// `rustango-tenancy`'s bootstrap migrations, which pin themselves
+    /// to `rustango_orgs` + `rustango_operators` + `rustango_users`).
+    #[must_use]
+    pub fn from_models(models: &[&ModelSchema]) -> Self {
+        let mut tables: Vec<TableSnapshot> =
+            models.iter().map(|s| TableSnapshot::from_schema(s)).collect();
+        tables.sort_by(|a, b| a.name.cmp(&b.name));
+        Self { tables }
+    }
+
     /// Look up a table by SQL name.
     #[must_use]
     pub fn table(&self, name: &str) -> Option<&TableSnapshot> {
@@ -80,7 +93,12 @@ impl SchemaSnapshot {
 }
 
 impl TableSnapshot {
-    fn from_schema(s: &ModelSchema) -> Self {
+    /// Build a snapshot row from a registered [`ModelSchema`]. Public
+    /// so external callers (e.g. tenancy bootstrap migrations) can
+    /// assemble their own snapshots without going through the global
+    /// inventory.
+    #[must_use]
+    pub fn from_schema(s: &ModelSchema) -> Self {
         let mut fields: Vec<FieldSnapshot> =
             s.scalar_fields().map(FieldSnapshot::from_schema).collect();
         fields.sort_by(|a, b| a.column.cmp(&b.column));

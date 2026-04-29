@@ -34,10 +34,11 @@
 //! | `migrate-tenants`  | Run pending tenant-scoped migrations across active orgs |
 //! | (anything else)    | Delegated to `rustango_migrate::manage::run` (registry-scoped) |
 //!
-//! Hard-delete with schema/DB drop is intentionally **not** in slice 5 —
-//! footgun-level operation. v0.6 ships `purge-tenant <slug>
-//! --confirm <slug>` that requires typing the slug to drop schema or
-//! call `DROP DATABASE`.
+//! Hard-delete with schema/DB drop lands as the v0.6 `purge-tenant
+//! <slug> --confirm <slug>` verb. Schema-mode tenants get
+//! `DROP SCHEMA … CASCADE`; database-mode tenants additionally
+//! require `--purge-database` and run `DROP DATABASE …` against an
+//! admin connection. The Org row is deleted in both cases.
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -89,14 +90,25 @@ pub async fn run_with_writer<W: Write + Send>(
     match cmd {
         "create-tenant" => create_tenant(pools, registry_url, dir, &args[1..], writer).await,
         "drop-tenant" => drop_tenant(pools, &args[1..], writer).await,
+        "purge-tenant" => purge_tenant(pools, &args[1..], writer).await,
         "list-tenants" => list_tenants(pools, writer).await,
         "migrate-tenants" => migrate_tenants_cmd(pools, registry_url, dir, writer).await,
+        "migrate-registry" => migrate_registry_cmd(pools, dir, writer).await,
         "create-operator" => create_operator_cmd(pools, &args[1..], writer).await,
         "create-user" => create_user_cmd(pools, registry_url, &args[1..], writer).await,
         "run-server" | "runserver" => run_server_cmd(pools, registry_url, &args[1..], writer).await,
-        // Default to the single-tenant manage::run against the
-        // registry pool. This handles `migrate`, `makemigrations`,
-        // `downgrade`, `showmigrations`, `--help`, etc.
+        "init-tenancy" => init_tenancy_cmd(dir, writer),
+        // Plain `migrate` is scope-aware here — registry-scoped
+        // migrations apply to the registry pool first, then tenant-
+        // scoped ones fan out across active orgs. Direct fall-through
+        // to `rustango::migrate::manage` (which is scope-blind) would
+        // apply tenant migrations to the registry pool, a real
+        // footgun. `migrate-registry` / `migrate-tenants` stay
+        // available for fine-grained control.
+        "migrate" => migrate_all_cmd(pools, registry_url, dir, &args[1..], writer).await,
+        // Everything else (makemigrations, showmigrations, downgrade,
+        // help, …) is registry-scoped and delegates to the standard
+        // single-tenant runner.
         _ => rustango::migrate::manage::run_with_writer(
             pools.registry(),
             dir,
@@ -391,8 +403,187 @@ async fn drop_tenant<W: Write + Send>(
     writeln!(w, "soft-deleted tenant `{slug}` (active=false). Data preserved.")?;
     writeln!(
         w,
-        "  to hard-delete (drop schema or DB), use `purge-tenant` (v0.6+)."
+        "  to hard-delete (drop schema or DB), use `purge-tenant`."
     )?;
+    Ok(())
+}
+
+// ---------- purge-tenant (v0.6 step 6) ----------
+
+async fn purge_tenant<W: Write + Send>(
+    pools: &TenantPools,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError> {
+    let mut iter = args.iter();
+    let slug_arg = iter.next().cloned();
+    let mut confirm: Option<String> = None;
+    let mut purge_database = false;
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--confirm" => {
+                confirm = Some(next_value(&mut iter, "--confirm")?);
+            }
+            "--purge-database" => purge_database = true,
+            "--help" | "-h" => {
+                return Err(TenancyError::Validation(
+                    "purge-tenant <slug> [--confirm <slug>] [--purge-database]\n  \
+                     HARD-DELETE. Schema-mode: DROP SCHEMA <slug> CASCADE.\n  \
+                     Database-mode: refuses unless `--purge-database` is also\n  \
+                     passed; with it, runs `DROP DATABASE` against an admin\n  \
+                     connection. The Org row is deleted in both cases.\n  \
+                     Data is unrecoverable. Use `drop-tenant` for soft-delete.\n  \
+                     `--confirm` must repeat the slug verbatim — interactive\n  \
+                     terminals can omit it and answer the prompt instead."
+                        .into(),
+                ));
+            }
+            other => {
+                return Err(TenancyError::Validation(format!(
+                    "purge-tenant: unknown argument `{other}`"
+                )));
+            }
+        }
+    }
+    let slug = match slug_arg {
+        Some(s) => s,
+        None => crate::manage_interactive::ask("Tenant slug to PURGE: ")
+            .map_err(TenancyError::Io)?
+            .ok_or_else(|| {
+                TenancyError::Validation(
+                    "purge-tenant requires a slug positional argument".into(),
+                )
+            })?,
+    };
+    let confirm = match confirm {
+        Some(c) => c,
+        None => {
+            // Interactive confirmation — make the operator retype the
+            // slug to prove they meant THIS tenant. Mirrors drop-tenant
+            // but the consequence is hard-delete, so the message is louder.
+            let prompt = format!(
+                "HARD-DELETE: type `{slug}` to confirm permanent deletion: "
+            );
+            crate::manage_interactive::ask(&prompt)
+                .map_err(TenancyError::Io)?
+                .ok_or_else(|| {
+                    TenancyError::Validation(format!(
+                        "purge-tenant requires `--confirm {slug}` (repeat the slug verbatim)"
+                    ))
+                })?
+        }
+    };
+    if confirm != slug {
+        return Err(TenancyError::Validation(format!(
+            "purge-tenant: confirmation `{confirm}` does not match slug `{slug}` — aborted"
+        )));
+    }
+
+    let existing: Vec<Org> = Org::objects()
+        .where_(Org::slug.eq(slug.clone()))
+        .fetch(pools.registry())
+        .await?;
+    let Some(org) = existing.into_iter().next() else {
+        return Err(TenancyError::Validation(format!(
+            "purge-tenant: no tenant with slug `{slug}`"
+        )));
+    };
+
+    let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
+        TenancyError::Validation(format!(
+            "org `{slug}` has unknown storage_mode `{got}`"
+        ))
+    })?;
+
+    match mode {
+        StorageMode::Schema => {
+            let schema = org.schema_name.clone().unwrap_or_else(|| slug.clone());
+            let sql = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(&schema));
+            rustango::sql::sqlx::query(&sql)
+                .execute(pools.registry())
+                .await?;
+            writeln!(w, "purged tenant `{slug}` (dropped schema `{schema}`)")?;
+        }
+        StorageMode::Database => {
+            if !purge_database {
+                return Err(TenancyError::Validation(format!(
+                    "tenant `{slug}` is database-mode — `DROP DATABASE` is unrecoverable. \
+                     Pass `--purge-database` to confirm you want the DB dropped, or use \
+                     `drop-tenant` for soft-delete."
+                )));
+            }
+            // Resolve the URL through the secrets resolver so vault-
+            // backed orgs purge correctly. Then close & drop the
+            // cached pool — DROP DATABASE refuses while connections
+            // are open.
+            let url = pools.resolved_database_url(&org).await?;
+            pools.invalidate(&slug).await;
+            drop_database_at(&url, w).await?;
+            writeln!(w, "purged tenant `{slug}` (dropped dedicated database)")?;
+        }
+    }
+
+    // DELETE the Org row. Use a raw query so we don't depend on a
+    // model-level delete API (rustango doesn't ship one yet).
+    let id = org.id.get().copied().ok_or_else(|| {
+        TenancyError::Validation("purge-tenant: Org row has no PK".into())
+    })?;
+    let result = rustango::sql::sqlx::query("DELETE FROM rustango_orgs WHERE id = $1")
+        .bind(id)
+        .execute(pools.registry())
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(TenancyError::Validation(format!(
+            "purge-tenant: no Org row deleted for id {id} — race condition?"
+        )));
+    }
+    writeln!(w, "  removed Org row (id {id})")?;
+    Ok(())
+}
+
+/// Connect to the same Postgres server as `tenant_url` but switch to
+/// the `postgres` admin database (DROP DATABASE can't run from a
+/// connection to the database being dropped). Issue the DROP, then
+/// close the admin connection.
+///
+/// Inherits credentials, host, port, and TLS settings from
+/// `tenant_url`. The dropped database is `tenant_url`'s
+/// `database` field — same DB the tenant pool was connected to.
+async fn drop_database_at<W: Write + Send>(
+    tenant_url: &str,
+    w: &mut W,
+) -> Result<(), TenancyError> {
+    use rustango::sql::sqlx::postgres::PgConnectOptions;
+    use rustango::sql::sqlx::ConnectOptions;
+    use std::str::FromStr;
+
+    let opts = PgConnectOptions::from_str(tenant_url).map_err(|e| {
+        TenancyError::Validation(format!(
+            "purge-tenant: cannot parse database_url `{tenant_url}`: {e}"
+        ))
+    })?;
+    let dbname = opts.get_database().ok_or_else(|| {
+        TenancyError::Validation(
+            "purge-tenant: database_url is missing the database name — \
+             can't determine what to DROP DATABASE"
+                .into(),
+        )
+    })?;
+    if dbname.eq_ignore_ascii_case("postgres") || dbname.eq_ignore_ascii_case("template0")
+        || dbname.eq_ignore_ascii_case("template1")
+    {
+        return Err(TenancyError::Validation(format!(
+            "purge-tenant: refusing to DROP DATABASE `{dbname}` (Postgres system database)"
+        )));
+    }
+    let dbname = dbname.to_owned();
+    let admin_opts = opts.clone().database("postgres");
+    let mut admin = admin_opts.connect().await?;
+    let sql = format!("DROP DATABASE IF EXISTS {}", quote_ident(&dbname));
+    writeln!(w, "  issuing {sql}")?;
+    rustango::sql::sqlx::query(&sql)
+        .execute(&mut admin)
+        .await?;
     Ok(())
 }
 
@@ -444,6 +635,13 @@ async fn migrate_tenants_cmd<W: Write + Send>(
     w: &mut W,
 ) -> Result<(), TenancyError> {
     let report = tenant_migrate::migrate_tenants(pools, dir, registry_url).await?;
+    write_tenant_report(w, &report)
+}
+
+fn write_tenant_report<W: Write>(
+    w: &mut W,
+    report: &crate::migrate::TenantMigrationReport,
+) -> Result<(), TenancyError> {
     if report.tenants.is_empty() {
         writeln!(w, "no active tenants")?;
         return Ok(());
@@ -462,6 +660,131 @@ async fn migrate_tenants_cmd<W: Write + Send>(
         } else {
             writeln!(w, "  ✓ {}: {} migration(s)", o.slug, o.applied.len())?;
         }
+    }
+    Ok(())
+}
+
+// ---------- migrate-registry ----------
+
+async fn migrate_registry_cmd<W: Write + Send>(
+    pools: &TenantPools,
+    dir: &Path,
+    w: &mut W,
+) -> Result<(), TenancyError> {
+    let applied = tenant_migrate::migrate_registry(pools, dir).await?;
+    if applied.is_empty() {
+        writeln!(w, "registry: nothing to migrate (already up to date)")?;
+    } else {
+        writeln!(w, "registry: applied {} migration(s)", applied.len())?;
+        for m in &applied {
+            writeln!(w, "  + {}", m.name)?;
+        }
+    }
+    Ok(())
+}
+
+// ---------- migrate (scope-aware) ----------
+
+async fn migrate_all_cmd<W: Write + Send>(
+    pools: &TenantPools,
+    registry_url: &str,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError> {
+    // Pass any flags / args (e.g. `--dry-run`, `--help`, target name)
+    // through to the registry-side runner. The single-tenant manage
+    // runner doesn't know about scopes, so for now we let the
+    // tenant phase short-circuit on `--help` / target args. Most
+    // operators just type `migrate` with no args.
+    let mut iter = args.iter();
+    let mut help = false;
+    let mut dry_run = false;
+    let mut target: Option<&str> = None;
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => help = true,
+            "--dry-run" => dry_run = true,
+            other if other.starts_with('-') => {
+                return Err(TenancyError::Migrate(
+                    rustango::migrate::MigrateError::Validation(format!(
+                        "unknown migrate flag: {other}"
+                    )),
+                ));
+            }
+            other => {
+                if target.is_some() {
+                    return Err(TenancyError::Migrate(
+                        rustango::migrate::MigrateError::Validation(format!(
+                            "unexpected positional argument: {other}"
+                        )),
+                    ));
+                }
+                target = Some(other);
+            }
+        }
+    }
+    if help {
+        writeln!(
+            w,
+            "migrate                         apply registry-scoped + every tenant's pending migrations\n\
+             migrate <target>                forward or back to <target> (registry-scoped only — use migrate-tenants for tenants)\n\
+             migrate --dry-run               preview SQL for registry-scoped pending migrations\n\
+             migrate-registry                apply registry-scoped pending migrations only\n\
+             migrate-tenants                 apply tenant-scoped pending migrations across active orgs"
+        )?;
+        return Ok(());
+    }
+    if target.is_some() || dry_run {
+        // Targeted / dry-run mode is registry-only — tenant-scoped
+        // routing for arbitrary targets isn't well-defined yet.
+        // Forward the original args to the registry runner.
+        let mut forwarded = vec!["migrate".to_owned()];
+        forwarded.extend(args.iter().cloned());
+        return rustango::migrate::manage::run_with_writer(pools.registry(), dir, forwarded, w)
+            .await
+            .map_err(TenancyError::Migrate);
+    }
+
+    // Registry phase.
+    let registry_applied = tenant_migrate::migrate_registry(pools, dir).await?;
+    if registry_applied.is_empty() {
+        writeln!(w, "registry: nothing to migrate (already up to date)")?;
+    } else {
+        writeln!(w, "registry: applied {} migration(s)", registry_applied.len())?;
+        for m in &registry_applied {
+            writeln!(w, "  + {}", m.name)?;
+        }
+    }
+
+    // Tenant phase.
+    let report = tenant_migrate::migrate_tenants(pools, dir, registry_url).await?;
+    write_tenant_report(w, &report)?;
+    Ok(())
+}
+
+// ---------- init-tenancy ----------
+
+fn init_tenancy_cmd<W: Write>(dir: &Path, w: &mut W) -> Result<(), TenancyError> {
+    let report = crate::bootstrap::init_tenancy(dir)?;
+    if report.written.is_empty() && report.skipped.is_empty() {
+        // Should not happen — init_tenancy always processes both files.
+        writeln!(w, "init-tenancy: no migrations to write")?;
+        return Ok(());
+    }
+    writeln!(
+        w,
+        "init-tenancy: bootstrap migrations in {}",
+        dir.display()
+    )?;
+    for name in &report.written {
+        writeln!(w, "  + wrote {name}.json")?;
+    }
+    for name in &report.skipped {
+        writeln!(w, "  · {name}.json already exists — left untouched")?;
+    }
+    if !report.written.is_empty() {
+        writeln!(w, "next: run `migrate` to apply them.")?;
     }
     Ok(())
 }

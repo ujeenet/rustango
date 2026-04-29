@@ -40,6 +40,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod bootstrap;
 mod error;
 pub mod manage;
 mod manage_interactive;
@@ -53,6 +54,10 @@ mod secrets;
 pub mod server;
 
 pub use auth::{authenticate_operator, authenticate_user, Operator, User};
+pub use bootstrap::{
+    init_tenancy, registry_bootstrap_migration, tenant_bootstrap_migration, InitTenancyReport,
+    REGISTRY_BOOTSTRAP_NAME, TENANT_BOOTSTRAP_NAME,
+};
 
 pub use error::TenancyError;
 pub use migrate::{migrate_registry, migrate_tenants, TenantMigrationOutcome, TenantMigrationReport};

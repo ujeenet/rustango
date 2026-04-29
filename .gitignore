@@ -7,3 +7,7 @@
 .claude/settings.local.json
 # manage_demo example writes its migrations here at runtime
 /manage_demo_migrations/
+# tenancy_manage example writes packaged bootstrap migrations here on first run
+/tenancy_manage_migrations/
+# local env file with DATABASE_URL etc — never commit
+.env

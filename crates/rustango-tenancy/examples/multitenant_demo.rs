@@ -34,7 +34,7 @@ use std::sync::Arc;
 use rustango::core::Column as _;
 use rustango::sql::sqlx::{self, PgPool};
 use rustango::sql::Fetcher;
-use rustango::{migrate as rmig, Model};
+use rustango::Model;
 use rustango_tenancy::{
     admin::TenantAdminBuilder,
     manage,
@@ -75,19 +75,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = PgPool::connect(&registry_url).await?;
     let pools = Arc::new(TenantPools::new(registry.clone()));
 
-    // ---- 1. Reset the registry and bootstrap every registered model ----
-    println!("==> dropping and recreating registry tables");
-    rmig::drop_all(&registry).await?;
-    rmig::apply_all(&registry).await?;
+    // ---- 1. Reset every relevant table for a clean demo run ----
+    //
+    // `drop_all` walks every linked `#[derive(Model)]`, including the
+    // tenancy registry tables and our `Post` model. CASCADE means we
+    // don't have to topologically sort. This wipes the demo's state in
+    // the registry; tenant schemas get dropped explicitly below.
+    println!("==> dropping every linked table for a clean slate");
+    rustango::migrate::drop_all(&registry).await?;
+    // Also drop the migration ledger so the second run sees a fresh
+    // ledger and re-applies the bootstraps. `__rustango_migrations__`
+    // is owned by the runner, not by inventory, so drop_all leaves it
+    // alone.
+    sqlx::query(r#"DROP TABLE IF EXISTS "__rustango_migrations__" CASCADE"#)
+        .execute(&registry)
+        .await?;
 
-    // ---- 2. Provision two schema-mode tenants ----
+    // ---- 2. Bootstrap registry tables via the packaged migrations ----
+    let migrations_dir = std::env::temp_dir().join("rustango_multitenant_demo_migrations");
+    let _ = std::fs::remove_dir_all(&migrations_dir);
+    {
+        let mut buf: Vec<u8> = Vec::new();
+        manage::run_with_writer(
+            &pools,
+            &registry_url,
+            &migrations_dir,
+            vec!["init-tenancy".into()],
+            &mut buf,
+        )
+        .await?;
+        manage::run_with_writer(
+            &pools,
+            &registry_url,
+            &migrations_dir,
+            vec!["migrate-registry".into()],
+            &mut buf,
+        )
+        .await?;
+        print!("{}", String::from_utf8_lossy(&buf));
+    }
+
+    // ---- 3. Provision two schema-mode tenants ----
     for slug in [ACME, GLOBEX] {
         drop_schema(&registry, slug).await?;
-        // Manually CREATE SCHEMA + the post + user tables in each
-        // tenant's schema. In a real deployment you'd write a
-        // tenant-scoped migration JSON and run `manage migrate-tenants`;
-        // for the demo we keep it inline so the example is self-contained.
-        run(&registry, &format!(r#"CREATE SCHEMA "{slug}""#)).await?;
+
+        // create-tenant (no `--no-migrate`) creates the schema, inserts
+        // the Org row, and runs the packaged tenant-scoped bootstrap
+        // migration against the new schema — so `rustango_users` lands
+        // automatically.
+        let mut buf: Vec<u8> = Vec::new();
+        manage::run_with_writer(
+            &pools,
+            &registry_url,
+            &migrations_dir,
+            vec![
+                "create-tenant".into(),
+                slug.into(),
+                "--mode".into(),
+                "schema".into(),
+                "--display-name".into(),
+                slug.to_uppercase(),
+            ],
+            &mut buf,
+        )
+        .await?;
+        // The demo's own `Post` model has no migration JSON — hand-roll
+        // it inside the tenant schema. Real apps would author a tenant-
+        // scoped migration and let `migrate-tenants` apply it.
         run(
             &registry,
             &format!(
@@ -100,44 +154,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         )
         .await?;
-        run(
-            &registry,
-            &format!(
-                r#"CREATE TABLE "{slug}"."rustango_users" (
-                    "id" BIGSERIAL NOT NULL PRIMARY KEY,
-                    "username" VARCHAR(64) NOT NULL,
-                    "password_hash" VARCHAR(255) NOT NULL,
-                    "is_superuser" BOOLEAN NOT NULL,
-                    "active" BOOLEAN NOT NULL,
-                    "created_at" TIMESTAMPTZ NOT NULL
-                )"#
-            ),
-        )
-        .await?;
-
-        // Use the manage runner to provision the Org row + a superuser.
-        // This is the same code path operators use in production.
-        let mut buf: Vec<u8> = Vec::new();
         manage::run_with_writer(
             &pools,
             &registry_url,
-            std::path::Path::new(""),
-            vec![
-                "create-tenant".into(),
-                slug.into(),
-                "--mode".into(),
-                "schema".into(),
-                "--display-name".into(),
-                slug.to_uppercase(),
-                "--no-migrate".into(),
-            ],
-            &mut buf,
-        )
-        .await?;
-        manage::run_with_writer(
-            &pools,
-            &registry_url,
-            std::path::Path::new(""),
+            &migrations_dir,
             vec![
                 "create-user".into(),
                 slug.into(),
