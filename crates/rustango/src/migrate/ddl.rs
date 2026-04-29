@@ -138,13 +138,13 @@ fn write_check_constraint(s: &mut String, field: &FieldSchema) {
 
 fn sql_type(field: &FieldSchema) -> String {
     if field.auto {
-        return match field.ty {
-            FieldType::I32 => "SERIAL".into(),
-            FieldType::I64 => "BIGSERIAL".into(),
-            // Macro rejects non-integer Auto<T> at derive time; this is
-            // unreachable for any model that compiled.
-            other => unreachable!("Auto<{other}> should have failed at derive time"),
-        };
+        // Delegate to the dialect — Postgres returns SERIAL/BIGSERIAL,
+        // SQLite returns INTEGER PRIMARY KEY AUTOINCREMENT, MySQL
+        // returns BIGINT AUTO_INCREMENT. v0.8 hardcodes Postgres
+        // because that's the only impl shipped; v0.10 generalises
+        // when SqliteDialect / MySqlDialect land.
+        use crate::sql::{Dialect as _, Postgres};
+        return Postgres.serial_type(field.ty).to_owned();
     }
     match field.ty {
         FieldType::I32 => "INTEGER".into(),

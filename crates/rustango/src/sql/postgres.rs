@@ -16,6 +16,35 @@ use super::{CompiledStatement, Dialect, SqlError};
 pub struct Postgres;
 
 impl Dialect for Postgres {
+    fn name(&self) -> &'static str {
+        "postgres"
+    }
+
+    // Postgres uses ANSI-style double-quoted identifiers — same as the
+    // trait default, no override needed for `quote_ident`.
+
+    fn placeholder(&self, n: usize) -> String {
+        format!("${n}")
+    }
+
+    fn serial_type(&self, field_type: FieldType) -> &'static str {
+        match field_type {
+            FieldType::I32 => "SERIAL",
+            _ => "BIGSERIAL",
+        }
+    }
+
+    // Postgres has a native `BOOLEAN` type with `TRUE` / `FALSE`
+    // literals — same as the trait default, no override.
+
+    fn supports_concurrent_index(&self) -> bool {
+        true
+    }
+
+    fn supports_returning(&self) -> bool {
+        true
+    }
+
     fn compile_select(&self, query: &SelectQuery) -> Result<CompiledStatement, SqlError> {
         let mut sql = String::new();
         let mut params: Vec<SqlValue> = Vec::new();
