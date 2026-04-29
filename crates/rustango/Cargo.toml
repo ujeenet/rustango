@@ -25,6 +25,10 @@ rustango-query   = { workspace = true }
 rustango-sql     = { workspace = true }
 rustango-migrate = { workspace = true }
 rustango-admin   = { workspace = true }
+# rustango-tenancy is intentionally NOT a dep of the facade — it
+# depends on the facade itself (so the `#[derive(Model)]` macro's
+# `::rustango::core` paths resolve), which would be a cycle. Users
+# wanting tenancy add `rustango-tenancy` to their own Cargo.toml.
 
 [dev-dependencies]
 tokio          = { workspace = true }

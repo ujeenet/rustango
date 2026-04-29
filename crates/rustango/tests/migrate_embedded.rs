@@ -64,6 +64,7 @@ fn make_migration_json(table: &str, name: &str) -> String {
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
         atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot: snapshot_with_table(table),
         forward: vec![Operation::Schema(SchemaChange::CreateTable(
             table.to_owned(),
@@ -212,6 +213,7 @@ async fn migrate_embedded_rejects_broken_prev_chain() {
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: Some("0001_missing_predecessor".into()),
         atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot: snapshot_with_table(&table),
         forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
     };

@@ -3,8 +3,8 @@
 use std::fmt::Write as _;
 
 use rustango_core::{
-    BulkInsertQuery, CountQuery, DeleteQuery, Filter, InsertQuery, Op, SearchClause, SelectQuery,
-    SqlValue, UpdateQuery,
+    BulkInsertQuery, CountQuery, DeleteQuery, FieldType, Filter, InsertQuery, ModelSchema, Op,
+    SearchClause, SelectQuery, SqlValue, UpdateQuery,
 };
 
 use crate::{CompiledStatement, Dialect, SqlError};
@@ -72,6 +72,7 @@ impl Dialect for Postgres {
             &query.filters,
             query.search.as_ref(),
             qualify.then_some(query.model.table),
+            Some(query.model),
         )?;
 
         if let Some(limit) = query.limit {
@@ -88,7 +89,7 @@ impl Dialect for Postgres {
         let mut sql = String::from("SELECT COUNT(*) FROM ");
         let mut params: Vec<SqlValue> = Vec::new();
         write_ident(&mut sql, query.model.table);
-        write_where(&mut sql, &mut params, &query.filters)?;
+        write_where(&mut sql, &mut params, &query.filters, Some(query.model))?;
         Ok(CompiledStatement { sql, params })
     }
 
@@ -128,12 +129,13 @@ impl Dialect for Postgres {
             }
             sql.push_str(") VALUES (");
             let mut first = true;
-            for value in &query.values {
+            for (col, value) in query.columns.iter().zip(&query.values) {
                 if !first {
                     sql.push_str(", ");
                 }
                 first = false;
-                push_param(&mut sql, &mut params, value.clone());
+                let cast = pg_null_cast_for(query.model, col);
+                push_param_typed(&mut sql, &mut params, value.clone(), cast);
             }
             sql.push(')');
         }
@@ -222,12 +224,13 @@ impl Dialect for Postgres {
                 first_row = false;
                 sql.push('(');
                 let mut first_v = true;
-                for value in row {
+                for (col, value) in query.columns.iter().zip(row) {
                     if !first_v {
                         sql.push_str(", ");
                     }
                     first_v = false;
-                    push_param(&mut sql, &mut params, value.clone());
+                    let cast = pg_null_cast_for(query.model, col);
+                    push_param_typed(&mut sql, &mut params, value.clone(), cast);
                 }
                 sql.push(')');
             }
@@ -266,10 +269,11 @@ impl Dialect for Postgres {
             first = false;
             write_ident(&mut sql, assignment.column);
             sql.push_str(" = ");
-            push_param(&mut sql, &mut params, assignment.value.clone());
+            let cast = pg_null_cast_for(query.model, assignment.column);
+            push_param_typed(&mut sql, &mut params, assignment.value.clone(), cast);
         }
 
-        write_where(&mut sql, &mut params, &query.filters)?;
+        write_where(&mut sql, &mut params, &query.filters, Some(query.model))?;
 
         Ok(CompiledStatement { sql, params })
     }
@@ -279,7 +283,7 @@ impl Dialect for Postgres {
         let mut params: Vec<SqlValue> = Vec::new();
         write_ident(&mut sql, query.model.table);
 
-        write_where(&mut sql, &mut params, &query.filters)?;
+        write_where(&mut sql, &mut params, &query.filters, Some(query.model))?;
 
         Ok(CompiledStatement { sql, params })
     }
@@ -289,6 +293,7 @@ fn write_where(
     sql: &mut String,
     params: &mut Vec<SqlValue>,
     filters: &[Filter],
+    model: Option<&'static ModelSchema>,
 ) -> Result<(), SqlError> {
     if filters.is_empty() {
         return Ok(());
@@ -300,7 +305,7 @@ fn write_where(
             sql.push_str(" AND ");
         }
         first = false;
-        write_filter(sql, params, filter)?;
+        write_filter(sql, params, filter, model)?;
     }
     Ok(())
 }
@@ -319,6 +324,7 @@ fn write_where_with_search_qualified(
     filters: &[Filter],
     search: Option<&SearchClause>,
     qualify_with: Option<&str>,
+    model: Option<&'static ModelSchema>,
 ) -> Result<(), SqlError> {
     let has_search = search.is_some_and(|s| !s.columns.is_empty() && !s.query.is_empty());
     if filters.is_empty() && !has_search {
@@ -331,7 +337,7 @@ fn write_where_with_search_qualified(
             sql.push_str(" AND ");
         }
         first = false;
-        write_filter_qualified(sql, params, filter, qualify_with)?;
+        write_filter_qualified(sql, params, filter, qualify_with, model)?;
     }
     if has_search {
         let s = search.expect("checked above");
@@ -361,8 +367,9 @@ fn write_filter(
     sql: &mut String,
     params: &mut Vec<SqlValue>,
     filter: &Filter,
+    model: Option<&'static ModelSchema>,
 ) -> Result<(), SqlError> {
-    write_filter_qualified(sql, params, filter, None)
+    write_filter_qualified(sql, params, filter, None, model)
 }
 
 fn write_filter_qualified(
@@ -370,6 +377,7 @@ fn write_filter_qualified(
     params: &mut Vec<SqlValue>,
     filter: &Filter,
     qualify_with: Option<&str>,
+    model: Option<&'static ModelSchema>,
 ) -> Result<(), SqlError> {
     if let Some(table) = qualify_with {
         write_ident(sql, table);
@@ -377,34 +385,36 @@ fn write_filter_qualified(
     }
     write_ident(sql, filter.column);
 
+    let cast = model.and_then(|m| pg_null_cast_for(m, filter.column));
+
     match filter.op {
         Op::Eq => {
             sql.push_str(" = ");
-            push_param(sql, params, filter.value.clone());
+            push_param_typed(sql, params, filter.value.clone(), cast);
         }
         Op::Ne => {
             sql.push_str(" <> ");
-            push_param(sql, params, filter.value.clone());
+            push_param_typed(sql, params, filter.value.clone(), cast);
         }
         Op::Lt => {
             sql.push_str(" < ");
-            push_param(sql, params, filter.value.clone());
+            push_param_typed(sql, params, filter.value.clone(), cast);
         }
         Op::Lte => {
             sql.push_str(" <= ");
-            push_param(sql, params, filter.value.clone());
+            push_param_typed(sql, params, filter.value.clone(), cast);
         }
         Op::Gt => {
             sql.push_str(" > ");
-            push_param(sql, params, filter.value.clone());
+            push_param_typed(sql, params, filter.value.clone(), cast);
         }
         Op::Gte => {
             sql.push_str(" >= ");
-            push_param(sql, params, filter.value.clone());
+            push_param_typed(sql, params, filter.value.clone(), cast);
         }
         Op::Like => {
             sql.push_str(" LIKE ");
-            push_param(sql, params, filter.value.clone());
+            push_param_typed(sql, params, filter.value.clone(), cast);
         }
         Op::In => {
             let SqlValue::List(elements) = &filter.value else {
@@ -420,7 +430,7 @@ fn write_filter_qualified(
                     sql.push_str(", ");
                 }
                 first = false;
-                push_param(sql, params, elem.clone());
+                push_param_typed(sql, params, elem.clone(), cast);
             }
             sql.push(')');
         }
@@ -434,10 +444,45 @@ fn write_filter_qualified(
     Ok(())
 }
 
-fn push_param(sql: &mut String, params: &mut Vec<SqlValue>, value: SqlValue) {
+/// Emit `$N` for a non-null value, or `$N::PGTYPE` when the value is
+/// `SqlValue::Null` and a column hint is supplied. Postgres rejects an
+/// untyped/text NULL bound against an integer column with
+/// `column "x" is of type integer but expression is of type text`; the
+/// cast tells Postgres exactly what NULL we mean. Non-null values go
+/// through unchanged (sqlx's binding is already typed correctly).
+fn push_param_typed(
+    sql: &mut String,
+    params: &mut Vec<SqlValue>,
+    value: SqlValue,
+    pg_type: Option<&'static str>,
+) {
+    let is_null = matches!(value, SqlValue::Null);
     params.push(value);
-    // Length post-push gives the 1-based placeholder index Postgres expects.
     let _ = write!(sql, "${}", params.len());
+    if is_null {
+        if let Some(ty) = pg_type {
+            let _ = write!(sql, "::{ty}");
+        }
+    }
+}
+
+/// Postgres type a NULL parameter should be cast to when the column
+/// is known. Coarser than the full DDL `sql_type` (no `VARCHAR(N)`
+/// length, no CHECK) — for the cast we only need the *family*.
+fn pg_null_cast_for(model: &ModelSchema, column: &str) -> Option<&'static str> {
+    let field = model.field_by_column(column)?;
+    Some(match field.ty {
+        FieldType::I32 => "INTEGER",
+        FieldType::I64 => "BIGINT",
+        FieldType::F32 => "REAL",
+        FieldType::F64 => "DOUBLE PRECISION",
+        FieldType::Bool => "BOOLEAN",
+        FieldType::String => "TEXT",
+        FieldType::DateTime => "TIMESTAMPTZ",
+        FieldType::Date => "DATE",
+        FieldType::Uuid => "UUID",
+        FieldType::Json => "JSONB",
+    })
 }
 
 fn write_ident(sql: &mut String, name: &str) {

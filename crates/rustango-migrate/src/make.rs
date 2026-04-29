@@ -92,6 +92,7 @@ pub fn make_migrations_from(
         created_at,
         prev: prev_name,
         atomic: true,
+        scope: crate::MigrationScope::default(),
         snapshot: current.clone(),
         forward: changes.into_iter().map(Operation::Schema).collect(),
     };

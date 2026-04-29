@@ -28,7 +28,7 @@ pub use diff::{
     detect_changes, detect_unsupported_field_changes, render_changes, SchemaChange,
 };
 pub use error::MigrateError;
-pub use file::{DataOp, Migration, Operation};
+pub use file::{DataOp, Migration, MigrationScope, Operation};
 pub use invert::invert;
 pub use make::{make_migrations, make_migrations_from};
 pub use runner::{

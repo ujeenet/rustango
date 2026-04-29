@@ -1,0 +1,30 @@
+[package]
+name = "rustango-tenancy"
+description = "Multi-tenancy for rustango: Org registry, resolvers, tenant pools, scoped migrations."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Depend on the facade so `#[derive(Model)]`'s emitted
+# `::rustango::core` / `::rustango::sql` paths resolve. The facade
+# does NOT re-export rustango-tenancy (cycle would form), so users
+# pulling in tenancy add `rustango-tenancy` separately.
+rustango   = { workspace = true }
+chrono     = { workspace = true }
+serde      = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+
+[dev-dependencies]
+tokio       = { workspace = true }
+serde_json  = { workspace = true }

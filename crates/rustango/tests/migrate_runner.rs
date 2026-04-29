@@ -139,6 +139,7 @@ async fn applies_one_schema_migration_and_records_in_ledger() {
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
         atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot: snapshot_with_table(&table),
         forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
     };
@@ -194,6 +195,7 @@ async fn rerun_skips_already_applied_migrations() {
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
         atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot: snapshot_with_table(&table),
         forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
     };
@@ -238,6 +240,7 @@ async fn atomic_failure_rolls_back_offender_keeps_priors() {
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
             atomic: true,
+            scope: rustango::migrate::MigrationScope::default(),
             snapshot: snapshot_with_table(&table_a),
             forward: vec![Operation::Schema(SchemaChange::CreateTable(
                 table_a.clone(),
@@ -254,6 +257,7 @@ async fn atomic_failure_rolls_back_offender_keeps_priors() {
             prev: Some(mig_a.clone()),
             atomic: true,
             // Snapshot includes table_a but the data op references a phantom table.
+            scope: rustango::migrate::MigrationScope::default(),
             snapshot: snapshot_with_table(&table_a),
             forward: vec![Operation::Data(DataOp {
                 sql: format!(r#"INSERT INTO "{table_b_does_not_exist}" (id) VALUES (1)"#),
@@ -324,6 +328,7 @@ async fn mixed_schema_and_data_ops_apply_in_order() {
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
         atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot: snapshot_with_table(&table),
         forward: vec![
             Operation::Schema(SchemaChange::CreateTable(table.clone())),
@@ -370,6 +375,7 @@ async fn non_atomic_migration_runs_outside_a_tx() {
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
         atomic: false,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot: snapshot_with_table(&table),
         forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
     };
@@ -415,6 +421,7 @@ async fn unapply_round_trips_a_schema_only_migration() {
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
             atomic: true,
+            scope: rustango::migrate::MigrationScope::default(),
             snapshot: snapshot_with_table(&table),
             forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
         },
@@ -483,6 +490,7 @@ async fn unapply_data_op_uses_reverse_sql() {
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
             atomic: true,
+            scope: rustango::migrate::MigrationScope::default(),
             snapshot: snapshot_with_table(&table),
             forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
         },
@@ -496,6 +504,7 @@ async fn unapply_data_op_uses_reverse_sql() {
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: Some(create_name.clone()),
             atomic: true,
+            scope: rustango::migrate::MigrationScope::default(),
             snapshot: snapshot_with_table(&table),
             forward: vec![Operation::Data(DataOp {
                 sql: format!(r#"INSERT INTO "{table}" (id) VALUES (7)"#),
@@ -566,6 +575,7 @@ async fn unapply_irreversible_migration_fails_fast_no_db_writes() {
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
             atomic: true,
+            scope: rustango::migrate::MigrationScope::default(),
             snapshot: snapshot_with_table(&table),
             forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
         },
@@ -579,6 +589,7 @@ async fn unapply_irreversible_migration_fails_fast_no_db_writes() {
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: Some(create_name.clone()),
             atomic: true,
+            scope: rustango::migrate::MigrationScope::default(),
             snapshot: snapshot_with_table(&table),
             forward: vec![Operation::Data(DataOp {
                 sql: format!(r#"INSERT INTO "{table}" (id) VALUES (1)"#),
@@ -648,6 +659,7 @@ async fn unapply_then_reapply_round_trip() {
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
             atomic: true,
+            scope: rustango::migrate::MigrationScope::default(),
             snapshot: snapshot_with_table(&table),
             forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
         },
@@ -732,6 +744,7 @@ async fn migration_with_two_create_tables_one_having_fk_to_other_applies() {
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
         atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot,
         forward: vec![
             // Same lex order make_migrations would produce: child < parent.
@@ -801,6 +814,7 @@ fn three_migrations() -> (PathBuf, [String; 3], [String; 3]) {
                 created_at: "2026-04-28T00:00:00Z".into(),
                 prev: prev.clone(),
                 atomic: true,
+                scope: rustango::migrate::MigrationScope::default(),
                 snapshot: snapshot_with_table(&tables[i]),
                 forward: vec![Operation::Schema(SchemaChange::CreateTable(
                     tables[i].clone(),
@@ -1048,6 +1062,7 @@ async fn alter_column_type_applies_and_unapplies_round_trip() {
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
             atomic: true,
+            scope: rustango::migrate::MigrationScope::default(),
             snapshot: create_snap.clone(),
             forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
         },
@@ -1068,6 +1083,7 @@ async fn alter_column_type_applies_and_unapplies_round_trip() {
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: Some(create_name.clone()),
             atomic: true,
+            scope: rustango::migrate::MigrationScope::default(),
             snapshot: alter_snap,
             forward: vec![Operation::Schema(SchemaChange::AlterColumnType {
                 table: table.clone(),
@@ -1141,6 +1157,7 @@ async fn rename_column_applies_and_unapplies() {
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
             atomic: true,
+            scope: rustango::migrate::MigrationScope::default(),
             snapshot: create_snap.clone(),
             forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
         },
@@ -1160,6 +1177,7 @@ async fn rename_column_applies_and_unapplies() {
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: Some(create_name.clone()),
             atomic: true,
+            scope: rustango::migrate::MigrationScope::default(),
             snapshot: renamed,
             forward: vec![Operation::Schema(SchemaChange::RenameColumn {
                 table: table.clone(),
@@ -1222,6 +1240,7 @@ async fn dry_run_returns_pending_sql_without_executing() {
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
         atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot: snapshot_with_table(&table),
         forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
     };

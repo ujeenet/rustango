@@ -52,10 +52,43 @@ pub struct Migration {
     /// CONCURRENTLY`).
     #[serde(default = "default_atomic")]
     pub atomic: bool,
+    /// Where this migration runs — registry vs tenant. Default
+    /// `Tenant` (most schema work is tenant-shaped). v0.5+ scoped
+    /// migrations use this to route between `migrate_registry` (runs
+    /// once against the registry DB) and `migrate_tenants` (fans out
+    /// across active orgs). Pre-v0.5 migrations missing the field
+    /// deserialize as `Tenant` and the runner ignores the distinction
+    /// until v0.5 Slice 3 wires it in.
+    #[serde(default, skip_serializing_if = "MigrationScope::is_default")]
+    pub scope: MigrationScope,
     /// Full schema snapshot **after** applying `forward`.
     pub snapshot: SchemaSnapshot,
     /// Ordered list of operations — schema and data interleaved.
     pub forward: Vec<Operation>,
+}
+
+/// Where a migration runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MigrationScope {
+    /// Cross-tenant — runs once against the registry DB. Reserved
+    /// for migrations that touch `rustango_orgs`,
+    /// `rustango_operators`, audit logs, or any other registry-only
+    /// table.
+    Registry,
+    /// Per-tenant — runs against every active org's storage (schema
+    /// or dedicated DB). Default; covers ~all user schema work.
+    #[default]
+    Tenant,
+}
+
+impl MigrationScope {
+    /// Used by serde's `skip_serializing_if` so the default
+    /// (`Tenant`) doesn't clutter migration files.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::Tenant)
+    }
 }
 
 fn default_atomic() -> bool {

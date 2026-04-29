@@ -97,6 +97,7 @@ fn round_trip_schema_only_migration() {
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
         atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot: SchemaSnapshot {
             tables: vec![user_table()],
         },
@@ -116,6 +117,7 @@ fn round_trip_mixed_schema_and_data_ops() {
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: Some("0001_initial".into()),
         atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot: SchemaSnapshot {
             tables: vec![user_table()],
         },
@@ -143,6 +145,7 @@ fn round_trip_irreversible_data_op() {
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: Some("0002_backfill_slugs".into()),
         atomic: false,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot: empty_snapshot(),
         forward: vec![Operation::Data(DataOp {
             sql: "DELETE FROM events WHERE created < NOW() - INTERVAL '90 days'".into(),
@@ -171,6 +174,7 @@ fn write_then_load_round_trip_via_filesystem() {
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
         atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot: SchemaSnapshot {
             tables: vec![user_table()],
         },
@@ -248,6 +252,7 @@ fn migration_with_empty_forward_round_trips() {
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
         atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot: empty_snapshot(),
         forward: vec![],
     };
@@ -344,6 +349,7 @@ fn list_dir_rejects_broken_prev_chain() {
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: Some("0001_initial".into()),
         atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot: empty_snapshot(),
         forward: vec![],
     };
@@ -371,6 +377,7 @@ fn list_dir_accepts_well_formed_chain() {
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
         atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot: empty_snapshot(),
         forward: vec![],
     };
@@ -379,6 +386,7 @@ fn list_dir_accepts_well_formed_chain() {
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: Some("0001_initial".into()),
         atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot: empty_snapshot(),
         forward: vec![],
     };
@@ -400,6 +408,7 @@ fn list_dir_skips_subdirectories() {
         created_at: "now".into(),
         prev: None,
         atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
         snapshot: empty_snapshot(),
         forward: vec![],
     };

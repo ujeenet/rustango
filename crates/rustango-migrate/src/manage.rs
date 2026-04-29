@@ -373,6 +373,7 @@ pub fn make_empty(dir: &Path, name: &str) -> Result<Migration, MigrateError> {
         created_at: chrono::Utc::now().to_rfc3339(),
         prev: prev_name,
         atomic: true,
+        scope: crate::MigrationScope::default(),
         snapshot: prev_snapshot,
         forward: vec![],
     };
