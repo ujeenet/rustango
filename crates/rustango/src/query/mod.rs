@@ -32,6 +32,9 @@ pub struct QuerySet<T: Model> {
     /// `compile()` time, so the SELECT pulls the parent rows along
     /// with the children in a single SQL round trip.
     select_related: Vec<String>,
+    /// `(field_name, desc)` pairs registered via [`Self::order_by`].
+    /// Slice 9.0b. Resolved against the schema at `compile()` time.
+    order_by: Vec<(String, bool)>,
     _model: PhantomData<fn() -> T>,
 }
 
@@ -76,8 +79,36 @@ impl<T: Model> QuerySet<T> {
             limit: None,
             offset: None,
             select_related: Vec::new(),
+            order_by: Vec::new(),
             _model: PhantomData,
         }
+    }
+
+    /// Append `ORDER BY` columns. Slice 9.0b.
+    ///
+    /// Each entry is a `(field_name, desc)` pair where `field_name`
+    /// is a Rust-side field on the model — schema validation runs at
+    /// `compile()` time. Multiple `.order_by(...)` calls compose;
+    /// subsequent calls append after earlier ones (left-to-right
+    /// precedence).
+    ///
+    /// ```ignore
+    /// let posts = Post::objects()
+    ///     .order_by(&[("published_at", true)])  // newest first
+    ///     .fetch_on(conn).await?;
+    /// ```
+    ///
+    /// To sort by multiple columns:
+    ///
+    /// ```ignore
+    /// .order_by(&[("category", false), ("published_at", true)])
+    /// ```
+    #[must_use]
+    pub fn order_by(mut self, items: &[(&str, bool)]) -> Self {
+        for (field, desc) in items {
+            self.order_by.push(((*field).to_owned(), *desc));
+        }
+        self
     }
 
     /// Eagerly load a `ForeignKey<Parent>` field via a `LEFT JOIN` —
@@ -171,11 +202,13 @@ impl<T: Model> QuerySet<T> {
         let model: &'static ModelSchema = T::SCHEMA;
         let where_clause = resolve_pending(model, self.pending)?;
         let joins = lower_select_related(model, &self.select_related)?;
+        let order_by = lower_order_by(model, &self.order_by)?;
         Ok(SelectQuery {
             model,
             where_clause,
             search: None,
             joins,
+            order_by,
             limit: self.limit,
             offset: self.offset,
         })
@@ -264,6 +297,28 @@ impl<T: Model> UpdateBuilder<T> {
             where_clause,
         })
     }
+}
+
+/// Convert `(field_name, desc)` pairs into `OrderClause`s by
+/// resolving each field name on the schema. Slice 9.0b.
+fn lower_order_by(
+    model: &'static ModelSchema,
+    items: &[(String, bool)],
+) -> Result<Vec<crate::core::OrderClause>, QueryError> {
+    let mut out = Vec::with_capacity(items.len());
+    for (field_name, desc) in items {
+        let field = model
+            .field(field_name)
+            .ok_or_else(|| QueryError::UnknownField {
+                model: model.name,
+                field: field_name.clone(),
+            })?;
+        out.push(crate::core::OrderClause {
+            column: field.column,
+            desc: *desc,
+        });
+    }
+    Ok(out)
 }
 
 /// Convert `select_related` field names into `Join`s — slice 9.0d.

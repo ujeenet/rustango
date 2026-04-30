@@ -122,6 +122,27 @@ impl Dialect for Postgres {
             Some(query.model),
         )?;
 
+        // Slice 9.0b — `ORDER BY "col" [DESC]` per registered clause,
+        // comma-separated. Emitted after WHERE / joins but before
+        // LIMIT / OFFSET so the database can apply the ordering
+        // before the slice is taken.
+        if !query.order_by.is_empty() {
+            sql.push_str(" ORDER BY ");
+            for (i, clause) in query.order_by.iter().enumerate() {
+                if i > 0 {
+                    sql.push_str(", ");
+                }
+                if qualify {
+                    write_ident(&mut sql, query.model.table);
+                    sql.push('.');
+                }
+                write_ident(&mut sql, clause.column);
+                if clause.desc {
+                    sql.push_str(" DESC");
+                }
+            }
+        }
+
         if let Some(limit) = query.limit {
             let _ = write!(sql, " LIMIT {limit}");
         }

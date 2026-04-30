@@ -16,7 +16,7 @@ pub use error::QueryError;
 pub use field_type::FieldType;
 pub use query::{
     Assignment, BulkInsertQuery, CountQuery, DeleteQuery, Filter, InsertQuery, Join, Op,
-    SearchClause, SelectQuery, UpdateQuery, WhereExpr,
+    OrderClause, SearchClause, SelectQuery, UpdateQuery, WhereExpr,
 };
 pub use schema::{
     infer_app_label_from_module_path, FieldSchema, Model, ModelEntry, ModelSchema, Relation,

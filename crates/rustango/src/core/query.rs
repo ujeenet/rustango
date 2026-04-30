@@ -175,8 +175,23 @@ pub struct SelectQuery {
     pub where_clause: WhereExpr,
     pub search: Option<SearchClause>,
     pub joins: Vec<Join>,
+    /// `ORDER BY` clauses, in the order they should appear in SQL.
+    /// Slice 9.0b. Emitted after WHERE / JOIN / GROUP BY but before
+    /// LIMIT / OFFSET. Empty = no `ORDER BY` (existing behaviour).
+    pub order_by: Vec<OrderClause>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+/// Single column in an `ORDER BY` clause. Slice 9.0b.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderClause {
+    /// SQL column name on the main table — already resolved by
+    /// `QuerySet::order_by` from a Rust-side field name (so the
+    /// writer doesn't re-walk the schema).
+    pub column: &'static str,
+    /// `true` for `DESC`, `false` for the default `ASC`.
+    pub desc: bool,
 }
 
 /// A `LEFT JOIN` against a target model.
