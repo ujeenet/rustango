@@ -434,6 +434,37 @@ fn load_related_impl_tokens(
     }
 }
 
+/// Emit `impl FkPkAccess for #StructName` — slice 9.0e. Pattern-
+/// matches `field_name` against the model's FK fields and returns
+/// the FK's stored PK as `i64`. Used by `fetch_with_prefetch` to
+/// group children by parent PK.
+///
+/// Always emitted (with `_ => None` for FK-less models) so the
+/// trait bound on `fetch_with_prefetch` is universally satisfied.
+fn fk_pk_access_impl_tokens(
+    struct_name: &syn::Ident,
+    fk_relations: &[FkRelation],
+) -> TokenStream2 {
+    let arms = fk_relations.iter().map(|rel| {
+        let fk_col = rel.fk_column.as_str();
+        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        quote! {
+            #fk_col => ::core::option::Option::Some(self.#field_ident.pk()),
+        }
+    });
+    quote! {
+        impl ::rustango::sql::FkPkAccess for #struct_name {
+            #[allow(unused_variables)]
+            fn __rustango_fk_pk(&self, field_name: &str) -> ::core::option::Option<i64> {
+                match field_name {
+                    #( #arms )*
+                    _ => ::core::option::Option::None,
+                }
+            }
+        }
+    }
+}
+
 /// For every `ForeignKey<Parent>` field on `Child`, emit
 /// `impl Parent { pub async fn <child_table>_set(&self, executor) -> Vec<Child> }`.
 /// Reads the parent's PK via the macro-generated `__rustango_pk_value`
@@ -1136,6 +1167,20 @@ fn inherent_impl_tokens(
         }
     });
 
+    let has_pk_value_impl = primary_key.map(|(pk_ident, _)| {
+        quote! {
+            impl ::rustango::sql::HasPkValue for #struct_name {
+                fn __rustango_pk_value_impl(&self) -> ::rustango::core::SqlValue {
+                    ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                        ::core::clone::Clone::clone(&self.#pk_ident)
+                    )
+                }
+            }
+        }
+    });
+
+    let fk_pk_access_impl = fk_pk_access_impl_tokens(struct_name, &fields.fk_relations);
+
     let from_aliased_row_inits = &fields.from_aliased_row_inits;
     let aliased_row_helper = quote! {
         /// Decode a row's aliased target columns (produced by
@@ -1181,6 +1226,10 @@ fn inherent_impl_tokens(
         }
 
         #load_related_impl
+
+        #has_pk_value_impl
+
+        #fk_pk_access_impl
     }
 }
 

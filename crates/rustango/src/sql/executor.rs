@@ -11,6 +11,22 @@ use sqlx::query::{Query, QueryAs};
 use super::{Dialect, ExecError, Postgres};
 
 /// Hidden trait every `#[derive(Model)]` type implements via the
+/// macro — slice 9.0e's bridge between `fetch_with_prefetch` and
+/// the per-Model FK-PK accessor. For each `ForeignKey<T>` field on
+/// a Child model, the macro generates an arm that returns the FK's
+/// stored PK (regardless of `Loaded` / `Unloaded` state) so the
+/// prefetch grouper can stitch children to the right parent.
+///
+/// Models with no `ForeignKey<T>` fields get a no-op impl
+/// (returns `None` for any field name).
+#[doc(hidden)]
+pub trait FkPkAccess {
+    /// Read the i64 PK stored in a `ForeignKey<T>` field by name.
+    /// `None` for unknown field names or non-FK fields.
+    fn __rustango_fk_pk(&self, field_name: &str) -> Option<i64>;
+}
+
+/// Hidden trait every `#[derive(Model)]` type implements via the
 /// macro — slice 9.0d's bridge between `QuerySet::fetch_on` and the
 /// per-Model `__rustango_load_related` dispatcher. Loaders for
 /// individual FK fields live on the Model's inherent impl; this
@@ -467,6 +483,140 @@ where
     }
     let row = q.fetch_one(executor).await?;
     Ok(sqlx::Row::try_get::<i64, _>(&row, 0)?)
+}
+
+/// Slice 9.0e — `prefetch_related` Django-shape: fetch a list of
+/// parents and, for each one, the children that point at it via a
+/// foreign key. **Two SQL queries total**, regardless of how many
+/// parents:
+///
+/// ```text
+///   SELECT * FROM <parent>;
+///   SELECT * FROM <child> WHERE <fk_column> IN ($1, $2, ...);
+/// ```
+///
+/// Returns `Vec<(Parent, Vec<Child>)>` — each parent paired with its
+/// children. Parents with no matching children get an empty `Vec`.
+/// The order of parents matches the queryset; the order of children
+/// within each group matches the order of the second query (lex by
+/// PK is the typical default; pass `.limit()` / `.offset()` on the
+/// child queryset if you need to scope).
+///
+/// `child_fk_column` is the SQL column on the child table that
+/// stores the parent's PK — for `Post { author: ForeignKey<Author> }`,
+/// that's `"author"`. The function looks up child rows where
+/// `<child_fk_column> IN (parent_pks)` and groups them by reading
+/// the same column on each fetched child via the
+/// macro-generated [`FkPkAccess`] impl.
+///
+/// Closes the multi-parent gap left by v0.8.2's `<parent>::<child>_set`
+/// helper (which fetches one parent's children at a time, requiring
+/// N queries for N parents).
+///
+/// # Errors
+/// Anything either of the underlying `fetch` calls returns.
+pub async fn fetch_with_prefetch<P, C>(
+    parent_qs: crate::query::QuerySet<P>,
+    child_fk_column: &'static str,
+    pool: &PgPool,
+) -> Result<Vec<(P, Vec<C>)>, ExecError>
+where
+    P: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin + LoadRelated + HasPkValue,
+    C: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin + LoadRelated + FkPkAccess,
+{
+    let parents: Vec<P> = parent_qs.fetch(pool).await?;
+    if parents.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Collect parent PKs. Models without an integer PK can't be
+    // batch-prefetched this way; treat as "no children" for those
+    // parents (consistent with empty-set behaviour).
+    let pk_field = P::SCHEMA.primary_key().ok_or(ExecError::MissingPrimaryKey {
+        table: P::SCHEMA.table,
+    })?;
+    let mut parent_pks: Vec<i64> = Vec::with_capacity(parents.len());
+    for parent in &parents {
+        if let Some(pk) = sql_value_as_i64(&extract_pk_value(parent)) {
+            parent_pks.push(pk);
+        }
+    }
+    parent_pks.sort_unstable();
+    parent_pks.dedup();
+    if parent_pks.is_empty() {
+        return Ok(parents.into_iter().map(|p| (p, Vec::new())).collect());
+    }
+
+    // Batch-fetch the children where their FK column points at any
+    // of the parent PKs.
+    let pk_values: Vec<crate::core::SqlValue> = parent_pks
+        .iter()
+        .copied()
+        .map(crate::core::SqlValue::I64)
+        .collect();
+    let children: Vec<C> = crate::query::QuerySet::<C>::new()
+        .filter(
+            child_fk_column,
+            crate::core::Op::In,
+            crate::core::SqlValue::List(pk_values),
+        )
+        .fetch(pool)
+        .await?;
+
+    // Group children by FK PK.
+    let mut grouped: std::collections::HashMap<i64, Vec<C>> = std::collections::HashMap::new();
+    for child in children {
+        let Some(fk_pk) = child.__rustango_fk_pk(child_fk_column) else {
+            continue;
+        };
+        grouped.entry(fk_pk).or_default().push(child);
+    }
+
+    // Stitch.
+    let mut out = Vec::with_capacity(parents.len());
+    for parent in parents {
+        let pk = sql_value_as_i64(&extract_pk_value(&parent)).unwrap_or(0);
+        let kids = grouped.remove(&pk).unwrap_or_default();
+        out.push((parent, kids));
+    }
+    let _ = pk_field; // suppress unused-warning when only the PK lookup ran
+    Ok(out)
+}
+
+/// Extract a model's PK as a `SqlValue` via the macro-generated
+/// `__rustango_pk_value`. The trait bound `LoadRelated` is satisfied
+/// by every Model derive but doesn't expose `__rustango_pk_value`,
+/// so we go through `sqlx::Row` instead — every Model also impls
+/// `FromRow`, and we already have an instance.
+///
+/// Actually we have the instance; the macro emits
+/// `__rustango_pk_value` as an inherent method. Calling it through
+/// a trait object would force a new trait. Punt: use sqlx-side
+/// extraction via `sqlx::Encode` against the schema field. Cleaner:
+/// just have callers' Models implement `PrefetchableParent`.
+///
+/// For the v0.9 MVP we leverage the fact that every Model with a
+/// PK has `__rustango_pk_value`. We add a small trait `HasPkValue`
+/// that the macro impls; its body just calls the inherent method.
+fn extract_pk_value<P: HasPkValue>(parent: &P) -> crate::core::SqlValue {
+    parent.__rustango_pk_value_impl()
+}
+
+fn sql_value_as_i64(v: &crate::core::SqlValue) -> Option<i64> {
+    match v {
+        crate::core::SqlValue::I64(n) => Some(*n),
+        crate::core::SqlValue::I32(n) => Some(i64::from(*n)),
+        _ => None,
+    }
+}
+
+/// Hidden trait — exposes the macro-generated inherent
+/// `__rustango_pk_value` method polymorphically so generic
+/// `fetch_with_prefetch` can read parent PKs without forcing the
+/// caller to write a closure.
+#[doc(hidden)]
+pub trait HasPkValue {
+    fn __rustango_pk_value_impl(&self) -> crate::core::SqlValue;
 }
 
 /// Extension trait that runs a `SELECT COUNT(*)` against the queryset's
