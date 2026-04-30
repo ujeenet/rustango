@@ -56,6 +56,15 @@ pub struct StartAppReport {
     pub written: Vec<String>,
     /// Filesystem paths that already existed and were left untouched.
     pub skipped: Vec<String>,
+    /// Filesystem paths that were edited in place (slice 9.0g
+    /// auto-mount). Distinct from `written` because the file already
+    /// existed; we patched it to register the new app.
+    pub patched: Vec<String>,
+    /// Files we tried to patch but couldn't safely (couldn't find
+    /// the expected anchor — user has hand-rolled their main.rs /
+    /// urls.rs into a non-canonical shape). The CLI prints these
+    /// with a "add this manually" hint.
+    pub manual_steps: Vec<String>,
 }
 
 /// Materialize a Django-shape app module into `project_root/src/<app>/`.
@@ -98,6 +107,56 @@ pub fn startapp(
         write_or_skip(&path, &rel, &body, &mut report)?;
     }
 
+    // Slice 9.0g — register the new app in the project's main.rs +
+    // urls.rs. Conservative regex anchors with bail-out: if the file
+    // doesn't have the expected aggregator pattern, we skip the edit
+    // and surface a "add this manually" hint via report.manual_steps.
+    let main_path = project_root.join(&base_dir).join("main.rs");
+    let lib_path = project_root.join(&base_dir).join("lib.rs");
+    let entry_path = if main_path.exists() {
+        Some(main_path)
+    } else if lib_path.exists() {
+        Some(lib_path)
+    } else {
+        None
+    };
+    if let Some(path) = entry_path {
+        let rel = path
+            .strip_prefix(project_root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        match try_register_app_in_entry(&path, &opts.app_name)? {
+            EntryEditOutcome::Patched => report.patched.push(rel),
+            EntryEditOutcome::AlreadyRegistered => {} // silent — idempotent
+            EntryEditOutcome::CouldNotFindAnchor => {
+                report.manual_steps.push(format!(
+                    "{rel}: add `mod {};` near the other `mod` declarations",
+                    opts.app_name
+                ));
+            }
+        }
+    }
+
+    let urls_path = project_root.join(&base_dir).join("urls.rs");
+    if urls_path.exists() {
+        let rel = urls_path
+            .strip_prefix(project_root)
+            .unwrap_or(&urls_path)
+            .display()
+            .to_string();
+        match try_merge_app_into_urls(&urls_path, &opts.app_name)? {
+            EntryEditOutcome::Patched => report.patched.push(rel),
+            EntryEditOutcome::AlreadyRegistered => {}
+            EntryEditOutcome::CouldNotFindAnchor => {
+                report.manual_steps.push(format!(
+                    "{rel}: add `.merge(crate::{}::urls::api())` to your aggregator router",
+                    opts.app_name
+                ));
+            }
+        }
+    }
+
     if let Some(template) = opts.manage_bin {
         let bin_dir = project_root.join(&base_dir).join("bin");
         if !bin_dir.exists() {
@@ -124,6 +183,129 @@ fn write_or_skip(
     std::fs::write(path, body)?;
     report.written.push(rel.to_owned());
     Ok(())
+}
+
+/// Outcome of a single auto-edit attempt.
+enum EntryEditOutcome {
+    Patched,
+    AlreadyRegistered,
+    CouldNotFindAnchor,
+}
+
+/// Patch a project entry file (`src/main.rs` / `src/lib.rs`) to add
+/// `mod <app_name>;`. Idempotent: if the line is already present,
+/// returns `AlreadyRegistered` without rewriting. Anchors on:
+///
+///   1. An existing `mod <foo>;` line — appends the new `mod` after
+///      the last consecutive `mod` declaration in the file.
+///   2. Failing that, after the last `//!` doc comment block at the
+///      top of the file.
+///
+/// If neither anchor is found (user has hand-rolled the layout into
+/// something unusual), we bail out without modifying the file and
+/// the caller surfaces a "add manually" hint.
+fn try_register_app_in_entry(
+    path: &Path,
+    app_name: &str,
+) -> Result<EntryEditOutcome, MigrateError> {
+    let body = std::fs::read_to_string(path)?;
+    let needle = format!("mod {app_name};");
+    let needle_pub = format!("pub mod {app_name};");
+    if body.contains(&needle) || body.contains(&needle_pub) {
+        return Ok(EntryEditOutcome::AlreadyRegistered);
+    }
+
+    let lines: Vec<&str> = body.lines().collect();
+    // Find the last contiguous run of `mod foo;` lines and insert
+    // after it.
+    let mod_anchor = lines
+        .iter()
+        .rposition(|l| l.trim_start().starts_with("mod ") && l.trim_end().ends_with(';'));
+    let insert_at = if let Some(idx) = mod_anchor {
+        idx + 1
+    } else {
+        // Fall back: after the leading docstring block (lines starting
+        // with `//!` followed by a blank line).
+        let mut i = 0;
+        while i < lines.len() && lines[i].trim_start().starts_with("//!") {
+            i += 1;
+        }
+        if i == 0 {
+            return Ok(EntryEditOutcome::CouldNotFindAnchor);
+        }
+        // Skip a single blank line if present.
+        if lines.get(i).is_some_and(|l| l.trim().is_empty()) {
+            i + 1
+        } else {
+            i
+        }
+    };
+
+    let mut out = String::with_capacity(body.len() + needle.len() + 1);
+    for (i, line) in lines.iter().enumerate() {
+        if i == insert_at {
+            out.push_str(&needle);
+            out.push('\n');
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if insert_at >= lines.len() {
+        out.push_str(&needle);
+        out.push('\n');
+    }
+    std::fs::write(path, out)?;
+    Ok(EntryEditOutcome::Patched)
+}
+
+/// Patch `src/urls.rs` to add `.merge(crate::<app>::urls::api())` to
+/// the project-root aggregator router. Idempotent. Anchors on the
+/// pattern `Router::new()` followed by zero or more `.merge(...)` /
+/// `.route(...)` / `.nest(...)` lines — appends the new `.merge` to
+/// the end of that chain (just before the trailing `}` of the body).
+///
+/// Bail-out: if the file doesn't have a `Router::new()` call, return
+/// `CouldNotFindAnchor` and let the caller surface a manual-step hint.
+fn try_merge_app_into_urls(
+    path: &Path,
+    app_name: &str,
+) -> Result<EntryEditOutcome, MigrateError> {
+    let body = std::fs::read_to_string(path)?;
+    let merge_call = format!(".merge(crate::{app_name}::urls::api())");
+    if body.contains(&merge_call) {
+        return Ok(EntryEditOutcome::AlreadyRegistered);
+    }
+
+    // Find the line that creates the Router. We append the .merge
+    // immediately after this line — the user can re-indent if they
+    // prefer a different call-chain style, but this works as a
+    // valid expression continuation.
+    let lines: Vec<&str> = body.lines().collect();
+    let anchor = lines.iter().rposition(|l| l.contains("Router::new()"));
+    let Some(idx) = anchor else {
+        return Ok(EntryEditOutcome::CouldNotFindAnchor);
+    };
+
+    // Detect indentation of the anchor line so the inserted line
+    // looks at home next to siblings.
+    let indent: String = lines[idx]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
+    let inserted_indent = format!("{indent}    ");
+    let inserted = format!("{inserted_indent}{merge_call}");
+
+    let mut out = String::with_capacity(body.len() + inserted.len() + 1);
+    for (i, line) in lines.iter().enumerate() {
+        out.push_str(line);
+        out.push('\n');
+        if i == idx {
+            out.push_str(&inserted);
+            out.push('\n');
+        }
+    }
+    std::fs::write(path, out)?;
+    Ok(EntryEditOutcome::Patched)
 }
 
 fn validate_app_name(name: &str) -> Result<(), MigrateError> {
@@ -204,27 +386,30 @@ pub async fn healthz() -> &'static str {
 }
 ";
 
-/// Default `urls.rs` body — wires the views + nests the auto-admin.
+/// Default `urls.rs` body for an app — exposes a stateless
+/// `Router<()>` via `pub fn api()` so the project-root urls.rs
+/// aggregator can `.merge(crate::<app>::urls::api())` it. Slice 9.0g
+/// shape — the project's main.rs / Builder mounts admin + tenant
+/// dispatch separately, so the app router stays focused on the
+/// custom routes the user adds.
 const URLS_TEMPLATE: &str = "//! App URL routing.
 //!
-//! Single function `router(pool) -> Router` that wires every HTTP
-//! path the app exposes. The auto-admin mounts under `/admin`;
-//! custom views from `views.rs` mount alongside.
+//! `pub fn api() -> Router<()>` — every route this app exposes.
+//! The project-root `src/urls.rs` aggregator calls
+//! `.merge(crate::<this_app>::urls::api())` so these routes show up
+//! at the project's root. Handlers can take
+//! `rustango::extractors::Tenant` (in tenancy projects) or extract
+//! state via axum's normal `State<...>` mechanism.
 
 use axum::routing::get;
 use axum::Router;
-use rustango::admin;
-use rustango::sql::sqlx::PgPool;
 
 use super::views;
 
-pub fn router(pool: PgPool) -> Router {
-    let admin = admin::Builder::new(pool.clone()).build();
+pub fn api() -> Router<()> {
     Router::new()
         .route(\"/\", get(views::index))
         .route(\"/healthz\", get(views::healthz))
-        .with_state(pool)
-        .nest(\"/admin\", admin)
 }
 ";
 
@@ -369,5 +554,107 @@ mod tests {
         assert!(body.contains("pub mod models;"));
         assert!(body.contains("pub mod urls;"));
         assert!(body.contains("pub mod views;"));
+    }
+
+    #[test]
+    fn auto_mount_inserts_mod_after_existing_mods() {
+        let root = fresh_root("automount_main");
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let main = src.join("main.rs");
+        std::fs::write(
+            &main,
+            "//! example main.rs\n\
+             \n\
+             mod blog;\n\
+             mod views;\n\
+             \n\
+             fn main() {}\n",
+        )
+        .unwrap();
+        let report = startapp(
+            &root,
+            &StartAppOptions {
+                app_name: "shop".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(&main).unwrap();
+        assert!(body.contains("mod shop;"), "body was {body}");
+        assert!(report.patched.iter().any(|p| p.contains("main.rs")));
+        // Re-running is idempotent; no double-add.
+        let report2 = startapp(
+            &root,
+            &StartAppOptions {
+                app_name: "shop".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report2.patched.len(), 0, "second run should not patch");
+        let body2 = std::fs::read_to_string(&main).unwrap();
+        assert_eq!(body2.matches("mod shop;").count(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn auto_mount_appends_merge_call_to_urls_router() {
+        let root = fresh_root("automount_urls");
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(
+            src.join("urls.rs"),
+            "use axum::Router;\n\
+             pub fn api() -> Router<()> {\n    \
+                 Router::new()\n\
+             }\n",
+        )
+        .unwrap();
+        let report = startapp(
+            &root,
+            &StartAppOptions {
+                app_name: "shop".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(src.join("urls.rs")).unwrap();
+        assert!(
+            body.contains(".merge(crate::shop::urls::api())"),
+            "urls.rs was: {body}"
+        );
+        assert!(report.patched.iter().any(|p| p.contains("urls.rs")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn auto_mount_emits_manual_step_when_no_anchor() {
+        let root = fresh_root("automount_bail");
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        // urls.rs without an axum router-construction anchor — should
+        // bail out and emit a manual-step hint.
+        std::fs::write(
+            src.join("urls.rs"),
+            "// hand-rolled aggregator with no recognisable anchor\npub fn api() {}\n",
+        )
+        .unwrap();
+        std::fs::write(src.join("main.rs"), "fn main() {}\n").unwrap();
+        let report = startapp(
+            &root,
+            &StartAppOptions {
+                app_name: "shop".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            report.manual_steps.iter().any(|h| h.contains("urls.rs")),
+            "expected a manual-step hint for urls.rs, got: {:?}",
+            report.manual_steps
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

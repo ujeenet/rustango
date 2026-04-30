@@ -128,6 +128,12 @@ fn write_report<W: Write>(
     for path in &report.skipped {
         writeln!(w, "  · {path} already exists — left untouched")?;
     }
+    for path in &report.patched {
+        writeln!(w, "  ~ patched {path} (auto-mounted new app)")?;
+    }
+    for hint in &report.manual_steps {
+        writeln!(w, "  ! manual: {hint}")?;
+    }
     if let Some(b) = bootstrap {
         let migrations_rel = format!("{base_label}/{app_name}/migrations");
         for name in &b.written {

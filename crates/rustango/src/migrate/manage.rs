@@ -523,6 +523,12 @@ fn write_startapp_report<W: Write>(
     for path in &report.skipped {
         writeln!(w, "  · {path} already exists — left untouched")?;
     }
+    for path in &report.patched {
+        writeln!(w, "  ~ patched {path} (auto-mounted new app)")?;
+    }
+    for hint in &report.manual_steps {
+        writeln!(w, "  ! manual: {hint}")?;
+    }
     if !report.written.is_empty() {
         writeln!(w, "next:")?;
         writeln!(

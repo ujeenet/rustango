@@ -93,34 +93,66 @@ impl Builder {
         Ok(self)
     }
 
-    /// Apply every migration in `dir` to the registry + every active
-    /// tenant. The Django-shape one-call setup:
+    /// Apply every migration discoverable from `project_root` to the
+    /// registry + every active tenant. The Django-shape one-call setup
+    /// for multi-app projects:
     ///
     /// 1. Write the packaged tenancy bootstrap migrations
     ///    (`0001_rustango_registry_initial`, `0001_rustango_tenant_initial`)
-    ///    into `dir` if they're not already present — idempotent.
-    /// 2. Apply registry-scoped migrations against the registry pool.
-    /// 3. Apply tenant-scoped migrations against every active org's
-    ///    storage (schema-mode or database-mode), per-tenant
-    ///    isolation: failures on one tenant don't abort the others.
+    ///    into `<project_root>/migrations/` if they're not already
+    ///    present — idempotent.
+    /// 2. Discover every migrations directory under `project_root`:
+    ///    the flat `<project_root>/migrations/` (project-level
+    ///    bootstraps + project-root models) plus every
+    ///    `<project_root>/<app>/migrations/` subdir scaffolded by
+    ///    `manage startapp`.
+    /// 3. For each discovered dir, apply registry-scoped migrations
+    ///    against the registry pool, then tenant-scoped migrations
+    ///    against every active org's storage. Per-tenant isolation:
+    ///    failures on one tenant don't abort the others.
     ///
-    /// `dir` is created via `fs::create_dir_all` if it doesn't exist
-    /// — first-run friendly. Pass the path the demo or app commits its
-    /// hand-authored / `make-migrations`-generated JSON files to.
+    /// Back-compat with v0.8.1: if `project_root` does **not** contain
+    /// a `migrations/` subdir but DOES itself contain `*.json`
+    /// migration files, it's treated as the migrations dir directly
+    /// (the v0.8.1 single-dir shape). Pass the project root for
+    /// multi-app discovery; pass the flat `migrations/` dir for the
+    /// pre-9.0g flat layout.
     ///
     /// # Errors
-    /// I/O failures creating the directory or writing the bootstrap
-    /// files; [`crate::tenancy::TenancyError`] from the registry or
-    /// tenant migration runners.
+    /// I/O failures creating directories or writing bootstrap files;
+    /// [`crate::tenancy::TenancyError`] from the registry or tenant
+    /// migration runners.
     pub async fn migrate<P: AsRef<std::path::Path>>(
         self,
-        dir: P,
+        project_root: P,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let dir = dir.as_ref();
-        std::fs::create_dir_all(dir)?;
-        crate::tenancy::init_tenancy(dir)?;
-        let _ = crate::tenancy::migrate_registry(&self.pools, dir).await?;
-        let _ = crate::tenancy::migrate_tenants(&self.pools, dir, &self.registry_url).await?;
+        let root = project_root.as_ref();
+        std::fs::create_dir_all(root)?;
+
+        // Detect which shape the user passed. If `<root>/migrations/`
+        // exists OR `<root>/<app>/migrations/` exists, we're a project
+        // root. Otherwise (root contains *.json directly), back-compat
+        // single-dir mode.
+        let dirs = crate::migrate::discover_migration_dirs(root);
+        if dirs.is_empty() && root_has_json_files(root) {
+            // v0.8.1 shape: user passed the flat migrations dir.
+            crate::tenancy::init_tenancy(root)?;
+            let _ = crate::tenancy::migrate_registry(&self.pools, root).await?;
+            let _ = crate::tenancy::migrate_tenants(&self.pools, root, &self.registry_url).await?;
+            return Ok(self);
+        }
+
+        // 9.0g shape: walk every per-app dir + the flat dir.
+        let flat = root.join("migrations");
+        std::fs::create_dir_all(&flat)?;
+        crate::tenancy::init_tenancy(&flat)?;
+
+        // Re-discover after init_tenancy populated the flat dir.
+        let dirs = crate::migrate::discover_migration_dirs(root);
+        for dir in &dirs {
+            let _ = crate::tenancy::migrate_registry(&self.pools, dir).await?;
+            let _ = crate::tenancy::migrate_tenants(&self.pools, dir, &self.registry_url).await?;
+        }
         Ok(self)
     }
 
@@ -202,4 +234,17 @@ fn build_resolver(apex: &str) -> ChainResolver {
     ChainResolver::new()
         .push(SubdomainResolver::new(apex.to_owned()))
         .push(HeaderResolver::default())
+}
+
+/// Whether `root` contains any `*.json` files at the top level. Used
+/// to detect the v0.8.1 single-dir shape of `Builder::migrate(dir)`
+/// for back-compat — if a user passed the migrations dir itself,
+/// rather than the project root, `discover_migration_dirs` finds
+/// nothing but the dir clearly has migration files.
+fn root_has_json_files(root: &std::path::Path) -> bool {
+    let Ok(read) = std::fs::read_dir(root) else {
+        return false;
+    };
+    read.filter_map(Result::ok)
+        .any(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
 }
