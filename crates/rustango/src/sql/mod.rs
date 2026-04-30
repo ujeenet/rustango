@@ -19,8 +19,9 @@ pub use compiled::CompiledStatement;
 pub use dialect::Dialect;
 pub use error::{ExecError, SqlError};
 pub use executor::{
-    bulk_insert, count_rows, delete, insert, insert_returning, select_one_row, select_rows, update,
-    Counter, Deleter, Fetcher, Updater,
+    bulk_insert, bulk_insert_on, count_rows, count_rows_on, delete, delete_on, insert, insert_on,
+    insert_returning, insert_returning_on, select_one_row, select_rows, update, update_on,
+    Counter, Deleter, Fetcher, Page, Updater,
 };
 pub use foreign_key::ForeignKey;
 pub use postgres::Postgres;

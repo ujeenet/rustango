@@ -430,9 +430,21 @@ fn startapp<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
         .cloned()
         .ok_or_else(|| MigrateError::Validation(usage()))?;
     let mut with_manage_bin = false;
-    for arg in iter {
+    let mut into: Option<String> = None;
+    while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--with-manage-bin" => with_manage_bin = true,
+            "--into" => {
+                into = Some(
+                    iter.next()
+                        .cloned()
+                        .ok_or_else(|| {
+                            MigrateError::Validation(
+                                "--into requires a directory argument".into(),
+                            )
+                        })?,
+                );
+            }
             "--help" | "-h" => {
                 writeln!(w, "{}", usage())?;
                 return Ok(());
@@ -444,9 +456,11 @@ fn startapp<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
             }
         }
     }
+    let base_label = into.clone().unwrap_or_else(|| "src".into());
     let opts = super::scaffold::StartAppOptions {
         app_name: app_name.clone(),
         manage_bin: with_manage_bin.then_some(super::scaffold::SINGLE_TENANT_MANAGE_BIN),
+        base_dir: into.map(std::path::PathBuf::from),
     };
     // Project root = current working directory. Most users run
     // `cargo run --bin manage -- startapp …` from the project root,
@@ -454,12 +468,13 @@ fn startapp<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
     // help string so non-default invocations are an explicit `cd`.
     let cwd = std::env::current_dir()?;
     let report = super::scaffold::startapp(&cwd, &opts)?;
-    write_startapp_report(w, &app_name, &report)
+    write_startapp_report(w, &app_name, &base_label, &report)
 }
 
 fn write_startapp_report<W: Write>(
     w: &mut W,
     app_name: &str,
+    base_label: &str,
     report: &super::scaffold::StartAppReport,
 ) -> Result<(), MigrateError> {
     if report.written.is_empty() && report.skipped.is_empty() {
@@ -477,11 +492,11 @@ fn write_startapp_report<W: Write>(
         writeln!(w, "next:")?;
         writeln!(
             w,
-            "  add `mod {app_name};` to src/main.rs (or src/lib.rs) so the"
+            "  add `mod {app_name};` to {base_label}/main.rs (or {base_label}/lib.rs)"
         )?;
         writeln!(
             w,
-            "  derive macros' `inventory` registrations are pulled in."
+            "  so the derive macros' `inventory` registrations are pulled in."
         )?;
     }
     Ok(())

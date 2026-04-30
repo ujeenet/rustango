@@ -55,9 +55,15 @@ pub(super) fn startapp_cmd<W: Write>(
         .cloned()
         .ok_or_else(|| TenancyError::Validation(usage()))?;
     let mut with_manage_bin = false;
+    let mut with_bootstrap = false;
+    let mut into: Option<String> = None;
     while let Some(flag) = iter.next() {
         match flag.as_str() {
             "--with-manage-bin" => with_manage_bin = true,
+            "--with-bootstrap-migration" => with_bootstrap = true,
+            "--into" => {
+                into = Some(next_value(&mut iter, "--into")?);
+            }
             "--help" | "-h" => {
                 writeln!(w, "{}", usage())?;
                 return Ok(());
@@ -74,22 +80,44 @@ pub(super) fn startapp_cmd<W: Write>(
             }
         }
     }
+    let base_label = into.clone().unwrap_or_else(|| "src".into());
     let opts = rustango::migrate::scaffold::StartAppOptions {
         app_name: app_name.clone(),
         manage_bin: with_manage_bin.then_some(TENANCY_MANAGE_BIN),
+        base_dir: into.map(std::path::PathBuf::from),
     };
     let cwd = std::env::current_dir().map_err(TenancyError::Io)?;
     let report = rustango::migrate::scaffold::startapp(&cwd, &opts)
         .map_err(TenancyError::Migrate)?;
-    write_report(w, &app_name, &report)
+
+    // Optional: drop the framework's registry+tenant bootstrap
+    // migrations into the new app's `migrations/` subdirectory so a
+    // fresh project is `cargo run`-ready in one command — no separate
+    // `init-tenancy` step.
+    let bootstrap_report = if with_bootstrap {
+        let migrations_dir = cwd
+            .join(opts.base_dir.clone().unwrap_or_else(|| std::path::PathBuf::from("src")))
+            .join(&app_name)
+            .join("migrations");
+        Some(crate::tenancy::init_tenancy(&migrations_dir)?)
+    } else {
+        None
+    };
+
+    write_report(w, &app_name, &base_label, &report, bootstrap_report.as_ref())
 }
 
 fn write_report<W: Write>(
     w: &mut W,
     app_name: &str,
+    base_label: &str,
     report: &rustango::migrate::scaffold::StartAppReport,
+    bootstrap: Option<&crate::tenancy::InitTenancyReport>,
 ) -> Result<(), TenancyError> {
-    if report.written.is_empty() && report.skipped.is_empty() {
+    if report.written.is_empty()
+        && report.skipped.is_empty()
+        && bootstrap.is_none_or(|b| b.written.is_empty() && b.skipped.is_empty())
+    {
         writeln!(w, "startapp: nothing to do")?;
         return Ok(());
     }
@@ -100,37 +128,76 @@ fn write_report<W: Write>(
     for path in &report.skipped {
         writeln!(w, "  · {path} already exists — left untouched")?;
     }
+    if let Some(b) = bootstrap {
+        let migrations_rel = format!("{base_label}/{app_name}/migrations");
+        for name in &b.written {
+            writeln!(w, "  + wrote {migrations_rel}/{name}.json")?;
+        }
+        for name in &b.skipped {
+            writeln!(
+                w,
+                "  · {migrations_rel}/{name}.json already exists — left untouched"
+            )?;
+        }
+    }
     if !report.written.is_empty() {
         writeln!(w, "next:")?;
         writeln!(
             w,
-            "  add `mod {app_name};` to src/main.rs (or src/lib.rs) so"
+            "  add `mod {app_name};` to {base_label}/main.rs (or {base_label}/lib.rs)"
         )?;
         writeln!(
             w,
-            "  the derive macros' `inventory` registrations are pulled in."
+            "  so the derive macros' `inventory` registrations are pulled in."
         )?;
-        writeln!(w)?;
-        writeln!(
-            w,
-            "  for tenancy: `manage init-tenancy && manage migrate` to"
-        )?;
-        writeln!(
-            w,
-            "  materialize the registry + tenant bootstrap migrations."
-        )?;
+        if bootstrap.is_some() {
+            writeln!(w)?;
+            writeln!(
+                w,
+                "  bootstrap migrations are already in {base_label}/{app_name}/migrations/ —"
+            )?;
+            writeln!(
+                w,
+                "  point `Builder::migrate(...)` at that directory and `cargo run` is enough."
+            )?;
+        } else {
+            writeln!(w)?;
+            writeln!(
+                w,
+                "  for tenancy: `manage init-tenancy && manage migrate` to"
+            )?;
+            writeln!(
+                w,
+                "  materialize the registry + tenant bootstrap migrations."
+            )?;
+            writeln!(
+                w,
+                "  (or pass `--with-bootstrap-migration` next time to bundle them in.)"
+            )?;
+        }
     }
     Ok(())
 }
 
 fn usage() -> String {
-    "startapp <name> [--with-manage-bin]\n  \
-     Scaffold a Django-shape app module under src/<name>/ (mod.rs +\n  \
-     models.rs + views.rs + urls.rs). Idempotent: existing files\n  \
-     are left untouched. <name> must be a valid Rust identifier.\n\n  \
+    "startapp <name> [--into <dir>] [--with-manage-bin] [--with-bootstrap-migration]\n  \
+     Scaffold a Django-shape app module under <dir>/<name>/ (mod.rs +\n  \
+     models.rs + views.rs + urls.rs). Idempotent: existing files are\n  \
+     left untouched. <name> must be a valid Rust identifier.\n\n  \
+     --into <dir>\n  \
+     Override the default `src/` directory the app lands in. Use\n  \
+     for non-standard layouts — e.g. `--into examples/blog_demo`\n  \
+     for an in-tree example dir, or `--into crates/web` for a\n  \
+     workspace member with no `src/` parent. Default: `src`.\n\n  \
      --with-manage-bin\n  \
-     Also write src/bin/manage.rs with the **tenancy-aware**\n  \
+     Also write <dir>/bin/manage.rs with the **tenancy-aware**\n  \
      dispatcher boilerplate (crate::tenancy::manage::run). Skipped\n  \
-     if the file already exists."
+     if the file already exists.\n\n  \
+     --with-bootstrap-migration\n  \
+     Also drop the framework's registry+tenant bootstrap migrations\n  \
+     into <dir>/<name>/migrations/. Pair with\n  \
+     `Builder::migrate(\"<dir>/<name>/migrations\")` and the project\n  \
+     is `cargo run`-ready out of the gate — no separate `init-tenancy`\n  \
+     step. Idempotent."
         .to_owned()
 }

@@ -99,6 +99,78 @@ pub fn embed_migrations(input: TokenStream) -> TokenStream {
         .into()
 }
 
+/// `#[rustango::main]` — the Django-shape runserver entrypoint. Wraps
+/// `#[tokio::main]` and a default `tracing_subscriber` initialisation
+/// (env-filter, falling back to `info,sqlx=warn`) so user `main`
+/// functions are zero-boilerplate:
+///
+/// ```ignore
+/// #[rustango::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     rustango::server::Builder::from_env().await?
+///         .migrate("migrations").await?
+///         .api(my_app::urls::api())
+///         .seed_with(my_app::seed::run).await?
+///         .serve("0.0.0.0:8080").await
+/// }
+/// ```
+///
+/// Optional `flavor = "current_thread"` passes through to
+/// `#[tokio::main]`; default is the multi-threaded runtime.
+///
+/// Pulls `tracing-subscriber` into the rustango crate behind the
+/// `runtime` sub-feature (implied by `tenancy`), so apps that opt
+/// out get plain `#[tokio::main]` ergonomics without the dependency.
+#[proc_macro_attribute]
+pub fn main(args: TokenStream, item: TokenStream) -> TokenStream {
+    expand_main(args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+fn expand_main(
+    args: TokenStream2,
+    item: TokenStream2,
+) -> syn::Result<TokenStream2> {
+    let mut input: syn::ItemFn = syn::parse2(item)?;
+    if input.sig.asyncness.is_none() {
+        return Err(syn::Error::new(
+            input.sig.ident.span(),
+            "`#[rustango::main]` must wrap an `async fn`",
+        ));
+    }
+
+    // Parse optional `flavor = "..."` etc. from the attribute args
+    // and pass them straight through to `#[tokio::main(...)]`.
+    let tokio_attr = if args.is_empty() {
+        quote! { #[::tokio::main] }
+    } else {
+        quote! { #[::tokio::main(#args)] }
+    };
+
+    // Re-block the body so the tracing init runs before user code.
+    let body = input.block.clone();
+    input.block = syn::parse2(quote! {{
+        {
+            use ::rustango::__private_runtime::tracing_subscriber::{self, EnvFilter};
+            // `try_init` so duplicate installers (e.g. tests already
+            // holding a subscriber) don't panic.
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn")),
+                )
+                .try_init();
+        }
+        #body
+    }})?;
+
+    Ok(quote! {
+        #tokio_attr
+        #input
+    })
+}
+
 fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
     // Default to "./migrations" if invoked without args.
     let path_str = if input.is_empty() {
@@ -288,12 +360,14 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     );
     let column_module = column_module_tokens(&module_ident, struct_name, &collected.column_entries);
     let from_row_impl = from_row_impl_tokens(struct_name, &collected.from_row_inits);
+    let reverse_helpers = reverse_helper_tokens(struct_name, &collected.fk_relations);
 
     Ok(quote! {
         #model_impl
         #inherent_impl
         #from_row_impl
         #column_module
+        #reverse_helpers
 
         ::rustango::core::inventory::submit! {
             ::rustango::core::ModelEntry {
@@ -301,6 +375,64 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
     })
+}
+
+/// For every `ForeignKey<Parent>` field on `Child`, emit
+/// `impl Parent { pub async fn <child_table>_set(&self, executor) -> Vec<Child> }`.
+/// Reads the parent's PK via the macro-generated `__rustango_pk_value`
+/// and runs a single `SELECT … FROM <child_table> WHERE <fk_column> = $1`
+/// — the canonical reverse-FK fetch. One round trip, no N+1.
+fn reverse_helper_tokens(
+    child_ident: &syn::Ident,
+    fk_relations: &[FkRelation],
+) -> TokenStream2 {
+    if fk_relations.is_empty() {
+        return TokenStream2::new();
+    }
+    // Snake-case the child struct name to derive the method suffix —
+    // `Post` → `post_set`, `BlogComment` → `blog_comment_set`. Avoids
+    // English-plural edge cases (Django's `<child>_set` convention).
+    let suffix = format!("{}_set", to_snake_case(&child_ident.to_string()));
+    let method_ident = syn::Ident::new(&suffix, child_ident.span());
+    let impls = fk_relations.iter().map(|rel| {
+        let parent_ty = &rel.parent_type;
+        let fk_col = rel.fk_column.as_str();
+        let doc = format!(
+            "Fetch every `{child_ident}` whose `{fk_col}` foreign key points at this row. \
+             Single SQL query — `SELECT … FROM <{child_ident} table> WHERE {fk_col} = $1` — \
+             generated from the FK declaration on `{child_ident}::{fk_col}`. Composes with \
+             further `{child_ident}::objects()` filters via direct queryset use."
+        );
+        quote! {
+            impl #parent_ty {
+                #[doc = #doc]
+                ///
+                /// # Errors
+                /// Returns [`::rustango::sql::ExecError`] for SQL-writing
+                /// or driver failures.
+                pub async fn #method_ident<'_c, _E>(
+                    &self,
+                    _executor: _E,
+                ) -> ::core::result::Result<
+                    ::std::vec::Vec<#child_ident>,
+                    ::rustango::sql::ExecError,
+                >
+                where
+                    _E: ::rustango::sql::sqlx::Executor<
+                        '_c,
+                        Database = ::rustango::sql::sqlx::Postgres,
+                    >,
+                {
+                    let _pk: ::rustango::core::SqlValue = self.__rustango_pk_value();
+                    ::rustango::query::QuerySet::<#child_ident>::new()
+                        .filter(#fk_col, ::rustango::core::Op::Eq, _pk)
+                        .fetch_on(_executor)
+                        .await
+                }
+            }
+        }
+    });
+    quote! { #( #impls )* }
 }
 
 struct ColumnEntry {
@@ -376,6 +508,21 @@ struct CollectedFields {
     /// Rust-side field names, in declaration order. Used to validate
     /// container attributes like `display = "…"`.
     field_names: Vec<String>,
+    /// FK fields on this child model. Drives the reverse-relation
+    /// helper emit — for each FK, the macro adds an inherent
+    /// `<parent>::<child_table>_set(&self, executor) -> Vec<Self>`
+    /// method on the parent type.
+    fk_relations: Vec<FkRelation>,
+}
+
+#[derive(Clone)]
+struct FkRelation {
+    /// Inner type of `ForeignKey<T>` — the parent model. The reverse
+    /// helper is emitted as `impl <ParentType> { … }`.
+    parent_type: Type,
+    /// SQL column name on the child table for this FK (e.g. `"author"`).
+    /// Used in the generated `WHERE <fk_column> = $1` clause.
+    fk_column: String,
 }
 
 fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
@@ -401,6 +548,7 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
         primary_key: None,
         column_entries: Vec::with_capacity(cap),
         field_names: Vec::with_capacity(cap),
+        fk_relations: Vec::new(),
     };
 
     for field in &named.named {
@@ -408,6 +556,12 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
         out.field_names.push(info.ident.to_string());
         out.field_schemas.push(info.schema);
         out.from_row_inits.push(info.from_row_init);
+        if let Some(parent_ty) = info.fk_inner.clone() {
+            out.fk_relations.push(FkRelation {
+                parent_type: parent_ty,
+                fk_column: info.column.clone(),
+            });
+        }
         let column = info.column.as_str();
         let ident = info.ident;
         out.insert_columns.push(quote!(#column));
@@ -565,8 +719,28 @@ fn inherent_impl_tokens(
                 &mut self,
                 pool: &::rustango::sql::sqlx::PgPool,
             ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                self.save_on(pool).await
+            }
+
+            /// Like [`Self::save`] but accepts any sqlx executor —
+            /// `&PgPool`, `&mut PgConnection`, or a transaction. The
+            /// escape hatch for tenant-scoped writes: schema-mode
+            /// tenants share the registry pool but rely on a per-
+            /// checkout `SET search_path`, so passing `&PgPool` would
+            /// silently hit the wrong schema. Acquire a connection
+            /// via `TenantPools::acquire(&org)` and pass `&mut *conn`.
+            ///
+            /// # Errors
+            /// As [`Self::save`].
+            pub async fn save_on<'_c, _E>(
+                &mut self,
+                _executor: _E,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
+            where
+                _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+            {
                 if matches!(self.#pk_ident, ::rustango::sql::Auto::Unset) {
-                    return self.insert(pool).await;
+                    return self.insert_on(_executor).await;
                 }
                 let _query = ::rustango::core::UpdateQuery {
                     model: <Self as ::rustango::core::Model>::SCHEMA,
@@ -581,7 +755,7 @@ fn inherent_impl_tokens(
                         }
                     ),
                 };
-                let _ = ::rustango::sql::update(pool, &_query).await?;
+                let _ = ::rustango::sql::update_on(_executor, &_query).await?;
                 ::core::result::Result::Ok(())
             }
         })
@@ -603,6 +777,22 @@ fn inherent_impl_tokens(
                 &self,
                 pool: &::rustango::sql::sqlx::PgPool,
             ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                self.delete_on(pool).await
+            }
+
+            /// Like [`Self::delete`] but accepts any sqlx executor —
+            /// for tenant-scoped deletes against an explicitly-acquired
+            /// connection. See [`Self::save_on`] for the rationale.
+            ///
+            /// # Errors
+            /// As [`Self::delete`].
+            pub async fn delete_on<'_c, _E>(
+                &self,
+                _executor: _E,
+            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError>
+            where
+                _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+            {
                 let query = ::rustango::core::DeleteQuery {
                     model: <Self as ::rustango::core::Model>::SCHEMA,
                     where_clause: ::rustango::core::WhereExpr::Predicate(
@@ -615,7 +805,7 @@ fn inherent_impl_tokens(
                         }
                     ),
                 };
-                ::rustango::sql::delete(pool, &query).await
+                ::rustango::sql::delete_on(_executor, &query).await
             }
         }
     });
@@ -637,6 +827,21 @@ fn inherent_impl_tokens(
                 &mut self,
                 pool: &::rustango::sql::sqlx::PgPool,
             ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                self.insert_on(pool).await
+            }
+
+            /// Like [`Self::insert`] but accepts any sqlx executor.
+            /// See [`Self::save_on`] for tenancy-scoped rationale.
+            ///
+            /// # Errors
+            /// As [`Self::insert`].
+            pub async fn insert_on<'_c, _E>(
+                &mut self,
+                _executor: _E,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
+            where
+                _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+            {
                 let mut _columns: ::std::vec::Vec<&'static str> =
                     ::std::vec::Vec::new();
                 let mut _values: ::std::vec::Vec<::rustango::core::SqlValue> =
@@ -648,7 +853,7 @@ fn inherent_impl_tokens(
                     values: _values,
                     returning: ::std::vec![ #( #returning_cols ),* ],
                 };
-                let _returning_row = ::rustango::sql::insert_returning(pool, &query).await?;
+                let _returning_row = ::rustango::sql::insert_returning_on(_executor, &query).await?;
                 #( #auto_assigns )*
                 ::core::result::Result::Ok(())
             }
@@ -666,13 +871,28 @@ fn inherent_impl_tokens(
                 &self,
                 pool: &::rustango::sql::sqlx::PgPool,
             ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                self.insert_on(pool).await
+            }
+
+            /// Like [`Self::insert`] but accepts any sqlx executor.
+            /// See [`Self::save_on`] for tenancy-scoped rationale.
+            ///
+            /// # Errors
+            /// As [`Self::insert`].
+            pub async fn insert_on<'_c, _E>(
+                &self,
+                _executor: _E,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
+            where
+                _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+            {
                 let query = ::rustango::core::InsertQuery {
                     model: <Self as ::rustango::core::Model>::SCHEMA,
                     columns: ::std::vec![ #( #insert_columns ),* ],
                     values: ::std::vec![ #( #insert_values ),* ],
                     returning: ::std::vec::Vec::new(),
                 };
-                ::rustango::sql::insert(pool, &query).await
+                ::rustango::sql::insert_on(_executor, &query).await
             }
         }
     };
@@ -707,6 +927,21 @@ fn inherent_impl_tokens(
                 rows: &mut [Self],
                 pool: &::rustango::sql::sqlx::PgPool,
             ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                Self::bulk_insert_on(rows, pool).await
+            }
+
+            /// Like [`Self::bulk_insert`] but accepts any sqlx executor.
+            /// See [`Self::save_on`] for tenancy-scoped rationale.
+            ///
+            /// # Errors
+            /// As [`Self::bulk_insert`].
+            pub async fn bulk_insert_on<'_c, _E>(
+                rows: &mut [Self],
+                _executor: _E,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
+            where
+                _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+            {
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
@@ -743,7 +978,7 @@ fn inherent_impl_tokens(
                     rows: _all_rows,
                     returning: ::std::vec![ #( #returning_cols ),* ],
                 };
-                let _returned = ::rustango::sql::bulk_insert(pool, &_query).await?;
+                let _returned = ::rustango::sql::bulk_insert_on(_executor, &_query).await?;
                 if _returned.len() != rows.len() {
                     return ::core::result::Result::Err(
                         ::rustango::sql::ExecError::Sql(
@@ -777,6 +1012,21 @@ fn inherent_impl_tokens(
                 rows: &[Self],
                 pool: &::rustango::sql::sqlx::PgPool,
             ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                Self::bulk_insert_on(rows, pool).await
+            }
+
+            /// Like [`Self::bulk_insert`] but accepts any sqlx executor.
+            /// See [`Self::save_on`] for tenancy-scoped rationale.
+            ///
+            /// # Errors
+            /// As [`Self::bulk_insert`].
+            pub async fn bulk_insert_on<'_c, _E>(
+                rows: &[Self],
+                _executor: _E,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
+            where
+                _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+            {
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
@@ -795,11 +1045,26 @@ fn inherent_impl_tokens(
                     rows: _all_rows,
                     returning: ::std::vec::Vec::new(),
                 };
-                let _ = ::rustango::sql::bulk_insert(pool, &_query).await?;
+                let _ = ::rustango::sql::bulk_insert_on(_executor, &_query).await?;
                 ::core::result::Result::Ok(())
             }
         }
     };
+
+    let pk_value_helper = primary_key.map(|(pk_ident, _)| {
+        quote! {
+            /// Hidden runtime accessor for the primary-key value as a
+            /// [`SqlValue`]. Used by reverse-relation helpers
+            /// (`<parent>::<child>_set`) emitted from sibling models'
+            /// FK fields. Not part of the public API.
+            #[doc(hidden)]
+            pub fn __rustango_pk_value(&self) -> ::rustango::core::SqlValue {
+                ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                    ::core::clone::Clone::clone(&self.#pk_ident)
+                )
+            }
+        }
+    });
 
     quote! {
         impl #struct_name {
@@ -816,6 +1081,8 @@ fn inherent_impl_tokens(
             #save_method
 
             #pk_methods
+
+            #pk_value_helper
 
             #column_consts
         }
@@ -1073,6 +1340,10 @@ struct FieldInfo<'a> {
     field_type_tokens: TokenStream2,
     schema: TokenStream2,
     from_row_init: TokenStream2,
+    /// Inner type from a `ForeignKey<T>` field, if any. The reverse-
+    /// relation helper emit (`Author::<child>_set`) needs to know `T`
+    /// to point the generated method at the right child model.
+    fk_inner: Option<Type>,
 }
 
 fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
@@ -1148,6 +1419,7 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
         field_type_tokens,
         schema,
         from_row_init,
+        fk_inner: fk_inner.cloned(),
     })
 }
 

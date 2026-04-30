@@ -36,6 +36,33 @@ pub mod forms;
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
+/// Per-request extractors for handlers — tenancy-aware DI. Today
+/// ships [`extractors::Tenant`]; future slices add `Operator` + `User`.
+#[cfg(feature = "tenancy")]
+pub mod extractors;
+
+/// Django-style runserver — [`server::Builder`] owns every line of
+/// boilerplate every tenancy app would otherwise rewrite (DB pool,
+/// resolver chain, host dispatch, operator console, bind + serve).
+#[cfg(feature = "tenancy")]
+pub mod server;
+
+/// `#[rustango::main]` — the Django-shape `runserver` entrypoint.
+/// Wraps `#[tokio::main]` with a default `tracing-subscriber` boot
+/// (env-filter, falling back to `info,sqlx=warn`). Available behind
+/// the `runtime` feature, which `tenancy` implies.
+#[cfg(feature = "runtime")]
+pub use rustango_macros::main;
+
+/// Internal re-exports for proc-macros that need to name third-party
+/// crates without forcing the user to add them to their `Cargo.toml`.
+/// Not part of the public API — names here may change between minors.
+#[doc(hidden)]
+#[cfg(feature = "runtime")]
+pub mod __private_runtime {
+    pub use tracing_subscriber;
+}
+
 /// Proc-macros crate, re-exported. End users normally reach
 /// [`Model`] and [`embed_migrations`] directly via the facade rather
 /// than naming `macros`.

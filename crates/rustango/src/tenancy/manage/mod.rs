@@ -46,6 +46,12 @@ mod server;
 mod tenants;
 mod users;
 
+/// Typed Rust API for tenancy provisioning — `create_tenant_if_missing`,
+/// `create_operator_if_missing`, `create_user_if_missing`, `find_org`.
+/// Use these from `Builder::seed_with` closures and other in-process
+/// callers; the verb dispatcher [`run_with_writer`] is the CLI surface.
+pub mod api;
+
 use std::io::{self, Write};
 use std::path::Path;
 

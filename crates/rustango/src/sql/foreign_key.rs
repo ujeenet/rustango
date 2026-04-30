@@ -32,7 +32,6 @@ use crate::query::QuerySet;
 use sqlx::postgres::{PgPool, PgRow};
 use sqlx::FromRow;
 
-use super::executor::Fetcher;
 use super::ExecError;
 
 /// Lazy-loaded reference to a parent row. See module docs.
@@ -155,6 +154,20 @@ where
     ///   `#[rustango(primary_key)]` field (programming error).
     /// * Any [`ExecError`] produced by the underlying [`Fetcher`].
     pub async fn get(&mut self, pool: &PgPool) -> Result<&T, ExecError> {
+        self.get_on(pool).await
+    }
+
+    /// Like [`Self::get`] but accepts any sqlx executor — needed for
+    /// tenant-scoped lookups, where the calling connection has the
+    /// `search_path` already set and a fresh checkout from `&PgPool`
+    /// would land in the wrong schema.
+    ///
+    /// # Errors
+    /// As [`Self::get`].
+    pub async fn get_on<'c, E>(&mut self, executor: E) -> Result<&T, ExecError>
+    where
+        E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+    {
         if matches!(self, Self::Unloaded(_)) {
             let pk = self.pk();
             let pk_field = T::SCHEMA
@@ -164,7 +177,7 @@ where
                 })?;
             let mut rows: Vec<T> = QuerySet::<T>::new()
                 .filter(pk_field.column, Op::Eq, pk)
-                .fetch(pool)
+                .fetch_on(executor)
                 .await?;
             let value = rows
                 .pop()

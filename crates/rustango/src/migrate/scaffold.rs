@@ -28,15 +28,24 @@ use std::path::{Path, PathBuf};
 use super::error::MigrateError;
 
 /// Options for [`startapp`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StartAppOptions {
-    /// App module name. Becomes the `src/<app_name>/` directory.
+    /// App module name. Becomes the `<base>/<app_name>/` directory
+    /// (where `<base>` is `src/` by default — see [`Self::base_dir`]).
     /// Must be a valid Rust identifier (`[A-Za-z_][A-Za-z0-9_]*`).
     pub app_name: String,
-    /// When `Some`, also write `src/bin/manage.rs` with this body.
+    /// When `Some`, also write `<base>/bin/manage.rs` with this body.
     /// Skipped if the file already exists. `None` leaves manage.rs
     /// unchanged (the common case once a project has one).
     pub manage_bin: Option<&'static str>,
+    /// Override the default `src/` directory the app lands in. Set
+    /// to `Some(path)` for non-standard layouts — e.g.
+    /// `examples/blog_demo` for an in-tree example, or `crates/web`
+    /// for a workspace member with no `src/` parent. The scaffolder
+    /// writes `<project_root>/<base_dir>/<app_name>/` and (when
+    /// `manage_bin` is set) `<project_root>/<base_dir>/bin/manage.rs`.
+    /// `None` keeps the v0.7 default of `src/`.
+    pub base_dir: Option<PathBuf>,
 }
 
 /// Outcome of [`startapp`]: which files were written and which were
@@ -66,7 +75,12 @@ pub fn startapp(
     validate_app_name(&opts.app_name)?;
 
     let mut report = StartAppReport::default();
-    let app_dir = project_root.join("src").join(&opts.app_name);
+    let base_dir = opts
+        .base_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("src"));
+    let base_label = base_dir.display().to_string();
+    let app_dir = project_root.join(&base_dir).join(&opts.app_name);
     if !app_dir.exists() {
         std::fs::create_dir_all(&app_dir)?;
     }
@@ -80,17 +94,18 @@ pub fn startapp(
     ];
     for (filename, body) in entries {
         let path = app_dir.join(filename);
-        let rel = format!("src/{}/{}", opts.app_name, filename);
+        let rel = format!("{base_label}/{}/{}", opts.app_name, filename);
         write_or_skip(&path, &rel, &body, &mut report)?;
     }
 
     if let Some(template) = opts.manage_bin {
-        let bin_dir = project_root.join("src").join("bin");
+        let bin_dir = project_root.join(&base_dir).join("bin");
         if !bin_dir.exists() {
             std::fs::create_dir_all(&bin_dir)?;
         }
         let path = bin_dir.join("manage.rs");
-        write_or_skip(&path, "src/bin/manage.rs", template, &mut report)?;
+        let rel = format!("{base_label}/bin/manage.rs");
+        write_or_skip(&path, &rel, template, &mut report)?;
     }
 
     Ok(report)
@@ -269,7 +284,7 @@ mod tests {
             &root,
             &StartAppOptions {
                 app_name: "blog".into(),
-                manage_bin: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -297,7 +312,7 @@ mod tests {
             &root,
             &StartAppOptions {
                 app_name: "blog".into(),
-                manage_bin: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -305,7 +320,7 @@ mod tests {
             &root,
             &StartAppOptions {
                 app_name: "blog".into(),
-                manage_bin: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -322,6 +337,7 @@ mod tests {
             &StartAppOptions {
                 app_name: "blog".into(),
                 manage_bin: Some(SINGLE_TENANT_MANAGE_BIN),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -338,7 +354,7 @@ mod tests {
             &root,
             &StartAppOptions {
                 app_name: "1bad-name".into(),
-                manage_bin: None,
+                ..Default::default()
             },
         )
         .unwrap_err();

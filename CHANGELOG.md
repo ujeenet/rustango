@@ -2,6 +2,155 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [Unreleased] — v0.8.2
+
+Demo-as-canary release: drove every line of `examples/blog_demo` through framework features. The user reviewed the prior v0.8.1 demo and asked the right question — "why don't you use ORM and migrations tool in seeds file?". v0.8.2 closes the last gaps so the answer is "we do, all the way down".
+
+### Added — write-path executor variants (`save_on` / `insert_on` / `bulk_insert_on` / `delete_on` / `update_on`)
+
+- **Macro-generated `_on` methods** on every `#[derive(Model)]` type: `Model::save_on(executor)`, `Model::insert_on(executor)`, `Model::bulk_insert_on(executor)` (Auto + non-Auto variants), `Model::delete_on(executor)`. Accept any `sqlx::Executor<'_, Database = Postgres>` — `&PgPool`, `&mut PgConnection`, transactions. The pool methods (`save`, `insert`, …) keep working: they're now 1-line delegates to the new variants. Non-breaking for v0.8.1 callers.
+- **Low-level `executor::*_on` functions**: `insert_on`, `insert_returning_on`, `bulk_insert_on`, `update_on`, `delete_on`. The pool functions delegate. Re-exported from `rustango::sql`.
+- **Why this matters:** schema-mode tenancy shares the registry pool but relies on per-checkout `SET search_path` — passing `&PgPool` would silently hit `public`. With v0.8.2 the demo's seed runs `Author { … }.save_on(tenant.conn()).await?` and the row lands in the tenant's schema as expected.
+
+### Added — `rustango::tenancy::manage::api` typed Rust API
+
+- New public module wrapping the previously `pub(super)` provisioning verbs. Functions: `create_tenant_if_missing(pools, registry_url, dir, slug, opts)`, `create_tenant(...)`, `create_operator_if_missing(pools, username, password)`, `create_user_if_missing(pools, slug, username, password, superuser)`, `find_org(pools, slug)`. All return typed model values; `*_if_missing` variants are idempotent (return existing on duplicate, no error-string matching needed).
+- `CreateTenantOpts` carries `mode`, `display_name`, `schema_name`, `database_url`, `host_pattern`, `port`, `path_prefix`, `no_migrate` — all `Option`s with `Default::default()`. Replaces stringly-typed `vec!["create-tenant", slug, "--mode", "schema", …]` for in-process callers.
+- The verb dispatcher (`tenancy::manage::run_with_writer`) is unchanged for CLI consumers.
+
+### Added — `rustango::server::Builder::migrate(dir)`
+
+- One Builder method that subsumes the three calls every tenancy app would otherwise wire up: `init_tenancy(dir)` (writes registry + tenant bootstrap migrations if absent), `migrate_registry(pools, dir)`, `migrate_tenants(pools, dir, registry_url)`. Creates `dir` via `fs::create_dir_all` if it doesn't exist — first-run friendly.
+- Self-returning, so it composes: `Builder::from_env().await?.migrate("migrations").await?.api(...).seed_with(...).await?.serve(...).await`.
+
+### Added — `#[rustango::main]` attribute proc macro
+
+- New `#[rustango::main]` wraps `#[tokio::main]` plus a default `tracing_subscriber` boot (`EnvFilter::try_from_default_env().unwrap_or("info,sqlx=warn")`). User `main` becomes zero-boilerplate.
+- Optional args pass through to tokio: `#[rustango::main(flavor = "current_thread")]`.
+- Lives behind a new `runtime` feature (implied by `tenancy`) so apps that don't want the macro can opt out and skip the `tracing-subscriber` dependency. `tracing-subscriber` moved from dev-deps into the optional dep list with `default-features = false, features = ["fmt", "env-filter"]` for minimal cold-compile cost.
+
+### Added — `manage startapp --with-bootstrap-migration` (one-command tenancy setup)
+
+The tenancy-aware `startapp` now optionally drops the framework's registry + tenant bootstrap migrations into the new app's `<app>/migrations/` subdirectory in the same invocation that scaffolds the code files. Pair with `Builder::migrate("<dir>/<app>/migrations")` and a fresh tenancy project is `cargo run`-ready in one command — no separate `manage init-tenancy && manage migrate` step.
+
+```sh
+cargo run --example blog_demo_manage --features tenancy -- \
+    startapp shop --into examples/myproj --with-bootstrap-migration
+# writes:
+#   examples/myproj/shop/{mod,models,views,urls}.rs
+#   examples/myproj/shop/migrations/0001_rustango_registry_initial.json
+#   examples/myproj/shop/migrations/0001_rustango_tenant_initial.json
+```
+
+The post-scaffold hint message switches accordingly: with the flag, it says "bootstrap migrations are already in `<dir>/<app>/migrations/` — point `Builder::migrate(...)` at that directory and `cargo run` is enough." Without the flag, the original `manage init-tenancy && manage migrate` recipe is printed (plus a tip about the new flag for next time). Idempotent — the flag re-runs against an existing directory skip files that are already there.
+
+Verified end-to-end via the demo's manage CLI; the bootstrap files emitted are byte-identical to the standalone `init-tenancy` verb's output.
+
+### Added — `manage startapp --into <dir>` for non-standard project layouts
+
+The v0.7 scaffolder hard-coded the destination to `<cwd>/src/<app>/` — correct for `cargo new`-shaped projects but wrong for examples, workspace members without `src/`, or any layout that puts apps in `examples/`, `app/`, etc. Reviewers running `cargo run --example blog_demo_manage -- startapp shop` from the workspace root got `src/shop/` written next to the workspace `Cargo.toml` instead of next to the demo's `blog/`.
+
+- New `--into <dir>` flag on both `manage startapp` (single-tenant) and `tenancy::manage startapp` (tenancy-aware). Overrides the default `src/` base. The scaffolder writes `<cwd>/<dir>/<app_name>/{mod,models,views,urls}.rs` and (when `--with-manage-bin` is set) `<cwd>/<dir>/bin/manage.rs`.
+- New public `StartAppOptions::base_dir: Option<PathBuf>` field exposes the same hook to programmatic callers. `StartAppOptions` now `#[derive(Default)]` so callers can `..Default::default()` instead of listing every field.
+- Verified end-to-end: `cargo run --example blog_demo_manage --features tenancy -- startapp shop --into crates/rustango/examples/blog_demo` writes `crates/rustango/examples/blog_demo/shop/{mod,models,views,urls}.rs` — Django shape, in the right place, sibling to `blog/`.
+
+### Changed — `examples/blog_demo` reshaped into Django project layout
+
+The demo's files used to be flat under `examples/blog_demo/`; reviewers correctly noted this didn't match Django's "project shell at the top, apps as subdirectories" shape. Reorganized to:
+
+```
+examples/blog_demo/
+├── main.rs              ← project shell (Builder + serve)
+├── manage.rs            ← CLI dispatcher
+└── blog/                ← the "blog" app (matches `manage startapp blog` output)
+    ├── mod.rs
+    ├── models.rs
+    ├── views.rs
+    ├── urls.rs
+    ├── seed.rs
+    └── migrations/
+        ├── 0001_rustango_registry_initial.json
+        ├── 0001_rustango_tenant_initial.json
+        └── 0002_blog_initial.json
+```
+
+`main.rs` becomes `mod blog;` + a single Builder chain. `manage.rs` mounts the same `blog` module. To add another app, run `cargo run --example blog_demo_manage --features tenancy -- startapp shop` — the existing v0.7 scaffolder writes the same `<app>/{mod,models,views,urls}.rs` shape into a new directory; add `mod shop;` next to `mod blog;` in `main.rs` and the second app is mounted. No framework changes — just demonstrating that the existing scaffolder + the v0.8.2 `Builder::migrate(dir)` already compose into the canonical Django shape.
+
+Migrations live inside the app at `blog/migrations/` (per-app, Django-shaped). For multi-app projects with separate migration sets, v0.9 will add per-app migration discovery; today the runner takes one directory, so single-app demos like this one fit the Django shape exactly.
+
+### Added — `fetch_paginated_on` — rows + total in one SQL query (better than Django)
+
+- New `QuerySet::fetch_paginated_on<E: sqlx::Executor>` (and pool-side `fetch_paginated`) returns a `Page<T> { rows: Vec<T>, total: i64 }` from a **single** SQL round trip. The total is the count of rows matching the WHERE before LIMIT/OFFSET; same trip as the page slice. Built on Postgres' `COUNT(*) OVER ()` window function, stable since 8.4.
+- **Beats Django's `Paginator`**, which always runs two queries (one `SELECT`, one `SELECT COUNT(*)`); same for DRF's pagination. With `fetch_paginated_on` paginated endpoints get rows + total without the second round trip.
+- SQL emitted (verified via `RUST_LOG=sqlx::query=debug`):
+  ```sql
+  SELECT id, title, body, author, published_at, COUNT(*) OVER () AS "__rustango_total"
+  FROM post
+  LIMIT 2 OFFSET 0
+  ```
+- New `Page<T> { pub rows: Vec<T>, pub total: i64 }` re-exported from `rustango::sql`. Empty result set → `Page { rows: vec![], total: 0 }`. The total-count column injection happens in `executor.rs` via string splice at the ` FROM ` boundary — fully contained, no dialect-writer surface change. SQLite (window functions since 3.25) and MySQL (8.0+) both support `COUNT(*) OVER ()`, so the v0.10 multi-DB story is covered too.
+- Demo: new `GET /api/articles/paginated?page=N&per_page=M` endpoint in `examples/blog_demo/views.rs::list_articles_paginated`. Verified `total=6` on every page slice (`page=1 per_page=2`, `page=2 per_page=3`, etc.) with one SQL query for the page itself plus the existing batched author fetch (`WHERE id IN`) for embedding — N posts in two queries flat.
+
+### Added — `count_on(executor)` for tenant-scoped row counts
+
+- New `QuerySet::count_on<E: sqlx::Executor>` mirrors the existing `Counter::count(&PgPool)` for tenant connections. The pool method now delegates. Re-exported with the low-level `count_rows_on` from `rustango::sql`.
+- The blog demo's `/api/authors` count loop drops its raw `sqlx::query_as("SELECT COUNT(*) ...")` for `Post::objects().where_(Post::author.eq(id)).count_on(tenant.conn()).await?` — zero raw SQL in the entire view module. Still N+1 (one COUNT per author) until v0.9 ships aggregation; the win here is "ORM-driven, not stringly-typed".
+
+### Changed — `/api/articles` embeds full author + drops N+1 via batched `IN` fetch
+
+- Articles now serialize as `{id, title, body, published_at, author: {id, name, bio, post_count}}` — the embedded author is the full record, not just `author_name`.
+- The handler no longer does `post.author.get_on(conn)` per row (N+1). Instead: one `SELECT … FROM post`, then collect distinct PKs and one batched `SELECT … FROM author WHERE id IN ($1, $2, …)` via `Author::id.is_in(pks)`. Stitched into a `HashMap<i64, Author>` and rendered. **Two queries total**, regardless of post count — verified via `RUST_LOG=sqlx::query=debug`.
+- The proper one-query forward JOIN (`Post::objects().select_related("author").fetch_on(conn)` → single SQL with `LEFT JOIN`) still queues for v0.9 — it needs compile_select JOIN emit, alias-prefixed column decoder, and macro-generated `ForeignKey::Loaded` setters. The current two-query batched fetch closes the user-visible N+1 today; `select_related` will collapse it to one round trip later.
+
+### Added — reverse-FK macro helper (`<parent>::<child>_set`)
+
+- **`#[derive(Model)]` now emits an inherent `<child>_set(&self, executor)` method on every parent type** for each `ForeignKey<Parent>` field on a child. So `Post { author: ForeignKey<Author>, … }` automatically gives `Author` a method `post_set(&self, executor) -> Result<Vec<Post>, ExecError>`. One SQL query: `SELECT … FROM post WHERE author = $1` — no N+1, no client-side join, no hand-written WHERE clause.
+- **Naming convention:** `<snake_case_child_name>_set` — Django shape, predictable across irregular plurals.
+- **Implementation:** the parent's own `Model` derive emits a private `__rustango_pk_value(&self) -> SqlValue` inherent helper that the reverse method calls to read the parent's PK at runtime. Both impls coexist as inherent impls; works as long as parent and child are in the same crate (the Django shape).
+- **Demo endpoint:** new `/api/authors/{id}/articles` in `examples/blog_demo/views.rs::articles_by_author` uses `author.post_set(tenant.conn()).await?` end-to-end. Verified single-query behaviour via `RUST_LOG=sqlx::query=debug`: one `SELECT ... FROM "post" WHERE "author" = $1` returning the right rows.
+- **Forward `select_related` (one-query JOIN to load `post.author` along with `Post`)** is the natural complement and is queued as a v0.9 slice — bigger surface area (compile_select JOIN emit + per-Model alias-row decoder + macro support for setting `ForeignKey::Loaded` from a joined row). `list_articles` keeps the FK lazy-load (N+1) until that lands.
+
+### Changed — `examples/blog_demo` end-to-end refactor
+
+The blog demo is now the canonical Django-shape example, with **zero** raw SQL or hand-rolled DDL:
+
+- **`migrations/0002_blog_initial.json` is committed** — generated via `cargo run --example blog_demo_manage --features tenancy -- makemigrations blog_initial`. Schema lives in JSON; `Builder::migrate(...)` applies it on every boot. The framework's existing make-migrations machinery (`src/migrate/make.rs`) auto-creates the `migrations/` dir on first run, so `manage makemigrations` works in a fresh project with no setup.
+- **`seed.rs` is ORM-only and idempotent.** Provisioning via `manage::api::create_*_if_missing(...)` (typed args, returns the model). Author + Post seed data via `Author { … }.save_on(conn).await?`. Re-runs against the same DB are no-ops — tables, tenant, operator, user, and seed rows are all checked-and-skipped. No `drop_all`, no `DROP SCHEMA`, no destructive cleanup anywhere.
+- **`main.rs` is one framework chain** — `#[rustango::main]` + `Builder::from_env().migrate("…").api(urls::api()).seed_with(seed::run).serve(...)`. No `tokio::main`, no `tracing_subscriber::fmt()`, no pool wiring, no resolver chain, no host dispatcher.
+- **New `examples/blog_demo_manage` binary** — same models linked, dispatches to `tenancy::manage::run` so the full Django verb set works against the demo: `init-tenancy`, `makemigrations`, `migrate`, `migrate-registry`, `migrate-tenants`, `create-tenant`, `create-user`, `create-operator`, `showmigrations`. Doc header explains how to regenerate `0002_blog_initial.json` after a model change.
+- **Live smoke verified twice**: a fresh boot provisions tenant + operator + user + 3 authors + 6 posts; a second boot against the same DB applies 0 migrations, creates 0 rows, and serves the same data unchanged.
+
+## [Unreleased] — v0.8.1
+
+Patch on top of v0.8 surfacing two DX gaps the `examples/blog_demo` review caught: tenant-scoped queries couldn't use the ORM, and every tenancy app had to hand-roll ~50 lines of pool / resolver / dispatcher wiring before serving. Both addressed without breaking 0.8 callers.
+
+### Added — `Fetcher::fetch_on` + `ForeignKey::get_on` (tenant-scoped ORM)
+
+- **`QuerySet::fetch_on<E: sqlx::Executor>`** in `src/sql/executor.rs` — runs a queryset against any executor, not just `&PgPool`. The escape hatch tenancy needs: schema-mode tenants share the registry pool but rely on a per-checkout `SET search_path`, so passing `&PgPool` would silently hit the public schema. Pass `tenant.conn()` (or any `&mut PgConnection`) and the ORM works in tenant scope.
+- **`ForeignKey::get_on<E>`** mirrors the same shape for FK lazy-loads. `ForeignKey::get(&pool)` keeps working, delegating to `get_on(pool)` — non-breaking for v0.8 callers.
+
+### Added — `rustango::server::Builder` (Django-style runserver)
+
+- **New `rustango::server::Builder`** owns every line of boilerplate every tenancy app would otherwise rewrite: `PgPool::connect` from `DATABASE_URL`, `Arc::new(TenantPools::new(...))`, the `ChainResolver` (subdomain + header fallback) from `RUSTANGO_APEX_DOMAIN`, the host-based dispatcher (apex → operator console / subdomain → tenant admin + user routes), session-secret resolution, and `axum::serve` on a bound TCP listener. A tenancy-app `main` is now three framework calls — see `examples/blog_demo/main.rs`.
+- **`Builder::api(Router<()>)`** mounts a stateless user-supplied router on the tenant subdomain. The Builder layers `Extension<Arc<TenantContext>>` so `extractors::Tenant` works in every handler — users don't have to thread state through `with_state`.
+- **`Builder::admin_show_only`** narrows the auto-mounted tenant admin to specific tables.
+- **`Builder::seed_with(closure)`** runs a first-run hook with `(Arc<TenantPools>, PgPool, String)` — for `init-tenancy` / `migrate-registry` / `create-tenant` provisioning.
+
+### Added — `rustango::extractors::Tenant`
+
+- **`Tenant` extractor** (`FromRequestParts`) resolves the request's tenant via the chain resolver in `TenantContext` (populated by `Builder`), acquires a tenant-scoped connection, and exposes it as `tenant.conn() -> &mut PgConnection`. Handlers become one-liners:
+  ```rust
+  pub async fn list_articles(mut t: Tenant) -> Result<Json<Vec<Post>>, StatusCode> {
+      let posts = Post::objects().fetch_on(t.conn()).await?;
+      Ok(Json(posts))
+  }
+  ```
+- Rejection types: `MissingContext` (Builder didn't run, 500), `NotFound` (no tenant matches, 404), `Internal(String)` (resolver / pool error, 500). All implement `IntoResponse`.
+
+### Added — `examples/blog_demo` end-to-end demo
+
+- **New multi-file example** (`examples/blog_demo/{main,models,views,urls,seed}.rs`) demonstrating the full v0.8.1 shape: pre-seeded operator + tenant + superuser + 3 authors + 6 posts; `Author` + `Post` (`ForeignKey<Author>`) models; `GET /api/articles` + `GET /api/authors` JSON endpoints via the `Tenant` extractor; auto-mounted tenant admin + operator console via `server::Builder`. Three framework calls in `main.rs`. Run with `cargo run --example blog_demo --features tenancy`.
+
 ## [Unreleased] — v0.8
 
 Absorb-the-field release. After a deep competitive review of Cot, Loco, and Reinhardt, v0.8 closes the four highest-impact gaps every reviewer notices in week 1: a `Dialect` seam for multi-DB, a `cargo rustango new` project scaffolder, layered TOML config, and a public forms framework with CSRF middleware. v0.9 (API-first surface — serializers, ViewSets, OpenAPI, browsable API, multi-auth) and v0.10 (operations + multi-DB — jobs, mail, cache, test harness, SQLite + MySQL) follow.

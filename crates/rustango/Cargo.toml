@@ -63,6 +63,7 @@ admin = [
 # authentication paths.
 tenancy = [
     "admin",
+    "runtime",
     "dep:async-trait",
     "dep:argon2",
     "dep:cookie",
@@ -76,6 +77,13 @@ tenancy = [
     "dep:tokio",
     "dep:tower",
 ]
+
+# `#[rustango::main]` runserver shim (slice 9.0 / 0.8.2). Pulls in
+# `tracing-subscriber` so the macro can install the default
+# `info,sqlx=warn` env-filter logger before the user body runs. Apps
+# that don't want this dep can opt out by skipping the macro and
+# using `#[tokio::main]` directly.
+runtime = ["dep:tracing-subscriber"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
@@ -116,6 +124,10 @@ subtle           = { workspace = true, optional = true }
 tokio            = { workspace = true, optional = true }
 tower            = { workspace = true, optional = true }
 
+# `runtime` feature dep — used by `#[rustango::main]` to install a
+# default tracing subscriber (env-filter) before the user body runs.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"], optional = true }
+
 [dev-dependencies]
 tokio          = { workspace = true }
 chrono         = { workspace = true }
@@ -125,23 +137,8 @@ tower          = { workspace = true }
 http-body-util = { workspace = true }
 axum           = { workspace = true }
 base64         = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy        = { workspace = true }
 
-# Multi-file example demonstrating the Django-shape models / views /
-# urls split for downstream user projects (slice 6c). Single-file
-# examples are auto-detected by Cargo; multi-file ones need this
-# explicit declaration.
-[[example]]
-name = "project_layout"
-path = "examples/project_layout/main.rs"
-
-[[example]]
-name = "multitenant_demo"
-path = "examples/multitenant_demo.rs"
-required-features = ["tenancy"]
-
-[[example]]
-name = "tenancy_manage"
-path = "examples/tenancy_manage.rs"
-required-features = ["tenancy"]
+# All example crates removed. Single-file examples are auto-detected
+# by Cargo; multi-file or required-features examples used to be
+# declared here. Re-add as needed.
