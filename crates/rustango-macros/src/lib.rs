@@ -384,6 +384,56 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     })
 }
 
+/// Emit `impl LoadRelated for #StructName` — slice 9.0d. Pattern-
+/// matches `field_name` against the model's FK fields and, for a
+/// match, decodes the FK target via the parent's macro-generated
+/// `__rustango_from_aliased_row`, reads the parent's PK, and stores
+/// `ForeignKey::Loaded` on `self`.
+///
+/// Always emitted (with empty arms for FK-less models, which
+/// return `Ok(false)` for any field name) so the `T: LoadRelated`
+/// trait bound on `fetch_on` is universally satisfied — users
+/// never have to think about implementing it.
+fn load_related_impl_tokens(
+    struct_name: &syn::Ident,
+    fk_relations: &[FkRelation],
+) -> TokenStream2 {
+    let arms = fk_relations.iter().map(|rel| {
+        let parent_ty = &rel.parent_type;
+        let fk_col = rel.fk_column.as_str();
+        // FK field's Rust ident matches its SQL column name in v0.8
+        // (no `column = "..."` rename ships on FK fields).
+        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        quote! {
+            #fk_col => {
+                let _parent: #parent_ty = <#parent_ty>::__rustango_from_aliased_row(row, alias)?;
+                let _pk = match <#parent_ty>::__rustango_pk_value(&_parent) {
+                    ::rustango::core::SqlValue::I64(v) => v,
+                    _ => 0i64,
+                };
+                self.#field_ident = ::rustango::sql::ForeignKey::loaded(_pk, _parent);
+                ::core::result::Result::Ok(true)
+            }
+        }
+    });
+    quote! {
+        impl ::rustango::sql::LoadRelated for #struct_name {
+            #[allow(unused_variables)]
+            fn __rustango_load_related(
+                &mut self,
+                row: &::rustango::sql::sqlx::postgres::PgRow,
+                field_name: &str,
+                alias: &str,
+            ) -> ::core::result::Result<bool, ::rustango::sql::sqlx::Error> {
+                match field_name {
+                    #( #arms )*
+                    _ => ::core::result::Result::Ok(false),
+                }
+            }
+        }
+    }
+}
+
 /// For every `ForeignKey<Parent>` field on `Child`, emit
 /// `impl Parent { pub async fn <child_table>_set(&self, executor) -> Vec<Child> }`.
 /// Reads the parent's PK via the macro-generated `__rustango_pk_value`
@@ -459,6 +509,10 @@ struct ColumnEntry {
 struct CollectedFields {
     field_schemas: Vec<TokenStream2>,
     from_row_inits: Vec<TokenStream2>,
+    /// Aliased counterparts of `from_row_inits` — read columns via
+    /// `format!("{prefix}__{col}")` aliases so a Model can be
+    /// decoded from a JOINed row's projected target columns.
+    from_aliased_row_inits: Vec<TokenStream2>,
     /// Static column-name list — used by the simple insert path
     /// (no `Auto<T>` fields). Aligned with `insert_values`.
     insert_columns: Vec<TokenStream2>,
@@ -537,6 +591,7 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
     let mut out = CollectedFields {
         field_schemas: Vec::with_capacity(cap),
         from_row_inits: Vec::with_capacity(cap),
+        from_aliased_row_inits: Vec::with_capacity(cap),
         insert_columns: Vec::with_capacity(cap),
         insert_values: Vec::with_capacity(cap),
         insert_pushes: Vec::with_capacity(cap),
@@ -563,6 +618,7 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
         out.field_names.push(info.ident.to_string());
         out.field_schemas.push(info.schema);
         out.from_row_inits.push(info.from_row_init);
+        out.from_aliased_row_inits.push(info.from_aliased_row_init);
         if let Some(parent_ty) = info.fk_inner.clone() {
             out.fk_relations.push(FkRelation {
                 parent_type: parent_ty,
@@ -1080,6 +1136,27 @@ fn inherent_impl_tokens(
         }
     });
 
+    let from_aliased_row_inits = &fields.from_aliased_row_inits;
+    let aliased_row_helper = quote! {
+        /// Decode a row's aliased target columns (produced by
+        /// `select_related`'s LEFT JOIN) into a fresh instance of
+        /// this model. Reads each column via
+        /// `format!("{prefix}__{col}")`, matching the alias the
+        /// SELECT writer emitted. Slice 9.0d.
+        #[doc(hidden)]
+        pub fn __rustango_from_aliased_row(
+            row: &::rustango::sql::sqlx::postgres::PgRow,
+            prefix: &str,
+        ) -> ::core::result::Result<Self, ::rustango::sql::sqlx::Error> {
+            ::core::result::Result::Ok(Self {
+                #( #from_aliased_row_inits ),*
+            })
+        }
+    };
+
+    let load_related_impl =
+        load_related_impl_tokens(struct_name, &fields.fk_relations);
+
     quote! {
         impl #struct_name {
             /// Start a new `QuerySet` over this model.
@@ -1098,8 +1175,12 @@ fn inherent_impl_tokens(
 
             #pk_value_helper
 
+            #aliased_row_helper
+
             #column_consts
         }
+
+        #load_related_impl
     }
 }
 
@@ -1367,6 +1448,12 @@ struct FieldInfo<'a> {
     field_type_tokens: TokenStream2,
     schema: TokenStream2,
     from_row_init: TokenStream2,
+    /// Variant of [`Self::from_row_init`] that reads the column via
+    /// `format!("{prefix}__{col}")` so a model can be decoded out of
+    /// the aliased columns of a JOINed row. Drives slice 9.0d's
+    /// `Self::__rustango_from_aliased_row(row, prefix)` per-Model
+    /// helper that `select_related` calls when stitching loaded FKs.
+    from_aliased_row_init: TokenStream2,
     /// Inner type from a `ForeignKey<T>` field, if any. The reverse-
     /// relation helper emit (`Author::<child>_set`) needs to know `T`
     /// to point the generated method at the right child model.
@@ -1436,6 +1523,12 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
     let from_row_init = quote! {
         #ident: ::rustango::sql::sqlx::Row::try_get(row, #column_lit)?
     };
+    let from_aliased_row_init = quote! {
+        #ident: ::rustango::sql::sqlx::Row::try_get(
+            row,
+            ::std::format!("{}__{}", prefix, #column_lit).as_str(),
+        )?
+    };
 
     Ok(FieldInfo {
         ident,
@@ -1446,6 +1539,7 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
         field_type_tokens,
         schema,
         from_row_init,
+        from_aliased_row_init,
         fk_inner: fk_inner.cloned(),
     })
 }

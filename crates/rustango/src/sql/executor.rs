@@ -10,6 +10,37 @@ use sqlx::query::{Query, QueryAs};
 
 use super::{Dialect, ExecError, Postgres};
 
+/// Hidden trait every `#[derive(Model)]` type implements via the
+/// macro — slice 9.0d's bridge between `QuerySet::fetch_on` and the
+/// per-Model `__rustango_load_related` dispatcher. Loaders for
+/// individual FK fields live on the Model's inherent impl; this
+/// trait makes them callable polymorphically from generic
+/// fetch_on code.
+///
+/// Models with no `ForeignKey<T>` fields get a no-op impl
+/// (returns `Ok(false)` for any field name), so the trait bound on
+/// `fetch_on` is universally satisfied — users don't have to think
+/// about it.
+#[doc(hidden)]
+pub trait LoadRelated {
+    /// Stitch a `select_related`-loaded parent onto this instance's
+    /// FK field. `field_name` is the FK field's Rust name (e.g.
+    /// `"author"`); `alias` is the SELECT writer's alias prefix
+    /// for that JOIN's projected columns (typically the same as
+    /// `field_name`). Returns `Ok(false)` for unknown field names —
+    /// callers may pass select directives that don't apply to this
+    /// model and get a graceful skip.
+    ///
+    /// # Errors
+    /// `sqlx::Error` from `try_get` decoding the joined columns.
+    fn __rustango_load_related(
+        &mut self,
+        row: &PgRow,
+        field_name: &str,
+        alias: &str,
+    ) -> Result<bool, sqlx::Error>;
+}
+
 /// Extension trait that drives a `QuerySet` to completion against a Postgres pool.
 ///
 /// Adds `.fetch(&pool)` to any `QuerySet<T>` whose `T` is `Model + FromRow`.
@@ -62,15 +93,42 @@ where
     pub async fn fetch_on<'c, E>(self, executor: E) -> Result<Vec<T>, ExecError>
     where
         E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+        T: LoadRelated,
     {
         let select = self.compile()?;
+        let select_related_aliases: Vec<&'static str> =
+            select.joins.iter().map(|j| j.alias).collect();
         let stmt = Postgres.compile_select(&select)?;
-        let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> = sqlx::query_as::<_, T>(&stmt.sql);
-        for value in stmt.params {
-            q = bind_query_as(q, value);
+
+        if select_related_aliases.is_empty() {
+            // No JOINs — fast path identical to the v0.8.1 shape.
+            let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
+                sqlx::query_as::<_, T>(&stmt.sql);
+            for value in stmt.params {
+                q = bind_query_as(q, value);
+            }
+            let rows = q.fetch_all(executor).await?;
+            return Ok(rows);
         }
-        let rows = q.fetch_all(executor).await?;
-        Ok(rows)
+
+        // Slice 9.0d: select_related path. Fetch raw rows so we can
+        // both decode `T` via `from_row` AND call
+        // `T::__rustango_load_related(&mut t, &row, alias, alias)`
+        // for each JOINed target — single SQL round trip, no N+1.
+        let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+        for value in stmt.params {
+            q = bind_query(q, value);
+        }
+        let raw_rows = q.fetch_all(executor).await?;
+        let mut out = Vec::with_capacity(raw_rows.len());
+        for row in &raw_rows {
+            let mut t = T::from_row(row)?;
+            for alias in &select_related_aliases {
+                let _ = t.__rustango_load_related(row, alias, alias)?;
+            }
+            out.push(t);
+        }
+        Ok(out)
     }
 
     /// Fetch a page of rows **and** the total matching count in a

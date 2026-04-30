@@ -140,7 +140,7 @@ impl<T> sqlx::Type<sqlx::Postgres> for ForeignKey<T> {
 
 impl<T> ForeignKey<T>
 where
-    T: Model + for<'r> FromRow<'r, PgRow> + Send + Unpin,
+    T: Model + for<'r> FromRow<'r, PgRow> + Send + Unpin + crate::sql::LoadRelated,
 {
     /// Resolve the parent row and cache it on the field. Subsequent
     /// calls return the cached reference without hitting the DB.

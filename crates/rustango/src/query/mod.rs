@@ -27,6 +27,11 @@ pub struct QuerySet<T: Model> {
     pending: Vec<PendingFilter>,
     limit: Option<i64>,
     offset: Option<i64>,
+    /// FK field names registered for [`Self::select_related`] — slice
+    /// 9.0d. Each name resolves to a `Join` against the FK target at
+    /// `compile()` time, so the SELECT pulls the parent rows along
+    /// with the children in a single SQL round trip.
+    select_related: Vec<String>,
     _model: PhantomData<fn() -> T>,
 }
 
@@ -70,8 +75,32 @@ impl<T: Model> QuerySet<T> {
             pending: Vec::new(),
             limit: None,
             offset: None,
+            select_related: Vec::new(),
             _model: PhantomData,
         }
+    }
+
+    /// Eagerly load a `ForeignKey<Parent>` field via a `LEFT JOIN` —
+    /// Django's `select_related`. Pass the field name on `T` (not the
+    /// FK column or the parent table); subsequent `fetch_on` returns
+    /// rows where each `ForeignKey<Parent>` is `Loaded` after a
+    /// **single** SQL query, no N+1.
+    ///
+    /// ```ignore
+    /// let posts: Vec<Post> = Post::objects()
+    ///     .select_related("author")
+    ///     .fetch_on(conn).await?;
+    /// // post.author is ForeignKey::Loaded { pk, value }
+    /// ```
+    ///
+    /// Multiple `.select_related()` calls compose: each adds another
+    /// `LEFT JOIN` to the same SELECT. Schema validation (the field
+    /// exists, is an FK, has a primary-key target) happens at
+    /// `compile()` time.
+    #[must_use]
+    pub fn select_related(mut self, field: impl Into<String>) -> Self {
+        self.select_related.push(field.into());
+        self
     }
 
     /// Cap the number of returned rows. `None` removes any previously set limit.
@@ -141,11 +170,12 @@ impl<T: Model> QuerySet<T> {
     pub fn compile(self) -> Result<SelectQuery, QueryError> {
         let model: &'static ModelSchema = T::SCHEMA;
         let where_clause = resolve_pending(model, self.pending)?;
+        let joins = lower_select_related(model, &self.select_related)?;
         Ok(SelectQuery {
             model,
             where_clause,
             search: None,
-            joins: vec![],
+            joins,
             limit: self.limit,
             offset: self.offset,
         })
@@ -234,6 +264,65 @@ impl<T: Model> UpdateBuilder<T> {
             where_clause,
         })
     }
+}
+
+/// Convert `select_related` field names into `Join`s — slice 9.0d.
+///
+/// For each name: look up the field on `model`, verify it's a
+/// `Relation::Fk`, find the target schema in inventory, build a
+/// `Join` projecting all of the target's columns. Errors out on any
+/// unresolvable name with a clear `SelectRelatedInvalid` reason.
+fn lower_select_related(
+    model: &'static ModelSchema,
+    names: &[String],
+) -> Result<Vec<crate::core::Join>, QueryError> {
+    use crate::core::{inventory, Join, ModelEntry, Relation};
+    let mut out: Vec<Join> = Vec::with_capacity(names.len());
+    for name in names {
+        let field = model
+            .field(name)
+            .ok_or_else(|| QueryError::SelectRelatedInvalid {
+                model: model.name,
+                field: name.clone(),
+                reason: format!("no field `{name}` on this model"),
+            })?;
+        let (to, on) = match field.relation {
+            Some(Relation::Fk { to, on }) | Some(Relation::O2O { to, on }) => (to, on),
+            _ => {
+                return Err(QueryError::SelectRelatedInvalid {
+                    model: model.name,
+                    field: name.clone(),
+                    reason: "not a `ForeignKey<T>` field".into(),
+                });
+            }
+        };
+        let target = inventory::iter::<ModelEntry>
+            .into_iter()
+            .find(|e| e.schema.table == to)
+            .map(|e| e.schema)
+            .ok_or_else(|| QueryError::SelectRelatedInvalid {
+                model: model.name,
+                field: name.clone(),
+                reason: format!(
+                    "target table `{to}` is not registered (is the parent's `#[derive(Model)]` linked into the binary?)"
+                ),
+            })?;
+        // Project every column on the target so the decoder has the
+        // full row to rebuild a `Target` instance.
+        let project: Vec<&'static str> =
+            target.scalar_fields().map(|f| f.column).collect();
+        out.push(Join {
+            target,
+            on_local: field.column,
+            on_remote: on,
+            // The Rust field name is unique within the model, so it
+            // makes a clean alias prefix that doesn't collide with
+            // other JOINs the writer or admin might add later.
+            alias: field.name,
+            project,
+        });
+    }
+    Ok(out)
 }
 
 fn resolve_pending(

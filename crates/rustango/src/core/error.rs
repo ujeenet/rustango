@@ -34,4 +34,15 @@ pub enum QueryError {
         min: Option<i64>,
         max: Option<i64>,
     },
+
+    /// `QuerySet::select_related("foo")` couldn't be lowered: the
+    /// field doesn't exist, isn't a `ForeignKey<T>`, the target
+    /// table isn't registered in `inventory`, or the target has no
+    /// primary key. Slice 9.0d.
+    #[error("select_related(`{field}`) on model `{model}` is invalid: {reason}")]
+    SelectRelatedInvalid {
+        model: &'static str,
+        field: String,
+        reason: String,
+    },
 }
