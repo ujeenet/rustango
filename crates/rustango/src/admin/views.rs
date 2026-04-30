@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use crate::core::{
-    inventory, CountQuery, DeleteQuery, Filter, InsertQuery, ModelEntry, ModelSchema, Op,
+    inventory, CountQuery, DeleteQuery, Filter, InsertQuery, ModelEntry, Op,
     SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
 
@@ -25,26 +25,68 @@ use super::urls::AppState;
 // ============================================================== INDEX
 
 pub(crate) async fn index(State(state): State<AppState>) -> Html<String> {
-    let mut models: Vec<&'static ModelSchema> = inventory::iter::<ModelEntry>
+    // Group registered models by Django-shape app label (slice 9.0g).
+    // Each entry's `resolved_app_label()` returns the explicit
+    // `#[rustango(app = "...")]` override OR infers from the model's
+    // module path. Models with no app label land in a "Project" group.
+    let mut entries: Vec<&'static ModelEntry> = inventory::iter::<ModelEntry>
         .into_iter()
-        .map(|e| e.schema)
-        .filter(|m| state.is_visible(m.table))
+        .filter(|e| state.is_visible(e.schema.table))
         .collect();
-    models.sort_by_key(|m| m.name);
+    entries.sort_by_key(|e| e.schema.name);
 
-    let models_ctx: Vec<serde_json::Value> = models
+    let mut by_app: indexmap::IndexMap<String, Vec<&'static ModelEntry>> = indexmap::IndexMap::new();
+    for e in entries {
+        let label = e
+            .resolved_app_label()
+            .map_or_else(|| "Project".to_owned(), str::to_owned);
+        by_app.entry(label).or_default().push(e);
+    }
+    // Apps in alpha order, with "Project" pinned to the bottom so the
+    // canonical apps come first in the sidebar.
+    let mut groups: Vec<(String, Vec<&'static ModelEntry>)> = by_app.into_iter().collect();
+    groups.sort_by(|a, b| match (a.0.as_str(), b.0.as_str()) {
+        ("Project", _) => std::cmp::Ordering::Greater,
+        (_, "Project") => std::cmp::Ordering::Less,
+        _ => a.0.cmp(&b.0),
+    });
+
+    let groups_ctx: Vec<serde_json::Value> = groups
         .into_iter()
-        .map(|m| {
-            serde_json::json!({
-                "name": m.name,
-                "table": m.table,
-                "field_count": m.scalar_fields().count(),
-            })
+        .map(|(label, items)| {
+            let models_ctx: Vec<serde_json::Value> = items
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "name": e.schema.name,
+                        "table": e.schema.table,
+                        "field_count": e.schema.scalar_fields().count(),
+                    })
+                })
+                .collect();
+            serde_json::json!({ "app": label, "models": models_ctx })
         })
         .collect();
+
+    // Flat `models` list kept for back-compat with any user-overridden
+    // template that still iterates `models` directly. New template
+    // renders from `groups`.
+    let flat_models_ctx: Vec<serde_json::Value> = groups_ctx
+        .iter()
+        .flat_map(|g| {
+            g.get("models")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect();
+
     Html(render_template(
         "index.html",
-        &serde_json::json!({ "models": models_ctx }),
+        &serde_json::json!({
+            "groups": groups_ctx,
+            "models": flat_models_ctx,
+        }),
     ))
 }
 
