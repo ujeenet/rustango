@@ -1,0 +1,221 @@
+{
+  "name": "0001_rustango_registry_initial",
+  "created_at": "2026-04-29T00:00:00Z",
+  "atomic": true,
+  "scope": "registry",
+  "snapshot": {
+    "tables": [
+      {
+        "name": "rustango_operators",
+        "model": "Operator",
+        "fields": [
+          {
+            "name": "active",
+            "column": "active",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "created_at",
+            "column": "created_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "password_hash",
+            "column": "password_hash",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "username",
+            "column": "username",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 64
+          }
+        ]
+      },
+      {
+        "name": "rustango_orgs",
+        "model": "Org",
+        "fields": [
+          {
+            "name": "active",
+            "column": "active",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "created_at",
+            "column": "created_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "database_url",
+            "column": "database_url",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "display_name",
+            "column": "display_name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "host_pattern",
+            "column": "host_pattern",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "path_prefix",
+            "column": "path_prefix",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "port",
+            "column": "port",
+            "ty": "i32",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "schema_name",
+            "column": "schema_name",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 64
+          },
+          {
+            "name": "slug",
+            "column": "slug",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 64
+          },
+          {
+            "name": "storage_mode",
+            "column": "storage_mode",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 16
+          }
+        ]
+      },
+      {
+        "name": "rustango_users",
+        "model": "User",
+        "fields": [
+          {
+            "name": "active",
+            "column": "active",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "created_at",
+            "column": "created_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "is_superuser",
+            "column": "is_superuser",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "password_hash",
+            "column": "password_hash",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "username",
+            "column": "username",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 64
+          }
+        ]
+      }
+    ]
+  },
+  "forward": [
+    {
+      "schema": {
+        "CreateTable": "rustango_orgs"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_operators"
+      }
+    },
+    {
+      "data": {
+        "sql": "ALTER TABLE \"rustango_orgs\" ADD CONSTRAINT \"rustango_orgs_slug_key\" UNIQUE (\"slug\")",
+        "reverse_sql": "ALTER TABLE \"rustango_orgs\" DROP CONSTRAINT \"rustango_orgs_slug_key\"",
+        "reversible": true
+      }
+    },
+    {
+      "data": {
+        "sql": "ALTER TABLE \"rustango_operators\" ADD CONSTRAINT \"rustango_operators_username_key\" UNIQUE (\"username\")",
+        "reverse_sql": "ALTER TABLE \"rustango_operators\" DROP CONSTRAINT \"rustango_operators_username_key\"",
+        "reversible": true
+      }
+    }
+  ]
+}

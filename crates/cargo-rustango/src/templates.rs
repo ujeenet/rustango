@@ -17,6 +17,11 @@ pub fn cargo_toml(name: &str, template: Template) -> String {
 name = "{name}"
 version = "0.1.0"
 edition = "2021"
+# `default-run` resolves the `cargo run` ambiguity that comes from
+# shipping two binaries (the app and the manage CLI). Without it,
+# bare `cargo run` errors with "could not determine which binary to
+# run". Use `cargo run --bin manage -- <verb>` for the CLI.
+default-run = "{name}"
 
 # Empty `[workspace]` table makes this project standalone: if a parent
 # directory has its own workspace `Cargo.toml`, cargo would otherwise
@@ -354,3 +359,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 }
+
+
+// ---------------- Bootstrap migrations (tenant template) ----------------
+
+/// Registry-scoped bootstrap migration shipped by `rustango::tenancy`.
+/// Embedded as a static string so `cargo rustango new --template tenant`
+/// drops a working `migrations/` dir into the new project — the very
+/// first `cargo run --bin manage -- migrate` creates `rustango_orgs` /
+/// `rustango_operators` without a separate `manage init-tenancy` step.
+///
+/// Regenerate by running `cargo test -p rustango --test dump_bootstrap
+/// --features tenancy` and copying the output into
+/// `crates/cargo-rustango/templates/`.
+pub const BOOTSTRAP_REGISTRY_MIGRATION: &str =
+    include_str!("../templates/0001_rustango_registry_initial.json");
+
+/// Tenant-scoped bootstrap migration — same provenance as
+/// [`BOOTSTRAP_REGISTRY_MIGRATION`]. Creates `rustango_users` inside
+/// each tenant's schema/database when `manage migrate-tenants` runs.
+pub const BOOTSTRAP_TENANT_MIGRATION: &str =
+    include_str!("../templates/0001_rustango_tenant_initial.json");
+

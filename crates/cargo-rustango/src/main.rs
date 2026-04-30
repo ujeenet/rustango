@@ -222,6 +222,25 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     write(root, "src/urls.rs", &templates::urls_rs(template))?;
     write(root, "src/bin/manage.rs", &templates::manage_rs(template))?;
 
+    // Tenant projects need the framework's registry+tenant bootstrap
+    // migrations from day one — without them the very first
+    // `cargo run --bin manage -- migrate` reports "nothing to migrate"
+    // and then errors when the tenant pass queries the (non-existent)
+    // `rustango_orgs` table. Drop the same JSON `init-tenancy` would
+    // produce so the project is `migrate`-ready out of the box.
+    if matches!(template, Template::Tenant) {
+        write(
+            root,
+            "migrations/0001_rustango_registry_initial.json",
+            templates::BOOTSTRAP_REGISTRY_MIGRATION,
+        )?;
+        write(
+            root,
+            "migrations/0001_rustango_tenant_initial.json",
+            templates::BOOTSTRAP_TENANT_MIGRATION,
+        )?;
+    }
+
     Ok(())
 }
 
