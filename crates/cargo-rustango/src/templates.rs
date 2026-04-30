@@ -183,7 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let url = std::env::var(\"DATABASE_URL\")?;
+    let url = require_env(\"DATABASE_URL\")?;
     let pool = PgPool::connect(&url).await?;
     let app = urls::router(pool);
 
@@ -192,6 +192,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!(\"server listening on http://{}\", listener.local_addr()?);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Read a required environment variable, returning a friendly error
+/// instead of the bare `VarError(NotPresent)` that bubbles up from `?`.
+fn require_env(key: &str) -> Result<String, String> {
+    std::env::var(key).map_err(|_| {
+        format!(
+            \"missing env var `{key}`. Set it in your shell, or copy `.env.example` to `.env` (which is auto-loaded via dotenvy on startup): cp .env.example .env\"
+        )
+    })
 }
 ";
 
@@ -238,7 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let url = std::env::var("DATABASE_URL")?;
+    let url = require_env("DATABASE_URL")?;
     let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
     let bind = std::env::var("RUSTANGO_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
 
@@ -297,6 +307,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("server listening on http://{}", listener.local_addr()?);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Read a required environment variable, returning a friendly error
+/// instead of the bare `VarError(NotPresent)` that bubbles up from `?`.
+fn require_env(key: &str) -> Result<String, String> {
+    std::env::var(key).map_err(|_| {
+        format!(
+            "missing env var `{key}`. Set it in your shell, or copy `.env.example` to `.env` (auto-loaded via dotenvy on startup): cp .env.example .env"
+        )
+    })
 }
 "##;
 
@@ -460,7 +480,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use crate::models::*;
 
     let _ = dotenvy::dotenv();
-    let pool = PgPool::connect(&std::env::var(\"DATABASE_URL\")?).await?;
+    let url = std::env::var(\"DATABASE_URL\").map_err(|_| {
+        \"missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env` (auto-loaded via dotenvy on startup): cp .env.example .env\".to_owned()
+    })?;
+    let pool = PgPool::connect(&url).await?;
     let dir: &std::path::Path = \"./migrations\".as_ref();
     rustango::migrate::manage::run(&pool, dir, std::env::args().skip(1)).await?;
     Ok(())
@@ -489,7 +512,9 @@ use rustango::tenancy::TenantPools;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    let registry_url = std::env::var(\"DATABASE_URL\")?;
+    let registry_url = std::env::var(\"DATABASE_URL\").map_err(|_| {
+        \"missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env` (auto-loaded via dotenvy on startup): cp .env.example .env\".to_owned()
+    })?;
     let pool = PgPool::connect(&registry_url).await?;
     let pools = TenantPools::new(pool);
     let dir: &std::path::Path = \"./migrations\".as_ref();
