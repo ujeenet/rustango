@@ -208,6 +208,7 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     write(root, "Cargo.toml", &templates::cargo_toml(name, template))?;
     write(root, ".env.example", templates::ENV_EXAMPLE)?;
     write(root, ".gitignore", templates::GITIGNORE)?;
+    write(root, "rust-toolchain.toml", templates::RUST_TOOLCHAIN)?;
     write(root, "docker-compose.yml", &templates::docker_compose(name))?;
     write(root, "README.md", &templates::readme(name, template))?;
 
@@ -216,7 +217,7 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     fs::create_dir_all(root.join("src/bin"))
         .map_err(|e| format!("create src/bin/: {e}"))?;
 
-    write(root, "src/main.rs", templates::MAIN_RS)?;
+    write(root, "src/main.rs", templates::main_rs(template))?;
     write(root, "src/models.rs", &templates::models_rs(template))?;
     write(root, "src/views.rs", templates::VIEWS_RS)?;
     write(root, "src/urls.rs", &templates::urls_rs(template))?;

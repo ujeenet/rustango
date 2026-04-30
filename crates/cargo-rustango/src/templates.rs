@@ -35,6 +35,7 @@ default-run = "{name}"
 rustango = {rustango_dep}
 tokio = {{ version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }}
 axum = {{ version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }}
+tower = {{ version = "0.5", features = ["util"] }}
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 chrono = {{ version = "0.4", default-features = false, features = ["serde", "clock"] }}
@@ -65,6 +66,18 @@ RUSTANGO_SESSION_SECRET=change-me-base64-encoded-32-bytes-or-more
 pub const GITIGNORE: &str = "/target
 /.env
 *.log
+";
+
+// ---------------- rust-toolchain.toml ----------------
+
+/// Pin rustup to 1.88 in the new project so users on macOS who have
+/// Homebrew's older `rust` binary on PATH (currently 1.86) don't get
+/// the "rustc 1.86.0 is not supported by the following packages"
+/// error when they `cd` into the project. rustup reads this file and
+/// silently uses 1.88 inside the project regardless of which cargo
+/// they invoked. v0.8 rustango requires 1.88 (workspace.package.rust-version).
+pub const RUST_TOOLCHAIN: &str = "[toolchain]
+channel = \"1.88\"
 ";
 
 // ---------------- docker-compose.yml ----------------
@@ -133,7 +146,21 @@ feature list.
 
 // ---------------- src/main.rs ----------------
 
-pub const MAIN_RS: &str = "//! Project entrypoint — boots the HTTP server.
+/// Per-template `main.rs` — api/fullstack get the simple sqlx pool +
+/// `urls::router(pool)` shape; tenant gets `rustango::server::Builder`
+/// which auto-mounts the operator console at the apex and the tenant
+/// admin at every subdomain via host-based dispatch. Without Builder,
+/// the tenant template would scaffold a server that 404s on `/admin`
+/// because nothing wires the auto-admin or operator console in — the
+/// v0.8.1 Builder does that work.
+pub fn main_rs(template: Template) -> &'static str {
+    match template {
+        Template::Api | Template::Fullstack => MAIN_RS_PLAIN,
+        Template::Tenant => MAIN_RS_TENANT,
+    }
+}
+
+const MAIN_RS_PLAIN: &str = "//! Project entrypoint — boots the HTTP server.
 //!
 //! `manage.rs` (under src/bin/) handles migrations + scaffolding;
 //! this binary is just the runtime web server.
@@ -167,6 +194,111 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ";
+
+const MAIN_RS_TENANT: &str = r##"//! Tenant project entrypoint — host-dispatcher wiring.
+//!
+//! Mounted routes:
+//!
+//! * Apex (`localhost:8080`)            → operator console
+//!   - `/login`               operator login form (admin / your password)
+//!   - `/<table>`             registry CRUD: rustango_orgs, rustango_users, ...
+//! * Subdomain (`acme.localhost:8080`)  → tenant admin + your `urls::api()`
+//!   - `/__login`             tenant user login (alice / your password)
+//!   - `/<table>`             tenant CRUD on every #[derive(Model)] type
+//!   - your custom routes from `urls::api()` (default `/` and `/healthz`)
+//!
+//! Looks like a lot of wiring? It is — and v0.8.x will introduce a
+//! `rustango::server::Builder::from_env().migrate("migrations")
+//! .api(urls::api()).serve(...)` shorthand that collapses the body
+//! below to ~6 lines. Until that version is on crates.io, this is
+//! the canonical shape against published rustango v0.8.0.
+
+mod models;
+mod urls;
+mod views;
+
+use std::sync::Arc;
+
+use rustango::sql::sqlx::PgPool;
+use rustango::tenancy::{
+    admin::TenantAdminBuilder,
+    operator_console::{self, SessionSecret},
+    ChainResolver, HeaderResolver, SubdomainResolver, TenantPools,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load .env so DATABASE_URL / RUSTANGO_APEX_DOMAIN /
+    // RUSTANGO_SESSION_SECRET are visible without re-exporting them.
+    let _ = dotenvy::dotenv();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,sqlx=warn")),
+        )
+        .init();
+
+    let url = std::env::var("DATABASE_URL")?;
+    let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
+    let bind = std::env::var("RUSTANGO_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
+
+    let registry = PgPool::connect(&url).await?;
+    let pools = Arc::new(TenantPools::new(registry.clone()));
+
+    // Apply registry + tenant migrations on boot. `init_tenancy` is
+    // idempotent: writes the bootstrap files only if missing.
+    let dir = std::path::Path::new("migrations");
+    rustango::tenancy::init_tenancy(dir)?;
+    let _ = rustango::tenancy::migrate_registry(&pools, dir).await?;
+    let _ = rustango::tenancy::migrate_tenants(&pools, dir, &url).await?;
+
+    // Subdomain-first resolver, X-Org header fallback for curl.
+    let resolver = ChainResolver::new()
+        .push(SubdomainResolver::new(apex.clone()))
+        .push(HeaderResolver::default());
+
+    let tenant_admin = TenantAdminBuilder::new(pools.clone(), url.clone(), resolver)
+        .with_session(SessionSecret::from_env_or_random())
+        .build();
+    let tenant_app = urls::api().fallback_service(tenant_admin);
+
+    let operator = operator_console::router(registry, SessionSecret::from_env_or_random());
+
+    // Host dispatch: apex → operator console, subdomain → tenant admin + user routes.
+    let app = axum::Router::new().fallback_service(tower::service_fn({
+        let operator = operator.clone();
+        let tenants = tenant_app.clone();
+        let apex = apex.clone();
+        move |req: axum::http::Request<axum::body::Body>| {
+            let mut operator = operator.clone();
+            let mut tenants = tenants.clone();
+            let apex = apex.clone();
+            async move {
+                use tower::ServiceExt as _;
+                let host = req
+                    .headers()
+                    .get(axum::http::header::HOST)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.split(':').next().unwrap_or(s).to_owned())
+                    .unwrap_or_default();
+                let resp = if host == apex {
+                    operator.as_service().oneshot(req).await
+                } else {
+                    tenants.as_service().oneshot(req).await
+                };
+                resp.map_err(|e| -> std::convert::Infallible {
+                    panic!("axum router service is Infallible: {e}")
+                })
+            }
+        }
+    }));
+
+    let listener = tokio::net::TcpListener::bind(&bind).await?;
+    eprintln!("server listening on http://{}", listener.local_addr()?);
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+"##;
 
 // ---------------- src/models.rs ----------------
 
@@ -269,24 +401,34 @@ pub fn router(pool: PgPool) -> Router {
                 .to_owned()
         }
         Template::Tenant => {
-            // Multi-tenant — main.rs is unusual here because the
-            // typical entrypoint is `manage run-server`, not a
-            // bespoke router. We still ship a simple router for the
-            // dev experience.
-            "//! Project URL routing (template: tenant — multi-tenancy enabled).
+            // Multi-tenant: main.rs uses `rustango::server::Builder`,
+            // which expects a stateless `Router<()>` and injects the
+            // `TenantContext` extension itself so handlers can use
+            // `rustango::extractors::Tenant`. The user's routes mount
+            // on every tenant subdomain alongside the auto-admin.
+            "//! Project URL routing (template: tenant).
 //!
-//! For production wiring, the recommended entrypoint is
-//! `cargo run --bin manage -- run-server` which boots the operator
-//! console at the apex + tenant admin at every subdomain via
-//! host-based dispatch. This file is the simpler dev-server form.
+//! `Builder::api(...)` mounts these routes on every tenant
+//! subdomain alongside the auto-admin. Handlers can take
+//! `rustango::extractors::Tenant` to resolve the current tenant +
+//! get a tenant-scoped `&mut PgConnection`. Example:
+//!
+//! ```ignore
+//! pub async fn list_items(mut t: rustango::extractors::Tenant)
+//!     -> Result<axum::Json<Vec<crate::models::Item>>, axum::http::StatusCode> {
+//!     let rows = crate::models::Item::objects()
+//!         .fetch_on(t.conn()).await
+//!         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+//!     Ok(axum::Json(rows))
+//! }
+//! ```
 
 use axum::routing::get;
 use axum::Router;
-use rustango::sql::sqlx::PgPool;
 
 use crate::views;
 
-pub fn router(_pool: PgPool) -> Router {
+pub fn api() -> Router<()> {
     Router::new()
         .route(\"/\", get(views::index))
         .route(\"/healthz\", get(views::healthz))
