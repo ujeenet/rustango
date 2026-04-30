@@ -69,6 +69,11 @@ pub struct ModelSchema {
     pub table: &'static str,
     pub fields: &'static [FieldSchema],
     pub display: Option<&'static str>,
+    /// Explicit Django-style app label, set via
+    /// `#[rustango(app = "blog")]` on the struct. `None` when the user
+    /// didn't override it; in that case [`ModelEntry::resolved_app_label`]
+    /// falls back to inferring from the registered module path.
+    pub app_label: Option<&'static str>,
 }
 
 impl ModelSchema {
@@ -135,6 +140,71 @@ pub trait Model: Sized + Send + Sync + 'static {
 #[doc(hidden)]
 pub struct ModelEntry {
     pub schema: &'static ModelSchema,
+    /// Result of `module_path!()` at the registration site (e.g.
+    /// `"my_app::blog::models"`). Used by
+    /// [`Self::resolved_app_label`] to infer a Django-style
+    /// `app_label` when the user didn't set one explicitly.
+    pub module_path: &'static str,
+}
+
+impl ModelEntry {
+    /// Django-shape app label for this model. Returns the explicit
+    /// override from `#[rustango(app = "...")]` if set; otherwise
+    /// infers from `module_path` by taking the first segment after the
+    /// crate root. Examples (assuming crate `my_app`):
+    ///
+    /// * `"my_app::blog::models"`  → `Some("blog")`
+    /// * `"my_app::shop::models"`  → `Some("shop")`
+    /// * `"my_app::models"`        → `None` (top-level project model)
+    /// * `"my_app"`                → `None`
+    ///
+    /// `None` means the model lives at the project root, not inside a
+    /// dedicated app. Used for per-app migration discovery, admin
+    /// sidebar grouping, and `manage makemigrations <app>` filtering.
+    #[must_use]
+    pub fn resolved_app_label(&self) -> Option<&'static str> {
+        if let Some(label) = self.schema.app_label {
+            return Some(label);
+        }
+        infer_app_label_from_module_path(self.module_path)
+    }
+}
+
+/// Parse the Rust module path produced by `module_path!()` and return
+/// the first segment after the crate root, or `None` when the model
+/// lives at the project root. Public so callers (admin, makemigrations
+/// CLI, the diagnostic `manage list-apps` verb) can apply the same
+/// inference rules to module-path strings they already have.
+#[must_use]
+pub fn infer_app_label_from_module_path(path: &'static str) -> Option<&'static str> {
+    let mut parts = path.split("::");
+    let _crate_name = parts.next()?;
+    let candidate = parts.next()?;
+    // Skip pseudo-segments that mean "still at the project root":
+    // `models`, `views`, `urls` are sibling files at `src/`, not apps.
+    if matches!(candidate, "models" | "views" | "urls" | "main") {
+        return None;
+    }
+    Some(candidate)
 }
 
 inventory::collect!(ModelEntry);
+
+#[cfg(test)]
+mod tests {
+    use super::infer_app_label_from_module_path as infer;
+
+    #[test]
+    fn infers_app_from_submodule() {
+        assert_eq!(infer("my_app::blog::models"), Some("blog"));
+        assert_eq!(infer("my_app::shop::models"), Some("shop"));
+        assert_eq!(infer("my_app::auth"), Some("auth"));
+    }
+
+    #[test]
+    fn returns_none_for_project_root_models() {
+        assert_eq!(infer("my_app"), None);
+        assert_eq!(infer("my_app::models"), None);
+        assert_eq!(infer("my_app::views"), None);
+    }
+}

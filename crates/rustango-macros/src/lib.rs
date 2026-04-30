@@ -342,12 +342,14 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     }
     let display = container.display.map(|(name, _)| name);
+    let app_label = container.app.clone();
 
     let model_impl = model_impl_tokens(
         struct_name,
         &model_name,
         &table,
         display.as_deref(),
+        app_label.as_deref(),
         &collected.field_schemas,
     );
     let module_ident = column_module_ident(struct_name);
@@ -372,6 +374,11 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         ::rustango::core::inventory::submit! {
             ::rustango::core::ModelEntry {
                 schema: <#struct_name as ::rustango::core::Model>::SCHEMA,
+                // `module_path!()` evaluates at the registration site,
+                // so a Model declared in `crate::blog::models` records
+                // `"<crate>::blog::models"` and `resolved_app_label()`
+                // can infer "blog" without an explicit attribute.
+                module_path: ::core::module_path!(),
             }
         }
     })
@@ -667,9 +674,15 @@ fn model_impl_tokens(
     model_name: &str,
     table: &str,
     display: Option<&str>,
+    app_label: Option<&str>,
     field_schemas: &[TokenStream2],
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
+        quote!(::core::option::Option::Some(#name))
+    } else {
+        quote!(::core::option::Option::None)
+    };
+    let app_label_tokens = if let Some(name) = app_label {
         quote!(::core::option::Option::Some(#name))
     } else {
         quote!(::core::option::Option::None)
@@ -681,6 +694,7 @@ fn model_impl_tokens(
                 table: #table,
                 fields: &[ #(#field_schemas),* ],
                 display: #display_tokens,
+                app_label: #app_label_tokens,
             };
         }
     }
@@ -1189,12 +1203,20 @@ fn from_row_impl_tokens(struct_name: &syn::Ident, from_row_inits: &[TokenStream2
 struct ContainerAttrs {
     table: Option<String>,
     display: Option<(String, proc_macro2::Span)>,
+    /// Explicit Django-style app label from `#[rustango(app = "blog")]`.
+    /// Recorded on the emitted `ModelSchema.app_label`. When unset,
+    /// `ModelEntry::resolved_app_label()` infers from `module_path!()`
+    /// at runtime — this attribute is the override for cases where
+    /// the inference is wrong (e.g. a model that conceptually belongs
+    /// to one app but is physically in another module).
+    app: Option<String>,
 }
 
 fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
     let mut out = ContainerAttrs {
         table: None,
         display: None,
+        app: None,
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -1209,6 +1231,11 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
             if meta.path.is_ident("display") {
                 let s: LitStr = meta.value()?.parse()?;
                 out.display = Some((s.value(), s.span()));
+                return Ok(());
+            }
+            if meta.path.is_ident("app") {
+                let s: LitStr = meta.value()?.parse()?;
+                out.app = Some(s.value());
                 return Ok(());
             }
             Err(meta.error("unknown rustango container attribute"))

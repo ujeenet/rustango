@@ -72,6 +72,25 @@ impl SchemaSnapshot {
         Self { tables }
     }
 
+    /// Capture only the models whose [`ModelEntry::resolved_app_label`]
+    /// matches `app`. Powers `manage makemigrations <app>` — diffs
+    /// just one app's models against the latest snapshot and emits a
+    /// migration scoped to that app.
+    ///
+    /// Models with no app label (project-root models) are excluded —
+    /// they belong to the project's flat `migrations/` dir, not to a
+    /// sub-app's `migrations/<app>/`.
+    #[must_use]
+    pub fn from_registry_for_app(app: &str) -> Self {
+        let mut tables: Vec<TableSnapshot> = inventory::iter::<ModelEntry>
+            .into_iter()
+            .filter(|e| e.resolved_app_label() == Some(app))
+            .map(|e| TableSnapshot::from_schema(e.schema))
+            .collect();
+        tables.sort_by(|a, b| a.name.cmp(&b.name));
+        Self { tables }
+    }
+
     /// Capture an explicit list of model schemas — the inventory-
     /// agnostic counterpart of [`from_registry`]. Used by callers that
     /// want a curated snapshot rather than every linked model (e.g.

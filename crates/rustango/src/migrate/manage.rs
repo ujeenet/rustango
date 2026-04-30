@@ -45,7 +45,7 @@ use crate::sql::sqlx::PgPool;
 
 use super::error::MigrateError;
 use super::file::{self, Migration, Operation};
-use super::make::make_migrations;
+use super::make::{make_migrations, make_migrations_for_app};
 use super::runner;
 use super::snapshot::SchemaSnapshot;
 
@@ -170,14 +170,26 @@ fn makemigrations<W: Write>(
 ) -> Result<(), MigrateError> {
     let mut empty = false;
     let mut name: Option<String> = None;
-    for arg in args {
+    let mut app: Option<String> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--empty" => empty = true,
+            "--app" => {
+                app = Some(
+                    iter.next()
+                        .cloned()
+                        .ok_or_else(|| {
+                            MigrateError::Validation("--app requires an app name".into())
+                        })?,
+                );
+            }
             "--help" | "-h" => {
                 writeln!(
                     w,
-                    "makemigrations [name]            generate next migration\n\
-                     makemigrations --empty <name>    empty scaffold for data ops"
+                    "makemigrations [name]                  diff registry, write next file in <dir>\n\
+                     makemigrations --app <app> [name]      diff one app, write to <project_root>/<app>/migrations/\n\
+                     makemigrations --empty <name>          empty scaffold for data ops"
                 )?;
                 return Ok(());
             }
@@ -207,6 +219,29 @@ fn makemigrations<W: Write>(
             "wrote {} (empty scaffold — fill in `forward` with data ops)",
             file_path(dir, &mig.name).display()
         )?;
+        return Ok(());
+    }
+
+    // Per-app makemigrations (slice 9.0g): filter inventory to models
+    // whose `resolved_app_label()` matches `<app>` and write the
+    // result under `<project_root>/<app>/migrations/`. The `dir`
+    // argument's parent is the project root so existing manage CLI
+    // wiring (which passes the flat `migrations/` dir) keeps working.
+    if let Some(app_name) = app {
+        let project_root = dir.parent().unwrap_or(dir);
+        match make_migrations_for_app(project_root, &app_name, name.as_deref())? {
+            Some(mig) => {
+                let app_dir = project_root.join(&app_name).join("migrations");
+                writeln!(w, "wrote {}", file_path(&app_dir, &mig.name).display())?;
+                for op in &mig.forward {
+                    writeln!(w, "    + {}", describe_op(op))?;
+                }
+            }
+            None => writeln!(
+                w,
+                "app `{app_name}`: no changes — models match latest snapshot (or no models with this app_label)"
+            )?,
+        }
         return Ok(());
     }
 

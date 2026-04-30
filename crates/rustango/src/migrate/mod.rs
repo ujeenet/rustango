@@ -29,9 +29,9 @@ pub use diff::{
     detect_changes, detect_unsupported_field_changes, render_changes, SchemaChange,
 };
 pub use error::MigrateError;
-pub use file::{DataOp, Migration, MigrationScope, Operation};
+pub use file::{discover_migration_dirs, list_dirs, DataOp, Migration, MigrationScope, Operation};
 pub use invert::invert;
-pub use make::{make_migrations, make_migrations_from};
+pub use make::{make_migrations, make_migrations_for_app, make_migrations_from};
 pub use runner::{
     applied_set, apply_all, downgrade, drop_all, ensure_ledger, migrate, migrate_dry_run,
     migrate_embedded, migrate_to, registered_models, unapply, unapply_force, Builder,

@@ -40,6 +40,32 @@ pub fn make_migrations(
     make_migrations_from(dir, &current, name_override)
 }
 
+/// Per-app counterpart of [`make_migrations`] — diffs only the models
+/// whose Django-shape app label matches `app`, and writes the result
+/// into `<project_root>/<app>/migrations/`. Powers the
+/// `manage makemigrations <app>` flow (slice 9.0g).
+///
+/// `project_root` is typically the project's `src/` (or whatever the
+/// scaffolder's `--into` was set to). Returns `Ok(None)` when nothing
+/// changed, or when no models carry that `app_label`.
+///
+/// # Errors
+/// Anything [`make_migrations_from`] can return, plus
+/// [`MigrateError::Io`] if the per-app migrations dir can't be
+/// created.
+pub fn make_migrations_for_app(
+    project_root: &Path,
+    app: &str,
+    name_override: Option<&str>,
+) -> Result<Option<Migration>, MigrateError> {
+    let app_dir = project_root.join(app).join("migrations");
+    if !app_dir.exists() {
+        std::fs::create_dir_all(&app_dir)?;
+    }
+    let current = SchemaSnapshot::from_registry_for_app(app);
+    make_migrations_from(&app_dir, &current, name_override)
+}
+
 /// Testable form of [`make_migrations`] that takes the current snapshot
 /// as input rather than building it from the registry.
 ///

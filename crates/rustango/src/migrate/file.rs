@@ -200,6 +200,84 @@ pub fn list_dir(dir: &Path) -> Result<Vec<Migration>, MigrateError> {
     Ok(out)
 }
 
+/// Multi-directory variant of [`list_dir`] — slice 9.0g's foundation
+/// for per-app migration discovery. Walks every directory in `dirs`,
+/// concatenates their `Vec<Migration>` outputs, and re-sorts the
+/// merged list lex by `name` so the apply order is deterministic
+/// regardless of which app contributed which file.
+///
+/// Per-directory chain validation is preserved (each dir's prev/name
+/// graph is checked in isolation by [`list_dir`]); cross-directory
+/// chains aren't required to link, since two independent apps would
+/// have no reason to chain through each other.
+///
+/// # Errors
+/// Whatever [`list_dir`] returns for any of the inputs.
+pub fn list_dirs<I, P>(dirs: I) -> Result<Vec<Migration>, MigrateError>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    let mut out: Vec<Migration> = Vec::new();
+    for dir in dirs {
+        out.extend(list_dir(dir.as_ref())?);
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// Discover every migrations directory rooted at `project_root`:
+/// the flat `<project_root>/migrations/` (project-level migrations,
+/// including bootstraps) PLUS each `<project_root>/<app>/migrations/`
+/// (per-app migrations the scaffolder drops alongside `models.rs`).
+///
+/// Used by `Builder::migrate(project_root)` so a multi-app project
+/// applies all of its migrations from a single call. Returns the
+/// directories as `PathBuf` (not loaded migrations) so callers can
+/// scope-filter (e.g. tenancy's `migrate_registry` vs
+/// `migrate_tenants`) before loading.
+///
+/// Order: flat dir first (registry-shaped bootstraps land before app
+/// content), then app dirs in lex order of app names.
+#[must_use]
+pub fn discover_migration_dirs(project_root: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let flat = project_root.join("migrations");
+    if flat.is_dir() {
+        out.push(flat);
+    }
+    if let Ok(read) = std::fs::read_dir(project_root) {
+        let mut app_dirs: Vec<PathBuf> = read
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                if !path.is_dir() {
+                    return None;
+                }
+                // Skip the flat top-level migrations dir (already added)
+                // + obvious not-an-app folders.
+                let name = path.file_name()?.to_str()?;
+                if matches!(
+                    name,
+                    "migrations" | "target" | "src" | ".git" | "node_modules"
+                ) || name.starts_with('.')
+                {
+                    return None;
+                }
+                let candidate = path.join("migrations");
+                if candidate.is_dir() {
+                    Some(candidate)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        app_dirs.sort();
+        out.extend(app_dirs);
+    }
+    out
+}
+
 /// Verify every migration's `prev` reference points to another
 /// migration in the slice. Caller passes `origin` (a dir path or a
 /// label like `"embedded slice"`) so the error message names where

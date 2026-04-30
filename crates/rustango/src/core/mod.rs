@@ -18,7 +18,9 @@ pub use query::{
     Assignment, BulkInsertQuery, CountQuery, DeleteQuery, Filter, InsertQuery, Join, Op,
     SearchClause, SelectQuery, UpdateQuery, WhereExpr,
 };
-pub use schema::{FieldSchema, Model, ModelEntry, ModelSchema, Relation};
+pub use schema::{
+    infer_app_label_from_module_path, FieldSchema, Model, ModelEntry, ModelSchema, Relation,
+};
 pub use validate::validate_value;
 pub use value::SqlValue;
 
