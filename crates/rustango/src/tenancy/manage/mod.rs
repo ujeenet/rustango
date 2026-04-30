@@ -95,6 +95,10 @@ pub async fn run_with_writer<W: Write + Send>(
     let cmd = args.first().map_or("", String::as_str);
 
     match cmd {
+        "" | "help" | "--help" | "-h" => {
+            write_help(writer)?;
+            Ok(())
+        }
         "create-tenant" => {
             tenants::create_tenant(pools, registry_url, dir, &args[1..], writer).await
         }
@@ -129,7 +133,7 @@ pub async fn run_with_writer<W: Write + Send>(
             migrations::migrate_all_cmd(pools, registry_url, dir, &args[1..], writer).await
         }
         // Everything else (makemigrations, showmigrations, downgrade,
-        // help, …) is registry-scoped and delegates to the standard
+        // …) is registry-scoped and delegates to the standard
         // single-tenant runner.
         _ => rustango::migrate::manage::run_with_writer(
             pools.registry(),
@@ -140,4 +144,141 @@ pub async fn run_with_writer<W: Write + Send>(
         .await
         .map_err(TenancyError::Migrate),
     }
+}
+
+/// Render the curated help text for `cargo run --bin manage` (or
+/// equivalent). Covers every tenancy verb with a brief description +
+/// the most common flags, then the registry-scoped verbs that fall
+/// through to `rustango::migrate::manage`.
+///
+/// Public so generated `manage.rs` binaries can short-circuit the
+/// `help` / `--help` / `-h` / no-args case **before** connecting to
+/// Postgres — otherwise `cargo run --bin manage -- help` would error
+/// with "missing DATABASE_URL" and the user couldn't see the help.
+///
+/// # Errors
+/// Returns [`TenancyError::Io`] for a failed write — should not happen
+/// against `std::io::stdout()`.
+pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
+    writeln!(w, "rustango manage CLI — tenancy-aware dispatcher")?;
+    writeln!(w)?;
+    writeln!(w, "USAGE:")?;
+    writeln!(w, "  cargo run --bin manage -- <verb> [args]")?;
+    writeln!(w)?;
+    writeln!(w, "TENANT MANAGEMENT:")?;
+    writeln!(
+        w,
+        "  create-tenant <slug> [--display-name <s>] [--mode schema|database]"
+    )?;
+    writeln!(
+        w,
+        "                       [--host-pattern <s>] [--database-url <s>] [--no-migrate]"
+    )?;
+    writeln!(
+        w,
+        "                       Provision a new tenant. Schema mode (default) gives the"
+    )?;
+    writeln!(
+        w,
+        "                       tenant its own Postgres schema; database mode points at"
+    )?;
+    writeln!(
+        w,
+        "                       a fully separate DB via --database-url."
+    )?;
+    writeln!(
+        w,
+        "  drop-tenant   <slug> [--confirm <slug>]"
+    )?;
+    writeln!(
+        w,
+        "                       Soft-delete (active=false). Data preserved."
+    )?;
+    writeln!(
+        w,
+        "  purge-tenant  <slug> [--confirm <slug>] [--purge-database]"
+    )?;
+    writeln!(
+        w,
+        "                       HARD-delete: drops schema (or DB with --purge-database)."
+    )?;
+    writeln!(w, "  list-tenants         Print every Org row in the registry.")?;
+    writeln!(w)?;
+    writeln!(w, "USER / OPERATOR MANAGEMENT:")?;
+    writeln!(
+        w,
+        "  create-operator <username> --password <p>"
+    )?;
+    writeln!(
+        w,
+        "                       Operator-level account; signs into the apex /login."
+    )?;
+    writeln!(
+        w,
+        "  create-user <slug> <username> --password <p> [--superuser]"
+    )?;
+    writeln!(
+        w,
+        "                       Tenant-scoped user; signs into <slug>.<apex>/__login."
+    )?;
+    writeln!(w)?;
+    writeln!(w, "MIGRATIONS:")?;
+    writeln!(
+        w,
+        "  init-tenancy         Materialize bootstrap migrations into ./migrations/."
+    )?;
+    writeln!(
+        w,
+        "  makemigrations       Diff models against latest snapshot, emit a new JSON file."
+    )?;
+    writeln!(
+        w,
+        "  migrate              Apply registry-scoped, then tenant-scoped, migrations."
+    )?;
+    writeln!(
+        w,
+        "  migrate-registry     Apply registry-scoped migrations only."
+    )?;
+    writeln!(
+        w,
+        "  migrate-tenants      Apply tenant-scoped migrations to every active org."
+    )?;
+    writeln!(
+        w,
+        "  showmigrations       List which migrations are applied / pending."
+    )?;
+    writeln!(
+        w,
+        "  downgrade            Roll back the most recent migration."
+    )?;
+    writeln!(w)?;
+    writeln!(w, "SERVER:")?;
+    writeln!(
+        w,
+        "  run-server [--bind <addr>]"
+    )?;
+    writeln!(
+        w,
+        "                       Boot the HTTP server with admin + operator console."
+    )?;
+    writeln!(w)?;
+    writeln!(w, "SCAFFOLDING:")?;
+    writeln!(
+        w,
+        "  startapp <name> [--into <dir>] [--with-manage-bin] [--with-bootstrap-migration]"
+    )?;
+    writeln!(
+        w,
+        "                       Scaffold a Django-shape app module."
+    )?;
+    writeln!(w)?;
+    writeln!(w, "EXAMPLES:")?;
+    writeln!(w, "  cargo run --bin manage -- migrate")?;
+    writeln!(w, "  cargo run --bin manage -- create-operator admin --password letmein")?;
+    writeln!(w, "  cargo run --bin manage -- create-tenant acme --display-name 'ACME Corp'")?;
+    writeln!(w, "  cargo run --bin manage -- create-user acme alice --password hunter2 --superuser")?;
+    writeln!(w, "  cargo run --bin manage -- list-tenants")?;
+    writeln!(w)?;
+    writeln!(w, "Run any verb with --help for verb-specific flags + details.")?;
+    Ok(())
 }

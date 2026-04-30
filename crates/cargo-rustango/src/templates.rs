@@ -511,6 +511,19 @@ use rustango::tenancy::TenantPools;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    // Short-circuit help **before** connecting to Postgres so users
+    // who haven't yet copied `.env.example` to `.env` can still read
+    // the verb list. Same for the no-args case (running `manage` with
+    // nothing prints the help instead of an opaque error).
+    match argv.first().map(String::as_str) {
+        None | Some(\"help\") | Some(\"--help\") | Some(\"-h\") => {
+            print!(\"{}\", HELP);
+            return Ok(());
+        }
+        _ => {}
+    }
+
     let _ = dotenvy::dotenv();
     let registry_url = std::env::var(\"DATABASE_URL\").map_err(|_| {
         \"missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env` (auto-loaded via dotenvy on startup): cp .env.example .env\".to_owned()
@@ -518,9 +531,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPool::connect(&registry_url).await?;
     let pools = TenantPools::new(pool);
     let dir: &std::path::Path = \"./migrations\".as_ref();
-    rustango::tenancy::manage::run(&pools, &registry_url, dir, std::env::args().skip(1)).await?;
+    rustango::tenancy::manage::run(&pools, &registry_url, dir, argv).await?;
     Ok(())
 }
+
+const HELP: &str = r#\"rustango manage CLI — tenancy-aware dispatcher
+
+USAGE:
+  cargo run --bin manage -- <verb> [args]
+
+TENANT MANAGEMENT:
+  create-tenant <slug> [--display-name <s>] [--mode schema|database]
+                       [--host-pattern <s>] [--database-url <s>] [--no-migrate]
+                       Provision a new tenant. Schema mode (default) gives the
+                       tenant its own Postgres schema; database mode points at
+                       a fully separate DB via --database-url.
+  drop-tenant   <slug> [--confirm <slug>]
+                       Soft-delete (active=false). Data preserved.
+  purge-tenant  <slug> [--confirm <slug>] [--purge-database]
+                       HARD-delete: drops schema (or DB with --purge-database).
+  list-tenants         Print every Org row in the registry.
+
+USER / OPERATOR MANAGEMENT:
+  create-operator <username> --password <p>
+                       Operator-level account; signs into the apex /login.
+  create-user <slug> <username> --password <p> [--superuser]
+                       Tenant-scoped user; signs into <slug>.<apex>/__login.
+
+MIGRATIONS:
+  init-tenancy         Materialize bootstrap migrations into ./migrations/.
+  makemigrations       Diff models against latest snapshot, emit a new JSON file.
+  migrate              Apply registry-scoped, then tenant-scoped, migrations.
+  migrate-registry     Apply registry-scoped migrations only.
+  migrate-tenants      Apply tenant-scoped migrations to every active org.
+  showmigrations       List which migrations are applied / pending.
+  downgrade            Roll back the most recent migration.
+
+SERVER:
+  run-server [--bind <addr>]
+                       Boot the HTTP server with admin + operator console.
+
+SCAFFOLDING:
+  startapp <name> [--into <dir>] [--with-manage-bin] [--with-bootstrap-migration]
+                       Scaffold a Django-shape app module.
+
+EXAMPLES:
+  cargo run --bin manage -- migrate
+  cargo run --bin manage -- create-operator admin --password letmein
+  cargo run --bin manage -- create-tenant acme --display-name 'ACME Corp'
+  cargo run --bin manage -- create-user acme alice --password hunter2 --superuser
+  cargo run --bin manage -- list-tenants
+
+Run any verb with --help for verb-specific flags + details.
+\"#;
 "
                 .to_owned()
         }
