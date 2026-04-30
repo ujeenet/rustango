@@ -18,6 +18,14 @@ name = "{name}"
 version = "0.1.0"
 edition = "2021"
 
+# Empty `[workspace]` table makes this project standalone: if a parent
+# directory has its own workspace `Cargo.toml`, cargo would otherwise
+# refuse to build (see "current package believes it's in a workspace
+# when it's not"). This declaration severs that link without taking on
+# any workspace members. Delete it if you intentionally want the
+# project to be a member of a parent workspace.
+[workspace]
+
 [dependencies]
 rustango = {rustango_dep}
 tokio = {{ version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }}
