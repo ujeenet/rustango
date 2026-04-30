@@ -155,26 +155,28 @@ feature list.
 /// v0.8.1 Builder does that work.
 pub fn main_rs(template: Template) -> &'static str {
     match template {
-        Template::Api | Template::Fullstack => MAIN_RS_PLAIN,
+        Template::Api => MAIN_RS_API,
+        Template::Fullstack => MAIN_RS_FULLSTACK,
         Template::Tenant => MAIN_RS_TENANT,
     }
 }
 
-const MAIN_RS_PLAIN: &str = "//! Project entrypoint — boots the HTTP server.
+const MAIN_RS_API: &str = "//! Project entrypoint — boots the HTTP server (api template, no admin).
 //!
-//! `manage.rs` (under src/bin/) handles migrations + scaffolding;
-//! this binary is just the runtime web server.
+//! `urls::api()` is the stateless aggregator that `manage startapp`
+//! patches when you add new sub-apps. The pool flows through
+//! request extensions (`Extension<PgPool>`) so every linked app's
+//! handlers can pull it without each one declaring a state type.
 
 mod models;
 mod urls;
 mod views;
 
+use axum::Extension;
 use rustango::sql::sqlx::PgPool;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load .env (or any ancestor) so DATABASE_URL et al. are set
-    // without re-exporting each session.
     let _ = dotenvy::dotenv();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -185,7 +187,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let url = require_env(\"DATABASE_URL\")?;
     let pool = PgPool::connect(&url).await?;
-    let app = urls::router(pool);
+    let dir: &std::path::Path = \"./migrations\".as_ref();
+    let _ = rustango::migrate::migrate(&pool, dir).await?;
+
+    let app = urls::api().layer(Extension(pool));
 
     let bind = std::env::var(\"RUSTANGO_BIND\").unwrap_or_else(|_| \"127.0.0.1:8080\".into());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
@@ -200,6 +205,58 @@ fn require_env(key: &str) -> Result<String, String> {
     std::env::var(key).map_err(|_| {
         format!(
             \"missing env var `{key}`. Set it in your shell, or copy `.env.example` to `.env` (which is auto-loaded via dotenvy on startup): cp .env.example .env\"
+        )
+    })
+}
+";
+
+const MAIN_RS_FULLSTACK: &str = "//! Project entrypoint — boots the HTTP server (fullstack template, ORM + auto-admin).
+//!
+//! `urls::api()` is the stateless aggregator (`manage startapp`
+//! patches `.merge(...)` lines into it). `urls::admin_router(pool)`
+//! builds the auto-admin and gets nested at `/admin`. The pool
+//! flows through request extensions so every linked app's
+//! handlers can pull it via `axum::Extension<PgPool>`.
+
+mod models;
+mod urls;
+mod views;
+
+use axum::Extension;
+use rustango::sql::sqlx::PgPool;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = dotenvy::dotenv();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(\"info\")),
+        )
+        .init();
+
+    let url = require_env(\"DATABASE_URL\")?;
+    let pool = PgPool::connect(&url).await?;
+    let dir: &std::path::Path = \"./migrations\".as_ref();
+    let _ = rustango::migrate::migrate(&pool, dir).await?;
+
+    let app = urls::api()
+        .nest(\"/admin\", urls::admin_router(pool.clone()))
+        .layer(Extension(pool));
+
+    let bind = std::env::var(\"RUSTANGO_BIND\").unwrap_or_else(|_| \"127.0.0.1:8080\".into());
+    let listener = tokio::net::TcpListener::bind(&bind).await?;
+    eprintln!(\"server listening on http://{}\", listener.local_addr()?);
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Read a required environment variable, returning a friendly error
+/// instead of the bare `VarError(NotPresent)` that bubbles up from `?`.
+fn require_env(key: &str) -> Result<String, String> {
+    std::env::var(key).map_err(|_| {
+        format!(
+            \"missing env var `{key}`. Set it in your shell, or copy `.env.example` to `.env` (auto-loaded via dotenvy on startup): cp .env.example .env\"
         )
     })
 }
@@ -381,16 +438,23 @@ pub async fn healthz() -> &'static str {
 pub fn urls_rs(template: Template) -> String {
     match template {
         Template::Api => {
-            // No admin import; just custom views.
+            // Stateless aggregator. `manage startapp <name>` auto-
+            // patches a `.merge(crate::<name>::urls::api())` line
+            // after `Router::new()` so additional apps compose
+            // cleanly. Handlers that need the pool can read it from
+            // request extensions (`Extension<PgPool>`) — main.rs
+            // attaches it via `.layer(Extension(pool))`.
             "//! Project URL routing (template: api — no admin).
+//!
+//! `Router::new()` is the auto-mount anchor — `manage startapp`
+//! inserts `.merge(crate::<name>::urls::api())` lines here.
 
 use axum::routing::get;
 use axum::Router;
-use rustango::sql::sqlx::PgPool;
 
 use crate::views;
 
-pub fn router(_pool: PgPool) -> Router {
+pub fn api() -> Router<()> {
     Router::new()
         .route(\"/\", get(views::index))
         .route(\"/healthz\", get(views::healthz))
@@ -399,8 +463,17 @@ pub fn router(_pool: PgPool) -> Router {
                 .to_owned()
         }
         Template::Fullstack => {
-            // ORM + auto-admin nested under /admin.
+            // Stateless aggregator + a separate `admin_router(pool)`
+            // helper that main.rs nests under `/admin`. Pool flows
+            // through `Extension<PgPool>` (attached by main.rs) so
+            // all apps' handlers can grab it without each one
+            // declaring the pool as a state type.
             "//! Project URL routing (template: fullstack — ORM + auto-admin).
+//!
+//! `Router::new()` in `api()` is the auto-mount anchor —
+//! `manage startapp` inserts `.merge(crate::<name>::urls::api())`
+//! lines here. The auto-admin is built separately via
+//! `admin_router(pool)` and nested at `/admin` from `main.rs`.
 
 use axum::routing::get;
 use axum::Router;
@@ -409,13 +482,14 @@ use rustango::sql::sqlx::PgPool;
 
 use crate::views;
 
-pub fn router(pool: PgPool) -> Router {
-    let admin = admin::Builder::new(pool.clone()).build();
+pub fn api() -> Router<()> {
     Router::new()
         .route(\"/\", get(views::index))
         .route(\"/healthz\", get(views::healthz))
-        .with_state(pool)
-        .nest(\"/admin\", admin)
+}
+
+pub fn admin_router(pool: PgPool) -> Router {
+    admin::Builder::new(pool).build()
 }
 "
                 .to_owned()
@@ -479,23 +553,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[allow(unused_imports)]
     use crate::models::*;
 
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    // Short-circuit verbs that don't touch the DB (scaffold,
+    // makemigrations, help) **before** opening a Postgres connection
+    // so users who haven't set DATABASE_URL yet can still scaffold
+    // apps and generate migration files.
+    let needs_db = !matches!(
+        argv.first().map(String::as_str),
+        None | Some(\"help\") | Some(\"--help\") | Some(\"-h\")
+            | Some(\"startapp\") | Some(\"makemigrations\")
+    );
+
     let _ = dotenvy::dotenv();
-    let url = std::env::var(\"DATABASE_URL\").map_err(|_| {
-        \"missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env` (auto-loaded via dotenvy on startup): cp .env.example .env\".to_owned()
-    })?;
-    let pool = PgPool::connect(&url).await?;
     let dir: &std::path::Path = \"./migrations\".as_ref();
-    rustango::migrate::manage::run(&pool, dir, std::env::args().skip(1)).await?;
+
+    if needs_db {
+        let url = std::env::var(\"DATABASE_URL\").map_err(|_| {
+            \"missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env` (auto-loaded via dotenvy on startup): cp .env.example .env\".to_owned()
+        })?;
+        let pool = PgPool::connect(&url).await?;
+        rustango::migrate::manage::run(&pool, dir, argv).await?;
+    } else {
+        // No DB needed — hand the dispatcher a pool that lazy-fails
+        // if a verb still tries to use it. We pass DATABASE_URL when
+        // present (so e.g. `makemigrations` against a real DB works
+        // when the user did set it) and a placeholder otherwise; the
+        // placeholder pool builds without contacting Postgres.
+        let url = std::env::var(\"DATABASE_URL\")
+            .unwrap_or_else(|_| \"postgres://offline\".into());
+        let pool = PgPool::connect_lazy(&url)?;
+        rustango::migrate::manage::run(&pool, dir, argv).await?;
+    }
     Ok(())
 }
 
 // `cargo run --bin manage` is a separate binary; pull the project's
-// own crate root into scope as a dependency for the model imports
-// above. Cargo gives every `[[bin]]` access to the lib via the crate
-// name; for binary-only projects we use a path module instead.
-mod models {
-    include!(\"../models.rs\");
-}
+// own crate root models into scope so `inventory::submit!` fires
+// for every `#[derive(Model)]`. `#[path]` is the canonical way to
+// re-locate a module file from a binary that doesn't share its
+// parent's tree (binary-only projects don't have a lib.rs to import
+// from).
+#[path = \"../models.rs\"]
+mod models;
 "
                 .to_owned()
         }
