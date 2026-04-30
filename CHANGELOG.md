@@ -2,7 +2,71 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
-## [Unreleased] — v0.8.2
+## [v0.9.0] — ORM-shape complete
+
+Closes the gap between rustango's ORM and Django's. Every advanced query pattern Django ships — `select_related`, `prefetch_related`, `.annotate(Count(...))`, `.order_by(...)`, paginated counts in one query, multi-app projects — is now first-class. The unreleased v0.8.2 changes (write-path `_on`, `Builder`, `Tenant` extractor, reverse-FK helper, `count_on`, `fetch_paginated`, demo refactor, `manage` polish) are folded into this release rather than published separately.
+
+### Added — query layer (slice 9.0b)
+
+- **`QuerySet::order_by(&[(field, desc)])`** — schema-validated `ORDER BY` clauses, multiple calls compose left-to-right, qualified column refs when JOINs are present so it composes cleanly with `select_related`.
+- **`fetch_with_prefetch::<P, C>(qs, fk_column, &pool) -> Vec<(P, Vec<C>)>`** — Django's `prefetch_related` shape. Two SQL queries flat regardless of N parents: one over the parent queryset, one batched `WHERE <fk> IN (...)` over the children. Each parent paired with its matching children; parents with no children get an empty `Vec`.
+- **`annotate_count_children::<P>(qs, child_table, fk_column, &pool) -> Vec<(P, i64)>`** — Django's `Author.objects.annotate(post_count=Count('post'))`. One SQL with `LEFT JOIN child` + `COUNT(child.id)` + `GROUP BY` over every parent column. MVP scope: single Count over a single reverse-FK; multi-aggregate annotation queues for follow-on.
+
+### Added — `select_related` (slice 9.0d)
+
+- **`QuerySet::select_related(field)`** — eagerly load a `ForeignKey<Parent>` field via a `LEFT JOIN`, with `ForeignKey::Loaded { pk, value }` on the returned rows. Single SQL round trip, no N+1.
+- Schema validation at `compile()` — rejects non-FK fields with `QueryError::SelectRelatedInvalid`.
+- Per-Model `__rustango_from_aliased_row(row, prefix)` macro emit reads aliased columns from a JOINed row.
+- `LoadRelated` trait (auto-impl'd by every Model derive) is the polymorphic dispatcher `fetch_on` calls for each select_related entry.
+
+### Added — multi-app project support (slice 9.0g)
+
+- **`ModelEntry::resolved_app_label()`** — Django-shape `app_label` resolution. Explicit override via `#[rustango(app = "blog")]`; otherwise inferred from `module_path!()` at registration site.
+- **Per-app migration directories** — `file::list_dirs` + `file::discover_migration_dirs(project_root)` walk both `<root>/migrations/` and every `<root>/<app>/migrations/`. `Builder::migrate(project_root)` applies all of them in dependency order with shared ledger dedup.
+- **`manage makemigrations --app <name>`** — diffs only that app's models, writes to `<project_root>/<app>/migrations/`.
+- **`manage startapp` auto-mount** — patches `src/main.rs` to add `mod <name>;` and `src/urls.rs` to add `.merge(crate::<name>::urls::api())` after `Router::new()`. Idempotent, with bail-out hints when the user's layout doesn't match the canonical pattern. New `StartAppReport.patched` / `manual_steps` fields surface to the CLI.
+- **Admin sidebar grouped by app** — index template renders one `<section>` per `app_label`; "Project" group pinned at the bottom for unlabelled models.
+- **`startapp --into <dir>`** + **`--with-bootstrap-migration`** — non-standard layouts (examples, workspace members without `src/`) and one-command tenancy bootstrap respectively.
+
+### Added — server + extractors (slice 9.0)
+
+- **`rustango::server::Builder`** — Django-style runserver. Owns `PgPool::connect`, `TenantPools` construction, resolver chain, host-based dispatch (apex → operator console / subdomain → tenant admin + user routes), bind + `axum::serve`. Methods: `from_env`, `admin_show_only`, `api(Router<()>)`, `migrate(project_root)`, `seed_with(closure)`, `serve(addr)`. A whole tenancy app's `main` is now five framework calls.
+- **`rustango::extractors::Tenant`** — `FromRequestParts` extractor that resolves the request's tenant via `ChainResolver` and exposes a tenant-scoped `&mut PgConnection` through `tenant.conn()`. Reads `TenantContext` from request extensions populated by `Builder` — no `with_state` plumbing needed.
+
+### Added — paginated reads in one query (slice 9.0f)
+
+- **`QuerySet::fetch_paginated_on(executor) -> Page<T>`** — returns `{ rows, total }` from a single SQL via Postgres' `COUNT(*) OVER ()` window function. **Beats Django's `Paginator`**, which always runs two queries; same for DRF's pagination.
+
+### Added — write-path executor variants (carryover from v0.8.1)
+
+- **`Model::save_on / insert_on / bulk_insert_on / delete_on`** + low-level `executor::*_on` functions. Accept any `sqlx::Executor` (pool, connection, transaction). Pool methods delegate. Closes the tenancy gap where schema-mode connections (carrying per-checkout `SET search_path`) couldn't drive ORM writes.
+- **`Fetcher::fetch_on` + `ForeignKey::get_on`** — read-side counterpart for tenant-scoped queries.
+- **`QuerySet::count_on`** — typed COUNT for tenant connections.
+- **Reverse-FK helper `<parent>::<child>_set(&self, executor) -> Vec<Child>`** — auto-emitted from `ForeignKey<Parent>` fields. One SQL query, no manual `where_(Post::author.eq(id))` required.
+
+### Added — typed tenancy management (carryover from v0.8.1)
+
+- **`tenancy::manage::api`** — typed Rust API for `create_tenant_if_missing`, `create_operator_if_missing`, `create_user_if_missing`, `find_org`. Idempotent variants replace the verb-string CLI dispatcher for in-process callers; the verb dispatcher remains for shell consumers.
+- **`#[rustango::main]`** — proc macro wrapping `#[tokio::main]` + default `tracing_subscriber` boot. New `runtime` feature (implied by `tenancy`) gates the dep.
+
+### Added — `cargo-rustango` template improvements (carryover)
+
+- All three templates (api / fullstack / tenant) expose `pub fn api() -> Router<...>` aggregator shapes so `manage startapp` auto-mount produces well-typed code.
+- Generated projects ship `rust-toolchain.toml` (1.88) and `[workspace]` table to neutralize parent-workspace inheritance.
+- `default-run = "<name>"` resolves the bare-`cargo run` ambiguity created by shipping two binaries.
+- Tenant template bundles registry+tenant bootstrap migrations so the very first `manage migrate` works without a separate `init-tenancy` step.
+- `manage` CLI: `help` / `--help` / no-args verb (works without `DATABASE_URL`); friendly error message when `DATABASE_URL` is unset.
+- `manage startapp --into <dir>` + `--with-bootstrap-migration` flags.
+
+### Roadmap — what's next (queued for v0.9.x or v0.10)
+
+- **Slice 9.1 — Serializers** (`#[derive(ModelSerializer)]`). Design locked: sync `dump`/`validate` + async `validate_async` for DB-touching validators; nested serializers stay sync (push hydration to `select_related`/`prefetch_related`); streaming responses async at I/O boundary only. ~10 days.
+- **Slice 9.2 — ViewSets**, **9.3 — OpenAPI auto-gen**, **9.4 — browsable API**, **9.5 — multi-auth (Session / Token / JWT / Basic)** — all gated behind 9.1.
+- Multi-aggregate annotation (`Sum`, `Avg`, `Min`, `Max`); `prefetch_related` connection variant for tenant-scoped users; full Django-shape `Author::objects().prefetch_related("post_set")` builder API.
+
+## [v0.8.2] — folded into v0.9.0
+
+The unreleased v0.8.2 section below documents the demo-as-canary work (write-path `_on` ORM, `Builder::migrate`, `manage::api`, `#[rustango::main]`, scaffolder polish, paginated reads, friendly error messages, multi-app urls aggregator, etc.). All of it is included in the v0.9.0 release above; this section is preserved for the per-slice detail.
 
 Demo-as-canary release: drove every line of `examples/blog_demo` through framework features. The user reviewed the prior v0.8.1 demo and asked the right question — "why don't you use ORM and migrations tool in seeds file?". v0.8.2 closes the last gaps so the answer is "we do, all the way down".
 
