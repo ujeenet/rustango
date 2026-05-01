@@ -19,8 +19,8 @@ pub use query::{
     OrderClause, SearchClause, SelectQuery, UpdateQuery, WhereExpr,
 };
 pub use schema::{
-    infer_app_label_from_module_path, AdminConfig, FieldSchema, Model, ModelEntry, ModelSchema,
-    Relation,
+    infer_app_label_from_module_path, AdminConfig, FieldSchema, Fieldset, Model, ModelEntry,
+    ModelSchema, Relation,
 };
 pub use validate::validate_value;
 pub use value::SqlValue;

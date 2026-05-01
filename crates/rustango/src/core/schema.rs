@@ -118,6 +118,24 @@ pub struct AdminConfig {
     /// receives the selected row PKs. Built-in: `"delete_selected"`.
     /// Empty slice means the action picker is hidden.
     pub actions: &'static [&'static str],
+    /// Field grouping on the create/edit form. Each [`Fieldset`] is
+    /// rendered as a `<fieldset><legend>title</legend>...</fieldset>`
+    /// block in the listed order. Empty slice means "one unnamed
+    /// group with every visible field" (today's default).
+    pub fieldsets: &'static [Fieldset],
+}
+
+/// One group of fields on a create/edit form (slice 10.5).
+///
+/// A `title` of `""` renders without a `<legend>` so the operator can
+/// have a single-group form without a section header.
+#[derive(Debug, Clone, Copy)]
+pub struct Fieldset {
+    /// Section title shown as `<legend>`. Empty string suppresses it.
+    pub title: &'static str,
+    /// Field names in this group, in render order. Names must match
+    /// declared scalar fields on the model.
+    pub fields: &'static [&'static str],
 }
 
 impl AdminConfig {
@@ -131,6 +149,7 @@ impl AdminConfig {
         readonly_fields: &[],
         list_filter: &[],
         actions: &[],
+        fieldsets: &[],
     };
 }
 

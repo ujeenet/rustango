@@ -7,14 +7,19 @@
 <p class="error">{{ error }}</p>
 {% endif %}
 <form method="post" action="{{ action }}">
-  <table>
-  {% for row in rows %}
-    <tr>
-      <th><label for="{{ row.label }}">{{ row.label }}{{ row.extra | safe }}</label></th>
-      <td>{{ row.input | safe }}</td>
-    </tr>
-  {% endfor %}
-  </table>
+{% for set in fieldsets %}
+  <fieldset class="form-fieldset">
+    {% if set.title %}<legend>{{ set.title }}</legend>{% endif %}
+    <table>
+    {% for row in set.rows %}
+      <tr>
+        <th><label for="{{ row.label }}">{{ row.label }}{{ row.extra | safe }}</label></th>
+        <td>{{ row.input | safe }}</td>
+      </tr>
+    {% endfor %}
+    </table>
+  </fieldset>
+{% endfor %}
   <p><button type="submit">save</button></p>
 </form>
 {% endblock body %}

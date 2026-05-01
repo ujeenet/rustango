@@ -2189,3 +2189,165 @@ async fn list_filter_renders_fk_target_display_name() {
 
     migrate::drop_all(&pool).await.unwrap();
 }
+
+/// Slice 10.5 fixture — model with `fieldsets` + `readonly_fields`.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "fs_doc", display = "title")]
+#[rustango(admin(
+    fieldsets = "Identity: title | Audit: created_by",
+    readonly_fields = "created_by",
+))]
+pub struct FsDoc {
+    #[rustango(primary_key)]
+    id: i64,
+    #[rustango(max_length = 200)]
+    title: String,
+    #[rustango(max_length = 32)]
+    created_by: String,
+}
+
+#[tokio::test]
+async fn fieldsets_render_legend_and_groups_fields() {
+    // Slice 10.5: each fieldset renders as `<fieldset><legend>...</legend>`
+    // wrapping its named fields. Two-section configuration shows two
+    // legends in document order.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+
+    let app = rustango::admin::router(pool.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/fs_doc/new")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("<legend>Identity</legend>"),
+        "Identity legend missing: {body}"
+    );
+    assert!(
+        body.contains("<legend>Audit</legend>"),
+        "Audit legend missing: {body}"
+    );
+    let identity = body.find("<legend>Identity</legend>").unwrap();
+    let audit = body.find("<legend>Audit</legend>").unwrap();
+    assert!(
+        identity < audit,
+        "fieldset order should match attribute order"
+    );
+    assert!(
+        body.contains(r#"name="title""#),
+        "title input missing: {body}"
+    );
+    assert!(
+        body.contains(r#"name="created_by""#),
+        "created_by input missing: {body}"
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn readonly_fields_render_input_as_readonly_on_edit() {
+    // Slice 10.5: `readonly_fields` flips matching inputs to
+    // `readonly` on the edit form so operators see the value but
+    // can't change it.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+    FsDoc {
+        id: 1,
+        title: "first".into(),
+        created_by: "alice".into(),
+    }
+    .insert(&pool)
+    .await
+    .unwrap();
+
+    let app = rustango::admin::router(pool.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/fs_doc/1/edit")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(resp).await;
+    assert!(
+        body.contains(r#"name="created_by""#) && body.contains("readonly"),
+        "created_by input should carry `readonly` attr: {body}"
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn readonly_fields_are_skipped_on_update_submit() {
+    // Slice 10.5: even if the operator manipulates the form to POST
+    // a new value for a readonly field, server-side `update_submit`
+    // skips that column so the stored value is unchanged.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+    FsDoc {
+        id: 1,
+        title: "first".into(),
+        created_by: "alice".into(),
+    }
+    .insert(&pool)
+    .await
+    .unwrap();
+
+    let app = rustango::admin::router(pool.clone());
+    // Note: we deliberately set `created_by=mallory` to attempt the
+    // override. The expected outcome is "ignored, server keeps the
+    // existing value `alice`".
+    let body =
+        "id=1&title=updated&created_by=mallory".to_owned();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/fs_doc/1")
+                .header(
+                    header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let stored: (String, String) = sqlx::query_as(
+        "SELECT title, created_by FROM fs_doc WHERE id = 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.0, "updated", "title should be updated");
+    assert_eq!(
+        stored.1, "alice",
+        "created_by should NOT be overridden by readonly bypass attempt"
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}

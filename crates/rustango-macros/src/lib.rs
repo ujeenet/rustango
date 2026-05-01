@@ -377,6 +377,20 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 }
             }
         }
+        if let Some((groups, span)) = &admin.fieldsets {
+            for (_, fields) in groups {
+                for name in fields {
+                    if !collected.field_names.iter().any(|n| n == name) {
+                        return Err(syn::Error::new(
+                            *span,
+                            format!(
+                                "`fieldsets`: \"{name}\" is not a declared field on this struct"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     let model_impl = model_impl_tokens(
@@ -869,6 +883,20 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
         .unwrap_or(&[]);
     let actions_lits = actions.iter().map(|s| s.as_str());
 
+    let fieldsets = admin
+        .fieldsets
+        .as_ref()
+        .map(|(v, _)| v.as_slice())
+        .unwrap_or(&[]);
+    let fieldset_tokens = fieldsets.iter().map(|(title, fields)| {
+        let title = title.as_str();
+        let field_lits = fields.iter().map(|s| s.as_str());
+        quote!(::rustango::core::Fieldset {
+            title: #title,
+            fields: &[ #( #field_lits ),* ],
+        })
+    });
+
     let list_per_page = admin.list_per_page.unwrap_or(0);
 
     let ordering_pairs = admin
@@ -891,6 +919,7 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
             readonly_fields: &[ #( #readonly_fields_lits ),* ],
             list_filter: &[ #( #list_filter_lits ),* ],
             actions: &[ #( #actions_lits ),* ],
+            fieldsets: &[ #( #fieldset_tokens ),* ],
         })
     }
 }
@@ -1470,6 +1499,10 @@ struct AdminAttrs {
     /// Bulk action names. No field-validation against model fields —
     /// these are action handlers, not column references.
     actions: Option<(Vec<String>, proc_macro2::Span)>,
+    /// Form fieldsets — `Vec<(title, [field_names])>`. Pipe-separated
+    /// sections, comma-separated fields per section, optional
+    /// `Title:` prefix. Empty title omits the `<legend>`.
+    fieldsets: Option<(Vec<(String, Vec<String>)>, proc_macro2::Span)>,
 }
 
 fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
@@ -1545,10 +1578,17 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                             Some((split_field_list(&s.value()), s.span()));
                         return Ok(());
                     }
+                    if inner.path.is_ident("fieldsets") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        admin.fieldsets =
+                            Some((parse_fieldset_list(&s.value()), s.span()));
+                        return Ok(());
+                    }
                     Err(inner.error(
                         "unknown admin attribute (supported: \
                          `list_display`, `search_fields`, `readonly_fields`, \
-                         `list_filter`, `list_per_page`, `ordering`, `actions`)",
+                         `list_filter`, `list_per_page`, `ordering`, `actions`, \
+                         `fieldsets`)",
                     ))
                 })?;
                 out.admin = Some(admin);
@@ -1568,6 +1608,32 @@ fn split_field_list(raw: &str) -> Vec<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
+        .collect()
+}
+
+/// Parse the fieldsets DSL: pipe-separated sections, optional
+/// `"Title:"` prefix on each, comma-separated field names after.
+/// Examples:
+/// * `"name, office"` → one untitled section with two fields
+/// * `"Identity: name, office | Metadata: created_at"` → two titled
+///   sections
+///
+/// Returns `(title, fields)` pairs. Title is `""` when no prefix.
+fn parse_fieldset_list(raw: &str) -> Vec<(String, Vec<String>)> {
+    raw.split('|')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|section| {
+            // Split off an optional `Title:` prefix (first colon).
+            let (title, rest) = match section.split_once(':') {
+                Some((title, rest)) if !title.contains(',') => {
+                    (title.trim().to_owned(), rest)
+                }
+                _ => (String::new(), section),
+            };
+            let fields = split_field_list(rest);
+            (title, fields)
+        })
         .collect()
 }
 

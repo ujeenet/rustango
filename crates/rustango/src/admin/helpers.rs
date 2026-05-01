@@ -249,40 +249,82 @@ pub(crate) fn render_form(
         format!("New {}", model.name)
     };
 
-    let rows_ctx: Vec<serde_json::Value> = model
-        .scalar_fields()
-        // Auto-PK columns are server-assigned — Postgres' DEFAULT (BIGSERIAL)
-        // fills them on INSERT. Rendering them on the create form caused
-        // HTML5 `required` validation to silently block submit when the
-        // operator (correctly) left them blank. On the edit form we still
-        // show the existing PK as a read-only field so the row identity is
-        // visible.
-        .filter(|f| !(f.auto && f.primary_key && !pk_locked))
-        .map(|f| {
-            let value = prefill
-                .and_then(|m| m.get(f.name))
-                .map_or("", String::as_str);
-            let extra = if f.primary_key {
-                " <small>(pk)</small>"
-            } else if !f.nullable {
-                " <small>required</small>"
-            } else {
-                ""
-            };
-            serde_json::json!({
-                "label": f.name,
-                "extra": extra,
-                "input": render::render_input(f, value, pk_locked),
-            })
+    let admin_cfg = model
+        .admin
+        .copied()
+        .unwrap_or(crate::core::AdminConfig::DEFAULT);
+
+    let row_for_field = |f: &'static FieldSchema| -> serde_json::Value {
+        let value = prefill
+            .and_then(|m| m.get(f.name))
+            .map_or("", String::as_str);
+        let is_readonly_field =
+            admin_cfg.readonly_fields.iter().any(|n| *n == f.name);
+        let extra = if f.primary_key {
+            " <small>(pk)</small>"
+        } else if is_readonly_field {
+            " <small>read-only</small>"
+        } else if !f.nullable {
+            " <small>required</small>"
+        } else {
+            ""
+        };
+        // PK is locked on the edit form (`pk_locked`); user-marked
+        // readonly_fields are also locked there. On the create form
+        // we keep readonly_fields editable so the operator can set
+        // them on initial insert (Django's default behavior — the
+        // post-save value is what becomes immutable). Auto-PK skip
+        // already happened in the field filter below.
+        let lock_input = pk_locked && (f.primary_key || is_readonly_field);
+        serde_json::json!({
+            "label": f.name,
+            "extra": extra,
+            "input": render::render_input(f, value, lock_input),
         })
-        .collect();
+    };
+
+    let visible = |f: &&'static FieldSchema| -> bool {
+        // Auto-PK columns are server-assigned — Postgres' DEFAULT
+        // (BIGSERIAL) fills them on INSERT. Rendering them on the
+        // create form caused HTML5 `required` validation to silently
+        // block submit when the operator (correctly) left them blank.
+        // On the edit form we still show the existing PK as a
+        // read-only field so the row identity is visible.
+        !(f.auto && f.primary_key && !pk_locked)
+    };
+
+    // Optionally group fields into fieldsets (slice 10.5). Empty
+    // fieldsets means "one unnamed group with every visible field".
+    let fieldsets_ctx: Vec<serde_json::Value> = if admin_cfg.fieldsets.is_empty() {
+        let rows: Vec<serde_json::Value> = model
+            .scalar_fields()
+            .filter(visible)
+            .map(row_for_field)
+            .collect();
+        vec![serde_json::json!({ "title": "", "rows": rows })]
+    } else {
+        admin_cfg
+            .fieldsets
+            .iter()
+            .map(|set| {
+                let rows: Vec<serde_json::Value> = set
+                    .fields
+                    .iter()
+                    .filter_map(|name| model.field(name))
+                    .filter(visible)
+                    .map(row_for_field)
+                    .collect();
+                serde_json::json!({ "title": set.title, "rows": rows })
+            })
+            .collect()
+    };
 
     let mut ctx = serde_json::json!({
         "model": { "name": model.name, "table": model.table },
         "title": title,
         "action": action,
         "error": error_msg,
-        "rows": rows_ctx,
+        "fieldsets": fieldsets_ctx,
     });
     super::templates::render_with_chrome(
         "form.html",

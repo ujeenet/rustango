@@ -680,8 +680,17 @@ pub(crate) async fn update_submit(
     })?;
     let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
 
-    // Don't include PK in SET — keep identity stable.
-    let collected = match forms::collect_values(model, &form, &[pk_field.name]) {
+    // Don't include PK in SET — keep identity stable. Same for any
+    // user-marked `readonly_fields` (slice 10.5): the form rendered
+    // them as `readonly` inputs, but a malicious POST could still
+    // include them; skip server-side too.
+    let admin_cfg = model
+        .admin
+        .copied()
+        .unwrap_or(crate::core::AdminConfig::DEFAULT);
+    let mut skip: Vec<&'static str> = vec![pk_field.name];
+    skip.extend(admin_cfg.readonly_fields.iter().copied());
+    let collected = match forms::collect_values(model, &form, &skip) {
         Ok(v) => v,
         Err(e) => {
             let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));

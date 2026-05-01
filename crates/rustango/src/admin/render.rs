@@ -122,11 +122,11 @@ pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) ->
     } else {
         " required"
     };
-    let readonly = if pk_locked && field.primary_key {
-        " readonly"
-    } else {
-        ""
-    };
+    // Caller passes `pk_locked=true` to mean "render this field as
+    // read-only" — used both for PKs on edit forms (slice 10.5
+    // pre-existing behavior) and for `readonly_fields` flagged via
+    // `#[rustango(admin(...))]`.
+    let readonly = if pk_locked { " readonly" } else { "" };
 
     match field.ty {
         FieldType::Bool => {

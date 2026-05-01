@@ -2,7 +2,7 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
-## [Unreleased] — v0.10 admin Django-parity (in progress)
+## [v0.10.0] — admin Django-parity — 2026-04-30
 
 Pulling the auto-admin from "functional CRUD" toward Django ModelAdmin shape. v0.10 lands across slices; this entry tracks what's shipped so far.
 
@@ -14,15 +14,11 @@ Pulling the auto-admin from "functional CRUD" toward Django ModelAdmin shape. v0
 - **`list_filter` right-rail facet filters (slice 10.4)** — declare `admin(list_filter = "field1, field2")` and the list view grows a right rail with one card per facet showing every distinct value with its row count. Clicking a value toggles `?<col>=<value>` in the URL; clicking the active value clears the filter. Two-column subgrid collapses below a 1000px viewport. SQL is one `GROUP BY` round-trip per facet (acceptable for low-cardinality fields; high-cardinality fields should not be added to `list_filter`).
 - **Bulk actions (slice 10.6)** — declare `admin(actions = "delete_selected")` and the list view grows an action picker `<select>` + `Go` button at the top of the table, plus a per-row checkbox. Selected PKs POST to `/<table>/__action` and the named action runs in a single round-trip. Built-in: `delete_selected`. Action names that aren't in the model's allowlist are rejected with a 500 (defense against URL guessing). User-defined action handlers queue for v0.11.
 
+- **`fieldsets` + `readonly_fields` on create/edit forms (slice 10.5)** — declare `admin(fieldsets = "Identity: name, office | Audit: created_at")` and the form renders each section as `<fieldset><legend>...</legend>` with grouped fields. `readonly_fields = "created_at"` flips matching inputs to HTML `readonly` AND skips them server-side in `update_submit` so a manipulated POST can't override the value. PK on edit form is read-only; PK on create form is omitted entirely (slice 10.2).
+
 ### Improved
 
 - **FK display in `list_filter` facets (slice 10.7)** — when a faceted field is a `ForeignKey`, the facet card now JOINs to the target's `display` column and renders the target's display value (e.g. `Dr. Maeve O'Hara (3)`) instead of the raw PK number (`1 (3)`). One JOINed `GROUP BY` query per facet — same round-trip count as before. List view's column rendering already JOINed for FK display in v0.7's auto-admin; this brings facets to parity. Falls back to raw value for FK targets that aren't visible in the admin or have no `display = "..."` attribute.
-
-### Schedule
-
-Remaining v0.10 slices queued behind these (see in-tree plan `v010-admin-django-parity.md`):
-
-- 10.5 — `fieldsets` + `readonly_fields` rendering on the create/edit form
 
 ## [v0.9.1] — multi-tenant polish — 2026-04-30
 
