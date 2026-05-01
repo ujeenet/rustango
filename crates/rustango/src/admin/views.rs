@@ -698,43 +698,75 @@ pub(crate) async fn audit_log_view(
 }
 
 /// `POST /__audit/cleanup` — apply a retention policy to the audit
-/// log. Reads `days` from the form payload (defaults to 90). Records
-/// its own audit entry before flushing so the cleanup itself is
-/// observable in the trail.
+/// log. Reads `mode` from the form (`"older_than"` or `"keep_last"`,
+/// default `"older_than"`) and the corresponding numeric input. The
+/// cleanup itself emits an audit entry so the trail is
+/// self-describing.
 pub(crate) async fn audit_cleanup_submit(
     State(state): State<AppState>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Result<Response, AdminError> {
-    let days: i64 = form
-        .get("days")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(90)
-        .max(0);
-    let removed = match crate::audit::cleanup_older_than(&state.pool, days).await {
-        Ok(n) => n,
-        Err(e) => {
-            tracing::warn!(target: "rustango::admin::audit",
-                error = %e, "cleanup_older_than failed");
-            0
+    let mode = form.get("mode").map(String::as_str).unwrap_or("older_than");
+    let (removed, changes) = match mode {
+        "keep_last" => {
+            let keep: i64 = form
+                .get("keep")
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(50)
+                .max(0);
+            let removed = crate::audit::cleanup_keep_last_n(&state.pool, keep)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(target: "rustango::admin::audit",
+                        error = %e, "cleanup_keep_last_n failed");
+                    0
+                });
+            (
+                removed,
+                serde_json::json!({
+                    "__action": "audit_cleanup",
+                    "mode": "keep_last",
+                    "keep": keep,
+                    "removed": removed,
+                }),
+            )
+        }
+        _ => {
+            let days: i64 = form
+                .get("days")
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(90)
+                .max(0);
+            let removed = crate::audit::cleanup_older_than(&state.pool, days)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(target: "rustango::admin::audit",
+                        error = %e, "cleanup_older_than failed");
+                    0
+                });
+            (
+                removed,
+                serde_json::json!({
+                    "__action": "audit_cleanup",
+                    "mode": "older_than",
+                    "cutoff_days": days,
+                    "removed": removed,
+                }),
+            )
         }
     };
-    // Record the cleanup itself as an audit entry so the trail is
-    // self-describing — operators see who pruned what and when.
     let entry = crate::audit::PendingEntry {
         entity_table: "rustango_audit_log",
         entity_pk: "*".into(),
         operation: crate::audit::AuditOp::Delete,
         source: crate::audit::current_source(),
-        changes: serde_json::json!({
-            "__action": "audit_cleanup",
-            "cutoff_days": days,
-            "removed": removed,
-        }),
+        changes,
     };
     if let Err(e) = crate::audit::emit_one(&state.pool, &entry).await {
         tracing::warn!(target: "rustango::admin::audit",
             error = %e, "audit_cleanup self-audit emit failed");
     }
+    let _ = removed;
     Ok(Redirect::to("/__audit").into_response())
 }
 

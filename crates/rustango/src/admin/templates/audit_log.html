@@ -12,13 +12,21 @@
 </p>
 {% endif %}
 
-<form method="post" action="/__audit/cleanup" class="audit-cleanup" onsubmit="return confirm('Delete audit entries older than ' + this.days.value + ' days?');">
-  <label>Retention:
+<form method="post" action="/__audit/cleanup" class="audit-cleanup" onsubmit="return confirm('Apply audit cleanup? This is irreversible.');">
+  <label>
+    <input type="radio" name="mode" value="older_than" checked>
+    older than
     <input type="number" name="days" value="90" min="0" step="1" style="width: 5rem;">
     days
   </label>
+  <label>
+    <input type="radio" name="mode" value="keep_last">
+    keep last
+    <input type="number" name="keep" value="50" min="0" step="1" style="width: 5rem;">
+    per row
+  </label>
   <button type="submit">Apply cleanup</button>
-  <small class="muted">Deletes entries with <code>occurred_at &lt; NOW() − N days</code>. The cleanup itself is recorded as an audit entry.</small>
+  <small class="muted">Per-tenant. The cleanup itself is recorded as an audit entry.</small>
 </form>
 
 <div class="list-shell">

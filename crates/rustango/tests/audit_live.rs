@@ -602,6 +602,94 @@ async fn cleanup_older_than_negative_treated_as_zero() {
     assert_eq!(removed, 1);
 }
 
+#[tokio::test]
+async fn cleanup_keep_last_n_keeps_n_per_row() {
+    // v0.12.8: keep_last_n retains the N most recent entries per
+    // (entity_table, entity_pk) pair. With 4 entries on row "1" and
+    // 2 entries on row "2", keep_last_n(2) should drop only the 2
+    // oldest entries on row "1" (4-2 = 2 over the keep limit; row
+    // "2" already at the limit).
+    let _g = lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    reset(&pool).await;
+
+    // Row "1": 4 entries with increasing occurred_at gaps.
+    for days_ago in [10_i64, 7, 3, 0] {
+        sqlx::query(
+            r#"INSERT INTO "rustango_audit_log"
+                  ("entity_table", "entity_pk", "operation", "source",
+                   "changes", "occurred_at")
+               VALUES ('demo', '1', 'update', 'system', '{}'::jsonb,
+                       NOW() - ($1 || ' days')::interval)"#,
+        )
+        .bind(days_ago.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    // Row "2": 2 entries.
+    for days_ago in [5_i64, 0] {
+        sqlx::query(
+            r#"INSERT INTO "rustango_audit_log"
+                  ("entity_table", "entity_pk", "operation", "source",
+                   "changes", "occurred_at")
+               VALUES ('demo', '2', 'update', 'system', '{}'::jsonb,
+                       NOW() - ($1 || ' days')::interval)"#,
+        )
+        .bind(days_ago.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let removed = audit::cleanup_keep_last_n(&pool, 2).await.unwrap();
+    assert_eq!(removed, 2, "row 1 had 4 entries; should drop 2 oldest");
+
+    let row1: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM "rustango_audit_log" WHERE "entity_pk" = '1'"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let row2: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM "rustango_audit_log" WHERE "entity_pk" = '2'"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row1, 2);
+    assert_eq!(row2, 2);
+}
+
+#[tokio::test]
+async fn cleanup_keep_last_n_zero_clears_table() {
+    let _g = lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    reset(&pool).await;
+    for pk in ["1", "2", "3"] {
+        let entry = PendingEntry {
+            entity_table: "demo",
+            entity_pk: pk.into(),
+            operation: AuditOp::Create,
+            source: AuditSource::System,
+            changes: json!({}),
+        };
+        audit::emit_one(&pool, &entry).await.unwrap();
+    }
+    let removed = audit::cleanup_keep_last_n(&pool, 0).await.unwrap();
+    assert_eq!(removed, 3);
+    let total: i64 =
+        sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log""#)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(total, 0);
+}
+
 #[test]
 fn audit_source_token_is_stable() {
     assert_eq!(AuditSource::System.as_token(), "system");

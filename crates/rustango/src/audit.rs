@@ -357,6 +357,47 @@ pub async fn cleanup_older_than(
     Ok(result.rows_affected())
 }
 
+/// Per-row retention: keep the `keep` most recent audit entries
+/// per `(entity_table, entity_pk)` pair, deleting the rest. Useful
+/// when "the last N revisions of every row" is the right retention
+/// shape — e.g. compliance regimes that require keeping the full
+/// edit chain but cap storage growth as the table ages.
+///
+/// Implementation runs a single window-function DELETE: each entry
+/// gets a per-row `ROW_NUMBER()` ordered by `occurred_at DESC, id
+/// DESC`, and rows with rank > `keep` are dropped. One round-trip
+/// regardless of how many `(entity_table, entity_pk)` pairs the
+/// table holds.
+///
+/// `keep = 0` clears the entire table; negative values clamp to 0.
+/// Returns the number of rows removed.
+///
+/// # Errors
+/// Driver / SQL failures from the DELETE.
+pub async fn cleanup_keep_last_n(
+    pool: &PgPool,
+    keep: i64,
+) -> Result<u64, sqlx::Error> {
+    let keep = keep.max(0);
+    let result = sqlx::query(
+        r#"DELETE FROM "rustango_audit_log" WHERE "id" IN (
+              SELECT "id" FROM (
+                SELECT "id",
+                       ROW_NUMBER() OVER (
+                           PARTITION BY "entity_table", "entity_pk"
+                           ORDER BY "occurred_at" DESC, "id" DESC
+                       ) AS _rn
+                FROM "rustango_audit_log"
+              ) ranked
+              WHERE _rn > $1
+           )"#,
+    )
+    .bind(keep)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Convenience for tests + ad-hoc setup: ensure the table exists in
 /// `pool`'s database / schema. No-op when already present.
 ///

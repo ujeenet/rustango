@@ -2,6 +2,21 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.12.8] — per-row retention (`cleanup_keep_last_n`) — 2026-05-01
+
+### Added
+
+- **`audit::cleanup_keep_last_n(pool, keep) -> u64`** — alternative retention shape: keeps the `keep` most recent entries per `(entity_table, entity_pk)` pair, deleting the rest. Useful when "the last N revisions of every row" is the right policy regardless of wall-clock age. Implementation: single window-function DELETE with `ROW_NUMBER() OVER (PARTITION BY entity_table, entity_pk ORDER BY occurred_at DESC, id DESC)`. One round-trip regardless of how many distinct rows the table holds. `keep = 0` clears everything; negative values clamp to 0.
+- **Cleanup form on `/__audit` now has a mode picker** — radio between `older than N days` (the v0.12.6 default) and `keep last N per row` (new). Self-audit entry records the mode chosen + the corresponding numeric input.
+
+### Tests
+
+- 2 new live tests in `audit_live`: keep_last keeps N per row across multiple `entity_pk`s, keep_last(0) clears everything. 21/21 pass.
+
+### Curl-verified
+
+5 audit rows on `course#1` + 3 on `course#2` + 1 each on `course#3` + `course#4` → POST `/__audit/cleanup` with `mode=keep_last&keep=2` → row 1 trimmed to 2, row 2 trimmed to 2, rows 3+4 untouched (already ≤ keep). Self-audit row records `{ "keep": 2, "mode": "keep_last", "removed": 4 }`.
+
 ## [v0.12.7] — per-row "View full history" link — 2026-05-01
 
 ### Added
