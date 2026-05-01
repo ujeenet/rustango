@@ -69,6 +69,112 @@ fn format_json(row: &PgRow, field: &FieldSchema) -> String {
     "<em>JSON (rendering disabled)</em>".to_owned()
 }
 
+/// Read a column value as a typed [`serde_json::Value`]. Mirrors what
+/// the macro's audit emit produces via `serde_json::to_value(&self.f)`,
+/// so admin-side audit JSON shapes match the app-code-side shapes:
+///
+/// * `I32` / `I64` / `F32` / `F64` → JSON number
+/// * `Bool` → JSON true/false
+/// * `String` / `Uuid` → JSON string
+/// * `Date` → ISO 8601 date string
+/// * `DateTime` → RFC 3339 datetime string
+/// * `Json` → the raw JSONB value
+///
+/// `NULL` columns become `Value::Null`. Decode errors fall back to
+/// `Value::Null` so an audit emit never fails the data write.
+pub(crate) fn read_value_as_json(row: &PgRow, field: &FieldSchema) -> serde_json::Value {
+    use serde_json::Value;
+    match field.ty {
+        FieldType::I32 => row
+            .try_get::<Option<i32>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(|v| Value::from(v))
+            .unwrap_or(Value::Null),
+        FieldType::I64 => row
+            .try_get::<Option<i64>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(|v| Value::from(v))
+            .unwrap_or(Value::Null),
+        FieldType::F32 => row
+            .try_get::<Option<f32>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(|v| Value::from(v))
+            .unwrap_or(Value::Null),
+        FieldType::F64 => row
+            .try_get::<Option<f64>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(|v| Value::from(v))
+            .unwrap_or(Value::Null),
+        FieldType::Bool => row
+            .try_get::<Option<bool>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+        FieldType::String => row
+            .try_get::<Option<String>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+        FieldType::Uuid => row
+            .try_get::<Option<uuid::Uuid>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(|v| Value::from(v.to_string()))
+            .unwrap_or(Value::Null),
+        FieldType::Date => row
+            .try_get::<Option<chrono::NaiveDate>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(|d| Value::from(d.format("%Y-%m-%d").to_string()))
+            .unwrap_or(Value::Null),
+        FieldType::DateTime => row
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(|d| Value::from(d.to_rfc3339()))
+            .unwrap_or(Value::Null),
+        FieldType::Json => row
+            .try_get::<Option<Value>, _>(field.column)
+            .ok()
+            .flatten()
+            .unwrap_or(Value::Null),
+    }
+}
+
+/// Parse a form-payload string into a typed [`serde_json::Value`]
+/// matching `field.ty`. Used by the admin audit emit to coerce form
+/// values back to typed JSON before diffing — operators see numbers
+/// as numbers and booleans as booleans, not as quoted strings.
+///
+/// Falls back to `Value::String(raw)` when the raw doesn't parse as
+/// the field's type (e.g. a malformed integer); the emit path's job
+/// is to record what happened, not to validate.
+pub(crate) fn coerce_form_to_json(field: &FieldSchema, raw: &str) -> serde_json::Value {
+    use serde_json::Value;
+    if raw.is_empty() && field.nullable {
+        return Value::Null;
+    }
+    match field.ty {
+        FieldType::I32 => raw.parse::<i32>().map(Value::from).unwrap_or_else(|_| Value::String(raw.to_owned())),
+        FieldType::I64 => raw.parse::<i64>().map(Value::from).unwrap_or_else(|_| Value::String(raw.to_owned())),
+        FieldType::F32 => raw.parse::<f32>().map(Value::from).unwrap_or_else(|_| Value::String(raw.to_owned())),
+        FieldType::F64 => raw.parse::<f64>().map(Value::from).unwrap_or_else(|_| Value::String(raw.to_owned())),
+        FieldType::Bool => match raw.to_ascii_lowercase().as_str() {
+            "true" | "on" | "1" | "yes" => Value::Bool(true),
+            "false" | "off" | "0" | "no" | "" => Value::Bool(false),
+            _ => Value::String(raw.to_owned()),
+        },
+        // String / Uuid / Date / DateTime / Json all stringify cleanly.
+        _ => Value::String(raw.to_owned()),
+    }
+}
+
 /// Best-effort string form of a column value for pre-populating form
 /// inputs. Returns an empty string for `NULL`, so the input renders blank.
 pub(crate) fn render_value_for_input(row: &PgRow, field: &FieldSchema) -> String {

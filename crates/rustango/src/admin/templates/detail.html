@@ -30,7 +30,11 @@
   <ol>
     {% for e in audit_entries %}
     <li>
-      <span class="audit-op audit-op-{{ e.operation }}">{{ e.operation }}</span>
+      {% if e.action_name %}
+        <span class="audit-op audit-op-action">action: {{ e.action_name }}</span>
+      {% else %}
+        <span class="audit-op audit-op-{{ e.operation }}">{{ e.operation }}</span>
+      {% endif %}
       by <strong>{{ e.source }}</strong>
       <small>at {{ e.occurred_at }}</small>
       <pre class="audit-changes">{{ e.changes }}</pre>

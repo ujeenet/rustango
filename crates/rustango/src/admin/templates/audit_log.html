@@ -38,7 +38,11 @@
 <ol>
   {% for e in entries %}
   <li>
-    <span class="audit-op audit-op-{{ e.operation }}">{{ e.operation }}</span>
+    {% if e.action_name %}
+      <span class="audit-op audit-op-action">action: {{ e.action_name }}</span>
+    {% else %}
+      <span class="audit-op audit-op-{{ e.operation }}">{{ e.operation }}</span>
+    {% endif %}
     <a href="{{ e.detail_url | safe }}"><strong>{{ e.entity_table }}#{{ e.entity_pk }}</strong></a>
     by <strong>{{ e.source }}</strong>
     <small>at {{ e.occurred_at }}</small>

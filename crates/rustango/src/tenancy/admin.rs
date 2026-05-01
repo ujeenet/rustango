@@ -62,7 +62,6 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::Router;
 use cookie::time::Duration as CookieDuration;
 use cookie::{Cookie, SameSite};
-use crate::admin;
 use crate::sql::sqlx::postgres::{PgPool, PgPoolOptions};
 use crate::sql::sqlx::Row;
 use tera::{Context, Tera};

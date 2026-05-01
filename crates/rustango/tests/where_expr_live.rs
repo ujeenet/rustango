@@ -186,6 +186,7 @@ async fn empty_or_branch_returns_named_writer_error() {
         where_clause: WhereExpr::Or(vec![]),
         search: None,
         joins: vec![],
+        order_by: vec![],
         limit: None,
         offset: None,
     };
@@ -202,6 +203,7 @@ async fn empty_or_branch_returns_named_writer_error() {
         })]),
         search: None,
         joins: vec![],
+        order_by: vec![],
         limit: None,
         offset: None,
     };

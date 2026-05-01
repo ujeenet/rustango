@@ -233,12 +233,32 @@ async fn run_for_one_tenant(
                 .unwrap_or_else(|| org.slug.clone());
             let pool = build_schema_scoped_pool(registry_url, &schema).await?;
             let applied = migrate::migrate(&pool, dir).await?;
+            // v0.13.0: ensure the per-tenant audit log table exists so
+            // projects don't have to call `audit::ensure_table` from
+            // their seed manually. Best-effort — failures here log a
+            // warning but don't fail the migration.
+            if let Err(e) = crate::audit::ensure_table(&pool).await {
+                tracing::warn!(
+                    target: "crate::tenancy",
+                    slug = %org.slug,
+                    error = %e,
+                    "audit::ensure_table failed for schema-mode tenant",
+                );
+            }
             pool.close().await;
             Ok(applied)
         }
         StorageMode::Database => {
             let tenant_pool = pools.pool_for_org(org).await?;
             let applied = migrate::migrate(tenant_pool.pool(), dir).await?;
+            if let Err(e) = crate::audit::ensure_table(tenant_pool.pool()).await {
+                tracing::warn!(
+                    target: "crate::tenancy",
+                    slug = %org.slug,
+                    error = %e,
+                    "audit::ensure_table failed for database-mode tenant",
+                );
+            }
             Ok(applied)
         }
     }

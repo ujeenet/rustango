@@ -2,6 +2,29 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.13.0] — consolidation + admin/audit.rs split — 2026-05-01
+
+Six debt-reduction commits in one tag. No new user-facing features; behaviour preserved end-to-end. Run `cargo test --workspace` for the first time since v0.9.0 — full live sweep passes 589/589.
+
+### Fixed
+
+- **Long-broken test compiles** — `tests/sql.rs` and `tests/where_expr_live.rs` had `SelectQuery` literals missing the `order_by` field since the v0.9.0 slice introduced it. Three sites updated; full workspace test suite is now reachable without per-suite `--test <name>` flags.
+- **Standing `use crate::admin;` warning** in `tenancy/admin.rs` dropped — the import was dead, every actual reference uses the fully-qualified `crate::admin::` path.
+
+### Added
+
+- **`Builder::migrate(...)` auto-creates `rustango_audit_log` per tenant** via `audit::ensure_table` in the per-tenant migration hook. Removes the v0.12 footgun where projects had to call `ensure_table` from their seed manually. The uni_portal demo's manual call is gone.
+
+### Changed
+
+- **`admin/views.rs` extracted to `admin/audit.rs`** — moved `audit_log_view`, `audit_cleanup_submit`, `emit_admin_audit`, `emit_admin_audit_diff`, `url_encode_q`, the `AUDIT_PAGE_SIZE` const, and the new `split_action_marker` helper. `views.rs` shrank from 1449 → 1056 lines (~430 lines into the new module). Pure refactor; behaviour preserved.
+- **Admin audit JSON shapes match the macro path** — admin update/delete/action emits now read column values via `render::read_value_as_json` (typed primitives) and form payloads via `render::coerce_form_to_json` (parses `i64`/`bool`/etc. into typed JSON). Operators see `credits: { before: 3, after: 5 }` instead of `credits: { before: "3", after: "5" }`. Strings stay as strings; FKs serialize as integer PKs.
+- **`__action` marker rendered as a distinct badge** in the audit panel and `/__audit` activity feed. Bulk-action rows previously looked like updates with a hidden `__action` key in the changes JSON; v0.13.0 splits the marker out via `audit::split_action_marker`, renders `<span class="audit-op-action">action: <name></span>` (blue), and pretty-prints `changes` without the marker. The macro-emitted update rows continue to render as plain "update" badges.
+
+### Tests
+
+- 589/589 across the full workspace test suite. No new tests added this release — the changes are debt cleanup + refactor + JSON shape normalisation, all exercised by existing live tests.
+
 ## [v0.12.8] — per-row retention (`cleanup_keep_last_n`) — 2026-05-01
 
 ### Added

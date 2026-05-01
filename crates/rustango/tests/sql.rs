@@ -512,6 +512,7 @@ fn empty_select() -> SelectQuery {
         where_clause: WhereExpr::And(vec![]),
         search: None,
         joins: vec![],
+        order_by: vec![],
         limit: None,
         offset: None,
     }
@@ -725,6 +726,7 @@ fn empty_post_select() -> SelectQuery {
         where_clause: WhereExpr::And(vec![]),
         search: None,
         joins: vec![],
+        order_by: vec![],
         limit: None,
         offset: None,
     }

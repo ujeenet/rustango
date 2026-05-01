@@ -39,6 +39,7 @@
 //! - `forms`, `render`, `auth` — value parsing, HTML rendering primitives,
 //!   HTTP Basic auth middleware.
 
+mod audit;
 mod auth;
 mod errors;
 mod forms;
