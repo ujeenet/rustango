@@ -2,6 +2,17 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.12.7] — per-row "View full history" link — 2026-05-01
+
+### Added
+
+- **"View full history" link** on every audited row's detail page, appended to the "Audit trail" heading. Points at `/__audit?entity_table=<table>&entity_pk=<pk>` so the activity feed pre-filters to that single row's lifecycle. Lets operators jump from the detail-page snippet (3 most recent) to the full paginated history with one click.
+- **`/__audit` accepts `entity_pk` as a filter param** alongside `entity_table` / `operation` / `source`. `entity_pk` is intentionally NOT a facet (per-PK distinct-value cardinality is unbounded); appears only as an active-filter pill when set in the URL.
+
+### Curl-verified
+
+7 audit rows in pg-sju (4 system creates + 3 user:1 updates spread across courses 1, 1, 2). Filtered URL `/__audit?entity_table=course&entity_pk=1` correctly shows 3 entries (1 create + 2 updates for course 1) with both filter pills visible.
+
 ## [v0.12.6] — audit retention — 2026-05-01
 
 ### Added

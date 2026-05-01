@@ -515,8 +515,14 @@ pub(crate) async fn audit_log_view(
     let mut where_sql = String::new();
     let mut binds: Vec<String> = Vec::new();
     let mut active_field_filters: Vec<(&'static str, String)> = Vec::new();
+    // `entity_pk` is filterable too — used by the "View history"
+    // link on each row's detail page to scope the activity feed
+    // to that single row. It's not in the facet list because per-PK
+    // distinct-value cardinality is unbounded; appears only as an
+    // active-filter pill when set.
     for (col_static, key) in [
         ("entity_table", "entity_table"),
+        ("entity_pk", "entity_pk"),
         ("operation", "operation"),
         ("source", "source"),
     ] {
