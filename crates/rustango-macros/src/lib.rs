@@ -392,6 +392,20 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
     }
+    if let Some(audit) = &container.audit {
+        if let Some((names, span)) = &audit.track {
+            for name in names {
+                if !collected.field_names.iter().any(|n| n == name) {
+                    return Err(syn::Error::new(
+                        *span,
+                        format!(
+                            "`audit(track = \"{name}\")`: \"{name}\" is not a declared field on this struct"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
 
     let model_impl = model_impl_tokens(
         struct_name,
@@ -1598,6 +1612,25 @@ struct ContainerAttrs {
     /// attribute — the emitted `ModelSchema.admin` becomes `None` and
     /// admin code falls back to `AdminConfig::DEFAULT`.
     admin: Option<AdminAttrs>,
+    /// Per-model audit configuration from `#[rustango(audit(...))]`.
+    /// `None` when the model isn't audited — write paths emit no
+    /// audit entries. When present, single-row writes capture
+    /// before/after for the listed fields and bulk writes batch
+    /// snapshots into one INSERT into `rustango_audit_log`.
+    audit: Option<AuditAttrs>,
+}
+
+/// Parsed shape of `#[rustango(audit(track = "name, body", source =
+/// "user"))]`. `track` is a comma-separated list of field names whose
+/// before/after values land in the JSONB `changes` column. `source`
+/// is informational only — it pins a default source when the model
+/// is written outside any `audit::with_source(...)` scope (rare).
+#[derive(Default)]
+struct AuditAttrs {
+    /// Field names to capture in the `changes` JSONB. Validated
+    /// against declared scalar fields at compile time. Empty means
+    /// "track every scalar field" — Django's audit-everything default.
+    track: Option<(Vec<String>, proc_macro2::Span)>,
 }
 
 /// Parsed shape of `#[rustango(admin(list_display = "…", search_fields =
@@ -1627,6 +1660,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         display: None,
         app: None,
         admin: None,
+        audit: None,
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -1708,6 +1742,22 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     ))
                 })?;
                 out.admin = Some(admin);
+                return Ok(());
+            }
+            if meta.path.is_ident("audit") {
+                let mut audit = AuditAttrs::default();
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("track") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        audit.track =
+                            Some((split_field_list(&s.value()), s.span()));
+                        return Ok(());
+                    }
+                    Err(inner.error(
+                        "unknown audit attribute (supported: `track`)",
+                    ))
+                })?;
+                out.audit = Some(audit);
                 return Ok(());
             }
             Err(meta.error("unknown rustango container attribute"))

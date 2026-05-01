@@ -19,6 +19,7 @@
 // rewriting either.
 extern crate self as rustango;
 
+pub mod audit;
 pub mod core;
 pub mod migrate;
 pub mod query;
