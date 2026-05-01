@@ -273,6 +273,7 @@ async fn handle_request(
     // Per-tenant auth opt-in. Without `with_session`, the v0.5 path
     // still applies — every request goes straight to the inner admin.
     let mut force_read_only = false;
+    let mut session_user_id: Option<i64> = None;
     if let Some(cfg) = session {
         let path = parts.uri.path().to_owned();
         let method = parts.method.clone();
@@ -299,10 +300,14 @@ async fn handle_request(
 
         // Private surface — require a valid session cookie.
         match validate_session(&parts.headers, cfg, &org, pool.pg_pool()).await {
-            SessionCheck::Authenticated { is_superuser } => {
+            SessionCheck::Authenticated {
+                is_superuser,
+                user_id,
+            } => {
                 if !is_superuser {
                     force_read_only = true;
                 }
+                session_user_id = Some(user_id);
             }
             SessionCheck::Anonymous => {
                 return redirect_to_tenant_login(&path).into_response();
@@ -322,9 +327,27 @@ async fn handle_request(
     );
 
     let inner_req = Request::from_parts(parts, body);
-    let response = match admin_router.oneshot(inner_req).await {
-        Ok(r) => r,
-        Err(_infallible) => unreachable!("axum::Router service is Infallible"),
+    // v0.12.1: wrap the inner-router dispatch in an `audit::with_source`
+    // scope so any audited Model write inside the request picks up
+    // the authenticated user automatically. Anonymous public surface
+    // and projects without `with_session` get `AuditSource::System`
+    // by default (no scope entered).
+    let dispatch = async {
+        match admin_router.oneshot(inner_req).await {
+            Ok(r) => r,
+            Err(_infallible) => unreachable!("axum::Router service is Infallible"),
+        }
+    };
+    let response = if let Some(uid) = session_user_id {
+        crate::audit::with_source(
+            crate::audit::AuditSource::User {
+                id: uid.to_string(),
+            },
+            dispatch,
+        )
+        .await
+    } else {
+        dispatch.await
     };
 
     // Schema-mode pool is dropped here when `pool` falls out of
@@ -337,7 +360,14 @@ async fn handle_request(
 // ----------------------------- session helpers
 
 enum SessionCheck {
-    Authenticated { is_superuser: bool },
+    Authenticated {
+        is_superuser: bool,
+        /// Tenant-side `rustango_users.id` of the authenticated user.
+        /// Threaded into `audit::with_source(User { id })` for the
+        /// duration of the inner-router dispatch so any audited
+        /// write picks up the user-attribution automatically.
+        user_id: i64,
+    },
     Anonymous,
     Error(String),
 }
@@ -372,7 +402,10 @@ async fn validate_session(
                 return SessionCheck::Anonymous;
             }
             let is_superuser: bool = row.try_get("is_superuser").unwrap_or(false);
-            SessionCheck::Authenticated { is_superuser }
+            SessionCheck::Authenticated {
+                is_superuser,
+                user_id: payload.uid,
+            }
         }
         Ok(None) => SessionCheck::Anonymous,
         Err(e) => {

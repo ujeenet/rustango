@@ -2,6 +2,30 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.12.1] — admin auto-attribution + admin write audit + uni_portal demo — 2026-05-01
+
+Closes the v0.12.0 deferred items so the audit story is end-to-end.
+
+### Added
+
+- **Admin handlers emit audit entries for every write**, regardless of whether the model declares `#[rustango(audit(...))]`. `create_submit` writes `operation = "create"`, `update_submit` writes `"update"`, `delete_submit` writes `"delete"`. Form values become the `changes` JSON snapshot. Best-effort emit — failures log a warning but don't fail the user-visible request.
+- **Tenant admin auto-attributes user**: `tenancy::admin::handle_request` now wraps the inner-router dispatch in `audit::with_source(AuditSource::User { id: session.uid })` for every authenticated request. Anonymous public surface and projects without `with_session` keep `AuditSource::System` as the default (no scope entered).
+- **`ForeignKey<T>: Serialize`** — the FK enum now serializes to its PK integer. Lets audited models include FK columns in `audit(track = "...")` and have the audit JSON record the parent's PK without forcing every FK target to also derive `Serialize`.
+
+### Demo
+
+- **uni_portal `Course` is now audited** (`audit(track = "code, title, credits, instructor")`). The seed creates 4 tenants with `audit::ensure_table` per tenant pool, and a new `GET /api/courses/:pk/audit` endpoint reads the per-row trail. Browser-driven verification: an admin update by `alice` (uid=1) produces an audit entry with `source = "user:1"` while the seed-time create stays attributed to `system`.
+
+### Tests
+
+- New `tenant_auth_live::admin_write_records_user_source_via_with_source_install` — full round-trip through login + admin POST update + audit read, asserts `source = "user:<uid>"`.
+- 126/126 across the full live sweep (audit_live, mixins_live, admin_live, save_live, order_by_annotate_live, foreign_key_live, prefetch_related_live, select_related_live, tenant_admin_live, tenant_auth_live, tenant_migrate_live, manage_live).
+
+### Still deferred to v0.12.2
+
+- True before/after diff in `save_on` UPDATE branch (today snapshots the after-state only). Requires a before-SELECT round-trip.
+- A "View audit trail" panel in the admin detail page (today exposes via the user's API; the panel needs a Tera template + helper).
+
 ## [v0.12.0] — base-model mixins + per-tenant audit log — 2026-05-01
 
 Brings Django-shape "BaseModel inheritance" semantics to rustango: opt-in `auto_uuid` / `auto_now_add` / `auto_now` / `soft_delete` field-level mixins, and a per-tenant audit log that records who changed what, with source-of-change attribution.

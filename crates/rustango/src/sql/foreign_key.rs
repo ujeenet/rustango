@@ -101,6 +101,20 @@ impl<T> ForeignKey<T> {
     }
 }
 
+/// Serialize as the PK integer — the only piece of `ForeignKey<T>`
+/// stable across loaded/unloaded states. Lets audited models include
+/// FK columns in `audit(track = "...")` and have the audit JSON
+/// record the parent's PK without forcing every FK target to also
+/// derive `Serialize`.
+impl<T> serde::Serialize for ForeignKey<T> {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Unloaded(pk) => pk.serialize(ser),
+            Self::Loaded { pk, .. } => pk.serialize(ser),
+        }
+    }
+}
+
 impl<T> From<i64> for ForeignKey<T> {
     fn from(pk: i64) -> Self {
         Self::Unloaded(pk)

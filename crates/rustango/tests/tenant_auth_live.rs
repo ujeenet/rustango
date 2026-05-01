@@ -422,6 +422,91 @@ async fn cookie_from_one_tenant_is_rejected_at_another() {
     rmig::drop_all(&pool).await.unwrap();
 }
 
+/// v0.12.1 regression: when a request is authenticated, the tenant
+/// admin wraps the inner-router dispatch in
+/// `audit::with_source(User { id: session.uid })`. Any audited write
+/// inside the request — including the admin's own create/update/delete
+/// emit — records `source = "user:<uid>"`.
+#[tokio::test]
+async fn admin_write_records_user_source_via_with_source_install() {
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rmig::drop_all(&pool).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+    rustango::audit::ensure_table(&pool).await.unwrap();
+
+    let slug = unique("aud");
+    seed_db_mode_tenant(&pool, &slug, &url).await;
+    reset_users_table(&pool).await;
+    insert_user(&pool, "alice", "hunter2", true).await;
+    let alice_uid: i64 = sqlx::query_scalar(
+        r#"SELECT "id" FROM "rustango_users" WHERE "username" = 'alice'"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let mut w = Widget {
+        id: Auto::default(),
+        label: "before-edit".into(),
+    };
+    w.insert(&pool).await.unwrap();
+    let widget_pk = w.id.get().copied().unwrap();
+
+    let pools = Arc::new(TenantPools::new(pool.clone()));
+    let app = build_app(pools, url);
+
+    // Login.
+    let form = serde_urlencoded::to_string([("username", "alice"), ("password", "hunter2")])
+        .unwrap();
+    let login_req = Request::builder()
+        .method("POST")
+        .uri("/__login")
+        .header("x-org", &slug)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(form))
+        .unwrap();
+    let login_resp = app.clone().oneshot(login_req).await.unwrap();
+    let cookie = extract_session_cookie(&login_resp).expect("cookie should be set");
+
+    // POST update via the admin.
+    let update_form = serde_urlencoded::to_string([
+        ("id", widget_pk.to_string().as_str()),
+        ("label", "after-edit"),
+    ])
+    .unwrap();
+    let update_req = Request::builder()
+        .method("POST")
+        .uri(format!("/tenauth_widget/{widget_pk}"))
+        .header("x-org", &slug)
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(update_form))
+        .unwrap();
+    let resp = app.oneshot(update_req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    // Audit entry must be attributed to alice.
+    let entries = rustango::audit::fetch_for_entity(
+        &pool,
+        "tenauth_widget",
+        &widget_pk.to_string(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        entries.iter().any(|e| e.operation == "update"),
+        "no update entry recorded: {entries:?}",
+    );
+    let upd = entries.iter().find(|e| e.operation == "update").unwrap();
+    assert_eq!(upd.source, format!("user:{alice_uid}"),
+        "expected user:{alice_uid} attribution, got `{}`", upd.source);
+
+    rmig::drop_all(&pool).await.unwrap();
+}
+
 fn extract_session_cookie(resp: &axum::http::Response<Body>) -> Option<String> {
     for v in resp.headers().get_all("set-cookie") {
         let s = v.to_str().ok()?;

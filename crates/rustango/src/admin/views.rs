@@ -616,6 +616,14 @@ pub(crate) async fn create_submit(
     // Pull the (possibly-generated) PK back out of the RETURNING row so
     // the redirect lands on the right detail page even for Auto-PK models.
     let pk_value = render::read_value_as_string(&row, pk_field).unwrap_or_default();
+    emit_admin_audit(
+        &state,
+        model,
+        &pk_value,
+        crate::audit::AuditOp::Create,
+        &form,
+    )
+    .await;
     Ok(Redirect::to(&format!("/{}/{}", model.table, pk_value)).into_response())
 }
 
@@ -715,7 +723,54 @@ pub(crate) async fn update_submit(
         let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));
         return Ok(Html(html).into_response());
     }
+    // v0.12.1: every admin write emits an audit entry regardless of
+    // the model's `audit(...)` attribute. Picks up the per-request
+    // `with_source(User { id })` install from `tenancy::admin`, so
+    // operators get a "who changed what" trail for free.
+    emit_admin_audit(
+        &state,
+        model,
+        &pk_raw,
+        crate::audit::AuditOp::Update,
+        &form,
+    )
+    .await;
     Ok(Redirect::to(&format!("/{}/{}", model.table, pk_raw)).into_response())
+}
+
+/// Build an audit `PendingEntry` from a form submission and emit it
+/// to `rustango_audit_log`. Best-effort — failures here log a
+/// warning but don't fail the user-visible request, since the data
+/// write already succeeded.
+async fn emit_admin_audit(
+    state: &AppState,
+    model: &'static crate::core::ModelSchema,
+    pk_str: &str,
+    op: crate::audit::AuditOp,
+    form: &HashMap<String, String>,
+) {
+    // Snapshot every field present in the form (skip anything that
+    // didn't show up — e.g. `_selected` / unchecked checkboxes).
+    let pairs: Vec<(&str, serde_json::Value)> = model
+        .scalar_fields()
+        .filter_map(|f| form.get(f.name).map(|v| (f.name, serde_json::Value::String(v.clone()))))
+        .collect();
+    let entry = crate::audit::PendingEntry {
+        entity_table: model.table,
+        entity_pk: pk_str.to_owned(),
+        operation: op,
+        source: crate::audit::current_source(),
+        changes: crate::audit::snapshot_changes(&pairs),
+    };
+    if let Err(e) = crate::audit::emit_one(&state.pool, &entry).await {
+        tracing::warn!(
+            target: "rustango::admin::audit",
+            error = %e,
+            entity_table = %model.table,
+            entity_pk = %pk_str,
+            "admin audit emit failed (data write already committed)",
+        );
+    }
 }
 
 // ============================================================== DELETE
@@ -750,6 +805,14 @@ pub(crate) async fn delete_submit(
     )
     .await?;
 
+    emit_admin_audit(
+        &state,
+        model,
+        &pk_raw,
+        crate::audit::AuditOp::Delete,
+        &HashMap::new(),
+    )
+    .await;
     Ok(Redirect::to(&format!("/{}", model.table)).into_response())
 }
 
