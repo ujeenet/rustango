@@ -517,6 +517,28 @@ pub async fn annotate_count_children<P>(
 where
     P: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
 {
+    annotate_count_children_on(parent_qs, child_table, child_fk_column, pool).await
+}
+
+/// Like [`annotate_count_children`] but accepts any sqlx executor —
+/// `&PgPool`, `&mut PgConnection`, or a transaction handle. Lets
+/// tenant-scoped admin / API code use the optimized one-query form
+/// against a `Tenant::conn()` connection (search_path scoped to the
+/// tenant's schema), instead of falling back to a per-parent
+/// `count_on` loop (N+1).
+///
+/// # Errors
+/// As [`annotate_count_children`].
+pub async fn annotate_count_children_on<'c, P, E>(
+    parent_qs: crate::query::QuerySet<P>,
+    child_table: &'static str,
+    child_fk_column: &'static str,
+    executor: E,
+) -> Result<Vec<(P, i64)>, ExecError>
+where
+    P: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
+    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+{
     use std::fmt::Write as _;
     let select = parent_qs.compile()?;
     let parent = select.model;
@@ -561,7 +583,7 @@ where
 
     let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&sql);
     let _ = &mut q; // params vec unused in this MVP — `WHERE` support pending
-    let raw_rows = q.fetch_all(pool).await?;
+    let raw_rows = q.fetch_all(executor).await?;
     let mut out = Vec::with_capacity(raw_rows.len());
     for row in &raw_rows {
         let parent_obj = P::from_row(row)?;

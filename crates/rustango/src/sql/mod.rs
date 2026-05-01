@@ -21,7 +21,7 @@ pub use error::{ExecError, SqlError};
 pub use executor::{
     bulk_insert, bulk_insert_on, count_rows, count_rows_on, delete, delete_on, insert, insert_on,
     insert_returning, insert_returning_on, select_one_row, select_rows, update, update_on,
-    Counter, Deleter, Fetcher, FkPkAccess, HasPkValue, LoadRelated, Page, Updater, annotate_count_children, fetch_with_prefetch,
+    Counter, Deleter, Fetcher, FkPkAccess, HasPkValue, LoadRelated, Page, Updater, annotate_count_children, annotate_count_children_on, fetch_with_prefetch,
 };
 pub use foreign_key::ForeignKey;
 pub use postgres::Postgres;

@@ -6,7 +6,7 @@
 
 use std::sync::OnceLock;
 
-use rustango::sql::{annotate_count_children, sqlx, Auto, ForeignKey};
+use rustango::sql::{annotate_count_children, annotate_count_children_on, sqlx, Auto, ForeignKey};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -162,6 +162,63 @@ async fn annotate_count_children_groups_per_parent() {
     assert_eq!(by_name.get("Ada"), Some(&3));
     assert_eq!(by_name.get("Grace"), Some(&1));
     assert_eq!(by_name.get("Linus"), Some(&0));
+}
+
+#[tokio::test]
+async fn annotate_count_children_on_works_against_acquired_connection() {
+    // S4 regression: tenant-scoped admin/api code drives the ORM
+    // through a `&mut PgConnection` (search_path scoped to a tenant
+    // schema). Before v0.9.1 only `&PgPool` was accepted, forcing a
+    // per-parent `count_on` N+1. The `_on` variant must produce the
+    // same Vec<(Parent, i64)> as the pool variant.
+    let _g = lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    setup(&pool).await;
+
+    let mut ada = Author {
+        id: Auto::default(),
+        name: "Ada".into(),
+    };
+    ada.save(&pool).await.unwrap();
+    let mut grace = Author {
+        id: Auto::default(),
+        name: "Grace".into(),
+    };
+    grace.save(&pool).await.unwrap();
+
+    let now = chrono::Utc::now();
+    for fk in [
+        ada.id.get().copied().unwrap(),
+        ada.id.get().copied().unwrap(),
+        grace.id.get().copied().unwrap(),
+    ] {
+        let mut p = Post {
+            id: Auto::default(),
+            title: "x".into(),
+            author: ForeignKey::unloaded(fk),
+            published_at: now,
+        };
+        p.save(&pool).await.unwrap();
+    }
+
+    let mut conn = pool.acquire().await.unwrap();
+    let counts: Vec<(Author, i64)> =
+        annotate_count_children_on::<Author, _>(
+            Author::objects(),
+            "rustango_ob_post",
+            "author",
+            &mut *conn,
+        )
+        .await
+        .unwrap();
+    let by_name: std::collections::HashMap<&str, i64> = counts
+        .iter()
+        .map(|(a, n)| (a.name.as_str(), *n))
+        .collect();
+    assert_eq!(by_name.get("Ada"), Some(&2));
+    assert_eq!(by_name.get("Grace"), Some(&1));
 }
 
 #[tokio::test]
