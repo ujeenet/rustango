@@ -655,6 +655,11 @@ struct CollectedFields {
     /// `<parent>::<child_table>_set(&self, executor) -> Vec<Self>`
     /// method on the parent type.
     fk_relations: Vec<FkRelation>,
+    /// SQL column name of the `#[rustango(soft_delete)]` field, if
+    /// the model has one. Drives emission of the `soft_delete_on` /
+    /// `restore_on` inherent methods. At most one such column per
+    /// model is allowed; collect_fields rejects duplicates.
+    soft_delete_column: Option<String>,
 }
 
 #[derive(Clone)]
@@ -692,6 +697,7 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
         column_entries: Vec::with_capacity(cap),
         field_names: Vec::with_capacity(cap),
         fk_relations: Vec::new(),
+        soft_delete_column: None,
     };
 
     for field in &named.named {
@@ -705,6 +711,15 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
                 parent_type: parent_ty,
                 fk_column: info.column.clone(),
             });
+        }
+        if info.soft_delete {
+            if out.soft_delete_column.is_some() {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "only one field may be marked `#[rustango(soft_delete)]`",
+                ));
+            }
+            out.soft_delete_column = Some(info.column.clone());
         }
         let column = info.column.as_str();
         let ident = info.ident;
@@ -785,6 +800,21 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
             if info.auto {
                 out.pk_is_auto = true;
             }
+        } else if info.auto_now_add {
+            // Immutable post-insert: skip from UPDATE entirely.
+        } else if info.auto_now {
+            // `auto_now` columns: bind `chrono::Utc::now()` on every
+            // UPDATE so the column is always overridden with the
+            // wall-clock at write time, regardless of what value the
+            // user left in the struct field.
+            out.update_assignments.push(quote! {
+                ::rustango::core::Assignment {
+                    column: #column,
+                    value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                        ::chrono::Utc::now()
+                    ),
+                }
+            });
         } else {
             out.update_assignments.push(quote! {
                 ::rustango::core::Assignment {
@@ -1003,6 +1033,91 @@ fn inherent_impl_tokens(
 
     let pk_methods = primary_key.map(|(pk_ident, pk_column)| {
         let pk_column_lit = pk_column.as_str();
+        // Optional `soft_delete_on` / `restore_on` companions when the
+        // model has a `#[rustango(soft_delete)]` column. They land
+        // alongside the regular `delete_on` so callers have both
+        // options — a hard delete (audit-tracked as a real DELETE) and
+        // a logical delete (audit-tracked as an UPDATE setting the
+        // deleted_at column to NOW()).
+        let soft_delete_methods = if let Some(col) = fields.soft_delete_column.as_deref() {
+            let col_lit = col;
+            quote! {
+                /// Soft-delete this row by setting its
+                /// `#[rustango(soft_delete)]` column to `NOW()`.
+                /// Mirrors Django's `SoftDeleteModel.delete()` shape:
+                /// the row stays in the table; query helpers can
+                /// filter it out by checking the column for `IS NOT
+                /// NULL`.
+                ///
+                /// # Errors
+                /// As [`Self::delete`].
+                pub async fn soft_delete_on<'_c, _E>(
+                    &self,
+                    _executor: _E,
+                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError>
+                where
+                    _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+                {
+                    let _query = ::rustango::core::UpdateQuery {
+                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                        set: ::std::vec![
+                            ::rustango::core::Assignment {
+                                column: #col_lit,
+                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                    ::chrono::Utc::now()
+                                ),
+                            },
+                        ],
+                        where_clause: ::rustango::core::WhereExpr::Predicate(
+                            ::rustango::core::Filter {
+                                column: #pk_column_lit,
+                                op: ::rustango::core::Op::Eq,
+                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                    ::core::clone::Clone::clone(&self.#pk_ident)
+                                ),
+                            }
+                        ),
+                    };
+                    ::rustango::sql::update_on(_executor, &_query).await
+                }
+
+                /// Inverse of [`Self::soft_delete_on`] — clears the
+                /// soft-delete column back to NULL so the row is
+                /// considered live again.
+                ///
+                /// # Errors
+                /// As [`Self::delete`].
+                pub async fn restore_on<'_c, _E>(
+                    &self,
+                    _executor: _E,
+                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError>
+                where
+                    _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+                {
+                    let _query = ::rustango::core::UpdateQuery {
+                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                        set: ::std::vec![
+                            ::rustango::core::Assignment {
+                                column: #col_lit,
+                                value: ::rustango::core::SqlValue::Null,
+                            },
+                        ],
+                        where_clause: ::rustango::core::WhereExpr::Predicate(
+                            ::rustango::core::Filter {
+                                column: #pk_column_lit,
+                                op: ::rustango::core::Op::Eq,
+                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                    ::core::clone::Clone::clone(&self.#pk_ident)
+                                ),
+                            }
+                        ),
+                    };
+                    ::rustango::sql::update_on(_executor, &_query).await
+                }
+            }
+        } else {
+            quote!()
+        };
         quote! {
             /// Delete the row identified by this instance's primary key.
             ///
@@ -1045,6 +1160,7 @@ fn inherent_impl_tokens(
                 };
                 ::rustango::sql::delete_on(_executor, &query).await
             }
+            #soft_delete_methods
         }
     });
 
@@ -1660,6 +1776,28 @@ struct FieldAttrs {
     min: Option<i64>,
     max: Option<i64>,
     default: Option<String>,
+    /// `#[rustango(auto_uuid)]` — UUID PK generated by Postgres
+    /// `gen_random_uuid()`. Implies `auto + primary_key + default =
+    /// "gen_random_uuid()"`. The Rust field type must be
+    /// `uuid::Uuid` (or `Auto<Uuid>`); the column is excluded from
+    /// INSERTs so the DB DEFAULT fires.
+    auto_uuid: bool,
+    /// `#[rustango(auto_now_add)]` — `created_at`-shape column.
+    /// Server-set on insert, immutable from app code afterwards.
+    /// Implies `auto + default = "now()"`. Field type must be
+    /// `DateTime<Utc>`.
+    auto_now_add: bool,
+    /// `#[rustango(auto_now)]` — `updated_at`-shape column. Set on
+    /// every insert AND every update. Implies `auto + default =
+    /// "now()"`; the macro additionally rewrites `update_on` /
+    /// `save_on` to bind `chrono::Utc::now()` instead of the user's
+    /// field value.
+    auto_now: bool,
+    /// `#[rustango(soft_delete)]` — `deleted_at`-shape column. Type
+    /// must be `Option<DateTime<Utc>>`. Triggers macro emission of
+    /// `soft_delete_on(executor)` and `restore_on(executor)`
+    /// methods on the model.
+    soft_delete: bool,
 }
 
 fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
@@ -1673,6 +1811,10 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         min: None,
         max: None,
         default: None,
+        auto_uuid: false,
+        auto_now_add: false,
+        auto_now: false,
+        soft_delete: false,
     };
     for attr in &field.attrs {
         if !attr.path().is_ident("rustango") {
@@ -1719,6 +1861,35 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
             if meta.path.is_ident("default") {
                 let s: LitStr = meta.value()?.parse()?;
                 out.default = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("auto_uuid") {
+                out.auto_uuid = true;
+                // Implied: PK + auto + DEFAULT gen_random_uuid().
+                // Each is also explicitly settable; the explicit
+                // value wins if conflicting.
+                out.primary_key = true;
+                if out.default.is_none() {
+                    out.default = Some("gen_random_uuid()".into());
+                }
+                return Ok(());
+            }
+            if meta.path.is_ident("auto_now_add") {
+                out.auto_now_add = true;
+                if out.default.is_none() {
+                    out.default = Some("now()".into());
+                }
+                return Ok(());
+            }
+            if meta.path.is_ident("auto_now") {
+                out.auto_now = true;
+                if out.default.is_none() {
+                    out.default = Some("now()".into());
+                }
+                return Ok(());
+            }
+            if meta.path.is_ident("soft_delete") {
+                out.soft_delete = true;
                 return Ok(());
             }
             Err(meta.error("unknown rustango field attribute"))
@@ -1783,6 +1954,23 @@ struct FieldInfo<'a> {
     /// relation helper emit (`Author::<child>_set`) needs to know `T`
     /// to point the generated method at the right child model.
     fk_inner: Option<Type>,
+    /// `true` when this column was marked `#[rustango(auto_now)]` —
+    /// `update_on` / `save_on` bind `chrono::Utc::now()` for this
+    /// column instead of the user-supplied value, so `updated_at`
+    /// always reflects the latest write without the caller having
+    /// to remember to set it.
+    auto_now: bool,
+    /// `true` when this column was marked `#[rustango(auto_now_add)]`
+    /// — the column is server-set on INSERT (DB DEFAULT) and
+    /// **immutable** afterwards. `update_on` / `save_on` skip the
+    /// column entirely so a stale `created_at` value in memory never
+    /// rewrites the persisted timestamp.
+    auto_now_add: bool,
+    /// `true` when this column was marked `#[rustango(soft_delete)]`.
+    /// Triggers emission of `soft_delete_on(executor)` and
+    /// `restore_on(executor)` on the model's inherent impl. There is
+    /// at most one such column per model — emission asserts this.
+    soft_delete: bool,
 }
 
 fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
@@ -1797,17 +1985,67 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
     let DetectedType {
         kind,
         nullable,
-        auto,
+        auto: detected_auto,
         fk_inner,
     } = detect_type(&field.ty)?;
     check_bound_compatibility(field, &attrs, kind)?;
-    if auto && !primary_key {
+    let auto = detected_auto;
+    // Mixin attributes piggyback on the existing `Auto<T>` skip-on-
+    // INSERT path: the user must wrap the field in `Auto<T>`, which
+    // marks the column as DB-default-supplied. The mixin attrs then
+    // layer in the SQL default (`now()` / `gen_random_uuid()`) and,
+    // for `auto_now`, force the value on UPDATE too.
+    if attrs.auto_uuid {
+        if kind != DetectedKind::Uuid {
+            return Err(syn::Error::new_spanned(
+                field,
+                "`#[rustango(auto_uuid)]` requires the field type to be \
+                 `Auto<uuid::Uuid>`",
+            ));
+        }
+        if !detected_auto {
+            return Err(syn::Error::new_spanned(
+                field,
+                "`#[rustango(auto_uuid)]` requires the field type to be \
+                 wrapped in `Auto<...>` so the macro skips the column on \
+                 INSERT and the DB DEFAULT (`gen_random_uuid()`) fires",
+            ));
+        }
+    }
+    if attrs.auto_now_add || attrs.auto_now {
+        if kind != DetectedKind::DateTime {
+            return Err(syn::Error::new_spanned(
+                field,
+                "`#[rustango(auto_now_add)]` / `#[rustango(auto_now)]` require \
+                 the field type to be `Auto<chrono::DateTime<chrono::Utc>>`",
+            ));
+        }
+        if !detected_auto {
+            return Err(syn::Error::new_spanned(
+                field,
+                "`#[rustango(auto_now_add)]` / `#[rustango(auto_now)]` require \
+                 the field type to be wrapped in `Auto<...>` so the macro skips \
+                 the column on INSERT and the DB DEFAULT (`now()`) fires",
+            ));
+        }
+    }
+    if attrs.soft_delete && !(kind == DetectedKind::DateTime && nullable) {
         return Err(syn::Error::new_spanned(
             field,
-            "`Auto<T>` is only valid on a `#[rustango(primary_key)]` field",
+            "`#[rustango(soft_delete)]` requires the field type to be \
+             `Option<chrono::DateTime<chrono::Utc>>`",
         ));
     }
-    if auto && attrs.default.is_some() {
+    let is_mixin_auto = attrs.auto_uuid || attrs.auto_now_add || attrs.auto_now;
+    if detected_auto && !primary_key && !is_mixin_auto {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`Auto<T>` is only valid on a `#[rustango(primary_key)]` field, \
+             or on a field carrying one of `auto_uuid`, `auto_now_add`, or \
+             `auto_now`",
+        ));
+    }
+    if detected_auto && attrs.default.is_some() && !is_mixin_auto {
         return Err(syn::Error::new_spanned(
             field,
             "`#[rustango(default = \"…\")]` is redundant on an `Auto<T>` field — \
@@ -1866,6 +2104,9 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
         from_row_init,
         from_aliased_row_init,
         fk_inner: fk_inner.cloned(),
+        auto_now: attrs.auto_now,
+        auto_now_add: attrs.auto_now_add,
+        soft_delete: attrs.soft_delete,
     })
 }
 
@@ -2073,10 +2314,15 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
                 "`Auto<ForeignKey<T>>` is not supported — Auto is for server-assigned PKs, ForeignKey is for parent references",
             ));
         }
-        if !matches!(inner_det.kind, DetectedKind::I32 | DetectedKind::I64) {
+        if !matches!(
+            inner_det.kind,
+            DetectedKind::I32 | DetectedKind::I64 | DetectedKind::Uuid | DetectedKind::DateTime
+        ) {
             return Err(syn::Error::new_spanned(
                 ty,
-                "`Auto<T>` only supports integer types (`i32` → SERIAL, `i64` → BIGSERIAL)",
+                "`Auto<T>` only supports integers (`i32` → SERIAL, `i64` → BIGSERIAL), \
+                 `uuid::Uuid` (DEFAULT gen_random_uuid()), or `chrono::DateTime<chrono::Utc>` \
+                 (DEFAULT now())",
             ));
         }
         return Ok(DetectedType {
