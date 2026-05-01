@@ -2,6 +2,21 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.12.6] — audit retention — 2026-05-01
+
+### Added
+
+- **`audit::cleanup_older_than(pool, cutoff_days) -> u64`** — deletes `rustango_audit_log` entries where `occurred_at < NOW() - cutoff_days * INTERVAL '1 day'`. Returns the number of rows removed. Per-tenant scope: each tenant's audit table is its own retention boundary, so the same call against a tenant pool only expires that tenant's history. `cutoff_days = 0` clears everything; negative values are clamped to 0.
+- **Cleanup form on `/__audit`** — number input + "Apply cleanup" button. Defaults to 90 days, validates `≥ 0`, includes a `confirm()` dialog before submit. The cleanup itself emits an audit entry via `emit_one` with `entity_table = "rustango_audit_log"`, `entity_pk = "*"`, `operation = "delete"`, `changes = { __action: "audit_cleanup", cutoff_days, removed }` so the trail is self-describing — operators see who pruned what and when.
+
+### Tests
+
+- 3 new live tests in `audit_live`: 7-day cutoff retains recent rows, `0 days` clears the table, negative values clamp to 0. 19/19 pass.
+
+### Curl-verified
+
+- 4 seed-time `system` audit entries → POST `/__audit/cleanup` with `days=0` (alice / uid=1) → 4 rows deleted, 1 self-audit row remains: `{ "__action": "audit_cleanup", "cutoff_days": 0, "removed": 4 }` attributed to `user:1`.
+
 ## [v0.12.5] — admin /__audit activity feed — 2026-05-01
 
 ### Added

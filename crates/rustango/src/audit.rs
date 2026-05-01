@@ -327,6 +327,36 @@ CREATE INDEX IF NOT EXISTS "rustango_audit_log_occurred_idx"
     ON "rustango_audit_log" ("occurred_at" DESC);
 "#;
 
+/// Delete audit entries older than `cutoff_days` from `pool`'s
+/// audit table. Returns the number of rows removed.
+///
+/// Useful as a retention-policy hook — operators can wire this into
+/// a daily cron, a tenant-side maintenance task, or a one-off CLI
+/// invocation. Per-tenant scope: each tenant's audit table is its
+/// own retention boundary, so `cleanup_older_than(tenant_pool, 90)`
+/// expires only that tenant's history. The framework doesn't auto-
+/// schedule this — the operator picks the cadence.
+///
+/// `cutoff_days = 0` clears the entire table (use with caution); a
+/// negative value is clamped to 0.
+///
+/// # Errors
+/// Driver / SQL failures from the DELETE.
+pub async fn cleanup_older_than(
+    pool: &PgPool,
+    cutoff_days: i64,
+) -> Result<u64, sqlx::Error> {
+    let cutoff = cutoff_days.max(0);
+    let result = sqlx::query(
+        r#"DELETE FROM "rustango_audit_log"
+           WHERE "occurred_at" < NOW() - ($1::int8 * INTERVAL '1 day')"#,
+    )
+    .bind(cutoff)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Convenience for tests + ad-hoc setup: ensure the table exists in
 /// `pool`'s database / schema. No-op when already present.
 ///

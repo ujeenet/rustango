@@ -507,6 +507,101 @@ async fn bulk_insert_on_emits_one_batched_audit_for_all_rows() {
     }
 }
 
+#[tokio::test]
+async fn cleanup_older_than_drops_rows_past_the_cutoff() {
+    // v0.12.6: insert three audit entries with explicit occurred_at
+    // values straddling a 7-day cutoff, run cleanup_older_than(7),
+    // assert only the past-cutoff row was removed.
+    let _g = lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    reset(&pool).await;
+
+    // Two recent entries (today + 3 days ago) and one old (15 days
+    // ago). The old one should be the only casualty of cleanup(7).
+    for (pk, days_ago) in [("1", 0_i64), ("2", 3), ("3", 15)] {
+        sqlx::query(
+            r#"INSERT INTO "rustango_audit_log"
+                  ("entity_table", "entity_pk", "operation", "source",
+                   "changes", "occurred_at")
+               VALUES ($1, $2, 'create', 'system', '{}'::jsonb,
+                       NOW() - ($3 || ' days')::interval)"#,
+        )
+        .bind("retention_demo")
+        .bind(pk)
+        .bind(days_ago.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let total_before: i64 =
+        sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log""#)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(total_before, 3);
+
+    let removed = audit::cleanup_older_than(&pool, 7).await.unwrap();
+    assert_eq!(removed, 1, "exactly one row past the 7-day cutoff");
+
+    let total_after: i64 =
+        sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log""#)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(total_after, 2, "two recent entries remain");
+}
+
+#[tokio::test]
+async fn cleanup_older_than_zero_clears_table() {
+    let _g = lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    reset(&pool).await;
+    for pk in ["1", "2"] {
+        let entry = PendingEntry {
+            entity_table: "demo",
+            entity_pk: pk.into(),
+            operation: AuditOp::Create,
+            source: AuditSource::System,
+            changes: json!({}),
+        };
+        audit::emit_one(&pool, &entry).await.unwrap();
+    }
+    let removed = audit::cleanup_older_than(&pool, 0).await.unwrap();
+    assert_eq!(removed, 2);
+    let total: i64 =
+        sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log""#)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(total, 0);
+}
+
+#[tokio::test]
+async fn cleanup_older_than_negative_treated_as_zero() {
+    // Negative days are clamped to 0 (i.e., delete everything).
+    // Mirrors the doc-comment contract.
+    let _g = lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    reset(&pool).await;
+    let entry = PendingEntry {
+        entity_table: "demo",
+        entity_pk: "1".into(),
+        operation: AuditOp::Create,
+        source: AuditSource::System,
+        changes: json!({}),
+    };
+    audit::emit_one(&pool, &entry).await.unwrap();
+    let removed = audit::cleanup_older_than(&pool, -42).await.unwrap();
+    assert_eq!(removed, 1);
+}
+
 #[test]
 fn audit_source_token_is_stable() {
     assert_eq!(AuditSource::System.as_token(), "system");
