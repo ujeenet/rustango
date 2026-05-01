@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use crate::core::{
-    inventory, CountQuery, DeleteQuery, FieldSchema, Filter, InsertQuery, ModelEntry, Op,
-    SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
+    inventory, Assignment, CountQuery, DeleteQuery, FieldSchema, Filter, InsertQuery, ModelEntry,
+    Op, SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
 
 use super::errors::AdminError;
@@ -802,9 +802,9 @@ pub(crate) async fn update_submit(
             return Ok(Html(html).into_response());
         }
     };
-    let assignments: Vec<crate::core::Assignment> = collected
+    let assignments: Vec<Assignment> = collected
         .into_iter()
-        .map(|(column, value)| crate::core::Assignment { column, value })
+        .map(|(column, value)| Assignment { column, value })
         .collect();
 
     // v0.12.3: SELECT the row's pre-update state so the audit emit
@@ -897,18 +897,43 @@ pub(crate) async fn delete_submit(
     .ok()
     .flatten();
 
-    crate::sql::delete(
-        &state.pool,
-        &DeleteQuery {
-            model,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::Eq,
-                value: pk_value,
-            }),
-        },
-    )
-    .await?;
+    let audit_op = if model.soft_delete_column.is_some() {
+        crate::audit::AuditOp::SoftDelete
+    } else {
+        crate::audit::AuditOp::Delete
+    };
+
+    if let Some(col) = model.soft_delete_column {
+        crate::sql::update(
+            &state.pool,
+            &UpdateQuery {
+                model,
+                set: vec![Assignment {
+                    column: col,
+                    value: SqlValue::from(chrono::Utc::now()),
+                }],
+                where_clause: WhereExpr::Predicate(Filter {
+                    column: pk_field.column,
+                    op: Op::Eq,
+                    value: pk_value,
+                }),
+            },
+        )
+        .await?;
+    } else {
+        crate::sql::delete(
+            &state.pool,
+            &DeleteQuery {
+                model,
+                where_clause: WhereExpr::Predicate(Filter {
+                    column: pk_field.column,
+                    op: Op::Eq,
+                    value: pk_value,
+                }),
+            },
+        )
+        .await?;
+    }
 
     let pairs: Vec<(&str, serde_json::Value)> = before_row
         .as_ref()
@@ -922,7 +947,7 @@ pub(crate) async fn delete_submit(
     let entry = crate::audit::PendingEntry {
         entity_table: model.table,
         entity_pk: pk_raw.clone(),
-        operation: crate::audit::AuditOp::Delete,
+        operation: audit_op,
         source: crate::audit::current_source(),
         changes: crate::audit::snapshot_changes(&pairs),
     };
@@ -1034,33 +1059,80 @@ pub(crate) async fn action_submit(
     .unwrap_or_default();
 
     let audit_op = if action == "delete_selected" {
-        crate::audit::AuditOp::Delete
+        if model.soft_delete_column.is_some() {
+            crate::audit::AuditOp::SoftDelete
+        } else {
+            crate::audit::AuditOp::Delete
+        }
+    } else if action == "restore_selected" {
+        crate::audit::AuditOp::Update
     } else {
         crate::audit::AuditOp::Update
     };
 
     if action == "delete_selected" {
-        // Built-in: hard-coded so users don't need to register it.
-        crate::sql::delete(
-            &state.pool,
-            &DeleteQuery {
-                model,
-                where_clause: WhereExpr::Predicate(Filter {
-                    column: pk_field.column,
-                    op: Op::In,
-                    value: SqlValue::List(pk_values),
-                }),
-            },
-        )
-        .await?;
+        if let Some(col) = model.soft_delete_column {
+            // Soft model — stamp the deleted_at column instead of hard DELETE.
+            crate::sql::update(
+                &state.pool,
+                &UpdateQuery {
+                    model,
+                    set: vec![Assignment {
+                        column: col,
+                        value: SqlValue::from(chrono::Utc::now()),
+                    }],
+                    where_clause: WhereExpr::Predicate(Filter {
+                        column: pk_field.column,
+                        op: Op::In,
+                        value: SqlValue::List(pk_values),
+                    }),
+                },
+            )
+            .await?;
+        } else {
+            crate::sql::delete(
+                &state.pool,
+                &DeleteQuery {
+                    model,
+                    where_clause: WhereExpr::Predicate(Filter {
+                        column: pk_field.column,
+                        op: Op::In,
+                        value: SqlValue::List(pk_values),
+                    }),
+                },
+            )
+            .await?;
+        }
+    } else if action == "restore_selected" {
+        // Built-in restore — clears the soft-delete column (NULL = live).
+        // Only meaningful for models with soft_delete_column; for others
+        // the action is a no-op so users don't need to guard it.
+        if let Some(col) = model.soft_delete_column {
+            crate::sql::update(
+                &state.pool,
+                &UpdateQuery {
+                    model,
+                    set: vec![Assignment {
+                        column: col,
+                        value: SqlValue::Null,
+                    }],
+                    where_clause: WhereExpr::Predicate(Filter {
+                        column: pk_field.column,
+                        op: Op::In,
+                        value: SqlValue::List(pk_values),
+                    }),
+                },
+            )
+            .await?;
+        }
     } else if let Some(handler) = state.action_handler(model.table, &action) {
         handler(&state.pool, &pk_values).await?;
     } else {
         return Err(AdminError::Internal(format!(
             "action `{action}` is in `admin.actions` but no handler is registered \
              on the admin builder; register it via \
-             `admin::Builder::register_action(\"{}\", \"{action}\", ...)` (built-in: \
-             delete_selected)",
+             `admin::Builder::register_action(\"{}\", \"{action}\", ...)` (built-ins: \
+             delete_selected, restore_selected)",
             model.table
         )));
     }

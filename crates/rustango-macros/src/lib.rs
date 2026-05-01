@@ -415,6 +415,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         app_label.as_deref(),
         container.admin.as_ref(),
         &collected.field_schemas,
+        collected.soft_delete_column.as_deref(),
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -874,6 +875,7 @@ fn model_impl_tokens(
     app_label: Option<&str>,
     admin: Option<&AdminAttrs>,
     field_schemas: &[TokenStream2],
+    soft_delete_column: Option<&str>,
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
@@ -882,6 +884,11 @@ fn model_impl_tokens(
     };
     let app_label_tokens = if let Some(name) = app_label {
         quote!(::core::option::Option::Some(#name))
+    } else {
+        quote!(::core::option::Option::None)
+    };
+    let soft_delete_tokens = if let Some(col) = soft_delete_column {
+        quote!(::core::option::Option::Some(#col))
     } else {
         quote!(::core::option::Option::None)
     };
@@ -895,6 +902,7 @@ fn model_impl_tokens(
                 display: #display_tokens,
                 app_label: #app_label_tokens,
                 admin: #admin_tokens,
+                soft_delete_column: #soft_delete_tokens,
             };
         }
     }

@@ -547,12 +547,21 @@ fn add_column_sql(table: &str, f: &FieldSnapshot) -> String {
 }
 
 fn sql_type(f: &FieldSnapshot) -> String {
+    // v0.13.2: `auto = true` historically meant "PK SERIAL/BIGSERIAL,"
+    // but v0.12+ field mixins (`auto_now_add`, `auto_now`,
+    // `auto_uuid`) reuse the same flag to mark a column as
+    // "skipped on INSERT, DB DEFAULT fires." For non-integer types
+    // we fall through to the regular type mapping so the migration
+    // emits e.g. `TIMESTAMPTZ NOT NULL DEFAULT now()` instead of
+    // an invalid `DATETIME` literal. Integer auto stays SERIAL.
     if f.auto {
-        return match f.ty.as_str() {
-            "i32" => "SERIAL".into(),
-            "i64" => "BIGSERIAL".into(),
-            other => other.to_uppercase(),
-        };
+        match f.ty.as_str() {
+            "i32" => return "SERIAL".into(),
+            "i64" => return "BIGSERIAL".into(),
+            // anything else: fall through to the regular type
+            // resolution below.
+            _ => {}
+        }
     }
     match f.ty.as_str() {
         "i32" => "INTEGER".into(),
@@ -569,5 +578,54 @@ fn sql_type(f: &FieldSnapshot) -> String {
         "uuid" => "UUID".into(),
         "json" => "JSONB".into(),
         other => other.to_uppercase(),
+    }
+}
+
+#[cfg(test)]
+mod sql_type_tests {
+    use super::*;
+    use crate::migrate::snapshot::FieldSnapshot;
+
+    fn fs(ty: &str, auto: bool) -> FieldSnapshot {
+        FieldSnapshot {
+            name: "x".into(),
+            column: "x".into(),
+            ty: ty.into(),
+            nullable: false,
+            primary_key: false,
+            max_length: None,
+            min: None,
+            max: None,
+            default: None,
+            auto,
+            fk: None,
+        }
+    }
+
+    #[test]
+    fn auto_integer_emits_serial() {
+        assert_eq!(sql_type(&fs("i32", true)), "SERIAL");
+        assert_eq!(sql_type(&fs("i64", true)), "BIGSERIAL");
+    }
+
+    #[test]
+    fn auto_non_integer_falls_through_to_real_type() {
+        // v0.13.2 — B1 from the rustail postmortem. Auto on
+        // non-integer types (auto_now_add / auto_now / auto_uuid)
+        // must emit the real Postgres column type, not an
+        // upper-cased version of the rustango-internal name. A
+        // CREATE TABLE with `"created_at" DATETIME ...` makes
+        // Postgres reject the migration.
+        assert_eq!(sql_type(&fs("datetime", true)), "TIMESTAMPTZ");
+        assert_eq!(sql_type(&fs("date", true)), "DATE");
+        assert_eq!(sql_type(&fs("uuid", true)), "UUID");
+        assert_eq!(sql_type(&fs("bool", true)), "BOOLEAN");
+        assert_eq!(sql_type(&fs("string", true)), "TEXT");
+    }
+
+    #[test]
+    fn non_auto_passes_through_normally() {
+        assert_eq!(sql_type(&fs("i64", false)), "BIGINT");
+        assert_eq!(sql_type(&fs("datetime", false)), "TIMESTAMPTZ");
     }
 }

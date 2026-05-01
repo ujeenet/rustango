@@ -84,28 +84,130 @@ impl SessionPayload {
 #[derive(Clone)]
 pub struct SessionSecret(Vec<u8>);
 
+/// Error returned by [`SessionSecret::try_from_env`] when the
+/// `RUSTANGO_SESSION_SECRET` env var is set but the value isn't a
+/// valid signing key. Used by production boot paths that prefer to
+/// fail loudly over silently downgrading to an ephemeral random key.
+#[derive(Debug)]
+pub enum SessionSecretError {
+    /// The env var didn't decode as base64.
+    BadBase64 { cause: String },
+    /// Decoded successfully but the resulting key is fewer than 32
+    /// bytes — too short for HMAC-SHA256.
+    TooShort { actual: usize },
+}
+
+impl core::fmt::Display for SessionSecretError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::BadBase64 { cause } => write!(
+                f,
+                "RUSTANGO_SESSION_SECRET is not valid base64: {cause} \
+                 (generate one with: openssl rand -base64 32)"
+            ),
+            Self::TooShort { actual } => write!(
+                f,
+                "RUSTANGO_SESSION_SECRET decoded to {actual} bytes; need at least 32 \
+                 (generate one with: openssl rand -base64 32)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SessionSecretError {}
+
 impl SessionSecret {
     /// Read the secret from `RUSTANGO_SESSION_SECRET` (base64-encoded
     /// 32+ bytes). Falls back to a randomly generated secret with a
-    /// `tracing::warn` — sessions are then invalidated on every
-    /// server restart, so production should always set the env var.
+    /// `tracing::warn` when the var is *unset* — sessions are then
+    /// invalidated on every server restart.
+    ///
+    /// v0.13.2 — when the var IS set but unparseable (bad base64,
+    /// fewer than 32 bytes), we now ALSO print a loud
+    /// `eprintln!` to stderr in addition to the tracing::warn.
+    /// Operators who set the var and forget to run it through
+    /// `base64` quietly lost session persistence on every redeploy
+    /// before this fix, with the only signal being a structured
+    /// log line buried in the boot output. The eprintln! makes the
+    /// failure mode loud at the boot console.
     #[must_use]
     pub fn from_env_or_random() -> Self {
         if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
             match base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
                 Ok(bytes) if bytes.len() >= 32 => return Self(bytes),
-                Ok(bytes) => tracing::warn!(
-                    target: "crate::tenancy",
-                    actual_len = bytes.len(),
-                    "RUSTANGO_SESSION_SECRET decoded to fewer than 32 bytes — falling back to random",
-                ),
-                Err(e) => tracing::warn!(
-                    target: "crate::tenancy",
-                    error = %e,
-                    "RUSTANGO_SESSION_SECRET is not valid base64 — falling back to random",
-                ),
+                Ok(bytes) => {
+                    tracing::warn!(
+                        target: "crate::tenancy",
+                        actual_len = bytes.len(),
+                        "RUSTANGO_SESSION_SECRET decoded to fewer than 32 bytes — falling back to random",
+                    );
+                    eprintln!(
+                        "\x1b[33;1mwarning:\x1b[0m RUSTANGO_SESSION_SECRET is set but \
+                         decoded to {} bytes (need ≥ 32). Using a random key. \
+                         Sessions will NOT survive a server restart. \
+                         Generate one with: \
+                         openssl rand -base64 32",
+                        bytes.len()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "crate::tenancy",
+                        error = %e,
+                        "RUSTANGO_SESSION_SECRET is not valid base64 — falling back to random",
+                    );
+                    eprintln!(
+                        "\x1b[33;1mwarning:\x1b[0m RUSTANGO_SESSION_SECRET is set but \
+                         is not valid base64 ({}). Using a random key. \
+                         Sessions will NOT survive a server restart. \
+                         Generate one with: \
+                         openssl rand -base64 32",
+                        e
+                    );
+                }
             }
+        } else {
+            tracing::warn!(
+                target: "crate::tenancy",
+                "RUSTANGO_SESSION_SECRET not set — generating random key (sessions \
+                 will not survive server restarts; set the env var for production)",
+            );
         }
+        let mut buf = vec![0u8; 32];
+        rand::thread_rng().fill(&mut buf[..]);
+        Self(buf)
+    }
+
+    /// Strict variant of [`Self::from_env_or_random`]: returns
+    /// `Err(...)` when the env var is *set but unparseable* or
+    /// *too short*. Use this from production boot paths where a
+    /// malformed secret should fail loudly instead of silently
+    /// downgrading to a random ephemeral key.
+    ///
+    /// Behaviour:
+    /// * Var set + ≥ 32 bytes after base64 decode → `Ok(SessionSecret)`.
+    /// * Var set but bad base64 / too short → `Err(SessionSecretError)`.
+    /// * Var unset → `Ok(random key)` with the same warn-and-go path
+    ///   as `from_env_or_random` (this is the dev/test default and
+    ///   is fine in those contexts).
+    ///
+    /// # Errors
+    /// `SessionSecretError::BadBase64` when decode fails;
+    /// `SessionSecretError::TooShort` when the decoded bytes are
+    /// fewer than 32.
+    pub fn try_from_env() -> Result<Self, SessionSecretError> {
+        if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
+            return match base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
+                Ok(bytes) if bytes.len() >= 32 => Ok(Self(bytes)),
+                Ok(bytes) => Err(SessionSecretError::TooShort {
+                    actual: bytes.len(),
+                }),
+                Err(e) => Err(SessionSecretError::BadBase64 {
+                    cause: e.to_string(),
+                }),
+            };
+        }
+        // Var unset is the dev/test path; fall back to random.
         tracing::warn!(
             target: "crate::tenancy",
             "RUSTANGO_SESSION_SECRET not set — generating random key (sessions \
@@ -113,7 +215,7 @@ impl SessionSecret {
         );
         let mut buf = vec![0u8; 32];
         rand::thread_rng().fill(&mut buf[..]);
-        Self(buf)
+        Ok(Self(buf))
     }
 
     /// Construct from raw bytes — useful for tests.

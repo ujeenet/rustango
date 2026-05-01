@@ -79,6 +79,10 @@ pub struct ModelSchema {
     /// didn't override anything; admin code falls back to
     /// [`AdminConfig::DEFAULT`] in that case.
     pub admin: Option<&'static AdminConfig>,
+    /// SQL column name of the field marked `#[rustango(soft_delete)]`,
+    /// if the model has one. The admin uses this to route DELETE requests
+    /// through an UPDATE-set-column-to-NOW path instead of a hard DELETE.
+    pub soft_delete_column: Option<&'static str>,
 }
 
 /// Django ModelAdmin-shape per-model admin customization. Populated by

@@ -48,7 +48,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tera::{Context, Tera};
 
-pub use session::{SessionPayload, SessionSecret};
+pub use session::{SessionPayload, SessionSecret, SessionSecretError};
 use session::{COOKIE_NAME, SESSION_TTL_SECS};
 
 use super::auth;
