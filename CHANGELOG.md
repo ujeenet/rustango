@@ -2,6 +2,22 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.13.3] — `audit-cleanup` manage verb — 2026-05-01
+
+### Added
+
+- **`audit-cleanup` manage CLI verb** — run audit-log retention from cron without
+  going through the admin UI.
+  ```
+  cargo run --bin manage -- audit-cleanup --days 90
+  cargo run --bin manage -- audit-cleanup --keep-last 50
+  cargo run --bin manage -- audit-cleanup --tenant acme --days 90
+  ```
+  Iterates every active tenant (or a single slug with `--tenant`) and calls
+  `audit::cleanup_older_than` / `cleanup_keep_last_n` against each tenant's pool.
+  Reports per-tenant deleted count and a final total. `--days` and `--keep-last` are
+  mutually exclusive; omitting both is a validation error.
+
 ## [v0.13.2] — admin soft-delete + restore; session secret hardening — 2026-05-01
 
 Four postmortem fixes from building rustail (real multi-tenant app). B1 and B3 are

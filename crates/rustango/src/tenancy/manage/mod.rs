@@ -40,6 +40,7 @@
 //! - [`args`] — shared positional / flag parsing helpers.
 
 mod args;
+mod audit;
 mod migrations;
 mod scaffold;
 mod server;
@@ -121,6 +122,7 @@ pub async fn run_with_writer<W: Write + Send>(
         // dispatcher. Plain models/views/urls files are identical
         // across both crates, so the heavy lifting still runs through
         // `rustango::migrate::scaffold::startapp`.
+        "audit-cleanup" => audit::audit_cleanup_cmd(pools, &args[1..], writer).await,
         "startapp" => scaffold::startapp_cmd(&args[1..], writer),
         // Plain `migrate` is scope-aware here — registry-scoped
         // migrations apply to the registry pool first, then tenant-
@@ -252,6 +254,20 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         "  downgrade            Roll back the most recent migration."
     )?;
     writeln!(w)?;
+    writeln!(w, "AUDIT:")?;
+    writeln!(
+        w,
+        "  audit-cleanup --days <N>     Delete entries older than N days (all active tenants)."
+    )?;
+    writeln!(
+        w,
+        "  audit-cleanup --keep-last <N> Keep N most recent entries per row."
+    )?;
+    writeln!(
+        w,
+        "                [--tenant <s>]  Scope to one tenant instead of all."
+    )?;
+    writeln!(w)?;
     writeln!(w, "SERVER:")?;
     writeln!(
         w,
@@ -278,6 +294,8 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(w, "  cargo run --bin manage -- create-tenant acme --display-name 'ACME Corp'")?;
     writeln!(w, "  cargo run --bin manage -- create-user acme alice --password hunter2 --superuser")?;
     writeln!(w, "  cargo run --bin manage -- list-tenants")?;
+    writeln!(w, "  cargo run --bin manage -- audit-cleanup --days 90")?;
+    writeln!(w, "  cargo run --bin manage -- audit-cleanup --keep-last 50 --tenant acme")?;
     writeln!(w)?;
     writeln!(w, "Run any verb with --help for verb-specific flags + details.")?;
     Ok(())
