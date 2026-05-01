@@ -42,6 +42,7 @@
 mod args;
 mod audit;
 mod migrations;
+mod roles;
 mod scaffold;
 mod server;
 mod tenants;
@@ -123,6 +124,13 @@ pub async fn run_with_writer<W: Write + Send>(
         // across both crates, so the heavy lifting still runs through
         // `rustango::migrate::scaffold::startapp`.
         "audit-cleanup" => audit::audit_cleanup_cmd(pools, &args[1..], writer).await,
+        "create-role"  => roles::create_role_cmd(pools, &args[1..], writer).await,
+        "list-roles"   => roles::list_roles_cmd(pools, &args[1..], writer).await,
+        "assign-role"  => roles::assign_role_cmd(pools, &args[1..], writer).await,
+        "revoke-role"  => roles::revoke_role_cmd(pools, &args[1..], writer).await,
+        "grant-perm"   => roles::grant_perm_cmd(pools, &args[1..], writer).await,
+        "revoke-perm"  => roles::revoke_perm_cmd(pools, &args[1..], writer).await,
+        "create-api-key" => roles::create_api_key_cmd(pools, &args[1..], writer).await,
         "startapp" => scaffold::startapp_cmd(&args[1..], writer),
         // Plain `migrate` is scope-aware here — registry-scoped
         // migrations apply to the registry pool first, then tenant-
@@ -253,6 +261,21 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "  downgrade            Roll back the most recent migration."
     )?;
+    writeln!(w)?;
+    writeln!(w, "ROLES & PERMISSIONS:")?;
+    writeln!(w, "  create-role <slug> <name> [--description <s>]")?;
+    writeln!(w, "                       Create a named role on a tenant.")?;
+    writeln!(w, "  list-roles  <slug>   List roles and permission counts.")?;
+    writeln!(w, "  assign-role <slug> <username> <role>")?;
+    writeln!(w, "                       Add a user to a role.")?;
+    writeln!(w, "  revoke-role <slug> <username> <role>")?;
+    writeln!(w, "                       Remove a user from a role.")?;
+    writeln!(w, "  grant-perm  <slug> <name> <codename> [--role]")?;
+    writeln!(w, "                       Grant a codename to a user (default) or role (--role).")?;
+    writeln!(w, "  revoke-perm <slug> <name> <codename> [--role]")?;
+    writeln!(w, "                       Revoke a codename from a user or role.")?;
+    writeln!(w, "  create-api-key <slug> <username> [--label <s>] [--expires-days <N>]")?;
+    writeln!(w, "                       Issue a Bearer API key for a tenant user.")?;
     writeln!(w)?;
     writeln!(w, "AUDIT:")?;
     writeln!(

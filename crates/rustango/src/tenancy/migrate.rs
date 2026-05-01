@@ -238,12 +238,13 @@ async fn run_for_one_tenant(
             // their seed manually. Best-effort — failures here log a
             // warning but don't fail the migration.
             if let Err(e) = crate::audit::ensure_table(&pool).await {
-                tracing::warn!(
-                    target: "crate::tenancy",
-                    slug = %org.slug,
-                    error = %e,
-                    "audit::ensure_table failed for schema-mode tenant",
-                );
+                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "audit::ensure_table failed for schema-mode tenant");
+            }
+            if let Err(e) = super::permissions::ensure_tables(&pool).await {
+                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "permissions::ensure_tables failed for schema-mode tenant");
+            }
+            if let Err(e) = super::auth_backends::ensure_api_keys_table(&pool).await {
+                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "ensure_api_keys_table failed for schema-mode tenant");
             }
             pool.close().await;
             Ok(applied)
@@ -252,12 +253,13 @@ async fn run_for_one_tenant(
             let tenant_pool = pools.pool_for_org(org).await?;
             let applied = migrate::migrate(tenant_pool.pool(), dir).await?;
             if let Err(e) = crate::audit::ensure_table(tenant_pool.pool()).await {
-                tracing::warn!(
-                    target: "crate::tenancy",
-                    slug = %org.slug,
-                    error = %e,
-                    "audit::ensure_table failed for database-mode tenant",
-                );
+                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "audit::ensure_table failed for database-mode tenant");
+            }
+            if let Err(e) = super::permissions::ensure_tables(tenant_pool.pool()).await {
+                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "permissions::ensure_tables failed for database-mode tenant");
+            }
+            if let Err(e) = super::auth_backends::ensure_api_keys_table(tenant_pool.pool()).await {
+                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "ensure_api_keys_table failed for database-mode tenant");
             }
             Ok(applied)
         }

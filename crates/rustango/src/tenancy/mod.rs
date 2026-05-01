@@ -40,14 +40,17 @@
 
 pub mod admin;
 pub mod auth;
+pub mod auth_backends;
 pub mod bootstrap;
 mod error;
 pub mod manage;
 mod manage_interactive;
+pub mod middleware;
 pub mod migrate;
 pub mod operator_console;
 mod org;
 pub mod password;
+pub mod permissions;
 mod pools;
 mod resolver;
 mod secrets;
@@ -55,6 +58,16 @@ pub mod server;
 pub mod tenant_console;
 
 pub use auth::{authenticate_operator, authenticate_user, Operator, User};
+pub use auth_backends::{
+    create_api_key, ensure_api_keys_table, ApiKeyBackend, AuthBackend, AuthError, AuthUser,
+    BoxedBackend, JwtBackend, ModelBackend,
+};
+pub use middleware::{AuthenticatedUser, CurrentUser, RouterAuthExt};
+pub use permissions::{
+    assign_role, clear_user_perm, ensure_tables as ensure_permission_tables, get_or_create_role,
+    grant_role_perm, has_all_perms, has_any_perm, has_perm, model_codenames, remove_role,
+    revoke_role_perm, set_user_perm, user_permissions, user_roles,
+};
 pub use bootstrap::{
     init_tenancy, registry_bootstrap_migration, tenant_bootstrap_migration, InitTenancyReport,
     REGISTRY_BOOTSTRAP_NAME, TENANT_BOOTSTRAP_NAME,
