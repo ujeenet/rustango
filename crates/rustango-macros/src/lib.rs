@@ -991,48 +991,11 @@ fn inherent_impl_tokens(
     column_consts: &TokenStream2,
     audited_fields: Option<&[&ColumnEntry]>,
 ) -> TokenStream2 {
-    // Audit-emit fragment threaded into `insert_on` for Auto-PK
-    // models. Non-empty only when the model carries
-    // `#[rustango(audit(...))]`. The emit reborrows `_executor` (a
-    // `&mut PgConnection` for audited models — the macro switches the
-    // signature below) so the data INSERT and the audit INSERT both
-    // run on the same caller-supplied connection.
-    let audit_insert_emit: TokenStream2 = if let Some(tracked) = audited_fields {
-        let pk_to_string = if let Some((pk_ident, _)) = primary_key {
-            if fields.pk_is_auto {
-                quote!(self.#pk_ident.get().map(|v| ::std::format!("{}", v)).unwrap_or_default())
-            } else {
-                quote!(::std::format!("{}", &self.#pk_ident))
-            }
-        } else {
-            quote!(::std::string::String::new())
-        };
-        let pairs = tracked.iter().map(|c| {
-            let column_lit = c.column.as_str();
-            let ident = &c.ident;
-            quote! {
-                (
-                    #column_lit,
-                    ::serde_json::to_value(&self.#ident)
-                        .unwrap_or(::serde_json::Value::Null),
-                )
-            }
-        });
-        quote! {
-            let _audit_entry = ::rustango::audit::PendingEntry {
-                entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
-                entity_pk: #pk_to_string,
-                operation: ::rustango::audit::AuditOp::Create,
-                source: ::rustango::audit::current_source(),
-                changes: ::rustango::audit::snapshot_changes(&[
-                    #( #pairs ),*
-                ]),
-            };
-            ::rustango::audit::emit_one(&mut *_executor, &_audit_entry).await?;
-        }
-    } else {
-        quote!()
-    };
+    // Audit-emit fragments threaded into write paths. Non-empty only
+    // when the model carries `#[rustango(audit(...))]`. They reborrow
+    // `_executor` (a `&mut PgConnection` for audited models — the
+    // macro switches the signature below) so the data write and the
+    // audit INSERT both run on the same caller-supplied connection.
     let executor_passes_to_data_write = if audited_fields.is_some() {
         quote!(&mut *_executor)
     } else {
@@ -1076,6 +1039,70 @@ fn inherent_impl_tokens(
     } else {
         quote!(self.insert_on(pool).await)
     };
+    let pool_to_delete_on = if audited_fields.is_some() {
+        quote! {
+            let mut _conn = pool.acquire().await?;
+            self.delete_on(&mut *_conn).await
+        }
+    } else {
+        quote!(self.delete_on(pool).await)
+    };
+
+    // Build the (column, JSON value) pair list used by every
+    // snapshot-style audit emission. Reused across delete_on,
+    // soft_delete_on, restore_on, and (later) bulk paths. Empty
+    // when the model isn't audited.
+    let audit_pair_tokens: Vec<TokenStream2> = audited_fields
+        .map(|tracked| {
+            tracked
+                .iter()
+                .map(|c| {
+                    let column_lit = c.column.as_str();
+                    let ident = &c.ident;
+                    quote! {
+                        (
+                            #column_lit,
+                            ::serde_json::to_value(&self.#ident)
+                                .unwrap_or(::serde_json::Value::Null),
+                        )
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let audit_pk_to_string = if let Some((pk_ident, _)) = primary_key {
+        if fields.pk_is_auto {
+            quote!(self.#pk_ident.get().map(|v| ::std::format!("{}", v)).unwrap_or_default())
+        } else {
+            quote!(::std::format!("{}", &self.#pk_ident))
+        }
+    } else {
+        quote!(::std::string::String::new())
+    };
+    let make_op_emit = |op_path: TokenStream2| -> TokenStream2 {
+        if audited_fields.is_some() {
+            let pairs = audit_pair_tokens.iter();
+            let pk_str = audit_pk_to_string.clone();
+            quote! {
+                let _audit_entry = ::rustango::audit::PendingEntry {
+                    entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
+                    entity_pk: #pk_str,
+                    operation: #op_path,
+                    source: ::rustango::audit::current_source(),
+                    changes: ::rustango::audit::snapshot_changes(&[
+                        #( #pairs ),*
+                    ]),
+                };
+                ::rustango::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+            }
+        } else {
+            quote!()
+        }
+    };
+    let audit_insert_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Create));
+    let audit_delete_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Delete));
+    let audit_softdelete_emit = make_op_emit(quote!(::rustango::audit::AuditOp::SoftDelete));
+    let audit_restore_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Restore));
 
     let save_method = if fields.pk_is_auto {
         let (pk_ident, pk_column) = primary_key
@@ -1167,12 +1194,11 @@ fn inherent_impl_tokens(
                 ///
                 /// # Errors
                 /// As [`Self::delete`].
-                pub async fn soft_delete_on<'_c, _E>(
+                pub async fn soft_delete_on #executor_generics (
                     &self,
-                    _executor: _E,
+                    #executor_param,
                 ) -> ::core::result::Result<u64, ::rustango::sql::ExecError>
-                where
-                    _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+                #executor_where
                 {
                     let _query = ::rustango::core::UpdateQuery {
                         model: <Self as ::rustango::core::Model>::SCHEMA,
@@ -1194,7 +1220,12 @@ fn inherent_impl_tokens(
                             }
                         ),
                     };
-                    ::rustango::sql::update_on(_executor, &_query).await
+                    let _affected = ::rustango::sql::update_on(
+                        #executor_passes_to_data_write,
+                        &_query,
+                    ).await?;
+                    #audit_softdelete_emit
+                    ::core::result::Result::Ok(_affected)
                 }
 
                 /// Inverse of [`Self::soft_delete_on`] — clears the
@@ -1203,12 +1234,11 @@ fn inherent_impl_tokens(
                 ///
                 /// # Errors
                 /// As [`Self::delete`].
-                pub async fn restore_on<'_c, _E>(
+                pub async fn restore_on #executor_generics (
                     &self,
-                    _executor: _E,
+                    #executor_param,
                 ) -> ::core::result::Result<u64, ::rustango::sql::ExecError>
-                where
-                    _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+                #executor_where
                 {
                     let _query = ::rustango::core::UpdateQuery {
                         model: <Self as ::rustango::core::Model>::SCHEMA,
@@ -1228,7 +1258,12 @@ fn inherent_impl_tokens(
                             }
                         ),
                     };
-                    ::rustango::sql::update_on(_executor, &_query).await
+                    let _affected = ::rustango::sql::update_on(
+                        #executor_passes_to_data_write,
+                        &_query,
+                    ).await?;
+                    #audit_restore_emit
+                    ::core::result::Result::Ok(_affected)
                 }
             }
         } else {
@@ -1246,7 +1281,7 @@ fn inherent_impl_tokens(
                 &self,
                 pool: &::rustango::sql::sqlx::PgPool,
             ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                self.delete_on(pool).await
+                #pool_to_delete_on
             }
 
             /// Like [`Self::delete`] but accepts any sqlx executor —
@@ -1255,12 +1290,11 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::delete`].
-            pub async fn delete_on<'_c, _E>(
+            pub async fn delete_on #executor_generics (
                 &self,
-                _executor: _E,
+                #executor_param,
             ) -> ::core::result::Result<u64, ::rustango::sql::ExecError>
-            where
-                _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+            #executor_where
             {
                 let query = ::rustango::core::DeleteQuery {
                     model: <Self as ::rustango::core::Model>::SCHEMA,
@@ -1274,7 +1308,12 @@ fn inherent_impl_tokens(
                         }
                     ),
                 };
-                ::rustango::sql::delete_on(_executor, &query).await
+                let _affected = ::rustango::sql::delete_on(
+                    #executor_passes_to_data_write,
+                    &query,
+                ).await?;
+                #audit_delete_emit
+                ::core::result::Result::Ok(_affected)
             }
             #soft_delete_methods
         }

@@ -253,6 +253,100 @@ async fn macro_emits_audit_create_entry_on_insert_on() {
 }
 
 #[tokio::test]
+async fn macro_emits_audit_delete_entry_on_delete_on() {
+    // commit 3b: `delete_on` writes a snapshot of the deleted row's
+    // tracked fields with operation = "delete". Captures the
+    // in-memory `&self` values; no separate before-SELECT.
+    let _g = lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    setup_post(&pool).await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    let mut row = AuditedPost {
+        id: rustango::sql::Auto::default(),
+        title: "doomed".into(),
+        body: "soon gone".into(),
+    };
+    row.insert_on(&mut *conn).await.unwrap();
+    let pk = row.id.get().copied().unwrap();
+    row.delete_on(&mut *conn).await.unwrap();
+
+    let entries = audit::fetch_for_entity(&pool, "rustango_audit_post", &pk.to_string())
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 2, "create + delete entries expected");
+    assert_eq!(entries[0].operation, "delete");
+    assert_eq!(
+        entries[0].changes,
+        json!({ "title": "doomed", "body": "soon gone" })
+    );
+    assert_eq!(entries[1].operation, "create");
+}
+
+// Audited model with the soft_delete mixin so we can exercise both
+// snapshot-shaped audit hooks (delete + soft_delete + restore) on the
+// same model.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rustango_audit_paper", display = "title")]
+#[rustango(audit(track = "title"))]
+#[allow(dead_code)]
+pub struct AuditedPaper {
+    #[rustango(primary_key)]
+    pub id: rustango::sql::Auto<i64>,
+    #[rustango(max_length = 64)]
+    pub title: String,
+    #[rustango(soft_delete)]
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn setup_paper(pool: &sqlx::PgPool) {
+    let _ = sqlx::query(r#"DROP TABLE IF EXISTS "rustango_audit_paper""#)
+        .execute(pool)
+        .await;
+    sqlx::query(
+        r#"CREATE TABLE "rustango_audit_paper" (
+              "id"         BIGSERIAL PRIMARY KEY,
+              "title"      TEXT NOT NULL,
+              "deleted_at" TIMESTAMPTZ NULL
+          )"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    reset(pool).await;
+}
+
+#[tokio::test]
+async fn macro_emits_audit_softdelete_and_restore_entries() {
+    let _g = lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    setup_paper(&pool).await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    let mut row = AuditedPaper {
+        id: rustango::sql::Auto::default(),
+        title: "draft".into(),
+        deleted_at: None,
+    };
+    row.insert_on(&mut *conn).await.unwrap();
+    let pk = row.id.get().copied().unwrap();
+
+    row.soft_delete_on(&mut *conn).await.unwrap();
+    row.restore_on(&mut *conn).await.unwrap();
+
+    let entries = audit::fetch_for_entity(&pool, "rustango_audit_paper", &pk.to_string())
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 3, "create + soft_delete + restore expected");
+    let ops: Vec<&str> = entries.iter().map(|e| e.operation.as_str()).collect();
+    assert_eq!(ops, vec!["restore", "soft_delete", "create"]);
+}
+
+#[tokio::test]
 async fn macro_emits_audit_with_user_source_inside_with_source_scope() {
     // The `with_source` task-local override propagates into the
     // macro-emitted hook so admin handlers can attribute writes to
