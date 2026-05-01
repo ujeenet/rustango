@@ -25,6 +25,8 @@ pub(crate) fn chrome_context(state: &AppState, active_table: Option<&str>) -> se
     serde_json::json!({
         "sidebar_groups": sidebar_context(state, active_table),
         "active_table": active_table.unwrap_or(""),
+        "admin_title": state.config.title.as_deref().unwrap_or("rustango admin"),
+        "admin_subtitle": state.config.subtitle.as_deref(),
     })
 }
 
@@ -234,14 +236,17 @@ pub(crate) fn render_form(
     pk_locked: bool,
     error_msg: Option<&str>,
 ) -> String {
-    let action = if pk_locked {
+    let (action, edit_pk) = if pk_locked {
         let pk_field = model.primary_key().expect("pk_locked requires a PK");
         let pk_value = prefill
             .and_then(|m| m.get(pk_field.name).cloned())
             .unwrap_or_default();
-        format!("/__admin/{}/{}", model.table, render::escape(&pk_value))
+        (
+            format!("/__admin/{}/{}", model.table, render::escape(&pk_value)),
+            Some(pk_value),
+        )
     } else {
-        format!("/__admin/{}", model.table)
+        (format!("/__admin/{}", model.table), None)
     };
     let title = if pk_locked {
         format!("Edit {}", model.name)
@@ -323,6 +328,7 @@ pub(crate) fn render_form(
         "model": { "name": model.name, "table": model.table },
         "title": title,
         "action": action,
+        "edit_pk": edit_pk,
         "error": error_msg,
         "fieldsets": fieldsets_ctx,
     });

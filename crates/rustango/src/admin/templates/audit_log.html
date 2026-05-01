@@ -1,7 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Activity — rustango admin{% endblock title %}
 {% block body %}
-<p><a href="/__admin/">&larr; admin home</a></p>
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <ol>
+    <li><a href="/__admin/">{{ admin_title }}</a></li>
+    <li><strong>Activity</strong></li>
+  </ol>
+</nav>
 <h1>Activity</h1>
 <p>{{ total }} audit entr{% if total == 1 %}y{% else %}ies{% endif %} across every model. Newest first.</p>
 

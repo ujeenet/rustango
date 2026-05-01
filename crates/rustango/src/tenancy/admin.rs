@@ -83,6 +83,8 @@ pub struct TenantAdminBuilder {
     read_only: Vec<String>,
     session: Option<Arc<TenantSessionConfig>>,
     actions: Vec<RegisteredAction>,
+    title: Option<String>,
+    subtitle: Option<String>,
 }
 
 /// One row in the action registry threaded through the tenant admin
@@ -121,7 +123,23 @@ impl TenantAdminBuilder {
             read_only: Vec::new(),
             session: None,
             actions: Vec::new(),
+            title: None,
+            subtitle: None,
         }
+    }
+
+    /// Set the display name shown in the admin sidebar header.
+    #[must_use]
+    pub fn title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Set an optional subtitle shown below the title.
+    #[must_use]
+    pub fn subtitle(mut self, subtitle: impl Into<String>) -> Self {
+        self.subtitle = Some(subtitle.into());
+        self
     }
 
     /// Enable per-tenant auth. Anon traffic gets redirected to
@@ -210,6 +228,8 @@ impl TenantAdminBuilder {
         let read_only = Arc::new(self.read_only);
         let session = self.session;
         let actions = Arc::new(self.actions);
+        let title = Arc::new(self.title);
+        let subtitle = Arc::new(self.subtitle);
 
         Router::new().fallback(move |req: Request<Body>| {
             let pools = pools.clone();
@@ -219,6 +239,8 @@ impl TenantAdminBuilder {
             let read_only = read_only.clone();
             let session = session.clone();
             let actions = actions.clone();
+            let title = title.clone();
+            let subtitle = subtitle.clone();
             async move {
                 handle_request(
                     req,
@@ -229,6 +251,8 @@ impl TenantAdminBuilder {
                     &read_only,
                     session.as_deref(),
                     &actions,
+                    title.as_deref().as_deref(),
+                    subtitle.as_deref().as_deref(),
                 )
                 .await
             }
@@ -245,6 +269,8 @@ async fn handle_request(
     read_only: &[String],
     session: Option<&TenantSessionConfig>,
     actions: &[RegisteredAction],
+    title: Option<&str>,
+    subtitle: Option<&str>,
 ) -> Response {
     let (mut parts, body) = req.into_parts();
     let org = match resolver.resolve(&parts, pools.registry()).await {
@@ -323,6 +349,8 @@ async fn handle_request(
         read_only,
         force_read_only,
         actions,
+        title,
+        subtitle,
     );
 
     // Strip the `/__admin` mount prefix from the request URI so the
@@ -743,6 +771,8 @@ fn build_inner_admin_router(
     read_only: &[String],
     force_read_only_all: bool,
     actions: &[RegisteredAction],
+    title: Option<&str>,
+    subtitle: Option<&str>,
 ) -> Router {
     let mut builder = crate::admin::Builder::new(pool);
     if let Some(allow) = show_only {
@@ -753,6 +783,12 @@ fn build_inner_admin_router(
     }
     if force_read_only_all {
         builder = builder.read_only_all();
+    }
+    if let Some(t) = title {
+        builder = builder.title(t);
+    }
+    if let Some(s) = subtitle {
+        builder = builder.subtitle(s);
     }
     for action in actions {
         let handler = action.handler.clone();

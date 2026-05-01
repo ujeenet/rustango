@@ -65,6 +65,10 @@ pub struct Builder {
 
 #[derive(Clone, Default)]
 pub(crate) struct Config {
+    /// Display name shown in the sidebar header. `None` → "rustango admin".
+    pub(crate) title: Option<String>,
+    /// Optional subtitle shown below the title in the sidebar.
+    pub(crate) subtitle: Option<String>,
     /// Tables visible in the admin. `None` = every registered model.
     pub(crate) allowed_tables: Option<HashSet<String>>,
     /// Tables whose mutating routes are blocked and whose write-buttons
@@ -124,6 +128,19 @@ impl Builder {
     /// don't want to enumerate every table per request.
     pub fn read_only_all(mut self) -> Self {
         self.config.read_only_all = true;
+        self
+    }
+
+    /// Set the admin title shown in the sidebar header.
+    /// Defaults to `"rustango admin"` when not set.
+    pub fn title(mut self, title: impl Into<String>) -> Self {
+        self.config.title = Some(title.into());
+        self
+    }
+
+    /// Set the subtitle shown below the title in the sidebar (optional).
+    pub fn subtitle(mut self, subtitle: impl Into<String>) -> Self {
+        self.config.subtitle = Some(subtitle.into());
         self
     }
 

@@ -26,6 +26,8 @@ pub struct Builder {
     pools: Arc<TenantPools>,
     registry: PgPool,
     show_only: Vec<String>,
+    admin_title: Option<String>,
+    admin_subtitle: Option<String>,
     api: Option<ApiRouter>,
     admin_actions: Vec<PendingAction>,
 }
@@ -56,9 +58,26 @@ impl Builder {
             pools,
             registry,
             show_only: Vec::new(),
+            admin_title: None,
+            admin_subtitle: None,
             api: None,
             admin_actions: Vec::new(),
         })
+    }
+
+    /// Set the display name shown in the tenant admin sidebar header.
+    /// Defaults to `"rustango admin"` when not called.
+    #[must_use]
+    pub fn admin_title(mut self, title: impl Into<String>) -> Self {
+        self.admin_title = Some(title.into());
+        self
+    }
+
+    /// Set an optional subtitle shown below the admin title in the sidebar.
+    #[must_use]
+    pub fn admin_subtitle(mut self, subtitle: impl Into<String>) -> Self {
+        self.admin_subtitle = Some(subtitle.into());
+        self
     }
 
     /// Limit the auto-mounted tenant admin to a subset of registered
@@ -216,6 +235,12 @@ impl Builder {
         );
         if !self.show_only.is_empty() {
             tenant_admin_builder = tenant_admin_builder.show_only(self.show_only.clone());
+        }
+        if let Some(t) = self.admin_title {
+            tenant_admin_builder = tenant_admin_builder.title(t);
+        }
+        if let Some(s) = self.admin_subtitle {
+            tenant_admin_builder = tenant_admin_builder.subtitle(s);
         }
         for action in self.admin_actions {
             let handler = action.handler;

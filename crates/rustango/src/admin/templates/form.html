@@ -1,7 +1,14 @@
 {% extends "base.html" %}
 {% block title %}{{ title }} — rustango admin{% endblock title %}
 {% block body %}
-<p><a href="/__admin/">admin</a> &rsaquo; <a href="/__admin/{{ model.table }}">{{ model.name }}</a></p>
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <ol>
+    <li><a href="/__admin/">{{ admin_title }}</a></li>
+    <li><a href="/__admin/{{ model.table }}">{{ model.name }}</a></li>
+    {% if edit_pk %}<li><a href="/__admin/{{ model.table }}/{{ edit_pk }}">#{{ edit_pk }}</a></li>{% endif %}
+    <li><strong>{{ title }}</strong></li>
+  </ol>
+</nav>
 <h1>{{ title }}</h1>
 {% if error %}
 <p class="error">{{ error }}</p>

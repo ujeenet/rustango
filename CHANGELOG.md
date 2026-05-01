@@ -2,6 +2,27 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.14.2] — full-width admin; custom title; semantic breadcrumbs — 2026-05-01
+
+### Added
+
+- **`Builder::admin_title(name)` / `Builder::admin_subtitle(name)`** — set the text
+  shown in the admin sidebar header. Defaults to `"rustango admin"`. Example:
+  `.admin_title("Rustail Admin")`.
+
+- **`admin::Builder::title()` / `subtitle()`** — same API on the standalone admin
+  builder for non-tenancy projects.
+
+- **Semantic breadcrumbs** — every admin page now uses
+  `<nav class="breadcrumb" aria-label="breadcrumb"><ol><li>` with a CSS `::before`
+  separator. Root crumb uses the configurable admin title; subsequent crumbs show
+  the model name and (on detail/edit) the row PK. Old bare `<p>` links removed.
+
+### Changed
+
+- **Admin content area is now full-width** — removed `max-width: 1100px` from
+  `main.content` so list, detail, and form views fill the viewport inside the sidebar.
+
 ## [v0.14.1] — admin under `/__admin/`; readonly_fields skip on create — 2026-05-01
 
 ### Fixed
