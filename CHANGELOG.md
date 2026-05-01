@@ -2,6 +2,26 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.14.0] — FK facet dropdown — 2026-05-01
+
+### Added
+
+- **FK `list_filter` facets render as `<select>` dropdowns** instead of link lists.
+  When a `list_filter` field has a `Relation::Fk` (or `O2O`) on its `FieldSchema`,
+  `compute_facets` now sets `is_fk: true` and adds a `clear_url` (the "— all —"
+  option). The `list.html` template renders these fields as a `<select>` with one
+  `data-href` attribute per option and a one-line `onchange` handler that navigates
+  directly — no form POST, no extra JS dependency. Non-FK facets keep the existing
+  link list. Filtering behaviour is unchanged (URL still carries the raw PK value
+  which the ORM accepts as-is).
+
+### Browser-verified
+
+- `Post` admin list with `list_filter = ["author", "published_at"]`:
+  "BY AUTHOR" renders a dropdown; selecting "Alice Kowalski (2)" navigates to
+  `?author=1` and shows 2 rows with the dropdown pre-selected. "BY PUBLISHED"
+  keeps the link list. "— all —" clears the filter back to the full list.
+
 ## [v0.13.3] — `audit-cleanup` manage verb — 2026-05-01
 
 ### Added

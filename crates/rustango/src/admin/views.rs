@@ -510,11 +510,30 @@ async fn compute_facets(
         } else {
             None
         };
+        // For FK facets, build a "clear" URL (removes this filter) used
+        // as the "All" option in the <select> dropdown renderer.
+        let clear_url = if fk_join.is_some() {
+            let mut params: Vec<(String, String)> = Vec::new();
+            if let Some(qv) = q {
+                params.push(("q".into(), qv.into()));
+            }
+            for (k, v) in active_field_filters {
+                if *k == field.name {
+                    continue;
+                }
+                params.push(((*k).into(), v.clone()));
+            }
+            Some(build_query_url(model.table, &params))
+        } else {
+            None
+        };
         out.push(serde_json::json!({
             "field": field.name,
+            "is_fk": fk_join.is_some(),
             "values": values,
             "more_count": more_count,
             "show_all_url": show_all_url,
+            "clear_url": clear_url,
         }));
     }
     Ok(out)
