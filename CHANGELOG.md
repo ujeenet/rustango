@@ -12,13 +12,13 @@ Pulling the auto-admin from "functional CRUD" toward Django ModelAdmin shape. v0
 - **Per-model `#[rustango(admin(...))]` attribute (slice 10.2)** — Django ModelAdmin-shape knobs declared inline on the model derive, surfaced as `ModelSchema.admin: Option<&'static AdminConfig>`. Field-name lists (`list_display`, `search_fields`, `readonly_fields`, `ordering`) are validated against declared fields at compile time via `compile_error!`.
 - **`list_display` / `search_fields` / `list_per_page` / `ordering` driven by the new attribute (slice 10.3)** — list view's columns, search columns, page size, and default sort all read from `AdminConfig`. Defaults preserve today's behavior so existing models render identically. Django-shape `-name` syntax for descending order.
 - **`list_filter` right-rail facet filters (slice 10.4)** — declare `admin(list_filter = "field1, field2")` and the list view grows a right rail with one card per facet showing every distinct value with its row count. Clicking a value toggles `?<col>=<value>` in the URL; clicking the active value clears the filter. Two-column subgrid collapses below a 1000px viewport. SQL is one `GROUP BY` round-trip per facet (acceptable for low-cardinality fields; high-cardinality fields should not be added to `list_filter`).
+- **Bulk actions (slice 10.6)** — declare `admin(actions = "delete_selected")` and the list view grows an action picker `<select>` + `Go` button at the top of the table, plus a per-row checkbox. Selected PKs POST to `/<table>/__action` and the named action runs in a single round-trip. Built-in: `delete_selected`. Action names that aren't in the model's allowlist are rejected with a 500 (defense against URL guessing). User-defined action handlers queue for v0.11.
 
 ### Schedule
 
 Remaining v0.10 slices queued behind these (see in-tree plan `v010-admin-django-parity.md`):
 
 - 10.5 — `fieldsets` + `readonly_fields` rendering on the create/edit form
-- 10.6 — bulk actions
 - 10.7 — `list_select_related` / `list_prefetch_related` for FK perf (would also let facets render FK target names instead of raw PK numbers)
 
 ## [v0.9.1] — multi-tenant polish — 2026-04-30

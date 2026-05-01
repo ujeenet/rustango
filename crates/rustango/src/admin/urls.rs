@@ -98,6 +98,7 @@ impl Builder {
             .route("/", get(views::index))
             .route("/{table}", get(views::table_view).post(views::create_submit))
             .route("/{table}/new", get(views::create_form))
+            .route("/{table}/__action", post(views::action_submit))
             .route(
                 "/{table}/{pk}",
                 get(views::detail_view).post(views::update_submit),

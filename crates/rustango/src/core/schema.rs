@@ -113,6 +113,11 @@ pub struct AdminConfig {
     /// value in the table; clicking a value toggles `?<col>=<value>`
     /// in the URL. Empty slice means "no facets" (today's behavior).
     pub list_filter: &'static [&'static str],
+    /// Bulk actions exposed at the top of the list view. Each name
+    /// corresponds to a built-in or user-registered handler that
+    /// receives the selected row PKs. Built-in: `"delete_selected"`.
+    /// Empty slice means the action picker is hidden.
+    pub actions: &'static [&'static str],
 }
 
 impl AdminConfig {
@@ -125,6 +130,7 @@ impl AdminConfig {
         ordering: &[],
         readonly_fields: &[],
         list_filter: &[],
+        actions: &[],
     };
 }
 

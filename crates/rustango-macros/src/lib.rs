@@ -862,6 +862,13 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
         .unwrap_or(&[]);
     let list_filter_lits = list_filter.iter().map(|s| s.as_str());
 
+    let actions = admin
+        .actions
+        .as_ref()
+        .map(|(v, _)| v.as_slice())
+        .unwrap_or(&[]);
+    let actions_lits = actions.iter().map(|s| s.as_str());
+
     let list_per_page = admin.list_per_page.unwrap_or(0);
 
     let ordering_pairs = admin
@@ -883,6 +890,7 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
             ordering: &[ #( #ordering_tokens ),* ],
             readonly_fields: &[ #( #readonly_fields_lits ),* ],
             list_filter: &[ #( #list_filter_lits ),* ],
+            actions: &[ #( #actions_lits ),* ],
         })
     }
 }
@@ -1459,6 +1467,9 @@ struct AdminAttrs {
     ordering: Option<(Vec<(String, bool)>, proc_macro2::Span)>,
     readonly_fields: Option<(Vec<String>, proc_macro2::Span)>,
     list_filter: Option<(Vec<String>, proc_macro2::Span)>,
+    /// Bulk action names. No field-validation against model fields —
+    /// these are action handlers, not column references.
+    actions: Option<(Vec<String>, proc_macro2::Span)>,
 }
 
 fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
@@ -1528,10 +1539,16 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                             Some((split_field_list(&s.value()), s.span()));
                         return Ok(());
                     }
+                    if inner.path.is_ident("actions") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        admin.actions =
+                            Some((split_field_list(&s.value()), s.span()));
+                        return Ok(());
+                    }
                     Err(inner.error(
                         "unknown admin attribute (supported: \
                          `list_display`, `search_fields`, `readonly_fields`, \
-                         `list_filter`, `list_per_page`, `ordering`)",
+                         `list_filter`, `list_per_page`, `ordering`, `actions`)",
                     ))
                 })?;
                 out.admin = Some(admin);

@@ -34,24 +34,45 @@
 {% if rows | length == 0 %}
 <p><em>No rows on this page.</em></p>
 {% else %}
-<table>
-  <thead>
-    <tr>
-    {% for col in columns %}
-      <th>{{ col.label | safe }}</th>
+<form method="post" action="/{{ model.table }}/__action" class="list-form">
+  {% if actions and actions | length > 0 and not read_only %}
+  <div class="action-bar">
+    <label>Action:
+      <select name="action">
+        <option value="">— select —</option>
+        {% for a in actions %}
+        <option value="{{ a.name }}">{{ a.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">Go</button>
+  </div>
+  {% endif %}
+  <table>
+    <thead>
+      <tr>
+      {% if actions and actions | length > 0 and not read_only %}
+        <th class="checkbox-col"></th>
+      {% endif %}
+      {% for col in columns %}
+        <th>{{ col.label | safe }}</th>
+      {% endfor %}
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in rows %}
+      <tr>
+        {% if actions and actions | length > 0 and not read_only %}
+        <td class="checkbox-col">{% if row.pk %}<input type="checkbox" name="_selected" value="{{ row.pk }}">{% endif %}</td>
+        {% endif %}
+        {% for cell in row.cells %}<td>{{ cell | safe }}</td>{% endfor %}
+        <td>{% if row.pk %}<a href="/{{ model.table }}/{{ row.pk }}">view</a>{% endif %}</td>
+      </tr>
     {% endfor %}
-      <th></th>
-    </tr>
-  </thead>
-  <tbody>
-  {% for row in rows %}
-    <tr>
-      {% for cell in row.cells %}<td>{{ cell | safe }}</td>{% endfor %}
-      <td>{% if row.pk %}<a href="/{{ model.table }}/{{ row.pk }}">view</a>{% endif %}</td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
+    </tbody>
+  </table>
+</form>
 {% endif %}
 
 {% if last_page > 1 %}

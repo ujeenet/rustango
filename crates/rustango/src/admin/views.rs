@@ -285,6 +285,20 @@ pub(crate) async fn table_view(
     let facets_ctx: Vec<serde_json::Value> =
         compute_facets(&state, model, &admin_cfg, &active_field_filters, q.as_deref()).await?;
 
+    // Action menu items (slice 10.6). Empty when the model declares
+    // no `admin.actions`, hiding the picker entirely.
+    let actions_ctx: Vec<serde_json::Value> = admin_cfg
+        .actions
+        .iter()
+        .map(|name| {
+            let label = match *name {
+                "delete_selected" => "Delete selected".to_owned(),
+                other => other.replace('_', " "),
+            };
+            serde_json::json!({ "name": name, "label": label })
+        })
+        .collect();
+
     let mut ctx = serde_json::json!({
         "model": { "name": model.name, "table": model.table },
         "total": total,
@@ -294,6 +308,7 @@ pub(crate) async fn table_view(
         "q": q.unwrap_or_default(),
         "active_filters": active_filters_ctx,
         "facets": facets_ctx,
+        "actions": actions_ctx,
         "columns": columns_ctx,
         "rows": rows_ctx,
         "page": page,
@@ -681,6 +696,103 @@ pub(crate) async fn delete_submit(
         },
     )
     .await?;
+
+    Ok(Redirect::to(&format!("/{}", model.table)).into_response())
+}
+
+// ============================================================== ACTIONS (slice 10.6)
+
+/// `POST /<table>/__action` — bulk action handler. Form payload:
+///
+/// ```text
+/// action=<name>&_selected=<pk1>&_selected=<pk2>&...
+/// ```
+///
+/// `<name>` must be in the model's `admin.actions` allowlist. The
+/// built-in `delete_selected` runs `DELETE WHERE pk IN (...)` in a
+/// single round-trip. Unknown action names → 400. No selected rows or
+/// no action chosen → silent redirect back to the list.
+pub(crate) async fn action_submit(
+    Path(table): Path<String>,
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<Response, AdminError> {
+    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound {
+        table: table.clone(),
+    })?;
+    if state.is_read_only(model.table) {
+        return Err(AdminError::ReadOnly {
+            table: model.table.to_owned(),
+        });
+    }
+
+    // Parse the form preserving repeats. axum's `Form<HashMap>` would
+    // collapse duplicate `_selected` keys into one; we read the raw
+    // body and use `serde_urlencoded` over a Vec<(String, String)>.
+    let pairs: Vec<(String, String)> = serde_urlencoded::from_bytes(&body)
+        .map_err(|e| AdminError::Internal(format!("parse action form: {e}")))?;
+
+    let mut action_name: Option<String> = None;
+    let mut selected_raw: Vec<String> = Vec::new();
+    for (k, v) in pairs {
+        if k == "action" {
+            action_name = Some(v);
+        } else if k == "_selected" {
+            selected_raw.push(v);
+        }
+    }
+    let Some(action) = action_name.filter(|s| !s.is_empty()) else {
+        // No action picked — just bounce back to the list.
+        return Ok(Redirect::to(&format!("/{}", model.table)).into_response());
+    };
+    if selected_raw.is_empty() {
+        return Ok(Redirect::to(&format!("/{}", model.table)).into_response());
+    }
+
+    let admin_cfg = model
+        .admin
+        .copied()
+        .unwrap_or(crate::core::AdminConfig::DEFAULT);
+    if !admin_cfg.actions.iter().any(|a| *a == action) {
+        return Err(AdminError::Internal(format!(
+            "action `{action}` not registered for `{}`",
+            model.name
+        )));
+    }
+
+    let pk_field = model.primary_key().ok_or_else(|| {
+        AdminError::Internal(format!("model `{}` has no primary key", model.name))
+    })?;
+
+    match action.as_str() {
+        "delete_selected" => {
+            let pk_values: Vec<SqlValue> = selected_raw
+                .iter()
+                .filter_map(|raw| forms::parse_pk_string(pk_field, raw).ok())
+                .collect();
+            if pk_values.is_empty() {
+                return Ok(Redirect::to(&format!("/{}", model.table)).into_response());
+            }
+            crate::sql::delete(
+                &state.pool,
+                &DeleteQuery {
+                    model,
+                    where_clause: WhereExpr::Predicate(Filter {
+                        column: pk_field.column,
+                        op: Op::In,
+                        value: SqlValue::List(pk_values),
+                    }),
+                },
+            )
+            .await?;
+        }
+        other => {
+            return Err(AdminError::Internal(format!(
+                "action `{other}` is in `admin.actions` but no handler is registered \
+                 (built-ins: delete_selected)"
+            )));
+        }
+    }
 
     Ok(Redirect::to(&format!("/{}", model.table)).into_response())
 }

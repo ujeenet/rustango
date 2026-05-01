@@ -60,6 +60,7 @@ pub struct AdminWidget {
     list_filter = "color",
     list_per_page = 10,
     ordering = "-name",
+    actions = "delete_selected",
 ))]
 pub struct AdminDjango {
     #[rustango(primary_key)]
@@ -1971,6 +1972,134 @@ async fn list_filter_active_value_highlights_and_filters_rows() {
         body.contains(r#"class="active">red<"#),
         "active facet link not highlighted: {body}"
     );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn actions_attr_renders_action_picker_and_checkboxes() {
+    // Slice 10.6: `admin(actions = "delete_selected")` shows the
+    // action `<select>` and a `_selected` checkbox per row.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed_admin_django(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_django")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(resp).await;
+    assert!(
+        body.contains(r#"<select name="action">"#),
+        "action picker missing: {body}"
+    );
+    assert!(
+        body.contains(r#"value="delete_selected""#),
+        "delete_selected option missing: {body}"
+    );
+    assert!(
+        body.contains(r#"name="_selected""#),
+        "row checkbox missing: {body}"
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn delete_selected_action_removes_named_rows() {
+    // Slice 10.6 round-trip: POST `/<table>/__action` with
+    // action=delete_selected and the picked PKs. Targeted rows go
+    // away in a single SQL round-trip (DELETE WHERE pk IN (...)).
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed_admin_django(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    // `axum::http::Form` doesn't support repeated keys for `Vec` —
+    // we simulate the browser's classic form encoding by hand.
+    let body =
+        "action=delete_selected&_selected=1&_selected=2".to_owned();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin_django/__action")
+                .header(
+                    header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok()),
+        Some("/admin_django"),
+    );
+
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM admin_django")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 1, "expected 1 row left after deleting 2 of 3");
+    let last: String =
+        sqlx::query_scalar("SELECT name FROM admin_django")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(last, "charlie", "unexpected survivor: {last}");
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn unknown_action_returns_500() {
+    // Action name not in `admin.actions` allowlist → 500. Prevents a
+    // user from naming an arbitrary string and expecting it to run.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed_admin_django(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let body = "action=nuke_everything&_selected=1".to_owned();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin_django/__action")
+                .header(
+                    header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM admin_django")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 3, "rows must not be touched on unknown action");
 
     migrate::drop_all(&pool).await.unwrap();
 }
