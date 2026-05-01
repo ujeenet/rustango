@@ -49,6 +49,28 @@ pub struct AdminWidget {
     label: String,
 }
 
+/// Slice 10.2/10.3 fixture: model with `admin(...)` attribute set so we
+/// can assert `list_display`, `search_fields`, and `ordering` flow into
+/// the rendered list view + executed SQL.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "admin_django", display = "name")]
+#[rustango(admin(
+    list_display = "name, color",
+    search_fields = "name",
+    list_per_page = 10,
+    ordering = "-name",
+))]
+pub struct AdminDjango {
+    #[rustango(primary_key)]
+    id: i64,
+    #[rustango(max_length = 32)]
+    name: String,
+    #[rustango(max_length = 16)]
+    color: String,
+    #[rustango(max_length = 200)]
+    notes: String,
+}
+
 fn live_lock() -> &'static Mutex<()> {
     static M: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
     M.get_or_init(|| Mutex::new(()))
@@ -1669,6 +1691,213 @@ async fn pager_links_preserve_search_and_filters() {
     assert!(
         body.contains("page=2") && body.contains("q=alpha") && body.contains("is_active=true"),
         "pager dropped filters: {body}",
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+// ============================================================== SLICE 10.2 + 10.3
+//
+// Per-model `#[rustango(admin(...))]` attribute drives `list_display`,
+// `search_fields`, `list_per_page`, and `ordering` on the list view.
+
+async fn seed_admin_django(pool: &sqlx::PgPool) {
+    migrate::drop_all(pool).await.unwrap();
+    migrate::apply_all(pool).await.unwrap();
+    for (id, name, color, notes) in [
+        (1_i64, "alpha", "red", "first row"),
+        (2, "bravo", "green", "second"),
+        (3, "charlie", "blue", "third"),
+    ] {
+        AdminDjango {
+            id,
+            name: name.into(),
+            color: color.into(),
+            notes: notes.into(),
+        }
+        .insert(pool)
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn list_display_attr_renders_only_named_columns() {
+    // `admin(list_display = "name, color")` — `id` and `notes` must NOT
+    // appear in the list view's <thead>. `name` and `color` must.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed_admin_django(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_django")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(resp).await;
+    let head = body
+        .split("<tbody")
+        .next()
+        .expect("tbody marker present");
+    assert!(head.contains(">name<"), "name column missing: {head}");
+    assert!(head.contains(">color<"), "color column missing: {head}");
+    assert!(
+        !head.contains(">id<"),
+        "id should be hidden by list_display: {head}"
+    );
+    assert!(
+        !head.contains(">notes<"),
+        "notes should be hidden by list_display: {head}"
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn search_fields_attr_filters_by_named_columns() {
+    // `admin(search_fields = "name")` — `?q=alpha` must match the
+    // `name=alpha` row and only that row, not `notes` or `color`.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed_admin_django(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_django?q=alpha")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(resp).await;
+    assert!(body.contains(">alpha<"), "alpha row missing: {body}");
+    assert!(!body.contains(">bravo<"), "bravo leaked: {body}");
+    assert!(!body.contains(">charlie<"), "charlie leaked: {body}");
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn ordering_attr_drives_sort_order() {
+    // `admin(ordering = "-name")` — rows should come back in reverse
+    // alphabetic order (charlie, bravo, alpha).
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed_admin_django(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_django")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(resp).await;
+    let charlie = body.find(">charlie<").expect("charlie row present");
+    let bravo = body.find(">bravo<").expect("bravo row present");
+    let alpha = body.find(">alpha<").expect("alpha row present");
+    assert!(
+        charlie < bravo && bravo < alpha,
+        "expected reverse-name order; got positions charlie={charlie} bravo={bravo} alpha={alpha}"
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn no_admin_attr_falls_back_to_all_scalar_fields() {
+    // Sanity: `AdminUser` has no `admin(...)` attribute — every scalar
+    // column (id, name, age, is_active) must render as a column.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(resp).await;
+    let head = body
+        .split("<tbody")
+        .next()
+        .expect("tbody marker present");
+    for col in ["id", "name", "age", "is_active"] {
+        assert!(
+            head.contains(&format!(">{col}")),
+            "expected default-list_display column `{col}`: {head}"
+        );
+    }
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn sidebar_renders_on_admin_pages() {
+    // Slice 10.1 regression: every admin page now embeds the sidebar
+    // partial. Assert the sidebar's `<aside class="sidebar">` shell
+    // appears on the index, list, and detail routes, and that the
+    // active table gets `class="active"` highlighted.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    for path in ["/", "/admin_user", "/admin_user/1"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(r#"<aside class="sidebar">"#),
+            "sidebar missing on `{path}`: {body}"
+        );
+    }
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_user")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(resp).await;
+    assert!(
+        body.contains(r#"href="/admin_user" class="active""#),
+        "active sidebar link not highlighted: {body}"
     );
 
     migrate::drop_all(&pool).await.unwrap();

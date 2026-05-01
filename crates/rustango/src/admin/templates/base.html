@@ -4,9 +4,22 @@
 <meta charset="utf-8">
 <title>{% block title %}rustango admin{% endblock title %}</title>
 <style>
-body { font-family: -apple-system, system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
-table { border-collapse: collapse; width: 100%; }
-th, td { border: 1px solid #ccc; padding: .35rem .6rem; text-align: left; vertical-align: top; }
+* { box-sizing: border-box; }
+body { font-family: -apple-system, system-ui, sans-serif; margin: 0; min-height: 100vh; background: #fafafa; color: #222; }
+.layout { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+aside.sidebar { background: #f4eee7; border-right: 1px solid #e0d8cc; padding: 1.25rem 1rem; font-size: .9em; }
+aside.sidebar h2 { margin: 0 0 .25rem 0; font-size: 1.1rem; color: #b03a2e; letter-spacing: .03em; }
+aside.sidebar p.subtitle { margin: 0 0 1.25rem 0; font-size: .85em; color: #666; }
+aside.sidebar h3 { margin: 1rem 0 .35rem 0; font-size: .8em; text-transform: uppercase; letter-spacing: .05em; color: #888; font-weight: 600; }
+aside.sidebar ul { list-style: none; padding: 0; margin: 0; }
+aside.sidebar li { margin: .15rem 0; }
+aside.sidebar a { display: block; padding: .25rem .5rem; border-radius: 3px; color: #333; text-decoration: none; }
+aside.sidebar a:hover { background: rgba(0,0,0,.05); }
+aside.sidebar a.active { background: #fff; color: #b03a2e; font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+aside.sidebar .empty { color: #aaa; font-style: italic; font-size: .85em; }
+main.content { padding: 1.5rem 2rem; max-width: 1100px; }
+table { border-collapse: collapse; width: 100%; background: #fff; }
+th, td { border: 1px solid #ddd; padding: .35rem .6rem; text-align: left; vertical-align: top; }
 th { background: #f4f4f4; }
 a { color: #0a4; text-decoration: none; }
 a:hover { text-decoration: underline; }
@@ -24,9 +37,19 @@ textarea { min-height: 4rem; }
 button { padding: .4rem 1rem; font: inherit; cursor: pointer; }
 dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; }
 dt { font-weight: bold; }
+@media (max-width: 720px) {
+  .layout { grid-template-columns: 1fr; }
+  aside.sidebar { border-right: none; border-bottom: 1px solid #e0d8cc; }
+  main.content { padding: 1rem; }
+}
 </style>
 </head>
 <body>
+<div class="layout">
+  {% include "_sidebar.html" %}
+  <main class="content">
 {% block body %}{% endblock body %}
+  </main>
+</div>
 </body>
 </html>

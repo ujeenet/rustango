@@ -9,6 +9,7 @@ use crate::core::{inventory, FieldSchema, Join, ModelEntry, ModelSchema, Relatio
 use crate::sql::sqlx;
 
 use super::render;
+#[allow(unused_imports)]
 use super::templates::render_template;
 use super::urls::AppState;
 
@@ -16,6 +17,66 @@ use super::urls::AppState;
 /// Populated from joined rows so list/detail rendering needs no extra
 /// per-FK queries.
 pub(crate) type FkMap = HashMap<(String, String), String>;
+
+/// Build the standard chrome context (sidebar + active-link state)
+/// that every admin page renders. Pass the active table (or `None` on
+/// the index page) so the matching sidebar link gets `class="active"`.
+pub(crate) fn chrome_context(state: &AppState, active_table: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "sidebar_groups": sidebar_context(state, active_table),
+        "active_table": active_table.unwrap_or(""),
+    })
+}
+
+/// Build the sidebar context — every visible model the admin exposes,
+/// grouped by Django-shape app label. Pass `active_table` so the
+/// matching link gets `class="active"`.
+///
+/// Sidebar shape mirrors the operator console's left rail
+/// (`tenancy/templates/op_layout.html`) so tenant operators see a
+/// consistent navigation surface across both consoles.
+pub(crate) fn sidebar_context(
+    state: &AppState,
+    active_table: Option<&str>,
+) -> Vec<serde_json::Value> {
+    let mut entries: Vec<&'static ModelEntry> = inventory::iter::<ModelEntry>
+        .into_iter()
+        .filter(|e| state.is_visible(e.schema.table))
+        .collect();
+    entries.sort_by_key(|e| e.schema.name);
+
+    let mut by_app: indexmap::IndexMap<String, Vec<&'static ModelEntry>> =
+        indexmap::IndexMap::new();
+    for e in entries {
+        let label = e
+            .resolved_app_label()
+            .map_or_else(|| "Project".to_owned(), str::to_owned);
+        by_app.entry(label).or_default().push(e);
+    }
+    let mut groups: Vec<(String, Vec<&'static ModelEntry>)> = by_app.into_iter().collect();
+    groups.sort_by(|a, b| match (a.0.as_str(), b.0.as_str()) {
+        ("Project", _) => std::cmp::Ordering::Greater,
+        (_, "Project") => std::cmp::Ordering::Less,
+        _ => a.0.cmp(&b.0),
+    });
+
+    groups
+        .into_iter()
+        .map(|(label, items)| {
+            let models: Vec<serde_json::Value> = items
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "name": e.schema.name,
+                        "table": e.schema.table,
+                        "active": active_table == Some(e.schema.table),
+                    })
+                })
+                .collect();
+            serde_json::json!({ "app": label, "models": models })
+        })
+        .collect()
+}
 
 /// Resolve `table` to a `ModelSchema`, but only if the admin is configured
 /// to expose it. A model that exists but is filtered out via `show_only`
@@ -164,7 +225,10 @@ pub(crate) fn render_cell(
 /// values come from `prefill` (keyed by Rust field name); pass `None` for
 /// an empty create form. `pk_locked` makes the PK input read-only (edit
 /// mode). `error_msg`, when present, is shown above the form.
+///
+/// `state` is needed so the sidebar context can be attached.
 pub(crate) fn render_form(
+    state: &AppState,
     model: &'static ModelSchema,
     prefill: Option<&HashMap<String, String>>,
     pk_locked: bool,
@@ -213,14 +277,16 @@ pub(crate) fn render_form(
         })
         .collect();
 
-    render_template(
+    let mut ctx = serde_json::json!({
+        "model": { "name": model.name, "table": model.table },
+        "title": title,
+        "action": action,
+        "error": error_msg,
+        "rows": rows_ctx,
+    });
+    super::templates::render_with_chrome(
         "form.html",
-        &serde_json::json!({
-            "model": { "name": model.name, "table": model.table },
-            "title": title,
-            "action": action,
-            "error": error_msg,
-            "rows": rows_ctx,
-        }),
+        &mut ctx,
+        chrome_context(state, Some(model.table)),
     )
 }

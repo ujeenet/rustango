@@ -2,6 +2,25 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [Unreleased] — v0.10 admin Django-parity (in progress)
+
+Pulling the auto-admin from "functional CRUD" toward Django ModelAdmin shape. v0.10 lands across slices; this entry tracks what's shipped so far.
+
+### Added
+
+- **Sidebar nav on every admin page (slice 10.1)** — `admin/templates/base.html` is now a CSS-grid with a left rail listing every visible model grouped by app label, with active-state highlighting on the current table. Tenant operators can navigate between models without bouncing through the index. Mobile breakpoint stacks the rail above content.
+- **Per-model `#[rustango(admin(...))]` attribute (slice 10.2)** — Django ModelAdmin-shape knobs declared inline on the model derive, surfaced as `ModelSchema.admin: Option<&'static AdminConfig>`. Field-name lists (`list_display`, `search_fields`, `readonly_fields`, `ordering`) are validated against declared fields at compile time via `compile_error!`.
+- **`list_display` / `search_fields` / `list_per_page` / `ordering` driven by the new attribute (slice 10.3)** — list view's columns, search columns, page size, and default sort all read from `AdminConfig`. Defaults preserve today's behavior so existing models render identically. Django-shape `-name` syntax for descending order.
+
+### Schedule
+
+Remaining v0.10 slices queued behind these (see in-tree plan `v010-admin-django-parity.md`):
+
+- 10.4 — `list_filter` (right-rail facet filters)
+- 10.5 — `fieldsets` + `readonly_fields` rendering on the create/edit form
+- 10.6 — bulk actions
+- 10.7 — `list_select_related` / `list_prefetch_related` for FK perf
+
 ## [v0.9.1] — multi-tenant polish — 2026-04-30
 
 Fixes surfaced while building a real four-tenant demo (database-mode + schema-mode mixed) and driving its admin end-to-end with a real browser.

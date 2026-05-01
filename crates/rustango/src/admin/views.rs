@@ -9,17 +9,18 @@ use std::collections::HashMap;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use crate::core::{
-    inventory, CountQuery, DeleteQuery, Filter, InsertQuery, ModelEntry, Op,
+    inventory, CountQuery, DeleteQuery, FieldSchema, Filter, InsertQuery, ModelEntry, Op,
     SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
 
 use super::errors::AdminError;
 use super::forms;
 use super::helpers::{
-    build_fk_joins, fk_map_from_joined_rows, lookup_model, pager_suffix, render_cell, render_form,
+    build_fk_joins, chrome_context, fk_map_from_joined_rows, lookup_model, pager_suffix,
+    render_cell, render_form,
 };
 use super::render;
-use super::templates::render_template;
+use super::templates::render_with_chrome;
 use super::urls::AppState;
 
 // ============================================================== INDEX
@@ -81,18 +82,21 @@ pub(crate) async fn index(State(state): State<AppState>) -> Html<String> {
         })
         .collect();
 
-    Html(render_template(
+    let mut ctx = serde_json::json!({
+        "groups": groups_ctx,
+        "models": flat_models_ctx,
+    });
+    Html(render_with_chrome(
         "index.html",
-        &serde_json::json!({
-            "groups": groups_ctx,
-            "models": flat_models_ctx,
-        }),
+        &mut ctx,
+        chrome_context(&state, None),
     ))
 }
 
 // ============================================================== LIST
 
-const PAGE_SIZE: i64 = 50;
+/// Default page size when the model's `admin.list_per_page == 0`.
+const DEFAULT_PAGE_SIZE: i64 = 50;
 
 /// Reserved query parameters; everything else is treated as a per-field filter.
 const RESERVED_PARAMS: &[&str] = &["page", "q"];
@@ -105,12 +109,22 @@ pub(crate) async fn table_view(
 ) -> Result<Html<String>, AdminError> {
     let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound { table })?;
     let pk_field = model.primary_key();
+    let admin_cfg = model
+        .admin
+        .copied()
+        .unwrap_or(crate::core::AdminConfig::DEFAULT);
+    // Resolve per-model page size (fall back to framework default when unset).
+    let page_size: i64 = if admin_cfg.list_per_page == 0 {
+        DEFAULT_PAGE_SIZE
+    } else {
+        admin_cfg.list_per_page as i64
+    };
     let page = params
         .get("page")
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(1)
         .max(1);
-    let offset = (page - 1) * PAGE_SIZE;
+    let offset = (page - 1) * page_size;
     let q = params
         .get("q")
         .map(String::as_str)
@@ -142,14 +156,24 @@ pub(crate) async fn table_view(
         active_field_filters.push((field.name, value.clone()));
     }
 
-    // Build the search clause from String fields with max_length set.
+    // Build the search clause. If `admin.search_fields` is set, that's
+    // the list (Django shape). Otherwise fall back to fields whose
+    // `searchable` flag is true on `FieldSchema` (today's auto behavior).
+    let search_columns: Vec<&'static str> = if admin_cfg.search_fields.is_empty() {
+        model.searchable_fields().map(|f| f.column).collect()
+    } else {
+        admin_cfg
+            .search_fields
+            .iter()
+            .filter_map(|name| model.field(name).map(|f| f.column))
+            .collect()
+    };
     let search = q.as_ref().and_then(|qstr| {
-        let cols: Vec<&'static str> = model.searchable_fields().map(|f| f.column).collect();
-        if cols.is_empty() {
+        if search_columns.is_empty() {
             None
         } else {
             Some(SearchClause {
-                columns: cols,
+                columns: search_columns.clone(),
                 query: qstr.clone(),
             })
         }
@@ -167,6 +191,21 @@ pub(crate) async fn table_view(
     // NOTE: count_rows ignores the search clause; counts are approximate
     // when ?q is set. Acceptable for a v0.2 admin pager.
     let joins = build_fk_joins(&state, model);
+    // Default ordering: PK ASC unless `admin.ordering` overrides.
+    let order_by: Vec<crate::core::OrderClause> = if admin_cfg.ordering.is_empty() {
+        Vec::new()
+    } else {
+        admin_cfg
+            .ordering
+            .iter()
+            .filter_map(|(name, desc)| {
+                model.field(name).map(|f| crate::core::OrderClause {
+                    column: f.column,
+                    desc: *desc,
+                })
+            })
+            .collect()
+    };
     let rows = crate::sql::select_rows(
         &state.pool,
         &SelectQuery {
@@ -174,8 +213,8 @@ pub(crate) async fn table_view(
             where_clause,
             search: search.clone(),
             joins,
-            order_by: vec![],
-            limit: Some(PAGE_SIZE),
+            order_by,
+            limit: Some(page_size),
             offset: Some(offset),
         },
     )
@@ -186,14 +225,28 @@ pub(crate) async fn table_view(
     let last_page = if total == 0 {
         1
     } else {
-        ((total - 1) / PAGE_SIZE) + 1
+        ((total - 1) / page_size) + 1
     };
     let read_only = state.is_read_only(model.table);
 
+    // Resolve the columns shown on the list. If `admin.list_display`
+    // is set, use those (in order, validated at compile time against
+    // declared field names — `model.field(name)` is `Some` here);
+    // otherwise show every scalar field.
+    let display_fields: Vec<&'static FieldSchema> = if admin_cfg.list_display.is_empty() {
+        model.scalar_fields().collect()
+    } else {
+        admin_cfg
+            .list_display
+            .iter()
+            .filter_map(|name| model.field(name))
+            .collect()
+    };
+
     // Per-column header label. PK gets a `<small>(pk)</small>` suffix; the
     // template marks the value `| safe` so this raw HTML survives.
-    let columns_ctx: Vec<serde_json::Value> = model
-        .scalar_fields()
+    let columns_ctx: Vec<serde_json::Value> = display_fields
+        .iter()
         .map(|f| {
             let label = if f.primary_key {
                 format!("{} <small>(pk)</small>", render::escape(f.name))
@@ -209,8 +262,8 @@ pub(crate) async fn table_view(
     let rows_ctx: Vec<serde_json::Value> = rows
         .iter()
         .map(|row| {
-            let cells: Vec<String> = model
-                .scalar_fields()
+            let cells: Vec<String> = display_fields
+                .iter()
                 .map(|f| render_cell(row, f, &fk_map))
                 .collect();
             let pk = pk_field.map(|pk| render::escape(&render::render_value_for_input(row, pk)));
@@ -224,22 +277,24 @@ pub(crate) async fn table_view(
         .collect();
     let pager_suffix_str = pager_suffix(q.as_deref(), &active_field_filters);
 
-    Ok(Html(render_template(
+    let mut ctx = serde_json::json!({
+        "model": { "name": model.name, "table": model.table },
+        "total": total,
+        "plural": if total == 1 { "" } else { "s" },
+        "read_only": read_only,
+        "has_searchable": !search_columns.is_empty(),
+        "q": q.unwrap_or_default(),
+        "active_filters": active_filters_ctx,
+        "columns": columns_ctx,
+        "rows": rows_ctx,
+        "page": page,
+        "last_page": last_page,
+        "pager_suffix": pager_suffix_str,
+    });
+    Ok(Html(render_with_chrome(
         "list.html",
-        &serde_json::json!({
-            "model": { "name": model.name, "table": model.table },
-            "total": total,
-            "plural": if total == 1 { "" } else { "s" },
-            "read_only": read_only,
-            "has_searchable": model.searchable_fields().next().is_some(),
-            "q": q.unwrap_or_default(),
-            "active_filters": active_filters_ctx,
-            "columns": columns_ctx,
-            "rows": rows_ctx,
-            "page": page,
-            "last_page": last_page,
-            "pager_suffix": pager_suffix_str,
-        }),
+        &mut ctx,
+        chrome_context(&state, Some(model.table)),
     )))
 }
 
@@ -291,14 +346,16 @@ pub(crate) async fn detail_view(
             })
         })
         .collect();
-    let html = render_template(
+    let mut ctx = serde_json::json!({
+        "model": { "name": model.name, "table": model.table },
+        "pk": pk_raw,
+        "cells": cells_ctx,
+        "read_only": state.is_read_only(model.table),
+    });
+    let html = render_with_chrome(
         "detail.html",
-        &serde_json::json!({
-            "model": { "name": model.name, "table": model.table },
-            "pk": pk_raw,
-            "cells": cells_ctx,
-            "read_only": state.is_read_only(model.table),
-        }),
+        &mut ctx,
+        chrome_context(&state, Some(model.table)),
     );
     Ok(Html(html))
 }
@@ -316,7 +373,7 @@ pub(crate) async fn create_form(
         });
     }
     Ok(Html(render_form(
-        model, None, /* pk_locked */ false, None,
+        &state, model, None, /* pk_locked */ false, None,
     )))
 }
 
@@ -345,7 +402,7 @@ pub(crate) async fn create_submit(
         Ok(v) => v,
         Err(e) => {
             // Re-render the form with the error message instead of a 4xx.
-            let html = render_form(model, Some(&form), false, Some(&e.to_string()));
+            let html = render_form(&state, model, Some(&form), false, Some(&e.to_string()));
             return Ok(Html(html).into_response());
         }
     };
@@ -360,7 +417,7 @@ pub(crate) async fn create_submit(
     let row = match crate::sql::insert_returning(&state.pool, &query).await {
         Ok(row) => row,
         Err(e) => {
-            let html = render_form(model, Some(&form), false, Some(&e.to_string()));
+            let html = render_form(&state, model, Some(&form), false, Some(&e.to_string()));
             return Ok(Html(html).into_response());
         }
     };
@@ -411,7 +468,7 @@ pub(crate) async fn edit_form(
     for f in model.scalar_fields() {
         prefill.insert(f.name.to_owned(), render::render_value_for_input(&row, f));
     }
-    Ok(Html(render_form(model, Some(&prefill), true, None)))
+    Ok(Html(render_form(&state, model, Some(&prefill), true, None)))
 }
 
 pub(crate) async fn update_submit(
@@ -436,7 +493,7 @@ pub(crate) async fn update_submit(
     let collected = match forms::collect_values(model, &form, &[pk_field.name]) {
         Ok(v) => v,
         Err(e) => {
-            let html = render_form(model, Some(&form), true, Some(&e.to_string()));
+            let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));
             return Ok(Html(html).into_response());
         }
     };
@@ -455,7 +512,7 @@ pub(crate) async fn update_submit(
         }),
     };
     if let Err(e) = crate::sql::update(&state.pool, &query).await {
-        let html = render_form(model, Some(&form), true, Some(&e.to_string()));
+        let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));
         return Ok(Html(html).into_response());
     }
     Ok(Redirect::to(&format!("/{}/{}", model.table, pk_raw)).into_response())

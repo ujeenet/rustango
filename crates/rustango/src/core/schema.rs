@@ -74,6 +74,52 @@ pub struct ModelSchema {
     /// didn't override it; in that case [`ModelEntry::resolved_app_label`]
     /// falls back to inferring from the registered module path.
     pub app_label: Option<&'static str>,
+    /// Auto-admin customization (Django ModelAdmin-shape) set via
+    /// `#[rustango(admin(...))]` on the struct. `None` when the user
+    /// didn't override anything; admin code falls back to
+    /// [`AdminConfig::DEFAULT`] in that case.
+    pub admin: Option<&'static AdminConfig>,
+}
+
+/// Django ModelAdmin-shape per-model admin customization. Populated by
+/// the `Model` derive when the struct carries `#[rustango(admin(...))]`.
+///
+/// All fields default to "use the framework default" (an empty slice or
+/// zero) so users only set the knobs they care about.
+#[derive(Debug, Clone, Copy)]
+pub struct AdminConfig {
+    /// Field names rendered as columns on the list view, in order.
+    /// Empty slice means "every scalar field, in declaration order"
+    /// (today's default). FK columns auto-render the target's display
+    /// value when the target is also visible in the admin.
+    pub list_display: &'static [&'static str],
+    /// Field names searched by the admin's `?q=` box, in order. Empty
+    /// slice falls back to fields whose `searchable` flag is true on
+    /// the [`FieldSchema`] (today's behavior, which auto-flags strings
+    /// with `max_length`).
+    pub search_fields: &'static [&'static str],
+    /// Page size on the list view. `0` means "use the admin default"
+    /// (currently 50).
+    pub list_per_page: usize,
+    /// Default ordering for the list view, as `(field_name, desc)` pairs.
+    /// Empty slice means "PK ascending" (today's default).
+    pub ordering: &'static [(&'static str, bool)],
+    /// Field names rendered as text instead of editable inputs on the
+    /// edit form. Reserved for slice 10.5; today's admin treats this
+    /// as a no-op so existing models stay editable.
+    pub readonly_fields: &'static [&'static str],
+}
+
+impl AdminConfig {
+    /// Default config for a model that has no `#[rustango(admin(...))]`
+    /// attribute — every knob falls back to "framework default".
+    pub const DEFAULT: AdminConfig = AdminConfig {
+        list_display: &[],
+        search_fields: &[],
+        list_per_page: 0,
+        ordering: &[],
+        readonly_fields: &[],
+    };
 }
 
 impl ModelSchema {

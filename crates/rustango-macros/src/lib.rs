@@ -344,12 +344,47 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let display = container.display.map(|(name, _)| name);
     let app_label = container.app.clone();
 
+    // Validate admin field-name lists against declared field names.
+    if let Some(admin) = &container.admin {
+        for (label, list) in [
+            ("list_display", &admin.list_display),
+            ("search_fields", &admin.search_fields),
+            ("readonly_fields", &admin.readonly_fields),
+        ] {
+            if let Some((names, span)) = list {
+                for name in names {
+                    if !collected.field_names.iter().any(|n| n == name) {
+                        return Err(syn::Error::new(
+                            *span,
+                            format!(
+                                "`{label} = \"{name}\"`: \"{name}\" is not a declared field on this struct"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some((pairs, span)) = &admin.ordering {
+            for (name, _) in pairs {
+                if !collected.field_names.iter().any(|n| n == name) {
+                    return Err(syn::Error::new(
+                        *span,
+                        format!(
+                            "`ordering = \"{name}\"`: \"{name}\" is not a declared field on this struct"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
     let model_impl = model_impl_tokens(
         struct_name,
         &model_name,
         &table,
         display.as_deref(),
         app_label.as_deref(),
+        container.admin.as_ref(),
         &collected.field_schemas,
     );
     let module_ident = column_module_ident(struct_name);
@@ -762,6 +797,7 @@ fn model_impl_tokens(
     table: &str,
     display: Option<&str>,
     app_label: Option<&str>,
+    admin: Option<&AdminAttrs>,
     field_schemas: &[TokenStream2],
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
@@ -774,6 +810,7 @@ fn model_impl_tokens(
     } else {
         quote!(::core::option::Option::None)
     };
+    let admin_tokens = admin_config_tokens(admin);
     quote! {
         impl ::rustango::core::Model for #struct_name {
             const SCHEMA: &'static ::rustango::core::ModelSchema = &::rustango::core::ModelSchema {
@@ -782,8 +819,62 @@ fn model_impl_tokens(
                 fields: &[ #(#field_schemas),* ],
                 display: #display_tokens,
                 app_label: #app_label_tokens,
+                admin: #admin_tokens,
             };
         }
+    }
+}
+
+/// Emit the `admin: Option<&'static AdminConfig>` field for the model
+/// schema. `None` when the user wrote no `#[rustango(admin(...))]`;
+/// otherwise a static reference to a populated `AdminConfig`.
+fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
+    let Some(admin) = admin else {
+        return quote!(::core::option::Option::None);
+    };
+
+    let list_display = admin
+        .list_display
+        .as_ref()
+        .map(|(v, _)| v.as_slice())
+        .unwrap_or(&[]);
+    let list_display_lits = list_display.iter().map(|s| s.as_str());
+
+    let search_fields = admin
+        .search_fields
+        .as_ref()
+        .map(|(v, _)| v.as_slice())
+        .unwrap_or(&[]);
+    let search_fields_lits = search_fields.iter().map(|s| s.as_str());
+
+    let readonly_fields = admin
+        .readonly_fields
+        .as_ref()
+        .map(|(v, _)| v.as_slice())
+        .unwrap_or(&[]);
+    let readonly_fields_lits = readonly_fields.iter().map(|s| s.as_str());
+
+    let list_per_page = admin.list_per_page.unwrap_or(0);
+
+    let ordering_pairs = admin
+        .ordering
+        .as_ref()
+        .map(|(v, _)| v.as_slice())
+        .unwrap_or(&[]);
+    let ordering_tokens = ordering_pairs.iter().map(|(name, desc)| {
+        let name = name.as_str();
+        let desc = *desc;
+        quote!((#name, #desc))
+    });
+
+    quote! {
+        ::core::option::Option::Some(&::rustango::core::AdminConfig {
+            list_display: &[ #( #list_display_lits ),* ],
+            search_fields: &[ #( #search_fields_lits ),* ],
+            list_per_page: #list_per_page,
+            ordering: &[ #( #ordering_tokens ),* ],
+            readonly_fields: &[ #( #readonly_fields_lits ),* ],
+        })
     }
 }
 
@@ -1340,6 +1431,24 @@ struct ContainerAttrs {
     /// the inference is wrong (e.g. a model that conceptually belongs
     /// to one app but is physically in another module).
     app: Option<String>,
+    /// Django ModelAdmin-shape per-model knobs from
+    /// `#[rustango(admin(...))]`. `None` when the user didn't write the
+    /// attribute — the emitted `ModelSchema.admin` becomes `None` and
+    /// admin code falls back to `AdminConfig::DEFAULT`.
+    admin: Option<AdminAttrs>,
+}
+
+/// Parsed shape of `#[rustango(admin(list_display = "…", search_fields =
+/// "…", list_per_page = N, ordering = "…"))]`. Field-name lists are
+/// comma-separated strings; we validate each ident against the model's
+/// declared fields at compile time.
+#[derive(Default)]
+struct AdminAttrs {
+    list_display: Option<(Vec<String>, proc_macro2::Span)>,
+    search_fields: Option<(Vec<String>, proc_macro2::Span)>,
+    list_per_page: Option<usize>,
+    ordering: Option<(Vec<(String, bool)>, proc_macro2::Span)>,
+    readonly_fields: Option<(Vec<String>, proc_macro2::Span)>,
 }
 
 fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
@@ -1347,6 +1456,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         table: None,
         display: None,
         app: None,
+        admin: None,
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -1368,10 +1478,77 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 out.app = Some(s.value());
                 return Ok(());
             }
+            if meta.path.is_ident("admin") {
+                let mut admin = AdminAttrs::default();
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("list_display") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        admin.list_display =
+                            Some((split_field_list(&s.value()), s.span()));
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("search_fields") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        admin.search_fields =
+                            Some((split_field_list(&s.value()), s.span()));
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("readonly_fields") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        admin.readonly_fields =
+                            Some((split_field_list(&s.value()), s.span()));
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("list_per_page") {
+                        let lit: syn::LitInt = inner.value()?.parse()?;
+                        admin.list_per_page = Some(lit.base10_parse::<usize>()?);
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("ordering") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        admin.ordering = Some((
+                            parse_ordering_list(&s.value()),
+                            s.span(),
+                        ));
+                        return Ok(());
+                    }
+                    Err(inner.error(
+                        "unknown admin attribute (supported: \
+                         `list_display`, `search_fields`, `readonly_fields`, \
+                         `list_per_page`, `ordering`)",
+                    ))
+                })?;
+                out.admin = Some(admin);
+                return Ok(());
+            }
             Err(meta.error("unknown rustango container attribute"))
         })?;
     }
     Ok(out)
+}
+
+/// Split a comma-separated field-name list (e.g. `"name, office"`) into
+/// owned field names, trimming whitespace and skipping empty entries.
+/// Field-name validation against the model is done by the caller.
+fn split_field_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Parse Django-shape ordering — `"name"` is ASC, `"-name"` is DESC.
+/// Returns `(field_name, desc)` pairs in the same order as the input.
+fn parse_ordering_list(raw: &str) -> Vec<(String, bool)> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|spec| {
+            spec.strip_prefix('-')
+                .map_or((spec.to_owned(), false), |rest| (rest.trim().to_owned(), true))
+        })
+        .collect()
 }
 
 struct FieldAttrs {

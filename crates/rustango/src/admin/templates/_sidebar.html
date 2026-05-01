@@ -1,0 +1,17 @@
+<aside class="sidebar">
+  <h2>{{ admin_title | default(value="rustango admin") }}</h2>
+  {% if admin_subtitle %}<p class="subtitle">{{ admin_subtitle }}</p>{% endif %}
+  <p><a href="/" class="{% if active_table is undefined or active_table == '' %}active{% endif %}">Home</a></p>
+  {% if sidebar_groups %}
+    {% for group in sidebar_groups %}
+    <h3>{{ group.app }}</h3>
+    <ul>
+      {% for m in group.models %}
+      <li><a href="/{{ m.table }}"{% if m.active %} class="active"{% endif %}>{{ m.name }}</a></li>
+      {% endfor %}
+    </ul>
+    {% endfor %}
+  {% else %}
+    <p class="empty">No models registered.</p>
+  {% endif %}
+</aside>

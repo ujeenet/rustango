@@ -13,6 +13,7 @@ fn templates() -> &'static tera::Tera {
         let mut tera = tera::Tera::default();
         tera.add_raw_templates([
             ("base.html", include_str!("templates/base.html")),
+            ("_sidebar.html", include_str!("templates/_sidebar.html")),
             ("index.html", include_str!("templates/index.html")),
             ("list.html", include_str!("templates/list.html")),
             ("detail.html", include_str!("templates/detail.html")),
@@ -31,4 +32,21 @@ pub(crate) fn render_template(template: &str, ctx: &serde_json::Value) -> String
     templates()
         .render(template, &tera_ctx)
         .expect("admin template renders")
+}
+
+/// Render with a render-time supplement context — the supplement is
+/// merged into the base context just before render. Used by view code
+/// to layer sidebar / chrome data onto a per-view context without each
+/// caller having to remember the keys.
+pub(crate) fn render_with_chrome(
+    template: &str,
+    ctx: &mut serde_json::Value,
+    chrome: serde_json::Value,
+) -> String {
+    if let (Some(map), Some(extra)) = (ctx.as_object_mut(), chrome.as_object()) {
+        for (k, v) in extra {
+            map.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+    render_template(template, ctx)
 }
