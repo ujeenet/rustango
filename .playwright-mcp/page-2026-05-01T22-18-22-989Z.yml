@@ -1,0 +1,63 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - heading "rustango admin" [level=2] [ref=e4]
+    - paragraph [ref=e5]:
+      - link "Home" [ref=e6] [cursor=pointer]:
+        - /url: /
+    - paragraph [ref=e7]:
+      - link "Activity" [ref=e8] [cursor=pointer]:
+        - /url: /__audit
+    - heading "Project" [level=3] [ref=e9]
+    - list [ref=e10]:
+      - listitem [ref=e11]:
+        - link "Author" [ref=e12] [cursor=pointer]:
+          - /url: /author
+      - listitem [ref=e13]:
+        - link "Comment" [ref=e14] [cursor=pointer]:
+          - /url: /comment
+      - listitem [ref=e15]:
+        - link "Post" [ref=e16] [cursor=pointer]:
+          - /url: /post
+      - listitem [ref=e17]:
+        - link "PostTag" [ref=e18] [cursor=pointer]:
+          - /url: /post_tag
+      - listitem [ref=e19]:
+        - link "Tag" [ref=e20] [cursor=pointer]:
+          - /url: /tag
+  - main [ref=e21]:
+    - paragraph [ref=e22]:
+      - link "← admin home" [ref=e23] [cursor=pointer]:
+        - /url: /
+    - heading "Author" [level=1] [ref=e24]
+    - generic [ref=e26]:
+      - paragraph [ref=e27]:
+        - text: "Table:"
+        - code [ref=e28]: author
+        - text: — 2 rows ·
+        - link "+ new Author" [ref=e29] [cursor=pointer]:
+          - /url: /author/__new
+      - generic [ref=e30]:
+        - searchbox "search…" [ref=e31]
+        - button "go" [ref=e32] [cursor=pointer]
+      - table [ref=e34]:
+        - rowgroup [ref=e35]:
+          - row "name headline posts_count" [ref=e36]:
+            - columnheader "name" [ref=e37]
+            - columnheader "headline" [ref=e38]
+            - columnheader "posts_count" [ref=e39]
+            - columnheader [ref=e40]
+        - rowgroup [ref=e41]:
+          - row "Alice Kowalski Database engineer, occasional Rust evangelist. 0 view" [ref=e42]:
+            - cell "Alice Kowalski" [ref=e43]
+            - cell "Database engineer, occasional Rust evangelist." [ref=e44]
+            - cell "0" [ref=e45]
+            - cell "view" [ref=e46]:
+              - link "view" [ref=e47] [cursor=pointer]:
+                - /url: /author/1
+          - row "Sam Reyes Distributed systems, observability, runtimes. 0 view" [ref=e48]:
+            - cell "Sam Reyes" [ref=e49]
+            - cell "Distributed systems, observability, runtimes." [ref=e50]
+            - cell "0" [ref=e51]
+            - cell "view" [ref=e52]:
+              - link "view" [ref=e53] [cursor=pointer]:
+                - /url: /author/2

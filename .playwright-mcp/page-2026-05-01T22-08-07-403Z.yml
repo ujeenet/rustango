@@ -1,0 +1,124 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - heading "rustango admin" [level=2] [ref=e4]
+    - paragraph [ref=e5]:
+      - link "Home" [ref=e6] [cursor=pointer]:
+        - /url: /
+    - paragraph [ref=e7]:
+      - link "Activity" [ref=e8] [cursor=pointer]:
+        - /url: /__audit
+    - heading "Project" [level=3] [ref=e9]
+    - list [ref=e10]:
+      - listitem [ref=e11]:
+        - link "Author" [ref=e12] [cursor=pointer]:
+          - /url: /author
+      - listitem [ref=e13]:
+        - link "Comment" [ref=e14] [cursor=pointer]:
+          - /url: /comment
+      - listitem [ref=e15]:
+        - link "Post" [ref=e16] [cursor=pointer]:
+          - /url: /post
+      - listitem [ref=e17]:
+        - link "PostTag" [ref=e18] [cursor=pointer]:
+          - /url: /post_tag
+      - listitem [ref=e19]:
+        - link "Tag" [ref=e20] [cursor=pointer]:
+          - /url: /tag
+  - main [ref=e21]:
+    - paragraph [ref=e22]:
+      - link "← admin home" [ref=e23] [cursor=pointer]:
+        - /url: /
+    - heading "Post" [level=1] [ref=e24]
+    - generic [ref=e25]:
+      - generic [ref=e26]:
+        - paragraph [ref=e27]:
+          - text: "Table:"
+          - code [ref=e28]: post
+          - text: — 4 rows ·
+          - link "+ new Post" [ref=e29] [cursor=pointer]:
+            - /url: /post/new
+        - generic [ref=e30]:
+          - searchbox "search…" [ref=e31]
+          - button "go" [ref=e32] [cursor=pointer]
+        - generic [ref=e33]:
+          - generic [ref=e34]:
+            - generic [ref=e35]:
+              - text: "Action:"
+              - combobox "Action:" [ref=e36]:
+                - option "— select —" [selected]
+                - option "publish selected"
+                - option "archive selected"
+                - option "Delete selected"
+            - button "Go" [ref=e37] [cursor=pointer]
+          - table [ref=e38]:
+            - rowgroup [ref=e39]:
+              - row "title slug author published_at" [ref=e40]:
+                - columnheader [ref=e41]
+                - columnheader "title" [ref=e42]
+                - columnheader "slug" [ref=e43]
+                - columnheader "author" [ref=e44]
+                - columnheader "published_at" [ref=e45]
+                - columnheader [ref=e46]
+            - rowgroup [ref=e47]:
+              - row "Audit attribution via tokio task-locals tokio-task-locals Sam Reyes 2026-05-01 22:07:09.670206 UTC view" [ref=e48]:
+                - cell [ref=e49]:
+                  - checkbox [ref=e50]
+                - cell "Audit attribution via tokio task-locals" [ref=e51]
+                - cell "tokio-task-locals" [ref=e52]
+                - cell "Sam Reyes" [ref=e53]:
+                  - link "Sam Reyes" [ref=e54] [cursor=pointer]:
+                    - /url: /author/2
+                - cell "2026-05-01 22:07:09.670206 UTC" [ref=e55]
+                - cell "view" [ref=e56]:
+                  - link "view" [ref=e57] [cursor=pointer]:
+                    - /url: /post/4
+              - row "Auto<DateTime>, auto_now, and the case for letting the DB do it auto-now-vs-server-default Alice Kowalski 2026-05-01 22:07:09.668874 UTC view" [ref=e58]:
+                - cell [ref=e59]:
+                  - checkbox [ref=e60]
+                - cell "Auto<DateTime>, auto_now, and the case for letting the DB do it" [ref=e61]
+                - cell "auto-now-vs-server-default" [ref=e62]
+                - cell "Alice Kowalski" [ref=e63]:
+                  - link "Alice Kowalski" [ref=e64] [cursor=pointer]:
+                    - /url: /author/1
+                - cell "2026-05-01 22:07:09.668874 UTC" [ref=e65]
+                - cell "view" [ref=e66]:
+                  - link "view" [ref=e67] [cursor=pointer]:
+                    - /url: /post/3
+              - row "Postgres LISTEN/NOTIFY for cheap real-time postgres-listen-notify Sam Reyes 2026-05-01 22:07:09.667477 UTC view" [ref=e68]:
+                - cell [ref=e69]:
+                  - checkbox [ref=e70]
+                - cell "Postgres LISTEN/NOTIFY for cheap real-time" [ref=e71]
+                - cell "postgres-listen-notify" [ref=e72]
+                - cell "Sam Reyes" [ref=e73]:
+                  - link "Sam Reyes" [ref=e74] [cursor=pointer]:
+                    - /url: /author/2
+                - cell "2026-05-01 22:07:09.667477 UTC" [ref=e75]
+                - cell "view" [ref=e76]:
+                  - link "view" [ref=e77] [cursor=pointer]:
+                    - /url: /post/2
+              - row "Why I'm betting on rustango for our next service rust Alice Kowalski 2026-05-01 22:07:09.663711 UTC view" [ref=e78]:
+                - cell [ref=e79]:
+                  - checkbox [ref=e80]
+                - cell "Why I'm betting on rustango for our next service" [ref=e81]
+                - cell "rust" [ref=e82]
+                - cell "Alice Kowalski" [ref=e83]:
+                  - link "Alice Kowalski" [ref=e84] [cursor=pointer]:
+                    - /url: /author/1
+                - cell "2026-05-01 22:07:09.663711 UTC" [ref=e85]
+                - cell "view" [ref=e86]:
+                  - link "view" [ref=e87] [cursor=pointer]:
+                    - /url: /post/1
+      - complementary [ref=e88]:
+        - generic [ref=e89]:
+          - heading "By author" [level=4] [ref=e90]
+          - combobox [ref=e91]:
+            - option "— all —" [selected]
+            - option "Alice Kowalski (2)"
+            - option "Sam Reyes (2)"
+        - generic [ref=e92]:
+          - heading "By published" [level=4] [ref=e93]
+          - list [ref=e94]:
+            - listitem [ref=e95]:
+              - link "—" [ref=e96] [cursor=pointer]:
+                - /url: /post?published=
+              - text: (4)

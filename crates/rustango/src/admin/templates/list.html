@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ model.name }} — rustango admin{% endblock title %}
 {% block body %}
-<p><a href="/">&larr; admin home</a></p>
+<p><a href="/__admin/">&larr; admin home</a></p>
 <h1>{{ model.name }}</h1>
 <div class="list-shell">
 <div class="list-main">
@@ -9,12 +9,12 @@
 {% if read_only %}
   &nbsp;&middot;&nbsp; <em>read-only</em>
 {% else %}
-  &nbsp;&middot;&nbsp; <a href="/{{ model.table }}/new">+ new {{ model.name }}</a>
+  &nbsp;&middot;&nbsp; <a href="/__admin/{{ model.table }}/new">+ new {{ model.name }}</a>
 {% endif %}
 </p>
 
 {% if has_searchable %}
-<form method="get" action="/{{ model.table }}" class="search">
+<form method="get" action="/__admin/{{ model.table }}" class="search">
   <input type="search" name="q" value="{{ q }}" placeholder="search&hellip;">
   <button type="submit">go</button>
   {% for f in active_filters %}
@@ -67,7 +67,7 @@
         <td class="checkbox-col">{% if row.pk %}<input type="checkbox" name="_selected" value="{{ row.pk }}">{% endif %}</td>
         {% endif %}
         {% for cell in row.cells %}<td>{{ cell | safe }}</td>{% endfor %}
-        <td>{% if row.pk %}<a href="/{{ model.table }}/{{ row.pk }}">view</a>{% endif %}</td>
+        <td>{% if row.pk %}<a href="/__admin/{{ model.table }}/{{ row.pk }}">view</a>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>
@@ -78,13 +78,13 @@
 {% if last_page > 1 %}
 <p class="pager">
   {% if page > 1 %}
-    <a href="/{{ model.table }}?page={{ page - 1 }}{{ pager_suffix | safe }}">&larr; prev</a>
+    <a href="/__admin/{{ model.table }}?page={{ page - 1 }}{{ pager_suffix | safe }}">&larr; prev</a>
   {% else %}
     <span class="muted">&larr; prev</span>
   {% endif %}
   &middot; page {{ page }} of {{ last_page }} &middot;
   {% if page < last_page %}
-    <a href="/{{ model.table }}?page={{ page + 1 }}{{ pager_suffix | safe }}">next &rarr;</a>
+    <a href="/__admin/{{ model.table }}?page={{ page + 1 }}{{ pager_suffix | safe }}">next &rarr;</a>
   {% else %}
     <span class="muted">next &rarr;</span>
   {% endif %}

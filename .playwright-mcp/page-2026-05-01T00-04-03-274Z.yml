@@ -1,0 +1,34 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - generic [ref=e4]: rustango
+    - navigation [ref=e5]:
+      - link "Home" [ref=e6] [cursor=pointer]:
+        - /url: /
+      - link "Operators" [ref=e7] [cursor=pointer]:
+        - /url: /operators
+      - link "Organizations" [ref=e8] [cursor=pointer]:
+        - /url: /orgs
+    - generic [ref=e9]:
+      - text: signed in as
+      - strong [ref=e10]: admin
+    - button "Sign out" [ref=e12] [cursor=pointer]
+  - main [ref=e13]:
+    - generic [ref=e14]:
+      - img "rustango" [ref=e15]
+      - heading "Welcome, admin" [level=1] [ref=e16]
+      - paragraph [ref=e17]: This is the rustango operator console. From here you manage the registry — the source of truth for every tenant in your deployment.
+      - list [ref=e18]:
+        - listitem [ref=e19]:
+          - text: Click
+          - strong [ref=e20]: Operators
+          - text: to browse main-system administrators.
+        - listitem [ref=e21]:
+          - text: Click
+          - strong [ref=e22]: Organizations
+          - text: to see every tenant the registry knows about.
+        - listitem [ref=e23]:
+          - text: Day-to-day tenant lifecycle (create, drop, list, migrate) lives in the
+          - code [ref=e24]: manage
+          - text: CLI — see
+          - code [ref=e25]: cargo run --bin manage -- --help
+          - text: .

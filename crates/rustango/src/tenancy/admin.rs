@@ -246,7 +246,7 @@ async fn handle_request(
     session: Option<&TenantSessionConfig>,
     actions: &[RegisteredAction],
 ) -> Response {
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
     let org = match resolver.resolve(&parts, pools.registry()).await {
         Ok(Some(o)) => o,
         Ok(None) => return (StatusCode::NOT_FOUND, "tenant not found").into_response(),
@@ -324,6 +324,23 @@ async fn handle_request(
         force_read_only,
         actions,
     );
+
+    // Strip the `/__admin` mount prefix from the request URI so the
+    // inner admin router sees plain `/{table}` paths. Requests routed
+    // via the explicit `/__admin/{*rest}` route in the builder carry the
+    // full URI; session-only paths (`/__login`, `/__logout`) go through
+    // the fallback and are NOT prefixed.
+    if let Some(stripped) = parts.uri.path().strip_prefix("/__admin") {
+        let new_path = if stripped.is_empty() { "/" } else { stripped };
+        let new_pq = if let Some(q) = parts.uri.query() {
+            format!("{new_path}?{q}")
+        } else {
+            new_path.to_owned()
+        };
+        if let Ok(new_uri) = new_pq.parse::<axum::http::Uri>() {
+            parts.uri = new_uri;
+        }
+    }
 
     let inner_req = Request::from_parts(parts, body);
     // v0.12.1: wrap the inner-router dispatch in an `audit::with_source`

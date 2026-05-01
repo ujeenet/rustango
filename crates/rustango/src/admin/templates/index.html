@@ -14,7 +14,7 @@
     <tbody>
     {% for m in group.models %}
       <tr>
-        <td><a href="/{{ m.table }}">{{ m.name }}</a></td>
+        <td><a href="/__admin/{{ m.table }}">{{ m.name }}</a></td>
         <td>{{ m.table }}</td>
         <td>{{ m.field_count }}</td>
       </tr>

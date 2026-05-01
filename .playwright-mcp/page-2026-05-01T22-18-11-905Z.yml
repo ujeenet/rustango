@@ -1,0 +1,10 @@
+- generic [ref=e2]:
+  - heading "Rustail Tech" [level=1] [ref=e4]
+  - paragraph [ref=e5]:
+    - text: Sign in to
+    - strong [ref=e6]: tech
+  - generic [ref=e7]: Username
+  - textbox "Username" [active] [ref=e8]
+  - generic [ref=e9]: Password
+  - textbox "Password" [ref=e10]
+  - button "Sign in" [ref=e11] [cursor=pointer]

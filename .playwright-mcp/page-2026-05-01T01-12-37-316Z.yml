@@ -1,0 +1,88 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - heading "rustango admin" [level=2] [ref=e4]
+    - paragraph [ref=e5]:
+      - link "Home" [ref=e6] [cursor=pointer]:
+        - /url: /
+    - heading "Project" [level=3] [ref=e7]
+    - list [ref=e8]:
+      - listitem [ref=e9]:
+        - link "Course" [ref=e10] [cursor=pointer]:
+          - /url: /course
+      - listitem [ref=e11]:
+        - link "Instructor" [ref=e12] [cursor=pointer]:
+          - /url: /instructor
+  - main [ref=e13]:
+    - paragraph [ref=e14]:
+      - link "← admin home" [ref=e15] [cursor=pointer]:
+        - /url: /
+    - heading "Course" [level=1] [ref=e16]
+    - generic [ref=e17]:
+      - generic [ref=e18]:
+        - paragraph [ref=e19]:
+          - text: "Table:"
+          - code [ref=e20]: course
+          - text: — 2 rows ·
+          - link "+ new Course" [ref=e21] [cursor=pointer]:
+            - /url: /course/new
+        - generic [ref=e22]:
+          - searchbox "search…" [ref=e23]
+          - button "go" [ref=e24] [cursor=pointer]
+        - paragraph [ref=e25]:
+          - text: "filtered by:"
+          - code [ref=e26]: credits=4
+          - text: ·
+          - link "clear" [ref=e27] [cursor=pointer]:
+            - /url: /course
+        - table [ref=e28]:
+          - rowgroup [ref=e29]:
+            - row "code title credits instructor" [ref=e30]:
+              - columnheader "code" [ref=e31]
+              - columnheader "title" [ref=e32]
+              - columnheader "credits" [ref=e33]
+              - columnheader "instructor" [ref=e34]
+              - columnheader [ref=e35]
+          - rowgroup [ref=e36]:
+            - row "MAT 161 Calculus I 4 Dr. Liam Park view" [ref=e37]:
+              - cell "MAT 161" [ref=e38]
+              - cell "Calculus I" [ref=e39]
+              - cell "4" [ref=e40]
+              - cell "Dr. Liam Park" [ref=e41]:
+                - link "Dr. Liam Park" [ref=e42] [cursor=pointer]:
+                  - /url: /instructor/2
+              - cell "view" [ref=e43]:
+                - link "view" [ref=e44] [cursor=pointer]:
+                  - /url: /course/3
+            - row "MAT 261 Linear Algebra 4 Dr. Liam Park view" [ref=e45]:
+              - cell "MAT 261" [ref=e46]
+              - cell "Linear Algebra" [ref=e47]
+              - cell "4" [ref=e48]
+              - cell "Dr. Liam Park" [ref=e49]:
+                - link "Dr. Liam Park" [ref=e50] [cursor=pointer]:
+                  - /url: /instructor/2
+              - cell "view" [ref=e51]:
+                - link "view" [ref=e52] [cursor=pointer]:
+                  - /url: /course/4
+      - complementary [ref=e53]:
+        - generic [ref=e54]:
+          - heading "By credits" [level=4] [ref=e55]
+          - list [ref=e56]:
+            - listitem [ref=e57]:
+              - link "3" [ref=e58] [cursor=pointer]:
+                - /url: /course?credits=3
+              - text: (2)
+            - listitem [ref=e59]:
+              - link "4" [ref=e60] [cursor=pointer]:
+                - /url: /course
+              - text: (2)
+        - generic [ref=e61]:
+          - heading "By instructor" [level=4] [ref=e62]
+          - list [ref=e63]:
+            - listitem [ref=e64]:
+              - link "1" [ref=e65] [cursor=pointer]:
+                - /url: /course?credits=4&instructor=1
+              - text: (2)
+            - listitem [ref=e66]:
+              - link "2" [ref=e67] [cursor=pointer]:
+                - /url: /course?credits=4&instructor=2
+              - text: (2)

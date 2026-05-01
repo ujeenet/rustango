@@ -239,7 +239,7 @@ pub(crate) async fn audit_log_view(
                 "id": id,
                 "entity_table": entity_table,
                 "entity_pk": entity_pk,
-                "detail_url": format!("/{entity_table}/{entity_pk}"),
+                "detail_url": format!("/__admin/{entity_table}/{entity_pk}"),
                 "operation": operation,
                 "action_name": action_name,
                 "source": source,

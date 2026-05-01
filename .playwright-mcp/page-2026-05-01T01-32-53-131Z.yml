@@ -1,0 +1,53 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - heading "rustango admin" [level=2] [ref=e4]
+    - paragraph [ref=e5]:
+      - link "Home" [ref=e6] [cursor=pointer]:
+        - /url: /
+    - heading "Project" [level=3] [ref=e7]
+    - list [ref=e8]:
+      - listitem [ref=e9]:
+        - link "Course" [ref=e10] [cursor=pointer]:
+          - /url: /course
+      - listitem [ref=e11]:
+        - link "Instructor" [ref=e12] [cursor=pointer]:
+          - /url: /instructor
+  - main [ref=e13]:
+    - paragraph [ref=e14]:
+      - link "admin" [ref=e15] [cursor=pointer]:
+        - /url: /
+      - text: ›
+      - link "Course" [ref=e16] [cursor=pointer]:
+        - /url: /course
+    - heading "New Course" [level=1] [ref=e17]
+    - generic [ref=e18]:
+      - group "Course identity" [ref=e19]:
+        - generic [ref=e20]: Course identity
+        - table [ref=e21]:
+          - rowgroup [ref=e22]:
+            - row "code required" [ref=e23]:
+              - rowheader "code required" [ref=e24]:
+                - generic [ref=e25]: code required
+              - cell [ref=e26]:
+                - textbox "code required" [ref=e27]
+            - row "title required" [ref=e28]:
+              - rowheader "title required" [ref=e29]:
+                - generic [ref=e30]: title required
+              - cell [ref=e31]:
+                - textbox "title required" [ref=e32]
+      - group "Curriculum" [ref=e33]:
+        - generic [ref=e34]: Curriculum
+        - table [ref=e35]:
+          - rowgroup [ref=e36]:
+            - row "credits required" [ref=e37]:
+              - rowheader "credits required" [ref=e38]:
+                - generic [ref=e39]: credits required
+              - cell [ref=e40]:
+                - spinbutton "credits required" [ref=e41]
+            - row "instructor required" [ref=e42]:
+              - rowheader "instructor required" [ref=e43]:
+                - generic [ref=e44]: instructor required
+              - cell [ref=e45]:
+                - spinbutton "instructor required" [ref=e46]
+      - paragraph [ref=e47]:
+        - button "save" [ref=e48] [cursor=pointer]

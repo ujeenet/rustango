@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ title }} — rustango admin{% endblock title %}
 {% block body %}
-<p><a href="/">admin</a> &rsaquo; <a href="/{{ model.table }}">{{ model.name }}</a></p>
+<p><a href="/__admin/">admin</a> &rsaquo; <a href="/__admin/{{ model.table }}">{{ model.name }}</a></p>
 <h1>{{ title }}</h1>
 {% if error %}
 <p class="error">{{ error }}</p>

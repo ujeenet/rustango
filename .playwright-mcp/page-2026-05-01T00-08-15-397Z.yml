@@ -1,0 +1,68 @@
+- generic [active] [ref=e1]:
+  - paragraph [ref=e2]:
+    - link "← admin home" [ref=e3] [cursor=pointer]:
+      - /url: /
+  - heading "Course" [level=1] [ref=e4]
+  - paragraph [ref=e5]:
+    - text: "Table:"
+    - code [ref=e6]: course
+    - text: — 4 rows ·
+    - link "+ new Course" [ref=e7] [cursor=pointer]:
+      - /url: /course/new
+  - generic [ref=e8]:
+    - searchbox "search…" [ref=e9]
+    - button "go" [ref=e10] [cursor=pointer]
+  - table [ref=e11]:
+    - rowgroup [ref=e12]:
+      - row "id (pk) code title credits instructor" [ref=e13]:
+        - columnheader "id (pk)" [ref=e14]
+        - columnheader "code" [ref=e15]
+        - columnheader "title" [ref=e16]
+        - columnheader "credits" [ref=e17]
+        - columnheader "instructor" [ref=e18]
+        - columnheader [ref=e19]
+    - rowgroup [ref=e20]:
+      - row "1 ART 110 Foundations of Drawing 3 Dr. Nora Chen view" [ref=e21]:
+        - cell "1" [ref=e22]
+        - cell "ART 110" [ref=e23]
+        - cell "Foundations of Drawing" [ref=e24]
+        - cell "3" [ref=e25]
+        - cell "Dr. Nora Chen" [ref=e26]:
+          - link "Dr. Nora Chen" [ref=e27] [cursor=pointer]:
+            - /url: /instructor/1
+        - cell "view" [ref=e28]:
+          - link "view" [ref=e29] [cursor=pointer]:
+            - /url: /course/1
+      - row "2 ART 220 Painting Studio 3 Dr. Nora Chen view" [ref=e30]:
+        - cell "2" [ref=e31]
+        - cell "ART 220" [ref=e32]
+        - cell "Painting Studio" [ref=e33]
+        - cell "3" [ref=e34]
+        - cell "Dr. Nora Chen" [ref=e35]:
+          - link "Dr. Nora Chen" [ref=e36] [cursor=pointer]:
+            - /url: /instructor/1
+        - cell "view" [ref=e37]:
+          - link "view" [ref=e38] [cursor=pointer]:
+            - /url: /course/2
+      - row "3 PHI 101 Intro to Philosophy 3 Dr. Owen Patel view" [ref=e39]:
+        - cell "3" [ref=e40]
+        - cell "PHI 101" [ref=e41]
+        - cell "Intro to Philosophy" [ref=e42]
+        - cell "3" [ref=e43]
+        - cell "Dr. Owen Patel" [ref=e44]:
+          - link "Dr. Owen Patel" [ref=e45] [cursor=pointer]:
+            - /url: /instructor/2
+        - cell "view" [ref=e46]:
+          - link "view" [ref=e47] [cursor=pointer]:
+            - /url: /course/3
+      - row "4 PHI 305 Ethics in Practice 3 Dr. Owen Patel view" [ref=e48]:
+        - cell "4" [ref=e49]
+        - cell "PHI 305" [ref=e50]
+        - cell "Ethics in Practice" [ref=e51]
+        - cell "3" [ref=e52]
+        - cell "Dr. Owen Patel" [ref=e53]:
+          - link "Dr. Owen Patel" [ref=e54] [cursor=pointer]:
+            - /url: /instructor/2
+        - cell "view" [ref=e55]:
+          - link "view" [ref=e56] [cursor=pointer]:
+            - /url: /course/4

@@ -22,7 +22,7 @@
 //! Routes:
 //! * `GET  /`                          — list every registered model
 //! * `GET  /<table>`                   — list rows
-//! * `GET  /<table>/new`               — create form
+//! * `GET  /__admin/<table>/new`        — create form
 //! * `POST /<table>`                   — submit create
 //! * `GET  /<table>/<pk>`              — detail view
 //! * `GET  /<table>/<pk>/edit`         — edit form (PK readonly)

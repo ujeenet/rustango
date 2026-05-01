@@ -1,0 +1,33 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - generic [ref=e4]: rustango
+    - navigation [ref=e5]:
+      - link "Home" [ref=e6] [cursor=pointer]:
+        - /url: /
+      - link "Operators" [ref=e7] [cursor=pointer]:
+        - /url: /operators
+      - link "Organizations" [ref=e8] [cursor=pointer]:
+        - /url: /orgs
+    - generic [ref=e9]:
+      - text: signed in as
+      - strong [ref=e10]: admin
+    - button "Sign out" [ref=e12] [cursor=pointer]
+  - main [ref=e13]:
+    - heading "Operators" [level=1] [ref=e14]
+    - paragraph [ref=e15]:
+      - text: Registry-scoped administrators. Mutations go through
+      - code [ref=e16]: manage create-operator <username> --password <p>
+      - text: .
+    - table [ref=e17]:
+      - rowgroup [ref=e18]:
+        - row "id username active created" [ref=e19]:
+          - columnheader "id" [ref=e20]
+          - columnheader "username" [ref=e21]
+          - columnheader "active" [ref=e22]
+          - columnheader "created" [ref=e23]
+      - rowgroup [ref=e24]:
+        - row "1 admin ✓ 2026-04-30 23:55 UTC" [ref=e25]:
+          - cell "1" [ref=e26]
+          - cell "admin" [ref=e27]
+          - cell "✓" [ref=e28]
+          - cell "2026-04-30 23:55 UTC" [ref=e29]

@@ -229,16 +229,62 @@ impl Builder {
             .with_session(session_secret_for_tenant)
             .build();
 
-        // The user's API router (stateless) fronts the tenant admin
-        // for a path-falls-through chain: `/api/...` → user; anything
-        // else → admin login + CRUD pages. Every request gets the
-        // `TenantContext` extension so handler-side
-        // `extractors::Tenant` can resolve.
+        // Admin CRUD lives under `/__admin/*` registered as explicit
+        // routes so they take priority over user routes like `/post/{slug}`
+        // whose typed Path extractor would otherwise capture `/__admin/post`
+        // before the fallback. Session routes (`/__login`, `/__logout`,
+        // `/__static__`) remain as fallback-only paths.
+        //
+        // We pass the full Request (including the `/__admin` prefix in the
+        // URI) to the tenant admin; `handle_request` strips the prefix before
+        // dispatching to the inner admin router so that redirect `next=` params
+        // correctly reference `/__admin/...` paths.
+        // Build a fresh request (method + URI + headers only, no outer-router
+        // path-param extensions) before forwarding to the admin service.
+        // Without this, axum's path extractor sees params from the outer
+        // `/__admin/{*rest}` match stacked on top of the inner admin router's
+        // own params, producing "Wrong number of path arguments" errors.
+        let make_admin_handler =
+            |svc: Router| {
+                move |req: axum::http::Request<axum::body::Body>| {
+                    let svc = svc.clone();
+                    async move {
+                        let (parts, body) = req.into_parts();
+                        let mut builder = axum::http::Request::builder()
+                            .method(&parts.method)
+                            .uri(&parts.uri);
+                        for (k, v) in &parts.headers {
+                            builder = builder.header(k, v);
+                        }
+                        let fresh = builder.body(body).expect("valid request");
+                        svc.oneshot(fresh)
+                            .await
+                            .unwrap_or_else(|_| unreachable!("Router is Infallible"))
+                    }
+                }
+            };
         let tenant_app = match self.api {
-            Some(router) => router
-                .layer(Extension(ctx.clone()))
-                .fallback_service(tenant_admin),
-            None => Router::new().fallback_service(tenant_admin),
+            Some(router) => {
+                let h1 = make_admin_handler(tenant_admin.clone());
+                let h2 = make_admin_handler(tenant_admin.clone());
+                let h3 = make_admin_handler(tenant_admin.clone());
+                router
+                    .layer(Extension(ctx.clone()))
+                    .route("/__admin", axum::routing::any(h1))
+                    .route("/__admin/", axum::routing::any(h2))
+                    .route("/__admin/{*rest}", axum::routing::any(h3))
+                    .fallback_service(tenant_admin)
+            }
+            None => {
+                let h1 = make_admin_handler(tenant_admin.clone());
+                let h2 = make_admin_handler(tenant_admin.clone());
+                let h3 = make_admin_handler(tenant_admin.clone());
+                Router::new()
+                    .route("/__admin", axum::routing::any(h1))
+                    .route("/__admin/", axum::routing::any(h2))
+                    .route("/__admin/{*rest}", axum::routing::any(h3))
+                    .fallback_service(tenant_admin)
+            }
         };
 
         let session_secret = SessionSecret::from_env_or_random();

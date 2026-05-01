@@ -1,0 +1,53 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - heading "rustango admin" [level=2] [ref=e4]
+    - paragraph [ref=e5]:
+      - link "Home" [ref=e6] [cursor=pointer]:
+        - /url: /
+    - heading "Project" [level=3] [ref=e7]
+    - list [ref=e8]:
+      - listitem [ref=e9]:
+        - link "Course" [ref=e10] [cursor=pointer]:
+          - /url: /course
+      - listitem [ref=e11]:
+        - link "Instructor" [ref=e12] [cursor=pointer]:
+          - /url: /instructor
+  - main [ref=e13]:
+    - paragraph [ref=e14]:
+      - link "← admin home" [ref=e15] [cursor=pointer]:
+        - /url: /
+    - heading "Course" [level=1] [ref=e16]
+    - paragraph [ref=e17]:
+      - text: "Table:"
+      - code [ref=e18]: course
+      - text: — 4 rows ·
+      - link "+ new Course" [ref=e19] [cursor=pointer]:
+        - /url: /course/new
+    - generic [ref=e20]:
+      - searchbox "search…" [ref=e21]: algebra
+      - button "go" [ref=e22] [cursor=pointer]
+    - paragraph [ref=e23]:
+      - text: "filtered by:"
+      - code [ref=e24]: q=algebra
+      - text: ·
+      - link "clear" [ref=e25] [cursor=pointer]:
+        - /url: /course
+    - table [ref=e26]:
+      - rowgroup [ref=e27]:
+        - row "code title credits instructor" [ref=e28]:
+          - columnheader "code" [ref=e29]
+          - columnheader "title" [ref=e30]
+          - columnheader "credits" [ref=e31]
+          - columnheader "instructor" [ref=e32]
+          - columnheader [ref=e33]
+      - rowgroup [ref=e34]:
+        - row "MAT 261 Linear Algebra 4 Dr. Liam Park view" [ref=e35]:
+          - cell "MAT 261" [ref=e36]
+          - cell "Linear Algebra" [ref=e37]
+          - cell "4" [ref=e38]
+          - cell "Dr. Liam Park" [ref=e39]:
+            - link "Dr. Liam Park" [ref=e40] [cursor=pointer]:
+              - /url: /instructor/2
+          - cell "view" [ref=e41]:
+            - link "view" [ref=e42] [cursor=pointer]:
+              - /url: /course/4

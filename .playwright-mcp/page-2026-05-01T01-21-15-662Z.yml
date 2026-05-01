@@ -1,0 +1,87 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - heading "rustango admin" [level=2] [ref=e4]
+    - paragraph [ref=e5]:
+      - link "Home" [ref=e6] [cursor=pointer]:
+        - /url: /
+    - heading "Project" [level=3] [ref=e7]
+    - list [ref=e8]:
+      - listitem [ref=e9]:
+        - link "Course" [ref=e10] [cursor=pointer]:
+          - /url: /course
+      - listitem [ref=e11]:
+        - link "Instructor" [ref=e12] [cursor=pointer]:
+          - /url: /instructor
+  - main [ref=e13]:
+    - paragraph [ref=e14]:
+      - link "← admin home" [ref=e15] [cursor=pointer]:
+        - /url: /
+    - heading "Course" [level=1] [ref=e16]
+    - generic [ref=e17]:
+      - generic [ref=e18]:
+        - paragraph [ref=e19]:
+          - text: "Table:"
+          - code [ref=e20]: course
+          - text: — 2 rows ·
+          - link "+ new Course" [ref=e21] [cursor=pointer]:
+            - /url: /course/new
+        - generic [ref=e22]:
+          - searchbox "search…" [ref=e23]
+          - button "go" [ref=e24] [cursor=pointer]
+        - generic [ref=e25]:
+          - generic [ref=e26]:
+            - generic [ref=e27]:
+              - text: "Action:"
+              - combobox "Action:" [ref=e28]:
+                - option "— select —" [selected]
+                - option "Delete selected"
+            - button "Go" [ref=e29] [cursor=pointer]
+          - table [ref=e30]:
+            - rowgroup [ref=e31]:
+              - row "code title credits instructor" [ref=e32]:
+                - columnheader [ref=e33]
+                - columnheader "code" [ref=e34]
+                - columnheader "title" [ref=e35]
+                - columnheader "credits" [ref=e36]
+                - columnheader "instructor" [ref=e37]
+                - columnheader [ref=e38]
+            - rowgroup [ref=e39]:
+              - row "CSC 120 Intro to Computer Science 3 Dr. Maeve O'Hara view" [ref=e40]:
+                - cell [ref=e41]:
+                  - checkbox [ref=e42]
+                - cell "CSC 120" [ref=e43]
+                - cell "Intro to Computer Science" [ref=e44]
+                - cell "3" [ref=e45]
+                - cell "Dr. Maeve O'Hara" [ref=e46]:
+                  - link "Dr. Maeve O'Hara" [ref=e47] [cursor=pointer]:
+                    - /url: /instructor/1
+                - cell "view" [ref=e48]:
+                  - link "view" [ref=e49] [cursor=pointer]:
+                    - /url: /course/1
+              - row "CSC 230 Data Structures 3 Dr. Maeve O'Hara view" [ref=e50]:
+                - cell [ref=e51]:
+                  - checkbox [ref=e52]
+                - cell "CSC 230" [ref=e53]
+                - cell "Data Structures" [ref=e54]
+                - cell "3" [ref=e55]
+                - cell "Dr. Maeve O'Hara" [ref=e56]:
+                  - link "Dr. Maeve O'Hara" [ref=e57] [cursor=pointer]:
+                    - /url: /instructor/1
+                - cell "view" [ref=e58]:
+                  - link "view" [ref=e59] [cursor=pointer]:
+                    - /url: /course/2
+      - complementary [ref=e60]:
+        - generic [ref=e61]:
+          - heading "By credits" [level=4] [ref=e62]
+          - list [ref=e63]:
+            - listitem [ref=e64]:
+              - link "3" [ref=e65] [cursor=pointer]:
+                - /url: /course?credits=3
+              - text: (2)
+        - generic [ref=e66]:
+          - heading "By instructor" [level=4] [ref=e67]
+          - list [ref=e68]:
+            - listitem [ref=e69]:
+              - link "1" [ref=e70] [cursor=pointer]:
+                - /url: /course?instructor=1
+              - text: (2)

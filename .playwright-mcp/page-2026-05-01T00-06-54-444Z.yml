@@ -1,0 +1,28 @@
+- generic [active] [ref=e1]:
+  - paragraph [ref=e2]:
+    - link "admin" [ref=e3] [cursor=pointer]:
+      - /url: /
+    - text: ›
+    - link "Instructor" [ref=e4] [cursor=pointer]:
+      - /url: /instructor
+  - heading "Edit Instructor" [level=1] [ref=e5]
+  - generic [ref=e6]:
+    - table [ref=e7]:
+      - rowgroup [ref=e8]:
+        - row "id (pk) 99" [ref=e9]:
+          - rowheader "id (pk)" [ref=e10]:
+            - generic [ref=e11]: id (pk)
+          - cell "99" [ref=e12]:
+            - spinbutton "id (pk)" [ref=e13]: "99"
+        - row "name required Dr. Playwright Test" [ref=e14]:
+          - rowheader "name required" [ref=e15]:
+            - generic [ref=e16]: name required
+          - cell "Dr. Playwright Test" [ref=e17]:
+            - textbox "name required" [ref=e18]: Dr. Playwright Test
+        - row "office required Office 99, Synthetic Hall" [ref=e19]:
+          - rowheader "office required" [ref=e20]:
+            - generic [ref=e21]: office required
+          - cell "Office 99, Synthetic Hall" [ref=e22]:
+            - textbox "office required" [ref=e23]: Office 99, Synthetic Hall
+    - paragraph [ref=e24]:
+      - button "save" [ref=e25] [cursor=pointer]

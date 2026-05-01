@@ -239,9 +239,9 @@ pub(crate) fn render_form(
         let pk_value = prefill
             .and_then(|m| m.get(pk_field.name).cloned())
             .unwrap_or_default();
-        format!("/{}/{}", model.table, render::escape(&pk_value))
+        format!("/__admin/{}/{}", model.table, render::escape(&pk_value))
     } else {
-        format!("/{}", model.table)
+        format!("/__admin/{}", model.table)
     };
     let title = if pk_locked {
         format!("Edit {}", model.name)

@@ -541,13 +541,13 @@ async fn compute_facets(
 
 fn build_query_url(table: &str, params: &[(String, String)]) -> String {
     if params.is_empty() {
-        format!("/{table}")
+        format!("/__admin/{table}")
     } else {
         let qs: Vec<String> = params
             .iter()
             .map(|(k, v)| format!("{}={}", url_encode(k), url_encode(v)))
             .collect();
-        format!("/{table}?{}", qs.join("&"))
+        format!("/__admin/{table}?{}", qs.join("&"))
     }
 }
 
@@ -701,11 +701,17 @@ pub(crate) async fn create_submit(
     let pk_field = model.primary_key().ok_or_else(|| {
         AdminError::Internal(format!("model `{}` has no primary key", model.name))
     })?;
-    // Auto-PK is server-assigned (matches the create form, which now
-    // omits the column). Skip it in collect_values so we don't synthesize
-    // a SqlValue::Null and clobber the column's BIGSERIAL DEFAULT.
-    let auto_pk_skip: &[&str] = if pk_field.auto { &[pk_field.name] } else { &[] };
-    let collected = match forms::collect_values(model, &form, auto_pk_skip) {
+    // Auto-PK fields are server-assigned; readonly_fields are display-only
+    // and must not be part of the INSERT. Build the combined skip list.
+    let admin_cfg = model
+        .admin
+        .copied()
+        .unwrap_or(crate::core::AdminConfig::DEFAULT);
+    let mut skip: Vec<&str> = admin_cfg.readonly_fields.to_vec();
+    if pk_field.auto {
+        skip.push(pk_field.name);
+    }
+    let collected = match forms::collect_values(model, &form, &skip) {
         Ok(v) => v,
         Err(e) => {
             // Re-render the form with the error message instead of a 4xx.
@@ -740,7 +746,7 @@ pub(crate) async fn create_submit(
         &form,
     )
     .await;
-    Ok(Redirect::to(&format!("/{}/{}", model.table, pk_value)).into_response())
+    Ok(Redirect::to(&format!("/__admin/{}/{}", model.table, pk_value)).into_response())
 }
 
 // ============================================================== EDIT
@@ -869,7 +875,7 @@ pub(crate) async fn update_submit(
     // `tenancy::admin`, so operators get a "who changed what" trail
     // automatically.
     super::audit::emit_admin_audit_diff(&state, model, &pk_raw, before_row.as_ref(), &form).await;
-    Ok(Redirect::to(&format!("/{}/{}", model.table, pk_raw)).into_response())
+    Ok(Redirect::to(&format!("/__admin/{}/{}", model.table, pk_raw)).into_response())
 }
 
 
@@ -979,7 +985,7 @@ pub(crate) async fn delete_submit(
             "admin audit emit failed for delete",
         );
     }
-    Ok(Redirect::to(&format!("/{}", model.table)).into_response())
+    Ok(Redirect::to(&format!("/__admin/{}", model.table)).into_response())
 }
 
 // ============================================================== ACTIONS (slice 10.6)
@@ -1025,10 +1031,10 @@ pub(crate) async fn action_submit(
     }
     let Some(action) = action_name.filter(|s| !s.is_empty()) else {
         // No action picked — just bounce back to the list.
-        return Ok(Redirect::to(&format!("/{}", model.table)).into_response());
+        return Ok(Redirect::to(&format!("/__admin/{}", model.table)).into_response());
     };
     if selected_raw.is_empty() {
-        return Ok(Redirect::to(&format!("/{}", model.table)).into_response());
+        return Ok(Redirect::to(&format!("/__admin/{}", model.table)).into_response());
     }
 
     let admin_cfg = model
@@ -1051,7 +1057,7 @@ pub(crate) async fn action_submit(
         .filter_map(|raw| forms::parse_pk_string(pk_field, raw).ok())
         .collect();
     if pk_values.is_empty() {
-        return Ok(Redirect::to(&format!("/{}", model.table)).into_response());
+        return Ok(Redirect::to(&format!("/__admin/{}", model.table)).into_response());
     }
 
     // v0.12.4: SELECT every selected row's pre-action state so the
@@ -1198,5 +1204,5 @@ pub(crate) async fn action_submit(
         }
     }
 
-    Ok(Redirect::to(&format!("/{}", model.table)).into_response())
+    Ok(Redirect::to(&format!("/__admin/{}", model.table)).into_response())
 }

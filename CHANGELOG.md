@@ -2,6 +2,32 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.14.1] — admin under `/__admin/`; readonly_fields skip on create — 2026-05-01
+
+### Fixed
+
+- **Admin CRUD routes moved to `/__admin/` prefix** so they can't be shadowed by user
+  routes like `/author/{id: Path<i64>}`. Previously, `/author/new` (create form) was
+  captured by user public routes before the admin fallback, producing
+  "Cannot parse `new` to a `i64`". The admin builder now registers
+  `/__admin`, `/__admin/`, `/__admin/{*rest}` as explicit routes that take priority.
+  `handle_request` strips the `/__admin` prefix before dispatching to the inner router
+  so that login redirects correctly reference `/__admin/…` paths. Session routes
+  (`/__login`, `/__logout`, `/__static__`) are unchanged.
+
+- **`readonly_fields` are now skipped in `create_submit`** as well as `update_submit`.
+  Previously, declaring a field as `readonly_fields` (e.g. a computed `posts_count`)
+  excluded it from the create form but `collect_values` still required it, producing a
+  "required field missing" error on every create. The skip list now includes both the
+  auto-PK and all `readonly_fields` on create.
+
+### Changed (breaking for admin URL shape)
+
+- All admin CRUD URLs changed from `/{table}` to `/__admin/{table}`. Projects that
+  hardcode admin paths (unusual — the framework generates all links from templates)
+  must update them. `cargo build` is all that's needed for projects that only use the
+  framework's generated UI.
+
 ## [v0.14.0] — FK facet dropdown — 2026-05-01
 
 ### Added

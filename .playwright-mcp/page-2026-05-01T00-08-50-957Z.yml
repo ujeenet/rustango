@@ -1,0 +1,68 @@
+- generic [active] [ref=e1]:
+  - paragraph [ref=e2]:
+    - link "← admin home" [ref=e3] [cursor=pointer]:
+      - /url: /
+  - heading "Course" [level=1] [ref=e4]
+  - paragraph [ref=e5]:
+    - text: "Table:"
+    - code [ref=e6]: course
+    - text: — 4 rows ·
+    - link "+ new Course" [ref=e7] [cursor=pointer]:
+      - /url: /course/new
+  - generic [ref=e8]:
+    - searchbox "search…" [ref=e9]
+    - button "go" [ref=e10] [cursor=pointer]
+  - table [ref=e11]:
+    - rowgroup [ref=e12]:
+      - row "id (pk) code title credits instructor" [ref=e13]:
+        - columnheader "id (pk)" [ref=e14]
+        - columnheader "code" [ref=e15]
+        - columnheader "title" [ref=e16]
+        - columnheader "credits" [ref=e17]
+        - columnheader "instructor" [ref=e18]
+        - columnheader [ref=e19]
+    - rowgroup [ref=e20]:
+      - row "1 CSC 120 Intro to Computer Science 3 Dr. Maeve O'Hara view" [ref=e21]:
+        - cell "1" [ref=e22]
+        - cell "CSC 120" [ref=e23]
+        - cell "Intro to Computer Science" [ref=e24]
+        - cell "3" [ref=e25]
+        - cell "Dr. Maeve O'Hara" [ref=e26]:
+          - link "Dr. Maeve O'Hara" [ref=e27] [cursor=pointer]:
+            - /url: /instructor/1
+        - cell "view" [ref=e28]:
+          - link "view" [ref=e29] [cursor=pointer]:
+            - /url: /course/1
+      - row "2 CSC 230 Data Structures 3 Dr. Maeve O'Hara view" [ref=e30]:
+        - cell "2" [ref=e31]
+        - cell "CSC 230" [ref=e32]
+        - cell "Data Structures" [ref=e33]
+        - cell "3" [ref=e34]
+        - cell "Dr. Maeve O'Hara" [ref=e35]:
+          - link "Dr. Maeve O'Hara" [ref=e36] [cursor=pointer]:
+            - /url: /instructor/1
+        - cell "view" [ref=e37]:
+          - link "view" [ref=e38] [cursor=pointer]:
+            - /url: /course/2
+      - row "3 MAT 161 Calculus I 4 Dr. Liam Park view" [ref=e39]:
+        - cell "3" [ref=e40]
+        - cell "MAT 161" [ref=e41]
+        - cell "Calculus I" [ref=e42]
+        - cell "4" [ref=e43]
+        - cell "Dr. Liam Park" [ref=e44]:
+          - link "Dr. Liam Park" [ref=e45] [cursor=pointer]:
+            - /url: /instructor/2
+        - cell "view" [ref=e46]:
+          - link "view" [ref=e47] [cursor=pointer]:
+            - /url: /course/3
+      - row "4 MAT 261 Linear Algebra 4 Dr. Liam Park view" [ref=e48]:
+        - cell "4" [ref=e49]
+        - cell "MAT 261" [ref=e50]
+        - cell "Linear Algebra" [ref=e51]
+        - cell "4" [ref=e52]
+        - cell "Dr. Liam Park" [ref=e53]:
+          - link "Dr. Liam Park" [ref=e54] [cursor=pointer]:
+            - /url: /instructor/2
+        - cell "view" [ref=e55]:
+          - link "view" [ref=e56] [cursor=pointer]:
+            - /url: /course/4

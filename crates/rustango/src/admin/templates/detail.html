@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ model.name }} #{{ pk }} — rustango admin{% endblock title %}
 {% block body %}
-<p><a href="/">admin</a> &rsaquo; <a href="/{{ model.table }}">{{ model.name }}</a> &rsaquo; <strong>{{ pk }}</strong></p>
+<p><a href="/__admin/">admin</a> &rsaquo; <a href="/__admin/{{ model.table }}">{{ model.name }}</a> &rsaquo; <strong>{{ pk }}</strong></p>
 <h1>{{ model.name }} #{{ pk }}</h1>
 <dl>
 {% for cell in cells %}
@@ -13,8 +13,8 @@
 <p><em>This table is read-only.</em></p>
 {% else %}
 <p>
-  <a href="/{{ model.table }}/{{ pk }}/edit">edit</a> &middot;
-  <form method="post" action="/{{ model.table }}/{{ pk }}/delete" style="display:inline" onsubmit="return confirm('Delete this row?')">
+  <a href="/__admin/{{ model.table }}/{{ pk }}/edit">edit</a> &middot;
+  <form method="post" action="/__admin/{{ model.table }}/{{ pk }}/delete" style="display:inline" onsubmit="return confirm('Delete this row?')">
     <button type="submit">delete</button>
   </form>
 </p>

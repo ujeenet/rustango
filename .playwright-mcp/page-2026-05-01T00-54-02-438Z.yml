@@ -1,0 +1,50 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - heading "rustango admin" [level=2] [ref=e4]
+    - paragraph [ref=e5]:
+      - link "Home" [ref=e6] [cursor=pointer]:
+        - /url: /
+    - heading "Project" [level=3] [ref=e7]
+    - list [ref=e8]:
+      - listitem [ref=e9]:
+        - link "Course" [ref=e10] [cursor=pointer]:
+          - /url: /course
+      - listitem [ref=e11]:
+        - link "Instructor" [ref=e12] [cursor=pointer]:
+          - /url: /instructor
+  - main [ref=e13]:
+    - paragraph [ref=e14]:
+      - link "← admin home" [ref=e15] [cursor=pointer]:
+        - /url: /
+    - heading "Instructor" [level=1] [ref=e16]
+    - paragraph [ref=e17]:
+      - text: "Table:"
+      - code [ref=e18]: instructor
+      - text: — 2 rows ·
+      - link "+ new Instructor" [ref=e19] [cursor=pointer]:
+        - /url: /instructor/new
+    - generic [ref=e20]:
+      - searchbox "search…" [ref=e21]
+      - button "go" [ref=e22] [cursor=pointer]
+    - table [ref=e23]:
+      - rowgroup [ref=e24]:
+        - row "id (pk) name office" [ref=e25]:
+          - columnheader "id (pk)" [ref=e26]
+          - columnheader "name" [ref=e27]
+          - columnheader "office" [ref=e28]
+          - columnheader [ref=e29]
+      - rowgroup [ref=e30]:
+        - row "1 Dr. Maeve O'Hara Office 14, Hawk Hall view" [ref=e31]:
+          - cell "1" [ref=e32]
+          - cell "Dr. Maeve O'Hara" [ref=e33]
+          - cell "Office 14, Hawk Hall" [ref=e34]
+          - cell "view" [ref=e35]:
+            - link "view" [ref=e36] [cursor=pointer]:
+              - /url: /instructor/1
+        - row "2 Dr. Liam Park Office 7, Mandeville Hall view" [ref=e37]:
+          - cell "2" [ref=e38]
+          - cell "Dr. Liam Park" [ref=e39]
+          - cell "Office 7, Mandeville Hall" [ref=e40]
+          - cell "view" [ref=e41]:
+            - link "view" [ref=e42] [cursor=pointer]:
+              - /url: /instructor/2
