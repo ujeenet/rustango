@@ -150,6 +150,9 @@ pub async fn migrate_tenants(
         ScopedDir::Owned(temp) => temp.path().to_path_buf(),
         ScopedDir::Original => dir.to_path_buf(),
     };
+    let migrations_in_scope = rustango::migrate::file::list_dir(&scoped_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
 
     let orgs: Vec<Org> = Org::objects()
         .where_(Org::active.eq(true))
@@ -159,8 +162,23 @@ pub async fn migrate_tenants(
     info!(
         target: "crate::tenancy",
         tenants = orgs.len(),
+        migrations = migrations_in_scope,
+        dir = %dir.display(),
         "applying tenant-scoped migrations"
     );
+    if migrations_in_scope == 0 && !orgs.is_empty() {
+        // Surface the most likely cause for an `applied=0` report: caller
+        // passed a path with no tenant-scoped migrations. Common footgun
+        // is passing the project root when a flat `migrations/` subdir
+        // was meant. The typed `tenancy::manage::api` auto-detects via
+        // `resolve_migration_dirs`, but raw callers can still hit this.
+        warn!(
+            target: "crate::tenancy",
+            dir = %dir.display(),
+            "no tenant-scoped migrations found in dir; tenants will record applied=0 — \
+             pass the flat migrations directory or a project root containing one"
+        );
+    }
 
     let mut report = TenantMigrationReport::default();
     for org in &orgs {

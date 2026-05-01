@@ -37,6 +37,18 @@ pub struct AdminPost {
     author_id: i64,
 }
 
+/// Auto-PK twin of `AdminUser` — exists only to assert that the create
+/// form omits the server-assigned `id` column (S7 regression — HTML5
+/// `required` on a blank Auto-PK column was silently blocking submit).
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "admin_widget", display = "label")]
+pub struct AdminWidget {
+    #[rustango(primary_key)]
+    id: rustango::Auto<i64>,
+    #[rustango(max_length = 32)]
+    label: String,
+}
+
 fn live_lock() -> &'static Mutex<()> {
     static M: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
     M.get_or_init(|| Mutex::new(()))
@@ -366,6 +378,88 @@ async fn create_form_shows_one_input_per_field() {
     // min/max from age surface on the number input
     assert!(body.contains(r#"min="0""#), "missing min: {body}");
     assert!(body.contains(r#"max="150""#), "missing max: {body}");
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn create_form_for_auto_pk_omits_id_input() {
+    // S7 regression: the create form for an `Auto<i64>` PK model used
+    // to render `<input type="number" name="id" required>`. Empty
+    // `id` + `required` made HTML5 silently block form submit. The
+    // column is now omitted entirely on create — Postgres' BIGSERIAL
+    // DEFAULT fills it via `insert_returning`.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_widget/new")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_string(response).await;
+    assert!(
+        !body.contains(r#"name="id""#),
+        "Auto-PK `id` must not render on create form: {body}"
+    );
+    assert!(
+        body.contains(r#"name="label""#),
+        "label input still rendered: {body}"
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn create_submit_for_auto_pk_assigns_pk_and_redirects() {
+    // S7 round-trip: POST to an Auto-PK model without an `id` field —
+    // server-assigned PK from `insert_returning`, redirect lands on
+    // the new row's detail URL.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+
+    let app = rustango::admin::router(pool.clone());
+    let response = app
+        .oneshot(form_request(Method::POST, "/admin_widget", "label=auto-pk-test"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let prefix = "/admin_widget/";
+    assert!(
+        location.starts_with(prefix),
+        "expected /admin_widget/<id>, got `{location}`"
+    );
+    let pk: i64 = location[prefix.len()..]
+        .parse()
+        .expect("redirect should include numeric PK");
+    assert!(pk > 0, "expected server-assigned positive PK, got `{pk}`");
+
+    let row = sqlx::query("SELECT label FROM admin_widget WHERE id = $1")
+        .bind(pk)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.try_get::<String, _>("label").unwrap(), "auto-pk-test");
 
     migrate::drop_all(&pool).await.unwrap();
 }

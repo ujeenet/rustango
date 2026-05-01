@@ -187,6 +187,13 @@ pub(crate) fn render_form(
 
     let rows_ctx: Vec<serde_json::Value> = model
         .scalar_fields()
+        // Auto-PK columns are server-assigned — Postgres' DEFAULT (BIGSERIAL)
+        // fills them on INSERT. Rendering them on the create form caused
+        // HTML5 `required` validation to silently block submit when the
+        // operator (correctly) left them blank. On the edit form we still
+        // show the existing PK as a read-only field so the row identity is
+        // visible.
+        .filter(|f| !(f.auto && f.primary_key && !pk_locked))
         .map(|f| {
             let value = prefill
                 .and_then(|m| m.get(f.name))

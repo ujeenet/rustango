@@ -334,7 +334,14 @@ pub(crate) async fn create_submit(
         });
     }
 
-    let collected = match forms::collect_values(model, &form, &[]) {
+    let pk_field = model.primary_key().ok_or_else(|| {
+        AdminError::Internal(format!("model `{}` has no primary key", model.name))
+    })?;
+    // Auto-PK is server-assigned (matches the create form, which now
+    // omits the column). Skip it in collect_values so we don't synthesize
+    // a SqlValue::Null and clobber the column's BIGSERIAL DEFAULT.
+    let auto_pk_skip: &[&str] = if pk_field.auto { &[pk_field.name] } else { &[] };
+    let collected = match forms::collect_values(model, &form, auto_pk_skip) {
         Ok(v) => v,
         Err(e) => {
             // Re-render the form with the error message instead of a 4xx.
@@ -348,18 +355,19 @@ pub(crate) async fn create_submit(
         model,
         columns,
         values,
-        returning: Vec::new(),
+        returning: vec![pk_field.column],
     };
-    if let Err(e) = crate::sql::insert(&state.pool, &query).await {
-        let html = render_form(model, Some(&form), false, Some(&e.to_string()));
-        return Ok(Html(html).into_response());
-    }
+    let row = match crate::sql::insert_returning(&state.pool, &query).await {
+        Ok(row) => row,
+        Err(e) => {
+            let html = render_form(model, Some(&form), false, Some(&e.to_string()));
+            return Ok(Html(html).into_response());
+        }
+    };
 
-    // Redirect to the new row's detail page using whatever PK the user supplied.
-    let pk_field = model.primary_key().ok_or_else(|| {
-        AdminError::Internal(format!("model `{}` has no primary key", model.name))
-    })?;
-    let pk_value = form.get(pk_field.name).cloned().unwrap_or_default();
+    // Pull the (possibly-generated) PK back out of the RETURNING row so
+    // the redirect lands on the right detail page even for Auto-PK models.
+    let pk_value = render::read_value_as_string(&row, pk_field).unwrap_or_default();
     Ok(Redirect::to(&format!("/{}/{}", model.table, pk_value)).into_response())
 }
 

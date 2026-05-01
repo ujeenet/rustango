@@ -2,6 +2,19 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [Unreleased] — v0.9.1 multi-tenant polish
+
+Fixes surfaced while building a real four-tenant demo (database-mode + schema-mode mixed) and driving its admin end-to-end with a real browser.
+
+### Fixed
+
+- **Admin create form rendered server-assigned `Auto<T>` PK as `<input required>`**, so HTML5 native validation silently blocked submit when the operator left the column blank — exactly the right thing to do, but the column shouldn't appear at all. The create form now omits Auto-PK columns; Postgres' `BIGSERIAL` DEFAULT fills the value via `insert_returning`, and the redirect uses the returned PK. Edit forms still display the existing PK as read-only. Regression tests in `admin_live`: `create_form_for_auto_pk_omits_id_input` and `create_submit_for_auto_pk_assigns_pk_and_redirects`.
+- **`tenancy::manage::api::create_tenant{,_if_missing}(.., migrations_dir, ..)`** silently no-op'd (and then errored with `relation "rustango_users" does not exist`) when the caller passed a project root rather than a flat migrations directory. The typed API now mirrors `Builder::migrate`'s auto-detect via a new `resolve_migration_dirs` helper: it accepts a project root that contains a flat `migrations/` subdir or per-app `<x>/migrations/` subdirs, the flat dir directly, or both.
+
+### Improved
+
+- **`migrate_tenants` log line now includes `migrations=<n>` and `dir=<path>`**, and emits a `WARN` when the runner is asked to apply a tenant-scoped migration but found zero in the dir — that's the most common bug shape ("applied=0" everywhere) and the warning names the likely root cause directly.
+
 ## [v0.9.0] — ORM-shape complete
 
 Closes the gap between rustango's ORM and Django's. Every advanced query pattern Django ships — `select_related`, `prefetch_related`, `.annotate(Count(...))`, `.order_by(...)`, paginated counts in one query, multi-app projects — is now first-class. The unreleased v0.8.2 changes (write-path `_on`, `Builder`, `Tenant` extractor, reverse-FK helper, `count_on`, `fetch_paginated`, demo refactor, `manage` polish) are folded into this release rather than published separately.

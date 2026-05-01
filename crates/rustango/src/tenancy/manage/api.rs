@@ -133,7 +133,9 @@ pub async fn create_tenant(
     org.insert(pools.registry()).await?;
 
     if !opts.no_migrate {
-        let _ = tenant_migrate::migrate_tenants(pools, migrations_dir, registry_url).await?;
+        for dir in resolve_migration_dirs(migrations_dir) {
+            let _ = tenant_migrate::migrate_tenants(pools, &dir, registry_url).await?;
+        }
     }
 
     // Re-fetch so the returned Org has whatever the runner / triggers
@@ -231,4 +233,43 @@ pub async fn create_user_if_missing(
     };
     user.insert_on(&mut *conn_ref).await?;
     Ok(user)
+}
+
+/// Resolve the path the caller passed to [`create_tenant`] /
+/// [`create_tenant_if_missing`] into the actual list of migrations
+/// directories to run against. Mirrors the auto-detect in
+/// [`crate::server::Builder::migrate`] so the typed API and the
+/// builder accept the same shape.
+///
+/// Cases:
+/// * `dir` itself contains `*.json` migrations — treat it as a flat
+///   migrations directory and run against it directly.
+/// * `dir` contains a `migrations/` subdir or per-app `<app>/migrations/`
+///   subdirs — treat `dir` as the project root and discover.
+/// * Anything else — return `[dir]` and let the runner produce its
+///   normal "no migrations to apply" outcome rather than silently
+///   pretending the apply happened.
+fn resolve_migration_dirs(dir: &Path) -> Vec<std::path::PathBuf> {
+    let dirs = crate::migrate::file::discover_migration_dirs(dir);
+    if !dirs.is_empty() {
+        return dirs;
+    }
+    if dir_has_json_files(dir) {
+        return vec![dir.to_path_buf()];
+    }
+    vec![dir.to_path_buf()]
+}
+
+fn dir_has_json_files(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|e| {
+            e.path()
+                .extension()
+                .and_then(|s| s.to_str())
+                == Some("json")
+        })
 }
