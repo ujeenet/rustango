@@ -11,8 +11,12 @@ use crate::sql::sqlx;
 
 use super::forms::FormError;
 
+/// Error returned by admin handlers — including user-defined bulk
+/// action handlers registered via [`super::Builder::register_action`].
+/// Variants are non-exhaustive only for `Internal`; user code should
+/// almost always return [`AdminError::Internal`] from custom actions.
 #[derive(Debug)]
-pub(crate) enum AdminError {
+pub enum AdminError {
     TableNotFound { table: String },
     RowNotFound { table: String, pk: String },
     ReadOnly { table: String },

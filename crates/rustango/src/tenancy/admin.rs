@@ -83,6 +83,17 @@ pub struct TenantAdminBuilder {
     show_only: Option<Vec<String>>,
     read_only: Vec<String>,
     session: Option<Arc<TenantSessionConfig>>,
+    actions: Vec<RegisteredAction>,
+}
+
+/// One row in the action registry threaded through the tenant admin
+/// builder. Re-applied per request when the inner admin router is
+/// constructed for the resolved tenant.
+#[derive(Clone)]
+struct RegisteredAction {
+    table: &'static str,
+    name: &'static str,
+    handler: crate::admin::AdminActionFn,
 }
 
 struct TenantSessionConfig {
@@ -110,6 +121,7 @@ impl TenantAdminBuilder {
             show_only: None,
             read_only: Vec::new(),
             session: None,
+            actions: Vec::new(),
         }
     }
 
@@ -159,6 +171,34 @@ impl TenantAdminBuilder {
         self
     }
 
+    /// Register a user-defined bulk action handler. Same semantics as
+    /// [`crate::admin::Builder::register_action`]. The handler runs on
+    /// the resolved tenant's pool — search_path is already scoped to
+    /// the tenant's schema.
+    #[must_use]
+    pub fn register_action<F>(
+        mut self,
+        model_table: &'static str,
+        action_name: &'static str,
+        handler: F,
+    ) -> Self
+    where
+        F: for<'a> Fn(
+                &'a crate::sql::sqlx::PgPool,
+                &'a [crate::core::SqlValue],
+            ) -> crate::admin::AdminActionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.actions.push(RegisteredAction {
+            table: model_table,
+            name: action_name,
+            handler: Arc::new(handler),
+        });
+        self
+    }
+
     /// Build the tenant-aware `axum::Router`. Catches every request
     /// via a fallback handler — mount it under whatever prefix you
     /// want via `Router::nest`.
@@ -170,6 +210,7 @@ impl TenantAdminBuilder {
         let show_only = Arc::new(self.show_only);
         let read_only = Arc::new(self.read_only);
         let session = self.session;
+        let actions = Arc::new(self.actions);
 
         Router::new().fallback(move |req: Request<Body>| {
             let pools = pools.clone();
@@ -178,6 +219,7 @@ impl TenantAdminBuilder {
             let show_only = show_only.clone();
             let read_only = read_only.clone();
             let session = session.clone();
+            let actions = actions.clone();
             async move {
                 handle_request(
                     req,
@@ -187,6 +229,7 @@ impl TenantAdminBuilder {
                     &show_only,
                     &read_only,
                     session.as_deref(),
+                    &actions,
                 )
                 .await
             }
@@ -202,6 +245,7 @@ async fn handle_request(
     show_only: &Option<Vec<String>>,
     read_only: &[String],
     session: Option<&TenantSessionConfig>,
+    actions: &[RegisteredAction],
 ) -> Response {
     let (parts, body) = req.into_parts();
     let org = match resolver.resolve(&parts, pools.registry()).await {
@@ -274,6 +318,7 @@ async fn handle_request(
         show_only,
         read_only,
         force_read_only,
+        actions,
     );
 
     let inner_req = Request::from_parts(parts, body);
@@ -648,6 +693,7 @@ fn build_inner_admin_router(
     show_only: &Option<Vec<String>>,
     read_only: &[String],
     force_read_only_all: bool,
+    actions: &[RegisteredAction],
 ) -> Router {
     let mut builder = crate::admin::Builder::new(pool);
     if let Some(allow) = show_only {
@@ -658,6 +704,12 @@ fn build_inner_admin_router(
     }
     if force_read_only_all {
         builder = builder.read_only_all();
+    }
+    for action in actions {
+        let handler = action.handler.clone();
+        builder = builder.register_action(action.table, action.name, move |pool, pks| {
+            handler(pool, pks)
+        });
     }
     builder.build()
 }

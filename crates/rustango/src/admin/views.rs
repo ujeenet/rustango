@@ -817,34 +817,38 @@ pub(crate) async fn action_submit(
         AdminError::Internal(format!("model `{}` has no primary key", model.name))
     })?;
 
-    match action.as_str() {
-        "delete_selected" => {
-            let pk_values: Vec<SqlValue> = selected_raw
-                .iter()
-                .filter_map(|raw| forms::parse_pk_string(pk_field, raw).ok())
-                .collect();
-            if pk_values.is_empty() {
-                return Ok(Redirect::to(&format!("/{}", model.table)).into_response());
-            }
-            crate::sql::delete(
-                &state.pool,
-                &DeleteQuery {
-                    model,
-                    where_clause: WhereExpr::Predicate(Filter {
-                        column: pk_field.column,
-                        op: Op::In,
-                        value: SqlValue::List(pk_values),
-                    }),
-                },
-            )
-            .await?;
-        }
-        other => {
-            return Err(AdminError::Internal(format!(
-                "action `{other}` is in `admin.actions` but no handler is registered \
-                 (built-ins: delete_selected)"
-            )));
-        }
+    let pk_values: Vec<SqlValue> = selected_raw
+        .iter()
+        .filter_map(|raw| forms::parse_pk_string(pk_field, raw).ok())
+        .collect();
+    if pk_values.is_empty() {
+        return Ok(Redirect::to(&format!("/{}", model.table)).into_response());
+    }
+
+    if action == "delete_selected" {
+        // Built-in: hard-coded so users don't need to register it.
+        crate::sql::delete(
+            &state.pool,
+            &DeleteQuery {
+                model,
+                where_clause: WhereExpr::Predicate(Filter {
+                    column: pk_field.column,
+                    op: Op::In,
+                    value: SqlValue::List(pk_values),
+                }),
+            },
+        )
+        .await?;
+    } else if let Some(handler) = state.action_handler(model.table, &action) {
+        handler(&state.pool, &pk_values).await?;
+    } else {
+        return Err(AdminError::Internal(format!(
+            "action `{action}` is in `admin.actions` but no handler is registered \
+             on the admin builder; register it via \
+             `admin::Builder::register_action(\"{}\", \"{action}\", ...)` (built-in: \
+             delete_selected)",
+            model.table
+        )));
     }
 
     Ok(Redirect::to(&format!("/{}", model.table)).into_response())

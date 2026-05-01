@@ -2351,3 +2351,136 @@ async fn readonly_fields_are_skipped_on_update_submit() {
 
     migrate::drop_all(&pool).await.unwrap();
 }
+
+/// Slice 11.0 fixture: model with a custom bulk action allowlisted.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "ua_post", display = "title")]
+#[rustango(admin(actions = "publish_selected, delete_selected"))]
+pub struct UaPost {
+    #[rustango(primary_key)]
+    id: i64,
+    #[rustango(max_length = 100)]
+    title: String,
+    is_published: bool,
+}
+
+#[tokio::test]
+async fn user_defined_action_runs_via_register_action() {
+    // v0.11.0: register a custom handler on `Builder`. POSTing
+    // `action=publish_selected` flips the targeted rows'
+    // `is_published` flag via the user-supplied closure.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+    for (id, title) in [(1_i64, "alpha"), (2, "bravo"), (3, "charlie")] {
+        UaPost {
+            id,
+            title: title.into(),
+            is_published: false,
+        }
+        .insert(&pool)
+        .await
+        .unwrap();
+    }
+
+    let app = rustango::admin::Builder::new(pool.clone())
+        .register_action("ua_post", "publish_selected", |pool, pks| {
+            let pool = pool.clone();
+            let pks = pks.to_vec();
+            Box::pin(async move {
+                let ids: Vec<i64> = pks
+                    .iter()
+                    .filter_map(|v| match v {
+                        rustango::core::SqlValue::I64(n) => Some(*n),
+                        _ => None,
+                    })
+                    .collect();
+                rustango::sql::sqlx::query(
+                    r#"UPDATE "ua_post" SET "is_published" = true WHERE "id" = ANY($1)"#,
+                )
+                .bind(&ids)
+                .execute(&pool)
+                .await
+                .map_err(|e| {
+                    rustango::admin::AdminError::Internal(e.to_string())
+                })?;
+                Ok(())
+            })
+        })
+        .build();
+
+    let body = "action=publish_selected&_selected=1&_selected=3".to_owned();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/ua_post/__action")
+                .header(
+                    header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let rows: Vec<(i64, bool)> = sqlx::query_as(
+        "SELECT id, is_published FROM ua_post ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, vec![(1, true), (2, false), (3, true)]);
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn allowlisted_action_without_handler_returns_500() {
+    // Allowlisted in `admin(actions = "...")` but not registered on
+    // the Builder → 500 with a hint pointing at register_action.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+    UaPost {
+        id: 1,
+        title: "x".into(),
+        is_published: false,
+    }
+    .insert(&pool)
+    .await
+    .unwrap();
+
+    let app = rustango::admin::router(pool.clone());
+    let body = "action=publish_selected&_selected=1".to_owned();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/ua_post/__action")
+                .header(
+                    header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("register_action"),
+        "error body should hint at register_action: {body}"
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}

@@ -27,6 +27,13 @@ pub struct Builder {
     registry: PgPool,
     show_only: Vec<String>,
     api: Option<ApiRouter>,
+    admin_actions: Vec<PendingAction>,
+}
+
+struct PendingAction {
+    table: &'static str,
+    name: &'static str,
+    handler: crate::admin::AdminActionFn,
 }
 
 impl Builder {
@@ -50,6 +57,7 @@ impl Builder {
             registry,
             show_only: Vec::new(),
             api: None,
+            admin_actions: Vec::new(),
         })
     }
 
@@ -74,6 +82,37 @@ impl Builder {
     #[must_use]
     pub fn api(mut self, router: ApiRouter) -> Self {
         self.api = Some(router);
+        self
+    }
+
+    /// Register a user-defined bulk admin action that runs against the
+    /// tenant pool of whichever tenant the request resolves to. The
+    /// action name must also appear in the model's
+    /// `#[rustango(admin(actions = "..."))]` allowlist.
+    ///
+    /// Mirrors [`crate::admin::Builder::register_action`]; the only
+    /// difference is the handler receives the tenant-scoped pool.
+    #[must_use]
+    pub fn admin_register_action<F>(
+        mut self,
+        model_table: &'static str,
+        action_name: &'static str,
+        handler: F,
+    ) -> Self
+    where
+        F: for<'a> Fn(
+                &'a crate::sql::sqlx::PgPool,
+                &'a [crate::core::SqlValue],
+            ) -> crate::admin::AdminActionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.admin_actions.push(PendingAction {
+            table: model_table,
+            name: action_name,
+            handler: std::sync::Arc::new(handler),
+        });
         self
     }
 
@@ -177,6 +216,14 @@ impl Builder {
         );
         if !self.show_only.is_empty() {
             tenant_admin_builder = tenant_admin_builder.show_only(self.show_only.clone());
+        }
+        for action in self.admin_actions {
+            let handler = action.handler;
+            tenant_admin_builder = tenant_admin_builder.register_action(
+                action.table,
+                action.name,
+                move |pool, pks| handler(pool, pks),
+            );
         }
         let tenant_admin = tenant_admin_builder
             .with_session(session_secret_for_tenant)

@@ -4,14 +4,41 @@
 //! HTTP path to a handler in [`super::views`]. Mounted via
 //! `Router::new().nest("/admin", admin::router(pool))`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::routing::{get, post};
 use axum::Router;
+use crate::core::SqlValue;
 use crate::sql::sqlx::PgPool;
 
+use super::errors::AdminError;
 use super::views;
+
+/// Future returned by an [`AdminAction`] handler.
+pub type AdminActionFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), AdminError>> + Send + 'a>>;
+
+/// Bulk action handler. Receives the model's `&PgPool` (not a tenant
+/// connection — the admin runs with the connection the request lives
+/// on, so search_path is already correct) and the parsed PK list of
+/// the rows the operator selected. Return `Ok(())` on success;
+/// `AdminError::Internal(...)` for failure (renders as 500). Built-in
+/// `delete_selected` uses this signature.
+pub type AdminActionFn = Arc<
+    dyn for<'a> Fn(&'a PgPool, &'a [SqlValue]) -> AdminActionFuture<'a>
+        + Send
+        + Sync,
+>;
+
+/// Per-table action registry: model `table` name → action name →
+/// handler. The action name must also appear in the model's
+/// `admin(actions = "...")` allowlist; the registry just maps the
+/// allowlisted names to their callables.
+pub(crate) type AdminActionRegistry =
+    HashMap<&'static str, HashMap<&'static str, AdminActionFn>>;
 
 /// Mount the admin under any prefix using axum's nesting:
 /// `Router::new().nest("/admin", crate::admin::router(pool))`.
@@ -48,6 +75,13 @@ pub(crate) struct Config {
     /// `rustango-tenancy` to gate non-superuser tenant users without
     /// having to enumerate every table at request time.
     pub(crate) read_only_all: bool,
+    /// User-registered bulk action handlers (slice 11.0). Keyed by
+    /// `<table_name>` then `<action_name>`. The built-in
+    /// `delete_selected` is hard-coded in the handler so users don't
+    /// need to register it. An action name listed in a model's
+    /// `admin(actions = "...")` but NOT in this map AND not the built-in
+    /// produces a 500 — same defense as the v0.10.6 unknown-action gate.
+    pub(crate) actions: AdminActionRegistry,
 }
 
 impl Builder {
@@ -93,6 +127,51 @@ impl Builder {
         self
     }
 
+    /// Register a user-defined bulk action handler.
+    ///
+    /// `model_table` must match the target Model's `table = "..."`
+    /// attribute. `action_name` must also appear in that model's
+    /// `admin(actions = "...")` allowlist; the attribute is the
+    /// allowlist, this is the executable.
+    ///
+    /// The handler receives the pool and the parsed PK list of the
+    /// selected rows. Use it to implement publish, archive, recompute,
+    /// etc. — anything that runs over a batch of rows.
+    ///
+    /// ```ignore
+    /// use rustango::sql::sqlx::PgPool;
+    /// use rustango::core::SqlValue;
+    /// use rustango::admin::AdminError;
+    /// async fn mark_published(pool: &PgPool, pks: &[SqlValue]) -> Result<(), AdminError> {
+    ///     // ... custom UPDATE here ...
+    ///     Ok(())
+    /// }
+    /// admin::Builder::new(pool)
+    ///     .register_action("post", "mark_published", |pool, pks| {
+    ///         Box::pin(mark_published(pool, pks))
+    ///     })
+    ///     .build();
+    /// ```
+    pub fn register_action<F>(
+        mut self,
+        model_table: &'static str,
+        action_name: &'static str,
+        handler: F,
+    ) -> Self
+    where
+        F: for<'a> Fn(&'a PgPool, &'a [SqlValue]) -> AdminActionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.config
+            .actions
+            .entry(model_table)
+            .or_default()
+            .insert(action_name, Arc::new(handler));
+        self
+    }
+
     pub fn build(self) -> Router {
         Router::new()
             .route("/", get(views::index))
@@ -130,5 +209,20 @@ impl AppState {
 
     pub(crate) fn is_read_only(&self, table: &str) -> bool {
         self.config.read_only_all || self.config.read_only_tables.contains(table)
+    }
+
+    /// Look up a registered action handler. Returns `None` for the
+    /// built-in `delete_selected` (which the handler short-circuits)
+    /// and for action names that haven't been registered.
+    pub(crate) fn action_handler(
+        &self,
+        table: &str,
+        action: &str,
+    ) -> Option<AdminActionFn> {
+        self.config
+            .actions
+            .get(table)
+            .and_then(|m| m.get(action))
+            .cloned()
     }
 }

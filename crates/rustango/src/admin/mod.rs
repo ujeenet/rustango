@@ -49,4 +49,5 @@ mod urls;
 mod views;
 
 pub use auth::protect_with_basic_auth;
-pub use urls::{router, Builder};
+pub use errors::AdminError;
+pub use urls::{router, AdminActionFn, AdminActionFuture, Builder};

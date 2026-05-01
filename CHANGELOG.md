@@ -2,6 +2,17 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.11.0] — user-defined bulk actions — 2026-04-30
+
+### Added
+
+- **`admin::Builder::register_action(table, name, handler)`** — register custom bulk action handlers. The action's name must also appear in the model's `#[rustango(admin(actions = "..."))]` allowlist; the attribute is the allowlist, this is the executable. Built-in `delete_selected` keeps working without registration. Handler receives `(&PgPool, &[SqlValue])` and returns `Result<(), AdminError>`.
+- **`tenancy::admin::TenantAdminBuilder::register_action(...)`** — same shape, but the handler runs against the resolved tenant's pool (search_path scoped to the tenant's schema).
+- **`server::Builder::admin_register_action(...)`** — top-level chain entry point that forwards into the auto-mounted tenant admin. Lets a multi-tenant app register actions in `main.rs` alongside `admin_show_only` / `migrate` / `seed_with`.
+- **`AdminError`, `AdminActionFn`, `AdminActionFuture`** — promoted from `pub(crate)` to public so user code can return errors and type-annotate handlers.
+
+Tests: 2 new in `admin_live` covering a custom UPDATE action via `register_action` and the "allowlisted but unregistered" hint that points at `register_action` in the 500 body. 63/63 pass.
+
 ## [v0.10.0] — admin Django-parity — 2026-04-30
 
 Pulling the auto-admin from "functional CRUD" toward Django ModelAdmin shape. v0.10 lands across slices; this entry tracks what's shipped so far.
