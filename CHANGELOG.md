@@ -2,7 +2,7 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
-## [Unreleased] — v0.9.1 multi-tenant polish
+## [v0.9.1] — multi-tenant polish — 2026-04-30
 
 Fixes surfaced while building a real four-tenant demo (database-mode + schema-mode mixed) and driving its admin end-to-end with a real browser.
 
