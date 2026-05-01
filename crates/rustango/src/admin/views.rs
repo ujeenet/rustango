@@ -537,11 +537,35 @@ pub(crate) async fn detail_view(
             })
         })
         .collect();
+
+    // v0.12.2: Audit trail panel for this row. Best-effort — if the
+    // audit table doesn't exist yet (project hasn't called
+    // `audit::ensure_table` per tenant), the lookup returns Err and
+    // we render an empty section instead of failing the whole page.
+    let audit_entries_ctx: Vec<serde_json::Value> =
+        match crate::audit::fetch_for_entity(&state.pool, model.table, &pk_raw).await {
+            Ok(entries) => entries
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "id": e.id,
+                        "operation": e.operation,
+                        "source": e.source,
+                        "occurred_at": e.occurred_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                        "changes": serde_json::to_string_pretty(&e.changes)
+                            .unwrap_or_default(),
+                    })
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+
     let mut ctx = serde_json::json!({
         "model": { "name": model.name, "table": model.table },
         "pk": pk_raw,
         "cells": cells_ctx,
         "read_only": state.is_read_only(model.table),
+        "audit_entries": audit_entries_ctx,
     });
     let html = render_with_chrome(
         "detail.html",

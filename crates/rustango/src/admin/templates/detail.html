@@ -19,4 +19,23 @@
   </form>
 </p>
 {% endif %}
+{% if audit_entries %}
+<section class="audit-trail">
+  <h2>Audit trail</h2>
+  {% if audit_entries | length == 0 %}
+    <p><em>No audit history for this row.</em></p>
+  {% else %}
+  <ol>
+    {% for e in audit_entries %}
+    <li>
+      <span class="audit-op audit-op-{{ e.operation }}">{{ e.operation }}</span>
+      by <strong>{{ e.source }}</strong>
+      <small>at {{ e.occurred_at }}</small>
+      <pre class="audit-changes">{{ e.changes }}</pre>
+    </li>
+    {% endfor %}
+  </ol>
+  {% endif %}
+</section>
+{% endif %}
 {% endblock body %}

@@ -2,6 +2,21 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.12.2] — UPDATE diff + admin audit-trail panel — 2026-05-01
+
+### Added
+
+- **True before/after diff on `Model::save_on` UPDATE branch** — for audited models, the macro now emits a single-PK `SELECT` of the tracked columns BEFORE the UPDATE, captures each field's prior value, and after the UPDATE runs `audit::diff_changes(before, after)` so unchanged columns drop out of the JSON. The audit row's `changes` becomes the canonical Django shape `{ "field": { "before": <v>, "after": <v> } }`. The before-SELECT is one extra round-trip per audited UPDATE — bounded cost, paid only when audit is opted-in.
+- **Admin "Audit trail" panel on the detail page** — every model's `/<table>/<pk>` page now renders an `<section class="audit-trail">` showing the most recent audit entries newest-first, with operation badge, source attribution, timestamp, and a pretty-printed JSON of `changes`. Best-effort lookup: missing `rustango_audit_log` table renders an empty section instead of failing the page.
+
+### Two audit-emission paths, two shapes
+
+The admin's `update_submit` handler bypasses `Model::save_on` (it builds a generic `UpdateQuery` because the admin works across every model uniformly), so admin writes still emit a *snapshot* of the form payload — not a diff. Application code that calls `model.save_on(&mut conn)` gets the diff. Both paths land in the same `rustango_audit_log` table; the JSON shape distinguishes them. A future v0.12.x can teach the admin handler to do its own before-SELECT for parity.
+
+### Tests
+
+- Updated `macro_emits_audit_update_entry_with_before_after_diff` in `audit_live` — asserts unchanged columns are excluded from the diff JSON. 16/16 audit_live tests pass; 126/126 across the full live sweep.
+
 ## [v0.12.1] — admin auto-attribution + admin write audit + uni_portal demo — 2026-05-01
 
 Closes the v0.12.0 deferred items so the audit story is end-to-end.

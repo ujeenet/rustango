@@ -1108,10 +1108,116 @@ fn inherent_impl_tokens(
         }
     };
     let audit_insert_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Create));
-    let audit_update_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Update));
     let audit_delete_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Delete));
     let audit_softdelete_emit = make_op_emit(quote!(::rustango::audit::AuditOp::SoftDelete));
     let audit_restore_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Restore));
+
+    // Update emission captures both BEFORE and AFTER state — runs an
+    // extra SELECT against `_executor` BEFORE the UPDATE, captures
+    // each tracked field's prior value, then after the UPDATE diffs
+    // against the in-memory `&self`. `diff_changes` drops unchanged
+    // columns so the JSON only contains the actual delta.
+    //
+    // Two-fragment shape: `audit_update_pre` runs before the UPDATE
+    // and binds `_audit_before_pairs`; `audit_update_post` runs
+    // after the UPDATE and emits the PendingEntry.
+    let (audit_update_pre, audit_update_post): (TokenStream2, TokenStream2) =
+        if let Some(tracked) = audited_fields {
+            if tracked.is_empty() {
+                (quote!(), quote!())
+            } else {
+                let select_cols: String = tracked
+                    .iter()
+                    .map(|c| format!("\"{}\"", c.column.replace('"', "\"\"")))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let pk_column_for_select = primary_key
+                    .map(|(_, col)| col.clone())
+                    .unwrap_or_default();
+                let select_cols_lit = select_cols;
+                let pk_column_lit_for_select = pk_column_for_select;
+                let pk_value_for_bind = if let Some((pk_ident, _)) = primary_key {
+                    if fields.pk_is_auto {
+                        quote!(self.#pk_ident.get().copied().unwrap_or_default())
+                    } else {
+                        quote!(::core::clone::Clone::clone(&self.#pk_ident))
+                    }
+                } else {
+                    quote!(0_i64)
+                };
+                let before_pairs = tracked.iter().map(|c| {
+                    let column_lit = c.column.as_str();
+                    let value_ty = &c.value_ty;
+                    quote! {
+                        (
+                            #column_lit,
+                            match ::rustango::sql::sqlx::Row::try_get::<#value_ty, _>(
+                                &_audit_before_row, #column_lit,
+                            ) {
+                                ::core::result::Result::Ok(v) => {
+                                    ::serde_json::to_value(&v)
+                                        .unwrap_or(::serde_json::Value::Null)
+                                }
+                                ::core::result::Result::Err(_) => ::serde_json::Value::Null,
+                            },
+                        )
+                    }
+                });
+                let after_pairs = tracked.iter().map(|c| {
+                    let column_lit = c.column.as_str();
+                    let ident = &c.ident;
+                    quote! {
+                        (
+                            #column_lit,
+                            ::serde_json::to_value(&self.#ident)
+                                .unwrap_or(::serde_json::Value::Null),
+                        )
+                    }
+                });
+                let pk_str = audit_pk_to_string.clone();
+                let pre = quote! {
+                    let _audit_select_sql = ::std::format!(
+                        r#"SELECT {} FROM "{}" WHERE "{}" = $1"#,
+                        #select_cols_lit,
+                        <Self as ::rustango::core::Model>::SCHEMA.table,
+                        #pk_column_lit_for_select,
+                    );
+                    let _audit_before_pairs:
+                        ::std::option::Option<::std::vec::Vec<(&'static str, ::serde_json::Value)>> =
+                        match ::rustango::sql::sqlx::query(&_audit_select_sql)
+                            .bind(#pk_value_for_bind)
+                            .fetch_optional(&mut *_executor)
+                            .await
+                        {
+                            ::core::result::Result::Ok(::core::option::Option::Some(_audit_before_row)) => {
+                                ::core::option::Option::Some(::std::vec![ #( #before_pairs ),* ])
+                            }
+                            _ => ::core::option::Option::None,
+                        };
+                };
+                let post = quote! {
+                    if let ::core::option::Option::Some(_audit_before) = _audit_before_pairs {
+                        let _audit_after:
+                            ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
+                            ::std::vec![ #( #after_pairs ),* ];
+                        let _audit_entry = ::rustango::audit::PendingEntry {
+                            entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
+                            entity_pk: #pk_str,
+                            operation: ::rustango::audit::AuditOp::Update,
+                            source: ::rustango::audit::current_source(),
+                            changes: ::rustango::audit::diff_changes(
+                                &_audit_before,
+                                &_audit_after,
+                            ),
+                        };
+                        ::rustango::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+                    }
+                };
+                (pre, post)
+            }
+        } else {
+            (quote!(), quote!())
+        };
 
     // Bulk-insert audit: capture every row's tracked fields after the
     // RETURNING populates each PK, then push one batched INSERT INTO
@@ -1211,6 +1317,7 @@ fn inherent_impl_tokens(
                 if matches!(self.#pk_ident, ::rustango::sql::Auto::Unset) {
                     return self.insert_on(#executor_passes_to_data_write).await;
                 }
+                #audit_update_pre
                 let _query = ::rustango::core::UpdateQuery {
                     model: <Self as ::rustango::core::Model>::SCHEMA,
                     set: ::std::vec![ #( #assignments ),* ],
@@ -1228,7 +1335,7 @@ fn inherent_impl_tokens(
                     #executor_passes_to_data_write,
                     &_query,
                 ).await?;
-                #audit_update_emit
+                #audit_update_post
                 ::core::result::Result::Ok(())
             }
 

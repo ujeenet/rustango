@@ -376,10 +376,11 @@ async fn macro_emits_audit_with_user_source_inside_with_source_scope() {
 }
 
 #[tokio::test]
-async fn macro_emits_audit_update_entry_on_save_branch() {
-    // commit 3c: when save_on falls into the UPDATE branch (Auto-PK
-    // already Set), the macro emits an audit entry with operation =
-    // "update" capturing the after-state of every tracked field.
+async fn macro_emits_audit_update_entry_with_before_after_diff() {
+    // v0.12.2: save_on UPDATE branch runs a before-SELECT and writes
+    // a true diff via `diff_changes(before, after)`. Unchanged
+    // columns drop out of the JSON entirely; changed ones land as
+    // `{ "field": { "before": <v>, "after": <v> } }`.
     let _g = lock().lock().await;
     let Some(pool) = pool().await else {
         return;
@@ -390,12 +391,13 @@ async fn macro_emits_audit_update_entry_on_save_branch() {
     let mut row = AuditedPost {
         id: rustango::sql::Auto::default(),
         title: "v1".into(),
-        body: "first".into(),
+        body: "unchanged".into(),
     };
     row.insert_on(&mut *conn).await.unwrap();
     let pk = row.id.get().copied().unwrap();
 
     row.title = "v2".into();
+    // body left at "unchanged" — must NOT appear in the diff.
     row.save_on(&mut *conn).await.unwrap();
 
     let entries =
@@ -404,7 +406,11 @@ async fn macro_emits_audit_update_entry_on_save_branch() {
             .unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].operation, "update");
-    assert_eq!(entries[0].changes, json!({ "title": "v2", "body": "first" }));
+    assert_eq!(
+        entries[0].changes,
+        json!({ "title": { "before": "v1", "after": "v2" } }),
+        "diff should only include the changed column"
+    );
     assert_eq!(entries[1].operation, "create");
 }
 
