@@ -350,6 +350,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             ("list_display", &admin.list_display),
             ("search_fields", &admin.search_fields),
             ("readonly_fields", &admin.readonly_fields),
+            ("list_filter", &admin.list_filter),
         ] {
             if let Some((names, span)) = list {
                 for name in names {
@@ -854,6 +855,13 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
         .unwrap_or(&[]);
     let readonly_fields_lits = readonly_fields.iter().map(|s| s.as_str());
 
+    let list_filter = admin
+        .list_filter
+        .as_ref()
+        .map(|(v, _)| v.as_slice())
+        .unwrap_or(&[]);
+    let list_filter_lits = list_filter.iter().map(|s| s.as_str());
+
     let list_per_page = admin.list_per_page.unwrap_or(0);
 
     let ordering_pairs = admin
@@ -874,6 +882,7 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
             list_per_page: #list_per_page,
             ordering: &[ #( #ordering_tokens ),* ],
             readonly_fields: &[ #( #readonly_fields_lits ),* ],
+            list_filter: &[ #( #list_filter_lits ),* ],
         })
     }
 }
@@ -1449,6 +1458,7 @@ struct AdminAttrs {
     list_per_page: Option<usize>,
     ordering: Option<(Vec<(String, bool)>, proc_macro2::Span)>,
     readonly_fields: Option<(Vec<String>, proc_macro2::Span)>,
+    list_filter: Option<(Vec<String>, proc_macro2::Span)>,
 }
 
 fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
@@ -1512,10 +1522,16 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                         ));
                         return Ok(());
                     }
+                    if inner.path.is_ident("list_filter") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        admin.list_filter =
+                            Some((split_field_list(&s.value()), s.span()));
+                        return Ok(());
+                    }
                     Err(inner.error(
                         "unknown admin attribute (supported: \
                          `list_display`, `search_fields`, `readonly_fields`, \
-                         `list_per_page`, `ordering`)",
+                         `list_filter`, `list_per_page`, `ordering`)",
                     ))
                 })?;
                 out.admin = Some(admin);

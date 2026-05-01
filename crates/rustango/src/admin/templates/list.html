@@ -3,6 +3,8 @@
 {% block body %}
 <p><a href="/">&larr; admin home</a></p>
 <h1>{{ model.name }}</h1>
+<div class="list-shell">
+<div class="list-main">
 <p>Table: <code>{{ model.table }}</code> &mdash; {{ total }} row{{ plural }}
 {% if read_only %}
   &nbsp;&middot;&nbsp; <em>read-only</em>
@@ -67,4 +69,23 @@
   {% endif %}
 </p>
 {% endif %}
+</div>{# /list-main #}
+{% if facets and facets | length > 0 %}
+<aside class="list-rail">
+  {% for facet in facets %}
+  <section class="facet">
+    <h4>By {{ facet.field }}</h4>
+    <ul>
+    {% for v in facet.values %}
+      <li>
+        <a href="{{ v.toggle_url | safe }}"{% if v.active %} class="active"{% endif %}>{{ v.display | safe }}</a>
+        <span class="count">({{ v.count }})</span>
+      </li>
+    {% endfor %}
+    </ul>
+  </section>
+  {% endfor %}
+</aside>
+{% endif %}
+</div>{# /list-shell #}
 {% endblock body %}

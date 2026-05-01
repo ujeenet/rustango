@@ -108,6 +108,11 @@ pub struct AdminConfig {
     /// edit form. Reserved for slice 10.5; today's admin treats this
     /// as a no-op so existing models stay editable.
     pub readonly_fields: &'static [&'static str],
+    /// Field names to render as right-rail facet filters on the list
+    /// view. Each named field gets a card showing every distinct
+    /// value in the table; clicking a value toggles `?<col>=<value>`
+    /// in the URL. Empty slice means "no facets" (today's behavior).
+    pub list_filter: &'static [&'static str],
 }
 
 impl AdminConfig {
@@ -119,6 +124,7 @@ impl AdminConfig {
         list_per_page: 0,
         ordering: &[],
         readonly_fields: &[],
+        list_filter: &[],
     };
 }
 

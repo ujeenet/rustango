@@ -49,14 +49,15 @@ pub struct AdminWidget {
     label: String,
 }
 
-/// Slice 10.2/10.3 fixture: model with `admin(...)` attribute set so we
-/// can assert `list_display`, `search_fields`, and `ordering` flow into
-/// the rendered list view + executed SQL.
+/// Slice 10.2/10.3/10.4 fixture: model with `admin(...)` attribute set
+/// so we can assert `list_display`, `search_fields`, `ordering`, and
+/// `list_filter` flow into the rendered list view + executed SQL.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "admin_django", display = "name")]
 #[rustango(admin(
     list_display = "name, color",
     search_fields = "name",
+    list_filter = "color",
     list_per_page = 10,
     ordering = "-name",
 ))]
@@ -1898,6 +1899,77 @@ async fn sidebar_renders_on_admin_pages() {
     assert!(
         body.contains(r#"href="/admin_user" class="active""#),
         "active sidebar link not highlighted: {body}"
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn list_filter_attr_renders_facet_card_with_distinct_values() {
+    // Slice 10.4: `admin(list_filter = "color")` should render a
+    // right-rail card listing each distinct color with its row count
+    // and a toggle URL. With seeded rows red/green/blue (one each),
+    // we expect three list items + counts.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed_admin_django(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_django")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("By color"),
+        "facet header missing: {body}"
+    );
+    for color in ["red", "green", "blue"] {
+        assert!(
+            body.contains(&format!(">{color}<")),
+            "facet value `{color}` missing: {body}"
+        );
+    }
+    // Each color appears once; the count should read `(1)` next to it.
+    assert!(body.contains("(1)"), "facet count `(1)` missing: {body}");
+
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn list_filter_active_value_highlights_and_filters_rows() {
+    // With `?color=red`, only the `red` row remains AND the facet's
+    // `red` link gets `class="active"`.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    seed_admin_django(&pool).await;
+
+    let app = rustango::admin::router(pool.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin_django?color=red")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(resp).await;
+    assert!(body.contains(">alpha<"), "alpha row missing: {body}");
+    assert!(!body.contains(">bravo<"), "bravo leaked through filter: {body}");
+    assert!(!body.contains(">charlie<"), "charlie leaked: {body}");
+    assert!(
+        body.contains(r#"class="active">red<"#),
+        "active facet link not highlighted: {body}"
     );
 
     migrate::drop_all(&pool).await.unwrap();

@@ -37,6 +37,19 @@ textarea { min-height: 4rem; }
 button { padding: .4rem 1rem; font: inherit; cursor: pointer; }
 dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; }
 dt { font-weight: bold; }
+.list-shell { display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 1.5rem; align-items: start; }
+.list-shell.no-rail { grid-template-columns: 1fr; }
+.list-rail { font-size: .9em; }
+.list-rail .facet { background: #fff; border: 1px solid #e0d8cc; border-radius: 4px; padding: .5rem .75rem; margin-bottom: .75rem; }
+.list-rail .facet h4 { margin: 0 0 .35rem 0; font-size: .8em; text-transform: uppercase; letter-spacing: .03em; color: #888; font-weight: 600; }
+.list-rail .facet ul { list-style: none; padding: 0; margin: 0; }
+.list-rail .facet li { margin: .15rem 0; line-height: 1.4; }
+.list-rail .facet a { color: #333; }
+.list-rail .facet a.active { color: #b03a2e; font-weight: 600; }
+.list-rail .facet .count { color: #888; font-size: .85em; }
+@media (max-width: 1000px) {
+  .list-shell { grid-template-columns: 1fr; }
+}
 @media (max-width: 720px) {
   .layout { grid-template-columns: 1fr; }
   aside.sidebar { border-right: none; border-bottom: 1px solid #e0d8cc; }

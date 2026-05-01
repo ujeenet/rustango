@@ -184,23 +184,35 @@ pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) ->
 /// fragment. Returns `None` for `NULL` and for value types we don't
 /// support as PKs/FKs.
 pub(crate) fn read_value_as_string(row: &PgRow, field: &FieldSchema) -> Option<String> {
+    read_value_as_string_at(row, field, field.column)
+}
+
+/// Variant of [`read_value_as_string`] that reads from an arbitrary
+/// column alias (e.g. `"facet_value"` after a `SELECT col AS facet_value`).
+/// Used by the facet-filter machinery (slice 10.4) which renames the
+/// column to keep its query independent of the source table's schema.
+pub(crate) fn read_value_as_string_at(
+    row: &PgRow,
+    field: &FieldSchema,
+    column_alias: &str,
+) -> Option<String> {
     match field.ty {
         FieldType::I32 => row
-            .try_get::<Option<i32>, _>(field.column)
+            .try_get::<Option<i32>, _>(column_alias)
             .ok()
             .flatten()
             .map(|v| v.to_string()),
         FieldType::I64 => row
-            .try_get::<Option<i64>, _>(field.column)
+            .try_get::<Option<i64>, _>(column_alias)
             .ok()
             .flatten()
             .map(|v| v.to_string()),
         FieldType::String => row
-            .try_get::<Option<String>, _>(field.column)
+            .try_get::<Option<String>, _>(column_alias)
             .ok()
             .flatten(),
         FieldType::Uuid => row
-            .try_get::<Option<uuid::Uuid>, _>(field.column)
+            .try_get::<Option<uuid::Uuid>, _>(column_alias)
             .ok()
             .flatten()
             .map(|v| v.to_string()),

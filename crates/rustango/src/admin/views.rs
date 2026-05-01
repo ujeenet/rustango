@@ -277,6 +277,14 @@ pub(crate) async fn table_view(
         .collect();
     let pager_suffix_str = pager_suffix(q.as_deref(), &active_field_filters);
 
+    // Facet filters (slice 10.4). For each field named in
+    // `admin.list_filter`, query its distinct values + counts and
+    // render a right-rail card. Each value link toggles the
+    // `?<col>=<value>` query param: clicking the active value clears
+    // the filter; clicking a different value swaps to it.
+    let facets_ctx: Vec<serde_json::Value> =
+        compute_facets(&state, model, &admin_cfg, &active_field_filters, q.as_deref()).await?;
+
     let mut ctx = serde_json::json!({
         "model": { "name": model.name, "table": model.table },
         "total": total,
@@ -285,6 +293,7 @@ pub(crate) async fn table_view(
         "has_searchable": !search_columns.is_empty(),
         "q": q.unwrap_or_default(),
         "active_filters": active_filters_ctx,
+        "facets": facets_ctx,
         "columns": columns_ctx,
         "rows": rows_ctx,
         "page": page,
@@ -296,6 +305,129 @@ pub(crate) async fn table_view(
         &mut ctx,
         chrome_context(&state, Some(model.table)),
     )))
+}
+
+/// Slice 10.4 — for each `admin.list_filter` field, compute the
+/// distinct values + row counts and the URL each value should toggle to.
+///
+/// SQL is one round-trip per facet field: `SELECT <col>, COUNT(*) FROM
+/// <table> GROUP BY <col> ORDER BY <col>`. For dynamic admin pages
+/// this is acceptable (handful of facets, modest cardinalities); if a
+/// model has 50k distinct values per facet the operator should drop
+/// the field from `list_filter`. FK columns get the JOINed display
+/// value rendered alongside the raw key for readability.
+///
+/// Toggle semantics: clicking the active value's link omits that
+/// filter from the URL (clears it); clicking a sibling sets it.
+async fn compute_facets(
+    state: &AppState,
+    model: &'static crate::core::ModelSchema,
+    admin_cfg: &crate::core::AdminConfig,
+    active_field_filters: &[(&'static str, String)],
+    q: Option<&str>,
+) -> Result<Vec<serde_json::Value>, AdminError> {
+    if admin_cfg.list_filter.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(admin_cfg.list_filter.len());
+    for filter_name in admin_cfg.list_filter {
+        let Some(field) = model.field(filter_name) else {
+            continue;
+        };
+        let active_value: Option<&str> = active_field_filters
+            .iter()
+            .find(|(k, _)| k == &field.name)
+            .map(|(_, v)| v.as_str());
+
+        let sql = format!(
+            r#"SELECT "{col}" AS facet_value, COUNT(*) AS facet_count
+               FROM "{table}"
+               GROUP BY "{col}"
+               ORDER BY "{col}""#,
+            col = field.column.replace('"', "\"\""),
+            table = model.table.replace('"', "\"\""),
+        );
+        let rows = sqlx::query(&sql).fetch_all(&state.pool).await?;
+        let mut values = Vec::with_capacity(rows.len());
+        for row in &rows {
+            // Stringify the value at the `facet_value` column alias.
+            // Same shape `parse_form_value` accepts back when the URL
+            // round-trips through the filter machinery.
+            let raw = render::read_value_as_string_at(row, field, "facet_value")
+                .unwrap_or_default();
+            // Display: for FK fields the raw is the target PK
+            // (numeric); a FK-target display lookup is queued for
+            // slice 10.7. For everything else, raw == display.
+            let display = if raw.is_empty() {
+                "—".to_owned()
+            } else {
+                render::escape(&raw)
+            };
+            let count: i64 = sqlx::Row::try_get(row, "facet_count").unwrap_or(0);
+            let is_active = active_value.map(|v| v == raw).unwrap_or(false);
+            // Build the toggle URL: drop this filter when active, else
+            // set it. Other active filters + ?q= are preserved.
+            let mut params: Vec<(String, String)> = Vec::new();
+            if let Some(qv) = q {
+                params.push(("q".into(), qv.into()));
+            }
+            for (k, v) in active_field_filters {
+                if *k == field.name {
+                    continue; // dropped (or replaced below)
+                }
+                params.push(((*k).into(), v.clone()));
+            }
+            if !is_active {
+                params.push((field.name.into(), raw.clone()));
+            }
+            let toggle_url = build_query_url(model.table, &params);
+
+            values.push(serde_json::json!({
+                "raw": raw,
+                "display": display,
+                "count": count,
+                "active": is_active,
+                "toggle_url": toggle_url,
+            }));
+        }
+        out.push(serde_json::json!({
+            "field": field.name,
+            "values": values,
+        }));
+    }
+    Ok(out)
+}
+
+fn build_query_url(table: &str, params: &[(String, String)]) -> String {
+    if params.is_empty() {
+        format!("/{table}")
+    } else {
+        let qs: Vec<String> = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", url_encode(k), url_encode(v)))
+            .collect();
+        format!("/{table}?{}", qs.join("&"))
+    }
+}
+
+fn url_encode(s: &str) -> String {
+    // Bare-minimum percent-encoding for query-string values: spaces
+    // and the seven query-control characters. Avoids pulling in
+    // `urlencoding` for one call site.
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            ' ' => out.push_str("%20"),
+            '&' => out.push_str("%26"),
+            '=' => out.push_str("%3D"),
+            '?' => out.push_str("%3F"),
+            '#' => out.push_str("%23"),
+            '+' => out.push_str("%2B"),
+            '%' => out.push_str("%25"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 // ============================================================== DETAIL
