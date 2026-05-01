@@ -1037,6 +1037,35 @@ pub(crate) async fn action_submit(
         return Ok(Redirect::to(&format!("/{}", model.table)).into_response());
     }
 
+    // v0.12.4: SELECT every selected row's pre-action state so the
+    // audit emit can record what the action ran against. For
+    // delete_selected this snapshots the gone rows; for user-defined
+    // actions it records the row state at the time of action.
+    let before_rows = crate::sql::select_rows(
+        &state.pool,
+        &SelectQuery {
+            model,
+            where_clause: WhereExpr::Predicate(Filter {
+                column: pk_field.column,
+                op: Op::In,
+                value: SqlValue::List(pk_values.clone()),
+            }),
+            search: None,
+            joins: vec![],
+            order_by: vec![],
+            limit: None,
+            offset: None,
+        },
+    )
+    .await
+    .unwrap_or_default();
+
+    let audit_op = if action == "delete_selected" {
+        crate::audit::AuditOp::Delete
+    } else {
+        crate::audit::AuditOp::Update
+    };
+
     if action == "delete_selected" {
         // Built-in: hard-coded so users don't need to register it.
         crate::sql::delete(
@@ -1061,6 +1090,53 @@ pub(crate) async fn action_submit(
              delete_selected)",
             model.table
         )));
+    }
+
+    // Build one audit entry per row and emit them in a single
+    // batched INSERT. For delete_selected the changes JSON is the
+    // snapshot of what was deleted; for user-defined actions it
+    // captures pre-action state with an `__action` marker so the
+    // audit panel shows who ran what against which rows.
+    let source = crate::audit::current_source();
+    let entries: Vec<crate::audit::PendingEntry> = before_rows
+        .iter()
+        .map(|row| {
+            let pk_str = render::read_value_as_string(row, pk_field).unwrap_or_default();
+            let mut pairs: Vec<(&str, serde_json::Value)> = model
+                .scalar_fields()
+                .map(|f| {
+                    (
+                        f.name,
+                        serde_json::Value::String(render::render_value_for_input(row, f)),
+                    )
+                })
+                .collect();
+            if action != "delete_selected" {
+                // Tag the action name into the changes payload so
+                // the per-row audit row distinguishes "alice ran
+                // publish_selected" from a plain edit.
+                pairs.push(("__action", serde_json::Value::String(action.clone())));
+            }
+            crate::audit::PendingEntry {
+                entity_table: model.table,
+                entity_pk: pk_str,
+                operation: audit_op,
+                source: source.clone(),
+                changes: crate::audit::snapshot_changes(&pairs),
+            }
+        })
+        .collect();
+    if !entries.is_empty() {
+        if let Err(e) = crate::audit::emit_many(&state.pool, &entries).await {
+            tracing::warn!(
+                target: "rustango::admin::audit",
+                error = %e,
+                entity_table = %model.table,
+                action = %action,
+                count = entries.len(),
+                "admin bulk-action audit emit failed",
+            );
+        }
     }
 
     Ok(Redirect::to(&format!("/{}", model.table)).into_response())

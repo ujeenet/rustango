@@ -2,6 +2,23 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.12.4] — bulk-action audit — 2026-05-01
+
+### Added
+
+- **Admin bulk actions emit batched audit entries** — one `PendingEntry` per affected row, all written via a single `emit_many` after the action runs. Closes the gap from v0.12.3 where `admin_write_records_user_source_via_with_source_install` covered single-row writes but bulk actions left no audit trail.
+- **Built-in `delete_selected`**: each row's pre-delete state is SELECTed before the bulk DELETE and snapshotted into the per-row audit entry's `changes`. Operators see exactly what got removed.
+- **User-registered actions** (any name in `admin(actions = "...")` other than `delete_selected`): each affected row gets an `Update`-tagged audit entry with the row's pre-action snapshot plus an `__action` marker carrying the action's name. Lets the audit panel show "alice ran publish_selected on these rows; here's what they looked like before."
+- All bulk audit entries inherit the per-request `with_source(User { id })` install from `tenancy::admin`, so the operator who ran the action shows up in `source` for every row.
+
+### Implementation
+
+- `action_submit` runs one `select_rows(WHERE pk IN (...))` before the action to capture pre-state, then dispatches to the action handler, then assembles `Vec<PendingEntry>` and calls `audit::emit_many`. One extra round-trip pre + one batched audit INSERT post — bounded cost regardless of N rows. Best-effort: a SELECT failure logs a tracing warning but doesn't fail the user-visible request, since the data write may have already partially committed.
+
+### Tests
+
+- Existing `audit_live`, `admin_live`, `tenant_auth_live` suites stay green (86/86 across the touched suites; full sweep stays at 126/126). Browser-verified end-to-end: ran `mark_4_credits` + `delete_selected` on uni_portal courses, confirmed 4 audit rows with correct ops + payloads.
+
 ## [v0.12.3] — admin update + delete also produce diff/snapshot audit JSON — 2026-05-01
 
 ### Improved
