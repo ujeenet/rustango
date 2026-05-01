@@ -19,8 +19,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 
 // Compiles only when `audit(track = ...)` parses + validates against
-// the declared scalar fields. The runtime audit emission this model
-// triggers ships in commit 3.
+// the declared scalar fields.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "rustango_audit_post", display = "title")]
 #[rustango(audit(track = "title, body"))]
@@ -32,6 +31,23 @@ pub struct AuditedPost {
     pub title: String,
     #[rustango(max_length = 200)]
     pub body: String,
+}
+
+async fn setup_post(pool: &sqlx::PgPool) {
+    let _ = sqlx::query(r#"DROP TABLE IF EXISTS "rustango_audit_post""#)
+        .execute(pool)
+        .await;
+    sqlx::query(
+        r#"CREATE TABLE "rustango_audit_post" (
+              "id" BIGSERIAL PRIMARY KEY,
+              "title" TEXT NOT NULL,
+              "body" TEXT NOT NULL
+          )"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    reset(pool).await;
 }
 
 fn lock() -> &'static Mutex<()> {
@@ -201,6 +217,68 @@ fn snapshot_changes_captures_all_after_values() {
     ];
     let snap = audit::snapshot_changes(&after);
     assert_eq!(snap, json!({ "title": "first", "body": "hello" }));
+}
+
+#[tokio::test]
+async fn macro_emits_audit_create_entry_on_insert_on() {
+    // v0.12 commit 3a: with `#[rustango(audit(track = "title, body"))]`
+    // the macro-generated `insert_on` writes a snapshot to
+    // `rustango_audit_log` after the data INSERT. Default source is
+    // `system` because no `with_source` scope is active here.
+    let _g = lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    setup_post(&pool).await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    let mut row = AuditedPost {
+        id: rustango::sql::Auto::default(),
+        title: "first".into(),
+        body: "hello world".into(),
+    };
+    row.insert_on(&mut *conn).await.unwrap();
+    let pk = row.id.get().copied().unwrap();
+
+    let entries = audit::fetch_for_entity(&pool, "rustango_audit_post", &pk.to_string())
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1, "exactly one audit entry expected");
+    assert_eq!(entries[0].operation, "create");
+    assert_eq!(entries[0].source, "system");
+    assert_eq!(
+        entries[0].changes,
+        json!({ "title": "first", "body": "hello world" })
+    );
+}
+
+#[tokio::test]
+async fn macro_emits_audit_with_user_source_inside_with_source_scope() {
+    // The `with_source` task-local override propagates into the
+    // macro-emitted hook so admin handlers can attribute writes to
+    // the authenticated user.
+    let _g = lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    setup_post(&pool).await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    audit::with_source(AuditSource::User { id: "alice".into() }, async {
+        let mut row = AuditedPost {
+            id: rustango::sql::Auto::default(),
+            title: "scoped".into(),
+            body: "x".into(),
+        };
+        row.insert_on(&mut *conn).await.unwrap();
+        let pk = row.id.get().copied().unwrap();
+        let entries =
+            audit::fetch_for_entity(&pool, "rustango_audit_post", &pk.to_string())
+                .await
+                .unwrap();
+        assert_eq!(entries[0].source, "user:alice");
+    })
+    .await;
 }
 
 #[test]

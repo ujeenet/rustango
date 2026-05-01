@@ -418,11 +418,27 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
+    let audited_fields: Option<Vec<&ColumnEntry>> = container.audit.as_ref().map(|audit| {
+        let track_set: Option<std::collections::HashSet<&str>> = audit
+            .track
+            .as_ref()
+            .map(|(names, _)| names.iter().map(String::as_str).collect());
+        collected
+            .column_entries
+            .iter()
+            .filter(|c| {
+                track_set
+                    .as_ref()
+                    .map_or(true, |s| s.contains(c.name.as_str()))
+            })
+            .collect()
+    });
     let inherent_impl = inherent_impl_tokens(
         struct_name,
         &collected,
         collected.primary_key.as_ref(),
         &column_consts,
+        audited_fields.as_deref(),
     );
     let column_module = column_module_tokens(&module_ident, struct_name, &collected.column_entries);
     let from_row_impl = from_row_impl_tokens(struct_name, &collected.from_row_inits);
@@ -973,7 +989,94 @@ fn inherent_impl_tokens(
     fields: &CollectedFields,
     primary_key: Option<&(syn::Ident, String)>,
     column_consts: &TokenStream2,
+    audited_fields: Option<&[&ColumnEntry]>,
 ) -> TokenStream2 {
+    // Audit-emit fragment threaded into `insert_on` for Auto-PK
+    // models. Non-empty only when the model carries
+    // `#[rustango(audit(...))]`. The emit reborrows `_executor` (a
+    // `&mut PgConnection` for audited models — the macro switches the
+    // signature below) so the data INSERT and the audit INSERT both
+    // run on the same caller-supplied connection.
+    let audit_insert_emit: TokenStream2 = if let Some(tracked) = audited_fields {
+        let pk_to_string = if let Some((pk_ident, _)) = primary_key {
+            if fields.pk_is_auto {
+                quote!(self.#pk_ident.get().map(|v| ::std::format!("{}", v)).unwrap_or_default())
+            } else {
+                quote!(::std::format!("{}", &self.#pk_ident))
+            }
+        } else {
+            quote!(::std::string::String::new())
+        };
+        let pairs = tracked.iter().map(|c| {
+            let column_lit = c.column.as_str();
+            let ident = &c.ident;
+            quote! {
+                (
+                    #column_lit,
+                    ::serde_json::to_value(&self.#ident)
+                        .unwrap_or(::serde_json::Value::Null),
+                )
+            }
+        });
+        quote! {
+            let _audit_entry = ::rustango::audit::PendingEntry {
+                entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
+                entity_pk: #pk_to_string,
+                operation: ::rustango::audit::AuditOp::Create,
+                source: ::rustango::audit::current_source(),
+                changes: ::rustango::audit::snapshot_changes(&[
+                    #( #pairs ),*
+                ]),
+            };
+            ::rustango::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+        }
+    } else {
+        quote!()
+    };
+    let executor_passes_to_data_write = if audited_fields.is_some() {
+        quote!(&mut *_executor)
+    } else {
+        quote!(_executor)
+    };
+    let executor_param = if audited_fields.is_some() {
+        quote!(_executor: &mut ::rustango::sql::sqlx::PgConnection)
+    } else {
+        quote!(_executor: _E)
+    };
+    let executor_generics = if audited_fields.is_some() {
+        quote!()
+    } else {
+        quote!(<'_c, _E>)
+    };
+    let executor_where = if audited_fields.is_some() {
+        quote!()
+    } else {
+        quote! {
+            where
+                _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+        }
+    };
+    // For audited models the `_on` methods take `&mut PgConnection`, so
+    // the &PgPool convenience wrappers (`save`, `insert`, `delete`)
+    // must acquire a connection first. Non-audited models keep the
+    // direct delegation since `&PgPool` IS an Executor.
+    let pool_to_save_on = if audited_fields.is_some() {
+        quote! {
+            let mut _conn = pool.acquire().await?;
+            self.save_on(&mut *_conn).await
+        }
+    } else {
+        quote!(self.save_on(pool).await)
+    };
+    let pool_to_insert_on = if audited_fields.is_some() {
+        quote! {
+            let mut _conn = pool.acquire().await?;
+            self.insert_on(&mut *_conn).await
+        }
+    } else {
+        quote!(self.insert_on(pool).await)
+    };
+
     let save_method = if fields.pk_is_auto {
         let (pk_ident, pk_column) = primary_key
             .expect("pk_is_auto implies primary_key is Some");
@@ -1001,7 +1104,7 @@ fn inherent_impl_tokens(
                 &mut self,
                 pool: &::rustango::sql::sqlx::PgPool,
             ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
-                self.save_on(pool).await
+                #pool_to_save_on
             }
 
             /// Like [`Self::save`] but accepts any sqlx executor —
@@ -1014,15 +1117,14 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::save`].
-            pub async fn save_on<'_c, _E>(
+            pub async fn save_on #executor_generics (
                 &mut self,
-                _executor: _E,
+                #executor_param,
             ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
-            where
-                _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+            #executor_where
             {
                 if matches!(self.#pk_ident, ::rustango::sql::Auto::Unset) {
-                    return self.insert_on(_executor).await;
+                    return self.insert_on(#executor_passes_to_data_write).await;
                 }
                 let _query = ::rustango::core::UpdateQuery {
                     model: <Self as ::rustango::core::Model>::SCHEMA,
@@ -1195,7 +1297,7 @@ fn inherent_impl_tokens(
                 &mut self,
                 pool: &::rustango::sql::sqlx::PgPool,
             ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
-                self.insert_on(pool).await
+                #pool_to_insert_on
             }
 
             /// Like [`Self::insert`] but accepts any sqlx executor.
@@ -1203,12 +1305,11 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::insert`].
-            pub async fn insert_on<'_c, _E>(
+            pub async fn insert_on #executor_generics (
                 &mut self,
-                _executor: _E,
+                #executor_param,
             ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
-            where
-                _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+            #executor_where
             {
                 let mut _columns: ::std::vec::Vec<&'static str> =
                     ::std::vec::Vec::new();
@@ -1221,8 +1322,12 @@ fn inherent_impl_tokens(
                     values: _values,
                     returning: ::std::vec![ #( #returning_cols ),* ],
                 };
-                let _returning_row = ::rustango::sql::insert_returning_on(_executor, &query).await?;
+                let _returning_row = ::rustango::sql::insert_returning_on(
+                    #executor_passes_to_data_write,
+                    &query,
+                ).await?;
                 #( #auto_assigns )*
+                #audit_insert_emit
                 ::core::result::Result::Ok(())
             }
         }
