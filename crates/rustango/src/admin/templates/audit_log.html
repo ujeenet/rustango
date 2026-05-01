@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Activity — rustango admin{% endblock title %}
+{% block body %}
+<p><a href="/">&larr; admin home</a></p>
+<h1>Activity</h1>
+<p>{{ total }} audit entr{% if total == 1 %}y{% else %}ies{% endif %} across every model. Newest first.</p>
+
+{% if active_filters | length > 0 %}
+<p class="active-filters">filtered by:
+  {% for f in active_filters %}<code>{{ f.key }}={{ f.value }}</code> {% endfor %}
+  &middot; <a href="/__audit">clear</a>
+</p>
+{% endif %}
+
+<div class="list-shell">
+<div class="list-main">
+{% if entries | length == 0 %}
+<p><em>No audit entries match the current filter.</em></p>
+{% else %}
+<section class="audit-trail">
+<ol>
+  {% for e in entries %}
+  <li>
+    <span class="audit-op audit-op-{{ e.operation }}">{{ e.operation }}</span>
+    <a href="{{ e.detail_url | safe }}"><strong>{{ e.entity_table }}#{{ e.entity_pk }}</strong></a>
+    by <strong>{{ e.source }}</strong>
+    <small>at {{ e.occurred_at }}</small>
+    <pre class="audit-changes">{{ e.changes }}</pre>
+  </li>
+  {% endfor %}
+</ol>
+</section>
+{% endif %}
+
+{% if last_page > 1 %}
+<p class="pager">
+  {% if page > 1 %}
+    <a href="/__audit?page={{ page - 1 }}{{ pager_extras | safe }}">&larr; prev</a>
+  {% else %}
+    <span class="muted">&larr; prev</span>
+  {% endif %}
+  &middot; page {{ page }} of {{ last_page }} &middot;
+  {% if page < last_page %}
+    <a href="/__audit?page={{ page + 1 }}{{ pager_extras | safe }}">next &rarr;</a>
+  {% else %}
+    <span class="muted">next &rarr;</span>
+  {% endif %}
+</p>
+{% endif %}
+</div>{# /list-main #}
+{% if facets and facets | length > 0 %}
+<aside class="list-rail">
+  {% for facet in facets %}
+  <section class="facet">
+    <h4>By {{ facet.field }}</h4>
+    <ul>
+    {% for v in facet.values %}
+      <li>
+        <a href="{{ v.toggle_url | safe }}"{% if v.active %} class="active"{% endif %}>{{ v.display | safe }}</a>
+        <span class="count">({{ v.count }})</span>
+      </li>
+    {% endfor %}
+    </ul>
+  </section>
+  {% endfor %}
+</aside>
+{% endif %}
+</div>{# /list-shell #}
+{% endblock body %}

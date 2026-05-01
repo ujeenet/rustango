@@ -175,6 +175,7 @@ impl Builder {
     pub fn build(self) -> Router {
         Router::new()
             .route("/", get(views::index))
+            .route("/__audit", get(views::audit_log_view))
             .route("/{table}", get(views::table_view).post(views::create_submit))
             .route("/{table}/new", get(views::create_form))
             .route("/{table}/__action", post(views::action_submit))

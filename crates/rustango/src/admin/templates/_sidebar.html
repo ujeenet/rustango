@@ -2,6 +2,7 @@
   <h2>{{ admin_title | default(value="rustango admin") }}</h2>
   {% if admin_subtitle %}<p class="subtitle">{{ admin_subtitle }}</p>{% endif %}
   <p><a href="/" class="{% if active_table is undefined or active_table == '' %}active{% endif %}">Home</a></p>
+  <p><a href="/__audit" class="{% if active_table == '__audit' %}active{% endif %}">Activity</a></p>
   {% if sidebar_groups %}
     {% for group in sidebar_groups %}
     <h3>{{ group.app }}</h3>

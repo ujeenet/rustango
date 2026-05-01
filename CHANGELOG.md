@@ -2,6 +2,18 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.12.5] — admin /__audit activity feed — 2026-05-01
+
+### Added
+
+- **First-class admin activity feed at `/__audit`** — cross-row audit log view that lists every entry in `rustango_audit_log` newest-first with pagination (50/page). Each row is rendered with the same operation-coded badge as the per-row detail panel + a clickable link back to `entity_table#entity_pk`'s detail page. JSON `changes` payload is pretty-printed inline.
+- **Facet filters on `/__audit`**: right rail shows distinct `entity_table`, `operation`, and `source` values with row counts; clicking a value toggles `?<col>=<value>` in the URL (mirrors the `list_filter` UI shape). Active filters render as `<code>` pills above the list with a "clear" link. Pager preserves the active filters across pages.
+- **"Activity" link in the sidebar** pointing at `/__audit`. Highlights as active when on the audit page.
+
+### Tests
+
+- Browser-driven verification (curl + DB inspection): 8 audit rows in `pg-sju` (4 system creates + 4 user:1 updates) all render on the page; `?source=user%3A1` filters to 4 entries with the active-filter pill visible. 86/86 across the touched suites.
+
 ## [v0.12.4] — bulk-action audit — 2026-05-01
 
 ### Added

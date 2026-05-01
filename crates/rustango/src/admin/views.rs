@@ -489,6 +489,228 @@ fn url_encode(s: &str) -> String {
     out
 }
 
+// ============================================================== AUDIT LOG (v0.12.5)
+
+const AUDIT_PAGE_SIZE: i64 = 50;
+
+/// `GET /__audit` — cross-row activity feed of `rustango_audit_log`.
+/// Newest first, paginated. Supports `?entity_table=...`,
+/// `?operation=...`, `?source=...` facet filters; the right rail
+/// shows distinct values + counts and toggle URLs (mirrors the
+/// `list_filter` UI shape).
+pub(crate) async fn audit_log_view(
+    Query(params): Query<HashMap<String, String>>,
+    State(state): State<AppState>,
+) -> Result<Html<String>, AdminError> {
+    let page = params
+        .get("page")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(1)
+        .max(1);
+    let offset = (page - 1) * AUDIT_PAGE_SIZE;
+
+    // Build dynamic WHERE from the per-facet params. Each
+    // (column, value) pair is appended to the SQL with a $N
+    // placeholder; sqlx binds them positionally.
+    let mut where_sql = String::new();
+    let mut binds: Vec<String> = Vec::new();
+    let mut active_field_filters: Vec<(&'static str, String)> = Vec::new();
+    for (col_static, key) in [
+        ("entity_table", "entity_table"),
+        ("operation", "operation"),
+        ("source", "source"),
+    ] {
+        if let Some(v) = params.get(key).filter(|s| !s.is_empty()) {
+            binds.push(v.clone());
+            let placeholder = binds.len();
+            if where_sql.is_empty() {
+                where_sql.push_str(" WHERE ");
+            } else {
+                where_sql.push_str(" AND ");
+            }
+            use std::fmt::Write as _;
+            let _ = write!(
+                where_sql,
+                r#""{col_static}" = ${placeholder}"#,
+            );
+            active_field_filters.push((col_static, v.clone()));
+        }
+    }
+
+    // Total count for the pager.
+    let count_sql = format!(
+        r#"SELECT COUNT(*) FROM "rustango_audit_log"{where_sql}"#,
+    );
+    let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
+    for v in &binds {
+        count_q = count_q.bind(v);
+    }
+    let total: i64 = count_q.fetch_one(&state.pool).await.unwrap_or(0);
+
+    // Page of rows.
+    let rows_sql = format!(
+        r#"SELECT "id", "entity_table", "entity_pk", "operation", "source",
+                  "changes", "occurred_at"
+           FROM "rustango_audit_log"{where_sql}
+           ORDER BY "occurred_at" DESC, "id" DESC
+           LIMIT $%LIMIT% OFFSET $%OFFSET%"#,
+    )
+    .replace("$%LIMIT%", &format!("${}", binds.len() + 1))
+    .replace("$%OFFSET%", &format!("${}", binds.len() + 2));
+    let mut rows_q = sqlx::query(&rows_sql);
+    for v in &binds {
+        rows_q = rows_q.bind(v);
+    }
+    rows_q = rows_q.bind(AUDIT_PAGE_SIZE).bind(offset);
+    let rows = rows_q.fetch_all(&state.pool).await.unwrap_or_default();
+
+    // Per-facet distinct values + counts. One small GROUP BY query
+    // per facet column. Always runs against the unfiltered table
+    // so operators can navigate to any value without losing them.
+    let mut facets_ctx: Vec<serde_json::Value> = Vec::new();
+    for col in ["entity_table", "operation", "source"] {
+        let active_value = active_field_filters
+            .iter()
+            .find(|(k, _)| *k == col)
+            .map(|(_, v)| v.as_str());
+        let q_sql = format!(
+            r#"SELECT "{col}" AS facet_value, COUNT(*) AS facet_count
+               FROM "rustango_audit_log"
+               GROUP BY "{col}"
+               ORDER BY "{col}""#,
+        );
+        let facet_rows = sqlx::query(&q_sql)
+            .fetch_all(&state.pool)
+            .await
+            .unwrap_or_default();
+        let values: Vec<serde_json::Value> = facet_rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                let raw: String = r.try_get("facet_value").unwrap_or_default();
+                let count: i64 = r.try_get("facet_count").unwrap_or(0);
+                let is_active = active_value.map(|v| v == raw).unwrap_or(false);
+                let mut params: Vec<(String, String)> = Vec::new();
+                for (k, v) in &active_field_filters {
+                    if *k == col {
+                        continue;
+                    }
+                    params.push(((*k).into(), v.clone()));
+                }
+                if !is_active {
+                    params.push((col.into(), raw.clone()));
+                }
+                let mut url = String::from("/__audit");
+                if !params.is_empty() {
+                    url.push('?');
+                    let qs: Vec<String> = params
+                        .iter()
+                        .map(|(k, v)| format!("{}={}", url_encode_q(k), url_encode_q(v)))
+                        .collect();
+                    url.push_str(&qs.join("&"));
+                }
+                serde_json::json!({
+                    "raw": raw.clone(),
+                    "display": render::escape(&raw),
+                    "count": count,
+                    "active": is_active,
+                    "toggle_url": url,
+                })
+            })
+            .collect();
+        facets_ctx.push(serde_json::json!({
+            "field": col,
+            "values": values,
+        }));
+    }
+
+    let last_page = if total == 0 {
+        1
+    } else {
+        ((total - 1) / AUDIT_PAGE_SIZE) + 1
+    };
+
+    let entries_ctx: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            use sqlx::Row;
+            let id: i64 = r.try_get("id").unwrap_or(0);
+            let entity_table: String = r.try_get("entity_table").unwrap_or_default();
+            let entity_pk: String = r.try_get("entity_pk").unwrap_or_default();
+            let operation: String = r.try_get("operation").unwrap_or_default();
+            let source: String = r.try_get("source").unwrap_or_default();
+            let changes: serde_json::Value =
+                r.try_get("changes").unwrap_or(serde_json::Value::Null);
+            let occurred_at: chrono::DateTime<chrono::Utc> = r
+                .try_get("occurred_at")
+                .unwrap_or_else(|_| chrono::Utc::now());
+            serde_json::json!({
+                "id": id,
+                "entity_table": entity_table,
+                "entity_pk": entity_pk,
+                "detail_url": format!("/{entity_table}/{entity_pk}"),
+                "operation": operation,
+                "source": source,
+                "changes": serde_json::to_string_pretty(&changes).unwrap_or_default(),
+                "occurred_at": occurred_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            })
+        })
+        .collect();
+
+    // Pager URL preserves the active facets.
+    let mut pager_extras = String::new();
+    for (k, v) in &active_field_filters {
+        use std::fmt::Write as _;
+        let _ = write!(
+            pager_extras,
+            "&{}={}",
+            url_encode_q(k),
+            url_encode_q(v),
+        );
+    }
+
+    let active_filters_ctx: Vec<serde_json::Value> = active_field_filters
+        .iter()
+        .map(|(k, v)| serde_json::json!({ "key": k, "value": v }))
+        .collect();
+
+    let mut ctx = serde_json::json!({
+        "total": total,
+        "plural": if total == 1 { "" } else { "s" },
+        "entries": entries_ctx,
+        "facets": facets_ctx,
+        "active_filters": active_filters_ctx,
+        "page": page,
+        "last_page": last_page,
+        "pager_extras": pager_extras,
+    });
+    Ok(Html(render_with_chrome(
+        "audit_log.html",
+        &mut ctx,
+        chrome_context(&state, Some("__audit")),
+    )))
+}
+
+/// Tiny ASCII-safe percent encoder for query-string values. Mirrors
+/// the helper used by `compute_facets` so URL construction stays
+/// consistent across the admin.
+fn url_encode_q(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            ' ' => out.push_str("%20"),
+            '&' => out.push_str("%26"),
+            '=' => out.push_str("%3D"),
+            '?' => out.push_str("%3F"),
+            '#' => out.push_str("%23"),
+            '+' => out.push_str("%2B"),
+            '%' => out.push_str("%25"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 // ============================================================== DETAIL
 
 pub(crate) async fn detail_view(
