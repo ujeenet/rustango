@@ -48,8 +48,10 @@ use crate::core::Model as _;
 use crate::migrate::{DataOp, Migration, MigrationScope, Operation, SchemaChange, SchemaSnapshot};
 
 use super::auth::{Operator, User};
+use super::auth_backends::ApiKey;
 use super::error::TenancyError;
 use super::org::Org;
+use super::permissions::{Role, RolePermission, UserPermission, UserRole};
 
 /// File stem of the registry-scoped bootstrap migration.
 pub const REGISTRY_BOOTSTRAP_NAME: &str = "0001_rustango_registry_initial";
@@ -101,7 +103,16 @@ pub fn tenant_bootstrap_migration() -> Migration {
 /// lex-greatest one (`0001_rustango_tenant_initial`) leaves the
 /// world looking complete to a downstream `make_migrations`.
 fn full_snapshot() -> SchemaSnapshot {
-    SchemaSnapshot::from_models(&[Org::SCHEMA, Operator::SCHEMA, User::SCHEMA])
+    SchemaSnapshot::from_models(&[
+        Org::SCHEMA,
+        Operator::SCHEMA,
+        User::SCHEMA,
+        Role::SCHEMA,
+        RolePermission::SCHEMA,
+        UserRole::SCHEMA,
+        UserPermission::SCHEMA,
+        ApiKey::SCHEMA,
+    ])
 }
 
 fn unique_constraint(table: &str, column: &str) -> DataOp {

@@ -148,7 +148,47 @@ impl AuthBackend for ModelBackend {
     }
 }
 
-// ------------------------------------------------------------------ ApiKeyBackend
+// ------------------------------------------------------------------ ApiKey model + backend
+
+/// An API key for a tenant user. Keys are stored hashed; the full
+/// token is only returned at creation time.
+///
+/// Query with the ORM:
+/// ```ignore
+/// let keys = ApiKey::objects()
+///     .where_(ApiKey::user_id.eq(alice_id))
+///     .fetch(&pool)
+///     .await?;
+/// ```
+#[derive(crate::Model, Debug, Clone)]
+#[rustango(
+    table = "rustango_api_keys",
+    admin(
+        list_display  = "user_id, key_prefix, label, expires_at, created_at",
+        ordering      = "-created_at",
+        readonly_fields = "key_prefix, key_hash, created_at",
+    ),
+)]
+pub struct ApiKey {
+    #[rustango(primary_key)]
+    pub id: crate::sql::Auto<i64>,
+    /// `rustango_users.id`
+    pub user_id: i64,
+    /// 8-char hex prefix — public, used to look up the row.
+    #[rustango(max_length = 8)]
+    pub key_prefix: String,
+    /// argon2id hash of the 32-char secret. Never returned to callers.
+    #[rustango(max_length = 255)]
+    pub key_hash: String,
+    /// Human-readable label (e.g. "CI pipeline key").
+    #[rustango(max_length = 100)]
+    pub label: String,
+    /// Optional expiry. `None` = never expires.
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Set on INSERT via `DEFAULT NOW()`.
+    #[rustango(auto_now_add)]
+    pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
+}
 
 const API_KEY_ENSURE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS "rustango_api_keys" (
