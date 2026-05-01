@@ -354,14 +354,48 @@ async fn compute_facets(
             .find(|(k, _)| k == &field.name)
             .map(|(_, v)| v.as_str());
 
-        let sql = format!(
-            r#"SELECT "{col}" AS facet_value, COUNT(*) AS facet_count
-               FROM "{table}"
-               GROUP BY "{col}"
-               ORDER BY "{col}""#,
-            col = field.column.replace('"', "\"\""),
-            table = model.table.replace('"', "\"\""),
-        );
+        // Slice 10.7 — for FK fields, JOIN to the target table on its
+        // display column so the facet card shows "Dr. Maeve O'Hara
+        // (3)" instead of "1 (3)". Falls back to raw value for
+        // non-FK fields, FKs whose target isn't visible in the admin,
+        // or FK targets without a `display = "..."` attribute.
+        let fk_join: Option<(&'static str, &'static str, &'static str)> =
+            field.relation.and_then(|rel| match rel {
+                crate::core::Relation::Fk { to, on }
+                | crate::core::Relation::O2O { to, on } => {
+                    let target = lookup_model(state, to)?;
+                    let display_field = target.display_field()?;
+                    Some((target.table, on, display_field.column))
+                }
+                crate::core::Relation::M2M { .. } => None,
+            });
+
+        let sql = if let Some((target_table, target_pk, display_col)) = fk_join {
+            format!(
+                r#"SELECT "{src_table}"."{col}" AS facet_value,
+                          "{target_table}"."{display_col}" AS facet_display,
+                          COUNT(*) AS facet_count
+                   FROM "{src_table}"
+                   LEFT JOIN "{target_table}"
+                     ON "{target_table}"."{target_pk}" = "{src_table}"."{col}"
+                   GROUP BY "{src_table}"."{col}", "{target_table}"."{display_col}"
+                   ORDER BY "{target_table}"."{display_col}""#,
+                col = field.column.replace('"', "\"\""),
+                src_table = model.table.replace('"', "\"\""),
+                target_table = target_table.replace('"', "\"\""),
+                target_pk = target_pk.replace('"', "\"\""),
+                display_col = display_col.replace('"', "\"\""),
+            )
+        } else {
+            format!(
+                r#"SELECT "{col}" AS facet_value, COUNT(*) AS facet_count
+                   FROM "{table}"
+                   GROUP BY "{col}"
+                   ORDER BY "{col}""#,
+                col = field.column.replace('"', "\"\""),
+                table = model.table.replace('"', "\"\""),
+            )
+        };
         let rows = sqlx::query(&sql).fetch_all(&state.pool).await?;
         let mut values = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -370,11 +404,21 @@ async fn compute_facets(
             // round-trips through the filter machinery.
             let raw = render::read_value_as_string_at(row, field, "facet_value")
                 .unwrap_or_default();
-            // Display: for FK fields the raw is the target PK
-            // (numeric); a FK-target display lookup is queued for
-            // slice 10.7. For everything else, raw == display.
+            // Display: for FK fields with a JOIN, prefer the target's
+            // display value; otherwise fall back to the raw key.
             let display = if raw.is_empty() {
                 "—".to_owned()
+            } else if fk_join.is_some() {
+                let display_text: Option<String> = sqlx::Row::try_get::<Option<String>, _>(
+                    row,
+                    "facet_display",
+                )
+                .ok()
+                .flatten();
+                match display_text {
+                    Some(t) if !t.is_empty() => render::escape(&t),
+                    _ => render::escape(&raw),
+                }
             } else {
                 render::escape(&raw)
             };

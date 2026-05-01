@@ -2103,3 +2103,89 @@ async fn unknown_action_returns_500() {
 
     migrate::drop_all(&pool).await.unwrap();
 }
+
+/// Slice 10.7 fixtures: a parent with `display = "name"` and a child
+/// whose `list_filter` includes the FK column. The facet card for that
+/// FK should render the parent's `name` value, not the raw PK.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "fk_parent", display = "name")]
+pub struct FkParent {
+    #[rustango(primary_key)]
+    id: i64,
+    #[rustango(max_length = 32)]
+    name: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "fk_child", display = "label")]
+#[rustango(admin(
+    list_display = "label, parent_id",
+    list_filter = "parent_id",
+))]
+pub struct FkChild {
+    #[rustango(primary_key)]
+    id: i64,
+    #[rustango(max_length = 32)]
+    label: String,
+    #[rustango(fk = "fk_parent", on = "id")]
+    parent_id: i64,
+}
+
+#[tokio::test]
+async fn list_filter_renders_fk_target_display_name() {
+    // Slice 10.7: when a `list_filter` field is a FK, the facet card
+    // shows the FK target's `display` value next to its count instead
+    // of the raw PK number.
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+    for (id, name) in [(1_i64, "Ada"), (2, "Linus")] {
+        FkParent {
+            id,
+            name: name.into(),
+        }
+        .insert(&pool)
+        .await
+        .unwrap();
+    }
+    for (id, label, parent_id) in [
+        (1_i64, "x", 1_i64),
+        (2, "y", 1),
+        (3, "z", 2),
+    ] {
+        FkChild {
+            id,
+            label: label.into(),
+            parent_id,
+        }
+        .insert(&pool)
+        .await
+        .unwrap();
+    }
+
+    let app = rustango::admin::router(pool.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/fk_child")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(resp).await;
+    assert!(body.contains("Ada"), "Ada display name missing in facet: {body}");
+    assert!(body.contains("Linus"), "Linus display name missing: {body}");
+    // The raw PK numbers should NOT appear inside the facet card's
+    // `<a>` text — only the display name. (The PK still appears in
+    // the toggle URL.)
+    assert!(
+        body.contains(r#">Ada<"#),
+        "Ada should be the link text: {body}"
+    );
+
+    migrate::drop_all(&pool).await.unwrap();
+}
