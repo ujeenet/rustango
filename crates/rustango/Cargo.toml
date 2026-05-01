@@ -55,6 +55,8 @@ admin = [
     "dep:base64",
     "dep:http",
     "dep:http-body-util",
+    "dep:serde_urlencoded",
+    "dep:tokio",
 ]
 
 # Multi-tenancy module (`rustango::tenancy`). Implies `admin` (the
