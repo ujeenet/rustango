@@ -2,6 +2,48 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.12.0] — base-model mixins + per-tenant audit log — 2026-05-01
+
+Brings Django-shape "BaseModel inheritance" semantics to rustango: opt-in `auto_uuid` / `auto_now_add` / `auto_now` / `soft_delete` field-level mixins, and a per-tenant audit log that records who changed what, with source-of-change attribution.
+
+### Added
+
+- **Field-level mixins (commit 1)**:
+  - `#[rustango(auto_uuid)]` on `Auto<uuid::Uuid>` — UUID PK; DB-side `gen_random_uuid()` default.
+  - `#[rustango(auto_now_add)]` on `Auto<DateTime<Utc>>` — `created_at` shape; server-set on INSERT, immutable on UPDATE.
+  - `#[rustango(auto_now)]` on `Auto<DateTime<Utc>>` — `updated_at` shape; macro rewrites every UPDATE to bind `chrono::Utc::now()`.
+  - `#[rustango(soft_delete)]` on `Option<DateTime<Utc>>` — adds `soft_delete_on(executor)` and `restore_on(executor)` methods.
+  - `Auto<T>` now accepts `Uuid` and `DateTime<Utc>` in addition to integers.
+
+- **Audit primitives (commit 2)** — new `rustango::audit` module:
+  - Composite-key `rustango_audit_log(entity_table, entity_pk, operation, source, changes JSONB, occurred_at)` with covering indexes. Lives **per-tenant** for tenancy projects (one table per schema/database).
+  - `AuditSource { System, User { id }, Custom(String) }` flows through a tokio task-local; `audit::with_source(src, fut).await` scopes a source for the duration of `fut`. Default is `System`.
+  - `emit_one(executor, &entry)` / `emit_many(executor, &entries)` write paths. `fetch_for_entity(pool, table, pk)` reads the per-row history newest-first.
+  - `diff_changes(before, after)` and `snapshot_changes(after)` JSON builders. Idempotent `ensure_table(pool)` for ad-hoc setup.
+
+- **Macro emits audit hooks** (commits 3a/3b/3c) — declare `#[rustango(audit(track = "title, body"))]` on a Model derive and the macro auto-emits a `PendingEntry` after every per-row write:
+  - `insert_on` → operation = "create" (snapshot of after-state)
+  - `save_on` UPDATE branch → operation = "update" (snapshot of after-state)
+  - `delete_on` → operation = "delete" (snapshot of in-memory `&self`)
+  - `soft_delete_on` → operation = "soft_delete"
+  - `restore_on` → operation = "restore"
+  - `bulk_insert_on` → one batched `emit_many` regardless of N rows. One audit round-trip per call.
+  - Field-name list in `track = "..."` validated at compile time against declared scalar fields.
+  - Per-call source override: `save_on_with(executor, source)`, `insert_on_with`, `delete_on_with` — wrap the underlying call in `audit::with_source(...)` so seed scripts and CLI tools can attribute writes without touching the task-local.
+
+### Changed
+
+- For audited models, the executor on `_on` methods (`insert_on`, `save_on`, `delete_on`, `soft_delete_on`, `restore_on`, `bulk_insert_on`) is now `&mut sqlx::PgConnection` (concrete) rather than `_E: Executor` (generic), so the macro can reborrow `&mut *_executor` across the data write and the audit write. Non-audited models keep the generic signature for backward compatibility.
+- `&PgPool` convenience wrappers (`save`, `insert`, `delete`, `bulk_insert`) acquire a connection from the pool internally for audited models, then forward to the `_on(&mut PgConnection)` variant. Non-audited models keep the direct delegation.
+
+### Deferred to v0.12.1
+
+- True before/after diff in `save_on` UPDATE branch (today snapshots the after-state only). Requires a before-SELECT round-trip; queued.
+- Admin handler auto-install of `audit::with_source(User { session.user_id })` per request.
+- uni_portal end-to-end demo.
+
+Tests: 16 new in `audit_live` (per-op emit, with-source override, per-call `_with` override, bulk audit) + 4 in `mixins_live` (Auto<UUID> insert, auto_now_add fill, auto_now rebind, soft_delete + restore round-trip). Full sweep: 109/109.
+
 ## [v0.11.0] — user-defined bulk actions — 2026-04-30
 
 ### Added

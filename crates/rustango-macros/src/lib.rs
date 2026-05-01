@@ -1047,6 +1047,14 @@ fn inherent_impl_tokens(
     } else {
         quote!(self.delete_on(pool).await)
     };
+    let pool_to_bulk_insert_on = if audited_fields.is_some() {
+        quote! {
+            let mut _conn = pool.acquire().await?;
+            Self::bulk_insert_on(rows, &mut *_conn).await
+        }
+    } else {
+        quote!(Self::bulk_insert_on(rows, pool).await)
+    };
 
     // Build the (column, JSON value) pair list used by every
     // snapshot-style audit emission. Reused across delete_on,
@@ -1100,9 +1108,59 @@ fn inherent_impl_tokens(
         }
     };
     let audit_insert_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Create));
+    let audit_update_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Update));
     let audit_delete_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Delete));
     let audit_softdelete_emit = make_op_emit(quote!(::rustango::audit::AuditOp::SoftDelete));
     let audit_restore_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Restore));
+
+    // Bulk-insert audit: capture every row's tracked fields after the
+    // RETURNING populates each PK, then push one batched INSERT INTO
+    // audit_log via `emit_many`. One round-trip regardless of N rows.
+    let audit_bulk_insert_emit: TokenStream2 = if audited_fields.is_some() {
+        let row_pk_str = if let Some((pk_ident, _)) = primary_key {
+            if fields.pk_is_auto {
+                quote!(_row.#pk_ident.get().map(|v| ::std::format!("{}", v)).unwrap_or_default())
+            } else {
+                quote!(::std::format!("{}", &_row.#pk_ident))
+            }
+        } else {
+            quote!(::std::string::String::new())
+        };
+        let row_pairs = audited_fields
+            .unwrap_or(&[])
+            .iter()
+            .map(|c| {
+                let column_lit = c.column.as_str();
+                let ident = &c.ident;
+                quote! {
+                    (
+                        #column_lit,
+                        ::serde_json::to_value(&_row.#ident)
+                            .unwrap_or(::serde_json::Value::Null),
+                    )
+                }
+            });
+        quote! {
+            let _audit_source = ::rustango::audit::current_source();
+            let mut _audit_entries:
+                ::std::vec::Vec<::rustango::audit::PendingEntry> =
+                    ::std::vec::Vec::with_capacity(rows.len());
+            for _row in rows.iter() {
+                _audit_entries.push(::rustango::audit::PendingEntry {
+                    entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
+                    entity_pk: #row_pk_str,
+                    operation: ::rustango::audit::AuditOp::Create,
+                    source: _audit_source.clone(),
+                    changes: ::rustango::audit::snapshot_changes(&[
+                        #( #row_pairs ),*
+                    ]),
+                });
+            }
+            ::rustango::audit::emit_many(&mut *_executor, &_audit_entries).await?;
+        }
+    } else {
+        quote!()
+    };
 
     let save_method = if fields.pk_is_auto {
         let (pk_ident, pk_column) = primary_key
@@ -1166,8 +1224,32 @@ fn inherent_impl_tokens(
                         }
                     ),
                 };
-                let _ = ::rustango::sql::update_on(_executor, &_query).await?;
+                let _ = ::rustango::sql::update_on(
+                    #executor_passes_to_data_write,
+                    &_query,
+                ).await?;
+                #audit_update_emit
                 ::core::result::Result::Ok(())
+            }
+
+            /// Per-call override for the audit source. Runs
+            /// [`Self::save_on`] inside an [`::rustango::audit::with_source`]
+            /// scope so the resulting audit entry records `source`
+            /// instead of the task-local default. Useful for seed
+            /// scripts and one-off CLI tools that don't sit inside an
+            /// admin handler. The override applies only to this call;
+            /// no global state changes.
+            ///
+            /// # Errors
+            /// As [`Self::save_on`].
+            pub async fn save_on_with #executor_generics (
+                &mut self,
+                #executor_param,
+                source: ::rustango::audit::AuditSource,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
+            #executor_where
+            {
+                ::rustango::audit::with_source(source, self.save_on(_executor)).await
             }
         })
     } else {
@@ -1315,6 +1397,21 @@ fn inherent_impl_tokens(
                 #audit_delete_emit
                 ::core::result::Result::Ok(_affected)
             }
+
+            /// Per-call audit-source override for [`Self::delete_on`].
+            /// See [`Self::save_on_with`] for shape rationale.
+            ///
+            /// # Errors
+            /// As [`Self::delete_on`].
+            pub async fn delete_on_with #executor_generics (
+                &self,
+                #executor_param,
+                source: ::rustango::audit::AuditSource,
+            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError>
+            #executor_where
+            {
+                ::rustango::audit::with_source(source, self.delete_on(_executor)).await
+            }
             #soft_delete_methods
         }
     });
@@ -1368,6 +1465,21 @@ fn inherent_impl_tokens(
                 #( #auto_assigns )*
                 #audit_insert_emit
                 ::core::result::Result::Ok(())
+            }
+
+            /// Per-call audit-source override for [`Self::insert_on`].
+            /// See [`Self::save_on_with`] for shape rationale.
+            ///
+            /// # Errors
+            /// As [`Self::insert_on`].
+            pub async fn insert_on_with #executor_generics (
+                &mut self,
+                #executor_param,
+                source: ::rustango::audit::AuditSource,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
+            #executor_where
+            {
+                ::rustango::audit::with_source(source, self.insert_on(_executor)).await
             }
         }
     } else {
@@ -1439,7 +1551,7 @@ fn inherent_impl_tokens(
                 rows: &mut [Self],
                 pool: &::rustango::sql::sqlx::PgPool,
             ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
-                Self::bulk_insert_on(rows, pool).await
+                #pool_to_bulk_insert_on
             }
 
             /// Like [`Self::bulk_insert`] but accepts any sqlx executor.
@@ -1447,12 +1559,11 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::bulk_insert`].
-            pub async fn bulk_insert_on<'_c, _E>(
+            pub async fn bulk_insert_on #executor_generics (
                 rows: &mut [Self],
-                _executor: _E,
+                #executor_param,
             ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
-            where
-                _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+            #executor_where
             {
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
@@ -1490,7 +1601,10 @@ fn inherent_impl_tokens(
                     rows: _all_rows,
                     returning: ::std::vec![ #( #returning_cols ),* ],
                 };
-                let _returned = ::rustango::sql::bulk_insert_on(_executor, &_query).await?;
+                let _returned = ::rustango::sql::bulk_insert_on(
+                    #executor_passes_to_data_write,
+                    &_query,
+                ).await?;
                 if _returned.len() != rows.len() {
                     return ::core::result::Result::Err(
                         ::rustango::sql::ExecError::Sql(
@@ -1504,6 +1618,7 @@ fn inherent_impl_tokens(
                 for (_returning_row, _row_mut) in _returned.iter().zip(rows.iter_mut()) {
                     #auto_assigns_for_row
                 }
+                #audit_bulk_insert_emit
                 ::core::result::Result::Ok(())
             }
         }

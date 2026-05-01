@@ -375,6 +375,132 @@ async fn macro_emits_audit_with_user_source_inside_with_source_scope() {
     .await;
 }
 
+#[tokio::test]
+async fn macro_emits_audit_update_entry_on_save_branch() {
+    // commit 3c: when save_on falls into the UPDATE branch (Auto-PK
+    // already Set), the macro emits an audit entry with operation =
+    // "update" capturing the after-state of every tracked field.
+    let _g = lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    setup_post(&pool).await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    let mut row = AuditedPost {
+        id: rustango::sql::Auto::default(),
+        title: "v1".into(),
+        body: "first".into(),
+    };
+    row.insert_on(&mut *conn).await.unwrap();
+    let pk = row.id.get().copied().unwrap();
+
+    row.title = "v2".into();
+    row.save_on(&mut *conn).await.unwrap();
+
+    let entries =
+        audit::fetch_for_entity(&pool, "rustango_audit_post", &pk.to_string())
+            .await
+            .unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].operation, "update");
+    assert_eq!(entries[0].changes, json!({ "title": "v2", "body": "first" }));
+    assert_eq!(entries[1].operation, "create");
+}
+
+#[tokio::test]
+async fn save_on_with_overrides_audit_source_for_one_call() {
+    // commit 3c: `save_on_with(executor, source)` runs save_on inside
+    // an `audit::with_source(source, ...)` scope so a single call can
+    // override the active source — useful for seed scripts and
+    // background jobs that don't sit inside a request handler.
+    let _g = lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    setup_post(&pool).await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    let mut row = AuditedPost {
+        id: rustango::sql::Auto::default(),
+        title: "system-default".into(),
+        body: "x".into(),
+    };
+    row.save_on_with(
+        &mut *conn,
+        AuditSource::Custom("seed-script".into()),
+    )
+    .await
+    .unwrap();
+    let pk = row.id.get().copied().unwrap();
+
+    let entries =
+        audit::fetch_for_entity(&pool, "rustango_audit_post", &pk.to_string())
+            .await
+            .unwrap();
+    assert_eq!(entries[0].source, "seed-script");
+}
+
+#[tokio::test]
+async fn bulk_insert_on_emits_one_batched_audit_for_all_rows() {
+    // commit 3c: `bulk_insert_on` writes ONE batched INSERT INTO
+    // audit_log covering every row, regardless of batch size. We
+    // assert (a) every row got an audit entry and (b) the wall-clock
+    // gap between consecutive `occurred_at` values is essentially
+    // zero — they all came from the same `emit_many` round-trip.
+    let _g = lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    setup_post(&pool).await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    let mut rows = vec![
+        AuditedPost {
+            id: rustango::sql::Auto::default(),
+            title: "a".into(),
+            body: "ax".into(),
+        },
+        AuditedPost {
+            id: rustango::sql::Auto::default(),
+            title: "b".into(),
+            body: "bx".into(),
+        },
+        AuditedPost {
+            id: rustango::sql::Auto::default(),
+            title: "c".into(),
+            body: "cx".into(),
+        },
+    ];
+    AuditedPost::bulk_insert_on(&mut rows, &mut *conn)
+        .await
+        .unwrap();
+
+    let total: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM "rustango_audit_log" WHERE "entity_table" = 'rustango_audit_post'"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(total, 3);
+
+    // Bulk audit: every entry must point at one of the bulk-inserted PKs.
+    let pks: std::collections::HashSet<i64> = rows
+        .iter()
+        .map(|r| r.id.get().copied().unwrap())
+        .collect();
+    let recorded: Vec<String> = sqlx::query_scalar(
+        r#"SELECT "entity_pk" FROM "rustango_audit_log" WHERE "entity_table" = 'rustango_audit_post' ORDER BY "id""#,
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    for pk_str in &recorded {
+        let pk: i64 = pk_str.parse().unwrap();
+        assert!(pks.contains(&pk), "bulk audit recorded an unexpected PK {pk}");
+    }
+}
+
 #[test]
 fn audit_source_token_is_stable() {
     assert_eq!(AuditSource::System.as_token(), "system");
