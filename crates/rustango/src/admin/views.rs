@@ -99,7 +99,13 @@ pub(crate) async fn index(State(state): State<AppState>) -> Html<String> {
 const DEFAULT_PAGE_SIZE: i64 = 50;
 
 /// Reserved query parameters; everything else is treated as a per-field filter.
-const RESERVED_PARAMS: &[&str] = &["page", "q"];
+const RESERVED_PARAMS: &[&str] = &["page", "q", "facet_show_all"];
+
+/// Default cap on how many values a single facet shows. v0.13.1 —
+/// keeps the right rail compact on high-cardinality columns. The
+/// remainder collapses into a "+N more" link that opts the column
+/// into showing every value via `?facet_show_all=<field>`.
+const FACET_TRUNCATE: usize = 15;
 
 #[allow(clippy::too_many_lines)] // mostly linear HTML emission; splitting hurts readability
 pub(crate) async fn table_view(
@@ -282,8 +288,18 @@ pub(crate) async fn table_view(
     // render a right-rail card. Each value link toggles the
     // `?<col>=<value>` query param: clicking the active value clears
     // the filter; clicking a different value swaps to it.
-    let facets_ctx: Vec<serde_json::Value> =
-        compute_facets(&state, model, &admin_cfg, &active_field_filters, q.as_deref()).await?;
+    let show_all_facet = params
+        .get("facet_show_all")
+        .map(String::as_str);
+    let facets_ctx: Vec<serde_json::Value> = compute_facets(
+        &state,
+        model,
+        &admin_cfg,
+        &active_field_filters,
+        q.as_deref(),
+        show_all_facet,
+    )
+    .await?;
 
     // Action menu items (slice 10.6). Empty when the model declares
     // no `admin.actions`, hiding the picker entirely.
@@ -340,6 +356,7 @@ async fn compute_facets(
     admin_cfg: &crate::core::AdminConfig,
     active_field_filters: &[(&'static str, String)],
     q: Option<&str>,
+    show_all_facet: Option<&str>,
 ) -> Result<Vec<serde_json::Value>, AdminError> {
     if admin_cfg.list_filter.is_empty() {
         return Ok(Vec::new());
@@ -370,6 +387,10 @@ async fn compute_facets(
                 crate::core::Relation::M2M { .. } => None,
             });
 
+        // v0.13.1: order facets by count desc so the most active
+        // value floats to the top. Tie-break alphabetically by the
+        // displayed value so output stays deterministic across
+        // requests.
         let sql = if let Some((target_table, target_pk, display_col)) = fk_join {
             format!(
                 r#"SELECT "{src_table}"."{col}" AS facet_value,
@@ -379,7 +400,7 @@ async fn compute_facets(
                    LEFT JOIN "{target_table}"
                      ON "{target_table}"."{target_pk}" = "{src_table}"."{col}"
                    GROUP BY "{src_table}"."{col}", "{target_table}"."{display_col}"
-                   ORDER BY "{target_table}"."{display_col}""#,
+                   ORDER BY facet_count DESC, "{target_table}"."{display_col}""#,
                 col = field.column.replace('"', "\"\""),
                 src_table = model.table.replace('"', "\"\""),
                 target_table = target_table.replace('"', "\"\""),
@@ -391,7 +412,7 @@ async fn compute_facets(
                 r#"SELECT "{col}" AS facet_value, COUNT(*) AS facet_count
                    FROM "{table}"
                    GROUP BY "{col}"
-                   ORDER BY "{col}""#,
+                   ORDER BY facet_count DESC, "{col}""#,
                 col = field.column.replace('"', "\"\""),
                 table = model.table.replace('"', "\"\""),
             )
@@ -449,9 +470,51 @@ async fn compute_facets(
                 "toggle_url": toggle_url,
             }));
         }
+        // v0.13.1: truncate to FACET_TRUNCATE values unless the
+        // operator opted into "show all" for this column. Active
+        // filters always render so an active value never disappears
+        // behind the cutoff (counted toward the truncate budget).
+        let show_all = show_all_facet == Some(field.name);
+        let total_values = values.len();
+        let mut more_count: usize = 0;
+        if !show_all && total_values > FACET_TRUNCATE {
+            // Keep every active value + as many of the rest as fit.
+            let mut active_first: Vec<serde_json::Value> = Vec::new();
+            let mut rest: Vec<serde_json::Value> = Vec::new();
+            for v in values.into_iter() {
+                if v.get("active").and_then(|b| b.as_bool()).unwrap_or(false) {
+                    active_first.push(v);
+                } else {
+                    rest.push(v);
+                }
+            }
+            let cap = FACET_TRUNCATE.saturating_sub(active_first.len());
+            let kept_rest_len = rest.len().min(cap);
+            more_count = total_values - active_first.len() - kept_rest_len;
+            active_first.extend(rest.into_iter().take(cap));
+            values = active_first;
+        }
+        let show_all_url = if more_count > 0 {
+            // Build a URL that preserves current filters AND adds
+            // `facet_show_all=<field>`. Click swaps the truncated
+            // list to the full distinct-value list.
+            let mut params: Vec<(String, String)> = Vec::new();
+            if let Some(qv) = q {
+                params.push(("q".into(), qv.into()));
+            }
+            for (k, v) in active_field_filters {
+                params.push(((*k).into(), v.clone()));
+            }
+            params.push(("facet_show_all".into(), field.name.into()));
+            Some(build_query_url(model.table, &params))
+        } else {
+            None
+        };
         out.push(serde_json::json!({
             "field": field.name,
             "values": values,
+            "more_count": more_count,
+            "show_all_url": show_all_url,
         }));
     }
     Ok(out)

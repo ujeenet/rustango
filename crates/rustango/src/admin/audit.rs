@@ -33,6 +33,11 @@ use super::helpers::chrome_context;
 /// admin list views (50 by default).
 const AUDIT_PAGE_SIZE: i64 = 50;
 
+/// Cap on facet values rendered per column on `/__audit`. Mirrors
+/// the `FACET_TRUNCATE` knob used by `compute_facets` for per-table
+/// list views; opt out per-column with `?facet_show_all=<col>`.
+const AUDIT_FACET_TRUNCATE: usize = 15;
+
 /// `GET /__audit` — cross-row activity feed of `rustango_audit_log`.
 /// Newest first, paginated. Supports `?entity_table=...`,
 /// `?entity_pk=...`, `?operation=...`, `?source=...` filter params;
@@ -112,22 +117,27 @@ pub(crate) async fn audit_log_view(
     // per facet column. Always runs against the unfiltered table so
     // operators can navigate to any value without losing them.
     let mut facets_ctx: Vec<Value> = Vec::new();
+    let show_all_facet = params
+        .get("facet_show_all")
+        .map(String::as_str);
     for col in ["entity_table", "operation", "source"] {
         let active_value = active_field_filters
             .iter()
             .find(|(k, _)| *k == col)
             .map(|(_, v)| v.as_str());
+        // v0.13.1: count desc with alpha tie-break — most active
+        // value first, deterministic output across requests.
         let q_sql = format!(
             r#"SELECT "{col}" AS facet_value, COUNT(*) AS facet_count
                FROM "rustango_audit_log"
                GROUP BY "{col}"
-               ORDER BY "{col}""#,
+               ORDER BY facet_count DESC, "{col}""#,
         );
         let facet_rows = sqlx::query(&q_sql)
             .fetch_all(&state.pool)
             .await
             .unwrap_or_default();
-        let values: Vec<Value> = facet_rows
+        let mut values: Vec<Value> = facet_rows
             .iter()
             .map(|r| {
                 use sqlx::Row;
@@ -162,9 +172,46 @@ pub(crate) async fn audit_log_view(
                 })
             })
             .collect();
+        let show_all = show_all_facet == Some(col);
+        let total_values = values.len();
+        let mut more_count: usize = 0;
+        if !show_all && total_values > AUDIT_FACET_TRUNCATE {
+            let mut active_first: Vec<Value> = Vec::new();
+            let mut rest: Vec<Value> = Vec::new();
+            for v in values.into_iter() {
+                if v.get("active").and_then(|b| b.as_bool()).unwrap_or(false) {
+                    active_first.push(v);
+                } else {
+                    rest.push(v);
+                }
+            }
+            let cap = AUDIT_FACET_TRUNCATE.saturating_sub(active_first.len());
+            let kept_rest_len = rest.len().min(cap);
+            more_count = total_values - active_first.len() - kept_rest_len;
+            active_first.extend(rest.into_iter().take(cap));
+            values = active_first;
+        }
+        let show_all_url = if more_count > 0 {
+            let mut params: Vec<(String, String)> = Vec::new();
+            for (k, v) in &active_field_filters {
+                params.push(((*k).into(), v.clone()));
+            }
+            params.push(("facet_show_all".into(), col.into()));
+            let mut url = String::from("/__audit?");
+            let qs: Vec<String> = params
+                .iter()
+                .map(|(k, v)| format!("{}={}", url_encode_q(k), url_encode_q(v)))
+                .collect();
+            url.push_str(&qs.join("&"));
+            Some(url)
+        } else {
+            None
+        };
         facets_ctx.push(serde_json::json!({
             "field": col,
             "values": values,
+            "more_count": more_count,
+            "show_all_url": show_all_url,
         }));
     }
 

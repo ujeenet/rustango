@@ -2,6 +2,19 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.13.1] — facet polish (count-desc + truncation) — 2026-05-01
+
+### Changed
+
+- **Facet values sort by count descending** with alphabetic tie-break, on both per-table list views (`list_filter` rail) and the `/__audit` activity feed. Most active value floats to the top — operators see "edit hotspots" first instead of alphabetically first.
+- **Facet lists truncate at 15 values** with a `+N more…` link that opts the column into showing every distinct value via `?facet_show_all=<field>`. Active filters always render so the operator's currently-selected value never disappears behind the cutoff. Low-cardinality columns (≤ 15 distinct) render the full list with no "more" link.
+
+### Curl-verified
+
+- 23 distinct `source` values in `/__audit` → rail shows top 15 + "+8 more" link; `?facet_show_all=source` expands to all 23.
+- `By operation` facet on the same page shows `update (7)` above `create (4)`.
+- 589/589 across the full workspace test suite.
+
 ## [v0.13.0] — consolidation + admin/audit.rs split — 2026-05-01
 
 Six debt-reduction commits in one tag. No new user-facing features; behaviour preserved end-to-end. Run `cargo test --workspace` for the first time since v0.9.0 — full live sweep passes 589/589.

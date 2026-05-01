@@ -81,6 +81,9 @@
         <span class="count">({{ v.count }})</span>
       </li>
     {% endfor %}
+    {% if facet.more_count and facet.more_count > 0 %}
+      <li class="facet-more"><a href="{{ facet.show_all_url | safe }}">+{{ facet.more_count }} more&hellip;</a></li>
+    {% endif %}
     </ul>
   </section>
   {% endfor %}
