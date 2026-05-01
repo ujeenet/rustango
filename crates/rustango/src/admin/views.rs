@@ -734,6 +734,31 @@ pub(crate) async fn update_submit(
         .map(|(column, value)| crate::core::Assignment { column, value })
         .collect();
 
+    // v0.12.3: SELECT the row's pre-update state so the audit emit
+    // can produce a `{ "field": { "before": v, "after": v } }`
+    // diff. Best-effort — if the SELECT fails (race, concurrent
+    // delete), we fall back to the snapshot path so the data write
+    // still emits something useful.
+    let before_row = crate::sql::select_one_row(
+        &state.pool,
+        &SelectQuery {
+            model,
+            where_clause: WhereExpr::Predicate(Filter {
+                column: pk_field.column,
+                op: Op::Eq,
+                value: pk_value.clone(),
+            }),
+            search: None,
+            joins: vec![],
+            order_by: vec![],
+            limit: None,
+            offset: None,
+        },
+    )
+    .await
+    .ok()
+    .flatten();
+
     let query = UpdateQuery {
         model,
         set: assignments,
@@ -747,19 +772,73 @@ pub(crate) async fn update_submit(
         let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));
         return Ok(Html(html).into_response());
     }
-    // v0.12.1: every admin write emits an audit entry regardless of
-    // the model's `audit(...)` attribute. Picks up the per-request
-    // `with_source(User { id })` install from `tenancy::admin`, so
-    // operators get a "who changed what" trail for free.
-    emit_admin_audit(
-        &state,
-        model,
-        &pk_raw,
-        crate::audit::AuditOp::Update,
-        &form,
-    )
-    .await;
+    // Diff path: before from the SELECT, after from the form. Picks
+    // up the per-request `with_source(User { id })` install from
+    // `tenancy::admin`, so operators get a "who changed what" trail
+    // automatically.
+    emit_admin_audit_diff(&state, model, &pk_raw, before_row.as_ref(), &form).await;
     Ok(Redirect::to(&format!("/{}/{}", model.table, pk_raw)).into_response())
+}
+
+/// v0.12.3: diff-shaped audit emit for admin UPDATE writes. Reads
+/// the pre-update row that `update_submit` SELECTed before the
+/// UPDATE, builds a `{ "field": { "before": v, "after": v } }` JSON
+/// via `audit::diff_changes`, and emits an Update entry. Falls back
+/// to the snapshot path when the before-row is missing (rare:
+/// concurrent delete between SELECT and UPDATE).
+async fn emit_admin_audit_diff(
+    state: &AppState,
+    model: &'static crate::core::ModelSchema,
+    pk_str: &str,
+    before_row: Option<&sqlx::postgres::PgRow>,
+    form: &HashMap<String, String>,
+) {
+    let Some(row) = before_row else {
+        emit_admin_audit(state, model, pk_str, crate::audit::AuditOp::Update, form).await;
+        return;
+    };
+    // Build before-pairs by reading every scalar column out of the
+    // row as a string. `render_value_for_input` matches what the
+    // edit form would have shown the operator pre-edit, which is
+    // also what their form payload represents post-edit. Comparing
+    // both as strings keeps the JSON shape consistent across types.
+    let before_pairs: Vec<(&str, serde_json::Value)> = model
+        .scalar_fields()
+        .map(|f| {
+            (
+                f.name,
+                serde_json::Value::String(render::render_value_for_input(row, f)),
+            )
+        })
+        .collect();
+    let after_pairs: Vec<(&str, serde_json::Value)> = model
+        .scalar_fields()
+        .map(|f| {
+            let v = form
+                .get(f.name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    render::render_value_for_input(row, f)
+                });
+            (f.name, serde_json::Value::String(v))
+        })
+        .collect();
+    let entry = crate::audit::PendingEntry {
+        entity_table: model.table,
+        entity_pk: pk_str.to_owned(),
+        operation: crate::audit::AuditOp::Update,
+        source: crate::audit::current_source(),
+        changes: crate::audit::diff_changes(&before_pairs, &after_pairs),
+    };
+    if let Err(e) = crate::audit::emit_one(&state.pool, &entry).await {
+        tracing::warn!(
+            target: "rustango::admin::audit",
+            error = %e,
+            entity_table = %model.table,
+            entity_pk = %pk_str,
+            "admin audit emit failed (data write already committed)",
+        );
+    }
 }
 
 /// Build an audit `PendingEntry` from a form submission and emit it
@@ -816,6 +895,30 @@ pub(crate) async fn delete_submit(
     })?;
     let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
 
+    // v0.12.3: SELECT the row before delete so the audit entry
+    // captures what was actually removed (snapshot of pre-delete
+    // state). Best-effort — missing row falls back to an empty
+    // changes payload, which still records the operation + source.
+    let before_row = crate::sql::select_one_row(
+        &state.pool,
+        &SelectQuery {
+            model,
+            where_clause: WhereExpr::Predicate(Filter {
+                column: pk_field.column,
+                op: Op::Eq,
+                value: pk_value.clone(),
+            }),
+            search: None,
+            joins: vec![],
+            order_by: vec![],
+            limit: None,
+            offset: None,
+        },
+    )
+    .await
+    .ok()
+    .flatten();
+
     crate::sql::delete(
         &state.pool,
         &DeleteQuery {
@@ -829,14 +932,36 @@ pub(crate) async fn delete_submit(
     )
     .await?;
 
-    emit_admin_audit(
-        &state,
-        model,
-        &pk_raw,
-        crate::audit::AuditOp::Delete,
-        &HashMap::new(),
-    )
-    .await;
+    let pairs: Vec<(&str, serde_json::Value)> = before_row
+        .as_ref()
+        .map(|row| {
+            model
+                .scalar_fields()
+                .map(|f| {
+                    (
+                        f.name,
+                        serde_json::Value::String(render::render_value_for_input(row, f)),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let entry = crate::audit::PendingEntry {
+        entity_table: model.table,
+        entity_pk: pk_raw.clone(),
+        operation: crate::audit::AuditOp::Delete,
+        source: crate::audit::current_source(),
+        changes: crate::audit::snapshot_changes(&pairs),
+    };
+    if let Err(e) = crate::audit::emit_one(&state.pool, &entry).await {
+        tracing::warn!(
+            target: "rustango::admin::audit",
+            error = %e,
+            entity_table = %model.table,
+            entity_pk = %pk_raw,
+            "admin audit emit failed for delete",
+        );
+    }
     Ok(Redirect::to(&format!("/{}", model.table)).into_response())
 }
 

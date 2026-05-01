@@ -2,6 +2,26 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.12.3] — admin update + delete also produce diff/snapshot audit JSON — 2026-05-01
+
+### Improved
+
+- **Admin update_submit now emits a diff** instead of a flat snapshot. Before the UPDATE, the handler runs a one-PK SELECT, captures every scalar field's prior value, and after the UPDATE compares against the form payload via `audit::diff_changes`. Resulting JSON: `{ "field": { "before": v, "after": v } }`. Unchanged fields drop out entirely. Closes the parity gap from v0.12.2 — both `Model::save_on(...)` and admin form POSTs now produce the same diff shape.
+- **Admin delete_submit now emits a snapshot of the deleted row** (rather than an empty payload). SELECTs every scalar field before the DELETE, packages them into `snapshot_changes`. Operators see what was actually removed in the audit panel.
+
+### Implementation
+
+- `update_submit` / `delete_submit` both call `crate::sql::select_one_row` immediately before the data write to capture the before-state. Best-effort — a missing row (concurrent delete race) falls back gracefully without failing the user-visible request. The pre-select is one extra round-trip per admin write — bounded cost, paid only once per request.
+- Field values stringify via `render::render_value_for_input` so the JSON shape matches what the operator typed in the form, regardless of the column's Postgres type. Keeps the admin audit consistent across `i64` / `String` / `DateTime` / `ForeignKey` / `Bool`.
+
+### Tests
+
+- Existing audit_live + admin_live + tenant_auth_live suites still pass (86/86 across the touched ones; full sweep stays at 126/126). No new test added — the existing `admin_write_records_user_source_via_with_source_install` covers the round-trip, and the diff shape is browser-verified manually given the variability of timestamps.
+
+### Deferred to v0.12.4
+
+- Diff for the admin's `delete_submit` is currently a snapshot (no "before/after"). Could be marked as a delete with `{ "field": { "before": v, "after": null } }` for symmetry — opinion split, defer until a user asks.
+
 ## [v0.12.2] — UPDATE diff + admin audit-trail panel — 2026-05-01
 
 ### Added
