@@ -127,6 +127,25 @@ pub struct ModelSchema {
     /// The migration writer emits `CREATE INDEX` / `DROP INDEX` for each
     /// entry. Empty slice when the model has no declared indexes.
     pub indexes: &'static [IndexSchema],
+    /// Table-level CHECK constraints declared via
+    /// `#[rustango(check(name = "…", expr = "…"))]` on the container.
+    ///
+    /// Each entry is rendered as `ALTER TABLE … ADD CONSTRAINT "name"
+    /// CHECK (expr)` after the table is created.
+    pub check_constraints: &'static [CheckConstraint],
+}
+
+/// Descriptor for one table-level CHECK constraint.
+///
+/// Declared via `#[rustango(check(name = "name", expr = "raw_sql"))]`.
+/// The expression is inserted verbatim into the DDL — quote literals and
+/// reference column names yourself.
+#[derive(Debug, Clone, Copy)]
+pub struct CheckConstraint {
+    /// Constraint name used in `ALTER TABLE … ADD CONSTRAINT "name"`.
+    pub name: &'static str,
+    /// Raw SQL boolean expression placed inside `CHECK ( … )`.
+    pub expr: &'static str,
 }
 
 /// Descriptor for one `CREATE INDEX` emitted by the migration writer.

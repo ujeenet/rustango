@@ -23,6 +23,18 @@ pub struct SchemaSnapshot {
     /// by name. Absent from old migration files — defaults to empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexes: Vec<IndexSnapshot>,
+    /// CHECK constraints derived from `ModelSchema::check_constraints`,
+    /// sorted by name. Absent from old migration files — defaults to empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<CheckSnapshot>,
+}
+
+/// Snapshot of one table-level CHECK constraint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CheckSnapshot {
+    pub name: String,
+    pub table: String,
+    pub expr: String,
 }
 
 /// Snapshot of one `CREATE INDEX` declaration.
@@ -108,7 +120,8 @@ impl SchemaSnapshot {
         tables.sort_by(|a, b| a.name.cmp(&b.name));
         let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
         let indexes = collect_indexes(entries.iter().map(|e| e.schema));
-        Self { tables, m2m_tables, indexes }
+        let checks = collect_checks(entries.iter().map(|e| e.schema));
+        Self { tables, m2m_tables, indexes, checks }
     }
 
     /// Capture only the models whose [`ModelEntry::resolved_app_label`]
@@ -130,7 +143,8 @@ impl SchemaSnapshot {
         tables.sort_by(|a, b| a.name.cmp(&b.name));
         let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
         let indexes = collect_indexes(entries.iter().map(|e| e.schema));
-        Self { tables, m2m_tables, indexes }
+        let checks = collect_checks(entries.iter().map(|e| e.schema));
+        Self { tables, m2m_tables, indexes, checks }
     }
 
     /// Capture an explicit list of model schemas — the inventory-
@@ -145,7 +159,8 @@ impl SchemaSnapshot {
         tables.sort_by(|a, b| a.name.cmp(&b.name));
         let m2m_tables = collect_m2m_tables(models.iter().copied());
         let indexes = collect_indexes(models.iter().copied());
-        Self { tables, m2m_tables, indexes }
+        let checks = collect_checks(models.iter().copied());
+        Self { tables, m2m_tables, indexes, checks }
     }
 
     /// Look up an M2M table snapshot by junction table name.
@@ -158,6 +173,12 @@ impl SchemaSnapshot {
     #[must_use]
     pub fn index(&self, name: &str) -> Option<&IndexSnapshot> {
         self.indexes.iter().find(|i| i.name == name)
+    }
+
+    /// Look up a check-constraint snapshot by name.
+    #[must_use]
+    pub fn check(&self, name: &str) -> Option<&CheckSnapshot> {
+        self.checks.iter().find(|c| c.name == name)
     }
 
     /// Look up a table by SQL name.
@@ -236,6 +257,25 @@ fn field_type_name(ty: FieldType) -> &'static str {
         FieldType::Uuid => "uuid",
         FieldType::Json => "json",
     }
+}
+
+/// Collect all CHECK constraint descriptors, deduplicating by name.
+fn collect_checks<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<CheckSnapshot> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<CheckSnapshot> = Vec::new();
+    for schema in schemas {
+        for c in schema.check_constraints {
+            if seen.insert(c.name) {
+                out.push(CheckSnapshot {
+                    name: c.name.to_owned(),
+                    table: schema.table.to_owned(),
+                    expr: c.expr.to_owned(),
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 /// Collect all `CREATE INDEX` descriptors from a set of model schemas,

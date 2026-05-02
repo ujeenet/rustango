@@ -97,7 +97,7 @@ fn make_empty_writes_scaffold_with_empty_forward() {
     assert_eq!(mig.name, "0001_backfill_slugs");
     assert!(mig.prev.is_none());
     assert!(mig.forward.is_empty());
-    assert_eq!(mig.snapshot, SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![] });
+    assert_eq!(mig.snapshot, SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![], checks: vec![] });
 
     // File exists and round-trips.
     let loaded = file::load(&dir.join("0001_backfill_slugs.json")).unwrap();

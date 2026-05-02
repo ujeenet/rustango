@@ -8,7 +8,7 @@ use rustango::migrate::{
 };
 
 fn empty_snapshot() -> SchemaSnapshot {
-    SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![] }
+    SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![], checks: vec![] }
 }
 
 fn user_table() -> TableSnapshot {

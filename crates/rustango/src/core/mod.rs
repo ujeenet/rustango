@@ -20,8 +20,8 @@ pub use query::{
     UpdateQuery, WhereExpr,
 };
 pub use schema::{
-    infer_app_label_from_module_path, AdminConfig, FieldSchema, Fieldset, IndexSchema, M2MRelation,
-    Model, ModelEntry, ModelSchema, Relation,
+    infer_app_label_from_module_path, AdminConfig, CheckConstraint, FieldSchema, Fieldset,
+    IndexSchema, M2MRelation, Model, ModelEntry, ModelSchema, Relation,
 };
 pub use validate::validate_value;
 pub use value::SqlValue;

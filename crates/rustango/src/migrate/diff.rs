@@ -111,6 +111,17 @@ pub enum SchemaChange {
     DropIndex {
         name: String,
     },
+    /// Add a table-level CHECK constraint.
+    AddCheckConstraint {
+        name: String,
+        table: String,
+        expr: String,
+    },
+    /// Drop a CHECK constraint by name.
+    DropCheckConstraint {
+        name: String,
+        table: String,
+    },
     /// Create a many-to-many junction table. Render emits a `CREATE TABLE`
     /// with two `BIGINT NOT NULL` FK columns and a composite `PRIMARY KEY`.
     CreateM2MTable {
@@ -215,6 +226,25 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     for idx in &prev.indexes {
         if current.index(&idx.name).is_none() {
             changes.push(SchemaChange::DropIndex { name: idx.name.clone() });
+        }
+    }
+    // New CHECK constraints.
+    for c in &current.checks {
+        if prev.check(&c.name).is_none() {
+            changes.push(SchemaChange::AddCheckConstraint {
+                name: c.name.clone(),
+                table: c.table.clone(),
+                expr: c.expr.clone(),
+            });
+        }
+    }
+    // Dropped CHECK constraints.
+    for c in &prev.checks {
+        if current.check(&c.name).is_none() {
+            changes.push(SchemaChange::DropCheckConstraint {
+                name: c.name.clone(),
+                table: c.table.clone(),
+            });
         }
     }
     // New M2M junction tables.
@@ -532,6 +562,16 @@ pub fn render_changes_split(
             }
             SchemaChange::DropIndex { name } => {
                 out.immediate.push(format!(r#"DROP INDEX IF EXISTS "{name}""#));
+            }
+            SchemaChange::AddCheckConstraint { name, table, expr } => {
+                out.immediate.push(format!(
+                    r#"ALTER TABLE "{table}" ADD CONSTRAINT "{name}" CHECK ({expr})"#,
+                ));
+            }
+            SchemaChange::DropCheckConstraint { name, table } => {
+                out.immediate.push(format!(
+                    r#"ALTER TABLE "{table}" DROP CONSTRAINT IF EXISTS "{name}""#,
+                ));
             }
             SchemaChange::CreateM2MTable { through, src_table, src_col, dst_table, dst_col } => {
                 out.immediate.push(format!(

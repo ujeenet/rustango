@@ -513,6 +513,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         audit_track_names.as_deref(),
         &container.m2m,
         &all_indexes,
+        &container.checks,
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -1015,6 +1016,7 @@ fn model_impl_tokens(
     audit_track: Option<&[String]>,
     m2m_relations: &[M2MAttr],
     indexes: &[IndexAttr],
+    checks: &[CheckAttr],
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
@@ -1051,6 +1053,16 @@ fn model_impl_tokens(
             }
         }
     });
+    let checks_tokens = checks.iter().map(|c| {
+        let name = c.name.as_str();
+        let expr = c.expr.as_str();
+        quote! {
+            ::rustango::core::CheckConstraint {
+                name: #name,
+                expr: #expr,
+            }
+        }
+    });
     let m2m_tokens = m2m_relations.iter().map(|rel| {
         let name = rel.name.as_str();
         let to = rel.to.as_str();
@@ -1081,6 +1093,7 @@ fn model_impl_tokens(
                 audit_track: #audit_track_tokens,
                 m2m: &[ #(#m2m_tokens),* ],
                 indexes: &[ #(#indexes_tokens),* ],
+                check_constraints: &[ #(#checks_tokens),* ],
             };
         }
     }
@@ -2247,6 +2260,9 @@ struct ContainerAttrs {
     /// Single-column indexes from `#[rustango(index)]` on fields are
     /// accumulated here during field collection.
     indexes: Vec<IndexAttr>,
+    /// Table-level CHECK constraints declared via
+    /// `#[rustango(check(name = "…", expr = "…"))]`.
+    checks: Vec<CheckAttr>,
 }
 
 /// Parsed form of one index declaration (field-level or container-level).
@@ -2257,6 +2273,12 @@ struct IndexAttr {
     columns: Vec<String>,
     /// `true` for `CREATE UNIQUE INDEX`.
     unique: bool,
+}
+
+/// Parsed form of one `#[rustango(check(name = "…", expr = "…"))]` declaration.
+struct CheckAttr {
+    name: String,
+    expr: String,
 }
 
 /// Parsed form of one `#[rustango(m2m(...))]` declaration.
@@ -2317,6 +2339,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         permissions: false,
         m2m: Vec::new(),
         indexes: Vec::new(),
+        checks: Vec::new(),
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -2445,6 +2468,28 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     })?;
                 }
                 out.indexes.push(IndexAttr { name, columns, unique });
+                return Ok(());
+            }
+            if meta.path.is_ident("check") {
+                // #[rustango(check(name = "…", expr = "…"))]
+                let mut name: Option<String> = None;
+                let mut expr: Option<String> = None;
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("name") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        name = Some(s.value());
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("expr") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        expr = Some(s.value());
+                        return Ok(());
+                    }
+                    Err(inner.error("unknown check attribute (supported: `name`, `expr`)"))
+                })?;
+                let name = name.ok_or_else(|| meta.error("check requires `name = \"...\"`"))?;
+                let expr = expr.ok_or_else(|| meta.error("check requires `expr = \"...\"`"))?;
+                out.checks.push(CheckAttr { name, expr });
                 return Ok(());
             }
             if meta.path.is_ident("m2m") {

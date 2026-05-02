@@ -11,7 +11,7 @@ use rustango::migrate::{
 // ---------------- helpers ----------------
 
 fn empty_snapshot() -> SchemaSnapshot {
-    SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![] }
+    SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![], checks: vec![] }
 }
 
 fn user_table() -> TableSnapshot {
@@ -407,7 +407,7 @@ fn table_snapshot_field_lookup_by_column() {
 // ---------------- AlterField + Rename DDL (v0.4 Slice 3) ----------------
 
 fn empty_snap() -> SchemaSnapshot {
-    SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![] }
+    SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![], checks: vec![] }
 }
 
 #[test]

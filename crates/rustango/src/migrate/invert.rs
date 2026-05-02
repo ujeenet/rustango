@@ -151,6 +151,24 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
             old_column: new_column.clone(),
             new_column: old_column.clone(),
         })),
+        Operation::Schema(SchemaChange::AddCheckConstraint { name, table, .. }) => {
+            Ok(Operation::Schema(SchemaChange::DropCheckConstraint {
+                name: name.clone(),
+                table: table.clone(),
+            }))
+        }
+        Operation::Schema(SchemaChange::DropCheckConstraint { name, .. }) => {
+            let c = prev.check(name).ok_or_else(|| {
+                MigrateError::Validation(format!(
+                    "cannot invert DropCheckConstraint(`{name}`): constraint not in predecessor snapshot",
+                ))
+            })?;
+            Ok(Operation::Schema(SchemaChange::AddCheckConstraint {
+                name: name.clone(),
+                table: c.table.clone(),
+                expr: c.expr.clone(),
+            }))
+        }
         Operation::Schema(SchemaChange::CreateIndex { name, .. }) => {
             Ok(Operation::Schema(SchemaChange::DropIndex { name: name.clone() }))
         }
