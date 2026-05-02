@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals"]
+default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -52,6 +52,11 @@ cache = ["dep:async-trait", "dep:tokio"]
 # / pre_delete / post_delete async dispatch. Receivers register globally
 # per model type; senders fire signals after write paths.
 signals = ["dep:tokio"]
+
+# Email backends (`rustango::email`) — Mailer trait + ConsoleMailer +
+# InMemoryMailer + NullMailer. SMTP and external transports plug in via
+# the trait.
+email = ["dep:async-trait"]
 
 # Redis cache backend (`rustango::cache::RedisCache`). Adds the `redis`
 # async connection-manager client. Implies `cache`.

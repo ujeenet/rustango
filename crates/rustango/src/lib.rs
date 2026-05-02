@@ -58,6 +58,15 @@ pub mod cors;
 #[cfg(feature = "admin")]
 pub mod rate_limit;
 
+/// Health check endpoints — `/health` (liveness) + `/ready` (readiness).
+/// See [`health::health_router`].
+#[cfg(feature = "admin")]
+pub mod health;
+
+/// Email backends — [`email::Mailer`] trait + console/in-memory/null backends.
+#[cfg(feature = "email")]
+pub mod email;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
