@@ -93,6 +93,11 @@ pub mod content_negotiation;
 #[cfg(feature = "admin")]
 pub mod etag;
 
+/// In-process scheduled task runner — fire async jobs at fixed intervals.
+/// See [`scheduler::Scheduler`].
+#[cfg(feature = "scheduler")]
+pub mod scheduler;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
