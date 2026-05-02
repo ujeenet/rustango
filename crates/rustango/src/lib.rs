@@ -71,6 +71,11 @@ pub mod email;
 #[cfg(feature = "storage")]
 pub mod storage;
 
+/// Test client — fire HTTP requests against an `axum::Router` in tests
+/// without binding a real socket. See [`test_client::TestClient`].
+#[cfg(feature = "admin")]
+pub mod test_client;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
