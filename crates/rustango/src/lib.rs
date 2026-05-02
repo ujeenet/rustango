@@ -203,6 +203,12 @@ pub mod idempotency;
 #[cfg(feature = "admin")]
 pub mod maintenance;
 
+/// Trailing-slash redirect middleware — canonicalize URL paths
+/// (Django `APPEND_SLASH` / Rails `trailing_slash` shape).
+/// See [`trailing_slash::TrailingSlashLayer`].
+#[cfg(feature = "admin")]
+pub mod trailing_slash;
+
 /// Webhook signature verification (HMAC-SHA256). See [`webhook::verify_signature`].
 #[cfg(feature = "webhook")]
 pub mod webhook;
