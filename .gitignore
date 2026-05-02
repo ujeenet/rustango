@@ -11,3 +11,5 @@
 /tenancy_manage_migrations/
 # local env file with DATABASE_URL etc — never commit
 .env
+# playwright-mcp debug output (screenshots, page snapshots, console logs)
+.playwright-mcp/

@@ -1,8 +1,0 @@
-- generic [ref=e2]:
-  - heading "rustango" [level=1] [ref=e3]
-  - paragraph [ref=e4]: operator console
-  - generic [ref=e5]: Username
-  - textbox "Username" [active] [ref=e6]
-  - generic [ref=e7]: Password
-  - textbox "Password" [ref=e8]
-  - button "Sign in" [ref=e9] [cursor=pointer]
