@@ -199,6 +199,11 @@ pub mod signed_url;
 #[cfg(feature = "admin")]
 pub mod welcome;
 
+/// Debug profiling panel at `/__debug__/` — Telescope/Debug-Toolbar-shape.
+/// **DEV ONLY** — captures per-request telemetry. See [`debug_panel`].
+#[cfg(all(feature = "admin", feature = "tenancy"))]
+pub mod debug_panel;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
