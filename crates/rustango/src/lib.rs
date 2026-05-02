@@ -173,6 +173,12 @@ pub mod security_headers;
 #[cfg(feature = "signed_url")]
 pub mod signed_url;
 
+/// First-run welcome page — confidence signal that rustango is wired up.
+/// Mount under `/` while bootstrapping; replace once you have content.
+/// See [`welcome::welcome_router`].
+#[cfg(feature = "admin")]
+pub mod welcome;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 

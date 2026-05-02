@@ -168,6 +168,8 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(w, "      Open docs.rs/rustango in the default browser.\n")?;
     writeln!(w, "  version | --version")?;
     writeln!(w, "      Print the rustango framework version.\n")?;
+    writeln!(w, "  (To bootstrap a new project from scratch, install + run")?;
+    writeln!(w, "  `cargo install cargo-rustango` then `cargo rustango new <name>`.)\n")?;
     writeln!(w, "  startapp <name> [--with-manage-bin]")?;
     writeln!(
         w,
@@ -886,3 +888,4 @@ fn version_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
     writeln!(w, "rustango {}", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
+
