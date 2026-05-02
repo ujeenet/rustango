@@ -95,6 +95,13 @@ pub async fn run_with_writer<W: Write + Send>(
         "showmigrations" | "status" => showmigrations(pool, dir, writer).await,
         "startapp" => startapp(&args[1..], writer),
         "add-data-op" => add_data_op_cmd(dir, &args[1..], writer),
+        "make:viewset" => make_viewset_cmd(&args[1..], writer),
+        "make:serializer" => make_serializer_cmd(&args[1..], writer),
+        "make:form" => make_form_cmd(&args[1..], writer),
+        "make:job" => make_job_cmd(&args[1..], writer),
+        "make:notification" => make_notification_cmd(&args[1..], writer),
+        "make:middleware" => make_middleware_cmd(&args[1..], writer),
+        "make:test" => make_test_cmd(&args[1..], writer),
         "about" => about_cmd(pool, writer).await,
         "check" => check_cmd(pool, dir, &args[1..], writer).await,
         "docs" => docs_cmd(writer),
@@ -170,6 +177,15 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(w, "      Print the rustango framework version.\n")?;
     writeln!(w, "  (To bootstrap a new project from scratch, install + run")?;
     writeln!(w, "  `cargo install cargo-rustango` then `cargo rustango new <name>`.)\n")?;
+    writeln!(w, "  make:viewset <Name> [--model <Model>]")?;
+    writeln!(w, "  make:serializer <Name> [--model <Model>]")?;
+    writeln!(w, "  make:form <Name>")?;
+    writeln!(w, "  make:job <Name>")?;
+    writeln!(w, "  make:notification <Name>")?;
+    writeln!(w, "  make:middleware <Name>")?;
+    writeln!(w, "  make:test <Name>")?;
+    writeln!(w, "      Scaffold a single source file with the chosen shape.")?;
+    writeln!(w, "      Writes to src/<snake_name>.rs (skips if exists).\n")?;
     writeln!(w, "  startapp <name> [--with-manage-bin]")?;
     writeln!(
         w,
@@ -889,3 +905,337 @@ fn version_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
     Ok(())
 }
 
+
+// ============================================================ make:* generators
+
+fn parse_name_and_model(args: &[String]) -> Result<(String, Option<String>), MigrateError> {
+    let mut name: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--model" => {
+                model = Some(iter.next().cloned().ok_or_else(|| {
+                    MigrateError::Validation("--model requires a value".into())
+                })?);
+            }
+            other if other.starts_with('-') => {
+                return Err(MigrateError::Validation(format!(
+                    "unknown flag `{other}`"
+                )));
+            }
+            other => {
+                if name.is_some() {
+                    return Err(MigrateError::Validation(format!(
+                        "unexpected positional `{other}`"
+                    )));
+                }
+                name = Some(other.to_owned());
+            }
+        }
+    }
+    let name = name.ok_or_else(|| {
+        MigrateError::Validation("name is required (e.g. `manage make:viewset PostViewSet`)".into())
+    })?;
+    if !is_valid_type_name(&name) {
+        return Err(MigrateError::Validation(format!(
+            "`{name}` is not a valid Rust type name (PascalCase, alphanumeric + underscore)"
+        )));
+    }
+    Ok((name, model))
+}
+
+fn is_valid_type_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes[0].is_ascii_uppercase()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+}
+
+fn pascal_to_snake(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, c) in s.chars().enumerate() {
+        if c.is_ascii_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(c.to_ascii_lowercase());
+    }
+    out
+}
+
+fn write_generated<W: Write>(
+    w: &mut W,
+    file_name: &str,
+    contents: String,
+) -> Result<(), MigrateError> {
+    let path = std::path::PathBuf::from("src").join(file_name);
+    if path.exists() {
+        return Err(MigrateError::Validation(format!(
+            "{} already exists — refusing to overwrite",
+            path.display()
+        )));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, contents)?;
+    writeln!(w, "wrote {}", path.display())?;
+    writeln!(w, "  add `pub mod {};` to your src/lib.rs", file_name.trim_end_matches(".rs"))?;
+    Ok(())
+}
+
+fn make_viewset_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let (name, model) = parse_name_and_model(args)?;
+    let snake = pascal_to_snake(&name);
+    let model = model.unwrap_or_else(|| "Post".into());
+    let body = format!(
+        r#"//! Auto-scaffolded by `manage make:viewset {name}`.
+
+use rustango::ViewSet;
+
+#[derive(ViewSet)]
+#[viewset(
+    model        = {model},
+    fields       = "id, ",
+    filter_fields = "",
+    search_fields = "",
+    page_size    = 20,
+)]
+pub struct {name};
+
+// Mount in your urls.rs:
+//
+//   .merge({name}::router("/api/{snake}", pool.clone()))
+"#
+    );
+    write_generated(w, &format!("{snake}.rs"), body)
+}
+
+fn make_serializer_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let (name, model) = parse_name_and_model(args)?;
+    let snake = pascal_to_snake(&name);
+    let model = model.unwrap_or_else(|| "Post".into());
+    let body = format!(
+        r#"//! Auto-scaffolded by `manage make:serializer {name}`.
+
+use rustango::Serializer;
+
+#[derive(Serializer, serde::Deserialize, Default)]
+#[serializer(model = {model})]
+pub struct {name} {{
+    pub id: i64,
+    // pub title: String,
+    // #[serializer(read_only)]
+    // pub created_at: chrono::DateTime<chrono::Utc>,
+}}
+"#
+    );
+    write_generated(w, &format!("{snake}.rs"), body)
+}
+
+fn make_form_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let (name, _) = parse_name_and_model(args)?;
+    let snake = pascal_to_snake(&name);
+    let body = format!(
+        r#"//! Auto-scaffolded by `manage make:form {name}`.
+
+use rustango::forms::Form;
+use rustango::Form as DeriveForm;
+
+#[derive(DeriveForm)]
+pub struct {name} {{
+    #[form(min_length = 1, max_length = 200)]
+    pub title: String,
+    pub body: Option<String>,
+}}
+"#
+    );
+    write_generated(w, &format!("{snake}.rs"), body)
+}
+
+fn make_job_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let (name, _) = parse_name_and_model(args)?;
+    let snake = pascal_to_snake(&name);
+    let body = format!(
+        r#"//! Auto-scaffolded by `manage make:job {name}`.
+//!
+//! Background job — run async work outside the request lifecycle.
+//! Pair with `rustango::scheduler::Scheduler` (cron-shape) or your queue layer.
+
+use std::sync::Arc;
+use rustango::sql::sqlx::PgPool;
+
+pub struct {name} {{
+    pub pool: PgPool,
+}}
+
+impl {name} {{
+    pub async fn run(self: Arc<Self>) {{
+        // TODO: implement
+        let _ = self.pool.acquire().await;
+    }}
+}}
+
+// Wire up in main.rs:
+//
+//   let job = Arc::new({name} {{ pool: pool.clone() }});
+//   scheduler.every("{snake}", Duration::from_secs(60), move || {{
+//       let job = job.clone();
+//       async move {{ job.run().await }}
+//   }});
+"#
+    );
+    write_generated(w, &format!("{snake}.rs"), body)
+}
+
+fn make_notification_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let (name, _) = parse_name_and_model(args)?;
+    let snake = pascal_to_snake(&name);
+    let body = format!(
+        r#"//! Auto-scaffolded by `manage make:notification {name}`.
+//!
+//! User-facing notification. For now this just builds an Email; once the
+//! `rustango::notifications` layer ships you'll add `via()` for multi-channel.
+
+use rustango::email::Email;
+
+pub struct {name} {{
+    pub user_email: String,
+    pub subject: String,
+}}
+
+impl {name} {{
+    pub fn build_email(&self) -> Email {{
+        Email::new()
+            .to(&self.user_email)
+            .from("noreply@example.com")
+            .subject(&self.subject)
+            .body("Hello — this notification was generated by {name}.")
+    }}
+}}
+"#
+    );
+    write_generated(w, &format!("{snake}.rs"), body)
+}
+
+fn make_middleware_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let (name, _) = parse_name_and_model(args)?;
+    let snake = pascal_to_snake(&name);
+    let body = format!(
+        r#"//! Auto-scaffolded by `manage make:middleware {name}`.
+
+use axum::body::Body;
+use axum::http::{{Request, Response}};
+use axum::middleware::Next;
+
+pub async fn {snake}(req: Request<Body>, next: Next) -> Response<Body> {{
+    // TODO: pre-handler logic
+    let response = next.run(req).await;
+    // TODO: post-handler logic
+    response
+}}
+
+// Apply with:
+//   router.layer(axum::middleware::from_fn({snake}))
+"#
+    );
+    write_generated(w, &format!("{snake}.rs"), body)
+}
+
+fn make_test_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let (name, _) = parse_name_and_model(args)?;
+    let snake = pascal_to_snake(&name);
+    let body = format!(
+        r#"//! Auto-scaffolded by `manage make:test {name}`.
+//!
+//! Integration test. Run with `cargo test --test {snake}`.
+
+use rustango::test_client::TestClient;
+use axum::Router;
+use axum::routing::get;
+
+fn app() -> Router {{
+    Router::new().route("/hello", get(|| async {{ "hi" }}))
+}}
+
+#[tokio::test]
+async fn {snake}_smoke() {{
+    let client = TestClient::new(app());
+    let r = client.get("/hello").send().await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.text(), "hi");
+}}
+"#
+    );
+    // Tests live in tests/ not src/
+    let path = std::path::PathBuf::from("tests").join(format!("{snake}.rs"));
+    if path.exists() {
+        return Err(MigrateError::Validation(format!(
+            "{} already exists — refusing to overwrite",
+            path.display()
+        )));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, body)?;
+    writeln!(w, "wrote {}", path.display())?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod gen_tests {
+    use super::*;
+
+    #[test]
+    fn pascal_to_snake_cases() {
+        assert_eq!(pascal_to_snake("Post"), "post");
+        assert_eq!(pascal_to_snake("PostViewSet"), "post_view_set");
+        assert_eq!(pascal_to_snake("API"), "a_p_i"); // simple impl — acceptable
+        assert_eq!(pascal_to_snake("UserNotification"), "user_notification");
+    }
+
+    #[test]
+    fn is_valid_type_name_accepts_pascal() {
+        assert!(is_valid_type_name("Post"));
+        assert!(is_valid_type_name("PostViewSet"));
+        assert!(is_valid_type_name("Foo_Bar"));
+    }
+
+    #[test]
+    fn is_valid_type_name_rejects_invalid() {
+        assert!(!is_valid_type_name(""));
+        assert!(!is_valid_type_name("post"));     // lowercase
+        assert!(!is_valid_type_name("123Foo"));   // starts with digit
+        assert!(!is_valid_type_name("Post!"));    // bad char
+    }
+
+    #[test]
+    fn parse_name_and_model_basic() {
+        let (n, m) = parse_name_and_model(&["PostViewSet".into()]).unwrap();
+        assert_eq!(n, "PostViewSet");
+        assert_eq!(m, None);
+    }
+
+    #[test]
+    fn parse_name_and_model_with_model_flag() {
+        let args: Vec<String> = vec!["PostViewSet".into(), "--model".into(), "Post".into()];
+        let (n, m) = parse_name_and_model(&args).unwrap();
+        assert_eq!(n, "PostViewSet");
+        assert_eq!(m, Some("Post".into()));
+    }
+
+    #[test]
+    fn parse_name_and_model_rejects_missing_name() {
+        let r = parse_name_and_model(&[]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_name_and_model_rejects_lowercase_name() {
+        let r = parse_name_and_model(&["postviewset".into()]);
+        assert!(r.is_err());
+    }
+}
