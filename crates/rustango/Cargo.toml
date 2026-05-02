@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer"]
+default = ["postgres", "admin", "config", "forms", "serializer", "cache"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -42,6 +42,15 @@ forms = []
 # with field control (read_only, write_only, source, skip) and cross-field
 # validation. Implies `forms` so serializer errors share `FormErrors`.
 serializer = ["forms"]
+
+# Caching layer (`rustango::cache`) — pluggable `Cache` trait with
+# `NullCache` (no-op) and `InMemoryCache` (tokio RwLock + TTL). Redis
+# backend is behind the separate `cache-redis` feature.
+cache = ["dep:async-trait", "dep:tokio"]
+
+# Redis cache backend (`rustango::cache::RedisCache`). Adds the `redis`
+# async connection-manager client. Implies `cache`.
+cache-redis = ["cache", "dep:redis"]
 
 # CSRF protection (`rustango::forms::csrf`) — double-submit-cookie
 # axum middleware. Lives behind its own flag so `forms`-only users
@@ -131,6 +140,7 @@ sha2             = { workspace = true, optional = true }
 subtle           = { workspace = true, optional = true }
 tokio            = { workspace = true, optional = true }
 tower            = { workspace = true, optional = true }
+redis            = { workspace = true, optional = true }
 
 # `runtime` feature dep — used by `#[rustango::main]` to install a
 # default tracing subscriber (env-filter) before the user body runs.

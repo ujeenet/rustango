@@ -39,6 +39,11 @@ pub mod forms;
 #[cfg(feature = "serializer")]
 pub mod serializer;
 
+/// Pluggable caching layer — [`cache::Cache`] trait + [`cache::NullCache`] +
+/// [`cache::InMemoryCache`]. Redis backend behind the `cache-redis` feature.
+#[cfg(feature = "cache")]
+pub mod cache;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
