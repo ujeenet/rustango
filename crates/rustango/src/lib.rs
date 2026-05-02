@@ -84,6 +84,15 @@ pub mod env;
 /// See [`i18n::Translator`] and [`i18n::negotiate_language`].
 pub mod i18n;
 
+/// HTTP content negotiation — pick the best response format from the
+/// client's `Accept` header. See [`content_negotiation::negotiate`].
+pub mod content_negotiation;
+
+/// ETag middleware — hashes 2xx response bodies, returns 304 when
+/// `If-None-Match` matches. See [`etag::EtagLayer`].
+#[cfg(feature = "admin")]
+pub mod etag;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
