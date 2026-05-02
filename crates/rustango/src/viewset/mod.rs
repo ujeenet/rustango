@@ -43,6 +43,7 @@
 //! | `ordering` | configured default | Comma-separated field names, prefix `-` for DESC |
 //! | `search` | — | Full-text search across `search_fields` |
 //! | `{field}` | — | Exact filter for any `filter_fields` |
+//! | `{field}__{lookup}` | — | Django-style lookup (gt/gte/lt/lte/ne/in/not_in/contains/icontains/startswith/istartswith/endswith/iendswith/isnull) |
 //!
 //! Response: `{"count": N, "page": P, "page_size": S, "last_page": L, "results": [...]}`
 //!
@@ -425,6 +426,59 @@ fn no_content() -> Response {
         .unwrap()
 }
 
+/// Build a `WhereExpr` from one query-param `field[__lookup]=value` entry.
+///
+/// Supported Django-style lookups:
+/// - (none) / `exact` — `Op::Eq`
+/// - `gt`, `gte`, `lt`, `lte`, `ne`
+/// - `in` / `not_in` — comma-separated values
+/// - `contains` (LIKE %v%) / `icontains` (ILIKE %v%)
+/// - `startswith` (LIKE v%) / `istartswith` (ILIKE v%)
+/// - `endswith` (LIKE %v) / `iendswith` (ILIKE %v)
+/// - `isnull` — value `"true"` / `"false"`
+fn build_lookup_filter(
+    field: &'static crate::core::FieldSchema,
+    lookup: Option<&str>,
+    raw: &str,
+) -> Option<WhereExpr> {
+    let column = field.column;
+    let predicate = |op: Op, value: SqlValue| {
+        Some(WhereExpr::Predicate(Filter { column, op, value }))
+    };
+    match lookup.unwrap_or("exact") {
+        "exact" => parse_form_value(field, Some(raw)).ok().and_then(|v| predicate(Op::Eq, v)),
+        "ne" => parse_form_value(field, Some(raw)).ok().and_then(|v| predicate(Op::Ne, v)),
+        "gt" => parse_form_value(field, Some(raw)).ok().and_then(|v| predicate(Op::Gt, v)),
+        "gte" => parse_form_value(field, Some(raw)).ok().and_then(|v| predicate(Op::Gte, v)),
+        "lt" => parse_form_value(field, Some(raw)).ok().and_then(|v| predicate(Op::Lt, v)),
+        "lte" => parse_form_value(field, Some(raw)).ok().and_then(|v| predicate(Op::Lte, v)),
+        "in" | "not_in" => {
+            let parts: Vec<SqlValue> = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .filter_map(|s| parse_form_value(field, Some(s)).ok())
+                .collect();
+            if parts.is_empty() {
+                return None;
+            }
+            let op = if lookup == Some("not_in") { Op::NotIn } else { Op::In };
+            predicate(op, SqlValue::List(parts))
+        }
+        "contains" => predicate(Op::Like, SqlValue::String(format!("%{raw}%"))),
+        "icontains" => predicate(Op::ILike, SqlValue::String(format!("%{raw}%"))),
+        "startswith" => predicate(Op::Like, SqlValue::String(format!("{raw}%"))),
+        "istartswith" => predicate(Op::ILike, SqlValue::String(format!("{raw}%"))),
+        "endswith" => predicate(Op::Like, SqlValue::String(format!("%{raw}"))),
+        "iendswith" => predicate(Op::ILike, SqlValue::String(format!("%{raw}"))),
+        "isnull" => {
+            let is_null = matches!(raw.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
+            predicate(Op::IsNull, SqlValue::Bool(is_null))
+        }
+        _ => None, // unknown lookup → silently ignore
+    }
+}
+
 // ------------------------------------------------------------------ Handlers
 
 async fn handle_list(
@@ -444,19 +498,33 @@ async fn handle_list(
         .min(1000)
         .max(1);
 
-    // Build WHERE from filter_fields in query params
+    // Build WHERE from filter_fields in query params.
+    //
+    // Supports both:
+    //   ?author_id=42                — exact match (Op::Eq)
+    //   ?author_id__gt=10            — Django-style lookup
+    //   ?status__in=draft,published  — comma-separated for IN/NOT_IN
+    //   ?title__icontains=hello      — pattern lookups
+    //   ?published_at__isnull=true   — IS NULL / IS NOT NULL
     let mut filters: Vec<WhereExpr> = Vec::new();
-    for field_name in &state.vs.filter_fields {
-        if let Some(raw_val) = params.get(field_name.as_str()) {
-            if let Some(field) = state.vs.schema.field(field_name) {
-                if let Ok(sql_val) = parse_form_value(field, Some(raw_val.as_str())) {
-                    filters.push(WhereExpr::Predicate(Filter {
-                        column: field.column,
-                        op: Op::Eq,
-                        value: sql_val,
-                    }));
-                }
-            }
+    for (param_key, raw_val) in &params {
+        // Skip reserved keys
+        if matches!(
+            param_key.as_str(),
+            "page" | "page_size" | "ordering" | "search" | "cursor"
+        ) {
+            continue;
+        }
+        let (field_name, lookup) = match param_key.split_once("__") {
+            Some((name, lk)) => (name, Some(lk)),
+            None => (param_key.as_str(), None),
+        };
+        if !state.vs.filter_fields.iter().any(|f| f == field_name) {
+            continue;
+        }
+        let Some(field) = state.vs.schema.field(field_name) else { continue };
+        if let Some(predicate) = build_lookup_filter(field, lookup, raw_val) {
+            filters.push(predicate);
         }
     }
 
@@ -1002,5 +1070,152 @@ mod cursor_tests {
         use base64::Engine;
         let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("not_a_number");
         assert!(decode_cursor(&token).is_none());
+    }
+}
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::*;
+    use crate::core::{FieldSchema, FieldType};
+
+    fn int_field() -> &'static FieldSchema {
+        &FieldSchema {
+            name: "author_id",
+            column: "author_id",
+            ty: FieldType::I64,
+            nullable: false,
+            primary_key: false,
+            relation: None,
+            max_length: None,
+            min: None,
+            max: None,
+            default: None,
+            auto: false,
+            unique: false,
+        }
+    }
+
+    fn string_field() -> &'static FieldSchema {
+        &FieldSchema {
+            name: "title",
+            column: "title",
+            ty: FieldType::String,
+            nullable: true,
+            primary_key: false,
+            relation: None,
+            max_length: None,
+            min: None,
+            max: None,
+            default: None,
+            auto: false,
+            unique: false,
+        }
+    }
+
+    fn extract_pred(expr: WhereExpr) -> Filter {
+        match expr {
+            WhereExpr::Predicate(f) => f,
+            _ => panic!("expected Predicate"),
+        }
+    }
+
+    #[test]
+    fn no_lookup_means_eq() {
+        let f = extract_pred(build_lookup_filter(int_field(), None, "42").unwrap());
+        assert_eq!(f.op, Op::Eq);
+        assert!(matches!(f.value, SqlValue::I64(42)));
+    }
+
+    #[test]
+    fn explicit_exact_means_eq() {
+        let f = extract_pred(build_lookup_filter(int_field(), Some("exact"), "42").unwrap());
+        assert_eq!(f.op, Op::Eq);
+    }
+
+    #[test]
+    fn comparison_lookups() {
+        for (lk, expected) in [
+            ("gt", Op::Gt), ("gte", Op::Gte),
+            ("lt", Op::Lt), ("lte", Op::Lte), ("ne", Op::Ne),
+        ] {
+            let f = extract_pred(build_lookup_filter(int_field(), Some(lk), "10").unwrap());
+            assert_eq!(f.op, expected, "lookup {lk}");
+        }
+    }
+
+    #[test]
+    fn in_lookup_parses_csv() {
+        let f = extract_pred(build_lookup_filter(int_field(), Some("in"), "1,2,3").unwrap());
+        assert_eq!(f.op, Op::In);
+        match f.value {
+            SqlValue::List(v) => assert_eq!(v.len(), 3),
+            _ => panic!("expected List"),
+        }
+    }
+
+    #[test]
+    fn not_in_lookup_parses_csv() {
+        let f = extract_pred(build_lookup_filter(int_field(), Some("not_in"), "1,2").unwrap());
+        assert_eq!(f.op, Op::NotIn);
+    }
+
+    #[test]
+    fn in_lookup_drops_empty_entries() {
+        let f = extract_pred(build_lookup_filter(int_field(), Some("in"), "1,,2,").unwrap());
+        match f.value {
+            SqlValue::List(v) => assert_eq!(v.len(), 2),
+            _ => panic!("expected List"),
+        }
+    }
+
+    #[test]
+    fn contains_wraps_with_percents_and_uses_like() {
+        let f = extract_pred(build_lookup_filter(string_field(), Some("contains"), "hello").unwrap());
+        assert_eq!(f.op, Op::Like);
+        assert!(matches!(f.value, SqlValue::String(ref s) if s == "%hello%"));
+    }
+
+    #[test]
+    fn icontains_uses_ilike() {
+        let f = extract_pred(build_lookup_filter(string_field(), Some("icontains"), "hi").unwrap());
+        assert_eq!(f.op, Op::ILike);
+        assert!(matches!(f.value, SqlValue::String(ref s) if s == "%hi%"));
+    }
+
+    #[test]
+    fn startswith_only_trailing_percent() {
+        let f = extract_pred(build_lookup_filter(string_field(), Some("startswith"), "pre").unwrap());
+        assert!(matches!(f.value, SqlValue::String(ref s) if s == "pre%"));
+    }
+
+    #[test]
+    fn endswith_only_leading_percent() {
+        let f = extract_pred(build_lookup_filter(string_field(), Some("endswith"), "fix").unwrap());
+        assert!(matches!(f.value, SqlValue::String(ref s) if s == "%fix"));
+    }
+
+    #[test]
+    fn isnull_true() {
+        let f = extract_pred(build_lookup_filter(string_field(), Some("isnull"), "true").unwrap());
+        assert_eq!(f.op, Op::IsNull);
+        assert!(matches!(f.value, SqlValue::Bool(true)));
+    }
+
+    #[test]
+    fn isnull_false() {
+        let f = extract_pred(build_lookup_filter(string_field(), Some("isnull"), "false").unwrap());
+        assert!(matches!(f.value, SqlValue::Bool(false)));
+    }
+
+    #[test]
+    fn unknown_lookup_returns_none() {
+        let r = build_lookup_filter(int_field(), Some("frobulate"), "x");
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn parse_failure_returns_none() {
+        let r = build_lookup_filter(int_field(), Some("gt"), "not-a-number");
+        assert!(r.is_none());
     }
 }
