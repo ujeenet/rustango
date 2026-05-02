@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.17.4"
+version = "0.19.0"
 readme = "README.md"
 edition = "2021"
 rust-version = "1.88"
@@ -18,7 +18,7 @@ categories = ["database"]
 # Internal — collapsed shape: one library facade `rustango` (with
 # feature flags for admin / tenancy) plus the proc-macro crate which
 # Rust requires to live separately.
-rustango-macros = { version = "0.17.4", path = "crates/rustango-macros" }
+rustango-macros = { version = "0.19.0", path = "crates/rustango-macros" }
 rustango        = { version = "0.17.4", path = "crates/rustango" }
 
 # Async runtime

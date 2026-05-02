@@ -2,6 +2,117 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.19.0] — ORM improvements — 2026-05-02
+
+### Added
+
+- **`ConflictClause` / `Model::upsert_on`** — `InsertQuery` and `BulkInsertQuery` now carry an
+  optional `on_conflict: Option<ConflictClause>` field. `ConflictClause::DoNothing` emits
+  `ON CONFLICT DO NOTHING`; `ConflictClause::DoUpdate { target, update_columns }` emits
+  `ON CONFLICT (…) DO UPDATE SET col = EXCLUDED.col`. Auto-PK models gain `upsert()` /
+  `upsert_on(executor)` — single round-trip insert-or-update by primary key.
+
+- **`sql::transaction(pool, |conn| async { … })`** — ergonomic transaction helper wrapping
+  `pool.begin()` / `commit()` / `rollback()`. All `_on(executor)` methods compose inside the
+  closure without any other changes.
+
+- **New `Op` variants and `Column` trait methods** — `ILike`, `NotLike`, `NotILike`, `NotIn`,
+  `Between`, `IsDistinctFrom`, `IsNotDistinctFrom` added to the `Op` enum, the Postgres writer,
+  and the typed `Column` trait (`.ilike()`, `.not_like()`, `.between(lo, hi)`,
+  `.is_distinct_from()`, `.not_in()`, etc.).
+
+- **`WhereExpr::Not`** — `Not(Box<WhereExpr>)` variant emits `NOT (…)`. Accessible via
+  `TypedFilter::not()` and `TypedExpr::not()`.
+
+- **`AggregateQuery` + `QuerySet::aggregate()`** — `AggregateExpr` enum (`Count`, `Sum`, `Avg`,
+  `Max`, `Min`), `AggregateQuery` IR with `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`, `OFFSET`.
+  `compile_aggregate()` in the Postgres dialect; `sql::fetch_aggregate()` /
+  `fetch_aggregate_on()` executor functions. Build via `Post::objects().aggregate().group_by(…)
+  .annotate("cnt", AggregateExpr::Count(None)).compile()`.
+
+- **JSONB operators** — `Op::JsonContains` (`@>`), `JsonContainedBy` (`<@`), `JsonHasKey` (`?`),
+  `JsonHasAnyKey` (`?|`), `JsonHasAllKeys` (`?&`) added to `Op`, the Postgres writer, and the
+  `Column` trait (`.json_contains()`, `.json_has_key()`, `.json_has_any_key()`, etc.).
+
+- **`sql::raw_query<T>` / `sql::raw_execute`** — typed raw SQL escape hatches. `raw_query::<T>`
+  decodes rows via the same `FromRow` impl as ORM queries. `raw_execute` returns rows affected.
+  Both have `_on(executor)` variants.
+
+- **`sql::bulk_update` / `BulkUpdateQuery`** — `UPDATE t SET … FROM (VALUES …) AS data(pk, …)
+  WHERE t.pk = data.pk`. One round-trip for N rows with per-row different values.
+
+### Fixed
+
+- **JSON field binding** — `SqlValue::Json` was an `unreachable!()` in the `bind_match!` macro.
+  Now correctly bound via `sqlx::types::Json`, enabling JSONB column reads and writes.
+
+- **`annotate_count_children` WHERE forwarding** — the parent queryset's `WHERE`, `ORDER BY`,
+  `LIMIT`, and `OFFSET` clauses are now forwarded into the aggregate SQL. Previously they were
+  silently dropped.
+
+---
+
+## [v0.18.0] — permission-gated admin (Option G) — 2026-05-02
+
+### Added
+
+- **`#[rustango(permissions)]`** model attribute — sets `ModelSchema.permissions: bool`. When
+  present, `auto_create_permissions(pool)` seeds the four CRUD codenames
+  (`{table}.add/change/delete/view`) into the `rustango_permissions` catalog table via a single
+  UNNEST batch INSERT (idempotent, `ON CONFLICT DO NOTHING`).
+
+- **`rustango_permissions` catalog table** — created by `ensure_permission_tables`. Stores
+  `(table_name, codename, name)` rows so tooling can enumerate available permissions without
+  knowing model names at runtime.
+
+- **Per-user permission gating in the tenant admin** — `TenantAdminBuilder` now fetches the
+  authenticated user's effective codename set once per request (`user_permissions(uid, pool)`)
+  and threads it into the inner admin builder. Superusers get full access (`user_perms = None`
+  bypasses all checks); non-superusers get per-table filtering.
+
+- **`Builder::with_user_perms(perms)`** — wires a pre-fetched codename set into the admin
+  builder. `AppState` gains `can_add(table)` and `can_delete(table)` methods alongside the
+  extended `is_visible` (`{table}.view`) and `is_read_only` (`{table}.change`).
+
+### Changed
+
+- **Admin create/delete gating split** — `create_form` and `create_submit` now check `can_add`
+  instead of `is_read_only`. `delete_submit` checks `can_delete`. `action_submit` gates
+  `delete_selected` on `can_delete`, `restore_selected` and custom handlers on `is_read_only`.
+  Replaces the previous binary superuser / read-only-all model.
+
+---
+
+## [v0.17.4] — admin JSONB editing, `AlterColumnUnique`, `Role.name` unique — 2026-05-01
+
+### Added
+
+- **Admin JSONB field editing** — JSON columns render as `<textarea>` on create/edit forms and
+  pretty-print the current value as the prefill. Empty submission defaults to `{}`.
+
+- **`AlterColumnUnique` migration op** — adding or removing `#[rustango(unique)]` on an existing
+  field now auto-generates an invertible `ADD CONSTRAINT … UNIQUE` / `DROP CONSTRAINT` DDL op.
+  The diff engine detects the flip; `invert.rs` reverses it.
+
+- **`Role.name` uniqueness enforced** — `Role.name` now carries `#[rustango(unique)]` matching
+  the unique constraint already present in `ensure_tables` DDL.
+
+---
+
+## [v0.17.3] — `blog_demo` example, `server::ApiRouter` re-export — 2026-05-01
+
+### Added
+
+- **`blog_demo` example** (`crates/rustango/examples/blog_demo/`) — end-to-end canary using
+  `Author` + `Post` models, ORM seeding, Tenant extractor views, a committed schema migration,
+  and the `#[rustango::main]` builder chain. No raw SQL; re-running is safe.
+
+- **`server::ApiRouter` re-exported** — was previously builder-private; now accessible as
+  `rustango::server::ApiRouter` for projects that compose their own router separately from the
+  `Builder` chain.
+
+---
+
 ## [v0.17.2] — `#[rustango(unique)]`, admin form fixes, bootstrap cleanup — 2026-05-01
 
 ### Added
