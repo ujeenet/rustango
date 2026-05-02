@@ -27,7 +27,7 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 /// Signature encoding format — what the webhook provider sends.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum SignatureFormat {
     /// `sha256=<hex>` (GitHub `X-Hub-Signature-256`)
     HexSha256WithPrefix,

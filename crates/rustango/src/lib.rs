@@ -173,6 +173,12 @@ pub mod ip_filter;
 #[cfg(feature = "webhook")]
 pub mod webhook;
 
+/// Outbound webhook delivery — POSTs HMAC-signed JSON via the background
+/// job queue (so retries with exponential backoff are free). See
+/// [`webhook_delivery::WebhookSubscription`].
+#[cfg(feature = "webhook-delivery")]
+pub mod webhook_delivery;
+
 /// Standardized API error responses. See [`api_errors::ApiError`].
 #[cfg(feature = "admin")]
 pub mod api_errors;
