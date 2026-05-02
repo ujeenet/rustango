@@ -64,6 +64,8 @@ pub struct AuthUser {
 pub enum AuthError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
+    #[error("database error: {0}")]
+    Exec(#[from] crate::sql::ExecError),
     #[error("token is malformed or expired")]
     InvalidToken,
     #[error("account is inactive")]
@@ -105,6 +107,9 @@ impl AuthBackend for ModelBackend {
         parts: &Parts,
         pool: &PgPool,
     ) -> Result<Option<AuthUser>, AuthError> {
+        use crate::core::Column as _;
+        use crate::sql::Fetcher as _;
+
         let auth_header = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
@@ -112,38 +117,32 @@ impl AuthBackend for ModelBackend {
 
         let (username, password) = match parse_basic_auth(auth_header) {
             Some(pair) => pair,
-            None => return Ok(None), // Not Basic auth — skip
+            None => return Ok(None),
         };
 
-        let row = sqlx::query(
-            r#"SELECT id, username, password_hash, is_superuser, active
-               FROM "rustango_users"
-               WHERE username = $1"#,
-        )
-        .bind(&username)
-        .fetch_optional(pool)
-        .await?;
+        let users = super::auth::User::objects()
+            .where_(super::auth::User::username.eq(username.clone()))
+            .fetch(pool)
+            .await?;
 
-        let Some(row) = row else {
+        let Some(user) = users.into_iter().next() else {
             return Ok(None);
         };
 
-        let active: bool = row.try_get("active").unwrap_or(false);
-        if !active {
+        if !user.active {
             return Err(AuthError::Inactive);
         }
 
-        let hash: String = row.try_get("password_hash").unwrap_or_default();
-        let ok = password::verify(&password, &hash)
+        let ok = password::verify(&password, &user.password_hash)
             .map_err(|_| AuthError::InvalidToken)?;
         if !ok {
             return Ok(None);
         }
 
         Ok(Some(AuthUser {
-            id: row.try_get("id")?,
-            username: row.try_get("username")?,
-            is_superuser: row.try_get("is_superuser").unwrap_or(false),
+            id: user.id.get().copied().unwrap_or(0),
+            username: user.username,
+            is_superuser: user.is_superuser,
         }))
     }
 }
@@ -297,34 +296,29 @@ pub async fn create_api_key(
     label: &str,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pool: &PgPool,
-) -> Result<String, sqlx::Error> {
+) -> Result<String, crate::tenancy::error::TenancyError> {
+    use crate::sql::Auto;
     use rand::Rng;
-    let mut rng = rand::thread_rng();
 
-    // 8-char hex prefix (4 random bytes)
+    let mut rng = rand::thread_rng();
     let prefix_bytes: [u8; 4] = rng.gen();
     let prefix = to_hex(&prefix_bytes);
-
-    // 32-char secret (16 random bytes → 32 hex chars)
     let secret_bytes: [u8; 16] = rng.gen();
     let secret = to_hex(&secret_bytes);
 
     let hash = password::hash(&secret)
-        .map_err(|e| sqlx::Error::Decode(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other, e.to_string()
-        ))))?;
+        .map_err(|e| crate::tenancy::error::TenancyError::Validation(e.to_string()))?;
 
-    sqlx::query(
-        r#"INSERT INTO "rustango_api_keys" (user_id, key_prefix, key_hash, label, expires_at)
-           VALUES ($1, $2, $3, $4, $5)"#,
-    )
-    .bind(user_id)
-    .bind(&prefix)
-    .bind(&hash)
-    .bind(label)
-    .bind(expires_at)
-    .execute(pool)
-    .await?;
+    let mut key = ApiKey {
+        id: Auto::default(),
+        user_id,
+        key_prefix: prefix.clone(),
+        key_hash: hash,
+        label: label.to_owned(),
+        expires_at,
+        created_at: Auto::default(),
+    };
+    key.save_on(pool).await?;
 
     Ok(format!("{prefix}.{secret}"))
 }
@@ -408,14 +402,21 @@ impl AuthBackend for JwtBackend {
         parts: &Parts,
         pool: &PgPool,
     ) -> Result<Option<AuthUser>, AuthError> {
+        use crate::core::Column as _;
+        use crate::sql::Fetcher as _;
+
         let bearer = extract_bearer(parts)?;
         let Some(token) = bearer else {
             return Ok(None);
         };
 
-        // JWT has two dots; Basic keys have one dot (prefix.secret).
-        // If token has exactly one dot it's an API key — skip.
+        // JWT has exactly one dot (payload.sig). API key has one dot (prefix.secret).
+        // Both are one dot — distinguish by prefix length (JWT payload is base64, not 8 hex chars).
         if token.chars().filter(|&c| c == '.').count() != 1 {
+            return Ok(None);
+        }
+        // If the part before the first dot is exactly 8 chars, it's an API key prefix.
+        if token.split_once('.').map(|(p, _)| p.len()) == Some(8) {
             return Ok(None);
         }
 
@@ -424,28 +425,23 @@ impl AuthBackend for JwtBackend {
             None => return Err(AuthError::InvalidToken),
         };
 
-        let row = sqlx::query(
-            r#"SELECT id, username, is_superuser, active
-               FROM "rustango_users"
-               WHERE id = $1"#,
-        )
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await?;
+        let users = super::auth::User::objects()
+            .where_(super::auth::User::id.eq(user_id))
+            .fetch(pool)
+            .await?;
 
-        let Some(row) = row else {
+        let Some(user) = users.into_iter().next() else {
             return Ok(None);
         };
 
-        let active: bool = row.try_get("active").unwrap_or(false);
-        if !active {
+        if !user.active {
             return Err(AuthError::Inactive);
         }
 
         Ok(Some(AuthUser {
-            id: row.try_get("id")?,
-            username: row.try_get("username")?,
-            is_superuser: row.try_get("is_superuser").unwrap_or(false),
+            id: user.id.get().copied().unwrap_or(0),
+            username: user.username,
+            is_superuser: user.is_superuser,
         }))
     }
 }

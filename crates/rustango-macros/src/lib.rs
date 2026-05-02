@@ -2904,11 +2904,15 @@ fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
     }
 
     Ok(quote! {
-        impl ::rustango::forms::FormStruct for #struct_name {
+        impl ::rustango::forms::Form for #struct_name {
             fn parse(
-                form: &::std::collections::HashMap<::std::string::String, ::std::string::String>,
-            ) -> ::core::result::Result<Self, ::rustango::forms::FormError> {
+                data: &::std::collections::HashMap<::std::string::String, ::std::string::String>,
+            ) -> ::core::result::Result<Self, ::rustango::forms::FormErrors> {
+                let mut __errors = ::rustango::forms::FormErrors::default();
                 #( #field_blocks )*
+                if !__errors.is_empty() {
+                    return ::core::result::Result::Err(__errors);
+                }
                 ::core::result::Result::Ok(Self {
                     #( #field_idents ),*
                 })
@@ -3004,18 +3008,14 @@ fn render_form_field_parse(
     nullable: bool,
     attrs: &FormFieldAttrs,
 ) -> TokenStream2 {
-    // Common helper: pull the raw &str out of the form. Bool's
-    // checkbox semantics (absent = false) are handled inline; every
-    // other type errors with `Missing` for absent required fields,
-    // or yields `None` for absent nullable Option<T> fields.
+    // Pull the raw &str from the payload. Uses variable name `data` to
+    // match the new `Form::parse(data: &HashMap<…>)` signature.
     let lookup = quote! {
-        let __raw: ::core::option::Option<&::std::string::String> = form.get(#name_lit);
+        let __raw: ::core::option::Option<&::std::string::String> = data.get(#name_lit);
     };
 
     let parsed_value = match kind {
         FormFieldKind::Bool => quote! {
-            // HTML checkbox: absent = false, anything-non-empty = true,
-            // except literal "false"/"0"/"off"/"no".
             let __v: bool = match __raw {
                 ::core::option::Option::None => false,
                 ::core::option::Option::Some(__s) => !matches!(
@@ -3044,11 +3044,8 @@ fn render_form_field_parse(
                             ::core::clone::Clone::clone(__s)
                         }
                         _ => {
-                            return ::core::result::Result::Err(
-                                ::rustango::forms::FormError::Missing {
-                                    field: ::std::string::String::from(#name_lit),
-                                }
-                            );
+                            __errors.add(#name_lit, "This field is required.");
+                            ::std::string::String::new()
                         }
                     };
                 }
@@ -3057,15 +3054,12 @@ fn render_form_field_parse(
         FormFieldKind::I32 | FormFieldKind::I64 | FormFieldKind::F32 | FormFieldKind::F64 => {
             let parse_ty = syn::Ident::new(kind.parse_method(), proc_macro2::Span::call_site());
             let ty_lit = kind.parse_method();
-            let parse_expr = quote! {
-                __s.parse::<#parse_ty>().map_err(|__e| {
-                    ::rustango::forms::FormError::Parse {
-                        field: ::std::string::String::from(#name_lit),
-                        ty: #ty_lit,
-                        value: ::core::clone::Clone::clone(__s),
-                        detail: ::std::string::ToString::to_string(&__e),
-                    }
-                })
+            let default_val = match kind {
+                FormFieldKind::I32 => quote! { 0i32 },
+                FormFieldKind::I64 => quote! { 0i64 },
+                FormFieldKind::F32 => quote! { 0f32 },
+                FormFieldKind::F64 => quote! { 0f64 },
+                _ => quote! { Default::default() },
             };
             if nullable {
                 quote! {
@@ -3075,7 +3069,18 @@ fn render_form_field_parse(
                             ::core::option::Option::None
                         }
                         ::core::option::Option::Some(__s) => {
-                            ::core::option::Option::Some(#parse_expr?)
+                            match __s.parse::<#parse_ty>() {
+                                ::core::result::Result::Ok(__n) => {
+                                    ::core::option::Option::Some(__n)
+                                }
+                                ::core::result::Result::Err(__e) => {
+                                    __errors.add(
+                                        #name_lit,
+                                        ::std::format!("Enter a valid {} value: {}", #ty_lit, __e),
+                                    );
+                                    ::core::option::Option::None
+                                }
+                            }
                         }
                     };
                 }
@@ -3083,14 +3088,20 @@ fn render_form_field_parse(
                 quote! {
                     let __v: #parse_ty = match __raw {
                         ::core::option::Option::Some(__s) if !__s.is_empty() => {
-                            #parse_expr?
+                            match __s.parse::<#parse_ty>() {
+                                ::core::result::Result::Ok(__n) => __n,
+                                ::core::result::Result::Err(__e) => {
+                                    __errors.add(
+                                        #name_lit,
+                                        ::std::format!("Enter a valid {} value: {}", #ty_lit, __e),
+                                    );
+                                    #default_val
+                                }
+                            }
                         }
                         _ => {
-                            return ::core::result::Result::Err(
-                                ::rustango::forms::FormError::Missing {
-                                    field: ::std::string::String::from(#name_lit),
-                                }
-                            );
+                            __errors.add(#name_lit, "This field is required.");
+                            #default_val
                         }
                     };
                 }
@@ -3098,10 +3109,6 @@ fn render_form_field_parse(
         }
     };
 
-    // Validator emission. min / max only make sense on numeric kinds;
-    // min_length / max_length only on String. We silently ignore
-    // wrong-shape combinations for now (a future commit can validate
-    // attribute-vs-type at macro time).
     let validators = render_form_validators(name_lit, kind, nullable, attrs);
 
     quote! {
@@ -3123,7 +3130,6 @@ fn render_form_validators(
     let mut checks: Vec<TokenStream2> = Vec::new();
 
     let val_ref = if nullable {
-        // Validate the inner value when Some; skip when None.
         quote! { __v.as_ref() }
     } else {
         quote! { ::core::option::Option::Some(&__v) }
@@ -3141,15 +3147,9 @@ fn render_form_validators(
             checks.push(quote! {
                 if let ::core::option::Option::Some(__s) = #val_ref {
                     if __s.len() < #min_len_usize {
-                        return ::core::result::Result::Err(
-                            ::rustango::forms::FormError::Parse {
-                                field: ::std::string::String::from(#name_lit),
-                                ty: "String",
-                                value: ::core::clone::Clone::clone(__s),
-                                detail: ::std::format!(
-                                    "shorter than min_length {}", #min_len_usize
-                                ),
-                            }
+                        __errors.add(
+                            #name_lit,
+                            ::std::format!("Ensure this value has at least {} characters.", #min_len_usize),
                         );
                     }
                 }
@@ -3160,15 +3160,9 @@ fn render_form_validators(
             checks.push(quote! {
                 if let ::core::option::Option::Some(__s) = #val_ref {
                     if __s.len() > #max_len_usize {
-                        return ::core::result::Result::Err(
-                            ::rustango::forms::FormError::Parse {
-                                field: ::std::string::String::from(#name_lit),
-                                ty: "String",
-                                value: ::core::clone::Clone::clone(__s),
-                                detail: ::std::format!(
-                                    "longer than max_length {}", #max_len_usize
-                                ),
-                            }
+                        __errors.add(
+                            #name_lit,
+                            ::std::format!("Ensure this value has at most {} characters.", #max_len_usize),
                         );
                     }
                 }
@@ -3180,15 +3174,10 @@ fn render_form_validators(
         if let Some(min) = attrs.min {
             checks.push(quote! {
                 if let ::core::option::Option::Some(__n) = #val_ref {
-                    let __nf = (*__n) as f64;
-                    if __nf < (#min as f64) {
-                        return ::core::result::Result::Err(
-                            ::rustango::forms::FormError::Parse {
-                                field: ::std::string::String::from(#name_lit),
-                                ty: "numeric",
-                                value: ::std::string::ToString::to_string(__n),
-                                detail: ::std::format!("less than min {}", #min),
-                            }
+                    if (*__n as f64) < (#min as f64) {
+                        __errors.add(
+                            #name_lit,
+                            ::std::format!("Ensure this value is greater than or equal to {}.", #min),
                         );
                     }
                 }
@@ -3197,15 +3186,10 @@ fn render_form_validators(
         if let Some(max) = attrs.max {
             checks.push(quote! {
                 if let ::core::option::Option::Some(__n) = #val_ref {
-                    let __nf = (*__n) as f64;
-                    if __nf > (#max as f64) {
-                        return ::core::result::Result::Err(
-                            ::rustango::forms::FormError::Parse {
-                                field: ::std::string::String::from(#name_lit),
-                                ty: "numeric",
-                                value: ::std::string::ToString::to_string(__n),
-                                detail: ::std::format!("greater than max {}", #max),
-                            }
+                    if (*__n as f64) > (#max as f64) {
+                        __errors.add(
+                            #name_lit,
+                            ::std::format!("Ensure this value is less than or equal to {}.", #max),
                         );
                     }
                 }

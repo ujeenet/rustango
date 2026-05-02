@@ -37,9 +37,7 @@ pub(super) async fn create_role_cmd<W: Write + Send>(
         }
     }
     let pool = tenant_pool_for_slug(pools, &slug).await?;
-    let id = permissions::create_role(&name, &description, &pool)
-        .await
-        .map_err(TenancyError::Driver)?;
+    let id = permissions::create_role(&name, &description, &pool).await?;
     writeln!(w, "created role `{name}` (id={id}) on tenant `{slug}`")?;
     Ok(())
 }
@@ -106,7 +104,6 @@ async fn role_membership_cmd<W: Write + Send>(
     w: &mut W,
     assign: bool,
 ) -> Result<(), TenancyError> {
-    let verb = if assign { "assign-role" } else { "revoke-role" };
     let mut iter = args.iter();
     let slug = next_value(&mut iter, "<tenant-slug>")?;
     let username = next_value(&mut iter, "<username>")?;
@@ -117,14 +114,10 @@ async fn role_membership_cmd<W: Write + Send>(
     let role_id = role_id_by_name(&role_name, &pool).await?;
 
     if assign {
-        permissions::assign_role(user_id, role_id, &pool)
-            .await
-            .map_err(TenancyError::Driver)?;
+        permissions::assign_role(user_id, role_id, &pool).await?;
         writeln!(w, "assigned role `{role_name}` to `{username}` on tenant `{slug}`")?;
     } else {
-        permissions::remove_role(user_id, role_id, &pool)
-            .await
-            .map_err(TenancyError::Driver)?;
+        permissions::remove_role(user_id, role_id, &pool).await?;
         writeln!(w, "removed role `{role_name}` from `{username}` on tenant `{slug}`")?;
     }
     Ok(())
@@ -149,15 +142,11 @@ pub(super) async fn grant_perm_cmd<W: Write + Send>(
     let pool = tenant_pool_for_slug(pools, &slug).await?;
     if to_role {
         let role_id = role_id_by_name(&target, &pool).await?;
-        permissions::grant_role_perm(role_id, &codename, &pool)
-            .await
-            .map_err(TenancyError::Driver)?;
+        permissions::grant_role_perm(role_id, &codename, &pool).await?;
         writeln!(w, "granted `{codename}` to role `{target}` on tenant `{slug}`")?;
     } else {
         let user_id = user_id_by_username(&target, &pool).await?;
-        permissions::set_user_perm(user_id, &codename, true, &pool)
-            .await
-            .map_err(TenancyError::Driver)?;
+        permissions::set_user_perm(user_id, &codename, true, &pool).await?;
         writeln!(w, "granted `{codename}` to user `{target}` on tenant `{slug}`")?;
     }
     Ok(())
@@ -180,15 +169,11 @@ pub(super) async fn revoke_perm_cmd<W: Write + Send>(
     let pool = tenant_pool_for_slug(pools, &slug).await?;
     if to_role {
         let role_id = role_id_by_name(&target, &pool).await?;
-        permissions::revoke_role_perm(role_id, &codename, &pool)
-            .await
-            .map_err(TenancyError::Driver)?;
+        permissions::revoke_role_perm(role_id, &codename, &pool).await?;
         writeln!(w, "revoked `{codename}` from role `{target}` on tenant `{slug}`")?;
     } else {
         let user_id = user_id_by_username(&target, &pool).await?;
-        permissions::set_user_perm(user_id, &codename, false, &pool)
-            .await
-            .map_err(TenancyError::Driver)?;
+        permissions::set_user_perm(user_id, &codename, false, &pool).await?;
         writeln!(w, "denied `{codename}` for user `{target}` on tenant `{slug}`")?;
     }
     Ok(())
@@ -229,9 +214,7 @@ pub(super) async fn create_api_key_cmd<W: Write + Send>(
         .map_err(TenancyError::Driver)?;
     let user_id = user_id_by_username(&username, &pool).await?;
     let expires_at = expires_days.map(|d| chrono::Utc::now() + chrono::Duration::days(d));
-    let token = auth_backends::create_api_key(user_id, &label, expires_at, &pool)
-        .await
-        .map_err(TenancyError::Driver)?;
+    let token = auth_backends::create_api_key(user_id, &label, expires_at, &pool).await?;
 
     writeln!(w, "API key for `{username}` on tenant `{slug}`:")?;
     writeln!(w, "  {token}")?;
@@ -254,27 +237,24 @@ async fn tenant_pool_for_slug(pools: &TenantPools, slug: &str) -> Result<PgPool,
 }
 
 async fn user_id_by_username(username: &str, pool: &PgPool) -> Result<i64, TenancyError> {
-    let row = crate::sql::sqlx::query(
-        r#"SELECT id FROM "rustango_users" WHERE username = $1"#,
-    )
-    .bind(username)
-    .fetch_optional(pool)
-    .await
-    .map_err(TenancyError::Driver)?;
-    row.ok_or_else(|| TenancyError::Validation(format!("user `{username}` not found")))?
-        .try_get("id")
-        .map_err(TenancyError::Driver)
+    let rows = User::objects()
+        .where_(User::username.eq(username.to_owned()))
+        .fetch(pool)
+        .await?;
+    rows.into_iter()
+        .next()
+        .ok_or_else(|| TenancyError::Validation(format!("user `{username}` not found")))
+        .map(|u| u.id.get().copied().unwrap_or(0))
 }
 
 async fn role_id_by_name(name: &str, pool: &PgPool) -> Result<i64, TenancyError> {
-    let row = crate::sql::sqlx::query(
-        r#"SELECT id FROM "rustango_roles" WHERE name = $1"#,
-    )
-    .bind(name)
-    .fetch_optional(pool)
-    .await
-    .map_err(TenancyError::Driver)?;
-    row.ok_or_else(|| TenancyError::Validation(format!("role `{name}` not found")))?
-        .try_get("id")
-        .map_err(TenancyError::Driver)
+    use crate::tenancy::permissions::Role;
+    let rows = Role::objects()
+        .where_(Role::name.eq(name.to_owned()))
+        .fetch(pool)
+        .await?;
+    rows.into_iter()
+        .next()
+        .ok_or_else(|| TenancyError::Validation(format!("role `{name}` not found")))
+        .map(|r| r.id.get().copied().unwrap_or(0))
 }

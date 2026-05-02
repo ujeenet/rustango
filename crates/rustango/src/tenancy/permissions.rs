@@ -262,50 +262,56 @@ pub async fn has_all_perms(
 
 // ------------------------------------------------------------------ Role management (ORM-backed)
 
-/// Create a role, returning its id. Errors if name already exists.
-pub async fn create_role(name: &str, description: &str, pool: &PgPool) -> Result<i64, sqlx::Error> {
-    let row = sqlx::query(
-        r#"INSERT INTO "rustango_roles" (name, description)
-           VALUES ($1, $2) RETURNING id"#,
-    )
-    .bind(name)
-    .bind(description)
-    .fetch_one(pool)
-    .await?;
-    row.try_get("id")
+/// Create a role. Errors if name already exists.
+pub async fn create_role(
+    name: &str,
+    description: &str,
+    pool: &PgPool,
+) -> Result<i64, TenancyError> {
+    let mut role = Role {
+        id: Auto::default(),
+        name: name.to_owned(),
+        description: description.to_owned(),
+    };
+    role.save_on(pool).await?;
+    Ok(role.id.get().copied().unwrap_or(0))
 }
 
-/// Get or create a role by name. Returns the existing id or creates a new one.
+/// Get an existing role by name or create one. Returns the id.
 pub async fn get_or_create_role(
     name: &str,
     description: &str,
     pool: &PgPool,
-) -> Result<i64, sqlx::Error> {
-    let existing = sqlx::query(r#"SELECT id FROM "rustango_roles" WHERE name = $1"#)
-        .bind(name)
-        .fetch_optional(pool)
+) -> Result<i64, TenancyError> {
+    let existing = Role::objects()
+        .where_(Role::name.eq(name.to_owned()))
+        .fetch(pool)
         .await?;
-    if let Some(row) = existing {
-        return row.try_get("id");
+    if let Some(role) = existing.into_iter().next() {
+        return Ok(role.id.get().copied().unwrap_or(0));
     }
     create_role(name, description, pool).await
 }
 
-/// Grant a codename to a role. No-op if already granted.
+/// Grant a codename to a role. No-op if already granted (fetch-then-insert).
 pub async fn grant_role_perm(
     role_id: i64,
     codename: &str,
     pool: &PgPool,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"INSERT INTO "rustango_role_permissions" (role_id, codename)
-           VALUES ($1, $2)
-           ON CONFLICT ON CONSTRAINT "rustango_role_permissions_uq" DO NOTHING"#,
-    )
-    .bind(role_id)
-    .bind(codename)
-    .execute(pool)
-    .await?;
+) -> Result<(), TenancyError> {
+    let existing = RolePermission::objects()
+        .where_(RolePermission::role_id.eq(role_id))
+        .where_(RolePermission::codename.eq(codename.to_owned()))
+        .fetch(pool)
+        .await?;
+    if existing.is_empty() {
+        let mut perm = RolePermission {
+            id: Auto::default(),
+            role_id,
+            codename: codename.to_owned(),
+        };
+        perm.save_on(pool).await?;
+    }
     Ok(())
 }
 
@@ -314,62 +320,77 @@ pub async fn revoke_role_perm(
     role_id: i64,
     codename: &str,
     pool: &PgPool,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"DELETE FROM "rustango_role_permissions"
-           WHERE role_id = $1 AND codename = $2"#,
-    )
-    .bind(role_id)
-    .bind(codename)
-    .execute(pool)
-    .await?;
+) -> Result<(), TenancyError> {
+    let rows = RolePermission::objects()
+        .where_(RolePermission::role_id.eq(role_id))
+        .where_(RolePermission::codename.eq(codename.to_owned()))
+        .fetch(pool)
+        .await?;
+    for row in rows {
+        row.delete_on(pool).await?;
+    }
     Ok(())
 }
 
 /// Assign a user to a role. No-op if already assigned.
-pub async fn assign_role(user_id: i64, role_id: i64, pool: &PgPool) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"INSERT INTO "rustango_user_roles" (user_id, role_id)
-           VALUES ($1, $2)
-           ON CONFLICT ON CONSTRAINT "rustango_user_roles_uq" DO NOTHING"#,
-    )
-    .bind(user_id)
-    .bind(role_id)
-    .execute(pool)
-    .await?;
+pub async fn assign_role(
+    user_id: i64,
+    role_id: i64,
+    pool: &PgPool,
+) -> Result<(), TenancyError> {
+    let existing = UserRole::objects()
+        .where_(UserRole::user_id.eq(user_id))
+        .where_(UserRole::role_id.eq(role_id))
+        .fetch(pool)
+        .await?;
+    if existing.is_empty() {
+        let mut membership = UserRole { id: Auto::default(), user_id, role_id };
+        membership.save_on(pool).await?;
+    }
     Ok(())
 }
 
 /// Remove a user from a role.
-pub async fn remove_role(user_id: i64, role_id: i64, pool: &PgPool) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"DELETE FROM "rustango_user_roles" WHERE user_id = $1 AND role_id = $2"#,
-    )
-    .bind(user_id)
-    .bind(role_id)
-    .execute(pool)
-    .await?;
+pub async fn remove_role(
+    user_id: i64,
+    role_id: i64,
+    pool: &PgPool,
+) -> Result<(), TenancyError> {
+    let rows = UserRole::objects()
+        .where_(UserRole::user_id.eq(user_id))
+        .where_(UserRole::role_id.eq(role_id))
+        .fetch(pool)
+        .await?;
+    for row in rows {
+        row.delete_on(pool).await?;
+    }
     Ok(())
 }
 
-/// Set a per-user permission override.
+/// Set a per-user permission override. Updates `granted` if a row already exists.
 pub async fn set_user_perm(
     user_id: i64,
     codename: &str,
     granted: bool,
     pool: &PgPool,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"INSERT INTO "rustango_user_permissions" (user_id, codename, granted)
-           VALUES ($1, $2, $3)
-           ON CONFLICT ON CONSTRAINT "rustango_user_permissions_uq"
-           DO UPDATE SET granted = EXCLUDED.granted"#,
-    )
-    .bind(user_id)
-    .bind(codename)
-    .bind(granted)
-    .execute(pool)
-    .await?;
+) -> Result<(), TenancyError> {
+    let existing = UserPermission::objects()
+        .where_(UserPermission::user_id.eq(user_id))
+        .where_(UserPermission::codename.eq(codename.to_owned()))
+        .fetch(pool)
+        .await?;
+    if let Some(mut perm) = existing.into_iter().next() {
+        perm.granted = granted;
+        perm.save_on(pool).await?;
+    } else {
+        let mut perm = UserPermission {
+            id: Auto::default(),
+            user_id,
+            codename: codename.to_owned(),
+            granted,
+        };
+        perm.save_on(pool).await?;
+    }
     Ok(())
 }
 
@@ -378,15 +399,15 @@ pub async fn clear_user_perm(
     user_id: i64,
     codename: &str,
     pool: &PgPool,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"DELETE FROM "rustango_user_permissions"
-           WHERE user_id = $1 AND codename = $2"#,
-    )
-    .bind(user_id)
-    .bind(codename)
-    .execute(pool)
-    .await?;
+) -> Result<(), TenancyError> {
+    let rows = UserPermission::objects()
+        .where_(UserPermission::user_id.eq(user_id))
+        .where_(UserPermission::codename.eq(codename.to_owned()))
+        .fetch(pool)
+        .await?;
+    for row in rows {
+        row.delete_on(pool).await?;
+    }
     Ok(())
 }
 
@@ -415,7 +436,7 @@ pub async fn user_roles_qs(user_id: i64, pool: &PgPool) -> Result<Vec<Role>, sql
 
 /// List all `(role_id, name)` pairs for a user.
 pub async fn user_roles(uid: i64, pool: &PgPool) -> Result<Vec<(i64, String)>, sqlx::Error> {
-    let roles = user_roles_qs(uid, pool).await?;
+    let roles = user_roles_qs(uid, pool).await?; // raw SQL join — stays sqlx::Error
     Ok(roles
         .into_iter()
         .map(|r| (r.id.get().copied().unwrap_or(0), r.name))
