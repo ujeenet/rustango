@@ -69,7 +69,16 @@ pub struct Operator {
 /// dedicated DB). `is_superuser = true` elevates to org-admin inside
 /// the tenant — never grants access to `/operator`.
 #[derive(Model, Debug, Clone)]
-#[rustango(table = "rustango_users", display = "username")]
+#[rustango(
+    table = "rustango_users",
+    display = "username",
+    admin(
+        list_display    = "username, is_superuser, active, created_at",
+        search_fields   = "username",
+        ordering        = "username",
+        readonly_fields = "password_hash, created_at",
+    ),
+)]
 #[allow(dead_code)]
 pub struct User {
     #[rustango(primary_key)]
