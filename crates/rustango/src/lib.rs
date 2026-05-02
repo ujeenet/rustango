@@ -67,6 +67,10 @@ pub mod health;
 #[cfg(feature = "email")]
 pub mod email;
 
+/// File storage backends — [`storage::Storage`] trait + LocalStorage + InMemoryStorage.
+#[cfg(feature = "storage")]
+pub mod storage;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
