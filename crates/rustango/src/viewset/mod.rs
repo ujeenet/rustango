@@ -77,6 +77,9 @@
 //!     .router("/api/posts", pool.clone())
 //! ```
 
+#[cfg(feature = "openapi")]
+mod openapi;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
