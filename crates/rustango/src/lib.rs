@@ -155,6 +155,14 @@ pub mod api_errors;
 #[cfg(feature = "api_keys")]
 pub mod api_keys;
 
+/// Generic password hash/verify + strength heuristic. See [`passwords::hash`].
+#[cfg(feature = "passwords")]
+pub mod passwords;
+
+/// Pagination helpers — RFC 5988 Link headers + cursor params.
+/// See [`pagination::LinkHeaderBuilder`].
+pub mod pagination;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 

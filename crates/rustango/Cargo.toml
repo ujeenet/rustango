@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "api_keys"]
+default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "api_keys", "passwords"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -81,6 +81,10 @@ webhook = ["dep:hmac", "dep:sha2", "dep:subtle", "dep:base64"]
 # API keys (`rustango::api_keys`) — standalone generate/hash/verify
 # helpers for `{prefix}.{secret}` keys with argon2id hashing.
 api_keys = ["dep:argon2", "dep:password-hash", "dep:rand"]
+
+# Generic password helpers (`rustango::passwords`) — argon2id hash/verify
+# + minimal strength check. Standalone alternative to tenancy::password.
+passwords = ["dep:argon2", "dep:password-hash"]
 
 # Redis cache backend (`rustango::cache::RedisCache`). Adds the `redis`
 # async connection-manager client. Implies `cache`.
