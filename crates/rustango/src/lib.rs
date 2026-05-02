@@ -175,6 +175,12 @@ pub mod request_id;
 #[cfg(feature = "admin")]
 pub mod ip_filter;
 
+/// Request body size limit middleware — fast `Content-Length` rejection
+/// returning structured `413 Payload Too Large` JSON. Complements
+/// axum's per-extractor `DefaultBodyLimit`. See [`body_limit::BodyLimitLayer`].
+#[cfg(feature = "admin")]
+pub mod body_limit;
+
 /// Webhook signature verification (HMAC-SHA256). See [`webhook::verify_signature`].
 #[cfg(feature = "webhook")]
 pub mod webhook;
