@@ -233,6 +233,12 @@ pub mod problem_details;
 #[cfg(feature = "cache")]
 pub mod feature_flags;
 
+/// Distributed locks backed by [`cache::Cache`] — "only one worker
+/// at a time runs this task" with TTL-based crash recovery and
+/// token-checked release. See [`distributed_lock::DistributedLock`].
+#[cfg(feature = "cache")]
+pub mod distributed_lock;
+
 /// Webhook signature verification (HMAC-SHA256). See [`webhook::verify_signature`].
 #[cfg(feature = "webhook")]
 pub mod webhook;
