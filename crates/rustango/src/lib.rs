@@ -189,6 +189,13 @@ pub mod body_limit;
 #[cfg(feature = "admin")]
 pub mod real_ip;
 
+/// Idempotency-key middleware (Stripe-shape) — replays a stored
+/// successful response when a write request arrives with the same
+/// `Idempotency-Key`. Backed by any [`cache::Cache`]. See
+/// [`idempotency::IdempotencyLayer`].
+#[cfg(all(feature = "admin", feature = "cache"))]
+pub mod idempotency;
+
 /// Webhook signature verification (HMAC-SHA256). See [`webhook::verify_signature`].
 #[cfg(feature = "webhook")]
 pub mod webhook;
