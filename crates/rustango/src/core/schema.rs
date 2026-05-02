@@ -36,6 +36,9 @@ pub struct FieldSchema {
     /// fires. The migration writer reads this; the `Auto::Unset → SQL
     /// DEFAULT` translation happens in the macro-generated INSERT path.
     pub auto: bool,
+    /// `true` when `#[rustango(unique)]` is present. The DDL writer emits
+    /// `UNIQUE` inline on the column definition.
+    pub unique: bool,
 }
 
 /// Static description of a relation to another model.

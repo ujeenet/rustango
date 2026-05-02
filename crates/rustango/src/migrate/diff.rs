@@ -283,6 +283,12 @@ fn push_field_diffs(table: &str, pf: &FieldSnapshot, cf: &FieldSnapshot, out: &m
             pf.auto, cf.auto
         ));
     }
+    if pf.unique != cf.unique {
+        out.push(format!(
+            "`{table}.{col}` unique changed: {} → {}",
+            pf.unique, cf.unique
+        ));
+    }
 }
 
 /// Render a list of [`SchemaChange`]s as Postgres DDL strings ready to
@@ -598,6 +604,7 @@ mod sql_type_tests {
             max: None,
             default: None,
             auto,
+            unique: false,
             fk: None,
         }
     }

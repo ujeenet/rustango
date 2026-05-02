@@ -50,7 +50,7 @@ pub struct Org {
     #[rustango(primary_key)]
     pub id: rustango::Auto<i64>,
 
-    #[rustango(max_length = 64)]
+    #[rustango(max_length = 64, unique)]
     pub slug: String,
 
     #[rustango(max_length = 255)]

@@ -112,6 +112,9 @@ fn write_column_def(s: &mut String, field: &FieldSchema) {
     if field.primary_key {
         s.push_str(" PRIMARY KEY");
     }
+    if field.unique && !field.primary_key {
+        s.push_str(" UNIQUE");
+    }
     write_check_constraint(s, field);
 }
 

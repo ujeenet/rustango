@@ -2222,6 +2222,9 @@ struct FieldAttrs {
     /// `soft_delete_on(executor)` and `restore_on(executor)`
     /// methods on the model.
     soft_delete: bool,
+    /// `#[rustango(unique)]` — adds a `UNIQUE` constraint inline on
+    /// the column in the generated DDL.
+    unique: bool,
 }
 
 fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
@@ -2239,6 +2242,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         auto_now_add: false,
         auto_now: false,
         soft_delete: false,
+        unique: false,
     };
     for attr in &field.attrs {
         if !attr.path().is_ident("rustango") {
@@ -2314,6 +2318,10 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
             }
             if meta.path.is_ident("soft_delete") {
                 out.soft_delete = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("unique") {
+                out.unique = true;
                 return Ok(());
             }
             Err(meta.error("unknown rustango field attribute"))
@@ -2491,6 +2499,7 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
     let max = optional_i64(attrs.max);
     let default = optional_str(attrs.default.as_deref());
 
+    let unique = attrs.unique;
     let schema = quote! {
         ::rustango::core::FieldSchema {
             name: #name,
@@ -2504,6 +2513,7 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
             max: #max,
             default: #default,
             auto: #auto,
+            unique: #unique,
         }
     };
 

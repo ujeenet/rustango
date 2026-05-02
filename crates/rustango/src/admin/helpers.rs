@@ -269,18 +269,16 @@ pub(crate) fn render_form(
             " <small>(pk)</small>"
         } else if is_readonly_field {
             " <small>read-only</small>"
+        } else if f.auto {
+            " <small>auto</small>"
         } else if !f.nullable {
             " <small>required</small>"
         } else {
             ""
         };
-        // PK is locked on the edit form (`pk_locked`); user-marked
-        // readonly_fields are also locked there. On the create form
-        // we keep readonly_fields editable so the operator can set
-        // them on initial insert (Django's default behavior — the
-        // post-save value is what becomes immutable). Auto-PK skip
-        // already happened in the field filter below.
-        let lock_input = pk_locked && (f.primary_key || is_readonly_field);
+        // PK is locked on edit; readonly_fields are locked on edit.
+        // Auto fields are always locked — they're DB-assigned.
+        let lock_input = f.auto || (pk_locked && (f.primary_key || is_readonly_field));
         serde_json::json!({
             "label": f.name,
             "extra": extra,
@@ -289,13 +287,15 @@ pub(crate) fn render_form(
     };
 
     let visible = |f: &&'static FieldSchema| -> bool {
-        // Auto-PK columns are server-assigned — Postgres' DEFAULT
-        // (BIGSERIAL) fills them on INSERT. Rendering them on the
-        // create form caused HTML5 `required` validation to silently
-        // block submit when the operator (correctly) left them blank.
-        // On the edit form we still show the existing PK as a
-        // read-only field so the row identity is visible.
-        !(f.auto && f.primary_key && !pk_locked)
+        // Auto fields (Auto<T> PK, auto_now_add, auto_uuid, default=…
+        // server-assigned columns) are hidden on create — Postgres'
+        // DEFAULT fills them. On edit they are shown readonly so the
+        // operator can see the value.
+        if f.auto && !pk_locked {
+            // Hide auto fields entirely on the create form.
+            return false;
+        }
+        true
     };
 
     // Optionally group fields into fieldsets (slice 10.5). Empty

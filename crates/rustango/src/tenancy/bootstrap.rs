@@ -45,7 +45,7 @@
 use std::path::Path;
 
 use crate::core::Model as _;
-use crate::migrate::{DataOp, Migration, MigrationScope, Operation, SchemaChange, SchemaSnapshot};
+use crate::migrate::{Migration, MigrationScope, Operation, SchemaChange, SchemaSnapshot};
 
 use super::auth::{Operator, User};
 use super::auth_backends::ApiKey;
@@ -72,11 +72,7 @@ pub fn registry_bootstrap_migration() -> Migration {
         snapshot: full_snapshot(),
         forward: vec![
             Operation::Schema(SchemaChange::CreateTable("rustango_orgs".into())),
-            Operation::Schema(SchemaChange::CreateTable(
-                "rustango_operators".into(),
-            )),
-            Operation::Data(unique_constraint("rustango_orgs", "slug")),
-            Operation::Data(unique_constraint("rustango_operators", "username")),
+            Operation::Schema(SchemaChange::CreateTable("rustango_operators".into())),
         ],
     }
 }
@@ -93,7 +89,6 @@ pub fn tenant_bootstrap_migration() -> Migration {
         snapshot: full_snapshot(),
         forward: vec![
             Operation::Schema(SchemaChange::CreateTable("rustango_users".into())),
-            Operation::Data(unique_constraint("rustango_users", "username")),
         ],
     }
 }
@@ -113,18 +108,6 @@ fn full_snapshot() -> SchemaSnapshot {
         UserPermission::SCHEMA,
         ApiKey::SCHEMA,
     ])
-}
-
-fn unique_constraint(table: &str, column: &str) -> DataOp {
-    DataOp {
-        sql: format!(
-            r#"ALTER TABLE "{table}" ADD CONSTRAINT "{table}_{column}_key" UNIQUE ("{column}")"#,
-        ),
-        reverse_sql: Some(format!(
-            r#"ALTER TABLE "{table}" DROP CONSTRAINT "{table}_{column}_key""#,
-        )),
-        reversible: true,
-    }
 }
 
 /// Outcome of [`init_tenancy`]: which files were written and which
@@ -174,8 +157,9 @@ mod tests {
         assert_eq!(m.scope, MigrationScope::Registry);
         assert_eq!(m.name, REGISTRY_BOOTSTRAP_NAME);
         assert!(m.prev.is_none());
-        // Two CreateTable ops for orgs + operators, plus 2 UNIQUE DataOps.
-        assert_eq!(m.forward.len(), 4);
+        // Two CreateTable ops: rustango_orgs + rustango_operators.
+        // UNIQUE constraints are now inline on the column (via #[rustango(unique)]).
+        assert_eq!(m.forward.len(), 2);
     }
 
     #[test]
@@ -184,8 +168,9 @@ mod tests {
         assert_eq!(m.scope, MigrationScope::Tenant);
         assert_eq!(m.name, TENANT_BOOTSTRAP_NAME);
         assert!(m.prev.is_none());
-        // CreateTable + UNIQUE DataOp.
-        assert_eq!(m.forward.len(), 2);
+        // One CreateTable op for rustango_users.
+        // UNIQUE constraint on username is now inline via #[rustango(unique)].
+        assert_eq!(m.forward.len(), 1);
     }
 
     #[test]
@@ -195,16 +180,6 @@ mod tests {
         assert!(names.contains(&"rustango_orgs"));
         assert!(names.contains(&"rustango_operators"));
         assert!(names.contains(&"rustango_users"));
-    }
-
-    #[test]
-    fn unique_constraint_emits_alter_table_pair() {
-        let op = unique_constraint("rustango_orgs", "slug");
-        assert!(op.sql.contains("ADD CONSTRAINT \"rustango_orgs_slug_key\""));
-        assert!(op.sql.contains("UNIQUE (\"slug\")"));
-        assert!(op.reversible);
-        let reverse = op.reverse_sql.unwrap();
-        assert!(reverse.contains("DROP CONSTRAINT \"rustango_orgs_slug_key\""));
     }
 
     #[test]

@@ -57,7 +57,7 @@ pub struct Operator {
     /// Login handle. Globally unique within the registry. Application-
     /// layer enforced (no DB UNIQUE yet — `#[rustango(unique)]` lands
     /// in a follow-up).
-    #[rustango(max_length = 64)]
+    #[rustango(max_length = 64, unique)]
     pub username: String,
     /// PHC-format Argon2id hash. NEVER stored as plaintext.
     #[rustango(max_length = 255)]
@@ -77,7 +77,7 @@ pub struct User {
     #[rustango(primary_key)]
     pub id: rustango::sql::Auto<i64>,
     /// Login handle. Unique within this tenant.
-    #[rustango(max_length = 64)]
+    #[rustango(max_length = 64, unique)]
     pub username: String,
     /// PHC-format Argon2id hash.
     #[rustango(max_length = 255)]

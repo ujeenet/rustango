@@ -1,13 +1,10 @@
-//! Unit-style tests for `#[derive(Form)]` (slice 8.4B).
+//! Unit-style tests for `#[derive(Form)]`.
 //!
-//! No DB required — these test the macro codegen + the
-//! `FormStruct::parse` impl in isolation. Live integration with the
-//! axum extractor and the CSRF middleware follows in slice 8.4C's
-//! live tests.
+//! No DB required — tests macro codegen + multi-error `FormErrors` collection.
 
 use std::collections::HashMap;
 
-use rustango::forms::{FormError, FormStruct};
+use rustango::forms::Form;
 use rustango::Form;
 
 #[derive(Form, Debug, PartialEq)]
@@ -21,37 +18,26 @@ pub struct CreateItemForm {
 }
 
 fn payload(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-    pairs
-        .iter()
-        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-        .collect()
+    pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
 }
 
 #[test]
 fn parses_minimal_payload() {
     let form = payload(&[("name", "alice"), ("age", "30")]);
     let parsed = CreateItemForm::parse(&form).unwrap();
-    assert_eq!(
-        parsed,
-        CreateItemForm {
-            name: "alice".into(),
-            age: 30,
-            active: false, // checkbox absent → false
-            email: None,   // Option<String> absent → None
-        }
-    );
+    assert_eq!(parsed, CreateItemForm {
+        name: "alice".into(),
+        age: 30,
+        active: false,
+        email: None,
+    });
 }
 
 #[test]
 fn parses_full_payload_with_checkbox_and_optional() {
-    let form = payload(&[
-        ("name", "bob"),
-        ("age", "42"),
-        ("active", "on"),
-        ("email", "bob@example.com"),
-    ]);
+    let form = payload(&[("name", "bob"), ("age", "42"), ("active", "on"), ("email", "bob@example.com")]);
     let parsed = CreateItemForm::parse(&form).unwrap();
-    assert_eq!(parsed.active, true);
+    assert!(parsed.active);
     assert_eq!(parsed.email.as_deref(), Some("bob@example.com"));
 }
 
@@ -63,67 +49,52 @@ fn empty_optional_string_becomes_none() {
 }
 
 #[test]
-fn missing_required_field_errors_with_field_name() {
+fn missing_required_field_collects_error() {
     let form = payload(&[("age", "10")]);
-    let err = CreateItemForm::parse(&form).unwrap_err();
-    match err {
-        FormError::Missing { field } => assert_eq!(field, "name"),
-        other => panic!("expected Missing(name), got {other:?}"),
-    }
+    let errors = CreateItemForm::parse(&form).unwrap_err();
+    let msgs = errors.get("name");
+    assert!(!msgs.is_empty(), "expected error for 'name', got none");
+    assert!(msgs[0].contains("required"), "unexpected message: {}", msgs[0]);
 }
 
 #[test]
-fn unparseable_int_errors_with_value_and_detail() {
+fn unparseable_int_collects_error() {
     let form = payload(&[("name", "dave"), ("age", "twelve")]);
-    let err = CreateItemForm::parse(&form).unwrap_err();
-    match err {
-        FormError::Parse {
-            field, value, ty, ..
-        } => {
-            assert_eq!(field, "age");
-            assert_eq!(value, "twelve");
-            assert_eq!(ty, "i32");
-        }
-        other => panic!("expected Parse(age), got {other:?}"),
-    }
+    let errors = CreateItemForm::parse(&form).unwrap_err();
+    let msgs = errors.get("age");
+    assert!(!msgs.is_empty(), "expected error for 'age'");
+    assert!(msgs[0].to_lowercase().contains("i32") || msgs[0].to_lowercase().contains("valid"),
+        "unexpected message: {}", msgs[0]);
 }
 
 #[test]
-fn min_length_validator_fires() {
-    let form = payload(&[("name", ""), ("age", "10")]);
-    // name="" is treated as missing for required String fields, so
-    // we expect Missing rather than Parse-for-min_length here.
-    // To exercise min_length proper, we'd need a min_length > 1 with
-    // a 1-char string.
-    let err = CreateItemForm::parse(&form).unwrap_err();
-    assert!(matches!(err, FormError::Missing { .. }));
+fn multiple_field_errors_collected() {
+    // Both name (missing) and age (bad type) fail — both should be in errors.
+    let form = payload(&[("age", "not-a-number")]);
+    let errors = CreateItemForm::parse(&form).unwrap_err();
+    assert!(!errors.get("name").is_empty(), "expected name error");
+    assert!(!errors.get("age").is_empty(), "expected age error");
 }
 
 #[test]
 fn max_length_validator_fires() {
     let long = "x".repeat(100);
     let form = payload(&[("name", long.as_str()), ("age", "10")]);
-    let err = CreateItemForm::parse(&form).unwrap_err();
-    match err {
-        FormError::Parse { field, detail, .. } => {
-            assert_eq!(field, "name");
-            assert!(detail.contains("max_length"), "{detail}");
-        }
-        other => panic!("expected Parse(name) max_length, got {other:?}"),
-    }
+    let errors = CreateItemForm::parse(&form).unwrap_err();
+    let msgs = errors.get("name");
+    assert!(!msgs.is_empty(), "expected name error");
+    assert!(msgs[0].contains("100") || msgs[0].to_lowercase().contains("most"),
+        "unexpected message: {}", msgs[0]);
 }
 
 #[test]
-fn min_max_int_validators_fire() {
+fn max_int_validator_fires() {
     let form = payload(&[("name", "x"), ("age", "999")]);
-    let err = CreateItemForm::parse(&form).unwrap_err();
-    match err {
-        FormError::Parse { field, detail, .. } => {
-            assert_eq!(field, "age");
-            assert!(detail.contains("max"), "{detail}");
-        }
-        other => panic!("expected Parse(age) max, got {other:?}"),
-    }
+    let errors = CreateItemForm::parse(&form).unwrap_err();
+    let msgs = errors.get("age");
+    assert!(!msgs.is_empty(), "expected age error");
+    assert!(msgs[0].to_lowercase().contains("150") || msgs[0].to_lowercase().contains("less"),
+        "unexpected message: {}", msgs[0]);
 }
 
 #[test]

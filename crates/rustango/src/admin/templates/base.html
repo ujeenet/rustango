@@ -32,6 +32,8 @@ small { color: #888; font-weight: normal; }
 em { color: #888; }
 input[type=text], input[type=number], input[type=date], input[type=datetime-local], input[type=search], textarea { width: 100%; box-sizing: border-box; padding: .25rem .4rem; font: inherit; }
 textarea { min-height: 4rem; }
+input:invalid, textarea:invalid { border-color: #e55; outline-color: #e55; }
+input:invalid + small, textarea:invalid + small { color: #c00; }
 .error { background: #fee; border: 1px solid #f88; padding: .5rem .75rem; border-radius: 4px; }
 .muted { color: #aaa; }
 .search { display: flex; gap: .5rem; align-items: center; margin: .5rem 0; }

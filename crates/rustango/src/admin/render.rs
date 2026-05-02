@@ -223,7 +223,7 @@ pub(crate) fn render_value_for_input(row: &PgRow, field: &FieldSchema) -> String
 pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) -> String {
     let name = escape(field.name);
     let val = escape(value);
-    let required = if field.nullable || field.ty == FieldType::Bool {
+    let required = if field.nullable || field.ty == FieldType::Bool || field.auto || field.primary_key {
         ""
     } else {
         " required"

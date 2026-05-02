@@ -43,6 +43,10 @@ pub struct FieldSnapshot {
     /// serialize when `false` so older snapshots stay diff-clean.
     #[serde(skip_serializing_if = "is_false", default)]
     pub auto: bool,
+    /// `true` when `#[rustango(unique)]` was declared. Skipped on
+    /// serialize when `false` to keep snapshots diff-clean.
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub unique: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub fk: Option<RelationSnapshot>,
 }
@@ -161,6 +165,7 @@ impl FieldSnapshot {
             max: f.max,
             default: f.default.map(str::to_owned),
             auto: f.auto,
+            unique: f.unique,
             fk,
         }
     }
