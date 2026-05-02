@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer", "cache"]
+default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -47,6 +47,11 @@ serializer = ["forms"]
 # `NullCache` (no-op) and `InMemoryCache` (tokio RwLock + TTL). Redis
 # backend is behind the separate `cache-redis` feature.
 cache = ["dep:async-trait", "dep:tokio"]
+
+# Signals layer (`rustango::signals`) — Django-shape pre_save / post_save
+# / pre_delete / post_delete async dispatch. Receivers register globally
+# per model type; senders fire signals after write paths.
+signals = ["dep:tokio"]
 
 # Redis cache backend (`rustango::cache::RedisCache`). Adds the `redis`
 # async connection-manager client. Implies `cache`.

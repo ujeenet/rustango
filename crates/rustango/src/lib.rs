@@ -44,6 +44,11 @@ pub mod serializer;
 #[cfg(feature = "cache")]
 pub mod cache;
 
+/// Django-shape model signals — [`signals::connect_post_save`] etc.
+/// Receivers register globally per model type and run sequentially.
+#[cfg(feature = "signals")]
+pub mod signals;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
