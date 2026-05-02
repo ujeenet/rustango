@@ -108,4 +108,33 @@ impl Cache for RedisCache {
             .await
             .map_err(|e| CacheError::Connection(e.to_string()))
     }
+
+    async fn incr(
+        &self,
+        key: &str,
+        by: i64,
+        ttl: Option<Duration>,
+    ) -> Result<i64, CacheError> {
+        let mut conn = self.conn.clone();
+        let new: i64 = redis::cmd("INCRBY")
+            .arg(key)
+            .arg(by)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| CacheError::Connection(e.to_string()))?;
+        // EXPIRE on first creation only — INCR-then-EXPIRE on every call
+        // would reset the window each tick, breaking fixed-window rate
+        // limiters. The NX flag is exactly the "set TTL only if no TTL"
+        // semantic we want.
+        if let Some(secs) = self.effective_ttl(ttl) {
+            let _: i64 = redis::cmd("EXPIRE")
+                .arg(key)
+                .arg(secs)
+                .arg("NX")
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| CacheError::Connection(e.to_string()))?;
+        }
+        Ok(new)
+    }
 }

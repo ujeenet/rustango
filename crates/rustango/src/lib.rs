@@ -58,6 +58,13 @@ pub mod cors;
 #[cfg(feature = "admin")]
 pub mod rate_limit;
 
+/// Cache-backed rate limiting middleware — fixed-window counter via the
+/// [`cache::Cache`] trait. Pair with `RedisCache` for distributed
+/// enforcement across multiple processes / replicas. See
+/// [`rate_limit_cache::CacheRateLimitLayer`].
+#[cfg(all(feature = "admin", feature = "cache"))]
+pub mod rate_limit_cache;
+
 /// Health check endpoints — `/health` (liveness) + `/ready` (readiness).
 /// See [`health::health_router`].
 #[cfg(feature = "admin")]

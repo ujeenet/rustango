@@ -204,3 +204,36 @@ async fn boxed_cache_null_via_dyn() {
     cache.set("k", "v", None).await.unwrap();
     assert!(cache.get("k").await.unwrap().is_none());
 }
+
+// ------------------------------------------------------------------ Cache::incr default impl
+
+#[tokio::test]
+async fn incr_starts_at_by_when_missing() {
+    let c = InMemoryCache::new();
+    assert_eq!(c.incr("counter", 1, None).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn incr_increments_each_call() {
+    let c = InMemoryCache::new();
+    assert_eq!(c.incr("counter", 1, None).await.unwrap(), 1);
+    assert_eq!(c.incr("counter", 1, None).await.unwrap(), 2);
+    assert_eq!(c.incr("counter", 1, None).await.unwrap(), 3);
+}
+
+#[tokio::test]
+async fn incr_supports_arbitrary_delta() {
+    let c = InMemoryCache::new();
+    assert_eq!(c.incr("counter", 5, None).await.unwrap(), 5);
+    assert_eq!(c.incr("counter", 3, None).await.unwrap(), 8);
+    assert_eq!(c.incr("counter", -2, None).await.unwrap(), 6);
+}
+
+#[tokio::test]
+async fn incr_resets_on_non_integer_value() {
+    let c = InMemoryCache::new();
+    c.set("counter", "not-a-number", None).await.unwrap();
+    // Default impl parses the existing value; non-int parses to 0, so the
+    // next incr returns `by`.
+    assert_eq!(c.incr("counter", 7, None).await.unwrap(), 7);
+}

@@ -91,6 +91,34 @@ pub trait Cache: Send + Sync + 'static {
 
     /// Remove all entries from the cache.
     async fn clear(&self) -> Result<(), CacheError>;
+
+    /// Atomically increment the integer counter at `key` by `by` and
+    /// return the new value. The default implementation is a non-atomic
+    /// get + parse + set — fine for single-process use. `RedisCache`
+    /// overrides with `INCRBY` so multi-replica rate limiters can rely
+    /// on it across processes.
+    ///
+    /// `ttl` is applied on every call by the default impl; backends with
+    /// native counters typically only set TTL on first creation. Treat
+    /// `ttl` as a hint, not a guarantee.
+    ///
+    /// Returns 0 if the existing value isn't a valid integer (the entry
+    /// is overwritten with `by` in that case).
+    async fn incr(
+        &self,
+        key: &str,
+        by: i64,
+        ttl: Option<Duration>,
+    ) -> Result<i64, CacheError> {
+        let cur = self
+            .get(key)
+            .await?
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let new = cur.saturating_add(by);
+        self.set(key, &new.to_string(), ttl).await?;
+        Ok(new)
+    }
 }
 
 /// `Arc<dyn Cache>` alias — the standard way to share a cache instance.
