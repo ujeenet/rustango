@@ -9,8 +9,9 @@
 use std::marker::PhantomData;
 
 use crate::core::{
-    Assignment, DeleteQuery, Filter, Model, ModelSchema, Op, QueryError, SelectQuery, SqlValue,
-    TypedAssignment, TypedExpr, UpdateQuery, WhereExpr,
+    AggregateExpr, AggregateQuery, Assignment, DeleteQuery, Filter, Model, ModelSchema, Op,
+    OrderClause, QueryError, SelectQuery, SqlValue, TypedAssignment, TypedExpr, UpdateQuery,
+    WhereExpr,
 };
 
 /// A lazy builder for a `SELECT` over `T`.
@@ -233,6 +234,22 @@ impl<T: Model> QuerySet<T> {
         UpdateBuilder {
             qs: self,
             set: Vec::new(),
+        }
+    }
+
+    /// Start an [`AggregateBuilder`] carrying this queryset's filters as the
+    /// WHERE clause. Chain `.group_by`, `.annotate`, `.having`, `.order_by`,
+    /// `.limit`, `.offset` then call `.compile()` to get an [`AggregateQuery`].
+    #[must_use]
+    pub fn aggregate(self) -> AggregateBuilder<T> {
+        AggregateBuilder {
+            qs: self,
+            group_by: Vec::new(),
+            aggregates: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
         }
     }
 }
@@ -460,4 +477,85 @@ fn resolve_assignment(
         column: field.column,
         value: raw.value,
     })
+}
+
+// ------------------------------------------------------------------ AggregateBuilder
+
+/// Fluent builder for [`AggregateQuery`]. Constructed via [`QuerySet::aggregate`].
+pub struct AggregateBuilder<T: Model> {
+    qs: QuerySet<T>,
+    group_by: Vec<&'static str>,
+    aggregates: Vec<(&'static str, AggregateExpr)>,
+    having: Option<WhereExpr>,
+    order_by: Vec<(&'static str, bool)>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+impl<T: Model> AggregateBuilder<T> {
+    /// Add a `GROUP BY` column. Call multiple times to group by multiple columns.
+    #[must_use]
+    pub fn group_by(mut self, column: &'static str) -> Self {
+        self.group_by.push(column);
+        self
+    }
+
+    /// Add an aggregate expression under `alias` (e.g. `"post_count"`).
+    #[must_use]
+    pub fn annotate(mut self, alias: &'static str, expr: AggregateExpr) -> Self {
+        self.aggregates.push((alias, expr));
+        self
+    }
+
+    /// Add a `HAVING` predicate. Multiple calls AND-join.
+    #[must_use]
+    pub fn having<E: Into<crate::core::TypedExpr<T>>>(mut self, predicate: E) -> Self {
+        let expr = predicate.into().into_expr();
+        match self.having {
+            None => self.having = Some(expr),
+            Some(ref mut existing) => existing.push_and(expr),
+        }
+        self
+    }
+
+    /// Add `ORDER BY` columns. `desc = true` → DESC.
+    #[must_use]
+    pub fn order_by(mut self, items: &[(&'static str, bool)]) -> Self {
+        self.order_by.extend_from_slice(items);
+        self
+    }
+
+    /// Set `LIMIT`.
+    #[must_use]
+    pub fn limit(mut self, n: i64) -> Self {
+        self.limit = Some(n);
+        self
+    }
+
+    /// Set `OFFSET`.
+    #[must_use]
+    pub fn offset(mut self, n: i64) -> Self {
+        self.offset = Some(n);
+        self
+    }
+
+    /// Compile to an [`AggregateQuery`] IR.
+    ///
+    /// # Errors
+    /// Returns [`QueryError`] if any filter or having clause names an unknown field.
+    pub fn compile(self) -> Result<AggregateQuery, QueryError> {
+        let model = T::SCHEMA;
+        let where_clause = resolve_pending(model, self.qs.pending)?;
+        let order_by = self.order_by.into_iter().map(|(col, desc)| OrderClause { column: col, desc }).collect();
+        Ok(AggregateQuery {
+            model,
+            where_clause,
+            group_by: self.group_by,
+            aggregates: self.aggregates,
+            having: self.having,
+            order_by,
+            limit: self.limit,
+            offset: self.offset,
+        })
+    }
 }

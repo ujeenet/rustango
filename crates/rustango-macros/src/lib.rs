@@ -677,6 +677,9 @@ struct CollectedFields {
     /// `Assignment` constructors for every non-PK column. Drives the
     /// UPDATE branch of `save()`.
     update_assignments: Vec<TokenStream2>,
+    /// Column name literals (`"col"`) for every non-PK, non-auto_now_add column.
+    /// Drives the `ON CONFLICT ... DO UPDATE SET` clause in `upsert_on`.
+    upsert_update_columns: Vec<TokenStream2>,
     primary_key: Option<(syn::Ident, String)>,
     column_entries: Vec<ColumnEntry>,
     /// Rust-side field names, in declaration order. Used to validate
@@ -725,6 +728,7 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
         has_auto: false,
         pk_is_auto: false,
         update_assignments: Vec::with_capacity(cap),
+        upsert_update_columns: Vec::with_capacity(cap),
         primary_key: None,
         column_entries: Vec::with_capacity(cap),
         field_names: Vec::with_capacity(cap),
@@ -847,6 +851,7 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
                     ),
                 }
             });
+            out.upsert_update_columns.push(quote!(#column));
         } else {
             out.update_assignments.push(quote! {
                 ::rustango::core::Assignment {
@@ -856,6 +861,7 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
                     ),
                 }
             });
+            out.upsert_update_columns.push(quote!(#column));
         }
         out.column_entries.push(ColumnEntry {
             ident: ident.clone(),
@@ -1284,6 +1290,18 @@ fn inherent_impl_tokens(
             .expect("pk_is_auto implies primary_key is Some");
         let pk_column_lit = pk_column.as_str();
         let assignments = &fields.update_assignments;
+        let upsert_cols = &fields.upsert_update_columns;
+        let upsert_pushes = &fields.insert_pushes;
+        let upsert_returning = &fields.returning_cols;
+        let upsert_auto_assigns = &fields.auto_assigns;
+        let conflict_clause = if fields.upsert_update_columns.is_empty() {
+            quote!(::rustango::core::ConflictClause::DoNothing)
+        } else {
+            quote!(::rustango::core::ConflictClause::DoUpdate {
+                target: ::std::vec![#pk_column_lit],
+                update_columns: ::std::vec![ #( #upsert_cols ),* ],
+            })
+        };
         Some(quote! {
             /// Insert this row if its `Auto<T>` primary key is
             /// `Unset`, otherwise update the existing row matching the
@@ -1368,6 +1386,53 @@ fn inherent_impl_tokens(
             #executor_where
             {
                 ::rustango::audit::with_source(source, self.save_on(_executor)).await
+            }
+
+            /// Insert this row or update it in-place if the primary key already
+            /// exists — single round-trip via `INSERT … ON CONFLICT (pk) DO UPDATE`.
+            ///
+            /// With `Auto::Unset` PK the server assigns a new key and no conflict
+            /// can occur (equivalent to `insert`). With `Auto::Set` PK the row is
+            /// inserted if absent or all non-PK columns are overwritten if present.
+            ///
+            /// # Errors
+            /// As [`Self::insert_on`].
+            pub async fn upsert(
+                &mut self,
+                pool: &::rustango::sql::sqlx::PgPool,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                self.upsert_on(pool).await
+            }
+
+            /// Like [`Self::upsert`] but accepts any sqlx executor.
+            /// See [`Self::save_on`] for tenancy-scoped rationale.
+            ///
+            /// # Errors
+            /// As [`Self::upsert`].
+            pub async fn upsert_on #executor_generics (
+                &mut self,
+                #executor_param,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
+            #executor_where
+            {
+                let mut _columns: ::std::vec::Vec<&'static str> =
+                    ::std::vec::Vec::new();
+                let mut _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                    ::std::vec::Vec::new();
+                #( #upsert_pushes )*
+                let query = ::rustango::core::InsertQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    columns: _columns,
+                    values: _values,
+                    returning: ::std::vec![ #( #upsert_returning ),* ],
+                    on_conflict: ::core::option::Option::Some(#conflict_clause),
+                };
+                let _returning_row = ::rustango::sql::insert_returning_on(
+                    #executor_passes_to_data_write,
+                    &query,
+                ).await?;
+                #( #upsert_auto_assigns )*
+                ::core::result::Result::Ok(())
             }
         })
     } else {
@@ -1575,6 +1640,7 @@ fn inherent_impl_tokens(
                     columns: _columns,
                     values: _values,
                     returning: ::std::vec![ #( #returning_cols ),* ],
+                    on_conflict: ::core::option::Option::None,
                 };
                 let _returning_row = ::rustango::sql::insert_returning_on(
                     #executor_passes_to_data_write,
@@ -1633,6 +1699,7 @@ fn inherent_impl_tokens(
                     columns: ::std::vec![ #( #insert_columns ),* ],
                     values: ::std::vec![ #( #insert_values ),* ],
                     returning: ::std::vec::Vec::new(),
+                    on_conflict: ::core::option::Option::None,
                 };
                 ::rustango::sql::insert_on(_executor, &query).await
             }
@@ -1718,6 +1785,7 @@ fn inherent_impl_tokens(
                     columns: _columns,
                     rows: _all_rows,
                     returning: ::std::vec![ #( #returning_cols ),* ],
+                    on_conflict: ::core::option::Option::None,
                 };
                 let _returned = ::rustango::sql::bulk_insert_on(
                     #executor_passes_to_data_write,
@@ -1789,6 +1857,7 @@ fn inherent_impl_tokens(
                     columns: ::std::vec![ #( #cols_all ),* ],
                     rows: _all_rows,
                     returning: ::std::vec::Vec::new(),
+                    on_conflict: ::core::option::Option::None,
                 };
                 let _ = ::rustango::sql::bulk_insert_on(_executor, &_query).await?;
                 ::core::result::Result::Ok(())

@@ -56,9 +56,24 @@ pub trait Column: Copy + 'static {
         TypedFilter::scalar(Self::COLUMN, Op::Gte, value.into().into())
     }
 
-    /// `column LIKE value` — case-sensitive on Postgres.
+    /// `column LIKE value` — case-sensitive.
     fn like<V: Into<Self::Value>>(self, value: V) -> TypedFilter<Self::Model> {
         TypedFilter::scalar(Self::COLUMN, Op::Like, value.into().into())
+    }
+
+    /// `column NOT LIKE value` — case-sensitive.
+    fn not_like<V: Into<Self::Value>>(self, value: V) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(Self::COLUMN, Op::NotLike, value.into().into())
+    }
+
+    /// `column ILIKE value` — case-insensitive (Postgres).
+    fn ilike<V: Into<Self::Value>>(self, value: V) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(Self::COLUMN, Op::ILike, value.into().into())
+    }
+
+    /// `column NOT ILIKE value` — case-insensitive (Postgres).
+    fn not_ilike<V: Into<Self::Value>>(self, value: V) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(Self::COLUMN, Op::NotILike, value.into().into())
     }
 
     /// `column IS NULL`.
@@ -80,6 +95,69 @@ pub trait Column: Copy + 'static {
     {
         let list: Vec<SqlValue> = values.into_iter().map(|v| v.into().into()).collect();
         TypedFilter::scalar(Self::COLUMN, Op::In, SqlValue::List(list))
+    }
+
+    /// `column NOT IN (v1, v2, …)`.
+    fn not_in<V, I>(self, values: I) -> TypedFilter<Self::Model>
+    where
+        V: Into<Self::Value>,
+        I: IntoIterator<Item = V>,
+    {
+        let list: Vec<SqlValue> = values.into_iter().map(|v| v.into().into()).collect();
+        TypedFilter::scalar(Self::COLUMN, Op::NotIn, SqlValue::List(list))
+    }
+
+    /// `column BETWEEN lo AND hi`. Both bounds are inclusive.
+    fn between<V: Into<Self::Value>>(self, lo: V, hi: V) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(
+            Self::COLUMN,
+            Op::Between,
+            SqlValue::List(vec![lo.into().into(), hi.into().into()]),
+        )
+    }
+
+    /// `column IS DISTINCT FROM value` — null-safe inequality.
+    fn is_distinct_from<V: Into<Self::Value>>(self, value: V) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(Self::COLUMN, Op::IsDistinctFrom, value.into().into())
+    }
+
+    /// `column IS NOT DISTINCT FROM value` — null-safe equality.
+    fn is_not_distinct_from<V: Into<Self::Value>>(self, value: V) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(Self::COLUMN, Op::IsNotDistinctFrom, value.into().into())
+    }
+
+    /// JSONB `@>` — column contains the given JSON value.
+    /// Bind a `serde_json::Value`.
+    fn json_contains(self, value: serde_json::Value) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(Self::COLUMN, Op::JsonContains, SqlValue::Json(value))
+    }
+
+    /// JSONB `<@` — column is contained by the given JSON value.
+    fn json_contained_by(self, value: serde_json::Value) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(Self::COLUMN, Op::JsonContainedBy, SqlValue::Json(value))
+    }
+
+    /// JSONB `?` — the key exists as a top-level key in the column.
+    fn json_has_key(self, key: impl Into<String>) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(Self::COLUMN, Op::JsonHasKey, SqlValue::String(key.into()))
+    }
+
+    /// JSONB `?|` — any of the given keys exist as top-level keys.
+    fn json_has_any_key<I: IntoIterator<Item = impl Into<String>>>(
+        self,
+        keys: I,
+    ) -> TypedFilter<Self::Model> {
+        let list: Vec<SqlValue> = keys.into_iter().map(|k| SqlValue::String(k.into())).collect();
+        TypedFilter::scalar(Self::COLUMN, Op::JsonHasAnyKey, SqlValue::List(list))
+    }
+
+    /// JSONB `?&` — all of the given keys exist as top-level keys.
+    fn json_has_all_keys<I: IntoIterator<Item = impl Into<String>>>(
+        self,
+        keys: I,
+    ) -> TypedFilter<Self::Model> {
+        let list: Vec<SqlValue> = keys.into_iter().map(|k| SqlValue::String(k.into())).collect();
+        TypedFilter::scalar(Self::COLUMN, Op::JsonHasAllKeys, SqlValue::List(list))
     }
 
     /// `SET column = value` for an UPDATE.
@@ -132,6 +210,12 @@ impl<M: Model> TypedFilter<M> {
     #[must_use]
     pub fn or<E: Into<TypedExpr<M>>>(self, rhs: E) -> TypedExpr<M> {
         TypedExpr::from(self).or(rhs)
+    }
+
+    /// Negate this predicate — emits `NOT (col op val)`.
+    #[must_use]
+    pub fn not(self) -> TypedExpr<M> {
+        TypedExpr::from(self).not()
     }
 }
 
@@ -220,6 +304,15 @@ impl<M: Model> TypedExpr<M> {
         };
         Self {
             inner,
+            _model: PhantomData,
+        }
+    }
+
+    /// Negate this expression — emits `NOT (…)`.
+    #[must_use]
+    pub fn not(self) -> Self {
+        Self {
+            inner: WhereExpr::Not(Box::new(self.inner)),
             _model: PhantomData,
         }
     }

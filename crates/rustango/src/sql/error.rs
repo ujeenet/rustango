@@ -13,6 +13,27 @@ pub enum SqlError {
     #[error("`Op::IsNull` requires `SqlValue::Bool` (true = IS NULL, false = IS NOT NULL)")]
     IsNullRequiresBool,
 
+    /// `Op::Between` requires `SqlValue::List` with exactly two elements `[lo, hi]`.
+    #[error("`Op::Between` requires `SqlValue::List([lo, hi])` with exactly two elements")]
+    BetweenRequiresTwoElementList,
+
+    /// `Op::JsonHasKey` requires `SqlValue::String`.
+    #[error("`Op::JsonHasKey` requires `SqlValue::String`")]
+    JsonKeyRequiresString,
+
+    /// `Op::JsonHasAnyKey` / `Op::JsonHasAllKeys` require `SqlValue::List` of strings.
+    #[error("`Op::JsonHasAnyKey` / `Op::JsonHasAllKeys` require `SqlValue::List` of strings")]
+    JsonKeysRequiresList,
+
+    /// `Op::JsonContains` / `Op::JsonContainedBy` require `SqlValue::Json`.
+    #[error("`Op::JsonContains` / `Op::JsonContainedBy` require `SqlValue::Json`")]
+    JsonOpRequiresJson,
+
+    /// `BulkUpdateQuery` was used on a model with no `#[rustango(primary_key)]`
+    /// field — the WHERE clause cannot be formed.
+    #[error("bulk UPDATE requires a primary key on the model")]
+    MissingPrimaryKey,
+
     /// `Op::In` with an empty list — Postgres does not accept `IN ()`.
     #[error("empty `IN` list is not supported")]
     EmptyInList,

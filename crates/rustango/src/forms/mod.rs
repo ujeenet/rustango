@@ -493,6 +493,7 @@ impl ModelForm {
                 columns,
                 values,
                 returning: vec![pk_field.column],
+                on_conflict: None,
             };
             let row = crate::sql::insert_returning(pool, &query).await?;
             use crate::sql::sqlx::Row as _;

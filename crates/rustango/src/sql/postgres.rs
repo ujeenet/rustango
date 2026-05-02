@@ -3,8 +3,9 @@
 use std::fmt::Write as _;
 
 use crate::core::{
-    BulkInsertQuery, CountQuery, DeleteQuery, FieldType, Filter, InsertQuery, ModelSchema, Op,
-    SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
+    AggregateExpr, AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery,
+    DeleteQuery, FieldType, Filter, InsertQuery, ModelSchema, Op, OrderClause, SearchClause,
+    SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
 
 use super::{CompiledStatement, Dialect, SqlError};
@@ -161,6 +162,139 @@ impl Dialect for Postgres {
         Ok(CompiledStatement { sql, params })
     }
 
+    fn compile_aggregate(&self, query: &AggregateQuery) -> Result<CompiledStatement, SqlError> {
+        let mut sql = String::from("SELECT ");
+        let mut params: Vec<SqlValue> = Vec::new();
+
+        // GROUP BY columns first, then aggregate expressions.
+        for (i, col) in query.group_by.iter().enumerate() {
+            if i > 0 { sql.push_str(", "); }
+            write_ident(&mut sql, col);
+        }
+        for (i, (alias, expr)) in query.aggregates.iter().enumerate() {
+            if !query.group_by.is_empty() || i > 0 { sql.push_str(", "); }
+            match expr {
+                AggregateExpr::Count(None) => sql.push_str("COUNT(*)"),
+                AggregateExpr::Count(Some(col)) => {
+                    sql.push_str("COUNT(");
+                    write_ident(&mut sql, col);
+                    sql.push(')');
+                }
+                AggregateExpr::Sum(col) => {
+                    sql.push_str("SUM(");
+                    write_ident(&mut sql, col);
+                    sql.push(')');
+                }
+                AggregateExpr::Avg(col) => {
+                    sql.push_str("AVG(");
+                    write_ident(&mut sql, col);
+                    sql.push(')');
+                }
+                AggregateExpr::Max(col) => {
+                    sql.push_str("MAX(");
+                    write_ident(&mut sql, col);
+                    sql.push(')');
+                }
+                AggregateExpr::Min(col) => {
+                    sql.push_str("MIN(");
+                    write_ident(&mut sql, col);
+                    sql.push(')');
+                }
+            }
+            sql.push_str(" AS ");
+            write_ident(&mut sql, alias);
+        }
+
+        sql.push_str(" FROM ");
+        write_ident(&mut sql, query.model.table);
+        write_where(&mut sql, &mut params, &query.where_clause, Some(query.model))?;
+
+        if !query.group_by.is_empty() {
+            sql.push_str(" GROUP BY ");
+            for (i, col) in query.group_by.iter().enumerate() {
+                if i > 0 { sql.push_str(", "); }
+                write_ident(&mut sql, col);
+            }
+        }
+
+        if let Some(having) = &query.having {
+            sql.push_str(" HAVING ");
+            write_where_expr(&mut sql, &mut params, having, None, Some(query.model))?;
+        }
+
+        if !query.order_by.is_empty() {
+            sql.push_str(" ORDER BY ");
+            for (i, clause) in query.order_by.iter().enumerate() {
+                if i > 0 { sql.push_str(", "); }
+                write_ident(&mut sql, clause.column);
+                if clause.desc { sql.push_str(" DESC"); }
+            }
+        }
+        if let Some(n) = query.limit {
+            let _ = write!(sql, " LIMIT {n}");
+        }
+        if let Some(n) = query.offset {
+            let _ = write!(sql, " OFFSET {n}");
+        }
+
+        Ok(CompiledStatement { sql, params })
+    }
+
+    fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError> {
+        if query.rows.is_empty() {
+            return Err(SqlError::EmptyBulkInsert);
+        }
+        if query.update_columns.is_empty() {
+            return Err(SqlError::EmptyUpdateSet);
+        }
+        let pk_field = query.model.primary_key().ok_or(SqlError::MissingPrimaryKey)?;
+
+        // UPDATE "t" SET col1 = __data.col1, col2 = __data.col2
+        // FROM (VALUES ($1, $2, $3), ($4, $5, $6)) AS __data(pk, col1, col2)
+        // WHERE "t".pk = __data.pk
+        let mut sql = String::from("UPDATE ");
+        let mut params: Vec<SqlValue> = Vec::new();
+        write_ident(&mut sql, query.model.table);
+        sql.push_str(" SET ");
+        let mut first = true;
+        for col in &query.update_columns {
+            if !first { sql.push_str(", "); }
+            first = false;
+            write_ident(&mut sql, col);
+            sql.push_str(" = __data.");
+            write_ident(&mut sql, col);
+        }
+        sql.push_str(" FROM (VALUES ");
+        let col_count = 1 + query.update_columns.len(); // pk + update cols
+        let mut first_row = true;
+        for row in &query.rows {
+            if !first_row { sql.push_str(", "); }
+            first_row = false;
+            sql.push('(');
+            for (i, val) in row.iter().enumerate() {
+                if i > 0 { sql.push_str(", "); }
+                params.push(val.clone());
+                let _ = write!(sql, "${}", params.len());
+            }
+            sql.push(')');
+        }
+        sql.push_str(") AS __data(");
+        write_ident(&mut sql, pk_field.column);
+        for col in &query.update_columns {
+            sql.push_str(", ");
+            write_ident(&mut sql, col);
+        }
+        sql.push_str(") WHERE ");
+        write_ident(&mut sql, query.model.table);
+        sql.push('.');
+        write_ident(&mut sql, pk_field.column);
+        sql.push_str(" = __data.");
+        write_ident(&mut sql, pk_field.column);
+
+        let _ = col_count; // suppress unused warning
+        Ok(CompiledStatement { sql, params })
+    }
+
     fn compile_insert(&self, query: &InsertQuery) -> Result<CompiledStatement, SqlError> {
         // `columns.is_empty()` is OK when every column is being filled
         // by a server-side default — typically an `Auto<T>`-only model.
@@ -206,6 +340,10 @@ impl Dialect for Postgres {
                 push_param_typed(&mut sql, &mut params, value.clone(), cast);
             }
             sql.push(')');
+        }
+
+        if let Some(conflict) = &query.on_conflict {
+            write_conflict_clause(&mut sql, conflict);
         }
 
         if !query.returning.is_empty() {
@@ -304,6 +442,10 @@ impl Dialect for Postgres {
             }
         }
 
+        if let Some(conflict) = &query.on_conflict {
+            write_conflict_clause(&mut sql, conflict);
+        }
+
         if !query.returning.is_empty() {
             sql.push_str(" RETURNING ");
             let mut first = true;
@@ -394,6 +536,12 @@ fn write_where_expr(
             }
             write_joined(sql, params, items, " OR ", qualify_with, model)
         }
+        WhereExpr::Not(child) => {
+            sql.push_str("NOT (");
+            write_where_expr(sql, params, child, qualify_with, model)?;
+            sql.push(')');
+            Ok(())
+        }
     }
 }
 
@@ -432,7 +580,7 @@ fn write_child(
         WhereExpr::Predicate(filter) => {
             write_filter_qualified(sql, params, filter, qualify_with, model)
         }
-        WhereExpr::And(_) | WhereExpr::Or(_) => {
+        WhereExpr::And(_) | WhereExpr::Or(_) | WhereExpr::Not(_) => {
             sql.push('(');
             write_where_expr(sql, params, expr, qualify_with, model)?;
             sql.push(')');
@@ -534,6 +682,18 @@ fn write_filter_qualified(
             sql.push_str(" LIKE ");
             push_param_typed(sql, params, filter.value.clone(), cast);
         }
+        Op::NotLike => {
+            sql.push_str(" NOT LIKE ");
+            push_param_typed(sql, params, filter.value.clone(), cast);
+        }
+        Op::ILike => {
+            sql.push_str(" ILIKE ");
+            push_param_typed(sql, params, filter.value.clone(), cast);
+        }
+        Op::NotILike => {
+            sql.push_str(" NOT ILIKE ");
+            push_param_typed(sql, params, filter.value.clone(), cast);
+        }
         Op::In => {
             let SqlValue::List(elements) = &filter.value else {
                 return Err(SqlError::InRequiresList);
@@ -552,11 +712,97 @@ fn write_filter_qualified(
             }
             sql.push(')');
         }
+        Op::NotIn => {
+            let SqlValue::List(elements) = &filter.value else {
+                return Err(SqlError::InRequiresList);
+            };
+            if elements.is_empty() {
+                return Err(SqlError::EmptyInList);
+            }
+            sql.push_str(" NOT IN (");
+            let mut first = true;
+            for elem in elements {
+                if !first {
+                    sql.push_str(", ");
+                }
+                first = false;
+                push_param_typed(sql, params, elem.clone(), cast);
+            }
+            sql.push(')');
+        }
+        Op::Between => {
+            let SqlValue::List(bounds) = &filter.value else {
+                return Err(SqlError::BetweenRequiresTwoElementList);
+            };
+            if bounds.len() != 2 {
+                return Err(SqlError::BetweenRequiresTwoElementList);
+            }
+            sql.push_str(" BETWEEN ");
+            push_param_typed(sql, params, bounds[0].clone(), cast);
+            sql.push_str(" AND ");
+            push_param_typed(sql, params, bounds[1].clone(), cast);
+        }
         Op::IsNull => {
             let SqlValue::Bool(is_null) = filter.value else {
                 return Err(SqlError::IsNullRequiresBool);
             };
             sql.push_str(if is_null { " IS NULL" } else { " IS NOT NULL" });
+        }
+        Op::IsDistinctFrom => {
+            sql.push_str(" IS DISTINCT FROM ");
+            push_param_typed(sql, params, filter.value.clone(), cast);
+        }
+        Op::IsNotDistinctFrom => {
+            sql.push_str(" IS NOT DISTINCT FROM ");
+            push_param_typed(sql, params, filter.value.clone(), cast);
+        }
+        Op::JsonContains => {
+            let SqlValue::Json(_) = &filter.value else {
+                return Err(SqlError::JsonOpRequiresJson);
+            };
+            params.push(filter.value.clone());
+            let _ = write!(sql, " @> ${}::jsonb", params.len());
+        }
+        Op::JsonContainedBy => {
+            let SqlValue::Json(_) = &filter.value else {
+                return Err(SqlError::JsonOpRequiresJson);
+            };
+            params.push(filter.value.clone());
+            let _ = write!(sql, " <@ ${}::jsonb", params.len());
+        }
+        Op::JsonHasKey => {
+            let SqlValue::String(_) = &filter.value else {
+                return Err(SqlError::JsonKeyRequiresString);
+            };
+            params.push(filter.value.clone());
+            let _ = write!(sql, " ? ${}", params.len());
+        }
+        Op::JsonHasAnyKey => {
+            let SqlValue::List(keys) = &filter.value else {
+                return Err(SqlError::JsonKeysRequiresList);
+            };
+            // Expand as text array: col ?| ARRAY[$1, $2, ...]
+            sql.push_str(" ?| ARRAY[");
+            let mut first = true;
+            for k in keys {
+                if !first { sql.push_str(", "); }
+                first = false;
+                push_param_typed(sql, params, k.clone(), None);
+            }
+            sql.push(']');
+        }
+        Op::JsonHasAllKeys => {
+            let SqlValue::List(keys) = &filter.value else {
+                return Err(SqlError::JsonKeysRequiresList);
+            };
+            sql.push_str(" ?& ARRAY[");
+            let mut first = true;
+            for k in keys {
+                if !first { sql.push_str(", "); }
+                first = false;
+                push_param_typed(sql, params, k.clone(), None);
+            }
+            sql.push(']');
         }
     }
     Ok(())
@@ -601,6 +847,72 @@ fn pg_null_cast_for(model: &ModelSchema, column: &str) -> Option<&'static str> {
         FieldType::Uuid => "UUID",
         FieldType::Json => "JSONB",
     })
+}
+
+/// Compile the WHERE / ORDER BY / LIMIT / OFFSET tail of a `SelectQuery`
+/// into a `CompiledStatement`. The `sql` field starts at the first `WHERE`
+/// keyword (or is empty when there are no filters/search/ordering). `params`
+/// carries the bound values for the WHERE clause in order.
+///
+/// Used by `annotate_count_children_on` to forward the parent queryset's
+/// WHERE / ORDER / LIMIT constraints into the hand-rolled aggregate SQL.
+pub(crate) fn compile_where_order_tail(
+    where_clause: &WhereExpr,
+    search: Option<&SearchClause>,
+    order_by: &[OrderClause],
+    limit: Option<i64>,
+    offset: Option<i64>,
+    qualify_with: Option<&str>,
+    model: Option<&'static ModelSchema>,
+) -> Result<CompiledStatement, SqlError> {
+    let mut sql = String::new();
+    let mut params: Vec<SqlValue> = Vec::new();
+    write_where_with_search_qualified(&mut sql, &mut params, where_clause, search, qualify_with, model)?;
+    if !order_by.is_empty() {
+        sql.push_str(" ORDER BY ");
+        let mut first = true;
+        for clause in order_by {
+            if !first { sql.push_str(", "); }
+            first = false;
+            if let Some(table) = qualify_with {
+                write_ident(&mut sql, table);
+                sql.push('.');
+            }
+            write_ident(&mut sql, clause.column);
+            if clause.desc { sql.push_str(" DESC"); }
+        }
+    }
+    if let Some(n) = limit {
+        let _ = write!(sql, " LIMIT {n}");
+    }
+    if let Some(n) = offset {
+        let _ = write!(sql, " OFFSET {n}");
+    }
+    Ok(CompiledStatement { sql, params })
+}
+
+fn write_conflict_clause(sql: &mut String, conflict: &ConflictClause) {
+    match conflict {
+        ConflictClause::DoNothing => sql.push_str(" ON CONFLICT DO NOTHING"),
+        ConflictClause::DoUpdate { target, update_columns } => {
+            sql.push_str(" ON CONFLICT (");
+            let mut first = true;
+            for col in target {
+                if !first { sql.push_str(", "); }
+                first = false;
+                write_ident(sql, col);
+            }
+            sql.push_str(") DO UPDATE SET ");
+            let mut first = true;
+            for col in update_columns {
+                if !first { sql.push_str(", "); }
+                first = false;
+                write_ident(sql, col);
+                sql.push_str(" = EXCLUDED.");
+                write_ident(sql, col);
+            }
+        }
+    }
 }
 
 fn write_ident(sql: &mut String, name: &str) {

@@ -726,6 +726,7 @@ pub(crate) async fn create_submit(
         columns,
         values,
         returning: vec![pk_field.column],
+        on_conflict: None,
     };
     let row = match crate::sql::insert_returning(&state.pool, &query).await {
         Ok(row) => row,

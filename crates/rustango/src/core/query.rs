@@ -17,11 +17,43 @@ pub enum Op {
     Gte,
     /// Right-hand side must be `SqlValue::List`.
     In,
+    /// Right-hand side must be `SqlValue::List`. Emits `NOT IN (…)`.
+    NotIn,
     /// Case-sensitive `LIKE`. Pattern characters live inside the bound value.
     Like,
+    /// Case-sensitive `NOT LIKE`.
+    NotLike,
+    /// Case-insensitive `ILIKE` (Postgres).
+    ILike,
+    /// Case-insensitive `NOT ILIKE` (Postgres).
+    NotILike,
+    /// Range check. The bound value must be `SqlValue::List([lo, hi])`.
+    /// Emits `col BETWEEN $lo AND $hi`.
+    Between,
     /// Compares against `NULL`. The bound value must be `SqlValue::Bool` —
     /// `true` means `IS NULL`, `false` means `IS NOT NULL`.
     IsNull,
+    /// Null-safe equality: `IS DISTINCT FROM`. Unlike `<>`, this treats
+    /// `NULL` as a comparable value — `NULL IS NOT DISTINCT FROM NULL` is
+    /// `true`. Bind any `SqlValue`.
+    IsDistinctFrom,
+    /// Null-safe equality: `IS NOT DISTINCT FROM`. The inverse of
+    /// [`IsDistinctFrom`](Op::IsDistinctFrom).
+    IsNotDistinctFrom,
+    /// JSONB `@>` — left operand contains the right operand. Bind a
+    /// `SqlValue::Json` value.
+    JsonContains,
+    /// JSONB `<@` — left operand is contained by the right operand.
+    JsonContainedBy,
+    /// JSONB `?` — the text key exists as a top-level key. Bind a
+    /// `SqlValue::String`.
+    JsonHasKey,
+    /// JSONB `?|` — any of the text keys exist. Bind a `SqlValue::List`
+    /// of `SqlValue::String`.
+    JsonHasAnyKey,
+    /// JSONB `?&` — all of the text keys exist. Bind a `SqlValue::List`
+    /// of `SqlValue::String`.
+    JsonHasAllKeys,
 }
 
 /// One predicate in a `WHERE` clause: `column <op> value`. Always
@@ -61,6 +93,8 @@ pub enum WhereExpr {
     /// Any child must match. Empty list = vacuously false (rejected
     /// by the writer).
     Or(Vec<WhereExpr>),
+    /// Logical negation. Emits `NOT (child)`.
+    Not(Box<WhereExpr>),
 }
 
 impl WhereExpr {
@@ -114,7 +148,7 @@ impl WhereExpr {
                 }
                 Some(out)
             }
-            Self::Or(_) => None,
+            Self::Or(_) | Self::Not(_) => None,
         }
     }
 
@@ -141,6 +175,7 @@ impl WhereExpr {
                 }
                 Ok(())
             }
+            Self::Not(child) => child.validate(model),
         }
     }
 }
@@ -226,6 +261,24 @@ pub struct SearchClause {
 /// Compiled `INSERT` of a single row.
 ///
 /// `columns` and `values` are positional: `values[i]` binds to `columns[i]`.
+/// Conflict resolution for `INSERT … ON CONFLICT` (Postgres-specific).
+///
+/// Attach to [`InsertQuery::on_conflict`] or [`BulkInsertQuery::on_conflict`]
+/// to control what happens when the insert would violate a unique constraint.
+#[derive(Debug, Clone)]
+pub enum ConflictClause {
+    /// `ON CONFLICT DO NOTHING` — silently skip duplicate rows.
+    DoNothing,
+    /// `ON CONFLICT (target) DO UPDATE SET col = EXCLUDED.col` for each
+    /// column in `update_columns`. `target` names the column(s) whose
+    /// uniqueness constraint defines the conflict (typically the PK or a
+    /// `#[rustango(unique)]` column).
+    DoUpdate {
+        target: Vec<&'static str>,
+        update_columns: Vec<&'static str>,
+    },
+}
+
 /// `returning` names columns the writer should append after `RETURNING` —
 /// used for `Auto<T>` PKs, where the row is inserted with the column
 /// omitted so Postgres' sequence DEFAULT fires, and the assigned value
@@ -239,6 +292,9 @@ pub struct InsertQuery {
     /// executor uses `execute()`. Non-empty = the executor uses
     /// `fetch_one()` and the caller reads the returned row.
     pub returning: Vec<&'static str>,
+    /// Optional `ON CONFLICT` clause. `None` = plain INSERT with no
+    /// conflict handling (errors on constraint violation).
+    pub on_conflict: Option<ConflictClause>,
 }
 
 impl InsertQuery {
@@ -285,6 +341,8 @@ pub struct BulkInsertQuery {
     pub columns: Vec<&'static str>,
     pub rows: Vec<Vec<SqlValue>>,
     pub returning: Vec<&'static str>,
+    /// Optional `ON CONFLICT` clause applied to every row in the batch.
+    pub on_conflict: Option<ConflictClause>,
 }
 
 impl BulkInsertQuery {
@@ -368,4 +426,56 @@ pub struct DeleteQuery {
 pub struct CountQuery {
     pub model: &'static ModelSchema,
     pub where_clause: WhereExpr,
+}
+
+/// Bulk per-row UPDATE using `UPDATE t SET … FROM (VALUES …)`. One row
+/// in the VALUES clause per input item; the PK identifies which table row
+/// to update.
+///
+/// All rows must supply the same `update_columns` list in the same order.
+/// The PK column must match `model.primary_key()`.
+///
+/// Built via [`crate::sql::bulk_update`] or directly.
+#[derive(Debug, Clone)]
+pub struct BulkUpdateQuery {
+    pub model: &'static ModelSchema,
+    /// The column names to update (not including the PK).
+    pub update_columns: Vec<&'static str>,
+    /// One inner `Vec<SqlValue>` per row: `[pk_value, col1_value, col2_value, …]`.
+    /// The first element is always the PK; the rest align with `update_columns`.
+    pub rows: Vec<Vec<SqlValue>>,
+}
+
+/// One aggregate expression in an [`AggregateQuery`].
+#[derive(Debug, Clone)]
+pub enum AggregateExpr {
+    /// `COUNT(*)` or `COUNT(column)` when `column` is `Some`.
+    Count(Option<&'static str>),
+    /// `SUM(column)`.
+    Sum(&'static str),
+    /// `AVG(column)`.
+    Avg(&'static str),
+    /// `MAX(column)`.
+    Max(&'static str),
+    /// `MIN(column)`.
+    Min(&'static str),
+}
+
+/// A `SELECT … GROUP BY … HAVING …` query. Returned rows are untyped
+/// (`HashMap<String, SqlValue>`) because the projection is dynamic.
+///
+/// Build via [`crate::query::QuerySet::aggregate`].
+#[derive(Debug, Clone)]
+pub struct AggregateQuery {
+    pub model: &'static ModelSchema,
+    pub where_clause: WhereExpr,
+    /// Columns to group by. Must be valid column names on `model`.
+    pub group_by: Vec<&'static str>,
+    /// `(alias, expr)` pairs — the alias becomes the key in each result row.
+    pub aggregates: Vec<(&'static str, AggregateExpr)>,
+    /// Optional HAVING clause (applied after GROUP BY).
+    pub having: Option<WhereExpr>,
+    pub order_by: Vec<OrderClause>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
 }

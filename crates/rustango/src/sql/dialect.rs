@@ -24,7 +24,8 @@
 //! dialect instead of the current Postgres-typed direct calls.
 
 use crate::core::{
-    BulkInsertQuery, CountQuery, DeleteQuery, FieldType, InsertQuery, SelectQuery, UpdateQuery,
+    AggregateQuery, BulkInsertQuery, BulkUpdateQuery, CountQuery, DeleteQuery, FieldType,
+    InsertQuery, SelectQuery, UpdateQuery,
 };
 
 use super::{CompiledStatement, SqlError};
@@ -191,4 +192,21 @@ pub trait Dialect {
     /// # Errors
     /// Returns [`SqlError`] for filter-shape errors in the WHERE clause.
     fn compile_count(&self, query: &CountQuery) -> Result<CompiledStatement, SqlError>;
+
+    /// Lower an `AggregateQuery` to a `SELECT … GROUP BY … HAVING …` statement.
+    ///
+    /// # Errors
+    /// Returns [`SqlError`] for filter-shape errors in WHERE/HAVING clauses or
+    /// empty `aggregates`.
+    fn compile_aggregate(&self, query: &AggregateQuery) -> Result<CompiledStatement, SqlError>;
+
+    /// Lower a `BulkUpdateQuery` to an
+    /// `UPDATE t SET col = data.col FROM (VALUES …) AS data(pk, col1, …) WHERE t.pk = data.pk`
+    /// statement.
+    ///
+    /// # Errors
+    /// Returns [`SqlError::EmptyBulkInsert`] if `rows` is empty,
+    /// [`SqlError::EmptyUpdateSet`] if `update_columns` is empty, or
+    /// [`SqlError::MissingPrimaryKey`] if `model` has no PK.
+    fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError>;
 }

@@ -1,8 +1,8 @@
 //! End-to-end check of the `QuerySet` → `SelectQuery` → Postgres SQL pipeline.
 
 use rustango::core::{
-    Assignment, BulkInsertQuery, CountQuery, DeleteQuery, Filter, InsertQuery, Join, Model as _,
-    Op, SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
+    Assignment, BulkInsertQuery, ConflictClause, CountQuery, DeleteQuery, Filter, InsertQuery,
+    Join, Model as _, Op, SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
 use rustango::sql::{Dialect, Postgres, SqlError};
 use rustango::Model;
@@ -185,7 +185,7 @@ fn insert_emits_columns_and_placeholders() {
             SqlValue::String("alice".into()),
             SqlValue::Bool(true),
         ],
-        returning: Vec::new(),
+        returning: Vec::new(), on_conflict: None,
     };
     let stmt = pg().compile_insert(&query).unwrap();
     assert_eq!(
@@ -203,12 +203,49 @@ fn insert_emits_columns_and_placeholders() {
 }
 
 #[test]
+fn insert_on_conflict_do_nothing() {
+    let query = InsertQuery {
+        model: User::SCHEMA,
+        columns: vec!["id", "name"],
+        values: vec![SqlValue::I64(1), SqlValue::String("alice".into())],
+        returning: Vec::new(),
+        on_conflict: Some(ConflictClause::DoNothing),
+    };
+    let stmt = pg().compile_insert(&query).unwrap();
+    assert!(stmt.sql.contains("ON CONFLICT DO NOTHING"), "{}", stmt.sql);
+}
+
+#[test]
+fn insert_on_conflict_do_update() {
+    let query = InsertQuery {
+        model: User::SCHEMA,
+        columns: vec!["id", "name", "is_active"],
+        values: vec![
+            SqlValue::I64(1),
+            SqlValue::String("alice".into()),
+            SqlValue::Bool(true),
+        ],
+        returning: Vec::new(),
+        on_conflict: Some(ConflictClause::DoUpdate {
+            target: vec!["id"],
+            update_columns: vec!["name", "is_active"],
+        }),
+    };
+    let stmt = pg().compile_insert(&query).unwrap();
+    assert!(
+        stmt.sql.contains(r#"ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name", "is_active" = EXCLUDED."is_active""#),
+        "{}",
+        stmt.sql
+    );
+}
+
+#[test]
 fn insert_with_no_columns_is_rejected() {
     let query = InsertQuery {
         model: User::SCHEMA,
         columns: vec![],
         values: vec![],
-        returning: Vec::new(),
+        returning: Vec::new(), on_conflict: None,
     };
     let err = pg().compile_insert(&query).unwrap_err();
     assert!(matches!(err, SqlError::EmptyInsert));
@@ -220,7 +257,7 @@ fn insert_with_mismatched_lengths_is_rejected() {
         model: User::SCHEMA,
         columns: vec!["id"],
         values: vec![SqlValue::I64(1), SqlValue::I64(2)],
-        returning: Vec::new(),
+        returning: Vec::new(), on_conflict: None,
     };
     let err = pg().compile_insert(&query).unwrap_err();
     assert!(matches!(
@@ -251,7 +288,7 @@ fn bulk_insert_emits_one_values_tuple_per_row() {
                 SqlValue::Bool(false),
             ],
         ],
-        returning: Vec::new(),
+        returning: Vec::new(), on_conflict: None,
     };
     let stmt = pg().compile_bulk_insert(&query).unwrap();
     assert_eq!(
@@ -270,7 +307,7 @@ fn bulk_insert_with_returning_appends_clause() {
             vec![SqlValue::String("alice".into()), SqlValue::Bool(true)],
             vec![SqlValue::String("bob".into()), SqlValue::Bool(false)],
         ],
-        returning: vec!["id"],
+        returning: vec!["id"], on_conflict: None,
     };
     let stmt = pg().compile_bulk_insert(&query).unwrap();
     assert!(stmt.sql.ends_with(r#"RETURNING "id""#), "{}", stmt.sql);
@@ -282,7 +319,7 @@ fn bulk_insert_empty_rows_is_rejected() {
         model: User::SCHEMA,
         columns: vec!["name"],
         rows: vec![],
-        returning: Vec::new(),
+        returning: Vec::new(), on_conflict: None,
     };
     let err = pg().compile_bulk_insert(&query).unwrap_err();
     assert!(matches!(err, SqlError::EmptyBulkInsert));
@@ -297,7 +334,7 @@ fn bulk_insert_row_shape_mismatch_is_rejected() {
             vec![SqlValue::I64(1), SqlValue::String("alice".into())],
             vec![SqlValue::I64(2)],
         ],
-        returning: Vec::new(),
+        returning: Vec::new(), on_conflict: None,
     };
     let err = pg().compile_bulk_insert(&query).unwrap_err();
     assert!(matches!(err, SqlError::InsertShapeMismatch { .. }));
