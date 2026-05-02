@@ -25,6 +25,12 @@ pub mod migrate;
 pub mod query;
 pub mod sql;
 
+/// Soft-delete query helpers — `active_filter` / `trashed_filter` /
+/// `compose_with_active` / `soft_delete` / `restore` / `purge` for any
+/// model carrying `#[rustango(soft_delete)]`. See [`soft_delete`].
+#[cfg(feature = "postgres")]
+pub mod soft_delete;
+
 #[cfg(feature = "admin")]
 pub mod admin;
 
