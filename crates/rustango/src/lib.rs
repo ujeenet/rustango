@@ -209,6 +209,12 @@ pub mod maintenance;
 #[cfg(feature = "admin")]
 pub mod trailing_slash;
 
+/// Static file serving — read files from a directory with sensible
+/// `Content-Type`, `Cache-Control`, `Last-Modified`, and 304 support.
+/// See [`static_files::StaticFiles`] + [`static_files::static_router`].
+#[cfg(feature = "admin")]
+pub mod static_files;
+
 /// Webhook signature verification (HMAC-SHA256). See [`webhook::verify_signature`].
 #[cfg(feature = "webhook")]
 pub mod webhook;

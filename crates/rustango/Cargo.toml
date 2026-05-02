@@ -271,6 +271,7 @@ http-body-util = { workspace = true }
 axum           = { workspace = true }
 base64         = { workspace = true }
 dotenvy        = { workspace = true }
+tempfile       = "3"
 
 # All example crates removed. Single-file examples are auto-detected
 # by Cargo; multi-file or required-features examples used to be
