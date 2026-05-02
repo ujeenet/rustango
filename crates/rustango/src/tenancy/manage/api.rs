@@ -230,6 +230,7 @@ pub async fn create_user_if_missing(
         is_superuser: superuser,
         active: true,
         created_at: chrono::Utc::now(),
+        data: serde_json::json!({}),
     };
     user.insert_on(&mut *conn_ref).await?;
     Ok(user)

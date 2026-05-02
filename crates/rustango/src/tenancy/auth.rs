@@ -89,6 +89,11 @@ pub struct User {
     /// Soft-disable.
     pub active: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Flexible per-user metadata bag. Store preferences, onboarding
+    /// state, app-specific attributes — anything that doesn't need its
+    /// own column. Never read by the framework itself.
+    #[rustango(default = "'{}'")]
+    pub data: serde_json::Value,
 }
 
 /// Look up an operator by username and verify the password.
@@ -166,6 +171,7 @@ pub async fn authenticate_user(
         is_superuser: row.try_get::<bool, _>("is_superuser")?,
         active: row.try_get::<bool, _>("active")?,
         created_at: row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")?,
+        data: row.try_get::<serde_json::Value, _>("data").unwrap_or_else(|_| serde_json::json!({})),
     };
     if !user.active {
         return Ok(None);

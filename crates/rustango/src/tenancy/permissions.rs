@@ -77,6 +77,10 @@ pub struct Role {
     pub name: String,
     #[rustango(max_length = 500)]
     pub description: String,
+    /// Flexible role metadata — display config, feature flags, UI
+    /// hints. Never read by the permission engine.
+    #[rustango(default = "'{}'")]
+    pub data: serde_json::Value,
 }
 
 /// One codename granted to a role. Composite key (role_id, codename)
@@ -120,6 +124,10 @@ pub struct UserPermission {
     pub codename: String,
     /// `true` = explicit grant; `false` = explicit denial.
     pub granted: bool,
+    /// Extra context on this override — reason, granted-by, expiry
+    /// hints. Never read by `has_perm`.
+    #[rustango(default = "'{}'")]
+    pub data: serde_json::Value,
 }
 
 // ------------------------------------------------------------------ ensure_tables (DDL)
@@ -129,8 +137,11 @@ CREATE TABLE IF NOT EXISTS "rustango_roles" (
     "id"          BIGSERIAL    PRIMARY KEY,
     "name"        VARCHAR(150) NOT NULL,
     "description" VARCHAR(500) NOT NULL DEFAULT '',
+    "data"        JSONB        NOT NULL DEFAULT '{}',
     CONSTRAINT "rustango_roles_name_uq" UNIQUE ("name")
 );
+ALTER TABLE "rustango_roles"
+    ADD COLUMN IF NOT EXISTS "data" JSONB NOT NULL DEFAULT '{}';
 CREATE TABLE IF NOT EXISTS "rustango_role_permissions" (
     "id"       BIGSERIAL    PRIMARY KEY,
     "role_id"  BIGINT       NOT NULL
@@ -156,8 +167,13 @@ CREATE TABLE IF NOT EXISTS "rustango_user_permissions" (
                              ON DELETE CASCADE,
     "codename" VARCHAR(100) NOT NULL,
     "granted"  BOOLEAN      NOT NULL DEFAULT TRUE,
+    "data"     JSONB        NOT NULL DEFAULT '{}',
     CONSTRAINT "rustango_user_permissions_uq" UNIQUE ("user_id", "codename")
 );
+ALTER TABLE "rustango_user_permissions"
+    ADD COLUMN IF NOT EXISTS "data" JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE "rustango_users"
+    ADD COLUMN IF NOT EXISTS "data" JSONB NOT NULL DEFAULT '{}';
 "#;
 
 /// Ensure all four permission tables exist in `pool`'s schema.
@@ -272,6 +288,7 @@ pub async fn create_role(
         id: Auto::default(),
         name: name.to_owned(),
         description: description.to_owned(),
+        data: serde_json::Value::Object(serde_json::Map::new()),
     };
     role.save_on(pool).await?;
     Ok(role.id.get().copied().unwrap_or(0))
@@ -388,6 +405,7 @@ pub async fn set_user_perm(
             user_id,
             codename: codename.to_owned(),
             granted,
+            data: serde_json::Value::Object(serde_json::Map::new()),
         };
         perm.save_on(pool).await?;
     }
@@ -429,6 +447,7 @@ pub async fn user_roles_qs(user_id: i64, pool: &PgPool) -> Result<Vec<Role>, sql
                 id: Auto::Set(row.try_get::<i64, _>("id")?),
                 name: row.try_get("name")?,
                 description: row.try_get("description")?,
+                data: row.try_get::<serde_json::Value, _>("data").unwrap_or_else(|_| serde_json::json!({})),
             })
         })
         .collect()
