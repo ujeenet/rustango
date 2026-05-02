@@ -53,6 +53,11 @@ pub mod signals;
 #[cfg(feature = "admin")]
 pub mod cors;
 
+/// Token-bucket rate limiting middleware — [`rate_limit::RateLimitLayer`].
+/// Per-IP, per-header, or global. Returns 429 with `Retry-After` when exhausted.
+#[cfg(feature = "admin")]
+pub mod rate_limit;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
