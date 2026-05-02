@@ -49,6 +49,10 @@ pub mod cache;
 #[cfg(feature = "signals")]
 pub mod signals;
 
+/// CORS middleware — [`cors::CorsLayer`] for axum routers.
+#[cfg(feature = "admin")]
+pub mod cors;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
