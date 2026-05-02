@@ -209,6 +209,19 @@ pub mod debug_panel;
 #[cfg(all(feature = "admin", feature = "tenancy"))]
 pub mod livereload;
 
+/// One-call tracing-subscriber setup. See [`logging::setup`] / [`logging::Setup`].
+pub mod logging;
+
+/// Per-account login lockout — defends against credential stuffing.
+/// Cache-backed counter + lock flag. See [`account_lockout::Lockout`].
+#[cfg(feature = "cache")]
+pub mod account_lockout;
+
+/// Broadcast event bus — fan-out for SSE / WebSocket / signal-driven push.
+/// See [`sse::EventBus`].
+#[cfg(feature = "sse")]
+pub mod sse;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 

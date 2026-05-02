@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "api_keys", "passwords", "signed_url", "notifications", "jobs", "auth_flows"]
+default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "api_keys", "passwords", "signed_url", "notifications", "jobs", "auth_flows", "sse"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -69,6 +69,10 @@ jobs = ["dep:async-trait", "dep:tokio"]
 # Pre-built auth flows (`rustango::auth_flows`) — password reset, email
 # verification, magic-link login. Composes signed_url + email helpers.
 auth_flows = ["signed_url"]
+
+# Broadcast event bus (`rustango::sse`) — fan-out for SSE / WebSocket /
+# signal-driven push. tokio::sync::broadcast under the hood.
+sse = ["dep:tokio"]
 
 # File storage backends (`rustango::storage`) — Storage trait + LocalStorage
 # (filesystem) + InMemoryStorage (tests). S3/GCS/Azure plug in via the trait.
