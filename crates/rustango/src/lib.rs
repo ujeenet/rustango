@@ -204,6 +204,11 @@ pub mod welcome;
 #[cfg(all(feature = "admin", feature = "tenancy"))]
 pub mod debug_panel;
 
+/// Browser auto-reload — refreshes pages when the server restarts.
+/// **DEV ONLY** — pairs with `cargo watch -x run`. See [`livereload`].
+#[cfg(all(feature = "admin", feature = "tenancy"))]
+pub mod livereload;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
