@@ -37,10 +37,11 @@
 //!
 //! ## UNIQUE constraints
 //!
-//! `#[rustango(unique)]` doesn't exist yet (slated for a follow-up
-//! ~1-day add). Until then, the bootstrap migrations carry the
-//! UNIQUE constraints as raw `DataOp` SQL with a matching
-//! `reverse_sql` so `unapply` works cleanly.
+//! `#[rustango(unique)]` emits `UNIQUE` inline on the column DDL so
+//! no separate `DataOp` constraint is needed. Both bootstrap migrations
+//! use only `CreateTable` ops; the unique constraints come from the
+//! model field attributes (`Org.slug`, `Operator.username`,
+//! `User.username`, `Role.name`).
 
 use std::path::Path;
 

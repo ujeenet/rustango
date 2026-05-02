@@ -23,11 +23,9 @@
 //!
 //! ## What's missing in Slice 1
 //!
-//! * The `slug` `UNIQUE` constraint must be added by a hand-authored
-//!   bootstrap migration (or via raw SQL in test setup) — the macro
-//!   doesn't yet support `#[rustango(unique)]`. Until then, callers
-//!   should validate uniqueness at the application layer before
-//!   inserting.
+//! * `slug` carries `#[rustango(unique)]` so the DDL writer emits the
+//!   `UNIQUE` constraint inline; the bootstrap migration uses a plain
+//!   `CreateTable` op with no separate `DataOp`.
 //! * `storage_mode` is a raw `String` because rustango models can't
 //!   carry custom enums yet. The [`StorageMode`] helper enum in this
 //!   module wraps the conversion.

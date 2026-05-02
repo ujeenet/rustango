@@ -214,7 +214,17 @@ pub(crate) fn render_value_for_input(row: &PgRow, field: &FieldSchema) -> String
             .flatten()
             .map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string())
             .unwrap_or_default(),
-        FieldType::Json => String::new(),
+        FieldType::Json => row
+            .try_get::<serde_json::Value, _>(field.column)
+            .ok()
+            .map(|v| {
+                if v == serde_json::Value::Object(serde_json::Map::new()) || v == serde_json::json!({}) {
+                    String::new()
+                } else {
+                    serde_json::to_string_pretty(&v).unwrap_or_default()
+                }
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -279,7 +289,7 @@ pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) ->
             r#"<input type="text" name="{name}" id="{name}" value="{val}" pattern="[0-9a-fA-F\-]+"{required}{readonly}>"#
         ),
         FieldType::Json => format!(
-            r#"<textarea name="{name}" id="{name}" disabled>JSON editing disabled in v0.1</textarea>"#
+            r#"<textarea name="{name}" id="{name}"{readonly} style="font-family:monospace">{val}</textarea>"#
         ),
     }
 }

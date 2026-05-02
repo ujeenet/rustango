@@ -292,10 +292,20 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
                 .map_err(|e| make_parse_err("DateTime", &e))?;
             Ok(SqlValue::DateTime(ndt.and_utc()))
         }
-        FieldType::Json => Err(FormError::UnsupportedPk {
-            field: field.name.to_owned(),
-            ty: "Json",
-        }),
+        FieldType::Json => {
+            if raw.is_empty() {
+                Ok(SqlValue::Json(serde_json::json!({})))
+            } else {
+                serde_json::from_str::<serde_json::Value>(raw).map(SqlValue::Json).map_err(|e| {
+                    FormError::Parse {
+                        field: field.name.to_owned(),
+                        ty: "Json",
+                        value: raw.to_owned(),
+                        detail: e.to_string(),
+                    }
+                })
+            }
+        }
     }
 }
 

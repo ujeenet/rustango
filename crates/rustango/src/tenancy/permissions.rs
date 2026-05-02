@@ -73,7 +73,7 @@ pub struct Role {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     /// Human-readable name. Unique within the tenant.
-    #[rustango(max_length = 150)]
+    #[rustango(max_length = 150, unique)]
     pub name: String,
     #[rustango(max_length = 500)]
     pub description: String,

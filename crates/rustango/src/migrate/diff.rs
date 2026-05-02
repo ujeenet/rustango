@@ -92,6 +92,14 @@ pub enum SchemaChange {
         old_column: String,
         new_column: String,
     },
+    /// Add or drop a `UNIQUE` constraint on a single column.
+    /// `unique` is the **new** state. Render emits
+    /// `ADD CONSTRAINT … UNIQUE` or `DROP CONSTRAINT`.
+    AlterColumnUnique {
+        table: String,
+        column: String,
+        unique: bool,
+    },
 }
 
 /// Compute the ordered list of changes from `prev` → `current`.
@@ -208,6 +216,13 @@ fn push_alter_changes(
             to: cf.max_length,
         });
     }
+    if pf.unique != cf.unique {
+        out.push(SchemaChange::AlterColumnUnique {
+            table: table.to_owned(),
+            column: cf.column.clone(),
+            unique: cf.unique,
+        });
+    }
     // primary_key, min, max, fk, auto changes still reach
     // `detect_unsupported_field_changes` and surface as the v0.3.1
     // hard error — ALTER PRIMARY KEY and CHECK manipulation are
@@ -283,12 +298,8 @@ fn push_field_diffs(table: &str, pf: &FieldSnapshot, cf: &FieldSnapshot, out: &m
             pf.auto, cf.auto
         ));
     }
-    if pf.unique != cf.unique {
-        out.push(format!(
-            "`{table}.{col}` unique changed: {} → {}",
-            pf.unique, cf.unique
-        ));
-    }
+    // `unique` changes are handled by `detect_changes` as
+    // `AlterColumnUnique` ops — not surfaced here.
 }
 
 /// Render a list of [`SchemaChange`]s as Postgres DDL strings ready to
@@ -427,6 +438,17 @@ pub fn render_changes_split(
                 out.immediate.push(format!(
                     r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
                 ));
+            }
+            SchemaChange::AlterColumnUnique { table, column, unique } => {
+                if *unique {
+                    out.immediate.push(format!(
+                        r#"ALTER TABLE "{table}" ADD CONSTRAINT "{table}_{column}_key" UNIQUE ("{column}")"#,
+                    ));
+                } else {
+                    out.immediate.push(format!(
+                        r#"ALTER TABLE "{table}" DROP CONSTRAINT "{table}_{column}_key""#,
+                    ));
+                }
             }
             SchemaChange::RenameTable { old_name, new_name } => {
                 out.immediate.push(format!(

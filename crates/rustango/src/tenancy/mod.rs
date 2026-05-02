@@ -19,7 +19,7 @@
 //! migrations, tenant-aware admin, provisioning CLI, and per-tenant
 //! auth land in slices 2-7.
 //!
-//! [`TenantPools`]: ()  // FIXME: link when slice 3 lands.
+//! [`TenantPools`]: pools::TenantPools
 //!
 //! ## Design choices (locked 2026-04-28)
 //!
