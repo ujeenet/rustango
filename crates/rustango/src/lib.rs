@@ -142,6 +142,14 @@ pub mod request_id;
 #[cfg(feature = "admin")]
 pub mod ip_filter;
 
+/// Webhook signature verification (HMAC-SHA256). See [`webhook::verify_signature`].
+#[cfg(feature = "webhook")]
+pub mod webhook;
+
+/// Standardized API error responses. See [`api_errors::ApiError`].
+#[cfg(feature = "admin")]
+pub mod api_errors;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
