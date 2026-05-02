@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "compression", "openapi"]
+default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -90,6 +90,12 @@ websocket = ["admin", "sse", "axum/ws"]
 # Apple, Keycloak) via the `/userinfo` endpoint as identity source.
 # Per-tenant via `OAuth2Registry`. Pulls reqwest (rustls — no openssl).
 oauth2 = ["dep:reqwest", "dep:urlencoding", "dep:tokio", "dep:hmac", "dep:sha2", "dep:base64", "dep:rand", "dep:subtle", "dep:async-trait"]
+
+# Opinionated HTTP client (`rustango::http_client`) — reqwest wrapper
+# with sane timeouts, exponential-backoff retry on idempotent verbs +
+# 5xx/timeout/connect failures, and a default User-Agent. Standalone
+# wrapper that any rustango app can use directly.
+http-client = ["dep:reqwest", "dep:tokio"]
 
 # Response compression middleware (`rustango::compression`) — gzip +
 # deflate via flate2 (miniz_oxide by default, no C deps). Honors the

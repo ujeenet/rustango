@@ -249,6 +249,12 @@ pub mod ws;
 #[cfg(feature = "oauth2")]
 pub mod oauth2;
 
+/// Opinionated HTTP client — `reqwest` wrapper with sane timeouts,
+/// retry on idempotent verbs / transient failures, default User-Agent.
+/// See [`http_client::HttpClient`].
+#[cfg(feature = "http-client")]
+pub mod http_client;
+
 /// Response compression middleware — gzip + deflate via flate2.
 /// Honors `Accept-Encoding`, skips already-compressed bodies and binary
 /// content-types. See [`compression::CompressionLayer`].
