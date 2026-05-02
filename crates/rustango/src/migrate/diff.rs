@@ -100,6 +100,17 @@ pub enum SchemaChange {
         column: String,
         unique: bool,
     },
+    /// Create a `CREATE [UNIQUE] INDEX` on a model table.
+    CreateIndex {
+        name: String,
+        table: String,
+        columns: Vec<String>,
+        unique: bool,
+    },
+    /// Drop an index by name.
+    DropIndex {
+        name: String,
+    },
     /// Create a many-to-many junction table. Render emits a `CREATE TABLE`
     /// with two `BIGINT NOT NULL` FK columns and a composite `PRIMARY KEY`.
     CreateM2MTable {
@@ -187,6 +198,23 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     for pt in &prev.tables {
         if current.table(&pt.name).is_none() {
             changes.push(SchemaChange::DropTable(pt.name.clone()));
+        }
+    }
+    // New indexes.
+    for idx in &current.indexes {
+        if prev.index(&idx.name).is_none() {
+            changes.push(SchemaChange::CreateIndex {
+                name: idx.name.clone(),
+                table: idx.table.clone(),
+                columns: idx.columns.clone(),
+                unique: idx.unique,
+            });
+        }
+    }
+    // Dropped indexes.
+    for idx in &prev.indexes {
+        if current.index(&idx.name).is_none() {
+            changes.push(SchemaChange::DropIndex { name: idx.name.clone() });
         }
     }
     // New M2M junction tables.
@@ -494,6 +522,16 @@ pub fn render_changes_split(
                 out.immediate.push(format!(
                     r#"ALTER TABLE "{table}" RENAME COLUMN "{old_column}" TO "{new_column}""#,
                 ));
+            }
+            SchemaChange::CreateIndex { name, table, columns, unique } => {
+                let unique_kw = if *unique { "UNIQUE " } else { "" };
+                let cols = columns.iter().map(|c| format!(r#""{c}""#)).collect::<Vec<_>>().join(", ");
+                out.immediate.push(format!(
+                    r#"CREATE {unique_kw}INDEX IF NOT EXISTS "{name}" ON "{table}" ({cols})"#,
+                ));
+            }
+            SchemaChange::DropIndex { name } => {
+                out.immediate.push(format!(r#"DROP INDEX IF EXISTS "{name}""#));
             }
             SchemaChange::CreateM2MTable { through, src_table, src_col, dst_table, dst_col } => {
                 out.immediate.push(format!(

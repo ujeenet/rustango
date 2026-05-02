@@ -477,6 +477,29 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .unwrap_or_default()
     });
 
+    // Merge field-level indexes into the container's index list.
+    let mut all_indexes: Vec<IndexAttr> = container.indexes;
+    for field in &named.named {
+        let ident = field.ident.as_ref().expect("named");
+        let col = to_snake_case(&ident.to_string()); // column name fallback
+        // Re-parse field attrs to check for index flag
+        if let Ok(fa) = parse_field_attrs(field) {
+            if fa.index {
+                let col_name = fa.column.clone().unwrap_or_else(|| col.clone());
+                let auto_name = if fa.index_unique {
+                    format!("{table}_{col_name}_uq_idx")
+                } else {
+                    format!("{table}_{col_name}_idx")
+                };
+                all_indexes.push(IndexAttr {
+                    name: fa.index_name.or(Some(auto_name)),
+                    columns: vec![col_name],
+                    unique: fa.index_unique,
+                });
+            }
+        }
+    }
+
     let model_impl = model_impl_tokens(
         struct_name,
         &model_name,
@@ -489,6 +512,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         container.permissions,
         audit_track_names.as_deref(),
         &container.m2m,
+        &all_indexes,
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -990,6 +1014,7 @@ fn model_impl_tokens(
     permissions: bool,
     audit_track: Option<&[String]>,
     m2m_relations: &[M2MAttr],
+    indexes: &[IndexAttr],
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
@@ -1014,6 +1039,18 @@ fn model_impl_tokens(
         }
     };
     let admin_tokens = admin_config_tokens(admin);
+    let indexes_tokens = indexes.iter().map(|idx| {
+        let name = idx.name.as_deref().unwrap_or("unnamed_index");
+        let cols: Vec<&str> = idx.columns.iter().map(String::as_str).collect();
+        let unique = idx.unique;
+        quote! {
+            ::rustango::core::IndexSchema {
+                name: #name,
+                columns: &[ #(#cols),* ],
+                unique: #unique,
+            }
+        }
+    });
     let m2m_tokens = m2m_relations.iter().map(|rel| {
         let name = rel.name.as_str();
         let to = rel.to.as_str();
@@ -1043,6 +1080,7 @@ fn model_impl_tokens(
                 permissions: #permissions,
                 audit_track: #audit_track_tokens,
                 m2m: &[ #(#m2m_tokens),* ],
+                indexes: &[ #(#indexes_tokens),* ],
             };
         }
     }
@@ -2203,6 +2241,22 @@ struct ContainerAttrs {
     /// `#[rustango(m2m(name = "tags", to = "app_tags", through = "post_tags",
     ///                 src = "post_id", dst = "tag_id"))]`.
     m2m: Vec<M2MAttr>,
+    /// Composite indexes declared via
+    /// `#[rustango(index("col1, col2"))]` or
+    /// `#[rustango(index("col1, col2", unique, name = "my_idx"))]`.
+    /// Single-column indexes from `#[rustango(index)]` on fields are
+    /// accumulated here during field collection.
+    indexes: Vec<IndexAttr>,
+}
+
+/// Parsed form of one index declaration (field-level or container-level).
+struct IndexAttr {
+    /// Index name; auto-derived when `None` at parse time.
+    name: Option<String>,
+    /// Column names in the index.
+    columns: Vec<String>,
+    /// `true` for `CREATE UNIQUE INDEX`.
+    unique: bool,
 }
 
 /// Parsed form of one `#[rustango(m2m(...))]` declaration.
@@ -2262,6 +2316,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         audit: None,
         permissions: false,
         m2m: Vec::new(),
+        indexes: Vec::new(),
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -2363,6 +2418,33 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
             }
             if meta.path.is_ident("permissions") {
                 out.permissions = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("index") {
+                // Container-level composite index:
+                // #[rustango(index("col1, col2"))]
+                // #[rustango(index("col1, col2", unique, name = "my_idx"))]
+                let cols_lit: LitStr = meta.value()?.parse()?;
+                let columns = split_field_list(&cols_lit.value());
+                let mut unique = false;
+                let mut name: Option<String> = None;
+                if meta.input.peek(syn::Token![,]) {
+                    let _: syn::Token![,] = meta.input.parse()?;
+                    // Parse remaining k=v or bare flags after the columns string
+                    meta.parse_nested_meta(|inner| {
+                        if inner.path.is_ident("unique") {
+                            unique = true;
+                            return Ok(());
+                        }
+                        if inner.path.is_ident("name") {
+                            let s: LitStr = inner.value()?.parse()?;
+                            name = Some(s.value());
+                            return Ok(());
+                        }
+                        Err(inner.error("unknown index attribute (supported: `unique`, `name`)"))
+                    })?;
+                }
+                out.indexes.push(IndexAttr { name, columns, unique });
                 return Ok(());
             }
             if meta.path.is_ident("m2m") {
@@ -2510,6 +2592,12 @@ struct FieldAttrs {
     /// `#[rustango(unique)]` — adds a `UNIQUE` constraint inline on
     /// the column in the generated DDL.
     unique: bool,
+    /// `#[rustango(index)]` or `#[rustango(index(name = "…", unique))]` —
+    /// generates a `CREATE INDEX` for this column. `unique` here means
+    /// `CREATE UNIQUE INDEX` (distinct from the `unique` constraint above).
+    index: bool,
+    index_unique: bool,
+    index_name: Option<String>,
 }
 
 fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
@@ -2528,6 +2616,9 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         auto_now: false,
         soft_delete: false,
         unique: false,
+        index: false,
+        index_unique: false,
+        index_name: None,
     };
     for attr in &field.attrs {
         if !attr.path().is_ident("rustango") {
@@ -2607,6 +2698,25 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
             }
             if meta.path.is_ident("unique") {
                 out.unique = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("index") {
+                out.index = true;
+                // Optional sub-attrs: #[rustango(index(unique, name = "…"))]
+                if meta.input.peek(syn::token::Paren) {
+                    meta.parse_nested_meta(|inner| {
+                        if inner.path.is_ident("unique") {
+                            out.index_unique = true;
+                            return Ok(());
+                        }
+                        if inner.path.is_ident("name") {
+                            let s: LitStr = inner.value()?.parse()?;
+                            out.index_name = Some(s.value());
+                            return Ok(());
+                        }
+                        Err(inner.error("unknown index sub-attribute (supported: `unique`, `name`)"))
+                    })?;
+                }
                 return Ok(());
             }
             Err(meta.error("unknown rustango field attribute"))

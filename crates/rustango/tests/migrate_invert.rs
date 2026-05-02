@@ -3,7 +3,7 @@
 use rustango::migrate::{invert, DataOp, Operation, SchemaChange, SchemaSnapshot, TableSnapshot};
 
 fn empty() -> SchemaSnapshot {
-    SchemaSnapshot { tables: vec![], m2m_tables: vec![] }
+    SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![] }
 }
 
 fn user_table() -> TableSnapshot {

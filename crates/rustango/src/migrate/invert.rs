@@ -151,6 +151,22 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
             old_column: new_column.clone(),
             new_column: old_column.clone(),
         })),
+        Operation::Schema(SchemaChange::CreateIndex { name, .. }) => {
+            Ok(Operation::Schema(SchemaChange::DropIndex { name: name.clone() }))
+        }
+        Operation::Schema(SchemaChange::DropIndex { name }) => {
+            let idx = prev.index(name).ok_or_else(|| {
+                MigrateError::Validation(format!(
+                    "cannot invert DropIndex(`{name}`): index not in predecessor snapshot",
+                ))
+            })?;
+            Ok(Operation::Schema(SchemaChange::CreateIndex {
+                name: name.clone(),
+                table: idx.table.clone(),
+                columns: idx.columns.clone(),
+                unique: idx.unique,
+            }))
+        }
         Operation::Schema(SchemaChange::CreateM2MTable {
             through,
             src_table: _,

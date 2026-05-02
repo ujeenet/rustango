@@ -121,6 +121,29 @@ pub struct ModelSchema {
     /// this slice to emit `CREATE TABLE` / `DROP TABLE` for junction tables.
     /// Empty slice when the model has no M2M relations.
     pub m2m: &'static [M2MRelation],
+    /// Indexes declared via `#[rustango(index)]` on fields (single-column) or
+    /// `#[rustango(index("col1, col2"))]` on the container (composite).
+    ///
+    /// The migration writer emits `CREATE INDEX` / `DROP INDEX` for each
+    /// entry. Empty slice when the model has no declared indexes.
+    pub indexes: &'static [IndexSchema],
+}
+
+/// Descriptor for one `CREATE INDEX` emitted by the migration writer.
+///
+/// Declared via:
+/// - `#[rustango(index)]` on a field → single-column non-unique index
+/// - `#[rustango(index("col1, col2"))]` on the model container → composite index
+/// - Either form accepts `unique` and `name` sub-attributes.
+#[derive(Debug, Clone, Copy)]
+pub struct IndexSchema {
+    /// Index name used in `CREATE INDEX "name"` and `DROP INDEX "name"`.
+    /// Auto-generated as `{table}_{col}_idx` when not supplied.
+    pub name: &'static str,
+    /// SQL column names included in the index, in order.
+    pub columns: &'static [&'static str],
+    /// `true` for `CREATE UNIQUE INDEX`.
+    pub unique: bool,
 }
 
 /// Django ModelAdmin-shape per-model admin customization. Populated by

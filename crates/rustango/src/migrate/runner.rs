@@ -913,7 +913,7 @@ async fn unapply_locked(
         })?;
 
     let prev_snapshot = match &target.prev {
-        None => SchemaSnapshot { tables: vec![], m2m_tables: vec![] },
+        None => SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![] },
         Some(prev_name) => all
             .iter()
             .find(|m| &m.name == prev_name)

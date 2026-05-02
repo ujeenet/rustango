@@ -19,6 +19,19 @@ pub struct SchemaSnapshot {
     /// (no M2M tables in older snapshots).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub m2m_tables: Vec<M2MTableSnapshot>,
+    /// Indexes derived from `ModelSchema::indexes` declarations, sorted
+    /// by name. Absent from old migration files — defaults to empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indexes: Vec<IndexSnapshot>,
+}
+
+/// Snapshot of one `CREATE INDEX` declaration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IndexSnapshot {
+    pub name: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
 }
 
 /// Snapshot of one many-to-many junction table.
@@ -94,7 +107,8 @@ impl SchemaSnapshot {
             entries.iter().map(|e| TableSnapshot::from_schema(e.schema)).collect();
         tables.sort_by(|a, b| a.name.cmp(&b.name));
         let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
-        Self { tables, m2m_tables }
+        let indexes = collect_indexes(entries.iter().map(|e| e.schema));
+        Self { tables, m2m_tables, indexes }
     }
 
     /// Capture only the models whose [`ModelEntry::resolved_app_label`]
@@ -115,7 +129,8 @@ impl SchemaSnapshot {
             entries.iter().map(|e| TableSnapshot::from_schema(e.schema)).collect();
         tables.sort_by(|a, b| a.name.cmp(&b.name));
         let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
-        Self { tables, m2m_tables }
+        let indexes = collect_indexes(entries.iter().map(|e| e.schema));
+        Self { tables, m2m_tables, indexes }
     }
 
     /// Capture an explicit list of model schemas — the inventory-
@@ -129,13 +144,20 @@ impl SchemaSnapshot {
             models.iter().map(|s| TableSnapshot::from_schema(s)).collect();
         tables.sort_by(|a, b| a.name.cmp(&b.name));
         let m2m_tables = collect_m2m_tables(models.iter().copied());
-        Self { tables, m2m_tables }
+        let indexes = collect_indexes(models.iter().copied());
+        Self { tables, m2m_tables, indexes }
     }
 
     /// Look up an M2M table snapshot by junction table name.
     #[must_use]
     pub fn m2m_table(&self, through: &str) -> Option<&M2MTableSnapshot> {
         self.m2m_tables.iter().find(|t| t.through == through)
+    }
+
+    /// Look up an index snapshot by name.
+    #[must_use]
+    pub fn index(&self, name: &str) -> Option<&IndexSnapshot> {
+        self.indexes.iter().find(|i| i.name == name)
     }
 
     /// Look up a table by SQL name.
@@ -214,6 +236,27 @@ fn field_type_name(ty: FieldType) -> &'static str {
         FieldType::Uuid => "uuid",
         FieldType::Json => "json",
     }
+}
+
+/// Collect all `CREATE INDEX` descriptors from a set of model schemas,
+/// deduplicating by index name and sorting for deterministic output.
+fn collect_indexes<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<IndexSnapshot> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<IndexSnapshot> = Vec::new();
+    for schema in schemas {
+        for idx in schema.indexes {
+            if seen.insert(idx.name) {
+                out.push(IndexSnapshot {
+                    name: idx.name.to_owned(),
+                    table: schema.table.to_owned(),
+                    columns: idx.columns.iter().map(|&c| c.to_owned()).collect(),
+                    unique: idx.unique,
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 /// Collect all M2M junction table descriptors from a set of model schemas,
