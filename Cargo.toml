@@ -84,6 +84,10 @@ tera = { version = "1.20", default-features = false }
 # Caching
 redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager"] }
 
+# OAuth2 / OIDC HTTP client (rustls — no openssl footprint)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+urlencoding = "2"
+
 # Macro deps
 syn          = { version = "2", features = ["full", "extra-traits"] }
 quote        = "1"

@@ -222,6 +222,14 @@ pub mod account_lockout;
 #[cfg(feature = "sse")]
 pub mod sse;
 
+/// OAuth2 / OIDC swiss-knife — social login that works for both pure
+/// OAuth2 (GitHub, Discord) and OIDC (Google, Microsoft, Keycloak)
+/// providers via the `/userinfo` endpoint. Per-tenant via
+/// [`oauth2::OAuth2Registry`]. Optional axum router under [`oauth2::router`]
+/// (requires the `admin` feature).
+#[cfg(feature = "oauth2")]
+pub mod oauth2;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
