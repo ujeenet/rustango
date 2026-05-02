@@ -67,6 +67,11 @@ pub mod health;
 #[cfg(feature = "email")]
 pub mod email;
 
+/// Multi-channel notifications — fan one notification out to mail / database /
+/// log / broadcast channels. See [`notifications::notify`].
+#[cfg(feature = "notifications")]
+pub mod notifications;
+
 /// File storage backends — [`storage::Storage`] trait + LocalStorage + InMemoryStorage.
 #[cfg(feature = "storage")]
 pub mod storage;

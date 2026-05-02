@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "api_keys", "passwords", "signed_url"]
+default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "api_keys", "passwords", "signed_url", "notifications"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -57,6 +57,10 @@ signals = ["dep:tokio"]
 # InMemoryMailer + NullMailer. SMTP and external transports plug in via
 # the trait.
 email = ["dep:async-trait"]
+
+# Multi-channel notifications layer (`rustango::notifications`) — Laravel-shape
+# fan-out across mail / database / log / broadcast. Implies email + cache.
+notifications = ["email", "cache"]
 
 # File storage backends (`rustango::storage`) — Storage trait + LocalStorage
 # (filesystem) + InMemoryStorage (tests). S3/GCS/Azure plug in via the trait.
