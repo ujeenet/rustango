@@ -51,6 +51,9 @@
 //! `Err(JobError::Fatal(_))` skips the retry queue and goes straight to the
 //! dead-letter handler.
 
+#[cfg(feature = "jobs-postgres")]
+pub mod pg;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;

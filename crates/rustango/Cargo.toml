@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "api_keys", "passwords", "signed_url", "notifications", "jobs", "auth_flows", "sse", "oauth2", "compression", "openapi"]
+default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "oauth2", "compression", "openapi"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -65,6 +65,11 @@ notifications = ["email", "cache"]
 # Background job queue (`rustango::jobs`) — Job trait, in-memory queue,
 # worker pool, retry with exponential backoff, dead-letter callback.
 jobs = ["dep:async-trait", "dep:tokio"]
+
+# Postgres-backed job queue (`rustango::jobs::pg::PgJobQueue`) using
+# `SELECT … FOR UPDATE SKIP LOCKED` for safe multi-process / multi-replica
+# pickup. Implies `jobs` + `postgres` and the always-on `chrono` workspace dep.
+jobs-postgres = ["jobs", "postgres"]
 
 # Pre-built auth flows (`rustango::auth_flows`) — password reset, email
 # verification, magic-link login. Composes signed_url + email helpers.
