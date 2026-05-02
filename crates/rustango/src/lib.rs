@@ -82,6 +82,11 @@ pub mod jobs;
 #[cfg(feature = "auth_flows")]
 pub mod auth_flows;
 
+/// Unified `RustangoError` enum + `From` impls for every framework error type.
+/// Use in handlers: `async fn handler() -> RustangoResult<Json<X>> { ... }`.
+mod error;
+pub use error::{RustangoError, RustangoResult};
+
 /// File storage backends — [`storage::Storage`] trait + LocalStorage + InMemoryStorage.
 #[cfg(feature = "storage")]
 pub mod storage;
