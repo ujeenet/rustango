@@ -36,6 +36,9 @@
 #[cfg(feature = "admin")]
 pub mod router;
 
+mod schema_for;
+pub use schema_for::OpenApiSchema;
+
 use indexmap::IndexMap;
 use serde::Serialize;
 

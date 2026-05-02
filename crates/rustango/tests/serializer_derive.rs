@@ -202,3 +202,98 @@ fn custom_validate_passes_with_title() {
     let s = ValidatedSerializer { title: "Hi".to_owned() };
     assert!(s.validate().is_ok());
 }
+
+// ============================================================ #[cfg(feature = "openapi")] auto-derive
+//
+// `#[derive(Serializer)]` also emits `impl OpenApiSchema` when the
+// `openapi` feature is on — verify the produced schemas match the
+// declared field types.
+
+#[cfg(feature = "openapi")]
+mod openapi_auto_derive {
+    use super::*;
+    use rustango::openapi::{OpenApiSchema, Schema};
+    use serde_json::Value;
+
+    fn schema_value<S: OpenApiSchema>() -> Value {
+        serde_json::to_value(S::openapi_schema()).unwrap()
+    }
+
+    #[test]
+    fn primitive_fields_get_correct_types_and_required() {
+        let v = schema_value::<PostSerializer>();
+        assert_eq!(v["type"], "object");
+        assert_eq!(v["properties"]["title"]["type"], "string");
+        assert_eq!(v["properties"]["body"]["type"], "string");
+        // Both fields are non-Option, so both required.
+        let req = v["required"].as_array().unwrap();
+        assert!(req.iter().any(|s| s == "title"));
+        assert!(req.iter().any(|s| s == "body"));
+    }
+
+    #[test]
+    fn read_only_field_appears_in_schema() {
+        let v = schema_value::<PostWithReadOnly>();
+        assert_eq!(v["properties"]["title"]["type"], "string");
+        assert_eq!(v["properties"]["view_count"]["type"], "integer");
+        assert_eq!(v["properties"]["view_count"]["format"], "int64");
+    }
+
+    #[derive(Serializer, Default)]
+    #[serializer(model = Post)]
+    struct WithOptional {
+        pub title: String,
+        // `skip` — Post doesn't have an Option<String> field; this just
+        // exercises the macro's Option<T> → nullable + not-required handling.
+        #[serializer(skip)]
+        pub maybe_body: Option<String>,
+    }
+
+    #[test]
+    fn option_field_is_nullable_and_not_required() {
+        let v = schema_value::<WithOptional>();
+        assert_eq!(v["properties"]["title"]["type"], "string");
+        assert_eq!(v["properties"]["maybe_body"]["type"], "string");
+        assert_eq!(v["properties"]["maybe_body"]["nullable"], true);
+        // `required` should contain `title` but not `maybe_body`.
+        let req: Vec<&str> = v["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap())
+            .collect();
+        assert!(req.contains(&"title"));
+        assert!(!req.contains(&"maybe_body"));
+    }
+
+    #[derive(Serializer, Default)]
+    #[serializer(model = Post)]
+    struct WithWriteOnly {
+        pub title: String,
+        #[serializer(write_only)]
+        pub secret: String,
+    }
+
+    #[test]
+    fn write_only_field_excluded_from_schema() {
+        let v = schema_value::<WithWriteOnly>();
+        assert!(v["properties"].get("title").is_some());
+        // write_only is excluded from the JSON output → also excluded from the schema.
+        assert!(v["properties"].get("secret").is_none());
+        let req: Vec<&str> = v["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap())
+            .collect();
+        assert!(!req.contains(&"secret"));
+    }
+
+    #[test]
+    fn schema_for_serializer_helper_returns_the_same_schema() {
+        let direct = serde_json::to_value(PostSerializer::openapi_schema()).unwrap();
+        let via_helper =
+            serde_json::to_value(Schema::for_serializer::<PostSerializer>()).unwrap();
+        assert_eq!(direct, via_helper);
+    }
+}

@@ -3989,13 +3989,18 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // Classify each field
     struct FieldInfo {
         ident: syn::Ident,
+        ty: syn::Type,
         attrs: SerializerFieldAttrs,
     }
     let mut fields_info: Vec<FieldInfo> = Vec::new();
     for field in &named.named {
         let ident = field.ident.clone().expect("named field has ident");
         let attrs = parse_serializer_field_attrs(field)?;
-        fields_info.push(FieldInfo { ident, attrs });
+        fields_info.push(FieldInfo {
+            ident,
+            ty: field.ty.clone(),
+            attrs,
+        });
     }
 
     // Generate from_model body: struct literal with each field assigned.
@@ -4031,6 +4036,50 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         .map(|fi| fi.ident.to_string())
         .collect();
 
+    // OpenAPI: emit `impl OpenApiSchema` when our `openapi` feature is on.
+    // Only includes fields shown in JSON output (skips write_only). For each
+    // `Option<T>` field, omit from `required` and add `.nullable()`.
+    let openapi_impl = {
+        #[cfg(feature = "openapi")]
+        {
+            let property_calls = output_fields.iter().map(|fi| {
+                let ident = &fi.ident;
+                let name_lit = ident.to_string();
+                let ty = &fi.ty;
+                let nullable_call = if is_option(ty) {
+                    quote! { .nullable() }
+                } else {
+                    quote! {}
+                };
+                quote! {
+                    .property(
+                        #name_lit,
+                        <#ty as ::rustango::openapi::OpenApiSchema>::openapi_schema()
+                            #nullable_call,
+                    )
+                }
+            });
+            let required_lits: Vec<_> = output_fields
+                .iter()
+                .filter(|fi| !is_option(&fi.ty))
+                .map(|fi| fi.ident.to_string())
+                .collect();
+            quote! {
+                impl ::rustango::openapi::OpenApiSchema for #struct_name {
+                    fn openapi_schema() -> ::rustango::openapi::Schema {
+                        ::rustango::openapi::Schema::object()
+                            #( #property_calls )*
+                            .required([ #( #required_lits ),* ])
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "openapi"))]
+        {
+            quote! {}
+        }
+    };
+
     Ok(quote! {
         impl ::rustango::serializer::ModelSerializer for #struct_name {
             type Model = #model_path;
@@ -4061,5 +4110,17 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 __state.end()
             }
         }
+
+        #openapi_impl
     })
+}
+
+/// Returns true if `ty` looks like `Option<T>` (any path ending in `Option`).
+fn is_option(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(p) = ty {
+        if let Some(last) = p.path.segments.last() {
+            return last.ident == "Option";
+        }
+    }
+    false
 }

@@ -17,6 +17,12 @@ workspace = true
 [lib]
 proc-macro = true
 
+[features]
+# Emit `impl ::rustango::openapi::OpenApiSchema` from `#[derive(Serializer)]`.
+# Forwarded from `rustango/openapi` so the macro and the trait turn on
+# together.
+openapi = []
+
 [dependencies]
 syn         = { workspace = true }
 quote       = { workspace = true }

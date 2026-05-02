@@ -89,8 +89,9 @@ compression = ["admin", "dep:flate2"]
 # OpenAPI 3.1 spec builder + Swagger UI router (`rustango::openapi`).
 # Pure-Rust types you assemble into a spec, serialized to JSON via serde.
 # Optional axum mount at `/openapi.json` + `/docs` (Swagger UI from a
-# CDN). Pulls no new deps — uses serde_json already in the always-on set.
-openapi = []
+# CDN). Forwards through to the proc-macro so `#[derive(Serializer)]`
+# also emits an `OpenApiSchema` impl.
+openapi = ["rustango-macros/openapi"]
 
 # File storage backends (`rustango::storage`) — Storage trait + LocalStorage
 # (filesystem) + InMemoryStorage (tests). S3/GCS/Azure plug in via the trait.
