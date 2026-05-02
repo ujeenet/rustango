@@ -34,6 +34,8 @@
 //!
 //! ## Query parameters (list endpoint)
 //!
+//! ### Page-number pagination (default)
+//!
 //! | Parameter | Default | Description |
 //! |---|---|---|
 //! | `page` | 1 | 1-based page number |
@@ -41,6 +43,21 @@
 //! | `ordering` | configured default | Comma-separated field names, prefix `-` for DESC |
 //! | `search` | — | Full-text search across `search_fields` |
 //! | `{field}` | — | Exact filter for any `filter_fields` |
+//!
+//! Response: `{"count": N, "page": P, "page_size": S, "last_page": L, "results": [...]}`
+//!
+//! ### Cursor pagination (opt-in)
+//!
+//! Enable via `.cursor_pagination("id")` or `.cursor_pagination_desc("id")`.
+//! Skips the `COUNT(*)` query so it scales to billion-row tables.
+//!
+//! | Parameter | Default | Description |
+//! |---|---|---|
+//! | `cursor` | — | Opaque token from a previous response's `next` field |
+//! | `page_size` | configured default | Items per page (capped at 1000) |
+//! | `{field}` | — | Exact filter for any `filter_fields` |
+//!
+//! Response: `{"page_size": S, "next": "<token>" \| null, "results": [...]}`
 //!
 //! ## Permissions
 //!
@@ -98,6 +115,44 @@ pub struct ViewSetPerms {
 
 // ------------------------------------------------------------------ ViewSet builder
 
+/// Pagination strategy for ViewSet list endpoints.
+#[derive(Clone, Debug)]
+pub enum PaginationStyle {
+    /// 1-based page numbering — `?page=1&page_size=20`. Returns
+    /// `count` + `page` + `last_page` in the response. Cheap when
+    /// the table is small; runs `COUNT(*)` per request.
+    PageNumber,
+    /// Cursor-based pagination — `?cursor=<encoded>&page_size=20`.
+    /// `field` must be a stable, monotonically-ordered column
+    /// (typically the primary key). Skips the COUNT query, so it
+    /// scales to billion-row tables.
+    Cursor {
+        /// SQL field name used as the cursor (e.g. `"id"`).
+        field: &'static str,
+        /// `true` for descending order. Cursors compare with `<` instead
+        /// of `>`. Default ordering is set automatically to match.
+        desc: bool,
+    },
+}
+
+impl PaginationStyle {
+    /// Default — 1-based page numbering.
+    #[must_use]
+    pub const fn page_number() -> Self { Self::PageNumber }
+
+    /// Cursor pagination on the named field, ascending.
+    #[must_use]
+    pub const fn cursor(field: &'static str) -> Self {
+        Self::Cursor { field, desc: false }
+    }
+
+    /// Cursor pagination on the named field, descending.
+    #[must_use]
+    pub const fn cursor_desc(field: &'static str) -> Self {
+        Self::Cursor { field, desc: true }
+    }
+}
+
 /// Builder for a set of REST CRUD endpoints over a single [`Model`] table.
 ///
 /// Call `.router(prefix, pool)` when done to get an `axum::Router`.
@@ -111,6 +166,7 @@ pub struct ViewSet {
     default_ordering: Vec<(String, bool)>,
     perms: ViewSetPerms,
     read_only: bool,
+    pagination: PaginationStyle,
 }
 
 impl ViewSet {
@@ -125,7 +181,32 @@ impl ViewSet {
             default_ordering: Vec::new(),
             perms: ViewSetPerms::default(),
             read_only: false,
+            pagination: PaginationStyle::PageNumber,
         }
+    }
+
+    /// Switch to cursor-based pagination on `field`. The cursor field
+    /// should be a stable, monotonically-ordered column (typically `"id"`).
+    /// This skips the `COUNT(*)` query that page-number pagination runs,
+    /// so it scales well for large tables.
+    #[must_use]
+    pub fn cursor_pagination(mut self, field: &'static str) -> Self {
+        self.pagination = PaginationStyle::Cursor { field, desc: false };
+        self
+    }
+
+    /// Cursor pagination, descending order.
+    #[must_use]
+    pub fn cursor_pagination_desc(mut self, field: &'static str) -> Self {
+        self.pagination = PaginationStyle::Cursor { field, desc: true };
+        self
+    }
+
+    /// Set the pagination strategy explicitly.
+    #[must_use]
+    pub fn pagination(mut self, style: PaginationStyle) -> Self {
+        self.pagination = style;
+        self
     }
 
     /// Restrict which fields appear in list/retrieve responses and are
@@ -356,14 +437,12 @@ async fn handle_list(
         return json_error(StatusCode::FORBIDDEN, "permission denied");
     }
 
-    let page: i64 = params.get("page").and_then(|p| p.parse().ok()).unwrap_or(1).max(1);
     let page_size: i64 = params
         .get("page_size")
         .and_then(|p| p.parse().ok())
         .unwrap_or(state.vs.default_page_size as i64)
         .min(1000)
         .max(1);
-    let offset = (page - 1) * page_size;
 
     // Build WHERE from filter_fields in query params
     let mut filters: Vec<WhereExpr> = Vec::new();
@@ -429,46 +508,183 @@ async fn handle_list(
                 .collect()
         });
 
-    let select_q = SelectQuery {
-        model: state.vs.schema,
-        where_clause: where_clause.clone(),
-        search: search_clause.clone(),
-        joins: vec![],
-        order_by: order_by.clone(),
-        limit: Some(page_size),
-        offset: Some(offset),
-    };
-    let count_q = CountQuery {
-        model: state.vs.schema,
-        where_clause,
-    };
-
     let fields = state.effective_fields();
 
-    let (rows_result, count_result) = tokio::join!(
-        crate::sql::select_rows(&state.pool, &select_q),
-        crate::sql::count_rows(&state.pool, &count_q),
-    );
+    match &state.vs.pagination {
+        PaginationStyle::PageNumber => {
+            let page: i64 = params
+                .get("page")
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(1)
+                .max(1);
+            let offset = (page - 1) * page_size;
 
-    let rows = match rows_result {
+            let select_q = SelectQuery {
+                model: state.vs.schema,
+                where_clause: where_clause.clone(),
+                search: search_clause.clone(),
+                joins: vec![],
+                order_by: order_by.clone(),
+                limit: Some(page_size),
+                offset: Some(offset),
+            };
+            let count_q = CountQuery { model: state.vs.schema, where_clause };
+
+            let (rows_result, count_result) = tokio::join!(
+                crate::sql::select_rows(&state.pool, &select_q),
+                crate::sql::count_rows(&state.pool, &count_q),
+            );
+            let rows = match rows_result {
+                Ok(r) => r,
+                Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            };
+            let count = match count_result {
+                Ok(c) => c,
+                Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            };
+
+            let results: Vec<Value> = rows.iter().map(|row| row_to_json(row, &fields)).collect();
+            let last_page = ((count - 1).max(0) / page_size) + 1;
+            json_response(json!({
+                "count": count,
+                "page": page,
+                "page_size": page_size,
+                "last_page": last_page,
+                "results": results,
+            }))
+        }
+        PaginationStyle::Cursor { field: cursor_field, desc } => {
+            handle_list_cursor(
+                state.as_ref(),
+                params,
+                where_clause,
+                search_clause,
+                fields,
+                page_size,
+                cursor_field,
+                *desc,
+            )
+            .await
+        }
+    }
+}
+
+async fn handle_list_cursor(
+    state: &ViewSetState,
+    params: HashMap<String, String>,
+    where_clause: WhereExpr,
+    search_clause: Option<SearchClause>,
+    fields: Vec<&'static crate::core::FieldSchema>,
+    page_size: i64,
+    cursor_field: &str,
+    desc: bool,
+) -> Response {
+    // Resolve cursor field schema
+    let Some(cursor_schema) = state.vs.schema.field(cursor_field) else {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("cursor field `{cursor_field}` not found on model"),
+        );
+    };
+    if !matches!(cursor_schema.ty, FieldType::I32 | FieldType::I64) {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cursor pagination requires an integer field (i32/i64)",
+        );
+    }
+
+    // Decode the incoming cursor (if any)
+    let cursor_val: Option<i64> = match params.get("cursor") {
+        Some(c) if !c.is_empty() => match decode_cursor(c) {
+            Some(v) => Some(v),
+            None => return json_error(StatusCode::BAD_REQUEST, "invalid cursor"),
+        },
+        _ => None,
+    };
+
+    // Build WHERE = filters AND (cursor predicate, if any)
+    let final_where = match cursor_val {
+        Some(v) => {
+            let op = if desc { Op::Lt } else { Op::Gt };
+            let cursor_pred = WhereExpr::Predicate(Filter {
+                column: cursor_schema.column,
+                op,
+                value: SqlValue::I64(v),
+            });
+            match where_clause {
+                WhereExpr::And(v) if v.is_empty() => cursor_pred,
+                WhereExpr::And(mut v) => {
+                    v.push(cursor_pred);
+                    WhereExpr::And(v)
+                }
+                other => WhereExpr::And(vec![other, cursor_pred]),
+            }
+        }
+        None => where_clause,
+    };
+
+    // Force ordering by the cursor field (cursor pagination requires it)
+    let order_by = vec![OrderClause {
+        column: cursor_schema.column,
+        desc,
+    }];
+
+    // Fetch page_size+1 to detect if a next page exists.
+    let select_q = SelectQuery {
+        model: state.vs.schema,
+        where_clause: final_where,
+        search: search_clause,
+        joins: vec![],
+        order_by,
+        limit: Some(page_size + 1),
+        offset: None,
+    };
+    let rows = match crate::sql::select_rows(&state.pool, &select_q).await {
         Ok(r) => r,
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
-    let count = match count_result {
-        Ok(c) => c,
-        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+
+    let has_more = rows.len() as i64 > page_size;
+    let page_rows = if has_more { &rows[..page_size as usize] } else { &rows[..] };
+
+    let next_cursor = if has_more {
+        // Read the cursor field value from the last row in this page
+        let last = page_rows.last().expect("non-empty page");
+        let val: i64 = match cursor_schema.ty {
+            FieldType::I32 => last
+                .try_get::<i32, _>(cursor_schema.column)
+                .map(i64::from)
+                .unwrap_or(0),
+            FieldType::I64 => last.try_get::<i64, _>(cursor_schema.column).unwrap_or(0),
+            _ => 0,
+        };
+        Some(encode_cursor(val))
+    } else {
+        None
     };
 
-    let results: Vec<Value> = rows.iter().map(|row| row_to_json(row, &fields)).collect();
-    let last_page = ((count - 1).max(0) / page_size) + 1;
-
+    let results: Vec<Value> = page_rows.iter().map(|row| row_to_json(row, &fields)).collect();
     json_response(json!({
-        "count": count,
-        "page": page,
         "page_size": page_size,
-        "last_page": last_page,
+        "next": next_cursor,
         "results": results,
     }))
+}
+
+/// Encode an i64 cursor value as URL-safe base64 of its decimal string.
+fn encode_cursor(value: i64) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string().as_bytes())
+}
+ 
+/// Decode a cursor token. Returns `None` for malformed input.
+fn decode_cursor(token: &str) -> Option<i64> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token.as_bytes())
+        .ok()?;
+    let s = std::str::from_utf8(&bytes).ok()?;
+    s.parse::<i64>().ok()
 }
 
 async fn handle_retrieve(
@@ -751,5 +967,40 @@ async fn extract_form_body(
         // form-urlencoded (default)
         serde_urlencoded::from_bytes::<HashMap<String, String>>(&bytes)
             .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::{decode_cursor, encode_cursor};
+
+    #[test]
+    fn cursor_roundtrip_positive() {
+        let token = encode_cursor(12345);
+        assert_eq!(decode_cursor(&token), Some(12345));
+    }
+
+    #[test]
+    fn cursor_roundtrip_zero() {
+        let token = encode_cursor(0);
+        assert_eq!(decode_cursor(&token), Some(0));
+    }
+
+    #[test]
+    fn cursor_roundtrip_max() {
+        let token = encode_cursor(i64::MAX);
+        assert_eq!(decode_cursor(&token), Some(i64::MAX));
+    }
+
+    #[test]
+    fn cursor_decode_invalid_base64_returns_none() {
+        assert!(decode_cursor("not!valid!base64@@").is_none());
+    }
+
+    #[test]
+    fn cursor_decode_non_numeric_payload_returns_none() {
+        use base64::Engine;
+        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("not_a_number");
+        assert!(decode_cursor(&token).is_none());
     }
 }
