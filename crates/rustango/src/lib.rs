@@ -42,6 +42,11 @@ pub mod tenancy;
 #[cfg(feature = "tenancy")]
 pub mod extractors;
 
+/// DRF-style ModelViewSet — five REST endpoints for any [`Model`] table
+/// in ~5 lines. See [`viewset::ViewSet`].
+#[cfg(feature = "tenancy")]
+pub mod viewset;
+
 /// Django-style runserver — [`server::Builder`] owns every line of
 /// boilerplate every tenancy app would otherwise rewrite (DB pool,
 /// resolver chain, host dispatch, operator console, bind + serve).
