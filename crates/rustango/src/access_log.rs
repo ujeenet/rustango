@@ -39,6 +39,10 @@ pub struct AccessLogLayer {
     /// Threshold (in ms) above which a request is logged at WARN instead
     /// of INFO. Set to `u64::MAX` to disable. Default 1000ms.
     pub slow_threshold_ms: u64,
+    /// Query parameter names whose values get redacted in logs. Default
+    /// includes the common credential-bearing params: `password`, `token`,
+    /// `secret`, `api_key`, `access_token`, `refresh_token`, `signature`.
+    pub redact_query_params: Vec<String>,
 }
 
 impl Default for AccessLogLayer {
@@ -49,14 +53,30 @@ impl Default for AccessLogLayer {
 
 impl AccessLogLayer {
     /// New layer with default config: log every request, include IP,
-    /// flag requests >1000ms as slow.
+    /// flag requests >1000ms as slow, redact known credential query params.
     #[must_use]
     pub fn new() -> Self {
         Self {
             log_success: true,
             include_ip: true,
             slow_threshold_ms: 1000,
+            redact_query_params: default_redact_params(),
         }
+    }
+
+    /// Replace the redacted-params list with `params`. Pass an empty list
+    /// to disable redaction.
+    #[must_use]
+    pub fn redact(mut self, params: Vec<String>) -> Self {
+        self.redact_query_params = params;
+        self
+    }
+
+    /// Add an additional query-param name to redact (extends defaults).
+    #[must_use]
+    pub fn redact_additional(mut self, name: impl Into<String>) -> Self {
+        self.redact_query_params.push(name.into());
+        self
     }
 
     /// Skip 2xx/3xx responses; only log 4xx/5xx.
@@ -102,7 +122,15 @@ impl<S: Clone + Send + Sync + 'static> AccessLogRouterExt for Router<S> {
 async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Response<Body> {
     let started = Instant::now();
     let method = req.method().clone();
-    let path = req.uri().path().to_owned();
+    let raw_query = req.uri().query();
+    let path = match raw_query {
+        Some(q) => format!(
+            "{}?{}",
+            req.uri().path(),
+            redact_query(q, &cfg.redact_query_params),
+        ),
+        None => req.uri().path().to_owned(),
+    };
     let ip = if cfg.include_ip {
         req.extensions()
             .get::<ConnectInfo<std::net::SocketAddr>>()
@@ -150,6 +178,35 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
     response
 }
 
+/// Default list of query-param names whose values get redacted.
+fn default_redact_params() -> Vec<String> {
+    vec![
+        "password".into(),
+        "passwd".into(),
+        "token".into(),
+        "secret".into(),
+        "api_key".into(),
+        "apikey".into(),
+        "access_token".into(),
+        "refresh_token".into(),
+        "signature".into(),
+        "auth".into(),
+    ]
+}
+
+/// Replace values of redacted params with `[redacted]` in a raw query string.
+fn redact_query(raw: &str, redact_keys: &[String]) -> String {
+    raw.split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((k, _)) if redact_keys.iter().any(|r| r.eq_ignore_ascii_case(k)) => {
+                format!("{k}=[redacted]")
+            }
+            _ => pair.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +235,69 @@ mod tests {
     fn slow_threshold_override() {
         let l = AccessLogLayer::new().slow_threshold_ms(500);
         assert_eq!(l.slow_threshold_ms, 500);
+    }
+
+    #[test]
+    fn defaults_include_common_credential_params() {
+        let l = AccessLogLayer::default();
+        for required in &["password", "token", "secret", "api_key", "access_token"] {
+            assert!(
+                l.redact_query_params.iter().any(|k| k == required),
+                "default redact list must include `{required}`"
+            );
+        }
+    }
+
+    #[test]
+    fn redact_query_replaces_password() {
+        let r = redact_query(
+            "user=alice&password=hunter2",
+            &["password".to_owned()],
+        );
+        assert_eq!(r, "user=alice&password=[redacted]");
+    }
+
+    #[test]
+    fn redact_query_handles_multiple_redacted_keys() {
+        let r = redact_query(
+            "u=a&token=xxx&password=yyy&q=z",
+            &["password".into(), "token".into()],
+        );
+        assert!(r.contains("u=a"));
+        assert!(r.contains("q=z"));
+        assert!(r.contains("token=[redacted]"));
+        assert!(r.contains("password=[redacted]"));
+    }
+
+    #[test]
+    fn redact_query_is_case_insensitive_on_keys() {
+        let r = redact_query("PASSWORD=x", &["password".to_owned()]);
+        assert_eq!(r, "PASSWORD=[redacted]");
+    }
+
+    #[test]
+    fn redact_query_passes_through_when_no_match() {
+        let r = redact_query("a=1&b=2", &["password".to_owned()]);
+        assert_eq!(r, "a=1&b=2");
+    }
+
+    #[test]
+    fn redact_query_handles_empty_list() {
+        let r = redact_query("password=x", &[]);
+        assert_eq!(r, "password=x");
+    }
+
+    #[test]
+    fn redact_additional_extends_defaults() {
+        let l = AccessLogLayer::new().redact_additional("session_id");
+        assert!(l.redact_query_params.iter().any(|k| k == "session_id"));
+        // Defaults still present
+        assert!(l.redact_query_params.iter().any(|k| k == "password"));
+    }
+
+    #[test]
+    fn redact_replaces_default_list() {
+        let l = AccessLogLayer::new().redact(vec!["only_this".into()]);
+        assert_eq!(l.redact_query_params, vec!["only_this".to_owned()]);
     }
 }

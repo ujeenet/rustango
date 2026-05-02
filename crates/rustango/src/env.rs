@@ -150,6 +150,119 @@ pub fn duration_millis(name: &str) -> Result<Duration, EnvError> {
     Ok(Duration::from_millis(ms))
 }
 
+// ------------------------------------------------------------------ Startup validation
+
+/// One declared environment-variable requirement.
+#[derive(Debug, Clone)]
+pub struct EnvRequirement {
+    pub name: String,
+    pub description: String,
+    pub required: bool,
+}
+
+/// Validator that collects required env vars and reports ALL missing ones at once.
+///
+/// Use during `Builder::serve(...)` startup so misconfigurations surface as
+/// a single clear error message instead of crashing on the first DB call.
+///
+/// ## Quick start
+///
+/// ```ignore
+/// use rustango::env::Validator;
+///
+/// Validator::new()
+///     .require("DATABASE_URL", "Postgres connection string (postgres://...)")
+///     .require("SECRET_KEY", "32+ byte secret for cookie signing")
+///     .optional("REDIS_URL", "Redis connection string (defaults to in-memory cache)")
+///     .check_or_panic();
+/// ```
+#[derive(Default)]
+pub struct Validator {
+    reqs: Vec<EnvRequirement>,
+}
+
+impl Validator {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a required env var.
+    #[must_use]
+    pub fn require(mut self, name: impl Into<String>, description: impl Into<String>) -> Self {
+        self.reqs.push(EnvRequirement {
+            name: name.into(),
+            description: description.into(),
+            required: true,
+        });
+        self
+    }
+
+    /// Add an optional env var (logged as a hint when absent, not a failure).
+    #[must_use]
+    pub fn optional(mut self, name: impl Into<String>, description: impl Into<String>) -> Self {
+        self.reqs.push(EnvRequirement {
+            name: name.into(),
+            description: description.into(),
+            required: false,
+        });
+        self
+    }
+
+    /// Run validation. Returns names of missing REQUIRED vars (empty when all set).
+    /// Optional vars are not in the failure list.
+    #[must_use]
+    pub fn check(&self) -> Vec<&EnvRequirement> {
+        self.reqs
+            .iter()
+            .filter(|r| r.required && lookup(&r.name).is_none())
+            .collect()
+    }
+
+    /// Run validation and return `Err(message)` listing every missing required var.
+    /// The message is formatted as a multi-line shell-runnable hint block.
+    ///
+    /// # Errors
+    /// Returns the formatted error message when any required vars are missing.
+    pub fn check_or_error(&self) -> Result<(), String> {
+        let missing = self.check();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let mut out = String::from("Missing required environment variables:\n");
+        for req in &missing {
+            out.push_str(&format!("  - {} — {}\n", req.name, req.description));
+        }
+        out.push_str("\nSet them and re-run, e.g.:\n");
+        for req in &missing {
+            out.push_str(&format!("  export {}=...\n", req.name));
+        }
+        Err(out)
+    }
+
+    /// Run validation and panic with a multi-line message if any required
+    /// vars are missing. Suitable for `Builder::serve(...)` startup.
+    ///
+    /// # Panics
+    /// Panics with a formatted message when any required vars are missing.
+    pub fn check_or_panic(&self) {
+        if let Err(msg) = self.check_or_error() {
+            panic!("{msg}");
+        }
+    }
+
+    /// Number of declared requirements.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.reqs.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.reqs.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +389,63 @@ mod tests {
             let d = duration_secs("RUSTANGO_TEST_TTL").unwrap();
             assert_eq!(d, Duration::from_secs(60));
         });
+    }
+
+    // -------------------------------------------------------------- Validator tests
+
+    #[test]
+    fn validator_check_passes_when_all_required_set() {
+        // Set two vars without nesting with_env — nested locks would deadlock
+        let _g = env_lock().lock().unwrap();
+        std::env::set_var("RUSTANGO_TEST_VALID_DB", "x");
+        std::env::set_var("RUSTANGO_TEST_VALID_KEY", "y");
+        let v = Validator::new()
+            .require("RUSTANGO_TEST_VALID_DB", "db url")
+            .require("RUSTANGO_TEST_VALID_KEY", "key");
+        assert!(v.check().is_empty());
+        assert!(v.check_or_error().is_ok());
+        std::env::remove_var("RUSTANGO_TEST_VALID_DB");
+        std::env::remove_var("RUSTANGO_TEST_VALID_KEY");
+    }
+
+    #[test]
+    fn validator_check_lists_missing_required() {
+        without_env("RUSTANGO_TEST_MISSING_REQ", || {
+            let v = Validator::new()
+                .require("RUSTANGO_TEST_MISSING_REQ", "needed for X");
+            let missing = v.check();
+            assert_eq!(missing.len(), 1);
+            assert_eq!(missing[0].name, "RUSTANGO_TEST_MISSING_REQ");
+        });
+    }
+
+    #[test]
+    fn validator_optional_not_in_missing_list() {
+        without_env("RUSTANGO_TEST_OPT", || {
+            let v = Validator::new().optional("RUSTANGO_TEST_OPT", "fallback OK");
+            assert!(v.check().is_empty());
+        });
+    }
+
+    #[test]
+    fn validator_check_or_error_returns_formatted_message() {
+        without_env("RUSTANGO_TEST_FORMAT_REQ", || {
+            let v = Validator::new()
+                .require("RUSTANGO_TEST_FORMAT_REQ", "Postgres URL");
+            let err = v.check_or_error().unwrap_err();
+            assert!(err.contains("RUSTANGO_TEST_FORMAT_REQ"));
+            assert!(err.contains("Postgres URL"));
+            assert!(err.contains("export RUSTANGO_TEST_FORMAT_REQ=..."));
+        });
+    }
+
+    #[test]
+    fn validator_len_and_is_empty() {
+        let v = Validator::new();
+        assert!(v.is_empty());
+        assert_eq!(v.len(), 0);
+        let v = v.require("X", "x").optional("Y", "y");
+        assert_eq!(v.len(), 2);
+        assert!(!v.is_empty());
     }
 }

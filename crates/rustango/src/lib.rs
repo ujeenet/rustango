@@ -163,6 +163,16 @@ pub mod passwords;
 /// See [`pagination::LinkHeaderBuilder`].
 pub mod pagination;
 
+/// Security headers middleware — HSTS / X-Frame-Options / nosniff /
+/// Referrer-Policy / Permissions-Policy / CSP. See [`security_headers::SecurityHeadersLayer`].
+#[cfg(feature = "admin")]
+pub mod security_headers;
+
+/// Signed URL helpers — HMAC-SHA256 with optional expiry.
+/// See [`signed_url::sign`] / [`signed_url::verify`].
+#[cfg(feature = "signed_url")]
+pub mod signed_url;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
