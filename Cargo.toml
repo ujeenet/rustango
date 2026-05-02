@@ -29,7 +29,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 
 # Schema collection + collections
 inventory = "0.3"
-indexmap  = "2"
+indexmap  = { version = "2", features = ["serde"] }
 
 # Serde
 serde      = { version = "1", features = ["derive"] }

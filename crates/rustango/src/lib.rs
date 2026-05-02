@@ -236,6 +236,12 @@ pub mod oauth2;
 #[cfg(feature = "compression")]
 pub mod compression;
 
+/// OpenAPI 3.1 spec builder + Swagger UI / Redoc viewer routes.
+/// Hand-build a spec with [`openapi::OpenApiSpec`] and mount it under
+/// [`openapi::router::openapi_router`] (requires the `admin` feature).
+#[cfg(feature = "openapi")]
+pub mod openapi;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 

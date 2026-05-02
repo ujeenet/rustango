@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "api_keys", "passwords", "signed_url", "notifications", "jobs", "auth_flows", "sse", "oauth2", "compression"]
+default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "api_keys", "passwords", "signed_url", "notifications", "jobs", "auth_flows", "sse", "oauth2", "compression", "openapi"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -85,6 +85,12 @@ oauth2 = ["dep:reqwest", "dep:urlencoding", "dep:tokio", "dep:hmac", "dep:sha2",
 # client's `Accept-Encoding`, skips already-compressed and binary
 # content-types. Implies `admin` (axum-only).
 compression = ["admin", "dep:flate2"]
+
+# OpenAPI 3.1 spec builder + Swagger UI router (`rustango::openapi`).
+# Pure-Rust types you assemble into a spec, serialized to JSON via serde.
+# Optional axum mount at `/openapi.json` + `/docs` (Swagger UI from a
+# CDN). Pulls no new deps — uses serde_json already in the always-on set.
+openapi = []
 
 # File storage backends (`rustango::storage`) — Storage trait + LocalStorage
 # (filesystem) + InMemoryStorage (tests). S3/GCS/Azure plug in via the trait.
