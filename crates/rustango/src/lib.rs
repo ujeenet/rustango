@@ -130,6 +130,18 @@ pub mod bulk_actions;
 #[cfg(feature = "totp")]
 pub mod totp;
 
+/// Text utilities — slugify, html_escape, truncate.
+pub mod text;
+
+/// Request ID middleware — assign per-request correlation IDs.
+/// See [`request_id::RequestIdLayer`].
+#[cfg(all(feature = "admin", feature = "tenancy"))]
+pub mod request_id;
+
+/// IP allowlist / blocklist middleware. See [`ip_filter::IpFilterLayer`].
+#[cfg(feature = "admin")]
+pub mod ip_filter;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
