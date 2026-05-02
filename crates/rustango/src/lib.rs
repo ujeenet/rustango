@@ -120,6 +120,11 @@ pub mod access_log;
 /// See [`fixtures::Fixture`].
 pub mod fixtures;
 
+/// Bulk-action runner — apply one operation to a set of selected PKs.
+/// See [`bulk_actions::BulkActionRegistry`] + built-in actions.
+#[cfg(feature = "tenancy")]
+pub mod bulk_actions;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
