@@ -46,9 +46,10 @@
 //!     .await?;
 //! ```
 
-use crate::core::{Column as _, DeleteQuery, Filter, Op, SqlValue, WhereExpr};
+use crate::core::{DeleteQuery, Filter, Op, SqlValue, WhereExpr};
+use crate::core::Model as _;
 use crate::sql::sqlx::{self, PgPool, Row};
-use crate::sql::{Auto, Fetcher as _};
+use crate::sql::Auto;
 use crate::Model;
 
 use super::error::TenancyError;

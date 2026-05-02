@@ -447,6 +447,16 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     }
 
+    // Build the audit_track list for ModelSchema: None when no audit attr,
+    // Some(empty) when audit present without track, Some(names) when explicit.
+    let audit_track_names: Option<Vec<String>> = container.audit.as_ref().map(|audit| {
+        audit
+            .track
+            .as_ref()
+            .map(|(names, _)| names.clone())
+            .unwrap_or_default()
+    });
+
     let model_impl = model_impl_tokens(
         struct_name,
         &model_name,
@@ -457,6 +467,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         &collected.field_schemas,
         collected.soft_delete_column.as_deref(),
         container.permissions,
+        audit_track_names.as_deref(),
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -924,6 +935,7 @@ fn model_impl_tokens(
     field_schemas: &[TokenStream2],
     soft_delete_column: Option<&str>,
     permissions: bool,
+    audit_track: Option<&[String]>,
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
@@ -940,6 +952,13 @@ fn model_impl_tokens(
     } else {
         quote!(::core::option::Option::None)
     };
+    let audit_track_tokens = match audit_track {
+        None => quote!(::core::option::Option::None),
+        Some(names) => {
+            let lits = names.iter().map(|n| n.as_str());
+            quote!(::core::option::Option::Some(&[ #(#lits),* ]))
+        }
+    };
     let admin_tokens = admin_config_tokens(admin);
     quote! {
         impl ::rustango::core::Model for #struct_name {
@@ -952,6 +971,7 @@ fn model_impl_tokens(
                 admin: #admin_tokens,
                 soft_delete_column: #soft_delete_tokens,
                 permissions: #permissions,
+                audit_track: #audit_track_tokens,
             };
         }
     }

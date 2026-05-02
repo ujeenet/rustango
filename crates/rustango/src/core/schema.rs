@@ -91,6 +91,16 @@ pub struct ModelSchema {
     /// `table.delete`, `table.view`) should be auto-seeded by
     /// [`rustango::tenancy::permissions::auto_create_permissions`].
     pub permissions: bool,
+    /// Rust field names that `#[rustango(audit(track = "…"))]` selected
+    /// for per-write change capture.
+    ///
+    /// * `None` — no `#[rustango(audit(...))]` on this model; the macro
+    ///   emits no audit code. The admin still records changes for all fields.
+    /// * `Some(&[])` — `audit` present with no `track` list; every scalar
+    ///   field is captured (macro and admin agree on "all fields").
+    /// * `Some(&["title", "body"])` — only these named fields are captured
+    ///   both by the macro-generated write path and by the admin diff.
+    pub audit_track: Option<&'static [&'static str]>,
 }
 
 /// Django ModelAdmin-shape per-model admin customization. Populated by

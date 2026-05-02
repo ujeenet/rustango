@@ -375,10 +375,12 @@ pub(crate) async fn emit_admin_audit_diff(
     // falling back to the row's prior value for absent keys.
     let before_pairs: Vec<(&str, Value)> = model
         .scalar_fields()
+        .filter(|f| model.audit_track.map_or(true, |names| names.is_empty() || names.contains(&f.name)))
         .map(|f| (f.name, render::read_value_as_json(row, f)))
         .collect();
     let after_pairs: Vec<(&str, Value)> = model
         .scalar_fields()
+        .filter(|f| model.audit_track.map_or(true, |names| names.is_empty() || names.contains(&f.name)))
         .map(|f| {
             let v = match form.get(f.name) {
                 Some(s) => render::coerce_form_to_json(f, s),
@@ -423,6 +425,7 @@ pub(crate) async fn emit_admin_audit(
     // bools, strings as strings).
     let pairs: Vec<(&str, Value)> = model
         .scalar_fields()
+        .filter(|f| model.audit_track.map_or(true, |names| names.is_empty() || names.contains(&f.name)))
         .filter_map(|f| {
             form.get(f.name)
                 .map(|v| (f.name, render::coerce_form_to_json(f, v)))
