@@ -416,6 +416,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         container.admin.as_ref(),
         &collected.field_schemas,
         collected.soft_delete_column.as_deref(),
+        container.permissions,
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -876,6 +877,7 @@ fn model_impl_tokens(
     admin: Option<&AdminAttrs>,
     field_schemas: &[TokenStream2],
     soft_delete_column: Option<&str>,
+    permissions: bool,
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
@@ -903,6 +905,7 @@ fn model_impl_tokens(
                 app_label: #app_label_tokens,
                 admin: #admin_tokens,
                 soft_delete_column: #soft_delete_tokens,
+                permissions: #permissions,
             };
         }
     }
@@ -1992,6 +1995,10 @@ struct ContainerAttrs {
     /// before/after for the listed fields and bulk writes batch
     /// snapshots into one INSERT into `rustango_audit_log`.
     audit: Option<AuditAttrs>,
+    /// `true` when `#[rustango(permissions)]` is present. Signals that
+    /// `auto_create_permissions` should seed the four CRUD codenames for
+    /// this model.
+    permissions: bool,
 }
 
 /// Parsed shape of `#[rustango(audit(track = "name, body", source =
@@ -2035,6 +2042,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         app: None,
         admin: None,
         audit: None,
+        permissions: false,
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -2132,6 +2140,10 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     ))
                 })?;
                 out.audit = Some(audit);
+                return Ok(());
+            }
+            if meta.path.is_ident("permissions") {
+                out.permissions = true;
                 return Ok(());
             }
             Err(meta.error("unknown rustango container attribute"))

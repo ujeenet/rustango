@@ -46,7 +46,7 @@
 //!     .await?;
 //! ```
 
-use crate::core::Column as _;
+use crate::core::{Column as _, DeleteQuery, Filter, Op, SqlValue, WhereExpr};
 use crate::sql::sqlx::{self, PgPool, Row};
 use crate::sql::{Auto, Fetcher as _};
 use crate::Model;
@@ -133,6 +133,13 @@ pub struct UserPermission {
 // ------------------------------------------------------------------ ensure_tables (DDL)
 
 const ENSURE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS "rustango_permissions" (
+    "id"          BIGSERIAL    PRIMARY KEY,
+    "table_name"  VARCHAR(150) NOT NULL,
+    "codename"    VARCHAR(100) NOT NULL,
+    "name"        VARCHAR(255) NOT NULL DEFAULT '',
+    CONSTRAINT "rustango_permissions_uq" UNIQUE ("table_name", "codename")
+);
 CREATE TABLE IF NOT EXISTS "rustango_roles" (
     "id"          BIGSERIAL    PRIMARY KEY,
     "name"        VARCHAR(150) NOT NULL,
@@ -249,31 +256,123 @@ pub async fn has_perm(uid: i64, codename: &str, pool: &PgPool) -> Result<bool, s
 }
 
 /// Check whether user `uid` holds ANY of the given `codenames`.
+///
+/// Single round-trip — resolves superuser, explicit denials, explicit
+/// grants, and role-based grants in one CTE for the full array.
 pub async fn has_any_perm(
     uid: i64,
     codenames: &[&str],
     pool: &PgPool,
 ) -> Result<bool, sqlx::Error> {
-    for c in codenames {
-        if has_perm(uid, c, pool).await? {
-            return Ok(true);
-        }
+    if codenames.is_empty() {
+        return Ok(false);
     }
-    Ok(false)
+    let names: Vec<&str> = codenames.to_vec();
+    let row = sqlx::query(
+        r#"
+        WITH user_info AS (
+            SELECT is_superuser
+            FROM   "rustango_users"
+            WHERE  id = $1 AND active = TRUE
+        ),
+        denied AS (
+            SELECT codename
+            FROM   "rustango_user_permissions"
+            WHERE  user_id = $1 AND granted = FALSE AND codename = ANY($2::text[])
+        ),
+        via_role AS (
+            SELECT 1
+            FROM   "rustango_user_roles" ur
+            JOIN   "rustango_role_permissions" rp ON rp.role_id = ur.role_id
+            WHERE  ur.user_id = $1
+              AND  rp.codename = ANY($2::text[])
+              AND  rp.codename NOT IN (SELECT codename FROM denied)
+            LIMIT  1
+        ),
+        explicit_grant AS (
+            SELECT 1
+            FROM   "rustango_user_permissions"
+            WHERE  user_id = $1 AND granted = TRUE
+              AND  codename = ANY($2::text[])
+              AND  codename NOT IN (SELECT codename FROM denied)
+            LIMIT  1
+        )
+        SELECT
+            COALESCE((SELECT is_superuser FROM user_info), FALSE)                            AS is_super,
+            EXISTS(SELECT 1 FROM via_role) OR EXISTS(SELECT 1 FROM explicit_grant) AS has_any
+        "#,
+    )
+    .bind(uid)
+    .bind(names)
+    .fetch_one(pool)
+    .await?;
+
+    let is_super: bool = row.try_get("is_super").unwrap_or(false);
+    if is_super {
+        return Ok(true);
+    }
+    Ok(row.try_get("has_any").unwrap_or(false))
 }
 
 /// Check whether user `uid` holds ALL of the given `codenames`.
+///
+/// Single round-trip — counts effective grants (after applying denials)
+/// and compares against the full codename list.
 pub async fn has_all_perms(
     uid: i64,
     codenames: &[&str],
     pool: &PgPool,
 ) -> Result<bool, sqlx::Error> {
-    for c in codenames {
-        if !has_perm(uid, c, pool).await? {
-            return Ok(false);
-        }
+    if codenames.is_empty() {
+        return Ok(true);
     }
-    Ok(true)
+    let names: Vec<&str> = codenames.to_vec();
+    let expected = codenames.len() as i64;
+    let row = sqlx::query(
+        r#"
+        WITH user_info AS (
+            SELECT is_superuser
+            FROM   "rustango_users"
+            WHERE  id = $1 AND active = TRUE
+        ),
+        denied AS (
+            SELECT codename
+            FROM   "rustango_user_permissions"
+            WHERE  user_id = $1 AND granted = FALSE AND codename = ANY($2::text[])
+        ),
+        effective AS (
+            SELECT rp.codename
+            FROM   "rustango_user_roles" ur
+            JOIN   "rustango_role_permissions" rp ON rp.role_id = ur.role_id
+            WHERE  ur.user_id = $1
+              AND  rp.codename = ANY($2::text[])
+              AND  rp.codename NOT IN (SELECT codename FROM denied)
+
+            UNION
+
+            SELECT codename
+            FROM   "rustango_user_permissions"
+            WHERE  user_id = $1 AND granted = TRUE
+              AND  codename = ANY($2::text[])
+              AND  codename NOT IN (SELECT codename FROM denied)
+        )
+        SELECT
+            COALESCE((SELECT is_superuser FROM user_info), FALSE) AS is_super,
+            COUNT(DISTINCT codename)                               AS matched
+        FROM effective
+        "#,
+    )
+    .bind(uid)
+    .bind(names)
+    .fetch_one(pool)
+    .await?;
+
+    let is_super: bool = row.try_get("is_super").unwrap_or(false);
+    if is_super {
+        return Ok(true);
+    }
+    let matched: i64 = row.try_get("matched").unwrap_or(0);
+    Ok(matched == expected)
 }
 
 // ------------------------------------------------------------------ Role management (ORM-backed)
@@ -300,35 +399,43 @@ pub async fn get_or_create_role(
     description: &str,
     pool: &PgPool,
 ) -> Result<i64, TenancyError> {
-    let existing = Role::objects()
-        .where_(Role::name.eq(name.to_owned()))
-        .fetch(pool)
-        .await?;
-    if let Some(role) = existing.into_iter().next() {
-        return Ok(role.id.get().copied().unwrap_or(0));
-    }
-    create_role(name, description, pool).await
+    // Single round-trip: insert if absent, then union-select the id.
+    let row = sqlx::query(
+        r#"
+        WITH ins AS (
+            INSERT INTO "rustango_roles" (name, description, data)
+            VALUES ($1, $2, '{}')
+            ON CONFLICT (name) DO NOTHING
+            RETURNING id
+        )
+        SELECT id FROM ins
+        UNION ALL
+        SELECT id FROM "rustango_roles" WHERE name = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(name)
+    .bind(description)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.try_get::<i64, _>("id").unwrap_or(0))
 }
 
-/// Grant a codename to a role. No-op if already granted (fetch-then-insert).
+/// Grant a codename to a role. No-op if already granted.
 pub async fn grant_role_perm(
     role_id: i64,
     codename: &str,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
-    let existing = RolePermission::objects()
-        .where_(RolePermission::role_id.eq(role_id))
-        .where_(RolePermission::codename.eq(codename.to_owned()))
-        .fetch(pool)
-        .await?;
-    if existing.is_empty() {
-        let mut perm = RolePermission {
-            id: Auto::default(),
-            role_id,
-            codename: codename.to_owned(),
-        };
-        perm.save_on(pool).await?;
-    }
+    sqlx::query(
+        r#"INSERT INTO "rustango_role_permissions" (role_id, codename)
+           VALUES ($1, $2)
+           ON CONFLICT (role_id, codename) DO NOTHING"#,
+    )
+    .bind(role_id)
+    .bind(codename)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -338,14 +445,14 @@ pub async fn revoke_role_perm(
     codename: &str,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
-    let rows = RolePermission::objects()
-        .where_(RolePermission::role_id.eq(role_id))
-        .where_(RolePermission::codename.eq(codename.to_owned()))
-        .fetch(pool)
-        .await?;
-    for row in rows {
-        row.delete_on(pool).await?;
-    }
+    crate::sql::delete(pool, &DeleteQuery {
+        model: RolePermission::SCHEMA,
+        where_clause: WhereExpr::and_predicates(vec![
+            Filter { column: "role_id", op: Op::Eq, value: SqlValue::from(role_id) },
+            Filter { column: "codename", op: Op::Eq, value: SqlValue::from(codename) },
+        ]),
+    })
+    .await?;
     Ok(())
 }
 
@@ -355,15 +462,15 @@ pub async fn assign_role(
     role_id: i64,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
-    let existing = UserRole::objects()
-        .where_(UserRole::user_id.eq(user_id))
-        .where_(UserRole::role_id.eq(role_id))
-        .fetch(pool)
-        .await?;
-    if existing.is_empty() {
-        let mut membership = UserRole { id: Auto::default(), user_id, role_id };
-        membership.save_on(pool).await?;
-    }
+    sqlx::query(
+        r#"INSERT INTO "rustango_user_roles" (user_id, role_id)
+           VALUES ($1, $2)
+           ON CONFLICT (user_id, role_id) DO NOTHING"#,
+    )
+    .bind(user_id)
+    .bind(role_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -373,14 +480,14 @@ pub async fn remove_role(
     role_id: i64,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
-    let rows = UserRole::objects()
-        .where_(UserRole::user_id.eq(user_id))
-        .where_(UserRole::role_id.eq(role_id))
-        .fetch(pool)
-        .await?;
-    for row in rows {
-        row.delete_on(pool).await?;
-    }
+    crate::sql::delete(pool, &DeleteQuery {
+        model: UserRole::SCHEMA,
+        where_clause: WhereExpr::and_predicates(vec![
+            Filter { column: "user_id", op: Op::Eq, value: SqlValue::from(user_id) },
+            Filter { column: "role_id", op: Op::Eq, value: SqlValue::from(role_id) },
+        ]),
+    })
+    .await?;
     Ok(())
 }
 
@@ -391,24 +498,16 @@ pub async fn set_user_perm(
     granted: bool,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
-    let existing = UserPermission::objects()
-        .where_(UserPermission::user_id.eq(user_id))
-        .where_(UserPermission::codename.eq(codename.to_owned()))
-        .fetch(pool)
-        .await?;
-    if let Some(mut perm) = existing.into_iter().next() {
-        perm.granted = granted;
-        perm.save_on(pool).await?;
-    } else {
-        let mut perm = UserPermission {
-            id: Auto::default(),
-            user_id,
-            codename: codename.to_owned(),
-            granted,
-            data: serde_json::Value::Object(serde_json::Map::new()),
-        };
-        perm.save_on(pool).await?;
-    }
+    sqlx::query(
+        r#"INSERT INTO "rustango_user_permissions" (user_id, codename, granted, data)
+           VALUES ($1, $2, $3, '{}')
+           ON CONFLICT (user_id, codename) DO UPDATE SET granted = EXCLUDED.granted"#,
+    )
+    .bind(user_id)
+    .bind(codename)
+    .bind(granted)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -418,14 +517,14 @@ pub async fn clear_user_perm(
     codename: &str,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
-    let rows = UserPermission::objects()
-        .where_(UserPermission::user_id.eq(user_id))
-        .where_(UserPermission::codename.eq(codename.to_owned()))
-        .fetch(pool)
-        .await?;
-    for row in rows {
-        row.delete_on(pool).await?;
-    }
+    crate::sql::delete(pool, &DeleteQuery {
+        model: UserPermission::SCHEMA,
+        where_clause: WhereExpr::and_predicates(vec![
+            Filter { column: "user_id", op: Op::Eq, value: SqlValue::from(user_id) },
+            Filter { column: "codename", op: Op::Eq, value: SqlValue::from(codename) },
+        ]),
+    })
+    .await?;
     Ok(())
 }
 
@@ -463,22 +562,34 @@ pub async fn user_roles(uid: i64, pool: &PgPool) -> Result<Vec<(i64, String)>, s
 }
 
 /// List all codenames a user has access to (union of role + direct grants,
-/// minus denials). Superuser implicit grants are NOT included.
+/// minus explicit denials). Superuser implicit grants are NOT included —
+/// callers that need to handle superusers should check `is_superuser` first.
+///
+/// Denial priority matches [`has_perm`]: an explicit `granted = false` row
+/// removes the codename even if a role would otherwise grant it.
 pub async fn user_permissions(uid: i64, pool: &PgPool) -> Result<Vec<String>, TenancyError> {
     let rows = sqlx::query(
         r#"
-        SELECT codename FROM (
-            SELECT rp.codename, TRUE AS granted
+        WITH denied AS (
+            SELECT codename
+            FROM   "rustango_user_permissions"
+            WHERE  user_id = $1 AND granted = FALSE
+        )
+        SELECT DISTINCT codename
+        FROM (
+            SELECT rp.codename
             FROM   "rustango_user_roles" ur
             JOIN   "rustango_role_permissions" rp ON rp.role_id = ur.role_id
             WHERE  ur.user_id = $1
-            UNION
-            SELECT codename, granted
+              AND  rp.codename NOT IN (SELECT codename FROM denied)
+
+            UNION ALL
+
+            SELECT codename
             FROM   "rustango_user_permissions"
-            WHERE  user_id = $1
-        ) combined
-        WHERE granted = TRUE
-        GROUP BY codename
+            WHERE  user_id = $1 AND granted = TRUE
+              AND  codename NOT IN (SELECT codename FROM denied)
+        ) effective
         ORDER BY codename
         "#,
     )
@@ -502,4 +613,57 @@ pub fn model_codenames(table: &str) -> [String; 4] {
         format!("{table}.delete"),
         format!("{table}.view"),
     ]
+}
+
+/// Seed the `rustango_permissions` catalog with the four standard CRUD
+/// codenames for every model that carries `#[rustango(permissions)]`.
+///
+/// Idempotent — uses `ON CONFLICT DO NOTHING`. Call once at startup after
+/// [`ensure_tables`] so the catalog reflects the current model set.
+///
+/// # Errors
+/// Driver / SQL failures.
+pub async fn auto_create_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
+    use crate::core::{inventory, ModelEntry};
+
+    let action_names = [
+        ("add", "Can add"),
+        ("change", "Can change"),
+        ("delete", "Can delete"),
+        ("view", "Can view"),
+    ];
+
+    let mut tables: Vec<&str> = Vec::new();
+    let mut codenames: Vec<String> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+
+    for entry in inventory::iter::<ModelEntry> {
+        if !entry.schema.permissions {
+            continue;
+        }
+        let table = entry.schema.table;
+        let model_name = entry.schema.name;
+        for (action, verb) in &action_names {
+            tables.push(table);
+            codenames.push(format!("{table}.{action}"));
+            names.push(format!("{verb} {model_name}"));
+        }
+    }
+
+    if tables.is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query(
+        r#"INSERT INTO "rustango_permissions" (table_name, codename, name)
+           SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[])
+           ON CONFLICT (table_name, codename) DO NOTHING"#,
+    )
+    .bind(&tables)
+    .bind(&codenames)
+    .bind(&names)
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }

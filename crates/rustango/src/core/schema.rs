@@ -86,6 +86,11 @@ pub struct ModelSchema {
     /// if the model has one. The admin uses this to route DELETE requests
     /// through an UPDATE-set-column-to-NOW path instead of a hard DELETE.
     pub soft_delete_column: Option<&'static str>,
+    /// `true` when the model carries `#[rustango(permissions)]`. Signals
+    /// that the four standard CRUD codenames (`table.add`, `table.change`,
+    /// `table.delete`, `table.view`) should be auto-seeded by
+    /// [`rustango::tenancy::permissions::auto_create_permissions`].
+    pub permissions: bool,
 }
 
 /// Django ModelAdmin-shape per-model admin customization. Populated by

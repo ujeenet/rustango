@@ -86,6 +86,11 @@ pub(crate) struct Config {
     /// `admin(actions = "...")` but NOT in this map AND not the built-in
     /// produces a 500 — same defense as the v0.10.6 unknown-action gate.
     pub(crate) actions: AdminActionRegistry,
+    /// Pre-fetched permission codenames for the current user.
+    /// `None` = superuser (all operations allowed).
+    /// `Some(set)` = the effective codename set; `is_visible`,
+    /// `is_read_only`, `can_add`, and `can_delete` consult it.
+    pub(crate) user_perms: Option<HashSet<String>>,
 }
 
 impl Builder {
@@ -141,6 +146,24 @@ impl Builder {
     /// Set the subtitle shown below the title in the sidebar (optional).
     pub fn subtitle(mut self, subtitle: impl Into<String>) -> Self {
         self.config.subtitle = Some(subtitle.into());
+        self
+    }
+
+    /// Restrict visible and writable tables to the authenticated user's
+    /// effective permission set. Pass the codenames returned by
+    /// `rustango::tenancy::permissions::user_permissions(uid, pool)`.
+    ///
+    /// * Tables where the user lacks `{table}.view` are hidden from the
+    ///   index and return 404 on direct hits.
+    /// * Tables where the user lacks `{table}.change` are rendered
+    ///   read-only (edit form still renders; save returns 403).
+    /// * `{table}.add` gates the create form and create submit.
+    /// * `{table}.delete` gates delete submit and `delete_selected`.
+    ///
+    /// Superusers should NOT call this method — omitting it means `None`
+    /// which bypasses all permission checks and allows everything.
+    pub fn with_user_perms<I: IntoIterator<Item = String>>(mut self, perms: I) -> Self {
+        self.config.user_perms = Some(perms.into_iter().collect());
         self
     }
 
@@ -220,14 +243,54 @@ pub(crate) struct AppState {
 
 impl AppState {
     pub(crate) fn is_visible(&self, table: &str) -> bool {
-        self.config
+        let allowlist_ok = self
+            .config
             .allowed_tables
             .as_ref()
-            .is_none_or(|allowed| allowed.contains(table))
+            .is_none_or(|allowed| allowed.contains(table));
+        if !allowlist_ok {
+            return false;
+        }
+        // When a per-user perm set is present, require `{table}.view`.
+        if let Some(perms) = &self.config.user_perms {
+            return perms.contains(&format!("{table}.view"));
+        }
+        true
     }
 
+    /// Returns `true` when the table's mutating routes (edit/update)
+    /// should be blocked. Checks the global/per-table read-only flags
+    /// first; when `user_perms` is set also checks `{table}.change`.
     pub(crate) fn is_read_only(&self, table: &str) -> bool {
-        self.config.read_only_all || self.config.read_only_tables.contains(table)
+        if self.config.read_only_all || self.config.read_only_tables.contains(table) {
+            return true;
+        }
+        if let Some(perms) = &self.config.user_perms {
+            return !perms.contains(&format!("{table}.change"));
+        }
+        false
+    }
+
+    /// `true` when the user may create rows in `table`.
+    pub(crate) fn can_add(&self, table: &str) -> bool {
+        if self.config.read_only_all || self.config.read_only_tables.contains(table) {
+            return false;
+        }
+        if let Some(perms) = &self.config.user_perms {
+            return perms.contains(&format!("{table}.add"));
+        }
+        true
+    }
+
+    /// `true` when the user may delete rows from `table`.
+    pub(crate) fn can_delete(&self, table: &str) -> bool {
+        if self.config.read_only_all || self.config.read_only_tables.contains(table) {
+            return false;
+        }
+        if let Some(perms) = &self.config.user_perms {
+            return perms.contains(&format!("{table}.delete"));
+        }
+        true
     }
 
     /// Look up a registered action handler. Returns `None` for the

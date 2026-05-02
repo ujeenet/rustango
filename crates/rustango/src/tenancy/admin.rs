@@ -297,7 +297,7 @@ async fn handle_request(
 
     // Per-tenant auth opt-in. Without `with_session`, the v0.5 path
     // still applies — every request goes straight to the inner admin.
-    let mut force_read_only = false;
+    let mut user_perms: Option<std::collections::HashSet<String>> = None;
     let mut session_user_id: Option<i64> = None;
     if let Some(cfg) = session {
         let path = parts.uri.path().to_owned();
@@ -329,10 +329,30 @@ async fn handle_request(
                 is_superuser,
                 user_id,
             } => {
-                if !is_superuser {
-                    force_read_only = true;
-                }
                 session_user_id = Some(user_id);
+                if !is_superuser {
+                    // Fetch the user's effective codenames once per request
+                    // and thread them into the inner admin builder so
+                    // individual views can check add/change/delete/view perms
+                    // per table without extra DB round-trips.
+                    match super::permissions::user_permissions(user_id, pool.pg_pool()).await {
+                        Ok(codenames) => {
+                            user_perms = Some(codenames.into_iter().collect());
+                        }
+                        Err(e) => {
+                            warn!(
+                                target: "crate::tenancy::admin",
+                                slug = %org.slug,
+                                user_id,
+                                error = %e,
+                                "failed to fetch user permissions",
+                            );
+                            return (StatusCode::INTERNAL_SERVER_ERROR, "permission lookup failed")
+                                .into_response();
+                        }
+                    }
+                }
+                // Superuser: user_perms stays None → all operations allowed.
             }
             SessionCheck::Anonymous => {
                 return redirect_to_tenant_login(&path).into_response();
@@ -347,7 +367,7 @@ async fn handle_request(
         pool.pg_pool().clone(),
         show_only,
         read_only,
-        force_read_only,
+        user_perms,
         actions,
         title,
         subtitle,
@@ -769,7 +789,7 @@ fn build_inner_admin_router(
     pool: PgPool,
     show_only: &Option<Vec<String>>,
     read_only: &[String],
-    force_read_only_all: bool,
+    user_perms: Option<std::collections::HashSet<String>>,
     actions: &[RegisteredAction],
     title: Option<&str>,
     subtitle: Option<&str>,
@@ -781,8 +801,8 @@ fn build_inner_admin_router(
     if !read_only.is_empty() {
         builder = builder.read_only(read_only.iter().cloned());
     }
-    if force_read_only_all {
-        builder = builder.read_only_all();
+    if let Some(perms) = user_perms {
+        builder = builder.with_user_perms(perms);
     }
     if let Some(t) = title {
         builder = builder.title(t);

@@ -674,7 +674,7 @@ pub(crate) async fn create_form(
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
     let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound { table })?;
-    if state.is_read_only(model.table) {
+    if !state.can_add(model.table) {
         return Err(AdminError::ReadOnly {
             table: model.table.to_owned(),
         });
@@ -692,7 +692,7 @@ pub(crate) async fn create_submit(
     let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound {
         table: table.clone(),
     })?;
-    if state.is_read_only(model.table) {
+    if !state.can_add(model.table) {
         return Err(AdminError::ReadOnly {
             table: model.table.to_owned(),
         });
@@ -888,7 +888,7 @@ pub(crate) async fn delete_submit(
     let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound {
         table: table.clone(),
     })?;
-    if state.is_read_only(model.table) {
+    if !state.can_delete(model.table) {
         return Err(AdminError::ReadOnly {
             table: model.table.to_owned(),
         });
@@ -1008,11 +1008,6 @@ pub(crate) async fn action_submit(
     let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound {
         table: table.clone(),
     })?;
-    if state.is_read_only(model.table) {
-        return Err(AdminError::ReadOnly {
-            table: model.table.to_owned(),
-        });
-    }
 
     // Parse the form preserving repeats. axum's `Form<HashMap>` would
     // collapse duplicate `_selected` keys into one; we read the raw
@@ -1096,6 +1091,11 @@ pub(crate) async fn action_submit(
     };
 
     if action == "delete_selected" {
+        if !state.can_delete(model.table) {
+            return Err(AdminError::ReadOnly {
+                table: model.table.to_owned(),
+            });
+        }
         if let Some(col) = model.soft_delete_column {
             // Soft model — stamp the deleted_at column instead of hard DELETE.
             crate::sql::update(
@@ -1129,6 +1129,11 @@ pub(crate) async fn action_submit(
             .await?;
         }
     } else if action == "restore_selected" {
+        if state.is_read_only(model.table) {
+            return Err(AdminError::ReadOnly {
+                table: model.table.to_owned(),
+            });
+        }
         // Built-in restore — clears the soft-delete column (NULL = live).
         // Only meaningful for models with soft_delete_column; for others
         // the action is a no-op so users don't need to guard it.
@@ -1151,6 +1156,11 @@ pub(crate) async fn action_submit(
             .await?;
         }
     } else if let Some(handler) = state.action_handler(model.table, &action) {
+        if state.is_read_only(model.table) {
+            return Err(AdminError::ReadOnly {
+                table: model.table.to_owned(),
+            });
+        }
         handler(&state.pool, &pk_values).await?;
     } else {
         return Err(AdminError::Internal(format!(

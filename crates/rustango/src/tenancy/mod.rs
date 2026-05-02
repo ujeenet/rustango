@@ -64,9 +64,10 @@ pub use auth_backends::{
 };
 pub use middleware::{AuthenticatedUser, CurrentUser, RouterAuthExt};
 pub use permissions::{
-    assign_role, clear_user_perm, ensure_tables as ensure_permission_tables, get_or_create_role,
-    grant_role_perm, has_all_perms, has_any_perm, has_perm, model_codenames, remove_role,
-    revoke_role_perm, set_user_perm, user_permissions, user_roles,
+    assign_role, auto_create_permissions, clear_user_perm,
+    ensure_tables as ensure_permission_tables, get_or_create_role, grant_role_perm, has_all_perms,
+    has_any_perm, has_perm, model_codenames, remove_role, revoke_role_perm, set_user_perm,
+    user_permissions, user_roles,
 };
 pub use bootstrap::{
     init_tenancy, registry_bootstrap_migration, tenant_bootstrap_migration, InitTenancyReport,
