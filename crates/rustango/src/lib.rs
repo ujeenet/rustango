@@ -76,6 +76,10 @@ pub mod storage;
 #[cfg(feature = "admin")]
 pub mod test_client;
 
+/// Typed environment variable readers — `required` / `with_default` /
+/// `optional` / `list` / `duration_secs` / `duration_millis`.
+pub mod env;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
