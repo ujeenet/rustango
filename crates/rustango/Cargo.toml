@@ -203,7 +203,7 @@ redis            = { workspace = true, optional = true }
 
 # `runtime` feature dep — used by `#[rustango::main]` to install a
 # default tracing subscriber (env-filter) before the user body runs.
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"], optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "json"], optional = true }
 
 [dev-dependencies]
 tokio          = { workspace = true }
