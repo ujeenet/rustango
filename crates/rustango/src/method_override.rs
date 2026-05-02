@@ -282,7 +282,7 @@ fn swap_method(req: Request<Body>, target: Method) -> Request<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::routing::{delete, patch, post, put};
+    use axum::routing::post;
     use axum::Router;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc as StdArc;

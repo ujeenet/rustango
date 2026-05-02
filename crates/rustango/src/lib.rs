@@ -221,6 +221,12 @@ pub mod static_files;
 #[cfg(feature = "admin")]
 pub mod method_override;
 
+/// RFC 7807 "Problem Details for HTTP APIs" — standardized error
+/// responses with `application/problem+json`. Sister to
+/// [`api_errors`]. See [`problem_details::ProblemDetails`].
+#[cfg(feature = "admin")]
+pub mod problem_details;
+
 /// Webhook signature verification (HMAC-SHA256). See [`webhook::verify_signature`].
 #[cfg(feature = "webhook")]
 pub mod webhook;
