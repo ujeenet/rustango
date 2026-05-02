@@ -24,4 +24,4 @@
 
 mod builder;
 
-pub use builder::Builder;
+pub use builder::{ApiRouter, Builder};

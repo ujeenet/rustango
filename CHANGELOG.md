@@ -2,6 +2,160 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.17.2] — `#[rustango(unique)]`, admin form fixes, bootstrap cleanup — 2026-05-01
+
+### Added
+
+- **`#[rustango(unique)]`** field attribute — emits `UNIQUE` inline on the column DDL.
+  `FieldSchema.unique: bool` is tracked in snapshots and detected by the diff engine as
+  an `AlterField` trigger. `Org.slug`, `Operator.username`, `User.username` all upgraded.
+
+### Fixed
+
+- **Admin create form: Auto-PK and `auto` fields no longer get `required`** — any field
+  with `field.auto = true` (Auto<T> PK, `auto_now_add`, `auto_uuid`, default-assigned
+  columns) is now hidden on the create form and shown read-only on edit. Previously an
+  Auto-PK rendered as `<input type="number" required>`, silently blocking the browser
+  submit when the operator correctly left it blank.
+
+- **Admin form `:invalid` CSS** — `base.html` now styles `input:invalid` and
+  `textarea:invalid` with a red border so HTML5 validation failures are visible
+  instead of causing a silent no-op click.
+
+### Changed
+
+- Bootstrap migrations simplified: raw `DataOp` `ALTER TABLE … ADD CONSTRAINT … UNIQUE`
+  workarounds removed. `UNIQUE` is now inline on the column via `#[rustango(unique)]`.
+  Registry migration drops from 4 ops to 2; tenant migration from 2 ops to 1.
+
+---
+
+## [v0.17.1] — JSONB `data` bag on Role, UserPermission, User — 2026-05-01
+
+### Added
+
+- **`Role.data`**, **`UserPermission.data`**, **`User.data`** — `JSONB NOT NULL DEFAULT '{}'`
+  columns for flexible per-row metadata. Store role display config, override context
+  (reason, grantor), and user preferences without schema migrations for each new attribute.
+  The permission engine (`has_perm` CTE, `granted` bool) is untouched.
+
+- **`ENSURE_SQL` idempotent migration** — `ALTER TABLE … ADD COLUMN IF NOT EXISTS` appended
+  for all three tables so existing deployments pick up the column on next boot.
+
+---
+
+## [v0.17.0] — `ViewSet`: DRF-style REST router for any Model — 2026-05-01
+
+### Added
+
+- **`rustango::viewset::ViewSet`** — wires six standard REST endpoints for any `#[derive(Model)]`
+  table in ~5 lines:
+
+  ```rust
+  ViewSet::for_model(Post::SCHEMA)
+      .fields(&["id", "title", "body", "author_id"])
+      .filter_fields(&["author_id"])
+      .search_fields(&["title", "body"])
+      .ordering(&[("published_at", true)])
+      .page_size(20)
+      .router("/api/posts", pool.clone())
+  ```
+
+  Endpoints: `GET /` (list), `POST /` (create), `GET /{pk}` (retrieve),
+  `PUT /{pk}` (update), `PATCH /{pk}` (partial update), `DELETE /{pk}` (204).
+
+- **List response envelope**: `{"count": N, "page": P, "page_size": S, "last_page": L, "results": [...]}`.
+
+- **Query parameters**: `?page`, `?page_size`, `?ordering` (comma-separated, `-field` for DESC),
+  `?search`, and exact filters for any declared `filter_fields`.
+
+- **`ViewSetPerms`** — optional per-action permission check (list, retrieve, create, update,
+  destroy). Reads `CurrentUser` extension injected by `RouterAuthExt::require_auth`.
+
+- **JSON + form-urlencoded body parsing** — handlers accept both `application/json` and
+  `application/x-www-form-urlencoded` on create/update/patch.
+
+- **`.read_only()`** builder flag — drops create/update/destroy, wires list + retrieve only.
+
+---
+
+## [v0.16.0] — `Form`, `ModelForm`, `DynamicForm` (Option J) — 2026-05-01
+
+### Added
+
+- **`FormErrors`** — multi-field error collection type. All field validations run before
+  returning; `errors.get("field")` returns all messages for that field.
+
+- **`#[derive(Form)]` upgraded** — now implements the `Form` trait (replaces `FormStruct`).
+  `ContactForm::parse(&data)` returns `Result<ContactForm, FormErrors>` with every failing
+  field collected in one shot. Validators (`min`, `max`, `min_length`, `max_length`) push
+  to the error bag instead of returning early.
+
+- **`ModelForm`** — schema-driven form for any `#[derive(Model)]` type. No dedicated struct
+  required:
+  ```rust
+  let form = ModelForm::new(Post::SCHEMA, form_data);
+  match form.save(&pool).await {
+      Ok(pk) => redirect(pk),
+      Err(ModelFormError::Validation(e)) => render_errors(e),
+      Err(ModelFormError::Database(e)) => server_error(e),
+  }
+  let form = ModelForm::for_update(Post::SCHEMA, data, SqlValue::I64(id));
+  form.save(&pool).await?;
+  ```
+
+- **`DynamicForm`** — runtime JSON-schema driven form for surveys and operator-configurable
+  inputs. Build from a JSON array of field descriptors, bind POST data, validate, read
+  cleaned values:
+  ```rust
+  let mut form = DynamicForm::from_json(schema_json)?;
+  form.bind(form_data);
+  if form.is_valid() { let data = form.cleaned_data()?; }
+  ```
+  Supports: `text`, `textarea`, `integer`, `float`, `boolean`, `date`, `datetime`,
+  `email`, `url`, `select`, `multi_select`.
+
+### Breaking
+
+- `FormStruct` deprecated in favour of `Form`. Code calling `MyForm::parse(&data)` continues
+  to work by importing `rustango::forms::Form` (or `use rustango::Form`).
+  `FormError` (single-error) is kept for the admin's CRUD path.
+
+---
+
+## [v0.15.0] — Permissions, auth backends, auth middlewares (G+H+I) — 2026-05-01
+
+### Added
+
+- **Permission engine** (`rustango::tenancy::permissions`):
+  - Four `#[derive(Model)]` tables: `Role`, `RolePermission`, `UserRole`, `UserPermission` —
+    queryable via ORM, visible in admin, included in bootstrap snapshot.
+  - `has_perm(uid, codename, pool)` — single-CTE round-trip: superuser → explicit deny/grant
+    → role membership → default false.
+  - `has_any_perm`, `has_all_perms`, `user_permissions`, `user_roles`.
+  - `model_codenames(table)` — generates `add/change/delete/view` set for any model.
+  - `ensure_tables` — idempotent DDL; framework-managed outside user migration chain.
+  - `create_role`, `get_or_create_role`, `grant_role_perm`, `revoke_role_perm`,
+    `assign_role`, `remove_role`, `set_user_perm`, `clear_user_perm` — all ORM-backed.
+
+- **Pluggable auth backends** (`rustango::tenancy::auth_backends`):
+  - `AuthBackend` trait — `authenticate(parts, pool) → Result<Option<AuthUser>, AuthError>`.
+  - `ModelBackend` — `Authorization: Basic <b64>` against `rustango_users`.
+  - `ApiKeyBackend` — `Authorization: Bearer <prefix>.<secret>` via `rustango_api_keys`.
+  - `JwtBackend` — HMAC-SHA256 bearer JWT; `issue(user_id)` + `verify_token`.
+  - `ApiKey` model with `#[derive(Model)]`, `ensure_api_keys_table`, `create_api_key`.
+
+- **Auth middlewares** (`rustango::tenancy::middleware`):
+  - `RouterAuthExt` — `.require_auth(backends, pool)`, `.optional_auth(...)`,
+    `.require_perm(codename, pool)` chain methods on any `Router<S>`.
+  - `AuthenticatedUser` — injected into request extensions on successful auth.
+  - `CurrentUser` — axum extractor returning `Option<AuthenticatedUser>`.
+
+- **`manage` verbs**: `create-role`, `list-roles`, `assign-role`, `revoke-role`,
+  `grant-perm`, `revoke-perm`, `create-api-key`.
+
+---
+
 ## [v0.14.2] — full-width admin; custom title; semantic breadcrumbs — 2026-05-01
 
 ### Added
