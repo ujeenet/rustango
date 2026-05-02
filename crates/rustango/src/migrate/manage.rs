@@ -106,6 +106,8 @@ pub async fn run_with_writer<W: Write + Send>(
         "check" => check_cmd(pool, dir, &args[1..], writer).await,
         "docs" => docs_cmd(writer),
         "version" | "--version" => version_cmd(writer),
+        "db:dump" => db_dump_cmd(&args[1..], writer),
+        "db:restore" => db_restore_cmd(&args[1..], writer),
         other => Err(MigrateError::Validation(format!(
             "unknown subcommand: `{other}` (run with --help for usage)"
         ))),
@@ -186,6 +188,14 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(w, "  make:test <Name>")?;
     writeln!(w, "      Scaffold a single source file with the chosen shape.")?;
     writeln!(w, "      Writes to src/<snake_name>.rs (skips if exists).\n")?;
+    writeln!(w, "  db:dump [--out <file>] [--data-only|--schema-only] [--no-owner]")?;
+    writeln!(w, "      Run pg_dump against $DATABASE_URL. Default: prints SQL to")?;
+    writeln!(w, "      stdout (omit --out to pipe). --data-only / --schema-only")?;
+    writeln!(w, "      mirror pg_dump's flags. --no-owner skips OWNER lines.\n")?;
+    writeln!(w, "  db:restore <file> [--clean]")?;
+    writeln!(w, "      Run psql against $DATABASE_URL with `\\i <file>`. With")?;
+    writeln!(w, "      --clean, prepend a `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`")?;
+    writeln!(w, "      so the restore lands on a clean database.\n")?;
     writeln!(w, "  startapp <name> [--with-manage-bin]")?;
     writeln!(
         w,
@@ -1185,6 +1195,209 @@ async fn {snake}_smoke() {{
     Ok(())
 }
 
+// =====================================================================
+// db:dump / db:restore — shell out to pg_dump / psql
+// =====================================================================
+
+#[derive(Debug, PartialEq)]
+struct DbDumpArgs {
+    out: Option<String>,
+    data_only: bool,
+    schema_only: bool,
+    no_owner: bool,
+}
+
+fn parse_db_dump_args(args: &[String]) -> Result<DbDumpArgs, MigrateError> {
+    let mut out: Option<String> = None;
+    let mut data_only = false;
+    let mut schema_only = false;
+    let mut no_owner = false;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--out" | "-o" => {
+                out = Some(
+                    iter.next()
+                        .cloned()
+                        .ok_or_else(|| {
+                            MigrateError::Validation("--out requires a path".into())
+                        })?,
+                );
+            }
+            "--data-only" => data_only = true,
+            "--schema-only" => schema_only = true,
+            "--no-owner" => no_owner = true,
+            other => {
+                return Err(MigrateError::Validation(format!(
+                    "unknown flag: {other}"
+                )));
+            }
+        }
+    }
+    if data_only && schema_only {
+        return Err(MigrateError::Validation(
+            "--data-only and --schema-only are mutually exclusive".into(),
+        ));
+    }
+    Ok(DbDumpArgs {
+        out,
+        data_only,
+        schema_only,
+        no_owner,
+    })
+}
+
+/// Build the argument vector for pg_dump given parsed args + database
+/// URL. Pure function — easy to test.
+fn build_pg_dump_argv(parsed: &DbDumpArgs, database_url: &str) -> Vec<String> {
+    let mut argv = vec![database_url.to_owned()];
+    if parsed.data_only {
+        argv.push("--data-only".into());
+    }
+    if parsed.schema_only {
+        argv.push("--schema-only".into());
+    }
+    if parsed.no_owner {
+        argv.push("--no-owner".into());
+    }
+    if let Some(out) = &parsed.out {
+        argv.push("--file".into());
+        argv.push(out.clone());
+    }
+    argv
+}
+
+fn db_dump_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let parsed = parse_db_dump_args(args)?;
+    let url = std::env::var("DATABASE_URL").map_err(|_| {
+        MigrateError::Validation(
+            "DATABASE_URL must be set for db:dump (e.g. \
+             postgres://user:pass@host:5432/db)"
+                .into(),
+        )
+    })?;
+    let argv = build_pg_dump_argv(&parsed, &url);
+    writeln!(w, "running: pg_dump {}", redact(&argv).join(" "))?;
+    let status = std::process::Command::new("pg_dump")
+        .args(&argv)
+        .status()
+        .map_err(|e| {
+            MigrateError::Validation(format!(
+                "could not run pg_dump (is it on PATH?): {e}"
+            ))
+        })?;
+    if !status.success() {
+        return Err(MigrateError::Validation(format!(
+            "pg_dump exited with status {status}"
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+struct DbRestoreArgs {
+    file: String,
+    clean: bool,
+}
+
+fn parse_db_restore_args(args: &[String]) -> Result<DbRestoreArgs, MigrateError> {
+    let mut file: Option<String> = None;
+    let mut clean = false;
+    for arg in args {
+        match arg.as_str() {
+            "--clean" => clean = true,
+            other if other.starts_with('-') => {
+                return Err(MigrateError::Validation(format!(
+                    "unknown flag: {other}"
+                )));
+            }
+            other => {
+                if file.is_some() {
+                    return Err(MigrateError::Validation(format!(
+                        "unexpected argument: {other}"
+                    )));
+                }
+                file = Some(other.to_owned());
+            }
+        }
+    }
+    let file = file.ok_or_else(|| {
+        MigrateError::Validation("db:restore <file> requires a dump file path".into())
+    })?;
+    Ok(DbRestoreArgs { file, clean })
+}
+
+/// Build the psql argv given parsed args + URL. Pure function — easy
+/// to test.
+fn build_psql_argv(parsed: &DbRestoreArgs, database_url: &str) -> Vec<String> {
+    let mut argv = vec![database_url.to_owned()];
+    // -v ON_ERROR_STOP=1 makes psql exit non-zero on the first SQL
+    // error, instead of plowing through and "succeeding" with garbage.
+    argv.push("-v".into());
+    argv.push("ON_ERROR_STOP=1".into());
+    if parsed.clean {
+        argv.push("-c".into());
+        argv.push(
+            "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;".into(),
+        );
+    }
+    argv.push("-f".into());
+    argv.push(parsed.file.clone());
+    argv
+}
+
+fn db_restore_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let parsed = parse_db_restore_args(args)?;
+    let url = std::env::var("DATABASE_URL").map_err(|_| {
+        MigrateError::Validation(
+            "DATABASE_URL must be set for db:restore (e.g. \
+             postgres://user:pass@host:5432/db)"
+                .into(),
+        )
+    })?;
+    let argv = build_psql_argv(&parsed, &url);
+    writeln!(w, "running: psql {}", redact(&argv).join(" "))?;
+    let status = std::process::Command::new("psql")
+        .args(&argv)
+        .status()
+        .map_err(|e| {
+            MigrateError::Validation(format!(
+                "could not run psql (is it on PATH?): {e}"
+            ))
+        })?;
+    if !status.success() {
+        return Err(MigrateError::Validation(format!(
+            "psql exited with status {status}"
+        )));
+    }
+    Ok(())
+}
+
+/// Mask the password in a `postgres://user:pass@host/db` connection
+/// URL so it doesn't leak into log output.
+fn redact(argv: &[String]) -> Vec<String> {
+    argv.iter().map(|a| redact_url(a)).collect()
+}
+
+fn redact_url(s: &str) -> String {
+    // Match `<scheme>://<user>:<password>@<rest>` and replace `<password>`
+    // with `***`. Anything that doesn't look like a URL passes through.
+    let Some(scheme_end) = s.find("://") else {
+        return s.to_owned();
+    };
+    let rest = &s[scheme_end + 3..];
+    let Some(at) = rest.find('@') else {
+        return s.to_owned();
+    };
+    let creds = &rest[..at];
+    let Some(colon) = creds.find(':') else {
+        return s.to_owned();
+    };
+    let user = &creds[..colon];
+    let after_at = &rest[at..];
+    format!("{}://{user}:***{after_at}", &s[..scheme_end])
+}
+
 #[cfg(test)]
 mod gen_tests {
     use super::*;
@@ -1237,5 +1450,200 @@ mod gen_tests {
     fn parse_name_and_model_rejects_lowercase_name() {
         let r = parse_name_and_model(&["postviewset".into()]);
         assert!(r.is_err());
+    }
+}
+
+#[cfg(test)]
+mod db_cmd_tests {
+    use super::*;
+
+    fn args(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| (*x).to_owned()).collect()
+    }
+
+    // -------- parse_db_dump_args
+
+    #[test]
+    fn dump_no_flags_defaults() {
+        let p = parse_db_dump_args(&[]).unwrap();
+        assert!(p.out.is_none());
+        assert!(!p.data_only);
+        assert!(!p.schema_only);
+        assert!(!p.no_owner);
+    }
+
+    #[test]
+    fn dump_out_flag_with_value() {
+        let p = parse_db_dump_args(&args(&["--out", "/tmp/db.sql"])).unwrap();
+        assert_eq!(p.out.as_deref(), Some("/tmp/db.sql"));
+    }
+
+    #[test]
+    fn dump_short_o_flag() {
+        let p = parse_db_dump_args(&args(&["-o", "/tmp/db.sql"])).unwrap();
+        assert_eq!(p.out.as_deref(), Some("/tmp/db.sql"));
+    }
+
+    #[test]
+    fn dump_data_only_flag() {
+        let p = parse_db_dump_args(&args(&["--data-only"])).unwrap();
+        assert!(p.data_only);
+        assert!(!p.schema_only);
+    }
+
+    #[test]
+    fn dump_schema_only_flag() {
+        let p = parse_db_dump_args(&args(&["--schema-only"])).unwrap();
+        assert!(p.schema_only);
+        assert!(!p.data_only);
+    }
+
+    #[test]
+    fn dump_no_owner_flag() {
+        let p = parse_db_dump_args(&args(&["--no-owner"])).unwrap();
+        assert!(p.no_owner);
+    }
+
+    #[test]
+    fn dump_out_without_value_errors() {
+        let r = parse_db_dump_args(&args(&["--out"]));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn dump_data_and_schema_only_conflict() {
+        let r = parse_db_dump_args(&args(&["--data-only", "--schema-only"]));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn dump_unknown_flag_errors() {
+        let r = parse_db_dump_args(&args(&["--bogus"]));
+        assert!(r.is_err());
+    }
+
+    // -------- build_pg_dump_argv
+
+    #[test]
+    fn dump_argv_contains_url_first() {
+        let parsed = DbDumpArgs {
+            out: None,
+            data_only: false,
+            schema_only: false,
+            no_owner: false,
+        };
+        let argv = build_pg_dump_argv(&parsed, "postgres://u:p@h/db");
+        assert_eq!(argv[0], "postgres://u:p@h/db");
+    }
+
+    #[test]
+    fn dump_argv_includes_chosen_flags() {
+        let parsed = DbDumpArgs {
+            out: Some("/tmp/x.sql".into()),
+            data_only: true,
+            schema_only: false,
+            no_owner: true,
+        };
+        let argv = build_pg_dump_argv(&parsed, "postgres://u:p@h/db");
+        assert!(argv.contains(&"--data-only".to_owned()));
+        assert!(argv.contains(&"--no-owner".to_owned()));
+        assert!(argv.contains(&"--file".to_owned()));
+        assert!(argv.contains(&"/tmp/x.sql".to_owned()));
+        assert!(!argv.contains(&"--schema-only".to_owned()));
+    }
+
+    // -------- parse_db_restore_args
+
+    #[test]
+    fn restore_requires_file() {
+        let r = parse_db_restore_args(&[]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn restore_positional_file() {
+        let p = parse_db_restore_args(&args(&["/tmp/db.sql"])).unwrap();
+        assert_eq!(p.file, "/tmp/db.sql");
+        assert!(!p.clean);
+    }
+
+    #[test]
+    fn restore_with_clean_flag() {
+        let p = parse_db_restore_args(&args(&["--clean", "/tmp/db.sql"])).unwrap();
+        assert!(p.clean);
+        assert_eq!(p.file, "/tmp/db.sql");
+    }
+
+    #[test]
+    fn restore_clean_after_file() {
+        let p = parse_db_restore_args(&args(&["/tmp/db.sql", "--clean"])).unwrap();
+        assert!(p.clean);
+    }
+
+    #[test]
+    fn restore_two_files_errors() {
+        let r = parse_db_restore_args(&args(&["a.sql", "b.sql"]));
+        assert!(r.is_err());
+    }
+
+    // -------- build_psql_argv
+
+    #[test]
+    fn restore_argv_includes_on_error_stop() {
+        let parsed = DbRestoreArgs {
+            file: "/tmp/x.sql".into(),
+            clean: false,
+        };
+        let argv = build_psql_argv(&parsed, "postgres://u:p@h/db");
+        // ON_ERROR_STOP=1 prevents psql from continuing past errors
+        // and silently "succeeding" with a half-restored DB.
+        assert!(argv.contains(&"ON_ERROR_STOP=1".to_owned()));
+        assert!(argv.contains(&"-f".to_owned()));
+        assert!(argv.contains(&"/tmp/x.sql".to_owned()));
+        assert!(!argv.iter().any(|a| a.contains("DROP SCHEMA")));
+    }
+
+    #[test]
+    fn restore_argv_with_clean_drops_schema() {
+        let parsed = DbRestoreArgs {
+            file: "/tmp/x.sql".into(),
+            clean: true,
+        };
+        let argv = build_psql_argv(&parsed, "postgres://u:p@h/db");
+        assert!(argv.iter().any(|a| a.contains("DROP SCHEMA")));
+        assert!(argv.iter().any(|a| a.contains("CREATE SCHEMA")));
+    }
+
+    // -------- redact_url
+
+    #[test]
+    fn redact_masks_password_in_postgres_url() {
+        assert_eq!(
+            redact_url("postgres://alice:supersecret@localhost:5432/mydb"),
+            "postgres://alice:***@localhost:5432/mydb"
+        );
+    }
+
+    #[test]
+    fn redact_passes_through_url_without_credentials() {
+        assert_eq!(
+            redact_url("postgres://localhost:5432/mydb"),
+            "postgres://localhost:5432/mydb"
+        );
+    }
+
+    #[test]
+    fn redact_passes_through_non_urls() {
+        assert_eq!(redact_url("--data-only"), "--data-only");
+        assert_eq!(redact_url("/tmp/db.sql"), "/tmp/db.sql");
+    }
+
+    #[test]
+    fn redact_handles_url_with_only_user() {
+        // No colon → no password to redact → pass through.
+        assert_eq!(
+            redact_url("postgres://alice@localhost/db"),
+            "postgres://alice@localhost/db"
+        );
     }
 }
