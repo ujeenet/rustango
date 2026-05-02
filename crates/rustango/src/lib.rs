@@ -181,6 +181,14 @@ pub mod ip_filter;
 #[cfg(feature = "admin")]
 pub mod body_limit;
 
+/// Real-IP extraction for apps behind a trusted reverse proxy
+/// (Cloudflare / nginx / ELB / etc). Parses `X-Forwarded-For`,
+/// `X-Real-IP`, `CF-Connecting-IP`, or RFC 7239 `Forwarded` and stuffs
+/// the resolved client IP into request extensions. See
+/// [`real_ip::RealIpLayer`].
+#[cfg(feature = "admin")]
+pub mod real_ip;
+
 /// Webhook signature verification (HMAC-SHA256). See [`webhook::verify_signature`].
 #[cfg(feature = "webhook")]
 pub mod webhook;
