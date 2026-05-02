@@ -215,6 +215,12 @@ pub mod trailing_slash;
 #[cfg(feature = "admin")]
 pub mod static_files;
 
+/// HTTP method override — rewrite POST → PUT/PATCH/DELETE based on
+/// `X-HTTP-Method-Override` header or `_method` form field, so HTML
+/// forms can drive REST routes. See [`method_override::MethodOverrideLayer`].
+#[cfg(feature = "admin")]
+pub mod method_override;
+
 /// Webhook signature verification (HMAC-SHA256). See [`webhook::verify_signature`].
 #[cfg(feature = "webhook")]
 pub mod webhook;
