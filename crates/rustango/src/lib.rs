@@ -77,6 +77,11 @@ pub mod notifications;
 #[cfg(feature = "jobs")]
 pub mod jobs;
 
+/// Pre-built auth flows — password reset, email verification, magic-link login.
+/// See [`auth_flows::PasswordReset`] / [`auth_flows::EmailVerification`].
+#[cfg(feature = "auth_flows")]
+pub mod auth_flows;
+
 /// File storage backends — [`storage::Storage`] trait + LocalStorage + InMemoryStorage.
 #[cfg(feature = "storage")]
 pub mod storage;
