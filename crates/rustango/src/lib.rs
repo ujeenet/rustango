@@ -106,6 +106,11 @@ pub mod api_version;
 /// Minimal RFC 4180 CSV writer — zero deps. See [`csv::CsvWriter`].
 pub mod csv;
 
+/// Pluggable secrets backend — [`secrets::Secrets`] trait + [`secrets::EnvSecrets`]
+/// + [`secrets::InMemorySecrets`].
+#[cfg(feature = "secrets")]
+pub mod secrets;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 

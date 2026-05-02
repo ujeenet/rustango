@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler"]
+default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -65,6 +65,10 @@ storage = ["dep:async-trait", "dep:tokio"]
 # In-process scheduled task runner (`rustango::scheduler`) — fire async jobs
 # at fixed intervals with panic isolation per task.
 scheduler = ["dep:tokio"]
+
+# Secrets manager (`rustango::secrets`) — Secrets trait + EnvSecrets +
+# InMemorySecrets. Vault / AWS / GCP plug in via the trait.
+secrets = ["dep:async-trait"]
 
 # Redis cache backend (`rustango::cache::RedisCache`). Adds the `redis`
 # async connection-manager client. Implies `cache`.
