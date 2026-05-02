@@ -239,6 +239,12 @@ pub mod feature_flags;
 #[cfg(feature = "cache")]
 pub mod distributed_lock;
 
+/// `Server-Timing` header middleware — surface per-request stage
+/// durations to the browser DevTools "Network" panel. See
+/// [`server_timing::ServerTimingLayer`] + [`server_timing::Timings`].
+#[cfg(feature = "admin")]
+pub mod server_timing;
+
 /// Webhook signature verification (HMAC-SHA256). See [`webhook::verify_signature`].
 #[cfg(feature = "webhook")]
 pub mod webhook;
