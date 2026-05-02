@@ -132,7 +132,7 @@ pub fn make_migrations_from(
 }
 
 fn empty_snapshot() -> SchemaSnapshot {
-    SchemaSnapshot { tables: vec![] }
+    SchemaSnapshot { tables: vec![], m2m_tables: vec![] }
 }
 
 fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
@@ -178,6 +178,8 @@ fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
             old_column,
             new_column,
         }] => format!("rename_{old_column}_to_{new_column}_on_{table}"),
+        [SchemaChange::CreateM2MTable { through, .. }] => format!("create_m2m_{through}"),
+        [SchemaChange::DropM2MTable { through }] => format!("drop_m2m_{through}"),
         many if is_first
             && many
                 .iter()

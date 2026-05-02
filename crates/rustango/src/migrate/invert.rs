@@ -151,6 +151,28 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
             old_column: new_column.clone(),
             new_column: old_column.clone(),
         })),
+        Operation::Schema(SchemaChange::CreateM2MTable {
+            through,
+            src_table: _,
+            src_col: _,
+            dst_table: _,
+            dst_col: _,
+        }) => Ok(Operation::Schema(SchemaChange::DropM2MTable { through: through.clone() })),
+        Operation::Schema(SchemaChange::DropM2MTable { through }) => {
+            if prev.m2m_table(through).is_none() {
+                return Err(MigrateError::Validation(format!(
+                    "cannot invert DropM2MTable(`{through}`): junction table not in predecessor snapshot",
+                )));
+            }
+            let mt = prev.m2m_table(through).unwrap();
+            Ok(Operation::Schema(SchemaChange::CreateM2MTable {
+                through: through.clone(),
+                src_table: mt.src_table.clone(),
+                src_col: mt.src_col.clone(),
+                dst_table: mt.dst_table.clone(),
+                dst_col: mt.dst_col.clone(),
+            }))
+        }
         Operation::Data(d) => {
             if !d.reversible {
                 return Err(MigrateError::Validation(format!(

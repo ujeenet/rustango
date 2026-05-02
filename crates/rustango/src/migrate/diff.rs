@@ -100,6 +100,19 @@ pub enum SchemaChange {
         column: String,
         unique: bool,
     },
+    /// Create a many-to-many junction table. Render emits a `CREATE TABLE`
+    /// with two `BIGINT NOT NULL` FK columns and a composite `PRIMARY KEY`.
+    CreateM2MTable {
+        through: String,
+        src_table: String,
+        src_col: String,
+        dst_table: String,
+        dst_col: String,
+    },
+    /// Drop a many-to-many junction table.
+    DropM2MTable {
+        through: String,
+    },
 }
 
 /// Compute the ordered list of changes from `prev` → `current`.
@@ -174,6 +187,24 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     for pt in &prev.tables {
         if current.table(&pt.name).is_none() {
             changes.push(SchemaChange::DropTable(pt.name.clone()));
+        }
+    }
+    // New M2M junction tables.
+    for mt in &current.m2m_tables {
+        if prev.m2m_table(&mt.through).is_none() {
+            changes.push(SchemaChange::CreateM2MTable {
+                through: mt.through.clone(),
+                src_table: mt.src_table.clone(),
+                src_col: mt.src_col.clone(),
+                dst_table: mt.dst_table.clone(),
+                dst_col: mt.dst_col.clone(),
+            });
+        }
+    }
+    // Dropped M2M junction tables.
+    for mt in &prev.m2m_tables {
+        if current.m2m_table(&mt.through).is_none() {
+            changes.push(SchemaChange::DropM2MTable { through: mt.through.clone() });
         }
     }
     changes
@@ -463,6 +494,20 @@ pub fn render_changes_split(
                 out.immediate.push(format!(
                     r#"ALTER TABLE "{table}" RENAME COLUMN "{old_column}" TO "{new_column}""#,
                 ));
+            }
+            SchemaChange::CreateM2MTable { through, src_table, src_col, dst_table, dst_col } => {
+                out.immediate.push(format!(
+                    r#"CREATE TABLE "{through}" ("{src_col}" BIGINT NOT NULL, "{dst_col}" BIGINT NOT NULL, PRIMARY KEY ("{src_col}", "{dst_col}"))"#,
+                ));
+                out.deferred_fks.push(format!(
+                    r#"ALTER TABLE "{through}" ADD CONSTRAINT "{through}_{src_col}_fkey" FOREIGN KEY ("{src_col}") REFERENCES "{src_table}" ("id") ON DELETE CASCADE"#,
+                ));
+                out.deferred_fks.push(format!(
+                    r#"ALTER TABLE "{through}" ADD CONSTRAINT "{through}_{dst_col}_fkey" FOREIGN KEY ("{dst_col}") REFERENCES "{dst_table}" ("id") ON DELETE CASCADE"#,
+                ));
+            }
+            SchemaChange::DropM2MTable { through } => {
+                out.immediate.push(format!(r#"DROP TABLE IF EXISTS "{through}" CASCADE"#));
             }
         }
     }

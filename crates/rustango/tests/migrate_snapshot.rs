@@ -45,7 +45,7 @@ fn snapshot_round_trips_through_json() {
 // ---------- diff ----------
 
 fn empty_snapshot() -> SchemaSnapshot {
-    SchemaSnapshot { tables: vec![] }
+    SchemaSnapshot { tables: vec![], m2m_tables: vec![] }
 }
 
 fn user_table() -> TableSnapshot {
@@ -64,6 +64,7 @@ fn diff_detects_added_table() {
     let prev = empty_snapshot();
     let current = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     let changes = detect_changes(&prev, &current);
     assert_eq!(changes, vec![SchemaChange::CreateTable("snap_user".into())]);
@@ -73,6 +74,7 @@ fn diff_detects_added_table() {
 fn diff_detects_dropped_table() {
     let prev = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     let current = empty_snapshot();
     let changes = detect_changes(&prev, &current);
@@ -83,6 +85,7 @@ fn diff_detects_dropped_table() {
 fn diff_detects_added_column() {
     let prev = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     let mut current = prev.clone();
     current.tables[0].fields.push(serde_json::from_value(serde_json::json!({
@@ -106,6 +109,7 @@ fn diff_detects_added_column() {
 fn diff_detects_dropped_column() {
     let mut prev = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     prev.tables[0].fields.push(serde_json::from_value(serde_json::json!({
         "name": "email", "column": "email", "ty": "string", "nullable": true, "primary_key": false
@@ -115,6 +119,7 @@ fn diff_detects_dropped_column() {
         .sort_by(|a, b| a.column.cmp(&b.column));
     let current = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
 
     let changes = detect_changes(&prev, &current);
@@ -131,6 +136,7 @@ fn diff_detects_dropped_column() {
 fn diff_no_changes_when_snapshots_equal() {
     let snap = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     assert!(detect_changes(&snap, &snap).is_empty());
 }
@@ -141,6 +147,7 @@ fn diff_no_changes_when_snapshots_equal() {
 fn render_create_table_emits_full_ddl() {
     let current = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     let ddl = render_changes(&[SchemaChange::CreateTable("snap_user".into())], &current).unwrap();
     assert_eq!(ddl.len(), 1);
@@ -163,6 +170,7 @@ fn render_drop_table_emits_cascade() {
 fn render_add_nullable_column() {
     let mut current = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     current.tables[0].fields.push(
         serde_json::from_value(serde_json::json!({
@@ -189,6 +197,7 @@ fn render_add_nullable_column() {
 fn render_add_not_null_column_is_rejected() {
     let mut current = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     current.tables[0].fields.push(
         serde_json::from_value(serde_json::json!({
@@ -231,6 +240,7 @@ fn render_drop_column_emits_alter() {
 fn render_add_not_null_with_default_is_permitted() {
     let mut current = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     current.tables[0].fields.push(
         serde_json::from_value(serde_json::json!({
@@ -259,6 +269,7 @@ fn render_add_not_null_with_default_is_permitted() {
 fn render_create_table_with_default_emits_default_clause() {
     let mut current = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     // Simulate a fresh `snap_post` with `status` carrying a default.
     let post: TableSnapshot = serde_json::from_value(serde_json::json!({
@@ -289,6 +300,7 @@ fn render_add_not_null_without_default_still_rejected() {
     // Regression: only the *combination* of NOT NULL + no default is the error.
     let mut current = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     current.tables[0].fields.push(
         serde_json::from_value(serde_json::json!({
@@ -317,6 +329,7 @@ fn render_add_not_null_without_default_still_rejected() {
 fn render_create_with_fk_emits_alter_after() {
     let mut current = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     let post: TableSnapshot = serde_json::from_value(serde_json::json!({
         "name": "snap_post",

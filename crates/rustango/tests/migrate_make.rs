@@ -46,7 +46,7 @@ fn post_table() -> TableSnapshot {
 }
 
 fn snapshot_with(tables: Vec<TableSnapshot>) -> SchemaSnapshot {
-    SchemaSnapshot { tables }
+    SchemaSnapshot { tables, ..Default::default() }
 }
 
 // ---------- empty dir → 0001_initial ----------

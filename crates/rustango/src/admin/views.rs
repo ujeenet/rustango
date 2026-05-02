@@ -384,7 +384,6 @@ async fn compute_facets(
                     let display_field = target.display_field()?;
                     Some((target.table, on, display_field.column))
                 }
-                crate::core::Relation::M2M { .. } => None,
             });
 
         // v0.13.1: order facets by count desc so the most active

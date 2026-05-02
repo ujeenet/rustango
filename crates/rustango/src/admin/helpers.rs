@@ -103,7 +103,6 @@ pub(crate) fn build_fk_joins(state: &AppState, model: &'static ModelSchema) -> V
         let Some(rel) = field.relation else { continue };
         let (to, on) = match rel {
             Relation::Fk { to, on } | Relation::O2O { to, on } => (to, on),
-            Relation::M2M { .. } => continue,
         };
         let Some(target) = lookup_model(state, to) else {
             continue;
@@ -138,7 +137,6 @@ pub(crate) fn fk_map_from_joined_rows(
         let Some(rel) = field.relation else { continue };
         let to = match rel {
             Relation::Fk { to, .. } | Relation::O2O { to, .. } => to,
-            Relation::M2M { .. } => continue,
         };
         let Some(target) = lookup_model(state, to) else {
             continue;
@@ -204,21 +202,18 @@ pub(crate) fn render_cell(
 ) -> String {
     if let Some(rel) = field.relation {
         let to = match rel {
-            Relation::Fk { to, .. } | Relation::O2O { to, .. } => Some(to),
-            Relation::M2M { .. } => None,
+            Relation::Fk { to, .. } | Relation::O2O { to, .. } => to,
         };
-        if let Some(to) = to {
-            let Some(raw_value) = render::read_value_as_string(row, field) else {
-                return "<em>NULL</em>".to_owned();
-            };
-            let raw_esc = render::escape(&raw_value);
-            let to_esc = render::escape(to);
-            return match fk_map.get(&(to.to_owned(), raw_value)) {
-                Some(display) => format!(r#"<a href="/{to_esc}/{raw_esc}">{display}</a>"#),
-                // Target hidden by show_only or row genuinely missing — show raw.
-                None => raw_esc,
-            };
-        }
+        let Some(raw_value) = render::read_value_as_string(row, field) else {
+            return "<em>NULL</em>".to_owned();
+        };
+        let raw_esc = render::escape(&raw_value);
+        let to_esc = render::escape(to);
+        return match fk_map.get(&(to.to_owned(), raw_value)) {
+            Some(display) => format!(r#"<a href="/{to_esc}/{raw_esc}">{display}</a>"#),
+            // Target hidden by show_only or row genuinely missing — show raw.
+            None => raw_esc,
+        };
     }
     render::render_value(row, field)
 }

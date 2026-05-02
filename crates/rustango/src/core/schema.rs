@@ -42,21 +42,33 @@ pub struct FieldSchema {
 }
 
 /// Static description of a relation to another model.
-///
-/// v0.1 only emits `FK` and `O2O`. `M2M` is reserved.
 #[derive(Debug, Clone, Copy)]
 pub enum Relation {
     /// Foreign key. The local column references `to.<on>`.
     Fk { to: &'static str, on: &'static str },
     /// One-to-one. Same shape as FK, separate variant for callers that care.
     O2O { to: &'static str, on: &'static str },
-    /// Many-to-many through a join table. Reserved for v0.2.
-    M2M {
-        to: &'static str,
-        through: &'static str,
-        src: &'static str,
-        dst: &'static str,
-    },
+}
+
+/// Descriptor for one many-to-many relation declared via
+/// `#[rustango(m2m(name = "tags", to = "app_tags", through = "post_tags",
+///                 src = "post_id", dst = "tag_id"))]`.
+///
+/// Stored in [`ModelSchema::m2m`] — does **not** correspond to any column on
+/// the source model's table. The migration writer reads this to emit
+/// `CREATE TABLE` for the junction table.
+#[derive(Debug, Clone, Copy)]
+pub struct M2MRelation {
+    /// Rust accessor name used to generate the `<name>_m2m()` method.
+    pub name: &'static str,
+    /// SQL name of the target (destination) table.
+    pub to: &'static str,
+    /// SQL name of the junction (through) table.
+    pub through: &'static str,
+    /// Column in the junction table that references the source model's PK.
+    pub src_col: &'static str,
+    /// Column in the junction table that references the target model's PK.
+    pub dst_col: &'static str,
 }
 
 /// Static description of a model.
@@ -101,6 +113,14 @@ pub struct ModelSchema {
     /// * `Some(&["title", "body"])` — only these named fields are captured
     ///   both by the macro-generated write path and by the admin diff.
     pub audit_track: Option<&'static [&'static str]>,
+    /// Many-to-many relations declared via
+    /// `#[rustango(m2m(name = "…", to = "…", through = "…",
+    ///                 src = "…", dst = "…"))]`.
+    ///
+    /// Each entry describes one junction table. The migration writer reads
+    /// this slice to emit `CREATE TABLE` / `DROP TABLE` for junction tables.
+    /// Empty slice when the model has no M2M relations.
+    pub m2m: &'static [M2MRelation],
 }
 
 /// Django ModelAdmin-shape per-model admin customization. Populated by
@@ -194,11 +214,9 @@ impl ModelSchema {
         self.fields.iter().find(|f| f.primary_key)
     }
 
-    /// Iterator over scalar (non-M2M) fields. v0.1 keeps everything scalar.
+    /// Iterator over all scalar (column-backed) fields.
     pub fn scalar_fields(&self) -> impl Iterator<Item = &'static FieldSchema> {
-        self.fields
-            .iter()
-            .filter(|f| !matches!(f.relation, Some(Relation::M2M { .. })))
+        self.fields.iter()
     }
 
     /// Field used to render this model as a foreign-key target.

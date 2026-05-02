@@ -10,9 +10,30 @@ use crate::core::{inventory, FieldType, ModelEntry, ModelSchema, Relation};
 use serde::{Deserialize, Serialize};
 
 /// A snapshot of every registered model, ordered by table name.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SchemaSnapshot {
     pub tables: Vec<TableSnapshot>,
+    /// Junction tables derived from `ModelSchema::m2m` declarations,
+    /// sorted by `through` name. Absent from old migration files — the
+    /// `#[serde(default)]` produces an empty vec, which is correct
+    /// (no M2M tables in older snapshots).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub m2m_tables: Vec<M2MTableSnapshot>,
+}
+
+/// Snapshot of one many-to-many junction table.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct M2MTableSnapshot {
+    /// SQL name of the junction table (e.g. `"post_tags"`).
+    pub through: String,
+    /// SQL name of the source model's table (e.g. `"posts"`).
+    pub src_table: String,
+    /// FK column in the junction table pointing to the source (e.g. `"post_id"`).
+    pub src_col: String,
+    /// SQL name of the target model's table (e.g. `"app_tags"`).
+    pub dst_table: String,
+    /// FK column in the junction table pointing to the target (e.g. `"tag_id"`).
+    pub dst_col: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -68,12 +89,12 @@ impl SchemaSnapshot {
     /// Capture every model registered in the binary's `inventory`.
     #[must_use]
     pub fn from_registry() -> Self {
-        let mut tables: Vec<TableSnapshot> = inventory::iter::<ModelEntry>
-            .into_iter()
-            .map(|e| TableSnapshot::from_schema(e.schema))
-            .collect();
+        let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>.into_iter().collect();
+        let mut tables: Vec<TableSnapshot> =
+            entries.iter().map(|e| TableSnapshot::from_schema(e.schema)).collect();
         tables.sort_by(|a, b| a.name.cmp(&b.name));
-        Self { tables }
+        let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
+        Self { tables, m2m_tables }
     }
 
     /// Capture only the models whose [`ModelEntry::resolved_app_label`]
@@ -86,13 +107,15 @@ impl SchemaSnapshot {
     /// sub-app's `migrations/<app>/`.
     #[must_use]
     pub fn from_registry_for_app(app: &str) -> Self {
-        let mut tables: Vec<TableSnapshot> = inventory::iter::<ModelEntry>
+        let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
             .into_iter()
             .filter(|e| e.resolved_app_label() == Some(app))
-            .map(|e| TableSnapshot::from_schema(e.schema))
             .collect();
+        let mut tables: Vec<TableSnapshot> =
+            entries.iter().map(|e| TableSnapshot::from_schema(e.schema)).collect();
         tables.sort_by(|a, b| a.name.cmp(&b.name));
-        Self { tables }
+        let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
+        Self { tables, m2m_tables }
     }
 
     /// Capture an explicit list of model schemas — the inventory-
@@ -105,7 +128,14 @@ impl SchemaSnapshot {
         let mut tables: Vec<TableSnapshot> =
             models.iter().map(|s| TableSnapshot::from_schema(s)).collect();
         tables.sort_by(|a, b| a.name.cmp(&b.name));
-        Self { tables }
+        let m2m_tables = collect_m2m_tables(models.iter().copied());
+        Self { tables, m2m_tables }
+    }
+
+    /// Look up an M2M table snapshot by junction table name.
+    #[must_use]
+    pub fn m2m_table(&self, through: &str) -> Option<&M2MTableSnapshot> {
+        self.m2m_tables.iter().find(|t| t.through == through)
     }
 
     /// Look up a table by SQL name.
@@ -152,7 +182,6 @@ impl FieldSnapshot {
                 to: to.to_owned(),
                 on: on.to_owned(),
             }),
-            Relation::M2M { .. } => None,
         });
         Self {
             name: f.name.to_owned(),
@@ -185,4 +214,28 @@ fn field_type_name(ty: FieldType) -> &'static str {
         FieldType::Uuid => "uuid",
         FieldType::Json => "json",
     }
+}
+
+/// Collect all M2M junction table descriptors from a set of model schemas,
+/// deduplicating by `through` table name and sorting for deterministic output.
+fn collect_m2m_tables<'a>(
+    schemas: impl Iterator<Item = &'a ModelSchema>,
+) -> Vec<M2MTableSnapshot> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<M2MTableSnapshot> = Vec::new();
+    for schema in schemas {
+        for rel in schema.m2m {
+            if seen.insert(rel.through) {
+                out.push(M2MTableSnapshot {
+                    through: rel.through.to_owned(),
+                    src_table: schema.table.to_owned(),
+                    src_col: rel.src_col.to_owned(),
+                    dst_table: rel.to.to_owned(),
+                    dst_col: rel.dst_col.to_owned(),
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.through.cmp(&b.through));
+    out
 }

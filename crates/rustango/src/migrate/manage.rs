@@ -410,7 +410,7 @@ pub fn make_empty(dir: &Path, name: &str) -> Result<Migration, MigrateError> {
     let prior = file::list_dir(dir)?;
     let prev_snapshot = prior
         .last()
-        .map_or_else(|| SchemaSnapshot { tables: vec![] }, |m| m.snapshot.clone());
+        .map_or_else(|| SchemaSnapshot { tables: vec![], m2m_tables: vec![] }, |m| m.snapshot.clone());
     let prev_name = prior.last().map(|m| m.name.clone());
     let next_index = prior
         .last()

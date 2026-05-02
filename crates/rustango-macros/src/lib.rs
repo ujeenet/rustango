@@ -468,6 +468,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         collected.soft_delete_column.as_deref(),
         container.permissions,
         audit_track_names.as_deref(),
+        &container.m2m,
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -496,6 +497,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let column_module = column_module_tokens(&module_ident, struct_name, &collected.column_entries);
     let from_row_impl = from_row_impl_tokens(struct_name, &collected.from_row_inits);
     let reverse_helpers = reverse_helper_tokens(struct_name, &collected.fk_relations);
+    let m2m_accessors = m2m_accessor_tokens(struct_name, &container.m2m);
 
     Ok(quote! {
         #model_impl
@@ -503,6 +505,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #from_row_impl
         #column_module
         #reverse_helpers
+        #m2m_accessors
 
         ::rustango::core::inventory::submit! {
             ::rustango::core::ModelEntry {
@@ -654,6 +657,36 @@ fn reverse_helper_tokens(
         }
     });
     quote! { #( #impls )* }
+}
+
+/// Emit `<name>_m2m(&self) -> M2MManager` inherent methods for every M2M
+/// relation declared on the model.
+fn m2m_accessor_tokens(struct_name: &syn::Ident, m2m_relations: &[M2MAttr]) -> TokenStream2 {
+    if m2m_relations.is_empty() {
+        return TokenStream2::new();
+    }
+    let methods = m2m_relations.iter().map(|rel| {
+        let method_name = format!("{}_m2m", rel.name);
+        let method_ident = syn::Ident::new(&method_name, struct_name.span());
+        let through = rel.through.as_str();
+        let src_col = rel.src.as_str();
+        let dst_col = rel.dst.as_str();
+        quote! {
+            pub fn #method_ident(&self) -> ::rustango::sql::M2MManager {
+                ::rustango::sql::M2MManager {
+                    src_pk: self.__rustango_pk_value(),
+                    through: #through,
+                    src_col: #src_col,
+                    dst_col: #dst_col,
+                }
+            }
+        }
+    });
+    quote! {
+        impl #struct_name {
+            #( #methods )*
+        }
+    }
 }
 
 struct ColumnEntry {
@@ -936,6 +969,7 @@ fn model_impl_tokens(
     soft_delete_column: Option<&str>,
     permissions: bool,
     audit_track: Option<&[String]>,
+    m2m_relations: &[M2MAttr],
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
@@ -960,6 +994,22 @@ fn model_impl_tokens(
         }
     };
     let admin_tokens = admin_config_tokens(admin);
+    let m2m_tokens = m2m_relations.iter().map(|rel| {
+        let name = rel.name.as_str();
+        let to = rel.to.as_str();
+        let through = rel.through.as_str();
+        let src = rel.src.as_str();
+        let dst = rel.dst.as_str();
+        quote! {
+            ::rustango::core::M2MRelation {
+                name: #name,
+                to: #to,
+                through: #through,
+                src_col: #src,
+                dst_col: #dst,
+            }
+        }
+    });
     quote! {
         impl ::rustango::core::Model for #struct_name {
             const SCHEMA: &'static ::rustango::core::ModelSchema = &::rustango::core::ModelSchema {
@@ -972,6 +1022,7 @@ fn model_impl_tokens(
                 soft_delete_column: #soft_delete_tokens,
                 permissions: #permissions,
                 audit_track: #audit_track_tokens,
+                m2m: &[ #(#m2m_tokens),* ],
             };
         }
     }
@@ -2128,6 +2179,24 @@ struct ContainerAttrs {
     /// `auto_create_permissions` should seed the four CRUD codenames for
     /// this model.
     permissions: bool,
+    /// Many-to-many relations declared via
+    /// `#[rustango(m2m(name = "tags", to = "app_tags", through = "post_tags",
+    ///                 src = "post_id", dst = "tag_id"))]`.
+    m2m: Vec<M2MAttr>,
+}
+
+/// Parsed form of one `#[rustango(m2m(...))]` declaration.
+struct M2MAttr {
+    /// Accessor suffix: `tags` → generates `tags_m2m()`.
+    name: String,
+    /// Target table (e.g. `"app_tags"`).
+    to: String,
+    /// Junction table (e.g. `"post_tags"`).
+    through: String,
+    /// Source FK column in the junction table (e.g. `"post_id"`).
+    src: String,
+    /// Destination FK column in the junction table (e.g. `"tag_id"`).
+    dst: String,
 }
 
 /// Parsed shape of `#[rustango(audit(track = "name, body", source =
@@ -2172,6 +2241,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         admin: None,
         audit: None,
         permissions: false,
+        m2m: Vec::new(),
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -2273,6 +2343,60 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
             }
             if meta.path.is_ident("permissions") {
                 out.permissions = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("m2m") {
+                let mut m2m = M2MAttr {
+                    name: String::new(),
+                    to: String::new(),
+                    through: String::new(),
+                    src: String::new(),
+                    dst: String::new(),
+                };
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("name") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        m2m.name = s.value();
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("to") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        m2m.to = s.value();
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("through") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        m2m.through = s.value();
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("src") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        m2m.src = s.value();
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("dst") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        m2m.dst = s.value();
+                        return Ok(());
+                    }
+                    Err(inner.error("unknown m2m attribute (supported: `name`, `to`, `through`, `src`, `dst`)"))
+                })?;
+                if m2m.name.is_empty() {
+                    return Err(meta.error("m2m requires `name = \"...\"`"));
+                }
+                if m2m.to.is_empty() {
+                    return Err(meta.error("m2m requires `to = \"...\"`"));
+                }
+                if m2m.through.is_empty() {
+                    return Err(meta.error("m2m requires `through = \"...\"`"));
+                }
+                if m2m.src.is_empty() {
+                    return Err(meta.error("m2m requires `src = \"...\"`"));
+                }
+                if m2m.dst.is_empty() {
+                    return Err(meta.error("m2m requires `dst = \"...\"`"));
+                }
+                out.m2m.push(m2m);
                 return Ok(());
             }
             Err(meta.error("unknown rustango container attribute"))

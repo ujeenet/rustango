@@ -11,7 +11,7 @@ use rustango::migrate::{
 // ---------------- helpers ----------------
 
 fn empty_snapshot() -> SchemaSnapshot {
-    SchemaSnapshot { tables: vec![] }
+    SchemaSnapshot { tables: vec![], m2m_tables: vec![] }
 }
 
 fn user_table() -> TableSnapshot {
@@ -97,6 +97,7 @@ fn schema_change_drop_column_round_trips() {
 fn detect_changes_identity_is_empty() {
     let snap = SchemaSnapshot {
         tables: vec![user_table(), post_table()],
+                    ..Default::default()
     };
     let changes = detect_changes(&snap, &snap);
     assert!(
@@ -118,6 +119,7 @@ fn detect_changes_new_column_on_new_table_is_just_create_table() {
     let prev = empty_snapshot();
     let current = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     let changes = detect_changes(&prev, &current);
     assert_eq!(changes.len(), 1);
@@ -130,6 +132,7 @@ fn detect_changes_dropped_column_on_dropped_table_is_just_drop_table() {
     // `id` and `name` — `DROP TABLE ... CASCADE` handles them.
     let prev = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     let current = empty_snapshot();
     let changes = detect_changes(&prev, &current);
@@ -145,6 +148,7 @@ fn detect_changes_complex_multi_table_diff() {
     // - user gains a `bio` column
     let prev = SchemaSnapshot {
         tables: vec![user_table(), post_table()],
+                    ..Default::default()
     };
 
     let mut user_with_bio = user_table();
@@ -168,6 +172,7 @@ fn detect_changes_complex_multi_table_diff() {
 
     let current = SchemaSnapshot {
         tables: vec![user_with_bio, comment],
+                    ..Default::default()
     };
 
     let changes = detect_changes(&prev, &current);
@@ -184,9 +189,11 @@ fn detect_changes_complex_multi_table_diff() {
 fn detect_changes_table_appears_in_both_with_no_field_changes_emits_nothing() {
     let prev = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     let current = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     assert!(detect_changes(&prev, &current).is_empty());
 }
@@ -207,6 +214,7 @@ fn detect_then_render_orders_create_before_add_before_drop_col_before_drop_table
     // (CREATE → ADD → DROP COLUMN → DROP TABLE → new-table FK ALTERs).
     let prev = SchemaSnapshot {
         tables: vec![user_table(), post_table()],
+                    ..Default::default()
     };
 
     // current: drop post, drop a column from user, add bio to user, create comment.
@@ -229,6 +237,7 @@ fn detect_then_render_orders_create_before_add_before_drop_col_before_drop_table
     .unwrap();
     let current = SchemaSnapshot {
         tables: vec![comment, user],
+                    ..Default::default()
     };
 
     let changes = detect_changes(&prev, &current);
@@ -252,6 +261,7 @@ fn render_changes_preserves_caller_order_except_for_new_table_fks() {
     // to the end so they're emitted after every CREATE TABLE has run.
     let current = SchemaSnapshot {
         tables: vec![user_table(), post_table()],
+                    ..Default::default()
     };
 
     // Intentionally awkward order — render emits as supplied.
@@ -289,6 +299,7 @@ fn render_changes_preserves_caller_order_except_for_new_table_fks() {
 fn render_changes_emits_fk_alters_at_the_end_of_create_tables() {
     let current = SchemaSnapshot {
         tables: vec![user_table(), post_table()],
+                    ..Default::default()
     };
     let ddl = render_changes(
         &[
@@ -328,6 +339,7 @@ fn render_changes_create_table_missing_in_snapshot_is_an_error() {
 fn render_changes_add_column_missing_field_is_an_error() {
     let current = SchemaSnapshot {
         tables: vec![user_table()],
+                    ..Default::default()
     };
     let err = render_changes(
         &[SchemaChange::AddColumn {
@@ -377,6 +389,7 @@ fn render_changes_drop_column_does_not_consult_snapshot() {
 fn schema_snapshot_table_lookup_by_name() {
     let snap = SchemaSnapshot {
         tables: vec![user_table(), post_table()],
+                    ..Default::default()
     };
     assert!(snap.table("diff_user").is_some());
     assert!(snap.table("diff_post").is_some());
@@ -394,7 +407,7 @@ fn table_snapshot_field_lookup_by_column() {
 // ---------------- AlterField + Rename DDL (v0.4 Slice 3) ----------------
 
 fn empty_snap() -> SchemaSnapshot {
-    SchemaSnapshot { tables: vec![] }
+    SchemaSnapshot { tables: vec![], m2m_tables: vec![] }
 }
 
 #[test]
@@ -532,6 +545,7 @@ fn detect_changes_emits_alter_column_type_for_metadata_diff() {
                 {"name": "age", "column": "age", "ty": "i32", "nullable": false, "primary_key": false}
             ]
         })).unwrap()],
+                    ..Default::default()
     };
     let current = SchemaSnapshot {
         tables: vec![serde_json::from_value(serde_json::json!({
@@ -542,6 +556,7 @@ fn detect_changes_emits_alter_column_type_for_metadata_diff() {
                 {"name": "age", "column": "age", "ty": "i64", "nullable": true, "primary_key": false, "default": "0"}
             ]
         })).unwrap()],
+                    ..Default::default()
     };
     let changes = detect_changes(&prev, &current);
     assert!(

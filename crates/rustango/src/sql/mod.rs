@@ -12,6 +12,7 @@ mod dialect;
 mod error;
 mod executor;
 mod foreign_key;
+pub mod m2m;
 mod postgres;
 
 pub use auto::Auto;
@@ -27,6 +28,7 @@ pub use executor::{
     HasPkValue, LoadRelated, Page, Updater,
 };
 pub use foreign_key::ForeignKey;
+pub use m2m::M2MManager;
 pub use postgres::Postgres;
 
 /// Re-exported so `#[derive(Model)]` output can name `sqlx` types without

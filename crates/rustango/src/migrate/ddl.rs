@@ -80,8 +80,6 @@ pub fn create_constraints_sql(model: &ModelSchema) -> Vec<String> {
         let Some(rel) = field.relation else { continue };
         let (to, on) = match rel {
             Relation::Fk { to, on } | Relation::O2O { to, on } => (to, on),
-            // M2M is reserved for v0.2; nothing to emit yet.
-            Relation::M2M { .. } => continue,
         };
         let mut s = String::from("ALTER TABLE ");
         write_ident(&mut s, model.table);
