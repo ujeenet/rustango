@@ -2,6 +2,30 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.19.2] — audit_track field filtering — 2026-05-02
+
+### Added
+
+- **`ModelSchema::audit_track`** — new `Option<&'static [&'static str]>` field. When set via
+  `#[rustango(audit(track = "field1, field2"))]`, admin diffs and create-snapshots include only
+  the listed fields. `None` or an empty slice captures all scalar fields (previous behavior
+  unchanged). The `#[derive(Model)]` macro emits the value; `emit_admin_audit_diff` and
+  `emit_admin_audit` in `admin/audit.rs` both respect it.
+
+---
+
+## [v0.19.1] — `#[derive(ViewSet)]` proc-macro — 2026-05-02
+
+### Added
+
+- **`#[derive(ViewSet)]`** — generates `fn router(prefix: &str, pool: PgPool) -> Router` on a
+  marker struct, wiring the full DRF-style CRUD router from a `#[viewset(...)]` attribute. Fields:
+  `model`, `fields`, `filter_fields`, `search_fields`, `ordering`, `page_size`, `read_only`,
+  `permissions { list/retrieve/create/update/destroy }`. Available via `use rustango::ViewSet`
+  behind the `tenancy` feature.
+
+---
+
 ## [v0.19.0] — ORM improvements — 2026-05-02
 
 ### Added

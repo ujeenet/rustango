@@ -222,12 +222,16 @@ impl Builder {
     /// returning an error.
     pub async fn serve(self, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         let resolver_for_admin = build_resolver(&self.apex);
+
+        let session_secret_for_tenant = SessionSecret::from_env_or_random();
+        let operator_secret = SessionSecret::from_env_or_random();
         let ctx = Arc::new(TenantContext {
             pools: self.pools.clone(),
             resolver: build_resolver(&self.apex),
+            session_secret: session_secret_for_tenant.clone(),
+            operator_secret: operator_secret.clone(),
+            registry: self.registry.clone(),
         });
-
-        let session_secret_for_tenant = SessionSecret::from_env_or_random();
         let mut tenant_admin_builder = TenantAdminBuilder::new(
             self.pools.clone(),
             self.registry_url.clone(),
@@ -312,8 +316,7 @@ impl Builder {
             }
         };
 
-        let session_secret = SessionSecret::from_env_or_random();
-        let operator_admin = operator_console::router(self.registry, session_secret);
+        let operator_admin = operator_console::router(self.registry, operator_secret);
 
         let app = Router::new().fallback_service(tower::service_fn({
             let operator = operator_admin.clone();

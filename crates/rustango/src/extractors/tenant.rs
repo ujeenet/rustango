@@ -9,7 +9,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use crate::sql::sqlx;
-use crate::tenancy::{ChainResolver, Org, OrgResolver, TenantConn, TenantPools};
+use crate::tenancy::{
+    operator_console::SessionSecret, ChainResolver, Org, OrgResolver, TenantConn, TenantPools,
+};
 
 /// Per-server context that the [`Tenant`] extractor reads out of
 /// request extensions. Populated once by [`crate::server::Builder`]
@@ -17,6 +19,15 @@ use crate::tenancy::{ChainResolver, Org, OrgResolver, TenantConn, TenantPools};
 pub struct TenantContext {
     pub pools: Arc<TenantPools>,
     pub resolver: ChainResolver,
+    /// The HMAC-SHA256 key used to sign tenant session cookies. Set by
+    /// [`crate::server::Builder`] so that [`SessionUser`] can validate
+    /// cookies on public routes without going through the admin router.
+    pub session_secret: SessionSecret,
+    /// The HMAC-SHA256 key used to sign operator session cookies.
+    pub operator_secret: SessionSecret,
+    /// Registry-level pool, used by [`SessionOperator`] to look up the
+    /// operator row after validating the cookie.
+    pub registry: sqlx::PgPool,
 }
 
 /// Extractor: resolves the request's tenant and acquires a connection

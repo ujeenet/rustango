@@ -1,20 +1,30 @@
 //! Per-request extractors for handlers — tenancy-aware DI.
 //!
-//! Today this module ships the [`Tenant`] extractor only. Future
-//! roadmap slices will add `Operator` and `User` (per-tenant session
-//! users). All extractors read from request extensions populated by
-//! [`crate::server::Builder`], so the user does not have to thread
-//! state through `with_state`.
+//! | Extractor | What it gives you |
+//! |---|---|
+//! | [`Tenant`] | Tenant-scoped DB connection (org + pool) |
+//! | [`SessionUser`] | Browser-session tenant user (`None` = anonymous) |
+//! | [`SessionOperator`] | Browser-session operator (`None` = anonymous) |
+//!
+//! All extractors read from request extensions populated by
+//! [`crate::server::Builder`], so no state wiring is required.
 //!
 //! ```ignore
-//! use rustango::extractors::Tenant;
+//! use rustango::extractors::{Tenant, SessionUser};
 //!
-//! pub async fn list_articles(mut t: Tenant) -> impl IntoResponse {
-//!     let posts: Vec<Post> = Post::objects().fetch_on(t.conn()).await?;
-//!     // ...
+//! pub async fn my_handler(
+//!     mut t: Tenant,
+//!     SessionUser(user): SessionUser,
+//! ) -> impl IntoResponse {
+//!     match user {
+//!         Some(u) => format!("hello, {}", u.username).into_response(),
+//!         None    => StatusCode::UNAUTHORIZED.into_response(),
+//!     }
 //! }
 //! ```
 
+mod session_user;
 mod tenant;
 
+pub use session_user::{SessionOperator, SessionUser};
 pub use tenant::{Tenant, TenantContext, TenantRejection};
