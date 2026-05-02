@@ -27,7 +27,6 @@ use axum::body::Body;
 use axum::extract::{FromRequestParts, Request};
 use axum::http::request::Parts;
 use axum::middleware::Next;
-use axum::response::Response;
 use axum::Router;
 
 /// Strategy for extracting the API version from a request.

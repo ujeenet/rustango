@@ -111,6 +111,15 @@ pub mod csv;
 #[cfg(feature = "secrets")]
 pub mod secrets;
 
+/// HTTP access log middleware — one tracing event per request with
+/// method / path / status / duration / IP. See [`access_log::AccessLogLayer`].
+#[cfg(feature = "admin")]
+pub mod access_log;
+
+/// Test fixture loader — seed a database from JSON files.
+/// See [`fixtures::Fixture`].
+pub mod fixtures;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
