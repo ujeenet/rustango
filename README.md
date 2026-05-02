@@ -60,6 +60,17 @@ cargo run --bin manage -- migrate           # apply bootstrap migrations
 cargo run                                   # http://localhost:8080
 ```
 
+**Autoreload during development** — recompiles + restarts on every file save:
+
+```bash
+cargo install cargo-watch
+cargo watch -x run
+
+# Or with bacon (faster, nicer UI):
+cargo install bacon
+bacon run
+```
+
 You should see the **welcome page** confirming rustango is wired up. Replace `welcome_router()` in `src/main.rs` once you mount your own `/` route.
 
 ### 4. Add an app + model

@@ -95,11 +95,12 @@ pub fn startapp(
     }
 
     let mod_body = render_mod_template(&opts.app_name);
-    let entries: [(&str, String); 4] = [
+    let entries: [(&str, String); 5] = [
         ("mod.rs", mod_body),
         ("models.rs", MODELS_TEMPLATE.into()),
         ("views.rs", VIEWS_TEMPLATE.into()),
         ("urls.rs", URLS_TEMPLATE.into()),
+        ("tests.rs", TESTS_TEMPLATE.into()),
     ];
     for (filename, body) in entries {
         let path = app_dir.join(filename);
@@ -334,7 +335,10 @@ fn render_mod_template(app_name: &str) -> String {
          \n\
          pub mod models;\n\
          pub mod urls;\n\
-         pub mod views;\n",
+         pub mod views;\n\
+         \n\
+         #[cfg(test)]\n\
+         mod tests;\n",
     )
 }
 
@@ -413,6 +417,35 @@ pub fn api() -> Router<()> {
 }
 ";
 
+/// Default `tests.rs` body — integration test using `TestClient`.
+/// Run with `cargo test --lib`.
+const TESTS_TEMPLATE: &str = "//! App-level integration tests.
+//!
+//! Run with `cargo test`. Uses `rustango::test_client::TestClient` to
+//! exercise the app's router in-process — no network, no real socket.
+
+#[cfg(test)]
+mod tests {
+    use rustango::test_client::TestClient;
+    use super::urls::api;
+
+    #[tokio::test]
+    async fn index_returns_200() {
+        let client = TestClient::new(api());
+        let response = client.get(\"/\").send().await;
+        assert_eq!(response.status, 200);
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_ok() {
+        let client = TestClient::new(api());
+        let response = client.get(\"/healthz\").send().await;
+        assert_eq!(response.status, 200);
+        assert_eq!(response.text(), \"ok\");
+    }
+}
+";
+
 /// Single-tenant `manage.rs` template — wires the standard
 /// `rustango::migrate::manage::run` dispatcher. Pass to
 /// [`StartAppOptions::manage_bin`] when bootstrapping a non-tenancy
@@ -481,9 +514,10 @@ mod tests {
                 "src/blog/models.rs",
                 "src/blog/views.rs",
                 "src/blog/urls.rs",
+                "src/blog/tests.rs",
             ]
         );
-        for f in ["mod.rs", "models.rs", "views.rs", "urls.rs"] {
+        for f in ["mod.rs", "models.rs", "views.rs", "urls.rs", "tests.rs"] {
             let p = root.join("src").join("blog").join(f);
             assert!(p.exists(), "{}", p.display());
         }
@@ -510,7 +544,7 @@ mod tests {
         )
         .unwrap();
         assert!(second.written.is_empty());
-        assert_eq!(second.skipped.len(), 4);
+        assert_eq!(second.skipped.len(), 5);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -554,6 +588,9 @@ mod tests {
         assert!(body.contains("pub mod models;"));
         assert!(body.contains("pub mod urls;"));
         assert!(body.contains("pub mod views;"));
+        // tests.rs is cfg-gated
+        assert!(body.contains("#[cfg(test)]"));
+        assert!(body.contains("mod tests;"));
     }
 
     #[test]
