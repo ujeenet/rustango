@@ -80,6 +80,10 @@ pub mod test_client;
 /// `optional` / `list` / `duration_secs` / `duration_millis`.
 pub mod env;
 
+/// Internationalization (i18n) — translation lookups + Accept-Language negotiation.
+/// See [`i18n::Translator`] and [`i18n::negotiate_language`].
+pub mod i18n;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
