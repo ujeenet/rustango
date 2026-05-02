@@ -227,6 +227,12 @@ pub mod method_override;
 #[cfg(feature = "admin")]
 pub mod problem_details;
 
+/// Feature flags / killswitches backed by [`cache::Cache`] —
+/// boolean killswitch + per-user override + stable percentage rollout.
+/// See [`feature_flags::FeatureFlags`].
+#[cfg(feature = "cache")]
+pub mod feature_flags;
+
 /// Webhook signature verification (HMAC-SHA256). See [`webhook::verify_signature`].
 #[cfg(feature = "webhook")]
 pub mod webhook;
