@@ -2,6 +2,83 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [v0.20.x] — feature push (M2M, serializers, indexes, JWT lifecycle, security, manage CLI) — 2026-05-02
+
+A 32-commit batch bringing rustango to "Django/Laravel-class polish" out of the box. Each subversion is a self-contained slice; the major themes:
+
+### Added — ORM + migrations
+
+- **v0.20.0** Many-to-many: `#[rustango(m2m(name, to, through, src, dst))]` declaration, junction-table auto-creation in `make_migrations`, and an ORM `M2MManager` with `all` / `add` / `remove` / `set` / `clear` / `contains`.
+- **v0.20.2** Index declarations: `#[rustango(index)]` on fields and `#[rustango(index("col1, col2"))]` on the container, with `unique` and `name` sub-attrs. Auto-generated `CreateIndex` / `DropIndex` migration ops.
+- **v0.20.3** Data migration CLI: `manage add-data-op --sql ... --reverse-sql ... [--name X | --to migration]`. Public API: `make_data_migration` / `append_data_op`.
+- **v0.20.21** Table-level CHECK constraints via `#[rustango(check(name, expr))]`; emits `AddCheckConstraint` / `DropCheckConstraint` ops.
+
+### Added — APIs
+
+- **v0.20.1** `#[derive(Serializer)]` + `ModelSerializer` trait. Field attrs `read_only` / `write_only` / `source` / `skip`; emits a custom `serde::Serialize` that respects `write_only`.
+- **v0.20.6** Cursor pagination on ViewSet (`?cursor=...`), skipping the COUNT(*) round-trip. New `PaginationStyle::Cursor { field, desc }`.
+- **v0.20.15** Django-style lookup operators on ViewSet `filter_fields`: `?field__gt=`, `__gte=`, `__lt=`, `__lte=`, `__ne=`, `__in=`, `__not_in=`, `__contains=`, `__icontains=`, `__startswith=`, `__istartswith=`, `__endswith=`, `__iendswith=`, `__isnull=`.
+
+### Added — Auth + security
+
+- **v0.20.12** Full JWT lifecycle: `JwtLifecycle` with access + refresh, JTI-based blacklist, sliding refresh that rotates the JTI on every refresh.
+- **v0.20.28** JWT custom payload claims: `issue_pair_with(user_id, custom_map)`, `issue_access_with`, `claims.get_custom::<T>("key")`. Refresh **preserves custom claims** automatically; `refresh_with(token, new_claims)` substitutes when permissions changed. Reserved claim names (`sub`, `exp`, `jti`, `typ`) rejected at issuance.
+- **v0.20.23** TOTP / RFC 6238 2FA: `TotpSecret`, `generate`, `verify`, `otpauth_url`. Both official RFC 6238 SHA-1 test vectors pass.
+- **v0.20.25** Webhook signature verification: `verify_signature(format, secret, body, signature)` constant-time, supports `HexSha256WithPrefix` (GitHub), `HexSha256` (Slack), `Base64Sha256` (Stripe).
+- **v0.20.26** Generic API-key helpers: `generate_key()` returns `(token, prefix, hash)` with argon2id; `verify_key`, `split_token`. Wire-compatible with the existing `tenancy::auth_backends::ApiKeyBackend`.
+- **v0.20.27** Generic password helpers: `passwords::hash`, `passwords::verify`, `strength_score` with built-in weak-password list.
+- **v0.20.29** Signed URLs: `signed_url::sign(url, secret, ttl)` / `verify(url, secret)` with HMAC-SHA256, canonical query-param sorting, optional expiry. For magic-link login, password reset confirmation, time-limited file downloads.
+
+### Added — Middleware + HTTP layer
+
+- **v0.20.7** CORS middleware: `CorsLayer::strict()` / `permissive()` / explicit allowlist; auto-handles OPTIONS preflight; sets `Vary: Origin` for cache safety.
+- **v0.20.8** Token-bucket rate limiter: `RateLimitLayer::per_ip` / `per_header` / `global`; returns 429 with `Retry-After`.
+- **v0.20.9** Health endpoints: `/health` (liveness, always 200) + `/ready` (DB-pinged, 503 if unreachable). `HealthRouter::check("name", async_fn)` for custom checks.
+- **v0.20.16** Content negotiation (`negotiate(accept, available)`) and ETag middleware (FNV-1a + length, no crypto-strength dep needed).
+- **v0.20.18** API versioning extractor (`VersionStrategy::Header / Query / UrlPrefix / Fixed`) and an RFC 4180 CSV writer.
+- **v0.20.20** Access log middleware (`AccessLogLayer`) with **default PII redaction** of `password`, `token`, `secret`, `api_key`, `access_token`, `refresh_token`, `signature`, `auth` query params. Test fixture loader (`Fixture::from_file(path).load_into(table, pool)`).
+- **v0.20.24** Text utilities (`slugify`, `slugify_unicode`, `html_escape`, `truncate`), Request ID middleware (with header-injection defense), IP allowlist/blocklist middleware (CIDR support, IPv4 + IPv6).
+- **v0.20.25** Standardized API errors: `ApiError` with status / code / message / details; presets `bad_request` / `unauthorized` / ... / `internal`. Implements `IntoResponse`.
+- **v0.20.27** RFC 5988 Link-header builder for pagination (`LinkHeaderBuilder::new(url).with_page_info(info).keep_param(k, v).build()`).
+- **v0.20.29** Security headers middleware: `SecurityHeadersLayer::strict()` / `relaxed()` / `dev()` presets covering HSTS / X-Frame-Options / X-Content-Type-Options / Referrer-Policy / Cross-Origin-Opener-Policy / Permissions-Policy. CSP builder with named directives.
+
+### Added — Backends + plumbing
+
+- **v0.20.4** Pluggable cache: `Cache` async trait + `NullCache` + `InMemoryCache` (tokio RwLock + lazy TTL eviction) + `RedisCache` behind `cache-redis` feature. Helpers: `get_json`, `set_json`, `get_or_set`.
+- **v0.20.5** Django-shape signals: `connect_pre_save<T>`, `connect_post_save<T>`, `connect_pre_delete<T>`, `connect_post_delete<T>` + matching `send_*`. TypeId-keyed global registry; receivers run sequentially in registration order.
+- **v0.20.9** Pluggable email backends: `Mailer` trait + `Email` builder + `ConsoleMailer` / `InMemoryMailer` / `NullMailer`.
+- **v0.20.10** Pluggable file storage: `Storage` trait + `LocalStorage` (filesystem) + `InMemoryStorage` (tests). Path-traversal validator built in.
+- **v0.20.11** Test client: `TestClient::new(router)` with `.get(path).header(...).json(...).send().await` shape and `TestResponse::{status, json, text, header}`.
+- **v0.20.13** Typed env readers (`required` / `with_default` / `optional` / `list` / `duration_secs` / `duration_millis`) and a startup `Validator::new().require(name, desc).check_or_panic()`.
+- **v0.20.14** i18n: `Translator` with file-loaded JSON catalogs, 3-tier fallback (locale → base lang → default → key), and `negotiate_language(accept_header, available)` for RFC 4647 q-value matching.
+- **v0.20.17** In-process scheduler: `Scheduler::new().every(name, period, async_fn).start()`. Per-task panic isolation via `tokio::spawn`.
+- **v0.20.19** Secrets manager: `Secrets` trait + `EnvSecrets` (with optional prefix) + `InMemorySecrets`.
+- **v0.20.22** Bulk-action runner for admin: `BulkActionRegistry`, plus built-in `BulkDeleteAction`, `BulkSoftDeleteAction { column }`, `BulkRestoreAction { column }`.
+
+### Added — `manage` CLI
+
+- **v0.20.30** `manage about`, `manage check [--deploy]`, `manage docs`, `manage version` / `--version`.
+- **v0.20.31** First-run welcome page (`welcome::welcome_router()`) — confidence signal that rustango is wired up, with next-steps + ships-features list. Self-contained HTML, no external CDN.
+- **v0.20.32** File generators: `manage make:viewset`, `make:serializer`, `make:form`, `make:job`, `make:notification`, `make:middleware`, `make:test`. Each refuses to overwrite + prints a `pub mod X;` hint.
+
+### Documentation
+
+- Full README rewrite with comprehensive feature list, ORM cookbook, and production checklist.
+- New `docs/getting-started.md` — 18-step end-to-end tutorial from `cargo install` to deployed.
+- New `docs/manage.md` — every `manage` subcommand with examples + common workflows.
+
+### Tests
+
+- **+200 unit tests** added across the v0.20.x batch. Total: 298 lib unit tests.
+
+### Breaking changes
+
+- `Relation::M2M` variant removed from `core::Relation` enum (M2M is now a model-level concept stored in `ModelSchema.m2m`, not a per-field relation).
+- `ModelSchema` gained `m2m`, `indexes`, `check_constraints` fields. Generated only by the `#[derive(Model)]` macro — direct construction in user code unlikely.
+- `SchemaSnapshot` gained `m2m_tables`, `indexes`, `checks` fields with `#[serde(default)]` — old migration files still deserialize cleanly.
+
+---
+
 ## [v0.19.2] — audit_track field filtering — 2026-05-02
 
 ### Added
