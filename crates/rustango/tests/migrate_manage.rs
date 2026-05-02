@@ -698,3 +698,46 @@ async fn makemigrations_empty_via_run_writes_scaffold() {
     assert!(mig.forward.is_empty(), "scaffold has empty forward");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------- about / check / docs / version ----------------
+
+#[tokio::test]
+async fn version_command_prints_framework_version() {
+    let dir = fresh_dir("version");
+    let pool = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let mut out = Vec::<u8>::new();
+    manage::run_with_writer(&pool, &dir, args(&["version"]), &mut out).await.unwrap();
+    let output = String::from_utf8(out).unwrap();
+    assert!(output.contains("rustango"));
+    assert!(output.contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[tokio::test]
+async fn version_dash_dash_alias_works() {
+    let dir = fresh_dir("version_alias");
+    let pool = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let mut out = Vec::<u8>::new();
+    manage::run_with_writer(&pool, &dir, args(&["--version"]), &mut out).await.unwrap();
+    assert!(String::from_utf8(out).unwrap().contains("rustango"));
+}
+
+#[tokio::test]
+async fn docs_command_prints_url() {
+    let dir = fresh_dir("docs");
+    let pool = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let mut out = Vec::<u8>::new();
+    manage::run_with_writer(&pool, &dir, args(&["docs"]), &mut out).await.unwrap();
+    assert!(String::from_utf8(out).unwrap().contains("docs.rs/rustango"));
+}
+
+#[tokio::test]
+async fn help_lists_new_commands() {
+    let dir = fresh_dir("help_new");
+    let pool = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let mut out = Vec::<u8>::new();
+    manage::run_with_writer(&pool, &dir, args(&["--help"]), &mut out).await.unwrap();
+    let output = String::from_utf8(out).unwrap();
+    for cmd in &["about", "check", "docs", "version"] {
+        assert!(output.contains(cmd), "help missing `{cmd}`");
+    }
+}

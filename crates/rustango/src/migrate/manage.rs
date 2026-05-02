@@ -95,6 +95,10 @@ pub async fn run_with_writer<W: Write + Send>(
         "showmigrations" | "status" => showmigrations(pool, dir, writer).await,
         "startapp" => startapp(&args[1..], writer),
         "add-data-op" => add_data_op_cmd(dir, &args[1..], writer),
+        "about" => about_cmd(pool, writer).await,
+        "check" => check_cmd(pool, dir, &args[1..], writer).await,
+        "docs" => docs_cmd(writer),
+        "version" | "--version" => version_cmd(writer),
         other => Err(MigrateError::Validation(format!(
             "unknown subcommand: `{other}` (run with --help for usage)"
         ))),
@@ -153,6 +157,17 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(w, "      --reverse-sql  Rollback SQL. Omit for irreversible ops.")?;
     writeln!(w, "      --name       Name suffix for the new migration file.")?;
     writeln!(w, "      --to         Append to an existing migration instead of creating one.\n")?;
+    writeln!(w, "  about")?;
+    writeln!(w, "      Print framework version, registered models/apps,")?;
+    writeln!(w, "      and detected backend configuration.\n")?;
+    writeln!(w, "  check [--deploy]")?;
+    writeln!(w, "      Run system audits — pending migrations, missing models, common")?;
+    writeln!(w, "      misconfigurations. With --deploy: production hardening checks.")?;
+    writeln!(w, "      Exits non-zero on any error-level finding.\n")?;
+    writeln!(w, "  docs")?;
+    writeln!(w, "      Open docs.rs/rustango in the default browser.\n")?;
+    writeln!(w, "  version | --version")?;
+    writeln!(w, "      Print the rustango framework version.\n")?;
     writeln!(w, "  startapp <name> [--with-manage-bin]")?;
     writeln!(
         w,
@@ -710,4 +725,164 @@ fn usage() -> String {
      Also write src/bin/manage.rs with the single-tenant dispatcher\n  \
      boilerplate. Skipped if the file already exists."
         .to_owned()
+}
+
+// ============================================================ about / check / docs / version
+
+/// `manage about` — env summary for support tickets / debugging.
+async fn about_cmd<W: Write>(pool: &PgPool, w: &mut W) -> Result<(), MigrateError> {
+    let registered_models = crate::core::inventory::iter::<crate::core::ModelEntry>
+        .into_iter()
+        .count();
+    let mut apps: std::collections::BTreeSet<&'static str> =
+        std::collections::BTreeSet::new();
+    for entry in crate::core::inventory::iter::<crate::core::ModelEntry> {
+        if let Some(app) = entry.resolved_app_label() {
+            apps.insert(app);
+        }
+    }
+
+    writeln!(w, "rustango")?;
+    writeln!(w, "  version:        {}", env!("CARGO_PKG_VERSION"))?;
+    writeln!(w, "  models:         {registered_models} registered")?;
+    writeln!(w, "  apps:           {} ({})",
+        apps.len(),
+        if apps.is_empty() { "none".to_owned() }
+        else { apps.iter().copied().collect::<Vec<_>>().join(", ") }
+    )?;
+    let env_label = std::env::var("RUSTANGO_ENV").unwrap_or_else(|_| "(unset)".into());
+    writeln!(w, "  RUSTANGO_ENV:   {env_label}")?;
+    let db_url = std::env::var("DATABASE_URL").map_or("(unset)".into(), |s| {
+        // Redact password component
+        if let Some(at) = s.rfind('@') {
+            if let Some(scheme_end) = s.find("://") {
+                let prefix = &s[..scheme_end + 3];
+                let rest = &s[at..];
+                return format!("{prefix}***{rest}");
+            }
+        }
+        s
+    });
+    writeln!(w, "  DATABASE_URL:   {db_url}")?;
+
+    // DB connectivity
+    write!(w, "  db_connect:     ")?;
+    let ok = sqlx::query("SELECT 1").execute(pool).await.is_ok();
+    writeln!(w, "{}", if ok { "ok" } else { "FAILED" })?;
+
+    Ok(())
+}
+
+/// `manage check [--deploy]` — run system audits.
+async fn check_cmd<W: Write>(
+    pool: &PgPool,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    let deploy = args.iter().any(|a| a == "--deploy");
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut info: Vec<String> = Vec::new();
+
+    writeln!(w, "running rustango system check{}...", if deploy { " (deploy mode)" } else { "" })?;
+
+    // Always-on checks
+    let model_count = crate::core::inventory::iter::<crate::core::ModelEntry>
+        .into_iter()
+        .count();
+    if model_count == 0 {
+        errors.push("no models registered — every #[derive(Model)] struct must be `pub use`d through the binary's crate root".into());
+    } else {
+        info.push(format!("{model_count} models registered via inventory"));
+    }
+
+    // DB connectivity
+    if sqlx::query("SELECT 1").execute(pool).await.is_err() {
+        errors.push("cannot connect to database — verify DATABASE_URL is reachable".into());
+    } else {
+        info.push("database reachable".into());
+    }
+
+    // Pending migrations
+    if dir.exists() {
+        let prior = file::list_dir(dir)?;
+        if prior.is_empty() && model_count > 0 {
+            warnings.push("models registered but no migrations on disk — run `manage makemigrations`".into());
+        } else {
+            info.push(format!("{} migration(s) on disk", prior.len()));
+        }
+    }
+
+    // Deploy checks
+    if deploy {
+        // DEBUG/dev-mode env vars
+        if std::env::var("RUSTANGO_ENV").as_deref() != Ok("prod")
+            && std::env::var("RUSTANGO_ENV").as_deref() != Ok("production")
+        {
+            warnings.push("RUSTANGO_ENV is not 'prod' or 'production'".into());
+        }
+        // Secret key length
+        match std::env::var("SECRET_KEY") {
+            Ok(s) if s.len() < 32 => {
+                errors.push(format!("SECRET_KEY is only {} bytes — need ≥ 32 for cookie signing", s.len()));
+            }
+            Err(_) => {
+                warnings.push("SECRET_KEY env var not set (operator console / sessions need this)".into());
+            }
+            _ => info.push("SECRET_KEY length OK".into()),
+        }
+        // DATABASE_URL set
+        if std::env::var("DATABASE_URL").is_err() {
+            errors.push("DATABASE_URL must be set in production".into());
+        }
+    }
+
+    // Render
+    for msg in &info {
+        writeln!(w, "  [info]    {msg}")?;
+    }
+    for msg in &warnings {
+        writeln!(w, "  [warning] {msg}")?;
+    }
+    for msg in &errors {
+        writeln!(w, "  [error]   {msg}")?;
+    }
+
+    if !errors.is_empty() {
+        return Err(MigrateError::Validation(format!(
+            "{} system check(s) failed",
+            errors.len()
+        )));
+    }
+    if warnings.is_empty() && errors.is_empty() {
+        writeln!(w, "all checks passed")?;
+    }
+    Ok(())
+}
+
+/// `manage docs` — try to open https://docs.rs/rustango in the user's browser.
+fn docs_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
+    let url = "https://docs.rs/rustango";
+    writeln!(w, "{url}")?;
+    // Best-effort — don't fail if the OS has no `open` / `xdg-open` / `start`
+    let opener = if cfg!(target_os = "macos") {
+        Some(("open", url))
+    } else if cfg!(target_os = "linux") {
+        Some(("xdg-open", url))
+    } else if cfg!(target_os = "windows") {
+        Some(("cmd", "/C start"))
+    } else {
+        None
+    };
+    if let Some((cmd, _)) = opener {
+        let _ = std::process::Command::new(cmd).arg(url).spawn();
+    }
+    Ok(())
+}
+
+/// `manage version` — print the rustango framework version.
+fn version_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
+    writeln!(w, "rustango {}", env!("CARGO_PKG_VERSION"))?;
+    Ok(())
 }
