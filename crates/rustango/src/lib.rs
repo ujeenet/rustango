@@ -196,6 +196,13 @@ pub mod real_ip;
 #[cfg(all(feature = "admin", feature = "cache"))]
 pub mod idempotency;
 
+/// Maintenance-mode middleware — return 503 with `Retry-After` from a
+/// shared atomic flag, so an orchestrator can drain traffic before a
+/// deploy / migration without killing in-flight requests. See
+/// [`maintenance::MaintenanceFlag`] + [`maintenance::MaintenanceLayer`].
+#[cfg(feature = "admin")]
+pub mod maintenance;
+
 /// Webhook signature verification (HMAC-SHA256). See [`webhook::verify_signature`].
 #[cfg(feature = "webhook")]
 pub mod webhook;
