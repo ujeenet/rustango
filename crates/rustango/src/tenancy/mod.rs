@@ -42,6 +42,7 @@ pub mod admin;
 pub mod auth;
 pub mod auth_backends;
 pub mod bootstrap;
+pub mod jwt_lifecycle;
 mod error;
 pub mod manage;
 mod manage_interactive;
