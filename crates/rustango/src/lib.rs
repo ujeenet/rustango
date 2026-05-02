@@ -201,6 +201,14 @@ pub mod pagination;
 #[cfg(feature = "admin")]
 pub mod security_headers;
 
+/// Per-request CSP nonce middleware — generates a fresh CSPRNG nonce
+/// per request, makes it available via `Extension<Nonce>`, and
+/// substitutes `'nonce-__RUSTANGO_NONCE__'` in the CSP header so
+/// inline `<script nonce="...">` tags pass strict CSP. See
+/// [`csp_nonce::CspNonceLayer`].
+#[cfg(feature = "csp-nonce")]
+pub mod csp_nonce;
+
 /// Signed URL helpers — HMAC-SHA256 with optional expiry.
 /// See [`signed_url::sign`] / [`signed_url::verify`].
 #[cfg(feature = "signed_url")]

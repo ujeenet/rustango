@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi"]
+default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -102,6 +102,13 @@ http-client = ["dep:reqwest", "dep:tokio"]
 # client's `Accept-Encoding`, skips already-compressed and binary
 # content-types. Implies `admin` (axum-only).
 compression = ["admin", "dep:flate2"]
+
+# Per-request CSP nonce middleware (`rustango::csp_nonce`) — generates
+# a fresh CSPRNG nonce per request, stuffs it into request extensions
+# for handlers to consume, and substitutes it into the
+# Content-Security-Policy header so inline `<script nonce="…">` blocks
+# pass strict CSP. Implies `admin` (axum-only) + rand for the nonce.
+csp-nonce = ["admin", "dep:rand"]
 
 # OpenAPI 3.1 spec builder + Swagger UI router (`rustango::openapi`).
 # Pure-Rust types you assemble into a spec, serialized to JSON via serde.
