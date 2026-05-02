@@ -61,6 +61,7 @@ password-hash = "0.5"
 
 # Session cookie crypto for the operator console
 hmac    = "0.12"
+sha1    = "0.10"   # TOTP / RFC 6238 default
 sha2    = "0.10"
 subtle  = "2"      # constant-time eq for MAC verify
 cookie  = "0.18"

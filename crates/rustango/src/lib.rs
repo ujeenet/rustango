@@ -125,6 +125,11 @@ pub mod fixtures;
 #[cfg(feature = "tenancy")]
 pub mod bulk_actions;
 
+/// TOTP — RFC 6238 time-based one-time passwords for 2FA.
+/// See [`totp::generate`] / [`totp::verify`] / [`totp::otpauth_url`].
+#[cfg(feature = "totp")]
+pub mod totp;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 

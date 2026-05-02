@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets"]
+default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -69,6 +69,10 @@ scheduler = ["dep:tokio"]
 # Secrets manager (`rustango::secrets`) — Secrets trait + EnvSecrets +
 # InMemorySecrets. Vault / AWS / GCP plug in via the trait.
 secrets = ["dep:async-trait"]
+
+# TOTP / 2FA (`rustango::totp`) — RFC 6238 time-based one-time passwords
+# for second-factor authentication. SHA-1 (Google Authenticator default).
+totp = ["dep:hmac", "dep:sha1", "dep:rand", "dep:subtle"]
 
 # Redis cache backend (`rustango::cache::RedisCache`). Adds the `redis`
 # async connection-manager client. Implies `cache`.
@@ -158,6 +162,7 @@ password-hash    = { workspace = true, optional = true }
 rand             = { workspace = true, optional = true }
 rpassword        = { workspace = true, optional = true }
 serde_urlencoded = { workspace = true, optional = true }
+sha1             = { workspace = true, optional = true }
 sha2             = { workspace = true, optional = true }
 subtle           = { workspace = true, optional = true }
 tokio            = { workspace = true, optional = true }
