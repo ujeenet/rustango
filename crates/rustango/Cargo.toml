@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "oauth2", "compression", "openapi"]
+default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "compression", "openapi"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -78,6 +78,12 @@ auth_flows = ["signed_url"]
 # Broadcast event bus (`rustango::sse`) — fan-out for SSE / WebSocket /
 # signal-driven push. tokio::sync::broadcast under the hood.
 sse = ["dep:tokio"]
+
+# WebSocket handler scaffold (`rustango::ws`) — fan-out via the SSE
+# EventBus, axum upgrade handler with auto JSON encode/decode + ping/pong
+# keep-alive. Implies `admin` (axum) + `sse` (broadcast bus). Adds
+# tokio-tungstenite via the `axum/ws` feature.
+websocket = ["admin", "sse", "axum/ws"]
 
 # OAuth2 / OIDC swiss-knife (`rustango::oauth2`) — works for pure OAuth2
 # providers (GitHub, Discord) AND OIDC providers (Google, Microsoft,

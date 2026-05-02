@@ -235,6 +235,12 @@ pub mod account_lockout;
 #[cfg(feature = "sse")]
 pub mod sse;
 
+/// WebSocket handler scaffold — fan-out via [`sse::EventBus`] with auto
+/// JSON encode/decode + keep-alive ping. See [`ws::WsHub`] +
+/// [`ws::ws_handler`].
+#[cfg(feature = "websocket")]
+pub mod ws;
+
 /// OAuth2 / OIDC swiss-knife — social login that works for both pure
 /// OAuth2 (GitHub, Discord) and OIDC (Google, Microsoft, Keycloak)
 /// providers via the `/userinfo` endpoint. Per-tenant via
