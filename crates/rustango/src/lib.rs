@@ -150,6 +150,11 @@ pub mod webhook;
 #[cfg(feature = "admin")]
 pub mod api_errors;
 
+/// Generic API key generation + verification (argon2id-hashed).
+/// See [`api_keys::generate_key`] / [`api_keys::verify_key`].
+#[cfg(feature = "api_keys")]
+pub mod api_keys;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
