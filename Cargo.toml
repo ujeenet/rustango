@@ -88,6 +88,10 @@ redis = { version = "0.27", default-features = false, features = ["tokio-comp", 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 urlencoding = "2"
 
+# Response compression (gzip + deflate). flate2 chooses the best backend
+# at build time (miniz_oxide by default, no C deps).
+flate2 = "1"
+
 # Macro deps
 syn          = { version = "2", features = ["full", "extra-traits"] }
 quote        = "1"

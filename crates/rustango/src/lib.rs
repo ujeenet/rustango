@@ -230,6 +230,12 @@ pub mod sse;
 #[cfg(feature = "oauth2")]
 pub mod oauth2;
 
+/// Response compression middleware — gzip + deflate via flate2.
+/// Honors `Accept-Encoding`, skips already-compressed bodies and binary
+/// content-types. See [`compression::CompressionLayer`].
+#[cfg(feature = "compression")]
+pub mod compression;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
