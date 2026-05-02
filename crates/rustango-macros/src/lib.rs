@@ -23,6 +23,46 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
         .into()
 }
 
+/// Derive a `router(prefix, pool) -> axum::Router` associated method on a
+/// marker struct, wiring the full CRUD ViewSet in one annotation.
+///
+/// ```ignore
+/// #[derive(ViewSet)]
+/// #[viewset(
+///     model        = Post,
+///     fields       = "id, title, body, author_id",
+///     filter_fields = "author_id",
+///     search_fields = "title, body",
+///     ordering     = "-published_at",
+///     page_size    = 20,
+/// )]
+/// pub struct PostViewSet;
+///
+/// // Mount into your app:
+/// let app = Router::new()
+///     .merge(PostViewSet::router("/api/posts", pool.clone()));
+/// ```
+///
+/// Attributes:
+/// * `model = TypeName` — *required*. The `#[derive(Model)]` struct whose
+///   `SCHEMA` constant drives the endpoints.
+/// * `fields = "a, b, c"` — scalar fields included in list/retrieve JSON
+///   and accepted on create/update (default: all scalar fields).
+/// * `filter_fields = "a, b"` — fields filterable via `?a=v` query params.
+/// * `search_fields = "a, b"` — fields searched by `?search=...`.
+/// * `ordering = "a, -b"` — default list ordering; prefix `-` for DESC.
+/// * `page_size = N` — default page size (default: 20, max: 1000).
+/// * `read_only` — flag; wires only `list` + `retrieve` (no mutations).
+/// * `permissions(list = "...", retrieve = "...", create = "...",
+///   update = "...", destroy = "...")` — codenames required per action.
+#[proc_macro_derive(ViewSet, attributes(viewset))]
+pub fn derive_viewset(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    expand_viewset(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 /// Derive `rustango::forms::FormStruct` (slice 8.4B). Generates a
 /// `parse(&HashMap<String, String>) -> Result<Self, FormError>` impl
 /// that walks every named field and:
@@ -3289,4 +3329,242 @@ fn render_form_validators(
     }
 
     quote! { #( #checks )* }
+}
+
+// ============================================================
+//  #[derive(ViewSet)]
+// ============================================================
+
+struct ViewSetAttrs {
+    model: syn::Path,
+    fields: Option<Vec<String>>,
+    filter_fields: Vec<String>,
+    search_fields: Vec<String>,
+    /// (field_name, desc)
+    ordering: Vec<(String, bool)>,
+    page_size: Option<usize>,
+    read_only: bool,
+    perms: ViewSetPermsAttrs,
+}
+
+#[derive(Default)]
+struct ViewSetPermsAttrs {
+    list: Vec<String>,
+    retrieve: Vec<String>,
+    create: Vec<String>,
+    update: Vec<String>,
+    destroy: Vec<String>,
+}
+
+fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
+    let struct_name = &input.ident;
+
+    // Must be a unit struct or an empty named struct.
+    match &input.data {
+        Data::Struct(s) => match &s.fields {
+            Fields::Unit | Fields::Named(_) => {}
+            Fields::Unnamed(_) => {
+                return Err(syn::Error::new_spanned(
+                    struct_name,
+                    "ViewSet can only be derived on a unit struct or an empty named struct",
+                ));
+            }
+        },
+        _ => {
+            return Err(syn::Error::new_spanned(
+                struct_name,
+                "ViewSet can only be derived on a struct",
+            ));
+        }
+    }
+
+    let attrs = parse_viewset_attrs(input)?;
+    let model_path = &attrs.model;
+
+    // `.fields(&[...])` call — None means skip (use all scalar fields).
+    let fields_call = if let Some(ref fields) = attrs.fields {
+        let lits = fields.iter().map(|f| f.as_str());
+        quote!(.fields(&[ #(#lits),* ]))
+    } else {
+        quote!()
+    };
+
+    let filter_fields_call = if attrs.filter_fields.is_empty() {
+        quote!()
+    } else {
+        let lits = attrs.filter_fields.iter().map(|f| f.as_str());
+        quote!(.filter_fields(&[ #(#lits),* ]))
+    };
+
+    let search_fields_call = if attrs.search_fields.is_empty() {
+        quote!()
+    } else {
+        let lits = attrs.search_fields.iter().map(|f| f.as_str());
+        quote!(.search_fields(&[ #(#lits),* ]))
+    };
+
+    let ordering_call = if attrs.ordering.is_empty() {
+        quote!()
+    } else {
+        let pairs = attrs.ordering.iter().map(|(f, desc)| {
+            let f = f.as_str();
+            quote!((#f, #desc))
+        });
+        quote!(.ordering(&[ #(#pairs),* ]))
+    };
+
+    let page_size_call = if let Some(n) = attrs.page_size {
+        quote!(.page_size(#n))
+    } else {
+        quote!()
+    };
+
+    let read_only_call = if attrs.read_only {
+        quote!(.read_only())
+    } else {
+        quote!()
+    };
+
+    let perms = &attrs.perms;
+    let perms_call = if perms.list.is_empty()
+        && perms.retrieve.is_empty()
+        && perms.create.is_empty()
+        && perms.update.is_empty()
+        && perms.destroy.is_empty()
+    {
+        quote!()
+    } else {
+        let list_lits = perms.list.iter().map(|s| s.as_str());
+        let retrieve_lits = perms.retrieve.iter().map(|s| s.as_str());
+        let create_lits = perms.create.iter().map(|s| s.as_str());
+        let update_lits = perms.update.iter().map(|s| s.as_str());
+        let destroy_lits = perms.destroy.iter().map(|s| s.as_str());
+        quote! {
+            .permissions(::rustango::viewset::ViewSetPerms {
+                list:     ::std::vec![ #(#list_lits.to_owned()),* ],
+                retrieve: ::std::vec![ #(#retrieve_lits.to_owned()),* ],
+                create:   ::std::vec![ #(#create_lits.to_owned()),* ],
+                update:   ::std::vec![ #(#update_lits.to_owned()),* ],
+                destroy:  ::std::vec![ #(#destroy_lits.to_owned()),* ],
+            })
+        }
+    };
+
+    Ok(quote! {
+        impl #struct_name {
+            /// Build an `axum::Router` with the six standard REST endpoints
+            /// for this ViewSet, mounted at `prefix`.
+            pub fn router(prefix: &str, pool: ::rustango::sql::sqlx::PgPool) -> ::axum::Router {
+                ::rustango::viewset::ViewSet::for_model(#model_path::SCHEMA)
+                    #fields_call
+                    #filter_fields_call
+                    #search_fields_call
+                    #ordering_call
+                    #page_size_call
+                    #perms_call
+                    #read_only_call
+                    .router(prefix, pool)
+            }
+        }
+    })
+}
+
+fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
+    let mut model: Option<syn::Path> = None;
+    let mut fields: Option<Vec<String>> = None;
+    let mut filter_fields: Vec<String> = Vec::new();
+    let mut search_fields: Vec<String> = Vec::new();
+    let mut ordering: Vec<(String, bool)> = Vec::new();
+    let mut page_size: Option<usize> = None;
+    let mut read_only = false;
+    let mut perms = ViewSetPermsAttrs::default();
+
+    for attr in &input.attrs {
+        if !attr.path().is_ident("viewset") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("model") {
+                let path: syn::Path = meta.value()?.parse()?;
+                model = Some(path);
+                return Ok(());
+            }
+            if meta.path.is_ident("fields") {
+                let s: LitStr = meta.value()?.parse()?;
+                fields = Some(split_field_list(&s.value()));
+                return Ok(());
+            }
+            if meta.path.is_ident("filter_fields") {
+                let s: LitStr = meta.value()?.parse()?;
+                filter_fields = split_field_list(&s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("search_fields") {
+                let s: LitStr = meta.value()?.parse()?;
+                search_fields = split_field_list(&s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("ordering") {
+                let s: LitStr = meta.value()?.parse()?;
+                ordering = parse_ordering_list(&s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("page_size") {
+                let lit: syn::LitInt = meta.value()?.parse()?;
+                page_size = Some(lit.base10_parse::<usize>()?);
+                return Ok(());
+            }
+            if meta.path.is_ident("read_only") {
+                read_only = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("permissions") {
+                meta.parse_nested_meta(|inner| {
+                    let parse_codenames = |inner: &syn::meta::ParseNestedMeta| -> syn::Result<Vec<String>> {
+                        let s: LitStr = inner.value()?.parse()?;
+                        Ok(split_field_list(&s.value()))
+                    };
+                    if inner.path.is_ident("list") {
+                        perms.list = parse_codenames(&inner)?;
+                    } else if inner.path.is_ident("retrieve") {
+                        perms.retrieve = parse_codenames(&inner)?;
+                    } else if inner.path.is_ident("create") {
+                        perms.create = parse_codenames(&inner)?;
+                    } else if inner.path.is_ident("update") {
+                        perms.update = parse_codenames(&inner)?;
+                    } else if inner.path.is_ident("destroy") {
+                        perms.destroy = parse_codenames(&inner)?;
+                    } else {
+                        return Err(inner.error(
+                            "unknown permissions key (supported: list, retrieve, create, update, destroy)",
+                        ));
+                    }
+                    Ok(())
+                })?;
+                return Ok(());
+            }
+            Err(meta.error(
+                "unknown viewset attribute (supported: model, fields, filter_fields, \
+                 search_fields, ordering, page_size, read_only, permissions(...))",
+            ))
+        })?;
+    }
+
+    let model = model.ok_or_else(|| {
+        syn::Error::new_spanned(
+            &input.ident,
+            "`#[viewset(model = SomeModel)]` is required",
+        )
+    })?;
+
+    Ok(ViewSetAttrs {
+        model,
+        fields,
+        filter_fields,
+        search_fields,
+        ordering,
+        page_size,
+        read_only,
+        perms,
+    })
 }

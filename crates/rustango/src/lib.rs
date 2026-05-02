@@ -93,3 +93,9 @@ pub use rustango_macros::embed_migrations;
 /// Re-exported only when the `forms` feature is on.
 #[cfg(feature = "forms")]
 pub use rustango_macros::Form;
+
+/// `#[derive(ViewSet)]` — generates a `router(prefix, pool) -> axum::Router`
+/// associated method on a marker struct, wiring the full CRUD ViewSet in one
+/// annotation. Re-exported only when the `tenancy` feature is on.
+#[cfg(feature = "tenancy")]
+pub use rustango_macros::ViewSet;

@@ -1,5 +1,5 @@
 use rustango::sql::{Auto, ForeignKey};
-use rustango::Model;
+use rustango::{Model, ViewSet};
 
 #[derive(Model, Debug, Clone)]
 #[rustango(
@@ -41,3 +41,26 @@ pub struct Post {
     pub author_id: ForeignKey<Author>,
     pub published_at: chrono::DateTime<chrono::Utc>,
 }
+
+/// REST API viewset for posts — `GET/POST /api/posts` + `GET/PUT/PATCH/DELETE /api/posts/{pk}`.
+#[derive(ViewSet)]
+#[viewset(
+    model         = Post,
+    fields        = "id, title, body, author_id, published_at",
+    filter_fields = "author_id",
+    search_fields = "title, body",
+    ordering      = "-published_at",
+    page_size     = 20,
+)]
+pub struct PostViewSet;
+
+/// Read-only viewset for authors.
+#[derive(ViewSet)]
+#[viewset(
+    model         = Author,
+    fields        = "id, name, bio",
+    search_fields = "name, bio",
+    ordering      = "name",
+    read_only,
+)]
+pub struct AuthorViewSet;
