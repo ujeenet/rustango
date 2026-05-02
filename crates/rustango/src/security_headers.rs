@@ -173,6 +173,23 @@ impl SecurityHeadersLayer {
         self
     }
 
+    /// Set the `report-uri` directive on the CSP header — the browser
+    /// will POST violation reports here. Pair with [`csp_report_router`]
+    /// to receive them.
+    ///
+    /// Note: `report-uri` is deprecated in favor of `report-to` (which
+    /// requires a `Report-To` HTTP header pointing at a named endpoint
+    /// group). This method appends to the existing CSP string.
+    #[must_use]
+    pub fn csp_report_uri(mut self, uri: &str) -> Self {
+        if let Some(existing) = self.csp.as_mut() {
+            existing.push_str(&format!("; report-uri {uri}"));
+        } else {
+            self.csp = Some(format!("default-src 'self'; report-uri {uri}"));
+        }
+        self
+    }
+
     /// Add an arbitrary custom header.
     #[must_use]
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
@@ -251,6 +268,60 @@ async fn handle(cfg: Arc<SecurityHeadersLayer>, req: Request<Body>, next: Next) 
     }
 
     response
+}
+
+// ------------------------------------------------------------------ CSP report endpoint
+
+/// Build a router exposing a CSP-violation report endpoint at `path`
+/// (typically `/__csp-report`). The browser POSTs JSON reports here when
+/// a CSP directive is violated; this handler logs them via `tracing::warn!`
+/// so they show up in your normal log pipeline.
+///
+/// ## Quick start
+///
+/// ```ignore
+/// use rustango::security_headers::{csp_report_router, SecurityHeadersLayer, CspBuilder};
+///
+/// let app = Router::new()
+///     .route("/", get(home))
+///     .merge(csp_report_router("/__csp-report"))
+///     .security_headers(
+///         SecurityHeadersLayer::strict()
+///             .csp(CspBuilder::strict_starter().build())
+///             .csp_report_uri("/__csp-report"),
+///     );
+/// ```
+///
+/// Reports look like:
+/// ```json
+/// {"csp-report": {
+///   "document-uri": "https://app.example.com/page",
+///   "violated-directive": "script-src 'self'",
+///   "blocked-uri": "inline",
+///   ...
+/// }}
+/// ```
+pub fn csp_report_router(path: &str) -> axum::Router {
+    use axum::routing::post;
+    let path = path.to_owned();
+    axum::Router::new().route(&path, post(handle_csp_report))
+}
+
+async fn handle_csp_report(
+    body: axum::extract::Json<serde_json::Value>,
+) -> axum::http::StatusCode {
+    // Standard CSP report format wraps the body in {"csp-report": {...}}
+    let report = body.0.get("csp-report").unwrap_or(&body.0);
+    let document_uri = report.get("document-uri").and_then(|v| v.as_str()).unwrap_or("?");
+    let violated = report.get("violated-directive").and_then(|v| v.as_str()).unwrap_or("?");
+    let blocked = report.get("blocked-uri").and_then(|v| v.as_str()).unwrap_or("?");
+    tracing::warn!(
+        document_uri = %document_uri,
+        violated_directive = %violated,
+        blocked_uri = %blocked,
+        "CSP violation report",
+    );
+    axum::http::StatusCode::NO_CONTENT
 }
 
 // ------------------------------------------------------------------ CspBuilder
@@ -464,5 +535,23 @@ mod tests {
             .csp("default-src 'self'".into())
             .csp_report_only(true);
         assert!(l.csp_report_only);
+    }
+
+    #[test]
+    fn csp_report_uri_appends_to_existing_csp() {
+        let l = SecurityHeadersLayer::strict()
+            .csp("default-src 'self'".into())
+            .csp_report_uri("/__csp-report");
+        let csp = l.csp.unwrap();
+        assert!(csp.contains("default-src 'self'"));
+        assert!(csp.contains("report-uri /__csp-report"));
+    }
+
+    #[test]
+    fn csp_report_uri_creates_default_csp_if_missing() {
+        let l = SecurityHeadersLayer::strict().csp_report_uri("/__csp-report");
+        let csp = l.csp.unwrap();
+        assert!(csp.contains("default-src 'self'"));
+        assert!(csp.contains("report-uri"));
     }
 }

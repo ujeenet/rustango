@@ -57,6 +57,70 @@ pub fn slugify_unicode(s: &str) -> String {
     out.trim_end_matches('-').to_owned()
 }
 
+/// Generate a unique slug by appending `-2`, `-3`, ... until `is_taken`
+/// returns false. Useful for URL slugs where the natural `slugify(title)`
+/// might collide with an existing row.
+///
+/// `is_taken` is a closure called once per candidate; it should return
+/// `true` if the slug already exists in your DB.
+///
+/// # Examples
+///
+/// ```
+/// use rustango::text::unique_slug;
+///
+/// let mut existing = std::collections::HashSet::new();
+/// existing.insert("hello-world".to_owned());
+/// existing.insert("hello-world-2".to_owned());
+///
+/// let slug = unique_slug("Hello, World!", |s| existing.contains(s));
+/// assert_eq!(slug, "hello-world-3");
+/// ```
+///
+/// For DB-backed checks, wrap your async lookup:
+///
+/// ```ignore
+/// let slug = unique_slug_async(&title, |candidate| async {
+///     Post::objects().where_(Post::slug.eq(candidate.to_owned())).count(&pool).await? > 0
+/// }).await?;
+/// ```
+#[must_use]
+pub fn unique_slug<F>(input: &str, mut is_taken: F) -> String
+where
+    F: FnMut(&str) -> bool,
+{
+    let base = slugify(input);
+    if !is_taken(&base) {
+        return base;
+    }
+    for i in 2..u32::MAX {
+        let candidate = format!("{base}-{i}");
+        if !is_taken(&candidate) {
+            return candidate;
+        }
+    }
+    base // pathological — fall back to base
+}
+
+/// Async variant of [`unique_slug`] for DB-backed uniqueness checks.
+pub async fn unique_slug_async<F, Fut>(input: &str, mut is_taken: F) -> String
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let base = slugify(input);
+    if !is_taken(base.clone()).await {
+        return base;
+    }
+    for i in 2..u32::MAX {
+        let candidate = format!("{base}-{i}");
+        if !is_taken(candidate.clone()).await {
+            return candidate;
+        }
+    }
+    base
+}
+
 // ------------------------------------------------------------------ HTML escape
 
 /// Escape a string for safe insertion into HTML element content or
@@ -195,5 +259,45 @@ mod tests {
     fn truncate_counts_chars_not_bytes() {
         // "café" is 4 chars but 5 bytes in UTF-8 — must respect char boundary
         assert_eq!(truncate("café au lait", 4, "…"), "café…");
+    }
+
+    // -------------------------------------------------------------- unique_slug
+
+    #[test]
+    fn unique_slug_returns_base_when_free() {
+        let result = unique_slug("Hello World", |_| false);
+        assert_eq!(result, "hello-world");
+    }
+
+    #[test]
+    fn unique_slug_appends_2_when_base_taken() {
+        let mut existing = std::collections::HashSet::new();
+        existing.insert("hello-world".to_owned());
+        let result = unique_slug("Hello World", |s| existing.contains(s));
+        assert_eq!(result, "hello-world-2");
+    }
+
+    #[test]
+    fn unique_slug_keeps_incrementing_until_free() {
+        let mut existing = std::collections::HashSet::new();
+        for i in 1..=5 {
+            let s = if i == 1 { "hello".to_owned() } else { format!("hello-{i}") };
+            existing.insert(s);
+        }
+        let result = unique_slug("Hello", |s| existing.contains(s));
+        assert_eq!(result, "hello-6");
+    }
+
+    #[tokio::test]
+    async fn unique_slug_async_works() {
+        let mut existing = std::collections::HashSet::new();
+        existing.insert("foo".to_owned());
+        existing.insert("foo-2".to_owned());
+
+        let result = unique_slug_async("foo", |candidate| {
+            let existing = existing.clone();
+            async move { existing.contains(&candidate) }
+        }).await;
+        assert_eq!(result, "foo-3");
     }
 }
