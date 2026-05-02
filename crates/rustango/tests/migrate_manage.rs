@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use rustango::migrate::{
-    self, file, manage, MigrateError, Migration, Operation, SchemaChange, SchemaSnapshot,
-    TableSnapshot,
+    self, file, manage, DataOp, MigrateError, Migration, Operation, SchemaChange, SchemaSnapshot,
+    TableSnapshot, append_data_op, make_data_migration,
 };
 use rustango::sql::sqlx::{self, PgPool, Row};
 
@@ -129,6 +129,166 @@ fn make_empty_picks_next_index_after_existing_migrations() {
     // Snapshot inherits predecessor's so a follow-up `makemigrations`
     // doesn't see a phantom diff.
     assert_eq!(mig.snapshot, snapshot_with_table("t"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------- pure: make_data_migration ----------------
+
+#[test]
+fn make_data_migration_creates_file_with_data_op() {
+    let dir = fresh_dir("data_mig");
+    let mig = make_data_migration(
+        &dir,
+        "backfill_slugs",
+        "UPDATE posts SET slug = lower(title)",
+        Some("UPDATE posts SET slug = NULL"),
+    ).unwrap();
+
+    assert_eq!(mig.name, "0001_backfill_slugs");
+    assert_eq!(mig.forward.len(), 1);
+    match &mig.forward[0] {
+        Operation::Data(d) => {
+            assert_eq!(d.sql, "UPDATE posts SET slug = lower(title)");
+            assert_eq!(d.reverse_sql.as_deref(), Some("UPDATE posts SET slug = NULL"));
+            assert!(d.reversible);
+        }
+        _ => panic!("expected Data op"),
+    }
+
+    let loaded = file::load(&dir.join("0001_backfill_slugs.json")).unwrap();
+    assert_eq!(loaded, mig);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn make_data_migration_irreversible_when_no_reverse_sql() {
+    let dir = fresh_dir("irreversible");
+    let mig = make_data_migration(&dir, "seed", "INSERT INTO config VALUES (1)", None).unwrap();
+    match &mig.forward[0] {
+        Operation::Data(d) => {
+            assert!(!d.reversible);
+            assert!(d.reverse_sql.is_none());
+        }
+        _ => panic!("expected Data op"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn make_data_migration_indexes_after_existing_chain() {
+    let dir = fresh_dir("data_after_chain");
+    write_migration(&dir, &Migration {
+        name: "0001_initial".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        prev: None,
+        atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
+        snapshot: snapshot_with_table("t"),
+        forward: vec![],
+    });
+    write_migration(&dir, &Migration {
+        name: "0002_add_col".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        prev: Some("0001_initial".into()),
+        atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
+        snapshot: snapshot_with_table("t"),
+        forward: vec![],
+    });
+    let mig = make_data_migration(&dir, "backfill", "UPDATE t SET x = 1", None).unwrap();
+    assert_eq!(mig.name, "0003_backfill");
+    assert_eq!(mig.prev.as_deref(), Some("0002_add_col"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------- pure: append_data_op ----------------
+
+#[test]
+fn append_data_op_adds_op_to_existing_migration() {
+    let dir = fresh_dir("append");
+    // Seed an initial migration with no ops
+    write_migration(&dir, &Migration {
+        name: "0001_initial".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        prev: None,
+        atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
+        snapshot: snapshot_with_table("t"),
+        forward: vec![],
+    });
+
+    append_data_op(
+        &dir,
+        "0001_initial",
+        "UPDATE t SET x = 1",
+        Some("UPDATE t SET x = 0"),
+    ).unwrap();
+
+    let loaded = file::load(&dir.join("0001_initial.json")).unwrap();
+    assert_eq!(loaded.forward.len(), 1);
+    match &loaded.forward[0] {
+        Operation::Data(d) => {
+            assert_eq!(d.sql, "UPDATE t SET x = 1");
+            assert!(d.reversible);
+        }
+        _ => panic!("expected Data op"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn append_data_op_error_on_missing_migration() {
+    let dir = fresh_dir("append_missing");
+    let _ = std::fs::create_dir_all(&dir);
+    let err = append_data_op(&dir, "0001_nonexistent", "SELECT 1", None).unwrap_err();
+    assert!(matches!(err, MigrateError::Validation(_)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------- argv: add-data-op subcommand ----------------
+
+#[tokio::test]
+async fn add_data_op_cmd_creates_new_migration() {
+    let dir = fresh_dir("cmd_create");
+    let mut out = Vec::<u8>::new();
+    // add-data-op is pure file I/O — no DB needed. Pass a lazy pool.
+    let pool = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    manage::run_with_writer(
+        &pool,
+        &dir,
+        args(&[
+            "add-data-op",
+            "--sql", "UPDATE t SET x = 1",
+            "--reverse-sql", "UPDATE t SET x = 0",
+            "--name", "backfill_x",
+        ]),
+        &mut out,
+    ).await.unwrap();
+
+    let output = String::from_utf8(out).unwrap();
+    assert!(output.contains("backfill_x"), "output: {output}");
+    assert!(output.contains("reversible"), "output: {output}");
+
+    let files: Vec<_> = std::fs::read_dir(&dir).unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(files.len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn add_data_op_cmd_missing_sql_is_error() {
+    let dir = fresh_dir("cmd_no_sql");
+    let _ = std::fs::create_dir_all(&dir);
+    let mut out = Vec::<u8>::new();
+    let pool = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let err = manage::run_with_writer(
+        &pool,
+        &dir,
+        args(&["add-data-op", "--name", "oops"]),
+        &mut out,
+    ).await.unwrap_err();
+    assert!(matches!(err, MigrateError::Validation(_)));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

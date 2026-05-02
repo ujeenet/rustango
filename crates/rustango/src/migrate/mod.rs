@@ -38,3 +38,4 @@ pub use runner::{
     MigrationPreview, LEDGER_TABLE,
 };
 pub use snapshot::{FieldSnapshot, RelationSnapshot, SchemaSnapshot, TableSnapshot};
+pub use manage::{append_data_op, make_data_migration};

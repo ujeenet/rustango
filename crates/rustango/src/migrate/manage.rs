@@ -44,7 +44,7 @@ use std::path::Path;
 use crate::sql::sqlx::PgPool;
 
 use super::error::MigrateError;
-use super::file::{self, Migration, Operation};
+use super::file::{self, DataOp, Migration, Operation};
 use super::make::{make_migrations, make_migrations_for_app};
 use super::runner;
 use super::snapshot::SchemaSnapshot;
@@ -94,6 +94,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "downgrade" => downgrade(pool, dir, &args[1..], writer).await,
         "showmigrations" | "status" => showmigrations(pool, dir, writer).await,
         "startapp" => startapp(&args[1..], writer),
+        "add-data-op" => add_data_op_cmd(dir, &args[1..], writer),
         other => Err(MigrateError::Validation(format!(
             "unknown subcommand: `{other}` (run with --help for usage)"
         ))),
@@ -146,6 +147,12 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     )?;
     writeln!(w, "  showmigrations | status")?;
     writeln!(w, "      List migrations with [X]/[ ] applied marker.\n")?;
+    writeln!(w, "  add-data-op --sql <SQL> [--reverse-sql <SQL>] [--name <name>] [--to <migration>]")?;
+    writeln!(w, "      Add a data transformation op (up + optional down).")?;
+    writeln!(w, "      --sql        Forward SQL to run (required).")?;
+    writeln!(w, "      --reverse-sql  Rollback SQL. Omit for irreversible ops.")?;
+    writeln!(w, "      --name       Name suffix for the new migration file.")?;
+    writeln!(w, "      --to         Append to an existing migration instead of creating one.\n")?;
     writeln!(w, "  startapp <name> [--with-manage-bin]")?;
     writeln!(
         w,
@@ -436,6 +443,157 @@ pub fn make_empty(dir: &Path, name: &str) -> Result<Migration, MigrateError> {
 
 fn file_path(dir: &Path, name: &str) -> std::path::PathBuf {
     dir.join(format!("{name}.json"))
+}
+
+// ------------------------------------------------------------------ add-data-op
+
+/// Create a new migration containing a single data operation.
+///
+/// `name` is the migration name suffix (e.g. `"backfill_slugs"`); the index
+/// prefix is derived automatically from the migration chain in `dir`.
+///
+/// If `reverse_sql` is `Some`, the op is marked `reversible = true` and
+/// `unapply` / `downgrade` will run the reverse SQL. If `None`, the op is
+/// irreversible and rollback will fail fast.
+///
+/// # Errors
+/// [`MigrateError::Io`] / [`MigrateError::Json`] if the file can't be written.
+pub fn make_data_migration(
+    dir: &Path,
+    name: &str,
+    sql: &str,
+    reverse_sql: Option<&str>,
+) -> Result<Migration, MigrateError> {
+    let prior = file::list_dir(dir)?;
+    let prev_snapshot = prior
+        .last()
+        .map_or_else(|| SchemaSnapshot::default(), |m| m.snapshot.clone());
+    let prev_name = prior.last().map(|m| m.name.clone());
+    let next_index = prior
+        .last()
+        .and_then(|m| file::extract_index(&m.name))
+        .map_or(1, |n| n + 1);
+
+    let full_name = format!("{next_index:04}_{name}");
+    let op = Operation::Data(DataOp {
+        sql: sql.to_owned(),
+        reverse_sql: reverse_sql.map(str::to_owned),
+        reversible: reverse_sql.is_some(),
+    });
+    let mig = Migration {
+        name: full_name.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        prev: prev_name,
+        atomic: true,
+        scope: super::MigrationScope::default(),
+        snapshot: prev_snapshot,
+        forward: vec![op],
+    };
+    if !dir.exists() {
+        std::fs::create_dir_all(dir)?;
+    }
+    file::write(&file_path(dir, &mig.name), &mig)?;
+    Ok(mig)
+}
+
+/// Append a data operation to an existing migration file.
+///
+/// `migration_name` is the full migration name (e.g. `"0002_add_slug"`).
+/// The op is appended to the end of `forward`. If `reverse_sql` is `Some`
+/// the op is reversible.
+///
+/// # Errors
+/// [`MigrateError::Validation`] if `migration_name` not found in `dir`.
+/// [`MigrateError::Io`] / [`MigrateError::Json`] for file I/O failures.
+pub fn append_data_op(
+    dir: &Path,
+    migration_name: &str,
+    sql: &str,
+    reverse_sql: Option<&str>,
+) -> Result<(), MigrateError> {
+    let path = file_path(dir, migration_name);
+    let mut mig = file::load(&path).map_err(|_| {
+        MigrateError::Validation(format!(
+            "migration `{migration_name}` not found at {}",
+            path.display()
+        ))
+    })?;
+    mig.forward.push(Operation::Data(DataOp {
+        sql: sql.to_owned(),
+        reverse_sql: reverse_sql.map(str::to_owned),
+        reversible: reverse_sql.is_some(),
+    }));
+    file::write(&path, &mig)?;
+    Ok(())
+}
+
+/// `add-data-op` subcommand handler.
+fn add_data_op_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let mut sql: Option<String> = None;
+    let mut reverse_sql: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut to: Option<String> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--sql" => {
+                sql = Some(
+                    iter.next()
+                        .cloned()
+                        .ok_or_else(|| MigrateError::Validation("--sql requires a value".into()))?,
+                );
+            }
+            "--reverse-sql" => {
+                reverse_sql = Some(
+                    iter.next().cloned().ok_or_else(|| {
+                        MigrateError::Validation("--reverse-sql requires a value".into())
+                    })?,
+                );
+            }
+            "--name" => {
+                name = Some(
+                    iter.next().cloned().ok_or_else(|| {
+                        MigrateError::Validation("--name requires a value".into())
+                    })?,
+                );
+            }
+            "--to" => {
+                to = Some(
+                    iter.next().cloned().ok_or_else(|| {
+                        MigrateError::Validation("--to requires a migration name".into())
+                    })?,
+                );
+            }
+            "--help" | "-h" => {
+                writeln!(
+                    w,
+                    "add-data-op --sql <SQL> [--reverse-sql <SQL>] [--name <name>] [--to <migration>]"
+                )?;
+                return Ok(());
+            }
+            other if other.starts_with('-') => {
+                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+            }
+            other => {
+                return Err(MigrateError::Validation(format!(
+                    "unexpected argument: `{other}` — use --sql, --reverse-sql, --name, --to"
+                )));
+            }
+        }
+    }
+
+    let sql = sql.ok_or_else(|| MigrateError::Validation("--sql is required".into()))?;
+
+    if let Some(migration_name) = to {
+        append_data_op(dir, &migration_name, &sql, reverse_sql.as_deref())?;
+        writeln!(w, "appended data op to {migration_name}.json")?;
+    } else {
+        let name = name.unwrap_or_else(|| "data_op".to_owned());
+        let mig = make_data_migration(dir, &name, &sql, reverse_sql.as_deref())?;
+        let rev_note = if reverse_sql.is_some() { " (reversible)" } else { " (irreversible)" };
+        writeln!(w, "wrote {}{rev_note}", file_path(dir, &mig.name).display())?;
+    }
+    Ok(())
 }
 
 fn describe_op(op: &Operation) -> String {
