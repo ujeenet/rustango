@@ -72,6 +72,11 @@ pub mod email;
 #[cfg(feature = "notifications")]
 pub mod notifications;
 
+/// Background job queue with worker pool — async work outside the request
+/// lifecycle. Currently in-memory only. See [`jobs::JobQueue`].
+#[cfg(feature = "jobs")]
+pub mod jobs;
+
 /// File storage backends — [`storage::Storage`] trait + LocalStorage + InMemoryStorage.
 #[cfg(feature = "storage")]
 pub mod storage;
