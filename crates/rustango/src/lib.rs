@@ -98,6 +98,14 @@ pub mod etag;
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
 
+/// API versioning — extract version from header / query / URL prefix.
+/// See [`api_version::VersionStrategy`] and [`api_version::ApiVersion`].
+#[cfg(feature = "admin")]
+pub mod api_version;
+
+/// Minimal RFC 4180 CSV writer — zero deps. See [`csv::CsvWriter`].
+pub mod csv;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
