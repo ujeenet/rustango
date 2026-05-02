@@ -34,6 +34,11 @@ pub mod config;
 #[cfg(feature = "forms")]
 pub mod forms;
 
+/// DRF-style serializer layer — `#[derive(Serializer)]` + [`serializer::ModelSerializer`].
+/// Typed JSON output from model instances with field control and validation.
+#[cfg(feature = "serializer")]
+pub mod serializer;
+
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
@@ -99,3 +104,10 @@ pub use rustango_macros::Form;
 /// annotation. Re-exported only when the `tenancy` feature is on.
 #[cfg(feature = "tenancy")]
 pub use rustango_macros::ViewSet;
+
+/// `#[derive(Serializer)]` — implements [`serializer::ModelSerializer`] on a
+/// struct, generating `from_model`, a custom `serde::Serialize` (respecting
+/// `write_only`), and `writable_fields`. Re-exported when the `serializer`
+/// feature is on.
+#[cfg(feature = "serializer")]
+pub use rustango_macros::Serializer;

@@ -98,6 +98,26 @@ pub fn derive_form(input: TokenStream) -> TokenStream {
         .into()
 }
 
+/// Derive [`rustango::serializer::ModelSerializer`] for a struct.
+///
+/// # Container attribute (required)
+/// `#[serializer(model = TypeName)]` — the [`Model`] type this serializer maps from.
+///
+/// # Field attributes
+/// - `#[serializer(read_only)]` — mapped from model; included in JSON output; excluded from `writable_fields()`
+/// - `#[serializer(write_only)]` — `Default::default()` in `from_model`; excluded from JSON output; included in `writable_fields()`
+/// - `#[serializer(source = "field_name")]` — reads from `model.field_name` instead of `model.<field_ident>`
+/// - `#[serializer(skip)]` — `Default::default()` in `from_model`; included in JSON output; excluded from `writable_fields()` (user sets manually)
+///
+/// The macro also emits a custom `impl serde::Serialize` — do **not** also `#[derive(Serialize)]`.
+#[proc_macro_derive(Serializer, attributes(serializer))]
+pub fn derive_serializer(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    expand_serializer(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 /// Bake every `*.json` migration file in a directory into the binary
 /// at compile time. Returns a `&'static [(&'static str, &'static str)]`
 /// of `(name, json_content)` pairs, lex-sorted by file stem.
@@ -3710,5 +3730,181 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
         page_size,
         read_only,
         perms,
+    })
+}
+
+// ============================================================ #[derive(Serializer)]
+
+struct SerializerContainerAttrs {
+    model: syn::Path,
+}
+
+#[derive(Default)]
+struct SerializerFieldAttrs {
+    read_only: bool,
+    write_only: bool,
+    source: Option<String>,
+    skip: bool,
+}
+
+fn parse_serializer_container_attrs(input: &DeriveInput) -> syn::Result<SerializerContainerAttrs> {
+    let mut model: Option<syn::Path> = None;
+    for attr in &input.attrs {
+        if !attr.path().is_ident("serializer") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("model") {
+                let _eq: syn::Token![=] = meta.input.parse()?;
+                model = Some(meta.input.parse()?);
+                return Ok(());
+            }
+            Err(meta.error("unknown serializer container attribute (supported: `model`)"))
+        })?;
+    }
+    let model = model.ok_or_else(|| {
+        syn::Error::new_spanned(
+            &input.ident,
+            "`#[serializer(model = SomeModel)]` is required",
+        )
+    })?;
+    Ok(SerializerContainerAttrs { model })
+}
+
+fn parse_serializer_field_attrs(field: &syn::Field) -> syn::Result<SerializerFieldAttrs> {
+    let mut out = SerializerFieldAttrs::default();
+    for attr in &field.attrs {
+        if !attr.path().is_ident("serializer") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("read_only") {
+                out.read_only = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("write_only") {
+                out.write_only = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("skip") {
+                out.skip = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("source") {
+                let s: LitStr = meta.value()?.parse()?;
+                out.source = Some(s.value());
+                return Ok(());
+            }
+            Err(meta.error(
+                "unknown serializer field attribute \
+                 (supported: `read_only`, `write_only`, `source`, `skip`)",
+            ))
+        })?;
+    }
+    // Validate: read_only + write_only is nonsensical
+    if out.read_only && out.write_only {
+        return Err(syn::Error::new_spanned(
+            field,
+            "a field cannot be both `read_only` and `write_only`",
+        ));
+    }
+    Ok(out)
+}
+
+fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
+    let struct_name = &input.ident;
+    let struct_name_lit = struct_name.to_string();
+
+    let Data::Struct(data) = &input.data else {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            "Serializer can only be derived on structs",
+        ));
+    };
+    let Fields::Named(named) = &data.fields else {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            "Serializer requires a struct with named fields",
+        ));
+    };
+
+    let container = parse_serializer_container_attrs(input)?;
+    let model_path = &container.model;
+
+    // Classify each field
+    struct FieldInfo {
+        ident: syn::Ident,
+        attrs: SerializerFieldAttrs,
+    }
+    let mut fields_info: Vec<FieldInfo> = Vec::new();
+    for field in &named.named {
+        let ident = field.ident.clone().expect("named field has ident");
+        let attrs = parse_serializer_field_attrs(field)?;
+        fields_info.push(FieldInfo { ident, attrs });
+    }
+
+    // Generate from_model body: struct literal with each field assigned.
+    let from_model_fields = fields_info.iter().map(|fi| {
+        let ident = &fi.ident;
+        if fi.attrs.write_only || fi.attrs.skip {
+            // Not read from model — use default
+            quote! { #ident: ::core::default::Default::default() }
+        } else if let Some(src) = &fi.attrs.source {
+            let src_ident = syn::Ident::new(src, ident.span());
+            quote! { #ident: ::core::clone::Clone::clone(&model.#src_ident) }
+        } else {
+            quote! { #ident: ::core::clone::Clone::clone(&model.#ident) }
+        }
+    });
+
+    // Generate custom Serialize: skip write_only fields
+    let output_fields: Vec<_> = fields_info
+        .iter()
+        .filter(|fi| !fi.attrs.write_only)
+        .collect();
+    let output_field_count = output_fields.len();
+    let serialize_fields = output_fields.iter().map(|fi| {
+        let ident = &fi.ident;
+        let name_lit = ident.to_string();
+        quote! { __state.serialize_field(#name_lit, &self.#ident)?; }
+    });
+
+    // writable_fields: normal + write_only (not read_only, not skip)
+    let writable_lits: Vec<_> = fields_info
+        .iter()
+        .filter(|fi| !fi.attrs.read_only && !fi.attrs.skip)
+        .map(|fi| fi.ident.to_string())
+        .collect();
+
+    Ok(quote! {
+        impl ::rustango::serializer::ModelSerializer for #struct_name {
+            type Model = #model_path;
+
+            fn from_model(model: &Self::Model) -> Self {
+                Self {
+                    #( #from_model_fields ),*
+                }
+            }
+
+            fn writable_fields() -> &'static [&'static str] {
+                &[ #( #writable_lits ),* ]
+            }
+        }
+
+        impl ::serde::Serialize for #struct_name {
+            fn serialize<S>(&self, serializer: S)
+                -> ::core::result::Result<S::Ok, S::Error>
+            where
+                S: ::serde::Serializer,
+            {
+                use ::serde::ser::SerializeStruct;
+                let mut __state = serializer.serialize_struct(
+                    #struct_name_lit,
+                    #output_field_count,
+                )?;
+                #( #serialize_fields )*
+                __state.end()
+            }
+        }
     })
 }

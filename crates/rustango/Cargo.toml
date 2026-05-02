@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms"]
+default = ["postgres", "admin", "config", "forms", "serializer"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -36,6 +36,12 @@ config = ["dep:toml"]
 # 8.4C lights up CSRF protection behind the `csrf` sub-feature so
 # parser-only users don't pay the cookie/rand cost.
 forms = []
+
+# Serializer layer (`rustango::serializer`) — `#[derive(Serializer)]` +
+# `ModelSerializer` trait. Produces typed JSON output from model instances
+# with field control (read_only, write_only, source, skip) and cross-field
+# validation. Implies `forms` so serializer errors share `FormErrors`.
+serializer = ["forms"]
 
 # CSRF protection (`rustango::forms::csrf`) — double-submit-cookie
 # axum middleware. Lives behind its own flag so `forms`-only users
