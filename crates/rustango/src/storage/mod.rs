@@ -25,7 +25,14 @@
 //! |---------|-------------|
 //! | [`LocalStorage`] | Single-server deployments — files on local disk |
 //! | [`InMemoryStorage`] | Tests — files in a `HashMap`, never touch disk |
-//! | S3 / GCS / Azure Blob | Plug your own — implement `Storage` for the SDK of your choice |
+//! | [`s3::S3Storage`] | AWS S3, Cloudflare R2, Backblaze B2, MinIO — any S3-compatible API. Behind the `storage-s3` feature. |
+//! | GCS / Azure Blob | Plug your own — implement `Storage` for the SDK of your choice |
+//!
+//! All backends share the same trait — swap them via configuration at
+//! startup, code stays identical.
+
+#[cfg(feature = "storage-s3")]
+pub mod s3;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
