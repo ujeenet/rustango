@@ -245,6 +245,49 @@ fn audit_ensure_table_pool_and_emit_one_pool_are_callable() {
     }
 }
 
+#[derive(Model)]
+#[rustango(table = "mysql_from_row_audited", audit(track = "name"))]
+#[allow(dead_code)]
+pub struct AuditedRecord {
+    #[rustango(primary_key)]
+    id: i64,
+    name: String,
+}
+
+#[test]
+fn audited_model_gets_delete_pool() {
+    // batch 20 — audited models now get delete_pool too. The macro
+    // routes through audit::delete_one_with_audit_pool which opens
+    // a per-backend tx wrapping DELETE + audit emit. Compile-time
+    // probe; live exec needs a database.
+    fn _probe(rec: &AuditedRecord, pool: &rustango::sql::Pool) {
+        let _fut = rec.delete_pool(pool);
+    }
+}
+
+#[test]
+fn audit_delete_one_with_audit_pool_is_callable() {
+    use rustango::core::{DeleteQuery, Filter, Model, Op, SqlValue, WhereExpr};
+    fn _probe(pool: &rustango::sql::Pool) {
+        let q = DeleteQuery {
+            model: <AuditedRecord as Model>::SCHEMA,
+            where_clause: WhereExpr::Predicate(Filter {
+                column: "id",
+                op: Op::Eq,
+                value: SqlValue::I64(1),
+            }),
+        };
+        let entry = rustango::audit::PendingEntry {
+            entity_table: "mysql_from_row_audited",
+            entity_pk: "1".into(),
+            operation: rustango::audit::AuditOp::Delete,
+            source: rustango::audit::AuditSource::System,
+            changes: serde_json::json!({}),
+        };
+        let _fut = rustango::audit::delete_one_with_audit_pool(pool, &q, &entry);
+    }
+}
+
 #[test]
 fn fetch_paginated_pool_is_callable() {
     // batch 19 — single-round-trip page + total via COUNT(*) OVER ().

@@ -554,3 +554,110 @@ pub async fn emit_one_pool(
         crate::sql::Pool::Mysql(my) => emit_one_my(my, entry).await,
     }
 }
+
+/// Run `DELETE` from a `DeleteQuery` and emit an audit entry inside
+/// a single transaction against either backend. Used by the
+/// macro-emitted `Model::delete_pool` for audited models so the data
+/// write and the audit row commit atomically — a crash between the
+/// two leaves the database consistent (either both rolled back or
+/// both committed).
+///
+/// The DELETE is compiled via `pool.dialect().compile_delete(query)`
+/// so identifier quoting + placeholder shape are correct per
+/// backend; binding goes through
+/// [`crate::sql::executor::bind_query`] / `bind_query_my` (private
+/// helpers re-used here through the per-backend arms).
+///
+/// # Errors
+/// Any [`crate::sql::ExecError`] from compile / bind / execute, plus
+/// `sqlx::Error` from the audit emit (wrapped as
+/// `ExecError::Driver`).
+pub async fn delete_one_with_audit_pool(
+    pool: &crate::sql::Pool,
+    query: &crate::core::DeleteQuery,
+    entry: &PendingEntry,
+) -> Result<u64, crate::sql::ExecError> {
+    let stmt = pool.dialect().compile_delete(query)?;
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let mut tx = pg.begin().await?;
+            let mut q: sqlx::query::Query<
+                '_,
+                sqlx::Postgres,
+                sqlx::postgres::PgArguments,
+            > = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_value_pg(q, v);
+            }
+            let affected = q.execute(&mut *tx).await?.rows_affected();
+            emit_one(&mut *tx, entry).await?;
+            tx.commit().await?;
+            Ok(affected)
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            let mut tx = my.begin().await?;
+            let mut q: sqlx::query::Query<
+                '_,
+                sqlx::MySql,
+                sqlx::mysql::MySqlArguments,
+            > = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_value_my(q, v);
+            }
+            let affected = q.execute(&mut *tx).await?.rows_affected();
+            emit_one_my(&mut *tx, entry).await?;
+            tx.commit().await?;
+            Ok(affected)
+        }
+    }
+}
+
+/// Local Postgres-typed bind helper — couldn't reuse
+/// `executor::bind_query` (it's private to the executor module).
+/// Same `bind_match!`-shape body, but copied rather than re-exported
+/// to keep the executor surface tight.
+#[cfg(feature = "postgres")]
+fn bind_value_pg(
+    q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    value: crate::core::SqlValue,
+) -> sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    use crate::core::SqlValue;
+    match value {
+        SqlValue::Null => q.bind(None::<String>),
+        SqlValue::I32(v) => q.bind(v),
+        SqlValue::I64(v) => q.bind(v),
+        SqlValue::F32(v) => q.bind(v),
+        SqlValue::F64(v) => q.bind(v),
+        SqlValue::Bool(v) => q.bind(v),
+        SqlValue::String(v) => q.bind(v),
+        SqlValue::DateTime(v) => q.bind(v),
+        SqlValue::Date(v) => q.bind(v),
+        SqlValue::Uuid(v) => q.bind(v),
+        SqlValue::Json(v) => q.bind(sqlx::types::Json(v)),
+        SqlValue::List(_) => unreachable!("List expanded to scalars by SQL writer"),
+    }
+}
+
+#[cfg(feature = "mysql")]
+fn bind_value_my(
+    q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+    value: crate::core::SqlValue,
+) -> sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> {
+    use crate::core::SqlValue;
+    match value {
+        SqlValue::Null => q.bind(None::<String>),
+        SqlValue::I32(v) => q.bind(v),
+        SqlValue::I64(v) => q.bind(v),
+        SqlValue::F32(v) => q.bind(v),
+        SqlValue::F64(v) => q.bind(v),
+        SqlValue::Bool(v) => q.bind(v),
+        SqlValue::String(v) => q.bind(v),
+        SqlValue::DateTime(v) => q.bind(v),
+        SqlValue::Date(v) => q.bind(v),
+        SqlValue::Uuid(v) => q.bind(v),
+        SqlValue::Json(v) => q.bind(sqlx::types::Json(v)),
+        SqlValue::List(_) => unreachable!("List expanded to scalars by SQL writer"),
+    }
+}

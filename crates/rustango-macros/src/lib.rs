@@ -1468,54 +1468,8 @@ fn inherent_impl_tokens(
         quote!()
     };
 
-    // `delete_pool(&Pool)` is emitted for non-audited models in
-    // v0.23.0-batch7. Audited models route delete through a connection
-    // (acquired from the pool) so the audit emit can sit inside a
-    // transaction with the DELETE — that requires a per-backend
-    // connection-acquire path that batch7 doesn't yet wire. They
-    // continue to use the &PgPool `delete` method.
-    let pool_delete_method = if audited_fields.is_some() {
-        quote!()
-    } else {
-        let pk_column_lit = primary_key
-            .map(|(_, col)| col.as_str())
-            .unwrap_or("id");
-        let pk_ident_for_pool = primary_key.map(|(ident, _)| ident);
-        if let Some(pk_ident) = pk_ident_for_pool {
-            quote! {
-                /// Delete the row identified by this instance's primary key
-                /// against either backend. Equivalent to [`Self::delete`] but
-                /// takes [`::rustango::sql::Pool`] and dispatches per backend.
-                ///
-                /// Audited models continue to use the `&PgPool` [`Self::delete`]
-                /// — audit-on-connection support over `&Pool` lands in a
-                /// follow-up batch.
-                ///
-                /// # Errors
-                /// As [`Self::delete`].
-                pub async fn delete_pool(
-                    &self,
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                    let _query = ::rustango::core::DeleteQuery {
-                        model: <Self as ::rustango::core::Model>::SCHEMA,
-                        where_clause: ::rustango::core::WhereExpr::Predicate(
-                            ::rustango::core::Filter {
-                                column: #pk_column_lit,
-                                op: ::rustango::core::Op::Eq,
-                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
-                                    ::core::clone::Clone::clone(&self.#pk_ident)
-                                ),
-                            }
-                        ),
-                    };
-                    ::rustango::sql::delete_pool(pool, &_query).await
-                }
-            }
-        } else {
-            quote!()
-        }
-    };
+    // pool_delete_method moved to after audit_pair_tokens / audit_pk_to_string
+    // are computed (they live ~80 lines below).
 
     // Build the (column, JSON value) pair list used by every
     // snapshot-style audit emission. Reused across delete_on,
@@ -1572,6 +1526,91 @@ fn inherent_impl_tokens(
     let audit_delete_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Delete));
     let audit_softdelete_emit = make_op_emit(quote!(::rustango::audit::AuditOp::SoftDelete));
     let audit_restore_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Restore));
+
+    // `delete_pool(&Pool)` — emitted for every model with a PK. Two
+    // body shapes:
+    // - non-audited: simple dispatch through `sql::delete_pool`
+    // - audited: routes through `audit::delete_one_with_audit_pool`,
+    //   which opens a per-backend transaction wrapping DELETE +
+    //   audit emit so the data write and audit row commit atomically.
+    let pool_delete_method = {
+        let pk_column_lit = primary_key
+            .map(|(_, col)| col.as_str())
+            .unwrap_or("id");
+        let pk_ident_for_pool = primary_key.map(|(ident, _)| ident);
+        if let Some(pk_ident) = pk_ident_for_pool {
+            if audited_fields.is_some() {
+                let pairs = audit_pair_tokens.iter();
+                let pk_str = audit_pk_to_string.clone();
+                quote! {
+                    /// Delete this row against either backend with audit
+                    /// emission inside the same transaction. Bi-dialect
+                    /// counterpart of [`Self::delete`] for audited models.
+                    ///
+                    /// # Errors
+                    /// As [`Self::delete`].
+                    pub async fn delete_pool(
+                        &self,
+                        pool: &::rustango::sql::Pool,
+                    ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                        let _query = ::rustango::core::DeleteQuery {
+                            model: <Self as ::rustango::core::Model>::SCHEMA,
+                            where_clause: ::rustango::core::WhereExpr::Predicate(
+                                ::rustango::core::Filter {
+                                    column: #pk_column_lit,
+                                    op: ::rustango::core::Op::Eq,
+                                    value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                        ::core::clone::Clone::clone(&self.#pk_ident)
+                                    ),
+                                }
+                            ),
+                        };
+                        let _audit_entry = ::rustango::audit::PendingEntry {
+                            entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
+                            entity_pk: #pk_str,
+                            operation: ::rustango::audit::AuditOp::Delete,
+                            source: ::rustango::audit::current_source(),
+                            changes: ::rustango::audit::snapshot_changes(&[
+                                #( #pairs ),*
+                            ]),
+                        };
+                        ::rustango::audit::delete_one_with_audit_pool(
+                            pool, &_query, &_audit_entry,
+                        ).await
+                    }
+                }
+            } else {
+                quote! {
+                    /// Delete the row identified by this instance's primary key
+                    /// against either backend. Equivalent to [`Self::delete`] but
+                    /// takes [`::rustango::sql::Pool`] and dispatches per backend.
+                    ///
+                    /// # Errors
+                    /// As [`Self::delete`].
+                    pub async fn delete_pool(
+                        &self,
+                        pool: &::rustango::sql::Pool,
+                    ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                        let _query = ::rustango::core::DeleteQuery {
+                            model: <Self as ::rustango::core::Model>::SCHEMA,
+                            where_clause: ::rustango::core::WhereExpr::Predicate(
+                                ::rustango::core::Filter {
+                                    column: #pk_column_lit,
+                                    op: ::rustango::core::Op::Eq,
+                                    value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                        ::core::clone::Clone::clone(&self.#pk_ident)
+                                    ),
+                                }
+                            ),
+                        };
+                        ::rustango::sql::delete_pool(pool, &_query).await
+                    }
+                }
+            }
+        } else {
+            quote!()
+        }
+    };
 
     // Update emission captures both BEFORE and AFTER state — runs an
     // extra SELECT against `_executor` BEFORE the UPDATE, captures
