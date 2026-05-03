@@ -24,8 +24,8 @@
 //! dialect instead of the current Postgres-typed direct calls.
 
 use crate::core::{
-    AggregateQuery, BulkInsertQuery, BulkUpdateQuery, CountQuery, DeleteQuery, FieldType,
-    InsertQuery, SelectQuery, UpdateQuery,
+    AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
+    FieldType, InsertQuery, Op, SelectQuery, UpdateQuery,
 };
 
 use super::{CompiledStatement, SqlError};
@@ -102,6 +102,55 @@ pub trait Dialect {
     /// runner to do a `last_insert_id()`-style follow-up read.
     fn supports_returning(&self) -> bool {
         false
+    }
+
+    /// SQL type to cast a `NULL` parameter to when the column type is
+    /// known. Postgres needs this — `INSERT INTO t(name) VALUES ($1)`
+    /// with `$1 = NULL` against an integer column raises
+    /// `column "x" is of type integer but expression is of type text`,
+    /// and the cast (`$1::INTEGER`) tells Postgres exactly which NULL
+    /// we mean. `MySQL` has no equivalent issue — return `None` and the
+    /// writer skips the cast. Default: `None`.
+    fn null_cast(&self, ty: FieldType) -> Option<&'static str> {
+        let _ = ty;
+        None
+    }
+
+    /// `true` if `op` can be lowered to SQL by this dialect.
+    /// `IsDistinctFrom`, `ILike`, and the JSONB operators
+    /// (`JsonContains`, `JsonHasKey`, etc.) are Postgres-only today.
+    /// Returning `false` here makes the writer fast-fail with a clear
+    /// [`SqlError::OperatorNotSupportedInDialect`] instead of
+    /// producing SQL that the backend would parse-error on.
+    fn supports_op(&self, op: Op) -> bool {
+        let _ = op;
+        true
+    }
+
+    /// Append the dialect's spelling of an `ON CONFLICT` / `ON DUPLICATE
+    /// KEY UPDATE` clause to `sql`. Default: error — only Postgres
+    /// supports the full `ConflictClause` shape today; `MySQL` overrides
+    /// to translate `DoNothing` and `DoUpdate { target: vec![], … }`.
+    ///
+    /// # Errors
+    /// [`SqlError::ConflictNotSupportedInDialect`] when this dialect
+    /// can't translate the requested shape (e.g. `MySQL` + `DoUpdate`
+    /// with a non-empty `target` list — `ON DUPLICATE KEY UPDATE`
+    /// has no target-column syntax).
+    fn write_conflict_clause(
+        &self,
+        sql: &mut String,
+        conflict: &ConflictClause,
+    ) -> Result<(), SqlError> {
+        let _ = sql;
+        let shape = match conflict {
+            ConflictClause::DoNothing => "DO NOTHING",
+            ConflictClause::DoUpdate { .. } => "DO UPDATE",
+        };
+        Err(SqlError::ConflictNotSupportedInDialect {
+            shape,
+            dialect: self.name(),
+        })
     }
 
     // ====== Advisory locks ======

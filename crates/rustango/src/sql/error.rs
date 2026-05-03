@@ -76,18 +76,36 @@ pub enum SqlError {
     EmptyOrBranch,
 
     /// `Dialect::compile_*` was called on a dialect whose query
-    /// compiler hasn't shipped yet. v0.23.0-batch2 wires the `MySQL`
-    /// connection plumbing + identity primitives but lands the SELECT/
-    /// INSERT/UPDATE/DELETE/etc. compilation logic in batch3 — until
-    /// then, ORM queries against a `MySqlPool` surface this error
-    /// rather than producing Postgres-shaped SQL the `MySQL` parser
-    /// would reject.
+    /// compiler hasn't shipped yet.
     #[error(
         "{dialect} dialect query compilation is not implemented yet — \
-         lands in rustango v0.23.0-batch3. Use a postgres pool or wait \
-         for batch 3 to issue ORM queries against MySQL."
+         lands in a future rustango v0.23.0 batch."
     )]
     DialectQueryCompilationNotImplemented {
+        dialect: &'static str,
+    },
+
+    /// A query operator is supported by the rustango IR but has no
+    /// equivalent (or no equivalent yet) in the active dialect.
+    /// Examples: `ILIKE` and the JSONB `?` / `?|` / `?&` / `@>` / `<@`
+    /// operators are Postgres-only; `IS DISTINCT FROM` is in standard
+    /// SQL but `MySQL` only ships the inverse `<=>` (null-safe equal)
+    /// — translation is on the v0.23.0-batch4 punch-list.
+    #[error("operator `{op}` is not supported by the `{dialect}` dialect")]
+    OperatorNotSupportedInDialect {
+        op: &'static str,
+        dialect: &'static str,
+    },
+
+    /// An ON CONFLICT clause shape isn't expressible in the active
+    /// dialect's syntax. Postgres supports
+    /// `ON CONFLICT (col) DO UPDATE SET col = EXCLUDED.col`; `MySQL`'s
+    /// `ON DUPLICATE KEY UPDATE` doesn't take a target column list
+    /// (it triggers on any unique violation), so a `DoUpdate` with a
+    /// non-empty `target` cannot be translated 1:1.
+    #[error("ON CONFLICT shape `{shape}` is not supported by the `{dialect}` dialect")]
+    ConflictNotSupportedInDialect {
+        shape: &'static str,
         dialect: &'static str,
     },
 }

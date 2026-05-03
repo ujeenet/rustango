@@ -17,6 +17,7 @@ pub mod m2m;
 mod mysql;
 mod pool;
 mod postgres;
+mod writers;
 
 pub use auto::Auto;
 pub use compiled::CompiledStatement;
