@@ -617,7 +617,7 @@ pub(crate) async fn detail_view(
     // Read joined FK display values from the same row — no extra queries.
     let fk_map = fk_map_from_joined_rows(&state, model, std::slice::from_ref(&row));
 
-    let cells_ctx: Vec<serde_json::Value> = model
+    let mut cells_ctx: Vec<serde_json::Value> = model
         .scalar_fields()
         .map(|f| {
             serde_json::json!({
@@ -626,6 +626,25 @@ pub(crate) async fn detail_view(
             })
         })
         .collect();
+
+    // F.4b — append one row per #[rustango(generic_fk(...))]
+    // declaration. Reads the (content_type_id, object_pk) pair off
+    // the row and renders a clickable target link via
+    // `contenttypes::render_generic_fk_link`. Stale references
+    // (CT not seeded, target deleted) render as a `(ct=N, pk=M)`
+    // fallback rather than failing the whole page.
+    for gfk in model.generic_relations {
+        let ct_id = sqlx::Row::try_get::<i64, _>(&row, gfk.ct_column).unwrap_or_default();
+        let object_pk = sqlx::Row::try_get::<i64, _>(&row, gfk.pk_column).unwrap_or_default();
+        let g = crate::contenttypes::GenericForeignKey::new(ct_id, object_pk);
+        let html = crate::contenttypes::render_generic_fk_link(&state.pool, g)
+            .await
+            .unwrap_or_else(|_| format!("<em>(ct={ct_id}, pk={object_pk})</em>"));
+        cells_ctx.push(serde_json::json!({
+            "label": gfk.name,
+            "value": html,
+        }));
+    }
 
     // v0.12.2: Audit trail panel for this row. Best-effort — if the
     // audit table doesn't exist yet (project hasn't called
