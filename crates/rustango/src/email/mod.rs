@@ -50,7 +50,7 @@ use async_trait::async_trait;
 // ------------------------------------------------------------------ Email
 
 /// One outbound email. Use the builder methods to assemble.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Email {
     pub to: Vec<String>,
     pub cc: Vec<String>,

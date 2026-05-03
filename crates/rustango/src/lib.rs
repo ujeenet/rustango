@@ -87,6 +87,13 @@ pub mod email;
 #[cfg(all(feature = "email", feature = "admin"))]
 pub mod email_templates;
 
+/// Send email off the request path via the [`crate::jobs`] queue.
+/// Pairs the [`email::Mailer`] trait with the queue's retry-with-
+/// backoff so transient SMTP failures don't blow up handlers.
+/// See [`email_jobs::register_email_job`] + [`email_jobs::dispatch_email`].
+#[cfg(all(feature = "email", feature = "jobs"))]
+pub mod email_jobs;
+
 /// Multi-channel notifications — fan one notification out to mail / database /
 /// log / broadcast channels. See [`notifications::notify`].
 #[cfg(feature = "notifications")]
