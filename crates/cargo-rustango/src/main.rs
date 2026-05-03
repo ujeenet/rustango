@@ -214,14 +214,11 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
 
     fs::create_dir_all(root.join("migrations"))
         .map_err(|e| format!("create migrations/: {e}"))?;
-    fs::create_dir_all(root.join("src/bin"))
-        .map_err(|e| format!("create src/bin/: {e}"))?;
 
     write(root, "src/main.rs", templates::main_rs(template))?;
     write(root, "src/models.rs", &templates::models_rs(template))?;
     write(root, "src/views.rs", templates::VIEWS_RS)?;
     write(root, "src/urls.rs", &templates::urls_rs(template))?;
-    write(root, "src/bin/manage.rs", &templates::manage_rs(template))?;
 
     // Tenant projects need the framework's registry+tenant bootstrap
     // migrations from day one — without them the very first

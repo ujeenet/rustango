@@ -17,11 +17,6 @@ pub fn cargo_toml(name: &str, template: Template) -> String {
 name = "{name}"
 version = "0.1.0"
 edition = "2021"
-# `default-run` resolves the `cargo run` ambiguity that comes from
-# shipping two binaries (the app and the manage CLI). Without it,
-# bare `cargo run` errors with "could not determine which binary to
-# run". Use `cargo run --bin manage -- <verb>` for the CLI.
-default-run = "{name}"
 
 # Empty `[workspace]` table makes this project standalone: if a parent
 # directory has its own workspace `Cargo.toml`, cargo would otherwise
@@ -161,219 +156,56 @@ pub fn main_rs(template: Template) -> &'static str {
     }
 }
 
-const MAIN_RS_API: &str = "//! Project entrypoint — boots the HTTP server (api template, no admin).
-//!
-//! `urls::api()` is the stateless aggregator that `manage startapp`
-//! patches when you add new sub-apps. The pool flows through
-//! request extensions (`Extension<PgPool>`) so every linked app's
-//! handlers can pull it without each one declaring a state type.
+const MAIN_RS_API: &str = "//! Project entrypoint — `Cli::run()` is the unified dispatcher
+//! that handles `cargo run` (runserver) AND `cargo run -- migrate` /
+//! `makemigrations` / `startapp` / etc. from one binary. No
+//! `src/bin/manage.rs` needed.
 
 mod models;
 mod urls;
 mod views;
 
-use axum::Extension;
-use rustango::sql::sqlx::PgPool;
-
-#[tokio::main]
+#[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(\"info\")),
-        )
-        .init();
-
-    let url = require_env(\"DATABASE_URL\")?;
-    let pool = PgPool::connect(&url).await?;
-    let dir: &std::path::Path = \"./migrations\".as_ref();
-    let _ = rustango::migrate::migrate(&pool, dir).await?;
-
-    let app = urls::api().layer(Extension(pool));
-
-    let bind = std::env::var(\"RUSTANGO_BIND\").unwrap_or_else(|_| \"127.0.0.1:8080\".into());
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
-    eprintln!(\"server listening on http://{}\", listener.local_addr()?);
-    axum::serve(listener, app).await?;
-    Ok(())
-}
-
-/// Read a required environment variable, returning a friendly error
-/// instead of the bare `VarError(NotPresent)` that bubbles up from `?`.
-fn require_env(key: &str) -> Result<String, String> {
-    std::env::var(key).map_err(|_| {
-        format!(
-            \"missing env var `{key}`. Set it in your shell, or copy `.env.example` to `.env` (which is auto-loaded via dotenvy on startup): cp .env.example .env\"
-        )
-    })
+    rustango::manage::Cli::new().api(urls::api()).run().await
 }
 ";
 
-const MAIN_RS_FULLSTACK: &str = "//! Project entrypoint — boots the HTTP server (fullstack template, ORM + auto-admin).
-//!
-//! `urls::api()` is the stateless aggregator (`manage startapp`
-//! patches `.merge(...)` lines into it). `urls::admin_router(pool)`
-//! builds the auto-admin and gets nested at `/admin`. The pool
-//! flows through request extensions so every linked app's
-//! handlers can pull it via `axum::Extension<PgPool>`.
+const MAIN_RS_FULLSTACK: &str = "//! Project entrypoint — `Cli::run()` is the unified dispatcher
+//! that handles `cargo run` (runserver) AND `cargo run -- migrate` /
+//! `makemigrations` / `startapp` / etc. from one binary. No
+//! `src/bin/manage.rs` needed. Auto-admin is mounted via
+//! `urls::api()` which nests `admin_router(pool)` itself.
 
 mod models;
 mod urls;
 mod views;
 
-use axum::Extension;
-use rustango::sql::sqlx::PgPool;
-
-#[tokio::main]
+#[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(\"info\")),
-        )
-        .init();
-
-    let url = require_env(\"DATABASE_URL\")?;
-    let pool = PgPool::connect(&url).await?;
-    let dir: &std::path::Path = \"./migrations\".as_ref();
-    let _ = rustango::migrate::migrate(&pool, dir).await?;
-
-    let app = urls::api()
-        .nest(\"/admin\", urls::admin_router(pool.clone()))
-        .layer(Extension(pool));
-
-    let bind = std::env::var(\"RUSTANGO_BIND\").unwrap_or_else(|_| \"127.0.0.1:8080\".into());
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
-    eprintln!(\"server listening on http://{}\", listener.local_addr()?);
-    axum::serve(listener, app).await?;
-    Ok(())
-}
-
-/// Read a required environment variable, returning a friendly error
-/// instead of the bare `VarError(NotPresent)` that bubbles up from `?`.
-fn require_env(key: &str) -> Result<String, String> {
-    std::env::var(key).map_err(|_| {
-        format!(
-            \"missing env var `{key}`. Set it in your shell, or copy `.env.example` to `.env` (auto-loaded via dotenvy on startup): cp .env.example .env\"
-        )
-    })
+    rustango::manage::Cli::new().api(urls::api()).run().await
 }
 ";
 
-const MAIN_RS_TENANT: &str = r##"//! Tenant project entrypoint — host-dispatcher wiring.
-//!
-//! Mounted routes:
-//!
-//! * Apex (`localhost:8080`)            → operator console
-//!   - `/login`               operator login form (admin / your password)
-//!   - `/<table>`             registry CRUD: rustango_orgs, rustango_users, ...
-//! * Subdomain (`acme.localhost:8080`)  → tenant admin + your `urls::api()`
-//!   - `/__login`             tenant user login (alice / your password)
-//!   - `/<table>`             tenant CRUD on every #[derive(Model)] type
-//!   - your custom routes from `urls::api()` (default `/` and `/healthz`)
-//!
-//! Looks like a lot of wiring? It is — and v0.8.x will introduce a
-//! `rustango::server::Builder::from_env().migrate("migrations")
-//! .api(urls::api()).serve(...)` shorthand that collapses the body
-//! below to ~6 lines. Until that version is on crates.io, this is
-//! the canonical shape against published rustango v0.8.0.
+const MAIN_RS_TENANT: &str = r##"//! Tenant project entrypoint — `Cli::tenancy().run()` is the unified
+//! dispatcher. It owns the apex/subdomain host split, operator console
+//! mount, registry + tenant migrations, and `cargo run -- create-tenant`
+//! / `migrate-tenants` / `create-operator` / `create-user` verbs from
+//! one binary. No `src/bin/manage.rs` needed.
 
 mod models;
 mod urls;
 mod views;
 
-use std::sync::Arc;
-
-use rustango::sql::sqlx::PgPool;
-use rustango::tenancy::{
-    admin::TenantAdminBuilder,
-    operator_console::{self, SessionSecret},
-    ChainResolver, HeaderResolver, SubdomainResolver, TenantPools,
-};
-
-#[tokio::main]
+#[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load .env so DATABASE_URL / RUSTANGO_APEX_DOMAIN /
-    // RUSTANGO_SESSION_SECRET are visible without re-exporting them.
     let _ = dotenvy::dotenv();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,sqlx=warn")),
-        )
-        .init();
-
-    let url = require_env("DATABASE_URL")?;
-    let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
-    let bind = std::env::var("RUSTANGO_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
-
-    let registry = PgPool::connect(&url).await?;
-    let pools = Arc::new(TenantPools::new(registry.clone()));
-
-    // Apply registry + tenant migrations on boot. `init_tenancy` is
-    // idempotent: writes the bootstrap files only if missing.
-    let dir = std::path::Path::new("migrations");
-    rustango::tenancy::init_tenancy(dir)?;
-    let _ = rustango::tenancy::migrate_registry(&pools, dir).await?;
-    let _ = rustango::tenancy::migrate_tenants(&pools, dir, &url).await?;
-
-    // Subdomain-first resolver, X-Org header fallback for curl.
-    let resolver = ChainResolver::new()
-        .push(SubdomainResolver::new(apex.clone()))
-        .push(HeaderResolver::default());
-
-    let tenant_admin = TenantAdminBuilder::new(pools.clone(), url.clone(), resolver)
-        .with_session(SessionSecret::from_env_or_random())
-        .build();
-    let tenant_app = urls::api().fallback_service(tenant_admin);
-
-    let operator = operator_console::router(registry, SessionSecret::from_env_or_random());
-
-    // Host dispatch: apex → operator console, subdomain → tenant admin + user routes.
-    let app = axum::Router::new().fallback_service(tower::service_fn({
-        let operator = operator.clone();
-        let tenants = tenant_app.clone();
-        let apex = apex.clone();
-        move |req: axum::http::Request<axum::body::Body>| {
-            let mut operator = operator.clone();
-            let mut tenants = tenants.clone();
-            let apex = apex.clone();
-            async move {
-                use tower::ServiceExt as _;
-                let host = req
-                    .headers()
-                    .get(axum::http::header::HOST)
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.split(':').next().unwrap_or(s).to_owned())
-                    .unwrap_or_default();
-                let resp = if host == apex {
-                    operator.as_service().oneshot(req).await
-                } else {
-                    tenants.as_service().oneshot(req).await
-                };
-                resp.map_err(|e| -> std::convert::Infallible {
-                    panic!("axum router service is Infallible: {e}")
-                })
-            }
-        }
-    }));
-
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
-    eprintln!("server listening on http://{}", listener.local_addr()?);
-    axum::serve(listener, app).await?;
-    Ok(())
-}
-
-/// Read a required environment variable, returning a friendly error
-/// instead of the bare `VarError(NotPresent)` that bubbles up from `?`.
-fn require_env(key: &str) -> Result<String, String> {
-    std::env::var(key).map_err(|_| {
-        format!(
-            "missing env var `{key}`. Set it in your shell, or copy `.env.example` to `.env` (auto-loaded via dotenvy on startup): cp .env.example .env"
-        )
-    })
+    rustango::manage::Cli::new()
+        .tenancy()
+        .api(urls::api())
+        .run().await
 }
 "##;
 
@@ -532,164 +364,6 @@ pub fn api() -> Router<()> {
         }
     }
 }
-
-// ---------------- src/bin/manage.rs ----------------
-
-pub fn manage_rs(template: Template) -> String {
-    match template {
-        Template::Api | Template::Fullstack => {
-            "//! Generated by `cargo rustango new`. Edit freely.
-//!
-//! UX: `cargo run --bin manage -- migrate`,
-//! `cargo run --bin manage -- makemigrations`,
-//! `cargo run --bin manage -- startapp <name>`, etc.
-
-use rustango::sql::sqlx::PgPool;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Pull your models into this binary so `inventory` registers
-    // them. Keep this in sync with src/main.rs's `mod models;`.
-    #[allow(unused_imports)]
-    use crate::models::*;
-
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    // Short-circuit verbs that don't touch the DB (scaffold,
-    // makemigrations, help) **before** opening a Postgres connection
-    // so users who haven't set DATABASE_URL yet can still scaffold
-    // apps and generate migration files.
-    let needs_db = !matches!(
-        argv.first().map(String::as_str),
-        None | Some(\"help\") | Some(\"--help\") | Some(\"-h\")
-            | Some(\"startapp\") | Some(\"makemigrations\")
-    );
-
-    let _ = dotenvy::dotenv();
-    let dir: &std::path::Path = \"./migrations\".as_ref();
-
-    if needs_db {
-        let url = std::env::var(\"DATABASE_URL\").map_err(|_| {
-            \"missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env` (auto-loaded via dotenvy on startup): cp .env.example .env\".to_owned()
-        })?;
-        let pool = PgPool::connect(&url).await?;
-        rustango::migrate::manage::run(&pool, dir, argv).await?;
-    } else {
-        // No DB needed — hand the dispatcher a pool that lazy-fails
-        // if a verb still tries to use it. We pass DATABASE_URL when
-        // present (so e.g. `makemigrations` against a real DB works
-        // when the user did set it) and a placeholder otherwise; the
-        // placeholder pool builds without contacting Postgres.
-        let url = std::env::var(\"DATABASE_URL\")
-            .unwrap_or_else(|_| \"postgres://offline\".into());
-        let pool = PgPool::connect_lazy(&url)?;
-        rustango::migrate::manage::run(&pool, dir, argv).await?;
-    }
-    Ok(())
-}
-
-// `cargo run --bin manage` is a separate binary; pull the project's
-// own crate root models into scope so `inventory::submit!` fires
-// for every `#[derive(Model)]`. `#[path]` is the canonical way to
-// re-locate a module file from a binary that doesn't share its
-// parent's tree (binary-only projects don't have a lib.rs to import
-// from).
-#[path = \"../models.rs\"]
-mod models;
-"
-                .to_owned()
-        }
-        Template::Tenant => {
-            "//! Generated by `cargo rustango new --template tenant`. Edit freely.
-//!
-//! Tenancy-aware dispatcher: `create-tenant`, `migrate-tenants`,
-//! `run-server`, `create-operator`, `create-user`, plus everything
-//! the single-tenant `manage` offers.
-
-use rustango::sql::sqlx::PgPool;
-use rustango::tenancy::TenantPools;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    // Short-circuit help **before** connecting to Postgres so users
-    // who haven't yet copied `.env.example` to `.env` can still read
-    // the verb list. Same for the no-args case (running `manage` with
-    // nothing prints the help instead of an opaque error).
-    match argv.first().map(String::as_str) {
-        None | Some(\"help\") | Some(\"--help\") | Some(\"-h\") => {
-            print!(\"{}\", HELP);
-            return Ok(());
-        }
-        _ => {}
-    }
-
-    let _ = dotenvy::dotenv();
-    let registry_url = std::env::var(\"DATABASE_URL\").map_err(|_| {
-        \"missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env` (auto-loaded via dotenvy on startup): cp .env.example .env\".to_owned()
-    })?;
-    let pool = PgPool::connect(&registry_url).await?;
-    let pools = TenantPools::new(pool);
-    let dir: &std::path::Path = \"./migrations\".as_ref();
-    rustango::tenancy::manage::run(&pools, &registry_url, dir, argv).await?;
-    Ok(())
-}
-
-const HELP: &str = r#\"rustango manage CLI — tenancy-aware dispatcher
-
-USAGE:
-  cargo run --bin manage -- <verb> [args]
-
-TENANT MANAGEMENT:
-  create-tenant <slug> [--display-name <s>] [--mode schema|database]
-                       [--host-pattern <s>] [--database-url <s>] [--no-migrate]
-                       Provision a new tenant. Schema mode (default) gives the
-                       tenant its own Postgres schema; database mode points at
-                       a fully separate DB via --database-url.
-  drop-tenant   <slug> [--confirm <slug>]
-                       Soft-delete (active=false). Data preserved.
-  purge-tenant  <slug> [--confirm <slug>] [--purge-database]
-                       HARD-delete: drops schema (or DB with --purge-database).
-  list-tenants         Print every Org row in the registry.
-
-USER / OPERATOR MANAGEMENT:
-  create-operator <username> --password <p>
-                       Operator-level account; signs into the apex /login.
-  create-user <slug> <username> --password <p> [--superuser]
-                       Tenant-scoped user; signs into <slug>.<apex>/__login.
-
-MIGRATIONS:
-  init-tenancy         Materialize bootstrap migrations into ./migrations/.
-  makemigrations       Diff models against latest snapshot, emit a new JSON file.
-  migrate              Apply registry-scoped, then tenant-scoped, migrations.
-  migrate-registry     Apply registry-scoped migrations only.
-  migrate-tenants      Apply tenant-scoped migrations to every active org.
-  showmigrations       List which migrations are applied / pending.
-  downgrade            Roll back the most recent migration.
-
-SERVER:
-  run-server [--bind <addr>]
-                       Boot the HTTP server with admin + operator console.
-
-SCAFFOLDING:
-  startapp <name> [--into <dir>] [--with-manage-bin] [--with-bootstrap-migration]
-                       Scaffold a Django-shape app module.
-
-EXAMPLES:
-  cargo run --bin manage -- migrate
-  cargo run --bin manage -- create-operator admin --password letmein
-  cargo run --bin manage -- create-tenant acme --display-name 'ACME Corp'
-  cargo run --bin manage -- create-user acme alice --password hunter2 --superuser
-  cargo run --bin manage -- list-tenants
-
-Run any verb with --help for verb-specific flags + details.
-\"#;
-"
-                .to_owned()
-        }
-    }
-}
-
-
 // ---------------- Bootstrap migrations (tenant template) ----------------
 
 /// Registry-scoped bootstrap migration shipped by `rustango::tenancy`.

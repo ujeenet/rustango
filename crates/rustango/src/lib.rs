@@ -583,6 +583,11 @@ pub mod viewset;
 #[cfg(feature = "tenancy")]
 pub mod server;
 
+/// Unified manage runner — collapses `src/main.rs` + `src/bin/manage.rs`
+/// boilerplate into one [`manage::Cli`] builder. Tenancy variant
+/// available when the `tenancy` feature is on.
+pub mod manage;
+
 /// `#[rustango::main]` — the Django-shape `runserver` entrypoint.
 /// Wraps `#[tokio::main]` with a default `tracing-subscriber` boot
 /// (env-filter, falling back to `info,sqlx=warn`). Available behind
