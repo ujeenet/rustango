@@ -457,6 +457,154 @@ post.tags_m2m().clear(&pool).await?;
 let has = post.tags_m2m().contains(42, &pool).await?;
 ```
 
+### ContentTypes — generic relations + composite-key FKs + soft-FK prefetch
+
+Django-shape framework for "any registered model" pointers. Lets one
+table point at *any* other model via `(content_type_id, object_pk)`
+(comments-on-anything, audit log targets, activity streams, tag
+generic relations) and lets a single FK constraint span multiple
+columns. Sub-slices F.1 / F.2 / F.3 of v0.15.0.
+
+#### Bootstrap
+
+```rust
+// Registers one row per #[derive(Model)] type in `rustango_content_types`.
+// Idempotent — re-runs on a populated DB return Ok(0). Run once at startup
+// after `migrate(&pool, dir).await?`.
+let inserted = rustango::contenttypes::ensure_seeded(&pool).await?;
+```
+
+#### Lookups
+
+```rust
+use rustango::contenttypes::ContentType;
+
+// By Rust type
+let ct = ContentType::for_model::<Post>(&pool).await?;       // Option<ContentType>
+
+// By natural key (parsed permission codenames, admin URLs, etc.)
+let ct = ContentType::by_natural_key(&pool, "blog", "post").await?;
+
+// By id (FK joins from audit log / permissions / generic FK rows)
+let ct = ContentType::by_id(&pool, 7).await?;
+
+// Full listing for admin sidebars / API
+let all_cts = ContentType::all(&pool).await?;                 // ordered (app, model)
+```
+
+#### Composite-key foreign keys (F.2)
+
+Multi-column FKs declared on the model, not the field. Each
+participating column keeps its plain Rust type — the FK metadata
+records which columns participate and where they reference.
+
+```rust
+#[derive(Model)]
+#[rustango(
+    table = "audit_log",
+    fk_composite(
+        name = "target",
+        to   = "ct_live_pair",
+        from = ("entity_table", "entity_pk"),
+        on   = ("table_name",   "row_pk"),
+    ),
+)]
+pub struct AuditLog {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub entity_table: String,
+    pub entity_pk: i64,
+}
+
+// Emits on migrate / apply_all:
+//   ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_target_fkey"
+//     FOREIGN KEY ("entity_table", "entity_pk")
+//     REFERENCES "ct_live_pair" ("table_name", "row_pk");
+```
+
+Both Postgres and MySQL emit the standard composite FK syntax —
+only identifier quoting differs. Single-column FKs continue to use
+the existing per-field `Relation::Fk` machinery; composite FKs sit
+on `ModelSchema.composite_relations` so the existing single-FK
+machinery (admin display, snapshot diff) stays untouched.
+
+#### GenericForeignKey + soft-FK prefetch (F.3)
+
+```rust
+use rustango::contenttypes::{GenericForeignKey, prefetch_soft, prefetch_generic};
+
+// `GenericForeignKey` — a runtime pointer at any registered model's row.
+let gfk = GenericForeignKey::for_target::<Post>(&pool, post_id).await?;
+// gfk.content_type_id  ← Post's ContentType row id
+// gfk.object_pk        ← post_id
+```
+
+**Soft-FK prefetch** — for integer columns that conceptually point at
+another model's PK without a declared `Relation::Fk` (audit log
+`entity_pk`, denormalized snapshots, optional cross-app refs):
+
+```rust
+let parent_pks: Vec<i64> = posts.iter().map(|p| p.id.get().copied().unwrap()).collect();
+
+// One batched SELECT + group-by-extractor → HashMap<i64, Vec<C>>
+let by_post = prefetch_soft::<Comment, _>(
+    &pool,
+    &parent_pks,
+    "post_id",            // soft-FK column on Comment
+    |c| c.post_id,        // extractor: how to read the value off &Comment
+).await?;
+
+for post in &posts {
+    let pk = post.id.get().copied().unwrap();
+    let comments = by_post.get(&pk).map(Vec::as_slice).unwrap_or(&[]);
+    // ...
+}
+```
+
+**Generic-FK prefetch** — for `(content_type_id, object_pk)` pointers
+that vary their target type per row. Single-target-type variant —
+caller picks the concrete `T: Model` to hydrate; pairs whose
+`content_type_id` doesn't match are filtered out:
+
+```rust
+let pairs: Vec<(i64, i64)> = audit_rows.iter()
+    .map(|a| (a.target.content_type_id, a.target.object_pk))
+    .collect();
+
+let posts: HashMap<(i64, i64), Post> =
+    prefetch_generic::<Post>(&pool, &pairs).await?;
+
+for row in &audit_rows {
+    if let Some(post) = posts.get(&(row.target.content_type_id, row.target.object_pk)) {
+        println!("{} → {}", row.id.get().copied().unwrap(), post.title);
+    }
+}
+```
+
+Both prefetch helpers short-circuit on empty input (no DB round trip)
+and use a single batched SELECT for the actual fetch.
+
+**What this unblocks:**
+- **Permissions (Option G, v0.16.0)** — `permission.content_type_id`
+  is a real FK to `rustango_content_types.id` instead of a
+  hard-coded `app.action_model` string that breaks when two apps
+  register the same model name.
+- **Audit history admin panels** — `User.history.all()`-style
+  queries become composite-FK joins instead of raw SQL.
+- **Comments / tags / generic FK** — one `Comment` model points
+  at any `Post` / `Photo` / `Article` via `(content_type_id,
+  object_pk)`, queried + admin-rendered in one shape.
+- **Activity stream / "recently changed" feeds** — the target of
+  each entry hydrates in one batched `prefetch_generic` call per
+  target type, no N+1.
+
+**Deferred (follow-up slice):**
+- Boxed-trait dynamic decoder registry → `prefetch_generic_dyn`
+  for mixed-target hydration in one query.
+- Admin renderer for `GenericForeignKey` columns (clickable target
+  links in list/detail).
+- `composite_relations` snapshot/diff support in `make_migrations`.
+
 ---
 
 ## Migrations

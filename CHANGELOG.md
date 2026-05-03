@@ -2,6 +2,44 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [Unreleased] — v0.15.0 series (ContentType framework, Option F)
+
+Schema substrate that the rest of v0.15+ (permissions, audit-history admin, generic FKs, soft-FK prefetch) sits on. Three sub-slices, all merged to `main`:
+
+### Added — F.1 ContentType model + registry seed + lookups
+
+- **`rustango::contenttypes::ContentType`** — `#[derive(Model)]` row with `(id Auto<i64>, app_label VARCHAR(100), model_name VARCHAR(100), table VARCHAR(100))`. Mirrors Django's `django_content_types` schema closely enough that audit / permissions / generic-FK code reading the table feels familiar.
+- **`contenttypes::ensure_seeded(&pool)`** — walks `inventory::iter::<ModelEntry>()`, inserts one ContentType row per registered model when missing. Idempotent (re-runs return `Ok(0)`); skips the ContentType table itself.
+- **`ContentType::for_model::<T>(&pool)`** — Rust-type → ContentType lookup. Used when the framework has a `T: Model` bound and needs the runtime row id (permission scoping, generic-FK inserts).
+- **`ContentType::by_natural_key(&pool, app, name)`** — string-keyed lookup for parsed permission codenames or HTTP-routed admin URLs.
+- **`ContentType::by_id(&pool, id)`** — FK joins from audit log / permission / generic-FK rows.
+- **`ContentType::all(&pool)`** — full listing ordered by `(app_label, model_name)` for admin sidebars + API.
+
+### Added — F.2 composite-key foreign keys
+
+- **`rustango::core::CompositeFkRelation { name, to, from: &[col], on: &[col] }`** — multi-column FK descriptor. Single-column FKs continue to live on `FieldSchema.relation`; composite FKs sit on the new `ModelSchema.composite_relations` slice so each participating column keeps its plain Rust type.
+- **`#[rustango(fk_composite(name = "...", to = "...", from = ("a", "b"), on = ("x", "y")))]`** container attr. Validates `from.len() == on.len()` at compile time; errors clearly on missing/empty fields.
+- **DDL writer** emits one `ALTER TABLE … ADD CONSTRAINT <table>_<rel.name>_fkey FOREIGN KEY (a, b, …) REFERENCES <to> (x, y, …)` per composite relation alongside the existing single-column FK ALTERs. Both PG and MySQL accept the same syntax — only identifier quoting differs, and that already dispatches through the dialect.
+
+### Added — F.3 GenericForeignKey + prefetch_soft + prefetch_generic
+
+- **`contenttypes::GenericForeignKey { content_type_id, object_pk }`** — `Copy + PartialEq` value carrier for "any registered model's row" pointers. Const-fn `new` constructor + async `for_target::<T>(&pool, pk)` that resolves T's ContentType through the F.1 registry.
+- **`contenttypes::prefetch_soft<C, F>(&pool, parent_pks, column, extract)`** — single batched SELECT + group-by-extractor for integer columns that conceptually point at another model's PK without a declared `Relation::Fk`. Returns `HashMap<i64, Vec<C>>` keyed on the soft-FK value. Empty-input short-circuits with no round trip. Use cases: audit log `entity_pk`, denormalized snapshots, optional cross-app refs.
+- **`contenttypes::prefetch_generic<C>(&pool, pairs)`** — typed-target generic-FK hydration. Resolves `C`'s ContentType once, filters out pairs whose `content_type_id` doesn't match, batches one SELECT for the surviving target PKs, returns `HashMap<(i64, i64), C>` keyed on the `(ct_id, pk)` pair. Use cases: comments-on-anything, audit log targets, activity-stream entries.
+
+### What this unblocks (queued for v0.16+)
+
+- **Permissions (Option G)** — `permission.content_type_id` becomes a real FK to `rustango_content_types.id` instead of a hard-coded `app.action_model` string that breaks when two apps register the same model name.
+- **Audit history admin panels** — `User.history.all()`-style queries are composite-FK joins instead of raw SQL.
+- **Comments / tags / generic FK** — one `Comment` model points at any `Post` / `Photo` / `Article` via `(content_type_id, object_pk)`, queried + admin-rendered uniformly.
+- **Activity stream feeds** — target hydration is one batched `prefetch_generic` per target type, no N+1.
+
+### Deferred (follow-up slices)
+
+- Boxed-trait dynamic decoder registry → `prefetch_generic_dyn` for mixed-target hydration in one query.
+- Admin renderer for `GenericForeignKey` columns — clickable target links in list/detail views.
+- `composite_relations` snapshot/diff support in `make_migrations` (composite FKs are currently ALTER-only).
+
 ## [Unreleased] — v0.23.0 series
 
 The "bi-dialect" series. Adds first-class MySQL 8.0+ support alongside the existing Postgres backend, exposed through a new `&Pool` API that's additive — every existing `&PgPool` call site keeps working unchanged, so apps adopt the new surface at their own pace (or never, if Postgres-only).
