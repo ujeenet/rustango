@@ -137,6 +137,36 @@ pub trait Dialect {
         None
     }
 
+    /// SQL column type for a non-`Auto<T>` field, used by the DDL
+    /// writer (`CREATE TABLE`). `max_length` is honored on
+    /// [`FieldType::String`] (`VARCHAR(N)` vs unbounded text).
+    ///
+    /// Default emits Postgres-shape names (`BIGINT`, `BOOLEAN`,
+    /// `TEXT`, `TIMESTAMPTZ`, `JSONB`, `UUID`). `MySQL` overrides
+    /// because:
+    /// - `BOOLEAN` is `TINYINT(1)`
+    /// - `TEXT` works but `VARCHAR` requires explicit length
+    /// - `TIMESTAMPTZ` doesn't exist; use `DATETIME(6)` or `TIMESTAMP(6)`
+    /// - `JSONB` doesn't exist; use `JSON`
+    /// - `UUID` doesn't exist; use `CHAR(36)` (string) or `BINARY(16)` (compact)
+    fn column_type(&self, ty: FieldType, max_length: Option<u32>) -> String {
+        match ty {
+            FieldType::I32 => "INTEGER".into(),
+            FieldType::I64 => "BIGINT".into(),
+            FieldType::F32 => "REAL".into(),
+            FieldType::F64 => "DOUBLE PRECISION".into(),
+            FieldType::Bool => "BOOLEAN".into(),
+            FieldType::String => match max_length {
+                Some(n) => format!("VARCHAR({n})"),
+                None => "TEXT".into(),
+            },
+            FieldType::DateTime => "TIMESTAMPTZ".into(),
+            FieldType::Date => "DATE".into(),
+            FieldType::Uuid => "UUID".into(),
+            FieldType::Json => "JSONB".into(),
+        }
+    }
+
     /// `true` if `op` can be lowered to SQL by this dialect. Default
     /// `true` — every dialect ships translations for every operator
     /// in the IR. Override to return `false` for ops that genuinely

@@ -65,6 +65,39 @@ impl Dialect for MySql {
         }
     }
 
+    /// `MySQL` column types — major divergences from the ANSI / Postgres
+    /// shape:
+    /// - no native `BOOLEAN`; `BOOL`/`BOOLEAN` are aliases for `TINYINT(1)`
+    /// - no `TIMESTAMPTZ`; `DATETIME(6)` is microsecond-precision and
+    ///   timezone-naive (the framework's chrono::DateTime<Utc> binds
+    ///   into it correctly via sqlx-mysql)
+    /// - no `JSONB`; `JSON` is the JSON type (validates on write,
+    ///   stores as binary internally)
+    /// - no `UUID`; `CHAR(36)` is the canonical string form
+    /// - `TEXT` exists but unbounded `VARCHAR` doesn't — `VARCHAR`
+    ///   without a length is rejected by the parser, so an
+    ///   unbounded `String` field becomes `TEXT`
+    /// - `DOUBLE PRECISION` is `DOUBLE`; `REAL` is an alias for
+    ///   `FLOAT` in MySQL (different from Postgres' 4-byte REAL —
+    ///   close enough for the framework's f32/f64 mapping)
+    fn column_type(&self, ty: FieldType, max_length: Option<u32>) -> String {
+        match ty {
+            FieldType::I32 => "INT".into(),
+            FieldType::I64 => "BIGINT".into(),
+            FieldType::F32 => "FLOAT".into(),
+            FieldType::F64 => "DOUBLE".into(),
+            FieldType::Bool => "TINYINT(1)".into(),
+            FieldType::String => match max_length {
+                Some(n) => format!("VARCHAR({n})"),
+                None => "TEXT".into(),
+            },
+            FieldType::DateTime => "DATETIME(6)".into(),
+            FieldType::Date => "DATE".into(),
+            FieldType::Uuid => "CHAR(36)".into(),
+            FieldType::Json => "JSON".into(),
+        }
+    }
+
     /// `MySQL` has no native `BOOLEAN` (the `BOOL` keyword is just an
     /// alias for `TINYINT(1)`). Emit `1`/`0` so `DEFAULT` clauses and
     /// inline comparisons match the storage shape.

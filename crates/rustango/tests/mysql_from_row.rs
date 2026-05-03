@@ -120,3 +120,38 @@ fn insert_pool_and_save_pool_methods_emitted() {
         drop(p.save_pool(pool));
     }
 }
+
+#[test]
+fn ddl_create_table_emits_mysql_shape() {
+    // batch 10 — DDL writer dispatches through Dialect.
+    // Verify MySQL emits backticks, TINYINT(1) for bool, TEXT for
+    // unbounded string, BIGINT for i64.
+    use rustango::core::Model;
+    use rustango::migrate::ddl::create_table_sql_with_dialect;
+    use rustango::sql::MySql;
+
+    let sql = create_table_sql_with_dialect(&MySql, <User as Model>::SCHEMA);
+    // MySQL identifier quoting
+    assert!(sql.starts_with("CREATE TABLE `mysql_from_row_users` ("));
+    // BIGINT for i64 PK (no Auto<T> on this test model — plain BIGINT)
+    assert!(sql.contains("`id` BIGINT"));
+    // TEXT for unbounded String
+    assert!(sql.contains("`name` TEXT"));
+    // No PG-isms
+    assert!(!sql.contains("\""));
+    assert!(!sql.contains("BIGSERIAL"));
+}
+
+#[test]
+fn ddl_create_table_pg_unchanged() {
+    // Regression guard: PG-typed shim still emits identical bytes
+    // to the pre-batch10 surface.
+    use rustango::core::Model;
+    use rustango::migrate::ddl::create_table_sql;
+
+    let sql = create_table_sql(<User as Model>::SCHEMA);
+    assert!(sql.starts_with("CREATE TABLE \"mysql_from_row_users\" ("));
+    assert!(sql.contains("\"id\" BIGINT"));
+    assert!(sql.contains("\"name\" TEXT"));
+    assert!(!sql.contains("`"));
+}
