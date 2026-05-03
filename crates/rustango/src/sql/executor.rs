@@ -1112,6 +1112,106 @@ pub async fn insert_pool(pool: &Pool, query: &InsertQuery) -> Result<(), ExecErr
     Ok(())
 }
 
+/// `INSERT … RETURNING <cols>` (Postgres) or `INSERT … ; SELECT
+/// LAST_INSERT_ID()` (MySQL) against either backend. Returns the
+/// auto-assigned PK as `i64`.
+///
+/// MySQL contract:
+/// - The query's `returning` list must contain exactly one column,
+///   and that column must be the model's `Auto<T>` PK. MySQL's
+///   `LAST_INSERT_ID()` only reports the most recently auto-generated
+///   value of an `AUTO_INCREMENT` column, so multi-column `RETURNING`
+///   is not expressible in MySQL syntax.
+/// - The INSERT and `SELECT LAST_INSERT_ID()` run on the **same
+///   acquired connection** — `LAST_INSERT_ID()` is connection-scoped,
+///   so reading it on a fresh checkout would see a stale (or zero)
+///   value if another task ran an INSERT in between.
+///
+/// Postgres contract: the IR's `returning` list is honored as-is and
+/// the row is returned with all requested columns (the executor's
+/// caller pulls each via `try_get`).
+///
+/// # Errors
+/// - [`ExecError::EmptyReturning`] when `query.returning` is empty.
+/// - [`SqlError::OperatorNotSupportedInDialect`] from the writer when
+///   MySQL is asked for a multi-column RETURNING (translation isn't
+///   expressible in MySQL syntax).
+/// - Validation, SQL-writing, or driver failures otherwise.
+///
+/// Returns the PG `PgRow` directly when the pool is Postgres so
+/// existing callers can use `try_get` for any column. For MySQL,
+/// returns the single auto-assigned i64 PK wrapped in
+/// [`InsertReturningPool::MySqlAutoId`] — callers handle the two
+/// shapes with a `match`.
+pub async fn insert_returning_pool(
+    pool: &Pool,
+    query: &InsertQuery,
+) -> Result<InsertReturningPool, ExecError> {
+    query.validate()?;
+    if query.returning.is_empty() {
+        return Err(ExecError::EmptyReturning);
+    }
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => {
+            let row = insert_returning_on(pg, query).await?;
+            Ok(InsertReturningPool::PgRow(row))
+        }
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            // Compile a plain INSERT (no RETURNING — MySQL can't
+            // express it) and run it + LAST_INSERT_ID() on the same
+            // checked-out connection.
+            let plain = InsertQuery {
+                model: query.model,
+                columns: query.columns.clone(),
+                values: query.values.clone(),
+                returning: ::std::vec::Vec::new(),
+                on_conflict: query.on_conflict.clone(),
+            };
+            let stmt = pool.dialect().compile_insert(&plain)?;
+            let mut conn = my.acquire().await?;
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_my(q, v);
+            }
+            q.execute(&mut *conn).await?;
+            // SELECT LAST_INSERT_ID() — connection-scoped, returns
+            // the most recently AUTO_INCREMENT-assigned value on
+            // *this* connection.
+            use sqlx::Row as _;
+            let row = sqlx::query("SELECT LAST_INSERT_ID()")
+                .fetch_one(&mut *conn)
+                .await?;
+            // sqlx-mysql decodes LAST_INSERT_ID() as u64; we surface
+            // it as i64 to match the Auto<i64>/Auto<i32> convention
+            // and the rest of the framework.
+            let id_u64: u64 = row.try_get::<u64, _>(0)?;
+            // i64::try_from would only fail at >2^63 IDs — a 9.2e18
+            // table that no realistic app will hit.
+            let id = i64::try_from(id_u64).unwrap_or(i64::MAX);
+            Ok(InsertReturningPool::MySqlAutoId(id))
+        }
+    }
+}
+
+/// Two-shape return from [`insert_returning_pool`] — a full Postgres
+/// row (caller picks columns via `try_get`) or a single MySQL
+/// auto-assigned `i64` PK from `LAST_INSERT_ID()`.
+///
+/// Macro-generated `Model::insert_pool` will pattern-match this:
+/// store every `RETURNING` column from the PG variant; store the
+/// single `i64` into the model's `Auto<T>` PK field on the MySQL
+/// variant.
+#[derive(Debug)]
+pub enum InsertReturningPool {
+    #[cfg(feature = "postgres")]
+    PgRow(PgRow),
+    #[cfg(feature = "mysql")]
+    MySqlAutoId(i64),
+}
+
 /// `UPDATE` against either backend; returns rows affected.
 ///
 /// # Errors

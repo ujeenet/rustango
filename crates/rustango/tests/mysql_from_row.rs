@@ -104,3 +104,19 @@ fn maybe_my_load_related_resolves_for_derived_model() {
     check::<User>();
     check::<Post>();
 }
+
+#[test]
+fn insert_pool_and_save_pool_methods_emitted() {
+    // batch 9 — the macro emits `insert_pool(&Pool)` and
+    // `save_pool(&mut self, &Pool)` for non-audited models with PKs.
+    // The Auto-bearing branch returns the future borrowing &mut self;
+    // the non-Auto branch borrows &self. Compile-time probe only —
+    // no live DB. Each future is dropped before the next call so the
+    // borrows don't overlap.
+    fn _probe(u: &mut User, p: &mut Post, pool: &rustango::sql::Pool) {
+        drop(u.insert_pool(pool));
+        drop(p.insert_pool(pool));
+        drop(u.save_pool(pool));
+        drop(p.save_pool(pool));
+    }
+}

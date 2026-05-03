@@ -1294,18 +1294,186 @@ fn inherent_impl_tokens(
         quote!(Self::bulk_insert_on(rows, pool).await)
     };
 
+    // `insert_pool(&Pool)` — v0.23.0-batch9. Non-audited models only
+    // (audit-on-connection over &Pool needs a bi-dialect transaction
+    // helper, deferred). Two body shapes:
+    // - has_auto: build InsertQuery skipping Auto::Unset columns,
+    //   request Auto cols in `returning`, dispatch via
+    //   `insert_returning_pool`, then on the returned `PgRow` /
+    //   `MySqlAutoId(id)` enum — pull each Auto field from the PG
+    //   row OR drop the single i64 into the first Auto field on MySQL
+    //   (multi-Auto models on MySQL error at runtime since
+    //   `LAST_INSERT_ID()` only reports one)
+    // - non-Auto: build InsertQuery with explicit columns/values and
+    //   call `insert_pool` (no returning needed)
+    let pool_insert_method = if audited_fields.is_some() {
+        quote!()
+    } else if fields.has_auto {
+        let pushes = &fields.insert_pushes;
+        let returning_cols = &fields.returning_cols;
+        let auto_assigns = &fields.auto_assigns;
+        let first_auto_ident = fields.first_auto_ident.as_ref();
+        let auto_count = fields.auto_assigns.len();
+        let mysql_assign_arm = if let Some(first) = first_auto_ident {
+            // For multi-Auto models, only the first auto column gets
+            // the LAST_INSERT_ID — surface a clear error so callers
+            // know to use the &PgPool path or restructure their model.
+            // (`auto_count > 1` is detected at runtime; the macro
+            // can't selectively emit per-Auto-arity bodies cleanly.)
+            quote! {
+                #[cfg(feature = "mysql")]
+                ::rustango::sql::InsertReturningPool::MySqlAutoId(_id) => {
+                    if #auto_count > 1 {
+                        return ::core::result::Result::Err(
+                            ::rustango::sql::ExecError::Sql(
+                                ::rustango::sql::SqlError::OperatorNotSupportedInDialect {
+                                    op: "multi-column RETURNING",
+                                    dialect: "mysql",
+                                },
+                            ),
+                        );
+                    }
+                    self.#first = ::rustango::sql::Auto::Set(_id);
+                }
+            }
+        } else {
+            quote!()
+        };
+        quote! {
+            /// Insert this row against either backend, populating any
+            /// `Auto<T>` PK from the auto-assigned value. Equivalent
+            /// to [`Self::insert`] but takes [`::rustango::sql::Pool`]
+            /// and dispatches per backend.
+            ///
+            /// MySQL caveat: only a single `Auto<T>` PK can be filled
+            /// in — `LAST_INSERT_ID()` reports one auto-assigned
+            /// column. Models with multiple `Auto<T>` PKs error at
+            /// runtime on MySQL with
+            /// `SqlError::OperatorNotSupportedInDialect{op:
+            /// "multi-column RETURNING"}`.
+            ///
+            /// Audited models continue to use the `&PgPool`
+            /// [`Self::insert`] until audit-on-connection over &Pool
+            /// lands in a follow-up batch.
+            ///
+            /// # Errors
+            /// As [`Self::insert`].
+            pub async fn insert_pool(
+                &mut self,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                let mut _columns: ::std::vec::Vec<&'static str> =
+                    ::std::vec::Vec::new();
+                let mut _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                    ::std::vec::Vec::new();
+                #( #pushes )*
+                let _query = ::rustango::core::InsertQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    columns: _columns,
+                    values: _values,
+                    returning: ::std::vec![ #( #returning_cols ),* ],
+                    on_conflict: ::core::option::Option::None,
+                };
+                let _result = ::rustango::sql::insert_returning_pool(
+                    pool, &_query,
+                ).await?;
+                match _result {
+                    #[cfg(feature = "postgres")]
+                    ::rustango::sql::InsertReturningPool::PgRow(_returning_row) => {
+                        #( #auto_assigns )*
+                    }
+                    #mysql_assign_arm
+                }
+                ::core::result::Result::Ok(())
+            }
+        }
+    } else {
+        let insert_columns = &fields.insert_columns;
+        let insert_values = &fields.insert_values;
+        quote! {
+            /// Insert this row into its table against either backend.
+            /// Equivalent to [`Self::insert`] but takes
+            /// [`::rustango::sql::Pool`].
+            ///
+            /// # Errors
+            /// As [`Self::insert`].
+            pub async fn insert_pool(
+                &self,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                let _query = ::rustango::core::InsertQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    columns: ::std::vec![ #( #insert_columns ),* ],
+                    values: ::std::vec![ #( #insert_values ),* ],
+                    returning: ::std::vec::Vec::new(),
+                    on_conflict: ::core::option::Option::None,
+                };
+                ::rustango::sql::insert_pool(pool, &_query).await
+            }
+        }
+    };
+
+    // `save_pool(&Pool)` — v0.23.0-batch9. Non-audited models only.
+    // - has_auto + Auto::Unset PK: route to `insert_pool` (which
+    //   handles RETURNING on PG and LAST_INSERT_ID on MySQL)
+    // - else: build UpdateQuery and call `update_pool`
+    let pool_save_method = if audited_fields.is_some() {
+        quote!()
+    } else if let Some((pk_ident, pk_col)) = primary_key {
+        let pk_column_lit = pk_col.as_str();
+        let assignments = &fields.update_assignments;
+        let dispatch_unset = if fields.pk_is_auto {
+            quote! {
+                if matches!(self.#pk_ident, ::rustango::sql::Auto::Unset) {
+                    return self.insert_pool(pool).await;
+                }
+            }
+        } else {
+            quote!()
+        };
+        quote! {
+            /// Save this row to its table against either backend.
+            /// `INSERT` when the `Auto<T>` PK is `Unset`, else
+            /// `UPDATE` keyed on the PK.
+            ///
+            /// Audited models continue to use the `&PgPool`
+            /// [`Self::save`] until audit-on-connection over &Pool
+            /// lands in a follow-up batch.
+            ///
+            /// # Errors
+            /// As [`Self::save`].
+            pub async fn save_pool(
+                &mut self,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                #dispatch_unset
+                let _query = ::rustango::core::UpdateQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    set: ::std::vec![ #( #assignments ),* ],
+                    where_clause: ::rustango::core::WhereExpr::Predicate(
+                        ::rustango::core::Filter {
+                            column: #pk_column_lit,
+                            op: ::rustango::core::Op::Eq,
+                            value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
+                            ),
+                        }
+                    ),
+                };
+                let _ = ::rustango::sql::update_pool(pool, &_query).await?;
+                ::core::result::Result::Ok(())
+            }
+        }
+    } else {
+        quote!()
+    };
+
     // `delete_pool(&Pool)` is emitted for non-audited models in
     // v0.23.0-batch7. Audited models route delete through a connection
     // (acquired from the pool) so the audit emit can sit inside a
     // transaction with the DELETE — that requires a per-backend
     // connection-acquire path that batch7 doesn't yet wire. They
     // continue to use the &PgPool `delete` method.
-    //
-    // `save_pool` and `insert_pool` aren't emitted yet — Auto<T>
-    // models need `insert_returning_pool` with a MySQL `LAST_INSERT_ID()`
-    // fallback (batch9), and audit-on-connection support hasn't landed.
-    // Until then, model writes against `&Pool` go through the
-    // existing `&PgPool` path.
     let pool_delete_method = if audited_fields.is_some() {
         quote!()
     } else {
@@ -1872,6 +2040,8 @@ fn inherent_impl_tokens(
                 ::rustango::audit::with_source(source, self.delete_on(_executor)).await
             }
             #pool_delete_method
+            #pool_insert_method
+            #pool_save_method
             #soft_delete_methods
         }
     });
