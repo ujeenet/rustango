@@ -275,6 +275,56 @@ fn audited_model_with_plain_pk_gets_save_pool() {
     }
 }
 
+#[derive(Model)]
+#[rustango(table = "mysql_from_row_audited_auto", audit(track = "name"))]
+#[allow(dead_code)]
+pub struct AuditedAutoRecord {
+    #[rustango(primary_key)]
+    id: rustango::sql::Auto<i64>,
+    name: String,
+}
+
+#[test]
+fn audited_auto_pk_model_gets_insert_pool() {
+    // batch 22 — audited Auto-PK models get insert_pool routing
+    // through audit::insert_one_with_audit_pool (per-backend tx
+    // wraps INSERT + auto-PK readback + audit emit).
+    fn _probe(rec: &mut AuditedAutoRecord, pool: &rustango::sql::Pool) {
+        drop(rec.insert_pool(pool));
+        drop(rec.save_pool(pool));
+    }
+}
+
+#[test]
+fn audited_plain_pk_model_gets_insert_pool() {
+    // batch 22 — audited non-Auto-PK models also get insert_pool now.
+    fn _probe(rec: &mut AuditedRecord, pool: &rustango::sql::Pool) {
+        let _fut = rec.insert_pool(pool);
+    }
+}
+
+#[test]
+fn audit_insert_one_with_audit_pool_is_callable() {
+    use rustango::core::{InsertQuery, Model, SqlValue};
+    fn _probe(pool: &rustango::sql::Pool) {
+        let q = InsertQuery {
+            model: <AuditedAutoRecord as Model>::SCHEMA,
+            columns: vec!["name"],
+            values: vec![SqlValue::String("seed".into())],
+            returning: vec!["id"],
+            on_conflict: None,
+        };
+        let entry = rustango::audit::PendingEntry {
+            entity_table: "mysql_from_row_audited_auto",
+            entity_pk: String::new(),
+            operation: rustango::audit::AuditOp::Create,
+            source: rustango::audit::AuditSource::System,
+            changes: serde_json::json!({}),
+        };
+        let _fut = rustango::audit::insert_one_with_audit_pool(pool, &q, &entry);
+    }
+}
+
 #[test]
 fn audit_save_one_with_audit_pool_is_callable() {
     use rustango::core::{Filter, Model, Op, SqlValue, UpdateQuery, WhereExpr};

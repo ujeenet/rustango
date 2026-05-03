@@ -123,6 +123,40 @@ where
     }
 }
 
+// ---- MySQL Decode/Type for Auto<T> (v0.23.0-batch22) ----
+//
+// Mirror of the Postgres impls above so `#[derive(Model)]` types
+// with `Auto<T>` PKs satisfy `FromRow<MySqlRow>` (the macro-emitted
+// `try_get::<Auto<i64>, _>(row, "id")` requires
+// `Auto<i64>: Decode<MySql> + Type<MySql>`). MySQL's
+// `BIGINT AUTO_INCREMENT` resolves to `BIGINT`, same as PG.
+
+#[cfg(feature = "mysql")]
+impl<'r, T> sqlx::Decode<'r, sqlx::MySql> for Auto<T>
+where
+    T: sqlx::Decode<'r, sqlx::MySql>,
+{
+    fn decode(
+        value: <sqlx::MySql as sqlx::Database>::ValueRef<'r>,
+    ) -> Result<Self, sqlx::error::BoxDynError> {
+        Ok(Self::Set(T::decode(value)?))
+    }
+}
+
+#[cfg(feature = "mysql")]
+impl<T> sqlx::Type<sqlx::MySql> for Auto<T>
+where
+    T: sqlx::Type<sqlx::MySql>,
+{
+    fn type_info() -> sqlx::mysql::MySqlTypeInfo {
+        T::type_info()
+    }
+
+    fn compatible(ty: &sqlx::mysql::MySqlTypeInfo) -> bool {
+        T::compatible(ty)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

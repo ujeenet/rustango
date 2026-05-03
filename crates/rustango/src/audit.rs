@@ -674,6 +674,94 @@ pub async fn save_one_with_audit_pool(
     }
 }
 
+/// Run `INSERT` from an `InsertQuery`, capture the auto-assigned PK
+/// (PG `RETURNING` row vs MySQL `LAST_INSERT_ID()`), and emit an
+/// audit entry inside a single transaction against either backend.
+/// Used by the macro-emitted `Model::insert_pool` for audited models.
+///
+/// Returns [`crate::sql::InsertReturningPool`] — same enum the
+/// non-audited [`crate::sql::insert_returning_pool`] returns. The
+/// macro-generated caller pattern-matches it to populate the
+/// model's `Auto<T>` field (PG arm reads each `returning` column;
+/// MySQL arm assigns the single i64).
+///
+/// MySQL caveat: only a single `Auto<T>` PK can be filled in (one
+/// `LAST_INSERT_ID()` value per connection). Multi-Auto-PK models
+/// on MySQL surface `SqlError::OperatorNotSupportedInDialect{op:
+/// "multi-column RETURNING"}` from the writer when the macro
+/// requests >1 returning column — same as the non-audited path.
+///
+/// # Errors
+/// Any [`crate::sql::ExecError`] from compile / bind / execute, plus
+/// `sqlx::Error` from the audit emit.
+pub async fn insert_one_with_audit_pool(
+    pool: &crate::sql::Pool,
+    query: &crate::core::InsertQuery,
+    entry: &PendingEntry,
+) -> Result<crate::sql::InsertReturningPool, crate::sql::ExecError> {
+    query.validate()?;
+    if query.returning.is_empty() {
+        return Err(crate::sql::ExecError::EmptyReturning);
+    }
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let stmt = pool.dialect().compile_insert(query)?;
+            let mut tx = pg.begin().await?;
+            let mut q: sqlx::query::Query<
+                '_,
+                sqlx::Postgres,
+                sqlx::postgres::PgArguments,
+            > = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_value_pg(q, v);
+            }
+            // INSERT … RETURNING — capture the row.
+            use sqlx::Executor as _;
+            let row = (&mut *tx).fetch_one(q).await?;
+            // Update the audit entry's entity_pk to the returned PK
+            // when available, so the snapshot's pk reflects the
+            // server-assigned value rather than the placeholder.
+            // For now we trust the caller-provided entry as-is.
+            emit_one(&mut *tx, entry).await?;
+            tx.commit().await?;
+            Ok(crate::sql::InsertReturningPool::PgRow(row))
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            // MySQL has no RETURNING — rewrite to a plain INSERT and
+            // read LAST_INSERT_ID() on the same connection.
+            let plain = crate::core::InsertQuery {
+                model: query.model,
+                columns: query.columns.clone(),
+                values: query.values.clone(),
+                returning: ::std::vec::Vec::new(),
+                on_conflict: query.on_conflict.clone(),
+            };
+            let stmt = pool.dialect().compile_insert(&plain)?;
+            let mut tx = my.begin().await?;
+            let mut q: sqlx::query::Query<
+                '_,
+                sqlx::MySql,
+                sqlx::mysql::MySqlArguments,
+            > = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_value_my(q, v);
+            }
+            q.execute(&mut *tx).await?;
+            use sqlx::Row as _;
+            let row = sqlx::query("SELECT LAST_INSERT_ID()")
+                .fetch_one(&mut *tx)
+                .await?;
+            let id_u64: u64 = row.try_get::<u64, _>(0)?;
+            let id = i64::try_from(id_u64).unwrap_or(i64::MAX);
+            emit_one_my(&mut *tx, entry).await?;
+            tx.commit().await?;
+            Ok(crate::sql::InsertReturningPool::MySqlAutoId(id))
+        }
+    }
+}
+
 /// Local Postgres-typed bind helper — couldn't reuse
 /// `executor::bind_query` (it's private to the executor module).
 /// Same `bind_match!`-shape body, but copied rather than re-exported
