@@ -62,6 +62,22 @@ pub struct Pair {
     pub right_id: i64,
 }
 
+/// Soft-FK target (F.3) — `Comment.post_id` is a plain `i64` column
+/// pointing at `ct_live_post.id` *without* a declared
+/// `Relation::Fk` on the field. Used to exercise [`prefetch_soft`].
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "ct_live_comment")]
+#[allow(dead_code)]
+pub struct Comment {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    /// Soft FK to ct_live_post.id — no `relation` declared so the
+    /// framework treats it as a plain integer column.
+    pub post_id: i64,
+    #[rustango(max_length = 500)]
+    pub body: String,
+}
+
 /// Composite-FK demo model (sub-slice F.2). Two columns
 /// `(left_ref, right_ref)` form a logical FK to `(left_id,
 /// right_id)` on [`Pair`]. Exercises the full macro / schema / DDL
@@ -101,6 +117,7 @@ async fn fresh_pool() -> Option<sqlx::PgPool> {
         "ct_live_user",
         "ct_live_audit",
         "ct_live_pair",
+        "ct_live_comment",
     ] {
         let drop_sql = format!(r#"DROP TABLE IF EXISTS "{tbl}" CASCADE"#);
         let _ = sqlx::query(&drop_sql).execute(&pool).await;
@@ -279,4 +296,190 @@ async fn ensure_seeded_skips_content_type_table_itself() {
         .await
         .expect("query");
     assert!(alt.is_none(), "ContentType should not seed itself");
+}
+
+// ============================================================ F.3 — GenericForeignKey + prefetch
+
+#[test]
+fn generic_foreign_key_constructs_and_compares() {
+    use rustango::contenttypes::GenericForeignKey;
+    let g = GenericForeignKey::new(7, 42);
+    assert_eq!(g.content_type_id, 7);
+    assert_eq!(g.object_pk, 42);
+    assert_eq!(g, GenericForeignKey::new(7, 42));
+    assert_ne!(g, GenericForeignKey::new(7, 43));
+}
+
+#[tokio::test]
+async fn for_target_resolves_via_content_type() {
+    use rustango::contenttypes::GenericForeignKey;
+    let _g = ct_lock().lock().await;
+    let Some(pool) = fresh_pool().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    contenttypes::ensure_seeded(&pool).await.expect("seed");
+    let g = GenericForeignKey::for_target::<Post>(&pool, 99)
+        .await
+        .expect("for_target");
+    let post_ct = ContentType::for_model::<Post>(&pool)
+        .await
+        .expect("for_model")
+        .expect("Post CT exists");
+    assert_eq!(g.content_type_id, post_ct.id.get().copied().unwrap());
+    assert_eq!(g.object_pk, 99);
+}
+
+#[tokio::test]
+async fn prefetch_soft_groups_children_by_fk_value() {
+    let _g = ct_lock().lock().await;
+    let Some(pool) = fresh_pool().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+
+    // Seed two posts + 3 comments — two on post 1, one on post 2.
+    let mut p1 = Post {
+        id: Auto::Unset,
+        title: "first".into(),
+    };
+    p1.insert(&pool).await.expect("insert p1");
+    let mut p2 = Post {
+        id: Auto::Unset,
+        title: "second".into(),
+    };
+    p2.insert(&pool).await.expect("insert p2");
+    let p1_id = p1.id.get().copied().unwrap();
+    let p2_id = p2.id.get().copied().unwrap();
+
+    for (post_id, body) in [
+        (p1_id, "comment-A"),
+        (p1_id, "comment-B"),
+        (p2_id, "comment-C"),
+    ] {
+        let mut c = Comment {
+            id: Auto::Unset,
+            post_id,
+            body: body.into(),
+        };
+        c.insert(&pool).await.expect("insert comment");
+    }
+
+    let parent_pks = vec![p1_id, p2_id];
+    let by_post = contenttypes::prefetch_soft::<Comment, _>(
+        &pool,
+        &parent_pks,
+        "post_id",
+        |c| c.post_id,
+    )
+    .await
+    .expect("prefetch_soft");
+
+    let p1_kids = by_post.get(&p1_id).expect("p1 has kids");
+    assert_eq!(p1_kids.len(), 2);
+    let p2_kids = by_post.get(&p2_id).expect("p2 has kids");
+    assert_eq!(p2_kids.len(), 1);
+    assert_eq!(p2_kids[0].body, "comment-C");
+}
+
+#[tokio::test]
+async fn prefetch_soft_short_circuits_on_empty_parent_list() {
+    let _g = ct_lock().lock().await;
+    let Some(pool) = fresh_pool().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    let by_post = contenttypes::prefetch_soft::<Comment, _>(
+        &pool,
+        &[],
+        "post_id",
+        |c| c.post_id,
+    )
+    .await
+    .expect("prefetch_soft");
+    assert!(by_post.is_empty());
+}
+
+#[tokio::test]
+async fn prefetch_generic_hydrates_typed_targets() {
+    use rustango::contenttypes::GenericForeignKey;
+    let _g = ct_lock().lock().await;
+    let Some(pool) = fresh_pool().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    contenttypes::ensure_seeded(&pool).await.expect("seed");
+
+    // Seed 2 posts + 1 user. Build a list of generic FKs pointing at
+    // both kinds. prefetch_generic::<Post>(...) should hydrate only
+    // the post-typed pairs and ignore the user-typed pair.
+    let mut p1 = Post {
+        id: Auto::Unset,
+        title: "alpha".into(),
+    };
+    p1.insert(&pool).await.expect("insert p1");
+    let mut p2 = Post {
+        id: Auto::Unset,
+        title: "beta".into(),
+    };
+    p2.insert(&pool).await.expect("insert p2");
+    let mut u = User {
+        id: Auto::Unset,
+        username: "carol".into(),
+    };
+    u.insert(&pool).await.expect("insert u");
+
+    let p1_pk = p1.id.get().copied().unwrap();
+    let p2_pk = p2.id.get().copied().unwrap();
+    let u_pk = u.id.get().copied().unwrap();
+
+    let g_p1 = GenericForeignKey::for_target::<Post>(&pool, p1_pk)
+        .await
+        .expect("g_p1");
+    let g_p2 = GenericForeignKey::for_target::<Post>(&pool, p2_pk)
+        .await
+        .expect("g_p2");
+    let g_u = GenericForeignKey::for_target::<User>(&pool, u_pk)
+        .await
+        .expect("g_u");
+    let pairs = vec![
+        (g_p1.content_type_id, g_p1.object_pk),
+        (g_p2.content_type_id, g_p2.object_pk),
+        (g_u.content_type_id, g_u.object_pk),
+    ];
+
+    let posts = contenttypes::prefetch_generic::<Post>(&pool, &pairs)
+        .await
+        .expect("prefetch_generic Post");
+    assert_eq!(
+        posts.len(),
+        2,
+        "should hydrate both posts and ignore the user-typed pair"
+    );
+    assert_eq!(
+        posts.get(&(g_p1.content_type_id, p1_pk)).map(|p| p.title.as_str()),
+        Some("alpha")
+    );
+    assert_eq!(
+        posts.get(&(g_p2.content_type_id, p2_pk)).map(|p| p.title.as_str()),
+        Some("beta")
+    );
+    assert!(
+        posts.get(&(g_u.content_type_id, u_pk)).is_none(),
+        "user-typed pair must not appear in the Post-targeted result"
+    );
+}
+
+#[tokio::test]
+async fn prefetch_generic_short_circuits_on_empty_pairs() {
+    let _g = ct_lock().lock().await;
+    let Some(pool) = fresh_pool().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    contenttypes::ensure_seeded(&pool).await.expect("seed");
+    let out = contenttypes::prefetch_generic::<Post>(&pool, &[])
+        .await
+        .expect("prefetch_generic empty");
+    assert!(out.is_empty());
 }

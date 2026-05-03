@@ -144,6 +144,254 @@ impl ContentType {
     }
 }
 
+/// "Generic foreign key" pair — a runtime pointer at any registered
+/// model's row, formed by `(content_type_id, object_pk)`. Sub-slice
+/// F.3 of the v0.15.0 ContentType plan.
+///
+/// Models embed it as two plain columns plus this struct used at
+/// the API surface — there's no dedicated SQL type for "generic
+/// FK", just the convention that `content_type_id` references
+/// `rustango_content_types.id` and `object_pk` is the target row's
+/// primary key value. The framework hydrates targets via
+/// [`prefetch_generic`].
+///
+/// # Why not a typed `T: Model` field?
+///
+/// The whole point of the generic shape is that the target type
+/// isn't known at compile time — a single audit log row, comment,
+/// activity-stream entry, or tag can point at any model. Typed FKs
+/// (`ForeignKey<User>`) are the right choice when the target type
+/// is fixed; `GenericForeignKey` is for the "could be anything"
+/// case Django's `contenttypes` framework solves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenericForeignKey {
+    /// FK to `rustango_content_types.id`. Identifies which model
+    /// the `object_pk` lives in.
+    pub content_type_id: i64,
+    /// Primary key of the target row in the table named by the
+    /// matching ContentType. Always `i64` — the framework's
+    /// `Auto<T>` PK is `i64` and non-Auto PKs that ride this path
+    /// must be i64-coercible.
+    pub object_pk: i64,
+}
+
+impl GenericForeignKey {
+    /// Construct a GFK from a ContentType row + a target PK. The
+    /// natural shape when the caller already has the ContentType
+    /// in hand (audit log writer, comment-create handler, etc.).
+    #[must_use]
+    pub const fn new(content_type_id: i64, object_pk: i64) -> Self {
+        Self {
+            content_type_id,
+            object_pk,
+        }
+    }
+
+    /// Construct a GFK pointing at a row of `T`. Looks up `T`'s
+    /// ContentType via the cached registry (`for_model::<T>`) — one
+    /// DB round-trip the first time, free thereafter once
+    /// memoization lands.
+    ///
+    /// # Errors
+    /// As [`ContentType::for_model`].
+    pub async fn for_target<T: crate::core::Model>(
+        pool: &PgPool,
+        object_pk: i64,
+    ) -> Result<Self, ExecError> {
+        let ct = ContentType::for_model::<T>(pool)
+            .await?
+            .ok_or_else(|| ExecError::MissingPrimaryKey {
+                table: T::SCHEMA.table,
+            })?;
+        let id = ct.id.get().copied().ok_or_else(|| {
+            ExecError::MissingPrimaryKey {
+                table: ContentType::SCHEMA.table,
+            }
+        })?;
+        Ok(Self::new(id, object_pk))
+    }
+}
+
+/// Soft-FK prefetch — fetch every row of `C` whose soft-FK column
+/// matches one of `parent_pks`, then group the results by the
+/// soft-FK value via the caller-supplied extractor closure. Returns
+/// a `HashMap<i64, Vec<C>>` keyed on the soft-FK value, mirroring
+/// the shape of [`crate::sql::fetch_with_prefetch`] but for
+/// columns that aren't declared as a real `Relation::Fk` (no DDL FK
+/// constraint, no macro-generated reverse helper).
+///
+/// "Soft FK" = an integer column that conceptually points at
+/// another model's PK without a declared FK relation. Use cases:
+/// optional cross-app references, migration-period references where
+/// the constraint can't be enforced yet, audit-log `entity_pk` columns,
+/// `denormalized_user_id` snapshots, etc.
+///
+/// Two SQL round trips total max (one for the prefetch + the parent
+/// fetch the caller already did). Empty `parent_pks` short-circuits
+/// to an empty map without a round trip.
+///
+/// ```ignore
+/// // After fetching parents:
+/// let parent_pks: Vec<i64> = posts.iter().map(|p| p.id.get().copied().unwrap()).collect();
+/// let by_post: HashMap<i64, Vec<Comment>> = prefetch_soft::<Comment, _>(
+///     &pool,
+///     &parent_pks,
+///     "post_id",        // the soft-FK column on the Comment table
+///     |c| c.post_id,    // extractor: how to read the value off &Comment
+/// ).await?;
+/// for post in &posts {
+///     let comments = by_post.get(&post.id.get().copied().unwrap())
+///         .map(Vec::as_slice).unwrap_or(&[]);
+///     // ...
+/// }
+/// ```
+///
+/// # Errors
+/// Driver / SQL failures from the SELECT.
+pub async fn prefetch_soft<C, F>(
+    pool: &PgPool,
+    parent_pks: &[i64],
+    target_fk_column: &'static str,
+    extract: F,
+) -> Result<::std::collections::HashMap<i64, Vec<C>>, ExecError>
+where
+    C: crate::core::Model
+        + for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>
+        + Send
+        + Unpin
+        + 'static,
+    F: Fn(&C) -> i64,
+{
+    if parent_pks.is_empty() {
+        return Ok(::std::collections::HashMap::new());
+    }
+    // Dedupe to keep the IN list compact — duplicate parent PKs
+    // would otherwise pad the SQL string and bind list pointlessly.
+    let mut keys: Vec<i64> = parent_pks.to_vec();
+    keys.sort_unstable();
+    keys.dedup();
+    let pk_values: Vec<crate::core::SqlValue> = keys
+        .iter()
+        .copied()
+        .map(crate::core::SqlValue::I64)
+        .collect();
+    let children: Vec<C> = crate::query::QuerySet::<C>::new()
+        .filter(
+            target_fk_column,
+            crate::core::Op::In,
+            crate::core::SqlValue::List(pk_values),
+        )
+        .fetch(pool)
+        .await?;
+    let mut grouped: ::std::collections::HashMap<i64, Vec<C>> =
+        ::std::collections::HashMap::new();
+    for child in children {
+        let key = extract(&child);
+        grouped.entry(key).or_default().push(child);
+    }
+    Ok(grouped)
+}
+
+/// Generic-FK prefetch — given a list of `(content_type_id, object_pk)`
+/// pairs (typically pulled off a parent set's `GenericForeignKey`
+/// fields), batches one SQL per distinct ContentType to fetch the
+/// targets, returns a `HashMap<(i64, i64), C>` keyed on the
+/// (ct_id, pk) pair.
+///
+/// **Single-target-type variant** — caller supplies the concrete
+/// `C: Model` they want hydrated. Filters out any pair whose
+/// `content_type_id` doesn't match `C`'s ContentType (the framework
+/// can't decode a `Photo` row into a `Comment`). For mixed-target
+/// hydration (one query → many target types) you'd need the
+/// boxed-trait dynamic decoder registry — that's a follow-up
+/// (`prefetch_generic_dyn`) once the registry trait is in.
+///
+/// Two SQL round trips total (one ContentType lookup + one target
+/// fetch). Empty input short-circuits to an empty map.
+///
+/// ```ignore
+/// let pairs: Vec<(i64, i64)> = audit_rows.iter()
+///     .map(|a| (a.target.content_type_id, a.target.object_pk))
+///     .collect();
+/// let posts: HashMap<(i64, i64), Post> =
+///     prefetch_generic::<Post>(&pool, &pairs).await?;
+/// ```
+///
+/// # Errors
+/// As [`ContentType::for_model`] + driver / SQL failures from the
+/// target SELECT.
+pub async fn prefetch_generic<C>(
+    pool: &PgPool,
+    pairs: &[(i64, i64)],
+) -> Result<::std::collections::HashMap<(i64, i64), C>, ExecError>
+where
+    C: crate::core::Model
+        + for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>
+        + crate::sql::HasPkValue
+        + Send
+        + Unpin
+        + 'static,
+{
+    if pairs.is_empty() {
+        return Ok(::std::collections::HashMap::new());
+    }
+    // Resolve C's ContentType once — every (ct_id, pk) pair whose
+    // ct_id doesn't match drops out of the result map (caller's
+    // expectation: typed-target prefetch).
+    let target_ct = ContentType::for_model::<C>(pool)
+        .await?
+        .ok_or_else(|| ExecError::MissingPrimaryKey {
+            table: C::SCHEMA.table,
+        })?;
+    let target_ct_id = target_ct.id.get().copied().ok_or_else(|| {
+        ExecError::MissingPrimaryKey {
+            table: ContentType::SCHEMA.table,
+        }
+    })?;
+
+    let mut wanted_pks: Vec<i64> = pairs
+        .iter()
+        .filter(|(ct, _)| *ct == target_ct_id)
+        .map(|(_, pk)| *pk)
+        .collect();
+    if wanted_pks.is_empty() {
+        return Ok(::std::collections::HashMap::new());
+    }
+    wanted_pks.sort_unstable();
+    wanted_pks.dedup();
+
+    let pk_values: Vec<crate::core::SqlValue> = wanted_pks
+        .iter()
+        .copied()
+        .map(crate::core::SqlValue::I64)
+        .collect();
+    let pk_field = C::SCHEMA
+        .primary_key()
+        .ok_or_else(|| ExecError::MissingPrimaryKey {
+            table: C::SCHEMA.table,
+        })?;
+    let rows: Vec<C> = crate::query::QuerySet::<C>::new()
+        .filter(
+            pk_field.column,
+            crate::core::Op::In,
+            crate::core::SqlValue::List(pk_values),
+        )
+        .fetch(pool)
+        .await?;
+
+    let mut out: ::std::collections::HashMap<(i64, i64), C> =
+        ::std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        // Pull the row's PK back out via the macro-generated
+        // __rustango_pk_value path through HasPkValue.
+        let pk_value = <C as crate::sql::HasPkValue>::__rustango_pk_value_impl(&row);
+        if let crate::core::SqlValue::I64(pk) = pk_value {
+            out.insert((target_ct_id, pk), row);
+        }
+    }
+    Ok(out)
+}
+
 /// Walk the inventory of registered models and INSERT a ContentType
 /// row for every one missing. Idempotent.
 ///
