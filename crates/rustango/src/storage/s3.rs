@@ -207,6 +207,99 @@ impl S3Storage {
             .await
             .map_err(|e| StorageError::Io(format!("http: {e}")))
     }
+
+    /// Build a SigV4 query-string-signed URL. Used for both
+    /// presigned GET (`method = "GET"`) and presigned PUT
+    /// (`method = "PUT"` + `Some(content_type)`).
+    ///
+    /// Per the spec:
+    /// - x-amz-content-sha256 = "UNSIGNED-PAYLOAD" (no body hash —
+    ///   the URL is generated before the body exists)
+    /// - All auth params live in the query string
+    /// - For PUT with a content-type, the content-type header IS
+    ///   signed (browser must send a matching value)
+    fn build_presigned_url(
+        &self,
+        method: &str,
+        key: &str,
+        ttl_secs: u64,
+        content_type: Option<&str>,
+    ) -> Result<String, StorageError> {
+        validate_key(key)?;
+        // AWS caps presign expiry at 7 days (604_800 s).
+        let expires = ttl_secs.min(604_800).max(1);
+        let path = self.key_path(key);
+        let host = self.host();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| StorageError::Io(format!("clock: {e}")))?
+            .as_secs();
+        let amz_date = format_amz_date(now);
+        let date_stamp = &amz_date[..8];
+        let scope = format!("{date_stamp}/{}/s3/aws4_request", self.cfg.region);
+        let credential = format!("{}/{scope}", self.cfg.access_key_id);
+
+        // Signed-headers list. Always includes host. PUT with a
+        // content-type binds the browser to send the same value.
+        let mut signed_headers_vec = vec!["host"];
+        if method == "PUT" && content_type.is_some() {
+            signed_headers_vec.push("content-type");
+        }
+        signed_headers_vec.sort();
+        let signed_headers = signed_headers_vec.join(";");
+
+        // Query parameters — these will be alphabetically sorted in
+        // the canonical query string per the spec.
+        let mut query: Vec<(String, String)> = vec![
+            ("X-Amz-Algorithm".into(), "AWS4-HMAC-SHA256".into()),
+            ("X-Amz-Credential".into(), credential.clone()),
+            ("X-Amz-Date".into(), amz_date.clone()),
+            ("X-Amz-Expires".into(), expires.to_string()),
+            ("X-Amz-SignedHeaders".into(), signed_headers.clone()),
+        ];
+        // Sort + render canonical-query-string (each value
+        // percent-encoded per the SigV4 spec — same rules as encode_key
+        // EXCEPT slashes are also encoded).
+        query.sort_by(|a, b| a.0.cmp(&b.0));
+        let canonical_query = query
+            .iter()
+            .map(|(k, v)| format!("{}={}", encode_query(k), encode_query(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+
+        // Canonical headers — host always; content-type when binding.
+        let canonical_headers = match (method, content_type) {
+            ("PUT", Some(ct)) => {
+                // Headers must be alphabetical when there are multiple.
+                format!("content-type:{ct}\nhost:{host}\n")
+            }
+            _ => format!("host:{host}\n"),
+        };
+
+        // Payload hash literal per spec for presigned URLs.
+        let payload_hash = "UNSIGNED-PAYLOAD";
+
+        let canonical_request = format!(
+            "{method}\n{path}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+        );
+        let cr_hash = sha256_hex(canonical_request.as_bytes());
+        let string_to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{cr_hash}");
+
+        let signing_key = derive_signing_key(
+            &self.cfg.secret_access_key,
+            date_stamp,
+            &self.cfg.region,
+            "s3",
+        );
+        let signature = hex_encode(&hmac_sha256(&signing_key, string_to_sign.as_bytes()));
+
+        Ok(format!(
+            "{}://{}{}?{canonical_query}&X-Amz-Signature={signature}",
+            self.scheme(),
+            host,
+            path,
+        ))
+    }
 }
 
 #[async_trait]
@@ -263,6 +356,23 @@ impl Storage for S3Storage {
     fn url(&self, key: &str) -> Option<String> {
         Some(self.full_url(key))
     }
+
+    async fn presigned_get_url(
+        &self,
+        key: &str,
+        ttl: std::time::Duration,
+    ) -> Option<String> {
+        self.build_presigned_url("GET", key, ttl.as_secs(), None).ok()
+    }
+
+    async fn presigned_put_url(
+        &self,
+        key: &str,
+        ttl: std::time::Duration,
+        content_type: Option<&str>,
+    ) -> Option<String> {
+        self.build_presigned_url("PUT", key, ttl.as_secs(), content_type).ok()
+    }
 }
 
 // =====================================================================
@@ -314,6 +424,22 @@ fn encode_key(key: &str) -> String {
     let mut out = String::with_capacity(key.len());
     for &b in key.as_bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'/') {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Like [`encode_key`] but escapes `/` too — used inside the
+/// canonical query string per the SigV4 spec, which says everything
+/// outside the unreserved set must be encoded (slashes included).
+fn encode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
             out.push(b as char);
         } else {
             out.push('%');
@@ -489,5 +615,120 @@ mod tests {
         assert!(s.exists(&key).await.expect("exists"));
         s.delete(&key).await.expect("delete");
         assert!(!s.exists(&key).await.expect("exists after delete"));
+    }
+
+    // -------- presigned URLs (offline checks; round-trips against AWS
+    // are covered by the live test if the env vars are set)
+
+    #[test]
+    fn encode_query_escapes_slashes() {
+        // Query encoding is stricter than key encoding — slashes go
+        // through the percent escape too.
+        assert_eq!(encode_query("a/b"), "a%2Fb");
+        assert_eq!(encode_query("plain-name_1.2~3"), "plain-name_1.2~3");
+        assert_eq!(encode_query("a+b"), "a%2Bb");
+    }
+
+    #[tokio::test]
+    async fn presigned_get_url_carries_required_query_params() {
+        let s = S3Storage::new(cfg());
+        let url = s
+            .presigned_get_url("avatars/alice.png", std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        // Hostname + path are correct.
+        assert!(url.starts_with(
+            "https://examplebucket.s3.us-east-1.amazonaws.com/avatars/alice.png?"
+        ));
+        // SigV4 query params present.
+        for k in [
+            "X-Amz-Algorithm=AWS4-HMAC-SHA256",
+            "X-Amz-Credential=",
+            "X-Amz-Date=",
+            "X-Amz-Expires=60",
+            "X-Amz-SignedHeaders=host",
+            "X-Amz-Signature=",
+        ] {
+            assert!(url.contains(k), "missing {k} in {url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn presigned_put_url_with_content_type_signs_it() {
+        let s = S3Storage::new(cfg());
+        let url = s
+            .presigned_put_url(
+                "uploads/x.png",
+                std::time::Duration::from_secs(300),
+                Some("image/png"),
+            )
+            .await
+            .unwrap();
+        // SignedHeaders should advertise BOTH content-type AND host
+        // (alphabetically sorted), proving the binding is in effect.
+        assert!(
+            url.contains("X-Amz-SignedHeaders=content-type%3Bhost"),
+            "expected content-type bound in SignedHeaders, got: {url}"
+        );
+    }
+
+    #[tokio::test]
+    async fn presigned_put_url_without_content_type_only_signs_host() {
+        let s = S3Storage::new(cfg());
+        let url = s
+            .presigned_put_url(
+                "uploads/x.bin",
+                std::time::Duration::from_secs(300),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(url.contains("X-Amz-SignedHeaders=host"));
+        assert!(!url.contains("content-type"));
+    }
+
+    #[tokio::test]
+    async fn presigned_url_clamps_expiry_at_7_days() {
+        let s = S3Storage::new(cfg());
+        let url = s
+            .presigned_get_url(
+                "k",
+                std::time::Duration::from_secs(60 * 60 * 24 * 30), // 30 days
+            )
+            .await
+            .unwrap();
+        // AWS spec caps at 604800 s (7 days).
+        assert!(url.contains("X-Amz-Expires=604800"), "got: {url}");
+    }
+
+    #[tokio::test]
+    async fn presigned_url_uses_path_style_when_configured() {
+        let mut c = cfg();
+        c.path_style = true;
+        c.endpoint = Some("https://minio.example.com".into());
+        let s = S3Storage::new(c);
+        let url = s
+            .presigned_get_url("uploads/x.png", std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert!(url.starts_with(
+            "https://minio.example.com/examplebucket/uploads/x.png?"
+        ));
+    }
+
+    #[tokio::test]
+    async fn local_storage_presigned_get_returns_none() {
+        // Default trait impl returns None — backends that can't sign
+        // shouldn't pretend they can.
+        use crate::storage::LocalStorage;
+        let local = LocalStorage::new(std::path::PathBuf::from("/tmp"));
+        assert!(local
+            .presigned_get_url("x", std::time::Duration::from_secs(60))
+            .await
+            .is_none());
+        assert!(local
+            .presigned_put_url("x", std::time::Duration::from_secs(60), None)
+            .await
+            .is_none());
     }
 }

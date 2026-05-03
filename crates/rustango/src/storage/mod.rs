@@ -34,6 +34,9 @@
 #[cfg(feature = "storage-s3")]
 pub mod s3;
 
+pub mod registry;
+pub use registry::StorageRegistry;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -75,6 +78,38 @@ pub trait Storage: Send + Sync + 'static {
     /// Return a URL where the file at `key` can be served, if the backend
     /// supports public URLs. Returns `None` for backends that don't (e.g. tests).
     fn url(&self, key: &str) -> Option<String>;
+
+    /// Return a time-limited GET URL for the file at `key` (for serving
+    /// private files without proxying through your handler). Returns
+    /// `None` when the backend can't sign — `LocalStorage`,
+    /// `InMemoryStorage`. `S3Storage` overrides with SigV4 query-string
+    /// signing.
+    ///
+    /// `ttl` is how long the URL stays valid. AWS caps at 7 days
+    /// (604_800 s); shorter is safer.
+    async fn presigned_get_url(
+        &self,
+        _key: &str,
+        _ttl: std::time::Duration,
+    ) -> Option<String> {
+        None
+    }
+
+    /// Return a time-limited PUT URL the browser can upload to
+    /// directly (no proxying through your handler). When
+    /// `content_type` is `Some`, the signature is bound to it — the
+    /// browser MUST send a matching `Content-Type` header.
+    ///
+    /// Returns `None` when the backend can't sign. `S3Storage`
+    /// overrides.
+    async fn presigned_put_url(
+        &self,
+        _key: &str,
+        _ttl: std::time::Duration,
+        _content_type: Option<&str>,
+    ) -> Option<String> {
+        None
+    }
 }
 
 /// `Arc<dyn Storage>` alias.
