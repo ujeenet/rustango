@@ -94,6 +94,13 @@ pub mod email_templates;
 #[cfg(all(feature = "email", feature = "jobs"))]
 pub mod email_jobs;
 
+/// Laravel-shape `Mailable` trait — declare an email type as a
+/// struct that owns its template + recipient logic. Pairs with
+/// [`email_templates::EmailRenderer`] (rendering) and
+/// [`email_jobs`] (off-request delivery). See [`mailable::Mailable`].
+#[cfg(all(feature = "email", feature = "admin"))]
+pub mod mailable;
+
 /// Multi-channel notifications — fan one notification out to mail / database /
 /// log / broadcast channels. See [`notifications::notify`].
 #[cfg(feature = "notifications")]
