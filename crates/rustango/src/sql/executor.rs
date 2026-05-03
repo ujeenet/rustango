@@ -1065,3 +1065,224 @@ where
         }
     }
 }
+
+// ====================================================================
+// `&Pool` dispatch — bi-dialect executor surface (v0.23.0-batch5)
+// ====================================================================
+//
+// Phase A of the v0.23.0 executor migration: the **non-`FromRow`**
+// operations (insert, update, delete, count, bulk_insert, bulk_update,
+// raw_execute) now have `_pool` variants that accept a [`super::Pool`]
+// and dispatch to the right sqlx driver. SQL is compiled via
+// `pool.dialect()`, so the same call works against either backend.
+//
+// The `FromRow`-bound operations (select_rows, fetch, insert_returning,
+// fetch_aggregate, raw_query, fetch_with_prefetch) stay
+// `&PgPool`-typed for now — they require macro changes so models
+// derive `FromRow<MySqlRow>` alongside `FromRow<PgRow>`. Phase B
+// in batch6 covers that.
+//
+// Existing `&PgPool` callers keep working — we don't touch the
+// existing functions. New code that already has `&Pool` (e.g. via
+// `Pool::connect_from_env`) can call the `_pool` variants directly.
+
+use super::Pool;
+
+/// Bind a `Query<MySql, MySqlArguments>` from a `SqlValue`. Mirrors
+/// the Postgres-typed [`bind_query`] using the same polymorphic
+/// `bind_match!` body.
+#[cfg(feature = "mysql")]
+fn bind_query_my(
+    q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+    value: SqlValue,
+) -> sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> {
+    bind_match!(q, value)
+}
+
+/// `INSERT` against either backend. Equivalent to [`insert`] but
+/// dispatches via [`Pool`] — runs against the dialect's compiled SQL
+/// and the matching sqlx driver.
+///
+/// # Errors
+/// As [`insert`].
+pub async fn insert_pool(pool: &Pool, query: &InsertQuery) -> Result<(), ExecError> {
+    query.validate()?;
+    let stmt = pool.dialect().compile_insert(query)?;
+    execute_pool(pool, &stmt.sql, stmt.params).await?;
+    Ok(())
+}
+
+/// `UPDATE` against either backend; returns rows affected.
+///
+/// # Errors
+/// As [`update`].
+pub async fn update_pool(pool: &Pool, query: &UpdateQuery) -> Result<u64, ExecError> {
+    let stmt = pool.dialect().compile_update(query)?;
+    execute_pool(pool, &stmt.sql, stmt.params).await
+}
+
+/// `DELETE` against either backend; returns rows affected.
+///
+/// # Errors
+/// As [`delete`].
+pub async fn delete_pool(pool: &Pool, query: &DeleteQuery) -> Result<u64, ExecError> {
+    let stmt = pool.dialect().compile_delete(query)?;
+    execute_pool(pool, &stmt.sql, stmt.params).await
+}
+
+/// `SELECT COUNT(*)` against either backend.
+///
+/// # Errors
+/// As [`count_rows`].
+pub async fn count_rows_pool(pool: &Pool, query: &CountQuery) -> Result<i64, ExecError> {
+    let stmt = pool.dialect().compile_count(query)?;
+    fetch_scalar_pool(pool, &stmt.sql, stmt.params).await
+}
+
+/// Multi-row `INSERT`. Bypasses any `Auto<T>` PK reconciliation that
+/// [`bulk_insert`] does for Postgres' `RETURNING` shape — the macro
+/// layer in batch6 will route Auto<T>-bearing models to a different
+/// path on MySQL (`LAST_INSERT_ID()` follow-up).
+///
+/// # Errors
+/// As [`bulk_insert`].
+pub async fn bulk_insert_pool(pool: &Pool, query: &BulkInsertQuery) -> Result<(), ExecError> {
+    if query.rows.is_empty() {
+        return Ok(());
+    }
+    let stmt = pool.dialect().compile_bulk_insert(query)?;
+    execute_pool(pool, &stmt.sql, stmt.params).await?;
+    Ok(())
+}
+
+/// `UPDATE … FROM (VALUES …)` (Postgres) / `UPDATE … INNER JOIN
+/// (VALUES …)` (MySQL); returns rows affected.
+///
+/// # Errors
+/// As [`bulk_update`].
+pub async fn bulk_update_pool(pool: &Pool, query: &BulkUpdateQuery) -> Result<u64, ExecError> {
+    if query.rows.is_empty() {
+        return Ok(0);
+    }
+    let stmt = pool.dialect().compile_bulk_update(query)?;
+    execute_pool(pool, &stmt.sql, stmt.params).await
+}
+
+/// Execute arbitrary SQL with bound `SqlValue` params; returns rows
+/// affected. SQL must use the **dialect's** placeholder shape (`$1`
+/// for Postgres, `?` for MySQL) — read it from `pool.dialect().placeholder(n)`
+/// when constructing dynamic queries.
+///
+/// # Errors
+/// Driver / SQL failures.
+pub async fn raw_execute_pool(
+    pool: &Pool,
+    sql: &str,
+    binds: Vec<SqlValue>,
+) -> Result<u64, ExecError> {
+    execute_pool(pool, sql, binds).await
+}
+
+// ---- internal dispatch helpers ----
+
+/// Execute a parameterized statement that doesn't return rows. Used
+/// by every non-`FromRow` `_pool` function.
+async fn execute_pool(
+    pool: &Pool,
+    sql: &str,
+    binds: Vec<SqlValue>,
+) -> Result<u64, ExecError> {
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => {
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
+            for v in binds {
+                q = bind_query(q, v);
+            }
+            Ok(q.execute(pg).await?.rows_affected())
+        }
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(sql);
+            for v in binds {
+                q = bind_query_my(q, v);
+            }
+            Ok(q.execute(my).await?.rows_affected())
+        }
+    }
+}
+
+/// Run a SELECT that returns a single scalar `i64` (used by
+/// [`count_rows_pool`]). Inlined per-backend so we can use the
+/// driver-specific `Row::try_get` directly.
+async fn fetch_scalar_pool(
+    pool: &Pool,
+    sql: &str,
+    binds: Vec<SqlValue>,
+) -> Result<i64, ExecError> {
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => {
+            use sqlx::Row as _;
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
+            for v in binds {
+                q = bind_query(q, v);
+            }
+            let row = q.fetch_one(pg).await?;
+            Ok(row.try_get::<i64, _>(0)?)
+        }
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            use sqlx::Row as _;
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(sql);
+            for v in binds {
+                q = bind_query_my(q, v);
+            }
+            let row = q.fetch_one(my).await?;
+            Ok(row.try_get::<i64, _>(0)?)
+        }
+    }
+}
+
+#[cfg(test)]
+mod pool_dispatch_tests {
+    use super::*;
+
+    /// Smoke test: a `Pool::Mysql` from a `connect_lazy` handle picks
+    /// the MySQL dialect when compiling, so a `count_rows_pool` call
+    /// would ship MySQL-shape SQL (backticks + `?`). We can't actually
+    /// execute without a live DB, but we can confirm the dispatch
+    /// finds the right compiler via `pool.dialect()`.
+    #[cfg(feature = "mysql")]
+    #[tokio::test]
+    async fn mysql_pool_dispatch_uses_mysql_dialect() {
+        let my = sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("mysql://user:pass@localhost:1/none")
+            .unwrap();
+        let pool: Pool = my.into();
+        // Confirm the dispatch path's compile step is routed to the
+        // MySQL dialect — this is what protects against regressions
+        // where a future refactor accidentally hard-codes Postgres.
+        assert_eq!(pool.dialect().name(), "mysql");
+        assert_eq!(pool.dialect().quote_ident("col"), "`col`");
+        assert_eq!(pool.dialect().placeholder(1), "?");
+    }
+
+    /// Same shape for Postgres — confirms the dispatch matrix has
+    /// both arms reachable via the public `Pool` enum.
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_pool_dispatch_uses_postgres_dialect() {
+        let pg = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost:1/none")
+            .unwrap();
+        let pool: Pool = pg.into();
+        assert_eq!(pool.dialect().name(), "postgres");
+        assert_eq!(pool.dialect().quote_ident("col"), "\"col\"");
+        assert_eq!(pool.dialect().placeholder(1), "$1");
+    }
+}

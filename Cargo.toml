@@ -26,8 +26,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signa
 
 # DB — backends are turned on via rustango's own `postgres` /
 # `mysql` features so apps can pick a single backend (smaller dep
-# tree) or both (one binary serving either).
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "chrono", "uuid"] }
+# tree) or both (one binary serving either). `json` is a fan-out
+# feature that wires `sqlx::types::Json<T>: Type<DB>` for whichever
+# backend(s) are enabled — needed for MySQL bind() of JSON columns.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "chrono", "uuid", "json"] }
 
 # Schema collection + collections
 inventory = "0.3"

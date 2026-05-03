@@ -24,12 +24,13 @@ pub use compiled::CompiledStatement;
 pub use dialect::Dialect;
 pub use error::{ExecError, SqlError};
 pub use executor::{
-    annotate_count_children, annotate_count_children_on, bulk_insert, bulk_insert_on, bulk_update,
-    bulk_update_on, count_rows, count_rows_on, delete, delete_on, fetch_aggregate,
-    fetch_aggregate_on, fetch_with_prefetch, insert, insert_on, insert_returning,
-    insert_returning_on, raw_execute, raw_execute_on, raw_query, raw_query_on, select_one_row,
-    select_rows, transaction, update, update_on, Counter, Deleter, Fetcher, FkPkAccess,
-    HasPkValue, LoadRelated, Page, Updater,
+    annotate_count_children, annotate_count_children_on, bulk_insert, bulk_insert_on,
+    bulk_insert_pool, bulk_update, bulk_update_on, bulk_update_pool, count_rows, count_rows_on,
+    count_rows_pool, delete, delete_on, delete_pool, fetch_aggregate, fetch_aggregate_on,
+    fetch_with_prefetch, insert, insert_on, insert_pool, insert_returning, insert_returning_on,
+    raw_execute, raw_execute_on, raw_execute_pool, raw_query, raw_query_on, select_one_row,
+    select_rows, transaction, update, update_on, update_pool, Counter, Deleter, Fetcher,
+    FkPkAccess, HasPkValue, LoadRelated, Page, Updater,
 };
 pub use foreign_key::ForeignKey;
 pub use m2m::M2MManager;
