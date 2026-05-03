@@ -80,6 +80,13 @@ pub mod health;
 #[cfg(feature = "email")]
 pub mod email;
 
+/// Tera-rendered email helpers — bridge [`crate::email`] mailers and
+/// the Tera templating engine. Each email = `<name>.subject.txt` +
+/// `<name>.txt` + optional `<name>.html`. See
+/// [`email_templates::EmailRenderer`].
+#[cfg(all(feature = "email", feature = "admin"))]
+pub mod email_templates;
+
 /// Multi-channel notifications — fan one notification out to mail / database /
 /// log / broadcast channels. See [`notifications::notify`].
 #[cfg(feature = "notifications")]
