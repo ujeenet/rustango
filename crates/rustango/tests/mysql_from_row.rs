@@ -227,3 +227,34 @@ fn select_rows_pool_with_related_is_callable() {
         let _fut: _ = rustango::sql::select_rows_pool_with_related::<User>(pool, &q);
     }
 }
+
+#[test]
+fn audit_ensure_table_pool_and_emit_one_pool_are_callable() {
+    // batch 16 — bi-dialect audit primitives. Compile-time probe;
+    // execution would dial the pool and write to rustango_audit_log.
+    fn _probe(pool: &rustango::sql::Pool) {
+        let entry = rustango::audit::PendingEntry {
+            entity_table: "users",
+            entity_pk: "1".into(),
+            operation: rustango::audit::AuditOp::Update,
+            source: rustango::audit::AuditSource::System,
+            changes: serde_json::json!({}),
+        };
+        let _fut = rustango::audit::ensure_table_pool(pool);
+        let _fut = rustango::audit::emit_one_pool(pool, &entry);
+    }
+}
+
+#[test]
+fn audit_mysql_ddl_uses_backticks_and_json() {
+    // batch 16 — confirm the MySQL-shape DDL uses backticks +
+    // JSON + DATETIME(6) (no JSONB / TIMESTAMPTZ / double quotes).
+    let ddl = rustango::audit::CREATE_TABLE_SQL_MYSQL;
+    assert!(ddl.contains("`rustango_audit_log`"));
+    assert!(ddl.contains("`changes`      JSON NOT NULL"));
+    assert!(ddl.contains("DATETIME(6)"));
+    assert!(ddl.contains("BIGINT AUTO_INCREMENT"));
+    assert!(!ddl.contains("JSONB"));
+    assert!(!ddl.contains("TIMESTAMPTZ"));
+    assert!(!ddl.contains("BIGSERIAL"));
+}

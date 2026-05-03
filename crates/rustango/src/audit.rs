@@ -417,3 +417,140 @@ pub async fn ensure_table(pool: &PgPool) -> Result<(), sqlx::Error> {
     }
     Ok(())
 }
+
+// ============================================================ bi-dialect audit (v0.23.0-batch16)
+
+/// `MySQL`-shape audit-log DDL. Mirror of [`CREATE_TABLE_SQL`] with
+/// MySQL types: `BIGINT AUTO_INCREMENT`, `JSON` (no `JSONB`),
+/// `DATETIME(6)` (no `TIMESTAMPTZ`), and backtick identifier quoting
+/// since `MySQL`'s parser rejects double-quoted identifiers in
+/// default `ANSI_QUOTES=off` mode.
+pub const CREATE_TABLE_SQL_MYSQL: &str = r#"
+CREATE TABLE IF NOT EXISTS `rustango_audit_log` (
+    `id`           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `entity_table` VARCHAR(255) NOT NULL,
+    `entity_pk`    VARCHAR(255) NOT NULL,
+    `operation`    VARCHAR(32) NOT NULL,
+    `source`       VARCHAR(255) NOT NULL,
+    `changes`      JSON NOT NULL,
+    `occurred_at`  DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+);
+CREATE INDEX `rustango_audit_log_entity_idx`
+    ON `rustango_audit_log` (`entity_table`, `entity_pk`);
+CREATE INDEX `rustango_audit_log_occurred_idx`
+    ON `rustango_audit_log` (`occurred_at` DESC);
+"#;
+
+/// Bootstrap the audit-log table against either backend. Routes the
+/// per-dialect DDL through the right driver via [`crate::sql::Pool`].
+///
+/// `MySQL` caveat: `CREATE INDEX IF NOT EXISTS` doesn't exist in
+/// `MySQL`. The bootstrap catches duplicate-index errors (1061) and
+/// continues, so the call remains idempotent.
+///
+/// # Errors
+/// Driver / SQL failures other than the swallowed duplicate-index
+/// errors on MySQL.
+pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Error> {
+    let dialect = pool.dialect();
+    let ddl = match dialect.name() {
+        "postgres" => CREATE_TABLE_SQL,
+        "mysql" => CREATE_TABLE_SQL_MYSQL,
+        // Future dialects fall through to a portable best-effort using
+        // `Dialect::column_type` for the timestamp + JSON columns; for
+        // the two backends rustango ships against, hand-rolled DDL is
+        // simpler and produces tighter SQL.
+        _ => CREATE_TABLE_SQL,
+    };
+    for stmt in ddl.split(';') {
+        let trimmed = stmt.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match pool {
+            #[cfg(feature = "postgres")]
+            crate::sql::Pool::Postgres(pg) => {
+                sqlx::query(trimmed).execute(pg).await?;
+            }
+            #[cfg(feature = "mysql")]
+            crate::sql::Pool::Mysql(my) => {
+                if let Err(e) = sqlx::query(trimmed).execute(my).await {
+                    // MySQL has no CREATE INDEX IF NOT EXISTS — the
+                    // index-create statements raise error 1061 when
+                    // the index already exists. Swallow that one
+                    // case so the bootstrap stays idempotent;
+                    // surface every other error.
+                    if !is_mysql_dup_index_error(&e) {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mysql")]
+fn is_mysql_dup_index_error(e: &sqlx::Error) -> bool {
+    if let sqlx::Error::Database(db) = e {
+        return db.code().as_deref() == Some("42000")
+            || db.message().contains("Duplicate key name");
+    }
+    false
+}
+
+#[cfg(not(feature = "mysql"))]
+#[allow(dead_code)]
+fn is_mysql_dup_index_error(_e: &sqlx::Error) -> bool {
+    false
+}
+
+/// Per-row audit emit on a `MySqlConnection`-shape executor —
+/// counterpart of [`emit_one`] using `?` placeholders + backtick
+/// quoting. Used by the macro layer when emitting audited writes
+/// over a MySQL transaction.
+///
+/// # Errors
+/// Driver / SQL failures from the INSERT.
+#[cfg(feature = "mysql")]
+pub async fn emit_one_my<'c, E>(
+    executor: E,
+    entry: &PendingEntry,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'c, Database = sqlx::MySql>,
+{
+    sqlx::query(
+        r#"INSERT INTO `rustango_audit_log`
+              (`entity_table`, `entity_pk`, `operation`, `source`, `changes`)
+           VALUES (?, ?, ?, ?, ?)"#,
+    )
+    .bind(entry.entity_table)
+    .bind(&entry.entity_pk)
+    .bind(entry.operation.as_str())
+    .bind(entry.source.as_token())
+    .bind(sqlx::types::Json(&entry.changes))
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+/// Per-row audit emit via [`crate::sql::Pool`] — dispatches to
+/// [`emit_one`] (Postgres) or [`emit_one_my`] (MySQL). **Not
+/// transactional** with the data write — for write-and-audit
+/// atomicity, acquire a connection / transaction yourself and call
+/// the per-backend `emit_one*` directly.
+///
+/// # Errors
+/// As [`emit_one`].
+pub async fn emit_one_pool(
+    pool: &crate::sql::Pool,
+    entry: &PendingEntry,
+) -> Result<(), sqlx::Error> {
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => emit_one(pg, entry).await,
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => emit_one_my(my, entry).await,
+    }
+}
