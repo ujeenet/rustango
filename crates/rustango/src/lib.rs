@@ -126,6 +126,12 @@ pub mod jwt;
 #[cfg(feature = "uploads")]
 pub mod uploads;
 
+/// First-class `Media` model — Postgres-backed file references with
+/// direct-browser upload, CDN-aware URLs, soft delete + orphan purge.
+/// See [`media::Media`] + [`media::MediaManager`].
+#[cfg(feature = "media")]
+pub mod media;
+
 /// Multi-channel notifications — fan one notification out to mail / database /
 /// log / broadcast channels. See [`notifications::notify`].
 #[cfg(feature = "notifications")]

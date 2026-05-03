@@ -1,0 +1,767 @@
+//! First-class `Media` model — a real `#[derive(Model)]` row that
+//! references a file in the [`crate::storage::Storage`] layer.
+//!
+//! Other models reference media via `Option<ForeignKey<Media>>`
+//! (a normal integer FK column). All metadata — disk, key, MIME,
+//! size, original filename, derived-from chain, custom JSONB —
+//! lives on the Media row, so deletes are atomic and the admin can
+//! browse uploads with no extra wiring.
+//!
+//! ## Quick start
+//!
+//! ```ignore
+//! use rustango::media::{Media, MediaManager};
+//! use rustango::storage::StorageRegistry;
+//! use std::sync::Arc;
+//!
+//! // Once at startup:
+//! Media::ensure_table(&pool).await?;
+//!
+//! let registry = StorageRegistry::new()
+//!     .set("avatars", Arc::new(s3_storage))
+//!     .with_default("avatars");
+//!
+//! let manager = MediaManager::new(pool.clone(), registry);
+//!
+//! // Server-side save (small files):
+//! let media = manager.save_bytes(SaveOpts {
+//!     disk: "avatars".into(),
+//!     key_prefix: "users/".into(),
+//!     bytes: png_bytes.clone(),
+//!     mime: "image/png".into(),
+//!     original_filename: "alice.png".into(),
+//!     uploaded_by_id: Some(42),
+//!     metadata: serde_json::json!({}),
+//! }).await?;
+//!
+//! // Read:
+//! let url = manager.url(&media);                  // CDN-aware
+//! let download = manager.presigned_get(&media, Duration::from_secs(3600)).await;
+//!
+//! // Delete row + storage object via post_delete signal:
+//! manager.delete(&media).await?;
+//! ```
+//!
+//! ## Schema
+//!
+//! ```sql
+//! CREATE TABLE rustango_media (
+//!     id                BIGSERIAL PRIMARY KEY,
+//!     disk              TEXT        NOT NULL,
+//!     storage_key       TEXT        NOT NULL,
+//!     mime              TEXT        NOT NULL,
+//!     size_bytes        BIGINT      NOT NULL,
+//!     original_filename TEXT        NOT NULL,
+//!     status            TEXT        NOT NULL,            -- pending/ready/failed
+//!     uploaded_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+//!     uploaded_by_id    BIGINT,                          -- soft FK to your User table
+//!     derived_from_id   BIGINT,                          -- self-FK for variants/thumbnails
+//!     metadata          JSONB       NOT NULL DEFAULT '{}'::JSONB,
+//!     deleted_at        TIMESTAMPTZ                      -- soft delete
+//! );
+//! CREATE INDEX rustango_media_disk_key_idx ON rustango_media (disk, storage_key);
+//! CREATE INDEX rustango_media_status_idx   ON rustango_media (status)
+//!     WHERE deleted_at IS NULL;
+//! ```
+
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sqlx::{PgPool, Row};
+
+use crate::sql::Auto;
+use crate::storage::{StorageError, StorageRegistry};
+
+const DEFAULT_DISK_NAME: &str = "default";
+
+/// Lifecycle state of a Media row.
+///
+/// - `Pending` — row exists but the storage object hasn't been
+///   confirmed (typical for direct-browser-upload flows: row created
+///   when the presigned URL was issued; storage object lands later).
+/// - `Ready` — the storage object has been confirmed to exist.
+/// - `Failed` — finalize attempted but the object wasn't there.
+///   (Useful for purge sweeps + audit.)
+///
+/// Stored on the database as a single TEXT column so callers can
+/// filter / order without bespoke type handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MediaStatus {
+    Pending,
+    Ready,
+    Failed,
+}
+
+impl MediaStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+        }
+    }
+
+    #[must_use]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(Self::Pending),
+            "ready" => Some(Self::Ready),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// First-class media row. Always referenced from user models via
+/// `Option<ForeignKey<Media>>` rather than embedded directly.
+#[derive(Debug, Clone)]
+pub struct Media {
+    pub id: Auto<i64>,
+    pub disk: String,
+    pub storage_key: String,
+    pub mime: String,
+    pub size_bytes: i64,
+    pub original_filename: String,
+    pub status: String, // MediaStatus serialized as &str
+    pub uploaded_at: DateTime<Utc>,
+    pub uploaded_by_id: Option<i64>,
+    pub derived_from_id: Option<i64>,
+    pub metadata: Value,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+impl Media {
+    /// Create the `rustango_media` table + supporting indexes if
+    /// they don't exist. Idempotent. Safe to call on every boot.
+    ///
+    /// We use raw DDL (matching the `PgJobQueue::ensure_table`
+    /// pattern shipped in v0.21.14) rather than threading through
+    /// the migration system, because Media is a framework-shipped
+    /// table rather than user-authored.
+    ///
+    /// # Errors
+    /// Underlying sqlx error if the DDL fails (insufficient
+    /// privileges, connection issue, etc.).
+    pub async fn ensure_table(pool: &PgPool) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS rustango_media (
+                id                BIGSERIAL PRIMARY KEY,
+                disk              TEXT        NOT NULL,
+                storage_key       TEXT        NOT NULL,
+                mime              TEXT        NOT NULL,
+                size_bytes        BIGINT      NOT NULL,
+                original_filename TEXT        NOT NULL,
+                status            TEXT        NOT NULL,
+                uploaded_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                uploaded_by_id    BIGINT,
+                derived_from_id   BIGINT,
+                metadata          JSONB       NOT NULL DEFAULT '{}'::JSONB,
+                deleted_at        TIMESTAMPTZ
+             )",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS rustango_media_disk_key_idx
+                ON rustango_media (disk, storage_key)",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS rustango_media_status_idx
+                ON rustango_media (status)
+                WHERE deleted_at IS NULL",
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Typed status accessor.
+    #[must_use]
+    pub fn status_enum(&self) -> Option<MediaStatus> {
+        MediaStatus::from_str(&self.status)
+    }
+
+    /// `true` when the storage object is confirmed present.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.status_enum() == Some(MediaStatus::Ready)
+    }
+
+    fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        let id: i64 = row.try_get("id")?;
+        Ok(Self {
+            id: Auto::Set(id),
+            disk: row.try_get("disk")?,
+            storage_key: row.try_get("storage_key")?,
+            mime: row.try_get("mime")?,
+            size_bytes: row.try_get("size_bytes")?,
+            original_filename: row.try_get("original_filename")?,
+            status: row.try_get("status")?,
+            uploaded_at: row.try_get("uploaded_at")?,
+            uploaded_by_id: row.try_get("uploaded_by_id")?,
+            derived_from_id: row.try_get("derived_from_id")?,
+            metadata: row.try_get("metadata")?,
+            deleted_at: row.try_get("deleted_at")?,
+        })
+    }
+}
+
+// =====================================================================
+// Errors
+// =====================================================================
+
+#[derive(Debug, thiserror::Error)]
+pub enum MediaError {
+    #[error("unknown disk: {0} (configure via StorageRegistry::set)")]
+    UnknownDisk(String),
+    #[error("storage: {0}")]
+    Storage(#[from] StorageError),
+    #[error("database: {0}")]
+    Db(#[from] sqlx::Error),
+    #[error("{0}")]
+    Other(String),
+}
+
+// =====================================================================
+// Save options
+// =====================================================================
+
+/// Arguments to [`MediaManager::save_bytes`].
+#[derive(Debug, Clone)]
+pub struct SaveOpts {
+    /// Disk name to write to. Must be registered in the
+    /// [`StorageRegistry`].
+    pub disk: String,
+    /// Optional path prefix prepended to the generated key
+    /// (e.g. `"users/"` -> `"users/{uuid}.png"`). Trailing `/` is
+    /// optional.
+    pub key_prefix: String,
+    /// File body.
+    pub bytes: Vec<u8>,
+    /// MIME type (caller is responsible for trusting / validating
+    /// this; for direct browser uploads the client always lies).
+    pub mime: String,
+    pub original_filename: String,
+    pub uploaded_by_id: Option<i64>,
+    /// Free-form JSONB metadata — EXIF, image dimensions, ICC,
+    /// whatever the app wants to keep alongside the file.
+    pub metadata: Value,
+}
+
+/// Arguments to [`MediaManager::begin_upload`] (direct browser flow).
+#[derive(Debug, Clone)]
+pub struct UploadIntent {
+    pub disk: String,
+    pub key_prefix: String,
+    pub mime: String,
+    pub original_filename: String,
+    pub size_bytes: i64,
+    pub uploaded_by_id: Option<i64>,
+    /// How long the presigned PUT URL stays valid. Default 5 min.
+    pub ttl: Duration,
+}
+
+impl UploadIntent {
+    pub fn new(
+        disk: impl Into<String>,
+        mime: impl Into<String>,
+        original_filename: impl Into<String>,
+        size_bytes: i64,
+    ) -> Self {
+        Self {
+            disk: disk.into(),
+            key_prefix: String::new(),
+            mime: mime.into(),
+            original_filename: original_filename.into(),
+            size_bytes,
+            uploaded_by_id: None,
+            ttl: Duration::from_secs(300),
+        }
+    }
+}
+
+/// Server response to [`MediaManager::begin_upload`] — the row id
+/// the browser will reference, the URL it should PUT to, and an
+/// expiry hint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadTicket {
+    pub media_id: i64,
+    pub upload_url: String,
+    pub expires_at: DateTime<Utc>,
+    /// Echoed back so the caller can confirm what they signed for.
+    pub disk: String,
+    pub storage_key: String,
+}
+
+// =====================================================================
+// MediaManager
+// =====================================================================
+
+/// Glue between the `Media` model and a [`StorageRegistry`]. Cheap
+/// to clone — internal state is `Arc`-shared.
+#[derive(Clone)]
+pub struct MediaManager {
+    pool: PgPool,
+    registry: StorageRegistry,
+}
+
+impl MediaManager {
+    #[must_use]
+    pub fn new(pool: PgPool, registry: StorageRegistry) -> Self {
+        Self { pool, registry }
+    }
+
+    #[must_use]
+    pub fn registry(&self) -> &StorageRegistry {
+        &self.registry
+    }
+
+    #[must_use]
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    fn resolve_disk(&self, name: &str) -> Result<crate::storage::BoxedStorage, MediaError> {
+        self.registry
+            .disk(name)
+            .ok_or_else(|| MediaError::UnknownDisk(name.to_owned()))
+    }
+
+    // --------- save_bytes (server-side write)
+
+    /// Write `opts.bytes` to the storage backend, then insert a
+    /// `Media` row in the `Ready` state. Returns the inserted row.
+    ///
+    /// # Errors
+    /// `UnknownDisk` if the disk isn't registered, `Storage` for any
+    /// upload failure, `Db` for the row insert.
+    pub async fn save_bytes(&self, opts: SaveOpts) -> Result<Media, MediaError> {
+        let storage = self.resolve_disk(&opts.disk)?;
+        let key = build_key(&opts.key_prefix, &opts.original_filename);
+        let size_bytes = opts.bytes.len() as i64;
+        storage.save(&key, &opts.bytes).await?;
+        self.insert_row(InsertRow {
+            disk: opts.disk,
+            storage_key: key,
+            mime: opts.mime,
+            size_bytes,
+            original_filename: opts.original_filename,
+            status: MediaStatus::Ready,
+            uploaded_by_id: opts.uploaded_by_id,
+            derived_from_id: None,
+            metadata: opts.metadata,
+        })
+        .await
+    }
+
+    // --------- begin / finalize (direct browser upload)
+
+    /// Issue a presigned PUT URL for direct browser upload, and
+    /// pre-create a `Media` row in `Pending` state. The browser PUTs
+    /// directly to S3 (or compatible); the server later calls
+    /// [`Self::finalize_upload`] to verify the object landed and
+    /// flip the row to `Ready`.
+    ///
+    /// # Errors
+    /// `UnknownDisk` / `Db` / a `Storage` error if the backend doesn't
+    /// support presigned URLs.
+    pub async fn begin_upload(
+        &self,
+        intent: UploadIntent,
+    ) -> Result<UploadTicket, MediaError> {
+        let storage = self.resolve_disk(&intent.disk)?;
+        let key = build_key(&intent.key_prefix, &intent.original_filename);
+        let upload_url = storage
+            .presigned_put_url(&key, intent.ttl, Some(&intent.mime))
+            .await
+            .ok_or_else(|| {
+                MediaError::Other(format!(
+                    "disk `{}` doesn't support presigned PUT (use save_bytes instead)",
+                    intent.disk
+                ))
+            })?;
+        let row = self
+            .insert_row(InsertRow {
+                disk: intent.disk.clone(),
+                storage_key: key.clone(),
+                mime: intent.mime,
+                size_bytes: intent.size_bytes,
+                original_filename: intent.original_filename,
+                status: MediaStatus::Pending,
+                uploaded_by_id: intent.uploaded_by_id,
+                derived_from_id: None,
+                metadata: Value::Object(serde_json::Map::new()),
+            })
+            .await?;
+        let media_id = match row.id {
+            Auto::Set(v) => v,
+            _ => unreachable!("insert returns Set id"),
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let expires_at = DateTime::<Utc>::from_timestamp(
+            i64::try_from(now + intent.ttl.as_secs()).unwrap_or(i64::MAX),
+            0,
+        )
+        .unwrap_or_else(Utc::now);
+        Ok(UploadTicket {
+            media_id,
+            upload_url,
+            expires_at,
+            disk: intent.disk,
+            storage_key: key,
+        })
+    }
+
+    /// Confirm the storage object exists for `media_id` and flip
+    /// the row from `Pending` to `Ready`. If the object isn't there,
+    /// flip to `Failed` instead so a purge sweep can clean it up.
+    ///
+    /// Returns the (possibly-updated) row regardless.
+    ///
+    /// # Errors
+    /// `Db` if the row doesn't exist or the update fails. `Storage`
+    /// for transport failures during the `exists` check.
+    pub async fn finalize_upload(&self, media_id: i64) -> Result<Media, MediaError> {
+        let media = self
+            .get(media_id)
+            .await?
+            .ok_or_else(|| MediaError::Other(format!("media {media_id} not found")))?;
+        let storage = self.resolve_disk(&media.disk)?;
+        let exists = storage.exists(&media.storage_key).await?;
+        let new_status = if exists {
+            MediaStatus::Ready
+        } else {
+            MediaStatus::Failed
+        };
+        sqlx::query("UPDATE rustango_media SET status = $1 WHERE id = $2")
+            .bind(new_status.as_str())
+            .bind(media_id)
+            .execute(&self.pool)
+            .await?;
+        let mut updated = media;
+        updated.status = new_status.as_str().to_owned();
+        Ok(updated)
+    }
+
+    // --------- read
+
+    /// Fetch by id. Soft-deleted rows are excluded; pass through to
+    /// [`Self::get_including_deleted`] when you want them.
+    pub async fn get(&self, id: i64) -> Result<Option<Media>, MediaError> {
+        let row = sqlx::query(
+            "SELECT id, disk, storage_key, mime, size_bytes, original_filename,
+                    status, uploaded_at, uploaded_by_id, derived_from_id,
+                    metadata, deleted_at
+               FROM rustango_media
+              WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| Media::from_row(&r)).transpose()?)
+    }
+
+    /// Like [`Self::get`] but returns soft-deleted rows too. Use
+    /// from admin / restore flows.
+    pub async fn get_including_deleted(&self, id: i64) -> Result<Option<Media>, MediaError> {
+        let row = sqlx::query(
+            "SELECT id, disk, storage_key, mime, size_bytes, original_filename,
+                    status, uploaded_at, uploaded_by_id, derived_from_id,
+                    metadata, deleted_at
+               FROM rustango_media
+              WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| Media::from_row(&r)).transpose()?)
+    }
+
+    /// CDN-aware URL for `m`. Returns `None` when neither the disk's
+    /// CDN prefix nor the backend's public URL is available.
+    #[must_use]
+    pub fn url(&self, m: &Media) -> Option<String> {
+        self.registry.cdn_url(&m.disk, &m.storage_key)
+    }
+
+    /// Bare backend URL (no CDN). For internal admin / debug.
+    #[must_use]
+    pub fn origin_url(&self, m: &Media) -> Option<String> {
+        self.registry.origin_url(&m.disk, &m.storage_key)
+    }
+
+    /// Time-limited download link suitable for `<a href=...>`.
+    /// Returns `None` when the disk's backend can't sign.
+    pub async fn presigned_get(&self, m: &Media, ttl: Duration) -> Option<String> {
+        let storage = self.registry.disk(&m.disk)?;
+        storage.presigned_get_url(&m.storage_key, ttl).await
+    }
+
+    /// Read the file bytes server-side.
+    pub async fn load_bytes(&self, m: &Media) -> Result<Vec<u8>, MediaError> {
+        let storage = self.resolve_disk(&m.disk)?;
+        Ok(storage.load(&m.storage_key).await?)
+    }
+
+    // --------- delete
+
+    /// Soft-delete: mark `deleted_at = NOW()`. The storage object
+    /// stays put — purge it later via [`Self::purge`] or wait for
+    /// the `purge_orphans` sweep.
+    pub async fn delete(&self, m: &Media) -> Result<(), MediaError> {
+        let id = match m.id {
+            Auto::Set(v) => v,
+            _ => return Err(MediaError::Other("Media has no id".into())),
+        };
+        sqlx::query("UPDATE rustango_media SET deleted_at = NOW() WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Hard-delete: remove the storage object AND the row. Use for
+    /// "I'm sure I want this gone right now" — typically called by
+    /// the post_delete signal once `delete()` has soft-deleted.
+    pub async fn purge(&self, m: &Media) -> Result<(), MediaError> {
+        let id = match m.id {
+            Auto::Set(v) => v,
+            _ => return Err(MediaError::Other("Media has no id".into())),
+        };
+        // Best-effort storage delete (matches Storage::delete trait
+        // semantics — missing key is fine).
+        if let Some(storage) = self.registry.disk(&m.disk) {
+            let _ = storage.delete(&m.storage_key).await;
+        }
+        sqlx::query("DELETE FROM rustango_media WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Hard-delete every soft-deleted Media row older than
+    /// `older_than`, removing the storage object as we go. Returns
+    /// the count of rows purged.
+    ///
+    /// Run from the [`crate::scheduler`] (e.g. nightly) to keep
+    /// orphan storage objects from accumulating.
+    pub async fn purge_orphans(&self, older_than: Duration) -> Result<u64, MediaError> {
+        let secs = older_than.as_secs() as f64;
+        let rows = sqlx::query(
+            "SELECT id, disk, storage_key, mime, size_bytes, original_filename,
+                    status, uploaded_at, uploaded_by_id, derived_from_id,
+                    metadata, deleted_at
+               FROM rustango_media
+              WHERE deleted_at IS NOT NULL
+                AND deleted_at < NOW() - ($1 || ' seconds')::INTERVAL",
+        )
+        .bind(format!("{secs:.3}"))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut purged = 0u64;
+        for row in rows {
+            let m = Media::from_row(&row)?;
+            self.purge(&m).await?;
+            purged += 1;
+        }
+        Ok(purged)
+    }
+
+    /// Hard-delete every Media row stuck in `Pending` for longer
+    /// than `older_than`. Direct-browser-upload flows leave Pending
+    /// rows behind when the browser abandons before calling
+    /// `finalize_upload`; this sweep cleans them up.
+    pub async fn purge_pending(&self, older_than: Duration) -> Result<u64, MediaError> {
+        let secs = older_than.as_secs() as f64;
+        let res = sqlx::query(
+            "DELETE FROM rustango_media
+              WHERE status = 'pending'
+                AND uploaded_at < NOW() - ($1 || ' seconds')::INTERVAL",
+        )
+        .bind(format!("{secs:.3}"))
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    // --------- internal: row insert
+
+    async fn insert_row(&self, r: InsertRow) -> Result<Media, MediaError> {
+        let row = sqlx::query(
+            "INSERT INTO rustango_media
+                (disk, storage_key, mime, size_bytes, original_filename,
+                 status, uploaded_by_id, derived_from_id, metadata)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             RETURNING id, disk, storage_key, mime, size_bytes, original_filename,
+                       status, uploaded_at, uploaded_by_id, derived_from_id,
+                       metadata, deleted_at",
+        )
+        .bind(&r.disk)
+        .bind(&r.storage_key)
+        .bind(&r.mime)
+        .bind(r.size_bytes)
+        .bind(&r.original_filename)
+        .bind(r.status.as_str())
+        .bind(r.uploaded_by_id)
+        .bind(r.derived_from_id)
+        .bind(&r.metadata)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(Media::from_row(&row)?)
+    }
+}
+
+struct InsertRow {
+    disk: String,
+    storage_key: String,
+    mime: String,
+    size_bytes: i64,
+    original_filename: String,
+    status: MediaStatus,
+    uploaded_by_id: Option<i64>,
+    derived_from_id: Option<i64>,
+    metadata: Value,
+}
+
+// =====================================================================
+// Helpers
+// =====================================================================
+
+/// Build a storage key: `<prefix>/<uuid>-<sanitized filename>`.
+/// Same sanitization rules as the `uploads` module's
+/// `sanitize_filename` (basename only; safe ASCII; underscore for
+/// the rest).
+fn build_key(prefix: &str, original_filename: &str) -> String {
+    let prefix = prefix.trim_end_matches('/');
+    let safe = sanitize_filename(original_filename);
+    let uuid = uuid::Uuid::new_v4();
+    if prefix.is_empty() {
+        format!("{uuid}-{safe}")
+    } else {
+        format!("{prefix}/{uuid}-{safe}")
+    }
+}
+
+fn sanitize_filename(name: &str) -> String {
+    let base = std::path::Path::new(name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name);
+    let mut out = String::with_capacity(base.len());
+    for c in base.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push_str("upload");
+    }
+    out
+}
+
+/// Default disk name when the registry has nothing configured —
+/// prefer matching this constant when constructing default `disk`
+/// strings in higher layers (router, manager helpers, etc.).
+#[doc(hidden)]
+pub const DEFAULT_DISK: &str = DEFAULT_DISK_NAME;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_status_round_trips_through_string() {
+        for s in [MediaStatus::Pending, MediaStatus::Ready, MediaStatus::Failed] {
+            let str_form = s.as_str();
+            let parsed = MediaStatus::from_str(str_form).unwrap();
+            assert_eq!(parsed, s);
+        }
+        assert!(MediaStatus::from_str("nonsense").is_none());
+    }
+
+    #[test]
+    fn build_key_uses_uuid_prefix_and_keeps_extension() {
+        let k = build_key("avatars", "alice.png");
+        assert!(k.starts_with("avatars/"));
+        assert!(k.ends_with("-alice.png"));
+    }
+
+    #[test]
+    fn build_key_strips_trailing_slash_on_prefix() {
+        let a = build_key("avatars", "a.png");
+        let b = build_key("avatars/", "a.png");
+        // Both should produce the same shape — exactly one slash.
+        assert_eq!(a.matches('/').count(), 1);
+        assert_eq!(b.matches('/').count(), 1);
+    }
+
+    #[test]
+    fn build_key_handles_empty_prefix() {
+        let k = build_key("", "a.png");
+        assert!(!k.starts_with('/'));
+        assert!(k.ends_with("-a.png"));
+        assert_eq!(k.matches('/').count(), 0);
+    }
+
+    #[test]
+    fn sanitize_strips_directory_and_unsafe_chars() {
+        assert_eq!(sanitize_filename("../etc/passwd"), "passwd");
+        assert_eq!(sanitize_filename("My File.png"), "My_File.png");
+        assert_eq!(sanitize_filename("évil.jpg"), "_vil.jpg");
+        assert_eq!(sanitize_filename(""), "upload");
+    }
+
+    #[test]
+    fn upload_intent_has_sane_defaults() {
+        let i = UploadIntent::new("avatars", "image/png", "x.png", 100);
+        assert_eq!(i.disk, "avatars");
+        assert_eq!(i.ttl, Duration::from_secs(300));
+        assert!(i.uploaded_by_id.is_none());
+        assert!(i.key_prefix.is_empty());
+    }
+
+    #[test]
+    fn media_is_ready_reflects_status_string() {
+        let mut m = bare_media();
+        m.status = "ready".into();
+        assert!(m.is_ready());
+        m.status = "pending".into();
+        assert!(!m.is_ready());
+        m.status = "garbage".into();
+        assert!(!m.is_ready());
+    }
+
+    #[test]
+    fn media_status_enum_handles_unknown_string() {
+        let mut m = bare_media();
+        m.status = "garbage".into();
+        assert!(m.status_enum().is_none());
+    }
+
+    fn bare_media() -> Media {
+        Media {
+            id: Auto::Set(1),
+            disk: "default".into(),
+            storage_key: "k".into(),
+            mime: "text/plain".into(),
+            size_bytes: 0,
+            original_filename: "x".into(),
+            status: "ready".into(),
+            uploaded_at: Utc::now(),
+            uploaded_by_id: None,
+            derived_from_id: None,
+            metadata: serde_json::json!({}),
+            deleted_at: None,
+        }
+    }
+}

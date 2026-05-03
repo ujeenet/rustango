@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3"]
+default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3", "media"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -132,6 +132,12 @@ jwt = ["dep:hmac", "dep:sha2", "dep:subtle", "dep:base64"]
 # uploads are a one-call API with size + extension guards. Pulls
 # `multer` transitively via `axum/multipart`.
 uploads = ["admin", "storage", "axum/multipart"]
+
+# First-class media model (`rustango::media`) — a Postgres-backed
+# Media row that references a file in the Storage layer. Handles
+# direct browser upload (via S3 presigning), CDN-aware URLs,
+# soft delete + orphan purge sweep. Implies `storage` + `postgres`.
+media = ["storage", "postgres"]
 
 # S3-compatible storage backend (`rustango::storage::s3::S3Storage`).
 # Hand-rolled SigV4 over reqwest — works for AWS S3, Cloudflare R2,
