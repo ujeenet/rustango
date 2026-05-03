@@ -30,6 +30,27 @@ use crate::core::{
 
 use super::{CompiledStatement, SqlError};
 
+/// Postgres-shape `<col> ?| ARRAY[$1, $2, …]` / `<col> ?& ARRAY[…]`
+/// helper. Factored out so both default JSON-key methods call it.
+fn write_pg_array_keys(
+    sql: &mut String,
+    qualified_col: &str,
+    placeholders: &[String],
+    keyword: &str,
+) {
+    sql.push_str(qualified_col);
+    sql.push_str(keyword);
+    let mut first = true;
+    for p in placeholders {
+        if !first {
+            sql.push_str(", ");
+        }
+        first = false;
+        sql.push_str(p);
+    }
+    sql.push(']');
+}
+
 /// Writes a dialect-neutral query IR to a parameterized statement,
 /// plus the small bag of per-dialect DDL primitives the migration
 /// runner needs (identifier quoting, placeholder syntax, `SERIAL` /
@@ -116,15 +137,96 @@ pub trait Dialect {
         None
     }
 
-    /// `true` if `op` can be lowered to SQL by this dialect.
-    /// `IsDistinctFrom`, `ILike`, and the JSONB operators
-    /// (`JsonContains`, `JsonHasKey`, etc.) are Postgres-only today.
-    /// Returning `false` here makes the writer fast-fail with a clear
-    /// [`SqlError::OperatorNotSupportedInDialect`] instead of
-    /// producing SQL that the backend would parse-error on.
+    /// `true` if `op` can be lowered to SQL by this dialect. Default
+    /// `true` — every dialect ships translations for every operator
+    /// in the IR. Override to return `false` for ops that genuinely
+    /// have no equivalent (rare); the writer surfaces a clear
+    /// [`SqlError::OperatorNotSupportedInDialect`] in that case.
     fn supports_op(&self, op: Op) -> bool {
         let _ = op;
         true
+    }
+
+    // ---- per-operator predicate writers ----
+    //
+    // Each method is handed the **already-rendered, qualified column**
+    // (e.g. `"users"."name"` on Postgres or `` `users`.`name` `` on
+    // MySQL) plus a placeholder string (e.g. `$1` or `?`). The dialect
+    // composes them into the SQL fragment its parser expects. Default
+    // implementations emit Postgres / ANSI shape; MySQL overrides the
+    // ones that need a different translation.
+
+    /// Case-insensitive LIKE: `<col> ILIKE <p>` (Postgres) or
+    /// `LOWER(<col>) LIKE LOWER(<p>)` (MySQL fallback).
+    fn write_ilike(&self, sql: &mut String, qualified_col: &str, placeholder: &str, negated: bool) {
+        sql.push_str(qualified_col);
+        sql.push_str(if negated { " NOT ILIKE " } else { " ILIKE " });
+        sql.push_str(placeholder);
+    }
+
+    /// Null-safe equality. Postgres: `<col> IS [NOT] DISTINCT FROM <p>`.
+    /// `distinct = true` means "not equal under null-safe semantics".
+    fn write_null_safe_eq(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        placeholder: &str,
+        distinct: bool,
+    ) {
+        sql.push_str(qualified_col);
+        sql.push_str(if distinct {
+            " IS DISTINCT FROM "
+        } else {
+            " IS NOT DISTINCT FROM "
+        });
+        sql.push_str(placeholder);
+    }
+
+    /// JSON containment: `<col> @> <p>::jsonb` (Postgres) /
+    /// `JSON_CONTAINS(<col>, <p>)` (MySQL).
+    fn write_json_contains(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {
+        sql.push_str(qualified_col);
+        sql.push_str(" @> ");
+        sql.push_str(placeholder);
+        sql.push_str("::jsonb");
+    }
+
+    /// Inverse of [`write_json_contains`]: `<col> <@ <p>::jsonb` (Postgres) /
+    /// `JSON_CONTAINS(<p>, <col>)` (MySQL — argument order swapped).
+    fn write_json_contained_by(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {
+        sql.push_str(qualified_col);
+        sql.push_str(" <@ ");
+        sql.push_str(placeholder);
+        sql.push_str("::jsonb");
+    }
+
+    /// Top-level JSON key existence: `<col> ? <p>` (Postgres) /
+    /// `JSON_CONTAINS_PATH(<col>, 'one', CONCAT('$.', <p>))` (MySQL).
+    fn write_json_has_key(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {
+        sql.push_str(qualified_col);
+        sql.push_str(" ? ");
+        sql.push_str(placeholder);
+    }
+
+    /// Multi-key JSON existence. `mode = "one"` matches the
+    /// Postgres `?|` "any" operator, `mode = "all"` matches `?&`.
+    fn write_json_has_any_keys(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        placeholders: &[String],
+    ) {
+        write_pg_array_keys(sql, qualified_col, placeholders, " ?| ARRAY[");
+    }
+
+    /// `JsonHasAllKeys` companion of [`write_json_has_any_keys`].
+    fn write_json_has_all_keys(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        placeholders: &[String],
+    ) {
+        write_pg_array_keys(sql, qualified_col, placeholders, " ?& ARRAY[");
     }
 
     /// Append the dialect's spelling of an `ON CONFLICT` / `ON DUPLICATE

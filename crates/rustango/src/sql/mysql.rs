@@ -24,7 +24,7 @@
 
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
-    FieldType, InsertQuery, Op, SelectQuery, UpdateQuery,
+    FieldType, InsertQuery, SelectQuery, UpdateQuery,
 };
 
 use super::writers::{
@@ -72,24 +72,98 @@ impl Dialect for MySql {
         if b { "1" } else { "0" }
     }
 
-    /// `MySQL` rejects `ILIKE`, `IS DISTINCT FROM`, and the JSONB
-    /// operators that have no native equivalent. Returning `false`
-    /// here makes the writer fast-fail with a clear
-    /// [`SqlError::OperatorNotSupportedInDialect`] instead of producing
-    /// SQL the parser would reject. Translation lands in batch4.
-    fn supports_op(&self, op: Op) -> bool {
-        !matches!(
-            op,
-            Op::ILike
-                | Op::NotILike
-                | Op::IsDistinctFrom
-                | Op::IsNotDistinctFrom
-                | Op::JsonContains
-                | Op::JsonContainedBy
-                | Op::JsonHasKey
-                | Op::JsonHasAnyKey
-                | Op::JsonHasAllKeys
-        )
+    // `MySQL` supports every operator in the IR — batch4 ships
+    // translations for `ILIKE`, `IS DISTINCT FROM`, and the JSONB
+    // operators via the per-op `write_*` methods below. Trait default
+    // `true` is correct, no override needed.
+
+    fn write_ilike(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        placeholder: &str,
+        negated: bool,
+    ) {
+        // `MySQL` has no native `ILIKE`; collation may make `LIKE`
+        // case-insensitive on `_ci` columns, but to guarantee semantics
+        // independent of column collation, lowercase both sides.
+        sql.push_str("LOWER(");
+        sql.push_str(qualified_col);
+        sql.push_str(if negated { ") NOT LIKE LOWER(" } else { ") LIKE LOWER(" });
+        sql.push_str(placeholder);
+        sql.push(')');
+    }
+
+    fn write_null_safe_eq(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        placeholder: &str,
+        distinct: bool,
+    ) {
+        // MySQL `<=>` is null-safe equality (`NULL <=> NULL` → 1).
+        // `IS DISTINCT FROM` is the *negation* of null-safe equality,
+        // so wrap with `NOT (…)` when `distinct = true`.
+        if distinct {
+            sql.push_str("NOT (");
+        }
+        sql.push_str(qualified_col);
+        sql.push_str(" <=> ");
+        sql.push_str(placeholder);
+        if distinct {
+            sql.push(')');
+        }
+    }
+
+    fn write_json_contains(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {
+        // MySQL: `JSON_CONTAINS(target, candidate)` returns 1 if every
+        // value in `candidate` exists in `target`. Order matches the
+        // Postgres `target @> candidate` semantics.
+        sql.push_str("JSON_CONTAINS(");
+        sql.push_str(qualified_col);
+        sql.push_str(", ");
+        sql.push_str(placeholder);
+        sql.push(')');
+    }
+
+    fn write_json_contained_by(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {
+        // PG `target <@ candidate` ↔ `JSON_CONTAINS(candidate, target)`.
+        // Argument order is swapped compared to the contains case.
+        sql.push_str("JSON_CONTAINS(");
+        sql.push_str(placeholder);
+        sql.push_str(", ");
+        sql.push_str(qualified_col);
+        sql.push(')');
+    }
+
+    fn write_json_has_key(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {
+        // PG `col ? 'key'` checks top-level key existence on a JSONB
+        // value. MySQL has `JSON_CONTAINS_PATH(col, 'one', '$.key')`
+        // for the same check; we assemble `'$.<key>'` at runtime via
+        // `CONCAT('$.', ?)` so the path is built from the bound value.
+        sql.push_str("JSON_CONTAINS_PATH(");
+        sql.push_str(qualified_col);
+        sql.push_str(", 'one', CONCAT('$.', ");
+        sql.push_str(placeholder);
+        sql.push_str("))");
+    }
+
+    fn write_json_has_any_keys(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        placeholders: &[String],
+    ) {
+        write_my_json_has_keys(sql, qualified_col, placeholders, "one");
+    }
+
+    fn write_json_has_all_keys(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        placeholders: &[String],
+    ) {
+        write_my_json_has_keys(sql, qualified_col, placeholders, "all");
     }
 
     /// `MySQL`'s `INSERT … ON DUPLICATE KEY UPDATE` doesn't take a
@@ -214,14 +288,15 @@ impl Dialect for MySql {
 
     fn compile_bulk_update(
         &self,
-        _query: &BulkUpdateQuery,
+        query: &BulkUpdateQuery,
     ) -> Result<CompiledStatement, SqlError> {
-        // Postgres uses `UPDATE … FROM (VALUES …)`; MySQL has no such
-        // shape pre-8.0.19. Batch4 will translate to either a
-        // `JOIN (VALUES …)` or a `CASE WHEN` cascade. Until then,
-        // fail clearly so callers know to fall back to per-row
-        // `compile_update`.
-        Err(SqlError::DialectQueryCompilationNotImplemented { dialect: "mysql" })
+        // MySQL 8.0.19+ supports `VALUES ROW(…), ROW(…)` table
+        // constructors that can be JOINed in `UPDATE … INNER JOIN
+        // (VALUES …) AS d(pk, c1, …) ON t.pk = d.pk SET t.c1 = d.c1`.
+        // Apps on older MySQL fall back to per-row `compile_update`.
+        let mut b = Sql::new(self);
+        write_mysql_bulk_update(&mut b, query)?;
+        Ok(b.finish())
     }
 }
 
@@ -239,6 +314,98 @@ fn write_my_ident(sql: &mut String, name: &str) {
         }
     }
     sql.push('`');
+}
+
+/// Shared body of [`MySql::write_json_has_any_keys`] /
+/// [`MySql::write_json_has_all_keys`]. `mode` is `"one"` for "any key
+/// matches" or `"all"` for "every key matches".
+fn write_my_json_has_keys(
+    sql: &mut String,
+    qualified_col: &str,
+    placeholders: &[String],
+    mode: &'static str,
+) {
+    sql.push_str("JSON_CONTAINS_PATH(");
+    sql.push_str(qualified_col);
+    sql.push_str(", '");
+    sql.push_str(mode);
+    sql.push('\'');
+    for p in placeholders {
+        sql.push_str(", CONCAT('$.', ");
+        sql.push_str(p);
+        sql.push(')');
+    }
+    sql.push(')');
+}
+
+/// MySQL bulk UPDATE: rewrite Postgres' `UPDATE t SET … FROM (VALUES …)`
+/// to `UPDATE t INNER JOIN (VALUES ROW(…), ROW(…)) AS d(pk, c1, …)
+/// ON t.pk = d.pk SET t.c1 = d.c1, …` (the multi-row VALUES + JOIN
+/// shape MySQL 8.0.19+ supports). The dialect dispatches to this from
+/// `compile_bulk_update` — kept here rather than in `writers` because
+/// the syntax is MySQL-specific.
+fn write_mysql_bulk_update(
+    b: &mut crate::sql::writers::Sql<'_>,
+    query: &crate::core::BulkUpdateQuery,
+) -> Result<(), SqlError> {
+    use std::fmt::Write as _;
+
+    if query.rows.is_empty() {
+        return Err(SqlError::EmptyBulkInsert);
+    }
+    if query.update_columns.is_empty() {
+        return Err(SqlError::EmptyUpdateSet);
+    }
+    let pk_field = query
+        .model
+        .primary_key()
+        .ok_or(SqlError::MissingPrimaryKey)?;
+
+    b.sql.push_str("UPDATE ");
+    b.write_ident(query.model.table);
+    b.sql.push_str(" INNER JOIN (VALUES ");
+    let mut first_row = true;
+    for row in &query.rows {
+        if !first_row {
+            b.sql.push_str(", ");
+        }
+        first_row = false;
+        b.sql.push_str("ROW(");
+        for (i, val) in row.iter().enumerate() {
+            if i > 0 {
+                b.sql.push_str(", ");
+            }
+            b.params.push(val.clone());
+            let _ = write!(b.sql, "{}", b.d.placeholder(b.params.len()));
+        }
+        b.sql.push(')');
+    }
+    b.sql.push_str(") AS __data(");
+    b.write_ident(pk_field.column);
+    for col in &query.update_columns {
+        b.sql.push_str(", ");
+        b.write_ident(col);
+    }
+    b.sql.push_str(") ON ");
+    b.write_ident(query.model.table);
+    b.sql.push('.');
+    b.write_ident(pk_field.column);
+    b.sql.push_str(" = __data.");
+    b.write_ident(pk_field.column);
+    b.sql.push_str(" SET ");
+    let mut first = true;
+    for col in &query.update_columns {
+        if !first {
+            b.sql.push_str(", ");
+        }
+        first = false;
+        b.write_ident(query.model.table);
+        b.sql.push('.');
+        b.write_ident(col);
+        b.sql.push_str(" = __data.");
+        b.write_ident(col);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -298,26 +465,35 @@ mod tests {
     }
 
     #[test]
-    fn supports_op_rejects_pg_only_operators() {
-        assert!(!MySql.supports_op(Op::ILike));
-        assert!(!MySql.supports_op(Op::NotILike));
-        assert!(!MySql.supports_op(Op::IsDistinctFrom));
-        assert!(!MySql.supports_op(Op::IsNotDistinctFrom));
-        assert!(!MySql.supports_op(Op::JsonContains));
-        assert!(!MySql.supports_op(Op::JsonContainedBy));
-        assert!(!MySql.supports_op(Op::JsonHasKey));
-        assert!(!MySql.supports_op(Op::JsonHasAnyKey));
-        assert!(!MySql.supports_op(Op::JsonHasAllKeys));
-    }
-
-    #[test]
-    fn supports_op_accepts_portable_operators() {
-        assert!(MySql.supports_op(Op::Eq));
-        assert!(MySql.supports_op(Op::Ne));
-        assert!(MySql.supports_op(Op::Like));
-        assert!(MySql.supports_op(Op::In));
-        assert!(MySql.supports_op(Op::Between));
-        assert!(MySql.supports_op(Op::IsNull));
+    fn supports_op_accepts_every_operator_after_batch4() {
+        // batch4 ships translations for ILIKE, IS DISTINCT FROM, and
+        // the JSONB operators; supports_op now returns true for all.
+        use crate::core::Op;
+        for op in [
+            Op::Eq,
+            Op::Ne,
+            Op::Lt,
+            Op::Lte,
+            Op::Gt,
+            Op::Gte,
+            Op::In,
+            Op::NotIn,
+            Op::Like,
+            Op::NotLike,
+            Op::ILike,
+            Op::NotILike,
+            Op::Between,
+            Op::IsNull,
+            Op::IsDistinctFrom,
+            Op::IsNotDistinctFrom,
+            Op::JsonContains,
+            Op::JsonContainedBy,
+            Op::JsonHasKey,
+            Op::JsonHasAnyKey,
+            Op::JsonHasAllKeys,
+        ] {
+            assert!(MySql.supports_op(op), "expected {op:?} to be supported");
+        }
     }
 
     #[test]
@@ -380,25 +556,267 @@ mod tests {
     }
 
     #[test]
-    fn bulk_update_errors_until_batch4() {
-        use crate::core::{BulkUpdateQuery, ModelSchema};
-        // We don't need to construct a real BulkUpdateQuery — the
-        // dispatch fast-fails before touching the IR. Use a stub.
-        let stub = BulkUpdateQuery {
-            model: empty_model(),
-            update_columns: vec!["x"],
-            rows: vec![],
+    fn ilike_translates_to_lower_like_lower() {
+        use crate::core::{Filter, Op, SelectQuery, SqlValue, WhereExpr};
+        let model = empty_model_with("users", &[("name", FieldType::String)]);
+        let q = SelectQuery {
+            model,
+            joins: vec![],
+            where_clause: WhereExpr::Predicate(Filter {
+                column: "name",
+                op: Op::ILike,
+                value: SqlValue::String("%Alice%".into()),
+            }),
+            search: None,
+            order_by: vec![],
+            limit: None,
+            offset: None,
         };
-        let err = MySql.compile_bulk_update(&stub).unwrap_err();
-        assert!(matches!(
-            err,
-            SqlError::DialectQueryCompilationNotImplemented { dialect: "mysql" }
-        ));
-        let _ = std::any::type_name::<ModelSchema>();
+        let stmt = MySql.compile_select(&q).unwrap();
+        assert_eq!(
+            stmt.sql,
+            "SELECT `name` FROM `users` WHERE LOWER(`name`) LIKE LOWER(?)"
+        );
+        assert_eq!(stmt.params.len(), 1);
     }
 
-    fn empty_model() -> &'static crate::core::ModelSchema {
-        empty_model_with("stub", &[])
+    #[test]
+    fn not_ilike_translates_to_not_like() {
+        use crate::core::{Filter, Op, SelectQuery, SqlValue, WhereExpr};
+        let model = empty_model_with("users", &[("name", FieldType::String)]);
+        let q = SelectQuery {
+            model,
+            joins: vec![],
+            where_clause: WhereExpr::Predicate(Filter {
+                column: "name",
+                op: Op::NotILike,
+                value: SqlValue::String("%bot%".into()),
+            }),
+            search: None,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+        };
+        let stmt = MySql.compile_select(&q).unwrap();
+        assert!(stmt.sql.contains("LOWER(`name`) NOT LIKE LOWER(?)"));
+    }
+
+    #[test]
+    fn is_distinct_from_translates_to_not_null_safe_eq() {
+        use crate::core::{Filter, Op, SelectQuery, SqlValue, WhereExpr};
+        let model = empty_model_with("users", &[("email", FieldType::String)]);
+        let q = SelectQuery {
+            model,
+            joins: vec![],
+            where_clause: WhereExpr::Predicate(Filter {
+                column: "email",
+                op: Op::IsDistinctFrom,
+                value: SqlValue::String("a@b".into()),
+            }),
+            search: None,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+        };
+        let stmt = MySql.compile_select(&q).unwrap();
+        assert!(stmt.sql.contains("NOT (`email` <=> ?)"));
+    }
+
+    #[test]
+    fn is_not_distinct_from_translates_to_null_safe_eq() {
+        use crate::core::{Filter, Op, SelectQuery, SqlValue, WhereExpr};
+        let model = empty_model_with("users", &[("email", FieldType::String)]);
+        let q = SelectQuery {
+            model,
+            joins: vec![],
+            where_clause: WhereExpr::Predicate(Filter {
+                column: "email",
+                op: Op::IsNotDistinctFrom,
+                value: SqlValue::Null,
+            }),
+            search: None,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+        };
+        let stmt = MySql.compile_select(&q).unwrap();
+        // No outer NOT; bare null-safe equality.
+        assert!(stmt.sql.contains("`email` <=> ?"));
+        assert!(!stmt.sql.contains("NOT"));
+    }
+
+    #[test]
+    fn json_contains_translates_to_json_contains_function() {
+        use crate::core::{Filter, Op, SelectQuery, SqlValue, WhereExpr};
+        let model = empty_model_with("posts", &[("meta", FieldType::Json)]);
+        let q = SelectQuery {
+            model,
+            joins: vec![],
+            where_clause: WhereExpr::Predicate(Filter {
+                column: "meta",
+                op: Op::JsonContains,
+                value: SqlValue::Json(serde_json::json!({"k": "v"})),
+            }),
+            search: None,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+        };
+        let stmt = MySql.compile_select(&q).unwrap();
+        assert!(stmt.sql.contains("JSON_CONTAINS(`meta`, ?)"));
+        assert!(!stmt.sql.contains("@>"));
+    }
+
+    #[test]
+    fn json_contained_by_swaps_argument_order() {
+        use crate::core::{Filter, Op, SelectQuery, SqlValue, WhereExpr};
+        let model = empty_model_with("posts", &[("meta", FieldType::Json)]);
+        let q = SelectQuery {
+            model,
+            joins: vec![],
+            where_clause: WhereExpr::Predicate(Filter {
+                column: "meta",
+                op: Op::JsonContainedBy,
+                value: SqlValue::Json(serde_json::json!({"k": "v"})),
+            }),
+            search: None,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+        };
+        let stmt = MySql.compile_select(&q).unwrap();
+        // Argument order is swapped vs JSON_CONTAINS — value first.
+        assert!(stmt.sql.contains("JSON_CONTAINS(?, `meta`)"));
+    }
+
+    #[test]
+    fn json_has_key_translates_to_contains_path_with_concat() {
+        use crate::core::{Filter, Op, SelectQuery, SqlValue, WhereExpr};
+        let model = empty_model_with("posts", &[("meta", FieldType::Json)]);
+        let q = SelectQuery {
+            model,
+            joins: vec![],
+            where_clause: WhereExpr::Predicate(Filter {
+                column: "meta",
+                op: Op::JsonHasKey,
+                value: SqlValue::String("title".into()),
+            }),
+            search: None,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+        };
+        let stmt = MySql.compile_select(&q).unwrap();
+        assert!(stmt
+            .sql
+            .contains("JSON_CONTAINS_PATH(`meta`, 'one', CONCAT('$.', ?))"));
+    }
+
+    #[test]
+    fn json_has_any_keys_translates_to_contains_path_one() {
+        use crate::core::{Filter, Op, SelectQuery, SqlValue, WhereExpr};
+        let model = empty_model_with("posts", &[("meta", FieldType::Json)]);
+        let q = SelectQuery {
+            model,
+            joins: vec![],
+            where_clause: WhereExpr::Predicate(Filter {
+                column: "meta",
+                op: Op::JsonHasAnyKey,
+                value: SqlValue::List(vec![
+                    SqlValue::String("title".into()),
+                    SqlValue::String("body".into()),
+                ]),
+            }),
+            search: None,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+        };
+        let stmt = MySql.compile_select(&q).unwrap();
+        assert!(stmt
+            .sql
+            .contains("JSON_CONTAINS_PATH(`meta`, 'one', CONCAT('$.', ?), CONCAT('$.', ?))"));
+        assert_eq!(stmt.params.len(), 2);
+    }
+
+    #[test]
+    fn json_has_all_keys_uses_all_mode() {
+        use crate::core::{Filter, Op, SelectQuery, SqlValue, WhereExpr};
+        let model = empty_model_with("posts", &[("meta", FieldType::Json)]);
+        let q = SelectQuery {
+            model,
+            joins: vec![],
+            where_clause: WhereExpr::Predicate(Filter {
+                column: "meta",
+                op: Op::JsonHasAllKeys,
+                value: SqlValue::List(vec![
+                    SqlValue::String("a".into()),
+                    SqlValue::String("b".into()),
+                ]),
+            }),
+            search: None,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+        };
+        let stmt = MySql.compile_select(&q).unwrap();
+        assert!(stmt
+            .sql
+            .contains("JSON_CONTAINS_PATH(`meta`, 'all', CONCAT('$.', ?), CONCAT('$.', ?))"));
+    }
+
+    #[test]
+    fn bulk_update_translates_to_inner_join_values_row() {
+        use crate::core::{BulkUpdateQuery, SqlValue};
+        let model = empty_model_with(
+            "users",
+            &[("id", FieldType::I64), ("name", FieldType::String)],
+        );
+        // Mark the id field as the PK so primary_key() resolves.
+        let pk_model = with_pk(model, "id");
+        let q = BulkUpdateQuery {
+            model: pk_model,
+            update_columns: vec!["name"],
+            rows: vec![
+                vec![SqlValue::I64(1), SqlValue::String("Alice".into())],
+                vec![SqlValue::I64(2), SqlValue::String("Bob".into())],
+            ],
+        };
+        let stmt = MySql.compile_bulk_update(&q).unwrap();
+        // Spot-check the key shape: VALUES ROW(?, ?) plus the JOIN
+        // on the PK plus the SET on the qualified target column.
+        assert!(stmt.sql.starts_with("UPDATE `users` INNER JOIN (VALUES "));
+        assert!(stmt.sql.contains("ROW(?, ?), ROW(?, ?)"));
+        assert!(stmt.sql.contains(") AS __data(`id`, `name`)"));
+        assert!(stmt.sql.contains("ON `users`.`id` = __data.`id`"));
+        assert!(stmt.sql.contains("SET `users`.`name` = __data.`name`"));
+        assert_eq!(stmt.params.len(), 4);
+    }
+
+    /// Build a model identical to `model` but with `pk_col` flipped to
+    /// `primary_key = true`. Used by `bulk_update` test since
+    /// `primary_key()` returns `None` otherwise.
+    fn with_pk(
+        model: &'static crate::core::ModelSchema,
+        pk_col: &'static str,
+    ) -> &'static crate::core::ModelSchema {
+        let new_fields: Vec<crate::core::FieldSchema> = model
+            .fields
+            .iter()
+            .map(|f| {
+                let mut f = *f;
+                if f.column == pk_col {
+                    f.primary_key = true;
+                }
+                f
+            })
+            .collect();
+        let leaked: &'static [crate::core::FieldSchema] =
+            Box::leak(new_fields.into_boxed_slice());
+        Box::leak(Box::new(crate::core::ModelSchema {
+            fields: leaked,
+            ..*model
+        }))
     }
 
     // -------- writers integration smoke tests --------
@@ -457,33 +875,6 @@ mod tests {
             err,
             SqlError::OperatorNotSupportedInDialect {
                 op: "RETURNING",
-                dialect: "mysql"
-            }
-        ));
-    }
-
-    #[test]
-    fn ilike_filter_errors_with_clear_message() {
-        use crate::core::{Filter, Op, SelectQuery, SqlValue, WhereExpr};
-        let model = empty_model_with("users", &[("name", FieldType::String)]);
-        let q = SelectQuery {
-            model,
-            joins: vec![],
-            where_clause: WhereExpr::Predicate(Filter {
-                column: "name",
-                op: Op::ILike,
-                value: SqlValue::String("%a%".into()),
-            }),
-            search: None,
-            order_by: vec![],
-            limit: None,
-            offset: None,
-        };
-        let err = MySql.compile_select(&q).unwrap_err();
-        assert!(matches!(
-            err,
-            SqlError::OperatorNotSupportedInDialect {
-                op: "ILIKE",
                 dialect: "mysql"
             }
         ));

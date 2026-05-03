@@ -625,31 +625,23 @@ fn write_filter(
     qualify_with: Option<&str>,
     model: Option<&'static ModelSchema>,
 ) -> Result<(), SqlError> {
-    if let Some(table) = qualify_with {
-        b.write_ident(table);
-        b.sql.push('.');
-    }
-    b.write_ident(filter.column);
-
+    let qualified_col = render_qualified_col(b.d, qualify_with, filter.column);
     let cast = model.and_then(|m| null_cast_for(b.d, m, filter.column));
 
     match filter.op {
-        Op::Eq => simple_op(b, " = ", filter.value.clone(), cast),
-        Op::Ne => simple_op(b, " <> ", filter.value.clone(), cast),
-        Op::Lt => simple_op(b, " < ", filter.value.clone(), cast),
-        Op::Lte => simple_op(b, " <= ", filter.value.clone(), cast),
-        Op::Gt => simple_op(b, " > ", filter.value.clone(), cast),
-        Op::Gte => simple_op(b, " >= ", filter.value.clone(), cast),
-        Op::Like => simple_op(b, " LIKE ", filter.value.clone(), cast),
-        Op::NotLike => simple_op(b, " NOT LIKE ", filter.value.clone(), cast),
+        Op::Eq => simple_op(b, &qualified_col, " = ", filter.value.clone(), cast),
+        Op::Ne => simple_op(b, &qualified_col, " <> ", filter.value.clone(), cast),
+        Op::Lt => simple_op(b, &qualified_col, " < ", filter.value.clone(), cast),
+        Op::Lte => simple_op(b, &qualified_col, " <= ", filter.value.clone(), cast),
+        Op::Gt => simple_op(b, &qualified_col, " > ", filter.value.clone(), cast),
+        Op::Gte => simple_op(b, &qualified_col, " >= ", filter.value.clone(), cast),
+        Op::Like => simple_op(b, &qualified_col, " LIKE ", filter.value.clone(), cast),
+        Op::NotLike => simple_op(b, &qualified_col, " NOT LIKE ", filter.value.clone(), cast),
         Op::ILike | Op::NotILike => {
             require_op(b.d, filter.op)?;
-            let kw = if matches!(filter.op, Op::ILike) {
-                " ILIKE "
-            } else {
-                " NOT ILIKE "
-            };
-            simple_op(b, kw, filter.value.clone(), cast);
+            b.params.push(filter.value.clone());
+            let p = b.d.placeholder(b.params.len());
+            b.d.write_ilike(&mut b.sql, &qualified_col, &p, matches!(filter.op, Op::NotILike));
         }
         Op::In | Op::NotIn => {
             let SqlValue::List(elements) = &filter.value else {
@@ -658,6 +650,7 @@ fn write_filter(
             if elements.is_empty() {
                 return Err(SqlError::EmptyInList);
             }
+            b.sql.push_str(&qualified_col);
             b.sql
                 .push_str(if matches!(filter.op, Op::In) { " IN (" } else { " NOT IN (" });
             let mut first = true;
@@ -677,6 +670,7 @@ fn write_filter(
             if bounds.len() != 2 {
                 return Err(SqlError::BetweenRequiresTwoElementList);
             }
+            b.sql.push_str(&qualified_col);
             b.sql.push_str(" BETWEEN ");
             b.push_param_typed(bounds[0].clone(), cast);
             b.sql.push_str(" AND ");
@@ -686,17 +680,20 @@ fn write_filter(
             let SqlValue::Bool(is_null) = filter.value else {
                 return Err(SqlError::IsNullRequiresBool);
             };
+            b.sql.push_str(&qualified_col);
             b.sql
                 .push_str(if is_null { " IS NULL" } else { " IS NOT NULL" });
         }
         Op::IsDistinctFrom | Op::IsNotDistinctFrom => {
             require_op(b.d, filter.op)?;
-            let kw = if matches!(filter.op, Op::IsDistinctFrom) {
-                " IS DISTINCT FROM "
-            } else {
-                " IS NOT DISTINCT FROM "
-            };
-            simple_op(b, kw, filter.value.clone(), cast);
+            b.params.push(filter.value.clone());
+            let p = b.d.placeholder(b.params.len());
+            b.d.write_null_safe_eq(
+                &mut b.sql,
+                &qualified_col,
+                &p,
+                matches!(filter.op, Op::IsDistinctFrom),
+            );
         }
         Op::JsonContains => {
             require_op(b.d, filter.op)?;
@@ -705,7 +702,7 @@ fn write_filter(
             };
             b.params.push(filter.value.clone());
             let p = b.d.placeholder(b.params.len());
-            let _ = write!(b.sql, " @> {p}::jsonb");
+            b.d.write_json_contains(&mut b.sql, &qualified_col, &p);
         }
         Op::JsonContainedBy => {
             require_op(b.d, filter.op)?;
@@ -714,7 +711,7 @@ fn write_filter(
             };
             b.params.push(filter.value.clone());
             let p = b.d.placeholder(b.params.len());
-            let _ = write!(b.sql, " <@ {p}::jsonb");
+            b.d.write_json_contained_by(&mut b.sql, &qualified_col, &p);
         }
         Op::JsonHasKey => {
             require_op(b.d, filter.op)?;
@@ -723,36 +720,66 @@ fn write_filter(
             };
             b.params.push(filter.value.clone());
             let p = b.d.placeholder(b.params.len());
-            let _ = write!(b.sql, " ? {p}");
+            b.d.write_json_has_key(&mut b.sql, &qualified_col, &p);
         }
         Op::JsonHasAnyKey | Op::JsonHasAllKeys => {
             require_op(b.d, filter.op)?;
             let SqlValue::List(keys) = &filter.value else {
                 return Err(SqlError::JsonKeysRequiresList);
             };
-            let kw = if matches!(filter.op, Op::JsonHasAnyKey) {
-                " ?| ARRAY["
+            // Bind each key as its own param, collect the placeholder
+            // strings, then ask the dialect to compose the predicate.
+            // PG produces `col ?| ARRAY[$1,$2]` / `col ?& ARRAY[$1,$2]`;
+            // MySQL produces `JSON_CONTAINS_PATH(col, 'one'|'all',
+            // CONCAT('$.', ?), CONCAT('$.', ?))`.
+            let placeholders = bind_param_list(b, keys);
+            if matches!(filter.op, Op::JsonHasAnyKey) {
+                b.d.write_json_has_any_keys(&mut b.sql, &qualified_col, &placeholders);
             } else {
-                " ?& ARRAY["
-            };
-            b.sql.push_str(kw);
-            let mut first = true;
-            for k in keys {
-                if !first {
-                    b.sql.push_str(", ");
-                }
-                first = false;
-                b.push_param(k.clone());
+                b.d.write_json_has_all_keys(&mut b.sql, &qualified_col, &placeholders);
             }
-            b.sql.push(']');
         }
     }
     Ok(())
 }
 
-fn simple_op(b: &mut Sql<'_>, kw: &str, value: SqlValue, cast: Option<&'static str>) {
+fn simple_op(
+    b: &mut Sql<'_>,
+    qualified_col: &str,
+    kw: &str,
+    value: SqlValue,
+    cast: Option<&'static str>,
+) {
+    b.sql.push_str(qualified_col);
     b.sql.push_str(kw);
     b.push_param_typed(value, cast);
+}
+
+/// Render `[<table>.]<col>` using the dialect's quoting rules.
+/// Allocated up front so `write_filter`'s op handlers can either emit
+/// it directly or wrap it (e.g. `LOWER(<col>) LIKE …`) without having
+/// to backtrack writes already on the buffer.
+fn render_qualified_col(d: &dyn Dialect, qualify_with: Option<&str>, column: &str) -> String {
+    let mut s = String::new();
+    if let Some(table) = qualify_with {
+        s.push_str(&d.quote_ident(table));
+        s.push('.');
+    }
+    s.push_str(&d.quote_ident(column));
+    s
+}
+
+/// Bind each value in `values` as a param without writing anything to
+/// `b.sql`; return the placeholder strings (`$1`, `$2`, … on Postgres;
+/// `?`, `?`, … on MySQL) so a per-dialect predicate writer can compose
+/// them into the final fragment.
+fn bind_param_list(b: &mut Sql<'_>, values: &[SqlValue]) -> Vec<String> {
+    let mut out = Vec::with_capacity(values.len());
+    for v in values {
+        b.params.push(v.clone());
+        out.push(b.d.placeholder(b.params.len()));
+    }
+    out
 }
 
 fn require_op(d: &dyn Dialect, op: Op) -> Result<(), SqlError> {
