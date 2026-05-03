@@ -101,6 +101,13 @@ pub mod email_jobs;
 #[cfg(all(feature = "email", feature = "admin"))]
 pub mod mailable;
 
+/// JSON:API v1.1 response envelope adapter — wrap a flat
+/// `serde_json::Value` (typical [`serializer`] output) into the
+/// `{"data": {"type", "id", "attributes": {...}}}` shape that
+/// JSON:API clients expect. See [`jsonapi::to_resource`] +
+/// [`jsonapi::to_collection`].
+pub mod jsonapi;
+
 /// Multi-channel notifications — fan one notification out to mail / database /
 /// log / broadcast channels. See [`notifications::notify`].
 #[cfg(feature = "notifications")]
