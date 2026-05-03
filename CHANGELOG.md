@@ -2,6 +2,79 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [Unreleased] — v0.23.0 series
+
+The "bi-dialect" series. Adds first-class MySQL 8.0+ support alongside the existing Postgres backend, exposed through a new `&Pool` API that's additive — every existing `&PgPool` call site keeps working unchanged, so apps adopt the new surface at their own pace (or never, if Postgres-only).
+
+### Added — bi-dialect foundation
+
+- **`rustango::sql::Pool`** — wrapper enum (`Postgres(PgPool)` / `Mysql(MySqlPool)`) with `connect("postgres://…")` / `connect("mysql://…")` / `connect_from_env()` / `connect_with_timeout`. The `mysql` Cargo feature is opt-in.
+- **`rustango::env::DatabaseUrlBuilder`** + **`database_url_from_env()`** — assemble a connection URL from `DB_DRIVER` / `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` / `DB_PARAMS` when `DATABASE_URL` isn't set; passwords are auto percent-encoded so `@`/`:`/`/`/`#`/`?`/`%` in passwords don't corrupt the URL. `DB_DRIVER` accepts `postgres` / `postgresql` / `pg` / `mysql` / `mariadb` aliases.
+- **`manage db:info`** — read-only summary of the resolved DB URL (password redacted), detected backend, and which `postgres`/`mysql` Cargo features are compiled in. Warns when the URL scheme and the enabled features don't match.
+
+### Added — bi-dialect SQL writers + ORM
+
+- **`rustango::sql::Dialect`** trait gains MySQL impl (`MySql` struct + `DIALECT` singleton): backtick identifier quoting, `?` placeholders, `BIGINT AUTO_INCREMENT` for `Auto<T>` PKs, `1`/`0` boolean literals, `GET_LOCK` / `RELEASE_LOCK` for advisory locking, `TINYINT(1)` / `DATETIME(6)` / `JSON` / `CHAR(36)` for `bool` / `DateTime<Utc>` / `serde_json::Value` / `Uuid`.
+- **Operator translations** — `ILIKE` / `NOT ILIKE` → `LOWER(col) LIKE LOWER(?)`, `IS DISTINCT FROM` → `NOT (col <=> ?)`, JSONB `@>` / `<@` → `JSON_CONTAINS(col, ?)` / `JSON_CONTAINS(?, col)`, JSONB `?` / `?|` / `?&` → `JSON_CONTAINS_PATH(col, 'one'|'all', CONCAT('$.', ?))`, `UPDATE … FROM (VALUES …)` → `UPDATE … INNER JOIN (VALUES ROW(…), ROW(…)) AS d(pk, c1) ON t.pk = d.pk SET t.c1 = d.c1`, `ON CONFLICT DO UPDATE SET col = EXCLUDED.col` → `ON DUPLICATE KEY UPDATE col = VALUES(col)`.
+- **Shared `sql::writers` module** — every dialect compiles SELECT / INSERT / UPDATE / DELETE / COUNT / AGGREGATE / BULK INSERT / BULK UPDATE through the same writer functions; identifier quoting + placeholder shape + NULL casts + per-op SQL all dispatch through the dialect.
+
+### Added — `_pool` executor surface
+
+Every read/write function in the existing `&PgPool` surface now has a `&Pool`-typed counterpart:
+
+- **`insert_pool` / `update_pool` / `delete_pool` / `count_rows_pool` / `bulk_insert_pool` / `bulk_update_pool` / `raw_execute_pool` / `raw_query_pool`** — non-`FromRow` and IR-level operations.
+- **`select_rows_pool` / `select_one_row_pool` / `select_rows_pool_with_related`** — single-table + select_related joins. `FetcherPool::fetch_pool(&pool)` extension trait drives a `QuerySet<T>` end-to-end.
+- **`insert_returning_pool`** — INSERT + `RETURNING` (PG) / `LAST_INSERT_ID()` (MySQL) — returns an `InsertReturningPool` enum.
+- **`fetch_paginated_pool`** — page + total via `COUNT(*) OVER ()` (single round trip; needs MySQL 8.0+).
+- **`fetch_with_prefetch_pool`** — Django-shape parent + 1:N children hydration in two round trips.
+- **`fetch_aggregate_pool`** + **`CounterPool::count_pool`** — aggregate IR + queryset count.
+- **`transaction_pool`** + **`PoolTx`** — backend-tagged transaction handle with `commit` / `rollback` for cross-table atomicity.
+
+### Added — macro-emitted `Model::*_pool` methods
+
+Every `#[derive(Model)]` type now exposes the bi-dialect write trio:
+
+- **`delete_pool(&self, &Pool)`** — non-audited path is a thin dispatch through `sql::delete_pool`; audited path opens a per-backend transaction wrapping DELETE + audit emit (atomic).
+- **`insert_pool(&mut self, &Pool)`** — `Auto<T>` PKs populated from `RETURNING` (PG) / `LAST_INSERT_ID()` (MySQL). Audited path runs the INSERT + auto-PK readback + audit emit on a single tx.
+- **`save_pool(&mut self, &Pool)`** — INSERT-or-UPDATE keyed on the PK. Audited path emits a **diff-style** audit row (one `{ "field": { "before": …, "after": … } }` entry per tracked column whose value actually changed) — full feature parity with the existing `&PgPool` `save()`.
+
+Models also auto-derive **`FromRow<MySqlRow>`** alongside `FromRow<PgRow>` (via the cfg-gated `__impl_my_from_row!` macro_rules), plus **`LoadRelatedMy`** + **`__rustango_from_aliased_my_row`** for select_related joins on the `_pool` path. Every macro-emitted MySQL impl materializes only when rustango itself is built with the `mysql` feature — PG-only users pay zero compile-time / binary-size cost.
+
+### Added — bi-dialect migration runner
+
+The Django-shape file-based migration runner now has a `&Pool` variant for every entry point:
+
+- **`migrate_pool` / `migrate_to_pool` / `unapply_pool` / `unapply_force_pool` / `downgrade_pool` / `migrate_dry_run_pool` / `migrate_embedded_pool`** — full lifecycle on either backend.
+- **`apply_all_pool` / `drop_all_pool`** — schema bootstrap / tear-down for tests + dev.
+- **`ensure_ledger_pool` / `applied_set_pool`** — primitives for custom flows.
+- Concurrent peers serialize via a per-backend session-scoped advisory lock (`pg_advisory_lock` / `GET_LOCK`).
+
+### Added — bi-dialect DDL writer + audit log
+
+- **`migrate::ddl::create_table_sql_with_dialect` / `drop_table_sql_with_dialect` / `create_constraints_sql_with_dialect`** — `CREATE TABLE` / `DROP TABLE` / `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` for either backend. Existing `&PgPool` callers go through PG-typed shims (zero diff in emitted SQL).
+- **`audit::ensure_table_pool` / `emit_one_pool` / `emit_one_my` / `delete_one_with_audit_pool` / `save_one_with_audit_pool` / `insert_one_with_audit_pool`** — bi-dialect audit primitives. `CREATE_TABLE_SQL_MYSQL` mirrors `CREATE_TABLE_SQL` with MySQL types (`BIGINT AUTO_INCREMENT`, `JSON`, `DATETIME(6)`, backtick quoting).
+
+### Added — sqlx + dependency wiring
+
+- `sqlx` dependency moved to `default-features = false`; `postgres` and `mysql` are now feature-gated on rustango itself.
+- `sqlx/json` enabled so `Json<T>: Type<MySql>` is in scope.
+- **`Auto<T>: Decode<MySql> + Type<MySql>`** — mirror of the existing Postgres impls so `#[derive(Model)]` types with `Auto<T>` PKs satisfy `FromRow<MySqlRow>`.
+
+### Fixed
+
+- Pre-existing macro bug: audited `Auto<T>`-PK models exposed an `upsert(&PgPool)` body that called `self.upsert_on(pool)` directly, but `upsert_on` for audited models takes `&mut PgConnection`. Surfaced as a compile error the first time an audited Auto-PK model gets derived. Added the missing `pool.acquire()` shim symmetric with `save` / `insert` / `delete` / `bulk_insert`.
+
+### Migration notes
+
+- **No breaking changes** to the existing `&PgPool` API — every call site keeps working unchanged on upgrade.
+- Apps that want MySQL support add `features = ["mysql"]` to their `rustango` dependency. Apps that only target Postgres do nothing differently.
+- Apps currently using `&PgPool` can adopt `&Pool` incrementally — pass `Pool::from(pg_pool)` at any boundary, or migrate top-down by calling `Pool::connect_from_env()` instead of `PgPool::connect(&url)`.
+
+### MySQL caveats
+
+- requires MySQL 8.0+ (window functions for `fetch_paginated_pool`, `JSON` column type, `VALUES ROW(…)` syntax for `bulk_update_pool`)
+- `LAST_INSERT_ID()` reports one auto-assigned column per connection, so models with multiple `Auto<T>` PKs error at runtime on MySQL with `SqlError::OperatorNotSupportedInDialect{op: "multi-column RETURNING"}`. Postgres `RETURNING` is unaffected.
+
 ## [0.22.1] — 2026-05-03
 
 Pure docs / packaging fix-up over v0.22.0; no library changes.

@@ -357,6 +357,94 @@ rustango::sql::transaction(&pool, |conn| async move {
 }).await?;
 ```
 
+### Bi-dialect (Postgres + MySQL) via `&Pool`
+
+The classic API takes `&PgPool` (Postgres-only). The v0.23.0 series
+adds a parallel `&Pool` API that targets either backend; pick MySQL
+8.0+ or Postgres at runtime via the connection URL.
+
+```toml
+# Cargo.toml — opt in to MySQL alongside the default postgres feature
+rustango = { version = "0.23", features = ["mysql"] }
+```
+
+```rust
+use rustango::sql::{Pool, FetcherPool, CounterPool};
+
+// Connect from URL (postgres:// or mysql://) or from split env vars
+// (DB_DRIVER + DB_HOST + DB_PORT + DB_USER + DB_PASSWORD + DB_NAME +
+// DB_PARAMS — passwords are auto percent-encoded).
+let pool = Pool::connect_from_env().await?;
+
+// Schema bootstrap (CREATE TABLE per registered model — dialect-aware
+// type names, BIGINT AUTO_INCREMENT vs BIGSERIAL, JSON vs JSONB, etc.).
+rustango::migrate::apply_all_pool(&pool).await?;
+
+// Or run the file-based ledger runner — full Django-shape lifecycle.
+rustango::migrate::migrate_pool(&pool, dir).await?;
+rustango::migrate::migrate_to_pool(&pool, dir, "0005_x").await?;
+rustango::migrate::downgrade_pool(&pool, dir, 1).await?;
+rustango::migrate::unapply_pool(&pool, dir, "0005_x").await?;
+
+// Macro-emitted CRUD against either backend (every #[derive(Model)] type).
+let mut user = User { id: Auto::Unset, name: "alice".into(), .. };
+user.insert_pool(&pool).await?;        // Auto<i64> populated via
+                                       // RETURNING (PG) / LAST_INSERT_ID() (MySQL)
+user.name = "Alice".into();
+user.save_pool(&pool).await?;          // INSERT-or-UPDATE; audited models
+                                       // emit a transactional diff audit row
+user.delete_pool(&pool).await?;        // DELETE (transactional with audit
+                                       // emit when the model is audited)
+
+// QuerySet read path — single-table, select_related joins, prefetch,
+// pagination, and aggregates all bi-dialect.
+let posts: Vec<Post> = Post::objects()
+    .filter(Post::is_published.eq(true))
+    .select_related(&[Post::author])   // joins decoded automatically
+    .order_by(&[Post::created_at.desc()])
+    .limit(20)
+    .fetch_pool(&pool).await?;
+let n: i64 = User::objects().count_pool(&pool).await?;
+let page = rustango::sql::fetch_paginated_pool(
+    Post::objects().limit(20).offset(40),
+    &pool,
+).await?;
+let with_kids: Vec<(User, Vec<Post>)> =
+    rustango::sql::fetch_with_prefetch_pool::<User, Post>(
+        User::objects(),
+        "user_id",
+        &pool,
+    ).await?;
+
+// Cross-table atomicity — open a backend-tagged transaction.
+let mut tx = rustango::sql::transaction_pool(&pool).await?;
+match &mut tx {
+    rustango::sql::PoolTx::Postgres(t) => { /* $1 placeholders */ }
+    rustango::sql::PoolTx::Mysql(t)    => { /* ?  placeholders */ }
+}
+tx.commit().await?;
+```
+
+**Operator translations:** `ILIKE` → `LOWER(col) LIKE LOWER(?)`,
+`IS DISTINCT FROM` → `NOT (col <=> ?)`, JSONB `@>` → `JSON_CONTAINS`,
+JSONB `?`/`?|`/`?&` → `JSON_CONTAINS_PATH(col, 'one'|'all', CONCAT('$.', ?))`,
+`UPDATE … FROM (VALUES …)` → `UPDATE … INNER JOIN (VALUES ROW(?, ?), …)`.
+`ON CONFLICT DO UPDATE SET col = EXCLUDED.col` → `ON DUPLICATE KEY UPDATE
+col = VALUES(col)` (with `target: vec![]`; `MySQL`'s upsert can't take a
+target column list).
+
+**MySQL caveats:**
+- requires MySQL 8.0+ (window functions for `fetch_paginated_pool`,
+  `JSON` column type, `VALUES ROW(…)` syntax for `bulk_update_pool`)
+- `fetch_paginated_pool` uses `COUNT(*) OVER ()` — needs 8.0
+- `LAST_INSERT_ID()` reports one auto-assigned column per connection,
+  so models with multiple `Auto<T>` PKs error at runtime on MySQL
+  (Postgres `RETURNING` is unaffected)
+
+**Migration story:** the `&PgPool` API stays exactly as it was — every
+existing app keeps working unchanged on upgrade. Adopt `&Pool` at
+your own pace (or never, if you only target Postgres).
+
 ### Many-to-many
 
 ```rust
