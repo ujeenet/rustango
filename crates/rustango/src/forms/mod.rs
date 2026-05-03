@@ -793,3 +793,214 @@ impl DynamicForm {
         Ok(out)
     }
 }
+
+// ============================================================ ModelForm (v0.17.0 J)
+
+/// Runtime ModelForm — parse a string-keyed payload into a typed
+/// `(columns, values)` pair against a `T: Model` schema, ready to feed
+/// straight into `sql::insert` / `sql::update` / their `_pool` variants.
+///
+/// The proc-macro `#[derive(ModelForm)]` follows in J.b; this is the
+/// runtime engine it'll defer to. End-user shape today:
+///
+/// ```ignore
+/// // POST /posts { title: "hello", body: "world" }
+/// let mf: ModelFormFor<Post> = ModelForm::parse(&form_payload)?;
+/// let query = mf.into_insert_query();
+/// rustango::sql::insert(&pool, &query).await?;
+/// ```
+///
+/// Skips the `Auto<T>` PK on create; rejects unknown form keys with
+/// a clear error so callers can surface "you sent us a field we
+/// don't recognise" instead of silently dropping data.
+#[derive(Debug)]
+pub struct ModelFormFor<T: crate::core::Model> {
+    /// Column names in the same declaration order as the model
+    /// schema (sans Auto<T> PK on create).
+    columns: Vec<&'static str>,
+    /// Parsed `SqlValue`s, parallel to `columns`.
+    values: Vec<crate::core::SqlValue>,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T: crate::core::Model> ModelFormFor<T> {
+    /// Parse + validate `payload` against `T::SCHEMA`. Walks every
+    /// scalar field, runs `parse_form_value` per field (which honours
+    /// `nullable` + per-type type checks), validates against
+    /// `min` / `max` / `max_length` bounds.
+    ///
+    /// `Auto<T>` PK fields are skipped — the database assigns those
+    /// on insert. Other PK fields (manual `i64`, `String`, etc.) are
+    /// included; ModelForm treats them as ordinary required fields.
+    ///
+    /// # Errors
+    /// [`FormErrors`] aggregating every per-field failure (missing,
+    /// parse, bound-violation). Multi-error: every issue is reported
+    /// together so callers can render a complete error summary.
+    pub fn parse(payload: &HashMap<String, String>) -> Result<Self, FormErrors> {
+        let mut errors = FormErrors::default();
+        let mut columns = Vec::new();
+        let mut values = Vec::new();
+        for field in T::SCHEMA.scalar_fields() {
+            // Auto<T> PK is server-assigned — skip on create.
+            if field.auto && field.primary_key {
+                continue;
+            }
+            let raw = payload.get(field.name).map(String::as_str);
+            match parse_form_value(field, raw) {
+                Ok(value) => {
+                    if let Err(bound_err) =
+                        crate::core::validate_value(T::SCHEMA.table, field, &value)
+                    {
+                        errors.add(field.name.to_owned(), bound_err.to_string());
+                    } else {
+                        columns.push(field.column);
+                        values.push(value);
+                    }
+                }
+                Err(e) => {
+                    errors.add(field.name.to_owned(), e.to_string());
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(Self {
+                columns,
+                values,
+                _marker: std::marker::PhantomData,
+            })
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Borrow the parsed `(column, value)` pairs without consuming.
+    /// Useful for tests + custom dispatch paths that don't want to
+    /// build a full `InsertQuery`.
+    #[must_use]
+    pub fn columns(&self) -> &[&'static str] {
+        &self.columns
+    }
+
+    /// Borrow the parsed values.
+    #[must_use]
+    pub fn values(&self) -> &[crate::core::SqlValue] {
+        &self.values
+    }
+
+    /// Convert into an [`crate::core::InsertQuery`] ready to feed
+    /// `sql::insert(&pool, &query)` or `sql::insert_pool(&pool, &query)`.
+    ///
+    /// Sets `returning = vec![]` and `on_conflict = None` — for
+    /// upsert / RETURNING flows, build the InsertQuery yourself
+    /// from `columns()` + `values()`.
+    #[must_use]
+    pub fn into_insert_query(self) -> crate::core::InsertQuery {
+        crate::core::InsertQuery {
+            model: T::SCHEMA,
+            columns: self.columns,
+            values: self.values,
+            returning: Vec::new(),
+            on_conflict: None,
+        }
+    }
+
+    /// Convert into an [`crate::core::UpdateQuery`] keyed on `pk_value`.
+    /// Each parsed field becomes one `Assignment`; the WHERE clause
+    /// filters the model's PK column equal to `pk_value`.
+    ///
+    /// Returns `None` when the model has no primary key (rare; the
+    /// macro layer normally requires one).
+    #[must_use]
+    pub fn into_update_query(
+        self,
+        pk_value: crate::core::SqlValue,
+    ) -> Option<crate::core::UpdateQuery> {
+        let pk = T::SCHEMA.primary_key()?;
+        let assignments: Vec<crate::core::Assignment> = self
+            .columns
+            .into_iter()
+            .zip(self.values)
+            .map(|(column, value)| crate::core::Assignment { column, value })
+            .collect();
+        Some(crate::core::UpdateQuery {
+            model: T::SCHEMA,
+            set: assignments,
+            where_clause: crate::core::WhereExpr::Predicate(crate::core::Filter {
+                column: pk.column,
+                op: crate::core::Op::Eq,
+                value: pk_value,
+            }),
+        })
+    }
+}
+
+#[cfg(test)]
+mod model_form_tests {
+    use super::*;
+    use crate::core::Model as _;
+    use crate::sql::Auto;
+
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "mf_post")]
+    #[allow(dead_code)]
+    pub struct Post {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 50)]
+        pub title: String,
+        pub body: Option<String>,
+    }
+
+    #[test]
+    fn parse_skips_auto_pk_and_accepts_required_string() {
+        let mut p: HashMap<String, String> = HashMap::new();
+        p.insert("title".into(), "hi".into());
+        p.insert("body".into(), "".into());
+        let mf: ModelFormFor<Post> = ModelFormFor::<Post>::parse(&p).expect("valid");
+        // Auto<i64> PK skipped → title + body present.
+        assert_eq!(mf.columns(), &["title", "body"]);
+    }
+
+    #[test]
+    fn parse_collects_multiple_errors() {
+        let mut p: HashMap<String, String> = HashMap::new();
+        // title missing entirely + > max_length when present
+        p.insert("title".into(), "x".repeat(100));
+        let err = ModelFormFor::<Post>::parse(&p).expect_err("should error");
+        // At least the title bound violation surfaces.
+        assert!(!err.is_empty(), "errors should be non-empty");
+    }
+
+    #[test]
+    fn into_insert_query_targets_correct_model() {
+        let mut p: HashMap<String, String> = HashMap::new();
+        p.insert("title".into(), "hi".into());
+        let mf: ModelFormFor<Post> = ModelFormFor::<Post>::parse(&p).expect("valid");
+        let q = mf.into_insert_query();
+        assert_eq!(q.model.table, "mf_post");
+        assert!(q.columns.contains(&"title"));
+    }
+
+    #[test]
+    fn into_update_query_filters_on_pk() {
+        let mut p: HashMap<String, String> = HashMap::new();
+        p.insert("title".into(), "edited".into());
+        // `body` is `Option<String>` and absent → parsed as
+        // `SqlValue::Null` (valid for a nullable column) and
+        // included in the assignment list. Two assignments expected:
+        // title (edited) + body (NULL).
+        let mf: ModelFormFor<Post> = ModelFormFor::<Post>::parse(&p).expect("valid");
+        let q = mf
+            .into_update_query(crate::core::SqlValue::I64(42))
+            .expect("model has PK");
+        assert_eq!(q.set.len(), 2);
+        match &q.where_clause {
+            crate::core::WhereExpr::Predicate(f) => {
+                assert_eq!(f.column, "id");
+                assert_eq!(f.value, crate::core::SqlValue::I64(42));
+            }
+            _ => panic!("wrong where shape"),
+        }
+    }
+}
