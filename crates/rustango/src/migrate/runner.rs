@@ -1220,23 +1220,86 @@ async fn migrate_pool_with_ledger(
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
     ensure_ledger_pool_for(pool, ledger).await?;
-    let all = file::list_dir(dir)?;
-    let applied = applied_set_pool_for(pool, ledger).await?;
-    let pending: Vec<Migration> = all
-        .into_iter()
-        .filter(|m| !applied.contains(&m.name))
-        .collect();
+    with_migrate_lock_pool(pool, async {
+        let all = file::list_dir(dir)?;
+        let applied = applied_set_pool_for(pool, ledger).await?;
+        let pending: Vec<Migration> = all
+            .into_iter()
+            .filter(|m| !applied.contains(&m.name))
+            .collect();
 
-    let mut newly = Vec::with_capacity(pending.len());
-    for mig in pending {
-        if mig.atomic {
-            apply_atomic_pool(pool, &mig, ledger).await?;
-        } else {
-            apply_nonatomic_pool(pool, &mig, ledger).await?;
+        let mut newly = Vec::with_capacity(pending.len());
+        for mig in pending {
+            if mig.atomic {
+                apply_atomic_pool(pool, &mig, ledger).await?;
+            } else {
+                apply_nonatomic_pool(pool, &mig, ledger).await?;
+            }
+            newly.push(mig);
         }
-        newly.push(mig);
+        Ok(newly)
+    })
+    .await
+}
+
+/// Hold the migrate session-scoped advisory lock while `body` runs,
+/// then release. Bi-dialect counterpart of [`with_migrate_lock`] —
+/// dispatches the lock acquire/release SQL through the pool's dialect.
+///
+/// Backend-specific bind shapes:
+/// - **Postgres** — `pg_advisory_lock($1)` takes an `i64`; we bind
+///   [`MIGRATE_LOCK_KEY`] (the same key the legacy PgPool runner
+///   uses, so the two paths coordinate).
+/// - **MySQL** — `GET_LOCK(?, -1)` takes a `VARCHAR` lock name; we
+///   bind `format!("rustango_migrate_{:x}", MIGRATE_LOCK_KEY)` so
+///   the name is stable, deterministic, and namespaced (MySQL
+///   `GET_LOCK` is global to the server, not scoped per database).
+///
+/// The lock is acquired on a checked-out connection and held until
+/// `body` returns; release happens on the same connection so MySQL's
+/// connection-scoped `GET_LOCK` semantics work correctly.
+async fn with_migrate_lock_pool<F, R>(
+    pool: &crate::sql::Pool,
+    body: F,
+) -> Result<R, MigrateError>
+where
+    F: std::future::Future<Output = Result<R, MigrateError>>,
+{
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let mut lock_conn = pg.acquire().await?;
+            sqlx::query("SELECT pg_advisory_lock($1)")
+                .bind(MIGRATE_LOCK_KEY)
+                .execute(&mut *lock_conn)
+                .await?;
+            let result = body.await;
+            // Best-effort release. PG releases on session close anyway,
+            // so a failed unlock can't permanently deadlock peers.
+            let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(MIGRATE_LOCK_KEY)
+                .execute(&mut *lock_conn)
+                .await;
+            result
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            let lock_name = format!("rustango_migrate_{:x}", MIGRATE_LOCK_KEY);
+            let mut lock_conn = my.acquire().await?;
+            sqlx::query("SELECT GET_LOCK(?, -1)")
+                .bind(&lock_name)
+                .execute(&mut *lock_conn)
+                .await?;
+            let result = body.await;
+            // Best-effort release. MySQL releases on connection close,
+            // so a failed RELEASE_LOCK can't permanently deadlock peers.
+            let _ = sqlx::query("SELECT RELEASE_LOCK(?)")
+                .bind(&lock_name)
+                .execute(&mut *lock_conn)
+                .await;
+            result
+        }
     }
-    Ok(newly)
 }
 
 /// Apply one migration inside a transaction. Both backends support
