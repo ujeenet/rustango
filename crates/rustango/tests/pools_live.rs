@@ -1,3 +1,4 @@
+#![cfg(feature = "tenancy")]
 //! Live tests for `TenantPools`. Bootstraps a registry + 2 schema-mode
 //! tenants (acme + globex), exercises pool resolution and search_path
 //! scoping. Database-mode tenants are tested separately because they

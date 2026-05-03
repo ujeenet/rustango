@@ -1,3 +1,4 @@
+#![cfg(feature = "tenancy")]
 //! Live tests for the `Org` registry model.
 //!
 //! Reads `DATABASE_URL`. If unset, every test returns silently — same

@@ -1,3 +1,4 @@
+#![cfg(feature = "tenancy")]
 //! Live tests for the tenant-aware admin router.
 //!
 //! Two tenants in different storage modes; same admin URL serves

@@ -1,3 +1,4 @@
+#![cfg(feature = "tenancy")]
 //! Live tests for the 2-domain auth model.
 //!
 //! Reads `DATABASE_URL`. Skips silently when unset.

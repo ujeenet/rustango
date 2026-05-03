@@ -70,6 +70,7 @@ fn snapshot_with_table(table_name: &str) -> SchemaSnapshot {
     .unwrap();
     SchemaSnapshot {
         tables: vec![table],
+        ..Default::default()
     }
 }
 
@@ -737,6 +738,7 @@ async fn migration_with_two_create_tables_one_having_fk_to_other_applies() {
     .unwrap();
     let snapshot = SchemaSnapshot {
         tables: vec![child_t, parent_t], // child first → exposes the bug
+        ..Default::default()
     };
 
     let mig = Migration {

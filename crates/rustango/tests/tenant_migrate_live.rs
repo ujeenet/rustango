@@ -1,3 +1,4 @@
+#![cfg(feature = "tenancy")]
 //! Live tests for scoped tenant migrations.
 //!
 //! Bootstraps a registry with two schema-mode tenants, writes a
@@ -61,6 +62,7 @@ fn snapshot_with_table(table: &str) -> rmig::SchemaSnapshot {
     .unwrap();
     rmig::SchemaSnapshot {
         tables: vec![table],
+        ..Default::default()
     }
 }
 

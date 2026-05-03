@@ -64,6 +64,7 @@ async fn seed_media_rows_for_inspection() {
                 mime: mime.into(),
                 original_filename: name.into(),
                 uploaded_by_id: Some(if name == "alice.png" { 1 } else { 2 }),
+                collection_id: None,
                 metadata: serde_json::json!({"alt": format!("avatar for {name}")}),
             })
             .await
@@ -91,6 +92,7 @@ async fn seed_media_rows_for_inspection() {
         original_filename: "manifesto.txt".into(),
         size_bytes: 27,
         uploaded_by_id: Some(3),
+        collection_id: None,
         ttl: Duration::from_secs(60),
     };
     let ticket = manager.begin_upload(intent).await.expect("begin");

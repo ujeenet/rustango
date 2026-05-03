@@ -73,6 +73,7 @@ async fn save_bytes_inserts_row_and_uploads_object() {
             mime: "image/png".into(),
             original_filename: "test.png".into(),
             uploaded_by_id: Some(99),
+            collection_id: None,
             metadata: serde_json::json!({"alt": "test fixture"}),
         })
         .await
@@ -114,6 +115,7 @@ async fn begin_then_finalize_upload_flips_pending_to_ready() {
         original_filename: "direct.png".into(),
         size_bytes: 100,
         uploaded_by_id: Some(7),
+        collection_id: None,
         ttl: Duration::from_secs(60),
     };
 
@@ -188,6 +190,7 @@ async fn delete_soft_then_get_returns_none() {
             mime: "text/plain".into(),
             original_filename: "x.txt".into(),
             uploaded_by_id: None,
+            collection_id: None,
             metadata: serde_json::json!({}),
         })
         .await
@@ -244,6 +247,7 @@ async fn purge_orphans_clears_old_soft_deleted_rows_and_storage() {
                 mime: "text/plain".into(),
                 original_filename: format!("o{i}.txt"),
                 uploaded_by_id: None,
+                collection_id: None,
                 metadata: serde_json::json!({}),
             })
             .await

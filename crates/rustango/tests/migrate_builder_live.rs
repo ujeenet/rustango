@@ -52,6 +52,7 @@ fn snapshot_with_table(table_name: &str) -> SchemaSnapshot {
     .unwrap();
     SchemaSnapshot {
         tables: vec![table],
+        ..Default::default()
     }
 }
 

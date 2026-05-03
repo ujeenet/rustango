@@ -1,3 +1,4 @@
+#![cfg(feature = "tenancy")]
 //! Live tests for the tenancy `manage` runner.
 //!
 //! Reads `DATABASE_URL`. Skips silently when unset.
