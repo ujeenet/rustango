@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt"]
+default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -126,6 +126,12 @@ hmac-auth = ["admin", "dep:hmac", "dep:sha2", "dep:subtle", "dep:base64"]
 # alternative to `tenancy::jwt_lifecycle` (which adds refresh +
 # blacklist + sliding rotation but is gated on tenancy).
 jwt = ["dep:hmac", "dep:sha2", "dep:subtle", "dep:base64"]
+
+# Multipart file upload helper (`rustango::uploads`) — wraps
+# axum's multipart extractor + the `storage::Storage` trait so file
+# uploads are a one-call API with size + extension guards. Pulls
+# `multer` transitively via `axum/multipart`.
+uploads = ["admin", "storage", "axum/multipart"]
 
 # OpenAPI 3.1 spec builder + Swagger UI router (`rustango::openapi`).
 # Pure-Rust types you assemble into a spec, serialized to JSON via serde.

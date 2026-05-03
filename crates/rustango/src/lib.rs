@@ -120,6 +120,12 @@ pub mod hmac_auth;
 #[cfg(feature = "jwt")]
 pub mod jwt;
 
+/// Multipart file upload helper — wraps axum's multipart extractor +
+/// the [`storage::Storage`] trait. See [`uploads::save_uploads`] +
+/// [`uploads::UploadConfig`].
+#[cfg(feature = "uploads")]
+pub mod uploads;
+
 /// Multi-channel notifications — fan one notification out to mail / database /
 /// log / broadcast channels. See [`notifications::notify`].
 #[cfg(feature = "notifications")]
