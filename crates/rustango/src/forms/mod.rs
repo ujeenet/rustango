@@ -824,6 +824,54 @@ pub struct ModelFormFor<T: crate::core::Model> {
 }
 
 impl<T: crate::core::Model> ModelFormFor<T> {
+    /// Parse + validate a JSON object against `T::SCHEMA`. Convenience
+    /// over [`Self::parse`] for apps with JSON request bodies (most
+    /// REST handlers): walks the JSON object, stringifies each value,
+    /// and dispatches to the same per-field parser the form-encoded
+    /// path uses.
+    ///
+    /// JSON null + missing keys map to absent (the field's nullable
+    /// rule decides whether that's an error). Strings pass through
+    /// directly; numbers/bools/Arrays/objects get JSON-stringified
+    /// then parsed by `parse_form_value` via the field's declared
+    /// type — so an i64 field accepts both `42` and `"42"`, and a
+    /// JSON field accepts an inline object that gets re-stringified
+    /// and re-parsed.
+    ///
+    /// # Errors
+    /// As [`Self::parse`], plus `FormErrors` with a non-field error
+    /// when `value` isn't a JSON object at the top level.
+    pub fn from_json(value: &serde_json::Value) -> Result<Self, FormErrors> {
+        let obj = match value.as_object() {
+            Some(o) => o,
+            None => {
+                let mut errors = FormErrors::default();
+                errors.add_non_field("expected JSON object body");
+                return Err(errors);
+            }
+        };
+        let mut payload: HashMap<String, String> = HashMap::with_capacity(obj.len());
+        for (k, v) in obj {
+            // serde_json::Value -> String for parse_form_value's
+            // string-keyed contract:
+            //   - null  → absent (skip insert; field's nullable
+            //             rule decides whether parse errors)
+            //   - String→ raw inner value (no JSON quotes)
+            //   - other → compact JSON serialization (numbers,
+            //             bools, arrays, objects)
+            match v {
+                serde_json::Value::Null => {}
+                serde_json::Value::String(s) => {
+                    payload.insert(k.clone(), s.clone());
+                }
+                other => {
+                    payload.insert(k.clone(), other.to_string());
+                }
+            }
+        }
+        Self::parse(&payload)
+    }
+
     /// Parse + validate `payload` against `T::SCHEMA`. Walks every
     /// scalar field, runs `parse_form_value` per field (which honours
     /// `nullable` + per-type type checks), validates against
@@ -980,6 +1028,50 @@ mod model_form_tests {
         let q = mf.into_insert_query();
         assert_eq!(q.model.table, "mf_post");
         assert!(q.columns.contains(&"title"));
+    }
+
+    #[test]
+    fn from_json_parses_object_body() {
+        let v = serde_json::json!({ "title": "from-json", "body": "x" });
+        let mf: ModelFormFor<Post> = ModelFormFor::<Post>::from_json(&v).expect("valid");
+        assert!(mf.columns().contains(&"title"));
+        assert!(mf.columns().contains(&"body"));
+    }
+
+    #[test]
+    fn from_json_handles_numeric_values() {
+        // i64-typed fields accept both `42` and `"42"`. Use the
+        // existing Post struct: title is string-typed so cover the
+        // numeric path with a string→number-stringified round trip.
+        let v = serde_json::json!({ "title": 42 });
+        // 42 → "42" → SqlValue::String("42") → fits a String field.
+        let mf: ModelFormFor<Post> = ModelFormFor::<Post>::from_json(&v).expect("valid");
+        match mf.values().iter().find(|_| true).unwrap() {
+            crate::core::SqlValue::String(s) => assert_eq!(s, "42"),
+            other => panic!("expected stringified value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_json_rejects_non_object_root() {
+        let v = serde_json::json!(["title", "body"]);
+        let err = ModelFormFor::<Post>::from_json(&v).expect_err("array body should error");
+        assert!(!err.non_field().is_empty());
+    }
+
+    #[test]
+    fn from_json_treats_null_as_absent() {
+        // body is Option<String> — JSON null should land as
+        // SqlValue::Null in the assignments (parse_form_value treats
+        // missing-string for nullable as Null).
+        let v = serde_json::json!({ "title": "ok", "body": null });
+        let mf: ModelFormFor<Post> = ModelFormFor::<Post>::from_json(&v).expect("valid");
+        let body_value = mf
+            .columns()
+            .iter()
+            .position(|c| *c == "body")
+            .and_then(|i| mf.values().get(i));
+        assert!(matches!(body_value, Some(crate::core::SqlValue::Null)));
     }
 
     #[test]
