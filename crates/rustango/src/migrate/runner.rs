@@ -263,6 +263,62 @@ pub async fn drop_all(pool: &PgPool) -> Result<(), MigrateError> {
     Ok(())
 }
 
+/// `apply_all` against either backend. Equivalent to [`apply_all`] but
+/// takes [`crate::sql::Pool`] and dispatches per backend — uses the
+/// dialect-aware DDL emitters from
+/// [`crate::migrate::ddl::create_table_sql_with_dialect`] +
+/// [`crate::migrate::ddl::create_constraints_sql_with_dialect`], so
+/// MySQL gets backticks + `TINYINT(1)` + `BIGINT AUTO_INCREMENT` etc.
+///
+/// Useful for dev bootstrap, ephemeral test databases, and one-shot
+/// CLI tools — for production schema evolution use the file-based
+/// [`migrate`] runner (still PG-only; bi-dialect ledger path lands
+/// in a follow-up batch).
+///
+/// # Errors
+/// As [`apply_all`].
+pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> {
+    let dialect = pool.dialect();
+    let models = registered_models();
+    for model in &models {
+        let sql = ddl::create_table_sql_with_dialect(dialect, model);
+        crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
+    }
+    for model in &models {
+        for sql in ddl::create_constraints_sql_with_dialect(dialect, model) {
+            crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
+        }
+    }
+    Ok(())
+}
+
+/// `drop_all` against either backend. Equivalent to [`drop_all`] but
+/// takes [`crate::sql::Pool`].
+///
+/// MySQL caveat: `DROP TABLE … CASCADE` is rejected by MySQL's parser
+/// (MySQL drops cascade FK constraints automatically and doesn't take
+/// the keyword). For now this routes the cascade flag through PG only;
+/// MySQL gets `DROP TABLE IF EXISTS` without it. A future batch will
+/// add `Dialect::supports_drop_cascade()` to gate the keyword cleanly.
+///
+/// # Errors
+/// As [`drop_all`].
+pub async fn drop_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> {
+    let dialect = pool.dialect();
+    // Cascade only emitted for PG — MySQL parses it as syntax error.
+    let cascade = dialect.name() == "postgres";
+    for model in registered_models() {
+        let sql = ddl::drop_table_sql_with_dialect(
+            dialect,
+            model,
+            /* if_exists */ true,
+            cascade,
+        );
+        crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
+    }
+    Ok(())
+}
+
 /// Ensure the ledger table exists, then apply every pending migration
 /// in `dir` (lex-sorted by name) to `pool`. Already-applied migrations
 /// are skipped.

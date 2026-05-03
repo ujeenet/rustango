@@ -155,3 +155,16 @@ fn ddl_create_table_pg_unchanged() {
     assert!(sql.contains("\"name\" TEXT"));
     assert!(!sql.contains("`"));
 }
+
+#[test]
+fn apply_all_pool_and_drop_all_pool_are_callable() {
+    // batch 11 — apply_all_pool / drop_all_pool take &Pool and
+    // dispatch through Dialect for both DDL emission and execution.
+    // Compile-time probe — the functions are async and would dial
+    // the connect_lazy URL only on first execute, so we don't
+    // actually run them.
+    fn _probe(pool: &rustango::sql::Pool) {
+        let _fut = rustango::migrate::apply_all_pool(pool);
+        let _fut = rustango::migrate::drop_all_pool(pool);
+    }
+}
