@@ -212,9 +212,10 @@ pub mod totp;
 /// Text utilities — slugify, html_escape, truncate.
 pub mod text;
 
-/// Request ID middleware — assign per-request correlation IDs.
-/// See [`request_id::RequestIdLayer`].
-#[cfg(all(feature = "admin", feature = "tenancy"))]
+/// Request ID middleware — assign per-request correlation IDs,
+/// honor inbound `X-Request-Id` for end-to-end propagation. See
+/// [`request_id::RequestIdLayer`].
+#[cfg(feature = "admin")]
 pub mod request_id;
 
 /// IP allowlist / blocklist middleware. See [`ip_filter::IpFilterLayer`].

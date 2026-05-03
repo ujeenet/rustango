@@ -62,7 +62,7 @@ use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{to_bytes, Body};
-use axum::http::{header, HeaderMap, HeaderValue, Request, Response, StatusCode};
+use axum::http::{header, HeaderValue, Request, Response, StatusCode};
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
