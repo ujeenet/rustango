@@ -246,6 +246,21 @@ fn audit_ensure_table_pool_and_emit_one_pool_are_callable() {
 }
 
 #[test]
+fn fetch_with_prefetch_pool_is_callable() {
+    // batch 18 — prefetch_related (1:N hydration) on either backend.
+    // Compile-time probe; live exec needs a database. Use User as
+    // the parent + Post as the child stand-in (test types have no
+    // FK between them; the call would return an error at runtime
+    // because the synthetic child_fk_column doesn't exist on Post,
+    // but the bound resolution + signature is what we're checking).
+    fn _probe(pool: &rustango::sql::Pool) {
+        let parent_qs = User::objects();
+        let _fut: _ =
+            rustango::sql::fetch_with_prefetch_pool::<User, Post>(parent_qs, "user_id", pool);
+    }
+}
+
+#[test]
 fn migrate_embedded_pool_is_callable() {
     // batch 17 — single-binary distribution path on either backend.
     fn _probe(pool: &rustango::sql::Pool) {

@@ -1505,6 +1505,96 @@ fn bind_query_as_my<T>(
     bind_match!(q, value)
 }
 
+/// `fetch_with_prefetch` against either backend. Bi-dialect counterpart
+/// of [`fetch_with_prefetch`] — fetches parents + children in two
+/// round trips and stitches each child onto its parent via
+/// [`FkPkAccess`]. Bounds add [`MaybeMyFromRow`] + [`MaybeMyLoadRelated`]
+/// over the `&PgPool` version's bounds; every `#[derive(Model)]`
+/// type satisfies them automatically.
+///
+/// `FkPkAccess` doesn't need a MySQL counterpart — it reads i64
+/// values from struct fields after decoding, with no Row dependency,
+/// so the same trait works against either backend.
+///
+/// # Errors
+/// As [`fetch_with_prefetch`].
+pub async fn fetch_with_prefetch_pool<P, C>(
+    parent_qs: crate::query::QuerySet<P>,
+    child_fk_column: &'static str,
+    pool: &Pool,
+) -> Result<Vec<(P, Vec<C>)>, ExecError>
+where
+    P: Model
+        + for<'r> sqlx::FromRow<'r, PgRow>
+        + MaybeMyFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + HasPkValue
+        + Send
+        + Unpin,
+    C: Model
+        + for<'r> sqlx::FromRow<'r, PgRow>
+        + MaybeMyFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + FkPkAccess
+        + Send
+        + Unpin,
+{
+    let parents: Vec<P> = parent_qs.fetch_pool(pool).await?;
+    if parents.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let pk_field = P::SCHEMA
+        .primary_key()
+        .ok_or(ExecError::MissingPrimaryKey {
+            table: P::SCHEMA.table,
+        })?;
+    let mut parent_pks: Vec<i64> = Vec::with_capacity(parents.len());
+    for parent in &parents {
+        if let Some(pk) = sql_value_as_i64(&extract_pk_value(parent)) {
+            parent_pks.push(pk);
+        }
+    }
+    parent_pks.sort_unstable();
+    parent_pks.dedup();
+    if parent_pks.is_empty() {
+        return Ok(parents.into_iter().map(|p| (p, Vec::new())).collect());
+    }
+
+    let pk_values: Vec<crate::core::SqlValue> = parent_pks
+        .iter()
+        .copied()
+        .map(crate::core::SqlValue::I64)
+        .collect();
+    let children: Vec<C> = crate::query::QuerySet::<C>::new()
+        .filter(
+            child_fk_column,
+            crate::core::Op::In,
+            crate::core::SqlValue::List(pk_values),
+        )
+        .fetch_pool(pool)
+        .await?;
+
+    let mut grouped: std::collections::HashMap<i64, Vec<C>> = std::collections::HashMap::new();
+    for child in children {
+        let Some(fk_pk) = child.__rustango_fk_pk(child_fk_column) else {
+            continue;
+        };
+        grouped.entry(fk_pk).or_default().push(child);
+    }
+
+    let mut out = Vec::with_capacity(parents.len());
+    for parent in parents {
+        let pk = sql_value_as_i64(&extract_pk_value(&parent)).unwrap_or(0);
+        let kids = grouped.remove(&pk).unwrap_or_default();
+        out.push((parent, kids));
+    }
+    let _ = pk_field;
+    Ok(out)
+}
+
 /// `select_rows_pool` with `select_related` join decoding. When the
 /// query carries no joins, behaves identically to [`select_rows_pool`]
 /// (fast `query_as` path). When joins are present, fetches raw rows
