@@ -114,6 +114,12 @@ pub mod jsonapi;
 #[cfg(feature = "hmac-auth")]
 pub mod hmac_auth;
 
+/// Standalone HS256 JWT — sign / verify / decode for magic links,
+/// microservice tokens, third-party SSO. See [`jwt::encode`] +
+/// [`jwt::decode`].
+#[cfg(feature = "jwt")]
+pub mod jwt;
+
 /// Multi-channel notifications — fan one notification out to mail / database /
 /// log / broadcast channels. See [`notifications::notify`].
 #[cfg(feature = "notifications")]
