@@ -876,18 +876,164 @@ mailer.send(&email).await?;
 
 ### File storage
 
-```rust
-use rustango::storage::{Storage, BoxedStorage, LocalStorage, InMemoryStorage};
+The framework ships three layers, each useful on its own:
 
-let storage: BoxedStorage = Arc::new(
+1. **`Storage` trait + backends** — write/read/delete/url + presign.
+2. **`StorageRegistry`** — named "disks" (Laravel-style) with optional CDN prefixes. Pick the right backend per call site by name.
+3. **`Media` model + `MediaManager`** — first-class Postgres-backed file references with direct browser uploads, soft delete, and orphan sweeps.
+
+#### Storage backends
+
+```rust
+use rustango::storage::{Storage, BoxedStorage, LocalStorage};
+use rustango::storage::s3::{S3Storage, S3Config};
+use std::sync::Arc;
+
+// Local disk:
+let local: BoxedStorage = Arc::new(
     LocalStorage::new("./uploads".into())
         .with_base_url("https://cdn.example.com/uploads")
 );
+local.save("avatars/alice.png", &png_bytes).await?;
 
-storage.save("avatars/alice.png", &png_bytes).await?;
-let bytes = storage.load("avatars/alice.png").await?;
-let url = storage.url("avatars/alice.png");          // → https://cdn.../avatars/alice.png
+// AWS S3 (or Cloudflare R2 / Backblaze B2 / MinIO — same struct):
+let s3: BoxedStorage = Arc::new(S3Storage::new(S3Config {
+    bucket: "my-bucket".into(),
+    region: "us-east-1".into(),
+    endpoint: None,                    // Some("https://...") for R2/B2/MinIO
+    access_key_id: env::var("AWS_ACCESS_KEY_ID")?,
+    secret_access_key: env::var("AWS_SECRET_ACCESS_KEY")?,
+    path_style: false,                 // true for R2/MinIO
+}));
+
+// Trait methods are identical across backends — swap in config.
+s3.save("avatars/alice.png", &png_bytes).await?;
+let bytes = s3.load("avatars/alice.png").await?;
+let public_url = s3.url("avatars/alice.png");
 ```
+
+The S3 backend is hand-rolled SigV4 over `reqwest` — no `aws-sdk-s3` dependency. Behind the `storage-s3` feature flag (default-on).
+
+#### Presigned URLs (private files + direct browser uploads)
+
+```rust
+use std::time::Duration;
+
+// Time-limited GET: paste into <img src=...> or <a href=...>
+let download_url = s3
+    .presigned_get_url("invoices/2026.pdf", Duration::from_secs(3600))
+    .await
+    .expect("S3 backend signs");
+
+// Time-limited PUT: browser uploads directly, server never proxies the body.
+// Content-Type binding — browser MUST send a matching header (S3 enforces).
+let upload_url = s3
+    .presigned_put_url("uploads/x.png", Duration::from_secs(300), Some("image/png"))
+    .await
+    .unwrap();
+```
+
+`LocalStorage` and `InMemoryStorage` return `None` from these methods (they can't sign). `S3Storage` (and any S3-compatible API) does. AWS caps presign expiry at 7 days; we clamp.
+
+#### `StorageRegistry` — named disks
+
+```rust
+use rustango::storage::StorageRegistry;
+
+let registry = StorageRegistry::new()
+    .set("avatars", Arc::new(s3))
+    .cdn("avatars", "https://cdn.example.com/avatars")
+    .set("docs",    Arc::new(docs_s3))
+    .set("cache",   Arc::new(local))
+    .with_default("avatars");
+
+let s = registry.disk("avatars").unwrap();
+let url = registry.cdn_url("avatars", "alice.png");
+//        → "https://cdn.example.com/avatars/alice.png"
+
+let internal = registry.origin_url("avatars", "alice.png");
+//        → bypasses CDN — for internal admin tools
+```
+
+#### First-class `Media` model
+
+`Media` is a Postgres-backed row. User models reference it via a normal integer FK (`Option<ForeignKey<Media>>`) — all metadata (disk, key, MIME, size, filename, free-form JSONB) lives on the `Media` row, so deletes are atomic and one file can be referenced by N parents without duplication.
+
+```rust
+use rustango::media::{Media, MediaManager, SaveOpts, UploadIntent};
+
+// Once at startup:
+Media::ensure_table(&pool).await?;
+let manager = MediaManager::new(pool.clone(), registry);
+
+// Server-side save: writes to S3 + inserts a Media row in one call.
+let m = manager.save_bytes(SaveOpts {
+    disk: "avatars".into(),
+    key_prefix: "users/".into(),
+    bytes: png_bytes.clone(),
+    mime: "image/png".into(),
+    original_filename: "alice.png".into(),
+    uploaded_by_id: Some(user.id),
+    metadata: serde_json::json!({"alt": "alice headshot"}),
+}).await?;
+
+// CDN-aware URL (falls back to backend URL when no CDN configured):
+let url = manager.url(&m).expect("url");
+
+// Time-limited download link for private files:
+let dl = manager.presigned_get(&m, Duration::from_secs(3600)).await;
+```
+
+#### Direct browser uploads (no proxying through your server)
+
+Two-step flow: server issues a presigned PUT URL, browser uploads to S3 directly, server confirms. Big files don't tie up handler bandwidth; you keep server-side gating on size/MIME via the pre-creation step.
+
+```rust
+// 1. Server: issue a presigned upload ticket.
+let ticket = manager.begin_upload(UploadIntent {
+    disk: "avatars".into(),
+    key_prefix: "uploads/".into(),
+    mime: "image/png".into(),
+    original_filename: "selfie.png".into(),
+    size_bytes: 12_345,
+    uploaded_by_id: Some(user.id),
+    ttl: Duration::from_secs(300),
+}).await?;
+// ticket.media_id    -> the Pending Media row id
+// ticket.upload_url  -> hand to the browser
+// ticket.expires_at  -> show client a deadline
+
+// 2. Browser:
+//    fetch(ticket.upload_url, {
+//        method: 'PUT',
+//        headers: { 'Content-Type': 'image/png' },
+//        body: file
+//    })
+
+// 3. Server: confirm the object landed; flips Pending → Ready
+//    (or → Failed if the browser abandoned).
+let m = manager.finalize_upload(ticket.media_id).await?;
+assert!(m.is_ready());
+```
+
+#### Lifecycle + cleanup
+
+```rust
+// Soft delete: marks deleted_at = NOW() but preserves the storage object.
+manager.delete(&m).await?;
+
+// Hard purge: removes both the row AND the storage object. Typical
+// "clean up after soft delete grace period" pattern.
+manager.purge(&m).await?;
+
+// Background sweeps — wire to rustango::scheduler:
+manager.purge_orphans(Duration::from_secs(7 * 86400)).await?;  // 7-day grace
+manager.purge_pending(Duration::from_secs(86400)).await?;      // abandoned uploads
+```
+
+The `MediaStatus` enum (`Pending` / `Ready` / `Failed`) is stored as TEXT so admins can filter / order without bespoke type handling. Soft-deleted rows are excluded from `manager.get(...)` by default; `manager.get_including_deleted(...)` brings them back for restore flows.
+
+Behind the `media` feature flag (default-on, implies `storage` + `postgres`).
 
 ### Scheduled tasks
 
