@@ -3986,7 +3986,10 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let container = parse_serializer_container_attrs(input)?;
     let model_path = &container.model;
 
-    // Classify each field
+    // Classify each field. `ty` is only consumed by the
+    // `#[cfg(feature = "openapi")]` block below, but we always
+    // capture it to keep the field-info build a single pass.
+    #[allow(dead_code)]
     struct FieldInfo {
         ident: syn::Ident,
         ty: syn::Type,
@@ -4116,6 +4119,9 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
 }
 
 /// Returns true if `ty` looks like `Option<T>` (any path ending in `Option`).
+/// Only used by the `openapi`-gated emission of `OpenApiSchema`; muted
+/// when the feature is off.
+#[cfg_attr(not(feature = "openapi"), allow(dead_code))]
 fn is_option(ty: &syn::Type) -> bool {
     if let syn::Type::Path(p) = ty {
         if let Some(last) = p.path.segments.last() {
