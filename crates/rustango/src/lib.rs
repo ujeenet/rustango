@@ -126,6 +126,14 @@ pub mod jwt;
 #[cfg(feature = "uploads")]
 pub mod uploads;
 
+/// `FileField` ORM type — typed reference to a file in
+/// [`storage::Storage`]. Stored as TEXT/VARCHAR; reads & writes are
+/// byte-equivalent to a String column. Pair with
+/// [`file_field::register_post_delete_cleanup`] to drop the
+/// underlying storage object when the row is deleted.
+#[cfg(feature = "storage")]
+pub mod file_field;
+
 /// Multi-channel notifications — fan one notification out to mail / database /
 /// log / broadcast channels. See [`notifications::notify`].
 #[cfg(feature = "notifications")]
