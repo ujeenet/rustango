@@ -1413,60 +1413,10 @@ fn inherent_impl_tokens(
         }
     };
 
-    // `save_pool(&Pool)` — v0.23.0-batch9. Non-audited models only.
-    // - has_auto + Auto::Unset PK: route to `insert_pool` (which
-    //   handles RETURNING on PG and LAST_INSERT_ID on MySQL)
-    // - else: build UpdateQuery and call `update_pool`
-    let pool_save_method = if audited_fields.is_some() {
-        quote!()
-    } else if let Some((pk_ident, pk_col)) = primary_key {
-        let pk_column_lit = pk_col.as_str();
-        let assignments = &fields.update_assignments;
-        let dispatch_unset = if fields.pk_is_auto {
-            quote! {
-                if matches!(self.#pk_ident, ::rustango::sql::Auto::Unset) {
-                    return self.insert_pool(pool).await;
-                }
-            }
-        } else {
-            quote!()
-        };
-        quote! {
-            /// Save this row to its table against either backend.
-            /// `INSERT` when the `Auto<T>` PK is `Unset`, else
-            /// `UPDATE` keyed on the PK.
-            ///
-            /// Audited models continue to use the `&PgPool`
-            /// [`Self::save`] until audit-on-connection over &Pool
-            /// lands in a follow-up batch.
-            ///
-            /// # Errors
-            /// As [`Self::save`].
-            pub async fn save_pool(
-                &mut self,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
-                #dispatch_unset
-                let _query = ::rustango::core::UpdateQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
-                    set: ::std::vec![ #( #assignments ),* ],
-                    where_clause: ::rustango::core::WhereExpr::Predicate(
-                        ::rustango::core::Filter {
-                            column: #pk_column_lit,
-                            op: ::rustango::core::Op::Eq,
-                            value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
-                                ::core::clone::Clone::clone(&self.#pk_ident)
-                            ),
-                        }
-                    ),
-                };
-                let _ = ::rustango::sql::update_pool(pool, &_query).await?;
-                ::core::result::Result::Ok(())
-            }
-        }
-    } else {
-        quote!()
-    };
+    // pool_save_method moved to after audit_pair_tokens /
+    // audit_pk_to_string (they live ~70 lines below) — needed for
+    // the audited branch which builds an UpdateQuery + PendingEntry
+    // and dispatches via audit::save_one_with_audit_pool.
 
     // pool_delete_method moved to after audit_pair_tokens / audit_pk_to_string
     // are computed (they live ~80 lines below).
@@ -1526,6 +1476,124 @@ fn inherent_impl_tokens(
     let audit_delete_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Delete));
     let audit_softdelete_emit = make_op_emit(quote!(::rustango::audit::AuditOp::SoftDelete));
     let audit_restore_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Restore));
+
+    // `save_pool(&Pool)` — emitted for every model with a PK.
+    // Audited Auto-PK models are deferred (the Auto::Unset →
+    // insert_pool path needs the audited-insert flow from a future
+    // batch). Three body shapes:
+    // - non-audited, plain PK: build UpdateQuery + dispatch through
+    //   sql::update_pool
+    // - non-audited, Auto-PK: same, but Auto::Unset routes to
+    //   self.insert_pool which already handles RETURNING / LAST_INSERT_ID
+    // - audited, plain PK: build UpdateQuery + PendingEntry, dispatch
+    //   through audit::save_one_with_audit_pool (per-backend tx wraps
+    //   UPDATE + audit emit atomically). Snapshot-style audit (post-
+    //   write field values) — diff-style audit (with pre-UPDATE
+    //   SELECT for `before` values) needs per-tracked-column codegen
+    //   that doesn't fit the runtime-helper pattern; legacy &PgPool
+    //   `save` keeps the diff for now.
+    let pool_save_method = if let Some((pk_ident, pk_col)) = primary_key {
+        let pk_column_lit = pk_col.as_str();
+        let assignments = &fields.update_assignments;
+        if audited_fields.is_some() {
+            if fields.pk_is_auto {
+                // Auto-PK + audited: defer. The Auto::Unset insert
+                // path needs a transactional INSERT + LAST_INSERT_ID
+                // + audit emit flow — that's a follow-up batch.
+                quote!()
+            } else {
+                let pairs = audit_pair_tokens.iter();
+                let pk_str = audit_pk_to_string.clone();
+                quote! {
+                    /// Save (UPDATE) this row against either backend
+                    /// with audit emission inside the same transaction.
+                    /// Bi-dialect counterpart of [`Self::save`] for
+                    /// audited models with non-`Auto<T>` PKs.
+                    ///
+                    /// Captures **post-write** field state (snapshot
+                    /// audit). The legacy &PgPool [`Self::save`]
+                    /// captures BEFORE+AFTER for true diff audit;
+                    /// porting that to the &Pool path needs runtime
+                    /// per-tracked-column decoding and is deferred.
+                    ///
+                    /// # Errors
+                    /// As [`Self::save`].
+                    pub async fn save_pool(
+                        &mut self,
+                        pool: &::rustango::sql::Pool,
+                    ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                        let _query = ::rustango::core::UpdateQuery {
+                            model: <Self as ::rustango::core::Model>::SCHEMA,
+                            set: ::std::vec![ #( #assignments ),* ],
+                            where_clause: ::rustango::core::WhereExpr::Predicate(
+                                ::rustango::core::Filter {
+                                    column: #pk_column_lit,
+                                    op: ::rustango::core::Op::Eq,
+                                    value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                        ::core::clone::Clone::clone(&self.#pk_ident)
+                                    ),
+                                }
+                            ),
+                        };
+                        let _audit_entry = ::rustango::audit::PendingEntry {
+                            entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
+                            entity_pk: #pk_str,
+                            operation: ::rustango::audit::AuditOp::Update,
+                            source: ::rustango::audit::current_source(),
+                            changes: ::rustango::audit::snapshot_changes(&[
+                                #( #pairs ),*
+                            ]),
+                        };
+                        let _ = ::rustango::audit::save_one_with_audit_pool(
+                            pool, &_query, &_audit_entry,
+                        ).await?;
+                        ::core::result::Result::Ok(())
+                    }
+                }
+            }
+        } else {
+            let dispatch_unset = if fields.pk_is_auto {
+                quote! {
+                    if matches!(self.#pk_ident, ::rustango::sql::Auto::Unset) {
+                        return self.insert_pool(pool).await;
+                    }
+                }
+            } else {
+                quote!()
+            };
+            quote! {
+                /// Save this row to its table against either backend.
+                /// `INSERT` when the `Auto<T>` PK is `Unset`, else
+                /// `UPDATE` keyed on the PK.
+                ///
+                /// # Errors
+                /// As [`Self::save`].
+                pub async fn save_pool(
+                    &mut self,
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    #dispatch_unset
+                    let _query = ::rustango::core::UpdateQuery {
+                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                        set: ::std::vec![ #( #assignments ),* ],
+                        where_clause: ::rustango::core::WhereExpr::Predicate(
+                            ::rustango::core::Filter {
+                                column: #pk_column_lit,
+                                op: ::rustango::core::Op::Eq,
+                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                    ::core::clone::Clone::clone(&self.#pk_ident)
+                                ),
+                            }
+                        ),
+                    };
+                    let _ = ::rustango::sql::update_pool(pool, &_query).await?;
+                    ::core::result::Result::Ok(())
+                }
+            }
+        }
+    } else {
+        quote!()
+    };
 
     // `delete_pool(&Pool)` — emitted for every model with a PK. Two
     // body shapes:

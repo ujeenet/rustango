@@ -614,6 +614,66 @@ pub async fn delete_one_with_audit_pool(
     }
 }
 
+/// Run `UPDATE` from an `UpdateQuery` and emit an audit entry inside
+/// a single transaction against either backend. Used by the
+/// macro-emitted `Model::save_pool` for audited models so the data
+/// write and the audit row commit atomically.
+///
+/// This is a **snapshot-style** audit (the entry's `changes` carries
+/// the post-write field values) rather than the diff-style audit the
+/// existing `&PgPool` `Model::save` produces. Diff-style audit
+/// requires a pre-UPDATE SELECT to capture `before` values per
+/// tracked column with their declared Rust types — that's
+/// per-model-per-field codegen the macro emits inline today, and
+/// porting it to a runtime helper is a separate refactor. Until then,
+/// audited writes on `&Pool` lose field-level diff capture but keep
+/// post-state provenance.
+///
+/// # Errors
+/// Any [`crate::sql::ExecError`] from compile / bind / execute, plus
+/// `sqlx::Error` from the audit emit.
+pub async fn save_one_with_audit_pool(
+    pool: &crate::sql::Pool,
+    query: &crate::core::UpdateQuery,
+    entry: &PendingEntry,
+) -> Result<u64, crate::sql::ExecError> {
+    let stmt = pool.dialect().compile_update(query)?;
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let mut tx = pg.begin().await?;
+            let mut q: sqlx::query::Query<
+                '_,
+                sqlx::Postgres,
+                sqlx::postgres::PgArguments,
+            > = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_value_pg(q, v);
+            }
+            let affected = q.execute(&mut *tx).await?.rows_affected();
+            emit_one(&mut *tx, entry).await?;
+            tx.commit().await?;
+            Ok(affected)
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            let mut tx = my.begin().await?;
+            let mut q: sqlx::query::Query<
+                '_,
+                sqlx::MySql,
+                sqlx::mysql::MySqlArguments,
+            > = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_value_my(q, v);
+            }
+            let affected = q.execute(&mut *tx).await?.rows_affected();
+            emit_one_my(&mut *tx, entry).await?;
+            tx.commit().await?;
+            Ok(affected)
+        }
+    }
+}
+
 /// Local Postgres-typed bind helper — couldn't reuse
 /// `executor::bind_query` (it's private to the executor module).
 /// Same `bind_match!`-shape body, but copied rather than re-exported

@@ -266,6 +266,43 @@ fn audited_model_gets_delete_pool() {
 }
 
 #[test]
+fn audited_model_with_plain_pk_gets_save_pool() {
+    // batch 21 — audited non-Auto-PK models get save_pool routing
+    // through audit::save_one_with_audit_pool (per-backend tx wraps
+    // UPDATE + audit emit atomically; snapshot-style audit).
+    fn _probe(rec: &mut AuditedRecord, pool: &rustango::sql::Pool) {
+        let _fut = rec.save_pool(pool);
+    }
+}
+
+#[test]
+fn audit_save_one_with_audit_pool_is_callable() {
+    use rustango::core::{Filter, Model, Op, SqlValue, UpdateQuery, WhereExpr};
+    fn _probe(pool: &rustango::sql::Pool) {
+        let q = UpdateQuery {
+            model: <AuditedRecord as Model>::SCHEMA,
+            set: vec![rustango::core::Assignment {
+                column: "name",
+                value: SqlValue::String("changed".into()),
+            }],
+            where_clause: WhereExpr::Predicate(Filter {
+                column: "id",
+                op: Op::Eq,
+                value: SqlValue::I64(1),
+            }),
+        };
+        let entry = rustango::audit::PendingEntry {
+            entity_table: "mysql_from_row_audited",
+            entity_pk: "1".into(),
+            operation: rustango::audit::AuditOp::Update,
+            source: rustango::audit::AuditSource::System,
+            changes: serde_json::json!({}),
+        };
+        let _fut = rustango::audit::save_one_with_audit_pool(pool, &q, &entry);
+    }
+}
+
+#[test]
 fn audit_delete_one_with_audit_pool_is_callable() {
     use rustango::core::{DeleteQuery, Filter, Model, Op, SqlValue, WhereExpr};
     fn _probe(pool: &rustango::sql::Pool) {
