@@ -246,6 +246,15 @@ fn audit_ensure_table_pool_and_emit_one_pool_are_callable() {
 }
 
 #[test]
+fn migrate_embedded_pool_is_callable() {
+    // batch 17 — single-binary distribution path on either backend.
+    fn _probe(pool: &rustango::sql::Pool) {
+        let entries: &[(&str, &str)] = &[];
+        let _fut = rustango::migrate::migrate_embedded_pool(pool, entries);
+    }
+}
+
+#[test]
 fn audit_mysql_ddl_uses_backticks_and_json() {
     // batch 16 — confirm the MySQL-shape DDL uses backticks +
     // JSON + DATETIME(6) (no JSONB / TIMESTAMPTZ / double quotes).

@@ -35,9 +35,9 @@ pub use make::{make_migrations, make_migrations_for_app, make_migrations_from};
 pub use runner::{
     applied_set, applied_set_pool, apply_all, apply_all_pool, downgrade, downgrade_pool,
     drop_all, drop_all_pool, ensure_ledger, ensure_ledger_pool, migrate, migrate_dry_run,
-    migrate_dry_run_pool, migrate_embedded, migrate_pool, migrate_to, migrate_to_pool,
-    registered_models, unapply, unapply_force, unapply_force_pool, unapply_pool, Builder,
-    MigrationPreview, LEDGER_TABLE,
+    migrate_dry_run_pool, migrate_embedded, migrate_embedded_pool, migrate_pool, migrate_to,
+    migrate_to_pool, registered_models, unapply, unapply_force, unapply_force_pool, unapply_pool,
+    Builder, MigrationPreview, LEDGER_TABLE,
 };
 pub use snapshot::{FieldSnapshot, RelationSnapshot, SchemaSnapshot, TableSnapshot};
 pub use manage::{append_data_op, make_data_migration};

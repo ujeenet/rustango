@@ -1831,6 +1831,66 @@ async fn unapply_atomic_pool(
     Ok(())
 }
 
+/// Apply pending migrations from an in-memory `&[(name, json)]` slice
+/// against either backend. Bi-dialect counterpart of [`migrate_embedded`].
+///
+/// Built for single-binary deployments where shipping a `migrations/`
+/// folder alongside the binary is awkward (Docker images, scratch
+/// containers, embedded systems). Pair with the
+/// [`embed_migrations!`](crate::embed_migrations) proc-macro, which
+/// scans a directory at compile time and emits the slice via
+/// `include_str!` per file.
+///
+/// Each entry's first item must equal the migration's `name` field
+/// — a divergence would mean the slice was hand-built incorrectly.
+///
+/// # Errors
+/// As [`migrate_embedded`], plus [`MigrateError::Validation`] when an
+/// entry key doesn't match the migration's own `name` field.
+pub async fn migrate_embedded_pool(
+    pool: &crate::sql::Pool,
+    embedded: &[(&str, &str)],
+) -> Result<Vec<Migration>, MigrateError> {
+    migrate_embedded_pool_with_ledger(pool, embedded, LEDGER_TABLE).await
+}
+
+async fn migrate_embedded_pool_with_ledger(
+    pool: &crate::sql::Pool,
+    embedded: &[(&str, &str)],
+    ledger: &str,
+) -> Result<Vec<Migration>, MigrateError> {
+    ensure_ledger_pool_for(pool, ledger).await?;
+    with_migrate_lock_pool(pool, async {
+        let mut all: Vec<Migration> = Vec::with_capacity(embedded.len());
+        for (name, json) in embedded {
+            let mig = file::parse(json)?;
+            if mig.name != *name {
+                return Err(MigrateError::Validation(format!(
+                    "embedded entry key `{name}` doesn't match migration `name` field `{}`",
+                    mig.name,
+                )));
+            }
+            all.push(mig);
+        }
+        all.sort_by(|a, b| a.name.cmp(&b.name));
+        file::validate_chain(&all, "embedded slice")?;
+
+        let applied = applied_set_pool_for(pool, ledger).await?;
+        let pending: Vec<Migration> = all
+            .into_iter()
+            .filter(|m| !applied.contains(&m.name))
+            .collect();
+
+        let mut newly = Vec::with_capacity(pending.len());
+        for mig in pending {
+            apply_one_pool(pool, &mig, ledger).await?;
+            newly.push(mig);
+        }
+        Ok(newly)
+    })
+    .await
+}
+
 async fn unapply_nonatomic_pool(
     pool: &crate::sql::Pool,
     target: &Migration,
