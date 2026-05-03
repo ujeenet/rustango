@@ -3226,6 +3226,12 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
         "f64" => DetectedKind::F64,
         "bool" => DetectedKind::Bool,
         "String" => DetectedKind::String,
+        // FileField is a String newtype that's also a typed reference
+        // to a file in `rustango::storage::Storage`. On the database
+        // it's stored as TEXT/VARCHAR — exactly the same shape as a
+        // bare String column — so migrations don't need to change
+        // when a column is promoted to FileField.
+        "FileField" => DetectedKind::String,
         "DateTime" => DetectedKind::DateTime,
         "NaiveDate" => DetectedKind::Date,
         "Uuid" => DetectedKind::Uuid,
@@ -3233,7 +3239,7 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
         other => {
             return Err(syn::Error::new_spanned(
                 ty,
-                format!("unsupported field type `{other}`; v0.1 supports i32/i64/f32/f64/bool/String/DateTime/NaiveDate/Uuid/serde_json::Value, optionally wrapped in Option or Auto (Auto only on integers)"),
+                format!("unsupported field type `{other}`; supported: i32/i64/f32/f64/bool/String/FileField/DateTime/NaiveDate/Uuid/serde_json::Value, optionally wrapped in Option or Auto (Auto only on integers)"),
             ));
         }
     };

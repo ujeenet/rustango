@@ -178,6 +178,15 @@ impl From<FileField> for String {
     }
 }
 
+// FileField -> SqlValue, so the macro-generated typed Column<Value =
+// FileField> can satisfy `Value: Into<SqlValue>`. We render as the
+// inner String — exactly what the database column shape demands.
+impl From<FileField> for crate::core::SqlValue {
+    fn from(f: FileField) -> Self {
+        Self::String(f.0)
+    }
+}
+
 // =====================================================================
 // sqlx integration — encode/decode as TEXT
 // =====================================================================
