@@ -575,3 +575,145 @@ fn detect_changes_emits_alter_column_type_for_metadata_diff() {
             .any(|c| matches!(c, SchemaChange::AlterColumnDefault { .. }))
     );
 }
+
+// ---------------- composite-FK diff (F.5b) ----------------
+
+fn pair_table_with_composite_fk(name: &str) -> TableSnapshot {
+    serde_json::from_value(serde_json::json!({
+        "name": name,
+        "model": "Pair",
+        "fields": [
+            {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true},
+            {"name": "left_id", "column": "left_id", "ty": "i64", "nullable": false, "primary_key": false},
+            {"name": "right_id", "column": "right_id", "ty": "i64", "nullable": false, "primary_key": false}
+        ],
+        "composite_fks": [
+            {
+                "name": "diff_pair_left_right_fkey",
+                "to": "diff_target",
+                "from": ["left_id", "right_id"],
+                "on": ["a_id", "b_id"]
+            }
+        ]
+    })).unwrap()
+}
+
+fn pair_table_no_composite_fk(name: &str) -> TableSnapshot {
+    serde_json::from_value(serde_json::json!({
+        "name": name,
+        "model": "Pair",
+        "fields": [
+            {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true},
+            {"name": "left_id", "column": "left_id", "ty": "i64", "nullable": false, "primary_key": false},
+            {"name": "right_id", "column": "right_id", "ty": "i64", "nullable": false, "primary_key": false}
+        ]
+    })).unwrap()
+}
+
+#[test]
+fn detect_add_composite_fk_on_existing_table() {
+    let prev = SchemaSnapshot {
+        tables: vec![pair_table_no_composite_fk("diff_pair")],
+        ..Default::default()
+    };
+    let current = SchemaSnapshot {
+        tables: vec![pair_table_with_composite_fk("diff_pair")],
+        ..Default::default()
+    };
+    let changes = detect_changes(&prev, &current);
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c, SchemaChange::AddCompositeFk { name, .. } if name == "diff_pair_left_right_fkey")),
+        "expected AddCompositeFk in {changes:?}",
+    );
+}
+
+#[test]
+fn detect_drop_composite_fk_on_existing_table() {
+    let prev = SchemaSnapshot {
+        tables: vec![pair_table_with_composite_fk("diff_pair")],
+        ..Default::default()
+    };
+    let current = SchemaSnapshot {
+        tables: vec![pair_table_no_composite_fk("diff_pair")],
+        ..Default::default()
+    };
+    let changes = detect_changes(&prev, &current);
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c, SchemaChange::DropCompositeFk { name, .. } if name == "diff_pair_left_right_fkey")),
+        "expected DropCompositeFk in {changes:?}",
+    );
+}
+
+#[test]
+fn render_add_composite_fk_emits_alter_table() {
+    let snap = SchemaSnapshot {
+        tables: vec![pair_table_with_composite_fk("diff_pair")],
+        ..Default::default()
+    };
+    let ddl = render_changes(
+        &[SchemaChange::AddCompositeFk {
+            table: "diff_pair".into(),
+            name: "diff_pair_left_right_fkey".into(),
+            to: "diff_target".into(),
+            from: vec!["left_id".into(), "right_id".into()],
+            on: vec!["a_id".into(), "b_id".into()],
+        }],
+        &snap,
+    )
+    .unwrap();
+    assert_eq!(ddl.len(), 1);
+    assert!(ddl[0].contains(r#"ALTER TABLE "diff_pair""#));
+    assert!(ddl[0].contains(r#"ADD CONSTRAINT "diff_pair_left_right_fkey""#));
+    assert!(ddl[0].contains(r#"FOREIGN KEY ("left_id", "right_id")"#));
+    assert!(ddl[0].contains(r#"REFERENCES "diff_target" ("a_id", "b_id")"#));
+}
+
+#[test]
+fn render_drop_composite_fk_emits_alter_table_drop_constraint() {
+    let snap = SchemaSnapshot {
+        tables: vec![pair_table_no_composite_fk("diff_pair")],
+        ..Default::default()
+    };
+    let ddl = render_changes(
+        &[SchemaChange::DropCompositeFk {
+            table: "diff_pair".into(),
+            name: "diff_pair_left_right_fkey".into(),
+        }],
+        &snap,
+    )
+    .unwrap();
+    assert_eq!(
+        ddl,
+        vec![r#"ALTER TABLE "diff_pair" DROP CONSTRAINT IF EXISTS "diff_pair_left_right_fkey""#]
+    );
+}
+
+#[test]
+fn create_table_emits_composite_fks_in_deferred_bucket() {
+    // CREATE TABLE for a model that owns a composite FK should emit
+    // the table creation immediately and the ADD CONSTRAINT after
+    // (so the referenced table exists by the time the FK runs).
+    let snap = SchemaSnapshot {
+        tables: vec![pair_table_with_composite_fk("diff_pair")],
+        ..Default::default()
+    };
+    let ddl = render_changes(
+        &[SchemaChange::CreateTable("diff_pair".into())],
+        &snap,
+    )
+    .unwrap();
+    assert!(
+        ddl[0].starts_with(r#"CREATE TABLE "diff_pair""#),
+        "first stmt should be CREATE TABLE; got: {}",
+        ddl[0],
+    );
+    assert!(
+        ddl.iter().any(|s| s.contains("diff_pair_left_right_fkey")
+            && s.contains(r#"FOREIGN KEY ("left_id", "right_id")"#)),
+        "expected composite FK ALTER TABLE in {ddl:?}",
+    );
+}

@@ -207,6 +207,31 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
                 dst_col: mt.dst_col.clone(),
             }))
         }
+        Operation::Schema(SchemaChange::AddCompositeFk { table, name, .. }) => {
+            Ok(Operation::Schema(SchemaChange::DropCompositeFk {
+                table: table.clone(),
+                name: name.clone(),
+            }))
+        }
+        Operation::Schema(SchemaChange::DropCompositeFk { table, name }) => {
+            let t = prev.table(table).ok_or_else(|| {
+                MigrateError::Validation(format!(
+                    "cannot invert DropCompositeFk(`{table}`.`{name}`): table missing in predecessor snapshot",
+                ))
+            })?;
+            let cf = t.composite_fk(name).ok_or_else(|| {
+                MigrateError::Validation(format!(
+                    "cannot invert DropCompositeFk(`{table}`.`{name}`): composite FK not in predecessor snapshot",
+                ))
+            })?;
+            Ok(Operation::Schema(SchemaChange::AddCompositeFk {
+                table: table.clone(),
+                name: name.clone(),
+                to: cf.to.clone(),
+                from: cf.from.clone(),
+                on: cf.on.clone(),
+            }))
+        }
         Operation::Data(d) => {
             if !d.reversible {
                 return Err(MigrateError::Validation(format!(

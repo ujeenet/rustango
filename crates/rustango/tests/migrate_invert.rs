@@ -359,3 +359,77 @@ fn invert_rename_column_swaps_old_and_new() {
         })]
     );
 }
+
+// ---------------- composite-FK invert (F.5b) ----------------
+
+fn pair_table_with_composite_fk() -> TableSnapshot {
+    serde_json::from_value(serde_json::json!({
+        "name": "pair",
+        "model": "Pair",
+        "fields": [
+            {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true},
+            {"name": "left_id", "column": "left_id", "ty": "i64", "nullable": false, "primary_key": false},
+            {"name": "right_id", "column": "right_id", "ty": "i64", "nullable": false, "primary_key": false}
+        ],
+        "composite_fks": [
+            {
+                "name": "pair_left_right_fkey",
+                "to": "target",
+                "from": ["left_id", "right_id"],
+                "on": ["a_id", "b_id"]
+            }
+        ]
+    })).unwrap()
+}
+
+#[test]
+fn invert_add_composite_fk_yields_drop_composite_fk() {
+    let forward = vec![Operation::Schema(SchemaChange::AddCompositeFk {
+        table: "pair".into(),
+        name: "pair_left_right_fkey".into(),
+        to: "target".into(),
+        from: vec!["left_id".into(), "right_id".into()],
+        on: vec!["a_id".into(), "b_id".into()],
+    })];
+    let out = invert(&forward, &empty()).unwrap();
+    assert_eq!(
+        out,
+        vec![Operation::Schema(SchemaChange::DropCompositeFk {
+            table: "pair".into(),
+            name: "pair_left_right_fkey".into(),
+        })]
+    );
+}
+
+#[test]
+fn invert_drop_composite_fk_recovers_metadata_from_prev() {
+    let prev = SchemaSnapshot {
+        tables: vec![pair_table_with_composite_fk()],
+        ..Default::default()
+    };
+    let forward = vec![Operation::Schema(SchemaChange::DropCompositeFk {
+        table: "pair".into(),
+        name: "pair_left_right_fkey".into(),
+    })];
+    let out = invert(&forward, &prev).unwrap();
+    assert_eq!(
+        out,
+        vec![Operation::Schema(SchemaChange::AddCompositeFk {
+            table: "pair".into(),
+            name: "pair_left_right_fkey".into(),
+            to: "target".into(),
+            from: vec!["left_id".into(), "right_id".into()],
+            on: vec!["a_id".into(), "b_id".into()],
+        })]
+    );
+}
+
+#[test]
+fn invert_drop_composite_fk_missing_in_prev_is_validation_error() {
+    let forward = vec![Operation::Schema(SchemaChange::DropCompositeFk {
+        table: "pair".into(),
+        name: "pair_left_right_fkey".into(),
+    })];
+    let err = invert(&forward, &empty()).unwrap_err();
+    assert!(format!("{err:?}").contains("pair_left_right_fkey"));
+}

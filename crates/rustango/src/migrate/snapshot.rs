@@ -249,6 +249,12 @@ impl TableSnapshot {
     pub fn field(&self, column: &str) -> Option<&FieldSnapshot> {
         self.fields.iter().find(|f| f.column == column)
     }
+
+    /// Look up a composite FK by constraint name.
+    #[must_use]
+    pub fn composite_fk(&self, name: &str) -> Option<&CompositeFkSnapshot> {
+        self.composite_fks.iter().find(|c| c.name == name)
+    }
 }
 
 impl FieldSnapshot {

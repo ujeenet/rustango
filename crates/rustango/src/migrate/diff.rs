@@ -135,6 +135,25 @@ pub enum SchemaChange {
     DropM2MTable {
         through: String,
     },
+    /// Add a composite (multi-column) foreign-key constraint declared
+    /// via `#[rustango(fk_composite(...))]`. Sub-slice F.5b. Render
+    /// emits `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY (...)
+    /// REFERENCES ...(...)` and routes the statement through
+    /// `deferred_fks` so the referenced table exists by the time the
+    /// constraint is created.
+    AddCompositeFk {
+        table: String,
+        name: String,
+        to: String,
+        from: Vec<String>,
+        on: Vec<String>,
+    },
+    /// Drop a composite FK by constraint name. Render emits
+    /// `ALTER TABLE ... DROP CONSTRAINT IF EXISTS ...`.
+    DropCompositeFk {
+        table: String,
+        name: String,
+    },
 }
 
 /// Compute the ordered list of changes from `prev` → `current`.
@@ -263,6 +282,41 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     for mt in &prev.m2m_tables {
         if current.m2m_table(&mt.through).is_none() {
             changes.push(SchemaChange::DropM2MTable { through: mt.through.clone() });
+        }
+    }
+    // New composite FK constraints (added on existing tables, or on
+    // brand-new tables — we emit them either way and let `render`
+    // route through `deferred_fks` so referenced tables exist first).
+    for ct in &current.tables {
+        let prev_fks: &[_] = prev
+            .table(&ct.name)
+            .map(|t| t.composite_fks.as_slice())
+            .unwrap_or(&[]);
+        for cf in &ct.composite_fks {
+            if !prev_fks.iter().any(|p| p.name == cf.name) {
+                changes.push(SchemaChange::AddCompositeFk {
+                    table: ct.name.clone(),
+                    name: cf.name.clone(),
+                    to: cf.to.clone(),
+                    from: cf.from.clone(),
+                    on: cf.on.clone(),
+                });
+            }
+        }
+    }
+    // Dropped composite FK constraints (still-present tables only —
+    // a `DropTable` already cascades the constraint).
+    for pt in &prev.tables {
+        let Some(ct) = current.table(&pt.name) else {
+            continue;
+        };
+        for pf in &pt.composite_fks {
+            if !ct.composite_fks.iter().any(|c| c.name == pf.name) {
+                changes.push(SchemaChange::DropCompositeFk {
+                    table: pt.name.clone(),
+                    name: pf.name.clone(),
+                });
+            }
         }
     }
     changes
@@ -587,6 +641,18 @@ pub fn render_changes_split(
             SchemaChange::DropM2MTable { through } => {
                 out.immediate.push(format!(r#"DROP TABLE IF EXISTS "{through}" CASCADE"#));
             }
+            SchemaChange::AddCompositeFk { table, name, to, from, on } => {
+                let from_cols = from.iter().map(|c| format!(r#""{c}""#)).collect::<Vec<_>>().join(", ");
+                let on_cols = on.iter().map(|c| format!(r#""{c}""#)).collect::<Vec<_>>().join(", ");
+                out.deferred_fks.push(format!(
+                    r#"ALTER TABLE "{table}" ADD CONSTRAINT "{name}" FOREIGN KEY ({from_cols}) REFERENCES "{to}" ({on_cols})"#,
+                ));
+            }
+            SchemaChange::DropCompositeFk { table, name } => {
+                out.immediate.push(format!(
+                    r#"ALTER TABLE "{table}" DROP CONSTRAINT IF EXISTS "{name}""#,
+                ));
+            }
         }
     }
     Ok(out)
@@ -653,7 +719,8 @@ fn create_table_sql_from_snapshot(t: &TableSnapshot) -> String {
 }
 
 fn constraints_sql_from_snapshot(t: &TableSnapshot) -> Vec<String> {
-    t.fields
+    let mut out: Vec<String> = t
+        .fields
         .iter()
         .filter_map(|f| {
             f.fk.as_ref().map(|rel| {
@@ -663,7 +730,16 @@ fn constraints_sql_from_snapshot(t: &TableSnapshot) -> Vec<String> {
                 )
             })
         })
-        .collect()
+        .collect();
+    for cf in &t.composite_fks {
+        let from_cols = cf.from.iter().map(|c| format!(r#""{c}""#)).collect::<Vec<_>>().join(", ");
+        let on_cols = cf.on.iter().map(|c| format!(r#""{c}""#)).collect::<Vec<_>>().join(", ");
+        out.push(format!(
+            r#"ALTER TABLE "{}" ADD CONSTRAINT "{}" FOREIGN KEY ({}) REFERENCES "{}" ({})"#,
+            t.name, cf.name, from_cols, cf.to, on_cols,
+        ));
+    }
+    out
 }
 
 fn add_column_sql(table: &str, f: &FieldSnapshot) -> String {
