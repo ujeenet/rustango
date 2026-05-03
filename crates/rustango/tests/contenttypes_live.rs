@@ -62,6 +62,32 @@ pub struct Pair {
     pub right_id: i64,
 }
 
+/// Generic-FK demo model (F.4). Two columns
+/// `(content_type_id, object_pk)` form a generic pointer at any
+/// registered model's row, surfaced via the runtime
+/// `GenericForeignKey { content_type_id, object_pk }` value type.
+/// The container `#[rustango(generic_fk(...))]` attr emits the
+/// metadata the admin renderer reads to show the target as a
+/// clickable link.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "ct_live_activity",
+    generic_fk(
+        name = "target",
+        ct_column = "target_content_type_id",
+        pk_column = "target_object_pk",
+    ),
+)]
+#[allow(dead_code)]
+pub struct ActivityEntry {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub target_content_type_id: i64,
+    pub target_object_pk: i64,
+    #[rustango(max_length = 64)]
+    pub action: String,
+}
+
 /// Soft-FK target (F.3) — `Comment.post_id` is a plain `i64` column
 /// pointing at `ct_live_post.id` *without* a declared
 /// `Relation::Fk` on the field. Used to exercise [`prefetch_soft`].
@@ -118,6 +144,7 @@ async fn fresh_pool() -> Option<sqlx::PgPool> {
         "ct_live_audit",
         "ct_live_pair",
         "ct_live_comment",
+        "ct_live_activity",
     ] {
         let drop_sql = format!(r#"DROP TABLE IF EXISTS "{tbl}" CASCADE"#);
         let _ = sqlx::query(&drop_sql).execute(&pool).await;
@@ -482,4 +509,71 @@ async fn prefetch_generic_short_circuits_on_empty_pairs() {
         .await
         .expect("prefetch_generic empty");
     assert!(out.is_empty());
+}
+
+// ============================================================ F.4 — generic_relations + admin renderer
+
+#[test]
+fn generic_fk_relation_is_emitted_on_model_schema() {
+    use rustango::core::Model as _;
+    let s = ActivityEntry::SCHEMA;
+    assert_eq!(
+        s.generic_relations.len(),
+        1,
+        "ActivityEntry should declare one generic_fk"
+    );
+    let rel = &s.generic_relations[0];
+    assert_eq!(rel.name, "target");
+    assert_eq!(rel.ct_column, "target_content_type_id");
+    assert_eq!(rel.pk_column, "target_object_pk");
+}
+
+#[tokio::test]
+async fn render_generic_fk_link_resolves_via_content_type() {
+    use rustango::contenttypes::{render_generic_fk_link, GenericForeignKey};
+    use rustango::core::Model as _;
+    let _g = ct_lock().lock().await;
+    let Some(pool) = fresh_pool().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    contenttypes::ensure_seeded(&pool).await.expect("seed");
+    let mut p = Post {
+        id: Auto::Unset,
+        title: "rendered".into(),
+    };
+    p.insert(&pool).await.expect("insert post");
+    let pk = p.id.get().copied().unwrap();
+
+    let gfk = GenericForeignKey::for_target::<Post>(&pool, pk)
+        .await
+        .expect("for_target");
+    let html = render_generic_fk_link(&pool, gfk)
+        .await
+        .expect("render_generic_fk_link");
+
+    // Link to the target table's admin route, with app_label.model_name
+    // as the visible label.
+    assert!(html.contains(r#"href="/ct_live_post/"#));
+    assert!(html.contains("blog.post"));
+    assert!(html.contains(&format!("#{pk}")));
+}
+
+#[tokio::test]
+async fn render_generic_fk_link_falls_back_on_unknown_ct_id() {
+    use rustango::contenttypes::{render_generic_fk_link, GenericForeignKey};
+    let _g = ct_lock().lock().await;
+    let Some(pool) = fresh_pool().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    contenttypes::ensure_seeded(&pool).await.expect("seed");
+    let gfk = GenericForeignKey::new(/* unknown */ 99_999_999, 42);
+    let html = render_generic_fk_link(&pool, gfk)
+        .await
+        .expect("render_generic_fk_link");
+    // Fallback shape — raw pair, no anchor link, italics for visibility.
+    assert!(html.contains("ct=99999999"));
+    assert!(html.contains("pk=42"));
+    assert!(!html.contains("href="));
 }

@@ -375,6 +375,7 @@ mod tests {
             check_constraints: &[],
             m2m: &[],
             composite_relations: &[],
+            generic_relations: &[],
         };
         &MS
     }

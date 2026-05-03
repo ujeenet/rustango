@@ -50,6 +50,32 @@ pub enum Relation {
     O2O { to: &'static str, on: &'static str },
 }
 
+/// Generic ("any model") foreign key declared at the model level —
+/// pairs a `content_type_id` column with an `object_pk` column whose
+/// values together identify a row in any registered model. The
+/// pointed-at model varies per row.
+///
+/// Sub-slice F.4 of the v0.15.0 ContentType plan. Used by audit log
+/// targets, comments-on-anything, activity-stream entries, generic
+/// tags. See [`crate::contenttypes::GenericForeignKey`] for the
+/// runtime value type and `prefetch_generic` for batched hydration.
+///
+/// Declared on the source model via the container attr
+/// `#[rustango(generic_fk(name = "target", ct_column = "content_type_id",
+/// pk_column = "object_pk"))]`. The admin renderer uses this metadata
+/// to display generic-FK columns as clickable target links.
+#[derive(Debug, Clone, Copy)]
+pub struct GenericRelation {
+    /// Logical name for the relation (used in admin labels, error
+    /// messages). Free-form Rust identifier.
+    pub name: &'static str,
+    /// Source-side column name carrying the `content_type_id` FK
+    /// to `rustango_content_types.id`.
+    pub ct_column: &'static str,
+    /// Source-side column name carrying the target row's primary key.
+    pub pk_column: &'static str,
+}
+
 /// Multi-column ("composite") foreign key relation, declared at the
 /// model level rather than the field level — single-column FKs stay
 /// in [`FieldSchema::relation`], composite FKs live here so each
@@ -175,6 +201,13 @@ pub struct ModelSchema {
     ///
     /// Empty slice when the model has no composite FKs.
     pub composite_relations: &'static [CompositeFkRelation],
+    /// Generic ("any model") foreign key relations declared via
+    /// `#[rustango(generic_fk(name = "...", ct_column = "...",
+    /// pk_column = "..."))]`. Each entry pairs a `content_type_id`
+    /// column with an `object_pk` column. Empty slice when the
+    /// model has no generic FKs. Sub-slice F.4 of the v0.15.0
+    /// ContentType plan.
+    pub generic_relations: &'static [GenericRelation],
 }
 
 /// Descriptor for one table-level CHECK constraint.

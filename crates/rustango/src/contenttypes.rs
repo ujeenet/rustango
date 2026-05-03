@@ -212,6 +212,59 @@ impl GenericForeignKey {
     }
 }
 
+/// Render a `GenericForeignKey` value as a clickable HTML link
+/// pointing at the target row's admin detail page. Used by the
+/// admin list/detail views (sub-slice F.4) when a model declares
+/// `#[rustango(generic_fk(...))]`.
+///
+/// Resolves the ContentType via [`ContentType::by_id`] to find the
+/// target table name + a human label, builds a relative URL of the
+/// form `/<target_table>/<object_pk>` (matches the auto-admin's
+/// per-table route shape), and returns escaped HTML. Returns the
+/// raw "(ct=…, pk=…)" text fallback if the ContentType lookup fails
+/// (e.g. CT not yet seeded, table dropped, etc.) so the admin
+/// degrades gracefully instead of crashing.
+///
+/// Output is HTML-safe: both `app_label.model_name` and the link
+/// path are HTML-entity-escaped via the same routine the existing
+/// per-FK renderer uses.
+///
+/// # Errors
+/// Driver / SQL failures from the ContentType lookup. Caller can
+/// `unwrap_or_else(|_| ...)` to a fallback rendering.
+pub async fn render_generic_fk_link(
+    pool: &PgPool,
+    gfk: GenericForeignKey,
+) -> Result<String, ExecError> {
+    let escape = |s: &str| -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#x27;")
+    };
+    let ct = match ContentType::by_id(pool, gfk.content_type_id).await? {
+        Some(c) => c,
+        None => {
+            // Stale or unseeded reference — show the raw pair so
+            // the admin operator can spot it.
+            return Ok(format!(
+                "<em>(ct={}, pk={})</em>",
+                gfk.content_type_id, gfk.object_pk
+            ));
+        }
+    };
+    let label = format!("{}.{}", ct.app_label, ct.model_name);
+    let table_esc = escape(&ct.table);
+    let label_esc = escape(&label);
+    Ok(format!(
+        r#"<a href="/{table}/{pk}">{label} #{pk}</a>"#,
+        table = table_esc,
+        pk = gfk.object_pk,
+        label = label_esc,
+    ))
+}
+
 /// Soft-FK prefetch — fetch every row of `C` whose soft-FK column
 /// matches one of `parent_pks`, then group the results by the
 /// soft-FK value via the caller-supplied extractor closure. Returns

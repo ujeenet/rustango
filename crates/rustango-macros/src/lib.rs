@@ -515,6 +515,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         &all_indexes,
         &container.checks,
         &container.composite_fks,
+        &container.generic_fks,
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -1058,6 +1059,7 @@ fn model_impl_tokens(
     indexes: &[IndexAttr],
     checks: &[CheckAttr],
     composite_fks: &[CompositeFkAttr],
+    generic_fks: &[GenericFkAttr],
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
@@ -1118,6 +1120,18 @@ fn model_impl_tokens(
             }
         }
     });
+    let generic_fk_tokens = generic_fks.iter().map(|rel| {
+        let name = rel.name.as_str();
+        let ct_col = rel.ct_column.as_str();
+        let pk_col = rel.pk_column.as_str();
+        quote! {
+            ::rustango::core::GenericRelation {
+                name: #name,
+                ct_column: #ct_col,
+                pk_column: #pk_col,
+            }
+        }
+    });
     let m2m_tokens = m2m_relations.iter().map(|rel| {
         let name = rel.name.as_str();
         let to = rel.to.as_str();
@@ -1150,6 +1164,7 @@ fn model_impl_tokens(
                 indexes: &[ #(#indexes_tokens),* ],
                 check_constraints: &[ #(#checks_tokens),* ],
                 composite_relations: &[ #(#composite_fk_tokens),* ],
+                generic_relations: &[ #(#generic_fk_tokens),* ],
             };
         }
     }
@@ -3051,6 +3066,10 @@ struct ContainerAttrs {
     /// `#[rustango(fk_composite(name = "…", to = "…", on = (…), from = (…)))]`.
     /// Sub-slice F.2 of the v0.15.0 ContentType plan.
     composite_fks: Vec<CompositeFkAttr>,
+    /// Generic ("any model") FKs declared via
+    /// `#[rustango(generic_fk(name = "…", ct_column = "…", pk_column = "…"))]`.
+    /// Sub-slice F.4 of the v0.15.0 ContentType plan.
+    generic_fks: Vec<GenericFkAttr>,
 }
 
 /// Parsed form of one index declaration (field-level or container-level).
@@ -3083,6 +3102,19 @@ struct CompositeFkAttr {
     from: Vec<String>,
     /// Target-side column names, same length / order as `from`.
     on: Vec<String>,
+}
+
+/// Parsed form of one `#[rustango(generic_fk(name = "target",
+/// ct_column = "content_type_id", pk_column = "object_pk"))]`
+/// declaration. Sub-slice F.4 of the v0.15.0 ContentType plan —
+/// generic ("any model") FKs live on the model, not the field.
+struct GenericFkAttr {
+    /// Logical relation name (free-form Rust identifier).
+    name: String,
+    /// Source-side column carrying the `content_type_id` value.
+    ct_column: String,
+    /// Source-side column carrying the target row's primary key.
+    pk_column: String,
 }
 
 /// Parsed form of one `#[rustango(m2m(...))]` declaration.
@@ -3145,6 +3177,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         indexes: Vec::new(),
         checks: Vec::new(),
         composite_fks: Vec::new(),
+        generic_fks: Vec::new(),
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -3295,6 +3328,44 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 let name = name.ok_or_else(|| meta.error("check requires `name = \"...\"`"))?;
                 let expr = expr.ok_or_else(|| meta.error("check requires `expr = \"...\"`"))?;
                 out.checks.push(CheckAttr { name, expr });
+                return Ok(());
+            }
+            if meta.path.is_ident("generic_fk") {
+                let mut gfk = GenericFkAttr {
+                    name: String::new(),
+                    ct_column: String::new(),
+                    pk_column: String::new(),
+                };
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("name") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        gfk.name = s.value();
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("ct_column") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        gfk.ct_column = s.value();
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("pk_column") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        gfk.pk_column = s.value();
+                        return Ok(());
+                    }
+                    Err(inner.error(
+                        "unknown generic_fk attribute (supported: `name`, `ct_column`, `pk_column`)",
+                    ))
+                })?;
+                if gfk.name.is_empty() {
+                    return Err(meta.error("generic_fk requires `name = \"...\"`"));
+                }
+                if gfk.ct_column.is_empty() {
+                    return Err(meta.error("generic_fk requires `ct_column = \"...\"`"));
+                }
+                if gfk.pk_column.is_empty() {
+                    return Err(meta.error("generic_fk requires `pk_column = \"...\"`"));
+                }
+                out.generic_fks.push(gfk);
                 return Ok(());
             }
             if meta.path.is_ident("fk_composite") {

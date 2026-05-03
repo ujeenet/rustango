@@ -951,6 +951,7 @@ mod tests {
             indexes: &[],
             check_constraints: &[],
             composite_relations: &[],
+            generic_relations: &[],
         }))
     }
 }
