@@ -1505,6 +1505,81 @@ fn bind_query_as_my<T>(
     bind_match!(q, value)
 }
 
+/// `fetch_paginated` against either backend — fetches a page of rows
+/// AND the pre-LIMIT total count in a single SQL round trip via
+/// `COUNT(*) OVER ()`. Bi-dialect counterpart of
+/// [`QuerySet::fetch_paginated_on`].
+///
+/// Both PG and MySQL 8.0+ support `COUNT(*) OVER ()` window
+/// functions, so the SQL splice is identical across backends — only
+/// the placeholder shape and identifier quoting differ, and those
+/// already come from `pool.dialect()`.
+///
+/// MySQL caveat: `COUNT(*) OVER ()` requires MySQL 8.0+ (window
+/// functions weren't supported pre-8.0). Apps targeting MySQL 5.7
+/// must use a separate `count_rows_pool` + `select_rows_pool`
+/// instead.
+///
+/// Empty result set → `Page { rows: vec![], total: 0 }` (no extra
+/// driver round trip wasted on a separate COUNT).
+///
+/// # Errors
+/// As [`QuerySet::fetch_paginated_on`].
+pub async fn fetch_paginated_pool<T>(
+    qs: crate::query::QuerySet<T>,
+    pool: &Pool,
+) -> Result<Page<T>, ExecError>
+where
+    T: Model + for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + Send + Unpin,
+{
+    let select = qs.compile()?;
+    let stmt = pool.dialect().compile_select(&select)?;
+    let sql = inject_total_count(&stmt.sql);
+
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => {
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&sql);
+            for v in stmt.params {
+                q = bind_query(q, v);
+            }
+            use sqlx::Row as _;
+            let raw_rows: Vec<PgRow> = q.fetch_all(pg).await?;
+            let total: i64 = raw_rows
+                .first()
+                .map(|row| row.try_get::<i64, _>("__rustango_total"))
+                .transpose()?
+                .unwrap_or(0);
+            let mut rows = Vec::with_capacity(raw_rows.len());
+            for row in &raw_rows {
+                rows.push(T::from_row(row)?);
+            }
+            Ok(Page { rows, total })
+        }
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&sql);
+            for v in stmt.params {
+                q = bind_query_my(q, v);
+            }
+            use sqlx::Row as _;
+            let raw_rows: Vec<sqlx::mysql::MySqlRow> = q.fetch_all(my).await?;
+            // sqlx-mysql exposes COUNT(*) OVER () as i64 (BIGINT).
+            let total: i64 = raw_rows
+                .first()
+                .map(|row| row.try_get::<i64, _>("__rustango_total"))
+                .transpose()?
+                .unwrap_or(0);
+            let mut rows = Vec::with_capacity(raw_rows.len());
+            for row in &raw_rows {
+                rows.push(<T as sqlx::FromRow<sqlx::mysql::MySqlRow>>::from_row(row)?);
+            }
+            Ok(Page { rows, total })
+        }
+    }
+}
+
 /// `fetch_with_prefetch` against either backend. Bi-dialect counterpart
 /// of [`fetch_with_prefetch`] — fetches parents + children in two
 /// round trips and stitches each child onto its parent via

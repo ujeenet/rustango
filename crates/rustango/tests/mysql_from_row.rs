@@ -246,6 +246,15 @@ fn audit_ensure_table_pool_and_emit_one_pool_are_callable() {
 }
 
 #[test]
+fn fetch_paginated_pool_is_callable() {
+    // batch 19 — single-round-trip page + total via COUNT(*) OVER ().
+    fn _probe(pool: &rustango::sql::Pool) {
+        let qs = User::objects();
+        let _fut = rustango::sql::fetch_paginated_pool::<User>(qs, pool);
+    }
+}
+
+#[test]
 fn fetch_with_prefetch_pool_is_callable() {
     // batch 18 — prefetch_related (1:N hydration) on either backend.
     // Compile-time probe; live exec needs a database. Use User as
