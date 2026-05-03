@@ -31,8 +31,11 @@ pub use executor::{
     raw_execute, raw_execute_on, raw_execute_pool, raw_query, raw_query_on, select_one_row,
     select_one_row_pool, select_rows, select_rows_pool, transaction, update, update_on,
     update_pool, Counter, Deleter, Fetcher, FetcherPool, FkPkAccess, HasPkValue, LoadRelated,
-    MaybeMyFromRow, Page, Updater,
+    MaybeMyFromRow, MaybeMyLoadRelated, Page, Updater,
 };
+
+#[cfg(feature = "mysql")]
+pub use executor::LoadRelatedMy;
 pub use foreign_key::ForeignKey;
 pub use m2m::M2MManager;
 #[cfg(feature = "mysql")]

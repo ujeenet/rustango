@@ -66,6 +66,81 @@ macro_rules! __impl_my_from_row {
     ($struct:ty, |$row:ident| { $($body:tt)* }) => {};
 }
 
+// ---- select_related's aliased-row decoder for MySQL (batch 8) ----
+//
+// `Model::__rustango_from_aliased_row(row, prefix)` is the per-model
+// helper the executor calls when decoding LEFT-JOINed columns into a
+// FK target. v0.23.0-batch8 adds a MySQL-typed counterpart via the
+// same hygiene-aware closure pattern as `__impl_my_from_row!`.
+
+#[doc(hidden)]
+#[cfg(feature = "mysql")]
+#[macro_export]
+macro_rules! __impl_my_aliased_row_decoder {
+    ($struct:ty, |$row:ident, $prefix:ident| { $($body:tt)* }) => {
+        impl $struct {
+            #[doc(hidden)]
+            pub fn __rustango_from_aliased_my_row(
+                $row: &$crate::sql::sqlx::mysql::MySqlRow,
+                $prefix: &str,
+            ) -> ::core::result::Result<Self, $crate::sql::sqlx::Error> {
+                ::core::result::Result::Ok(Self { $($body)* })
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+#[cfg(not(feature = "mysql"))]
+#[macro_export]
+macro_rules! __impl_my_aliased_row_decoder {
+    ($struct:ty, |$row:ident, $prefix:ident| { $($body:tt)* }) => {};
+}
+
+// ---- LoadRelated dual (PgRow + MySqlRow) impl ----
+//
+// The PG `LoadRelated` impl stays as-is. The MySQL counterpart
+// implements the new [`LoadRelatedMy`] trait (added in batch 8 to
+// the rustango sql module) — same shape, MySqlRow-typed.
+
+#[doc(hidden)]
+#[cfg(feature = "mysql")]
+#[macro_export]
+macro_rules! __impl_my_load_related {
+    // `self` is a Rust keyword and bypasses macro hygiene — bound as
+    // the method receiver, visible in body tokens regardless of which
+    // hygiene context they came from. So we don't pass it via the
+    // closure-style header; only `row`, `field_name`, `alias` need
+    // hygiene capture (they're regular idents).
+    ($struct:ty, |$row:ident, $field:ident, $alias:ident| {
+        $($arms:tt)*
+    }) => {
+        impl $crate::sql::LoadRelatedMy for $struct {
+            #[allow(unused_variables)]
+            fn __rustango_load_related_my(
+                &mut self,
+                $row: &$crate::sql::sqlx::mysql::MySqlRow,
+                $field: &str,
+                $alias: &str,
+            ) -> ::core::result::Result<bool, $crate::sql::sqlx::Error> {
+                match $field {
+                    $($arms)*
+                    _ => ::core::result::Result::Ok(false),
+                }
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+#[cfg(not(feature = "mysql"))]
+#[macro_export]
+macro_rules! __impl_my_load_related {
+    ($struct:ty, |$row:ident, $field:ident, $alias:ident| {
+        $($arms:tt)*
+    }) => {};
+}
+
 pub mod audit;
 pub mod core;
 pub mod migrate;

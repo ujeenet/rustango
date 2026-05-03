@@ -1275,6 +1275,46 @@ pub trait MaybeMyFromRow {}
 #[cfg(not(feature = "mysql"))]
 impl<T> MaybeMyFromRow for T {}
 
+/// MySQL counterpart of [`LoadRelated`]. The proc-macro emits this
+/// alongside the existing `LoadRelated` impl whenever rustango is
+/// built with the `mysql` feature, so `select_related` joins can
+/// stitch parents onto FK fields when decoding from a `MySqlRow`.
+///
+/// FK-less models get a no-op impl; the `MaybeMyLoadRelated` marker
+/// trait wraps this in the same cfg-gated way as
+/// `MaybeMyFromRow` so executor bounds resolve in either feature
+/// config.
+#[cfg(feature = "mysql")]
+pub trait LoadRelatedMy {
+    /// Same contract as [`LoadRelated::__rustango_load_related`] —
+    /// returns `Ok(true)` when `field_name` matched a known FK and
+    /// the parent was decoded successfully, `Ok(false)` for unknown
+    /// field names (graceful skip).
+    ///
+    /// # Errors
+    /// `sqlx::Error` from `try_get` decoding the joined columns.
+    fn __rustango_load_related_my(
+        &mut self,
+        row: &sqlx::mysql::MySqlRow,
+        field_name: &str,
+        alias: &str,
+    ) -> Result<bool, sqlx::Error>;
+}
+
+/// Marker trait used as a feature-gated `LoadRelatedMy` bound on
+/// future `_pool` join-decoding executor functions. Same shape as
+/// [`MaybeMyFromRow`] — auto-implemented for every `T` when
+/// rustango is built without `mysql`; requires `LoadRelatedMy`
+/// when on.
+#[cfg(feature = "mysql")]
+pub trait MaybeMyLoadRelated: LoadRelatedMy {}
+#[cfg(feature = "mysql")]
+impl<T> MaybeMyLoadRelated for T where T: LoadRelatedMy {}
+#[cfg(not(feature = "mysql"))]
+pub trait MaybeMyLoadRelated {}
+#[cfg(not(feature = "mysql"))]
+impl<T> MaybeMyLoadRelated for T {}
+
 /// Run a `SelectQuery` against either backend and decode each row
 /// into `T`. Equivalent to [`select_rows`] but takes [`Pool`] and
 /// dispatches per backend. Joins (`select_related`) are not yet

@@ -81,3 +81,26 @@ fn delete_pool_method_emitted_for_non_audited_model() {
         let _fut = p.delete_pool(pool);
     }
 }
+
+#[test]
+fn aliased_my_row_decoder_emitted_for_derived_model() {
+    // batch 8 — `__rustango_from_aliased_my_row(row, prefix)` is the
+    // MySQL counterpart of `__rustango_from_aliased_row`. The proc
+    // macro emits both via the cfg-gated macro_rules. Resolve the
+    // function pointer to confirm presence + signature.
+    fn _probe(row: &sqlx::mysql::MySqlRow, prefix: &str) {
+        let _r: Result<User, _> = User::__rustango_from_aliased_my_row(row, prefix);
+        let _r: Result<Post, _> = Post::__rustango_from_aliased_my_row(row, prefix);
+    }
+}
+
+#[test]
+fn maybe_my_load_related_resolves_for_derived_model() {
+    // The MaybeMyLoadRelated marker is what future _pool join-decoding
+    // executor functions will bound on. Even FK-less models satisfy it
+    // because the proc macro emits an empty-arms LoadRelatedMy impl
+    // (mirroring how PG's LoadRelated is universally implemented).
+    fn check<T: rustango::sql::MaybeMyLoadRelated>() {}
+    check::<User>();
+    check::<Post>();
+}

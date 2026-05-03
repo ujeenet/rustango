@@ -615,6 +615,45 @@ fn load_related_impl_tokens(
     }
 }
 
+/// MySQL counterpart of [`load_related_impl_tokens`] — v0.23.0-batch8.
+/// Emits a call to the cfg-gated `__impl_my_load_related!` macro_rules,
+/// which expands to a `LoadRelatedMy` impl when rustango is built with
+/// the `mysql` feature, and to nothing otherwise. The decoded parent
+/// is read via `__rustango_from_aliased_my_row` (the MySQL aliased
+/// decoder, also batch8) so the dual emission is symmetric across
+/// backends.
+fn load_related_impl_my_tokens(
+    struct_name: &syn::Ident,
+    fk_relations: &[FkRelation],
+) -> TokenStream2 {
+    let arms = fk_relations.iter().map(|rel| {
+        let parent_ty = &rel.parent_type;
+        let fk_col = rel.fk_column.as_str();
+        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        // `self` is a Rust keyword and bypasses macro hygiene — bound
+        // as the method receiver, accessible from body tokens whatever
+        // hygiene context they came from. The macro_rules header
+        // captures only `row`, `field_name`, `alias` (regular idents).
+        quote! {
+            #fk_col => {
+                let _parent: #parent_ty =
+                    <#parent_ty>::__rustango_from_aliased_my_row(row, alias)?;
+                let _pk = match <#parent_ty>::__rustango_pk_value(&_parent) {
+                    ::rustango::core::SqlValue::I64(v) => v,
+                    _ => 0i64,
+                };
+                self.#field_ident = ::rustango::sql::ForeignKey::loaded(_pk, _parent);
+                ::core::result::Result::Ok(true)
+            }
+        }
+    });
+    quote! {
+        ::rustango::__impl_my_load_related!(#struct_name, |row, field_name, alias| {
+            #( #arms )*
+        });
+    }
+}
+
 /// Emit `impl FkPkAccess for #StructName` — slice 9.0e. Pattern-
 /// matches `field_name` against the model's FK fields and returns
 /// the FK's stored PK as `i64`. Used by `fetch_with_prefetch` to
@@ -2149,9 +2188,18 @@ fn inherent_impl_tokens(
             })
         }
     };
+    // v0.23.0-batch8 — MySQL counterpart, gated through the
+    // cfg-aware macro_rules so PG-only builds expand to nothing.
+    let aliased_row_helper_my = quote! {
+        ::rustango::__impl_my_aliased_row_decoder!(#struct_name, |row, prefix| {
+            #( #from_aliased_row_inits ),*
+        });
+    };
 
     let load_related_impl =
         load_related_impl_tokens(struct_name, &fields.fk_relations);
+    let load_related_impl_my =
+        load_related_impl_my_tokens(struct_name, &fields.fk_relations);
 
     quote! {
         impl #struct_name {
@@ -2176,7 +2224,11 @@ fn inherent_impl_tokens(
             #column_consts
         }
 
+        #aliased_row_helper_my
+
         #load_related_impl
+
+        #load_related_impl_my
 
         #has_pk_value_impl
 
