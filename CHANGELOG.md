@@ -2,6 +2,19 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.22.1] — 2026-05-03
+
+Pure docs / packaging fix-up over v0.22.0; no library changes.
+
+### Fixed
+
+- crates.io v0.22.0 shipped without a `README.md` because the workspace-inherited `readme = "README.md"` resolves relative to each crate's own directory, and neither `crates/rustango/` nor `crates/rustango-macros/` had one. The published tarball therefore contained no README and the crates.io page rendered blank.
+
+### Changed
+
+- `crates/rustango/README.md` now symlinks to the workspace `README.md`, so the canonical README is shipped inside the published `.crate` tarball without duplication.
+- `crates/rustango-macros/README.md` is a new dedicated, narrower README for the proc-macro crate (lists the proc-macro entry points + the `openapi` feature; points readers at the parent crate for the full framework story).
+
 ## [0.22.0] — 2026-05-03
 
 The "platform-grade" release. ~50 new modules / features layered on top of v0.17.4 (the previous publish), with no breaking changes to the existing ORM / admin / migrations / multi-tenancy surface — the additions ride next to it under new opt-in feature flags (almost all default-on so existing apps just gain capabilities on upgrade).
