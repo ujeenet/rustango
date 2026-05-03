@@ -142,6 +142,11 @@ macro_rules! __impl_my_load_related {
 }
 
 pub mod audit;
+/// ContentType framework (Django-shape) — runtime handle for
+/// "any registered model" used by permissions, generic foreign
+/// keys, soft-FK prefetch, audit-history admin panels, etc.
+/// Sub-slice F.1 of the v0.15.0 plan.
+pub mod contenttypes;
 pub mod core;
 pub mod migrate;
 pub mod query;
