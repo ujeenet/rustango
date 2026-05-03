@@ -1505,16 +1505,119 @@ fn bind_query_as_my<T>(
     bind_match!(q, value)
 }
 
+/// `select_rows_pool` with `select_related` join decoding. When the
+/// query carries no joins, behaves identically to [`select_rows_pool`]
+/// (fast `query_as` path). When joins are present, fetches raw rows
+/// and dispatches to `T::__rustango_load_related` (Postgres) or
+/// `T::__rustango_load_related_my` (MySQL) for each join alias.
+///
+/// Bound on `T` adds [`LoadRelated`] + [`MaybeMyLoadRelated`] over
+/// [`select_rows_pool`]'s bound — every `#[derive(Model)]` type
+/// satisfies these (FK-less models get empty-arm impls so the trait
+/// bound is universal).
+///
+/// # Errors
+/// As [`select_rows_pool`].
+pub async fn select_rows_pool_with_related<T>(
+    pool: &Pool,
+    query: &SelectQuery,
+) -> Result<Vec<T>, ExecError>
+where
+    T: for<'r> sqlx::FromRow<'r, PgRow>
+        + MaybeMyFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + Send
+        + Unpin,
+{
+    let stmt = pool.dialect().compile_select(query)?;
+    let aliases: Vec<&'static str> = query.joins.iter().map(|j| j.alias).collect();
+
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => {
+            if aliases.is_empty() {
+                let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
+                    sqlx::query_as::<_, T>(&stmt.sql);
+                for v in stmt.params {
+                    q = bind_query_as(q, v);
+                }
+                return Ok(q.fetch_all(pg).await?);
+            }
+            // Join path — fetch raw rows so we can both decode T and
+            // stitch each JOIN target via __rustango_load_related.
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query(q, v);
+            }
+            let raw_rows = q.fetch_all(pg).await?;
+            let mut out = Vec::with_capacity(raw_rows.len());
+            for row in &raw_rows {
+                let mut t = T::from_row(row)?;
+                for alias in &aliases {
+                    let _ = t.__rustango_load_related(row, alias, alias)?;
+                }
+                out.push(t);
+            }
+            Ok(out)
+        }
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            if aliases.is_empty() {
+                let mut q: sqlx::query::QueryAs<
+                    '_,
+                    sqlx::MySql,
+                    T,
+                    sqlx::mysql::MySqlArguments,
+                > = sqlx::query_as::<_, T>(&stmt.sql);
+                for v in stmt.params {
+                    q = bind_query_as_my(q, v);
+                }
+                return Ok(q.fetch_all(my).await?);
+            }
+            // Join path on MySQL — symmetric with PG arm but routes
+            // through LoadRelatedMy::__rustango_load_related_my.
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_my(q, v);
+            }
+            let raw_rows = q.fetch_all(my).await?;
+            let mut out = Vec::with_capacity(raw_rows.len());
+            for row in &raw_rows {
+                let mut t = <T as sqlx::FromRow<sqlx::mysql::MySqlRow>>::from_row(row)?;
+                for alias in &aliases {
+                    let _ = t.__rustango_load_related_my(row, alias, alias)?;
+                }
+                out.push(t);
+            }
+            Ok(out)
+        }
+    }
+}
+
 /// `QuerySet::fetch` variant that takes `&Pool` — works against
 /// either backend when the model derives `Model` (the macro emits
 /// both `FromRow<PgRow>` and the cfg-gated `FromRow<MySqlRow>`).
-/// Joins (`select_related`) aren't supported on this path yet —
-/// see [`select_rows_pool`] for the rationale.
+///
+/// `select_related` joins are decoded automatically via
+/// [`LoadRelated`] (PG) and [`MaybeMyLoadRelated`] (MySQL); both
+/// traits are universally implemented on `#[derive(Model)]` types
+/// (FK-less models get empty-arm impls), so the bound is satisfied
+/// without user action.
 pub trait FetcherPool<T>
 where
-    T: Model + for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + Send + Unpin,
+    T: Model
+        + for<'r> sqlx::FromRow<'r, PgRow>
+        + MaybeMyFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + Send
+        + Unpin,
 {
     /// Compile the queryset and run `fetch_all` against either backend.
+    /// Stitches `select_related` joins automatically when the queryset
+    /// declared any.
     ///
     /// # Errors
     /// As [`Fetcher::fetch`].
@@ -1526,11 +1629,17 @@ where
 
 impl<T> FetcherPool<T> for QuerySet<T>
 where
-    T: Model + for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + Send + Unpin,
+    T: Model
+        + for<'r> sqlx::FromRow<'r, PgRow>
+        + MaybeMyFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + Send
+        + Unpin,
 {
     async fn fetch_pool(self, pool: &Pool) -> Result<Vec<T>, ExecError> {
         let select = self.compile()?;
-        select_rows_pool(pool, &select).await
+        select_rows_pool_with_related(pool, &select).await
     }
 }
 

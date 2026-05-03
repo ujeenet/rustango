@@ -195,3 +195,35 @@ fn direction_aware_pool_runners_are_callable() {
         let _fut = rustango::migrate::migrate_dry_run_pool(pool, dir);
     }
 }
+
+#[test]
+fn fetcher_pool_satisfies_join_bound() {
+    // batch 15 — FetcherPool::fetch_pool now requires LoadRelated +
+    // MaybeMyLoadRelated alongside FromRow + MaybeMyFromRow. Every
+    // derived Model satisfies all four bounds (FK-less models get
+    // empty-arm impls), so this resolves at compile time.
+    use rustango::sql::FetcherPool;
+    fn _probe(pool: &rustango::sql::Pool) {
+        let _fut = User::objects().fetch_pool(pool);
+        let _fut = Post::objects().fetch_pool(pool);
+    }
+}
+
+#[test]
+fn select_rows_pool_with_related_is_callable() {
+    // batch 15 — direct executor entry for join-aware fetch.
+    use rustango::core::Model;
+    use rustango::core::SelectQuery;
+    fn _probe(pool: &rustango::sql::Pool) {
+        let q = SelectQuery {
+            model: <User as Model>::SCHEMA,
+            joins: vec![],
+            where_clause: rustango::core::WhereExpr::And(vec![]),
+            search: None,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+        };
+        let _fut: _ = rustango::sql::select_rows_pool_with_related::<User>(pool, &q);
+    }
+}
