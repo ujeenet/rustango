@@ -66,6 +66,29 @@ pub struct TableSnapshot {
     pub name: String,
     pub model: String,
     pub fields: Vec<FieldSnapshot>,
+    /// Composite (multi-column) FKs declared on the model via
+    /// `#[rustango(fk_composite(...))]`. Sub-slice F.5 of the
+    /// v0.15.0 ContentType plan. Skipped on serialize when empty
+    /// so older snapshots written before F.5 stay diff-clean
+    /// (matches the `m2m_tables` / `indexes` / `checks`
+    /// already-empty-elision pattern).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub composite_fks: Vec<CompositeFkSnapshot>,
+}
+
+/// Serialized form of [`crate::core::CompositeFkRelation`]. Captured
+/// per-table in [`TableSnapshot`]. Stable order: declaration order
+/// from the `#[rustango(fk_composite(...))]` attrs on the model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompositeFkSnapshot {
+    /// Logical relation name (free-form Rust identifier).
+    pub name: String,
+    /// Target SQL table name.
+    pub to: String,
+    /// Source-side column names, in declaration order.
+    pub from: Vec<String>,
+    /// Target-side column names, same length / order as `from`.
+    pub on: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -198,10 +221,26 @@ impl TableSnapshot {
         let mut fields: Vec<FieldSnapshot> =
             s.scalar_fields().map(FieldSnapshot::from_schema).collect();
         fields.sort_by(|a, b| a.column.cmp(&b.column));
+        // Composite FK relations (sub-slice F.5) — preserve declaration
+        // order so snapshot diffs aren't sensitive to a meaningless
+        // reorder. Empty Vec for models with no fk_composite attrs;
+        // the field's `skip_serializing_if = Vec::is_empty` keeps
+        // pre-F.5 snapshot JSON byte-identical.
+        let composite_fks: Vec<CompositeFkSnapshot> = s
+            .composite_relations
+            .iter()
+            .map(|rel| CompositeFkSnapshot {
+                name: rel.name.to_owned(),
+                to: rel.to.to_owned(),
+                from: rel.from.iter().map(|c| (*c).to_owned()).collect(),
+                on: rel.on.iter().map(|c| (*c).to_owned()).collect(),
+            })
+            .collect();
         Self {
             name: s.table.to_owned(),
             model: s.name.to_owned(),
             fields,
+            composite_fks,
         }
     }
 
@@ -321,4 +360,104 @@ fn collect_m2m_tables<'a>(
     }
     out.sort_by(|a, b| a.through.cmp(&b.through));
     out
+}
+
+#[cfg(test)]
+mod composite_fk_snapshot_tests {
+    use super::*;
+    use crate::core::{CompositeFkRelation, FieldSchema, FieldType};
+
+    fn schema_with_composite_fk() -> &'static ModelSchema {
+        static FIELDS: [FieldSchema; 1] = [FieldSchema {
+            name: "id",
+            column: "id",
+            ty: FieldType::I64,
+            nullable: false,
+            primary_key: true,
+            relation: None,
+            max_length: None,
+            min: None,
+            max: None,
+            default: None,
+            auto: false,
+            unique: false,
+        }];
+        static COMPS: [CompositeFkRelation; 1] = [CompositeFkRelation {
+            name: "target",
+            to: "other_table",
+            from: &["a", "b"],
+            on: &["x", "y"],
+        }];
+        static MS: ModelSchema = ModelSchema {
+            name: "Demo",
+            table: "demo",
+            fields: &FIELDS,
+            display: None,
+            app_label: None,
+            admin: None,
+            soft_delete_column: None,
+            audit_track: None,
+            permissions: false,
+            indexes: &[],
+            check_constraints: &[],
+            m2m: &[],
+            composite_relations: &COMPS,
+            generic_relations: &[],
+        };
+        &MS
+    }
+
+    #[test]
+    fn from_schema_captures_composite_fks_in_declaration_order() {
+        let snap = TableSnapshot::from_schema(schema_with_composite_fk());
+        assert_eq!(snap.composite_fks.len(), 1);
+        let c = &snap.composite_fks[0];
+        assert_eq!(c.name, "target");
+        assert_eq!(c.to, "other_table");
+        assert_eq!(c.from, vec!["a", "b"]);
+        assert_eq!(c.on, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn empty_composite_fks_skipped_on_serialize_for_back_compat() {
+        // Models without composite FKs serialize without the
+        // composite_fks field — pre-F.5 snapshot JSON stays
+        // diff-clean against post-F.5 builds.
+        static FIELDS: [FieldSchema; 1] = [FieldSchema {
+            name: "id",
+            column: "id",
+            ty: FieldType::I64,
+            nullable: false,
+            primary_key: true,
+            relation: None,
+            max_length: None,
+            min: None,
+            max: None,
+            default: None,
+            auto: false,
+            unique: false,
+        }];
+        static MS: ModelSchema = ModelSchema {
+            name: "Plain",
+            table: "plain",
+            fields: &FIELDS,
+            display: None,
+            app_label: None,
+            admin: None,
+            soft_delete_column: None,
+            audit_track: None,
+            permissions: false,
+            indexes: &[],
+            check_constraints: &[],
+            m2m: &[],
+            composite_relations: &[],
+            generic_relations: &[],
+        };
+        let snap = TableSnapshot::from_schema(&MS);
+        let json = serde_json::to_string(&snap).expect("serialize");
+        assert!(
+            !json.contains("composite_fks"),
+            "empty composite_fks should not appear in JSON; got: {json}"
+        );
+    }
 }
