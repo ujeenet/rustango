@@ -2,6 +2,88 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.22.0] — 2026-05-03
+
+The "platform-grade" release. ~50 new modules / features layered on top of v0.17.4 (the previous publish), with no breaking changes to the existing ORM / admin / migrations / multi-tenancy surface — the additions ride next to it under new opt-in feature flags (almost all default-on so existing apps just gain capabilities on upgrade).
+
+### Added — first-class media stack
+
+- **`rustango::media`** — `Media` model (Postgres-backed file reference) + `MediaManager` (server-side save, direct browser uploads via presigned PUT, soft delete, orphan / pending sweeps).
+- **`MediaCollection`** — hierarchical folders (parent_id self-FK, `collection_path()` walks the chain, `list_in_collection(recursive)` via WITH RECURSIVE CTE).
+- **`MediaTag`** — flat M2M labels with auto-create on `tag()`, `popular_tags()` ordered by usage.
+- **`media::router::media_router`** — REST endpoints for the entire surface (`/uploads/begin`, `/uploads/{id}/finalize`, `/media/{id}`, `/collections`, `/tags`, `/tags/{slug}/media`, …).
+- **`StorageRegistry`** — Laravel-style named "disks" with optional per-disk CDN prefix. `cdn_url(disk, key)` and `origin_url(disk, key)` for explicit routing.
+- **`storage::s3::S3Storage`** — pure-Rust SigV4 over `reqwest`, no `aws-sdk-s3` dep. Works against AWS S3, Cloudflare R2, Backblaze B2, MinIO. Verified live against MinIO including SigV4 query-string presigning (GET + PUT with content-type binding + 7-day expiry clamp).
+- **`Storage` trait** gains default-`None` `presigned_get_url` + `presigned_put_url`. `LocalStorage` + `InMemoryStorage` inherit defaults; `S3Storage` overrides.
+
+### Added — auth, identity, sessions
+
+- **`rustango::oauth2`** — OAuth2/OIDC swiss-knife. `OAuth2Provider` works for both pure OAuth2 (GitHub, Discord) and OIDC (Google, Microsoft, Keycloak) via `/userinfo`. Per-tenant `OAuth2Registry`, axum router for `/auth/{tenant}/{provider}/{login,callback}`. Presets for google / github / microsoft / discord / gitlab / slack / facebook / keycloak.
+- **`rustango::sessions`** — server-side `Session` + `SessionStore` backed by any `Cache` (revocable cookie-id sessions; pair with `RedisCache` for cross-replica visibility).
+- **`rustango::jwt`** — standalone HS256 JWT (sign / verify / decode). Reserved-claim protection, `alg: none` rejection, constant-time signature comparison.
+- **`rustango::hmac_auth`** — AWS-style HMAC-signed request authentication (`X-Date` + `Authorization` with SigV4-shape canonical request, ±5 min replay window, content-type binding).
+
+### Added — APIs
+
+- **`rustango::openapi`** — OpenAPI 3.1 spec builder + Swagger UI / Redoc viewer routes (`/openapi.json` + `/docs` + `/redoc`).
+- **`#[derive(Serializer)]`** auto-derives `OpenApiSchema` so existing serializers become the source of truth for request/response schemas.
+- **`ViewSet::openapi_paths(prefix, ref)`** auto-generates the 5 standard CRUD path items from a `ViewSet` (with `operationId`, tags, request/response refs, paginated list shape).
+- **`rustango::jsonapi`** — JSON:API v1.1 envelope adapter (`to_resource`, `to_collection`, `with_included`, `with_meta`).
+- **`rustango::problem_details`** — RFC 7807 error responses with `application/problem+json`.
+
+### Added — background work
+
+- **`rustango::jobs::pg::PgJobQueue`** — Postgres-backed job queue using `SELECT … FOR UPDATE SKIP LOCKED` for safe multi-replica pickup. Reclaim-stuck-jobs sweep, dead-letter callback.
+- **`rustango::email_jobs`** — send mail off the request path via the job queue (`register_email_job` + `dispatch_email`).
+- **`rustango::email_templates::EmailRenderer`** — Tera-rendered emails (`{name}.subject.txt` + `{name}.txt` + optional `{name}.html`).
+- **`rustango::mailable::Mailable`** — Laravel-shape trait for self-contained email types.
+- **`rustango::webhook_delivery`** — outbound HMAC-signed webhook delivery via the job queue (retry-with-backoff included).
+
+### Added — production middleware (axum / tower)
+
+- **`compression`** — gzip + deflate with `Accept-Encoding` negotiation, content-aware skip rules (no SSE / no already-compressed), `Vary` handling.
+- **`csp_nonce`** — per-request CSP nonce middleware (substitutes `'nonce-__RUSTANGO_NONCE__'` placeholder in the CSP header).
+- **`body_limit`** — fast `Content-Length` rejection with structured 413 JSON.
+- **`real_ip`** — extract client IP from `X-Forwarded-For` / `X-Real-IP` / `CF-Connecting-IP` / RFC 7239 `Forwarded` (with auto-fallback chain).
+- **`idempotency`** — Stripe-shape `Idempotency-Key` middleware backed by `Cache`; replays cached responses verbatim.
+- **`maintenance`** — drain traffic for deploys/migrations via a shared `MaintenanceFlag` (returns 503 with `Retry-After`).
+- **`trailing_slash`** — Django `APPEND_SLASH`-shape redirect middleware.
+- **`static_files`** — serve a directory with `Cache-Control` + `Last-Modified` + 304 + path-traversal/dotfile guards.
+- **`method_override`** — `_method` form field + `X-HTTP-Method-Override` header for HTML form REST emulation.
+- **`server_timing`** — W3C Server-Timing header surfacing per-request stage durations to DevTools.
+- **`tracing_layer`** — request span with W3C / OpenTelemetry semantic-conventions field names + `traceparent` propagation.
+- **`metrics`** — Prometheus counters + histograms exposed at `/metrics` (pure-Rust, no Prometheus client crate).
+- **`distributed_lock`** — `Cache`-backed mutex with TTL-based crash recovery + token-checked release.
+- **`rate_limit_cache`** — distributed rate limiting via `Cache` (fixed-window counter, atomic on `RedisCache`).
+- **`feature_flags`** — `Cache`-backed killswitches + per-user override + stable percentage rollout (FNV-bucketed for flicker-free).
+- **`uploads`** — multipart helper (axum/multipart + Storage); `save_uploads(mp, &cfg, &storage)` one-call.
+- **`ws::WsHub`** — WebSocket handler scaffold on top of `sse::EventBus` with auto JSON encode/decode + keep-alive.
+- **`http_client::HttpClient`** — opinionated `reqwest` wrapper with retry on idempotent verbs / 5xx / `Retry-After`.
+
+### Added — smaller fixtures
+
+- **`soft_delete`** — query helpers + `restore` / `purge` for any model with `#[rustango(soft_delete)]`.
+- **`pagination`** — `PageLinks` JSON bundle + `page_number_links` / `cursor_links` + RFC 5988 `Link` header builder.
+- **`csv_response::CsvResponse`** — axum CSV download wrapper + `csv_from_json_rows` helper.
+- **`Cache::incr`** — atomic on `RedisCache`, default get+set on others.
+- **`logging`** — env-filter setup + JSON formatter for prod.
+- **`account_lockout`** — per-account login lockout (Cache-backed counter + lock flag).
+- **`sse::EventBus`** — pub/sub bus on `tokio::sync::broadcast`.
+- **`api_keys` / `passwords` / `webhook` / `signed_url` / `totp`** — standalone helpers (each behind its own feature).
+- **Health enhancements** — per-probe timeout + `latency_ms` per check + built-in `tcp_probe` / `cache_probe` / `http_probe`.
+- **`manage`** subcommands: `db:dump`, `db:restore`, `make:viewset`, `make:serializer`, `make:form`, `make:job`, `make:notification`, `make:middleware`, `make:test`, `about`, `check`, `docs`, `version`.
+
+### Changed
+
+- `request_id` middleware un-gated from the `tenancy` feature (now ships with default `admin`).
+- `webhook::SignatureFormat` derives `Serialize` + `Deserialize` so it can ride inside job payloads.
+- `Email` derives `Serialize` + `Deserialize` for `email_jobs`.
+- `cargo-rustango` scaffolder bumps generated `Cargo.toml` template to pin `rustango = "0.22"`.
+
+### Test coverage
+
+848 lib unit tests + 25 live integration tests (Postgres + MinIO) + the existing live test suite from prior versions. The media stack alone has 22 live tests across `tests/media_live.rs` + `tests/media_collections_tags_live.rs`.
+
 ## [v0.20.x] — feature push (M2M, serializers, indexes, JWT lifecycle, security, manage CLI) — 2026-05-02
 
 A 32-commit batch bringing rustango to "Django/Laravel-class polish" out of the box. Each subversion is a self-contained slice; the major themes:

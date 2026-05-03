@@ -1,6 +1,6 @@
 [package]
 name = "rustango"
-description = "Django-shaped web framework for Rust: ORM, migrations, auto-admin, multi-tenancy, audit log."
+description = "Django-shaped batteries-included web framework for Rust: ORM + migrations + auto-admin + multi-tenancy + audit log + auth (sessions, JWT, OAuth2/OIDC, HMAC) + APIs (ViewSet, OpenAPI auto-derive, JSON:API) + jobs (in-mem + Postgres) + email + media (S3 / R2 / B2 / MinIO + presigned uploads + collections + tags) + production middleware (CSRF, CSP, rate-limiting, compression, idempotency, etc.)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -246,7 +246,7 @@ runtime = ["dep:tracing-subscriber"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.20.32", path = "../rustango-macros" }
+rustango-macros = { version = "0.22.0", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono     = { workspace = true }

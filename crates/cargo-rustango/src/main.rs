@@ -113,9 +113,9 @@ impl Template {
 
     fn rustango_features(self) -> &'static str {
         match self {
-            Self::Api => r#"{ version = "0.20", default-features = false, features = ["postgres"] }"#,
-            Self::Fullstack => r#""0.20""#,
-            Self::Tenant => r#"{ version = "0.20", features = ["tenancy"] }"#,
+            Self::Api => r#"{ version = "0.22", default-features = false, features = ["postgres"] }"#,
+            Self::Fullstack => r#""0.22""#,
+            Self::Tenant => r#"{ version = "0.22", features = ["tenancy"] }"#,
         }
     }
 }

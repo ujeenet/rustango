@@ -2,11 +2,11 @@
 
 **A Django-shaped, batteries-included web framework for Rust.**
 
-ORM with auto-migrations, multi-tenancy, auto-admin, JWT lifecycle, signals, caching, file storage, email, scheduled tasks, RFC 6238 TOTP, signed URLs, security headers, rate limiting, CORS, ETag, content negotiation, i18n, fixtures, test client — all shipped, all opt-out via cargo features.
+ORM with auto-migrations, multi-tenancy, auto-admin, sessions + JWT + OAuth2/OIDC + HMAC auth, signals, caching, first-class media (Postgres rows + S3/R2/B2/MinIO + presigned uploads + collections + tags), email pipeline (renderer + jobs + Mailable), background jobs (in-mem + Postgres), webhook delivery, OpenAPI 3.1 auto-derive from serializers + viewsets, JSON:API + RFC 7807 Problem Details, scheduled tasks, RFC 6238 TOTP, signed URLs, Prometheus metrics, OTel-shape tracing, distributed locks + rate limits + feature flags, every standard middleware (CSRF, CSP nonce, gzip/deflate, body limit, real-IP, idempotency, maintenance, trailing slash, static files, method override, server-timing, …) — all shipped, all opt-out via cargo features.
 
 ```toml
 [dependencies]
-rustango = "0.20"
+rustango = "0.22"
 ```
 
 ---
@@ -1249,16 +1249,16 @@ The default features cover everything most apps need. Trim them when shipping a 
 
 ```toml
 # Default — everything except tenancy + cache-redis
-rustango = "0.20"
+rustango = "0.22"
 
 # Multi-tenant
-rustango = { version = "0.20", features = ["tenancy"] }
+rustango = { version = "0.22", features = ["tenancy"] }
 
 # With Redis cache
-rustango = { version = "0.20", features = ["cache-redis"] }
+rustango = { version = "0.22", features = ["cache-redis"] }
 
 # Bare ORM only (no admin, no forms, no email, no storage)
-rustango = { version = "0.20", default-features = false, features = ["postgres"] }
+rustango = { version = "0.22", default-features = false, features = ["postgres"] }
 ```
 
 | Feature | What it adds | On by default? |

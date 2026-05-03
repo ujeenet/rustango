@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.20.32"
+version = "0.22.0"
 readme = "README.md"
 edition = "2021"
 rust-version = "1.88"
@@ -11,15 +11,15 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/ujeenet/rustango"
 homepage = "https://github.com/ujeenet/rustango"
 documentation = "https://docs.rs/rustango"
-keywords = ["orm", "database", "postgres", "django", "async"]
-categories = ["database"]
+keywords = ["web-framework", "orm", "django", "postgres", "async"]
+categories = ["web-programming::http-server", "database", "asynchronous"]
 
 [workspace.dependencies]
 # Internal — collapsed shape: one library facade `rustango` (with
 # feature flags for admin / tenancy) plus the proc-macro crate which
 # Rust requires to live separately.
-rustango-macros = { version = "0.20.32", path = "crates/rustango-macros" }
-rustango        = { version = "0.20.32", path = "crates/rustango" }
+rustango-macros = { version = "0.22.0", path = "crates/rustango-macros" }
+rustango        = { version = "0.22.0", path = "crates/rustango" }
 
 # Async runtime
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
