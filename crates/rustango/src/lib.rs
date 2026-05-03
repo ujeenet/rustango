@@ -273,6 +273,15 @@ pub mod jobs;
 /// See [`auth_flows::PasswordReset`] / [`auth_flows::EmailVerification`].
 #[cfg(feature = "auth_flows")]
 pub mod auth_flows;
+/// Top-level permissions facade — typed convenience over the
+/// existing `tenancy::permissions` engine. Adds
+/// `has_perm_for_model::<T>` / `grant_role_perm_for_model::<T>` /
+/// `model_codenames_for::<T>` so callers reach for permissions by
+/// their `T: Model` type instead of hand-typing the codename
+/// string. Sub-slice of v0.16.0 Option G. Requires the `tenancy`
+/// feature (the underlying tables live in the tenancy bootstrap).
+#[cfg(feature = "tenancy")]
+pub mod permissions;
 
 /// Unified `RustangoError` enum + `From` impls for every framework error type.
 /// Use in handlers: `async fn handler() -> RustangoResult<Json<X>> { ... }`.

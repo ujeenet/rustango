@@ -944,6 +944,39 @@ async fn profile(CurrentUser(u): CurrentUser) -> impl IntoResponse {
 }
 ```
 
+### Typed permission helpers (v0.16.0)
+
+Permissions today use `{table}.{action}` string codenames
+(`"post.change"`, `"comment.delete"`, …). The
+`rustango::permissions` facade adds typed convenience over the
+existing engine so callers reach for permissions by their
+`T: Model` type instead of hand-typing the codename:
+
+```rust
+use rustango::permissions;
+
+// Old (still supported):
+rustango::tenancy::permissions::has_perm(uid, "post.change", &pool).await?;
+
+// New, typed:
+permissions::has_perm_for_model::<Post>(uid, "change", &pool).await?;
+
+// Bulk helpers exist for grant/revoke/set_user_perm/clear_user_perm too:
+permissions::grant_role_perm_for_model::<Post>(editor_role, "change", &pool).await?;
+permissions::set_user_perm_for_model::<Post>(uid, "delete", false, &pool).await?;
+
+// Build the four standard codenames for a model:
+let [add, change, delete, view] = permissions::model_codenames_for::<Post>();
+```
+
+The full underlying engine (`Role`, `RolePermission`, `UserRole`,
+`UserPermission`, `has_perm` / `has_any_perm` / `has_all_perms`,
+`assign_role` / `grant_role_perm` / `auto_create_permissions`)
+lives at [`rustango::tenancy::permissions`] — re-exported from
+the top-level `rustango::permissions` for the conceptually-cleaner
+path. Requires the `tenancy` feature (the underlying tables live
+in the tenancy bootstrap migration).
+
 ### TOTP / 2FA
 
 ```rust
