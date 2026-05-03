@@ -1745,17 +1745,92 @@ fn inherent_impl_tokens(
     // Update audited save_pool: now that insert_pool is wired for
     // audited Auto-PK models, save_pool can dispatch Auto::Unset →
     // insert_pool. Non-audited save_pool already does this.
-    let pool_save_method = if audited_fields.is_some() && fields.has_auto {
+    // v0.23.0-batch25 — diff-style audit on the audited save_pool path.
+    // Replaces the snapshot-only emission with a per-backend transaction
+    // body that:
+    //  1. SELECTs the tracked columns by PK (typed Row::try_get per
+    //     column), capturing BEFORE values
+    //  2. compiles the UPDATE via pool.dialect() and runs it on the tx
+    //  3. builds AFTER pairs from &self
+    //  4. diffs BEFORE/AFTER, emits one PendingEntry with
+    //     AuditOp::Update + diff_changes(...) on the same tx connection
+    //  5. commits
+    //
+    // Per-backend arms inline the SQL string + placeholder shape, then
+    // share the `audit_before_pair_tokens` decoder block (Row::try_get
+    // is polymorphic over Row type — the same tokens work against
+    // PgRow and MySqlRow as long as the field's Rust type implements
+    // both Decode<Postgres> and Decode<MySql>, which Auto<T> +
+    // primitives + chrono/uuid/serde_json::Value all do).
+    let pool_save_method = if let Some(tracked) = audited_fields {
         if let Some((pk_ident, pk_col)) = primary_key {
             let pk_column_lit = pk_col.as_str();
-            let assignments = &fields.update_assignments;
-            let pairs = audit_pair_tokens.iter();
+            // Two iterators — quote!'s `#(#var)*` consumes the
+            // iterator, and we need to splice the same after-pairs
+            // sequence into both per-backend arms.
+            let after_pairs_pg = audit_pair_tokens.iter().collect::<Vec<_>>();
+            let after_pairs_my = audit_pair_tokens.iter().collect::<Vec<_>>();
             let pk_str = audit_pk_to_string.clone();
+            // Per-tracked-column BEFORE-pair token list. Each entry
+            // is `(col_lit, try_get<value_ty>(row, col_lit) → Json)`.
+            let before_pairs_pg: Vec<proc_macro2::TokenStream> = tracked
+                .iter()
+                .map(|c| {
+                    let column_lit = c.column.as_str();
+                    let value_ty = &c.value_ty;
+                    quote! {
+                        (
+                            #column_lit,
+                            match ::rustango::sql::sqlx::Row::try_get::<#value_ty, _>(
+                                &_audit_before_row, #column_lit,
+                            ) {
+                                ::core::result::Result::Ok(v) => {
+                                    ::serde_json::to_value(&v)
+                                        .unwrap_or(::serde_json::Value::Null)
+                                }
+                                ::core::result::Result::Err(_) => ::serde_json::Value::Null,
+                            },
+                        )
+                    }
+                })
+                .collect();
+            let before_pairs_my = before_pairs_pg.clone();
+            let pg_select_cols: String = tracked
+                .iter()
+                .map(|c| format!("\"{}\"", c.column.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let my_select_cols: String = tracked
+                .iter()
+                .map(|c| format!("`{}`", c.column.replace('`', "``")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let pk_value_for_bind = if fields.pk_is_auto {
+                quote!(self.#pk_ident.get().copied().unwrap_or_default())
+            } else {
+                quote!(::core::clone::Clone::clone(&self.#pk_ident))
+            };
+            let assignments = &fields.update_assignments;
+            let unset_dispatch = if fields.has_auto {
+                quote! {
+                    if matches!(self.#pk_ident, ::rustango::sql::Auto::Unset) {
+                        return self.insert_pool(pool).await;
+                    }
+                }
+            } else {
+                quote!()
+            };
             quote! {
                 /// Save this row against either backend with audit
-                /// emission inside the same transaction. Auto::Unset
-                /// PK routes to insert_pool; else updates with the
-                /// new audit-aware UPDATE path.
+                /// emission (diff-style: BEFORE+AFTER) inside the
+                /// same transaction. Auto::Unset PK routes to
+                /// insert_pool. Bi-dialect counterpart of
+                /// [`Self::save`] for audited models.
+                ///
+                /// The audit row's `changes` JSON contains one
+                /// `{ "field": { "before": …, "after": … } }` entry
+                /// per tracked column whose value actually changed
+                /// — same shape as the existing &PgPool save() emits.
                 ///
                 /// # Errors
                 /// As [`Self::save`].
@@ -1763,9 +1838,7 @@ fn inherent_impl_tokens(
                     &mut self,
                     pool: &::rustango::sql::Pool,
                 ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
-                    if matches!(self.#pk_ident, ::rustango::sql::Auto::Unset) {
-                        return self.insert_pool(pool).await;
-                    }
+                    #unset_dispatch
                     let _query = ::rustango::core::UpdateQuery {
                         model: <Self as ::rustango::core::Model>::SCHEMA,
                         set: ::std::vec![ #( #assignments ),* ],
@@ -1779,19 +1852,108 @@ fn inherent_impl_tokens(
                             }
                         ),
                     };
-                    let _audit_entry = ::rustango::audit::PendingEntry {
-                        entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
-                        entity_pk: #pk_str,
-                        operation: ::rustango::audit::AuditOp::Update,
-                        source: ::rustango::audit::current_source(),
-                        changes: ::rustango::audit::snapshot_changes(&[
-                            #( #pairs ),*
-                        ]),
-                    };
-                    let _ = ::rustango::audit::save_one_with_audit_pool(
-                        pool, &_query, &_audit_entry,
-                    ).await?;
-                    ::core::result::Result::Ok(())
+                    let _stmt = ::rustango::sql::Dialect::compile_update(
+                        pool.dialect(), &_query,
+                    )?;
+                    match pool {
+                        #[cfg(feature = "postgres")]
+                        ::rustango::sql::Pool::Postgres(_pg) => {
+                            let mut _tx = _pg.begin().await?;
+                            // 1. BEFORE snapshot — SELECT tracked cols.
+                            let _audit_select_sql = ::std::format!(
+                                r#"SELECT {} FROM "{}" WHERE "{}" = $1"#,
+                                #pg_select_cols,
+                                <Self as ::rustango::core::Model>::SCHEMA.table,
+                                #pk_column_lit,
+                            );
+                            let _audit_before_pairs:
+                                ::std::option::Option<::std::vec::Vec<(&'static str, ::serde_json::Value)>> =
+                                match ::rustango::sql::sqlx::query(&_audit_select_sql)
+                                    .bind(#pk_value_for_bind)
+                                    .fetch_optional(&mut *_tx)
+                                    .await
+                                {
+                                    ::core::result::Result::Ok(::core::option::Option::Some(_audit_before_row)) => {
+                                        ::core::option::Option::Some(::std::vec![
+                                            #( #before_pairs_pg ),*
+                                        ])
+                                    }
+                                    _ => ::core::option::Option::None,
+                                };
+                            // 2. UPDATE.
+                            let mut _q = ::rustango::sql::sqlx::query(&_stmt.sql);
+                            for _v in _stmt.params {
+                                _q = ::rustango::audit::__bind_value_pg(_q, _v);
+                            }
+                            _q.execute(&mut *_tx).await?;
+                            // 3+4. Diff & emit.
+                            if let ::core::option::Option::Some(_audit_before) = _audit_before_pairs {
+                                let _audit_after:
+                                    ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
+                                    ::std::vec![ #( #after_pairs_pg ),* ];
+                                let _audit_entry = ::rustango::audit::PendingEntry {
+                                    entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
+                                    entity_pk: #pk_str,
+                                    operation: ::rustango::audit::AuditOp::Update,
+                                    source: ::rustango::audit::current_source(),
+                                    changes: ::rustango::audit::diff_changes(
+                                        &_audit_before,
+                                        &_audit_after,
+                                    ),
+                                };
+                                ::rustango::audit::emit_one(&mut *_tx, &_audit_entry).await?;
+                            }
+                            _tx.commit().await?;
+                            ::core::result::Result::Ok(())
+                        }
+                        #[cfg(feature = "mysql")]
+                        ::rustango::sql::Pool::Mysql(_my) => {
+                            let mut _tx = _my.begin().await?;
+                            let _audit_select_sql = ::std::format!(
+                                "SELECT {} FROM `{}` WHERE `{}` = ?",
+                                #my_select_cols,
+                                <Self as ::rustango::core::Model>::SCHEMA.table,
+                                #pk_column_lit,
+                            );
+                            let _audit_before_pairs:
+                                ::std::option::Option<::std::vec::Vec<(&'static str, ::serde_json::Value)>> =
+                                match ::rustango::sql::sqlx::query(&_audit_select_sql)
+                                    .bind(#pk_value_for_bind)
+                                    .fetch_optional(&mut *_tx)
+                                    .await
+                                {
+                                    ::core::result::Result::Ok(::core::option::Option::Some(_audit_before_row)) => {
+                                        ::core::option::Option::Some(::std::vec![
+                                            #( #before_pairs_my ),*
+                                        ])
+                                    }
+                                    _ => ::core::option::Option::None,
+                                };
+                            let mut _q = ::rustango::sql::sqlx::query(&_stmt.sql);
+                            for _v in _stmt.params {
+                                _q = ::rustango::audit::__bind_value_my(_q, _v);
+                            }
+                            _q.execute(&mut *_tx).await?;
+                            if let ::core::option::Option::Some(_audit_before) = _audit_before_pairs {
+                                let _audit_after:
+                                    ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
+                                    ::std::vec![ #( #after_pairs_my ),* ];
+                                let _audit_entry = ::rustango::audit::PendingEntry {
+                                    entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
+                                    entity_pk: #pk_str,
+                                    operation: ::rustango::audit::AuditOp::Update,
+                                    source: ::rustango::audit::current_source(),
+                                    changes: ::rustango::audit::diff_changes(
+                                        &_audit_before,
+                                        &_audit_after,
+                                    ),
+                                };
+                                ::rustango::audit::emit_one_my(&mut *_tx, &_audit_entry).await?;
+                            }
+                            _tx.commit().await?;
+                            ::core::result::Result::Ok(())
+                        }
+                    }
                 }
             }
         } else {

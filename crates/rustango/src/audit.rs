@@ -766,6 +766,31 @@ pub async fn insert_one_with_audit_pool(
 /// `executor::bind_query` (it's private to the executor module).
 /// Same `bind_match!`-shape body, but copied rather than re-exported
 /// to keep the executor surface tight.
+///
+/// Exposed (under a `__`-prefixed name) so macro-emitted bodies in
+/// the audited save_pool diff path (v0.23.0-batch25) can bind
+/// `SqlValue` arguments to the per-backend transaction. Not part of
+/// the public API.
+#[doc(hidden)]
+#[cfg(feature = "postgres")]
+pub fn __bind_value_pg(
+    q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    value: crate::core::SqlValue,
+) -> sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    bind_value_pg(q, value)
+}
+
+/// MySQL counterpart of [`__bind_value_pg`] — same purpose, MySQL
+/// driver type.
+#[doc(hidden)]
+#[cfg(feature = "mysql")]
+pub fn __bind_value_my(
+    q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+    value: crate::core::SqlValue,
+) -> sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> {
+    bind_value_my(q, value)
+}
+
 #[cfg(feature = "postgres")]
 fn bind_value_pg(
     q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
