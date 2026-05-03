@@ -259,6 +259,12 @@ pub mod feature_flags;
 #[cfg(feature = "cache")]
 pub mod distributed_lock;
 
+/// Server-side sessions backed by [`cache::Cache`] — opaque cookie
+/// ID, server-stored bag of typed values, revocable per-session.
+/// See [`sessions::Session`] + [`sessions::SessionStore`].
+#[cfg(feature = "sessions")]
+pub mod sessions;
+
 /// `Server-Timing` header middleware — surface per-request stage
 /// durations to the browser DevTools "Network" panel. See
 /// [`server_timing::ServerTimingLayer`] + [`server_timing::Timings`].
