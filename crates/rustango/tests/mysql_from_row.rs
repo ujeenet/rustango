@@ -296,6 +296,27 @@ fn audited_auto_pk_model_gets_insert_pool() {
 }
 
 #[test]
+fn transaction_pool_returns_pool_tx() {
+    // batch 23 — transaction_pool opens a tx, returns a PoolTx the
+    // caller commits or rolls back. Compile-time probe.
+    fn _probe(pool: &rustango::sql::Pool) {
+        let _fut = rustango::sql::transaction_pool(pool);
+    }
+}
+
+#[test]
+fn pool_tx_commit_and_rollback_signatures() {
+    // batch 23 — PoolTx::commit / rollback consume the tx. Compile-time probe.
+    async fn _probe(pool: &rustango::sql::Pool) -> Result<(), rustango::sql::ExecError> {
+        let tx = rustango::sql::transaction_pool(pool).await?;
+        tx.commit().await?;
+        let tx2 = rustango::sql::transaction_pool(pool).await?;
+        tx2.rollback().await?;
+        Ok(())
+    }
+}
+
+#[test]
 fn audited_plain_pk_model_gets_insert_pool() {
     // batch 22 — audited non-Auto-PK models also get insert_pool now.
     fn _probe(rec: &mut AuditedRecord, pool: &rustango::sql::Pool) {
