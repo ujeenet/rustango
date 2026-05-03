@@ -1417,3 +1417,454 @@ async fn apply_nonatomic_pool(
     Ok(())
 }
 
+
+// ====================================================================
+// Direction-aware `_pool` runners — v0.23.0-batch14
+// ====================================================================
+//
+// `migrate_to_pool` / `unapply_pool` / `unapply_force_pool` /
+// `downgrade_pool` / `migrate_dry_run_pool` — bi-dialect counterparts
+// to the existing PgPool functions. Same semantics, advisory-locked
+// via `with_migrate_lock_pool` (batch 13).
+//
+// `migrate_embedded_pool` follows the same pattern but isn't yet
+// emitted — the embed_migrations! macro and its callers are
+// PgPool-bound and migrating them is a separate concern.
+
+/// Move the database to a specific migration target — bi-dialect
+/// counterpart of [`migrate_to`].
+///
+/// # Errors
+/// As [`migrate_to`].
+pub async fn migrate_to_pool(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    target: &str,
+) -> Result<Vec<Migration>, MigrateError> {
+    migrate_to_pool_with_ledger(pool, dir, target, LEDGER_TABLE).await
+}
+
+async fn migrate_to_pool_with_ledger(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    target: &str,
+    ledger: &str,
+) -> Result<Vec<Migration>, MigrateError> {
+    ensure_ledger_pool_for(pool, ledger).await?;
+    with_migrate_lock_pool(pool, async {
+        let all = file::list_dir(dir)?;
+        let applied = applied_set_pool_for(pool, ledger).await?;
+
+        if target == "zero" {
+            return unapply_all_in_order_pool(pool, dir, &all, &applied, ledger).await;
+        }
+
+        if !all.iter().any(|m| m.name == target) {
+            return Err(MigrateError::Validation(format!(
+                "target migration `{target}` not found in {}",
+                dir.display()
+            )));
+        }
+
+        let head = all
+            .iter()
+            .rev()
+            .find(|m| applied.contains(&m.name))
+            .map(|m| m.name.clone());
+
+        let mut touched = Vec::new();
+        match head {
+            None => {
+                for mig in all.into_iter().filter(|m| m.name.as_str() <= target) {
+                    apply_one_pool(pool, &mig, ledger).await?;
+                    touched.push(mig);
+                }
+            }
+            Some(h) => {
+                use std::cmp::Ordering;
+                match target.cmp(h.as_str()) {
+                    Ordering::Equal => {}
+                    Ordering::Greater => {
+                        for mig in all.into_iter().filter(|m| {
+                            m.name.as_str() > h.as_str()
+                                && m.name.as_str() <= target
+                                && !applied.contains(&m.name)
+                        }) {
+                            apply_one_pool(pool, &mig, ledger).await?;
+                            touched.push(mig);
+                        }
+                    }
+                    Ordering::Less => {
+                        let mut to_unapply: Vec<Migration> = all
+                            .into_iter()
+                            .filter(|m| {
+                                m.name.as_str() > target
+                                    && m.name.as_str() <= h.as_str()
+                                    && applied.contains(&m.name)
+                            })
+                            .collect();
+                        to_unapply.reverse();
+                        for mig in to_unapply {
+                            unapply_locked_pool(pool, dir, &mig.name, ledger).await?;
+                            touched.push(mig);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(touched)
+    })
+    .await
+}
+
+/// Step back `steps` applied migrations against either backend.
+///
+/// # Errors
+/// As [`downgrade`].
+pub async fn downgrade_pool(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    steps: usize,
+) -> Result<Vec<Migration>, MigrateError> {
+    downgrade_pool_with_ledger(pool, dir, steps, LEDGER_TABLE).await
+}
+
+async fn downgrade_pool_with_ledger(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    steps: usize,
+    ledger: &str,
+) -> Result<Vec<Migration>, MigrateError> {
+    if steps == 0 {
+        return Ok(Vec::new());
+    }
+    ensure_ledger_pool_for(pool, ledger).await?;
+    with_migrate_lock_pool(pool, async {
+        let all = file::list_dir(dir)?;
+        let applied = applied_set_pool_for(pool, ledger).await?;
+
+        let applied_in_order: Vec<Migration> = all
+            .into_iter()
+            .filter(|m| applied.contains(&m.name))
+            .collect();
+        if applied_in_order.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let n = steps.min(applied_in_order.len());
+        let to_unapply: Vec<Migration> =
+            applied_in_order.into_iter().rev().take(n).collect();
+
+        let mut touched = Vec::with_capacity(to_unapply.len());
+        for mig in to_unapply {
+            unapply_locked_pool(pool, dir, &mig.name, ledger).await?;
+            touched.push(mig);
+        }
+        Ok(touched)
+    })
+    .await
+}
+
+/// Roll back a single applied migration against either backend.
+/// Refuses non-head targets (use [`downgrade_pool`] /
+/// [`migrate_to_pool`] for ordered rollback, or
+/// [`unapply_force_pool`] to bypass).
+///
+/// # Errors
+/// As [`unapply`].
+pub async fn unapply_pool(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    name: &str,
+) -> Result<Migration, MigrateError> {
+    unapply_pool_with_ledger(pool, dir, name, LEDGER_TABLE).await
+}
+
+async fn unapply_pool_with_ledger(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    name: &str,
+    ledger: &str,
+) -> Result<Migration, MigrateError> {
+    ensure_ledger_pool_for(pool, ledger).await?;
+    with_migrate_lock_pool(pool, async {
+        check_is_head_pool(pool, dir, name, ledger).await?;
+        unapply_locked_pool(pool, dir, name, ledger).await
+    })
+    .await
+}
+
+/// Roll back any applied migration on either backend, even out of
+/// order. Caller accepts responsibility for the resulting schema state.
+///
+/// # Errors
+/// As [`unapply_force`].
+pub async fn unapply_force_pool(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    name: &str,
+) -> Result<Migration, MigrateError> {
+    unapply_force_pool_with_ledger(pool, dir, name, LEDGER_TABLE).await
+}
+
+async fn unapply_force_pool_with_ledger(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    name: &str,
+    ledger: &str,
+) -> Result<Migration, MigrateError> {
+    ensure_ledger_pool_for(pool, ledger).await?;
+    with_migrate_lock_pool(pool, unapply_locked_pool(pool, dir, name, ledger)).await
+}
+
+/// Compute the SQL `migrate_pool(pool, dir)` would execute, without
+/// running any of it. Bi-dialect counterpart of [`migrate_dry_run`].
+///
+/// # Errors
+/// As [`migrate_dry_run`].
+pub async fn migrate_dry_run_pool(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+) -> Result<Vec<MigrationPreview>, MigrateError> {
+    migrate_dry_run_pool_with_ledger(pool, dir, LEDGER_TABLE).await
+}
+
+async fn migrate_dry_run_pool_with_ledger(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    ledger: &str,
+) -> Result<Vec<MigrationPreview>, MigrateError> {
+    ensure_ledger_pool_for(pool, ledger).await?;
+    let all = file::list_dir(dir)?;
+    let applied = applied_set_pool_for(pool, ledger).await?;
+    let pending: Vec<Migration> = all
+        .into_iter()
+        .filter(|m| !applied.contains(&m.name))
+        .collect();
+    let mut out = Vec::with_capacity(pending.len());
+    for mig in pending {
+        out.push(preview_migration(&mig, ledger)?);
+    }
+    Ok(out)
+}
+
+// ---- internal helpers ----
+
+async fn apply_one_pool(
+    pool: &crate::sql::Pool,
+    mig: &Migration,
+    ledger: &str,
+) -> Result<(), MigrateError> {
+    if mig.atomic {
+        apply_atomic_pool(pool, mig, ledger).await
+    } else {
+        apply_nonatomic_pool(pool, mig, ledger).await
+    }
+}
+
+async fn unapply_all_in_order_pool(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    all: &[Migration],
+    applied: &HashSet<String>,
+    ledger: &str,
+) -> Result<Vec<Migration>, MigrateError> {
+    let mut to_unapply: Vec<Migration> = all
+        .iter()
+        .filter(|m| applied.contains(&m.name))
+        .cloned()
+        .collect();
+    to_unapply.reverse();
+    let mut touched = Vec::with_capacity(to_unapply.len());
+    for mig in to_unapply {
+        unapply_locked_pool(pool, dir, &mig.name, ledger).await?;
+        touched.push(mig);
+    }
+    Ok(touched)
+}
+
+/// `unapply_pool`'s body without acquiring the migrate lock — used
+/// by `migrate_to_pool` and `downgrade_pool` which already hold it.
+async fn unapply_locked_pool(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    name: &str,
+    ledger: &str,
+) -> Result<Migration, MigrateError> {
+    let all = file::list_dir(dir)?;
+    let target = all
+        .iter()
+        .find(|m| m.name == name)
+        .cloned()
+        .ok_or_else(|| {
+            MigrateError::Validation(format!(
+                "migration `{name}` not found in {}",
+                dir.display()
+            ))
+        })?;
+
+    let prev_snapshot = match &target.prev {
+        None => SchemaSnapshot {
+            tables: vec![],
+            m2m_tables: vec![],
+            indexes: vec![],
+            checks: vec![],
+        },
+        Some(prev_name) => all
+            .iter()
+            .find(|m| &m.name == prev_name)
+            .map(|m| m.snapshot.clone())
+            .ok_or_else(|| {
+                MigrateError::Validation(format!(
+                    "migration `{name}` declares prev=`{prev_name}` but that file is missing in {}",
+                    dir.display()
+                ))
+            })?,
+    };
+
+    let inverted = invert(&target.forward, &prev_snapshot)?;
+
+    if target.atomic {
+        unapply_atomic_pool(pool, &target, &inverted, &prev_snapshot, ledger).await?;
+    } else {
+        unapply_nonatomic_pool(pool, &target, &inverted, &prev_snapshot, ledger).await?;
+    }
+
+    Ok(target)
+}
+
+async fn check_is_head_pool(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    name: &str,
+    ledger: &str,
+) -> Result<(), MigrateError> {
+    let applied = applied_set_pool_for(pool, ledger).await?;
+    if !applied.contains(name) {
+        return Ok(());
+    }
+    let all = file::list_dir(dir)?;
+    let head = all
+        .iter()
+        .rev()
+        .find(|m| applied.contains(&m.name))
+        .map(|m| m.name.as_str());
+    match head {
+        Some(h) if h == name => Ok(()),
+        Some(h) => Err(MigrateError::Validation(format!(
+            "refusing to unapply `{name}` out of order: current head is `{h}`. \
+             Use `downgrade_pool(pool, dir, n)` / `migrate_to_pool(pool, dir, target)` for \
+             ordered rollback, or `unapply_force_pool` to bypass.",
+        ))),
+        None => Ok(()),
+    }
+}
+
+async fn unapply_atomic_pool(
+    pool: &crate::sql::Pool,
+    target: &Migration,
+    inverted: &[Operation],
+    snapshot: &SchemaSnapshot,
+    ledger: &str,
+) -> Result<(), MigrateError> {
+    tracing::info!(migration = %target.name, "unapplying (atomic, _pool)");
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let mut tx = pg.begin().await?;
+            let mut deferred_fks: Vec<String> = Vec::new();
+            for op in inverted {
+                match op {
+                    Operation::Schema(change) => {
+                        let batch =
+                            render_changes_split(std::slice::from_ref(change), snapshot)
+                                .map_err(MigrateError::Validation)?;
+                        for stmt in batch.immediate {
+                            sqlx::query(&stmt).execute(&mut *tx).await?;
+                        }
+                        deferred_fks.extend(batch.deferred_fks);
+                    }
+                    Operation::Data(d) => {
+                        sqlx::query(&d.sql).execute(&mut *tx).await?;
+                    }
+                }
+            }
+            for stmt in deferred_fks {
+                sqlx::query(&stmt).execute(&mut *tx).await?;
+            }
+            sqlx::query(&format!("DELETE FROM {ledger} WHERE name = $1"))
+                .bind(&target.name)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            let mut tx = my.begin().await?;
+            let mut deferred_fks: Vec<String> = Vec::new();
+            for op in inverted {
+                match op {
+                    Operation::Schema(change) => {
+                        let batch =
+                            render_changes_split(std::slice::from_ref(change), snapshot)
+                                .map_err(MigrateError::Validation)?;
+                        for stmt in batch.immediate {
+                            sqlx::query(&stmt).execute(&mut *tx).await?;
+                        }
+                        deferred_fks.extend(batch.deferred_fks);
+                    }
+                    Operation::Data(d) => {
+                        sqlx::query(&d.sql).execute(&mut *tx).await?;
+                    }
+                }
+            }
+            for stmt in deferred_fks {
+                sqlx::query(&stmt).execute(&mut *tx).await?;
+            }
+            sqlx::query(&format!("DELETE FROM {ledger} WHERE name = ?"))
+                .bind(&target.name)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+    }
+    Ok(())
+}
+
+async fn unapply_nonatomic_pool(
+    pool: &crate::sql::Pool,
+    target: &Migration,
+    inverted: &[Operation],
+    snapshot: &SchemaSnapshot,
+    ledger: &str,
+) -> Result<(), MigrateError> {
+    tracing::info!(migration = %target.name, "unapplying (non-atomic, _pool)");
+    let mut deferred_fks: Vec<String> = Vec::new();
+    for op in inverted {
+        match op {
+            Operation::Schema(change) => {
+                let batch = render_changes_split(std::slice::from_ref(change), snapshot)
+                    .map_err(MigrateError::Validation)?;
+                for stmt in batch.immediate {
+                    crate::sql::raw_execute_pool(pool, &stmt, ::std::vec::Vec::new()).await?;
+                }
+                deferred_fks.extend(batch.deferred_fks);
+            }
+            Operation::Data(d) => {
+                crate::sql::raw_execute_pool(pool, &d.sql, ::std::vec::Vec::new()).await?;
+            }
+        }
+    }
+    for stmt in deferred_fks {
+        crate::sql::raw_execute_pool(pool, &stmt, ::std::vec::Vec::new()).await?;
+    }
+    let placeholder = pool.dialect().placeholder(1);
+    let delete_sql = format!("DELETE FROM {ledger} WHERE name = {placeholder}");
+    crate::sql::raw_execute_pool(
+        pool,
+        &delete_sql,
+        ::std::vec![crate::core::SqlValue::String(target.name.clone())],
+    )
+    .await?;
+    Ok(())
+}

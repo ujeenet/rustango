@@ -181,3 +181,17 @@ fn ledger_pool_runner_surface_is_callable() {
         let _fut = rustango::migrate::migrate_pool(pool, dir);
     }
 }
+
+#[test]
+fn direction_aware_pool_runners_are_callable() {
+    // batch 14 — migrate_to / unapply / unapply_force / downgrade /
+    // migrate_dry_run all have _pool variants now.
+    use std::path::Path;
+    fn _probe(pool: &rustango::sql::Pool, dir: &Path) {
+        let _fut = rustango::migrate::migrate_to_pool(pool, dir, "0001_init");
+        let _fut = rustango::migrate::unapply_pool(pool, dir, "0001_init");
+        let _fut = rustango::migrate::unapply_force_pool(pool, dir, "0001_init");
+        let _fut = rustango::migrate::downgrade_pool(pool, dir, 1);
+        let _fut = rustango::migrate::migrate_dry_run_pool(pool, dir);
+    }
+}
