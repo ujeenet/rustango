@@ -1033,7 +1033,93 @@ manager.purge_pending(Duration::from_secs(86400)).await?;      // abandoned uplo
 
 The `MediaStatus` enum (`Pending` / `Ready` / `Failed`) is stored as TEXT so admins can filter / order without bespoke type handling. Soft-deleted rows are excluded from `manager.get(...)` by default; `manager.get_including_deleted(...)` brings them back for restore flows.
 
-Behind the `media` feature flag (default-on, implies `storage` + `postgres`).
+#### Collections (folders) + tags
+
+`MediaCollection` is a hierarchical "where the file lives" folder — one Media row belongs to at most one collection; collections nest via `parent_id`. `MediaTag` is a flat M2M label — one Media has any number of tags. Both are first-class Postgres tables, so the auto-admin lists/filters/searches them with no extra wiring.
+
+```rust
+use rustango::media::ensure_all_tables;
+
+// Bootstrap rustango_media + rustango_media_collections +
+// rustango_media_tags + rustango_media_tag_links in one call.
+ensure_all_tables(&pool).await?;
+
+// Folders (hierarchical).
+let products = manager.create_collection("Products", "products", None, "").await?;
+let cid = match products.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+let launch = manager.create_collection("2026 Launch", "2026-launch", Some(cid), "").await?;
+
+// Drop a file into a folder at save-time.
+let m = manager.save_bytes(SaveOpts {
+    disk: "avatars".into(),
+    key_prefix: "products".into(),
+    bytes: png,
+    mime: "image/png".into(),
+    original_filename: "hero.png".into(),
+    uploaded_by_id: Some(user.id),
+    collection_id: launch.id.into(),     // folder
+    metadata: serde_json::json!({}),
+}).await?;
+
+// Move it later.
+let mid = match m.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+manager.move_to_collection(mid, Some(cid)).await?;
+
+// Walk the folder path.
+let path = manager.collection_path(cid).await?;          // "products"
+
+// List media in a folder, optionally recursive.
+let in_folder = manager.list_in_collection(cid, true).await?;
+
+// Tags (M2M, free-form labels).
+manager.tag(mid, &["featured", "approved", "homepage-hero"]).await?;
+manager.untag(mid, "homepage-hero").await?;
+
+// Replace the entire tag set:
+manager.set_tags(mid, &["featured", "draft"]).await?;
+
+// Find media by tag, paginated.
+let featured = manager.list_with_tag("featured", 50, 0).await?;
+
+// Top tags by usage:
+let popular = manager.popular_tags(10).await?;           // Vec<(MediaTag, i64)>
+```
+
+Deleting a collection orphans its Media (sets `collection_id = NULL`) — the rows + storage objects survive, just lose their folder. Deleting a tag cascades the junction rows away (tags are cheap to recreate).
+
+#### REST router
+
+The `media_router` exposes the manager surface as JSON endpoints — drop it under any prefix you like:
+
+```rust
+use rustango::media::router::media_router;
+
+let app = axum::Router::new()
+    .nest("/media", media_router(manager));
+```
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/uploads/begin` | Issue a presigned PUT ticket for browser upload |
+| `POST` | `/uploads/{id}/finalize` | Confirm storage object landed → flips `pending → ready` |
+| `GET` | `/media/{id}` | Single Media row with `url`, `presigned_url`, `tags` |
+| `DELETE` | `/media/{id}` | Soft-delete (storage preserved) |
+| `POST` | `/media/{id}/move` | Move to another collection: `{collection_id?}` |
+| `POST` | `/media/{id}/tags` | Replace tag set: `{slugs: [...]}` |
+| `DELETE` | `/media/{id}/tags/{slug}` | Remove a single tag |
+| `POST` | `/collections` | Create folder: `{name, slug, parent_id?, description?}` |
+| `GET` | `/collections` | List all (non-deleted) folders |
+| `GET` | `/collections/{id}` | Single folder |
+| `DELETE` | `/collections/{id}` | Soft-delete (Media inside orphaned, NOT deleted) |
+| `GET` | `/collections/{id}/contents` | Media in folder. `?recursive=1` includes sub-folders |
+| `POST` | `/tags` | Create / upsert tag: `{slug}` |
+| `GET` | `/tags` | All tags |
+| `GET` | `/tags/popular` | Top tags by use count. `?limit=N` |
+| `GET` | `/tags/{slug}/media` | Media carrying the tag. `?limit=N&offset=N` |
+
+`MediaError` implements `IntoResponse` so unknown disks return `400`, storage transport errors `502`, and "not found" errors `404`.
+
+Behind the `media` feature flag (default-on, implies `storage` + `postgres`); `media_router` additionally needs the `admin` feature for axum.
 
 ### Scheduled tasks
 
