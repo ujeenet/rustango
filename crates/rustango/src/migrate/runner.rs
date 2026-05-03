@@ -1090,3 +1090,267 @@ async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(),
         .await?;
     Ok(())
 }
+
+// ====================================================================
+// `&Pool` file-based ledger runner — v0.23.0-batch12
+// ====================================================================
+//
+// Bi-dialect counterpart to `migrate(&PgPool, dir)`. Same semantics
+// (skip already-applied migrations from the ledger, apply each in a
+// transaction by default), same default ledger table name. Skipped
+// in this batch:
+//
+// - Advisory locks. PG and MySQL emit different lock-name shapes
+//   (i64 vs string) and the bind needs per-backend dispatch — that's
+//   batch 13. Until then, concurrent `migrate_pool` calls against the
+//   same DB can race; single-process bootstrap is safe.
+// - migrate_to_pool / unapply_pool / downgrade_pool / migrate_dry_run_pool —
+//   the harder direction-aware paths land in batch 13+ once the
+//   advisory lock dispatch is in place.
+// - Per-Builder customization on the `_pool` path. Default ledger
+//   only for batch 12.
+
+/// Ensure the default ledger table (`__rustango_migrations__`) exists
+/// on either backend. Idempotent — re-running on an existing ledger
+/// is a no-op.
+///
+/// Backend-specific ledger DDL (the `applied_at` column type differs):
+/// - Postgres: `applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
+/// - MySQL: `applied_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)`
+///
+/// # Errors
+/// Returns [`MigrateError::Exec`] for any executor / driver failure.
+pub async fn ensure_ledger_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> {
+    ensure_ledger_pool_for(pool, LEDGER_TABLE).await
+}
+
+async fn ensure_ledger_pool_for(
+    pool: &crate::sql::Pool,
+    ledger: &str,
+) -> Result<(), MigrateError> {
+    let dialect_name = pool.dialect().name();
+    let timestamp_col = match dialect_name {
+        "postgres" => "TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+        "mysql" => "DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)",
+        // Future dialects: a `Dialect::current_timestamp_default()` +
+        // `Dialect::timestamp_type()` pair would let this branch go
+        // away. For now the runner only knows the two backends rustango
+        // ships against.
+        other => {
+            return Err(MigrateError::Validation(format!(
+                "ensure_ledger_pool: unrecognized dialect `{other}`"
+            )));
+        }
+    };
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS {ledger} (\
+         name VARCHAR(255) PRIMARY KEY, \
+         applied_at {timestamp_col})"
+    );
+    crate::sql::raw_execute_pool(pool, &create_sql, ::std::vec::Vec::new()).await?;
+    Ok(())
+}
+
+/// Set of migration names already recorded in the default ledger
+/// against either backend.
+///
+/// # Errors
+/// Returns [`MigrateError::Exec`] for any read failure (including a
+/// missing ledger table — call [`ensure_ledger_pool`] first).
+pub async fn applied_set_pool(
+    pool: &crate::sql::Pool,
+) -> Result<HashSet<String>, MigrateError> {
+    applied_set_pool_for(pool, LEDGER_TABLE).await
+}
+
+async fn applied_set_pool_for(
+    pool: &crate::sql::Pool,
+    ledger: &str,
+) -> Result<HashSet<String>, MigrateError> {
+    let sql = format!("SELECT name FROM {ledger}");
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let rows = sqlx::query(&sql).fetch_all(pg).await?;
+            let mut out = HashSet::with_capacity(rows.len());
+            for row in rows {
+                out.insert(row.try_get::<String, _>("name")?);
+            }
+            Ok(out)
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            let rows = sqlx::query(&sql).fetch_all(my).await?;
+            let mut out = HashSet::with_capacity(rows.len());
+            for row in rows {
+                out.insert(row.try_get::<String, _>("name")?);
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// Apply every pending migration in `dir` against either backend.
+/// Each migration runs in its own transaction unless its `atomic`
+/// field is `false` (e.g. `CREATE INDEX CONCURRENTLY`, which neither
+/// PG nor MySQL allow inside a transaction).
+///
+/// Skips files already recorded in the ledger. Returns the migrations
+/// that were newly applied.
+///
+/// **Concurrency caveat (batch 12):** no advisory lock yet — peers
+/// running `migrate_pool` against the same DB simultaneously can both
+/// pass the `applied_set` check and try to apply the same file. The
+/// ledger PRIMARY KEY constraint catches the second writer's INSERT
+/// and rolls its transaction back, but you'll see noisy errors. Lock
+/// dispatch lands in batch 13.
+///
+/// # Errors
+/// As [`migrate`].
+pub async fn migrate_pool(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+) -> Result<Vec<Migration>, MigrateError> {
+    migrate_pool_with_ledger(pool, dir, LEDGER_TABLE).await
+}
+
+async fn migrate_pool_with_ledger(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    ledger: &str,
+) -> Result<Vec<Migration>, MigrateError> {
+    ensure_ledger_pool_for(pool, ledger).await?;
+    let all = file::list_dir(dir)?;
+    let applied = applied_set_pool_for(pool, ledger).await?;
+    let pending: Vec<Migration> = all
+        .into_iter()
+        .filter(|m| !applied.contains(&m.name))
+        .collect();
+
+    let mut newly = Vec::with_capacity(pending.len());
+    for mig in pending {
+        if mig.atomic {
+            apply_atomic_pool(pool, &mig, ledger).await?;
+        } else {
+            apply_nonatomic_pool(pool, &mig, ledger).await?;
+        }
+        newly.push(mig);
+    }
+    Ok(newly)
+}
+
+/// Apply one migration inside a transaction. Both backends support
+/// the same `BEGIN`/`COMMIT`/`ROLLBACK` shape, but sqlx's `Transaction<DB>`
+/// is generic over the backend so the body is inlined per-arm rather
+/// than factored — `Executor<Database = sqlx::Postgres>` and
+/// `Executor<Database = sqlx::MySql>` can't share a single generic
+/// function without a Database-erased shim trait that doesn't ship
+/// in sqlx.
+async fn apply_atomic_pool(
+    pool: &crate::sql::Pool,
+    mig: &Migration,
+    ledger: &str,
+) -> Result<(), MigrateError> {
+    tracing::info!(migration = %mig.name, "applying (atomic, _pool)");
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let mut tx = pg.begin().await?;
+            let mut deferred_fks: Vec<String> = Vec::new();
+            for op in &mig.forward {
+                match op {
+                    Operation::Schema(change) => {
+                        let batch =
+                            render_changes_split(std::slice::from_ref(change), &mig.snapshot)
+                                .map_err(MigrateError::Validation)?;
+                        for stmt in batch.immediate {
+                            sqlx::query(&stmt).execute(&mut *tx).await?;
+                        }
+                        deferred_fks.extend(batch.deferred_fks);
+                    }
+                    Operation::Data(d) => {
+                        sqlx::query(&d.sql).execute(&mut *tx).await?;
+                    }
+                }
+            }
+            for stmt in deferred_fks {
+                sqlx::query(&stmt).execute(&mut *tx).await?;
+            }
+            sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES ($1)"))
+                .bind(&mig.name)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            let mut tx = my.begin().await?;
+            let mut deferred_fks: Vec<String> = Vec::new();
+            for op in &mig.forward {
+                match op {
+                    Operation::Schema(change) => {
+                        let batch =
+                            render_changes_split(std::slice::from_ref(change), &mig.snapshot)
+                                .map_err(MigrateError::Validation)?;
+                        for stmt in batch.immediate {
+                            sqlx::query(&stmt).execute(&mut *tx).await?;
+                        }
+                        deferred_fks.extend(batch.deferred_fks);
+                    }
+                    Operation::Data(d) => {
+                        sqlx::query(&d.sql).execute(&mut *tx).await?;
+                    }
+                }
+            }
+            for stmt in deferred_fks {
+                sqlx::query(&stmt).execute(&mut *tx).await?;
+            }
+            sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES (?)"))
+                .bind(&mig.name)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+    }
+    Ok(())
+}
+
+/// Apply one migration without a transaction (the file's `atomic`
+/// field is `false` — typically because it contains `CREATE INDEX
+/// CONCURRENTLY` which neither backend allows inside a transaction).
+async fn apply_nonatomic_pool(
+    pool: &crate::sql::Pool,
+    mig: &Migration,
+    ledger: &str,
+) -> Result<(), MigrateError> {
+    tracing::info!(migration = %mig.name, "applying (non-atomic, _pool)");
+    let mut deferred_fks: Vec<String> = Vec::new();
+    for op in &mig.forward {
+        match op {
+            Operation::Schema(change) => {
+                let batch = render_changes_split(std::slice::from_ref(change), &mig.snapshot)
+                    .map_err(MigrateError::Validation)?;
+                for stmt in batch.immediate {
+                    crate::sql::raw_execute_pool(pool, &stmt, ::std::vec::Vec::new()).await?;
+                }
+                deferred_fks.extend(batch.deferred_fks);
+            }
+            Operation::Data(d) => {
+                crate::sql::raw_execute_pool(pool, &d.sql, ::std::vec::Vec::new()).await?;
+            }
+        }
+    }
+    for stmt in deferred_fks {
+        crate::sql::raw_execute_pool(pool, &stmt, ::std::vec::Vec::new()).await?;
+    }
+    let placeholder = pool.dialect().placeholder(1);
+    let insert_sql = format!("INSERT INTO {ledger} (name) VALUES ({placeholder})");
+    crate::sql::raw_execute_pool(
+        pool,
+        &insert_sql,
+        ::std::vec![crate::core::SqlValue::String(mig.name.clone())],
+    )
+    .await?;
+    Ok(())
+}
+

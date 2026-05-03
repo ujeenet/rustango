@@ -168,3 +168,16 @@ fn apply_all_pool_and_drop_all_pool_are_callable() {
         let _fut = rustango::migrate::drop_all_pool(pool);
     }
 }
+
+#[test]
+fn ledger_pool_runner_surface_is_callable() {
+    // batch 12 — ensure_ledger_pool / applied_set_pool / migrate_pool
+    // make the file-based ledger runner work against either backend.
+    // Compile-time probe; live exec needs a database.
+    use std::path::Path;
+    fn _probe(pool: &rustango::sql::Pool, dir: &Path) {
+        let _fut = rustango::migrate::ensure_ledger_pool(pool);
+        let _fut = rustango::migrate::applied_set_pool(pool);
+        let _fut = rustango::migrate::migrate_pool(pool, dir);
+    }
+}
