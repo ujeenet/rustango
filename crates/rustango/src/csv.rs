@@ -24,6 +24,51 @@
 //! - Logs / audit trail dumps
 //! - Bulk data download endpoints
 
+/// Build a [`CsvWriter`] from a slice of [`serde_json::Value`] rows
+/// + a list of column names. Each row is expected to be an object;
+/// missing keys render as empty cells. Useful for piping a list
+/// endpoint's JSON output into a CSV download with no extra glue.
+///
+/// ```
+/// use rustango::csv::csv_from_json_rows;
+/// use serde_json::json;
+///
+/// let rows = vec![
+///     json!({"id": 1, "name": "Alice"}),
+///     json!({"id": 2, "name": "Bob, Jr."}),
+/// ];
+/// let s = csv_from_json_rows(&["id", "name"], &rows).into_string();
+/// assert!(s.contains("\"Bob, Jr.\""));
+/// ```
+#[must_use]
+pub fn csv_from_json_rows(columns: &[&str], rows: &[serde_json::Value]) -> CsvWriter {
+    let mut w = CsvWriter::new();
+    w.headers(columns);
+    for row in rows {
+        let cells: Vec<String> = columns
+            .iter()
+            .map(|c| json_cell_to_string(row.get(*c)))
+            .collect();
+        let cell_refs: Vec<&str> = cells.iter().map(String::as_str).collect();
+        w.row(&cell_refs);
+    }
+    w
+}
+
+/// Render a single JSON value into a flat CSV cell. Strings unwrap;
+/// numbers / bools stringify; null + missing fields become empty;
+/// objects + arrays serialize back to JSON so the cell carries
+/// readable structure rather than `[object Object]`.
+fn json_cell_to_string(v: Option<&serde_json::Value>) -> String {
+    match v {
+        None | Some(serde_json::Value::Null) => String::new(),
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Bool(b)) => b.to_string(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        Some(other) => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
 /// CSV writer that builds output into an in-memory `String`.
 ///
 /// For very large exports, write rows in batches and flush — but the typical

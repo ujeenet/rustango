@@ -153,6 +153,12 @@ pub mod api_version;
 /// Minimal RFC 4180 CSV writer — zero deps. See [`csv::CsvWriter`].
 pub mod csv;
 
+/// axum response wrapper for CSV exports — sets Content-Type +
+/// optional Content-Disposition so browsers prompt a "Save as…"
+/// download. See [`csv_response::CsvResponse`].
+#[cfg(feature = "admin")]
+pub mod csv_response;
+
 /// Pluggable secrets backend — [`secrets::Secrets`] trait + [`secrets::EnvSecrets`]
 /// + [`secrets::InMemorySecrets`].
 #[cfg(feature = "secrets")]
