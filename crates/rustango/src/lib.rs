@@ -19,6 +19,53 @@
 // rewriting either.
 extern crate self as rustango;
 
+// ---------------------------------------------------------------- bi-dialect macro support
+//
+// The `#[derive(Model)]` proc-macro emits an unconditional call to
+// [`__impl_my_from_row!`]. The macro_rules below has two definitions
+// gated on rustango's own `mysql` feature:
+//
+// - With `mysql` enabled: expands to a real
+//   `impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for $struct`,
+//   so user models can be SELECT-decoded against either backend.
+// - With `mysql` disabled: expands to nothing.
+//
+// This sidesteps the cross-crate feature-gating problem — the proc
+// macro can't see the user's `Cargo.toml` at expansion time, but
+// macro_rules expansion happens *after* the user's crate has resolved
+// rustango's feature set, so the right arm fires automatically. Users
+// don't have to add a `mysql = ["rustango/mysql"]` shim feature to
+// their own crate.
+
+#[doc(hidden)]
+#[cfg(feature = "mysql")]
+#[macro_export]
+macro_rules! __impl_my_from_row {
+    // The caller passes its own `row` identifier (`|$row|`) so the
+    // function parameter and the body's `row.try_get(...)` references
+    // share a single macro hygiene context. Without this, `$row` defined
+    // by the macro_rules is invisible to body tokens minted in the
+    // proc-macro's hygiene context, and the body fails name resolution.
+    ($struct:ty, |$row:ident| { $($body:tt)* }) => {
+        impl<'r> $crate::sql::sqlx::FromRow<'r, $crate::sql::sqlx::mysql::MySqlRow>
+            for $struct
+        {
+            fn from_row(
+                $row: &'r $crate::sql::sqlx::mysql::MySqlRow,
+            ) -> ::core::result::Result<Self, $crate::sql::sqlx::Error> {
+                ::core::result::Result::Ok(Self { $($body)* })
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+#[cfg(not(feature = "mysql"))]
+#[macro_export]
+macro_rules! __impl_my_from_row {
+    ($struct:ty, |$row:ident| { $($body:tt)* }) => {};
+}
+
 pub mod audit;
 pub mod core;
 pub mod migrate;

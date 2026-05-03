@@ -29,8 +29,9 @@ pub use executor::{
     count_rows_pool, delete, delete_on, delete_pool, fetch_aggregate, fetch_aggregate_on,
     fetch_with_prefetch, insert, insert_on, insert_pool, insert_returning, insert_returning_on,
     raw_execute, raw_execute_on, raw_execute_pool, raw_query, raw_query_on, select_one_row,
-    select_rows, transaction, update, update_on, update_pool, Counter, Deleter, Fetcher,
-    FkPkAccess, HasPkValue, LoadRelated, Page, Updater,
+    select_one_row_pool, select_rows, select_rows_pool, transaction, update, update_on,
+    update_pool, Counter, Deleter, Fetcher, FetcherPool, FkPkAccess, HasPkValue, LoadRelated,
+    MaybeMyFromRow, Page, Updater,
 };
 pub use foreign_key::ForeignKey;
 pub use m2m::M2MManager;

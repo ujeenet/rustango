@@ -1246,6 +1246,154 @@ async fn fetch_scalar_pool(
     }
 }
 
+// ====================================================================
+// `&Pool` FromRow dispatch — Phase B (v0.23.0-batch6)
+// ====================================================================
+//
+// `select_rows_pool` / `Fetcher::fetch` for `&Pool`. The trait bound on
+// `T` needs to flex: when rustango is built with the `mysql` feature,
+// it must also include `FromRow<MySqlRow>`; without it, the MySql
+// variant doesn't exist and the bound shouldn't either. The
+// [`MaybeMyFromRow`] marker trait below absorbs that conditionality —
+// it's auto-implemented for every type when `mysql` is off, and
+// requires `FromRow<MySqlRow>` when on. Models derived via
+// `#[derive(Model)]` get the right impl automatically: the proc macro
+// emits a call to the cfg-gated `__impl_my_from_row!` macro_rules so
+// the MySQL impl materializes when (and only when) it's needed.
+
+/// Marker trait used as a feature-gated `FromRow<MySqlRow>` bound on
+/// the `_pool` `FromRow`-using executor functions. Auto-implemented
+/// for every `T` when rustango is built without the `mysql` feature
+/// (so PG-only call sites compile unchanged); requires
+/// `FromRow<MySqlRow>` when `mysql` is on.
+#[cfg(feature = "mysql")]
+pub trait MaybeMyFromRow: for<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> {}
+#[cfg(feature = "mysql")]
+impl<T> MaybeMyFromRow for T where T: for<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> {}
+#[cfg(not(feature = "mysql"))]
+pub trait MaybeMyFromRow {}
+#[cfg(not(feature = "mysql"))]
+impl<T> MaybeMyFromRow for T {}
+
+/// Run a `SelectQuery` against either backend and decode each row
+/// into `T`. Equivalent to [`select_rows`] but takes [`Pool`] and
+/// dispatches per backend. Joins (`select_related`) are not yet
+/// supported on the `&Pool` path — use the `&PgPool` variant on
+/// Postgres until the join decoder migrates in batch7.
+///
+/// # Errors
+/// As [`select_rows`].
+pub async fn select_rows_pool<T>(
+    pool: &Pool,
+    query: &SelectQuery,
+) -> Result<Vec<T>, ExecError>
+where
+    T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + Send + Unpin,
+{
+    let stmt = pool.dialect().compile_select(query)?;
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => {
+            let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
+                sqlx::query_as::<_, T>(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_as(q, v);
+            }
+            Ok(q.fetch_all(pg).await?)
+        }
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            let mut q: sqlx::query::QueryAs<
+                '_,
+                sqlx::MySql,
+                T,
+                sqlx::mysql::MySqlArguments,
+            > = sqlx::query_as::<_, T>(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_as_my(q, v);
+            }
+            Ok(q.fetch_all(my).await?)
+        }
+    }
+}
+
+/// Single-row variant of [`select_rows_pool`]. Returns `Ok(None)`
+/// when no rows match.
+///
+/// # Errors
+/// As [`select_one_row`] but routed through `&Pool`.
+pub async fn select_one_row_pool<T>(
+    pool: &Pool,
+    query: &SelectQuery,
+) -> Result<Option<T>, ExecError>
+where
+    T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + Send + Unpin,
+{
+    let stmt = pool.dialect().compile_select(query)?;
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => {
+            let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
+                sqlx::query_as::<_, T>(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_as(q, v);
+            }
+            Ok(q.fetch_optional(pg).await?)
+        }
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            let mut q: sqlx::query::QueryAs<
+                '_,
+                sqlx::MySql,
+                T,
+                sqlx::mysql::MySqlArguments,
+            > = sqlx::query_as::<_, T>(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_as_my(q, v);
+            }
+            Ok(q.fetch_optional(my).await?)
+        }
+    }
+}
+
+/// MySQL-typed `QueryAs` binding helper, symmetric with [`bind_query_as`].
+#[cfg(feature = "mysql")]
+fn bind_query_as_my<T>(
+    q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments>,
+    value: SqlValue,
+) -> sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> {
+    bind_match!(q, value)
+}
+
+/// `QuerySet::fetch` variant that takes `&Pool` — works against
+/// either backend when the model derives `Model` (the macro emits
+/// both `FromRow<PgRow>` and the cfg-gated `FromRow<MySqlRow>`).
+/// Joins (`select_related`) aren't supported on this path yet —
+/// see [`select_rows_pool`] for the rationale.
+pub trait FetcherPool<T>
+where
+    T: Model + for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + Send + Unpin,
+{
+    /// Compile the queryset and run `fetch_all` against either backend.
+    ///
+    /// # Errors
+    /// As [`Fetcher::fetch`].
+    fn fetch_pool(
+        self,
+        pool: &Pool,
+    ) -> impl std::future::Future<Output = Result<Vec<T>, ExecError>> + Send;
+}
+
+impl<T> FetcherPool<T> for QuerySet<T>
+where
+    T: Model + for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + Send + Unpin,
+{
+    async fn fetch_pool(self, pool: &Pool) -> Result<Vec<T>, ExecError> {
+        let select = self.compile()?;
+        select_rows_pool(pool, &select).await
+    }
+}
+
 #[cfg(test)]
 mod pool_dispatch_tests {
     use super::*;
@@ -1284,5 +1432,17 @@ mod pool_dispatch_tests {
         assert_eq!(pool.dialect().name(), "postgres");
         assert_eq!(pool.dialect().quote_ident("col"), "\"col\"");
         assert_eq!(pool.dialect().placeholder(1), "$1");
+    }
+
+    /// Compile-time guard for the `MaybeMyFromRow` blanket impl.
+    /// `()` implements `FromRow<R>` for any `R` in sqlx, so it
+    /// satisfies the bound under both feature configs and is the
+    /// safest universal probe. The integration test
+    /// `tests/mysql_from_row.rs` covers the `#[derive(Model)]`
+    /// emission end-to-end.
+    #[test]
+    fn maybe_my_from_row_resolves_for_unit_type() {
+        fn check<T: super::MaybeMyFromRow>() {}
+        check::<()>();
     }
 }

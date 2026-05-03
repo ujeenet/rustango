@@ -2210,6 +2210,16 @@ fn column_module_ident(struct_name: &syn::Ident) -> syn::Ident {
 }
 
 fn from_row_impl_tokens(struct_name: &syn::Ident, from_row_inits: &[TokenStream2]) -> TokenStream2 {
+    // The Postgres impl is always emitted — every rustango build pulls in
+    // sqlx-postgres via the default `postgres` feature. The MySQL impl is
+    // routed through `::rustango::__impl_my_from_row!`, a cfg-gated
+    // macro_rules whose body collapses to nothing when rustango is built
+    // without the `mysql` feature. No user-facing feature shim required.
+    //
+    // The macro_rules pattern expects `[ field: expr, … ]` — we need to
+    // re-shape `from_row_inits` (each token is `field: row.try_get(...)`)
+    // back into a comma-separated list inside square brackets. Since each
+    // entry is already in `field: expr` shape, the existing tokens slot in.
     quote! {
         impl<'r> ::rustango::sql::sqlx::FromRow<'r, ::rustango::sql::sqlx::postgres::PgRow>
             for #struct_name
@@ -2222,6 +2232,10 @@ fn from_row_impl_tokens(struct_name: &syn::Ident, from_row_inits: &[TokenStream2
                 })
             }
         }
+
+        ::rustango::__impl_my_from_row!(#struct_name, |row| {
+            #( #from_row_inits ),*
+        });
     }
 }
 
