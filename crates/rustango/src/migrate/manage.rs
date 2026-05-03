@@ -108,6 +108,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "version" | "--version" => version_cmd(writer),
         "db:dump" => db_dump_cmd(&args[1..], writer),
         "db:restore" => db_restore_cmd(&args[1..], writer),
+        "db:info" => db_info_cmd(writer),
         other => Err(MigrateError::Validation(format!(
             "unknown subcommand: `{other}` (run with --help for usage)"
         ))),
@@ -196,6 +197,10 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(w, "      Run psql against $DATABASE_URL with `\\i <file>`. With")?;
     writeln!(w, "      --clean, prepend a `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`")?;
     writeln!(w, "      so the restore lands on a clean database.\n")?;
+    writeln!(w, "  db:info")?;
+    writeln!(w, "      Print the resolved DB URL (password redacted), detected")?;
+    writeln!(w, "      backend, and which `postgres`/`mysql` Cargo features are")?;
+    writeln!(w, "      compiled in. Read-only — does not connect.\n")?;
     writeln!(w, "  startapp <name> [--with-manage-bin]")?;
     writeln!(
         w,
@@ -1369,6 +1374,77 @@ fn db_restore_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateErr
         return Err(MigrateError::Validation(format!(
             "psql exited with status {status}"
         )));
+    }
+    Ok(())
+}
+
+/// `db:info` — read-only summary of the DB configuration this build
+/// would use. Shows the resolved URL (password redacted), the detected
+/// backend, and which `postgres`/`mysql` Cargo features are compiled
+/// in. Does not connect — handy in CI / containers where DB might not
+/// be reachable yet but you still want to confirm the runtime sees
+/// the expected backend.
+fn db_info_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
+    writeln!(w, "rustango db:info")?;
+    writeln!(w, "  framework version:  {}", env!("CARGO_PKG_VERSION"))?;
+
+    let pg_enabled = cfg!(feature = "postgres");
+    let mysql_enabled = cfg!(feature = "mysql");
+    writeln!(
+        w,
+        "  postgres feature:   {}",
+        if pg_enabled { "enabled" } else { "disabled" }
+    )?;
+    writeln!(
+        w,
+        "  mysql feature:      {} (impl lands in v0.23.0-batch2)",
+        if mysql_enabled { "enabled" } else { "disabled" }
+    )?;
+
+    match crate::env::database_url_from_env() {
+        Ok(url) => {
+            let scheme = url
+                .split("://")
+                .next()
+                .unwrap_or("(unknown)");
+            writeln!(w, "  resolved URL:       {}", redact_url(&url))?;
+            writeln!(w, "  detected backend:   {scheme}")?;
+            // Soft warning when scheme + feature don't line up — caught
+            // at runtime by Pool::connect, but this surfaces it before
+            // the operator tries to start the server.
+            match scheme {
+                "postgres" | "postgresql" if !pg_enabled => {
+                    writeln!(
+                        w,
+                        "  ! warning: URL is postgres but the `postgres` feature is disabled — \
+                         add `features = [\"postgres\"]` to rustango"
+                    )?;
+                }
+                "mysql" if !mysql_enabled => {
+                    writeln!(
+                        w,
+                        "  ! warning: URL is mysql but the `mysql` feature is disabled — \
+                         add `features = [\"mysql\"]` to rustango"
+                    )?;
+                }
+                "mysql" if mysql_enabled => {
+                    writeln!(
+                        w,
+                        "  ! note: MySql connections will fail in v0.23.0-batch1 \
+                         (MySqlDialect lands in batch2)"
+                    )?;
+                }
+                _ => {}
+            }
+        }
+        Err(e) => {
+            writeln!(w, "  resolved URL:       (none — {e})")?;
+            writeln!(
+                w,
+                "  hint:               set DATABASE_URL or DB_USER+DB_NAME (+optional \
+                 DB_HOST/DB_PORT/DB_PASSWORD/DB_DRIVER/DB_PARAMS)"
+            )?;
+        }
     }
     Ok(())
 }

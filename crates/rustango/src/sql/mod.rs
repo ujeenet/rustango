@@ -13,6 +13,7 @@ mod error;
 mod executor;
 mod foreign_key;
 pub mod m2m;
+mod pool;
 mod postgres;
 
 pub use auto::Auto;
@@ -29,6 +30,7 @@ pub use executor::{
 };
 pub use foreign_key::ForeignKey;
 pub use m2m::M2MManager;
+pub use pool::{Pool, PoolError};
 pub use postgres::Postgres;
 
 /// Re-exported so `#[derive(Model)]` output can name `sqlx` types without

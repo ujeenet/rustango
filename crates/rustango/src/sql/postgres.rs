@@ -16,6 +16,10 @@ use super::{CompiledStatement, Dialect, SqlError};
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Postgres;
 
+/// `'static` reference to the singleton [`Postgres`] dialect, useful
+/// where callers want a `&'static dyn Dialect` (e.g. [`crate::sql::Pool::dialect`]).
+pub static DIALECT: &Postgres = &Postgres;
+
 impl Dialect for Postgres {
     fn name(&self) -> &'static str {
         "postgres"

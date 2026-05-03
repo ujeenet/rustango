@@ -26,6 +26,14 @@ workspace = true
 default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3", "media"]
 postgres = ["sqlx/postgres"]
 
+# MySQL 8.4+ backend. Lands fully in rustango v0.23.0-batch2 (when the
+# `MySqlDialect` impl + DDL writer dispatch ship); the `mysql` feature
+# in v0.23.0-batch1 wires the sqlx side so apps can already opt-in.
+# Trying to actually `Pool::connect("mysql://...")` in batch1 returns a
+# clear "not yet implemented in this version" error — apps building
+# against `mysql` ahead of batch2 get a soft-error, not a panic.
+mysql = ["sqlx/mysql"]
+
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
 # → `config/{env}.toml` → env-var overrides. Slice 8.3.
 config = ["dep:toml"]

@@ -24,8 +24,10 @@ rustango        = { version = "0.22.1", path = "crates/rustango" }
 # Async runtime
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
 
-# DB
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "uuid"] }
+# DB — backends are turned on via rustango's own `postgres` /
+# `mysql` features so apps can pick a single backend (smaller dep
+# tree) or both (one binary serving either).
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "chrono", "uuid"] }
 
 # Schema collection + collections
 inventory = "0.3"
