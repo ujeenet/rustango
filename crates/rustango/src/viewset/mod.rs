@@ -250,6 +250,32 @@ impl ViewSet {
         self
     }
 
+    /// Auto-fill `ViewSetPerms` with the four standard CRUD codenames
+    /// for `T` (`<table>.view` / `<table>.add` / `<table>.change` /
+    /// `<table>.delete`), routed through the v0.16.0 typed
+    /// permissions facade ([`crate::permissions::codename_for`]).
+    ///
+    /// `list` + `retrieve` get `view`; `create` gets `add`; `update`
+    /// gets `change`; `destroy` gets `delete`. Mirrors Django's
+    /// `DjangoModelPermissions` shape — the convention every Django
+    /// app starts with.
+    ///
+    /// Use [`Self::permissions`] for fully-custom codenames or
+    /// non-CRUD actions. Requires the `tenancy` feature (the
+    /// underlying `has_perm` engine lives there).
+    #[cfg(feature = "tenancy")]
+    pub fn permissions_for_model<T: crate::core::Model>(mut self) -> Self {
+        let cn = |action: &str| crate::permissions::codename_for::<T>(action);
+        self.perms = ViewSetPerms {
+            list: vec![cn("view")],
+            retrieve: vec![cn("view")],
+            create: vec![cn("add")],
+            update: vec![cn("change")],
+            destroy: vec![cn("delete")],
+        };
+        self
+    }
+
     /// Allow GET only — wires list + retrieve, skips create/update/destroy.
     pub fn read_only(mut self) -> Self {
         self.read_only = true;
@@ -1220,5 +1246,33 @@ mod lookup_tests {
     fn parse_failure_returns_none() {
         let r = build_lookup_filter(int_field(), Some("gt"), "not-a-number");
         assert!(r.is_none());
+    }
+}
+
+#[cfg(all(test, feature = "tenancy"))]
+mod typed_perms_tests {
+    use super::*;
+    use crate::sql::Auto;
+
+    #[derive(crate::Model)]
+    #[rustango(table = "vs_typed_perm_post")]
+    #[allow(dead_code)]
+    pub struct PermPost {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 200)]
+        pub title: String,
+    }
+
+    #[test]
+    fn permissions_for_model_fills_all_four_crud_codenames() {
+        use crate::core::Model;
+        let vs = ViewSet::for_model(<PermPost as Model>::SCHEMA)
+            .permissions_for_model::<PermPost>();
+        assert_eq!(vs.perms.list, vec!["vs_typed_perm_post.view"]);
+        assert_eq!(vs.perms.retrieve, vec!["vs_typed_perm_post.view"]);
+        assert_eq!(vs.perms.create, vec!["vs_typed_perm_post.add"]);
+        assert_eq!(vs.perms.update, vec!["vs_typed_perm_post.change"]);
+        assert_eq!(vs.perms.destroy, vec!["vs_typed_perm_post.delete"]);
     }
 }
