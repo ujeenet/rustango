@@ -50,6 +50,37 @@ pub enum Relation {
     O2O { to: &'static str, on: &'static str },
 }
 
+/// Multi-column ("composite") foreign key relation, declared at the
+/// model level rather than the field level — single-column FKs stay
+/// in [`FieldSchema::relation`], composite FKs live here so each
+/// participating column keeps its plain Rust type.
+///
+/// Sub-slice F.2 of the v0.15.0 ContentType plan. Used by audit log
+/// (`(entity_table, entity_pk)` → `rustango_content_types`),
+/// permissions (`(content_type_id, codename)` → role-permission
+/// link), and any user model that points at another table by more
+/// than one column.
+///
+/// Declared on the source model via the container attr
+/// `#[rustango(fk_composite(name = "audit_target", to = "rustango_audit_log",
+/// on = ("entity_table", "entity_pk"), from = ("table_name", "row_pk")))]`.
+/// `from` and `on` must be the same length; the macro errors otherwise.
+#[derive(Debug, Clone, Copy)]
+pub struct CompositeFkRelation {
+    /// Logical name for the relation (used in admin labels, error
+    /// messages, and as the prefix for any reverse-relation accessors
+    /// the macro generates). Free-form Rust identifier.
+    pub name: &'static str,
+    /// SQL table name of the target model.
+    pub to: &'static str,
+    /// Column names on the source (this) table that participate in
+    /// the FK, in declaration order. Same length as `on`.
+    pub from: &'static [&'static str],
+    /// Column names on the target table that the FK references, in
+    /// the same order as `from`.
+    pub on: &'static [&'static str],
+}
+
 /// Descriptor for one many-to-many relation declared via
 /// `#[rustango(m2m(name = "tags", to = "app_tags", through = "post_tags",
 ///                 src = "post_id", dst = "tag_id"))]`.
@@ -133,6 +164,17 @@ pub struct ModelSchema {
     /// Each entry is rendered as `ALTER TABLE … ADD CONSTRAINT "name"
     /// CHECK (expr)` after the table is created.
     pub check_constraints: &'static [CheckConstraint],
+    /// Composite (multi-column) foreign key relations declared via
+    /// `#[rustango(fk_composite(name = "...", to = "...", on = (...),
+    /// from = (...)))]`. Each entry maps a tuple of source columns
+    /// to a tuple of target columns on `to`. Single-column FKs
+    /// continue to live on [`FieldSchema::relation`] — `composite_relations`
+    /// only carries the multi-column case so the existing single-FK
+    /// machinery (admin display, snapshot diff, single-col DDL) stays
+    /// untouched.
+    ///
+    /// Empty slice when the model has no composite FKs.
+    pub composite_relations: &'static [CompositeFkRelation],
 }
 
 /// Descriptor for one table-level CHECK constraint.

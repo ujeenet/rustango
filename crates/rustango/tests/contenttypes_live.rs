@@ -39,6 +39,51 @@ pub struct User {
     pub username: String,
 }
 
+/// Realistic composite-PK target — a junction-style table whose
+/// primary key is the natural `(left_id, right_id)` pair. Single-FK
+/// paths can't reference a row in this table; you need both columns
+/// matched, which is what `fk_composite` is for.
+///
+/// PG-side, this maps to:
+/// `CREATE TABLE ct_live_pair (left_id BIGINT NOT NULL, right_id
+/// BIGINT NOT NULL, PRIMARY KEY (left_id, right_id))` — the
+/// composite PK constraint isn't yet auto-emitted by the rustango
+/// DDL writer (single-column PK is the v0.x default), so the live
+/// test seeds the supporting unique index by hand. The model exists
+/// purely so [`AuditTarget`] has a target with two distinct columns
+/// for its `fk_composite`.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "ct_live_pair")]
+#[allow(dead_code)]
+pub struct Pair {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub left_id: i64,
+    pub right_id: i64,
+}
+
+/// Composite-FK demo model (sub-slice F.2). Two columns
+/// `(left_ref, right_ref)` form a logical FK to `(left_id,
+/// right_id)` on [`Pair`]. Exercises the full macro / schema / DDL
+/// composite-FK path end-to-end.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "ct_live_audit",
+    fk_composite(
+        name = "pair_target",
+        to = "ct_live_pair",
+        from = ("left_ref", "right_ref"),
+        on = ("left_id", "right_id"),
+    ),
+)]
+#[allow(dead_code)]
+pub struct AuditTarget {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub left_ref: i64,
+    pub right_ref: i64,
+}
+
 fn ct_lock() -> &'static Mutex<()> {
     static M: OnceLock<Mutex<()>> = OnceLock::new();
     M.get_or_init(|| Mutex::new(()))
@@ -50,13 +95,43 @@ async fn fresh_pool() -> Option<sqlx::PgPool> {
         .await
         .expect("connect to DATABASE_URL failed");
     // Reset the tables involved in these tests so re-runs are clean.
-    for tbl in ["rustango_content_types", "ct_live_post", "ct_live_user"] {
+    for tbl in [
+        "rustango_content_types",
+        "ct_live_post",
+        "ct_live_user",
+        "ct_live_audit",
+        "ct_live_pair",
+    ] {
         let drop_sql = format!(r#"DROP TABLE IF EXISTS "{tbl}" CASCADE"#);
         let _ = sqlx::query(&drop_sql).execute(&pool).await;
     }
-    rustango::migrate::apply_all(&pool)
-        .await
-        .expect("apply_all");
+    // Phase 1 — CREATE TABLE for every registered model. We do this
+    // manually rather than via `apply_all` because apply_all also
+    // emits FK constraints in the same call, and our composite FK
+    // needs a UNIQUE INDEX on `ct_live_pair (left_id, right_id)` to
+    // exist *before* the FK can be added (PG rule).
+    use rustango::core::Model as _;
+    use rustango::migrate::ddl::{create_constraints_sql, create_table_sql};
+    for entry in rustango::core::inventory::iter::<rustango::core::ModelEntry> {
+        let _ = sqlx::query(&create_table_sql(entry.schema))
+            .execute(&pool)
+            .await;
+    }
+    // Phase 2 — supporting unique index for the composite FK target.
+    let _ = sqlx::query(
+        r#"CREATE UNIQUE INDEX IF NOT EXISTS "ct_live_pair_left_right_uq"
+           ON "ct_live_pair" ("left_id", "right_id")"#,
+    )
+    .execute(&pool)
+    .await;
+    // Phase 3 — emit ALTER TABLE FK constraints (single-col + composite).
+    // Best-effort; some FKs may already exist from earlier runs.
+    for entry in rustango::core::inventory::iter::<rustango::core::ModelEntry> {
+        for stmt in create_constraints_sql(entry.schema) {
+            let _ = sqlx::query(&stmt).execute(&pool).await;
+        }
+    }
+    let _ = AuditTarget::SCHEMA; // silence "unused import" if Model's only use is here
     Some(pool)
 }
 
@@ -149,6 +224,40 @@ async fn all_returns_seeded_rows_ordered() {
         }
         last = Some((ct.app_label.clone(), ct.model_name.clone()));
     }
+}
+
+#[test]
+fn composite_fk_relation_is_emitted_on_model_schema() {
+    // Pure macro/schema test — doesn't need a live DB. Wired here
+    // alongside the live tests so the schema and the F.2 DDL stay
+    // exercised together.
+    use rustango::core::Model as _;
+    let s = AuditTarget::SCHEMA;
+    assert_eq!(
+        s.composite_relations.len(),
+        1,
+        "AuditTarget should declare one composite FK"
+    );
+    let rel = &s.composite_relations[0];
+    assert_eq!(rel.name, "pair_target");
+    assert_eq!(rel.to, "ct_live_pair");
+    assert_eq!(rel.from, &["left_ref", "right_ref"]);
+    assert_eq!(rel.on, &["left_id", "right_id"]);
+}
+
+#[test]
+fn composite_fk_emits_alter_table_constraint_in_ddl() {
+    // Confirm the DDL writer renders the composite FK as
+    // `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY (a, b) REFERENCES t (x, y)`.
+    use rustango::core::Model as _;
+    use rustango::migrate::ddl::create_constraints_sql;
+    let stmts = create_constraints_sql(AuditTarget::SCHEMA);
+    let composite = stmts
+        .iter()
+        .find(|s| s.contains("pair_target_fkey"))
+        .expect("composite FK ALTER TABLE statement should be emitted");
+    assert!(composite.contains(r#"FOREIGN KEY ("left_ref", "right_ref")"#));
+    assert!(composite.contains(r#"REFERENCES "ct_live_pair" ("left_id", "right_id")"#));
 }
 
 #[tokio::test]

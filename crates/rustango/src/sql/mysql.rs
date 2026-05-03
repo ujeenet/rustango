@@ -950,6 +950,7 @@ mod tests {
             m2m: &[],
             indexes: &[],
             check_constraints: &[],
+            composite_relations: &[],
         }))
     }
 }

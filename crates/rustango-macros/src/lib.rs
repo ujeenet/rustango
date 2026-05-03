@@ -514,6 +514,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         &container.m2m,
         &all_indexes,
         &container.checks,
+        &container.composite_fks,
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -1056,6 +1057,7 @@ fn model_impl_tokens(
     m2m_relations: &[M2MAttr],
     indexes: &[IndexAttr],
     checks: &[CheckAttr],
+    composite_fks: &[CompositeFkAttr],
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
@@ -1102,6 +1104,20 @@ fn model_impl_tokens(
             }
         }
     });
+    let composite_fk_tokens = composite_fks.iter().map(|rel| {
+        let name = rel.name.as_str();
+        let to = rel.to.as_str();
+        let from_cols: Vec<&str> = rel.from.iter().map(String::as_str).collect();
+        let on_cols: Vec<&str> = rel.on.iter().map(String::as_str).collect();
+        quote! {
+            ::rustango::core::CompositeFkRelation {
+                name: #name,
+                to: #to,
+                from: &[ #(#from_cols),* ],
+                on: &[ #(#on_cols),* ],
+            }
+        }
+    });
     let m2m_tokens = m2m_relations.iter().map(|rel| {
         let name = rel.name.as_str();
         let to = rel.to.as_str();
@@ -1133,6 +1149,7 @@ fn model_impl_tokens(
                 m2m: &[ #(#m2m_tokens),* ],
                 indexes: &[ #(#indexes_tokens),* ],
                 check_constraints: &[ #(#checks_tokens),* ],
+                composite_relations: &[ #(#composite_fk_tokens),* ],
             };
         }
     }
@@ -3030,6 +3047,10 @@ struct ContainerAttrs {
     /// Table-level CHECK constraints declared via
     /// `#[rustango(check(name = "…", expr = "…"))]`.
     checks: Vec<CheckAttr>,
+    /// Composite (multi-column) FKs declared via
+    /// `#[rustango(fk_composite(name = "…", to = "…", on = (…), from = (…)))]`.
+    /// Sub-slice F.2 of the v0.15.0 ContentType plan.
+    composite_fks: Vec<CompositeFkAttr>,
 }
 
 /// Parsed form of one index declaration (field-level or container-level).
@@ -3046,6 +3067,22 @@ struct IndexAttr {
 struct CheckAttr {
     name: String,
     expr: String,
+}
+
+/// Parsed form of one `#[rustango(fk_composite(name = "audit_target",
+/// to = "rustango_audit_log", on = ("entity_table", "entity_pk"),
+/// from = ("table_name", "row_pk")))]` declaration. Sub-slice F.2 of
+/// the v0.15.0 ContentType plan — multi-column foreign keys live on
+/// the model, not the field.
+struct CompositeFkAttr {
+    /// Logical relation name (free-form Rust identifier).
+    name: String,
+    /// SQL table name of the target.
+    to: String,
+    /// Source-side column names, in declaration order.
+    from: Vec<String>,
+    /// Target-side column names, same length / order as `from`.
+    on: Vec<String>,
 }
 
 /// Parsed form of one `#[rustango(m2m(...))]` declaration.
@@ -3107,6 +3144,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         m2m: Vec::new(),
         indexes: Vec::new(),
         checks: Vec::new(),
+        composite_fks: Vec::new(),
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -3257,6 +3295,68 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 let name = name.ok_or_else(|| meta.error("check requires `name = \"...\"`"))?;
                 let expr = expr.ok_or_else(|| meta.error("check requires `expr = \"...\"`"))?;
                 out.checks.push(CheckAttr { name, expr });
+                return Ok(());
+            }
+            if meta.path.is_ident("fk_composite") {
+                let mut fk = CompositeFkAttr {
+                    name: String::new(),
+                    to: String::new(),
+                    from: Vec::new(),
+                    on: Vec::new(),
+                };
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("name") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        fk.name = s.value();
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("to") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        fk.to = s.value();
+                        return Ok(());
+                    }
+                    // `on = ("col1", "col2", ...)` — parse a parenthesised
+                    // comma-list of string literals.
+                    if inner.path.is_ident("on") || inner.path.is_ident("from") {
+                        let value = inner.value()?;
+                        let content;
+                        syn::parenthesized!(content in value);
+                        let lits: syn::punctuated::Punctuated<syn::LitStr, syn::Token![,]> =
+                            content.parse_terminated(
+                                |p| p.parse::<syn::LitStr>(),
+                                syn::Token![,],
+                            )?;
+                        let cols: Vec<String> = lits.iter().map(syn::LitStr::value).collect();
+                        if inner.path.is_ident("on") {
+                            fk.on = cols;
+                        } else {
+                            fk.from = cols;
+                        }
+                        return Ok(());
+                    }
+                    Err(inner.error(
+                        "unknown fk_composite attribute (supported: `name`, `to`, `on`, `from`)",
+                    ))
+                })?;
+                if fk.name.is_empty() {
+                    return Err(meta.error("fk_composite requires `name = \"...\"`"));
+                }
+                if fk.to.is_empty() {
+                    return Err(meta.error("fk_composite requires `to = \"...\"`"));
+                }
+                if fk.from.is_empty() || fk.on.is_empty() {
+                    return Err(meta.error(
+                        "fk_composite requires non-empty `from = (...)` and `on = (...)` tuples",
+                    ));
+                }
+                if fk.from.len() != fk.on.len() {
+                    return Err(meta.error(format!(
+                        "fk_composite `from` ({} cols) and `on` ({} cols) must be the same length",
+                        fk.from.len(),
+                        fk.on.len(),
+                    )));
+                }
+                out.composite_fks.push(fk);
                 return Ok(());
             }
             if meta.path.is_ident("m2m") {

@@ -262,6 +262,7 @@ mod tests {
         indexes: &[],
         check_constraints: &[],
         m2m: &[],
+        composite_relations: &[],
     };
 
     static MODEL_WITHOUT_SD: ModelSchema = ModelSchema {
@@ -277,6 +278,7 @@ mod tests {
         indexes: &[],
         check_constraints: &[],
         m2m: &[],
+        composite_relations: &[],
     };
 
     #[test]

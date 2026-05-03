@@ -134,8 +134,10 @@ pub fn drop_table_sql_with_dialect(
     s
 }
 
-/// One `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` per FK / O2O field.
-/// MySQL accepts the same syntax — only the identifier quoting differs.
+/// One `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` per FK / O2O field,
+/// plus one per composite FK declared via `#[rustango(fk_composite(...))]`
+/// (sub-slice F.2 of the v0.15.0 ContentType plan). MySQL accepts the
+/// same FK syntax — only the identifier quoting differs.
 #[must_use]
 pub fn create_constraints_sql_with_dialect(
     dialect: &dyn Dialect,
@@ -157,6 +159,32 @@ pub fn create_constraints_sql_with_dialect(
         s.push_str(&dialect.quote_ident(to));
         s.push_str(" (");
         s.push_str(&dialect.quote_ident(on));
+        s.push(')');
+        out.push(s);
+    }
+    // Composite FKs — `(col_a, col_b, …) REFERENCES target (col_x, col_y, …)`.
+    // The macro ensures `from.len() == on.len()` at compile time.
+    for rel in model.composite_relations {
+        let mut s = String::from("ALTER TABLE ");
+        s.push_str(&dialect.quote_ident(model.table));
+        s.push_str(" ADD CONSTRAINT ");
+        s.push_str(&dialect.quote_ident(&format!("{}_{}_fkey", model.table, rel.name)));
+        s.push_str(" FOREIGN KEY (");
+        for (i, col) in rel.from.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            s.push_str(&dialect.quote_ident(col));
+        }
+        s.push_str(") REFERENCES ");
+        s.push_str(&dialect.quote_ident(rel.to));
+        s.push_str(" (");
+        for (i, col) in rel.on.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            s.push_str(&dialect.quote_ident(col));
+        }
         s.push(')');
         out.push(s);
     }
