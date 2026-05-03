@@ -265,6 +265,11 @@ pub mod distributed_lock;
 #[cfg(feature = "sessions")]
 pub mod sessions;
 
+/// Prometheus-format metrics — counters + histograms exposed at
+/// `/metrics`. Pure-Rust, no Prometheus client crate.
+/// See [`metrics::MetricsRegistry`] + [`metrics::metrics_router`].
+pub mod metrics;
+
 /// `Server-Timing` header middleware — surface per-request stage
 /// durations to the browser DevTools "Network" panel. See
 /// [`server_timing::ServerTimingLayer`] + [`server_timing::Timings`].
