@@ -74,7 +74,33 @@ use sqlx::{PgPool, Row};
 use crate::sql::Auto;
 use crate::storage::{StorageError, StorageRegistry};
 
+pub mod collection;
+pub mod tag;
+pub use collection::MediaCollection;
+pub use tag::MediaTag;
+
+#[cfg(feature = "admin")]
+pub mod router;
+
 const DEFAULT_DISK_NAME: &str = "default";
+
+/// One-call bootstrap for every table the `media` module needs:
+/// `rustango_media`, `rustango_media_collections`,
+/// `rustango_media_tags`, and the `rustango_media_tag_links`
+/// junction. Also runs the idempotent ALTER that adds
+/// `collection_id` to `rustango_media` for deployments that ran
+/// the v0.21.51 ensure_table before this column existed.
+///
+/// Safe to call on every boot.
+///
+/// # Errors
+/// Surfaces the underlying sqlx error if any DDL fails.
+pub async fn ensure_all_tables(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+    Media::ensure_table(pool).await?;
+    MediaCollection::ensure_table(pool).await?;
+    MediaTag::ensure_table(pool).await?;
+    Ok(())
+}
 
 /// Lifecycle state of a Media row.
 ///
@@ -129,6 +155,9 @@ pub struct Media {
     pub uploaded_at: DateTime<Utc>,
     pub uploaded_by_id: Option<i64>,
     pub derived_from_id: Option<i64>,
+    /// Optional FK to `rustango_media_collections.id` — the
+    /// "where it lives" folder. NULL means "loose" (in the root).
+    pub collection_id: Option<i64>,
     pub metadata: Value,
     pub deleted_at: Option<DateTime<Utc>>,
 }
@@ -158,9 +187,18 @@ impl Media {
                 uploaded_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 uploaded_by_id    BIGINT,
                 derived_from_id   BIGINT,
+                collection_id     BIGINT,
                 metadata          JSONB       NOT NULL DEFAULT '{}'::JSONB,
                 deleted_at        TIMESTAMPTZ
              )",
+        )
+        .execute(pool)
+        .await?;
+        // Idempotent ALTER for deployments that ran the v0.21.51
+        // ensure_table before `collection_id` existed. No-op on
+        // fresh installs (column is already in the CREATE above).
+        sqlx::query(
+            "ALTER TABLE rustango_media ADD COLUMN IF NOT EXISTS collection_id BIGINT",
         )
         .execute(pool)
         .await?;
@@ -173,6 +211,13 @@ impl Media {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS rustango_media_status_idx
                 ON rustango_media (status)
+                WHERE deleted_at IS NULL",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS rustango_media_collection_idx
+                ON rustango_media (collection_id)
                 WHERE deleted_at IS NULL",
         )
         .execute(pool)
@@ -205,6 +250,7 @@ impl Media {
             uploaded_at: row.try_get("uploaded_at")?,
             uploaded_by_id: row.try_get("uploaded_by_id")?,
             derived_from_id: row.try_get("derived_from_id")?,
+            collection_id: row.try_get("collection_id")?,
             metadata: row.try_get("metadata")?,
             deleted_at: row.try_get("deleted_at")?,
         })
@@ -248,6 +294,9 @@ pub struct SaveOpts {
     pub mime: String,
     pub original_filename: String,
     pub uploaded_by_id: Option<i64>,
+    /// Optional collection (folder) to drop the new row into. `None`
+    /// means "loose" / unfiled. See [`MediaCollection`].
+    pub collection_id: Option<i64>,
     /// Free-form JSONB metadata — EXIF, image dimensions, ICC,
     /// whatever the app wants to keep alongside the file.
     pub metadata: Value,
@@ -262,6 +311,7 @@ pub struct UploadIntent {
     pub original_filename: String,
     pub size_bytes: i64,
     pub uploaded_by_id: Option<i64>,
+    pub collection_id: Option<i64>,
     /// How long the presigned PUT URL stays valid. Default 5 min.
     pub ttl: Duration,
 }
@@ -280,6 +330,7 @@ impl UploadIntent {
             original_filename: original_filename.into(),
             size_bytes,
             uploaded_by_id: None,
+            collection_id: None,
             ttl: Duration::from_secs(300),
         }
     }
@@ -354,6 +405,7 @@ impl MediaManager {
             status: MediaStatus::Ready,
             uploaded_by_id: opts.uploaded_by_id,
             derived_from_id: None,
+            collection_id: opts.collection_id,
             metadata: opts.metadata,
         })
         .await
@@ -395,6 +447,7 @@ impl MediaManager {
                 status: MediaStatus::Pending,
                 uploaded_by_id: intent.uploaded_by_id,
                 derived_from_id: None,
+                collection_id: intent.collection_id,
                 metadata: Value::Object(serde_json::Map::new()),
             })
             .await?;
@@ -458,7 +511,7 @@ impl MediaManager {
         let row = sqlx::query(
             "SELECT id, disk, storage_key, mime, size_bytes, original_filename,
                     status, uploaded_at, uploaded_by_id, derived_from_id,
-                    metadata, deleted_at
+                    collection_id, metadata, deleted_at
                FROM rustango_media
               WHERE id = $1 AND deleted_at IS NULL",
         )
@@ -474,7 +527,7 @@ impl MediaManager {
         let row = sqlx::query(
             "SELECT id, disk, storage_key, mime, size_bytes, original_filename,
                     status, uploaded_at, uploaded_by_id, derived_from_id,
-                    metadata, deleted_at
+                    collection_id, metadata, deleted_at
                FROM rustango_media
               WHERE id = $1",
         )
@@ -558,7 +611,7 @@ impl MediaManager {
         let rows = sqlx::query(
             "SELECT id, disk, storage_key, mime, size_bytes, original_filename,
                     status, uploaded_at, uploaded_by_id, derived_from_id,
-                    metadata, deleted_at
+                    collection_id, metadata, deleted_at
                FROM rustango_media
               WHERE deleted_at IS NOT NULL
                 AND deleted_at < NOW() - ($1 || ' seconds')::INTERVAL",
@@ -592,17 +645,360 @@ impl MediaManager {
         Ok(res.rows_affected())
     }
 
+    // =================================================================
+    // Collections (folders)
+    // =================================================================
+
+    /// Create a new collection. `slug` must be unique. `parent` may be
+    /// `None` (root) or another collection's id (sub-folder).
+    ///
+    /// # Errors
+    /// `Db` for unique-constraint violations on `slug` or any other
+    /// underlying sqlx error.
+    pub async fn create_collection(
+        &self,
+        name: impl Into<String>,
+        slug: impl Into<String>,
+        parent: Option<i64>,
+        description: impl Into<String>,
+    ) -> Result<MediaCollection, MediaError> {
+        let row = sqlx::query(
+            "INSERT INTO rustango_media_collections (name, slug, parent_id, description)
+             VALUES ($1, $2, $3, $4)
+             RETURNING id, name, slug, parent_id, description, created_at, deleted_at",
+        )
+        .bind(name.into())
+        .bind(slug.into())
+        .bind(parent)
+        .bind(description.into())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(MediaCollection::from_row(&row)?)
+    }
+
+    /// Look up by id (excludes soft-deleted).
+    pub async fn get_collection(
+        &self,
+        id: i64,
+    ) -> Result<Option<MediaCollection>, MediaError> {
+        let row = sqlx::query(
+            "SELECT id, name, slug, parent_id, description, created_at, deleted_at
+               FROM rustango_media_collections
+              WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| MediaCollection::from_row(&r)).transpose()?)
+    }
+
+    /// Look up by slug (excludes soft-deleted).
+    pub async fn get_collection_by_slug(
+        &self,
+        slug: &str,
+    ) -> Result<Option<MediaCollection>, MediaError> {
+        let row = sqlx::query(
+            "SELECT id, name, slug, parent_id, description, created_at, deleted_at
+               FROM rustango_media_collections
+              WHERE slug = $1 AND deleted_at IS NULL",
+        )
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| MediaCollection::from_row(&r)).transpose()?)
+    }
+
+    /// List every non-deleted collection, ordered by `(parent_id, name)`
+    /// so siblings group together — handy for tree-renderers.
+    pub async fn list_collections(&self) -> Result<Vec<MediaCollection>, MediaError> {
+        let rows = sqlx::query(
+            "SELECT id, name, slug, parent_id, description, created_at, deleted_at
+               FROM rustango_media_collections
+              WHERE deleted_at IS NULL
+              ORDER BY parent_id NULLS FIRST, name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| MediaCollection::from_row(&r).map_err(MediaError::Db))
+            .collect()
+    }
+
+    /// Build the slug-joined path for a collection: `"products/2026/launch"`.
+    /// Walks up the parent chain. Cycles raise `Other`.
+    pub async fn collection_path(&self, id: i64) -> Result<String, MediaError> {
+        let mut parts = Vec::new();
+        let mut cur = Some(id);
+        let mut depth = 0;
+        while let Some(cid) = cur {
+            depth += 1;
+            if depth > 64 {
+                return Err(MediaError::Other(
+                    "collection_path: cycle / too-deep parent chain".into(),
+                ));
+            }
+            let c = self
+                .get_collection(cid)
+                .await?
+                .ok_or_else(|| MediaError::Other(format!("collection {cid} not found")))?;
+            cur = c.parent_id;
+            parts.push(c.slug);
+        }
+        parts.reverse();
+        Ok(parts.join("/"))
+    }
+
+    /// Soft-delete a collection. Media inside it is NOT deleted —
+    /// rows are orphaned (`collection_id` set to NULL) so they remain
+    /// queryable and the storage objects survive.
+    pub async fn delete_collection(&self, id: i64) -> Result<(), MediaError> {
+        sqlx::query(
+            "UPDATE rustango_media SET collection_id = NULL WHERE collection_id = $1",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "UPDATE rustango_media_collections
+                SET deleted_at = NOW()
+              WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Move a [`Media`] into a collection (or `None` to set "loose").
+    pub async fn move_to_collection(
+        &self,
+        media_id: i64,
+        collection_id: Option<i64>,
+    ) -> Result<(), MediaError> {
+        sqlx::query("UPDATE rustango_media SET collection_id = $1 WHERE id = $2")
+            .bind(collection_id)
+            .bind(media_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// List media in `collection_id`. When `recursive`, descends into
+    /// every nested collection.
+    pub async fn list_in_collection(
+        &self,
+        collection_id: i64,
+        recursive: bool,
+    ) -> Result<Vec<Media>, MediaError> {
+        let ids: Vec<i64> = if recursive {
+            self.collect_descendant_ids(collection_id).await?
+        } else {
+            vec![collection_id]
+        };
+        let rows = sqlx::query(
+            "SELECT id, disk, storage_key, mime, size_bytes, original_filename,
+                    status, uploaded_at, uploaded_by_id, derived_from_id,
+                    collection_id, metadata, deleted_at
+               FROM rustango_media
+              WHERE collection_id = ANY($1) AND deleted_at IS NULL
+              ORDER BY uploaded_at DESC",
+        )
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| Media::from_row(&r).map_err(MediaError::Db))
+            .collect()
+    }
+
+    async fn collect_descendant_ids(&self, root: i64) -> Result<Vec<i64>, MediaError> {
+        // Recursive CTE walks the parent_id chain.
+        let rows = sqlx::query(
+            "WITH RECURSIVE sub AS (
+                SELECT id FROM rustango_media_collections
+                 WHERE id = $1 AND deleted_at IS NULL
+                UNION
+                SELECT c.id
+                  FROM rustango_media_collections c
+                  JOIN sub ON c.parent_id = sub.id
+                 WHERE c.deleted_at IS NULL
+             )
+             SELECT id FROM sub",
+        )
+        .bind(root)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(|r| r.try_get::<i64, _>("id").map_err(MediaError::Db)).collect()
+    }
+
+    // =================================================================
+    // Tags
+    // =================================================================
+
+    /// Find or create a tag by `slug` (auto-derives `name` from
+    /// `slug` if creating).
+    pub async fn ensure_tag(&self, slug: &str) -> Result<MediaTag, MediaError> {
+        if let Some(t) = self.get_tag_by_slug(slug).await? {
+            return Ok(t);
+        }
+        let row = sqlx::query(
+            "INSERT INTO rustango_media_tags (name, slug)
+             VALUES ($1, $2)
+             ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name
+             RETURNING id, name, slug, created_at",
+        )
+        .bind(slug)
+        .bind(slug)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(MediaTag::from_row(&row)?)
+    }
+
+    /// Look up a tag by slug.
+    pub async fn get_tag_by_slug(&self, slug: &str) -> Result<Option<MediaTag>, MediaError> {
+        let row = sqlx::query(
+            "SELECT id, name, slug, created_at FROM rustango_media_tags WHERE slug = $1",
+        )
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| MediaTag::from_row(&r)).transpose()?)
+    }
+
+    /// Apply tags to a media row. Auto-creates missing tags.
+    /// Idempotent — duplicates ignored.
+    pub async fn tag(&self, media_id: i64, slugs: &[&str]) -> Result<(), MediaError> {
+        for slug in slugs {
+            let t = self.ensure_tag(slug).await?;
+            let tag_id = match t.id {
+                Auto::Set(v) => v,
+                _ => continue,
+            };
+            sqlx::query(
+                "INSERT INTO rustango_media_tag_links (media_id, tag_id)
+                 VALUES ($1, $2)
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(media_id)
+            .bind(tag_id)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Remove a single tag from a media row.
+    pub async fn untag(&self, media_id: i64, slug: &str) -> Result<(), MediaError> {
+        sqlx::query(
+            "DELETE FROM rustango_media_tag_links
+              USING rustango_media_tags t
+              WHERE rustango_media_tag_links.tag_id = t.id
+                AND t.slug = $1
+                AND rustango_media_tag_links.media_id = $2",
+        )
+        .bind(slug)
+        .bind(media_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Replace the entire tag set for a media row. Tags not in
+    /// `slugs` are removed; tags in `slugs` are added (auto-created
+    /// if needed).
+    pub async fn set_tags(
+        &self,
+        media_id: i64,
+        slugs: &[&str],
+    ) -> Result<(), MediaError> {
+        sqlx::query("DELETE FROM rustango_media_tag_links WHERE media_id = $1")
+            .bind(media_id)
+            .execute(&self.pool)
+            .await?;
+        self.tag(media_id, slugs).await
+    }
+
+    /// List tags applied to a media row, alphabetically by slug.
+    pub async fn tags_for(&self, media_id: i64) -> Result<Vec<MediaTag>, MediaError> {
+        let rows = sqlx::query(
+            "SELECT t.id, t.name, t.slug, t.created_at
+               FROM rustango_media_tags t
+               JOIN rustango_media_tag_links l ON l.tag_id = t.id
+              WHERE l.media_id = $1
+              ORDER BY t.slug",
+        )
+        .bind(media_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| MediaTag::from_row(&r).map_err(MediaError::Db))
+            .collect()
+    }
+
+    /// List media that carry `slug`. Soft-deleted media excluded.
+    pub async fn list_with_tag(
+        &self,
+        slug: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Media>, MediaError> {
+        let rows = sqlx::query(
+            "SELECT m.id, m.disk, m.storage_key, m.mime, m.size_bytes, m.original_filename,
+                    m.status, m.uploaded_at, m.uploaded_by_id, m.derived_from_id,
+                    m.collection_id, m.metadata, m.deleted_at
+               FROM rustango_media m
+               JOIN rustango_media_tag_links l ON l.media_id = m.id
+               JOIN rustango_media_tags t ON t.id = l.tag_id
+              WHERE t.slug = $1 AND m.deleted_at IS NULL
+              ORDER BY m.uploaded_at DESC
+              LIMIT $2 OFFSET $3",
+        )
+        .bind(slug)
+        .bind(limit.max(1).min(1000))
+        .bind(offset.max(0))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| Media::from_row(&r).map_err(MediaError::Db))
+            .collect()
+    }
+
+    /// Top tags by usage count, descending. Limit clamped at 1000.
+    pub async fn popular_tags(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(MediaTag, i64)>, MediaError> {
+        let rows = sqlx::query(
+            "SELECT t.id, t.name, t.slug, t.created_at, COUNT(l.media_id) AS use_count
+               FROM rustango_media_tags t
+               LEFT JOIN rustango_media_tag_links l ON l.tag_id = t.id
+              GROUP BY t.id, t.name, t.slug, t.created_at
+              ORDER BY use_count DESC, t.slug
+              LIMIT $1",
+        )
+        .bind(limit.max(1).min(1000))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| {
+                let count: i64 = r.try_get("use_count").map_err(MediaError::Db)?;
+                let tag = MediaTag::from_row(&r).map_err(MediaError::Db)?;
+                Ok((tag, count))
+            })
+            .collect()
+    }
+
     // --------- internal: row insert
 
     async fn insert_row(&self, r: InsertRow) -> Result<Media, MediaError> {
         let row = sqlx::query(
             "INSERT INTO rustango_media
                 (disk, storage_key, mime, size_bytes, original_filename,
-                 status, uploaded_by_id, derived_from_id, metadata)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 status, uploaded_by_id, derived_from_id, collection_id, metadata)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              RETURNING id, disk, storage_key, mime, size_bytes, original_filename,
                        status, uploaded_at, uploaded_by_id, derived_from_id,
-                       metadata, deleted_at",
+                       collection_id, metadata, deleted_at",
         )
         .bind(&r.disk)
         .bind(&r.storage_key)
@@ -612,6 +1008,7 @@ impl MediaManager {
         .bind(r.status.as_str())
         .bind(r.uploaded_by_id)
         .bind(r.derived_from_id)
+        .bind(r.collection_id)
         .bind(&r.metadata)
         .fetch_one(&self.pool)
         .await?;
@@ -628,6 +1025,7 @@ struct InsertRow {
     status: MediaStatus,
     uploaded_by_id: Option<i64>,
     derived_from_id: Option<i64>,
+    collection_id: Option<i64>,
     metadata: Value,
 }
 
@@ -760,6 +1158,7 @@ mod tests {
             uploaded_at: Utc::now(),
             uploaded_by_id: None,
             derived_from_id: None,
+            collection_id: None,
             metadata: serde_json::json!({}),
             deleted_at: None,
         }
