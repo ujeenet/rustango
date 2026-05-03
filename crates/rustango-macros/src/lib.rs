@@ -1255,6 +1255,61 @@ fn inherent_impl_tokens(
         quote!(Self::bulk_insert_on(rows, pool).await)
     };
 
+    // `delete_pool(&Pool)` is emitted for non-audited models in
+    // v0.23.0-batch7. Audited models route delete through a connection
+    // (acquired from the pool) so the audit emit can sit inside a
+    // transaction with the DELETE — that requires a per-backend
+    // connection-acquire path that batch7 doesn't yet wire. They
+    // continue to use the &PgPool `delete` method.
+    //
+    // `save_pool` and `insert_pool` aren't emitted yet — Auto<T>
+    // models need `insert_returning_pool` with a MySQL `LAST_INSERT_ID()`
+    // fallback (batch9), and audit-on-connection support hasn't landed.
+    // Until then, model writes against `&Pool` go through the
+    // existing `&PgPool` path.
+    let pool_delete_method = if audited_fields.is_some() {
+        quote!()
+    } else {
+        let pk_column_lit = primary_key
+            .map(|(_, col)| col.as_str())
+            .unwrap_or("id");
+        let pk_ident_for_pool = primary_key.map(|(ident, _)| ident);
+        if let Some(pk_ident) = pk_ident_for_pool {
+            quote! {
+                /// Delete the row identified by this instance's primary key
+                /// against either backend. Equivalent to [`Self::delete`] but
+                /// takes [`::rustango::sql::Pool`] and dispatches per backend.
+                ///
+                /// Audited models continue to use the `&PgPool` [`Self::delete`]
+                /// — audit-on-connection support over `&Pool` lands in a
+                /// follow-up batch.
+                ///
+                /// # Errors
+                /// As [`Self::delete`].
+                pub async fn delete_pool(
+                    &self,
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                    let _query = ::rustango::core::DeleteQuery {
+                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                        where_clause: ::rustango::core::WhereExpr::Predicate(
+                            ::rustango::core::Filter {
+                                column: #pk_column_lit,
+                                op: ::rustango::core::Op::Eq,
+                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                    ::core::clone::Clone::clone(&self.#pk_ident)
+                                ),
+                            }
+                        ),
+                    };
+                    ::rustango::sql::delete_pool(pool, &_query).await
+                }
+            }
+        } else {
+            quote!()
+        }
+    };
+
     // Build the (column, JSON value) pair list used by every
     // snapshot-style audit emission. Reused across delete_on,
     // soft_delete_on, restore_on, and (later) bulk paths. Empty
@@ -1777,6 +1832,7 @@ fn inherent_impl_tokens(
             {
                 ::rustango::audit::with_source(source, self.delete_on(_executor)).await
             }
+            #pool_delete_method
             #soft_delete_methods
         }
     });

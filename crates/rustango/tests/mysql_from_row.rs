@@ -69,3 +69,15 @@ fn maybe_my_from_row_resolves_for_derived_model() {
     check::<User>();
     check::<Post>();
 }
+
+#[test]
+fn delete_pool_method_emitted_for_non_audited_model() {
+    // Compile-time check: the macro emits `delete_pool(&self, &Pool) -> impl Future`
+    // for every non-audited model with a primary key. We don't await
+    // (would need a live DB); just calling the method confirms it
+    // resolves with the right signature.
+    fn _probe(u: &User, p: &Post, pool: &rustango::sql::Pool) {
+        let _fut = u.delete_pool(pool);
+        let _fut = p.delete_pool(pool);
+    }
+}
