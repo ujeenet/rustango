@@ -834,3 +834,115 @@ fn bind_value_my(
         SqlValue::List(_) => unreachable!("List expanded to scalars by SQL writer"),
     }
 }
+
+/// Per-row audited save against either backend.
+///
+/// Slice 17.1 — moved out of the macro into rustango so the
+/// `#[cfg(feature = "postgres")]` / `#[cfg(feature = "mysql")]`
+/// arms no longer leak into consumer-crate macro expansions.
+///
+/// Steps inside one transaction:
+/// 1. Run the per-backend BEFORE-snapshot SELECT and decode tracked
+///    columns into `(col, json)` pairs via `decode_before_pg` /
+///    `decode_before_my`.
+/// 2. Execute the compiled UPDATE.
+/// 3. Build AFTER pairs via `after_pairs` and diff against BEFORE.
+/// 4. Emit an `Update` audit entry on the same transaction.
+/// 5. Commit.
+///
+/// Closure types reference [`crate::sql::PgReturningRow`] /
+/// [`crate::sql::MyReturningRow`] aliases, which resolve to
+/// uninhabited types when the matching feature is off — keeps
+/// macro-emitted closure bodies typecheckable in any feature config.
+///
+/// # Errors
+/// Any [`crate::sql::ExecError`] from the UPDATE/SELECT, plus
+/// `sqlx::Error` from the audit emit (mapped through `From`).
+#[allow(clippy::too_many_arguments)]
+pub async fn save_one_with_diff_pool<F1, F2>(
+    pool: &crate::sql::Pool,
+    update_query: &crate::core::UpdateQuery,
+    pk_column: &'static str,
+    pk_value: crate::core::SqlValue,
+    entity_table: &'static str,
+    entity_pk: String,
+    after_pairs: Vec<(&'static str, serde_json::Value)>,
+    select_cols_pg: &str,
+    select_cols_my: &str,
+    decode_before_pg: F1,
+    decode_before_my: F2,
+) -> Result<(), crate::sql::ExecError>
+where
+    F1: FnOnce(&crate::sql::PgReturningRow) -> Vec<(&'static str, serde_json::Value)>,
+    F2: FnOnce(&crate::sql::MyReturningRow) -> Vec<(&'static str, serde_json::Value)>,
+{
+    let _ = (&decode_before_pg, &decode_before_my);
+    let _ = (select_cols_pg, select_cols_my);
+    let stmt = pool.dialect().compile_update(update_query)?;
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let mut tx = pg.begin().await?;
+            let select_sql = format!(
+                r#"SELECT {} FROM "{}" WHERE "{}" = $1"#,
+                select_cols_pg, entity_table, pk_column,
+            );
+            let pk_q = sqlx::query(&select_sql);
+            let pk_q = bind_value_pg(pk_q, pk_value);
+            let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
+                match pk_q.fetch_optional(&mut *tx).await {
+                    Ok(Some(row)) => Some(decode_before_pg(&row)),
+                    _ => None,
+                };
+            let mut q = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_value_pg(q, v);
+            }
+            q.execute(&mut *tx).await?;
+            if let Some(before) = before_pairs {
+                let entry = PendingEntry {
+                    entity_table,
+                    entity_pk,
+                    operation: AuditOp::Update,
+                    source: current_source(),
+                    changes: diff_changes(&before, &after_pairs),
+                };
+                emit_one(&mut *tx, &entry).await?;
+            }
+            tx.commit().await?;
+            Ok(())
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            let mut tx = my.begin().await?;
+            let select_sql = format!(
+                "SELECT {} FROM `{}` WHERE `{}` = ?",
+                select_cols_my, entity_table, pk_column,
+            );
+            let pk_q = sqlx::query(&select_sql);
+            let pk_q = bind_value_my(pk_q, pk_value);
+            let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
+                match pk_q.fetch_optional(&mut *tx).await {
+                    Ok(Some(row)) => Some(decode_before_my(&row)),
+                    _ => None,
+                };
+            let mut q = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_value_my(q, v);
+            }
+            q.execute(&mut *tx).await?;
+            if let Some(before) = before_pairs {
+                let entry = PendingEntry {
+                    entity_table,
+                    entity_pk,
+                    operation: AuditOp::Update,
+                    source: current_source(),
+                    changes: diff_changes(&before, &after_pairs),
+                };
+                emit_one_my(&mut *tx, &entry).await?;
+            }
+            tx.commit().await?;
+            Ok(())
+        }
+    }
+}

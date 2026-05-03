@@ -7,6 +7,7 @@
 //! `Dialect` arms in v0.2+.
 
 mod auto;
+mod backend;
 mod compiled;
 mod dialect;
 mod error;
@@ -20,6 +21,10 @@ mod postgres;
 mod writers;
 
 pub use auto::Auto;
+pub use backend::{
+    apply_auto_pk_pool, try_get_returning, try_get_returning_my, AssignAutoPkPool, MyReturningRow,
+    MysqlAutoIdSet, PgReturningRow,
+};
 pub use compiled::CompiledStatement;
 pub use dialect::Dialect;
 pub use error::{ExecError, SqlError};

@@ -817,6 +817,9 @@ struct CollectedFields {
     /// the bulk_insert codegen to rebuild assigns against `_row_mut`
     /// instead of `self`.
     auto_field_idents: Vec<(syn::Ident, String)>,
+    /// Inner `T` of the first `Auto<T>` field, for the MySQL
+    /// `LAST_INSERT_ID()` assignment in `AssignAutoPkPool`.
+    first_auto_value_ty: Option<Type>,
     /// Bulk-insert per-row pushes for **non-Auto fields only**. Used
     /// by the all-Auto-Unset bulk path (Auto cols dropped from
     /// `columns`).
@@ -889,6 +892,7 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
         returning_cols: Vec::new(),
         auto_assigns: Vec::new(),
         auto_field_idents: Vec::new(),
+        first_auto_value_ty: None,
         bulk_pushes_no_auto: Vec::with_capacity(cap),
         bulk_pushes_all: Vec::with_capacity(cap),
         bulk_columns_no_auto: Vec::with_capacity(cap),
@@ -939,12 +943,13 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
             out.has_auto = true;
             if out.first_auto_ident.is_none() {
                 out.first_auto_ident = Some(ident.clone());
+                out.first_auto_value_ty = auto_inner_type(info.value_ty).cloned();
             }
             out.returning_cols.push(quote!(#column));
             out.auto_field_idents
                 .push((ident.clone(), info.column.clone()));
             out.auto_assigns.push(quote! {
-                self.#ident = ::rustango::sql::sqlx::Row::try_get(&_returning_row, #column)?;
+                self.#ident = ::rustango::sql::try_get_returning(_returning_row, #column)?;
             });
             out.insert_pushes.push(quote! {
                 if let ::rustango::sql::Auto::Set(_v) = &self.#ident {
@@ -1374,29 +1379,6 @@ fn inherent_impl_tokens(
     } else if fields.has_auto {
         let pushes = &fields.insert_pushes;
         let returning_cols = &fields.returning_cols;
-        let auto_assigns = &fields.auto_assigns;
-        let first_auto_ident = fields.first_auto_ident.as_ref();
-        let auto_count = fields.auto_assigns.len();
-        let mysql_assign_arm = if let Some(first) = first_auto_ident {
-            quote! {
-                #[cfg(feature = "mysql")]
-                ::rustango::sql::InsertReturningPool::MySqlAutoId(_id) => {
-                    if #auto_count > 1 {
-                        return ::core::result::Result::Err(
-                            ::rustango::sql::ExecError::Sql(
-                                ::rustango::sql::SqlError::OperatorNotSupportedInDialect {
-                                    op: "multi-column RETURNING",
-                                    dialect: "mysql",
-                                },
-                            ),
-                        );
-                    }
-                    self.#first = ::rustango::sql::Auto::Set(_id);
-                }
-            }
-        } else {
-            quote!()
-        };
         quote! {
             /// Insert this row against either backend, populating any
             /// `Auto<T>` PK from the auto-assigned value.
@@ -1422,14 +1404,7 @@ fn inherent_impl_tokens(
                 let _result = ::rustango::sql::insert_returning_pool(
                     pool, &_query,
                 ).await?;
-                match _result {
-                    #[cfg(feature = "postgres")]
-                    ::rustango::sql::InsertReturningPool::PgRow(_returning_row) => {
-                        #( #auto_assigns )*
-                    }
-                    #mysql_assign_arm
-                }
-                ::core::result::Result::Ok(())
+                ::rustango::sql::apply_auto_pk_pool(_result, self)
             }
         }
     } else {
@@ -1683,40 +1658,6 @@ fn inherent_impl_tokens(
                     })
                     .unwrap_or_default()
             };
-            let auto_assigns = if fields.has_auto {
-                fields.auto_assigns.clone()
-            } else {
-                vec![]
-            };
-            let mysql_assign_arm = if let Some(first) = fields.first_auto_ident.as_ref() {
-                let auto_count = fields.auto_assigns.len();
-                quote! {
-                    #[cfg(feature = "mysql")]
-                    ::rustango::sql::InsertReturningPool::MySqlAutoId(_id) => {
-                        if #auto_count > 1 {
-                            return ::core::result::Result::Err(
-                                ::rustango::sql::ExecError::Sql(
-                                    ::rustango::sql::SqlError::OperatorNotSupportedInDialect {
-                                        op: "multi-column RETURNING",
-                                        dialect: "mysql",
-                                    },
-                                ),
-                            );
-                        }
-                        self.#first = ::rustango::sql::Auto::Set(_id);
-                    }
-                }
-            } else {
-                quote! {
-                    #[cfg(feature = "mysql")]
-                    ::rustango::sql::InsertReturningPool::MySqlAutoId(_id) => {
-                        // Non-Auto PK + MySQL: ignore LAST_INSERT_ID
-                        // (we didn't ask for one). The PK is whatever
-                        // the caller set on `self` before the call.
-                        let _ = _id;
-                    }
-                }
-            };
             let pairs = audit_pair_tokens.iter();
             let pk_str = audit_pk_to_string.clone();
             quote! {
@@ -1756,14 +1697,7 @@ fn inherent_impl_tokens(
                     let _result = ::rustango::audit::insert_one_with_audit_pool(
                         pool, &_query, &_audit_entry,
                     ).await?;
-                    match _result {
-                        #[cfg(feature = "postgres")]
-                        ::rustango::sql::InsertReturningPool::PgRow(_returning_row) => {
-                            #( #auto_assigns )*
-                        }
-                        #mysql_assign_arm
-                    }
-                    ::core::result::Result::Ok(())
+                    ::rustango::sql::apply_auto_pk_pool(_result, self)
                 }
             }
         } else {
@@ -1801,32 +1735,38 @@ fn inherent_impl_tokens(
             // iterator, and we need to splice the same after-pairs
             // sequence into both per-backend arms.
             let after_pairs_pg = audit_pair_tokens.iter().collect::<Vec<_>>();
-            let after_pairs_my = audit_pair_tokens.iter().collect::<Vec<_>>();
             let pk_str = audit_pk_to_string.clone();
             // Per-tracked-column BEFORE-pair token list. Each entry
-            // is `(col_lit, try_get<value_ty>(row, col_lit) → Json)`.
-            let before_pairs_pg: Vec<proc_macro2::TokenStream> = tracked
-                .iter()
-                .map(|c| {
-                    let column_lit = c.column.as_str();
-                    let value_ty = &c.value_ty;
-                    quote! {
-                        (
-                            #column_lit,
-                            match ::rustango::sql::sqlx::Row::try_get::<#value_ty, _>(
-                                &_audit_before_row, #column_lit,
-                            ) {
-                                ::core::result::Result::Ok(v) => {
-                                    ::serde_json::to_value(&v)
-                                        .unwrap_or(::serde_json::Value::Null)
-                                }
-                                ::core::result::Result::Err(_) => ::serde_json::Value::Null,
-                            },
-                        )
-                    }
-                })
-                .collect();
-            let before_pairs_my = before_pairs_pg.clone();
+            // is `(col_lit, try_get_returning<value_ty>(row, col_lit) → Json)`.
+            // The Row alias resolves to PgRow / MySqlRow per call site,
+            // so the same template generates both the PG and MySQL bodies.
+            let mk_before_pairs = |getter: proc_macro2::TokenStream| -> Vec<proc_macro2::TokenStream> {
+                tracked
+                    .iter()
+                    .map(|c| {
+                        let column_lit = c.column.as_str();
+                        let value_ty = &c.value_ty;
+                        quote! {
+                            (
+                                #column_lit,
+                                match #getter::<#value_ty>(
+                                    _audit_before_row, #column_lit,
+                                ) {
+                                    ::core::result::Result::Ok(v) => {
+                                        ::serde_json::to_value(&v)
+                                            .unwrap_or(::serde_json::Value::Null)
+                                    }
+                                    ::core::result::Result::Err(_) => ::serde_json::Value::Null,
+                                },
+                            )
+                        }
+                    })
+                    .collect()
+            };
+            let before_pairs_pg: Vec<proc_macro2::TokenStream> =
+                mk_before_pairs(quote!(::rustango::sql::try_get_returning));
+            let before_pairs_my: Vec<proc_macro2::TokenStream> =
+                mk_before_pairs(quote!(::rustango::sql::try_get_returning_my));
             let pg_select_cols: String = tracked
                 .iter()
                 .map(|c| format!("\"{}\"", c.column.replace('"', "\"\"")))
@@ -1884,108 +1824,23 @@ fn inherent_impl_tokens(
                             }
                         ),
                     };
-                    let _stmt = ::rustango::sql::Dialect::compile_update(
-                        pool.dialect(), &_query,
-                    )?;
-                    match pool {
-                        #[cfg(feature = "postgres")]
-                        ::rustango::sql::Pool::Postgres(_pg) => {
-                            let mut _tx = _pg.begin().await?;
-                            // 1. BEFORE snapshot — SELECT tracked cols.
-                            let _audit_select_sql = ::std::format!(
-                                r#"SELECT {} FROM "{}" WHERE "{}" = $1"#,
-                                #pg_select_cols,
-                                <Self as ::rustango::core::Model>::SCHEMA.table,
-                                #pk_column_lit,
-                            );
-                            let _audit_before_pairs:
-                                ::std::option::Option<::std::vec::Vec<(&'static str, ::serde_json::Value)>> =
-                                match ::rustango::sql::sqlx::query(&_audit_select_sql)
-                                    .bind(#pk_value_for_bind)
-                                    .fetch_optional(&mut *_tx)
-                                    .await
-                                {
-                                    ::core::result::Result::Ok(::core::option::Option::Some(_audit_before_row)) => {
-                                        ::core::option::Option::Some(::std::vec![
-                                            #( #before_pairs_pg ),*
-                                        ])
-                                    }
-                                    _ => ::core::option::Option::None,
-                                };
-                            // 2. UPDATE.
-                            let mut _q = ::rustango::sql::sqlx::query(&_stmt.sql);
-                            for _v in _stmt.params {
-                                _q = ::rustango::audit::__bind_value_pg(_q, _v);
-                            }
-                            _q.execute(&mut *_tx).await?;
-                            // 3+4. Diff & emit.
-                            if let ::core::option::Option::Some(_audit_before) = _audit_before_pairs {
-                                let _audit_after:
-                                    ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
-                                    ::std::vec![ #( #after_pairs_pg ),* ];
-                                let _audit_entry = ::rustango::audit::PendingEntry {
-                                    entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
-                                    entity_pk: #pk_str,
-                                    operation: ::rustango::audit::AuditOp::Update,
-                                    source: ::rustango::audit::current_source(),
-                                    changes: ::rustango::audit::diff_changes(
-                                        &_audit_before,
-                                        &_audit_after,
-                                    ),
-                                };
-                                ::rustango::audit::emit_one(&mut *_tx, &_audit_entry).await?;
-                            }
-                            _tx.commit().await?;
-                            ::core::result::Result::Ok(())
-                        }
-                        #[cfg(feature = "mysql")]
-                        ::rustango::sql::Pool::Mysql(_my) => {
-                            let mut _tx = _my.begin().await?;
-                            let _audit_select_sql = ::std::format!(
-                                "SELECT {} FROM `{}` WHERE `{}` = ?",
-                                #my_select_cols,
-                                <Self as ::rustango::core::Model>::SCHEMA.table,
-                                #pk_column_lit,
-                            );
-                            let _audit_before_pairs:
-                                ::std::option::Option<::std::vec::Vec<(&'static str, ::serde_json::Value)>> =
-                                match ::rustango::sql::sqlx::query(&_audit_select_sql)
-                                    .bind(#pk_value_for_bind)
-                                    .fetch_optional(&mut *_tx)
-                                    .await
-                                {
-                                    ::core::result::Result::Ok(::core::option::Option::Some(_audit_before_row)) => {
-                                        ::core::option::Option::Some(::std::vec![
-                                            #( #before_pairs_my ),*
-                                        ])
-                                    }
-                                    _ => ::core::option::Option::None,
-                                };
-                            let mut _q = ::rustango::sql::sqlx::query(&_stmt.sql);
-                            for _v in _stmt.params {
-                                _q = ::rustango::audit::__bind_value_my(_q, _v);
-                            }
-                            _q.execute(&mut *_tx).await?;
-                            if let ::core::option::Option::Some(_audit_before) = _audit_before_pairs {
-                                let _audit_after:
-                                    ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
-                                    ::std::vec![ #( #after_pairs_my ),* ];
-                                let _audit_entry = ::rustango::audit::PendingEntry {
-                                    entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
-                                    entity_pk: #pk_str,
-                                    operation: ::rustango::audit::AuditOp::Update,
-                                    source: ::rustango::audit::current_source(),
-                                    changes: ::rustango::audit::diff_changes(
-                                        &_audit_before,
-                                        &_audit_after,
-                                    ),
-                                };
-                                ::rustango::audit::emit_one_my(&mut *_tx, &_audit_entry).await?;
-                            }
-                            _tx.commit().await?;
-                            ::core::result::Result::Ok(())
-                        }
-                    }
+                    let _after_pairs: ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
+                        ::std::vec![ #( #after_pairs_pg ),* ];
+                    ::rustango::audit::save_one_with_diff_pool(
+                        pool,
+                        &_query,
+                        #pk_column_lit,
+                        ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                            #pk_value_for_bind,
+                        ),
+                        <Self as ::rustango::core::Model>::SCHEMA.table,
+                        #pk_str,
+                        _after_pairs,
+                        #pg_select_cols,
+                        #my_select_cols,
+                        |_audit_before_row| ::std::vec![ #( #before_pairs_pg ),* ],
+                        |_audit_before_row| ::std::vec![ #( #before_pairs_my ),* ],
+                    ).await
                 }
             }
         } else {
@@ -2378,10 +2233,11 @@ fn inherent_impl_tokens(
                     returning: ::std::vec![ #( #upsert_returning ),* ],
                     on_conflict: ::core::option::Option::Some(#conflict_clause),
                 };
-                let _returning_row = ::rustango::sql::insert_returning_on(
+                let _returning_row_v = ::rustango::sql::insert_returning_on(
                     #executor_passes_to_data_write,
                     &query,
                 ).await?;
+                let _returning_row = &_returning_row_v;
                 #( #upsert_auto_assigns )*
                 ::core::result::Result::Ok(())
             }
@@ -2596,10 +2452,11 @@ fn inherent_impl_tokens(
                     returning: ::std::vec![ #( #returning_cols ),* ],
                     on_conflict: ::core::option::Option::None,
                 };
-                let _returning_row = ::rustango::sql::insert_returning_on(
+                let _returning_row_v = ::rustango::sql::insert_returning_on(
                     #executor_passes_to_data_write,
                     &query,
                 ).await?;
+                let _returning_row = &_returning_row_v;
                 #( #auto_assigns )*
                 #audit_insert_emit
                 ::core::result::Result::Ok(())
@@ -2848,6 +2705,66 @@ fn inherent_impl_tokens(
 
     let fk_pk_access_impl = fk_pk_access_impl_tokens(struct_name, &fields.fk_relations);
 
+    // Slice 17.1 — `AssignAutoPkPool` impl lets `apply_auto_pk_pool`
+    // dispatch to the right per-backend body without the macro emitting
+    // any `#[cfg(feature = …)]` arm into consumer code. Always emitted
+    // so audited models with non-Auto PKs (which still go through
+    // `insert_one_with_audit_pool` → `apply_auto_pk_pool`) link.
+    let assign_auto_pk_pool_impl = {
+        let auto_assigns = &fields.auto_assigns;
+        let mysql_body = if let Some(first) = fields.first_auto_ident.as_ref() {
+            let auto_count = fields.auto_assigns.len();
+            // The MySQL `LAST_INSERT_ID()` is always i64. Route through
+            // `MysqlAutoIdSet` so Auto<i32> narrows safely and
+            // Auto<Uuid>/etc. fail to link against MySQL (intended —
+            // those models can't use AUTO_INCREMENT). The trait is only
+            // touched on the MySQL arm at runtime, so PG-only consumers
+            // never see the bound failure.
+            let value_ty = fields
+                .first_auto_value_ty
+                .as_ref()
+                .expect("first_auto_value_ty set whenever first_auto_ident is");
+            quote! {
+                if #auto_count > 1 {
+                    return ::core::result::Result::Err(
+                        ::rustango::sql::ExecError::Sql(
+                            ::rustango::sql::SqlError::OperatorNotSupportedInDialect {
+                                op: "multi-column RETURNING",
+                                dialect: "mysql",
+                            },
+                        ),
+                    );
+                }
+                let _converted = <#value_ty as ::rustango::sql::MysqlAutoIdSet>
+                    ::rustango_from_mysql_auto_id(_id)?;
+                self.#first = ::rustango::sql::Auto::Set(_converted);
+                ::core::result::Result::Ok(())
+            }
+        } else {
+            quote! {
+                let _ = _id;
+                ::core::result::Result::Ok(())
+            }
+        };
+        quote! {
+            impl ::rustango::sql::AssignAutoPkPool for #struct_name {
+                fn __rustango_assign_from_pg_row(
+                    &mut self,
+                    _returning_row: &::rustango::sql::PgReturningRow,
+                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    #( #auto_assigns )*
+                    ::core::result::Result::Ok(())
+                }
+                fn __rustango_assign_from_mysql_id(
+                    &mut self,
+                    _id: i64,
+                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    #mysql_body
+                }
+            }
+        }
+    };
+
     let from_aliased_row_inits = &fields.from_aliased_row_inits;
     let aliased_row_helper = quote! {
         /// Decode a row's aliased target columns (produced by
@@ -2910,6 +2827,8 @@ fn inherent_impl_tokens(
         #has_pk_value_impl
 
         #fk_pk_access_impl
+
+        #assign_auto_pk_pool_impl
     }
 }
 
@@ -4073,6 +3992,27 @@ struct DetectedType<'a> {
     nullable: bool,
     auto: bool,
     fk_inner: Option<&'a syn::Type>,
+}
+
+/// Extract the `T` from a `…::Auto<T>` field type. Returns `None` for
+/// non-`Auto` types — the caller should already have routed Auto-only
+/// codegen through this helper, so a `None` indicates a macro-internal
+/// invariant break.
+fn auto_inner_type(ty: &syn::Type) -> Option<&syn::Type> {
+    let Type::Path(TypePath { path, qself: None }) = ty else {
+        return None;
+    };
+    let last = path.segments.last()?;
+    if last.ident != "Auto" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|a| match a {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    })
 }
 
 fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
