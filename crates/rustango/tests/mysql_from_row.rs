@@ -296,6 +296,48 @@ fn audited_auto_pk_model_gets_insert_pool() {
 }
 
 #[test]
+fn counter_pool_count_pool_is_callable() {
+    // batch 24 — QuerySet::count_pool fills the QuerySet counter gap.
+    use rustango::sql::CounterPool;
+    fn _probe(pool: &rustango::sql::Pool) {
+        let _fut = User::objects().count_pool(pool);
+    }
+}
+
+#[test]
+fn fetch_aggregate_pool_is_callable() {
+    // batch 24 — bi-dialect aggregate fetch via &Pool.
+    use rustango::core::{AggregateQuery, Model, WhereExpr};
+    fn _probe(pool: &rustango::sql::Pool) {
+        let q = AggregateQuery {
+            model: <User as Model>::SCHEMA,
+            where_clause: WhereExpr::And(vec![]),
+            group_by: vec![],
+            aggregates: vec![],
+            having: None,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+        };
+        let _fut: _ = rustango::sql::fetch_aggregate_pool::<(i64,)>(pool, &q);
+    }
+}
+
+#[test]
+fn raw_query_pool_is_callable() {
+    // batch 24 — raw SQL escape hatch via &Pool. Caller picks $1 / ?
+    // placeholder shape per backend.
+    fn _probe(pool: &rustango::sql::Pool) {
+        let binds: Vec<rustango::core::SqlValue> = vec![];
+        let _fut: _ = rustango::sql::raw_query_pool::<User>(
+            "SELECT id, name, email, is_active FROM mysql_from_row_users",
+            binds,
+            pool,
+        );
+    }
+}
+
+#[test]
 fn transaction_pool_returns_pool_tx() {
     // batch 23 — transaction_pool opens a tx, returns a PoolTx the
     // caller commits or rolls back. Compile-time probe.

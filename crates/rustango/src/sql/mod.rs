@@ -27,12 +27,13 @@ pub use executor::{
     annotate_count_children, annotate_count_children_on, bulk_insert, bulk_insert_on,
     bulk_insert_pool, bulk_update, bulk_update_on, bulk_update_pool, count_rows, count_rows_on,
     count_rows_pool, delete, delete_on, delete_pool, fetch_aggregate, fetch_aggregate_on,
-    fetch_paginated_pool, fetch_with_prefetch, fetch_with_prefetch_pool, insert, insert_on,
-    insert_pool,
+    fetch_aggregate_pool, fetch_paginated_pool, fetch_with_prefetch, fetch_with_prefetch_pool,
+    insert, insert_on, insert_pool, raw_query_pool,
     insert_returning, insert_returning_on, insert_returning_pool, raw_execute, raw_execute_on,
     raw_execute_pool, raw_query, raw_query_on, select_one_row, select_one_row_pool, select_rows,
     select_rows_pool, select_rows_pool_with_related, transaction, transaction_pool, update,
-    update_on, update_pool, Counter, Deleter, Fetcher, FetcherPool, FkPkAccess, HasPkValue,
+    update_on, update_pool, Counter, CounterPool, Deleter, Fetcher, FetcherPool, FkPkAccess,
+    HasPkValue,
     InsertReturningPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated, Page, PoolTx, Updater,
 };
 

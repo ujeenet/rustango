@@ -1608,6 +1608,126 @@ fn bind_query_as_my<T>(
     bind_match!(q, value)
 }
 
+/// `fetch_aggregate` against either backend — runs an
+/// `AggregateQuery` (GROUP BY / HAVING / aggregate exprs) and
+/// decodes each row into `T` via `FromRow`. Bi-dialect counterpart
+/// of [`fetch_aggregate`].
+///
+/// Bound on `T` adds [`MaybeMyFromRow`] over the `&PgPool` version's
+/// bound — universally satisfied by `#[derive(Model)]` types and by
+/// any tuple/struct deriving sqlx's `FromRow`.
+///
+/// # Errors
+/// As [`fetch_aggregate`].
+pub async fn fetch_aggregate_pool<T>(
+    pool: &Pool,
+    query: &AggregateQuery,
+) -> Result<Vec<T>, ExecError>
+where
+    T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + Send + Unpin,
+{
+    let stmt = pool.dialect().compile_aggregate(query)?;
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => {
+            let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
+                sqlx::query_as::<_, T>(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_as(q, v);
+            }
+            Ok(q.fetch_all(pg).await?)
+        }
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            let mut q: sqlx::query::QueryAs<
+                '_,
+                sqlx::MySql,
+                T,
+                sqlx::mysql::MySqlArguments,
+            > = sqlx::query_as::<_, T>(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_as_my(q, v);
+            }
+            Ok(q.fetch_all(my).await?)
+        }
+    }
+}
+
+/// Execute arbitrary SQL with bound `SqlValue` params and decode each
+/// row into `T` via `FromRow`. Bi-dialect counterpart of
+/// [`raw_query`].
+///
+/// SQL must use the **dialect's** placeholder shape (`$1` for
+/// Postgres, `?` for MySQL) — read it from `pool.dialect().placeholder(n)`
+/// when constructing dynamic queries. Apps writing literal SQL pick
+/// the right shape themselves.
+///
+/// # Errors
+/// As [`raw_query`].
+pub async fn raw_query_pool<T>(
+    sql: &str,
+    binds: Vec<SqlValue>,
+    pool: &Pool,
+) -> Result<Vec<T>, ExecError>
+where
+    T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + Send + Unpin,
+{
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => {
+            let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
+                sqlx::query_as::<_, T>(sql);
+            for v in binds {
+                q = bind_query_as(q, v);
+            }
+            Ok(q.fetch_all(pg).await?)
+        }
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            let mut q: sqlx::query::QueryAs<
+                '_,
+                sqlx::MySql,
+                T,
+                sqlx::mysql::MySqlArguments,
+            > = sqlx::query_as::<_, T>(sql);
+            for v in binds {
+                q = bind_query_as_my(q, v);
+            }
+            Ok(q.fetch_all(my).await?)
+        }
+    }
+}
+
+/// `Counter::count` against either backend — fills the QuerySet
+/// counter gap from batches 5/15. Counts rows matching the queryset's
+/// filters via `count_rows_pool`.
+///
+/// Pulled in via `use rustango::sql::CounterPool;`.
+pub trait CounterPool<T: Model + Send> {
+    /// Count rows matching the queryset's filters against either backend.
+    ///
+    /// # Errors
+    /// As [`Counter::count`].
+    fn count_pool(
+        self,
+        pool: &Pool,
+    ) -> impl std::future::Future<Output = Result<i64, ExecError>> + Send;
+}
+
+impl<T: Model + Send> CounterPool<T> for QuerySet<T> {
+    async fn count_pool(self, pool: &Pool) -> Result<i64, ExecError> {
+        let select = self.compile()?;
+        count_rows_pool(
+            pool,
+            &CountQuery {
+                model: select.model,
+                where_clause: select.where_clause,
+            },
+        )
+        .await
+    }
+}
+
 /// `fetch_paginated` against either backend — fetches a page of rows
 /// AND the pre-LIMIT total count in a single SQL round trip via
 /// `COUNT(*) OVER ()`. Bi-dialect counterpart of
