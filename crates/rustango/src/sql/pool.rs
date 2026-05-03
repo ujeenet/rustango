@@ -40,12 +40,19 @@
 //!
 //! ## `MySQL` status
 //!
-//! The `mysql` Cargo feature is wired in v0.23.0-batch1 but the
-//! `MySqlDialect` impl lands in batch2. Connecting with a
-//! `mysql://` URL in batch1 returns
-//! [`PoolError::MysqlNotYetImplemented`] — a soft, clear error so
-//! apps building against `mysql` ahead of batch2 get an actionable
-//! message instead of a panic.
+//! - **batch1** (shipped) — `mysql` Cargo feature wired; connecting
+//!   via `mysql://` returns a soft-error.
+//! - **batch2** (this batch) — `Pool::Mysql(MySqlPool)` variant lands;
+//!   `Pool::connect("mysql://…")` opens a real `MySqlPool` and
+//!   `pool.dialect()` returns the [`crate::sql::MySql`] dialect with
+//!   correct identifier quoting (backticks), placeholder shape (`?`),
+//!   `BIGINT AUTO_INCREMENT` for `Auto<T>` PKs, and `GET_LOCK`-based
+//!   advisory locking. The query-compilation methods on `MySql`
+//!   error with [`crate::sql::SqlError::DialectQueryCompilationNotImplemented`]
+//!   — ORM queries against `MySQL` light up in batch3.
+//! - **batch3** — port the IR-to-SQL writers off Postgres-only
+//!   assumptions so `Model::objects().filter(...).fetch(...)` works
+//!   against either backend.
 
 use std::time::Duration;
 
@@ -63,16 +70,6 @@ pub enum PoolError {
     /// `postgresql://`, or `mysql://`).
     #[error("unsupported scheme in URL `{0}` — expected postgres:// or mysql://")]
     UnsupportedScheme(String),
-
-    /// `mysql` feature is enabled but the `MySqlDialect` lands in
-    /// rustango v0.23.0-batch2; this version returns a clear error
-    /// rather than panicking. (Batch 1 ships the connection plumbing
-    /// only.)
-    #[error(
-        "MySQL connections require rustango ≥ v0.23.0-batch2 (the MySqlDialect impl); \
-         this build is on v0.23.0-batch1. Switch to a postgres:// URL or wait for batch 2."
-    )]
-    MysqlNotYetImplemented,
 
     /// Tried to construct a Pool with a backend whose Cargo feature
     /// isn't enabled (e.g. `mysql://` URL with `default-features = false`
@@ -97,9 +94,8 @@ pub enum PoolError {
 pub enum Pool {
     #[cfg(feature = "postgres")]
     Postgres(sqlx::PgPool),
-    // MySql variant added in v0.23.0-batch2 alongside MySqlDialect.
-    // Leaving it out of the enum until the dialect impl lands keeps
-    // every checkpoint a working state.
+    #[cfg(feature = "mysql")]
+    Mysql(sqlx::MySqlPool),
 }
 
 impl Pool {
@@ -160,7 +156,20 @@ impl Pool {
                 scheme: "postgres",
                 feature: "postgres",
             }),
-            "mysql" => Self::connect_mysql_inner(url).await,
+            #[cfg(feature = "mysql")]
+            "mysql" => {
+                let pool = sqlx::mysql::MySqlPoolOptions::new()
+                    .acquire_timeout(timeout)
+                    .connect(url)
+                    .await
+                    .map_err(|e| PoolError::Connect(e.to_string()))?;
+                Ok(Self::Mysql(pool))
+            }
+            #[cfg(not(feature = "mysql"))]
+            "mysql" => Err(PoolError::FeatureNotEnabled {
+                scheme: "mysql",
+                feature: "mysql",
+            }),
             _ => Err(PoolError::UnsupportedScheme(url.to_owned())),
         }
     }
@@ -188,6 +197,8 @@ impl Pool {
         match self {
             #[cfg(feature = "postgres")]
             Pool::Postgres(_) => super::postgres::DIALECT,
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(_) => super::mysql::DIALECT,
         }
     }
 
@@ -211,6 +222,22 @@ impl Pool {
     pub fn as_postgres(&self) -> Option<&sqlx::PgPool> {
         match self {
             Pool::Postgres(p) => Some(p),
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(_) => None,
+        }
+    }
+
+    /// Borrow as a `MySqlPool`. Symmetric with [`Self::as_postgres`] —
+    /// returns `None` when the pool wraps a non-MySQL backend. Lets
+    /// MySQL-specific code paths reach the underlying `sqlx` handle
+    /// without having to re-dispatch through `Pool`'s enum each time.
+    #[must_use]
+    #[cfg(feature = "mysql")]
+    pub fn as_mysql(&self) -> Option<&sqlx::MySqlPool> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Pool::Postgres(_) => None,
+            Pool::Mysql(p) => Some(p),
         }
     }
 
@@ -232,17 +259,16 @@ impl Pool {
         })
     }
 
-    // Both branches must stay `async` so the call-site
-    // `Self::connect_mysql_inner(url).await` resolves identically
-    // regardless of feature — the unused-await on the non-mysql arm
-    // is intentional, hence the local allow.
     #[cfg(feature = "mysql")]
-    #[allow(clippy::unused_async)]
-    async fn connect_mysql_inner(_url: &str) -> Result<Self, PoolError> {
-        // batch 2 implements this. Until then, soft-error.
-        Err(PoolError::MysqlNotYetImplemented)
+    async fn connect_mysql_inner(url: &str) -> Result<Self, PoolError> {
+        let pool = sqlx::MySqlPool::connect(url)
+            .await
+            .map_err(|e| PoolError::Connect(e.to_string()))?;
+        Ok(Self::Mysql(pool))
     }
 
+    // Stays async so the call-site `.await` shape matches across
+    // feature configurations.
     #[cfg(not(feature = "mysql"))]
     #[allow(clippy::unused_async)]
     async fn connect_mysql_inner(_url: &str) -> Result<Self, PoolError> {
@@ -258,6 +284,8 @@ impl std::fmt::Debug for Pool {
         match self {
             #[cfg(feature = "postgres")]
             Pool::Postgres(_) => f.write_str("Pool::Postgres(<sqlx::PgPool>)"),
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(_) => f.write_str("Pool::Mysql(<sqlx::MySqlPool>)"),
         }
     }
 }
@@ -266,6 +294,13 @@ impl std::fmt::Debug for Pool {
 impl From<sqlx::PgPool> for Pool {
     fn from(p: sqlx::PgPool) -> Self {
         Pool::Postgres(p)
+    }
+}
+
+#[cfg(feature = "mysql")]
+impl From<sqlx::MySqlPool> for Pool {
+    fn from(p: sqlx::MySqlPool) -> Self {
+        Pool::Mysql(p)
     }
 }
 
@@ -286,16 +321,6 @@ mod tests {
     async fn empty_url_errors_clearly() {
         let err = Pool::connect("").await.unwrap_err();
         assert!(matches!(err, PoolError::UnsupportedScheme(_)));
-    }
-
-    #[cfg(feature = "mysql")]
-    #[tokio::test]
-    async fn mysql_url_returns_not_yet_implemented_in_batch1() {
-        let err = Pool::connect("mysql://user:pass@host:3306/db").await.unwrap_err();
-        assert!(
-            matches!(err, PoolError::MysqlNotYetImplemented),
-            "expected MysqlNotYetImplemented, got {err:?}"
-        );
     }
 
     #[cfg(all(feature = "postgres", not(feature = "mysql")))]
@@ -323,5 +348,43 @@ mod tests {
         let pool: Pool = pg.into();
         assert_eq!(pool.backend_name(), "postgres");
         assert!(pool.as_postgres().is_some());
+        #[cfg(feature = "mysql")]
+        assert!(pool.as_mysql().is_none());
+    }
+
+    #[cfg(feature = "mysql")]
+    #[tokio::test]
+    async fn from_mysql_pool_wraps() {
+        // Symmetric with `from_pg_pool_wraps`. `connect_lazy` defers
+        // the actual TCP dial, but the pool's spawn surface still
+        // needs a Tokio runtime.
+        let my = sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("mysql://user:pass@localhost:1/none")
+            .unwrap();
+        let pool: Pool = my.into();
+        assert_eq!(pool.backend_name(), "mysql");
+        assert!(pool.as_mysql().is_some());
+        #[cfg(feature = "postgres")]
+        assert!(pool.as_postgres().is_none());
+    }
+
+    #[cfg(feature = "mysql")]
+    #[tokio::test]
+    async fn mysql_pool_dialect_is_mysql() {
+        // Confirms Pool::dialect() dispatches to the MySql singleton —
+        // identifier quoting on the borrowed dialect must be backticks
+        // even though the pool itself can't be reached without a
+        // running MySQL.
+        let my = sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("mysql://user:pass@localhost:1/none")
+            .unwrap();
+        let pool: Pool = my.into();
+        let d = pool.dialect();
+        assert_eq!(d.name(), "mysql");
+        assert_eq!(d.quote_ident("col"), "`col`");
+        assert_eq!(d.placeholder(1), "?");
+        assert!(!d.supports_returning());
     }
 }

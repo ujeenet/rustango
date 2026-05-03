@@ -13,6 +13,8 @@ mod error;
 mod executor;
 mod foreign_key;
 pub mod m2m;
+#[cfg(feature = "mysql")]
+mod mysql;
 mod pool;
 mod postgres;
 
@@ -30,6 +32,8 @@ pub use executor::{
 };
 pub use foreign_key::ForeignKey;
 pub use m2m::M2MManager;
+#[cfg(feature = "mysql")]
+pub use mysql::MySql;
 pub use pool::{Pool, PoolError};
 pub use postgres::Postgres;
 

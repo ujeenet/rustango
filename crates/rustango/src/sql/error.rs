@@ -74,6 +74,22 @@ pub enum SqlError {
     /// "no filters" and is the default.)
     #[error("`WhereExpr::Or` with an empty branch list matches no rows; was that intentional?")]
     EmptyOrBranch,
+
+    /// `Dialect::compile_*` was called on a dialect whose query
+    /// compiler hasn't shipped yet. v0.23.0-batch2 wires the `MySQL`
+    /// connection plumbing + identity primitives but lands the SELECT/
+    /// INSERT/UPDATE/DELETE/etc. compilation logic in batch3 — until
+    /// then, ORM queries against a `MySqlPool` surface this error
+    /// rather than producing Postgres-shaped SQL the `MySQL` parser
+    /// would reject.
+    #[error(
+        "{dialect} dialect query compilation is not implemented yet — \
+         lands in rustango v0.23.0-batch3. Use a postgres pool or wait \
+         for batch 3 to issue ORM queries against MySQL."
+    )]
+    DialectQueryCompilationNotImplemented {
+        dialect: &'static str,
+    },
 }
 
 /// Raised while compiling, writing, or executing a query end-to-end.
