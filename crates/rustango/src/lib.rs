@@ -108,6 +108,12 @@ pub mod mailable;
 /// [`jsonapi::to_collection`].
 pub mod jsonapi;
 
+/// HMAC-signed request authentication for service-to-service traffic.
+/// AWS-style canonical request signed with SHA-256, replay-bounded
+/// by an X-Date tolerance window. See [`hmac_auth::HmacAuthLayer`].
+#[cfg(feature = "hmac-auth")]
+pub mod hmac_auth;
+
 /// Multi-channel notifications — fan one notification out to mail / database /
 /// log / broadcast channels. See [`notifications::notify`].
 #[cfg(feature = "notifications")]

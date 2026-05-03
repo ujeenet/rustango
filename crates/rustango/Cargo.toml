@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions"]
+default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth"]
 postgres = ["sqlx/postgres"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
@@ -114,6 +114,12 @@ csp-nonce = ["admin", "dep:rand"]
 # backed by any `Cache` implementation. Implies `cache` + rand for
 # the ID + base64 for encoding it.
 sessions = ["cache", "dep:rand", "dep:base64"]
+
+# HMAC-signed request authentication (`rustango::hmac_auth`) for
+# service-to-service traffic. AWS-style canonical request signed with
+# SHA-256, replay-bounded by an X-Date tolerance window. Implies
+# `admin` (axum) + the existing webhook crypto deps.
+hmac-auth = ["admin", "dep:hmac", "dep:sha2", "dep:subtle", "dep:base64"]
 
 # OpenAPI 3.1 spec builder + Swagger UI router (`rustango::openapi`).
 # Pure-Rust types you assemble into a spec, serialized to JSON via serde.
