@@ -390,7 +390,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         .unwrap_or_else(|| to_snake_case(&struct_name.to_string()));
     let model_name = struct_name.to_string();
 
-    let collected = collect_fields(named)?;
+    let collected = collect_fields(named, &table)?;
 
     // Validate that #[rustango(display = "…")] names a real field.
     if let Some((ref display, span)) = container.display {
@@ -880,7 +880,7 @@ struct FkRelation {
     fk_column: String,
 }
 
-fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
+fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<CollectedFields> {
     let cap = named.named.len();
     let mut out = CollectedFields {
         field_schemas: Vec::with_capacity(cap),
@@ -911,7 +911,7 @@ fn collect_fields(named: &syn::FieldsNamed) -> syn::Result<CollectedFields> {
     };
 
     for field in &named.named {
-        let info = process_field(field)?;
+        let info = process_field(field, table)?;
         out.field_names.push(info.ident.to_string());
         out.field_schemas.push(info.schema);
         out.from_row_inits.push(info.from_row_init);
@@ -3702,7 +3702,7 @@ struct FieldInfo<'a> {
     soft_delete: bool,
 }
 
-fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
+fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInfo<'a>> {
     let attrs = parse_field_attrs(field)?;
     let ident = field
         .ident
@@ -3788,7 +3788,7 @@ fn process_field(field: &syn::Field) -> syn::Result<FieldInfo<'_>> {
              a row's PK is its own identity, not a reference to a parent.",
         ));
     }
-    let relation = relation_tokens(field, &attrs, fk_inner)?;
+    let relation = relation_tokens(field, &attrs, fk_inner, table)?;
     let column_lit = column.as_str();
     let field_type_tokens = kind.variant_tokens();
     let max_length = optional_u32(attrs.max_length);
@@ -3897,6 +3897,7 @@ fn relation_tokens(
     field: &syn::Field,
     attrs: &FieldAttrs,
     fk_inner: Option<&syn::Type>,
+    table: &str,
 ) -> syn::Result<TokenStream2> {
     if let Some(inner) = fk_inner {
         if attrs.fk.is_some() || attrs.o2o.is_some() {
@@ -3921,14 +3922,21 @@ fn relation_tokens(
         )),
         (Some(to), None) => {
             let on = attrs.on.as_deref().unwrap_or("id");
+            // Self-FK sentinel — `#[rustango(fk = "self")]` resolves to
+            // the model's own table. Threaded as a literal string at
+            // macro-expansion time to sidestep the const-eval cycle
+            // that `Self::SCHEMA.table` would create when referenced
+            // inside Self::SCHEMA's own initializer.
+            let resolved = if to == "self" { table } else { to };
             Ok(quote! {
-                ::core::option::Option::Some(::rustango::core::Relation::Fk { to: #to, on: #on })
+                ::core::option::Option::Some(::rustango::core::Relation::Fk { to: #resolved, on: #on })
             })
         }
         (None, Some(to)) => {
             let on = attrs.on.as_deref().unwrap_or("id");
+            let resolved = if to == "self" { table } else { to };
             Ok(quote! {
-                ::core::option::Option::Some(::rustango::core::Relation::O2O { to: #to, on: #on })
+                ::core::option::Option::Some(::rustango::core::Relation::O2O { to: #resolved, on: #on })
             })
         }
         (None, None) => {
