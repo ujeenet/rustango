@@ -270,6 +270,13 @@ pub mod sessions;
 /// See [`metrics::MetricsRegistry`] + [`metrics::metrics_router`].
 pub mod metrics;
 
+/// Per-request `tracing` span with W3C / OpenTelemetry-conventional
+/// field names + `traceparent` header propagation. Hook
+/// `tracing_opentelemetry::layer()` in your subscriber for free
+/// distributed tracing. See [`tracing_layer::TracingLayer`].
+#[cfg(feature = "admin")]
+pub mod tracing_layer;
+
 /// `Server-Timing` header middleware — surface per-request stage
 /// durations to the browser DevTools "Network" panel. See
 /// [`server_timing::ServerTimingLayer`] + [`server_timing::Timings`].
