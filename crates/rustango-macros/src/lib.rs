@@ -3201,9 +3201,13 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("index") {
-                // Container-level composite index:
-                // #[rustango(index("col1, col2"))]
-                // #[rustango(index("col1, col2", unique, name = "my_idx"))]
+                // Container-level composite index. Syntax (key=value form
+                // because `meta.value()?.parse()?` is what the parser
+                // calls; the parenthesized comma-list form below pivots
+                // on `unique` / `name` AFTER the columns string):
+                //   #[rustango(index = "col1, col2")]
+                //   #[rustango(index = "col1, col2", unique)]
+                //   #[rustango(index = "col1, col2", name = "my_idx")]
                 let cols_lit: LitStr = meta.value()?.parse()?;
                 let columns = split_field_list(&cols_lit.value());
                 let mut unique = false;
