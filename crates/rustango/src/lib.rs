@@ -1,17 +1,77 @@
-//! rustango — a Django-inspired ORM + admin + multi-tenancy for Rust.
+//! rustango — a Django-shaped, batteries-included web framework for Rust.
 //!
-//! ```ignore
+//! ORM with auto-migrations, auto-admin, multi-tenancy, sessions +
+//! JWT + OAuth2/OIDC + HMAC auth, DRF-style serializers + viewsets,
+//! signals, caching, media (S3/R2/B2/MinIO), email pipeline,
+//! background jobs, scheduled tasks, OpenAPI 3.1 auto-derive, every
+//! standard middleware. Postgres + MySQL through the same `&Pool`
+//! API, opt-in via Cargo features.
+//!
+//! ```toml
 //! [dependencies]
-//! rustango = { version = "0.7", features = ["tenancy"] }
+//! rustango = "0.23"
 //! ```
 //!
-//! Out of the box (`default = ["postgres", "admin"]`) you get the
-//! ORM, the migration runner, and the auto-admin. Add `"tenancy"`
-//! for the multi-tenant resolver / pools / per-tenant auth pieces.
-//! Drop `default-features` for the bare ORM (no axum, no Tera).
+//! Defaults (`["postgres", "admin"]`) get you the ORM, migration
+//! runner, and auto-admin. Add `"tenancy"` for the multi-tenant
+//! resolver / pools / per-tenant auth pieces, `"mysql"` for MySQL
+//! 8.0+ alongside Postgres, or drop `default-features` for the bare
+//! ORM (no axum, no Tera).
+//!
+//! # Quick start
+//!
+//! ```bash
+//! cargo install cargo-rustango
+//! cargo rustango new myblog                 # default: ORM + admin
+//! cargo rustango new myapi --template api   # JSON-only, no admin
+//! cargo rustango new shop --template tenant # multi-tenancy + operator console
+//! ```
+//!
+//! Then:
+//!
+//! ```bash
+//! cd myblog
+//! cp .env.example .env                      # set DATABASE_URL
+//! cargo run -- migrate                      # apply bootstrap migrations
+//! cargo run                                 # http://localhost:8080
+//! ```
+//!
+//! # Unified manage runner (since v0.16)
+//!
+//! Since v0.16 there is **one binary** that serves HTTP and dispatches
+//! manage commands. `cargo run` starts the server; `cargo run -- <verb>`
+//! runs a CLI command. A scaffolded `src/main.rs` looks like:
+//!
+//! ```ignore
+//! #[rustango::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let _ = dotenvy::dotenv();
+//!     rustango::manage::Cli::new()
+//!         .api(myblog::urls::router())
+//!         .tenancy()                                            // optional, with `tenancy` feature
+//!         .migrations_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
+//!         .run()
+//!         .await
+//! }
+//! ```
+//!
+//! Common manage verbs (every command supports `--help`):
+//!
+//! | Group | Verbs |
+//! |---|---|
+//! | Migrations | `makemigrations`, `migrate [target]`, `downgrade [N]`, `showmigrations`, `add-data-op` |
+//! | Scaffolders | `startapp <name>`, `make:viewset`, `make:serializer`, `make:form`, `make:job`, `make:notification`, `make:middleware`, `make:test` |
+//! | System | `about`, `check`, `check --deploy`, `version`, `docs` |
+//! | Tenancy | `create-tenant`, `create-operator`, `create-user`, `list-tenants`, `create-api-key`, `grant-perm`, `revoke-perm`, `audit-cleanup` |
+//!
+//! # Full reference
 //!
 //! See the workspace [README](https://github.com/ujeenet/rustango)
-//! for the full feature matrix and the Django-shape project layout.
+//! for the complete feature matrix, ORM cookbook, viewset / serializer
+//! recipes, multi-tenancy guide, and production checklist. The
+//! [`examples/cookbook_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/cookbook_blog)
+//! crate ships a runnable multi-tenant blog with one chapter per
+//! feature surface.
 
 // Lets `::rustango::core::Model` (emitted by the proc-macro) and
 // `rustango::sql::Auto<i64>` (used in tenancy source code carried

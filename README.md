@@ -6,7 +6,7 @@ ORM with auto-migrations, multi-tenancy, auto-admin, sessions + JWT + OAuth2/OID
 
 ```toml
 [dependencies]
-rustango = "0.22"
+rustango = "0.23"
 ```
 
 ---
@@ -56,7 +56,7 @@ cargo rustango new shop --template tenant   # multi-tenancy + operator console
 cd myblog
 cp .env.example .env                        # edit DATABASE_URL
 docker compose up -d                        # starts Postgres
-cargo run --bin manage -- migrate           # apply bootstrap migrations
+cargo run -- migrate                        # apply bootstrap migrations
 cargo run                                   # http://localhost:8080
 ```
 
@@ -76,7 +76,7 @@ You should see the **welcome page** confirming rustango is wired up. Replace `we
 ### 4. Add an app + model
 
 ```bash
-cargo run --bin manage -- startapp blog     # scaffolds src/blog/
+cargo run -- startapp blog     # scaffolds src/blog/
 ```
 
 Edit `src/blog/models.rs`:
@@ -106,15 +106,15 @@ pub struct Post {
 ```
 
 ```bash
-cargo run --bin manage -- makemigrations    # generates migration JSON
-cargo run --bin manage -- migrate           # applies it
+cargo run -- makemigrations                 # generates migration JSON
+cargo run -- migrate                        # applies it
 ```
 
 ### 5. Generate a viewset + serializer
 
 ```bash
-cargo run --bin manage -- make:viewset PostViewSet --model Post
-cargo run --bin manage -- make:serializer PostSerializer --model Post
+cargo run -- make:viewset PostViewSet --model Post
+cargo run -- make:serializer PostSerializer --model Post
 ```
 
 Edit the generated files to fill in field lists, then mount in `src/urls.rs`.
@@ -131,19 +131,36 @@ myblog/
 ├── .env / .env.example         # DATABASE_URL, SECRET_KEY, RUSTANGO_ENV
 ├── docker-compose.yml          # Postgres in a container for local dev
 ├── README.md
-├── migrations/                 # JSON files written by `manage makemigrations`
+├── migrations/                 # JSON files written by `cargo run -- makemigrations`
 ├── src/
-│   ├── main.rs                 # HTTP entry point — Builder chain
+│   ├── main.rs                 # one binary — HTTP server + manage CLI
 │   ├── lib.rs                  # `pub mod` registry of every app module
 │   ├── urls.rs                 # top-level Router composition
 │   ├── models.rs               # OR per-app: src/blog/models.rs
-│   ├── views.rs
-│   ├── urls.rs
-│   └── bin/manage.rs           # CLI dispatcher (re-exports user models)
+│   └── views.rs
 └── tests/                      # integration tests using test_client
 ```
 
-Per-app structure (created by `manage startapp <name>`):
+Since v0.16 the `manage` CLI is dispatched from `main.rs` via
+`rustango::manage::Cli` — running `cargo run` with no args starts
+the HTTP server, and `cargo run -- <verb>` dispatches a CLI command.
+There is no longer a separate `src/bin/manage.rs`. A minimal
+`main.rs` looks like:
+
+```rust
+#[rustango::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = dotenvy::dotenv();
+    rustango::manage::Cli::new()
+        .api(myblog::urls::router())
+        .tenancy()                           // optional; only with `tenancy` feature
+        .migrations_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
+        .run()
+        .await
+}
+```
+
+Per-app structure (created by `cargo run -- startapp <name>`):
 
 ```
 src/blog/
@@ -157,64 +174,68 @@ src/blog/
 
 ## `manage` CLI reference
 
-Every command has `--help`. Exit code is non-zero on validation/IO/system-check errors.
+Since v0.16 there is no separate `manage` binary — the verbs are
+dispatched by the project's own binary via `rustango::manage::Cli`,
+so the canonical invocation is `cargo run -- <verb>`. Every command
+has `--help`. Exit code is non-zero on validation / IO / system-check
+errors.
 
 ### Migrations
 
 ```bash
-manage makemigrations [name]                   # diff registry → next JSON
-manage makemigrations --app <app> [name]       # per-app migration dir
-manage makemigrations --empty <name>           # scaffold for hand-authored data ops
-manage migrate                                  # apply every pending
-manage migrate <target>                         # forward or back to <target>; `zero` wipes
-manage migrate --dry-run                        # print SQL without writing
-manage downgrade [N]                            # step back N (default 1)
-manage showmigrations | status                  # [X] applied / [ ] pending list
+cargo run -- makemigrations [name]                   # diff registry → next JSON
+cargo run -- makemigrations --app <app> [name]       # per-app migration dir
+cargo run -- makemigrations --empty <name>           # scaffold for hand-authored data ops
+cargo run -- migrate                                  # apply every pending
+cargo run -- migrate <target>                         # forward or back to <target>; `zero` wipes
+cargo run -- migrate --dry-run                        # print SQL without writing
+cargo run -- downgrade [N]                            # step back N (default 1)
+cargo run -- showmigrations | status                  # [X] applied / [ ] pending list
 ```
 
 ### Data migrations
 
 ```bash
-manage add-data-op \
+cargo run -- add-data-op \
     --sql "UPDATE posts SET slug = lower(title)" \
     --reverse-sql "UPDATE posts SET slug = NULL" \
     --name backfill_post_slugs
 
-manage add-data-op --to 0003_add_slug --sql "UPDATE posts SET slug = id::text"
+cargo run -- add-data-op --to 0003_add_slug --sql "UPDATE posts SET slug = id::text"
 ```
 
 ### Scaffolders
 
 ```bash
-manage startapp <name> [--with-manage-bin]
-manage make:viewset PostViewSet --model Post
-manage make:serializer PostSerializer --model Post
-manage make:form ContactForm
-manage make:job EmailDigestJob
-manage make:notification WelcomeEmail
-manage make:middleware AuditLog
-manage make:test post_smoke
+cargo run -- startapp <name> [--with-manage-bin]
+cargo run -- make:viewset PostViewSet --model Post
+cargo run -- make:serializer PostSerializer --model Post
+cargo run -- make:form ContactForm
+cargo run -- make:job EmailDigestJob
+cargo run -- make:notification WelcomeEmail
+cargo run -- make:middleware AuditLog
+cargo run -- make:test post_smoke
 ```
 
 ### System
 
 ```bash
-manage about                # version, model count, registered apps, DB connectivity
-manage check                # pending migrations, missing models, DB reachable
-manage check --deploy       # + SECRET_KEY length, RUSTANGO_ENV, DATABASE_URL
-manage docs                 # opens https://docs.rs/rustango in browser
-manage version | --version  # framework version
+cargo run -- about                # version, model count, registered apps, DB connectivity
+cargo run -- check                # pending migrations, missing models, DB reachable
+cargo run -- check --deploy       # + SECRET_KEY length, RUSTANGO_ENV, DATABASE_URL
+cargo run -- docs                 # opens https://docs.rs/rustango in browser
+cargo run -- version | --version  # framework version
 ```
 
 ### Tenancy (only with `tenancy` feature)
 
 ```bash
-manage create-tenant acme --display-name "ACME Corp"
-manage create-operator admin --password letmein
-manage create-user acme alice --password hunter2 --superuser
-manage list-tenants
-manage audit-cleanup --days 90
-manage audit-cleanup --keep-last 50 --tenant acme
+cargo run -- create-tenant acme --display-name "ACME Corp"
+cargo run -- create-operator admin --password letmein
+cargo run -- create-user acme alice --password hunter2 --superuser
+cargo run -- list-tenants
+cargo run -- audit-cleanup --days 90
+cargo run -- audit-cleanup --keep-last 50 --tenant acme
 ```
 
 ---
@@ -610,12 +631,12 @@ and use a single batched SELECT for the actual fetch.
 ## Migrations
 
 ```bash
-manage makemigrations              # diff inventory ↔ snapshot, emit JSON
-manage migrate                     # apply pending
-manage migrate --dry-run           # print SQL only
-manage migrate <target>            # forward or back to specific name
-manage downgrade 2                 # step back 2 migrations
-manage showmigrations              # status
+cargo run -- makemigrations              # diff inventory ↔ snapshot, emit JSON
+cargo run -- migrate                     # apply pending
+cargo run -- migrate --dry-run           # print SQL only
+cargo run -- migrate <target>            # forward or back to specific name
+cargo run -- downgrade 2                 # step back 2 migrations
+cargo run -- showmigrations              # status
 ```
 
 Migration files are JSON in `migrations/`, lex-sorted by name. They:
@@ -641,22 +662,22 @@ Migration files are JSON in `migrations/`, lex-sorted by name. They:
 | New `#[rustango(index)]` / composite index | `CreateIndex` | unique flag respected |
 | New `#[rustango(check(...))]` | `AddCheckConstraint` | |
 | New M2M relation | `CreateM2MTable` | composite PK + 2 FKs ON DELETE CASCADE |
-| Renames | NOT auto-detected | use `manage makemigrations --empty` and edit JSON |
+| Renames | NOT auto-detected | use `cargo run -- makemigrations --empty` and edit JSON |
 
 ### Hand-authored data migrations
 
 ```bash
 # Quick path — one-liner
-manage add-data-op \
+cargo run -- add-data-op \
     --sql "UPDATE posts SET slug = lower(title)" \
     --reverse-sql "UPDATE posts SET slug = NULL" \
     --name backfill_post_slugs
 
 # Or append to an existing migration
-manage add-data-op --to 0003_add_slug --sql "UPDATE posts SET slug = id::text"
+cargo run -- add-data-op --to 0003_add_slug --sql "UPDATE posts SET slug = id::text"
 
 # Or scaffold an empty file and edit manually
-manage makemigrations --empty seed_initial_categories
+cargo run -- makemigrations --empty seed_initial_categories
 ```
 
 ---
@@ -1518,16 +1539,16 @@ The default features cover everything most apps need. Trim them when shipping a 
 
 ```toml
 # Default — everything except tenancy + cache-redis
-rustango = "0.22"
+rustango = "0.23"
 
 # Multi-tenant
-rustango = { version = "0.22", features = ["tenancy"] }
+rustango = { version = "0.23", features = ["tenancy"] }
 
 # With Redis cache
-rustango = { version = "0.22", features = ["cache-redis"] }
+rustango = { version = "0.23", features = ["cache-redis"] }
 
 # Bare ORM only (no admin, no forms, no email, no storage)
-rustango = { version = "0.22", default-features = false, features = ["postgres"] }
+rustango = { version = "0.23", default-features = false, features = ["postgres"] }
 ```
 
 | Feature | What it adds | On by default? |
@@ -1559,7 +1580,7 @@ rustango = { version = "0.22", default-features = false, features = ["postgres"]
 Run before deploy:
 
 ```bash
-cargo run --bin manage -- check --deploy
+cargo run -- check --deploy
 ```
 
 Audits:
