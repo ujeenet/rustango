@@ -698,6 +698,16 @@ fn create_table_sql_from_snapshot(t: &TableSnapshot) -> String {
         if f.primary_key {
             sql.push_str(" PRIMARY KEY");
         }
+        // Per-column UNIQUE constraint from #[rustango(unique)]. Without
+        // this clause the snapshot's `unique: true` flag was honoured by
+        // the diff path (AlterColumnUnique) but silently dropped when a
+        // CreateTable rendered the initial DDL — surfaced live by the
+        // cookbook /authors/new playwright session, where two Authors
+        // with the same email INSERT-ed cleanly despite the model
+        // declaring `#[rustango(unique)]`.
+        if f.unique && !f.primary_key {
+            sql.push_str(" UNIQUE");
+        }
         if f.min.is_some() || f.max.is_some() {
             sql.push_str(" CHECK (");
             let mut wrote = false;

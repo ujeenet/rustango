@@ -246,6 +246,16 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
     if field.nullable && raw.is_empty() {
         return Ok(SqlValue::Null);
     }
+    // Non-nullable String field with empty raw is a *missing* value,
+    // not a valid empty string — matches Django/DRF where CharField
+    // rejects "" unless allow_blank=True. Without this guard, blank
+    // form submits silently land empty strings in NOT NULL columns
+    // (surfaced playing with the cookbook /authors/new form).
+    if matches!(field.ty, FieldType::String) && !field.nullable && raw.is_empty() {
+        return Err(FormError::Missing {
+            field: field.name.to_owned(),
+        });
+    }
     let make_parse_err = |ty: &'static str, e: &dyn std::fmt::Display| FormError::Parse {
         field: field.name.to_owned(),
         ty,
