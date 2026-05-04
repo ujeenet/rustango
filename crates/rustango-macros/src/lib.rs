@@ -3200,35 +3200,51 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 out.permissions = true;
                 return Ok(());
             }
-            if meta.path.is_ident("index") {
-                // Container-level composite index. Syntax (key=value form
-                // because `meta.value()?.parse()?` is what the parser
-                // calls; the parenthesized comma-list form below pivots
-                // on `unique` / `name` AFTER the columns string):
-                //   #[rustango(index = "col1, col2")]
-                //   #[rustango(index = "col1, col2", unique)]
-                //   #[rustango(index = "col1, col2", name = "my_idx")]
+            if meta.path.is_ident("unique_together") {
+                // Django-shape composite UNIQUE index. Sugar for
+                // `index_together` + the unique flag, with an
+                // auto-derived index name.
+                //
+                //   #[rustango(unique_together = "org_id, user_id")]
+                //
+                // Produces `CREATE UNIQUE INDEX <table>_<col1>_<col2>_uq
+                // ON <table> (col1, col2)`.
                 let cols_lit: LitStr = meta.value()?.parse()?;
                 let columns = split_field_list(&cols_lit.value());
-                let mut unique = false;
-                let mut name: Option<String> = None;
-                if meta.input.peek(syn::Token![,]) {
-                    let _: syn::Token![,] = meta.input.parse()?;
-                    // Parse remaining k=v or bare flags after the columns string
-                    meta.parse_nested_meta(|inner| {
-                        if inner.path.is_ident("unique") {
-                            unique = true;
-                            return Ok(());
-                        }
-                        if inner.path.is_ident("name") {
-                            let s: LitStr = inner.value()?.parse()?;
-                            name = Some(s.value());
-                            return Ok(());
-                        }
-                        Err(inner.error("unknown index attribute (supported: `unique`, `name`)"))
-                    })?;
+                if columns.len() < 2 {
+                    return Err(meta.error(
+                        "unique_together expects two or more columns; for single-column UNIQUE use #[rustango(unique)] on the field",
+                    ));
                 }
-                out.indexes.push(IndexAttr { name, columns, unique });
+                out.indexes.push(IndexAttr { name: None, columns, unique: true });
+                return Ok(());
+            }
+            if meta.path.is_ident("index_together") {
+                // Django-shape composite (non-unique) index. Sugar with
+                // an auto-derived index name.
+                //
+                //   #[rustango(index_together = "created_at, status")]
+                let cols_lit: LitStr = meta.value()?.parse()?;
+                let columns = split_field_list(&cols_lit.value());
+                if columns.len() < 2 {
+                    return Err(meta.error(
+                        "index_together expects two or more columns; for a single-column index use #[rustango(index)] on the field",
+                    ));
+                }
+                out.indexes.push(IndexAttr { name: None, columns, unique: false });
+                return Ok(());
+            }
+            if meta.path.is_ident("index") {
+                // Container-level composite index — legacy entry that
+                // was advertised with a trailing `, unique, name = ...`
+                // flag block which doesn't actually compose under
+                // `parse_nested_meta`. Prefer `unique_together` /
+                // `index_together` (above) for new code. The bare
+                // `index = "..."` form is kept for back-compat: it
+                // emits a non-unique composite index.
+                let cols_lit: LitStr = meta.value()?.parse()?;
+                let columns = split_field_list(&cols_lit.value());
+                out.indexes.push(IndexAttr { name: None, columns, unique: false });
                 return Ok(());
             }
             if meta.path.is_ident("check") {
