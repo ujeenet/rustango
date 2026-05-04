@@ -32,6 +32,10 @@ async fn fresh_schema(pool: &sqlx::PgPool) {
         "DROP TABLE IF EXISTS cookbook_author CASCADE",
         "DROP TABLE IF EXISTS cookbook_session CASCADE",
         "DROP TABLE IF EXISTS cookbook_archive_note CASCADE",
+        "DROP TABLE IF EXISTS cookbook_inventory_item CASCADE",
+        "DROP TABLE IF EXISTS cookbook_pair_link CASCADE",
+        "DROP TABLE IF EXISTS cookbook_pair_target CASCADE",
+        "DROP TABLE IF EXISTS cookbook_activity CASCADE",
     ] {
         sqlx::query(ddl).execute(pool).await.expect(ddl);
     }
@@ -113,6 +117,61 @@ async fn fresh_schema(pool: &sqlx::PgPool) {
             deleted_at TIMESTAMPTZ NULL
         )"#,
     ).execute(pool).await.expect("create archive_note");
+
+    // §2.19 — table-level CHECK constraint on InventoryItem.
+    sqlx::query(
+        r#"CREATE TABLE cookbook_inventory_item (
+            id BIGSERIAL PRIMARY KEY,
+            name VARCHAR(80) NOT NULL,
+            qty BIGINT NOT NULL,
+            price_cents BIGINT NOT NULL,
+            CONSTRAINT cookbook_inventory_item_qty_chk CHECK (qty >= 0 AND price_cents > 0)
+        )"#,
+    ).execute(pool).await.expect("create inventory_item");
+
+    // §2.23 fk_composite target + source.
+    sqlx::query(
+        r#"CREATE TABLE cookbook_pair_target (
+            id BIGSERIAL PRIMARY KEY,
+            a_id BIGINT NOT NULL,
+            b_id BIGINT NOT NULL,
+            label VARCHAR(40) NOT NULL,
+            UNIQUE (a_id, b_id)
+        )"#,
+    ).execute(pool).await.expect("create pair_target");
+    sqlx::query(
+        r#"CREATE TABLE cookbook_pair_link (
+            id BIGSERIAL PRIMARY KEY,
+            left_ref BIGINT NOT NULL,
+            right_ref BIGINT NOT NULL,
+            CONSTRAINT pair_target_fk FOREIGN KEY (left_ref, right_ref)
+                REFERENCES cookbook_pair_target (a_id, b_id)
+        )"#,
+    ).execute(pool).await.expect("create pair_link");
+
+    // §2.24 generic_fk — Activity carries (CT, object_pk).
+    sqlx::query(
+        r#"CREATE TABLE cookbook_activity (
+            id BIGSERIAL PRIMARY KEY,
+            target_content_type_id BIGINT NOT NULL,
+            target_object_pk BIGINT NOT NULL,
+            action VARCHAR(40) NOT NULL
+        )"#,
+    ).execute(pool).await.expect("create activity");
+
+    // §2.25 ContentType registry table — required for ensure_seeded().
+    // Mirrors what the framework's bootstrap migration produces.
+    sqlx::query("DROP TABLE IF EXISTS rustango_content_types CASCADE")
+        .execute(pool).await.expect("drop ct");
+    sqlx::query(
+        r#"CREATE TABLE rustango_content_types (
+            id BIGSERIAL PRIMARY KEY,
+            app_label VARCHAR(100) NOT NULL,
+            model_name VARCHAR(100) NOT NULL,
+            "table" VARCHAR(100) NOT NULL,
+            UNIQUE (app_label, model_name)
+        )"#,
+    ).execute(pool).await.expect("create rustango_content_types");
 }
 
 // §2.11 / §2.12 — derive Model + Auto<i64> assigns id on save.
@@ -432,6 +491,109 @@ async fn m2m_through_junction_table_round_trips() {
         "SELECT COUNT(*) FROM cookbook_post_tag WHERE post_id = $1"
     ).bind(post_id).fetch_one(&pool).await.unwrap();
     assert_eq!(count, 2, "junction should hold 2 rows for one post");
+}
+
+// §2.19 — table-level CHECK rejects qty < 0 or price <= 0.
+#[tokio::test]
+async fn table_level_check_rejects_invalid_row() {
+    let Some(pool) = pool().await else { return };
+    fresh_schema(&pool).await;
+
+    let mut ok = InventoryItem {
+        id: Auto::Unset,
+        name: "widget".into(),
+        qty: 5,
+        price_cents: 1500,
+    };
+    ok.save(&pool).await.expect("valid row");
+
+    let mut bad = InventoryItem {
+        id: Auto::Unset,
+        name: "freebie".into(),
+        qty: 0,
+        price_cents: 0, // violates `price_cents > 0`
+    };
+    let err = bad.save(&pool).await.expect_err("CHECK violation");
+    let msg = format!("{err:?}").to_lowercase();
+    assert!(
+        msg.contains("check") || msg.contains("violates"),
+        "expected CHECK violation, got {err:?}"
+    );
+}
+
+// §2.23 — composite FK rejects (left_ref, right_ref) pair that doesn't exist on target.
+#[tokio::test]
+async fn fk_composite_rejects_unmatched_pair() {
+    let Some(pool) = pool().await else { return };
+    fresh_schema(&pool).await;
+
+    // Insert a valid pair on target.
+    let mut t = PairTarget { id: Auto::Unset, a_id: 10, b_id: 20, label: "ten-twenty".into() };
+    t.save(&pool).await.unwrap();
+
+    // Source pointing at the matching pair → ok.
+    let mut ok = PairLink { id: Auto::Unset, left_ref: 10, right_ref: 20 };
+    ok.save(&pool).await.expect("matching pair link");
+
+    // Source pointing at a pair that doesn't exist → FK violation.
+    let mut bad = PairLink { id: Auto::Unset, left_ref: 99, right_ref: 99 };
+    let err = bad.save(&pool).await.expect_err("composite FK violation");
+    let msg = format!("{err:?}").to_lowercase();
+    assert!(
+        msg.contains("foreign key") || msg.contains("foreign_key") ||
+        msg.contains("violates") || msg.contains("constraint"),
+        "expected FK violation, got {err:?}"
+    );
+}
+
+// §2.24 / §2.25 — `generic_fk` schema captures the (ct, pk) column pair;
+// ContentType lookup resolves the model registry row.
+#[tokio::test]
+async fn generic_fk_schema_and_content_type_lookup() {
+    use rustango::core::Model as _;
+    let Some(pool) = pool().await else { return };
+    fresh_schema(&pool).await;
+
+    // Schema-level: Activity must declare exactly one generic_fk pointing
+    // at the (target_content_type_id, target_object_pk) column pair.
+    assert_eq!(Activity::SCHEMA.generic_relations.len(), 1, "one generic_fk on Activity");
+    let g = &Activity::SCHEMA.generic_relations[0];
+    assert_eq!(g.name, "target");
+    assert_eq!(g.ct_column, "target_content_type_id");
+    assert_eq!(g.pk_column, "target_object_pk");
+
+    // ContentType lookup against an arbitrary registered model — Author
+    // is registered by this binary's inventory.
+    rustango::contenttypes::ensure_seeded(&pool).await.expect("seed contenttypes");
+    let ct = rustango::contenttypes::ContentType::for_model::<Author>(&pool)
+        .await
+        .expect("ContentType lookup")
+        .expect("ContentType row should exist after ensure_seeded");
+    assert_eq!(ct.table, Author::SCHEMA.table);
+
+    // Round-trip an Activity row pointing at an Author via the (CT, pk) pair.
+    let mut a = Author {
+        id: Auto::Unset,
+        name: "ct".into(), email: "ct@example.com".into(),
+        bio: None, joined_at: Auto::Unset,
+    };
+    a.save(&pool).await.unwrap();
+    let author_id = match a.id { Auto::Set(v) => v, _ => unreachable!() };
+    let ct_id = match ct.id { Auto::Set(v) => v, _ => unreachable!() };
+
+    let mut act = Activity {
+        id: Auto::Unset,
+        target_content_type_id: ct_id,
+        target_object_pk: author_id,
+        action: "viewed".into(),
+    };
+    act.save(&pool).await.expect("activity insert");
+
+    let rows: Vec<Activity> = Activity::objects()
+        .filter("target_object_pk", Op::Eq, author_id)
+        .fetch(&pool).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].action, "viewed");
 }
 
 // §2.30 — soft_delete column survives + deleted_at column writes a NULL by default.

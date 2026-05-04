@@ -72,6 +72,70 @@ pub struct Tag {
     pub name: String,
 }
 
+/// Chapter 2 §2.19 — table-level CHECK constraint via container attr.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "cookbook_inventory_item",
+    check(name = "cookbook_inventory_item_qty_chk", expr = "qty >= 0 AND price_cents > 0"),
+)]
+pub struct InventoryItem {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 80)]
+    pub name: String,
+    pub qty: i64,
+    pub price_cents: i64,
+}
+
+/// Chapter 2 §2.23 — composite (multi-column) FK target.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cookbook_pair_target")]
+pub struct PairTarget {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub a_id: i64,
+    pub b_id: i64,
+    #[rustango(max_length = 40)]
+    pub label: String,
+}
+
+/// Chapter 2 §2.23 — composite FK source. References (a_id, b_id) on PairTarget.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "cookbook_pair_link",
+    fk_composite(
+        name = "pair_target_fk",
+        to = "cookbook_pair_target",
+        from = ("left_ref", "right_ref"),
+        on = ("a_id", "b_id"),
+    ),
+)]
+pub struct PairLink {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub left_ref: i64,
+    pub right_ref: i64,
+}
+
+/// Chapter 2 §2.24 — generic FK (CT + object_pk).
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "cookbook_activity",
+    generic_fk(
+        name = "target",
+        ct_column = "target_content_type_id",
+        pk_column = "target_object_pk",
+    ),
+)]
+pub struct Activity {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub target_content_type_id: i64,
+    pub target_object_pk: i64,
+    #[rustango(max_length = 40)]
+    pub action: String,
+}
+
 /// Chapter 2 §2.30 — `#[rustango(soft_delete)]` marks a `deleted_at`
 /// column the ORM treats as "alive when NULL". `delete()` becomes a
 /// timestamp update; `objects()` filters by NULL by default.

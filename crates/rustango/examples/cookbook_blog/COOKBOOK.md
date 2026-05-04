@@ -411,8 +411,83 @@ pub struct ArchiveNote {
 
 ---
 
-*Sub-sections 2.19 (table-level CHECK), 2.23 (fk_composite),
-2.24 (generic_fk), 2.25 (ContentType) queued for Slice 2c.*
+### 2.19 `#[rustango(check(name, expr))]` — table-level CHECK
+
+**What**: Container-level CHECK constraint with a chosen name and a raw SQL boolean expression. Rejects inserts that violate the predicate at the DB.
+
+**Recipe** ([models.rs](src/apps/blog/models.rs)):
+
+```rust
+#[derive(Model)]
+#[rustango(
+    table = "cookbook_inventory_item",
+    check(name = "cookbook_inventory_item_qty_chk",
+          expr = "qty >= 0 AND price_cents > 0"),
+)]
+pub struct InventoryItem { ... }
+```
+
+**Verified by**: `table_level_check_rejects_invalid_row`
+
+---
+
+### 2.23 `#[rustango(fk_composite(name, to, from, on))]` — composite FK
+
+**What**: Multi-column foreign key. The `from = (...)` columns on this model reference the `on = (...)` columns on the target table. The DDL emits a single `CONSTRAINT … FOREIGN KEY (a, b) REFERENCES tgt (x, y)` so the DB rejects unmatched pairs.
+
+**Recipe**:
+
+```rust
+#[derive(Model)]
+#[rustango(
+    table = "cookbook_pair_link",
+    fk_composite(
+        name = "pair_target_fk",
+        to = "cookbook_pair_target",
+        from = ("left_ref", "right_ref"),
+        on = ("a_id", "b_id"),
+    ),
+)]
+pub struct PairLink { ... }
+```
+
+**Verified by**: `fk_composite_rejects_unmatched_pair`
+
+---
+
+### 2.24 / 2.25 `#[rustango(generic_fk(name, ct_column, pk_column))]` + ContentType lookup
+
+**What**: Generic foreign key — pairs a `target_content_type_id BIGINT` column with a `target_object_pk BIGINT` column. The framework knows the pair logically points at "any registered model's row." `Model::SCHEMA.generic_relations` exposes the metadata; admin uses it to render clickable links via `render_generic_fk_link`.
+
+`ContentType::for_model::<T>()` looks up the ContentType row for any registered model after `ensure_seeded(&pool)` populates the registry.
+
+**Recipe**:
+
+```rust
+#[derive(Model)]
+#[rustango(
+    table = "cookbook_activity",
+    generic_fk(
+        name = "target",
+        ct_column = "target_content_type_id",
+        pk_column = "target_object_pk",
+    ),
+)]
+pub struct Activity { ... }
+```
+
+```rust
+ensure_seeded(&pool).await?;
+let ct = ContentType::for_model::<Author>(&pool).await?.unwrap();
+let mut act = Activity {
+    target_content_type_id: ct.id_value()?,
+    target_object_pk: author_id,
+    action: "viewed".into(), ..
+};
+act.save(&pool).await?;
+```
+
+**Verified by**: `generic_fk_schema_and_content_type_lookup`
 
 ## Chapter 3 — ORM
 
