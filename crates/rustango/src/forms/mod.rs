@@ -322,7 +322,14 @@ pub fn collect_values(
 ) -> Result<Vec<(&'static str, SqlValue)>, FormError> {
     let mut out = Vec::new();
     for field in model.scalar_fields() {
-        if skip.contains(&field.name) {
+        // Server-assigned columns (`Auto<T>` PK with BIGSERIAL,
+        // `auto_now_add` / `auto_now` mixins, `auto_uuid`) are never
+        // present in HTML forms — the macro skips them on INSERT and
+        // the DB DEFAULT supplies the value. Filtering them here
+        // keeps both code paths in lock-step. See cookbook chapter 7
+        // `modelform_parses_form_encoded_into_typed_values` for the
+        // ModelFormFor analogue.
+        if field.auto || skip.contains(&field.name) {
             continue;
         }
         let raw = form.get(field.name).map(String::as_str);
