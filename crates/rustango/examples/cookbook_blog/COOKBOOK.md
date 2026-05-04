@@ -713,7 +713,31 @@ which would need a tenant-scoped cookbook migration applied.*
 
 ## Chapter 9 — ViewSets / DRF / OpenAPI
 
-*(Slice 6)*
+4 live tests against `ViewSet::for_model(...).router(...)` mounted
+in-process. Run with
+`DATABASE_URL=... cargo test --test cookbook_chapter09_viewsets -- --test-threads=1`.
+
+* §9.112 / 9.113 — `GET /authors` returns paginated list payload;
+  `POST /authors` with JSON body creates a row and returns the
+  serialized object with the assigned id.
+  → `viewset_list_create_round_trip`
+* §9.113 — `GET /authors/{id}` returns the single object;
+  `PUT /authors/{id}` updates it; `DELETE /authors/{id}` removes it
+  and a subsequent GET 404s. → `viewset_retrieve_returns_single_object_by_pk`,
+  `viewset_update_then_destroy`
+* §9.115 — `?name=bob` query param narrows the list to matching rows
+  when `filter_fields(&["name", ...])` is configured.
+  → `viewset_filter_query_param_narrows_list`
+
+The ViewSet builder also exposes `.search_fields` (?search=…),
+`.ordering` (default ORDER BY), `.page_size`, `.cursor_pagination`,
+`.pagination(PaginationStyle)`, and `.permissions_for_model::<T>()`
+(see Chapter 6 §6.80 for the typed-perm shortcut). All exercised
+live in rustango's own viewset / order_by_annotate_live tests.
+
+*Sub-sections 9.114 (full pagination — count + next + prev),
+9.116b (typed permissions), 9.117 (OpenAPI auto-derive),
+9.118 (response shaping via `.fields(&[...])`) queued for Slice 9b.*
 
 ## Chapter 10 — Templates + static
 
