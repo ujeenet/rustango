@@ -644,9 +644,51 @@ required EVERY field including `auto_now_add` columns (e.g.
 because `DEFAULT NOW()` fills them. Fix: skip every `auto = true`
 field (was: only `auto && primary_key`).
 
+### 7.99b `#[derive(Serializer)]` — DRF-shape JSON façade
+
+6 tests in `tests/cookbook_chapter07b_serializer.rs` exercise the
+serializer derive against the cookbook's `Author` model. Run with
+`cargo test --test cookbook_chapter07b_serializer`.
+
+* `from_model` + `to_value` round-trip — every field maps from the
+  model and lands in the JSON output. → `serializer_from_model_then_to_value_round_trip`
+* `#[serializer(read_only)]` — excluded from `writable_fields()`,
+  still appears in JSON output. → `read_only_field_omitted_from_writable_fields`
+* `#[serializer(write_only)]` — excluded from JSON output, accepted
+  on input. → `write_only_field_excluded_from_json_output`
+* `#[serializer(source = "x")]` — renames the JSON key to a
+  different model field. → `source_attribute_renames_json_key`
+* `#[serializer(skip)]` — uses `Default::default()`, leaves the field
+  in JSON but excludes it from `writable_fields()`. →
+  `skip_field_uses_default_and_appears_in_json_unchanged`
+* `many_to_value` — batches a `Vec<Model>` into a JSON array. →
+  `many_to_value_batches_into_json_array`
+
+**Framework fix during this slice**: `Auto<T>` was missing an
+`OpenApiSchema` impl, so `#[derive(Serializer)]` failed to build with
+the `openapi` feature on for any model with `Auto<T>` fields. Added
+`impl<T: OpenApiSchema> OpenApiSchema for Auto<T>` (forwards to T's
+schema).
+
+**Gaps tracked in [v0.18 DRF parity roadmap](../../../../../.claude/projects/-Users-ievgeniisvyryd-projects-rustango/memory/v018-drf-parity.md)**:
+
+1. **Auto-nested FK** — `#[serializer(nested = AuthorSerializer)]`
+   that lazy-loads + nests the parent. Today: manual.
+2. **`SerializerMethodField`** — `#[serializer(method = "fn_name")]`
+   computed fields. Today: manual after `from_model`.
+3. **ViewSet ↔ Serializer wiring** —
+   `ViewSet::for_model(...).serializer::<T>()`. Today: ViewSet
+   serializes the bare model.
+4. **M2M many-relations** —
+   `#[serializer(many = TagSerializer, source = "tags")]`. Today: no
+   automatic M2M traversal in serializers.
+5. **Per-field validators chain** —
+   `#[serializer(validate = "fn_name")]` per-field validator
+   callable. Today: only model-level `min`/`max`/`max_length`.
+
 *Sub-sections 7.93 (raw `Form` derive), 7.94 (admin's hand-rolled
 ModelForm engine), 7.97 (parse_form_value per type), 7.98b (custom
-validators), 7.99b (Serializer derive) queued for Slice 7b.*
+validators) queued for Slice 7c.*
 
 ## Chapter 8 — Admin
 
