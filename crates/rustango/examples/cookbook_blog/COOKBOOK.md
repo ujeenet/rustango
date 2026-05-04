@@ -589,7 +589,32 @@ templates) queued for Slice 5b.*
 
 ## Chapter 6 — Auth + permissions
 
-*(Slice 5)*
+7 live tests on the password / API-key / JWT / permission primitives.
+No DB needed — pure crypto. Run with `cargo test --test cookbook_chapter06_auth`.
+
+* §6.83 `passwords::hash` (Argon2 with random salt) +
+  `passwords::verify` round-trip + `strength_score` issue list.
+  → `passwords_hash_and_verify_round_trip`,
+  `passwords_strength_score_flags_weak`
+* §6.84 `api_keys::generate_key()` → `(token, prefix, hash)`.
+  `split_token(token)` → `(prefix, secret)`. `verify_key(secret, hash)`.
+  → `api_keys_issue_then_verify`
+* §6.85 `jwt::Claims::new(sub).issuer(...).audience(...).ttl(...)` →
+  `encode(&claims, secret)` → token. `decode(&token, secret)` rejects
+  wrong-secret + tampered tokens; `decode_at(&token, secret, now)`
+  rejects expired tokens.
+  → `jwt_round_trips_with_ttl_and_subject`,
+  `jwt_rejects_wrong_secret_and_tampered_token`,
+  `jwt_decode_at_rejects_expired_token`
+* §6.78 / 6.79 `permissions::codename_for::<T>("view"|"add"|"change"|"delete")`
+  → Django-shape `{app}.{action}_{model}` strings.
+  → `permission_codename_for_model_resolves_app_action_model`
+
+*Sub-sections 6.77 (User/Role/Permission models — registry-side, see
+framework's tenant_auth_live), 6.80 (ViewSet typed perms),
+6.81 (auth backends), 6.82 (auth middleware), 6.86 (sessions),
+6.87 (CSRF), 6.88 (HMAC-auth), 6.89 (TOTP), 6.90 (OAuth2),
+6.91 (auth_flows), 6.92 (signed URLs) queued for Slice 6b.*
 
 ## Chapter 7 — Forms + serializer
 
