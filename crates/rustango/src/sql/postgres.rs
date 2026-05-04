@@ -60,6 +60,15 @@ impl Dialect for Postgres {
         true
     }
 
+    fn cast_aggregate_to_int(&self, expr: &str) -> String {
+        // PostgreSQL accepts the shorter `<expr>::bigint` form.
+        format!("{expr}::bigint")
+    }
+
+    fn cast_aggregate_to_float(&self, expr: &str) -> String {
+        format!("{expr}::double precision")
+    }
+
     fn null_cast(&self, ty: FieldType) -> Option<&'static str> {
         Some(match ty {
             FieldType::I32 => "INTEGER",

@@ -125,6 +125,22 @@ pub trait Dialect {
         false
     }
 
+    /// Wrap a SUM expression in a cast back to BIGINT. PostgreSQL's
+    /// SUM(BIGINT) is NUMERIC and MySQL's is DECIMAL — both fall
+    /// through to Null in the aggregate row decoder which only tries
+    /// scalar types. Default: ANSI `CAST(<expr> AS BIGINT)`.
+    fn cast_aggregate_to_int(&self, expr: &str) -> String {
+        format!("CAST({expr} AS BIGINT)")
+    }
+
+    /// Wrap an AVG expression in a cast to a floating-point type.
+    /// PostgreSQL AVG of any int returns NUMERIC; MySQL AVG returns
+    /// DOUBLE for ints, DECIMAL for decimals. Default: ANSI
+    /// `CAST(<expr> AS DOUBLE PRECISION)`.
+    fn cast_aggregate_to_float(&self, expr: &str) -> String {
+        format!("CAST({expr} AS DOUBLE PRECISION)")
+    }
+
     /// SQL type to cast a `NULL` parameter to when the column type is
     /// known. Postgres needs this — `INSERT INTO t(name) VALUES ($1)`
     /// with `$1 = NULL` against an integer column raises

@@ -202,14 +202,18 @@ pub(super) fn write_aggregate(b: &mut Sql<'_>, query: &AggregateQuery) -> Result
                 b.sql.push(')');
             }
             AggregateExpr::Sum(col) => {
-                b.sql.push_str("SUM(");
-                b.write_ident(col);
-                b.sql.push(')');
+                // Both PG and MySQL widen SUM(int) into a type the
+                // SqlValue aggregate decoder doesn't try (PG NUMERIC,
+                // MySQL DECIMAL). Ask the dialect to cast back to a
+                // known scalar so the i64 decode arm picks it up.
+                let inner = format!("SUM({})", b.d.quote_ident(col));
+                let wrapped = b.d.cast_aggregate_to_int(&inner);
+                b.sql.push_str(&wrapped);
             }
             AggregateExpr::Avg(col) => {
-                b.sql.push_str("AVG(");
-                b.write_ident(col);
-                b.sql.push(')');
+                let inner = format!("AVG({})", b.d.quote_ident(col));
+                let wrapped = b.d.cast_aggregate_to_float(&inner);
+                b.sql.push_str(&wrapped);
             }
             AggregateExpr::Max(col) => {
                 b.sql.push_str("MAX(");

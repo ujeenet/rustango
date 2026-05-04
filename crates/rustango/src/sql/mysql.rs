@@ -65,6 +65,18 @@ impl Dialect for MySql {
         }
     }
 
+    fn cast_aggregate_to_int(&self, expr: &str) -> String {
+        // MySQL: `CAST(<expr> AS BIGINT)` doesn't work — the integer
+        // target is `SIGNED` (or `UNSIGNED`).
+        format!("CAST({expr} AS SIGNED)")
+    }
+
+    fn cast_aggregate_to_float(&self, expr: &str) -> String {
+        // MySQL doesn't have `DOUBLE PRECISION`; `DOUBLE` is the right
+        // target for AVG widening.
+        format!("CAST({expr} AS DOUBLE)")
+    }
+
     /// `MySQL` column types — major divergences from the ANSI / Postgres
     /// shape:
     /// - no native `BOOLEAN`; `BOOL`/`BOOLEAN` are aliases for `TINYINT(1)`
