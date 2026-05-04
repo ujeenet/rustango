@@ -159,6 +159,17 @@ impl<T: OpenApiSchema> OpenApiSchema for std::sync::Arc<T> {
     }
 }
 
+/// `Auto<T>` represents a server-assigned value (`SERIAL` /
+/// `BIGSERIAL` / `gen_random_uuid()` / DB DEFAULT NOW()) — clients
+/// don't supply it on create, but it's always present on read. The
+/// schema mirrors `T`. Surfaced when `#[derive(Serializer)]` runs
+/// against any model that uses `Auto<T>`.
+impl<T: OpenApiSchema> OpenApiSchema for crate::sql::Auto<T> {
+    fn openapi_schema() -> Schema {
+        T::openapi_schema()
+    }
+}
+
 impl<V: OpenApiSchema> OpenApiSchema for HashMap<String, V> {
     fn openapi_schema() -> Schema {
         let mut s = Schema::object();
