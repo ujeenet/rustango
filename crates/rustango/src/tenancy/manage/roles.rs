@@ -232,8 +232,7 @@ async fn tenant_pool_for_slug(pools: &TenantPools, slug: &str) -> Result<PgPool,
     let org = orgs.into_iter().next().ok_or_else(|| {
         TenancyError::Validation(format!("tenant `{slug}` not found"))
     })?;
-    let tenant_pool = pools.pool_for_org(&org).await?;
-    Ok(tenant_pool.pool().clone())
+    pools.scoped_pool(&org).await
 }
 
 async fn user_id_by_username(username: &str, pool: &PgPool) -> Result<i64, TenancyError> {

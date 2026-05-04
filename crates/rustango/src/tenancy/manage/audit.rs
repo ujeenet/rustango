@@ -100,13 +100,15 @@ pub(super) async fn audit_cleanup_cmd<W: Write + Send>(
     let mut total_deleted: u64 = 0;
 
     for org in &orgs {
-        let tenant_pool = pools.pool_for_org(org).await?;
-        let pool = tenant_pool.pool();
+        // `scoped_pool` bakes `search_path` into a dedicated pool in
+        // schema mode — without it the audit query would hit the
+        // `public` schema instead of the tenant's.
+        let pool = pools.scoped_pool(org).await?;
 
         let deleted = if let Some(n) = days {
-            crate::audit::cleanup_older_than(pool, n).await?
+            crate::audit::cleanup_older_than(&pool, n).await?
         } else if let Some(n) = keep_last {
-            crate::audit::cleanup_keep_last_n(pool, n).await?
+            crate::audit::cleanup_keep_last_n(&pool, n).await?
         } else {
             unreachable!()
         };

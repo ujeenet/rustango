@@ -8,12 +8,12 @@
 
 use axum::extract::Path;
 use axum::http::StatusCode;
-use axum::response::{Html, Json, Redirect};
+use axum::response::{Html, IntoResponse, Json, Redirect};
 use axum::routing::get;
 use axum::Router;
 
 use rustango::core::Op;
-use rustango::extractors::Tenant;
+use rustango::extractors::{SessionUser, Tenant};
 use rustango::forms::ModelFormFor;
 use rustango::sql::Auto;
 use std::collections::HashMap;
@@ -210,6 +210,26 @@ fn edit_form(id: i64, a: &Author, error: Option<&str>) -> Html<String> {
     ))
 }
 
+// ---------------- user-extraction demo (Chapter 6b) ----------------
+
+/// `GET /whoami` — demonstrates the [`SessionUser`] cookie extractor.
+///
+/// Anonymous → 401. Logged-in (via the tenant `__login` cookie flow) →
+/// 200 with `{ "username": ..., "is_superuser": ... }`. The extractor
+/// resolves the request's tenant via [`rustango::extractors::TenantContext`]
+/// and validates the cookie against that tenant's slug — a cookie minted
+/// on `acme` will not authenticate on `globex`.
+async fn whoami(SessionUser(user): SessionUser) -> axum::response::Response {
+    match user {
+        Some(u) => Json(serde_json::json!({
+            "username": u.username,
+            "is_superuser": u.is_superuser,
+        }))
+        .into_response(),
+        None => (StatusCode::UNAUTHORIZED, "anonymous").into_response(),
+    }
+}
+
 #[must_use]
 pub fn api() -> Router {
     Router::new()
@@ -217,4 +237,5 @@ pub fn api() -> Router {
         .route("/api/authors/{id}", get(retrieve))
         .route("/authors/new", get(show_new_form).post(submit_new_form))
         .route("/authors/{id}/edit", get(show_edit_form).post(submit_edit_form))
+        .route("/whoami", get(whoami))
 }

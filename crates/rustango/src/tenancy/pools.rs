@@ -221,6 +221,38 @@ impl TenantPools {
         }
     }
 
+    /// Owned, tenant-scoped [`PgPool`]. In schema mode the underlying
+    /// registry pool is shared and has no `search_path` set, so handing
+    /// it to ORM helpers that take `&PgPool` would route queries to
+    /// `public` instead of the tenant schema. This builds a small
+    /// dedicated pool with `search_path` baked into connect options so
+    /// every checkout is correctly scoped. Database mode just clones
+    /// the cached pool.
+    ///
+    /// Use this for one-shot tenant work (manage commands, audit
+    /// cleanup) where carrying a `&mut PgConnection` everywhere would
+    /// be unwieldy. For request-path code use [`Self::acquire`] —
+    /// it reuses the registry pool without spawning a new pool.
+    ///
+    /// # Errors
+    /// As [`Self::pool_for_org`] plus [`TenancyError::Driver`] for
+    /// the schema-mode dedicated pool build.
+    pub async fn scoped_pool(&self, org: &Org) -> Result<PgPool, TenancyError> {
+        match self.pool_for_org(org).await? {
+            TenantPool::Schema { schema, registry } => {
+                let mut opts = (*registry.connect_options()).clone();
+                opts =
+                    opts.options([("search_path", &format!("{schema},public") as &str)]);
+                let scoped = PgPoolOptions::new()
+                    .max_connections(2)
+                    .connect_with(opts)
+                    .await?;
+                Ok(scoped)
+            }
+            TenantPool::Database { pool } => Ok((*pool).clone()),
+        }
+    }
+
     /// Drop a database-mode tenant's pool from the cache. Useful
     /// when the operator updates `Org.database_url` (vault rotation,
     /// migration to new server) and wants the next `pool_for_org`
