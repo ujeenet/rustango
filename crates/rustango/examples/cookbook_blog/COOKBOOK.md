@@ -558,7 +558,34 @@ Slice 4b.*
 
 ## Chapter 5 — Multi-tenancy
 
-*(Slice 4)*
+One comprehensive live test that provisions two tenants in schema
+mode, then exercises every resolver against the seeded registry.
+Run with `DATABASE_URL=... cargo test --test cookbook_chapter05_tenancy -- --test-threads=1`.
+
+* §5.66 `SubdomainResolver::new(apex)` — extracts `acme` from
+  `acme.cookbook-test.local` then DB-loads the matching `Org`.
+* §5.68 `HeaderResolver::default()` — reads `X-Org` header slug.
+* §5.70 `ChainResolver::new().push(...).push(...)` — first hit wins
+  (Subdomain → Header fallback when no subdomain present).
+* §5.71 schema-per-tenant — `create_tenant_if_missing(...)` creates a
+  PG schema named after the slug + INSERTs the `Org` row + applies
+  tenant-scoped migrations.
+* §5.73 `TenantPools::pool_for_org(&org)` — returns a tenant-scoped
+  pool whose `search_path` lands on the tenant's schema.
+* §5.74 `tenancy::migrate_registry / migrate_tenants` — registry-
+  scoped vs tenant-scoped migration passes.
+
+→ `provision_two_tenants_then_resolve_and_lazy_pool`
+
+The tenant Builder + apex/subdomain HTTP host split is exercised
+implicitly by the `Cli::new().tenancy().run()` runserver path —
+covered by Chapter 1 §1.5 and the framework's own `tenant_admin_live`
+test.
+
+*Sub-sections 5.67 (PathPrefixResolver), 5.69 (PortResolver),
+5.72 (database-per-tenant via `--database-url`), 5.75 (per-tenant
+auth: Operator vs User scoping), 5.76 (org bootstrap migration
+templates) queued for Slice 5b.*
 
 ## Chapter 6 — Auth + permissions
 
