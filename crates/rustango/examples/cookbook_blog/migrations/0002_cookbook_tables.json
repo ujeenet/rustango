@@ -1,0 +1,25 @@
+{
+  "name": "0002_cookbook_tables",
+  "created_at": "2026-05-04T00:00:00Z",
+  "prev": "0001_rustango_tenant_initial",
+  "scope": "tenant",
+  "atomic": true,
+  "snapshot": {
+    "tables": [
+      {
+        "name": "cookbook_author",
+        "model": "Author",
+        "fields": [
+          {"name": "id",        "column": "id",        "ty": "i64",      "nullable": false, "primary_key": true,  "auto": true},
+          {"name": "name",      "column": "name",      "ty": "string",   "nullable": false, "primary_key": false, "max_length": 80},
+          {"name": "email",     "column": "email",     "ty": "string",   "nullable": false, "primary_key": false, "max_length": 200, "unique": true},
+          {"name": "bio",       "column": "bio",       "ty": "string",   "nullable": true,  "primary_key": false, "max_length": 500},
+          {"name": "joined_at", "column": "joined_at", "ty": "datetime", "nullable": false, "primary_key": false, "default": "now()", "auto": true}
+        ]
+      }
+    ]
+  },
+  "forward": [
+    {"schema": {"CreateTable": "cookbook_author"}}
+  ]
+}

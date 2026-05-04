@@ -708,7 +708,35 @@ Two parts: in-process router smoke + a real-browser playwright session.
 
 Run: `DATABASE_URL=... cargo test --test cookbook_chapter08_admin -- --test-threads=1`.
 
-### Part B — real-browser session (playwright MCP)
+### Part B/C — real-binary HTTP loop (Chapter 8b)
+
+`tests/cookbook_chapter08b_browser_forms.rs` boots the actual
+`cookbook_blog` binary against an isolated DB and drives the full
+admin form + ViewSet flow over HTTP — the closest a Rust integration
+test comes to a real browser session without playwright in the loop.
+1 test:
+
+* `admin_form_creates_then_viewset_isolates_per_tenant`:
+  - migrate registry → create operator → create acme + globex →
+    create alice/tenantpw on acme.
+  - spawn `cookbook_blog` on `127.0.0.1:8867`.
+  - `POST /__login` as alice (acme tenant).
+  - `POST /__admin/cookbook_author` with `name=ada lovelace` etc.
+  - `GET /api/authors` (acme) → returns `[{id:1, name:"ada lovelace"}]`.
+  - `GET /api/authors` (globex) → returns `[]`.
+  - `GET /api/authors` (apex `localhost`) → `404` (no tenant route).
+
+Run: `DATABASE_URL=... cargo test --test cookbook_chapter08b_browser_forms -- --test-threads=1`.
+
+**Framework bug fixed during this slice**: `forms::collect_values`
+(used by the admin's hand-rolled create handler) demanded every
+non-PK auto field — same shape as the Chapter 7 ModelFormFor bug.
+Posting an Author through the admin returned "required field
+`joined_at` was missing from the form" because `auto_now_add` columns
+should be skipped server-side. Added `field.auto` to the auto-skip
+filter alongside the explicit `skip` list.
+
+### Part D — real-browser session (playwright MCP)
 
 Reproducible by hand:
 
