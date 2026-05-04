@@ -63,7 +63,7 @@ a:hover {{ text-decoration: underline; }}
 <div class="next">
 <h3 style="margin-top:0">Next steps</h3>
 <ul>
-  <li>Scaffold an app: <code>cargo run --bin manage -- startapp blog</code></li>
+  <li>Scaffold an app: <code>cargo run -- startapp blog</code></li>
   <li>Define a model in <code>src/blog/models.rs</code> with <code>#[derive(Model)]</code></li>
   <li>Generate + apply migration: <code>manage makemigrations &amp;&amp; manage migrate</code></li>
   <li>Mount your routes in <code>src/urls.rs</code> and remove <code>welcome_router()</code> from your app</li>

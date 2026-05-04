@@ -13,7 +13,7 @@
 //! * `api`        — bare ORM + axum, no admin. For JSON-only services.
 //! * `fullstack`  — ORM + auto-admin (the default; matches the v0.7 README quickstart).
 //! * `tenant`     — multi-tenancy enabled, operator console wired,
-//!                  tenancy_manage CLI scaffolded into src/bin/manage.rs.
+//!                  apex/subdomain host dispatch via `Cli::tenancy()`.
 //!
 //! Each template writes a self-contained Cargo project into `<cwd>/<name>/`:
 //!
@@ -23,16 +23,15 @@
 //!     docker-compose.yml
 //!     migrations/
 //!     src/
-//!       main.rs
+//!       main.rs        ← Cli::new()[.tenancy()].api(...).run() — single binary
 //!       models.rs
 //!       views.rs
 //!       urls.rs
-//!     src/bin/manage.rs
 //!
 //! Once written, the user typically runs:
 //!
 //!   $ cd <name> && docker compose up -d
-//!   $ cargo run --bin manage -- migrate
+//!   $ cargo run -- migrate
 //!   $ cargo run
 
 use std::fs;

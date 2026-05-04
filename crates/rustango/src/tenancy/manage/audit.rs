@@ -8,9 +8,9 @@
 //!   `(entity_table, entity_pk)` pair; delete the rest.
 //!
 //! ```text
-//! cargo run --bin manage -- audit-cleanup --days 90
-//! cargo run --bin manage -- audit-cleanup --keep-last 50
-//! cargo run --bin manage -- audit-cleanup --tenant acme --days 90
+//! cargo run -- audit-cleanup --days 90
+//! cargo run -- audit-cleanup --keep-last 50
+//! cargo run -- audit-cleanup --tenant acme --days 90
 //! ```
 
 use std::io::Write;
@@ -144,15 +144,15 @@ fn write_verb_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(w, "EXAMPLES:")?;
     writeln!(
         w,
-        "  cargo run --bin manage -- audit-cleanup --days 90"
+        "  cargo run -- audit-cleanup --days 90"
     )?;
     writeln!(
         w,
-        "  cargo run --bin manage -- audit-cleanup --keep-last 50"
+        "  cargo run -- audit-cleanup --keep-last 50"
     )?;
     writeln!(
         w,
-        "  cargo run --bin manage -- audit-cleanup --tenant acme --days 90"
+        "  cargo run -- audit-cleanup --tenant acme --days 90"
     )?;
     Ok(())
 }
