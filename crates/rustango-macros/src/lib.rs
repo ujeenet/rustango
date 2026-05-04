@@ -4854,6 +4854,15 @@ struct SerializerFieldAttrs {
     write_only: bool,
     source: Option<String>,
     skip: bool,
+    /// `#[serializer(method = "fn_name")]` — DRF SerializerMethodField
+    /// analog. The macro emits `from_model` initializer that calls
+    /// `Self::fn_name(&model)` and stores the return value.
+    method: Option<String>,
+    /// `#[serializer(validate = "fn_name")]` — per-field validator
+    /// callable run by `Self::validate(&self)`. Must return
+    /// `Result<(), String>`. Errors land in `FormErrors` keyed by
+    /// the field name.
+    validate: Option<String>,
 }
 
 fn parse_serializer_container_attrs(input: &DeriveInput) -> syn::Result<SerializerContainerAttrs> {
@@ -4904,9 +4913,19 @@ fn parse_serializer_field_attrs(field: &syn::Field) -> syn::Result<SerializerFie
                 out.source = Some(s.value());
                 return Ok(());
             }
+            if meta.path.is_ident("method") {
+                let s: LitStr = meta.value()?.parse()?;
+                out.method = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("validate") {
+                let s: LitStr = meta.value()?.parse()?;
+                out.validate = Some(s.value());
+                return Ok(());
+            }
             Err(meta.error(
-                "unknown serializer field attribute \
-                 (supported: `read_only`, `write_only`, `source`, `skip`)",
+                "unknown serializer field attribute (supported: \
+                 `read_only`, `write_only`, `source`, `skip`, `method`, `validate`)",
             ))
         })?;
     }
@@ -4915,6 +4934,13 @@ fn parse_serializer_field_attrs(field: &syn::Field) -> syn::Result<SerializerFie
         return Err(syn::Error::new_spanned(
             field,
             "a field cannot be both `read_only` and `write_only`",
+        ));
+    }
+    if out.method.is_some() && out.source.is_some() {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`method` and `source` are mutually exclusive — `method` computes \
+             the value from a method, `source` reads it from a different model field",
         ));
     }
     Ok(out)
@@ -4963,7 +4989,13 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // Generate from_model body: struct literal with each field assigned.
     let from_model_fields = fields_info.iter().map(|fi| {
         let ident = &fi.ident;
-        if fi.attrs.write_only || fi.attrs.skip {
+        if let Some(method) = &fi.attrs.method {
+            // SerializerMethodField: call Self::<method>(&model) to
+            // compute the value. Method signature must be
+            // `fn <method>(model: &T) -> <field type>`.
+            let method_ident = syn::Ident::new(method, ident.span());
+            quote! { #ident: Self::#method_ident(model) }
+        } else if fi.attrs.write_only || fi.attrs.skip {
             // Not read from model — use default
             quote! { #ident: ::core::default::Default::default() }
         } else if let Some(src) = &fi.attrs.source {
@@ -4973,6 +5005,41 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             quote! { #ident: ::core::clone::Clone::clone(&model.#ident) }
         }
     });
+
+    // Per-field validators (DRF-shape `validators=[...]`). Emit a
+    // `validate(&self)` method that runs each user-defined validator
+    // and aggregates errors into `FormErrors`.
+    let validator_calls: Vec<_> = fields_info.iter().filter_map(|fi| {
+        let ident = &fi.ident;
+        let name_lit = ident.to_string();
+        let method = fi.attrs.validate.as_ref()?;
+        let method_ident = syn::Ident::new(method, ident.span());
+        Some(quote! {
+            if let ::core::result::Result::Err(__e) = Self::#method_ident(&self.#ident) {
+                __errors.add(#name_lit.to_owned(), __e);
+            }
+        })
+    }).collect();
+    let validate_method = if validator_calls.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            impl #struct_name {
+                /// Run every `#[serializer(validate = "...")]` per-field
+                /// validator. Aggregates errors into `FormErrors` keyed
+                /// by the field name. Returns `Ok(())` when all pass.
+                pub fn validate(&self) -> ::core::result::Result<(), ::rustango::forms::FormErrors> {
+                    let mut __errors = ::rustango::forms::FormErrors::default();
+                    #( #validator_calls )*
+                    if __errors.is_empty() {
+                        ::core::result::Result::Ok(())
+                    } else {
+                        ::core::result::Result::Err(__errors)
+                    }
+                }
+            }
+        }
+    };
 
     // Generate custom Serialize: skip write_only fields
     let output_fields: Vec<_> = fields_info
@@ -5069,6 +5136,8 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
 
         #openapi_impl
+
+        #validate_method
     })
 }
 
