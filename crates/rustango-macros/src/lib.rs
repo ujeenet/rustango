@@ -4865,11 +4865,19 @@ struct SerializerFieldAttrs {
     validate: Option<String>,
     /// `#[serializer(nested)]` on a field whose type is another
     /// `Serializer` — the macro emits `from_model` initializer that
-    /// reads the parent via `model.<source>.value().expect(...)` then
-    /// calls the child serializer's `from_model(parent)`.
+    /// reads the parent via `model.<source>.value()` then calls the
+    /// child serializer's `from_model(parent)`. When the FK is
+    /// unloaded the field falls back to `Default::default()` (does
+    /// NOT panic) so a missing prefetch in prod degrades gracefully.
     /// Source field on the model defaults to the field name; override
-    /// with `source = "..."`.
+    /// with `source = "..."`. Combine with `strict` to keep the v0.18.1
+    /// panic-on-unloaded behavior for tests.
     nested: bool,
+    /// `#[serializer(nested, strict)]` — opt back into the v0.18.1
+    /// strict behavior: panic when the FK isn't loaded. Useful in
+    /// test code where forgetting select_related must trip a hard
+    /// failure rather than render a blank nested object.
+    nested_strict: bool,
 }
 
 fn parse_serializer_container_attrs(input: &DeriveInput) -> syn::Result<SerializerContainerAttrs> {
@@ -4932,6 +4940,17 @@ fn parse_serializer_field_attrs(field: &syn::Field) -> syn::Result<SerializerFie
             }
             if meta.path.is_ident("nested") {
                 out.nested = true;
+                // Optional strict flag inside parentheses:
+                //   #[serializer(nested(strict))]
+                if meta.input.peek(syn::token::Paren) {
+                    meta.parse_nested_meta(|inner| {
+                        if inner.path.is_ident("strict") {
+                            out.nested_strict = true;
+                            return Ok(());
+                        }
+                        Err(inner.error("unknown nested sub-attribute (supported: `strict`)"))
+                    })?;
+                }
                 return Ok(());
             }
             Err(meta.error(
@@ -5012,19 +5031,38 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             // this struct; override via `source = "..."`. The source
             // field on the model is expected to be a `ForeignKey<T>`
             // whose `.value()` returns `Option<&T>` after lazy-load.
-            // Caller must `.get(&pool).await?` or `.select_related(...)`
-            // before invoking from_model — otherwise the value is
-            // None and from_model panics with a hint.
+            //
+            // Behavior matrix (tweakable per-field):
+            //   * FK loaded   → nested object materializes via
+            //                   ChildSerializer::from_model(parent).
+            //   * FK unloaded → fall back to ChildSerializer::default()
+            //                   (so prod doesn't crash on a missing
+            //                   prefetch — just renders a blank nested
+            //                   object). Add `#[serializer(nested,
+            //                   strict)]` to keep the v0.18.1
+            //                   panic-on-unloaded behavior for tests
+            //                   that want hard guardrails.
             let src_name = fi.attrs.source.as_deref().unwrap_or(&fi.ident.to_string()).to_owned();
             let src_ident = syn::Ident::new(&src_name, ident.span());
-            let panic_msg = format!(
-                "nested serializer for `{ident}` requires `model.{src_name}` to be loaded — \
-                 call .get(&pool).await? or .select_related(\"{src_name}\") on the model first",
-            );
-            quote! {
-                #ident: <#ty as ::rustango::serializer::ModelSerializer>::from_model(
-                    model.#src_ident.value().expect(#panic_msg),
-                )
+            if fi.attrs.nested_strict {
+                let panic_msg = format!(
+                    "nested(strict) serializer for `{ident}` requires `model.{src_name}` to be loaded — \
+                     call .get(&pool).await? or .select_related(\"{src_name}\") on the model first",
+                );
+                quote! {
+                    #ident: <#ty as ::rustango::serializer::ModelSerializer>::from_model(
+                        model.#src_ident.value().expect(#panic_msg),
+                    )
+                }
+            } else {
+                quote! {
+                    #ident: match model.#src_ident.value() {
+                        ::core::option::Option::Some(__loaded) =>
+                            <#ty as ::rustango::serializer::ModelSerializer>::from_model(__loaded),
+                        ::core::option::Option::None =>
+                            ::core::default::Default::default(),
+                    }
+                }
             }
         } else if fi.attrs.write_only || fi.attrs.skip {
             // Not read from model — use default

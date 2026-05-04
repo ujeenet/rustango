@@ -66,10 +66,22 @@ pub struct AuthorBrief {
 pub struct CommentSerializer {
     pub id: Auto<i64>,
     pub body: String,
-    /// Auto-nested via the new attr — reads model.author (a
-    /// ForeignKey<LocalAuthor>), unwraps via .value(), and feeds the
-    /// borrowed parent to AuthorBrief::from_model.
+    /// Auto-nested. Default behavior: when model.author is unloaded
+    /// (no select_related, no .get()), falls back to
+    /// AuthorBrief::default() so the response doesn't crash.
     #[serializer(nested)]
+    pub author: AuthorBrief,
+}
+
+/// Same shape but with the `strict` flag — panics when the FK is
+/// unloaded. Useful in test code that wants a hard guardrail
+/// against forgetting a prefetch.
+#[derive(Serializer, serde::Deserialize, Default, Debug)]
+#[serializer(model = Comment)]
+pub struct CommentSerializerStrict {
+    pub id: Auto<i64>,
+    pub body: String,
+    #[serializer(nested(strict))]
     pub author: AuthorBrief,
 }
 
@@ -102,13 +114,47 @@ fn nested_serializer_pulls_parent_via_value_when_loaded() {
     assert_eq!(v["author"]["name"], "ada");
 }
 
+// §7g.2 — default (non-strict) behavior: FK unloaded → graceful
+// fallback. The nested object renders as Default::default() instead
+// of crashing. Production-safe when prefetches go missing.
+#[test]
+fn nested_serializer_falls_back_when_fk_unloaded_by_default() {
+    let comment = Comment {
+        id: Auto::Set(1),
+        body: "no-prefetch".into(),
+        author: ForeignKey::unloaded(7),
+    };
+    let s = CommentSerializer::from_model(&comment);
+    // No panic. Author is the Default value.
+    assert_eq!(s.body, "no-prefetch");
+    assert_eq!(s.author.name, ""); // Default::default() for String
+    let v = s.to_value();
+    assert_eq!(v["body"], "no-prefetch");
+    assert_eq!(v["author"]["name"], ""); // blank nested object
+}
+
+// §7g.3 — opt-in strict mode: panic when FK is unloaded. Useful for
+// test code that wants to fail loudly on missing prefetches.
 #[test]
 #[should_panic(expected = "requires `model.author` to be loaded")]
-fn nested_serializer_panics_when_fk_unloaded() {
+fn nested_strict_serializer_panics_when_fk_unloaded() {
     let comment = Comment {
         id: Auto::Set(1),
         body: "bad".into(),
-        author: ForeignKey::unloaded(7), // .value() returns None
+        author: ForeignKey::unloaded(7),
     };
-    let _ = CommentSerializer::from_model(&comment);
+    let _ = CommentSerializerStrict::from_model(&comment);
+}
+
+// §7g.4 — strict mode also works when FK IS loaded (no panic, real data).
+#[test]
+fn nested_strict_works_when_fk_loaded() {
+    let parent = ada();
+    let comment = Comment {
+        id: Auto::Set(1),
+        body: "loaded ok".into(),
+        author: ForeignKey::loaded(7, parent),
+    };
+    let s = CommentSerializerStrict::from_model(&comment);
+    assert_eq!(s.author.name, "ada");
 }
