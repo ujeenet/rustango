@@ -27,6 +27,9 @@ edition = "2021"
 [workspace]
 
 [dependencies]
+# `rustango` re-exports every proc-macro (Model / Form / ViewSet /
+# Serializer / embed_migrations / main), so you do NOT need to depend
+# on `rustango-macros` directly. Use `rustango::Model` etc.
 rustango = {rustango_dep}
 tokio = {{ version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }}
 axum = {{ version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }}
@@ -46,15 +49,20 @@ tokio = {{ version = "1", features = ["macros", "rt-multi-thread"] }}
 
 // ---------------- .env.example ----------------
 
-pub const ENV_EXAMPLE: &str = "# Copy this file to .env and edit the values for your environment.
-# `dotenvy::dotenv()` in src/bin/manage.rs picks it up at startup.
-DATABASE_URL=postgres://rustango:rustango@localhost:5432/rustango_dev
+pub fn env_example(name: &str) -> String {
+    format!(
+        "# Copy this file to .env and edit the values for your environment.
+# `dotenvy::dotenv()` in src/main.rs picks it up at startup.
+# Database name matches docker-compose.yml's POSTGRES_DB ({name}_dev).
+DATABASE_URL=postgres://rustango:rustango@localhost:5432/{name}_dev
 RUSTANGO_BIND=127.0.0.1:8080
 
 # Tenancy template only — apex domain + signing secret.
 RUSTANGO_APEX_DOMAIN=localhost
 RUSTANGO_SESSION_SECRET=change-me-base64-encoded-32-bytes-or-more
-";
+"
+    )
+}
 
 // ---------------- .gitignore ----------------
 
@@ -115,19 +123,23 @@ Generated with `cargo rustango new {name}` — template `{template_label}`.
 ```sh
 cp .env.example .env
 docker compose up -d
-cargo run --bin manage -- migrate    # apply pending migrations
+cargo run -- migrate                 # apply pending migrations
 cargo run                            # boot the HTTP server
+cargo run -- --help                  # full verb list (makemigrations, startapp, etc.)
 ```
+
+`cargo run` (no args) is `runserver`. Every other Django-style verb
+flows through the same binary via `rustango::manage::Cli` — see
+`src/main.rs`.
 
 ## Project layout
 
 ```text
 src/
-  main.rs         — boots the binary, wires the router
+  main.rs         — Cli::new().api(urls::api()).run() boots both server + verbs
   models.rs       — every #[derive(Model)] lives here
   views.rs        — request handlers (Django-style "views")
-  urls.rs         — pub fn router(pool) -> Router mapping paths → views
-  bin/manage.rs   — Django-style migration / scaffolding CLI
+  urls.rs         — pub fn api() -> Router aggregator
 
 migrations/       — JSON migration files (committed to git)
 ```
@@ -189,11 +201,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ";
 
-const MAIN_RS_TENANT: &str = r##"//! Tenant project entrypoint — `Cli::tenancy().run()` is the unified
-//! dispatcher. It owns the apex/subdomain host split, operator console
-//! mount, registry + tenant migrations, and `cargo run -- create-tenant`
-//! / `migrate-tenants` / `create-operator` / `create-user` verbs from
-//! one binary. No `src/bin/manage.rs` needed.
+const MAIN_RS_TENANT: &str = r##"//! Tenant project entrypoint — HTTP server serving both the operator
+//! console and per-tenant apps via subdomain routing.
 
 mod models;
 mod urls;
@@ -208,6 +217,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run().await
 }
 "##;
+
+// MANAGE_RS_TENANT removed in v0.16 — tenant projects now use the
+// same single-binary `Cli::new().tenancy().run()` shape as every
+// other template; src/main.rs is the one entrypoint.
 
 // ---------------- src/models.rs ----------------
 
@@ -369,7 +382,7 @@ pub fn api() -> Router<()> {
 /// Registry-scoped bootstrap migration shipped by `rustango::tenancy`.
 /// Embedded as a static string so `cargo rustango new --template tenant`
 /// drops a working `migrations/` dir into the new project — the very
-/// first `cargo run --bin manage -- migrate` creates `rustango_orgs` /
+/// first `cargo run -- migrate` creates `rustango_orgs` /
 /// `rustango_operators` without a separate `manage init-tenancy` step.
 ///
 /// Regenerate by running `cargo test -p rustango --test dump_bootstrap

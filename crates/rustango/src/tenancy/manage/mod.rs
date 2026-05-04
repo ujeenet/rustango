@@ -156,14 +156,14 @@ pub async fn run_with_writer<W: Write + Send>(
     }
 }
 
-/// Render the curated help text for `cargo run --bin manage` (or
+/// Render the curated help text for `cargo run` (or
 /// equivalent). Covers every tenancy verb with a brief description +
 /// the most common flags, then the registry-scoped verbs that fall
 /// through to `rustango::migrate::manage`.
 ///
 /// Public so generated `manage.rs` binaries can short-circuit the
 /// `help` / `--help` / `-h` / no-args case **before** connecting to
-/// Postgres — otherwise `cargo run --bin manage -- help` would error
+/// Postgres — otherwise `cargo run -- help` would error
 /// with "missing DATABASE_URL" and the user couldn't see the help.
 ///
 /// # Errors
@@ -173,7 +173,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(w, "rustango manage CLI — tenancy-aware dispatcher")?;
     writeln!(w)?;
     writeln!(w, "USAGE:")?;
-    writeln!(w, "  cargo run --bin manage -- <verb> [args]")?;
+    writeln!(w, "  cargo run -- <verb> [args]")?;
     writeln!(w)?;
     writeln!(w, "TENANT MANAGEMENT:")?;
     writeln!(
@@ -312,13 +312,13 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(w)?;
     writeln!(w, "EXAMPLES:")?;
-    writeln!(w, "  cargo run --bin manage -- migrate")?;
-    writeln!(w, "  cargo run --bin manage -- create-operator admin --password letmein")?;
-    writeln!(w, "  cargo run --bin manage -- create-tenant acme --display-name 'ACME Corp'")?;
-    writeln!(w, "  cargo run --bin manage -- create-user acme alice --password hunter2 --superuser")?;
-    writeln!(w, "  cargo run --bin manage -- list-tenants")?;
-    writeln!(w, "  cargo run --bin manage -- audit-cleanup --days 90")?;
-    writeln!(w, "  cargo run --bin manage -- audit-cleanup --keep-last 50 --tenant acme")?;
+    writeln!(w, "  cargo run -- migrate")?;
+    writeln!(w, "  cargo run -- create-operator admin --password letmein")?;
+    writeln!(w, "  cargo run -- create-tenant acme --display-name 'ACME Corp'")?;
+    writeln!(w, "  cargo run -- create-user acme alice --password hunter2 --superuser")?;
+    writeln!(w, "  cargo run -- list-tenants")?;
+    writeln!(w, "  cargo run -- audit-cleanup --days 90")?;
+    writeln!(w, "  cargo run -- audit-cleanup --keep-last 50 --tenant acme")?;
     writeln!(w)?;
     writeln!(w, "Run any verb with --help for verb-specific flags + details.")?;
     Ok(())

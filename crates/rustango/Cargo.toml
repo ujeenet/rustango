@@ -23,8 +23,15 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3", "media"]
+default = ["postgres", "manage", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3", "media"]
 postgres = ["sqlx/postgres"]
+
+# Unified `cargo run` / `cargo run -- <verb>` dispatcher. Pulls the
+# minimum axum + tokio surface so bare-API projects (without admin)
+# can still use `rustango::manage::Cli::new().api(...).run().await`.
+# v0.16+. Default-on so `cargo rustango new` projects work with no
+# extra opt-ins.
+manage = ["dep:axum", "dep:tokio", "runtime"]
 
 # MySQL 8.4+ backend. Lands fully in rustango v0.23.0-batch2 (when the
 # `MySqlDialect` impl + DDL writer dispatch ship); the `mysql` feature

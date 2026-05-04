@@ -127,26 +127,10 @@ impl Cli {
     }
 
     async fn dispatch(self, args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
-        let url = std::env::var("DATABASE_URL").map_err(|_| {
-            "missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`."
-        })?;
-
-        #[cfg(feature = "tenancy")]
-        if self.tenancy {
-            let pool = PgPool::connect(&url).await?;
-            let pools = crate::tenancy::TenantPools::new(pool);
-            crate::tenancy::manage::run(&pools, &url, &self.migrations_dir, args).await?;
-            return Ok(());
-        }
-        #[cfg(not(feature = "tenancy"))]
-        if self.tenancy {
-            return Err("Cli::tenancy() requires the `tenancy` feature".into());
-        }
-
-        // Single-tenant verbs that don't need a real pool (help,
-        // makemigrations, scaffolding, etc.) tolerate a lazy connect
-        // so users without DATABASE_URL set can still scaffold.
-        let needs_db = !matches!(
+        // Verbs that print info and never touch the DB. We let these
+        // run even when DATABASE_URL is unset so users can scaffold or
+        // read help without configuring Postgres first.
+        let no_db_verb = matches!(
             args.first().map(String::as_str),
             Some("help") | Some("--help") | Some("-h")
                 | Some("startapp") | Some("makemigrations")
@@ -156,10 +140,31 @@ impl Cli {
                 | Some("make:notification") | Some("make:middleware")
                 | Some("make:test")
         );
-        let pool = if needs_db {
-            PgPool::connect(&url).await?
-        } else {
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://offline".into());
+        if !no_db_verb && std::env::var("DATABASE_URL").is_err() {
+            return Err("missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`.".into());
+        }
+
+        #[cfg(feature = "tenancy")]
+        if self.tenancy {
+            let pool = if no_db_verb {
+                PgPool::connect_lazy(&url)?
+            } else {
+                PgPool::connect(&url).await?
+            };
+            let pools = crate::tenancy::TenantPools::new(pool);
+            crate::tenancy::manage::run(&pools, &url, &self.migrations_dir, args).await?;
+            return Ok(());
+        }
+        #[cfg(not(feature = "tenancy"))]
+        if self.tenancy {
+            return Err("Cli::tenancy() requires the `tenancy` feature".into());
+        }
+
+        let pool = if no_db_verb {
             PgPool::connect_lazy(&url)?
+        } else {
+            PgPool::connect(&url).await?
         };
         crate::migrate::manage::run(&pool, &self.migrations_dir, args).await?;
         Ok(())

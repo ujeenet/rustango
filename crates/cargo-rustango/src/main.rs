@@ -113,7 +113,8 @@ impl Template {
 
     fn rustango_features(self) -> &'static str {
         match self {
-            Self::Api => r#"{ version = "0.22", default-features = false, features = ["postgres"] }"#,
+            // Bare ORM + axum + manage dispatcher; no auto-admin UI.
+            Self::Api => r#"{ version = "0.22", default-features = false, features = ["postgres", "manage"] }"#,
             Self::Fullstack => r#""0.22""#,
             Self::Tenant => r#"{ version = "0.22", features = ["tenancy"] }"#,
         }
@@ -150,9 +151,11 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
     println!();
     println!("done. next:");
     println!("  cd {}", parsed.name);
+    println!("  cp .env.example .env");
     println!("  docker compose up -d");
-    println!("  cargo run --bin manage -- migrate");
-    println!("  cargo run");
+    println!("  cargo run -- migrate    # apply pending migrations");
+    println!("  cargo run               # boot the HTTP server");
+    println!("  cargo run -- --help     # full verb list");
     Ok(())
 }
 
@@ -206,7 +209,7 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     let template = args.template;
 
     write(root, "Cargo.toml", &templates::cargo_toml(name, template))?;
-    write(root, ".env.example", templates::ENV_EXAMPLE)?;
+    write(root, ".env.example", &templates::env_example(name))?;
     write(root, ".gitignore", templates::GITIGNORE)?;
     write(root, "rust-toolchain.toml", templates::RUST_TOOLCHAIN)?;
     write(root, "docker-compose.yml", &templates::docker_compose(name))?;
@@ -222,8 +225,8 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
 
     // Tenant projects need the framework's registry+tenant bootstrap
     // migrations from day one — without them the very first
-    // `cargo run --bin manage -- migrate` reports "nothing to migrate"
-    // and then errors when the tenant pass queries the (non-existent)
+    // `cargo run -- migrate` reports "nothing to migrate" and then
+    // errors when the tenant pass queries the (non-existent)
     // `rustango_orgs` table. Drop the same JSON `init-tenancy` would
     // produce so the project is `migrate`-ready out of the box.
     if matches!(template, Template::Tenant) {

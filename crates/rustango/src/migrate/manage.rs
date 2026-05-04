@@ -20,8 +20,8 @@
 //! }
 //! ```
 //!
-//! UX: `cargo run --bin manage -- migrate`,
-//! `cargo run --bin manage -- makemigrations [name]`, etc. The
+//! UX: `cargo run -- migrate`,
+//! `cargo run -- makemigrations [name]`, etc. The
 //! framework owns the dispatcher; the user owns the entrypoint
 //! (which must compile in their models). Same factoring as Django's
 //! `manage.py` adapted for Rust's link-by-binary model.
@@ -704,7 +704,7 @@ fn startapp<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
         base_dir: into.map(std::path::PathBuf::from),
     };
     // Project root = current working directory. Most users run
-    // `cargo run --bin manage -- startapp …` from the project root,
+    // `cargo run -- startapp …` from the project root,
     // which is exactly where Cargo.toml lives. Document this in the
     // help string so non-default invocations are an explicit `cd`.
     let cwd = std::env::current_dir()?;

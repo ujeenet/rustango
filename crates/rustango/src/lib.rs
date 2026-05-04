@@ -585,9 +585,10 @@ pub mod server;
 
 /// Unified manage runner — collapses `src/main.rs` + `src/bin/manage.rs`
 /// boilerplate into one [`manage::Cli`] builder. Tenancy variant
-/// available when the `tenancy` feature is on. Requires `admin` because
-/// the runserver path mounts an `axum::Router` (which `admin` brings in).
-#[cfg(feature = "admin")]
+/// available when the `tenancy` feature is on. Behind the `manage`
+/// feature (default-on) which pulls a minimal axum + tokio surface
+/// so bare-API projects (no admin) can still use the dispatcher.
+#[cfg(feature = "manage")]
 pub mod manage;
 
 /// `#[rustango::main]` — the Django-shape `runserver` entrypoint.
