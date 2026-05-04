@@ -741,11 +741,53 @@ live in rustango's own viewset / order_by_annotate_live tests.
 
 ## Chapter 10 — Templates + static
 
-*(Slice 6)*
+3 tests on the Tera template surface that the admin (Chapter 8) +
+operator console use. No DB needed.
+Run with `cargo test --test cookbook_chapter10_templates`.
+
+* §10.119 `tera::Tera::default() + add_raw_template + render(name, ctx)`
+  → `tera_template_renders_with_context`
+* §10.119 `t.autoescape_on(vec!["html"])` — HTML special chars in
+  context get escaped. → `tera_template_autoescapes_html`
+* §10.122 `{% extends %} + {% block %}` template inheritance — child
+  blocks override parent fallbacks. → `tera_extends_inherits_blocks_from_base`
+
+The `render_generic_fk_link` helper (§10.121) is exercised live in
+Chapter 2's `generic_fk_schema_and_content_type_lookup`.
+
+*Sub-section 10.120 (Tera rendering from view handlers) and 10.123
+(static-file serving) queued for Slice 10b.*
 
 ## Chapter 11 — Async / IO / extensions
 
-*(Slice 7)*
+7 tests on the most-used extension surfaces. No DB / network needed.
+Run with `cargo test --test cookbook_chapter11_extensions`.
+
+* §11.135 `cache::get_or_set(&dyn Cache, key, factory, ttl)` —
+  loader runs once; subsequent reads hit the cached value.
+  → `cache_get_or_set_memoizes_loader`,
+  `cache_set_get_json_round_trips`
+* §11.128 `webhook::sign(format, secret, body)` +
+  `verify_signature(...)` round-trip. `HexSha256` produces a raw hex
+  digest; `HexSha256WithPrefix` produces GitHub's `sha256=<hex>`
+  shape; `Base64Sha256` for Stripe-style headers.
+  → `webhook_sign_then_verify_round_trip`,
+  `webhook_github_prefix_format`
+* §11.92 `signed_url::sign[_at](url, secret, ttl|None)` +
+  `verify[_at](signed, secret[, now_secs])` for one-time / time-bounded
+  URLs. → `signed_url_sign_then_verify_at_respects_expiry`,
+  `signed_url_no_expiry_always_verifies`
+* §11.126 `Scheduler::new().every(name, period, job).start()` runs
+  jobs at the given period; `Handle::shutdown()` stops further fires.
+  → `scheduler_every_fires_periodic_job`
+
+*Sub-sections 11.124 (WS hub), 11.125 (SSE), 11.127 (jobs queue),
+11.129 (http_client retry/UA), 11.130 (email backends),
+11.131 (storage filesystem), 11.132 (storage S3), 11.133 (media uploads),
+11.134 (notifications), 11.137 (signals — wire receivers to model
+save/delete events), 11.138 (compression middleware), 11.139 (CSP nonce)
+queued for Slice 11b. Several have framework-level live tests under
+rustango/tests already.*
 
 ## Chapter 12 — Bi-dialect + cross-cutting
 
