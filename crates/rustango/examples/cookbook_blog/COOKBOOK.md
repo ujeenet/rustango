@@ -791,7 +791,42 @@ rustango/tests already.*
 
 ## Chapter 12 — Bi-dialect + cross-cutting
 
-*(Slice 3 + Slice 8)*
+2 live tests against a docker MySQL 8.0 container, exercising the
+same cookbook model that PG tests use through the dialect-agnostic
+`Pool` + `save_pool` / `fetch_pool` ORM API. Run with:
+
+```sh
+docker run -d --name rustango-mysql \
+  -e MYSQL_ROOT_PASSWORD=rustango -e MYSQL_DATABASE=cookbook_blog_my \
+  -e MYSQL_USER=rustango -e MYSQL_PASSWORD=rustango \
+  -p 3406:3306 mysql:8.0
+
+MYSQL_TEST_URL=mysql://rustango:rustango@127.0.0.1:3406/cookbook_blog_my \
+  cargo test --test cookbook_chapter12_bidialect
+```
+
+* §12.140 / §12.141 — `Rating` model save + fetch + multi-row decode
+  via `Pool::Mysql` and `save_pool` / `fetch_pool`. Exercises
+  AUTO_INCREMENT for `Auto<i64>`, BIGINT round-trip, and the
+  Backend trait dispatch the v0.17.1 macro refactor enabled.
+  → `cookbook_rating_round_trips_against_mysql`,
+  `mysql_decodes_multi_row_select`
+
+**Surfaced limitation**: the cookbook's `Author` model can't run on
+MySQL because it has two `Auto<T>` columns (`id: Auto<i64>` PK +
+`joined_at: Auto<DateTime>` from `auto_now_add`). MySQL only supports
+single-column RETURNING via `LAST_INSERT_ID()`, so `save_pool` errors
+with `OperatorNotSupportedInDialect { op: "multi-column RETURNING",
+dialect: "mysql" }`. Not a bug — a known dialect divergence the
+framework surfaces as a clear runtime error. Workaround: drop the
+`auto_now_add` mixin on MySQL-targeted models, or split the timestamp
+column off into a trigger-managed shape.
+
+*Sub-sections 12.142 (connection-pool tuning), 12.143 (tracing
+subscriber + structured logs), 12.144 (manage check warnings),
+12.145 (health endpoint), 12.146 (graceful shutdown), 12.147 (test
+client utilities), 12.148 (inventory mechanism), 12.149 (macro
+hygiene), 12.150 (project-shape conventions) queued for Slice 12b.*
 
 ---
 

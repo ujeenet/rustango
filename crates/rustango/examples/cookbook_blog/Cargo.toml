@@ -22,7 +22,7 @@ path = "src/main.rs"
 
 [dependencies]
 rustango = { path = "../..", default-features = false, features = [
-    "postgres", "manage", "admin", "config", "forms", "serializer",
+    "postgres", "mysql", "manage", "admin", "config", "forms", "serializer",
     "cache", "signals", "email", "storage", "scheduler", "secrets",
     "totp", "webhook", "webhook-delivery", "api_keys", "passwords",
     "signed_url", "notifications", "jobs", "jobs-postgres",
@@ -43,7 +43,7 @@ dotenvy = "0.15"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "uuid", "json"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "mysql", "chrono", "uuid", "json"] }
 serde_json = "1"
 http = "1"
 futures = "0.3"
