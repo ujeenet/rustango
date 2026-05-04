@@ -20,7 +20,7 @@
 //! cargo test --test cookbook_chapter12_bidialect
 //! ```
 
-use cookbook_blog::apps::blog::models::Rating;
+use cookbook_blog::apps::blog::models::{Author, Rating};
 use rustango::core::Op;
 use rustango::sql::{sqlx, Auto, FetcherPool, Pool};
 
@@ -64,6 +64,64 @@ async fn cookbook_rating_round_trips_against_mysql() {
         .fetch_pool(&p).await.expect("fetch_pool against mysql");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].score, 4);
+}
+
+// §12.140b — multi-Auto<T> model (Auto<i64> PK + auto_now_add
+// joined_at) used to error hard with "multi-column RETURNING" on
+// MySQL. v0.20 path: insert succeeds, first Auto fills from
+// LAST_INSERT_ID(); other Autos stay Unset; caller re-fetches by PK
+// to materialize the DB-defaulted timestamp.
+#[tokio::test]
+async fn mysql_multi_auto_inserts_then_refetches_for_remaining_fields() {
+    let Some(p) = pool().await else { return };
+    fresh_author_table(&p).await;
+
+    let mut a = Author {
+        id: Auto::Unset,
+        name: "ada".into(),
+        email: "ada@example.com".into(),
+        bio: Some("multi-auto on mysql".into()),
+        joined_at: Auto::Unset,
+    };
+    a.save_pool(&p).await.expect("multi-Auto INSERT no longer errors on MySQL");
+    let id = match a.id { Auto::Set(v) => v, _ => panic!("PK Auto must be set") };
+    assert!(id > 0);
+
+    // joined_at stayed Unset on MySQL (we don't follow-up-SELECT).
+    assert!(matches!(a.joined_at, Auto::Unset),
+        "MySQL multi-Auto path leaves trailing Auto fields Unset; got {:?}", a.joined_at);
+
+    // Re-fetch by PK materializes joined_at via the regular FromRow
+    // path — same shape as Django apps that .refresh_from_db() after
+    // save when they need server-set timestamps.
+    let rows: Vec<Author> = Author::objects()
+        .filter("id", Op::Eq, id)
+        .fetch_pool(&p).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let loaded_joined_at = match rows[0].joined_at {
+        Auto::Set(t) => t,
+        Auto::Unset => panic!("after refetch joined_at must be set by the DB DEFAULT"),
+    };
+    let drift = (chrono::Utc::now() - loaded_joined_at).num_seconds().abs();
+    assert!(drift < 60, "auto_now_add joined_at should be ~now, drifted {drift}s");
+}
+
+async fn fresh_author_table(p: &Pool) {
+    use sqlx::Executor as _;
+    let raw = match p {
+        Pool::Postgres(_) => unreachable!("MYSQL_TEST_URL"),
+        Pool::Mysql(my) => my,
+    };
+    raw.execute("DROP TABLE IF EXISTS cookbook_author").await.unwrap();
+    raw.execute(
+        r#"CREATE TABLE cookbook_author (
+            id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(80) NOT NULL,
+            email VARCHAR(200) NOT NULL UNIQUE,
+            bio VARCHAR(500) NULL,
+            joined_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+        ) ENGINE=InnoDB"#,
+    ).await.unwrap();
 }
 
 // §12.141 — bulk i64 ↔ MySQL BIGINT decode (regression for batch3).

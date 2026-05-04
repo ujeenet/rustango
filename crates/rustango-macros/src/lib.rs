@@ -2713,28 +2713,28 @@ fn inherent_impl_tokens(
     let assign_auto_pk_pool_impl = {
         let auto_assigns = &fields.auto_assigns;
         let mysql_body = if let Some(first) = fields.first_auto_ident.as_ref() {
-            let auto_count = fields.auto_assigns.len();
             // The MySQL `LAST_INSERT_ID()` is always i64. Route through
             // `MysqlAutoIdSet` so Auto<i32> narrows safely and
             // Auto<Uuid>/etc. fail to link against MySQL (intended —
             // those models can't use AUTO_INCREMENT). The trait is only
             // touched on the MySQL arm at runtime, so PG-only consumers
             // never see the bound failure.
+            //
+            // Pre-v0.20: models with multiple `Auto<T>` fields (e.g.
+            // Auto<i64> PK + auto_now_add timestamp) errored hard at
+            // runtime with "multi-column RETURNING". MySQL has no
+            // multi-column RETURNING semantic and a follow-up SELECT
+            // would need cross-trait plumbing. Pragmatic shape: succeed
+            // with the FIRST Auto field populated from LAST_INSERT_ID();
+            // any other Auto fields stay `Auto::Unset`. Callers that
+            // need the DB-defaulted timestamp / UUID can re-fetch the
+            // row by PK after `save_pool`. Fixes the cookbook chapter
+            // 12 dialect divergence.
             let value_ty = fields
                 .first_auto_value_ty
                 .as_ref()
                 .expect("first_auto_value_ty set whenever first_auto_ident is");
             quote! {
-                if #auto_count > 1 {
-                    return ::core::result::Result::Err(
-                        ::rustango::sql::ExecError::Sql(
-                            ::rustango::sql::SqlError::OperatorNotSupportedInDialect {
-                                op: "multi-column RETURNING",
-                                dialect: "mysql",
-                            },
-                        ),
-                    );
-                }
                 let _converted = <#value_ty as ::rustango::sql::MysqlAutoIdSet>
                     ::rustango_from_mysql_auto_id(_id)?;
                 self.#first = ::rustango::sql::Auto::Set(_converted);
