@@ -618,7 +618,35 @@ framework's tenant_auth_live), 6.80 (ViewSet typed perms),
 
 ## Chapter 7 — Forms + serializer
 
-*(Slice 5)*
+6 tests covering `ModelFormFor<T>` parse/from_json/error aggregation/
+bound-validation/null handling/insert-query emission. No DB needed.
+Run with `cargo test --test cookbook_chapter07_forms`.
+
+* §7.95 `ModelFormFor::<T>::parse(&HashMap<String,String>)` — form-
+  encoded payload → `(columns, values)` with per-field bound
+  validation. Auto<T> PK and `auto_now_add` columns are skipped
+  (DB fills them). → `modelform_parses_form_encoded_into_typed_values`
+* §7.95 missing required fields aggregate into `FormErrors`, one
+  entry per field. → `modelform_missing_required_fields_aggregate_errors`
+* §7.96 `ModelFormFor::<T>::from_json(&serde_json::Value)` — JSON
+  request body. Null values on `Option<T>` write explicit
+  `SqlValue::Null`. → `modelform_from_json_parses_object`,
+  `modelform_from_json_null_writes_explicit_null`
+* §7.98 `min`/`max` bounds run at parse time. Out-of-range values
+  land in `FormErrors` keyed by field. →
+  `modelform_bound_violation_lands_in_form_errors`
+* §7.99 `into_insert_query()` emits an `InsertQuery` against the
+  model's table. → `modelform_into_insert_query_targets_model_table`
+
+**Framework bug fixed during this slice**: `ModelFormFor::parse`
+required EVERY field including `auto_now_add` columns (e.g.
+`joined_at: Auto<DateTime<Utc>>`), which the macro skips on INSERT
+because `DEFAULT NOW()` fills them. Fix: skip every `auto = true`
+field (was: only `auto && primary_key`).
+
+*Sub-sections 7.93 (raw `Form` derive), 7.94 (admin's hand-rolled
+ModelForm engine), 7.97 (parse_form_value per type), 7.98b (custom
+validators), 7.99b (Serializer derive) queued for Slice 7b.*
 
 ## Chapter 8 — Admin
 
