@@ -128,10 +128,93 @@ async fn submit_new_form(
     Redirect::to("/api/authors").into_response()
 }
 
+// ---------------- non-admin EDIT form (Chapter 7d) ----------------
+
+/// GET /authors/{id}/edit — fetch the row, pre-fill the form.
+async fn show_edit_form(
+    mut tenant: Tenant,
+    Path(id): Path<i64>,
+) -> Result<Html<String>, (StatusCode, String)> {
+    let mut rows: Vec<Author> = Author::objects()
+        .filter("id", Op::Eq, id)
+        .fetch_on(tenant.conn())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let a = rows.pop().ok_or((StatusCode::NOT_FOUND, format!("author {id} not found")))?;
+    Ok(edit_form(id, &a, None))
+}
+
+async fn submit_edit_form(
+    mut tenant: Tenant,
+    Path(id): Path<i64>,
+    axum::Form(form): axum::Form<HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use rustango::core::SqlValue;
+
+    let mf = match ModelFormFor::<Author>::parse(&form) {
+        Ok(mf) => mf,
+        Err(errors) => {
+            // Synthesize an Author from the form values so the re-render
+            // shows what the user typed (not the persisted row).
+            let preview = form_preview(&form);
+            return edit_form(id, &preview, Some(&errors.to_string()))
+                .into_response();
+        }
+    };
+    let query = match mf.into_update_query(SqlValue::I64(id)) {
+        Some(q) => q,
+        None => return (StatusCode::INTERNAL_SERVER_ERROR, "Author has no PK").into_response(),
+    };
+    if let Err(e) = rustango::sql::update_on(tenant.conn(), &query).await {
+        let preview = form_preview(&form);
+        return edit_form(id, &preview, Some(&e.to_string())).into_response();
+    }
+    Redirect::to(&format!("/api/authors/{id}")).into_response()
+}
+
+fn form_preview(form: &HashMap<String, String>) -> Author {
+    Author {
+        id: Auto::Unset, // unused on render
+        name: form.get("name").cloned().unwrap_or_default(),
+        email: form.get("email").cloned().unwrap_or_default(),
+        bio: form.get("bio").cloned().filter(|s| !s.is_empty()),
+        joined_at: Auto::Unset,
+    }
+}
+
+fn edit_form(id: i64, a: &Author, error: Option<&str>) -> Html<String> {
+    let banner = error
+        .map(|e| format!(r#"<p class="error" style="color:#b00">{}</p>"#, html_escape(e)))
+        .unwrap_or_default();
+    Html(format!(
+        r#"<!doctype html>
+<html><head><meta charset="utf-8"><title>Edit Author #{id}</title></head>
+<body>
+  <h1>Edit Author #{id}</h1>
+  {banner}
+  <form method="POST" action="/authors/{id}/edit">
+    <p><label>Name <input name="name" type="text" required value="{}"></label></p>
+    <p><label>Email <input name="email" type="email" required value="{}"></label></p>
+    <p><label>Bio <textarea name="bio">{}</textarea></label></p>
+    <p>
+      <button type="submit">Save changes</button>
+      <a href="/api/authors/{id}">Cancel</a>
+    </p>
+  </form>
+</body></html>
+"#,
+        html_escape(&a.name),
+        html_escape(&a.email),
+        html_escape(a.bio.as_deref().unwrap_or("")),
+    ))
+}
+
 #[must_use]
 pub fn api() -> Router {
     Router::new()
         .route("/api/authors", get(list_or_create))
         .route("/api/authors/{id}", get(retrieve))
         .route("/authors/new", get(show_new_form).post(submit_new_form))
+        .route("/authors/{id}/edit", get(show_edit_form).post(submit_edit_form))
 }
