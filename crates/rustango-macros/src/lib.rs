@@ -4878,6 +4878,15 @@ struct SerializerFieldAttrs {
     /// test code where forgetting select_related must trip a hard
     /// failure rather than render a blank nested object.
     nested_strict: bool,
+    /// `#[serializer(many = TagSerializer)]` — declare the field as
+    /// a list of nested serializers. Field type must be `Vec<S>`
+    /// where `S` is the inner serializer. The macro initializes the
+    /// field to `Vec::new()` in `from_model` and emits a typed
+    /// `set_<field>(&mut self, models: &[<S::Model>])` helper that
+    /// maps each model row through `S::from_model`. Auto-load isn't
+    /// possible (the M2M / one-to-many accessor is async); callers
+    /// fetch the children + call the setter post-from_model.
+    many: Option<syn::Type>,
 }
 
 fn parse_serializer_container_attrs(input: &DeriveInput) -> syn::Result<SerializerContainerAttrs> {
@@ -4936,6 +4945,11 @@ fn parse_serializer_field_attrs(field: &syn::Field) -> syn::Result<SerializerFie
             if meta.path.is_ident("validate") {
                 let s: LitStr = meta.value()?.parse()?;
                 out.validate = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("many") {
+                let _eq: syn::Token![=] = meta.input.parse()?;
+                out.many = Some(meta.input.parse()?);
                 return Ok(());
             }
             if meta.path.is_ident("nested") {
@@ -5020,7 +5034,12 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let from_model_fields = fields_info.iter().map(|fi| {
         let ident = &fi.ident;
         let ty = &fi.ty;
-        if let Some(method) = &fi.attrs.method {
+        if let Some(_inner) = &fi.attrs.many {
+            // Many — collection field. Initialize empty; caller
+            // populates via the macro-emitted set_<field> helper
+            // after fetching the M2M children.
+            quote! { #ident: ::std::vec::Vec::new() }
+        } else if let Some(method) = &fi.attrs.method {
             // SerializerMethodField: call Self::<method>(&model) to
             // compute the value. Method signature must be
             // `fn <method>(model: &T) -> <field type>`.
@@ -5106,6 +5125,39 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         ::core::result::Result::Err(__errors)
                     }
                 }
+            }
+        }
+    };
+
+    // For every `#[serializer(many = S)]` field, emit a
+    // `pub fn set_<field>(&mut self, models: &[<S::Model>]) -> &mut Self`
+    // helper that maps the parents through `S::from_model`.
+    let many_setters: Vec<_> = fields_info.iter().filter_map(|fi| {
+        let many_ty = fi.attrs.many.as_ref()?;
+        let ident = &fi.ident;
+        let setter = syn::Ident::new(&format!("set_{ident}"), ident.span());
+        Some(quote! {
+            /// Populate this `many` field by mapping each parent model
+            /// through the inner serializer's `from_model`. Call after
+            /// fetching the M2M / one-to-many children since
+            /// `from_model` itself can't await an SQL query.
+            pub fn #setter(
+                &mut self,
+                models: &[<#many_ty as ::rustango::serializer::ModelSerializer>::Model],
+            ) -> &mut Self {
+                self.#ident = models.iter()
+                    .map(<#many_ty as ::rustango::serializer::ModelSerializer>::from_model)
+                    .collect();
+                self
+            }
+        })
+    }).collect();
+    let many_setters_impl = if many_setters.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            impl #struct_name {
+                #( #many_setters )*
             }
         }
     };
@@ -5207,6 +5259,8 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #openapi_impl
 
         #validate_method
+
+        #many_setters_impl
     })
 }
 
