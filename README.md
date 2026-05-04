@@ -71,7 +71,7 @@ cargo install bacon
 bacon run
 ```
 
-You should see the **welcome page** confirming rustango is wired up. Replace `welcome_router()` in `src/main.rs` once you mount your own `/` route.
+You should see the scaffolded landing page (`src/views.rs::index`) at `/` confirming rustango is wired up. Replace it with your own handler — or mount a real router under `/` — when you're ready.
 
 ### 4. Add an app + model
 
@@ -132,33 +132,34 @@ myblog/
 ├── docker-compose.yml          # Postgres in a container for local dev
 ├── README.md
 ├── migrations/                 # JSON files written by `cargo run -- makemigrations`
-├── src/
-│   ├── main.rs                 # one binary — HTTP server + manage CLI
-│   ├── lib.rs                  # `pub mod` registry of every app module
-│   ├── urls.rs                 # top-level Router composition
-│   ├── models.rs               # OR per-app: src/blog/models.rs
-│   └── views.rs
-└── tests/                      # integration tests using test_client
+└── src/
+    ├── main.rs                 # one binary — HTTP server + manage CLI; declares `mod`s here
+    ├── urls.rs                 # top-level Router composition
+    ├── models.rs               # OR per-app: src/blog/models.rs
+    └── views.rs
 ```
 
 Since v0.16 the `manage` CLI is dispatched from `main.rs` via
 `rustango::manage::Cli` — running `cargo run` with no args starts
 the HTTP server, and `cargo run -- <verb>` dispatches a CLI command.
-There is no longer a separate `src/bin/manage.rs`. A minimal
-`main.rs` looks like:
+There is no longer a separate `src/bin/manage.rs`, and the scaffold
+is binary-only (no `src/lib.rs`) — apps are declared as `mod blog;`
+inside `src/main.rs`. The scaffolded `main.rs` is just:
 
 ```rust
+mod models;
+mod urls;
+mod views;
+
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    rustango::manage::Cli::new()
-        .api(myblog::urls::router())
-        .tenancy()                           // optional; only with `tenancy` feature
-        .migrations_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
-        .run()
-        .await
+    rustango::manage::Cli::new().api(urls::api()).run().await
 }
 ```
+
+The `tenant` template additionally calls `.tenancy()` and
+`.migrations_dir(...)` on the `Cli` builder.
 
 Per-app structure (created by `cargo run -- startapp <name>`):
 
@@ -214,7 +215,7 @@ cargo run -- make:form ContactForm
 cargo run -- make:job EmailDigestJob
 cargo run -- make:notification WelcomeEmail
 cargo run -- make:middleware AuditLog
-cargo run -- make:test post_smoke
+cargo run -- make:test PostSmoke               # PascalCase — file is post_smoke.rs
 ```
 
 ### System

@@ -97,7 +97,7 @@ pub fn startapp(
     let mod_body = render_mod_template(&opts.app_name);
     let entries: [(&str, String); 5] = [
         ("mod.rs", mod_body),
-        ("models.rs", MODELS_TEMPLATE.into()),
+        ("models.rs", render_models_template(&opts.app_name)),
         ("views.rs", VIEWS_TEMPLATE.into()),
         ("urls.rs", URLS_TEMPLATE.into()),
         ("tests.rs", TESTS_TEMPLATE.into()),
@@ -342,8 +342,23 @@ fn render_mod_template(app_name: &str) -> String {
     )
 }
 
-/// Default `models.rs` body — a single starter `Item` model.
-const MODELS_TEMPLATE: &str = "//! App models — every `#[derive(Model)]` lives here.
+/// Default `models.rs` body — a single starter model named after
+/// the app (e.g. `startapp blog` → `pub struct Blog` on table
+/// `"blog"`). Parameterising the struct + table name avoids
+/// colliding with the project-root `Item` example or with another
+/// app's `Item`.
+fn render_models_template(app_name: &str) -> String {
+    let struct_name = app_name
+        .split('_')
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let mut chars = s.chars();
+            chars.next().map(|c| c.to_ascii_uppercase()).into_iter()
+                .chain(chars.flat_map(char::to_lowercase))
+                .collect::<String>()
+        })
+        .collect::<String>();
+    format!("//! App models — every `#[derive(Model)]` lives here.
 //!
 //! Adding a struct here makes it admin-visible automatically: the
 //! macro populates the `inventory` registry that
@@ -354,39 +369,37 @@ use rustango::sql::Auto;
 use rustango::Model;
 
 #[derive(Model, Debug, Clone)]
-#[rustango(table = \"item\", display = \"name\")]
-pub struct Item {
+#[rustango(table = \"{app_name}\", display = \"name\")]
+pub struct {struct_name} {{
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     #[rustango(max_length = 64)]
     pub name: String,
     pub active: bool,
+}}
+")
 }
-";
 
-/// Default `views.rs` body — landing page + healthz.
+/// Default `views.rs` body — placeholder handler.
+///
+/// Project-root `src/views.rs` already ships `index` + `healthz` for
+/// `GET /` and `GET /healthz`, so the new app starts empty (one stub
+/// handler the user can replace) to avoid duplicate-route panics
+/// when the scaffolder auto-merges the new app's router.
 const VIEWS_TEMPLATE: &str = "//! App views — request handlers (Django-style \"views\").
 //!
 //! Each handler is a stateless async fn; `urls.rs` mounts them
 //! under their HTTP paths. For pure-CRUD admin needs you don't
 //! need any custom views — `rustango::admin::router(pool)` covers
-//! that. The handlers below are stubs you can replace.
+//! that. Replace the stub below with your own handlers and add
+//! corresponding `.route(...)` lines in `urls.rs`.
 
 use axum::response::Html;
 
-/// `GET /` — landing page with a link into the auto-admin.
-pub async fn index() -> Html<&'static str> {
-    Html(
-        \"<!doctype html>\\n\\
-         <title>rustango app</title>\\n\\
-         <h1>Hello from rustango!</h1>\\n\\
-         <p>The auto-admin is at <a href=\\\"/admin\\\">/admin</a>.</p>\",
-    )
-}
-
-/// `GET /healthz` — liveness probe.
-pub async fn healthz() -> &'static str {
-    \"ok\"
+/// `GET /<app-prefix>/hello` — placeholder. Wire the actual path
+/// in `urls.rs` once you decide on the app's URL prefix.
+pub async fn hello() -> Html<&'static str> {
+    Html(\"<h1>hello from your new app</h1>\")
 }
 ";
 
@@ -404,16 +417,21 @@ const URLS_TEMPLATE: &str = "//! App URL routing.
 //! at the project's root. Handlers can take
 //! `rustango::extractors::Tenant` (in tenancy projects) or extract
 //! state via axum's normal `State<...>` mechanism.
+//!
+//! Starts empty — uncomment the example or add your own routes.
+//! Defining `/` or `/healthz` here would clash with the project-
+//! root router, so prefer an app-specific prefix like `/blog/...`.
 
-use axum::routing::get;
 use axum::Router;
 
+#[allow(unused_imports)]
+use axum::routing::get;
+#[allow(unused_imports)]
 use super::views;
 
 pub fn api() -> Router<()> {
     Router::new()
-        .route(\"/\", get(views::index))
-        .route(\"/healthz\", get(views::healthz))
+        // .route(\"/blog/hello\", get(views::hello))
 }
 ";
 
@@ -426,22 +444,14 @@ const TESTS_TEMPLATE: &str = "//! App-level integration tests.
 
 #[cfg(test)]
 mod tests {
-    use rustango::test_client::TestClient;
     use super::urls::api;
 
+    /// Smoke test — the empty router builds without panicking.
+    /// Replace with real route assertions once you add `.route(...)`
+    /// lines in `urls.rs`.
     #[tokio::test]
-    async fn index_returns_200() {
-        let client = TestClient::new(api());
-        let response = client.get(\"/\").send().await;
-        assert_eq!(response.status, 200);
-    }
-
-    #[tokio::test]
-    async fn healthz_returns_ok() {
-        let client = TestClient::new(api());
-        let response = client.get(\"/healthz\").send().await;
-        assert_eq!(response.status, 200);
-        assert_eq!(response.text(), \"ok\");
+    async fn router_builds() {
+        let _router = api();
     }
 }
 ";

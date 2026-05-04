@@ -113,9 +113,9 @@ impl Template {
     fn rustango_features(self) -> &'static str {
         match self {
             // Bare ORM + axum + manage dispatcher; no auto-admin UI.
-            Self::Api => r#"{ version = "0.22", default-features = false, features = ["postgres", "manage"] }"#,
-            Self::Fullstack => r#""0.22""#,
-            Self::Tenant => r#"{ version = "0.22", features = ["tenancy"] }"#,
+            Self::Api => r#"{ version = "0.23", default-features = false, features = ["postgres", "manage"] }"#,
+            Self::Fullstack => r#""0.23""#,
+            Self::Tenant => r#"{ version = "0.23", features = ["tenancy"] }"#,
         }
     }
 }

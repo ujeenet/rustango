@@ -997,7 +997,7 @@ fn write_generated<W: Write>(
     }
     std::fs::write(&path, contents)?;
     writeln!(w, "wrote {}", path.display())?;
-    writeln!(w, "  add `pub mod {};` to your src/lib.rs", file_name.trim_end_matches(".rs"))?;
+    writeln!(w, "  add `mod {};` to src/main.rs (or `pub mod ...;` to src/lib.rs)", file_name.trim_end_matches(".rs"))?;
     Ok(())
 }
 
