@@ -890,8 +890,15 @@ impl<T: crate::core::Model> ModelFormFor<T> {
         let mut columns = Vec::new();
         let mut values = Vec::new();
         for field in T::SCHEMA.scalar_fields() {
-            // Auto<T> PK is server-assigned — skip on create.
-            if field.auto && field.primary_key {
+            // Skip fields the database fills in automatically:
+            //   * Auto<T> PK (BIGSERIAL / SERIAL / gen_random_uuid())
+            //   * `auto = true` non-PK fields (auto_now_add /
+            //     auto_now mixins) — DB DEFAULT NOW() supplies the
+            //     value on INSERT, and the macro skips them on the
+            //     INSERT path too. ModelFormFor used to require these
+            //     on every create, breaking any model with a created_at
+            //     auto-timestamp.
+            if field.auto {
                 continue;
             }
             let raw = payload.get(field.name).map(String::as_str);
