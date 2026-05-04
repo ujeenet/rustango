@@ -172,6 +172,22 @@ impl<T: Model> QuerySet<T> {
     /// Append a typed predicate or boolean expression built via the
     /// [`Column`](crate::core::Column) API. Accepts either a single
     /// [`TypedFilter`](crate::core::TypedFilter) (`User::id.gt(10)`)
+    /// AND-join a raw [`WhereExpr`] into the accumulated WHERE clause.
+    /// Useful when the model doesn't have typed columns derived (so
+    /// [`Self::where_`] isn't available) and the caller needs to
+    /// express OR / NOT / nested predicates that the string-keyed
+    /// [`Self::filter`] can't reach.
+    ///
+    /// The expression is fully validated against `T::SCHEMA` at
+    /// `compile()` time — passing an unknown column or a wrong-typed
+    /// value returns [`QueryError::UnknownField`] /
+    /// [`QueryError::TypeMismatch`] just like the typed paths.
+    #[must_use]
+    pub fn where_raw(mut self, expr: WhereExpr) -> Self {
+        self.pending.push(PendingFilter::Expr(expr));
+        self
+    }
+
     /// or a composed [`TypedExpr`] (`User::id.eq(1).or(User::id.eq(2))`).
     /// Every `.where_()` call AND-joins its argument into the
     /// queryset's accumulated WHERE clause.
