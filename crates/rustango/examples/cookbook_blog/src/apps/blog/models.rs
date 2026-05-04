@@ -136,6 +136,25 @@ pub struct Activity {
     pub action: String,
 }
 
+/// Chapter 2 §2.18b — composite UNIQUE constraint via the
+/// Django-shape `unique_together` container attr. Emits
+/// `CREATE UNIQUE INDEX <table>_<col>_<col>_uq ON <table> (...)` so
+/// the DB rejects duplicate `(org_id, user_id)` pairs even though
+/// neither column on its own is unique.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "cookbook_membership",
+    unique_together = "org_id, user_id",
+)]
+pub struct Membership {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub org_id: i64,
+    pub user_id: i64,
+    #[rustango(max_length = 32)]
+    pub role: String,
+}
+
 /// Chapter 2 §2.30 — `#[rustango(soft_delete)]` marks a `deleted_at`
 /// column the ORM treats as "alive when NULL". `delete()` becomes a
 /// timestamp update; `objects()` filters by NULL by default.

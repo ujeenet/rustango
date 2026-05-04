@@ -310,6 +310,44 @@ pub struct Author {
 
 ---
 
+### 2.18b `#[rustango(unique_together = "col1, col2")]` — composite UNIQUE
+
+**What**: Container-level Django-shape `unique_together`. Emits `CREATE UNIQUE INDEX <table>_<col1>_<col2>_uq ON <table> (col1, col2)` so the DB rejects duplicate pairs even though neither column on its own is unique. Sister attr `index_together = "..."` for non-unique composite indexes. Both auto-derive the index name from the column list (override pending — see [v0.19 roadmap](../../../../../.claude/projects/-Users-ievgeniisvyryd-projects-rustango/memory/v019-unique-together.md)).
+
+**Recipe** ([models.rs](src/apps/blog/models.rs)):
+
+```rust
+#[derive(Model)]
+#[rustango(
+    table = "cookbook_membership",
+    unique_together = "org_id, user_id",
+)]
+pub struct Membership {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub org_id: i64,
+    pub user_id: i64,
+    pub role: String,
+}
+```
+
+**Verified by**: `unique_together_emits_composite_unique_index_in_schema`,
+`unique_together_rejects_duplicate_pair`
+
+**Caveat**: today the duplicate surfaces as the raw Postgres
+`duplicate key value violates unique constraint "..."` message. A
+DRF-style `UniqueTogetherValidator` that pre-checks at form
+validation time and emits friendly per-field errors is tracked as
+v0.19.1.
+
+**Also during this slice** — the legacy container-level
+`#[rustango(index = "col1, col2", unique, name = "...")]` syntax was
+found unparseable (the trailing-flag block didn't compose under the
+syn `parse_nested_meta` API). Removed the broken trailing-flag block;
+`index = "..."` is now bare-only (composite, non-unique).
+
+---
+
 ### 2.20 `#[rustango(fk = "table")]` — basic foreign key
 
 **What**: Adds a `BIGINT` FK column and a `REFERENCES <table>(id)` constraint. The `on = "..."` sub-attr overrides the target column name. See also Chapter 17 `fk = "self"` for tree shapes.
