@@ -1,0 +1,36 @@
+[package]
+name = "cookbook_blog"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone — sever from the parent workspace so this can ship as a
+# self-contained example anyone can `cargo build` after copying out.
+# v0.16: one binary handles `cargo run` (runserver) AND
+# `cargo run -- <verb>` via `rustango::manage::Cli`.
+[workspace]
+
+[dependencies]
+rustango = { path = "../..", default-features = false, features = [
+    "postgres", "manage", "admin", "config", "forms", "serializer",
+    "cache", "signals", "email", "storage", "scheduler", "secrets",
+    "totp", "webhook", "webhook-delivery", "api_keys", "passwords",
+    "signed_url", "notifications", "jobs", "jobs-postgres",
+    "auth_flows", "sse", "websocket", "oauth2", "http-client",
+    "compression", "openapi", "csp-nonce", "sessions", "hmac-auth",
+    "jwt", "uploads", "storage-s3", "media", "tenancy", "csrf",
+    "runtime",
+] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }
+tower = { version = "0.5", features = ["util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+tracing = "0.1"
+dotenvy = "0.15"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "uuid", "json"] }
+serde_json = "1"

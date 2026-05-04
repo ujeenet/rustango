@@ -1,0 +1,3 @@
+# Overrides applied when RUSTANGO_ENV=test.
+[database]
+pool_max_size = 2

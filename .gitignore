@@ -1,6 +1,12 @@
 /target
 /Cargo.lock
 **/*.rs.bk
+
+# Nested example projects (cookbook_blog, blog_demo, etc.) are
+# standalone Cargo packages with their own target/ + Cargo.lock —
+# don't commit either.
+crates/rustango/examples/*/target/
+crates/rustango/examples/*/Cargo.lock
 .DS_Store
 .idea/
 .vscode/

@@ -1,0 +1,15 @@
+# Default settings — every other env's TOML overlays this file.
+# Override at runtime with `RUSTANGO__SECTION__KEY=...`.
+
+[database]
+url = "postgres://rustango:rustango@localhost:5432/cookbook_blog"
+pool_max_size = 10
+
+[admin]
+read_only_tables = []
+
+[tenancy]
+apex_domain = "localhost"
+
+[cache]
+backend = "memory"
