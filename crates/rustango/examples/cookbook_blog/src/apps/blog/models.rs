@@ -155,6 +155,22 @@ pub struct Membership {
     pub role: String,
 }
 
+/// Chapter 2 §2.18c — composite UNIQUE with an EXPLICIT index name
+/// via the parenthesized form (v0.19.2). The auto-derived
+/// `<table>_<col>_<col>_uq` is sometimes too long or doesn't match a
+/// pre-existing index.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "cookbook_explicit_uq",
+    unique_together(columns = "a, b", name = "custom_uniqueness"),
+)]
+pub struct ExplicitlyNamedTogether {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub a: i64,
+    pub b: i64,
+}
+
 /// Chapter 2 §2.30 — `#[rustango(soft_delete)]` marks a `deleted_at`
 /// column the ORM treats as "alive when NULL". `delete()` becomes a
 /// timestamp update; `objects()` filters by NULL by default.

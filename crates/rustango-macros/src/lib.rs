@@ -3201,37 +3201,26 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("unique_together") {
-                // Django-shape composite UNIQUE index. Sugar for
-                // `index_together` + the unique flag, with an
-                // auto-derived index name.
+                // Django-shape composite UNIQUE index. Two syntaxes:
                 //
-                //   #[rustango(unique_together = "org_id, user_id")]
+                //   #[rustango(unique_together = "org_id, user_id")]                       — auto-derived name
+                //   #[rustango(unique_together(columns = "org_id, user_id", name = "x"))]  — explicit name
                 //
-                // Produces `CREATE UNIQUE INDEX <table>_<col1>_<col2>_uq
-                // ON <table> (col1, col2)`.
-                let cols_lit: LitStr = meta.value()?.parse()?;
-                let columns = split_field_list(&cols_lit.value());
-                if columns.len() < 2 {
-                    return Err(meta.error(
-                        "unique_together expects two or more columns; for single-column UNIQUE use #[rustango(unique)] on the field",
-                    ));
-                }
-                out.indexes.push(IndexAttr { name: None, columns, unique: true });
+                // Both produce `CREATE UNIQUE INDEX <name> ON <table>
+                // (col1, col2)`, where <name> defaults to
+                // `<table>_<col1>_<col2>_uq` when not supplied.
+                let (columns, name) = parse_together_attr(&meta, "unique_together")?;
+                out.indexes.push(IndexAttr { name, columns, unique: true });
                 return Ok(());
             }
             if meta.path.is_ident("index_together") {
-                // Django-shape composite (non-unique) index. Sugar with
-                // an auto-derived index name.
+                // Django-shape composite (non-unique) index. Two syntaxes
+                // mirroring `unique_together`.
                 //
                 //   #[rustango(index_together = "created_at, status")]
-                let cols_lit: LitStr = meta.value()?.parse()?;
-                let columns = split_field_list(&cols_lit.value());
-                if columns.len() < 2 {
-                    return Err(meta.error(
-                        "index_together expects two or more columns; for a single-column index use #[rustango(index)] on the field",
-                    ));
-                }
-                out.indexes.push(IndexAttr { name: None, columns, unique: false });
+                //   #[rustango(index_together(columns = "created_at, status", name = "x"))]
+                let (columns, name) = parse_together_attr(&meta, "index_together")?;
+                out.indexes.push(IndexAttr { name, columns, unique: false });
                 return Ok(());
             }
             if meta.path.is_ident("index") {
@@ -3438,6 +3427,65 @@ fn split_field_list(raw: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+/// Shared parser for `unique_together` and `index_together` container
+/// attrs. Accepts both shapes:
+///
+///   * `attr = "col1, col2"`              — auto-derived index name.
+///   * `attr(columns = "col1, col2", name = "...")` — explicit name.
+///
+/// Returns `(columns, name)`.
+fn parse_together_attr(
+    meta: &syn::meta::ParseNestedMeta<'_>,
+    attr: &str,
+) -> syn::Result<(Vec<String>, Option<String>)> {
+    // Disambiguate by whether the next token is `=` (key-value) or
+    // `(` (parenthesized).
+    if meta.input.peek(syn::Token![=]) {
+        let cols_lit: LitStr = meta.value()?.parse()?;
+        let columns = split_field_list(&cols_lit.value());
+        check_together_columns(meta, attr, &columns)?;
+        return Ok((columns, None));
+    }
+    let mut columns: Option<Vec<String>> = None;
+    let mut name: Option<String> = None;
+    meta.parse_nested_meta(|inner| {
+        if inner.path.is_ident("columns") {
+            let s: LitStr = inner.value()?.parse()?;
+            columns = Some(split_field_list(&s.value()));
+            return Ok(());
+        }
+        if inner.path.is_ident("name") {
+            let s: LitStr = inner.value()?.parse()?;
+            name = Some(s.value());
+            return Ok(());
+        }
+        Err(inner.error("unknown sub-attribute (supported: `columns`, `name`)"))
+    })?;
+    let columns = columns.ok_or_else(|| meta.error(format!(
+        "{attr}(...) requires a `columns = \"col1, col2\"` argument",
+    )))?;
+    check_together_columns(meta, attr, &columns)?;
+    Ok((columns, name))
+}
+
+fn check_together_columns(
+    meta: &syn::meta::ParseNestedMeta<'_>,
+    attr: &str,
+    columns: &[String],
+) -> syn::Result<()> {
+    if columns.len() < 2 {
+        let single = if attr == "unique_together" {
+            "#[rustango(unique)] on the field"
+        } else {
+            "#[rustango(index)] on the field"
+        };
+        return Err(meta.error(format!(
+            "{attr} expects two or more columns; for a single-column equivalent use {single}",
+        )));
+    }
+    Ok(())
 }
 
 /// Parse the fieldsets DSL: pipe-separated sections, optional

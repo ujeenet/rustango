@@ -44,6 +44,19 @@ fn unique_together_emits_composite_unique_index_in_schema() {
     assert_eq!(idx.columns, &["org_id", "user_id"]);
 }
 
+// §2.18c — explicit-name form via the parenthesized syntax. Compile-
+// only smoke that exercises the alt parser path. See cookbook_blog
+// `apps/blog/models.rs::ExplicitlyNamedTogether` for the model.
+#[test]
+fn unique_together_explicit_name_lands_in_schema() {
+    use cookbook_blog::apps::blog::models::ExplicitlyNamedTogether;
+    let idxs: Vec<_> = ExplicitlyNamedTogether::SCHEMA.indexes.iter().collect();
+    assert_eq!(idxs.len(), 1);
+    assert_eq!(idxs[0].name, "custom_uniqueness");
+    assert_eq!(idxs[0].columns, &["a", "b"]);
+    assert!(idxs[0].unique);
+}
+
 // §2.18b — DB rejects a second row with the same (org_id, user_id) pair.
 #[tokio::test]
 async fn unique_together_rejects_duplicate_pair() {

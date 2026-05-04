@@ -230,7 +230,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             changes.push(SchemaChange::DropTable(pt.name.clone()));
         }
     }
-    // New indexes.
+    // New indexes — present in current, absent from prev.
     for idx in &current.indexes {
         if prev.index(&idx.name).is_none() {
             changes.push(SchemaChange::CreateIndex {
@@ -241,10 +241,32 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             });
         }
     }
-    // Dropped indexes.
+    // Dropped indexes — present in prev, absent from current.
     for idx in &prev.indexes {
         if current.index(&idx.name).is_none() {
             changes.push(SchemaChange::DropIndex { name: idx.name.clone() });
+        }
+    }
+    // Changed indexes — same name in both, but columns / table /
+    // unique flag differ. Without this branch, a model edit that
+    // tweaks an index in place (without renaming it) would land a
+    // silently-stale index in the database. The diff lowers each
+    // such change to a Drop + Create pair so the new shape is
+    // applied atomically.
+    for idx in &current.indexes {
+        if let Some(prev_idx) = prev.index(&idx.name) {
+            if prev_idx.columns != idx.columns
+                || prev_idx.unique != idx.unique
+                || prev_idx.table != idx.table
+            {
+                changes.push(SchemaChange::DropIndex { name: idx.name.clone() });
+                changes.push(SchemaChange::CreateIndex {
+                    name: idx.name.clone(),
+                    table: idx.table.clone(),
+                    columns: idx.columns.clone(),
+                    unique: idx.unique,
+                });
+            }
         }
     }
     // New CHECK constraints.

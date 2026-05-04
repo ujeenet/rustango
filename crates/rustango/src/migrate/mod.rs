@@ -39,5 +39,7 @@ pub use runner::{
     migrate_to_pool, registered_models, unapply, unapply_force, unapply_force_pool, unapply_pool,
     Builder, MigrationPreview, LEDGER_TABLE,
 };
-pub use snapshot::{FieldSnapshot, RelationSnapshot, SchemaSnapshot, TableSnapshot};
+pub use snapshot::{
+    FieldSnapshot, IndexSnapshot, RelationSnapshot, SchemaSnapshot, TableSnapshot,
+};
 pub use manage::{append_data_op, make_data_migration};

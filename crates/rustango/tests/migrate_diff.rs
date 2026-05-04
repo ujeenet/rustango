@@ -717,3 +717,55 @@ fn create_table_emits_composite_fks_in_deferred_bucket() {
         "expected composite FK ALTER TABLE in {ddl:?}",
     );
 }
+
+// ---------------- in-place index change (v0.19.2 regression) ------
+
+fn snap_with_index(name: &str, columns: &[&str], unique: bool) -> SchemaSnapshot {
+    SchemaSnapshot {
+        tables: vec![user_table()],
+        indexes: vec![rustango::migrate::IndexSnapshot {
+            name: name.into(),
+            table: "diff_user".into(),
+            columns: columns.iter().map(|s| (*s).into()).collect(),
+            unique,
+        }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn changing_index_columns_keeps_name_emits_drop_then_create() {
+    let prev = snap_with_index("uq", &["a", "b"], true);
+    let current = snap_with_index("uq", &["a", "c"], true);
+    let changes = detect_changes(&prev, &current);
+    let drop_idx = changes.iter().position(|c|
+        matches!(c, SchemaChange::DropIndex { name } if name == "uq")
+    );
+    let create_idx = changes.iter().position(|c|
+        matches!(c, SchemaChange::CreateIndex { name, columns, .. }
+            if name == "uq" && columns == &vec!["a".to_string(), "c".into()])
+    );
+    assert!(drop_idx.is_some(), "expected DropIndex(uq) — diff missed in-place column change: {changes:?}");
+    assert!(create_idx.is_some(), "expected CreateIndex(uq) with new columns: {changes:?}");
+    assert!(drop_idx.unwrap() < create_idx.unwrap(), "drop must come before create");
+}
+
+#[test]
+fn flipping_unique_flag_emits_drop_then_create() {
+    let prev = snap_with_index("idx", &["a"], false);
+    let current = snap_with_index("idx", &["a"], true);
+    let changes = detect_changes(&prev, &current);
+    assert!(changes.iter().any(|c| matches!(c, SchemaChange::DropIndex { name } if name == "idx")));
+    assert!(changes.iter().any(|c| matches!(c, SchemaChange::CreateIndex { name, unique, .. } if name == "idx" && *unique)));
+}
+
+#[test]
+fn unchanged_index_emits_nothing() {
+    let prev = snap_with_index("uq", &["a", "b"], true);
+    let current = snap_with_index("uq", &["a", "b"], true);
+    let changes = detect_changes(&prev, &current);
+    assert!(
+        !changes.iter().any(|c| matches!(c, SchemaChange::DropIndex { .. } | SchemaChange::CreateIndex { .. })),
+        "no index change → no Drop/CreateIndex; got {changes:?}",
+    );
+}
