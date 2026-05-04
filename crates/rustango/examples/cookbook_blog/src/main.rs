@@ -1,15 +1,8 @@
-//! cookbook_blog — multi-tenant blog example. One binary handles
-//! `cargo run` (runserver) AND `cargo run -- <verb>` via the unified
-//! `rustango::manage::Cli` (v0.16). See [`crate::apps`] for the
-//! per-feature recipes the COOKBOOK chapters cite.
+//! cookbook_blog binary shim. All logic lives in
+//! [`cookbook_blog::apps`] / [`cookbook_blog::settings`] so
+//! integration tests can import them.
 
-mod apps;
-mod settings;
-
-/// Embedded migrations — Chapter 1 §1.7. Surfaces as a `&[(&str, &str)]`
-/// of `(file_name, json_body)` tuples. Compile-time validated against
-/// `migrations/`.
-pub const EMBEDDED: &[(&str, &str)] = rustango::embed_migrations!("migrations");
+use cookbook_blog::{apps, settings};
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

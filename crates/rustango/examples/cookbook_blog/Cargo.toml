@@ -10,6 +10,16 @@ publish = false
 # `cargo run -- <verb>` via `rustango::manage::Cli`.
 [workspace]
 
+# Library target so integration tests can import the cookbook's
+# models / apps. The binary is a thin shim that calls into lib.
+[lib]
+name = "cookbook_blog"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cookbook_blog"
+path = "src/main.rs"
+
 [dependencies]
 rustango = { path = "../..", default-features = false, features = [
     "postgres", "manage", "admin", "config", "forms", "serializer",

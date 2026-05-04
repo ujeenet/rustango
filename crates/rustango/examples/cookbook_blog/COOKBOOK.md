@@ -221,7 +221,128 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> { ... }
 
 ## Chapter 2 — Models & schema
 
-*(Slice 2)*
+Models live in [src/apps/blog/models.rs](src/apps/blog/models.rs).
+Live tests against docker PG in
+[tests/cookbook_chapter02_models.rs](tests/cookbook_chapter02_models.rs).
+Run with `DATABASE_URL=... cargo test --test cookbook_chapter02_models -- --test-threads=1`.
+
+### 2.11 / 2.12 `#[derive(Model)]` + `Auto<i64>` / `Auto<i32>`
+
+**What**: Derive macro registers the struct with the global inventory and emits `objects()` / typed save / FromRow impls. `Auto<T>` PKs translate to `BIGSERIAL` (i64) / `SERIAL` (i32); the macro skips them on INSERT and assigns the returning value.
+
+**API**: [`rustango::Model`](../../src/lib.rs#L610) (re-exported from [`rustango_macros`](../../../rustango-macros/src/lib.rs)); [`rustango::sql::Auto`](../../src/sql/auto.rs).
+
+**Recipe** ([models.rs](src/apps/blog/models.rs)):
+
+```rust
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "cookbook_author", display = "name")]
+pub struct Author {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 80)]
+    pub name: String,
+    // ...
+}
+```
+
+**Verified by**: `tests/cookbook_chapter02_models.rs::save_assigns_auto_pk`
+
+---
+
+### 2.13 `Option<T>` → nullable column
+
+**What**: Wrap any field type in `Option<T>` and the column becomes `NULL`-able; `None` round-trips as SQL `NULL`.
+
+**Recipe**: `pub bio: Option<String>` on `Author`.
+
+**Verified by**: `option_field_round_trips_null`
+
+---
+
+### 2.14 `#[rustango(default = "...")]` + 2.29 `auto_now_add`
+
+**What**: `default = "expr"` emits `DEFAULT <expr>` in DDL. The mixin `auto_now_add` is sugar for "wrap in `Auto<T>` + DB DEFAULT NOW()" so the column auto-fills on INSERT and the macro skips it.
+
+**Recipe**: `#[rustango(auto_now_add)] pub joined_at: Auto<chrono::DateTime<chrono::Utc>>`.
+
+**Verified by**: `auto_now_add_assigns_at_insert`
+
+---
+
+### 2.15 `#[rustango(unique)]`
+
+**What**: Per-column UNIQUE constraint. Duplicate inserts fail with a SQL unique-violation error.
+
+**Recipe**: `#[rustango(unique, max_length = 200)] pub email: String`.
+
+**Verified by**: `unique_constraint_rejects_duplicates`
+
+---
+
+### 2.16 `#[rustango(min = N, max = M)]` → CHECK + client validation
+
+**What**: Defense in depth — the macro adds a CHECK constraint to DDL **and** a client-side range validator. `save()` rejects out-of-range values before the round-trip with `ExecError::OutOfRange`.
+
+**Recipe**: `#[rustango(min = 1, max = 5)] pub score: i64`.
+
+**Verified by**: `min_max_check_rejects_out_of_range`
+
+---
+
+### 2.17 `#[rustango(max_length = N)]`
+
+**What**: String columns become `VARCHAR(N)` instead of `TEXT`. Without it, plain `String` is `TEXT`.
+
+**Recipe**: `#[rustango(max_length = 80)] pub name: String`.
+
+**Verified by**: implicit (every `cookbook_*` table uses VARCHAR for max_length fields).
+
+---
+
+### 2.18 `#[rustango(index)]` (field-level)
+
+**What**: Single-column index on the field. `index(unique)` for unique-indexes, `index(name = "...")` to override the auto name.
+
+**Recipe**: `#[rustango(fk = "cookbook_author", index)] pub author_id: i64`.
+
+**Verified by**: `fk_column_round_trips`
+
+---
+
+### 2.20 `#[rustango(fk = "table")]` — basic foreign key
+
+**What**: Adds a `BIGINT` FK column and a `REFERENCES <table>(id)` constraint. The `on = "..."` sub-attr overrides the target column name. See also Chapter 17 `fk = "self"` for tree shapes.
+
+**Recipe**: `#[rustango(fk = "cookbook_author", index)] pub author_id: i64`.
+
+**Verified by**: `fk_column_round_trips`
+
+---
+
+### 2.26 `serde_json::Value` → JSONB
+
+**What**: Field of type `serde_json::Value` becomes a `JSONB` column. Nested structures round-trip without manual encoding.
+
+**Recipe**: `pub metadata: serde_json::Value`.
+
+**Verified by**: `jsonb_field_round_trips_structured_data`
+
+---
+
+### 2.28 `chrono::DateTime<Utc>` / `Option<DateTime>` → TIMESTAMPTZ
+
+**What**: Maps to `TIMESTAMPTZ`. `Option<DateTime>` is nullable.
+
+**Recipe**: `pub published_at: Option<chrono::DateTime<chrono::Utc>>`.
+
+**Verified by**: `datetime_option_round_trips`
+
+---
+
+*Sub-sections 2.19 (table-level CHECK), 2.21 (O2O), 2.22 (M2M through),
+2.23 (fk_composite), 2.24 (generic_fk), 2.25 (ContentType), 2.27 (UUID),
+2.30 (soft-delete) are queued for Slice 2b.*
 
 ## Chapter 3 — ORM
 
