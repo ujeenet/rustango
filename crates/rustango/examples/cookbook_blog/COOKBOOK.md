@@ -340,9 +340,79 @@ pub struct Author {
 
 ---
 
-*Sub-sections 2.19 (table-level CHECK), 2.21 (O2O), 2.22 (M2M through),
-2.23 (fk_composite), 2.24 (generic_fk), 2.25 (ContentType), 2.27 (UUID),
-2.30 (soft-delete) are queued for Slice 2b.*
+### 2.21 `#[rustango(o2o = "table")]` — one-to-one (UNIQUE FK)
+
+**What**: Same shape as `fk` but enforces a UNIQUE constraint so the relation is 1:1. Duplicate inserts into the FK column fail.
+
+**Recipe**: `#[rustango(o2o = "cookbook_author")] pub author_id: i64` on `AuthorProfile`.
+
+**Verified by**: `o2o_unique_fk_rejects_duplicate`
+
+---
+
+### 2.22 `#[rustango(m2m(name, to, through, src, dst))]` — M2M through
+
+**What**: Container-level attribute that emits a junction-table accessor `<name>_m2m()`. The macro doesn't auto-create the through table; you create it by adding a regular junction model + migration. Reads/writes go through the junction table directly.
+
+**Recipe** ([models.rs](src/apps/blog/models.rs)):
+
+```rust
+#[rustango(
+    table = "cookbook_post",
+    m2m(name = "tags", to = "cookbook_tag",
+        through = "cookbook_post_tag",
+        src = "post_id", dst = "tag_id"),
+)]
+pub struct Post { ... }
+```
+
+**Verified by**: `m2m_through_junction_table_round_trips`
+
+---
+
+### 2.27 `Auto<uuid::Uuid>` + `auto_uuid` — UUID PKs
+
+**What**: `#[rustango(auto_uuid)]` is sugar for `primary_key + auto + DEFAULT gen_random_uuid()`. Postgres' `pgcrypto` extension supplies the v4. Macro skips the column on INSERT; the returning value lands in `Auto<Uuid>`.
+
+**Recipe**:
+
+```rust
+#[derive(Model)]
+#[rustango(table = "cookbook_session")]
+pub struct Session {
+    #[rustango(auto_uuid)]
+    pub id: Auto<Uuid>,
+    pub user_token: String,
+}
+```
+
+**Verified by**: `auto_uuid_assigns_server_side_uuid`
+
+---
+
+### 2.30 `#[rustango(soft_delete)]` — tombstone deletes
+
+**What**: Mark an `Option<DateTime<Utc>>` field as the soft-delete tombstone. Currently captured in the model's `SCHEMA.soft_delete_column` so the ORM can layer the alive-when-NULL filter and override `delete()` to UPDATE the tombstone instead of `DELETE FROM`.
+
+**Recipe**:
+
+```rust
+#[derive(Model)]
+pub struct ArchiveNote {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub note: String,
+    #[rustango(soft_delete)]
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+```
+
+**Verified by**: `soft_delete_column_round_trips_and_deleted_at_defaults_null`
+
+---
+
+*Sub-sections 2.19 (table-level CHECK), 2.23 (fk_composite),
+2.24 (generic_fk), 2.25 (ContentType) queued for Slice 2c.*
 
 ## Chapter 3 — ORM
 

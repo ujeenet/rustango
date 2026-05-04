@@ -24,9 +24,14 @@ async fn pool() -> Option<sqlx::PgPool> {
 async fn fresh_schema(pool: &sqlx::PgPool) {
     // Drop in dependency-safe order.
     for ddl in [
+        "DROP TABLE IF EXISTS cookbook_post_tag CASCADE",
+        "DROP TABLE IF EXISTS cookbook_tag CASCADE",
         "DROP TABLE IF EXISTS cookbook_post CASCADE",
+        "DROP TABLE IF EXISTS cookbook_author_profile CASCADE",
         "DROP TABLE IF EXISTS cookbook_rating CASCADE",
         "DROP TABLE IF EXISTS cookbook_author CASCADE",
+        "DROP TABLE IF EXISTS cookbook_session CASCADE",
+        "DROP TABLE IF EXISTS cookbook_archive_note CASCADE",
     ] {
         sqlx::query(ddl).execute(pool).await.expect(ddl);
     }
@@ -65,6 +70,49 @@ async fn fresh_schema(pool: &sqlx::PgPool) {
 
     sqlx::query("CREATE INDEX cookbook_post_author_idx ON cookbook_post(author_id)")
         .execute(pool).await.expect("create index");
+
+    // §2.27 Auto<Uuid>
+    sqlx::query(r#"CREATE EXTENSION IF NOT EXISTS pgcrypto"#)
+        .execute(pool).await.expect("pgcrypto");
+    sqlx::query(
+        r#"CREATE TABLE cookbook_session (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_token VARCHAR(80) NOT NULL
+        )"#,
+    ).execute(pool).await.expect("create session");
+
+    // §2.21 O2O — UNIQUE on author_id makes it 1:1
+    sqlx::query(
+        r#"CREATE TABLE cookbook_author_profile (
+            id BIGSERIAL PRIMARY KEY,
+            author_id BIGINT NOT NULL UNIQUE REFERENCES cookbook_author(id),
+            avatar_url TEXT NOT NULL
+        )"#,
+    ).execute(pool).await.expect("create profile");
+
+    // §2.22 M2M
+    sqlx::query(
+        r#"CREATE TABLE cookbook_tag (
+            id BIGSERIAL PRIMARY KEY,
+            name VARCHAR(40) NOT NULL UNIQUE
+        )"#,
+    ).execute(pool).await.expect("create tag");
+    sqlx::query(
+        r#"CREATE TABLE cookbook_post_tag (
+            post_id BIGINT NOT NULL REFERENCES cookbook_post(id),
+            tag_id  BIGINT NOT NULL REFERENCES cookbook_tag(id),
+            PRIMARY KEY (post_id, tag_id)
+        )"#,
+    ).execute(pool).await.expect("create post_tag");
+
+    // §2.30 soft_delete
+    sqlx::query(
+        r#"CREATE TABLE cookbook_archive_note (
+            id BIGSERIAL PRIMARY KEY,
+            note VARCHAR(200) NOT NULL,
+            deleted_at TIMESTAMPTZ NULL
+        )"#,
+    ).execute(pool).await.expect("create archive_note");
 }
 
 // §2.11 / §2.12 — derive Model + Auto<i64> assigns id on save.
@@ -307,4 +355,102 @@ async fn datetime_option_round_trips() {
     assert!(now_back[0].published_at.is_some(), "Some(when) lost on round-trip");
     let never_back: Vec<Post> = Post::objects().filter("slug", Op::Eq, "never").fetch(&pool).await.unwrap();
     assert_eq!(never_back[0].published_at, None);
+}
+
+// §2.27 — Auto<Uuid> + auto_uuid mixin assigns a v4 UUID server-side.
+#[tokio::test]
+async fn auto_uuid_assigns_server_side_uuid() {
+    let Some(pool) = pool().await else { return };
+    fresh_schema(&pool).await;
+
+    let mut s = Session { id: Auto::Unset, user_token: "tok".into() };
+    s.save(&pool).await.expect("save session");
+    let id = match s.id { Auto::Set(v) => v, Auto::Unset => panic!("Auto<Uuid> not assigned") };
+    assert_ne!(id, uuid::Uuid::nil(), "DB DEFAULT gen_random_uuid() should fill a real v4");
+}
+
+// §2.21 — O2O UNIQUE FK rejects a second row with the same author_id.
+#[tokio::test]
+async fn o2o_unique_fk_rejects_duplicate() {
+    let Some(pool) = pool().await else { return };
+    fresh_schema(&pool).await;
+
+    let mut a = Author {
+        id: Auto::Unset,
+        name: "p".into(), email: "p@example.com".into(),
+        bio: None, joined_at: Auto::Unset,
+    };
+    a.save(&pool).await.unwrap();
+    let author_id = match a.id { Auto::Set(v) => v, Auto::Unset => unreachable!() };
+
+    let mut p1 = AuthorProfile { id: Auto::Unset, author_id, avatar_url: "/a.png".into() };
+    p1.save(&pool).await.expect("first profile");
+    let mut p2 = AuthorProfile { id: Auto::Unset, author_id, avatar_url: "/b.png".into() };
+    let err = p2.save(&pool).await.expect_err("o2o duplicate must fail");
+    let msg = format!("{err:?}").to_lowercase();
+    assert!(msg.contains("unique") || msg.contains("duplicate"),
+        "expected unique violation, got {err:?}");
+}
+
+// §2.22 — M2M through writes/reads the junction table.
+#[tokio::test]
+async fn m2m_through_junction_table_round_trips() {
+    let Some(pool) = pool().await else { return };
+    fresh_schema(&pool).await;
+
+    let mut a = Author {
+        id: Auto::Unset,
+        name: "m2m".into(), email: "m@example.com".into(),
+        bio: None, joined_at: Auto::Unset,
+    };
+    a.save(&pool).await.unwrap();
+    let author_id = match a.id { Auto::Set(v) => v, Auto::Unset => unreachable!() };
+
+    let mut p = Post {
+        id: Auto::Unset,
+        title: "tagged".into(), slug: "tagged".into(),
+        body: "b".into(), author_id,
+        published: false, view_count: 0,
+        metadata: serde_json::json!({}),
+        published_at: None,
+    };
+    p.save(&pool).await.unwrap();
+    let post_id = match p.id { Auto::Set(v) => v, Auto::Unset => unreachable!() };
+
+    let mut t1 = Tag { id: Auto::Unset, name: "rust".into() };
+    t1.save(&pool).await.unwrap();
+    let mut t2 = Tag { id: Auto::Unset, name: "framework".into() };
+    t2.save(&pool).await.unwrap();
+    let t1_id = match t1.id { Auto::Set(v) => v, _ => unreachable!() };
+    let t2_id = match t2.id { Auto::Set(v) => v, _ => unreachable!() };
+
+    sqlx::query("INSERT INTO cookbook_post_tag (post_id, tag_id) VALUES ($1, $2), ($1, $3)")
+        .bind(post_id).bind(t1_id).bind(t2_id)
+        .execute(&pool).await.expect("link tags");
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cookbook_post_tag WHERE post_id = $1"
+    ).bind(post_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(count, 2, "junction should hold 2 rows for one post");
+}
+
+// §2.30 — soft_delete column survives + deleted_at column writes a NULL by default.
+#[tokio::test]
+async fn soft_delete_column_round_trips_and_deleted_at_defaults_null() {
+    let Some(pool) = pool().await else { return };
+    fresh_schema(&pool).await;
+
+    let mut n = ArchiveNote {
+        id: Auto::Unset,
+        note: "alive".into(),
+        deleted_at: None,
+    };
+    n.save(&pool).await.unwrap();
+    let id = match n.id { Auto::Set(v) => v, _ => unreachable!() };
+
+    let rows: Vec<ArchiveNote> = ArchiveNote::objects()
+        .filter("id", Op::Eq, id)
+        .fetch(&pool).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].deleted_at, None, "fresh row deleted_at should be NULL");
 }
