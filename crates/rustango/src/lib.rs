@@ -107,12 +107,19 @@ macro_rules! __impl_my_aliased_row_decoder {
 #[cfg(feature = "mysql")]
 #[macro_export]
 macro_rules! __impl_my_load_related {
-    // `self` is a Rust keyword and bypasses macro hygiene — bound as
-    // the method receiver, visible in body tokens regardless of which
-    // hygiene context they came from. So we don't pass it via the
-    // closure-style header; only `row`, `field_name`, `alias` need
-    // hygiene capture (they're regular idents).
-    ($struct:ty, |$row:ident, $field:ident, $alias:ident| {
+    // The proc-macro emits arms that mutate `self.<field_ident>`. The
+    // earlier version omitted `$self` from the header on the
+    // (incorrect) assumption that `self` as a keyword bypasses macro
+    // hygiene. In practice `self` IS hygiene-tracked through
+    // macro_rules, and the proc-macro's emitted token comes from a
+    // different hygiene context than the `&mut self` parameter in
+    // the expanded fn — so the compile fails with "expected value,
+    // found module `self`" the moment any FK arm is generated.
+    //
+    // Fix: capture `$self` explicitly. The proc-macro now passes it
+    // through and the macro_rules substitutes it where the arms use
+    // it.
+    ($struct:ty, |$self_:ident, $row:ident, $field:ident, $alias:ident| {
         $($arms:tt)*
     }) => {
         impl $crate::sql::LoadRelatedMy for $struct {
@@ -123,6 +130,7 @@ macro_rules! __impl_my_load_related {
                 $field: &str,
                 $alias: &str,
             ) -> ::core::result::Result<bool, $crate::sql::sqlx::Error> {
+                let $self_ = self;
                 match $field {
                     $($arms)*
                     _ => ::core::result::Result::Ok(false),
@@ -136,7 +144,7 @@ macro_rules! __impl_my_load_related {
 #[cfg(not(feature = "mysql"))]
 #[macro_export]
 macro_rules! __impl_my_load_related {
-    ($struct:ty, |$row:ident, $field:ident, $alias:ident| {
+    ($struct:ty, |$self_:ident, $row:ident, $field:ident, $alias:ident| {
         $($arms:tt)*
     }) => {};
 }

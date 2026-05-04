@@ -632,10 +632,10 @@ fn load_related_impl_my_tokens(
         let parent_ty = &rel.parent_type;
         let fk_col = rel.fk_column.as_str();
         let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
-        // `self` is a Rust keyword and bypasses macro hygiene — bound
-        // as the method receiver, accessible from body tokens whatever
-        // hygiene context they came from. The macro_rules header
-        // captures only `row`, `field_name`, `alias` (regular idents).
+        // `self` IS hygiene-tracked through macro_rules — emitted from
+        // a different context than the `&mut self` parameter inside
+        // the macro_rules-expanded fn. Pass it through as `__self`
+        // and let the macro_rules rebind it to the receiver.
         quote! {
             #fk_col => {
                 let _parent: #parent_ty =
@@ -644,13 +644,13 @@ fn load_related_impl_my_tokens(
                     ::rustango::core::SqlValue::I64(v) => v,
                     _ => 0i64,
                 };
-                self.#field_ident = ::rustango::sql::ForeignKey::loaded(_pk, _parent);
+                __self.#field_ident = ::rustango::sql::ForeignKey::loaded(_pk, _parent);
                 ::core::result::Result::Ok(true)
             }
         }
     });
     quote! {
-        ::rustango::__impl_my_load_related!(#struct_name, |row, field_name, alias| {
+        ::rustango::__impl_my_load_related!(#struct_name, |__self, row, field_name, alias| {
             #( #arms )*
         });
     }
@@ -4863,6 +4863,13 @@ struct SerializerFieldAttrs {
     /// `Result<(), String>`. Errors land in `FormErrors` keyed by
     /// the field name.
     validate: Option<String>,
+    /// `#[serializer(nested)]` on a field whose type is another
+    /// `Serializer` — the macro emits `from_model` initializer that
+    /// reads the parent via `model.<source>.value().expect(...)` then
+    /// calls the child serializer's `from_model(parent)`.
+    /// Source field on the model defaults to the field name; override
+    /// with `source = "..."`.
+    nested: bool,
 }
 
 fn parse_serializer_container_attrs(input: &DeriveInput) -> syn::Result<SerializerContainerAttrs> {
@@ -4923,9 +4930,13 @@ fn parse_serializer_field_attrs(field: &syn::Field) -> syn::Result<SerializerFie
                 out.validate = Some(s.value());
                 return Ok(());
             }
+            if meta.path.is_ident("nested") {
+                out.nested = true;
+                return Ok(());
+            }
             Err(meta.error(
                 "unknown serializer field attribute (supported: \
-                 `read_only`, `write_only`, `source`, `skip`, `method`, `validate`)",
+                 `read_only`, `write_only`, `source`, `skip`, `method`, `validate`, `nested`)",
             ))
         })?;
     }
@@ -4989,12 +5000,32 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // Generate from_model body: struct literal with each field assigned.
     let from_model_fields = fields_info.iter().map(|fi| {
         let ident = &fi.ident;
+        let ty = &fi.ty;
         if let Some(method) = &fi.attrs.method {
             // SerializerMethodField: call Self::<method>(&model) to
             // compute the value. Method signature must be
             // `fn <method>(model: &T) -> <field type>`.
             let method_ident = syn::Ident::new(method, ident.span());
             quote! { #ident: Self::#method_ident(model) }
+        } else if fi.attrs.nested {
+            // Nested serializer. Source defaults to the field name on
+            // this struct; override via `source = "..."`. The source
+            // field on the model is expected to be a `ForeignKey<T>`
+            // whose `.value()` returns `Option<&T>` after lazy-load.
+            // Caller must `.get(&pool).await?` or `.select_related(...)`
+            // before invoking from_model — otherwise the value is
+            // None and from_model panics with a hint.
+            let src_name = fi.attrs.source.as_deref().unwrap_or(&fi.ident.to_string()).to_owned();
+            let src_ident = syn::Ident::new(&src_name, ident.span());
+            let panic_msg = format!(
+                "nested serializer for `{ident}` requires `model.{src_name}` to be loaded — \
+                 call .get(&pool).await? or .select_related(\"{src_name}\") on the model first",
+            );
+            quote! {
+                #ident: <#ty as ::rustango::serializer::ModelSerializer>::from_model(
+                    model.#src_ident.value().expect(#panic_msg),
+                )
+            }
         } else if fi.attrs.write_only || fi.attrs.skip {
             // Not read from model — use default
             quote! { #ident: ::core::default::Default::default() }

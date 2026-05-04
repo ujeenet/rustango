@@ -152,6 +152,31 @@ impl<T> sqlx::Type<sqlx::Postgres> for ForeignKey<T> {
     }
 }
 
+/// MySQL Decode mirror for the bi-dialect path. Without this,
+/// `#[derive(Model)]` on any model with a `ForeignKey<T>` field fails
+/// to compile when the consumer enables the `mysql` feature, because
+/// the macro emits a FromRow impl over MySqlRow that needs each
+/// column type to satisfy `Decode<MySql>`.
+#[cfg(feature = "mysql")]
+impl<'r, T> sqlx::Decode<'r, sqlx::MySql> for ForeignKey<T> {
+    fn decode(
+        value: <sqlx::MySql as sqlx::Database>::ValueRef<'r>,
+    ) -> Result<Self, sqlx::error::BoxDynError> {
+        Ok(Self::Unloaded(<i64 as sqlx::Decode<sqlx::MySql>>::decode(value)?))
+    }
+}
+
+#[cfg(feature = "mysql")]
+impl<T> sqlx::Type<sqlx::MySql> for ForeignKey<T> {
+    fn type_info() -> sqlx::mysql::MySqlTypeInfo {
+        <i64 as sqlx::Type<sqlx::MySql>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::mysql::MySqlTypeInfo) -> bool {
+        <i64 as sqlx::Type<sqlx::MySql>>::compatible(ty)
+    }
+}
+
 impl<T> ForeignKey<T>
 where
     T: Model + for<'r> FromRow<'r, PgRow> + Send + Unpin + crate::sql::LoadRelated,
