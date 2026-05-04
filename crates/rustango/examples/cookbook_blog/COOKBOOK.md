@@ -530,7 +530,31 @@ Slice 3b.*
 
 ## Chapter 4 — Migrations
 
-*(Slice 2)*
+5 live recipes against docker PG verifying the migration lifecycle.
+Run with `DATABASE_URL=... cargo test --test cookbook_chapter04_migrations -- --test-threads=1`.
+
+* §4.51 / 4.53 / 4.54 / 4.61 — `migrate(&pool, &dir)` applies pending,
+  `unapply(&pool, &dir, name)` rolls back. Verifies schema catalog
+  before + after. → `apply_then_unapply_round_trip`
+* §4.55 / 4.57 / 4.58 — `Migration { name, prev, scope, atomic, snapshot,
+  forward: Vec<Operation> }` with `Operation::Schema(SchemaChange)` +
+  `Operation::Data(DataOp { sql, reverse_sql, reversible })`.
+  Externally-tagged JSON: `{"schema": {"CreateTable": "..."}}` /
+  `{"data": {"sql": "...", "reverse_sql": "...", "reversible": true}}`.
+  → `migration_serde_round_trips_schema_and_data_ops`
+* §4.56 — `embed_migrations!("migrations")` baked into the binary at
+  compile time; `EMBEDDED.iter()` enumerates the migrations the
+  current cookbook ships with. → `embedded_migrations_const_is_loaded`
+* §4.59 — `AlterColumnType` / `AlterColumnNullable` /
+  `AlterColumnDefault` (and friends) round-trip via the same
+  externally-tagged JSON. → `alter_column_ops_serialize_with_external_tag`
+* §4.64 — `AddCompositeFk { table, name, to, from, on }` /
+  `DropCompositeFk { table, name }` (v0.15-F.5b) round-trip.
+  → `composite_fk_ops_serialize_round_trip`
+
+*Sub-sections 4.51b (make_migrations from inventory diff),
+4.52 (per-app), 4.60 (rename), 4.65 (per-app ledger) queued for
+Slice 4b.*
 
 ## Chapter 5 — Multi-tenancy
 
