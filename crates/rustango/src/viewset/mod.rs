@@ -157,6 +157,17 @@ impl PaginationStyle {
     }
 }
 
+/// Optional per-row render callback installed via
+/// [`ViewSet::serializer`]. When present, list / retrieve responses
+/// route every row through it instead of the default `row_to_json`
+/// projection. The closure decodes the row into the model's struct
+/// (`T::from_row`) then runs it through the serializer's `from_model`
+/// + `to_value`, so SerializerMethodField / read_only / source /
+/// many overrides all apply to the JSON output.
+type RowRender = std::sync::Arc<
+    dyn Fn(&crate::sql::sqlx::postgres::PgRow) -> Value + Send + Sync,
+>;
+
 /// Builder for a set of REST CRUD endpoints over a single [`Model`] table.
 ///
 /// Call `.router(prefix, pool)` when done to get an `axum::Router`.
@@ -171,6 +182,10 @@ pub struct ViewSet {
     perms: ViewSetPerms,
     read_only: bool,
     pagination: PaginationStyle,
+    /// When set, list / retrieve responses run each row through this
+    /// callback instead of the default field-level projection. Wired
+    /// via [`Self::serializer`].
+    row_render: Option<RowRender>,
 }
 
 impl ViewSet {
@@ -186,7 +201,39 @@ impl ViewSet {
             perms: ViewSetPerms::default(),
             read_only: false,
             pagination: PaginationStyle::PageNumber,
+            row_render: None,
         }
+    }
+
+    /// Render list / retrieve responses through `S` (a serializer
+    /// derived via `#[derive(Serializer)] #[serializer(model = T)]`)
+    /// instead of the default field-level projection.
+    ///
+    /// Apply when you want the ViewSet's JSON shape to match a typed
+    /// serializer's `read_only` / `source` / `method` / `nested` /
+    /// `many` overrides. The serializer's `Model` associated type
+    /// must be the same model the ViewSet is built over.
+    ///
+    /// Internally stores `Arc<dyn Fn(&PgRow) -> Value>` so the
+    /// ViewSet itself stays type-erased — non-breaking add-on.
+    #[must_use]
+    pub fn serializer<S>(mut self) -> Self
+    where
+        S: crate::serializer::ModelSerializer + 'static,
+        S::Model: for<'r> crate::sql::sqlx::FromRow<'r, crate::sql::sqlx::postgres::PgRow>
+            + Send + Unpin,
+    {
+        let render: RowRender = std::sync::Arc::new(|row| {
+            match <S::Model as crate::sql::sqlx::FromRow<_>>::from_row(row) {
+                Ok(model) => {
+                    let s = S::from_model(&model);
+                    serde_json::to_value(&s).unwrap_or(Value::Null)
+                }
+                Err(_) => Value::Null,
+            }
+        });
+        self.row_render = Some(render);
+        self
     }
 
     /// Switch to cursor-based pagination on `field`. The cursor field
@@ -640,7 +687,10 @@ async fn handle_list(
                 Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
             };
 
-            let results: Vec<Value> = rows.iter().map(|row| row_to_json(row, &fields)).collect();
+            let results: Vec<Value> = match &state.vs.row_render {
+                Some(render) => rows.iter().map(|r| (render)(r)).collect(),
+                None => rows.iter().map(|row| row_to_json(row, &fields)).collect(),
+            };
             let last_page = ((count - 1).max(0) / page_size) + 1;
             json_response(json!({
                 "count": count,
@@ -760,7 +810,10 @@ async fn handle_list_cursor(
         None
     };
 
-    let results: Vec<Value> = page_rows.iter().map(|row| row_to_json(row, &fields)).collect();
+    let results: Vec<Value> = match &state.vs.row_render {
+        Some(render) => page_rows.iter().map(|r| (render)(r)).collect(),
+        None => page_rows.iter().map(|row| row_to_json(row, &fields)).collect(),
+    };
     json_response(json!({
         "page_size": page_size,
         "next": next_cursor,
@@ -818,7 +871,10 @@ async fn handle_retrieve(
 
     let fields = state.effective_fields();
     match crate::sql::select_one_row(&state.pool, &select_q).await {
-        Ok(Some(row)) => json_response(row_to_json(&row, &fields)),
+        Ok(Some(row)) => match &state.vs.row_render {
+            Some(render) => json_response((render)(&row)),
+            None => json_response(row_to_json(&row, &fields)),
+        },
         Ok(None) => json_error(StatusCode::NOT_FOUND, "not found"),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -1022,7 +1078,10 @@ async fn fetch_by_pk(
         .await
         .ok()
         .flatten()
-        .map(|row| row_to_json(&row, fields))
+        .map(|row| match &state.vs.row_render {
+            Some(render) => (render)(&row),
+            None => row_to_json(&row, fields),
+        })
 }
 
 /// Extract form data from both `application/x-www-form-urlencoded` and
