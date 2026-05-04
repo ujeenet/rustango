@@ -650,7 +650,66 @@ validators), 7.99b (Serializer derive) queued for Slice 7b.*
 
 ## Chapter 8 — Admin
 
-*(Slice 6)*
+Two parts: in-process router smoke + a real-browser playwright session.
+
+### Part A — in-process smoke (no socket, no browser)
+
+`tests/cookbook_chapter08_admin.rs` boots `admin::Builder::new(pool)
+.build()` and hits routes via `tower::ServiceExt::oneshot`. 2 tests:
+
+* §8.100 / 8.101 `admin_builder_serves_list_page_for_registered_model`
+  — `GET /cookbook_author` returns 200 with the table name in the body.
+* §8.103 `admin_create_form_renders_input_for_each_writable_field` —
+  `GET /cookbook_author/new` returns 200; HTML contains `name="name"`,
+  `name="email"`, `name="bio"`; does NOT contain `name="id"` (Auto<i64>
+  PK is server-assigned and hidden from the create form).
+
+Run: `DATABASE_URL=... cargo test --test cookbook_chapter08_admin -- --test-threads=1`.
+
+### Part B — real-browser session (playwright MCP)
+
+Reproducible by hand:
+
+```sh
+# Terminal 1 — fresh DB + boot
+docker exec shop-postgres-1 psql -U rustango -c "CREATE DATABASE cookbook_browser_dev"
+DATABASE_URL=postgres://rustango:rustango@localhost:5432/cookbook_browser_dev \
+RUSTANGO_APEX_DOMAIN=localhost \
+RUSTANGO_BIND=127.0.0.1:8765 \
+RUSTANGO_SESSION_SECRET=cookbook-test-32bytes-cookbook-test-32bytes \
+cargo run -- init-tenancy
+# (then `migrate`, `create-operator admin --password letmein`,
+#  `create-tenant acme --display-name "Acme Inc" --host-pattern acme.localhost`,
+#  `create-user acme alice --password tenantpw --superuser`,
+#  finally `cargo run`)
+```
+
+Verified browser-side via playwright MCP:
+
+* §8.0 `http://localhost:8765/login` — operator login form renders
+  with username/password/Sign in. Logging in as `admin / letmein`
+  lands on the operator console (sidebar nav: Home, Operators,
+  Organizations).
+* §8.0 `http://acme.localhost:8765/__login` — tenant login form
+  renders titled "Sign in to **acme**". Logging in as `alice /
+  tenantpw` lands on the tenant admin index showing every registered
+  model split by app group: `apps` (the cookbook's blog/auth/etc.
+  models), `contenttypes` (rustango_content_types), `tenancy`
+  (rustango_users + friends).
+
+**Surfaced gap**: tenant admin returns a JSON 500 (`relation
+"cookbook_author" does not exist`) when a tenant-scoped model's table
+isn't materialized in the tenant's schema. The cookbook's models live
+in inventory but no `make-migrations` has been run for them, so the
+admin shows them in the index then errors on browse. A friendlier
+"table not yet migrated — run `migrate-tenants`" message would close
+this UX gap. Tracked in Gaps section below.
+
+*Sub-sections 8.102 (detail view), 8.104 (FK display widget),
+8.105 (FK search widget), 8.106 (M2M widget), 8.107 (JSONB editor),
+8.108 (generic-FK link rendering), 8.109 (basic-auth wrap),
+8.110 (custom actions), 8.111 (inline editing) queued for Slice 8b
+which would need a tenant-scoped cookbook migration applied.*
 
 ## Chapter 9 — ViewSets / DRF / OpenAPI
 

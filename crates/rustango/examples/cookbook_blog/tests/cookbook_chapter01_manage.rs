@@ -17,7 +17,8 @@ fn layout_matches_django_shape() {
         "src/settings.rs",
         "src/apps/mod.rs",
         "config/default.toml",
-        "migrations/0001_initial.json",
+        "migrations/0001_rustango_registry_initial.json",
+        "migrations/0001_rustango_tenant_initial.json",
         "COOKBOOK.md",
         "README.md",
     ] {
