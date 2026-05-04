@@ -960,6 +960,87 @@ impl<T: crate::core::Model> ModelFormFor<T> {
         &self.values
     }
 
+    // (helper for validate_unique_together below)
+
+    /// DRF-shape `UniqueTogetherValidator` — pre-checks every composite
+    /// UNIQUE index declared on `T::SCHEMA.indexes` (via
+    /// `#[rustango(unique_together = "...")]`) by SELECT-ing the
+    /// matching `(col1, col2, ...)` pair from the DB. Hits become
+    /// per-field `FormErrors` keyed by *each* column in the conflicting
+    /// tuple — a friendly alternative to the raw Postgres
+    /// `duplicate key value violates unique constraint "..."` error.
+    ///
+    /// Pass the optional `pk_value` when validating an UPDATE so the
+    /// row being edited isn't its own conflict (analog to DRF's
+    /// `instance` parameter on the validator).
+    ///
+    /// # Errors
+    /// Returns the accumulated [`FormErrors`] when any composite
+    /// UNIQUE check finds a conflicting row in the DB. Driver / SQL
+    /// failures land as a non-field error.
+    pub async fn validate_unique_together(
+        &self,
+        pool: &crate::sql::sqlx::PgPool,
+        pk_value: Option<&crate::core::SqlValue>,
+    ) -> Result<(), FormErrors> {
+        use crate::sql::sqlx;
+        let mut errors = FormErrors::default();
+        let pk_field = T::SCHEMA.primary_key();
+        for idx in T::SCHEMA.indexes {
+            if !idx.unique || idx.columns.len() < 2 {
+                continue;
+            }
+            // Resolve `(column, value)` pairs from this form for every
+            // column in the composite index. If any column is absent
+            // (skipped, missing) we can't pre-check — let the DB
+            // surface the conflict.
+            let mut bound: Vec<(&'static str, &crate::core::SqlValue)> = Vec::new();
+            let mut all_present = true;
+            for col in idx.columns {
+                match self.columns.iter().position(|c| c == col) {
+                    Some(i) => bound.push((idx.columns.iter().find(|c| c == &col).copied().unwrap(), &self.values[i])),
+                    None => { all_present = false; break; }
+                }
+            }
+            if !all_present { continue; }
+            // Build `SELECT 1 FROM "<table>" WHERE c1 = $1 AND c2 = $2 [...] [AND pk <> $N] LIMIT 1`
+            let mut sql = format!(r#"SELECT 1 FROM "{}" WHERE "#, T::SCHEMA.table);
+            let mut sep = "";
+            for (i, (col, _)) in bound.iter().enumerate() {
+                sql.push_str(sep);
+                sep = " AND ";
+                sql.push_str(&format!(r#""{col}" = ${}"#, i + 1));
+            }
+            let extra_pk_idx = bound.len() + 1;
+            if let (Some(pk_field), Some(_pk_value)) = (pk_field, pk_value) {
+                sql.push_str(&format!(r#" AND "{}" <> ${}"#, pk_field.column, extra_pk_idx));
+            }
+            sql.push_str(" LIMIT 1");
+            let mut q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> =
+                sqlx::query(&sql);
+            for (_, v) in &bound { q = bind_sql_value_inline(q, v); }
+            if let (Some(_), Some(pk_value)) = (pk_field, pk_value) {
+                q = bind_sql_value_inline(q, pk_value);
+            }
+            match q.fetch_optional(pool).await {
+                Ok(Some(_)) => {
+                    let label = idx.columns.join(", ");
+                    let msg = format!("a row with the same ({label}) already exists");
+                    for col in idx.columns {
+                        errors.add(col.to_owned(), msg.clone());
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => errors.add_non_field(format!(
+                    "unique-together pre-check failed: {e}"
+                )),
+            }
+        }
+        if errors.is_empty() { Ok(()) } else { Err(errors) }
+    }
+
+    // (continued)
+
     /// Convert into an [`crate::core::InsertQuery`] ready to feed
     /// `sql::insert(&pool, &query)` or `sql::insert_pool(&pool, &query)`.
     ///
@@ -1004,6 +1085,29 @@ impl<T: crate::core::Model> ModelFormFor<T> {
                 value: pk_value,
             }),
         })
+    }
+}
+
+/// Bind a [`SqlValue`] onto a Postgres `sqlx::Query`. Free helper used
+/// by [`ModelFormFor::validate_unique_together`]'s pre-check SELECT.
+fn bind_sql_value_inline<'a>(
+    q: crate::sql::sqlx::query::Query<'a, crate::sql::sqlx::Postgres, crate::sql::sqlx::postgres::PgArguments>,
+    v: &crate::core::SqlValue,
+) -> crate::sql::sqlx::query::Query<'a, crate::sql::sqlx::Postgres, crate::sql::sqlx::postgres::PgArguments> {
+    use crate::core::SqlValue;
+    match v {
+        SqlValue::Null         => q.bind(None::<i64>),
+        SqlValue::I32(v)       => q.bind(*v),
+        SqlValue::I64(v)       => q.bind(*v),
+        SqlValue::F32(v)       => q.bind(*v),
+        SqlValue::F64(v)       => q.bind(*v),
+        SqlValue::Bool(v)      => q.bind(*v),
+        SqlValue::String(v)    => q.bind(v.clone()),
+        SqlValue::DateTime(v)  => q.bind(*v),
+        SqlValue::Date(v)      => q.bind(*v),
+        SqlValue::Uuid(v)      => q.bind(*v),
+        SqlValue::Json(v)      => q.bind(v.clone()),
+        SqlValue::List(_)      => panic!("validate_unique_together: List not supported in pre-check"),
     }
 }
 
