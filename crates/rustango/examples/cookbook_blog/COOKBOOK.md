@@ -491,7 +491,42 @@ act.save(&pool).await?;
 
 ## Chapter 3 — ORM
 
-*(Slice 3)*
+13 live recipes against the Author / Post fixture from Chapter 2.
+Run with `DATABASE_URL=... cargo test --test cookbook_chapter03_orm -- --test-threads=1`.
+
+* §3.31 `Post::objects().filter("published", Op::Eq, true).fetch(&pool)` →
+  `filter_eq_fetch_returns_matching_rows`
+* §3.34 `Op::Gt` / `Op::Lt` / `Op::ILike` / `Op::In` / `Op::Between` /
+  `Op::IsNull` — six tests covering the full Op surface.
+* §3.35 `.order_by(&[("col", desc)])` (`true = DESC`, `false = ASC`) →
+  `order_by_view_count_desc`
+* §3.36 `.limit(N).offset(M)` for pagination → `limit_offset_paginates`
+* §3.37 `.aggregate().annotate("alias", AggregateExpr::Count|Sum|Avg|...)`
+  + `fetch_aggregate(&q, &pool)` → `Vec<HashMap<String, SqlValue>>`
+  → `aggregate_count_and_sum`
+* §3.42 `model.save(&pool)` does INSERT (PK Unset) or UPDATE (PK Set) →
+  `save_inserts_then_updates_in_place`
+* §3.46 raw `sqlx::query_scalar / query_as` for SQL the QuerySet
+  doesn't cover → `raw_sql_escape_via_sqlx`
+* §3.47 manual `pool.begin() ... tx.rollback()` — atomic rollback on
+  UNIQUE violation → `manual_transaction_rolls_back_on_error`
+* §3.48 PG JSONB `@>` containment operator on the `metadata` column →
+  `json_operator_on_jsonb_column`
+
+**Framework bug fixed during this slice**: `SUM(BIGINT)` returns
+PostgreSQL `NUMERIC` and `AVG(BIGINT)` returns `NUMERIC` — the
+aggregate row decoder only tries `i64`/`i32`/`f64`/`bool`/`String`,
+so the result silently came back as `SqlValue::Null`. Added
+`Dialect::cast_aggregate_to_int` / `cast_aggregate_to_float` (PG
+emits `::bigint` / `::double precision`; MySQL emits `CAST(.. AS
+SIGNED)` / `CAST(.. AS DOUBLE)`). Aggregate writer wraps SUM/AVG via
+the new methods.
+
+*Sub-sections 3.32 (get/get_on/fetch_on), 3.33 (OR-nested),
+3.38 (annotate), 3.39 (prefetch FK), 3.40 (prefetch_soft),
+3.41 (prefetch_generic), 3.43 (bulk_insert), 3.44 (bulk UPDATE),
+3.45 (WhereExpr::Not), 3.49 (_pool executor variants) queued for
+Slice 3b.*
 
 ## Chapter 4 — Migrations
 
