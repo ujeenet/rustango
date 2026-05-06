@@ -261,7 +261,7 @@ runtime = ["dep:tracing-subscriber"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.23.1", path = "../rustango-macros" }
+rustango-macros = { version = "0.24.0", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono     = { workspace = true }
