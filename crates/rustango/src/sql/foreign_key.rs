@@ -1,28 +1,38 @@
-//! `ForeignKey<T>` — lazy-loaded parent reference (v0.7 slice 3).
+//! `ForeignKey<T, K>` — lazy-loaded parent reference, generic over
+//! the parent's primary-key type `K` (defaults to `i64`).
 //!
-//! `#[derive(Model)] struct Post { author: ForeignKey<User>, … }`
-//! stores the parent's primary key in the column, just like the
-//! older `#[rustango(fk = "users")] author_id: i64` form. The
-//! difference is on the Rust side: the field type carries the
-//! target model statically, so `post.author.get(&pool).await?`
-//! resolves the parent row on demand without the caller juggling
-//! `User::objects().filter(…)`.
+//! `#[derive(Model)] struct Post { author: ForeignKey<User>, … }` —
+//! the same shape that's been working since v0.7. The generic `K`
+//! parameter (default `i64`) lets the same wrapper carry non-integer
+//! PKs:
+//!
+//! ```ignore
+//! #[derive(Model)]
+//! struct Comment {
+//!     #[rustango(primary_key)] id: Auto<i64>,
+//!     // String FK to users.user_uuid (parent's PK is String)
+//!     user_uuid: ForeignKey<User, String>,
+//!     body: String,
+//! }
+//! ```
 //!
 //! State machine:
 //!
 //! * Just-fetched rows hold `ForeignKey::Unloaded(pk)` — sqlx's
-//!   `Decode` impl reads the `BIGINT` column and builds this variant.
+//!   `Decode` impl reads the column and builds this variant.
 //! * After the first `.get(&pool)`, the variant becomes
 //!   `ForeignKey::Loaded { pk, value }` with the parent cached in a
 //!   `Box<T>`. Subsequent `.get()` calls are zero-cost (no SQL).
 //!
-//! On the write path, `ForeignKey<T>` lowers to `SqlValue::I64(pk)`
-//! regardless of state — matches the existing FK column shape.
+//! On the write path, `ForeignKey<T, K>` lowers to `K`'s `SqlValue`
+//! variant regardless of state — matches the column's declared type.
 //!
-//! Limitations (v1):
+//! Supported `K` values:
+//! `i32`, `i64`, `String`, `Uuid`, `chrono::DateTime<Utc>`,
+//! `chrono::NaiveDate`, `bool`, `f32`, `f64`. Anything that implements
+//! `Into<SqlValue> + Clone + sqlx::Decode + sqlx::Type` works.
 //!
-//! * Target's PK must be `i64` (or `Auto<i64>`). `i32` and other
-//!   shapes are deferred until they're asked for.
+//! Limitations:
 //! * Target's PK column defaults to `"id"` for the
 //!   `Relation::Fk { on: … }` schema entry. Override with
 //!   `#[rustango(on = "user_uuid")]` on the FK field.
@@ -36,43 +46,35 @@ use super::ExecError;
 
 /// Lazy-loaded reference to a parent row. See module docs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ForeignKey<T> {
+pub enum ForeignKey<T, K = i64> {
     /// Just-deserialized state — only the PK is known.
-    Unloaded(i64),
+    Unloaded(K),
     /// Resolved state — the parent row is cached on the field.
     Loaded {
         /// Carried alongside the value so writes can grab the PK
-        /// without inspecting `T` (whose PK could be `Auto<i64>` or
-        /// plain `i64`).
-        pk: i64,
+        /// without inspecting `T` (whose PK could be `Auto<…>` or a
+        /// plain field).
+        pk: K,
         value: Box<T>,
     },
 }
 
-impl<T> ForeignKey<T> {
+impl<T, K> ForeignKey<T, K> {
     /// Construct from a known PK without loading. Equivalent to
     /// `pk.into()`.
     #[must_use]
-    pub fn unloaded(pk: i64) -> Self {
+    pub fn unloaded(pk: K) -> Self {
         Self::Unloaded(pk)
     }
 
     /// Construct from an already-loaded parent. Caller supplies the
-    /// PK explicitly because `ForeignKey<T>` does not assume a fixed
-    /// shape for `T`'s PK field.
+    /// PK explicitly because `ForeignKey<T, K>` does not assume a
+    /// fixed shape for `T`'s PK field.
     #[must_use]
-    pub fn loaded(pk: i64, value: T) -> Self {
+    pub fn loaded(pk: K, value: T) -> Self {
         Self::Loaded {
             pk,
             value: Box::new(value),
-        }
-    }
-
-    /// The PK regardless of state.
-    #[must_use]
-    pub fn pk(&self) -> i64 {
-        match self {
-            Self::Unloaded(pk) | Self::Loaded { pk, .. } => *pk,
         }
     }
 
@@ -99,87 +101,118 @@ impl<T> ForeignKey<T> {
             Self::Unloaded(_) => None,
         }
     }
-}
 
-/// Serialize as the PK integer — the only piece of `ForeignKey<T>`
-/// stable across loaded/unloaded states. Lets audited models include
-/// FK columns in `audit(track = "...")` and have the audit JSON
-/// record the parent's PK without forcing every FK target to also
-/// derive `Serialize`.
-impl<T> serde::Serialize for ForeignKey<T> {
-    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+    /// Borrow the PK regardless of state. Cheap, no-clone variant of
+    /// [`Self::pk`] for callers that just want to peek.
+    #[must_use]
+    pub fn pk_ref(&self) -> &K {
         match self {
-            Self::Unloaded(pk) => pk.serialize(ser),
-            Self::Loaded { pk, .. } => pk.serialize(ser),
+            Self::Unloaded(pk) | Self::Loaded { pk, .. } => pk,
         }
     }
 }
 
-impl<T> From<i64> for ForeignKey<T> {
-    fn from(pk: i64) -> Self {
+impl<T, K: Clone> ForeignKey<T, K> {
+    /// The PK regardless of state. Returns by clone — cheap for the
+    /// integer PK types most apps use, and small allocation for
+    /// `String`/`Uuid`. Use [`Self::pk_ref`] if you need a borrow.
+    #[must_use]
+    pub fn pk(&self) -> K {
+        self.pk_ref().clone()
+    }
+}
+
+/// Serialize as the PK regardless of loaded/unloaded state. Lets
+/// audited models include FK columns in `audit(track = "...")` and
+/// have the audit JSON record the parent's PK without forcing every
+/// FK target to also derive `Serialize`.
+impl<T, K: serde::Serialize> serde::Serialize for ForeignKey<T, K> {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        self.pk_ref().serialize(ser)
+    }
+}
+
+impl<T, K> From<K> for ForeignKey<T, K> {
+    fn from(pk: K) -> Self {
         Self::Unloaded(pk)
     }
 }
 
 /// Always lowers to the PK regardless of state. Saves & inserts of
-/// the *parent's* row only need the FK column value, not the loaded
-/// child object.
-impl<T> From<ForeignKey<T>> for SqlValue {
-    fn from(fk: ForeignKey<T>) -> Self {
-        Self::I64(fk.pk())
+/// the *child's* row only need the FK column value, not the loaded
+/// parent object.
+impl<T, K: Clone + Into<SqlValue>> From<ForeignKey<T, K>> for SqlValue {
+    fn from(fk: ForeignKey<T, K>) -> Self {
+        match fk {
+            ForeignKey::Unloaded(k) | ForeignKey::Loaded { pk: k, .. } => k.into(),
+        }
     }
 }
 
-/// `ForeignKey<T>` decodes from a Postgres `BIGINT` column into the
-/// `Unloaded` variant. The lazy-load happens later via `.get()`.
-impl<'r, T> sqlx::Decode<'r, sqlx::Postgres> for ForeignKey<T> {
+/// `ForeignKey<T, K>` decodes from the underlying column type into
+/// the `Unloaded` variant. The lazy-load happens later via `.get()`.
+impl<'r, T, K> sqlx::Decode<'r, sqlx::Postgres> for ForeignKey<T, K>
+where
+    K: sqlx::Decode<'r, sqlx::Postgres>,
+{
     fn decode(
         value: <sqlx::Postgres as sqlx::Database>::ValueRef<'r>,
     ) -> Result<Self, sqlx::error::BoxDynError> {
-        Ok(Self::Unloaded(<i64 as sqlx::Decode<sqlx::Postgres>>::decode(value)?))
+        Ok(Self::Unloaded(<K as sqlx::Decode<sqlx::Postgres>>::decode(
+            value,
+        )?))
     }
 }
 
-/// `ForeignKey<T>` claims the same Postgres type as `i64`. The DDL
-/// writer emits `BIGINT` for FK columns, so this matches.
-impl<T> sqlx::Type<sqlx::Postgres> for ForeignKey<T> {
+/// `ForeignKey<T, K>` claims `K`'s Postgres type. The DDL writer
+/// emits whatever column type the FK field's declared type maps to,
+/// so this matches by construction.
+impl<T, K> sqlx::Type<sqlx::Postgres> for ForeignKey<T, K>
+where
+    K: sqlx::Type<sqlx::Postgres>,
+{
     fn type_info() -> sqlx::postgres::PgTypeInfo {
-        <i64 as sqlx::Type<sqlx::Postgres>>::type_info()
+        <K as sqlx::Type<sqlx::Postgres>>::type_info()
     }
 
     fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
-        <i64 as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+        <K as sqlx::Type<sqlx::Postgres>>::compatible(ty)
     }
 }
 
-/// MySQL Decode mirror for the bi-dialect path. Without this,
-/// `#[derive(Model)]` on any model with a `ForeignKey<T>` field fails
-/// to compile when the consumer enables the `mysql` feature, because
-/// the macro emits a FromRow impl over MySqlRow that needs each
-/// column type to satisfy `Decode<MySql>`.
+/// MySQL Decode mirror for the bi-dialect path.
 #[cfg(feature = "mysql")]
-impl<'r, T> sqlx::Decode<'r, sqlx::MySql> for ForeignKey<T> {
+impl<'r, T, K> sqlx::Decode<'r, sqlx::MySql> for ForeignKey<T, K>
+where
+    K: sqlx::Decode<'r, sqlx::MySql>,
+{
     fn decode(
         value: <sqlx::MySql as sqlx::Database>::ValueRef<'r>,
     ) -> Result<Self, sqlx::error::BoxDynError> {
-        Ok(Self::Unloaded(<i64 as sqlx::Decode<sqlx::MySql>>::decode(value)?))
+        Ok(Self::Unloaded(<K as sqlx::Decode<sqlx::MySql>>::decode(
+            value,
+        )?))
     }
 }
 
 #[cfg(feature = "mysql")]
-impl<T> sqlx::Type<sqlx::MySql> for ForeignKey<T> {
+impl<T, K> sqlx::Type<sqlx::MySql> for ForeignKey<T, K>
+where
+    K: sqlx::Type<sqlx::MySql>,
+{
     fn type_info() -> sqlx::mysql::MySqlTypeInfo {
-        <i64 as sqlx::Type<sqlx::MySql>>::type_info()
+        <K as sqlx::Type<sqlx::MySql>>::type_info()
     }
 
     fn compatible(ty: &sqlx::mysql::MySqlTypeInfo) -> bool {
-        <i64 as sqlx::Type<sqlx::MySql>>::compatible(ty)
+        <K as sqlx::Type<sqlx::MySql>>::compatible(ty)
     }
 }
 
-impl<T> ForeignKey<T>
+impl<T, K> ForeignKey<T, K>
 where
     T: Model + for<'r> FromRow<'r, PgRow> + Send + Unpin + crate::sql::LoadRelated,
+    K: Clone + Into<SqlValue> + Send + Sync + 'static,
 {
     /// Resolve the parent row and cache it on the field. Subsequent
     /// calls return the cached reference without hitting the DB.
@@ -208,22 +241,25 @@ where
         E: sqlx::Executor<'c, Database = sqlx::Postgres>,
     {
         if matches!(self, Self::Unloaded(_)) {
-            let pk = self.pk();
+            let pk = self.pk_ref().clone();
             let pk_field = T::SCHEMA
                 .primary_key()
                 .ok_or(ExecError::MissingPrimaryKey {
                     table: T::SCHEMA.table,
                 })?;
             let mut rows: Vec<T> = QuerySet::<T>::new()
-                .filter(pk_field.column, Op::Eq, pk)
+                .filter(pk_field.column, Op::Eq, pk.clone())
                 .fetch_on(executor)
                 .await?;
-            let value = rows
-                .pop()
-                .ok_or(ExecError::ForeignKeyTargetMissing {
+            let value = rows.pop().ok_or_else(|| {
+                // Render the missing PK using its `Into<SqlValue>` shape
+                // so error messages stay readable for non-integer keys.
+                let sv: SqlValue = pk.clone().into();
+                ExecError::ForeignKeyTargetMissing {
                     table: T::SCHEMA.table,
-                    pk,
-                })?;
+                    pk: sv.to_display_string(),
+                }
+            })?;
             *self = Self::Loaded {
                 pk,
                 value: Box::new(value),
@@ -250,7 +286,7 @@ mod tests {
 
     #[test]
     fn loaded_constructor_caches_value() {
-        let fk = ForeignKey::loaded(7, "alice".to_string());
+        let fk = ForeignKey::loaded(7_i64, "alice".to_string());
         assert_eq!(fk.pk(), 7);
         assert!(fk.is_loaded());
         assert_eq!(fk.value(), Some(&"alice".to_string()));
@@ -267,17 +303,53 @@ mod tests {
 
     #[test]
     fn into_sqlvalue_gives_i64_in_either_state() {
-        let unloaded: ForeignKey<()> = ForeignKey::unloaded(1);
-        let loaded = ForeignKey::loaded(2, ());
+        let unloaded: ForeignKey<()> = ForeignKey::unloaded(1_i64);
+        let loaded = ForeignKey::loaded(2_i64, ());
         assert!(matches!(SqlValue::from(unloaded), SqlValue::I64(1)));
         assert!(matches!(SqlValue::from(loaded), SqlValue::I64(2)));
     }
 
     #[test]
     fn into_value_consumes_when_loaded() {
-        let loaded = ForeignKey::loaded(3, 100_u32);
+        let loaded = ForeignKey::loaded(3_i64, 100_u32);
         assert_eq!(loaded.into_value(), Some(100));
-        let unloaded: ForeignKey<u32> = ForeignKey::unloaded(4);
+        let unloaded: ForeignKey<u32> = ForeignKey::unloaded(4_i64);
         assert_eq!(unloaded.into_value(), None);
+    }
+
+    // ----- Non-i64 PK shapes -----
+
+    #[test]
+    fn string_pk_unloaded_round_trip() {
+        let fk: ForeignKey<(), String> = ForeignKey::unloaded("alice-uuid".to_owned());
+        assert_eq!(fk.pk_ref(), "alice-uuid");
+        assert_eq!(fk.pk(), "alice-uuid");
+        assert!(!fk.is_loaded());
+    }
+
+    #[test]
+    fn string_pk_lowers_to_sqlvalue_string() {
+        let fk: ForeignKey<(), String> = ForeignKey::unloaded("k".to_owned());
+        match SqlValue::from(fk) {
+            SqlValue::String(s) => assert_eq!(s, "k"),
+            other => panic!("expected SqlValue::String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn uuid_pk_round_trip() {
+        let id = uuid::Uuid::nil();
+        let fk: ForeignKey<(), uuid::Uuid> = ForeignKey::unloaded(id);
+        assert_eq!(fk.pk(), id);
+        match SqlValue::from(fk) {
+            SqlValue::Uuid(u) => assert_eq!(u, id),
+            other => panic!("expected SqlValue::Uuid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_string_yields_unloaded() {
+        let fk: ForeignKey<(), String> = "x".to_owned().into();
+        assert!(matches!(fk, ForeignKey::Unloaded(ref s) if s == "x"));
     }
 }

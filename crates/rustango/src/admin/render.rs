@@ -37,6 +37,7 @@ pub(crate) fn escape(s: &str) -> String {
 /// * `serde_json::Value` → compact JSON
 pub(crate) fn render_value(row: &PgRow, field: &FieldSchema) -> String {
     match field.ty {
+        FieldType::I16 => format_display::<i16>(row, field),
         FieldType::I32 => format_display::<i32>(row, field),
         FieldType::I64 => format_display::<i64>(row, field),
         FieldType::F32 => format_display::<f32>(row, field),
@@ -85,6 +86,12 @@ fn format_json(row: &PgRow, field: &FieldSchema) -> String {
 pub(crate) fn read_value_as_json(row: &PgRow, field: &FieldSchema) -> serde_json::Value {
     use serde_json::Value;
     match field.ty {
+        FieldType::I16 => row
+            .try_get::<Option<i16>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(Value::from)
+            .unwrap_or(Value::Null),
         FieldType::I32 => row
             .try_get::<Option<i32>, _>(field.column)
             .ok()
@@ -161,6 +168,7 @@ pub(crate) fn coerce_form_to_json(field: &FieldSchema, raw: &str) -> serde_json:
         return Value::Null;
     }
     match field.ty {
+        FieldType::I16 => raw.parse::<i16>().map(Value::from).unwrap_or_else(|_| Value::String(raw.to_owned())),
         FieldType::I32 => raw.parse::<i32>().map(Value::from).unwrap_or_else(|_| Value::String(raw.to_owned())),
         FieldType::I64 => raw.parse::<i64>().map(Value::from).unwrap_or_else(|_| Value::String(raw.to_owned())),
         FieldType::F32 => raw.parse::<f32>().map(Value::from).unwrap_or_else(|_| Value::String(raw.to_owned())),
@@ -182,6 +190,7 @@ pub(crate) fn render_value_for_input(row: &PgRow, field: &FieldSchema) -> String
         v.map(|x| x.to_string()).unwrap_or_default()
     }
     match field.ty {
+        FieldType::I16 => opt_to_string(row.try_get::<Option<i16>, _>(field.column).ok().flatten()),
         FieldType::I32 => opt_to_string(row.try_get::<Option<i32>, _>(field.column).ok().flatten()),
         FieldType::I64 => opt_to_string(row.try_get::<Option<i64>, _>(field.column).ok().flatten()),
         FieldType::F32 => opt_to_string(row.try_get::<Option<f32>, _>(field.column).ok().flatten()),
@@ -251,7 +260,7 @@ pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) ->
                 r#"<input type="checkbox" name="{name}" id="{name}" value="true"{checked}{readonly}>"#
             )
         }
-        FieldType::I32 | FieldType::I64 => {
+        FieldType::I16 | FieldType::I32 | FieldType::I64 => {
             let mut attrs = String::new();
             if let Some(min) = field.min {
                 let _ = write!(attrs, r#" min="{min}""#);
@@ -313,6 +322,11 @@ pub(crate) fn read_value_as_string_at(
     column_alias: &str,
 ) -> Option<String> {
     match field.ty {
+        FieldType::I16 => row
+            .try_get::<Option<i16>, _>(column_alias)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string()),
         FieldType::I32 => row
             .try_get::<Option<i32>, _>(column_alias)
             .ok()
@@ -347,6 +361,11 @@ pub(crate) fn read_joined_value_as_html(
 ) -> Option<String> {
     let prefixed = format!("{}__{}", alias, field.column);
     let text: Option<String> = match field.ty {
+        FieldType::I16 => row
+            .try_get::<Option<i16>, _>(prefixed.as_str())
+            .ok()
+            .flatten()
+            .map(|v| v.to_string()),
         FieldType::I32 => row
             .try_get::<Option<i32>, _>(prefixed.as_str())
             .ok()

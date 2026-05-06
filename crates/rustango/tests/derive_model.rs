@@ -123,3 +123,177 @@ fn models_register_with_inventory() {
         "BlogPost missing from registry: {registered:?}",
     );
 }
+
+// ---------- ForeignKey<T, K> non-i64 PK shapes ----------
+
+#[derive(Model, Clone)]
+#[rustango(table = "fk_uuid_parent")]
+#[allow(dead_code)]
+pub struct UuidParent {
+    #[rustango(primary_key)]
+    id: uuid::Uuid,
+    name: String,
+}
+
+#[derive(Model, Clone)]
+#[rustango(table = "fk_uuid_child")]
+#[allow(dead_code)]
+pub struct UuidChild {
+    #[rustango(primary_key)]
+    id: i64,
+    parent: rustango::sql::ForeignKey<UuidParent, uuid::Uuid>,
+    label: String,
+}
+
+#[derive(Model, Clone)]
+#[rustango(table = "fk_string_parent")]
+#[allow(dead_code)]
+pub struct StringPkParent {
+    #[rustango(primary_key, max_length = 36)]
+    user_uuid: String,
+    name: String,
+}
+
+#[derive(Model, Clone)]
+#[rustango(table = "fk_string_child")]
+#[allow(dead_code)]
+pub struct StringPkChild {
+    #[rustango(primary_key)]
+    id: i64,
+    #[rustango(max_length = 36, on = "user_uuid")]
+    parent: rustango::sql::ForeignKey<StringPkParent, String>,
+    body: String,
+}
+
+// Plain `ForeignKey<Parent>` (no K) — the v0.7 BIGINT shape stays
+// the default. Backward-compat regression guard.
+#[derive(Model, Clone)]
+#[rustango(table = "fk_i64_parent")]
+#[allow(dead_code)]
+pub struct I64Parent {
+    #[rustango(primary_key)]
+    id: i64,
+    name: String,
+}
+
+#[derive(Model, Clone)]
+#[rustango(table = "fk_i64_child")]
+#[allow(dead_code)]
+pub struct I64Child {
+    #[rustango(primary_key)]
+    id: i64,
+    parent: rustango::sql::ForeignKey<I64Parent>,
+    label: String,
+}
+
+#[test]
+fn foreign_key_uuid_emits_uuid_column_type() {
+    let s = UuidChild::SCHEMA;
+    let f = s.field("parent").expect("parent column on UuidChild");
+    assert_eq!(f.ty, FieldType::Uuid);
+    assert!(
+        f.relation.is_some(),
+        "ForeignKey<UuidParent, Uuid> should still set Relation::Fk"
+    );
+}
+
+#[test]
+fn foreign_key_string_emits_string_column_type() {
+    let s = StringPkChild::SCHEMA;
+    let f = s.field("parent").expect("parent column on StringPkChild");
+    assert_eq!(f.ty, FieldType::String);
+    assert!(f.relation.is_some());
+}
+
+#[test]
+fn foreign_key_default_i64_unchanged() {
+    let f = I64Child::SCHEMA.field("parent").unwrap();
+    assert_eq!(f.ty, FieldType::I64);
+    assert!(f.relation.is_some());
+}
+
+// ---- Nullable FK shapes ----
+
+#[derive(Model, Clone)]
+#[rustango(table = "fk_nullable_parent")]
+#[allow(dead_code)]
+pub struct NullableParent {
+    #[rustango(primary_key)]
+    id: i64,
+    name: String,
+}
+
+#[derive(Model, Clone)]
+#[rustango(table = "fk_nullable_child")]
+#[allow(dead_code)]
+pub struct NullableChild {
+    #[rustango(primary_key)]
+    id: i64,
+    /// Nullable i64 FK — should compile and emit a nullable column.
+    parent: Option<rustango::sql::ForeignKey<NullableParent>>,
+    label: String,
+}
+
+#[derive(Model, Clone)]
+#[rustango(table = "fk_nullable_str_parent")]
+#[allow(dead_code)]
+pub struct NullableStrParent {
+    #[rustango(primary_key, max_length = 36)]
+    user_uuid: String,
+    name: String,
+}
+
+#[derive(Model, Clone)]
+#[rustango(table = "fk_nullable_str_child")]
+#[allow(dead_code)]
+pub struct NullableStrChild {
+    #[rustango(primary_key)]
+    id: i64,
+    /// Nullable String FK — covers the cross-product of nullable
+    /// + non-i64 PK.
+    #[rustango(max_length = 36, on = "user_uuid")]
+    parent: Option<rustango::sql::ForeignKey<NullableStrParent, String>>,
+    label: String,
+}
+
+#[test]
+fn option_foreign_key_compiles_and_marks_nullable() {
+    let f = NullableChild::SCHEMA.field("parent").unwrap();
+    assert_eq!(f.ty, FieldType::I64);
+    assert!(f.nullable, "Option<ForeignKey<…>> should be nullable");
+    assert!(f.relation.is_some());
+}
+
+#[test]
+fn option_foreign_key_string_pk_compiles() {
+    let f = NullableStrChild::SCHEMA.field("parent").unwrap();
+    assert_eq!(f.ty, FieldType::String);
+    assert!(f.nullable);
+    assert!(f.relation.is_some());
+}
+
+// ---------- i16 (SMALLINT) ----------
+
+#[derive(Model, Clone)]
+#[rustango(table = "i16_status")]
+#[allow(dead_code)]
+pub struct I16Status {
+    #[rustango(primary_key)]
+    id: i64,
+    /// Bounded status code — fits in i16, saves bytes vs i64.
+    code: i16,
+    /// Optional priority — covers nullable i16.
+    priority: Option<i16>,
+}
+
+#[test]
+fn i16_field_emits_i16_field_type() {
+    let s = I16Status::SCHEMA;
+    let code = s.field("code").unwrap();
+    assert_eq!(code.ty, FieldType::I16);
+    assert!(!code.nullable);
+
+    let priority = s.field("priority").unwrap();
+    assert_eq!(priority.ty, FieldType::I16);
+    assert!(priority.nullable);
+}

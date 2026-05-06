@@ -426,6 +426,10 @@ fn row_to_json(
     let mut map = serde_json::Map::new();
     for field in fields {
         let value = match field.ty {
+            FieldType::I16 => row
+                .try_get::<i16, _>(field.column)
+                .map(|n| json!(n))
+                .unwrap_or(Value::Null),
             FieldType::I32 => row
                 .try_get::<i32, _>(field.column)
                 .map(|n| json!(n))
@@ -733,10 +737,13 @@ async fn handle_list_cursor(
             &format!("cursor field `{cursor_field}` not found on model"),
         );
     };
-    if !matches!(cursor_schema.ty, FieldType::I32 | FieldType::I64) {
+    if !matches!(
+        cursor_schema.ty,
+        FieldType::I16 | FieldType::I32 | FieldType::I64
+    ) {
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "cursor pagination requires an integer field (i32/i64)",
+            "cursor pagination requires an integer field (i16/i32/i64)",
         );
     }
 
@@ -798,6 +805,10 @@ async fn handle_list_cursor(
         // Read the cursor field value from the last row in this page
         let last = page_rows.last().expect("non-empty page");
         let val: i64 = match cursor_schema.ty {
+            FieldType::I16 => last
+                .try_get::<i16, _>(cursor_schema.column)
+                .map(i64::from)
+                .unwrap_or(0),
             FieldType::I32 => last
                 .try_get::<i32, _>(cursor_schema.column)
                 .map(i64::from)
@@ -929,6 +940,7 @@ async fn handle_create(
     let pk_val = match pk_field.ty {
         FieldType::I64 => SqlValue::I64(row.try_get(pk_field.column).unwrap_or(0)),
         FieldType::I32 => SqlValue::I32(row.try_get(pk_field.column).unwrap_or(0)),
+        FieldType::I16 => SqlValue::I16(row.try_get(pk_field.column).unwrap_or(0)),
         _ => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "unsupported PK type"),
     };
     let fields = state.effective_fields();

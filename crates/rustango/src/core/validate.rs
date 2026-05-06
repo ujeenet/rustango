@@ -23,6 +23,7 @@ pub fn validate_value(
 ) -> Result<(), QueryError> {
     match value {
         SqlValue::String(s) => check_max_length(model, field, s),
+        SqlValue::I16(v) => check_int_range(model, field, i64::from(*v)),
         SqlValue::I32(v) => check_int_range(model, field, i64::from(*v)),
         SqlValue::I64(v) => check_int_range(model, field, *v),
         // No declared bounds for these variants in v0.1; `Null` is enforced

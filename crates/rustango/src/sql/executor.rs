@@ -826,6 +826,7 @@ macro_rules! bind_match {
         match $value {
             // `None::<String>` produces a typed NULL Postgres accepts in any context.
             SqlValue::Null => $q.bind(None::<String>),
+            SqlValue::I16(v) => $q.bind(v),
             SqlValue::I32(v) => $q.bind(v),
             SqlValue::I64(v) => $q.bind(v),
             SqlValue::F32(v) => $q.bind(v),

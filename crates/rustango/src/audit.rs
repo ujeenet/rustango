@@ -799,6 +799,7 @@ fn bind_value_pg(
     use crate::core::SqlValue;
     match value {
         SqlValue::Null => q.bind(None::<String>),
+        SqlValue::I16(v) => q.bind(v),
         SqlValue::I32(v) => q.bind(v),
         SqlValue::I64(v) => q.bind(v),
         SqlValue::F32(v) => q.bind(v),
@@ -821,6 +822,7 @@ fn bind_value_my(
     use crate::core::SqlValue;
     match value {
         SqlValue::Null => q.bind(None::<String>),
+        SqlValue::I16(v) => q.bind(v),
         SqlValue::I32(v) => q.bind(v),
         SqlValue::I64(v) => q.bind(v),
         SqlValue::F32(v) => q.bind(v),

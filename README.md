@@ -296,6 +296,184 @@ pub struct Post {
 }
 ```
 
+### Field types
+
+| Rust type | Postgres | MySQL | Notes |
+|---|---|---|---|
+| `i16` | `SMALLINT` | `SMALLINT` | 2-byte signed, `-32768..=32767`. Smallest portable integer. |
+| `i32` | `INTEGER` | `INT` | 4-byte signed. |
+| `i64` | `BIGINT` | `BIGINT` | 8-byte signed. Default PK width. |
+| `f32` | `REAL` | `FLOAT` | |
+| `f64` | `DOUBLE PRECISION` | `DOUBLE` | |
+| `bool` | `BOOLEAN` | `TINYINT(1)` | |
+| `String` | `TEXT` / `VARCHAR(N)` | `TEXT` / `VARCHAR(N)` | `TEXT` unless `max_length = N` is set. |
+| `chrono::DateTime<Utc>` | `TIMESTAMPTZ` | `DATETIME(6)` | |
+| `chrono::NaiveDate` | `DATE` | `DATE` | |
+| `uuid::Uuid` | `UUID` | `CHAR(36)` | |
+| `serde_json::Value` | `JSONB` | `JSON` | |
+
+`i8`, `u8`/`u16`/`u32`/`u64` are intentionally not supported — Postgres has no native 1-byte signed integer and no unsigned integers, so cross-dialect storage would diverge. Use `i16` and bounded `min`/`max` attributes instead. `Auto<i16>` is also rejected (SMALLSERIAL exhausts at 32k); use `Auto<i32>` or `Auto<i64>` for auto-incrementing PKs.
+
+### Nullable fields
+
+Wrap any scalar in `Option<T>` to make the column `NULL`-able. `None` round-trips through fetch + insert + update; `parse_form_value` and the admin's edit form both treat empty input as `NULL`.
+
+```rust
+#[derive(Model, Clone)]
+pub struct Article {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+
+    pub title: String,                          // NOT NULL
+    pub subtitle: Option<String>,               // NULLABLE
+    pub priority: Option<i16>,                  // NULLABLE SMALLINT
+
+    #[rustango(soft_delete)]
+    pub deleted_at: Option<DateTime<Utc>>,      // soft delete requires nullable timestamp
+}
+```
+
+`Auto<Option<T>>` and `Option<Auto<T>>` are both rejected — `Auto<T>` columns are server-assigned and cannot be `NULL`.
+
+### Primary keys
+
+Any scalar field marked `#[rustango(primary_key)]` becomes the PK. Three common shapes:
+
+```rust
+// Auto-incrementing i64 PK — the default for most tables.
+#[rustango(primary_key)] pub id: Auto<i64>,
+
+// Auto-incrementing i32 PK — saves 4 bytes per row when 2B is enough.
+#[rustango(primary_key)] pub id: Auto<i32>,
+
+// Server-generated UUID PK — Postgres `gen_random_uuid()`.
+#[rustango(primary_key, auto_uuid)] pub id: Auto<Uuid>,
+
+// Caller-supplied String PK — common for slug-shaped natural keys.
+#[rustango(primary_key, max_length = 64)] pub slug: String,
+```
+
+`Auto<T>` is supported on `i32`, `i64`, `Uuid`, and `DateTime<Utc>` (the last for `auto_now_add` defaults). Other PK types (i16, plain integers, String) require the caller to supply the value on insert.
+
+### Foreign keys
+
+`ForeignKey<T, K = i64>` is the typed, lazy-loadable wrapper. `T` is the parent model; `K` is the parent's primary-key type (defaults to `i64`).
+
+```rust
+use rustango::sql::ForeignKey;
+
+// Default — parent PK is i64 (or Auto<i64>). Stored as BIGINT.
+pub author: ForeignKey<Author>,
+
+// Parent PK is uuid::Uuid. Stored as UUID.
+pub region: ForeignKey<Region, uuid::Uuid>,
+
+// Parent PK is String. Stored as VARCHAR(N) — provide max_length on the field.
+#[rustango(max_length = 36, on = "user_uuid")]
+pub user: ForeignKey<User, String>,
+
+// Nullable FK — column allows NULL, the field stores Option<ForeignKey<…>>.
+pub editor: Option<ForeignKey<User>>,
+pub region: Option<ForeignKey<Region, uuid::Uuid>>,
+
+// Self-referential FK — for trees / hierarchies. The macro substitutes the
+// containing table name, sidestepping the type-name self-reference cycle.
+#[rustango(fk = "self")]
+pub parent_id: Option<i64>,
+```
+
+Reading the parent on demand:
+
+```rust
+let mut book = Book::objects().where_(Book::id.eq(42)).fetch_one(&pool).await?;
+let author: &Author = book.author.get(&pool).await?;     // fires one SELECT, caches the result
+println!("{}", author.name);
+let cached = book.author.get(&pool).await?;              // no SQL — returns the cached parent
+```
+
+For one-shot eager loading:
+
+```rust
+let books = Book::objects()
+    .select_related(&[Book::author])                     // single LEFT JOIN
+    .fetch(&pool).await?;                                // every book.author is already Loaded
+```
+
+`prefetch_related` (the bulk N+1 killer for `<parent>.<child>_set`) currently requires `i64` parent PKs; non-i64 FK PKs work for everything else but skip the prefetch grouper — tracked as P10 in the ORM improvement plan.
+
+#### Raw FK attribute (bypass `ForeignKey<T>`)
+
+When you want a foreign-key constraint on a plain typed field — no lazy-load, no wrapper — use `#[rustango(fk = "<table>")]`:
+
+```rust
+pub struct Comment {
+    #[rustango(primary_key)] pub id: Auto<i64>,
+    #[rustango(fk = "users", on = "id")]                 // FK constraint, plain i64
+    pub user_id: i64,
+    pub body: String,
+}
+```
+
+This is the v0.1 form — emits the same SQL constraint, no Rust-side resolver. Use it for hot-path columns where you don't want to opt into ForeignKey's lazy-load machinery, or when migrating from a legacy schema.
+
+#### Composite (multi-column) FK
+
+Container attribute, declared once per relation:
+
+```rust
+#[derive(Model)]
+#[rustango(
+    table = "audit_log",
+    fk_composite(name = "target",
+                 to = "rustango_audit_log",
+                 from = ("entity_table", "entity_pk"),
+                 on   = ("table_name",   "row_pk")),
+)]
+pub struct AuditLog {
+    #[rustango(primary_key)] pub id: Auto<i64>,
+    pub entity_table: String,
+    pub entity_pk: i64,
+    pub action: String,
+}
+```
+
+### Field attributes
+
+Attribute on the field carries column-level options:
+
+| Attribute | Effect |
+|---|---|
+| `#[rustango(primary_key)]` | Marks the PK. Exactly one per model. |
+| `#[rustango(column = "name")]` | Override the SQL column name. Default = field name. |
+| `#[rustango(max_length = N)]` | `VARCHAR(N)` (String) / range check (integer). |
+| `#[rustango(min = N, max = N)]` | Integer range check enforced at parse + insert/update. |
+| `#[rustango(default = "expr")]` | Raw SQL fragment for the column's `DEFAULT`. Quote literals yourself. |
+| `#[rustango(unique)]` | Adds `UNIQUE` to the column DDL inline. |
+| `#[rustango(index)]` | Single-column `CREATE INDEX`. |
+| `#[rustango(auto_now_add)]` | DB sets `now()` on INSERT; field becomes immutable on subsequent saves. Pair with `Auto<DateTime<Utc>>`. |
+| `#[rustango(auto_now)]` | Same as above + bound to `now()` on every UPDATE too. |
+| `#[rustango(auto_uuid)]` | DB sets `gen_random_uuid()` on INSERT. Pair with `Auto<Uuid>`. |
+| `#[rustango(soft_delete)]` | Routes admin DELETE through `UPDATE … = NOW()`. Requires `Option<DateTime<Utc>>`. |
+| `#[rustango(fk = "table")]` | Raw foreign-key constraint on a plain field. |
+| `#[rustango(on = "column")]` | Override the FK target column (default `"id"`). |
+
+### Container attributes
+
+Attributes on the struct itself, all wrapped in `#[rustango(...)]`:
+
+| Attribute | Effect |
+|---|---|
+| `table = "name"` | Override the SQL table name. Default = snake-case of struct name. |
+| `display = "field"` | Field rendered when this model is the target of an FK in admin / OpenAPI. |
+| `app = "label"` | Django-shape app label. Default = inferred from module path. |
+| `admin(...)` | Auto-admin config: `list_display`, `search_fields`, `list_filter`, `ordering`, `list_per_page`, `readonly_fields`. |
+| `audit(track = "f1, f2")` | Per-write before/after diff captured for these fields. Empty list = all scalar fields. |
+| `permissions` | Auto-seed the four CRUD codenames (`add`, `change`, `delete`, `view`). |
+| `index("a, b")` / `unique_together = "a, b"` | Composite (multi-column) index / unique constraint. |
+| `check(name = "n", expr = "raw SQL")` | Table-level `CHECK` constraint. |
+| `m2m(name = "...", to = "...", through = "...", src = "...", dst = "...")` | Many-to-many relation through a junction table. |
+| `fk_composite(name = "...", to = "...", from = (...), on = (...))` | Multi-column FK (see above). |
+
 ### Querying
 
 ```rust

@@ -94,6 +94,7 @@ impl Dialect for MySql {
     ///   close enough for the framework's f32/f64 mapping)
     fn column_type(&self, ty: FieldType, max_length: Option<u32>) -> String {
         match ty {
+            FieldType::I16 => "SMALLINT".into(),
             FieldType::I32 => "INT".into(),
             FieldType::I64 => "BIGINT".into(),
             FieldType::F32 => "FLOAT".into(),

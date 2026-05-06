@@ -167,6 +167,7 @@ pub trait Dialect {
     /// - `UUID` doesn't exist; use `CHAR(36)` (string) or `BINARY(16)` (compact)
     fn column_type(&self, ty: FieldType, max_length: Option<u32>) -> String {
         match ty {
+            FieldType::I16 => "SMALLINT".into(),
             FieldType::I32 => "INTEGER".into(),
             FieldType::I64 => "BIGINT".into(),
             FieldType::F32 => "REAL".into(),

@@ -12,6 +12,8 @@ use super::FieldType;
 #[derive(Debug, Clone, PartialEq)]
 pub enum SqlValue {
     Null,
+    /// 2-byte signed integer — Postgres `SMALLINT`, MySQL `SMALLINT`.
+    I16(i16),
     I32(i32),
     I64(i64),
     F32(f32),
@@ -27,11 +29,40 @@ pub enum SqlValue {
 }
 
 impl SqlValue {
+    /// Render the value as a short human-readable string for use in
+    /// error messages. Lists collapse into `[a, b, …]`; `Null` shows
+    /// `NULL`; binary-ish payloads (`Json`) show their `Display` form.
+    /// This is NOT for SQL emission — use the dialect formatter for
+    /// that. Only callers that want to embed the value in a
+    /// user-facing error message should reach for this.
+    #[must_use]
+    pub fn to_display_string(&self) -> String {
+        match self {
+            Self::Null => "NULL".to_owned(),
+            Self::I16(v) => v.to_string(),
+            Self::I32(v) => v.to_string(),
+            Self::I64(v) => v.to_string(),
+            Self::F32(v) => v.to_string(),
+            Self::F64(v) => v.to_string(),
+            Self::Bool(v) => v.to_string(),
+            Self::String(v) => v.clone(),
+            Self::DateTime(v) => v.to_rfc3339(),
+            Self::Date(v) => v.to_string(),
+            Self::Uuid(v) => v.to_string(),
+            Self::Json(v) => v.to_string(),
+            Self::List(items) => {
+                let inner: Vec<String> = items.iter().map(Self::to_display_string).collect();
+                format!("[{}]", inner.join(", "))
+            }
+        }
+    }
+
     /// Returns the `FieldType` this value corresponds to, or `None` for `Null` / `List`.
     #[must_use]
     pub fn field_type(&self) -> Option<FieldType> {
         Some(match self {
             Self::Null | Self::List(_) => return None,
+            Self::I16(_) => FieldType::I16,
             Self::I32(_) => FieldType::I32,
             Self::I64(_) => FieldType::I64,
             Self::F32(_) => FieldType::F32,
@@ -57,6 +88,7 @@ macro_rules! sql_value_from {
 }
 
 sql_value_from! {
+    i16 => I16,
     i32 => I32,
     i64 => I64,
     f32 => F32,

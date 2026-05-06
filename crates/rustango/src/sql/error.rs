@@ -134,7 +134,11 @@ pub enum ExecError {
     #[error("foreign-key target `{table}` has no row with primary key {pk}")]
     ForeignKeyTargetMissing {
         table: &'static str,
-        pk: i64,
+        /// Display-formatted PK value. `String` rather than `i64` so
+        /// the variant covers UUID, String, and other non-integer
+        /// `ForeignKey<T, K>` shapes — `K`'s `Into<SqlValue>` lowering
+        /// drives the rendering in `ForeignKey::get_on`.
+        pk: String,
     },
 
     /// Used when traversing schema metadata to resolve a foreign key

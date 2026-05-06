@@ -199,6 +199,10 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
         detail: e.to_string(),
     };
     match field.ty {
+        FieldType::I16 => raw
+            .parse::<i16>()
+            .map(SqlValue::I16)
+            .map_err(|e| make_parse_err("i16", &e)),
         FieldType::I32 => raw
             .parse::<i32>()
             .map(SqlValue::I32)
@@ -270,6 +274,10 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
             );
             Ok(SqlValue::Bool(v))
         }
+        FieldType::I16 => raw
+            .parse::<i16>()
+            .map(SqlValue::I16)
+            .map_err(|e| make_parse_err("i16", &e)),
         FieldType::I32 => raw
             .parse::<i32>()
             .map(SqlValue::I32)
@@ -517,6 +525,7 @@ impl ModelForm {
             let pk_val: SqlValue = match pk_field.ty {
                 FieldType::I64 => SqlValue::I64(row.try_get(pk_field.column).unwrap_or(0)),
                 FieldType::I32 => SqlValue::I32(row.try_get(pk_field.column).unwrap_or(0)),
+                FieldType::I16 => SqlValue::I16(row.try_get(pk_field.column).unwrap_or(0)),
                 FieldType::String => {
                     SqlValue::String(row.try_get(pk_field.column).unwrap_or_default())
                 }
@@ -1097,6 +1106,7 @@ fn bind_sql_value_inline<'a>(
     use crate::core::SqlValue;
     match v {
         SqlValue::Null         => q.bind(None::<i64>),
+        SqlValue::I16(v)       => q.bind(*v),
         SqlValue::I32(v)       => q.bind(*v),
         SqlValue::I64(v)       => q.bind(*v),
         SqlValue::F32(v)       => q.bind(*v),

@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use axum::extract::{Form, Path, Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use crate::core::{
-    inventory, Assignment, CountQuery, DeleteQuery, FieldSchema, Filter, InsertQuery, ModelEntry,
-    Op, SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
+    Assignment, CountQuery, DeleteQuery, FieldSchema, Filter, InsertQuery, ModelEntry, Op,
+    SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
 
 use super::errors::AdminError;

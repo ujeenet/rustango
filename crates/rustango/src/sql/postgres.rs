@@ -71,6 +71,7 @@ impl Dialect for Postgres {
 
     fn null_cast(&self, ty: FieldType) -> Option<&'static str> {
         Some(match ty {
+            FieldType::I16 => "SMALLINT",
             FieldType::I32 => "INTEGER",
             FieldType::I64 => "BIGINT",
             FieldType::F32 => "REAL",

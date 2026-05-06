@@ -221,6 +221,15 @@ impl ViewSet {
 
 fn field_type_to_schema(t: FieldType) -> Schema {
     match t {
+        FieldType::I16 => {
+            // JSON Schema has no `int16`. Render as `int32` and clamp
+            // via min/max so the schema still describes the actual
+            // bounds Postgres / MySQL enforce.
+            let mut s = Schema::int32();
+            s.minimum = Some(f64::from(i16::MIN));
+            s.maximum = Some(f64::from(i16::MAX));
+            s
+        }
         FieldType::I32 => Schema::int32(),
         FieldType::I64 => Schema::integer(),
         FieldType::F32 => {

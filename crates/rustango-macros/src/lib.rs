@@ -587,14 +587,26 @@ fn load_related_impl_tokens(
         // FK field's Rust ident matches its SQL column name in v0.8
         // (no `column = "..."` rename ships on FK fields).
         let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
+        let assign = if rel.nullable {
+            quote! {
+                self.#field_ident = ::core::option::Option::Some(
+                    ::rustango::sql::ForeignKey::loaded(_pk, _parent),
+                );
+            }
+        } else {
+            quote! {
+                self.#field_ident = ::rustango::sql::ForeignKey::loaded(_pk, _parent);
+            }
+        };
         quote! {
             #fk_col => {
                 let _parent: #parent_ty = <#parent_ty>::__rustango_from_aliased_row(row, alias)?;
                 let _pk = match <#parent_ty>::__rustango_pk_value(&_parent) {
-                    ::rustango::core::SqlValue::I64(v) => v,
-                    _ => 0i64,
+                    ::rustango::core::SqlValue::#variant_ident(v) => v,
+                    _ => #default_expr,
                 };
-                self.#field_ident = ::rustango::sql::ForeignKey::loaded(_pk, _parent);
+                #assign
                 ::core::result::Result::Ok(true)
             }
         }
@@ -632,6 +644,18 @@ fn load_related_impl_my_tokens(
         let parent_ty = &rel.parent_type;
         let fk_col = rel.fk_column.as_str();
         let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
+        let assign = if rel.nullable {
+            quote! {
+                __self.#field_ident = ::core::option::Option::Some(
+                    ::rustango::sql::ForeignKey::loaded(_pk, _parent),
+                );
+            }
+        } else {
+            quote! {
+                __self.#field_ident = ::rustango::sql::ForeignKey::loaded(_pk, _parent);
+            }
+        };
         // `self` IS hygiene-tracked through macro_rules — emitted from
         // a different context than the `&mut self` parameter inside
         // the macro_rules-expanded fn. Pass it through as `__self`
@@ -641,10 +665,10 @@ fn load_related_impl_my_tokens(
                 let _parent: #parent_ty =
                     <#parent_ty>::__rustango_from_aliased_my_row(row, alias)?;
                 let _pk = match <#parent_ty>::__rustango_pk_value(&_parent) {
-                    ::rustango::core::SqlValue::I64(v) => v,
-                    _ => 0i64,
+                    ::rustango::core::SqlValue::#variant_ident(v) => v,
+                    _ => #default_expr,
                 };
-                __self.#field_ident = ::rustango::sql::ForeignKey::loaded(_pk, _parent);
+                #assign
                 ::core::result::Result::Ok(true)
             }
         }
@@ -670,8 +694,34 @@ fn fk_pk_access_impl_tokens(
     let arms = fk_relations.iter().map(|rel| {
         let fk_col = rel.fk_column.as_str();
         let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
-        quote! {
-            #fk_col => ::core::option::Option::Some(self.#field_ident.pk()),
+        if rel.pk_kind == DetectedKind::I64 {
+            // i64 FK — return the stored PK so prefetch_related can
+            // group children by it. Nullable variant unwraps via
+            // `as_ref().map(...)`: an unset (NULL) FK column yields
+            // `None` and that child sits out of the grouping (correct
+            // semantics — it has no parent to attach to).
+            if rel.nullable {
+                quote! {
+                    #fk_col => self.#field_ident
+                        .as_ref()
+                        .map(|fk| ::rustango::sql::ForeignKey::pk(fk)),
+                }
+            } else {
+                quote! {
+                    #fk_col => ::core::option::Option::Some(self.#field_ident.pk()),
+                }
+            }
+        } else {
+            // Non-i64 FK PKs (e.g. `ForeignKey<T, String>`,
+            // `ForeignKey<T, Uuid>`) opt out of `prefetch_related`'s
+            // i64-keyed grouping path — the trait signature is
+            // `Option<i64>` and a non-i64 PK can't lower into it.
+            // The FK still works for everything else (CRUD, lazy
+            // load via `.get()`, select_related JOINs); only the
+            // bulk prefetch grouper needs the integer key.
+            quote! {
+                #fk_col => ::core::option::Option::None,
+            }
         }
     });
     quote! {
@@ -872,12 +922,22 @@ struct CollectedFields {
 
 #[derive(Clone)]
 struct FkRelation {
-    /// Inner type of `ForeignKey<T>` — the parent model. The reverse
+    /// Inner type of `ForeignKey<T, K>` — the parent model. The reverse
     /// helper is emitted as `impl <ParentType> { … }`.
     parent_type: Type,
     /// SQL column name on the child table for this FK (e.g. `"author"`).
     /// Used in the generated `WHERE <fk_column> = $1` clause.
     fk_column: String,
+    /// `K`'s underlying scalar kind — drives the `match SqlValue { … }`
+    /// arm emitted by [`load_related_impl_tokens`]. `I64` for the
+    /// default `ForeignKey<T>` (no explicit K); other kinds when the
+    /// user wrote `ForeignKey<T, String>`, `ForeignKey<T, Uuid>`, etc.
+    pk_kind: DetectedKind,
+    /// `true` when the field is `Option<ForeignKey<T, K>>` (nullable
+    /// FK column). Drives the `Some(...)` wrapping in load_related
+    /// assignment and `.as_ref().map(...)` in the FK PK accessor so
+    /// the codegen matches the field's declared shape.
+    nullable: bool,
 }
 
 fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<CollectedFields> {
@@ -920,6 +980,8 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             out.fk_relations.push(FkRelation {
                 parent_type: parent_ty,
                 fk_column: info.column.clone(),
+                pk_kind: info.fk_pk_kind,
+                nullable: info.nullable,
             });
         }
         if info.soft_delete {
@@ -3747,10 +3809,24 @@ struct FieldInfo<'a> {
     /// `Self::__rustango_from_aliased_row(row, prefix)` per-Model
     /// helper that `select_related` calls when stitching loaded FKs.
     from_aliased_row_init: TokenStream2,
-    /// Inner type from a `ForeignKey<T>` field, if any. The reverse-
+    /// Inner type from a `ForeignKey<T, K>` field, if any. The reverse-
     /// relation helper emit (`Author::<child>_set`) needs to know `T`
     /// to point the generated method at the right child model.
     fk_inner: Option<Type>,
+    /// `K`'s scalar kind for a `ForeignKey<T, K>` field. Mirrors
+    /// `kind` (since ForeignKey detection sets `kind` to K's
+    /// underlying type) but stored separately for clarity at the
+    /// `FkRelation` construction site, which only sees the FK's
+    /// surface fields.
+    fk_pk_kind: DetectedKind,
+    /// `true` when the field is `Option<ForeignKey<T, K>>` rather than
+    /// the bare `ForeignKey<T, K>`. Routes the load_related and
+    /// fk_pk_access emitters to wrap assignments / accessors in
+    /// `Some(...)` / `as_ref().map(...)` respectively, so a nullable
+    /// FK column compiles end-to-end. The DDL writer reads this off
+    /// the field schema (`nullable` flag); the macro just needs to
+    /// keep the Rust-side codegen consistent.
+    nullable: bool,
     /// `true` when this column was marked `#[rustango(auto_now)]` —
     /// `update_on` / `save_on` bind `chrono::Utc::now()` for this
     /// column instead of the user-supplied value, so `updated_at`
@@ -3903,6 +3979,8 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         from_row_init,
         from_aliased_row_init,
         fk_inner: fk_inner.cloned(),
+        fk_pk_kind: kind,
+        nullable,
         auto_now: attrs.auto_now,
         auto_now_add: attrs.auto_now_add,
         soft_delete: attrs.soft_delete,
@@ -4024,6 +4102,7 @@ fn relation_tokens(
 /// proc-macro/normal split it doesn't have today).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DetectedKind {
+    I16,
     I32,
     I64,
     F32,
@@ -4039,6 +4118,7 @@ enum DetectedKind {
 impl DetectedKind {
     fn variant_tokens(self) -> TokenStream2 {
         match self {
+            Self::I16 => quote!(::rustango::core::FieldType::I16),
             Self::I32 => quote!(::rustango::core::FieldType::I32),
             Self::I64 => quote!(::rustango::core::FieldType::I64),
             Self::F32 => quote!(::rustango::core::FieldType::F32),
@@ -4053,7 +4133,36 @@ impl DetectedKind {
     }
 
     fn is_integer(self) -> bool {
-        matches!(self, Self::I32 | Self::I64)
+        matches!(self, Self::I16 | Self::I32 | Self::I64)
+    }
+
+    /// `(SqlValue::<Variant>, default expr)` for emitting the
+    /// `match SqlValue { … }` arm in `LoadRelated::__rustango_load_related`
+    /// for a `ForeignKey<T, K>` FK whose K maps to `self`. The default
+    /// fires only when the parent's `__rustango_pk_value` returns a
+    /// different variant than expected, which is a compile-time bug —
+    /// but we still need a value-typed fallback to keep the match
+    /// total.
+    fn sqlvalue_match_arm(self) -> (TokenStream2, TokenStream2) {
+        match self {
+            Self::I16 => (quote!(I16), quote!(0i16)),
+            Self::I32 => (quote!(I32), quote!(0i32)),
+            Self::I64 => (quote!(I64), quote!(0i64)),
+            Self::F32 => (quote!(F32), quote!(0f32)),
+            Self::F64 => (quote!(F64), quote!(0f64)),
+            Self::Bool => (quote!(Bool), quote!(false)),
+            Self::String => (quote!(String), quote!(::std::string::String::new())),
+            Self::DateTime => (
+                quote!(DateTime),
+                quote!(<::chrono::DateTime<::chrono::Utc> as ::std::default::Default>::default()),
+            ),
+            Self::Date => (
+                quote!(Date),
+                quote!(<::chrono::NaiveDate as ::std::default::Default>::default()),
+            ),
+            Self::Uuid => (quote!(Uuid), quote!(::uuid::Uuid::nil())),
+            Self::Json => (quote!(Json), quote!(::serde_json::Value::Null)),
+        }
     }
 }
 
@@ -4160,13 +4269,20 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
     }
 
     if last.ident == "ForeignKey" {
-        let inner = generic_inner(ty, &last.arguments, "ForeignKey")?;
-        // `ForeignKey<T>` is stored as BIGINT — same column shape as
-        // the v0.1 `i64` + `#[rustango(fk = …)]` form. The macro does
-        // not recurse into `T` because `T` is a Model struct, not a
-        // primitive — its identity is opaque to schema detection.
+        let (inner, key_ty) = generic_pair(ty, &last.arguments, "ForeignKey")?;
+        // Resolve the FK column's underlying SQL type from `K`. When the
+        // user wrote `ForeignKey<T>` without a key parameter, the type
+        // alias defaults to `i64` and we keep the v0.7 BIGINT shape.
+        // When the user wrote `ForeignKey<T, K>` with an explicit `K`,
+        // recurse into K so the column DDL emits the right SQL type
+        // (VARCHAR for String, UUID for Uuid, …) and the load_related
+        // emitter knows which `SqlValue` variant to match.
+        let kind = match key_ty {
+            Some(k) => detect_type(k)?.kind,
+            None => DetectedKind::I64,
+        };
         return Ok(DetectedType {
-            kind: DetectedKind::I64,
+            kind,
             nullable: false,
             auto: false,
             fk_inner: Some(inner),
@@ -4174,6 +4290,7 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
     }
 
     let kind = match last.ident.to_string().as_str() {
+        "i16" => DetectedKind::I16,
         "i32" => DetectedKind::I32,
         "i64" => DetectedKind::I64,
         "f32" => DetectedKind::F32,
@@ -4221,6 +4338,31 @@ fn generic_inner<'a>(
         })
 }
 
+/// Like [`generic_inner`] but pulls *two* type args — the first is
+/// required, the second is optional. Used by the `ForeignKey<T, K>`
+/// detection where K defaults to `i64` when omitted.
+fn generic_pair<'a>(
+    ty: &'a Type,
+    arguments: &'a PathArguments,
+    wrapper: &str,
+) -> syn::Result<(&'a Type, Option<&'a Type>)> {
+    let PathArguments::AngleBracketed(args) = arguments else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            format!("{wrapper} requires a generic argument"),
+        ));
+    };
+    let mut types = args.args.iter().filter_map(|a| match a {
+        GenericArgument::Type(t) => Some(t),
+        _ => None,
+    });
+    let first = types.next().ok_or_else(|| {
+        syn::Error::new_spanned(ty, format!("{wrapper}<T> requires a type argument"))
+    })?;
+    let second = types.next();
+    Ok((first, second))
+}
+
 fn to_snake_case(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     for (i, ch) in s.chars().enumerate() {
@@ -4253,6 +4395,7 @@ struct FormFieldAttrs {
 #[derive(Clone, Copy)]
 enum FormFieldKind {
     String,
+    I16,
     I32,
     I64,
     F32,
@@ -4263,6 +4406,7 @@ enum FormFieldKind {
 impl FormFieldKind {
     fn parse_method(self) -> &'static str {
         match self {
+            Self::I16 => "i16",
             Self::I32 => "i32",
             Self::I64 => "i64",
             Self::F32 => "f32",
@@ -4386,6 +4530,7 @@ fn detect_form_field(ty: &Type, span: proc_macro2::Span) -> syn::Result<(FormFie
 
     let kind = match last.ident.to_string().as_str() {
         "String" => FormFieldKind::String,
+        "i16" => FormFieldKind::I16,
         "i32" => FormFieldKind::I32,
         "i64" => FormFieldKind::I64,
         "f32" => FormFieldKind::F32,
@@ -4396,7 +4541,7 @@ fn detect_form_field(ty: &Type, span: proc_macro2::Span) -> syn::Result<(FormFie
                 span,
                 format!(
                     "Form field type `{other}` is not supported in v0.8 — use String / \
-                     i32 / i64 / f32 / f64 / bool, optionally wrapped in Option<…>"
+                     i16 / i32 / i64 / f32 / f64 / bool, optionally wrapped in Option<…>"
                 ),
             ));
         }
@@ -4455,10 +4600,15 @@ fn render_form_field_parse(
                 }
             }
         }
-        FormFieldKind::I32 | FormFieldKind::I64 | FormFieldKind::F32 | FormFieldKind::F64 => {
+        FormFieldKind::I16
+        | FormFieldKind::I32
+        | FormFieldKind::I64
+        | FormFieldKind::F32
+        | FormFieldKind::F64 => {
             let parse_ty = syn::Ident::new(kind.parse_method(), proc_macro2::Span::call_site());
             let ty_lit = kind.parse_method();
             let default_val = match kind {
+                FormFieldKind::I16 => quote! { 0i16 },
                 FormFieldKind::I32 => quote! { 0i32 },
                 FormFieldKind::I64 => quote! { 0i64 },
                 FormFieldKind::F32 => quote! { 0f32 },
@@ -4542,7 +4692,11 @@ fn render_form_validators(
     let is_string = matches!(kind, FormFieldKind::String);
     let is_numeric = matches!(
         kind,
-        FormFieldKind::I32 | FormFieldKind::I64 | FormFieldKind::F32 | FormFieldKind::F64
+        FormFieldKind::I16
+            | FormFieldKind::I32
+            | FormFieldKind::I64
+            | FormFieldKind::F32
+            | FormFieldKind::F64
     );
 
     if is_string {

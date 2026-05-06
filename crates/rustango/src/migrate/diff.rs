@@ -688,6 +688,7 @@ pub fn render_changes_split(
 /// `VARCHAR(N)` rename op.
 fn pg_type_for_ty_name(ty: &str) -> String {
     match ty {
+        "i16" => "SMALLINT".into(),
         "i32" => "INTEGER".into(),
         "i64" => "BIGINT".into(),
         "f32" => "REAL".into(),
@@ -823,6 +824,7 @@ fn sql_type(f: &FieldSnapshot) -> String {
         }
     }
     match f.ty.as_str() {
+        "i16" => "SMALLINT".into(),
         "i32" => "INTEGER".into(),
         "i64" => "BIGINT".into(),
         "f32" => "REAL".into(),
