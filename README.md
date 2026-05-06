@@ -934,6 +934,102 @@ create_operator_if_missing(&pools, "admin", "letmein").await?;
 create_user_if_missing(&pools, "acme", "alice", "hunter2", true).await?;
 ```
 
+### Extra fields on tenant users
+
+The framework's tenant `User` is fixed at seven columns: `id`,
+`username`, `password_hash`, `is_superuser`, `active`, `created_at`,
+plus `data: serde_json::Value` (JSONB) for ad-hoc per-user metadata.
+Three escalating options when you want more:
+
+**1. Stuff it in `data` (zero-cost).** No schema change, no override —
+read/write `user.data["display_name"]`. Right answer for sparse,
+non-indexed attributes (preferences, onboarding flags, app-specific
+settings).
+
+**2. Sibling profile model with FK (works on any project).** When you
+want typed, indexable extras without touching `rustango_users`:
+
+```rust
+#[derive(rustango::Model)]
+pub struct UserProfile {
+    #[rustango(primary_key)] pub id: rustango::sql::Auto<i64>,
+    #[rustango(fk = "rustango_users")] pub user_id: i64,
+    #[rustango(max_length = 128, default = "''")] pub display_name: String,
+    #[rustango(max_length = 64, default = "'UTC'")] pub timezone: String,
+}
+```
+
+Run `cargo run -- makemigrations && cargo run -- migrate`. One JOIN
+per access; no risk of conflicting with framework auth.
+
+**3. Custom user model (greenfield only).** Extras go inline on
+`rustango_users` itself via the `TenantUserModel` trait. The override
+is read by `manage init-tenancy` and `Builder::migrate` to write the
+bootstrap migration's `CREATE TABLE` with your extra columns:
+
+```rust
+use rustango::sql::Auto;
+
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "rustango_users")]
+pub struct AppUser {
+    #[rustango(primary_key)] pub id: Auto<i64>,
+    #[rustango(max_length = 64, unique)] pub username: String,
+    #[rustango(max_length = 255)] pub password_hash: String,
+    pub is_superuser: bool,
+    pub active: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[rustango(default = "'{}'")] pub data: serde_json::Value,
+    // extras —
+    #[rustango(max_length = 128, default = "''")] pub display_name: String,
+    #[rustango(max_length = 64, default = "'UTC'")] pub timezone: String,
+}
+impl rustango::tenancy::TenantUserModel for AppUser {}
+
+#[rustango::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    rustango::manage::Cli::new()
+        .api(my_app::urls::router())
+        .tenancy()
+        .user_model::<AppUser>()
+        .run().await
+}
+```
+
+Then:
+
+```bash
+# If you used `cargo rustango new --template tenant`, delete the
+# scaffolder-written bootstrap JSONs — `init-tenancy` is idempotent
+# and won't replace them otherwise:
+rm migrations/0001_rustango_registry_initial.json
+rm migrations/0001_rustango_tenant_initial.json
+
+cargo run -- init-tenancy        # writes 0001_*.json from AppUser's schema
+cargo run -- migrate
+```
+
+Constraints:
+- Your model must declare every framework column verbatim (`id`,
+  `username`, `password_hash`, `is_superuser`, `active`, `created_at`,
+  `data`); `validate_tenant_user_schema` panics with a clear message at
+  `init-tenancy` time otherwise. Extras must be `NULL`-able or carry
+  `default = "…"`.
+- Both the framework's `User` and your `AppUser` register in the model
+  inventory (same `table`). Subsequent `makemigrations` runs may emit
+  redundant ops touching `rustango_users` — review the JSON before
+  applying. This is why option 3 is greenfield-only; option 2 sidesteps
+  it.
+- The framework's auth and admin paths still read the seven core
+  columns by name — extras are accessible via
+  `AppUser::objects().fetch(...)`.
+
+`Builder::user_model::<AppUser>()` is the equivalent setter for code
+that constructs the server `Builder` directly. Full reference in
+[docs/manage.md](docs/manage.md#custom-user-model-extra-columns-on-rustango_users).
+Runnable demo:
+[`crates/rustango/examples/tenant_user_extension/`](crates/rustango/examples/tenant_user_extension/).
+
 ---
 
 ## Authentication & permissions

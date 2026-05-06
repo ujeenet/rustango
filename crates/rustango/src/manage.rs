@@ -47,6 +47,12 @@ pub struct Cli {
     bind: String,
     migrations_dir: PathBuf,
     tenancy: bool,
+    /// Bootstrap initializer used by the `init-tenancy` verb when
+    /// [`Cli::tenancy`] is on. Defaults to
+    /// [`crate::tenancy::init_tenancy`]; replaced by [`Cli::user_model`]
+    /// to swap in a custom [`crate::tenancy::TenantUserModel`].
+    #[cfg(feature = "tenancy")]
+    init_tenancy_fn: crate::tenancy::manage::InitTenancyFn,
 }
 
 impl Cli {
@@ -60,6 +66,8 @@ impl Cli {
             bind: std::env::var("RUSTANGO_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
             migrations_dir: PathBuf::from("./migrations"),
             tenancy: false,
+            #[cfg(feature = "tenancy")]
+            init_tenancy_fn: crate::tenancy::init_tenancy,
         }
     }
 
@@ -112,6 +120,30 @@ impl Cli {
         self
     }
 
+    /// Swap the tenant user model used by the `init-tenancy` verb.
+    /// Implement [`crate::tenancy::TenantUserModel`] on a model that
+    /// declares extra columns on `rustango_users` (display name,
+    /// timezone, …) and pass it here — the materialized bootstrap
+    /// migration will then `CREATE TABLE` with those extras included.
+    ///
+    /// Only meaningful in tenancy mode and only on the very first
+    /// `init-tenancy`: subsequent invocations are idempotent and
+    /// won't rewrite the migration JSON.
+    ///
+    /// ```ignore
+    /// rustango::manage::Cli::new()
+    ///     .api(apps::api())
+    ///     .tenancy()
+    ///     .user_model::<myapp::AppUser>()
+    ///     .run().await
+    /// ```
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn user_model<U: crate::tenancy::TenantUserModel>(mut self) -> Self {
+        self.init_tenancy_fn = crate::tenancy::init_tenancy_with::<U>;
+        self
+    }
+
     /// Read argv, dispatch.
     ///
     /// # Errors
@@ -153,7 +185,14 @@ impl Cli {
                 PgPool::connect(&url).await?
             };
             let pools = crate::tenancy::TenantPools::new(pool);
-            crate::tenancy::manage::run(&pools, &url, &self.migrations_dir, args).await?;
+            crate::tenancy::manage::run_with_init(
+                &pools,
+                &url,
+                &self.migrations_dir,
+                args,
+                self.init_tenancy_fn,
+            )
+            .await?;
             return Ok(());
         }
         #[cfg(not(feature = "tenancy"))]

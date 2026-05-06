@@ -60,6 +60,15 @@ use std::path::Path;
 use super::error::TenancyError;
 use super::pools::TenantPools;
 
+/// Function pointer for the bootstrap initializer used by the
+/// `init-tenancy` verb. Defaults to
+/// [`crate::tenancy::bootstrap::init_tenancy`]; override via
+/// [`run_with_init`] / [`run_with_writer_and_init`] to swap in a
+/// custom [`crate::tenancy::TenantUserModel`] (typically threaded
+/// from [`crate::manage::Cli::user_model`]).
+pub type InitTenancyFn =
+    fn(&Path) -> Result<super::bootstrap::InitTenancyReport, TenancyError>;
+
 /// Dispatch entrypoint. Recognizes tenancy verbs and delegates the
 /// rest to `crate::migrate::manage::run`.
 ///
@@ -81,6 +90,23 @@ pub async fn run(
     run_with_writer(pools, registry_url, dir, args, &mut stdout).await
 }
 
+/// Like [`run`] but with a custom bootstrap initializer — wires a
+/// [`crate::tenancy::TenantUserModel`] override through to the
+/// `init-tenancy` verb. Other verbs ignore `init_fn`.
+///
+/// # Errors
+/// As [`run`].
+pub async fn run_with_init(
+    pools: &TenantPools,
+    registry_url: &str,
+    dir: &Path,
+    args: impl IntoIterator<Item = String>,
+    init_fn: InitTenancyFn,
+) -> Result<(), TenancyError> {
+    let mut stdout = io::stdout();
+    run_with_writer_and_init(pools, registry_url, dir, args, &mut stdout, init_fn).await
+}
+
 /// Same as [`run`] but writes user-facing output to `writer` —
 /// useful for tests.
 ///
@@ -92,6 +118,31 @@ pub async fn run_with_writer<W: Write + Send>(
     dir: &Path,
     args: impl IntoIterator<Item = String>,
     writer: &mut W,
+) -> Result<(), TenancyError> {
+    run_with_writer_and_init(
+        pools,
+        registry_url,
+        dir,
+        args,
+        writer,
+        super::bootstrap::init_tenancy,
+    )
+    .await
+}
+
+/// Full-bore variant: custom writer **and** custom bootstrap
+/// initializer. The other variants are ergonomic wrappers around
+/// this one.
+///
+/// # Errors
+/// As [`run`].
+pub async fn run_with_writer_and_init<W: Write + Send>(
+    pools: &TenantPools,
+    registry_url: &str,
+    dir: &Path,
+    args: impl IntoIterator<Item = String>,
+    writer: &mut W,
+    init_fn: InitTenancyFn,
 ) -> Result<(), TenancyError> {
     let args: Vec<String> = args.into_iter().collect();
     let cmd = args.first().map_or("", String::as_str);
@@ -116,7 +167,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "run-server" | "runserver" => {
             server::run_server_cmd(pools, registry_url, &args[1..], writer).await
         }
-        "init-tenancy" => migrations::init_tenancy_cmd(dir, writer),
+        "init-tenancy" => migrations::init_tenancy_cmd_with(dir, writer, init_fn),
         // Intercepted before fall-through: tenancy ships its own
         // manage.rs template in `--with-manage-bin`, wiring
         // `crate::tenancy::manage::run` instead of the single-tenant

@@ -189,6 +189,90 @@ pub async fn authenticate_user(
     Ok(Some(user))
 }
 
+// ---------- Swappable user model ----------
+
+/// Marker trait for the model backing `rustango_users` in a tenant's
+/// storage. The framework's [`User`] implements it as the default.
+///
+/// Implement it on your own `#[derive(Model)]` struct when you want the
+/// tenant `rustango_users` table to carry **extra columns** beyond the
+/// framework's defaults (display name, timezone, avatar URL, …).
+///
+/// ## Contract
+///
+/// The implementing struct's [`crate::core::ModelSchema`] MUST:
+/// * have `table = "rustango_users"`,
+/// * include every column in [`REQUIRED_USER_COLUMNS`] with a compatible
+///   Rust type (the framework's auth path reads these by name).
+///
+/// Extras must be NULL-able or carry a `default = "…"` so existing
+/// tenants can run the bootstrap migration without per-row backfill.
+///
+/// Wire your model in via [`crate::manage::Cli::user_model`].
+///
+/// ```ignore
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "rustango_users")]
+/// pub struct AppUser {
+///     #[rustango(primary_key)] pub id: rustango::sql::Auto<i64>,
+///     #[rustango(max_length = 64, unique)] pub username: String,
+///     #[rustango(max_length = 255)] pub password_hash: String,
+///     pub is_superuser: bool,
+///     pub active: bool,
+///     pub created_at: chrono::DateTime<chrono::Utc>,
+///     #[rustango(default = "'{}'")] pub data: serde_json::Value,
+///     // extras —
+///     #[rustango(max_length = 128, default = "''")] pub display_name: String,
+///     #[rustango(max_length = 64, default = "'UTC'")] pub timezone: String,
+/// }
+/// impl rustango::tenancy::TenantUserModel for AppUser {}
+/// ```
+pub trait TenantUserModel: crate::core::Model {}
+
+impl TenantUserModel for User {}
+
+/// Column names the framework's auth/admin paths read directly from
+/// `rustango_users`. A [`TenantUserModel`] schema must contain every
+/// one of these.
+pub const REQUIRED_USER_COLUMNS: &[&str] = &[
+    "id",
+    "username",
+    "password_hash",
+    "is_superuser",
+    "active",
+    "created_at",
+    "data",
+];
+
+/// Validate that `schema` is a viable `rustango_users` model — same
+/// table name and all [`REQUIRED_USER_COLUMNS`] present. Called by
+/// the bootstrap-migration generators so a misconfigured override
+/// fails fast with a clear message at `init-tenancy` time, not later
+/// during a tenant create or login.
+///
+/// # Errors
+/// Returns [`TenancyError::Validation`] when the table name is wrong
+/// or a required column is missing.
+pub fn validate_tenant_user_schema(
+    schema: &crate::core::ModelSchema,
+) -> Result<(), TenancyError> {
+    if schema.table != "rustango_users" {
+        return Err(TenancyError::Validation(format!(
+            "TenantUserModel must point at table \"rustango_users\", got \"{}\"",
+            schema.table
+        )));
+    }
+    for required in REQUIRED_USER_COLUMNS {
+        if !schema.fields.iter().any(|f| f.column == *required) {
+            return Err(TenancyError::Validation(format!(
+                "TenantUserModel \"{}\" is missing required column \"{}\"",
+                schema.name, required
+            )));
+        }
+    }
+    Ok(())
+}
+
 // ---------- HTTP Basic helpers ----------
 
 /// Parse an `Authorization: Basic <base64>` header value into
@@ -235,5 +319,44 @@ mod tests {
     #[test]
     fn parse_basic_auth_handles_none_header() {
         assert!(parse_basic_auth(None).is_none());
+    }
+
+    #[test]
+    fn validate_accepts_default_user() {
+        use crate::core::Model as _;
+        validate_tenant_user_schema(&User::SCHEMA).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_wrong_table() {
+        use crate::core::Model as _;
+        // Use Operator's schema — same shape-ish but wrong table name.
+        let err = validate_tenant_user_schema(&Operator::SCHEMA).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("rustango_users"), "{msg}");
+    }
+
+    #[derive(crate::Model, Debug, Clone)]
+    #[rustango(table = "rustango_users")]
+    #[allow(dead_code)]
+    pub struct MissingDataColumn {
+        #[rustango(primary_key)]
+        pub id: rustango::sql::Auto<i64>,
+        #[rustango(max_length = 64, unique)]
+        pub username: String,
+        #[rustango(max_length = 255)]
+        pub password_hash: String,
+        pub is_superuser: bool,
+        pub active: bool,
+        pub created_at: chrono::DateTime<chrono::Utc>,
+        // `data` deliberately omitted
+    }
+
+    #[test]
+    fn validate_rejects_missing_required_column() {
+        use crate::core::Model as _;
+        let err = validate_tenant_user_schema(&MissingDataColumn::SCHEMA).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("data"), "{msg}");
     }
 }

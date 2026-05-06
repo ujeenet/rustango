@@ -30,7 +30,7 @@ pub(crate) async fn index(State(state): State<AppState>) -> Html<String> {
     // Each entry's `resolved_app_label()` returns the explicit
     // `#[rustango(app = "...")]` override OR infers from the model's
     // module path. Models with no app label land in a "Project" group.
-    let mut entries: Vec<&'static ModelEntry> = inventory::iter::<ModelEntry>
+    let mut entries: Vec<&'static ModelEntry> = super::helpers::inventory_entries_dedup_by_table()
         .into_iter()
         .filter(|e| state.is_visible(e.schema.table))
         .collect();

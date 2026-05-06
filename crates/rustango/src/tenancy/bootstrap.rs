@@ -48,7 +48,7 @@ use std::path::Path;
 use crate::core::Model as _;
 use crate::migrate::{Migration, MigrationScope, Operation, SchemaChange, SchemaSnapshot};
 
-use super::auth::{Operator, User};
+use super::auth::{validate_tenant_user_schema, Operator, TenantUserModel, User};
 use super::auth_backends::ApiKey;
 use super::error::TenancyError;
 use super::org::Org;
@@ -64,13 +64,33 @@ const BOOTSTRAP_TIMESTAMP: &str = "2026-04-29T00:00:00Z";
 /// Build the registry-scoped bootstrap migration in memory.
 #[must_use]
 pub fn registry_bootstrap_migration() -> Migration {
+    registry_bootstrap_migration_for::<User>()
+}
+
+/// Build the tenant-scoped bootstrap migration in memory.
+#[must_use]
+pub fn tenant_bootstrap_migration() -> Migration {
+    tenant_bootstrap_migration_for::<User>()
+}
+
+/// Like [`registry_bootstrap_migration`] but uses `U`'s schema for
+/// `rustango_users`. Both bootstrap migrations carry the full
+/// snapshot, so the registry one needs the override too — otherwise
+/// `make_migrations` would see drift between the registry and tenant
+/// snapshots and try to "fix" the user table.
+///
+/// # Panics
+/// If `U`'s schema doesn't satisfy [`validate_tenant_user_schema`]
+/// (wrong table name or missing a required column).
+#[must_use]
+pub fn registry_bootstrap_migration_for<U: TenantUserModel>() -> Migration {
     Migration {
         name: REGISTRY_BOOTSTRAP_NAME.to_owned(),
         created_at: BOOTSTRAP_TIMESTAMP.to_owned(),
         prev: None,
         atomic: true,
         scope: MigrationScope::Registry,
-        snapshot: full_snapshot(),
+        snapshot: full_snapshot_for::<U>(),
         forward: vec![
             Operation::Schema(SchemaChange::CreateTable("rustango_orgs".into())),
             Operation::Schema(SchemaChange::CreateTable("rustango_operators".into())),
@@ -78,16 +98,21 @@ pub fn registry_bootstrap_migration() -> Migration {
     }
 }
 
-/// Build the tenant-scoped bootstrap migration in memory.
+/// Like [`tenant_bootstrap_migration`] but uses `U`'s schema for
+/// `rustango_users`, so any extra columns declared on `U` land in
+/// the bootstrap `CREATE TABLE`.
+///
+/// # Panics
+/// If `U`'s schema doesn't satisfy [`validate_tenant_user_schema`].
 #[must_use]
-pub fn tenant_bootstrap_migration() -> Migration {
+pub fn tenant_bootstrap_migration_for<U: TenantUserModel>() -> Migration {
     Migration {
         name: TENANT_BOOTSTRAP_NAME.to_owned(),
         created_at: BOOTSTRAP_TIMESTAMP.to_owned(),
         prev: None,
         atomic: true,
         scope: MigrationScope::Tenant,
-        snapshot: full_snapshot(),
+        snapshot: full_snapshot_for::<U>(),
         forward: vec![
             Operation::Schema(SchemaChange::CreateTable("rustango_users".into())),
         ],
@@ -98,11 +123,14 @@ pub fn tenant_bootstrap_migration() -> Migration {
 /// scope. Both bootstrap migrations share this snapshot so the
 /// lex-greatest one (`0001_rustango_tenant_initial`) leaves the
 /// world looking complete to a downstream `make_migrations`.
-fn full_snapshot() -> SchemaSnapshot {
+fn full_snapshot_for<U: TenantUserModel>() -> SchemaSnapshot {
+    if let Err(e) = validate_tenant_user_schema(&U::SCHEMA) {
+        panic!("invalid TenantUserModel: {e}");
+    }
     SchemaSnapshot::from_models(&[
         Org::SCHEMA,
         Operator::SCHEMA,
-        User::SCHEMA,
+        U::SCHEMA,
         Role::SCHEMA,
         RolePermission::SCHEMA,
         UserRole::SCHEMA,
@@ -132,11 +160,35 @@ pub struct InitTenancyReport {
 /// created or a file can't be written, or [`TenancyError::Io`] for
 /// raw I/O failures elsewhere.
 pub fn init_tenancy(dir: &Path) -> Result<InitTenancyReport, TenancyError> {
+    init_tenancy_with::<User>(dir)
+}
+
+/// Like [`init_tenancy`] but uses `U`'s schema for the
+/// `rustango_users` table — any extra columns on `U` are written into
+/// the materialized bootstrap migration JSON.
+///
+/// Idempotent: only writes files that don't already exist. The
+/// override therefore matters only on the first invocation; once the
+/// JSON is on disk it's the source of truth and changing `U` won't
+/// rewrite it (write a follow-up `AddColumn` migration instead).
+///
+/// # Errors
+/// As [`init_tenancy`].
+///
+/// # Panics
+/// If `U`'s schema doesn't satisfy
+/// [`super::auth::validate_tenant_user_schema`].
+pub fn init_tenancy_with<U: TenantUserModel>(
+    dir: &Path,
+) -> Result<InitTenancyReport, TenancyError> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
     }
     let mut report = InitTenancyReport::default();
-    for mig in [registry_bootstrap_migration(), tenant_bootstrap_migration()] {
+    for mig in [
+        registry_bootstrap_migration_for::<U>(),
+        tenant_bootstrap_migration_for::<U>(),
+    ] {
         let path = dir.join(format!("{}.json", mig.name));
         if path.exists() {
             report.skipped.push(mig.name);
@@ -176,11 +228,89 @@ mod tests {
 
     #[test]
     fn snapshots_contain_all_three_tenancy_tables() {
-        let s = full_snapshot();
+        let s = full_snapshot_for::<User>();
         let names: Vec<&str> = s.tables.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"rustango_orgs"));
         assert!(names.contains(&"rustango_operators"));
         assert!(names.contains(&"rustango_users"));
+    }
+
+    /// Custom user model with an extra column. Mirrors every required
+    /// framework column so the validator passes.
+    #[derive(crate::Model, Debug, Clone)]
+    #[rustango(table = "rustango_users")]
+    #[allow(dead_code)]
+    pub struct AppUserExt {
+        #[rustango(primary_key)]
+        pub id: rustango::sql::Auto<i64>,
+        #[rustango(max_length = 64, unique)]
+        pub username: String,
+        #[rustango(max_length = 255)]
+        pub password_hash: String,
+        pub is_superuser: bool,
+        pub active: bool,
+        pub created_at: chrono::DateTime<chrono::Utc>,
+        #[rustango(default = "'{}'")]
+        pub data: serde_json::Value,
+        #[rustango(max_length = 128, default = "''")]
+        pub display_name: String,
+        #[rustango(max_length = 64, default = "'UTC'")]
+        pub timezone: String,
+    }
+
+    impl super::TenantUserModel for AppUserExt {}
+
+    #[test]
+    fn user_model_override_lands_extras_in_tenant_snapshot() {
+        let m = tenant_bootstrap_migration_for::<AppUserExt>();
+        let users = m.snapshot.table("rustango_users").expect("rustango_users in snapshot");
+        let cols: Vec<&str> = users.fields.iter().map(|f| f.column.as_str()).collect();
+        // framework defaults still present
+        for required in super::super::auth::REQUIRED_USER_COLUMNS {
+            assert!(cols.contains(required), "missing required column {required}");
+        }
+        // extras present
+        assert!(cols.contains(&"display_name"), "extras must be in snapshot");
+        assert!(cols.contains(&"timezone"));
+    }
+
+    #[test]
+    fn user_model_override_also_propagates_to_registry_snapshot() {
+        // Both bootstrap migrations share the same snapshot — the
+        // registry one must carry the extras too, otherwise
+        // make_migrations would diff the two and try to "fix" the
+        // discrepancy on the next run.
+        let m = registry_bootstrap_migration_for::<AppUserExt>();
+        let users = m.snapshot.table("rustango_users").unwrap();
+        let cols: Vec<&str> = users.fields.iter().map(|f| f.column.as_str()).collect();
+        assert!(cols.contains(&"display_name"));
+    }
+
+    #[test]
+    fn default_user_snapshot_has_no_extras() {
+        let m = tenant_bootstrap_migration();
+        let users = m.snapshot.table("rustango_users").unwrap();
+        let cols: Vec<&str> = users.fields.iter().map(|f| f.column.as_str()).collect();
+        // Regression: stock User must not gain extras silently.
+        assert!(!cols.contains(&"display_name"));
+        assert!(!cols.contains(&"timezone"));
+    }
+
+    #[test]
+    fn init_tenancy_with_writes_override_migration() {
+        let dir = tempdir();
+        let report = init_tenancy_with::<AppUserExt>(&dir).unwrap();
+        assert_eq!(report.written.len(), 2);
+
+        // Read the tenant bootstrap JSON back and confirm extras
+        // round-tripped through serialization.
+        let path = dir.join(format!("{TENANT_BOOTSTRAP_NAME}.json"));
+        let mig = rustango::migrate::file::load(&path).unwrap();
+        let users = mig.snapshot.table("rustango_users").unwrap();
+        let cols: Vec<&str> = users.fields.iter().map(|f| f.column.as_str()).collect();
+        assert!(cols.contains(&"display_name"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

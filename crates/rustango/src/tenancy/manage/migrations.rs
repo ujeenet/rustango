@@ -147,8 +147,12 @@ pub(super) async fn migrate_all_cmd<W: Write + Send>(
 
 // ---------- init-tenancy ----------
 
-pub(super) fn init_tenancy_cmd<W: Write>(dir: &Path, w: &mut W) -> Result<(), TenancyError> {
-    let report = crate::tenancy::bootstrap::init_tenancy(dir)?;
+pub(super) fn init_tenancy_cmd_with<W: Write>(
+    dir: &Path,
+    w: &mut W,
+    init_fn: super::InitTenancyFn,
+) -> Result<(), TenancyError> {
+    let report = init_fn(dir)?;
     if report.written.is_empty() && report.skipped.is_empty() {
         // Should not happen — init_tenancy always processes both files.
         writeln!(w, "init-tenancy: no migrations to write")?;

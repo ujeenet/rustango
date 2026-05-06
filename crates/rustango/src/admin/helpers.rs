@@ -18,6 +18,34 @@ use super::urls::AppState;
 /// per-FK queries.
 pub(crate) type FkMap = HashMap<(String, String), String>;
 
+/// Iterate the model inventory, deduplicating entries that share a SQL
+/// table name. When two models point at the same `table`, the one with
+/// **more fields** wins; ties resolve to the first inventory order.
+///
+/// This is what makes a project-side override like
+/// [`crate::tenancy::TenantUserModel`] visible to the admin even when
+/// the framework's own model is also registered for the same table —
+/// e.g. `AppUser` (9 fields) shadows the framework's `User` (7 fields)
+/// on `rustango_users`. The richer schema is also what we want for
+/// list/detail rendering since the user explicitly added columns by
+/// declaring it.
+pub(crate) fn inventory_entries_dedup_by_table() -> Vec<&'static ModelEntry> {
+    let mut by_table: indexmap::IndexMap<&'static str, &'static ModelEntry> =
+        indexmap::IndexMap::new();
+    for entry in inventory::iter::<ModelEntry> {
+        let table = entry.schema.table;
+        match by_table.get(table) {
+            Some(existing) if existing.schema.fields.len() >= entry.schema.fields.len() => {
+                // Existing is at least as rich — keep it.
+            }
+            _ => {
+                by_table.insert(table, entry);
+            }
+        }
+    }
+    by_table.into_values().collect()
+}
+
 /// Build the standard chrome context (sidebar + active-link state)
 /// that every admin page renders. Pass the active table (or `None` on
 /// the index page) so the matching sidebar link gets `class="active"`.
@@ -41,7 +69,7 @@ pub(crate) fn sidebar_context(
     state: &AppState,
     active_table: Option<&str>,
 ) -> Vec<serde_json::Value> {
-    let mut entries: Vec<&'static ModelEntry> = inventory::iter::<ModelEntry>
+    let mut entries: Vec<&'static ModelEntry> = inventory_entries_dedup_by_table()
         .into_iter()
         .filter(|e| state.is_visible(e.schema.table))
         .collect();
@@ -88,7 +116,7 @@ pub(crate) fn lookup_model(state: &AppState, table: &str) -> Option<&'static Mod
     if !state.is_visible(table) {
         return None;
     }
-    inventory::iter::<ModelEntry>
+    inventory_entries_dedup_by_table()
         .into_iter()
         .find(|e| e.schema.table == table)
         .map(|e| e.schema)

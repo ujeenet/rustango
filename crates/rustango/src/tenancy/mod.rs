@@ -58,7 +58,10 @@ mod secrets;
 pub mod server;
 pub mod tenant_console;
 
-pub use auth::{authenticate_operator, authenticate_user, Operator, User};
+pub use auth::{
+    authenticate_operator, authenticate_user, validate_tenant_user_schema, Operator,
+    TenantUserModel, User, REQUIRED_USER_COLUMNS,
+};
 pub use auth_backends::{
     create_api_key, ensure_api_keys_table, ApiKeyBackend, AuthBackend, AuthError, AuthUser,
     BoxedBackend, JwtBackend, ModelBackend,
@@ -71,8 +74,10 @@ pub use permissions::{
     user_permissions, user_roles,
 };
 pub use bootstrap::{
-    init_tenancy, registry_bootstrap_migration, tenant_bootstrap_migration, InitTenancyReport,
-    REGISTRY_BOOTSTRAP_NAME, TENANT_BOOTSTRAP_NAME,
+    init_tenancy, init_tenancy_with, registry_bootstrap_migration,
+    registry_bootstrap_migration_for, tenant_bootstrap_migration,
+    tenant_bootstrap_migration_for, InitTenancyReport, REGISTRY_BOOTSTRAP_NAME,
+    TENANT_BOOTSTRAP_NAME,
 };
 
 pub use error::TenancyError;

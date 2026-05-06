@@ -620,6 +620,40 @@ implicitly by the `Cli::new().tenancy().run()` runserver path —
 covered by Chapter 1 §1.5 and the framework's own `tenant_admin_live`
 test.
 
+* §5.77 **Extras on tenant users** — three escalating options when the
+  framework's seven `rustango_users` columns aren't enough:
+  1. **JSONB `data` column** — stuff sparse attributes into
+     `user.data["display_name"]`. Zero migration, no override. Right
+     answer for preferences / onboarding flags.
+  2. **Sibling `UserProfile` model with FK** — typed, indexable extras
+     without touching `rustango_users`. Define a regular
+     `#[derive(Model)]` with `#[rustango(fk = "rustango_users")]`,
+     then `cargo run -- makemigrations && cargo run -- migrate`. Works
+     on any project, including ones already in production.
+  3. **`Cli::user_model::<AppUser>()`** — extras inline on
+     `rustango_users` itself (greenfield only).
+     `impl rustango::tenancy::TenantUserModel for AppUser {}` on a
+     `#[derive(Model)] #[rustango(table = "rustango_users")]` struct
+     that mirrors all seven required columns plus your extras, then
+     chain `.user_model::<AppUser>()` on `Cli` (or `Builder`).
+     `init-tenancy` and `Builder::migrate` then write the bootstrap
+     migration with your `CREATE TABLE rustango_users` columns.
+     Caveats:
+     - Idempotent: only takes effect when the bootstrap JSON
+       doesn't already exist. On a `cargo rustango new --template
+       tenant` project you must `rm migrations/0001_rustango_*.json`
+       before `cargo run -- init-tenancy`.
+     - Both framework `User` and `AppUser` register in inventory —
+       subsequent `makemigrations` may emit redundant ops touching
+       `rustango_users`; review the JSON.
+     - Validation (`validate_tenant_user_schema`) panics at
+       `init-tenancy` time on wrong table name or a missing required
+       column.
+  → option 3 covered by `tenancy::bootstrap::tests::user_model_override_*`
+    and `tenancy::auth::tests::validate_*` in the framework crate.
+  → see [docs/manage.md "Custom user model"](../../../../docs/manage.md#custom-user-model-extra-columns-on-rustango_users)
+    for the full step-by-step recipe.
+
 *Sub-sections 5.67 (PathPrefixResolver), 5.69 (PortResolver),
 5.72 (database-per-tenant via `--database-url`), 5.75 (per-tenant
 auth: Operator vs User scoping), 5.76 (org bootstrap migration

@@ -30,6 +30,11 @@ pub struct Builder {
     admin_subtitle: Option<String>,
     api: Option<ApiRouter>,
     admin_actions: Vec<PendingAction>,
+    /// Bootstrap initializer used by [`Builder::migrate`]. Defaults
+    /// to [`crate::tenancy::init_tenancy`]; swapped via
+    /// [`Builder::user_model`] for a custom
+    /// [`crate::tenancy::TenantUserModel`].
+    init_tenancy_fn: crate::tenancy::manage::InitTenancyFn,
 }
 
 struct PendingAction {
@@ -62,7 +67,16 @@ impl Builder {
             admin_subtitle: None,
             api: None,
             admin_actions: Vec::new(),
+            init_tenancy_fn: crate::tenancy::init_tenancy,
         })
+    }
+
+    /// Swap the tenant user model used by [`Builder::migrate`]. Same
+    /// semantics as [`crate::manage::Cli::user_model`].
+    #[must_use]
+    pub fn user_model<U: crate::tenancy::TenantUserModel>(mut self) -> Self {
+        self.init_tenancy_fn = crate::tenancy::init_tenancy_with::<U>;
+        self
     }
 
     /// Set the display name shown in the tenant admin sidebar header.
@@ -194,7 +208,7 @@ impl Builder {
         let dirs = crate::migrate::discover_migration_dirs(root);
         if dirs.is_empty() && root_has_json_files(root) {
             // v0.8.1 shape: user passed the flat migrations dir.
-            crate::tenancy::init_tenancy(root)?;
+            (self.init_tenancy_fn)(root)?;
             let _ = crate::tenancy::migrate_registry(&self.pools, root).await?;
             let _ = crate::tenancy::migrate_tenants(&self.pools, root, &self.registry_url).await?;
             return Ok(self);
@@ -203,7 +217,7 @@ impl Builder {
         // 9.0g shape: walk every per-app dir + the flat dir.
         let flat = root.join("migrations");
         std::fs::create_dir_all(&flat)?;
-        crate::tenancy::init_tenancy(&flat)?;
+        (self.init_tenancy_fn)(&flat)?;
 
         // Re-discover after init_tenancy populated the flat dir.
         let dirs = crate::migrate::discover_migration_dirs(root);
