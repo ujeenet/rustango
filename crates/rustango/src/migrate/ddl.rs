@@ -40,7 +40,7 @@
 
 use std::fmt::Write as _;
 
-use crate::core::{FieldSchema, ModelSchema, Relation};
+use crate::core::{FieldSchema, FieldType, ModelSchema, Relation};
 use crate::sql::{Dialect, Postgres};
 
 // ============================================================ Postgres-typed shims (existing API)
@@ -233,13 +233,150 @@ fn write_check_constraint(s: &mut String, dialect: &dyn Dialect, field: &FieldSc
     s.push(')');
 }
 
-/// Per-field SQL type — `Auto<T>` PKs delegate to
+/// Per-field SQL type — integer `Auto<T>` PKs delegate to
 /// [`Dialect::serial_type`] (PG: `BIGSERIAL`/`SERIAL`, MySQL: `BIGINT
-/// AUTO_INCREMENT`/`INT AUTO_INCREMENT`); everything else delegates to
-/// [`Dialect::column_type`] for the per-backend type spelling.
+/// AUTO_INCREMENT`/`INT AUTO_INCREMENT`); non-integer Auto fields
+/// (`Auto<Uuid>` w/ `auto_uuid`, `Auto<DateTime<Utc>>` w/
+/// `auto_now_add`/`auto_now`) fall through to [`Dialect::column_type`]
+/// — they're DB-default-supplied via the explicit `default`
+/// expression on the field, NOT a sequence.
+///
+/// Without this gate, a column like
+/// `#[rustango(auto_now_add)] created_at: Auto<DateTime<Utc>>`
+/// gets emitted as `BIGSERIAL DEFAULT now() NOT NULL` — Postgres'
+/// `BIGSERIAL` macro already supplies `DEFAULT nextval(...)`, so the
+/// CREATE TABLE rejects with `multiple default values specified for
+/// column "created_at"`. The migration-replay path
+/// (`crate::migrate::diff::sql_type_for_field`) already had this
+/// guard; this mirror brings the apply_all (ephemeral / test) path
+/// in line.
 fn sql_type(dialect: &dyn Dialect, field: &FieldSchema) -> String {
-    if field.auto {
+    if field.auto && matches!(field.ty, FieldType::I16 | FieldType::I32 | FieldType::I64) {
         return dialect.serial_type(field.ty).to_owned();
     }
     dialect.column_type(field.ty, field.max_length)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression tests for the `auto = true` × non-integer field-type
+    //! case that crashed `apply_all` against `rustango_api_keys` in
+    //! v0.24.0 — `Auto<DateTime<Utc>>` with `auto_now_add` was
+    //! rendering as `BIGSERIAL DEFAULT now()` and Postgres rejected
+    //! the duplicate default.
+    //!
+    //! Coverage:
+    //! 1. `Auto<i32>` / `Auto<i64>` PKs still emit SERIAL / BIGSERIAL
+    //!    (no regression on the integer path).
+    //! 2. `Auto<DateTime>` with `auto_now_add` emits `TIMESTAMPTZ`
+    //!    (column type only) so the field's `DEFAULT now()` lands
+    //!    cleanly.
+    //! 3. `Auto<Uuid>` with `auto_uuid` emits `UUID` so the field's
+    //!    `DEFAULT gen_random_uuid()` lands cleanly.
+    //! 4. The end-to-end CREATE TABLE has exactly one DEFAULT clause
+    //!    per column (smoke test against full DDL).
+
+    use super::*;
+    use crate::core::FieldType;
+
+    fn pg() -> Postgres {
+        Postgres
+    }
+
+    fn fld(name: &'static str, ty: FieldType, auto: bool, default: Option<&'static str>) -> FieldSchema {
+        FieldSchema {
+            name,
+            column: name,
+            ty,
+            nullable: false,
+            primary_key: false,
+            relation: None,
+            max_length: None,
+            min: None,
+            max: None,
+            default,
+            auto,
+            unique: false,
+        }
+    }
+
+    #[test]
+    fn auto_i32_emits_serial() {
+        let f = fld("id", FieldType::I32, true, None);
+        assert_eq!(sql_type(&pg(), &f), "SERIAL");
+    }
+
+    #[test]
+    fn auto_i64_emits_bigserial() {
+        let f = fld("id", FieldType::I64, true, None);
+        assert_eq!(sql_type(&pg(), &f), "BIGSERIAL");
+    }
+
+    #[test]
+    fn auto_datetime_emits_timestamptz_not_bigserial() {
+        // Regression for the `multiple default values specified for
+        // column "created_at"` panic: `Auto<DateTime<Utc>>` w/
+        // auto_now_add fed `BIGSERIAL` into Postgres which already
+        // supplies `DEFAULT nextval(...)`.
+        let f = fld("created_at", FieldType::DateTime, true, Some("now()"));
+        assert_eq!(sql_type(&pg(), &f), "TIMESTAMPTZ");
+    }
+
+    #[test]
+    fn auto_uuid_emits_uuid_not_bigserial() {
+        let f = fld("id", FieldType::Uuid, true, Some("gen_random_uuid()"));
+        assert_eq!(sql_type(&pg(), &f), "UUID");
+    }
+
+    #[test]
+    fn full_create_table_has_single_default_per_column() {
+        // Smoke: render a full CREATE TABLE for a table that mixes
+        // `Auto<i64>` PK + `auto_now_add` timestamp, and confirm no
+        // column carries two DEFAULT clauses.
+        let mut col_def = String::new();
+        write_column_def(
+            &mut col_def,
+            &pg(),
+            &fld("created_at", FieldType::DateTime, true, Some("now()")),
+        );
+        // Should be: `"created_at" TIMESTAMPTZ DEFAULT now() NOT NULL`
+        // — exactly one " DEFAULT " token.
+        let n_defaults = col_def.matches(" DEFAULT ").count();
+        assert_eq!(
+            n_defaults, 1,
+            "expected exactly one DEFAULT clause, got {n_defaults} in: {col_def}"
+        );
+        assert!(col_def.contains("TIMESTAMPTZ"), "got: {col_def}");
+        assert!(col_def.contains("DEFAULT now()"), "got: {col_def}");
+        assert!(!col_def.contains("BIGSERIAL"), "must not emit BIGSERIAL: {col_def}");
+    }
+
+    #[test]
+    fn full_create_table_uuid_auto_has_single_default() {
+        let mut col_def = String::new();
+        write_column_def(
+            &mut col_def,
+            &pg(),
+            &fld("id", FieldType::Uuid, true, Some("gen_random_uuid()")),
+        );
+        let n_defaults = col_def.matches(" DEFAULT ").count();
+        assert_eq!(n_defaults, 1, "got: {col_def}");
+        assert!(col_def.contains("UUID"));
+        assert!(col_def.contains("DEFAULT gen_random_uuid()"));
+    }
+
+    #[test]
+    fn auto_i64_default_clause_passthrough() {
+        // Sanity: an `Auto<i64>` PK with no explicit default still
+        // emits `BIGSERIAL` and NO `DEFAULT` clause (BIGSERIAL implies
+        // its own nextval default).
+        let mut col_def = String::new();
+        write_column_def(
+            &mut col_def,
+            &pg(),
+            &fld("id", FieldType::I64, true, None),
+        );
+        assert!(col_def.contains("BIGSERIAL"), "got: {col_def}");
+        assert!(!col_def.contains(" DEFAULT "), "BIGSERIAL must not get an explicit DEFAULT: {col_def}");
+    }
 }
