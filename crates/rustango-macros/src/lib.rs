@@ -602,9 +602,26 @@ fn load_related_impl_tokens(
         quote! {
             #fk_col => {
                 let _parent: #parent_ty = <#parent_ty>::__rustango_from_aliased_row(row, alias)?;
+                // Loud-in-debug, default-in-release: a divergence
+                // between the FK field's declared `K` (drives the
+                // expected `SqlValue::<Variant>`) and the parent's
+                // `__rustango_pk_value` output is a macro-internal
+                // invariant break — surfacing the panic in dev
+                // catches it before users hit silent PK=0 corruption.
                 let _pk = match <#parent_ty>::__rustango_pk_value(&_parent) {
                     ::rustango::core::SqlValue::#variant_ident(v) => v,
-                    _ => #default_expr,
+                    _other => {
+                        ::core::debug_assert!(
+                            false,
+                            "rustango macro bug: load_related on FK `{}` expected \
+                             SqlValue::{} from parent's __rustango_pk_value but got \
+                             {:?} — file a bug at https://github.com/ujeenet/rustango",
+                            #fk_col,
+                            ::core::stringify!(#variant_ident),
+                            _other,
+                        );
+                        #default_expr
+                    }
                 };
                 #assign
                 ::core::result::Result::Ok(true)
@@ -664,9 +681,22 @@ fn load_related_impl_my_tokens(
             #fk_col => {
                 let _parent: #parent_ty =
                     <#parent_ty>::__rustango_from_aliased_my_row(row, alias)?;
+                // See note in `load_related_impl_tokens` (PG twin) —
+                // the same loud-in-debug invariant guard.
                 let _pk = match <#parent_ty>::__rustango_pk_value(&_parent) {
                     ::rustango::core::SqlValue::#variant_ident(v) => v,
-                    _ => #default_expr,
+                    _other => {
+                        ::core::debug_assert!(
+                            false,
+                            "rustango macro bug: load_related on FK `{}` expected \
+                             SqlValue::{} from parent's __rustango_pk_value but got \
+                             {:?} — file a bug at https://github.com/ujeenet/rustango",
+                            #fk_col,
+                            ::core::stringify!(#variant_ident),
+                            _other,
+                        );
+                        #default_expr
+                    }
                 };
                 #assign
                 ::core::result::Result::Ok(true)

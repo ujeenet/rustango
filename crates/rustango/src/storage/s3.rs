@@ -55,8 +55,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256};
 
 use super::{validate_key, Storage, StorageError};
 
@@ -386,27 +384,10 @@ fn format_amz_date(unix_secs: u64) -> String {
     dt.format("%Y%m%dT%H%M%SZ").to_string()
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(bytes);
-    hex_encode(&h.finalize())
-}
-
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC key");
-    mac.update(data);
-    mac.finalize().into_bytes().to_vec()
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0xf) as usize] as char);
-    }
-    out
-}
+// SHA-256 / HMAC-SHA256 / hex-encode helpers live in
+// [`crate::crypto`] — re-imported here so the canonical-request +
+// signing-key code reads the same as before the consolidation.
+use crate::crypto::{hex_encode, hmac_sha256, sha256_hex};
 
 /// Derive the SigV4 signing key from the secret + scope chain:
 /// `kSecret -> kDate -> kRegion -> kService -> kSigning`.

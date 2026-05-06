@@ -221,24 +221,10 @@ fn url_encode(s: &str) -> String {
         .collect()
 }
 
-fn url_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("00");
-            if let Ok(b) = u8::from_str_radix(hex, 16) {
-                out.push(b);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
-        i += 1;
-    }
-    String::from_utf8(out).unwrap_or_default()
-}
+// Percent-decoder consolidated into [`crate::url_codec`] — see the
+// note in [`crate::signed_url`]. Re-imported under the `url_decode`
+// name to keep the local call sites unchanged.
+use crate::url_codec::url_decode;
 
 #[cfg(test)]
 mod tests {

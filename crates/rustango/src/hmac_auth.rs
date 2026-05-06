@@ -64,8 +64,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::body::{to_bytes, Body};
 use axum::http::{header, HeaderValue, Request, Response, StatusCode};
 use base64::Engine;
-use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tower::Service;
 
@@ -294,27 +292,10 @@ fn sort_query(q: &str) -> String {
     pairs.join("&")
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(bytes);
-    hex_encode(&h.finalize())
-}
-
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC key");
-    mac.update(data);
-    mac.finalize().into_bytes().to_vec()
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0xf) as usize] as char);
-    }
-    out
-}
+// SHA-256 / HMAC-SHA256 / hex-encode helpers live in
+// [`crate::crypto`] — re-exported as the same names so the existing
+// call sites read unchanged.
+use crate::crypto::{hmac_sha256, sha256_hex};
 
 fn date_within_tolerance(date_str: &str, tolerance_secs: u64) -> bool {
     let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(date_str) else {

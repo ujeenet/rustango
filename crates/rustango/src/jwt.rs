@@ -42,11 +42,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use hmac::{Hmac, Mac};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
-use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 #[derive(Debug, thiserror::Error)]
@@ -276,11 +274,9 @@ pub fn decode_unverified(token: &str) -> Result<Claims, JwtError> {
     Claims::from_json(&payload_bytes)
 }
 
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC key");
-    mac.update(data);
-    mac.finalize().into_bytes().to_vec()
-}
+// HMAC-SHA256 lives in [`crate::crypto`] — same shape, one
+// implementation for hmac_auth + jwt + storage::s3 to share.
+use crate::crypto::hmac_sha256;
 
 fn now_secs() -> u64 {
     SystemTime::now()

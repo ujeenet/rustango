@@ -304,6 +304,25 @@ pub mod mailable;
 pub mod jsonapi;
 
 /// HMAC-signed request authentication for service-to-service traffic.
+/// Shared HMAC-SHA256 / SHA-256 / hex-encoding primitives. Internal —
+/// users wanting raw HMAC pull in `hmac` + `sha2` themselves.
+#[cfg(any(
+    feature = "hmac-auth",
+    feature = "storage-s3",
+    feature = "signed_url",
+    feature = "jwt",
+))]
+pub(crate) mod crypto;
+
+/// Tiny `application/x-www-form-urlencoded` decoder shared by
+/// [`signed_url`], [`auth_flows`], and [`tenancy::admin`]. Internal.
+#[cfg(any(
+    feature = "signed_url",
+    feature = "auth_flows",
+    feature = "tenancy",
+))]
+pub(crate) mod url_codec;
+
 /// AWS-style canonical request signed with SHA-256, replay-bounded
 /// by an X-Date tolerance window. See [`hmac_auth::HmacAuthLayer`].
 #[cfg(feature = "hmac-auth")]
