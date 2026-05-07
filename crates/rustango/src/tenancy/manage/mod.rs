@@ -41,6 +41,7 @@
 
 mod args;
 mod audit;
+mod migrate_storage;
 mod migrations;
 mod roles;
 mod scaffold;
@@ -161,6 +162,10 @@ pub async fn run_with_writer_and_init<W: Write + Send>(
             migrations::migrate_tenants_cmd(pools, registry_url, dir, writer).await
         }
         "migrate-registry" => migrations::migrate_registry_cmd(pools, dir, writer).await,
+        "migrate-tenant-storage" => {
+            migrate_storage::migrate_tenant_storage_cmd(pools, registry_url, &args[1..], writer)
+                .await
+        }
         "create-operator" => users::create_operator_cmd(pools, &args[1..], writer).await,
         "create-user" => users::create_user_cmd(pools, registry_url, &args[1..], writer).await,
         "run-server" | "runserver" => {
@@ -294,6 +299,14 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "  migrate-tenants      Apply tenant-scoped migrations to every active org."
+    )?;
+    writeln!(
+        w,
+        "  migrate-tenant-storage <slug> --to schema|database [--database-url <s>] [--schema-name <s>] [--dry-run]"
+    )?;
+    writeln!(
+        w,
+        "                       Move a tenant between storage modes via pg_dump → psql."
     )?;
     writeln!(
         w,
