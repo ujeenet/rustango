@@ -250,6 +250,12 @@ pub mod cache;
 #[cfg(feature = "signals")]
 pub mod signals;
 
+/// Domain event bus — typed pub-sub for application-level events
+/// decoupled from the ORM. Use this for cross-component fanout
+/// (`OrderPlaced` → mail + billing + audit handlers); use
+/// [`signals`] for per-Model lifecycle hooks. See [`events::EventBus`].
+pub mod events;
+
 /// CORS middleware — [`cors::CorsLayer`] for axum routers.
 #[cfg(feature = "admin")]
 pub mod cors;
