@@ -945,6 +945,7 @@ mod tests {
                 default: None,
                 auto: false,
                 unique: false,
+                generated_as: None,
             })
             .collect();
         let leaked: &'static [crate::core::FieldSchema] = Box::leak(field_vec.into_boxed_slice());

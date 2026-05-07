@@ -197,6 +197,17 @@ fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) 
     s.push_str(&dialect.quote_ident(field.column));
     s.push(' ');
     s.push_str(&sql_type(dialect, field));
+    // Generated columns: emit `GENERATED ALWAYS AS (<expr>) STORED`
+    // and skip DEFAULT / PRIMARY KEY / UNIQUE / CHECK — Postgres
+    // rejects all of these on generated columns. NOT NULL is still
+    // permitted (the expression must always evaluate to non-NULL).
+    if let Some(expr) = field.generated_as {
+        let _ = write!(s, " GENERATED ALWAYS AS ({expr}) STORED");
+        if !field.nullable {
+            s.push_str(" NOT NULL");
+        }
+        return;
+    }
     if let Some(expr) = field.default {
         let _ = write!(s, " DEFAULT {expr}");
     }
@@ -302,6 +313,7 @@ mod tests {
             default,
             auto,
             unique: false,
+            generated_as: None,
         }
     }
 

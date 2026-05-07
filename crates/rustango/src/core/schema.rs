@@ -39,6 +39,17 @@ pub struct FieldSchema {
     /// `true` when `#[rustango(unique)]` is present. The DDL writer emits
     /// `UNIQUE` inline on the column definition.
     pub unique: bool,
+    /// Raw SQL expression for a `GENERATED ALWAYS AS (...) STORED`
+    /// column. When `Some`, the DDL writer emits the generated-column
+    /// clause and the macro skips this column from every INSERT and
+    /// UPDATE path — the value is always computed by the database
+    /// from the expression. Read-back via `FromRow` works as for any
+    /// other column.
+    ///
+    /// Example: `#[rustango(generated_as = "price * quantity")] pub
+    /// total: f64,` produces `total DOUBLE PRECISION GENERATED
+    /// ALWAYS AS (price * quantity) STORED`.
+    pub generated_as: Option<&'static str>,
 }
 
 /// Static description of a relation to another model.

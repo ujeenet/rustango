@@ -1239,6 +1239,7 @@ mod lookup_tests {
             default: None,
             auto: false,
             unique: false,
+            generated_as: None,
         }
     }
 
@@ -1256,6 +1257,7 @@ mod lookup_tests {
             default: None,
             auto: false,
             unique: false,
+            generated_as: None,
         }
     }
 

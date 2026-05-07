@@ -214,6 +214,7 @@ mod tests {
             default: None,
             auto: true,
             unique: false,
+            generated_as: None,
         },
         FieldSchema {
             name: "title",
@@ -228,6 +229,7 @@ mod tests {
             default: None,
             auto: false,
             unique: false,
+            generated_as: None,
         },
         FieldSchema {
             name: "deleted_at",
@@ -242,6 +244,7 @@ mod tests {
             default: None,
             auto: false,
             unique: false,
+            generated_as: None,
         },
     ];
 

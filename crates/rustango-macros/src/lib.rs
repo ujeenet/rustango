@@ -1048,6 +1048,24 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         }
         let column = info.column.as_str();
         let ident = info.ident;
+        // Generated columns (`#[rustango(generated_as = "EXPR")]`)
+        // skip every write path — Postgres recomputes the value
+        // from EXPR. Push only the column-entry record (so typed
+        // column constants still exist for filtering / projection)
+        // and the schema literal (already pushed above) and move
+        // on. No insert_columns/values, no insert_pushes, no
+        // bulk_*, no update_assignments, no upsert_update_columns,
+        // no returning_cols.
+        if info.generated_as.is_some() {
+            out.column_entries.push(ColumnEntry {
+                ident: ident.clone(),
+                value_ty: info.value_ty.clone(),
+                name: ident.to_string(),
+                column: info.column.clone(),
+                field_type_tokens: info.field_type_tokens,
+            });
+            continue;
+        }
         out.insert_columns.push(quote!(#column));
         out.insert_values.push(quote! {
             ::core::convert::Into::<::rustango::core::SqlValue>::into(
@@ -3722,6 +3740,12 @@ struct FieldAttrs {
     index: bool,
     index_unique: bool,
     index_name: Option<String>,
+    /// `#[rustango(generated_as = "EXPR")]` — emit `GENERATED ALWAYS
+    /// AS (EXPR) STORED` in the column DDL. Read-only from app code:
+    /// the macro skips this column from every INSERT and UPDATE
+    /// path, so the database always recomputes the value from
+    /// `EXPR`. Backlog item #35.
+    generated_as: Option<String>,
 }
 
 fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
@@ -3743,6 +3767,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         index: false,
         index_unique: false,
         index_name: None,
+        generated_as: None,
     };
     for attr in &field.attrs {
         if !attr.path().is_ident("rustango") {
@@ -3789,6 +3814,11 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
             if meta.path.is_ident("default") {
                 let s: LitStr = meta.value()?.parse()?;
                 out.default = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("generated_as") {
+                let s: LitStr = meta.value()?.parse()?;
+                out.generated_as = Some(s.value());
                 return Ok(());
             }
             if meta.path.is_ident("auto_uuid") {
@@ -3937,6 +3967,11 @@ struct FieldInfo<'a> {
     /// `restore_on(executor)` on the model's inherent impl. There is
     /// at most one such column per model — emission asserts this.
     soft_delete: bool,
+    /// `Some` when this column was marked
+    /// `#[rustango(generated_as = "EXPR")]`. The macro skips it from
+    /// every INSERT and UPDATE path; the database recomputes the
+    /// value from `EXPR`. Backlog item #35.
+    generated_as: Option<String>,
 }
 
 fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInfo<'a>> {
@@ -4025,6 +4060,40 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
              a row's PK is its own identity, not a reference to a parent.",
         ));
     }
+    if attrs.generated_as.is_some() {
+        if primary_key {
+            return Err(syn::Error::new_spanned(
+                field,
+                "`#[rustango(generated_as = \"…\")]` is not allowed on a \
+                 primary-key field — a PK must be writable so the row \
+                 has an identity at INSERT time.",
+            ));
+        }
+        if attrs.default.is_some() {
+            return Err(syn::Error::new_spanned(
+                field,
+                "`#[rustango(generated_as = \"…\")]` cannot combine with \
+                 `default = \"…\"` — Postgres rejects DEFAULT on \
+                 generated columns. The expression IS the default.",
+            ));
+        }
+        if detected_auto {
+            return Err(syn::Error::new_spanned(
+                field,
+                "`#[rustango(generated_as = \"…\")]` is not allowed on \
+                 an `Auto<T>` field — generated columns are computed \
+                 by the DB, not server-assigned via a sequence. Use a \
+                 plain Rust type (e.g. `f64`).",
+            ));
+        }
+        if fk_inner.is_some() {
+            return Err(syn::Error::new_spanned(
+                field,
+                "`#[rustango(generated_as = \"…\")]` is not allowed on a \
+                 ForeignKey field.",
+            ));
+        }
+    }
     let relation = relation_tokens(field, &attrs, fk_inner, table)?;
     let column_lit = column.as_str();
     let field_type_tokens = kind.variant_tokens();
@@ -4034,6 +4103,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let default = optional_str(attrs.default.as_deref());
 
     let unique = attrs.unique;
+    let generated_as = optional_str(attrs.generated_as.as_deref());
     let schema = quote! {
         ::rustango::core::FieldSchema {
             name: #name,
@@ -4048,6 +4118,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             default: #default,
             auto: #auto,
             unique: #unique,
+            generated_as: #generated_as,
         }
     };
 
@@ -4077,6 +4148,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         auto_now: attrs.auto_now,
         auto_now_add: attrs.auto_now_add,
         soft_delete: attrs.soft_delete,
+        generated_as: attrs.generated_as.clone(),
     })
 }
 
