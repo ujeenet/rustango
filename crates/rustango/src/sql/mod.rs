@@ -18,6 +18,8 @@ pub mod m2m;
 mod mysql;
 mod pool;
 mod postgres;
+#[cfg(feature = "sqlite")]
+mod sqlite;
 mod writers;
 
 pub use auto::Auto;
@@ -50,6 +52,8 @@ pub use m2m::M2MManager;
 pub use mysql::MySql;
 pub use pool::{Pool, PoolError};
 pub use postgres::Postgres;
+#[cfg(feature = "sqlite")]
+pub use sqlite::Sqlite;
 
 /// Re-exported so `#[derive(Model)]` output can name `sqlx` types without
 /// requiring downstream crates to add their own dependency on it.

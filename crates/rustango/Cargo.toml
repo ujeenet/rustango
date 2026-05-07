@@ -41,6 +41,16 @@ manage = ["dep:axum", "dep:tokio", "runtime"]
 # against `mysql` ahead of batch2 get a soft-error, not a panic.
 mysql = ["sqlx/mysql"]
 
+# SQLite 3.35+ backend. v0.27 Phase 1 ships the `Sqlite` dialect impl
+# + writer support — every SQL writer in `crate::sql::writers` produces
+# valid SQLite SQL through the dialect seam. Pool::Sqlite variant +
+# bi-dialect macro `__rustango_from_sqlite_row` decoder land in
+# subsequent phases (mirroring the v0.23 MySQL rollout); apps building
+# against the `sqlite` feature today get the dialect for SQL emission +
+# DDL but must execute statements through their own `sqlx::SqlitePool`
+# until Phase 2 ships.
+sqlite = ["sqlx/sqlite"]
+
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
 # → `config/{env}.toml` → env-var overrides. Slice 8.3.
 config = ["dep:toml"]

@@ -214,7 +214,14 @@ fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) 
     if !field.nullable {
         s.push_str(" NOT NULL");
     }
-    if field.primary_key {
+    // SQLite's `Auto<T>` PK type is `INTEGER PRIMARY KEY AUTOINCREMENT`
+    // — the PRIMARY KEY clause is part of the type name itself. Skip
+    // the standalone `PRIMARY KEY` append in that case so we don't
+    // emit it twice.
+    let serial_pk_inline = field.auto
+        && matches!(field.ty, FieldType::I16 | FieldType::I32 | FieldType::I64)
+        && dialect.serial_type_includes_primary_key();
+    if field.primary_key && !serial_pk_inline {
         s.push_str(" PRIMARY KEY");
     }
     if field.unique && !field.primary_key {
@@ -397,5 +404,41 @@ mod tests {
             !col_def.contains(" DEFAULT "),
             "BIGSERIAL must not get an explicit DEFAULT: {col_def}"
         );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_auto_pk_does_not_double_emit_primary_key() {
+        // SQLite's `Auto<T>` PK must emit `INTEGER PRIMARY KEY
+        // AUTOINCREMENT` (PK clause inline with the type) and NOT
+        // an additional `PRIMARY KEY` keyword from the standard
+        // append path. Doubled-PK CREATE TABLE crashes the SQLite
+        // parser.
+        let dialect = crate::sql::Sqlite;
+        let mut col_def = String::new();
+        let mut field = fld("id", FieldType::I64, true, None);
+        field.primary_key = true;
+        write_column_def(&mut col_def, &dialect, &field);
+        let n_pk = col_def.matches(" PRIMARY KEY").count();
+        assert_eq!(
+            n_pk, 1,
+            "SQLite Auto PK should emit exactly one PRIMARY KEY token, got: {col_def}"
+        );
+        assert!(col_def.contains("AUTOINCREMENT"), "got: {col_def}");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_non_auto_pk_still_appends_primary_key() {
+        // A plain (non-Auto) PK column on SQLite still wants the
+        // standard PRIMARY KEY append — the inline-pk shortcut only
+        // applies when the type itself is `INTEGER PRIMARY KEY
+        // AUTOINCREMENT`.
+        let dialect = crate::sql::Sqlite;
+        let mut col_def = String::new();
+        let mut field = fld("slug", FieldType::String, false, None);
+        field.primary_key = true;
+        write_column_def(&mut col_def, &dialect, &field);
+        assert!(col_def.contains(" PRIMARY KEY"), "got: {col_def}");
     }
 }

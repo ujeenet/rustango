@@ -98,6 +98,15 @@ pub trait Dialect {
         }
     }
 
+    /// `true` when [`Self::serial_type`]'s output already contains the
+    /// `PRIMARY KEY` clause inline — SQLite's case, where the storage
+    /// layer requires `INTEGER PRIMARY KEY AUTOINCREMENT` as one
+    /// indivisible token. Default `false`; the DDL writer separately
+    /// appends `PRIMARY KEY` for backends that don't bake it in.
+    fn serial_type_includes_primary_key(&self) -> bool {
+        false
+    }
+
     /// Render a boolean literal for `DEFAULT` clauses and inline
     /// comparisons. Default: ANSI `TRUE` / `FALSE`. SQLite + MySQL
     /// override to `1` / `0` (no native boolean type).
