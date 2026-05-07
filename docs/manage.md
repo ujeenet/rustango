@@ -82,6 +82,29 @@ cargo run -- makemigrations --app blog
 cargo run -- makemigrations --app blog backfill_slugs
 ```
 
+### `makemigrations --scope <registry|tenant>`
+
+Tenancy-only: emit a single migration tagged with the matching
+`MigrationScope`, diff'd against only the models whose
+`#[rustango(scope = "...")]` matches. Without the flag, a flagless
+`makemigrations` in a tenancy project (any registered model with
+`scope = "registry"`) automatically splits the diff into TWO files —
+one for registry-scoped models, one for tenant-scoped — so framework
+tables (`Org`, `Operator`) don't bleed across scopes when
+`migrate-tenants` fans out.
+
+```bash
+cargo run -- makemigrations                       # tenancy: writes 0NN_<auto>.json (registry) + 0MM_<auto>.json (tenant) as needed
+cargo run -- makemigrations --scope tenant        # explicit single-scope diff
+cargo run -- makemigrations --scope registry      # explicit single-scope diff
+```
+
+The split is a real bug-fix: pre-v0.24.2, a flagless `makemigrations`
+on a tenancy project would emit one tenant-scoped migration containing
+ops on `rustango_operators` (a registry table). When `migrate-tenants`
+applied that file, `rustango_operators` would resolve via `search_path`
+to the registry copy and conflict with the constraint already there.
+
 ### `makemigrations --empty <name>`
 
 Write an empty migration scaffold (no `forward` ops). Edit the JSON to
@@ -840,6 +863,45 @@ cargo run -- create-tenant acme --display-name "ACME Inc" \
 cargo run -- create-user acme alice --password tenantpw --superuser
 cargo run                        # serve at :8080
 ```
+
+### Adding tenants after the app is already running
+
+A real-world tenancy app accumulates user models + migrations long
+before its first tenant. The flow that works at any point in the
+project's life:
+
+```bash
+# 1. (any time) develop user models — define structs with #[derive(Model)],
+#    add `pub mod ...;` to src/lib.rs.
+# 2. Generate scope-aware migrations. In a tenancy project this writes
+#    up to TWO files: one tagged registry-scope (touches Org/Operator),
+#    one tagged tenant-scope (touches User + your models). Pre-v0.24.2
+#    this used to dump everything into one tenant-scoped file and
+#    crash on `create-tenant` — see the changelog.
+cargo run -- makemigrations
+
+# 3. Apply migrations. `migrate` is scope-aware: it runs registry-
+#    scoped files once against the registry pool first, then fans
+#    tenant-scoped files across every active tenant.
+cargo run -- migrate
+
+# 4. Provision a NEW tenant whenever (could be days, weeks, many
+#    migrations later). The tenancy code applies every accumulated
+#    tenant-scoped migration to the new tenant's schema in one pass —
+#    the new tenant arrives at the same schema state as existing ones.
+cargo run -- create-tenant acme --display-name "ACME Inc" \
+                  --host-pattern acme.localhost
+cargo run -- create-user acme alice --password tenantpw --superuser
+```
+
+What makes this safe:
+- `#[rustango(scope = "registry")]` on `Org`/`Operator` keeps registry-
+  table changes out of tenant migrations.
+- `migrate-tenants` walks every active org and applies only the
+  tenant-scoped chain — registry-scoped files are skipped.
+- `create-tenant` runs the same `migrate-tenants` pass against the
+  newly-created schema, so the new tenant starts at the latest
+  tenant-chain head with no manual fixup.
 
 ### Add a model
 

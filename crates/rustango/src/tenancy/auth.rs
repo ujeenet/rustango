@@ -33,9 +33,11 @@
 //!
 //! ## Bootstrap
 //!
-//! Use `manage create-operator <username> --password <p>` and
-//! `manage create-user <slug> <username> --password <p>
-//! [--superuser]` — see [`super::manage`].
+//! Use `cargo run -- create-operator <username> --password <p>` and
+//! `cargo run -- create-user <slug> <username> --password <p>
+//! [--superuser]` — see [`super::manage`]. (Replace `cargo run` with
+//! your project's binary name if different; the verbs route through
+//! `rustango::manage::Cli`.)
 
 use base64::Engine;
 use crate::core::Column as _;
@@ -49,7 +51,7 @@ use super::password;
 /// Registry-scoped operator. Single identity domain for the main app
 /// administrator(s); not visible to tenants.
 #[derive(Model, Debug, Clone)]
-#[rustango(table = "rustango_operators", display = "username")]
+#[rustango(table = "rustango_operators", display = "username", scope = "registry")]
 #[allow(dead_code)]
 pub struct Operator {
     #[rustango(primary_key)]

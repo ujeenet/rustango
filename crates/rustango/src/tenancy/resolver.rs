@@ -77,8 +77,8 @@ pub trait OrgResolver: Send + Sync + 'static {
 /// `apex_domain` is informational — used in error messages and as
 /// part of the boot pre-flight check that warns when `apex_domain`
 /// looks malformed. It does NOT auto-derive slugs from subdomains;
-/// `manage create-tenant <slug>` writes the full `host_pattern` to
-/// the Org row, and the resolver matches it verbatim.
+/// `cargo run -- create-tenant <slug>` writes the full `host_pattern`
+/// to the Org row, and the resolver matches it verbatim.
 pub struct SubdomainResolver {
     pub apex_domain: String,
 }

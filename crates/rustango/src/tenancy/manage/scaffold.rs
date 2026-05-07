@@ -170,7 +170,7 @@ fn write_report<W: Write>(
             writeln!(w)?;
             writeln!(
                 w,
-                "  for tenancy: `manage init-tenancy && manage migrate` to"
+                "  for tenancy: `cargo run -- init-tenancy && cargo run -- migrate` to"
             )?;
             writeln!(
                 w,

@@ -218,7 +218,7 @@ pub async fn ensure_api_keys_table(pool: &PgPool) -> Result<(), sqlx::Error> {
 /// `Authorization: Bearer <key>` backend. Keys are stored hashed;
 /// the bearer token format is `<8-char prefix>.<secret>`.
 ///
-/// Generate a key with `manage create-api-key <username>`.
+/// Generate a key with `cargo run -- create-api-key <username>`.
 pub struct ApiKeyBackend;
 
 #[async_trait]

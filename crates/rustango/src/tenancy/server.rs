@@ -213,7 +213,7 @@ async fn no_operators_warn<W: Write + Send>(
         )?;
         writeln!(
             w,
-            "         `manage create-operator <username> --password <p>`."
+            "         `cargo run -- create-operator <username> --password <p>`."
         )?;
         writeln!(w)?;
         Ok(false)

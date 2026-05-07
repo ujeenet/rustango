@@ -3,10 +3,12 @@
 {% block content %}
 <h1>Operators</h1>
 <p>Registry-scoped administrators. Mutations go through
-<code>manage create-operator &lt;username&gt; --password &lt;p&gt;</code>.</p>
+<code>cargo run -- create-operator &lt;username&gt; --password &lt;p&gt;</code>
+(routed through <code>rustango::manage::Cli</code>; substitute your
+project's binary name if different).</p>
 {% if operators | length == 0 %}
   <div class="empty">No operators yet — create one with
-  <code>manage create-operator</code>.</div>
+  <code>cargo run -- create-operator</code>.</div>
 {% else %}
 <table>
   <thead>

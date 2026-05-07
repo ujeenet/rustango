@@ -516,6 +516,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         &container.checks,
         &container.composite_fks,
         &container.generic_fks,
+        container.scope.as_deref(),
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -1157,6 +1158,7 @@ fn model_impl_tokens(
     checks: &[CheckAttr],
     composite_fks: &[CompositeFkAttr],
     generic_fks: &[GenericFkAttr],
+    scope: Option<&str>,
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
@@ -1181,6 +1183,13 @@ fn model_impl_tokens(
         }
     };
     let admin_tokens = admin_config_tokens(admin);
+    // Default `tenant` so single-tenant projects (no `scope` attr
+    // anywhere) keep the v0.24.x behavior. Container-attr parser
+    // already validated the value is "registry" or "tenant".
+    let scope_tokens = match scope.map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("registry") => quote!(::rustango::core::ModelScope::Registry),
+        _ => quote!(::rustango::core::ModelScope::Tenant),
+    };
     let indexes_tokens = indexes.iter().map(|idx| {
         let name = idx.name.as_deref().unwrap_or("unnamed_index");
         let cols: Vec<&str> = idx.columns.iter().map(String::as_str).collect();
@@ -1262,6 +1271,7 @@ fn model_impl_tokens(
                 check_constraints: &[ #(#checks_tokens),* ],
                 composite_relations: &[ #(#composite_fk_tokens),* ],
                 generic_relations: &[ #(#generic_fk_tokens),* ],
+                scope: #scope_tokens,
             };
         }
     }
@@ -3081,6 +3091,12 @@ struct ContainerAttrs {
     /// `#[rustango(generic_fk(name = "…", ct_column = "…", pk_column = "…"))]`.
     /// Sub-slice F.4 of the v0.15.0 ContentType plan.
     generic_fks: Vec<GenericFkAttr>,
+    /// Where this model lives in a tenancy deployment, declared via
+    /// `#[rustango(scope = "registry")]` or `#[rustango(scope = "tenant")]`.
+    /// Defaults to `"tenant"` when unset; `makemigrations` uses this
+    /// to partition diff output between registry-scoped and
+    /// tenant-scoped migration files.
+    scope: Option<String>,
 }
 
 /// Parsed form of one index declaration (field-level or container-level).
@@ -3189,6 +3205,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         checks: Vec::new(),
         composite_fks: Vec::new(),
         generic_fks: Vec::new(),
+        scope: None,
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -3208,6 +3225,17 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
             if meta.path.is_ident("app") {
                 let s: LitStr = meta.value()?.parse()?;
                 out.app = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("scope") {
+                let s: LitStr = meta.value()?.parse()?;
+                let val = s.value();
+                if !matches!(val.to_ascii_lowercase().as_str(), "registry" | "tenant") {
+                    return Err(meta.error(format!(
+                        "`scope` must be \"registry\" or \"tenant\", got {val:?}"
+                    )));
+                }
+                out.scope = Some(val);
                 return Ok(());
             }
             if meta.path.is_ident("admin") {

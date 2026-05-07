@@ -3,10 +3,12 @@
 {% block content %}
 <h1>Organizations</h1>
 <p>Tenants the registry knows about. Mutations go through
-<code>manage create-tenant</code> / <code>manage drop-tenant</code>.</p>
+<code>cargo run -- create-tenant</code> / <code>cargo run -- drop-tenant</code>
+(or whatever your project binary is — runs through
+<code>rustango::manage::Cli</code>).</p>
 {% if orgs | length == 0 %}
   <div class="empty">No tenants yet — provision one with
-  <code>manage create-tenant &lt;slug&gt;</code>.</div>
+  <code>cargo run -- create-tenant &lt;slug&gt;</code>.</div>
 {% else %}
 <table>
   <thead>

@@ -41,6 +41,7 @@
 use std::io::Write;
 use std::path::Path;
 
+use crate::core::inventory;
 use crate::sql::sqlx::PgPool;
 
 use super::error::MigrateError;
@@ -226,6 +227,7 @@ fn makemigrations<W: Write>(
     let mut empty = false;
     let mut name: Option<String> = None;
     let mut app: Option<String> = None;
+    let mut scope_override: Option<crate::core::ModelScope> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -239,12 +241,30 @@ fn makemigrations<W: Write>(
                         })?,
                 );
             }
+            "--scope" => {
+                let raw = iter.next().cloned().ok_or_else(|| {
+                    MigrateError::Validation(
+                        "--scope requires \"registry\" or \"tenant\"".into(),
+                    )
+                })?;
+                scope_override = Some(crate::core::ModelScope::from_str(&raw).ok_or_else(|| {
+                    MigrateError::Validation(format!(
+                        "--scope must be \"registry\" or \"tenant\", got {raw:?}"
+                    ))
+                })?);
+            }
             "--help" | "-h" => {
                 writeln!(
                     w,
                     "makemigrations [name]                  diff registry, write next file in <dir>\n\
                      makemigrations --app <app> [name]      diff one app, write to <project_root>/<app>/migrations/\n\
-                     makemigrations --empty <name>          empty scaffold for data ops"
+                     makemigrations --scope <s> [name]      <s> = registry|tenant; one file with that MigrationScope\n\
+                     makemigrations --empty <name>          empty scaffold for data ops\n\
+                     \n\
+                     In tenancy projects (any registered model with scope = \"registry\"),\n\
+                     a flagless makemigrations splits the diff into TWO files — one for\n\
+                     registry-scoped models, one for tenant-scoped — so framework tables\n\
+                     don't bleed across scopes when migrate-tenants fans out."
                 )?;
                 return Ok(());
             }
@@ -300,6 +320,55 @@ fn makemigrations<W: Write>(
         return Ok(());
     }
 
+    // Explicit scope flag — emit exactly one file in that scope.
+    if let Some(scope) = scope_override {
+        return write_scoped_migration(dir, scope, name.as_deref(), w);
+    }
+
+    // Auto-detect: if any registered model is `scope = "registry"`,
+    // we're in a tenancy project. Run BOTH scopes so framework
+    // registry tables get their own file and user's tenant models
+    // get theirs. Each scope is a no-op when nothing in that scope
+    // changed; the user sees one or two "wrote ..." lines.
+    let has_registry_scoped = inventory::iter::<crate::core::ModelEntry>
+        .into_iter()
+        .any(|e| e.schema.scope == crate::core::ModelScope::Registry);
+    if has_registry_scoped {
+        let mut wrote_any = false;
+        for scope in [crate::core::ModelScope::Registry, crate::core::ModelScope::Tenant] {
+            let mig = crate::migrate::make::make_migrations_for_scope(
+                dir,
+                scope,
+                name.as_deref(),
+            )?;
+            match mig {
+                Some(m) => {
+                    writeln!(
+                        w,
+                        "wrote {} ({} scope)",
+                        file_path(dir, &m.name).display(),
+                        scope.as_str(),
+                    )?;
+                    for op in &m.forward {
+                        writeln!(w, "    + {}", describe_op(op))?;
+                    }
+                    wrote_any = true;
+                }
+                None => writeln!(
+                    w,
+                    "no changes for {} scope",
+                    scope.as_str(),
+                )?,
+            }
+        }
+        if !wrote_any {
+            // Fall through silently — both scope-clean messages already printed.
+        }
+        return Ok(());
+    }
+
+    // Single-tenant (no registry-scoped models): one migration covering
+    // every registered model — the v0.24.x behavior.
     match make_migrations(dir, name.as_deref())? {
         Some(mig) => {
             writeln!(w, "wrote {}", file_path(dir, &mig.name).display())?;
@@ -308,6 +377,33 @@ fn makemigrations<W: Write>(
             }
         }
         None => writeln!(w, "no changes — registry matches latest snapshot")?,
+    }
+    Ok(())
+}
+
+fn write_scoped_migration<W: Write>(
+    dir: &Path,
+    scope: crate::core::ModelScope,
+    name: Option<&str>,
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    match crate::migrate::make::make_migrations_for_scope(dir, scope, name)? {
+        Some(mig) => {
+            writeln!(
+                w,
+                "wrote {} ({} scope)",
+                file_path(dir, &mig.name).display(),
+                scope.as_str(),
+            )?;
+            for op in &mig.forward {
+                writeln!(w, "    + {}", describe_op(op))?;
+            }
+        }
+        None => writeln!(
+            w,
+            "no changes — {} models match latest snapshot",
+            scope.as_str(),
+        )?,
     }
     Ok(())
 }

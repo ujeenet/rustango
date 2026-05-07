@@ -208,6 +208,63 @@ pub struct ModelSchema {
     /// model has no generic FKs. Sub-slice F.4 of the v0.15.0
     /// ContentType plan.
     pub generic_relations: &'static [GenericRelation],
+    /// Where this model lives in a tenancy deployment — the registry
+    /// DB or each tenant's storage. Drives `makemigrations` so it
+    /// emits separate registry-scoped vs tenant-scoped migration
+    /// files instead of dumping everything into one tenant migration
+    /// (which then breaks when applied to a tenant schema where
+    /// registry tables resolve to the wrong place via search_path).
+    ///
+    /// Set via `#[rustango(scope = "registry")]` on the struct;
+    /// defaults to [`ModelScope::Tenant`] when unset. Single-tenant
+    /// projects ignore this entirely — every model defaults to
+    /// `Tenant` and `makemigrations` produces one file as before.
+    pub scope: ModelScope,
+}
+
+/// Where a model's table lives in a tenancy deployment. Mirrors
+/// [`crate::migrate::MigrationScope`] but on the model side, so the
+/// migration generator can route changes to the right scoped file
+/// without touching the runtime schema-discovery path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ModelScope {
+    /// Lives in the registry DB. Cross-tenant — one row per tenant
+    /// or one row per operator. Examples: `Org`, `Operator`.
+    /// Migrations touching these tables MUST run as
+    /// `MigrationScope::Registry`, otherwise `migrate-tenants` will
+    /// re-apply them per tenant and constraint names will collide
+    /// against the existing registry copy via `search_path`.
+    Registry,
+    /// Lives in each tenant's storage (schema or dedicated DB).
+    /// Default — covers ~all user models and most framework models
+    /// (User, Role, ApiKey, audit, …). `makemigrations` emits these
+    /// as `MigrationScope::Tenant` and `migrate-tenants` fans them
+    /// out across active orgs.
+    #[default]
+    Tenant,
+}
+
+impl ModelScope {
+    /// Tiny round-trip helper for snapshot serialization /
+    /// container-attr parsing. Recognises `"registry"` and `"tenant"`
+    /// case-insensitively; everything else returns `None`.
+    #[must_use]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "registry" => Some(Self::Registry),
+            "tenant" => Some(Self::Tenant),
+            _ => None,
+        }
+    }
+
+    /// String form for snapshot JSON / error messages.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Registry => "registry",
+            Self::Tenant => "tenant",
+        }
+    }
 }
 
 /// Descriptor for one table-level CHECK constraint.

@@ -264,6 +264,7 @@ mod tests {
         m2m: &[],
         composite_relations: &[],
         generic_relations: &[],
+        scope: crate::core::ModelScope::Tenant,
     };
 
     static MODEL_WITHOUT_SD: ModelSchema = ModelSchema {
@@ -281,6 +282,7 @@ mod tests {
         m2m: &[],
         composite_relations: &[],
         generic_relations: &[],
+        scope: crate::core::ModelScope::Tenant,
     };
 
     #[test]

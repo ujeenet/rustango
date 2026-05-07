@@ -42,7 +42,7 @@ use crate::Model;
 /// `migrate::apply_all` walks the registry — or via
 /// `make_migrations` against the registry DB.
 #[derive(Model, Debug, Clone)]
-#[rustango(table = "rustango_orgs", display = "slug")]
+#[rustango(table = "rustango_orgs", display = "slug", scope = "registry")]
 #[allow(dead_code)] // Slices 2+ wire these fields into resolvers / pools / migrations.
 pub struct Org {
     #[rustango(primary_key)]

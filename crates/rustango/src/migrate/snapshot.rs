@@ -147,6 +147,87 @@ impl SchemaSnapshot {
         Self { tables, m2m_tables, indexes, checks }
     }
 
+    /// Capture only the models whose [`crate::core::ModelSchema::scope`]
+    /// matches `scope`. Powers tenancy-aware `makemigrations` — registry
+    /// changes (e.g. `rustango_orgs`, `rustango_operators`) and tenant
+    /// changes (everything else) get partitioned into separate migration
+    /// files, each tagged with the matching [`super::MigrationScope`].
+    ///
+    /// Without this split, framework registry-scoped models are diff'd
+    /// alongside tenant ones into a single tenant-scoped migration —
+    /// when the migration replays under a tenant's `search_path`, ALTERs
+    /// for `rustango_operators` resolve to the registry copy and crash
+    /// (`relation … already exists`).
+    #[must_use]
+    pub fn from_registry_for_scope(scope: crate::core::ModelScope) -> Self {
+        let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
+            .into_iter()
+            .filter(|e| e.schema.scope == scope)
+            .collect();
+        let mut tables: Vec<TableSnapshot> =
+            entries.iter().map(|e| TableSnapshot::from_schema(e.schema)).collect();
+        tables.sort_by(|a, b| a.name.cmp(&b.name));
+        let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
+        let indexes = collect_indexes(entries.iter().map(|e| e.schema));
+        let checks = collect_checks(entries.iter().map(|e| e.schema));
+        Self { tables, m2m_tables, indexes, checks }
+    }
+
+    /// Filter `self` to only the tables / indexes / checks whose owning
+    /// model has [`crate::core::ModelSchema::scope`] matching `scope`.
+    /// Used to filter a *prior* on-disk snapshot down to one scope before
+    /// diffing — necessary because the framework's bootstrap migrations
+    /// (and v0.23.x and earlier projects) put ALL framework tables into
+    /// the same snapshot regardless of which scope the migration ran in.
+    ///
+    /// Tables not currently in the inventory (model removed since the
+    /// snapshot was written) default to [`ModelScope::Tenant`] —
+    /// matches `MigrationScope`'s default and never accidentally
+    /// promotes a vanished registry table back into a tenant migration.
+    #[must_use]
+    pub fn filtered_to_scope(&self, scope: crate::core::ModelScope) -> Self {
+        let scope_of = |table: &str| {
+            inventory::iter::<ModelEntry>
+                .into_iter()
+                .find(|e| e.schema.table == table)
+                .map_or(crate::core::ModelScope::Tenant, |e| e.schema.scope)
+        };
+        let tables: Vec<TableSnapshot> = self
+            .tables
+            .iter()
+            .filter(|t| scope_of(&t.name) == scope)
+            .cloned()
+            .collect();
+        // M2M / indexes / checks live on a parent table — keep only
+        // those whose parent is in `tables`.
+        let table_names: std::collections::HashSet<&str> =
+            tables.iter().map(|t| t.name.as_str()).collect();
+        let m2m_tables = self
+            .m2m_tables
+            .iter()
+            .filter(|m| table_names.contains(m.src_table.as_str()))
+            .cloned()
+            .collect();
+        let indexes = self
+            .indexes
+            .iter()
+            .filter(|i| table_names.contains(i.table.as_str()))
+            .cloned()
+            .collect();
+        let checks = self
+            .checks
+            .iter()
+            .filter(|c| table_names.contains(c.table.as_str()))
+            .cloned()
+            .collect();
+        Self {
+            tables,
+            m2m_tables,
+            indexes,
+            checks,
+        }
+    }
+
     /// Capture only the models whose [`ModelEntry::resolved_app_label`]
     /// matches `app`. Powers `manage makemigrations <app>` — diffs
     /// just one app's models against the latest snapshot and emits a
@@ -410,6 +491,7 @@ mod composite_fk_snapshot_tests {
             m2m: &[],
             composite_relations: &COMPS,
             generic_relations: &[],
+            scope: crate::core::ModelScope::Tenant,
         };
         &MS
     }
@@ -459,6 +541,7 @@ mod composite_fk_snapshot_tests {
             m2m: &[],
             composite_relations: &[],
             generic_relations: &[],
+            scope: crate::core::ModelScope::Tenant,
         };
         let snap = TableSnapshot::from_schema(&MS);
         let json = serde_json::to_string(&snap).expect("serialize");

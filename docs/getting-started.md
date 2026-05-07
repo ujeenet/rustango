@@ -109,7 +109,7 @@ psql "$DATABASE_URL" -c "SELECT version();"   # should print Postgres version
 ## Step 5 — Run the bootstrap migrations
 
 ```bash
-cargo run --bin manage -- migrate
+cargo run -- migrate
 ```
 
 First compile takes ~2 minutes. After: a few empty migration JSON files get applied (the framework's audit/permissions tables).
@@ -117,7 +117,7 @@ First compile takes ~2 minutes. After: a few empty migration JSON files get appl
 Verify:
 
 ```bash
-cargo run --bin manage -- showmigrations
+cargo run -- showmigrations
 ```
 
 You should see `[X]` next to each entry.
@@ -147,7 +147,7 @@ Press Ctrl-C to stop.
 A "blog" app holds the Post model + its routes + its templates.
 
 ```bash
-cargo run --bin manage -- startapp blog
+cargo run -- startapp blog
 ```
 
 What got written:
@@ -217,7 +217,7 @@ pub struct Post {
 ## Step 9 — Generate + apply the migration
 
 ```bash
-cargo run --bin manage -- makemigrations
+cargo run -- makemigrations
 ```
 
 Output:
@@ -231,7 +231,7 @@ Look at it — it's a JSON file with a `CreateTable` op + the full schema snapsh
 Apply it:
 
 ```bash
-cargo run --bin manage -- migrate
+cargo run -- migrate
 ```
 
 Verify the table exists:
@@ -329,7 +329,7 @@ Open <http://localhost:8080/__admin/>. You should see the admin home with a `pos
 ### 12a. Generate the viewset
 
 ```bash
-cargo run --bin manage -- make:viewset PostViewSet --model Post
+cargo run -- make:viewset PostViewSet --model Post
 ```
 
 Edit `src/post_view_set.rs`:
@@ -400,7 +400,7 @@ curl "http://localhost:8080/api/posts?status__ne=draft"                   # look
 The default ViewSet response wraps every model field. Use a Serializer to control shape, hide internal fields, or rename for the API:
 
 ```bash
-cargo run --bin manage -- make:serializer PostSerializer --model Post
+cargo run -- make:serializer PostSerializer --model Post
 ```
 
 Edit `src/post_serializer.rs`:
@@ -498,7 +498,7 @@ let app = axum::Router::new()
 ## Step 16 — Write tests
 
 ```bash
-cargo run --bin manage -- make:test post_smoke
+cargo run -- make:test post_smoke
 ```
 
 Edit `tests/post_smoke.rs`:
@@ -553,7 +553,7 @@ cargo test --test post_smoke
 Before deploying:
 
 ```bash
-cargo run --bin manage -- check --deploy
+cargo run -- check --deploy
 ```
 
 Output (with sensible env):

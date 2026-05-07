@@ -15,7 +15,7 @@ one minimal recipe and one verifying test per feature.
 ```sh
 docker compose -f ../../../../docker-compose.yml up -d        # postgres
 DATABASE_URL=postgres://rustango:rustango@localhost:5432/cookbook_blog \
-    cargo run --bin manage -- migrate
+    cargo run -- migrate
 DATABASE_URL=postgres://rustango:rustango@localhost:5432/cookbook_blog \
     cargo run --bin cookbook_blog
 ```

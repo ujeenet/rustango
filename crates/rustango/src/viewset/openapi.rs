@@ -385,6 +385,7 @@ mod tests {
             m2m: &[],
             composite_relations: &[],
             generic_relations: &[],
+            scope: crate::core::ModelScope::Tenant,
         };
         &MS
     }

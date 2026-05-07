@@ -5,6 +5,67 @@
   "snapshot": {
     "tables": [
       {
+        "name": "rustango_api_keys",
+        "model": "ApiKey",
+        "fields": [
+          {
+            "name": "created_at",
+            "column": "created_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()",
+            "auto": true
+          },
+          {
+            "name": "expires_at",
+            "column": "expires_at",
+            "ty": "datetime",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "key_hash",
+            "column": "key_hash",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "key_prefix",
+            "column": "key_prefix",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 8
+          },
+          {
+            "name": "label",
+            "column": "label",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          },
+          {
+            "name": "user_id",
+            "column": "user_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false
+          }
+        ]
+      },
+      {
         "name": "rustango_operators",
         "model": "Operator",
         "fields": [
@@ -44,7 +105,8 @@
             "ty": "string",
             "nullable": false,
             "primary_key": false,
-            "max_length": 64
+            "max_length": 64,
+            "unique": true
           }
         ]
       },
@@ -126,7 +188,8 @@
             "ty": "string",
             "nullable": false,
             "primary_key": false,
-            "max_length": 64
+            "max_length": 64,
+            "unique": true
           },
           {
             "name": "storage_mode",
@@ -135,6 +198,146 @@
             "nullable": false,
             "primary_key": false,
             "max_length": 16
+          }
+        ]
+      },
+      {
+        "name": "rustango_role_permissions",
+        "model": "RolePermission",
+        "fields": [
+          {
+            "name": "codename",
+            "column": "codename",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "role_id",
+            "column": "role_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false
+          }
+        ]
+      },
+      {
+        "name": "rustango_roles",
+        "model": "Role",
+        "fields": [
+          {
+            "name": "data",
+            "column": "data",
+            "ty": "json",
+            "nullable": false,
+            "primary_key": false,
+            "default": "'{}'"
+          },
+          {
+            "name": "description",
+            "column": "description",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 500
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "name",
+            "column": "name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 150,
+            "unique": true
+          }
+        ]
+      },
+      {
+        "name": "rustango_user_permissions",
+        "model": "UserPermission",
+        "fields": [
+          {
+            "name": "codename",
+            "column": "codename",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          },
+          {
+            "name": "data",
+            "column": "data",
+            "ty": "json",
+            "nullable": false,
+            "primary_key": false,
+            "default": "'{}'"
+          },
+          {
+            "name": "granted",
+            "column": "granted",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "user_id",
+            "column": "user_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false
+          }
+        ]
+      },
+      {
+        "name": "rustango_user_roles",
+        "model": "UserRole",
+        "fields": [
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "role_id",
+            "column": "role_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "user_id",
+            "column": "user_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false
           }
         ]
       },
@@ -155,6 +358,14 @@
             "ty": "datetime",
             "nullable": false,
             "primary_key": false
+          },
+          {
+            "name": "data",
+            "column": "data",
+            "ty": "json",
+            "nullable": false,
+            "primary_key": false,
+            "default": "'{}'"
           },
           {
             "name": "id",
@@ -185,7 +396,8 @@
             "ty": "string",
             "nullable": false,
             "primary_key": false,
-            "max_length": 64
+            "max_length": 64,
+            "unique": true
           }
         ]
       }
@@ -195,13 +407,6 @@
     {
       "schema": {
         "CreateTable": "rustango_users"
-      }
-    },
-    {
-      "data": {
-        "sql": "ALTER TABLE \"rustango_users\" ADD CONSTRAINT \"rustango_users_username_key\" UNIQUE (\"username\")",
-        "reverse_sql": "ALTER TABLE \"rustango_users\" DROP CONSTRAINT \"rustango_users_username_key\"",
-        "reversible": true
       }
     }
   ]
