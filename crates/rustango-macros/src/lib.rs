@@ -535,6 +535,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         collected.primary_key.as_ref(),
         &column_consts,
         audited_fields.as_deref(),
+        &all_indexes,
     );
     let column_module = column_module_tokens(&module_ident, struct_name, &collected.column_entries);
     let from_row_impl = from_row_impl_tokens(struct_name, &collected.from_row_inits);
@@ -1352,6 +1353,7 @@ fn inherent_impl_tokens(
     primary_key: Option<&(syn::Ident, String)>,
     column_consts: &TokenStream2,
     audited_fields: Option<&[&ColumnEntry]>,
+    indexes: &[IndexAttr],
 ) -> TokenStream2 {
     // Audit-emit fragments threaded into write paths. Non-empty only
     // when the model carries `#[rustango(audit(...))]`. They reborrow
@@ -2181,11 +2183,28 @@ fn inherent_impl_tokens(
         let upsert_pushes = &fields.insert_pushes;
         let upsert_returning = &fields.returning_cols;
         let upsert_auto_assigns = &fields.auto_assigns;
+        // Conflict target: prefer the first declared `unique_together`
+        // when it exists. Plain `Auto<T>` PKs are server-assigned via
+        // `BIGSERIAL` and never collide on insert, so a PK-only target
+        // would silently turn `upsert()` into "always-insert" for
+        // surrogate-PK models with composite UNIQUE constraints — see
+        // `RolePermission` / `UserRole` / `UserPermission` in the
+        // tenancy permission engine. When no `unique_together` is
+        // declared we keep the PK target (the original behaviour).
+        let upsert_target_columns: Vec<String> = indexes
+            .iter()
+            .find(|i| i.unique && !i.columns.is_empty())
+            .map(|i| i.columns.clone())
+            .unwrap_or_else(|| vec![pk_column.clone()]);
+        let upsert_target_lits = upsert_target_columns
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
         let conflict_clause = if fields.upsert_update_columns.is_empty() {
             quote!(::rustango::core::ConflictClause::DoNothing)
         } else {
             quote!(::rustango::core::ConflictClause::DoUpdate {
-                target: ::std::vec![#pk_column_lit],
+                target: ::std::vec![ #( #upsert_target_lits ),* ],
                 update_columns: ::std::vec![ #( #upsert_cols ),* ],
             })
         };
