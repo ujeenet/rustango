@@ -67,8 +67,8 @@ pub enum PoolError {
     Connect(String),
 
     /// URL didn't start with a recognized scheme (`postgres://`,
-    /// `postgresql://`, or `mysql://`).
-    #[error("unsupported scheme in URL `{0}` — expected postgres:// or mysql://")]
+    /// `postgresql://`, `mysql://`, or `sqlite:`).
+    #[error("unsupported scheme in URL `{0}` — expected postgres://, mysql://, or sqlite:")]
     UnsupportedScheme(String),
 
     /// Tried to construct a Pool with a backend whose Cargo feature
@@ -87,7 +87,7 @@ pub enum PoolError {
     Env(#[from] EnvError),
 }
 
-/// Cheap-to-clone wrapper around either a `PgPool` or a `MySqlPool`.
+/// Cheap-to-clone wrapper around any rustango-supported sqlx pool.
 /// `Arc`-wrapping is handled by `sqlx` itself — cloning a Pool is
 /// cloning the underlying `Arc`.
 #[derive(Clone)]
@@ -96,6 +96,10 @@ pub enum Pool {
     Postgres(sqlx::PgPool),
     #[cfg(feature = "mysql")]
     Mysql(sqlx::MySqlPool),
+    /// SQLite — file-backed or `:memory:`. Phase 2 of the v0.27
+    /// SQLite rollout (item #37).
+    #[cfg(feature = "sqlite")]
+    Sqlite(sqlx::SqlitePool),
 }
 
 impl Pool {
@@ -116,10 +120,14 @@ impl Pool {
     /// - [`PoolError::Connect`] — sqlx couldn't reach the database.
     /// - [`PoolError::MysqlNotYetImplemented`] — see error variant.
     pub async fn connect(url: &str) -> Result<Self, PoolError> {
-        let scheme = url.split("://").next().unwrap_or("").to_ascii_lowercase();
+        // SQLite URLs use `sqlite:` (no `//`) for the colon form
+        // (`sqlite::memory:`, `sqlite:./path.db`) AND `sqlite://` for
+        // the URI form. Strip up to the first colon to detect.
+        let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
         match scheme.as_str() {
             "postgres" | "postgresql" => Self::connect_postgres_inner(url).await,
             "mysql" => Self::connect_mysql_inner(url).await,
+            "sqlite" => Self::connect_sqlite_inner(url).await,
             _ => Err(PoolError::UnsupportedScheme(url.to_owned())),
         }
     }
@@ -132,7 +140,7 @@ impl Pool {
     /// Same set as [`Self::connect`], plus a `Connect` error if `sqlx`
     /// times out before the database accepts the connection.
     pub async fn connect_with_timeout(url: &str, timeout: Duration) -> Result<Self, PoolError> {
-        let scheme = url.split("://").next().unwrap_or("").to_ascii_lowercase();
+        let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
         match scheme.as_str() {
             #[cfg(feature = "postgres")]
             "postgres" | "postgresql" => {
@@ -161,6 +169,20 @@ impl Pool {
             "mysql" => Err(PoolError::FeatureNotEnabled {
                 scheme: "mysql",
                 feature: "mysql",
+            }),
+            #[cfg(feature = "sqlite")]
+            "sqlite" => {
+                // Phase 3 pending — see `connect_sqlite_inner`.
+                let _ = timeout;
+                Err(PoolError::FeatureNotEnabled {
+                    scheme: "sqlite",
+                    feature: "sqlite (Phase 3 — runtime + macro decoder pending)",
+                })
+            }
+            #[cfg(not(feature = "sqlite"))]
+            "sqlite" => Err(PoolError::FeatureNotEnabled {
+                scheme: "sqlite",
+                feature: "sqlite",
             }),
             _ => Err(PoolError::UnsupportedScheme(url.to_owned())),
         }
@@ -191,6 +213,8 @@ impl Pool {
             Pool::Postgres(_) => super::postgres::DIALECT,
             #[cfg(feature = "mysql")]
             Pool::Mysql(_) => super::mysql::DIALECT,
+            #[cfg(feature = "sqlite")]
+            Pool::Sqlite(_) => super::sqlite::DIALECT,
         }
     }
 
@@ -216,6 +240,8 @@ impl Pool {
             Pool::Postgres(p) => Some(p),
             #[cfg(feature = "mysql")]
             Pool::Mysql(_) => None,
+            #[cfg(feature = "sqlite")]
+            Pool::Sqlite(_) => None,
         }
     }
 
@@ -230,6 +256,22 @@ impl Pool {
             #[cfg(feature = "postgres")]
             Pool::Postgres(_) => None,
             Pool::Mysql(p) => Some(p),
+            #[cfg(feature = "sqlite")]
+            Pool::Sqlite(_) => None,
+        }
+    }
+
+    /// Borrow as a `SqlitePool`. Symmetric with [`Self::as_postgres`] —
+    /// returns `None` when the pool wraps a non-SQLite backend.
+    #[must_use]
+    #[cfg(feature = "sqlite")]
+    pub fn as_sqlite(&self) -> Option<&sqlx::SqlitePool> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Pool::Postgres(_) => None,
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(_) => None,
+            Pool::Sqlite(p) => Some(p),
         }
     }
 
@@ -269,6 +311,35 @@ impl Pool {
             feature: "mysql",
         })
     }
+
+    #[cfg(feature = "sqlite")]
+    #[allow(clippy::unused_async)]
+    async fn connect_sqlite_inner(_url: &str) -> Result<Self, PoolError> {
+        // Phase 2 (this batch) wires the `Pool::Sqlite` variant +
+        // dialect dispatch + From<SqlitePool> impl, but the
+        // bi-dialect executor surface (`_pool` family in
+        // `crate::sql::executor`) still has stub arms that panic
+        // with `unimplemented!`. Until Phase 3 lights up the macro
+        // SqliteRow decoder, `Pool::connect("sqlite:…")` would
+        // return a Pool that the framework can't read back rows
+        // from — better to surface the Phase-3-pending state at
+        // construction time than at the first query. Users who
+        // explicitly want to experiment with the variant can build
+        // it via `Pool::from(SqlitePool::connect(...).await?)`.
+        Err(PoolError::FeatureNotEnabled {
+            scheme: "sqlite",
+            feature: "sqlite (Phase 3 — runtime + macro decoder pending)",
+        })
+    }
+
+    #[cfg(not(feature = "sqlite"))]
+    #[allow(clippy::unused_async)]
+    async fn connect_sqlite_inner(_url: &str) -> Result<Self, PoolError> {
+        Err(PoolError::FeatureNotEnabled {
+            scheme: "sqlite",
+            feature: "sqlite",
+        })
+    }
 }
 
 impl std::fmt::Debug for Pool {
@@ -278,6 +349,8 @@ impl std::fmt::Debug for Pool {
             Pool::Postgres(_) => f.write_str("Pool::Postgres(<sqlx::PgPool>)"),
             #[cfg(feature = "mysql")]
             Pool::Mysql(_) => f.write_str("Pool::Mysql(<sqlx::MySqlPool>)"),
+            #[cfg(feature = "sqlite")]
+            Pool::Sqlite(_) => f.write_str("Pool::Sqlite(<sqlx::SqlitePool>)"),
         }
     }
 }
@@ -293,6 +366,13 @@ impl From<sqlx::PgPool> for Pool {
 impl From<sqlx::MySqlPool> for Pool {
     fn from(p: sqlx::MySqlPool) -> Self {
         Pool::Mysql(p)
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl From<sqlx::SqlitePool> for Pool {
+    fn from(p: sqlx::SqlitePool) -> Self {
+        Pool::Sqlite(p)
     }
 }
 
@@ -361,6 +441,47 @@ mod tests {
         assert!(pool.as_mysql().is_some());
         #[cfg(feature = "postgres")]
         assert!(pool.as_postgres().is_none());
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn sqlite_url_returns_phase3_pending() {
+        // Phase 2: variant exists, but connect rejects so users
+        // don't construct a Pool::Sqlite that the bi-dialect
+        // executor surface can't dispatch to yet.
+        let err = Pool::connect("sqlite::memory:").await.unwrap_err();
+        match err {
+            PoolError::FeatureNotEnabled { scheme, feature } => {
+                assert_eq!(scheme, "sqlite");
+                assert!(
+                    feature.contains("Phase 3"),
+                    "expected Phase 3 hint, got `{feature}`"
+                );
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn sqlite_from_pool_dispatches_to_sqlite_dialect() {
+        // Users CAN build a Pool::Sqlite manually via From<SqlitePool>
+        // — confirms dialect dispatch + accessors work end-to-end.
+        let sqlite_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+        let pool: Pool = sqlite_pool.into();
+        assert_eq!(pool.backend_name(), "sqlite");
+        let d = pool.dialect();
+        assert_eq!(d.name(), "sqlite");
+        assert!(d.supports_returning());
+        assert_eq!(d.bool_literal(true), "1");
+        assert!(pool.as_sqlite().is_some());
+        #[cfg(feature = "postgres")]
+        assert!(pool.as_postgres().is_none());
+        #[cfg(feature = "mysql")]
+        assert!(pool.as_mysql().is_none());
     }
 
     #[cfg(feature = "mysql")]

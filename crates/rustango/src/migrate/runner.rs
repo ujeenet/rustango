@@ -1172,6 +1172,10 @@ async fn applied_set_pool_for(
             }
             Ok(out)
         }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(_) => {
+            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        }
     }
 }
 
@@ -1281,6 +1285,10 @@ where
                 .await;
             result
         }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(_) => {
+            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        }
     }
 }
 
@@ -1355,6 +1363,10 @@ async fn apply_atomic_pool(
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(_) => {
+            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
         }
     }
     Ok(())
@@ -1801,6 +1813,10 @@ async fn unapply_atomic_pool(
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(_) => {
+            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
         }
     }
     Ok(())

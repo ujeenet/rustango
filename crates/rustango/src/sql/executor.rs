@@ -1306,6 +1306,8 @@ pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'_>, ExecError> {
         Pool::Postgres(pg) => Ok(PoolTx::Postgres(pg.begin().await?)),
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => Ok(PoolTx::Mysql(my.begin().await?)),
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(_) => unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)"),
     }
 }
 
@@ -1436,6 +1438,10 @@ pub async fn insert_returning_pool(
             let id = i64::try_from(id_u64).unwrap_or(i64::MAX);
             Ok(InsertReturningPool::MySqlAutoId(id))
         }
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(_) => {
+            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        }
     }
 }
 
@@ -1549,6 +1555,10 @@ async fn execute_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<u6
             }
             Ok(q.execute(my).await?.rows_affected())
         }
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(_) => {
+            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        }
     }
 }
 
@@ -1577,6 +1587,10 @@ async fn fetch_scalar_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Resu
             }
             let row = q.fetch_one(my).await?;
             Ok(row.try_get::<i64, _>(0)?)
+        }
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(_) => {
+            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
         }
     }
 }
@@ -1682,6 +1696,10 @@ where
             }
             Ok(q.fetch_all(my).await?)
         }
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(_) => {
+            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        }
     }
 }
 
@@ -1716,6 +1734,10 @@ where
                 q = bind_query_as_my(q, v);
             }
             Ok(q.fetch_optional(my).await?)
+        }
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(_) => {
+            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
         }
     }
 }
@@ -1767,6 +1789,10 @@ where
             }
             Ok(q.fetch_all(my).await?)
         }
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(_) => {
+            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        }
     }
 }
 
@@ -1806,6 +1832,10 @@ where
                 q = bind_query_as_my(q, v);
             }
             Ok(q.fetch_all(my).await?)
+        }
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(_) => {
+            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
         }
     }
 }
@@ -1911,6 +1941,10 @@ where
                 rows.push(<T as sqlx::FromRow<sqlx::mysql::MySqlRow>>::from_row(row)?);
             }
             Ok(Page { rows, total })
+        }
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(_) => {
+            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
         }
     }
 }
@@ -2091,6 +2125,10 @@ where
                 out.push(t);
             }
             Ok(out)
+        }
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(_) => {
+            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
         }
     }
 }
