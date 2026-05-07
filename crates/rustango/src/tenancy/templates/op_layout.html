@@ -100,6 +100,125 @@
       border-radius: 3px;
       font-size: 0.9em;
     }
+    /* ---------- Forms (op_orgs_edit) ---------- */
+    .breadcrumb {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 0.5rem;
+    }
+    .breadcrumb a { color: var(--muted); text-decoration: none; }
+    .breadcrumb a:hover { color: var(--accent); text-decoration: underline; }
+    .breadcrumb .sep { padding: 0 0.35rem; color: #bbb; }
+    .lead {
+      color: var(--muted);
+      max-width: 60ch;
+      font-size: 13px;
+      margin: 0.25rem 0 1.25rem 0;
+    }
+    .alert {
+      padding: 0.6rem 0.85rem;
+      border-radius: 4px;
+      margin: 0.75rem 0 1rem 0;
+      font-size: 13px;
+      border: 1px solid;
+    }
+    .alert-error  { background: #fbeae6; border-color: #d9534f; color: #842c25; }
+    .alert-notice { background: #e8f4ec; border-color: #5cb85c; color: #1f5132; }
+    form.edit-form { max-width: 720px; }
+    fieldset.section {
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.75rem 1rem 0.5rem 1rem;
+      margin: 0 0 1rem 0;
+    }
+    fieldset.section > legend {
+      padding: 0 0.5rem;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      font-weight: 600;
+    }
+    fieldset.section table { margin-top: 0; }
+    fieldset.section th, fieldset.section td {
+      border-bottom: 0;
+      padding: 0.4rem 0.6rem 0.4rem 0;
+      vertical-align: top;
+    }
+    fieldset.section tr:hover td { background: transparent; }
+    fieldset.section th {
+      background: transparent;
+      text-transform: none;
+      letter-spacing: 0;
+      font-size: 13px;
+      color: var(--fg);
+      width: 12rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .field-helper {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 0.25rem;
+    }
+    .form-actions {
+      margin-top: 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .btn {
+      font: inherit;
+      padding: 0.45rem 1rem;
+      border-radius: 4px;
+      border: 1px solid transparent;
+      cursor: pointer;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+    }
+    .btn-primary:hover { background: #993f25; border-color: #993f25; }
+    .btn-link {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13px;
+    }
+    .btn-link:hover { color: var(--accent); text-decoration: underline; }
+    /* sane defaults for inputs the admin's render_input emits */
+    fieldset.section input[type="text"],
+    fieldset.section input[type="number"],
+    fieldset.section input[type="date"],
+    fieldset.section input[type="datetime-local"],
+    fieldset.section textarea,
+    fieldset.section select {
+      width: 100%;
+      max-width: 28rem;
+      padding: 0.4rem 0.5rem;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      font: inherit;
+      background: white;
+    }
+    fieldset.section input[type="text"]:focus,
+    fieldset.section input[type="number"]:focus,
+    fieldset.section textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px var(--accent-bg);
+    }
+    fieldset.section input[type="checkbox"] { margin-right: 0.4rem; }
+    fieldset.section input[readonly] {
+      background: var(--sidebar-bg);
+      color: var(--muted);
+      cursor: not-allowed;
+    }
+    fieldset.section.locked code {
+      font-size: 13px;
+      background: transparent;
+      padding: 0;
+    }
+    fieldset.section.locked th { color: var(--muted); }
   </style>
 </head>
 <body>

@@ -1,62 +1,61 @@
 {% extends "op_layout.html" %}
 {% block title %}Edit {{ slug }} — rustango operator console{% endblock %}
 {% block content %}
+
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <a href="/orgs">Organizations</a>
+  <span class="sep">›</span>
+  <code>{{ slug }}</code>
+  <span class="sep">›</span>
+  edit
+</nav>
+
 <h1>Edit <code>{{ slug }}</code></h1>
-<p style="color:#666;font-size:.95em;">
+<p class="lead">
   Adjust the live config for this tenant. Locked fields stay where they
   are — re-provisioning needs <code>cargo run -- create-tenant</code> /
-  <code>drop-tenant</code>. Form HTML for each editable field is
-  generated from <code>Org::SCHEMA</code> via
+  <code>drop-tenant</code>. Inputs are generated from
+  <code>Org::SCHEMA</code> via
   <code>rustango::admin::render::render_input</code>, so new columns
-  on <code>Org</code> show up here automatically.
+  added to <code>Org</code> show up here without template edits.
 </p>
 
-{% if error %}
-  <div style="padding:.75rem;background:#fbe3e3;border:1px solid #d9534f;color:#a00;margin:1rem 0;">
-    {{ error }}
-  </div>
-{% endif %}
-{% if notice %}
-  <div style="padding:.75rem;background:#e6f4ea;border:1px solid #5cb85c;color:#1a4421;margin:1rem 0;">
-    {{ notice }}
-  </div>
-{% endif %}
+{% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+{% if notice %}<div class="alert alert-notice">{{ notice }}</div>{% endif %}
 
-<form method="post" action="/orgs/{{ slug }}/edit" style="max-width:640px;">
-  <fieldset style="border:1px solid #ddd;padding:1rem;margin-bottom:1rem;">
-    <legend style="color:#888;font-size:.85em;text-transform:uppercase;">Locked</legend>
+<form method="post" action="/orgs/{{ slug }}/edit" class="edit-form">
+
+  <fieldset class="section locked">
+    <legend>Locked</legend>
     <table>
       {% for row in locked_rows %}
       <tr>
-        <th style="text-align:left;font-weight:600;padding:.25rem .75rem .25rem 0;">{{ row.name }}</th>
-        <td><code>{% if row.value %}{{ row.value }}{% else %}<em style="color:#aaa">none</em>{% endif %}</code></td>
+        <th>{{ row.name }}</th>
+        <td>{% if row.value %}<code>{{ row.value }}</code>{% else %}<span class="empty">none</span>{% endif %}</td>
       </tr>
       {% endfor %}
     </table>
   </fieldset>
 
-  <fieldset style="border:1px solid #ddd;padding:1rem;margin-bottom:1rem;">
-    <legend style="color:#888;font-size:.85em;text-transform:uppercase;">Editable</legend>
+  <fieldset class="section">
+    <legend>Editable</legend>
     <table>
       {% for row in editable_rows %}
       <tr>
-        <th style="text-align:left;font-weight:600;padding:.5rem .75rem .25rem 0;vertical-align:top;">
-          <label for="{{ row.name }}">{{ row.name }}</label>
-        </th>
-        <td style="padding-bottom:.5rem;">
+        <th><label for="{{ row.name }}">{{ row.name }}</label></th>
+        <td>
           {{ row.input | safe }}
-          {% if row.helper %}<div style="color:#888;font-size:.85em;margin-top:.25rem;">{{ row.helper }}</div>{% endif %}
+          {% if row.helper %}<div class="field-helper">{{ row.helper }}</div>{% endif %}
         </td>
       </tr>
       {% endfor %}
     </table>
   </fieldset>
 
-  <p>
-    <button type="submit" style="padding:.5rem 1.25rem;background:#5cb85c;color:#fff;border:0;cursor:pointer;">
-      Save
-    </button>
-    <a href="/orgs" style="margin-left:.75rem;color:#888;">Cancel</a>
-  </p>
+  <div class="form-actions">
+    <button type="submit" class="btn btn-primary">Save</button>
+    <a href="/orgs" class="btn-link">Cancel</a>
+  </div>
 </form>
+
 {% endblock %}
