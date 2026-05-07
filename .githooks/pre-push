@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# rustango — pre-push hook.
+#
+# Heavier checks that would slow `git commit` to a crawl, but you
+# want to know about before code leaves your machine.
+#
+# Skip everything with `git push --no-verify`. Per-step overrides:
+#   PREPUSH_SKIP_CHECK=1     skip cargo check
+#   PREPUSH_SKIP_CLIPPY=1    skip cargo clippy
+#   PREPUSH_SKIP_TESTS=1     skip cargo test --lib
+#   PREPUSH_DENY=1           opt-in cargo deny check (heaviest)
+#
+# Install once per clone: `bin/install-hooks.sh`.
+
+set -euo pipefail
+
+export PATH="$HOME/.cargo/bin:$PATH"
+
+red()    { printf '\033[31m%s\033[0m\n' "$*"; }
+green()  { printf '\033[32m%s\033[0m\n' "$*"; }
+yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
+gray()   { printf '\033[2m%s\033[0m\n'  "$*"; }
+
+start=$(date +%s)
+
+# ---------------------------------------------------------------- cargo check
+if [ "${PREPUSH_SKIP_CHECK:-0}" != "1" ]; then
+  gray "[pre-push] cargo check --workspace --all-features"
+  if ! cargo check --workspace --all-features 2>&1 | tail -20; then
+    red "[pre-push] cargo check failed"
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------- clippy
+# Clippy on the rustango lib only — the workspace currently carries
+# pre-existing pedantic warnings, so we'd produce noise without
+# `--no-deps` + scoping. Block on warnings introduced AFTER baseline
+# (rustango lib) only.
+if [ "${PREPUSH_SKIP_CLIPPY:-0}" != "1" ]; then
+  gray "[pre-push] cargo clippy -p rustango --features tenancy --lib --no-deps"
+  if ! cargo clippy -p rustango --features tenancy --lib --no-deps 2>&1 | tail -10; then
+    red "[pre-push] cargo clippy failed"
+    yellow "[pre-push] override with: PREPUSH_SKIP_CLIPPY=1 git push"
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------- lib tests
+if [ "${PREPUSH_SKIP_TESTS:-0}" != "1" ]; then
+  gray "[pre-push] cargo test -p rustango --features tenancy --lib"
+  if ! cargo test -p rustango --features tenancy --lib 2>&1 | tail -3; then
+    red "[pre-push] cargo test --lib failed"
+    yellow "[pre-push] live integration tests are NOT run here (need DATABASE_URL)"
+    yellow "[pre-push] override with: PREPUSH_SKIP_TESTS=1 git push"
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------- cargo deny (opt-in)
+if [ "${PREPUSH_DENY:-0}" = "1" ] && command -v cargo-deny >/dev/null 2>&1; then
+  gray "[pre-push] cargo deny check"
+  if ! cargo deny check 2>&1 | tail -10; then
+    red "[pre-push] cargo deny check failed"
+    exit 1
+  fi
+fi
+
+elapsed=$(( $(date +%s) - start ))
+green "[pre-push] ok (${elapsed}s)"

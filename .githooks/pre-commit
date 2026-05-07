@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# rustango — pre-commit hook.
+#
+# Fast, blocking checks that run on every `git commit`. Heavier
+# verification (cargo check, lib tests, cargo-deny) lives in pre-push
+# so commits stay snappy.
+#
+# Skip everything in this hook with `git commit --no-verify`. Per-step
+# overrides:
+#   PRECOMMIT_SKIP_FMT=1     skip rustfmt --check
+#   PRECOMMIT_SKIP_SECRETS=1 skip secret-pattern scan
+#   PRECOMMIT_SKIP_DEBRIS=1  skip stray-debugger scan
+#   PRECOMMIT_TYPOS=1        opt-in `typos` if installed
+#
+# Install once per clone: `bin/install-hooks.sh` (or
+# `git config core.hooksPath .githooks`).
+
+set -euo pipefail
+
+# Ensure cargo is reachable. macOS Homebrew users sometimes have an
+# older `rustc` on PATH that shadows the rustup-managed toolchain;
+# prepending `~/.cargo/bin` matches the rest of this project's
+# tooling (see memory/toolchain.md).
+export PATH="$HOME/.cargo/bin:$PATH"
+
+red()    { printf '\033[31m%s\033[0m\n' "$*"; }
+green()  { printf '\033[32m%s\033[0m\n' "$*"; }
+yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
+gray()   { printf '\033[2m%s\033[0m\n'  "$*"; }
+
+# Files staged for this commit, restricted to those that still exist
+# (skip deletions). Portable across bash 3.2 (macOS default) — no
+# `mapfile` / process substitution into an array.
+STAGED_FILES=()
+while IFS= read -r line; do
+  [ -n "$line" ] && STAGED_FILES+=("$line")
+done < <(git diff --cached --name-only --diff-filter=ACMR)
+
+if [ ${#STAGED_FILES[@]} -eq 0 ]; then
+  green "[pre-commit] nothing staged — skipping"
+  exit 0
+fi
+
+# ---------------------------------------------------------------- rustfmt
+if [ "${PRECOMMIT_SKIP_FMT:-0}" != "1" ]; then
+  RUST_STAGED=()
+  for f in "${STAGED_FILES[@]}"; do
+    case "$f" in *.rs) RUST_STAGED+=("$f") ;; esac
+  done
+  if [ ${#RUST_STAGED[@]} -gt 0 ]; then
+    gray "[pre-commit] rustfmt --check on ${#RUST_STAGED[@]} staged file(s)"
+    if ! cargo fmt --all -- --check >/dev/null 2>&1; then
+      red "[pre-commit] cargo fmt --check failed"
+      yellow "[pre-commit] auto-fix with: cargo fmt --all"
+      yellow "[pre-commit] then re-stage and re-commit"
+      exit 1
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------- secrets
+if [ "${PRECOMMIT_SKIP_SECRETS:-0}" != "1" ]; then
+  # Guard against committing typical secret-bearing files.
+  for f in "${STAGED_FILES[@]}"; do
+    case "$(basename "$f")" in
+      .env|.env.*|*.pem|*.key|id_rsa|id_dsa|*credentials*.json)
+        # Only block when the file actually contains content matching
+        # secret-shaped patterns — empty `.env.example` is fine.
+        if [ -f "$f" ] && grep -qE '(SECRET|TOKEN|PASSWORD|KEY|API_KEY|PRIVATE)\s*[:=]\s*[^\s#]+' "$f"; then
+          red "[pre-commit] looks like a secret-bearing file: $f"
+          yellow "[pre-commit] move secrets to env (.envrc, vault, etc.) before committing"
+          yellow "[pre-commit] override with: git commit --no-verify"
+          exit 1
+        fi
+        ;;
+    esac
+  done
+  # Scan the staged diff for high-confidence secret prefixes that
+  # shouldn't appear anywhere — AWS, GitHub, Stripe, Slack tokens.
+  if git diff --cached -U0 -- "${STAGED_FILES[@]}" 2>/dev/null \
+       | grep -E '^\+' \
+       | grep -EqI '(AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|sk_live_[A-Za-z0-9]{24}|xox[baprs]-[A-Za-z0-9-]{10,})'; then
+    red "[pre-commit] high-confidence secret token found in diff"
+    yellow "[pre-commit] rotate the credential and remove from history before pushing"
+    yellow "[pre-commit] override with: git commit --no-verify (only after rotation)"
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------- debris
+if [ "${PRECOMMIT_SKIP_DEBRIS:-0}" != "1" ]; then
+  # `dbg!`, `todo!()`, leftover `eprintln!("debug",`-style breadcrumbs.
+  # Restricted to staged Rust files in `src/` and `tests/` so example
+  # code and macros that legitimately use these aren't flagged.
+  DEBRIS_RE='(^|[^A-Za-z_])(dbg!|todo!|unimplemented!)\b'
+  bad=0
+  for f in "${STAGED_FILES[@]}"; do
+    case "$f" in
+      */src/*.rs|*/tests/*.rs)
+        if git show ":$f" | grep -EnH "$DEBRIS_RE" \
+             | grep -v '//.*allow.*precommit-debris' >/dev/null 2>&1; then
+          if [ "$bad" -eq 0 ]; then
+            red "[pre-commit] debris found in staged Rust files:"
+          fi
+          bad=1
+          git show ":$f" | grep -En "$DEBRIS_RE" \
+            | grep -v '//.*allow.*precommit-debris' \
+            | sed "s|^|  $f:|" || true
+        fi
+        ;;
+    esac
+  done
+  if [ "$bad" -ne 0 ]; then
+    yellow "[pre-commit] remove the debris, or annotate the line with"
+    yellow "             '// allow.precommit-debris' if it's intentional"
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------- typos (opt-in)
+if [ "${PRECOMMIT_TYPOS:-0}" = "1" ] && command -v typos >/dev/null 2>&1; then
+  gray "[pre-commit] typos"
+  if ! typos --quiet "${STAGED_FILES[@]}"; then
+    red "[pre-commit] typos check failed"
+    yellow "[pre-commit] auto-fix with: typos -w"
+    exit 1
+  fi
+fi
+
+green "[pre-commit] ok"
