@@ -196,7 +196,9 @@ mod tests {
     #[test]
     fn generated_nonce_is_url_safe_base64() {
         let n = generate_nonce(16);
-        assert!(n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(n
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
         // 16 raw bytes -> ceil(16 * 4 / 3) = 22 chars (no padding).
         assert_eq!(n.len(), 22);
     }
@@ -220,7 +222,9 @@ mod tests {
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
         let body = std::str::from_utf8(&bytes).unwrap();
         // Each call generates a fresh 22-char token.
         assert_eq!(body.len(), 22);
@@ -250,7 +254,10 @@ mod tests {
             .unwrap()
             .to_str()
             .unwrap();
-        assert!(!csp.contains("__RUSTANGO_NONCE__"), "placeholder should be replaced");
+        assert!(
+            !csp.contains("__RUSTANGO_NONCE__"),
+            "placeholder should be replaced"
+        );
         assert!(csp.contains("'nonce-"), "rendered nonce should be present");
     }
 
@@ -307,8 +314,7 @@ mod tests {
     async fn csp_substitutes_consistently_with_handler_nonce() {
         // The same nonce should appear in BOTH the header AND whatever
         // the handler rendered into the body.
-        async fn h(Extension(nonce): Extension<Nonce>) -> ([(HeaderName, HeaderValue); 1], String)
-        {
+        async fn h(Extension(nonce): Extension<Nonce>) -> ([(HeaderName, HeaderValue); 1], String) {
             let csp = format!("script-src 'nonce-{}'", "__RUSTANGO_NONCE__");
             (
                 [(
@@ -332,7 +338,9 @@ mod tests {
             .to_str()
             .unwrap()
             .to_owned();
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
         let body = std::str::from_utf8(&bytes).unwrap();
         let body_nonce = body.strip_prefix("nonce=").unwrap();
         assert!(

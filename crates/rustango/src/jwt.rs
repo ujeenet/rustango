@@ -128,7 +128,8 @@ impl Claims {
         let mut c = self;
         let now = now_secs();
         c.inner.insert("iat".into(), Value::from(now));
-        c.inner.insert("exp".into(), Value::from(now + ttl.as_secs()));
+        c.inner
+            .insert("exp".into(), Value::from(now + ttl.as_secs()));
         c
     }
 
@@ -162,8 +163,8 @@ impl Claims {
     }
 
     fn from_json(json: &[u8]) -> Result<Self, JwtError> {
-        let inner: Map<String, Value> = serde_json::from_slice(json)
-            .map_err(|e| JwtError::Decode(format!("claims: {e}")))?;
+        let inner: Map<String, Value> =
+            serde_json::from_slice(json).map_err(|e| JwtError::Decode(format!("claims: {e}")))?;
         Ok(Self { inner })
     }
 }
@@ -180,8 +181,7 @@ pub fn encode(claims: &Claims, secret: &[u8]) -> Result<String, JwtError> {
         return Err(JwtError::Decode("HMAC secret must not be empty".into()));
     }
     let header = json!({"alg": "HS256", "typ": "JWT"});
-    let header_b = URL_SAFE_NO_PAD
-        .encode(serde_json::to_vec(&header).expect("header serialize"));
+    let header_b = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("header serialize"));
     let payload_b = URL_SAFE_NO_PAD.encode(claims.to_json());
     let signing_input = format!("{header_b}.{payload_b}");
     let sig = hmac_sha256(secret, signing_input.as_bytes());
@@ -331,13 +331,22 @@ mod tests {
         let parts: Vec<&str> = t.split('.').collect();
         let evil_payload = URL_SAFE_NO_PAD.encode(b"{\"sub\":\"bob\"}");
         let tampered = format!("{}.{}.{}", parts[0], evil_payload, parts[2]);
-        assert!(matches!(decode(&tampered, SECRET), Err(JwtError::BadSignature)));
+        assert!(matches!(
+            decode(&tampered, SECRET),
+            Err(JwtError::BadSignature)
+        ));
     }
 
     #[test]
     fn malformed_token_rejected() {
-        assert!(matches!(decode("only.two", SECRET), Err(JwtError::Malformed)));
-        assert!(matches!(decode("a.b.c.d", SECRET), Err(JwtError::Malformed)));
+        assert!(matches!(
+            decode("only.two", SECRET),
+            Err(JwtError::Malformed)
+        ));
+        assert!(matches!(
+            decode("a.b.c.d", SECRET),
+            Err(JwtError::Malformed)
+        ));
     }
 
     #[test]
@@ -371,7 +380,10 @@ mod tests {
         let v = decode_at(&t, SECRET, 500).unwrap();
         assert_eq!(v.subject(), Some("x"));
         // Decode AT t=2000 — token expired.
-        assert!(matches!(decode_at(&t, SECRET, 2000), Err(JwtError::Expired(1000))));
+        assert!(matches!(
+            decode_at(&t, SECRET, 2000),
+            Err(JwtError::Expired(1000))
+        ));
     }
 
     #[test]
@@ -382,8 +394,7 @@ mod tests {
         let signing_input = format!("{header}.{payload}");
         // Sign it with the right secret so the signature WOULD check out
         // — and verify we still reject because of alg.
-        let sig = URL_SAFE_NO_PAD
-            .encode(hmac_sha256(SECRET, signing_input.as_bytes()));
+        let sig = URL_SAFE_NO_PAD.encode(hmac_sha256(SECRET, signing_input.as_bytes()));
         let token = format!("{signing_input}.{sig}");
         let err = decode(&token, SECRET).unwrap_err();
         assert!(matches!(err, JwtError::UnsupportedAlg(_)));
@@ -398,7 +409,10 @@ mod tests {
         let t = encode(&c, SECRET).unwrap();
         let v = decode(&t, SECRET).unwrap();
         assert_eq!(v.get::<String>("iss").as_deref(), Some("api.example.com"));
-        assert_eq!(v.get::<String>("aud").as_deref(), Some("client.example.com"));
+        assert_eq!(
+            v.get::<String>("aud").as_deref(),
+            Some("client.example.com")
+        );
         assert_eq!(v.get::<String>("jti").as_deref(), Some("token-1"));
     }
 

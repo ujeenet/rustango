@@ -115,7 +115,11 @@ impl Dialect for MySql {
     /// alias for `TINYINT(1)`). Emit `1`/`0` so `DEFAULT` clauses and
     /// inline comparisons match the storage shape.
     fn bool_literal(&self, b: bool) -> &'static str {
-        if b { "1" } else { "0" }
+        if b {
+            "1"
+        } else {
+            "0"
+        }
     }
 
     // `MySQL` supports every operator in the IR — batch4 ships
@@ -123,19 +127,17 @@ impl Dialect for MySql {
     // operators via the per-op `write_*` methods below. Trait default
     // `true` is correct, no override needed.
 
-    fn write_ilike(
-        &self,
-        sql: &mut String,
-        qualified_col: &str,
-        placeholder: &str,
-        negated: bool,
-    ) {
+    fn write_ilike(&self, sql: &mut String, qualified_col: &str, placeholder: &str, negated: bool) {
         // `MySQL` has no native `ILIKE`; collation may make `LIKE`
         // case-insensitive on `_ci` columns, but to guarantee semantics
         // independent of column collation, lowercase both sides.
         sql.push_str("LOWER(");
         sql.push_str(qualified_col);
-        sql.push_str(if negated { ") NOT LIKE LOWER(" } else { ") LIKE LOWER(" });
+        sql.push_str(if negated {
+            ") NOT LIKE LOWER("
+        } else {
+            ") LIKE LOWER("
+        });
         sql.push_str(placeholder);
         sql.push(')');
     }
@@ -311,10 +313,7 @@ impl Dialect for MySql {
         Ok(b.finish())
     }
 
-    fn compile_bulk_insert(
-        &self,
-        query: &BulkInsertQuery,
-    ) -> Result<CompiledStatement, SqlError> {
+    fn compile_bulk_insert(&self, query: &BulkInsertQuery) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::with_capacity(self, query.columns.len() * query.rows.len());
         write_bulk_insert(&mut b, query)?;
         Ok(b.finish())
@@ -332,10 +331,7 @@ impl Dialect for MySql {
         Ok(b.finish())
     }
 
-    fn compile_bulk_update(
-        &self,
-        query: &BulkUpdateQuery,
-    ) -> Result<CompiledStatement, SqlError> {
+    fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError> {
         // MySQL 8.0.19+ supports `VALUES ROW(…), ROW(…)` table
         // constructors that can be JOINed in `UPDATE … INNER JOIN
         // (VALUES …) AS d(pk, c1, …) ON t.pk = d.pk SET t.c1 = d.c1`.
@@ -597,7 +593,10 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             err,
-            SqlError::ConflictNotSupportedInDialect { dialect: "mysql", .. }
+            SqlError::ConflictNotSupportedInDialect {
+                dialect: "mysql",
+                ..
+            }
         ));
     }
 
@@ -857,8 +856,7 @@ mod tests {
                 f
             })
             .collect();
-        let leaked: &'static [crate::core::FieldSchema] =
-            Box::leak(new_fields.into_boxed_slice());
+        let leaked: &'static [crate::core::FieldSchema] = Box::leak(new_fields.into_boxed_slice());
         Box::leak(Box::new(crate::core::ModelSchema {
             fields: leaked,
             ..*model

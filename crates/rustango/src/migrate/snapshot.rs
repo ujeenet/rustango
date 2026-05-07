@@ -138,13 +138,20 @@ impl SchemaSnapshot {
     #[must_use]
     pub fn from_registry() -> Self {
         let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>.into_iter().collect();
-        let mut tables: Vec<TableSnapshot> =
-            entries.iter().map(|e| TableSnapshot::from_schema(e.schema)).collect();
+        let mut tables: Vec<TableSnapshot> = entries
+            .iter()
+            .map(|e| TableSnapshot::from_schema(e.schema))
+            .collect();
         tables.sort_by(|a, b| a.name.cmp(&b.name));
         let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
         let indexes = collect_indexes(entries.iter().map(|e| e.schema));
         let checks = collect_checks(entries.iter().map(|e| e.schema));
-        Self { tables, m2m_tables, indexes, checks }
+        Self {
+            tables,
+            m2m_tables,
+            indexes,
+            checks,
+        }
     }
 
     /// Capture only the models whose [`crate::core::ModelSchema::scope`]
@@ -164,13 +171,20 @@ impl SchemaSnapshot {
             .into_iter()
             .filter(|e| e.schema.scope == scope)
             .collect();
-        let mut tables: Vec<TableSnapshot> =
-            entries.iter().map(|e| TableSnapshot::from_schema(e.schema)).collect();
+        let mut tables: Vec<TableSnapshot> = entries
+            .iter()
+            .map(|e| TableSnapshot::from_schema(e.schema))
+            .collect();
         tables.sort_by(|a, b| a.name.cmp(&b.name));
         let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
         let indexes = collect_indexes(entries.iter().map(|e| e.schema));
         let checks = collect_checks(entries.iter().map(|e| e.schema));
-        Self { tables, m2m_tables, indexes, checks }
+        Self {
+            tables,
+            m2m_tables,
+            indexes,
+            checks,
+        }
     }
 
     /// Filter `self` to only the tables / indexes / checks whose owning
@@ -242,13 +256,20 @@ impl SchemaSnapshot {
             .into_iter()
             .filter(|e| e.resolved_app_label() == Some(app))
             .collect();
-        let mut tables: Vec<TableSnapshot> =
-            entries.iter().map(|e| TableSnapshot::from_schema(e.schema)).collect();
+        let mut tables: Vec<TableSnapshot> = entries
+            .iter()
+            .map(|e| TableSnapshot::from_schema(e.schema))
+            .collect();
         tables.sort_by(|a, b| a.name.cmp(&b.name));
         let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
         let indexes = collect_indexes(entries.iter().map(|e| e.schema));
         let checks = collect_checks(entries.iter().map(|e| e.schema));
-        Self { tables, m2m_tables, indexes, checks }
+        Self {
+            tables,
+            m2m_tables,
+            indexes,
+            checks,
+        }
     }
 
     /// Capture an explicit list of model schemas — the inventory-
@@ -258,13 +279,20 @@ impl SchemaSnapshot {
     /// to `rustango_orgs` + `rustango_operators` + `rustango_users`).
     #[must_use]
     pub fn from_models(models: &[&ModelSchema]) -> Self {
-        let mut tables: Vec<TableSnapshot> =
-            models.iter().map(|s| TableSnapshot::from_schema(s)).collect();
+        let mut tables: Vec<TableSnapshot> = models
+            .iter()
+            .map(|s| TableSnapshot::from_schema(s))
+            .collect();
         tables.sort_by(|a, b| a.name.cmp(&b.name));
         let m2m_tables = collect_m2m_tables(models.iter().copied());
         let indexes = collect_indexes(models.iter().copied());
         let checks = collect_checks(models.iter().copied());
-        Self { tables, m2m_tables, indexes, checks }
+        Self {
+            tables,
+            m2m_tables,
+            indexes,
+            checks,
+        }
     }
 
     /// Look up an M2M table snapshot by junction table name.
@@ -428,9 +456,7 @@ fn collect_indexes<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<In
 
 /// Collect all M2M junction table descriptors from a set of model schemas,
 /// deduplicating by `through` table name and sorting for deterministic output.
-fn collect_m2m_tables<'a>(
-    schemas: impl Iterator<Item = &'a ModelSchema>,
-) -> Vec<M2MTableSnapshot> {
+fn collect_m2m_tables<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<M2MTableSnapshot> {
     let mut seen = std::collections::HashSet::new();
     let mut out: Vec<M2MTableSnapshot> = Vec::new();
     for schema in schemas {

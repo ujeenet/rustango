@@ -103,7 +103,9 @@ pub fn with_included(mut doc: Value, included: Vec<Value>) -> Value {
     let Some(obj) = doc.as_object_mut() else {
         return doc;
     };
-    let entry = obj.entry("included").or_insert_with(|| Value::Array(Vec::new()));
+    let entry = obj
+        .entry("included")
+        .or_insert_with(|| Value::Array(Vec::new()));
     if let Value::Array(existing) = entry {
         existing.extend(included);
     }
@@ -212,9 +214,7 @@ mod tests {
     #[test]
     fn with_included_appends_to_array_creating_it_when_absent() {
         let doc = to_resource("posts", "1", json!({}));
-        let included = vec![
-            resource_object("authors", "7", json!({"name": "Alice"})),
-        ];
+        let included = vec![resource_object("authors", "7", json!({"name": "Alice"}))];
         let with = with_included(doc, included);
         assert_eq!(with["included"].as_array().unwrap().len(), 1);
         assert_eq!(with["included"][0]["type"], "authors");

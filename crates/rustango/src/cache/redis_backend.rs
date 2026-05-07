@@ -48,9 +48,11 @@ impl RedisCache {
     ///
     /// # Errors
     /// [`CacheError::Connection`] when the initial connection fails.
-    pub async fn with_default_ttl(url: &str, default_ttl: Option<Duration>) -> Result<Self, CacheError> {
-        let client = redis::Client::open(url)
-            .map_err(|e| CacheError::Connection(e.to_string()))?;
+    pub async fn with_default_ttl(
+        url: &str,
+        default_ttl: Option<Duration>,
+    ) -> Result<Self, CacheError> {
+        let client = redis::Client::open(url).map_err(|e| CacheError::Connection(e.to_string()))?;
         let conn = redis::aio::ConnectionManager::new(client)
             .await
             .map_err(|e| CacheError::Connection(e.to_string()))?;
@@ -74,16 +76,14 @@ impl Cache for RedisCache {
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
         let mut conn = self.conn.clone();
         match self.effective_ttl(ttl) {
-            Some(secs) => {
-                conn.set_ex::<_, _, ()>(key, value, secs)
-                    .await
-                    .map_err(|e| CacheError::Connection(e.to_string()))
-            }
-            None => {
-                conn.set::<_, _, ()>(key, value)
-                    .await
-                    .map_err(|e| CacheError::Connection(e.to_string()))
-            }
+            Some(secs) => conn
+                .set_ex::<_, _, ()>(key, value, secs)
+                .await
+                .map_err(|e| CacheError::Connection(e.to_string())),
+            None => conn
+                .set::<_, _, ()>(key, value)
+                .await
+                .map_err(|e| CacheError::Connection(e.to_string())),
         }
     }
 
@@ -109,12 +109,7 @@ impl Cache for RedisCache {
             .map_err(|e| CacheError::Connection(e.to_string()))
     }
 
-    async fn incr(
-        &self,
-        key: &str,
-        by: i64,
-        ttl: Option<Duration>,
-    ) -> Result<i64, CacheError> {
+    async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
         let mut conn = self.conn.clone();
         let new: i64 = redis::cmd("INCRBY")
             .arg(key)

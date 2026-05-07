@@ -19,9 +19,9 @@
 <p><em>This table is read-only.</em></p>
 {% else %}
 <p>
-  <a href="/__admin/{{ model.table }}/{{ pk }}/edit">edit</a> &middot;
+  <a href="/__admin/{{ model.table }}/{{ pk }}/edit">Edit</a> &middot;
   <form method="post" action="/__admin/{{ model.table }}/{{ pk }}/delete" style="display:inline" onsubmit="return confirm('Delete this row?')">
-    <button type="submit">delete</button>
+    <button type="submit">Delete</button>
   </form>
 </p>
 {% endif %}

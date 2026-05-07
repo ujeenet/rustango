@@ -49,9 +49,8 @@ pub fn hash(plaintext: &str) -> Result<String, TenancyError> {
 /// Returns [`TenancyError::Validation`] when `phc_hash` is malformed
 /// (not a valid PHC string).
 pub fn verify(plaintext: &str, phc_hash: &str) -> Result<bool, TenancyError> {
-    let parsed = PasswordHash::new(phc_hash).map_err(|e| {
-        TenancyError::Validation(format!("malformed password hash: {e}"))
-    })?;
+    let parsed = PasswordHash::new(phc_hash)
+        .map_err(|e| TenancyError::Validation(format!("malformed password hash: {e}")))?;
     Ok(Argon2::default()
         .verify_password(plaintext.as_bytes(), &parsed)
         .is_ok())

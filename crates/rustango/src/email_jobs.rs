@@ -92,8 +92,7 @@ impl Job for EmailJob {
             .cloned()
             .ok_or_else(|| {
                 JobError::Queue(
-                    "EmailJob: no mailer registered (call register_email_job at startup)"
-                        .into(),
+                    "EmailJob: no mailer registered (call register_email_job at startup)".into(),
                 )
             })?;
         mailer
@@ -120,7 +119,11 @@ pub async fn register_email_job<Q: JobQueue>(queue: &Q, cfg: EmailJobConfig) {
 /// Returns the underlying [`JobError::Queue`] when the enqueue fails
 /// (DB unavailable, channel closed, payload not serializable).
 pub async fn dispatch_email<Q: JobQueue>(queue: &Q, email: &Email) -> Result<(), JobError> {
-    queue.dispatch(&EmailJob { email: email.clone() }).await
+    queue
+        .dispatch(&EmailJob {
+            email: email.clone(),
+        })
+        .await
 }
 
 /// Test-only — wipe the static mailer registry. Use between tests so

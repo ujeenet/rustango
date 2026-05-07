@@ -66,8 +66,7 @@ use super::pools::TenantPools;
 /// [`run_with_init`] / [`run_with_writer_and_init`] to swap in a
 /// custom [`crate::tenancy::TenantUserModel`] (typically threaded
 /// from [`crate::manage::Cli::user_model`]).
-pub type InitTenancyFn =
-    fn(&Path) -> Result<super::bootstrap::InitTenancyReport, TenancyError>;
+pub type InitTenancyFn = fn(&Path) -> Result<super::bootstrap::InitTenancyReport, TenancyError>;
 
 /// Dispatch entrypoint. Recognizes tenancy verbs and delegates the
 /// rest to `crate::migrate::manage::run`.
@@ -175,12 +174,12 @@ pub async fn run_with_writer_and_init<W: Write + Send>(
         // across both crates, so the heavy lifting still runs through
         // `rustango::migrate::scaffold::startapp`.
         "audit-cleanup" => audit::audit_cleanup_cmd(pools, &args[1..], writer).await,
-        "create-role"  => roles::create_role_cmd(pools, &args[1..], writer).await,
-        "list-roles"   => roles::list_roles_cmd(pools, &args[1..], writer).await,
-        "assign-role"  => roles::assign_role_cmd(pools, &args[1..], writer).await,
-        "revoke-role"  => roles::revoke_role_cmd(pools, &args[1..], writer).await,
-        "grant-perm"   => roles::grant_perm_cmd(pools, &args[1..], writer).await,
-        "revoke-perm"  => roles::revoke_perm_cmd(pools, &args[1..], writer).await,
+        "create-role" => roles::create_role_cmd(pools, &args[1..], writer).await,
+        "list-roles" => roles::list_roles_cmd(pools, &args[1..], writer).await,
+        "assign-role" => roles::assign_role_cmd(pools, &args[1..], writer).await,
+        "revoke-role" => roles::revoke_role_cmd(pools, &args[1..], writer).await,
+        "grant-perm" => roles::grant_perm_cmd(pools, &args[1..], writer).await,
+        "revoke-perm" => roles::revoke_perm_cmd(pools, &args[1..], writer).await,
         "create-api-key" => roles::create_api_key_cmd(pools, &args[1..], writer).await,
         "startapp" => scaffold::startapp_cmd(&args[1..], writer),
         // Plain `migrate` is scope-aware here — registry-scoped
@@ -196,14 +195,9 @@ pub async fn run_with_writer_and_init<W: Write + Send>(
         // Everything else (makemigrations, showmigrations, downgrade,
         // …) is registry-scoped and delegates to the standard
         // single-tenant runner.
-        _ => rustango::migrate::manage::run_with_writer(
-            pools.registry(),
-            dir,
-            args,
-            writer,
-        )
-        .await
-        .map_err(TenancyError::Migrate),
+        _ => rustango::migrate::manage::run_with_writer(pools.registry(), dir, args, writer)
+            .await
+            .map_err(TenancyError::Migrate),
     }
 }
 
@@ -247,10 +241,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "                       a fully separate DB via --database-url."
     )?;
-    writeln!(
-        w,
-        "  drop-tenant   <slug> [--confirm <slug>]"
-    )?;
+    writeln!(w, "  drop-tenant   <slug> [--confirm <slug>]")?;
     writeln!(
         w,
         "                       Soft-delete (active=false). Data preserved."
@@ -263,13 +254,13 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "                       HARD-delete: drops schema (or DB with --purge-database)."
     )?;
-    writeln!(w, "  list-tenants         Print every Org row in the registry.")?;
-    writeln!(w)?;
-    writeln!(w, "USER / OPERATOR MANAGEMENT:")?;
     writeln!(
         w,
-        "  create-operator <username> --password <p>"
+        "  list-tenants         Print every Org row in the registry."
     )?;
+    writeln!(w)?;
+    writeln!(w, "USER / OPERATOR MANAGEMENT:")?;
+    writeln!(w, "  create-operator <username> --password <p>")?;
     writeln!(
         w,
         "                       Operator-level account; signs into the apex /login."
@@ -316,17 +307,32 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(w, "ROLES & PERMISSIONS:")?;
     writeln!(w, "  create-role <slug> <name> [--description <s>]")?;
     writeln!(w, "                       Create a named role on a tenant.")?;
-    writeln!(w, "  list-roles  <slug>   List roles and permission counts.")?;
+    writeln!(
+        w,
+        "  list-roles  <slug>   List roles and permission counts."
+    )?;
     writeln!(w, "  assign-role <slug> <username> <role>")?;
     writeln!(w, "                       Add a user to a role.")?;
     writeln!(w, "  revoke-role <slug> <username> <role>")?;
     writeln!(w, "                       Remove a user from a role.")?;
     writeln!(w, "  grant-perm  <slug> <name> <codename> [--role]")?;
-    writeln!(w, "                       Grant a codename to a user (default) or role (--role).")?;
+    writeln!(
+        w,
+        "                       Grant a codename to a user (default) or role (--role)."
+    )?;
     writeln!(w, "  revoke-perm <slug> <name> <codename> [--role]")?;
-    writeln!(w, "                       Revoke a codename from a user or role.")?;
-    writeln!(w, "  create-api-key <slug> <username> [--label <s>] [--expires-days <N>]")?;
-    writeln!(w, "                       Issue a Bearer API key for a tenant user.")?;
+    writeln!(
+        w,
+        "                       Revoke a codename from a user or role."
+    )?;
+    writeln!(
+        w,
+        "  create-api-key <slug> <username> [--label <s>] [--expires-days <N>]"
+    )?;
+    writeln!(
+        w,
+        "                       Issue a Bearer API key for a tenant user."
+    )?;
     writeln!(w)?;
     writeln!(w, "AUDIT:")?;
     writeln!(
@@ -343,10 +349,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(w)?;
     writeln!(w, "SERVER:")?;
-    writeln!(
-        w,
-        "  run-server [--bind <addr>]"
-    )?;
+    writeln!(w, "  run-server [--bind <addr>]")?;
     writeln!(
         w,
         "                       Boot the HTTP server with admin + operator console."
@@ -365,12 +368,24 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(w, "EXAMPLES:")?;
     writeln!(w, "  cargo run -- migrate")?;
     writeln!(w, "  cargo run -- create-operator admin --password letmein")?;
-    writeln!(w, "  cargo run -- create-tenant acme --display-name 'ACME Corp'")?;
-    writeln!(w, "  cargo run -- create-user acme alice --password hunter2 --superuser")?;
+    writeln!(
+        w,
+        "  cargo run -- create-tenant acme --display-name 'ACME Corp'"
+    )?;
+    writeln!(
+        w,
+        "  cargo run -- create-user acme alice --password hunter2 --superuser"
+    )?;
     writeln!(w, "  cargo run -- list-tenants")?;
     writeln!(w, "  cargo run -- audit-cleanup --days 90")?;
-    writeln!(w, "  cargo run -- audit-cleanup --keep-last 50 --tenant acme")?;
+    writeln!(
+        w,
+        "  cargo run -- audit-cleanup --keep-last 50 --tenant acme"
+    )?;
     writeln!(w)?;
-    writeln!(w, "Run any verb with --help for verb-specific flags + details.")?;
+    writeln!(
+        w,
+        "Run any verb with --help for verb-specific flags + details."
+    )?;
     Ok(())
 }

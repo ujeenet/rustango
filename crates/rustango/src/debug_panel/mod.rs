@@ -44,8 +44,8 @@
 //! ```
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::Body;
@@ -169,7 +169,9 @@ pub struct DebugPanelLayer {
 impl DebugPanelLayer {
     #[must_use]
     pub fn new() -> Self {
-        Self { state: DebugPanelState::new() }
+        Self {
+            state: DebugPanelState::new(),
+        }
     }
 
     #[must_use]
@@ -215,11 +217,7 @@ impl<S: Clone + Send + Sync + 'static> DebugPanelRouterExt for Router<S> {
     }
 }
 
-async fn capture(
-    state: DebugPanelState,
-    req: Request<Body>,
-    next: Next,
-) -> Response<Body> {
+async fn capture(state: DebugPanelState, req: Request<Body>, next: Next) -> Response<Body> {
     let started = Instant::now();
     let method = req.method().to_string();
     let path = req.uri().path().to_owned();
@@ -268,9 +266,7 @@ pub fn debug_router() -> Router {
         .route("/__debug__/data", get(panel_json))
 }
 
-async fn panel_index(
-    axum::Extension(state): axum::Extension<DebugPanelState>,
-) -> Html<String> {
+async fn panel_index(axum::Extension(state): axum::Extension<DebugPanelState>) -> Html<String> {
     let records = state.records().await;
     Html(render_panel(&records))
 }
@@ -413,19 +409,21 @@ mod tests {
     async fn buffer_evicts_oldest_when_full() {
         let state = DebugPanelState::with_capacity(3);
         for i in 0..5 {
-            state.push(RequestRecord {
-                request_id: format!("r{i}"),
-                method: "GET".into(),
-                path: "/".into(),
-                status: 200,
-                duration_ms: 0,
-                timestamp: chrono::Utc::now(),
-                query_count: 0,
-                total_query_ms: 0,
-                cache_hits: 0,
-                cache_misses: 0,
-                signals_fired: 0,
-            }).await;
+            state
+                .push(RequestRecord {
+                    request_id: format!("r{i}"),
+                    method: "GET".into(),
+                    path: "/".into(),
+                    status: 200,
+                    duration_ms: 0,
+                    timestamp: chrono::Utc::now(),
+                    query_count: 0,
+                    total_query_ms: 0,
+                    cache_hits: 0,
+                    cache_misses: 0,
+                    signals_fired: 0,
+                })
+                .await;
         }
         let records = state.records().await;
         assert_eq!(records.len(), 3);

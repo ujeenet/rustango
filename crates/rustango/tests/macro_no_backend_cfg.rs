@@ -23,10 +23,7 @@ fn macro_emits_no_backend_cfg_arms() {
     let body = std::fs::read_to_string(&macro_src)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", macro_src.display()));
 
-    for needle in [
-        r#"cfg(feature = "postgres")"#,
-        r#"cfg(feature = "mysql")"#,
-    ] {
+    for needle in [r#"cfg(feature = "postgres")"#, r#"cfg(feature = "mysql")"#] {
         assert!(
             !body.contains(needle),
             "rustango-macros/src/lib.rs contains `{needle}`. \

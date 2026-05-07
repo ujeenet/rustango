@@ -100,9 +100,7 @@ pub async fn create_tenant(
     });
     let display_name = opts.display_name.clone().unwrap_or_else(|| slug.to_owned());
     let schema_name = match opts.mode {
-        StorageMode::Schema => {
-            Some(opts.schema_name.clone().unwrap_or_else(|| slug.to_owned()))
-        }
+        StorageMode::Schema => Some(opts.schema_name.clone().unwrap_or_else(|| slug.to_owned())),
         StorageMode::Database => None,
     };
 
@@ -129,6 +127,12 @@ pub async fn create_tenant(
         path_prefix: opts.path_prefix.clone(),
         active: true,
         created_at: chrono::Utc::now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     org.insert(pools.registry()).await?;
 
@@ -210,9 +214,9 @@ pub async fn create_user_if_missing(
     password: &str,
     superuser: bool,
 ) -> Result<User, TenancyError> {
-    let org = find_org(pools, slug).await?.ok_or_else(|| {
-        TenancyError::Validation(format!("no tenant with slug `{slug}`"))
-    })?;
+    let org = find_org(pools, slug)
+        .await?
+        .ok_or_else(|| TenancyError::Validation(format!("no tenant with slug `{slug}`")))?;
     let mut conn = pools.acquire(&org).await?;
     let conn_ref: &mut rustango::sql::sqlx::PgConnection = &mut conn;
 
@@ -267,10 +271,5 @@ fn dir_has_json_files(dir: &Path) -> bool {
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
-        .any(|e| {
-            e.path()
-                .extension()
-                .and_then(|s| s.to_str())
-                == Some("json")
-        })
+        .any(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
 }

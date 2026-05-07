@@ -92,10 +92,7 @@ impl DistributedLock {
             // Keep the counter, but ALSO write a token — release reads
             // both. (The counter is the gate; the token is the receipt.)
             let token_key = format!("{key}:token");
-            let _ = self
-                .cache
-                .set(&token_key, &token, Some(ttl))
-                .await;
+            let _ = self.cache.set(&token_key, &token, Some(ttl)).await;
             Some(LockGuard {
                 cache: self.cache.clone(),
                 key,
@@ -113,12 +110,7 @@ impl DistributedLock {
     /// blocked us. The lock is released after body finishes (or on
     /// panic, via the guard's Drop — which is best-effort since we
     /// can't call async fns from Drop).
-    pub async fn with_lock<F, Fut, R>(
-        &self,
-        name: &str,
-        ttl: Duration,
-        body: F,
-    ) -> Option<R>
+    pub async fn with_lock<F, Fut, R>(&self, name: &str, ttl: Duration, body: F) -> Option<R>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = R>,
@@ -156,12 +148,7 @@ impl LockGuard {
         // Token check — if our token is still the one stored, we still
         // hold the lock, so we can clear it. Otherwise someone else
         // acquired after our TTL expired and we mustn't touch theirs.
-        let stored = self
-            .cache
-            .get(&self.token_key)
-            .await
-            .ok()
-            .flatten();
+        let stored = self.cache.get(&self.token_key).await.ok().flatten();
         if stored.as_deref() != Some(self.token.as_str()) {
             return;
         }
@@ -278,7 +265,10 @@ mod tests {
     #[tokio::test]
     async fn release_after_ttl_does_not_clobber_new_holder() {
         let l = lock();
-        let g1 = l.try_acquire("job", Duration::from_millis(30)).await.unwrap();
+        let g1 = l
+            .try_acquire("job", Duration::from_millis(30))
+            .await
+            .unwrap();
         // Wait for TTL to expire.
         tokio::time::sleep(Duration::from_millis(80)).await;
         // Someone else acquires.

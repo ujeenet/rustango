@@ -113,10 +113,7 @@ async fn auto_now_add_fills_created_at_via_db_default_on_insert() {
     row.save(&pool).await.unwrap();
 
     let pk = row.id.get().copied().unwrap();
-    let stored: (
-        chrono::DateTime<chrono::Utc>,
-        chrono::DateTime<chrono::Utc>,
-    ) = sqlx::query_as(
+    let stored: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
         r#"SELECT "created_at", "updated_at" FROM "rustango_mixin_post" WHERE "id" = $1"#,
     )
     .bind(pk)
@@ -156,13 +153,12 @@ async fn auto_now_overrides_updated_at_on_every_update() {
     row.save(&pool).await.unwrap();
     let pk = row.id.get().copied().unwrap();
 
-    let initial: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
-        r#"SELECT "updated_at" FROM "rustango_mixin_post" WHERE "id" = $1"#,
-    )
-    .bind(pk)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let initial: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar(r#"SELECT "updated_at" FROM "rustango_mixin_post" WHERE "id" = $1"#)
+            .bind(pk)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
 
     // Sleep a beat so the wall-clock advances measurably between
     // INSERT (DB now()) and UPDATE (Rust Utc::now()).
@@ -172,13 +168,12 @@ async fn auto_now_overrides_updated_at_on_every_update() {
     // the macro should rebind it to `chrono::Utc::now()` anyway.
     row.save(&pool).await.unwrap();
 
-    let after: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
-        r#"SELECT "updated_at" FROM "rustango_mixin_post" WHERE "id" = $1"#,
-    )
-    .bind(pk)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let after: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar(r#"SELECT "updated_at" FROM "rustango_mixin_post" WHERE "id" = $1"#)
+            .bind(pk)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert!(
         after > initial,
         "updated_at should advance on UPDATE; was {initial} now {after}",
@@ -205,23 +200,21 @@ async fn soft_delete_on_sets_deleted_at_then_restore_on_clears_it() {
 
     let n = row.soft_delete_on(&pool).await.unwrap();
     assert_eq!(n, 1, "soft_delete should affect exactly 1 row");
-    let after_delete: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-        r#"SELECT "deleted_at" FROM "rustango_mixin_post" WHERE "id" = $1"#,
-    )
-    .bind(pk)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let after_delete: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar(r#"SELECT "deleted_at" FROM "rustango_mixin_post" WHERE "id" = $1"#)
+            .bind(pk)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert!(after_delete.is_some(), "deleted_at should be NOW()");
 
     row.restore_on(&pool).await.unwrap();
-    let after_restore: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-        r#"SELECT "deleted_at" FROM "rustango_mixin_post" WHERE "id" = $1"#,
-    )
-    .bind(pk)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let after_restore: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar(r#"SELECT "deleted_at" FROM "rustango_mixin_post" WHERE "id" = $1"#)
+            .bind(pk)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert!(
         after_restore.is_none(),
         "deleted_at should be NULL after restore"
@@ -245,5 +238,9 @@ async fn auto_uuid_skips_pk_on_insert_and_db_fills_it() {
     };
     row.insert(&pool).await.unwrap();
     let assigned = row.id.get().copied().expect("PK populated by RETURNING");
-    assert_ne!(assigned, uuid::Uuid::nil(), "DB should have generated a UUID");
+    assert_ne!(
+        assigned,
+        uuid::Uuid::nil(),
+        "DB should have generated a UUID"
+    );
 }

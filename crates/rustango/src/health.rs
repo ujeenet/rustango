@@ -197,7 +197,9 @@ impl HealthRouter {
                     .map_err(|e| format!("get: {e}"))?
                     .ok_or_else(|| "set succeeded but get returned None".to_owned())?;
                 if got != value {
-                    return Err(format!("read-after-write mismatch: wrote {value}, read {got}"));
+                    return Err(format!(
+                        "read-after-write mismatch: wrote {value}, read {got}"
+                    ));
                 }
                 let _ = cache.delete(&key).await;
                 Ok(())
@@ -360,7 +362,9 @@ mod tests {
     }
 
     async fn body_json(resp: Response) -> Value {
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
 
@@ -368,7 +372,12 @@ mod tests {
     async fn health_endpoint_always_returns_ok() {
         let app = HealthRouter::new(lazy_pool()).skip_db_probe().into_router();
         let resp = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
@@ -383,7 +392,12 @@ mod tests {
             .check("always_ok", || async { Ok(()) })
             .into_router();
         let resp = app
-            .oneshot(Request::builder().uri("/ready").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
@@ -402,7 +416,12 @@ mod tests {
             .check("broken", || async { Err("nope".into()) })
             .into_router();
         let resp = app
-            .oneshot(Request::builder().uri("/ready").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), 503);
@@ -425,7 +444,12 @@ mod tests {
             .into_router();
         let start = std::time::Instant::now();
         let resp = app
-            .oneshot(Request::builder().uri("/ready").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let elapsed = start.elapsed();
@@ -446,7 +470,12 @@ mod tests {
     async fn skip_db_probe_omits_database_check() {
         let app = HealthRouter::new(lazy_pool()).skip_db_probe().into_router();
         let resp = app
-            .oneshot(Request::builder().uri("/ready").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let v = body_json(resp).await;
@@ -464,12 +493,21 @@ mod tests {
             })
             .into_router();
         let resp = app
-            .oneshot(Request::builder().uri("/ready").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let v = body_json(resp).await;
         let err = v["checks"]["verbose"]["error"].as_str().unwrap();
-        assert!(err.chars().count() <= 201, "got {} chars", err.chars().count());
+        assert!(
+            err.chars().count() <= 201,
+            "got {} chars",
+            err.chars().count()
+        );
         assert!(err.ends_with('…'));
     }
 
@@ -482,7 +520,12 @@ mod tests {
             .timeout(Duration::from_millis(500))
             .into_router();
         let resp = app
-            .oneshot(Request::builder().uri("/ready").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), 503);
@@ -502,7 +545,12 @@ mod tests {
             .cache_probe("memory", cache)
             .into_router();
         let resp = app
-            .oneshot(Request::builder().uri("/ready").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);

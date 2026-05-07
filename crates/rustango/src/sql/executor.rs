@@ -223,7 +223,10 @@ pub struct Page<T> {
 
 impl<T> Default for Page<T> {
     fn default() -> Self {
-        Self { rows: Vec::new(), total: 0 }
+        Self {
+            rows: Vec::new(),
+            total: 0,
+        }
     }
 }
 
@@ -342,10 +345,7 @@ where
 ///
 /// # Errors
 /// Returns [`ExecError`] for validation, SQL-writing, or driver failures.
-pub async fn bulk_insert(
-    pool: &PgPool,
-    query: &BulkInsertQuery,
-) -> Result<Vec<PgRow>, ExecError> {
+pub async fn bulk_insert(pool: &PgPool, query: &BulkInsertQuery) -> Result<Vec<PgRow>, ExecError> {
     bulk_insert_on(pool, query).await
 }
 
@@ -647,9 +647,11 @@ where
     // Collect parent PKs. Models without an integer PK can't be
     // batch-prefetched this way; treat as "no children" for those
     // parents (consistent with empty-set behaviour).
-    let pk_field = P::SCHEMA.primary_key().ok_or(ExecError::MissingPrimaryKey {
-        table: P::SCHEMA.table,
-    })?;
+    let pk_field = P::SCHEMA
+        .primary_key()
+        .ok_or(ExecError::MissingPrimaryKey {
+            table: P::SCHEMA.table,
+        })?;
     let mut parent_pks: Vec<i64> = Vec::with_capacity(parents.len());
     for parent in &parents {
         if let Some(pk) = sql_value_as_i64(&extract_pk_value(parent)) {
@@ -866,10 +868,7 @@ fn bind_query(
 /// # Errors
 /// SQL-writing or driver failures, or [`SqlError::EmptyBulkInsert`] if
 /// `query.rows` is empty (the caller should short-circuit).
-pub async fn bulk_update(
-    pool: &PgPool,
-    query: &BulkUpdateQuery,
-) -> Result<u64, ExecError> {
+pub async fn bulk_update(pool: &PgPool, query: &BulkUpdateQuery) -> Result<u64, ExecError> {
     bulk_update_on(pool, query).await
 }
 
@@ -877,10 +876,7 @@ pub async fn bulk_update(
 ///
 /// # Errors
 /// As [`bulk_update`].
-pub async fn bulk_update_on<'c, E>(
-    executor: E,
-    query: &BulkUpdateQuery,
-) -> Result<u64, ExecError>
+pub async fn bulk_update_on<'c, E>(executor: E, query: &BulkUpdateQuery) -> Result<u64, ExecError>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
 {
@@ -942,11 +938,7 @@ where
 ///
 /// # Errors
 /// Driver / SQL failures.
-pub async fn raw_execute(
-    sql: &str,
-    binds: Vec<SqlValue>,
-    pool: &PgPool,
-) -> Result<u64, ExecError> {
+pub async fn raw_execute(sql: &str, binds: Vec<SqlValue>, pool: &PgPool) -> Result<u64, ExecError> {
     raw_execute_on(sql, binds, pool).await
 }
 
@@ -1391,11 +1383,7 @@ pub async fn raw_execute_pool(
 
 /// Execute a parameterized statement that doesn't return rows. Used
 /// by every non-`FromRow` `_pool` function.
-async fn execute_pool(
-    pool: &Pool,
-    sql: &str,
-    binds: Vec<SqlValue>,
-) -> Result<u64, ExecError> {
+async fn execute_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<u64, ExecError> {
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -1420,11 +1408,7 @@ async fn execute_pool(
 /// Run a SELECT that returns a single scalar `i64` (used by
 /// [`count_rows_pool`]). Inlined per-backend so we can use the
 /// driver-specific `Row::try_get` directly.
-async fn fetch_scalar_pool(
-    pool: &Pool,
-    sql: &str,
-    binds: Vec<SqlValue>,
-) -> Result<i64, ExecError> {
+async fn fetch_scalar_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<i64, ExecError> {
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -1527,10 +1511,7 @@ impl<T> MaybeMyLoadRelated for T {}
 ///
 /// # Errors
 /// As [`select_rows`].
-pub async fn select_rows_pool<T>(
-    pool: &Pool,
-    query: &SelectQuery,
-) -> Result<Vec<T>, ExecError>
+pub async fn select_rows_pool<T>(pool: &Pool, query: &SelectQuery) -> Result<Vec<T>, ExecError>
 where
     T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + Send + Unpin,
 {
@@ -1547,12 +1528,8 @@ where
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
-            let mut q: sqlx::query::QueryAs<
-                '_,
-                sqlx::MySql,
-                T,
-                sqlx::mysql::MySqlArguments,
-            > = sqlx::query_as::<_, T>(&stmt.sql);
+            let mut q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> =
+                sqlx::query_as::<_, T>(&stmt.sql);
             for v in stmt.params {
                 q = bind_query_as_my(q, v);
             }
@@ -1586,12 +1563,8 @@ where
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
-            let mut q: sqlx::query::QueryAs<
-                '_,
-                sqlx::MySql,
-                T,
-                sqlx::mysql::MySqlArguments,
-            > = sqlx::query_as::<_, T>(&stmt.sql);
+            let mut q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> =
+                sqlx::query_as::<_, T>(&stmt.sql);
             for v in stmt.params {
                 q = bind_query_as_my(q, v);
             }
@@ -1640,12 +1613,8 @@ where
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
-            let mut q: sqlx::query::QueryAs<
-                '_,
-                sqlx::MySql,
-                T,
-                sqlx::mysql::MySqlArguments,
-            > = sqlx::query_as::<_, T>(&stmt.sql);
+            let mut q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> =
+                sqlx::query_as::<_, T>(&stmt.sql);
             for v in stmt.params {
                 q = bind_query_as_my(q, v);
             }
@@ -1676,8 +1645,7 @@ where
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
-            let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
-                sqlx::query_as::<_, T>(sql);
+            let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> = sqlx::query_as::<_, T>(sql);
             for v in binds {
                 q = bind_query_as(q, v);
             }
@@ -1685,12 +1653,8 @@ where
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
-            let mut q: sqlx::query::QueryAs<
-                '_,
-                sqlx::MySql,
-                T,
-                sqlx::mysql::MySqlArguments,
-            > = sqlx::query_as::<_, T>(sql);
+            let mut q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> =
+                sqlx::query_as::<_, T>(sql);
             for v in binds {
                 q = bind_query_as_my(q, v);
             }
@@ -1953,12 +1917,8 @@ where
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
             if aliases.is_empty() {
-                let mut q: sqlx::query::QueryAs<
-                    '_,
-                    sqlx::MySql,
-                    T,
-                    sqlx::mysql::MySqlArguments,
-                > = sqlx::query_as::<_, T>(&stmt.sql);
+                let mut q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> =
+                    sqlx::query_as::<_, T>(&stmt.sql);
                 for v in stmt.params {
                     q = bind_query_as_my(q, v);
                 }

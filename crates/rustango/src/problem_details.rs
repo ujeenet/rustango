@@ -89,10 +89,7 @@ impl ProblemDetails {
     pub fn new(status: StatusCode, detail: impl Into<String>) -> Self {
         Self {
             type_: "about:blank".into(),
-            title: status
-                .canonical_reason()
-                .unwrap_or("Unknown")
-                .to_owned(),
+            title: status.canonical_reason().unwrap_or("Unknown").to_owned(),
             status: status.as_u16(),
             detail: Some(detail.into()),
             instance: None,
@@ -168,11 +165,7 @@ impl ProblemDetails {
     /// ignored — the spec says they shouldn't be overridden via
     /// extension.
     #[must_use]
-    pub fn with_extension(
-        mut self,
-        name: impl Into<String>,
-        value: impl Into<Value>,
-    ) -> Self {
+    pub fn with_extension(mut self, name: impl Into<String>, value: impl Into<Value>) -> Self {
         let name = name.into();
         if !is_reserved(&name) {
             self.extensions.insert(name, value.into());
@@ -294,7 +287,8 @@ mod tests {
         let p = ProblemDetails::not_found("nope")
             .with_instance("/errors/req-1")
             .with_extension("trace_id", "abc-123");
-        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(v["type"], "about:blank");
         assert_eq!(v["title"], "Not Found");
         assert_eq!(v["status"], 404);

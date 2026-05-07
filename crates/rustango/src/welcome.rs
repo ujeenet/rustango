@@ -28,7 +28,10 @@ pub fn welcome_router() -> Router {
 async fn welcome_page() -> ([(axum::http::HeaderName, &'static str); 1], Html<String>) {
     let version = env!("CARGO_PKG_VERSION");
     let html = welcome_html(version);
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], Html(html))
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        Html(html),
+    )
 }
 
 fn welcome_html(version: &str) -> String {

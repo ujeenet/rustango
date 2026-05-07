@@ -348,7 +348,13 @@ impl JwtLifecycle {
             payload.remove(*reserved);
         }
 
-        Some(JwtClaims { sub, exp, jti, typ, custom: payload })
+        Some(JwtClaims {
+            sub,
+            exp,
+            jti,
+            typ,
+            custom: payload,
+        })
     }
 
     fn sign(&self, msg: &[u8]) -> Vec<u8> {
@@ -554,7 +560,10 @@ mod tests {
         for reserved in RESERVED_CLAIM_NAMES {
             let custom = map(serde_json::json!({ *reserved: "evil" }));
             let r = j.issue_pair_with(1, custom);
-            assert!(matches!(r, Err(JwtIssueError::ReservedClaim(_))), "should reject {reserved}");
+            assert!(
+                matches!(r, Err(JwtIssueError::ReservedClaim(_))),
+                "should reject {reserved}"
+            );
         }
     }
 
@@ -562,7 +571,10 @@ mod tests {
     fn refresh_preserves_custom_claims() {
         let j = jwt();
         let pair = j
-            .issue_pair_with(7, map(serde_json::json!({"scope": "read:posts write:posts"})))
+            .issue_pair_with(
+                7,
+                map(serde_json::json!({"scope": "read:posts write:posts"})),
+            )
             .unwrap();
         let new_pair = j.refresh(&pair.refresh).unwrap();
 
@@ -598,7 +610,9 @@ mod tests {
     #[test]
     fn refresh_with_invalid_token_returns_ok_none() {
         let j = jwt();
-        let r = j.refresh_with("not-a-token", map(serde_json::json!({}))).unwrap();
+        let r = j
+            .refresh_with("not-a-token", map(serde_json::json!({})))
+            .unwrap();
         assert!(r.is_none());
     }
 

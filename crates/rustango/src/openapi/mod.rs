@@ -123,21 +123,13 @@ impl OpenApiSpec {
 
     #[must_use]
     pub fn add_schema(mut self, name: impl Into<String>, schema: Schema) -> Self {
-        self.components
-            .schemas
-            .insert(name.into(), schema);
+        self.components.schemas.insert(name.into(), schema);
         self
     }
 
     #[must_use]
-    pub fn add_security_scheme(
-        mut self,
-        name: impl Into<String>,
-        scheme: SecurityScheme,
-    ) -> Self {
-        self.components
-            .security_schemes
-            .insert(name.into(), scheme);
+    pub fn add_security_scheme(mut self, name: impl Into<String>, scheme: SecurityScheme) -> Self {
+        self.components.security_schemes.insert(name.into(), scheme);
         self
     }
 
@@ -558,7 +550,10 @@ impl Response {
     pub fn json_content(mut self, schema: Schema) -> Self {
         self.content.insert(
             "application/json".to_owned(),
-            MediaType { schema, example: None },
+            MediaType {
+                schema,
+                example: None,
+            },
         );
         self
     }
@@ -630,7 +625,10 @@ pub struct Schema {
     pub minimum: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maximum: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "additionalProperties")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "additionalProperties"
+    )]
     pub additional_properties: Option<Box<Schema>>,
 }
 
@@ -835,9 +833,7 @@ pub enum SecurityScheme {
         location: ParameterIn,
     },
     #[serde(rename = "oauth2")]
-    OAuth2 {
-        flows: OAuth2Flows,
-    },
+    OAuth2 { flows: OAuth2Flows },
     #[serde(rename = "openIdConnect")]
     OpenIdConnect {
         #[serde(rename = "openIdConnectUrl")]
@@ -970,16 +966,28 @@ mod tests {
 
     #[test]
     fn schema_format_helpers() {
-        assert_eq!(serde_json::to_value(Schema::datetime()).unwrap()["format"], "date-time");
-        assert_eq!(serde_json::to_value(Schema::uuid()).unwrap()["format"], "uuid");
-        assert_eq!(serde_json::to_value(Schema::email()).unwrap()["format"], "email");
+        assert_eq!(
+            serde_json::to_value(Schema::datetime()).unwrap()["format"],
+            "date-time"
+        );
+        assert_eq!(
+            serde_json::to_value(Schema::uuid()).unwrap()["format"],
+            "uuid"
+        );
+        assert_eq!(
+            serde_json::to_value(Schema::email()).unwrap()["format"],
+            "email"
+        );
     }
 
     #[test]
     fn schema_enum_serializes_under_enum_key() {
         let s = Schema::string().enum_(["draft", "published", "archived"]);
         let v = serde_json::to_value(&s).unwrap();
-        assert_eq!(v["enum"], serde_json::json!(["draft", "published", "archived"]));
+        assert_eq!(
+            v["enum"],
+            serde_json::json!(["draft", "published", "archived"])
+        );
     }
 
     #[test]
@@ -1008,7 +1016,8 @@ mod tests {
                         .tag("posts")
                         .response(
                             "200",
-                            Response::new("OK").json_content(Schema::array_of(Schema::ref_("Post"))),
+                            Response::new("OK")
+                                .json_content(Schema::array_of(Schema::ref_("Post"))),
                         ),
                 ),
             );
@@ -1017,8 +1026,8 @@ mod tests {
         assert_eq!(v["paths"]["/posts"]["get"]["operationId"], "list_posts");
         assert_eq!(v["paths"]["/posts"]["get"]["tags"][0], "posts");
         assert_eq!(
-            v["paths"]["/posts"]["get"]["responses"]["200"]["content"]
-                ["application/json"]["schema"]["items"]["$ref"],
+            v["paths"]["/posts"]["get"]["responses"]["200"]["content"]["application/json"]
+                ["schema"]["items"]["$ref"],
             "#/components/schemas/Post"
         );
     }
@@ -1080,9 +1089,18 @@ mod tests {
         );
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["type"], "oauth2");
-        assert_eq!(v["flows"]["authorizationCode"]["authorizationUrl"], "https://idp/auth");
-        assert_eq!(v["flows"]["authorizationCode"]["tokenUrl"], "https://idp/token");
-        assert_eq!(v["flows"]["authorizationCode"]["scopes"]["read"], "Read access");
+        assert_eq!(
+            v["flows"]["authorizationCode"]["authorizationUrl"],
+            "https://idp/auth"
+        );
+        assert_eq!(
+            v["flows"]["authorizationCode"]["tokenUrl"],
+            "https://idp/token"
+        );
+        assert_eq!(
+            v["flows"]["authorizationCode"]["scopes"]["read"],
+            "Read access"
+        );
     }
 
     #[test]
@@ -1092,7 +1110,10 @@ mod tests {
             .require_security("bearerAuth", []);
         let v: serde_json::Value = serde_json::from_str(&spec.to_json()).unwrap();
         assert_eq!(v["security"][0]["bearerAuth"], serde_json::json!([]));
-        assert_eq!(v["components"]["securitySchemes"]["bearerAuth"]["type"], "http");
+        assert_eq!(
+            v["components"]["securitySchemes"]["bearerAuth"]["type"],
+            "http"
+        );
     }
 
     #[test]
@@ -1111,7 +1132,10 @@ mod tests {
             .require_security("oauth2", ["read".to_owned(), "write".to_owned()])
             .response("200", Response::new("OK"));
         let v = serde_json::to_value(&op).unwrap();
-        assert_eq!(v["security"][0]["oauth2"], serde_json::json!(["read", "write"]));
+        assert_eq!(
+            v["security"][0]["oauth2"],
+            serde_json::json!(["read", "write"])
+        );
     }
 
     #[test]
@@ -1132,7 +1156,9 @@ mod tests {
 
     #[test]
     fn deprecated_operation_flagged() {
-        let op = Operation::new().deprecated().response("200", Response::new("OK"));
+        let op = Operation::new()
+            .deprecated()
+            .response("200", Response::new("OK"));
         let v = serde_json::to_value(&op).unwrap();
         assert_eq!(v["deprecated"], true);
     }

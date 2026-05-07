@@ -397,8 +397,7 @@ fn lower_select_related(
             })?;
         // Project every column on the target so the decoder has the
         // full row to rebuild a `Target` instance.
-        let project: Vec<&'static str> =
-            target.scalar_fields().map(|f| f.column).collect();
+        let project: Vec<&'static str> = target.scalar_fields().map(|f| f.column).collect();
         out.push(Join {
             target,
             on_local: field.column,
@@ -562,7 +561,11 @@ impl<T: Model> AggregateBuilder<T> {
     pub fn compile(self) -> Result<AggregateQuery, QueryError> {
         let model = T::SCHEMA;
         let where_clause = resolve_pending(model, self.qs.pending)?;
-        let order_by = self.order_by.into_iter().map(|(col, desc)| OrderClause { column: col, desc }).collect();
+        let order_by = self
+            .order_by
+            .into_iter()
+            .map(|(col, desc)| OrderClause { column: col, desc })
+            .collect();
         Ok(AggregateQuery {
             model,
             where_clause,

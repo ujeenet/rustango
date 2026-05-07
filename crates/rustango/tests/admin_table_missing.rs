@@ -23,12 +23,16 @@ pub struct Widget {
 
 #[tokio::test]
 async fn missing_table_returns_503_with_migrate_hint_html() {
-    let Ok(url) = std::env::var("DATABASE_URL") else { return };
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
     let pool = sqlx::PgPool::connect(&url).await.expect("connect");
 
     // Make sure the table really is absent.
     sqlx::query("DROP TABLE IF EXISTS admin_table_missing_widget CASCADE")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // Touch the SCHEMA so inventory registers the model in this binary.
     use rustango::core::Model as _;
@@ -38,7 +42,8 @@ async fn missing_table_returns_503_with_migrate_hint_html() {
     let req = Request::builder()
         .method(Method::GET)
         .uri("/admin_table_missing_widget")
-        .body(Body::empty()).unwrap();
+        .body(Body::empty())
+        .unwrap();
     let resp = router.oneshot(req).await.expect("handler runs");
 
     let status = resp.status();
@@ -46,7 +51,8 @@ async fn missing_table_returns_503_with_migrate_hint_html() {
     let html = String::from_utf8_lossy(&bytes);
 
     assert_eq!(
-        status, StatusCode::SERVICE_UNAVAILABLE,
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
         "missing-table should be 503; got {status}; body head: {}",
         &html[..html.len().min(300)]
     );

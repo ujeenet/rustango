@@ -185,7 +185,9 @@ mod tests {
 
     fn lockout(max: u32) -> Lockout {
         let cache: Arc<dyn Cache> = Arc::new(InMemoryCache::new());
-        Lockout::new(cache).max_attempts(max).lockout_duration(Duration::from_secs(60))
+        Lockout::new(cache)
+            .max_attempts(max)
+            .lockout_duration(Duration::from_secs(60))
     }
 
     #[tokio::test]
@@ -259,18 +261,26 @@ mod tests {
     #[tokio::test]
     async fn key_prefix_isolates_namespaces() {
         let cache: Arc<dyn Cache> = Arc::new(InMemoryCache::new());
-        let l1 = Lockout::new(cache.clone()).key_prefix("login:").max_attempts(2);
+        let l1 = Lockout::new(cache.clone())
+            .key_prefix("login:")
+            .max_attempts(2);
         let l2 = Lockout::new(cache).key_prefix("mfa:").max_attempts(2);
         l1.record_failure("alice").await;
         l1.record_failure("alice").await;
         assert!(l1.is_locked("alice").await);
-        assert!(!l2.is_locked("alice").await, "MFA namespace shouldn't be locked");
+        assert!(
+            !l2.is_locked("alice").await,
+            "MFA namespace shouldn't be locked"
+        );
     }
 
     #[tokio::test]
     async fn max_attempts_floors_at_1() {
         let l = lockout(0);
         l.record_failure("alice").await;
-        assert!(l.is_locked("alice").await, "max_attempts(0) should be treated as 1");
+        assert!(
+            l.is_locked("alice").await,
+            "max_attempts(0) should be treated as 1"
+        );
     }
 }

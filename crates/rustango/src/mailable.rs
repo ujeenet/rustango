@@ -62,7 +62,7 @@
 use tera::Context;
 
 use crate::email::{BoxedMailer, Email, MailError};
-use crate::email_templates::{EmailRenderer, EmailRenderError};
+use crate::email_templates::{EmailRenderError, EmailRenderer};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MailableError {
@@ -146,9 +146,7 @@ pub trait Mailable {
             let email = self.render(renderer)?;
             crate::email_jobs::dispatch_email(queue, &email)
                 .await
-                .map_err(|e| {
-                    MailableError::Send(crate::email::MailError::Transport(e.to_string()))
-                })
+                .map_err(|e| MailableError::Send(crate::email::MailError::Transport(e.to_string())))
         })
     }
 }
@@ -163,7 +161,10 @@ mod tests {
         EmailRenderer::from_pairs(vec![
             ("welcome.subject.txt", "Welcome, {{ name }}"),
             ("welcome.txt", "Hi {{ name }}, your code is {{ code }}"),
-            ("welcome.html", "<p>Hi {{ name }}, code: <b>{{ code }}</b></p>"),
+            (
+                "welcome.html",
+                "<p>Hi {{ name }}, code: <b>{{ code }}</b></p>",
+            ),
         ])
         .unwrap()
     }
@@ -200,7 +201,10 @@ mod tests {
         let email = m.render(&r).unwrap();
         assert_eq!(email.subject, "Welcome, Alice");
         assert_eq!(email.body, "Hi Alice, your code is 42");
-        assert_eq!(email.html_body.as_deref(), Some("<p>Hi Alice, code: <b>42</b></p>"));
+        assert_eq!(
+            email.html_body.as_deref(),
+            Some("<p>Hi Alice, code: <b>42</b></p>")
+        );
         assert_eq!(email.to, vec!["alice@x.com"]);
         assert_eq!(email.from.as_deref(), Some("noreply@x.com"));
     }

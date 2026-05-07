@@ -131,8 +131,7 @@ struct JobEnvelope {
 
 /// Type-erased async handler. The queue stores one per registered Job::NAME.
 type HandlerFn = Arc<
-    dyn Fn(serde_json::Value)
-            -> Pin<Box<dyn Future<Output = Result<(), JobError>> + Send>>
+    dyn Fn(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<(), JobError>> + Send>>
         + Send
         + Sync,
 >;
@@ -146,8 +145,8 @@ impl HandlerRegistry {
     fn register<T: Job>(&mut self) {
         let handler: HandlerFn = Arc::new(move |payload| {
             Box::pin(async move {
-                let job: T = serde_json::from_value(payload)
-                    .map_err(|e| JobError::Queue(e.to_string()))?;
+                let job: T =
+                    serde_json::from_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
                 job.run().await
             })
         });
@@ -162,12 +161,8 @@ impl HandlerRegistry {
 // ------------------------------------------------------------------ DeadLetter
 
 /// Callback invoked when a job exhausts retries or returns `Fatal`.
-pub type DeadLetterFn = Arc<
-    dyn Fn(JobDeadLetter)
-            -> Pin<Box<dyn Future<Output = ()> + Send>>
-        + Send
-        + Sync,
->;
+pub type DeadLetterFn =
+    Arc<dyn Fn(JobDeadLetter) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct JobDeadLetter {
@@ -240,15 +235,15 @@ impl JobQueue for InMemoryJobQueue {
     }
 
     async fn dispatch<T: Job>(&self, payload: &T) -> Result<(), JobError> {
-        let value = serde_json::to_value(payload)
-            .map_err(|e| JobError::Queue(e.to_string()))?;
+        let value = serde_json::to_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
         let envelope = JobEnvelope {
             name: T::NAME,
             payload: value,
             attempt: 0,
             max_attempts: T::MAX_ATTEMPTS,
         };
-        self.pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.pending
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.tx
             .send(envelope)
             .map_err(|e| JobError::Queue(e.to_string()))?;
@@ -261,7 +256,9 @@ impl JobQueue for InMemoryJobQueue {
             return; // already started
         }
         let mut rx_guard = self.rx.lock().await;
-        let rx = rx_guard.take().expect("queue already started without workers");
+        let rx = rx_guard
+            .take()
+            .expect("queue already started without workers");
         // Wrap rx in Arc<Mutex> so multiple workers can pull
         let rx = Arc::new(Mutex::new(rx));
 
@@ -340,7 +337,8 @@ async fn worker_loop(
                             payload: envelope.payload.clone(),
                             attempts: next_attempt,
                             error: msg,
-                        }).await;
+                        })
+                        .await;
                     } else {
                         tracing::error!(job = envelope.name, attempts = next_attempt, error = %msg, "job exhausted retries");
                     }
@@ -367,7 +365,8 @@ async fn worker_loop(
                         payload: envelope.payload.clone(),
                         attempts: envelope.attempt + 1,
                         error: msg,
-                    }).await;
+                    })
+                    .await;
                 } else {
                     tracing::error!(job = envelope.name, error = %msg, "job fatal");
                 }
@@ -398,7 +397,9 @@ mod tests {
     }
 
     #[derive(Serialize, Deserialize, Debug)]
-    struct AlwaysFail { fatal: bool }
+    struct AlwaysFail {
+        fatal: bool,
+    }
 
     #[async_trait::async_trait]
     impl Job for AlwaysFail {
@@ -414,7 +415,10 @@ mod tests {
     }
 
     #[derive(Serialize, Deserialize, Debug)]
-    struct EventuallyOk { fail_n: u32, success_marker_id: u64 }
+    struct EventuallyOk {
+        fail_n: u32,
+        success_marker_id: u64,
+    }
 
     static SUCCESSES: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
     static ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
@@ -455,8 +459,11 @@ mod tests {
         let cap = captured.clone();
         q.on_dead_letter(move |dl| {
             let cap = cap.clone();
-            async move { cap.lock().await.push(dl); }
-        }).await;
+            async move {
+                cap.lock().await.push(dl);
+            }
+        })
+        .await;
         q.start().await;
         q.dispatch(&AlwaysFail { fatal: true }).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -472,7 +479,12 @@ mod tests {
         q.register::<EventuallyOk>().await;
         q.start().await;
         let marker = 12345;
-        q.dispatch(&EventuallyOk { fail_n: 2, success_marker_id: marker }).await.unwrap();
+        q.dispatch(&EventuallyOk {
+            fail_n: 2,
+            success_marker_id: marker,
+        })
+        .await
+        .unwrap();
         // Backoff: ~2s after first failure, ~4s after second → wait ~7s to be safe.
         tokio::time::sleep(Duration::from_millis(7000)).await;
         let succ = SUCCESSES.lock().unwrap();
@@ -491,7 +503,9 @@ mod tests {
         #[async_trait::async_trait]
         impl Job for UnregisteredJob {
             const NAME: &'static str = "test:unregistered";
-            async fn run(&self) -> Result<(), JobError> { Ok(()) }
+            async fn run(&self) -> Result<(), JobError> {
+                Ok(())
+            }
         }
 
         let q = InMemoryJobQueue::with_workers(1);

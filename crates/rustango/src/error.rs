@@ -234,101 +234,143 @@ pub type RustangoResult<T> = Result<T, RustangoError>;
 // ------------------------------------------------------------------ From impls
 
 impl From<crate::sql::ExecError> for RustangoError {
-    fn from(e: crate::sql::ExecError) -> Self { Self::Sql(e) }
+    fn from(e: crate::sql::ExecError) -> Self {
+        Self::Sql(e)
+    }
 }
 
 impl From<crate::migrate::MigrateError> for RustangoError {
-    fn from(e: crate::migrate::MigrateError) -> Self { Self::Migrate(e) }
+    fn from(e: crate::migrate::MigrateError) -> Self {
+        Self::Migrate(e)
+    }
 }
 
 #[cfg(feature = "forms")]
 impl From<crate::forms::FormErrors> for RustangoError {
-    fn from(e: crate::forms::FormErrors) -> Self { Self::Forms(e) }
+    fn from(e: crate::forms::FormErrors) -> Self {
+        Self::Forms(e)
+    }
 }
 
 #[cfg(feature = "cache")]
 impl From<crate::cache::CacheError> for RustangoError {
-    fn from(e: crate::cache::CacheError) -> Self { Self::Cache(e) }
+    fn from(e: crate::cache::CacheError) -> Self {
+        Self::Cache(e)
+    }
 }
 
 #[cfg(feature = "email")]
 impl From<crate::email::MailError> for RustangoError {
-    fn from(e: crate::email::MailError) -> Self { Self::Mail(e) }
+    fn from(e: crate::email::MailError) -> Self {
+        Self::Mail(e)
+    }
 }
 
 #[cfg(feature = "storage")]
 impl From<crate::storage::StorageError> for RustangoError {
-    fn from(e: crate::storage::StorageError) -> Self { Self::Storage(e) }
+    fn from(e: crate::storage::StorageError) -> Self {
+        Self::Storage(e)
+    }
 }
 
 #[cfg(feature = "tenancy")]
 impl From<crate::tenancy::auth_backends::AuthError> for RustangoError {
-    fn from(e: crate::tenancy::auth_backends::AuthError) -> Self { Self::Auth(e) }
+    fn from(e: crate::tenancy::auth_backends::AuthError) -> Self {
+        Self::Auth(e)
+    }
 }
 
 #[cfg(feature = "tenancy")]
 impl From<crate::tenancy::jwt_lifecycle::JwtIssueError> for RustangoError {
-    fn from(e: crate::tenancy::jwt_lifecycle::JwtIssueError) -> Self { Self::JwtIssue(e) }
+    fn from(e: crate::tenancy::jwt_lifecycle::JwtIssueError) -> Self {
+        Self::JwtIssue(e)
+    }
 }
 
 #[cfg(feature = "passwords")]
 impl From<crate::passwords::PasswordError> for RustangoError {
-    fn from(e: crate::passwords::PasswordError) -> Self { Self::Password(e) }
+    fn from(e: crate::passwords::PasswordError) -> Self {
+        Self::Password(e)
+    }
 }
 
 #[cfg(feature = "api_keys")]
 impl From<crate::api_keys::ApiKeyError> for RustangoError {
-    fn from(e: crate::api_keys::ApiKeyError) -> Self { Self::ApiKey(e) }
+    fn from(e: crate::api_keys::ApiKeyError) -> Self {
+        Self::ApiKey(e)
+    }
 }
 
 #[cfg(feature = "signed_url")]
 impl From<crate::signed_url::SignedUrlError> for RustangoError {
-    fn from(e: crate::signed_url::SignedUrlError) -> Self { Self::SignedUrl(e) }
+    fn from(e: crate::signed_url::SignedUrlError) -> Self {
+        Self::SignedUrl(e)
+    }
 }
 
 #[cfg(feature = "auth_flows")]
 impl From<crate::auth_flows::AuthFlowError> for RustangoError {
-    fn from(e: crate::auth_flows::AuthFlowError) -> Self { Self::AuthFlow(e) }
+    fn from(e: crate::auth_flows::AuthFlowError) -> Self {
+        Self::AuthFlow(e)
+    }
 }
 
 #[cfg(feature = "tenancy")]
 impl From<crate::bulk_actions::BulkActionError> for RustangoError {
-    fn from(e: crate::bulk_actions::BulkActionError) -> Self { Self::BulkAction(e) }
+    fn from(e: crate::bulk_actions::BulkActionError) -> Self {
+        Self::BulkAction(e)
+    }
 }
 
 #[cfg(feature = "admin")]
 impl From<crate::ip_filter::IpFilterError> for RustangoError {
-    fn from(e: crate::ip_filter::IpFilterError) -> Self { Self::IpFilter(e) }
+    fn from(e: crate::ip_filter::IpFilterError) -> Self {
+        Self::IpFilter(e)
+    }
 }
 
 #[cfg(feature = "jobs")]
 impl From<crate::jobs::JobError> for RustangoError {
-    fn from(e: crate::jobs::JobError) -> Self { Self::Job(e) }
+    fn from(e: crate::jobs::JobError) -> Self {
+        Self::Job(e)
+    }
 }
 
 impl From<crate::fixtures::FixtureError> for RustangoError {
-    fn from(e: crate::fixtures::FixtureError) -> Self { Self::Fixture(e) }
+    fn from(e: crate::fixtures::FixtureError) -> Self {
+        Self::Fixture(e)
+    }
 }
 
 impl From<crate::i18n::I18nError> for RustangoError {
-    fn from(e: crate::i18n::I18nError) -> Self { Self::I18n(e) }
+    fn from(e: crate::i18n::I18nError) -> Self {
+        Self::I18n(e)
+    }
 }
 
 impl From<crate::env::EnvError> for RustangoError {
-    fn from(e: crate::env::EnvError) -> Self { Self::Env(e) }
+    fn from(e: crate::env::EnvError) -> Self {
+        Self::Env(e)
+    }
 }
 
 #[cfg(feature = "secrets")]
 impl From<crate::secrets::SecretsError> for RustangoError {
-    fn from(e: crate::secrets::SecretsError) -> Self { Self::Secrets(e) }
+    fn from(e: crate::secrets::SecretsError) -> Self {
+        Self::Secrets(e)
+    }
 }
 
 impl From<std::io::Error> for RustangoError {
-    fn from(e: std::io::Error) -> Self { Self::Io(e) }
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 impl From<serde_json::Error> for RustangoError {
-    fn from(e: serde_json::Error) -> Self { Self::Serde(e) }
+    fn from(e: serde_json::Error) -> Self {
+        Self::Serde(e)
+    }
 }
 
 // ------------------------------------------------------------------ IntoResponse
@@ -378,7 +420,11 @@ mod into_response {
             RustangoError::IpFilter(_) => ApiError::bad_request(msg),
 
             // Server-side: 500
-            other => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", other.to_string()),
+            other => ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                other.to_string(),
+            ),
         }
     }
 }
@@ -438,7 +484,10 @@ mod tests {
     fn source_chain_for_serde() {
         let res: Result<i64, _> = serde_json::from_str("not-json");
         let e: RustangoError = res.unwrap_err().into();
-        assert!(e.source().is_some(), "RustangoError should expose source for chained errors");
+        assert!(
+            e.source().is_some(),
+            "RustangoError should expose source for chained errors"
+        );
     }
 
     #[test]

@@ -47,7 +47,9 @@ impl EtagLayer {
     /// Default config — hashes responses up to 4 MiB.
     #[must_use]
     pub fn new() -> Self {
-        Self { max_body_bytes: Some(4 * 1024 * 1024) }
+        Self {
+            max_body_bytes: Some(4 * 1024 * 1024),
+        }
     }
 
     /// Override the maximum body size. `None` means "no cap" (use with care).
@@ -67,10 +69,12 @@ pub trait EtagRouterExt {
 impl<S: Clone + Send + Sync + 'static> EtagRouterExt for Router<S> {
     fn etag(self, layer: EtagLayer) -> Self {
         let cfg = Arc::new(layer);
-        self.layer(axum::middleware::from_fn(move |req: Request<Body>, next: Next| {
-            let cfg = cfg.clone();
-            async move { handle(cfg, req, next).await }
-        }))
+        self.layer(axum::middleware::from_fn(
+            move |req: Request<Body>, next: Next| {
+                let cfg = cfg.clone();
+                async move { handle(cfg, req, next).await }
+            },
+        ))
     }
 }
 

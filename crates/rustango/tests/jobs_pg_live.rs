@@ -51,8 +51,7 @@ async fn dispatch_persists_and_runs() {
     RAN_INC.store(0, Ordering::SeqCst);
 
     let q = Arc::new(
-        PgJobQueue::with_workers(pool.clone(), 2)
-            .poll_interval(Duration::from_millis(100)),
+        PgJobQueue::with_workers(pool.clone(), 2).poll_interval(Duration::from_millis(100)),
     );
     q.register::<PgInc>().await;
     q.start().await;
@@ -106,8 +105,7 @@ async fn retryable_failure_reschedules_with_backoff() {
     RETRY_ATTEMPTS.store(0, Ordering::SeqCst);
 
     let q = Arc::new(
-        PgJobQueue::with_workers(pool.clone(), 1)
-            .poll_interval(Duration::from_millis(100)),
+        PgJobQueue::with_workers(pool.clone(), 1).poll_interval(Duration::from_millis(100)),
     );
     q.register::<PgRetry>().await;
     q.start().await;
@@ -154,12 +152,11 @@ async fn reclaim_stuck_jobs_resets_lock() {
         .unwrap();
     assert_eq!(reclaimed, 1);
 
-    let still_locked: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM rustango_jobs WHERE locked_at IS NOT NULL",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let still_locked: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM rustango_jobs WHERE locked_at IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(still_locked, 0);
 }
 

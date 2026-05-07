@@ -56,7 +56,8 @@ pub fn verify(password: &str, stored_hash: &str) -> Result<bool, PasswordError> 
     use argon2::password_hash::{PasswordHash, PasswordVerifier};
     use argon2::Argon2;
 
-    let parsed = PasswordHash::new(stored_hash).map_err(|e| PasswordError::Verify(e.to_string()))?;
+    let parsed =
+        PasswordHash::new(stored_hash).map_err(|e| PasswordError::Verify(e.to_string()))?;
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok())
@@ -94,7 +95,9 @@ pub fn strength_score(password: &str) -> Vec<StrengthIssue> {
     }
 
     let has_digit = password.chars().any(|c| c.is_ascii_digit());
-    let has_symbol = password.chars().any(|c| !c.is_alphanumeric() && !c.is_whitespace());
+    let has_symbol = password
+        .chars()
+        .any(|c| !c.is_alphanumeric() && !c.is_whitespace());
     let has_upper = password.chars().any(|c| c.is_ascii_uppercase());
     let has_lower = password.chars().any(|c| c.is_ascii_lowercase());
 

@@ -24,10 +24,10 @@ use serde_json::Value;
 use crate::sql::sqlx;
 
 use super::errors::AdminError;
+use super::helpers::chrome_context;
 use super::render;
 use super::templates::render_with_chrome;
 use super::urls::AppState;
-use super::helpers::chrome_context;
 
 /// Page size for the `/__audit` activity feed. Matches the per-table
 /// admin list views (50 by default).
@@ -78,18 +78,13 @@ pub(crate) async fn audit_log_view(
                 where_sql.push_str(" AND ");
             }
             use std::fmt::Write as _;
-            let _ = write!(
-                where_sql,
-                r#""{col_static}" = ${placeholder}"#,
-            );
+            let _ = write!(where_sql, r#""{col_static}" = ${placeholder}"#,);
             active_field_filters.push((col_static, v.clone()));
         }
     }
 
     // Total count for the pager.
-    let count_sql = format!(
-        r#"SELECT COUNT(*) FROM "rustango_audit_log"{where_sql}"#,
-    );
+    let count_sql = format!(r#"SELECT COUNT(*) FROM "rustango_audit_log"{where_sql}"#,);
     let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
     for v in &binds {
         count_q = count_q.bind(v);
@@ -117,9 +112,7 @@ pub(crate) async fn audit_log_view(
     // per facet column. Always runs against the unfiltered table so
     // operators can navigate to any value without losing them.
     let mut facets_ctx: Vec<Value> = Vec::new();
-    let show_all_facet = params
-        .get("facet_show_all")
-        .map(String::as_str);
+    let show_all_facet = params.get("facet_show_all").map(String::as_str);
     for col in ["entity_table", "operation", "source"] {
         let active_value = active_field_filters
             .iter()
@@ -375,12 +368,20 @@ pub(crate) async fn emit_admin_audit_diff(
     // falling back to the row's prior value for absent keys.
     let before_pairs: Vec<(&str, Value)> = model
         .scalar_fields()
-        .filter(|f| model.audit_track.map_or(true, |names| names.is_empty() || names.contains(&f.name)))
+        .filter(|f| {
+            model
+                .audit_track
+                .map_or(true, |names| names.is_empty() || names.contains(&f.name))
+        })
         .map(|f| (f.name, render::read_value_as_json(row, f)))
         .collect();
     let after_pairs: Vec<(&str, Value)> = model
         .scalar_fields()
-        .filter(|f| model.audit_track.map_or(true, |names| names.is_empty() || names.contains(&f.name)))
+        .filter(|f| {
+            model
+                .audit_track
+                .map_or(true, |names| names.is_empty() || names.contains(&f.name))
+        })
         .map(|f| {
             let v = match form.get(f.name) {
                 Some(s) => render::coerce_form_to_json(f, s),
@@ -425,7 +426,11 @@ pub(crate) async fn emit_admin_audit(
     // bools, strings as strings).
     let pairs: Vec<(&str, Value)> = model
         .scalar_fields()
-        .filter(|f| model.audit_track.map_or(true, |names| names.is_empty() || names.contains(&f.name)))
+        .filter(|f| {
+            model
+                .audit_track
+                .map_or(true, |names| names.is_empty() || names.contains(&f.name))
+        })
         .filter_map(|f| {
             form.get(f.name)
                 .map(|v| (f.name, render::coerce_form_to_json(f, v)))

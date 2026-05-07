@@ -194,7 +194,12 @@ mod tests {
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        let v = resp.headers().get("server-timing").unwrap().to_str().unwrap();
+        let v = resp
+            .headers()
+            .get("server-timing")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(v.starts_with("total;dur="), "got: {v}");
     }
 
@@ -213,7 +218,12 @@ mod tests {
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        let v = resp.headers().get("server-timing").unwrap().to_str().unwrap();
+        let v = resp
+            .headers()
+            .get("server-timing")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(v.contains("total;dur="));
         assert!(v.contains("db;dur="));
         assert!(v.contains("render;dur="));
@@ -232,7 +242,12 @@ mod tests {
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        let v = resp.headers().get("server-timing").unwrap().to_str().unwrap();
+        let v = resp
+            .headers()
+            .get("server-timing")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(v.contains("synthetic;dur=12.5"));
     }
 
@@ -249,7 +264,12 @@ mod tests {
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        let v = resp.headers().get("server-timing").unwrap().to_str().unwrap();
+        let v = resp
+            .headers()
+            .get("server-timing")
+            .unwrap()
+            .to_str()
+            .unwrap();
         // Spaces + parens become underscores so the token is HTTP-valid.
         assert!(v.contains("db_query__selects_;dur=1.0"));
     }

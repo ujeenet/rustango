@@ -42,8 +42,9 @@ pub mod admin;
 pub mod auth;
 pub mod auth_backends;
 pub mod bootstrap;
-pub mod jwt_lifecycle;
+pub mod branding;
 mod error;
+pub mod jwt_lifecycle;
 pub mod manage;
 mod manage_interactive;
 pub mod middleware;
@@ -66,6 +67,11 @@ pub use auth_backends::{
     create_api_key, ensure_api_keys_table, ApiKeyBackend, AuthBackend, AuthError, AuthUser,
     BoxedBackend, JwtBackend, ModelBackend,
 };
+pub use bootstrap::{
+    init_tenancy, init_tenancy_with, registry_bootstrap_migration,
+    registry_bootstrap_migration_for, tenant_bootstrap_migration, tenant_bootstrap_migration_for,
+    InitTenancyReport, REGISTRY_BOOTSTRAP_NAME, TENANT_BOOTSTRAP_NAME,
+};
 pub use middleware::{AuthenticatedUser, CurrentUser, RouterAuthExt};
 pub use permissions::{
     assign_role, auto_create_permissions, clear_user_perm,
@@ -73,20 +79,15 @@ pub use permissions::{
     has_any_perm, has_perm, model_codenames, remove_role, revoke_role_perm, set_user_perm,
     user_permissions, user_roles,
 };
-pub use bootstrap::{
-    init_tenancy, init_tenancy_with, registry_bootstrap_migration,
-    registry_bootstrap_migration_for, tenant_bootstrap_migration,
-    tenant_bootstrap_migration_for, InitTenancyReport, REGISTRY_BOOTSTRAP_NAME,
-    TENANT_BOOTSTRAP_NAME,
-};
 
 pub use error::TenancyError;
-pub use migrate::{migrate_registry, migrate_tenants, TenantMigrationOutcome, TenantMigrationReport};
+pub use migrate::{
+    migrate_registry, migrate_tenants, TenantMigrationOutcome, TenantMigrationReport,
+};
 pub use org::{Org, StorageMode};
 pub use pools::{TenantConn, TenantPool, TenantPools, TenantPoolsConfig};
 pub use resolver::{
-    ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver, PortResolver,
-    SubdomainResolver,
+    ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver, PortResolver, SubdomainResolver,
 };
 pub use secrets::{
     ChainSecretsResolver, EnvSecretsResolver, LiteralSecretsResolver, SecretsError, SecretsResolver,

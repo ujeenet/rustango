@@ -85,7 +85,9 @@ impl BulkActionRegistry {
     /// New empty registry.
     #[must_use]
     pub fn new() -> Self {
-        Self { actions: HashMap::new() }
+        Self {
+            actions: HashMap::new(),
+        }
     }
 
     /// Register an action. Builder-style — chain multiple `register` calls.
@@ -149,8 +151,12 @@ pub struct BulkDeleteAction;
 
 #[async_trait]
 impl BulkAction for BulkDeleteAction {
-    fn name(&self) -> &str { "delete_selected" }
-    fn label(&self) -> &str { "Delete selected" }
+    fn name(&self) -> &str {
+        "delete_selected"
+    }
+    fn label(&self) -> &str {
+        "Delete selected"
+    }
 
     async fn run(
         &self,
@@ -189,8 +195,12 @@ pub struct BulkSoftDeleteAction {
 
 #[async_trait]
 impl BulkAction for BulkSoftDeleteAction {
-    fn name(&self) -> &str { "soft_delete_selected" }
-    fn label(&self) -> &str { "Soft-delete selected" }
+    fn name(&self) -> &str {
+        "soft_delete_selected"
+    }
+    fn label(&self) -> &str {
+        "Soft-delete selected"
+    }
 
     async fn run(
         &self,
@@ -231,8 +241,12 @@ pub struct BulkRestoreAction {
 
 #[async_trait]
 impl BulkAction for BulkRestoreAction {
-    fn name(&self) -> &str { "restore_selected" }
-    fn label(&self) -> &str { "Restore selected" }
+    fn name(&self) -> &str {
+        "restore_selected"
+    }
+    fn label(&self) -> &str {
+        "Restore selected"
+    }
 
     async fn run(
         &self,
@@ -250,9 +264,7 @@ impl BulkAction for BulkRestoreAction {
             });
         }
         let col = self.column;
-        let sql = format!(
-            r#"UPDATE "{table}" SET "{col}" = NULL WHERE "id" = ANY($1)"#,
-        );
+        let sql = format!(r#"UPDATE "{table}" SET "{col}" = NULL WHERE "id" = ANY($1)"#,);
         let result = sqlx::query(&sql)
             .bind(pks)
             .execute(pool)
@@ -277,8 +289,12 @@ mod tests {
 
     #[async_trait]
     impl BulkAction for Dummy {
-        fn name(&self) -> &str { self.name }
-        fn label(&self) -> &str { self.label }
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn label(&self) -> &str {
+            self.label
+        }
         async fn run(
             &self,
             table: &str,
@@ -302,8 +318,14 @@ mod tests {
     #[test]
     fn register_adds_action() {
         let r = BulkActionRegistry::new()
-            .register(Arc::new(Dummy { name: "a", label: "A" }))
-            .register(Arc::new(Dummy { name: "b", label: "B" }));
+            .register(Arc::new(Dummy {
+                name: "a",
+                label: "A",
+            }))
+            .register(Arc::new(Dummy {
+                name: "b",
+                label: "B",
+            }));
         let list = r.list();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0], ("a".to_owned(), "A".to_owned()));
@@ -312,8 +334,10 @@ mod tests {
 
     #[test]
     fn get_returns_registered_action() {
-        let r = BulkActionRegistry::new()
-            .register(Arc::new(Dummy { name: "x", label: "X" }));
+        let r = BulkActionRegistry::new().register(Arc::new(Dummy {
+            name: "x",
+            label: "X",
+        }));
         assert!(r.get("x").is_some());
         assert!(r.get("nope").is_none());
     }
@@ -321,9 +345,18 @@ mod tests {
     #[test]
     fn list_is_alphabetically_sorted() {
         let r = BulkActionRegistry::new()
-            .register(Arc::new(Dummy { name: "zebra", label: "Z" }))
-            .register(Arc::new(Dummy { name: "apple", label: "A" }))
-            .register(Arc::new(Dummy { name: "mango", label: "M" }));
+            .register(Arc::new(Dummy {
+                name: "zebra",
+                label: "Z",
+            }))
+            .register(Arc::new(Dummy {
+                name: "apple",
+                label: "A",
+            }))
+            .register(Arc::new(Dummy {
+                name: "mango",
+                label: "M",
+            }));
         let list = r.list();
         assert_eq!(list[0].0, "apple");
         assert_eq!(list[1].0, "mango");
@@ -333,8 +366,14 @@ mod tests {
     #[test]
     fn re_registering_same_name_replaces() {
         let r = BulkActionRegistry::new()
-            .register(Arc::new(Dummy { name: "k", label: "old" }))
-            .register(Arc::new(Dummy { name: "k", label: "new" }));
+            .register(Arc::new(Dummy {
+                name: "k",
+                label: "old",
+            }))
+            .register(Arc::new(Dummy {
+                name: "k",
+                label: "new",
+            }));
         let list = r.list();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].1, "new");
@@ -361,14 +400,29 @@ mod tests {
         // Use a lazy pool — the action lookup fails before the SQL fires
         let pool = sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
         let r = BulkActionRegistry::new();
-        let err = r.run("nonexistent", "posts", &[1], &pool).await.unwrap_err();
+        let err = r
+            .run("nonexistent", "posts", &[1], &pool)
+            .await
+            .unwrap_err();
         assert!(matches!(err, BulkActionError::UnknownAction(_)));
     }
 
     #[test]
     fn builtin_action_names() {
         assert_eq!(BulkDeleteAction.name(), "delete_selected");
-        assert_eq!(BulkSoftDeleteAction { column: "deleted_at" }.name(), "soft_delete_selected");
-        assert_eq!(BulkRestoreAction { column: "deleted_at" }.name(), "restore_selected");
+        assert_eq!(
+            BulkSoftDeleteAction {
+                column: "deleted_at"
+            }
+            .name(),
+            "soft_delete_selected"
+        );
+        assert_eq!(
+            BulkRestoreAction {
+                column: "deleted_at"
+            }
+            .name(),
+            "restore_selected"
+        );
     }
 }

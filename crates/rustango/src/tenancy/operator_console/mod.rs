@@ -40,8 +40,12 @@
 
 pub(crate) mod session;
 
+use crate::core::Column as _;
+use crate::sql::sqlx::PgPool;
+use crate::sql::Fetcher;
+use crate::storage::BoxedStorage;
 use axum::body::Body;
-use axum::extract::{Form, Query, State};
+use axum::extract::{Form, Multipart, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Response, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect};
@@ -49,9 +53,6 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use cookie::time::Duration as CookieDuration;
 use cookie::{Cookie, SameSite};
-use crate::core::Column as _;
-use crate::sql::sqlx::PgPool;
-use crate::sql::Fetcher;
 use serde::Deserialize;
 use std::sync::Arc;
 use tera::{Context, Tera};
@@ -60,6 +61,7 @@ pub use session::{SessionPayload, SessionSecret, SessionSecretError};
 use session::{COOKIE_NAME, SESSION_TTL_SECS};
 
 use super::auth;
+use super::branding::{self, BrandAssetKind};
 use super::pools::TenantPools;
 
 const RUSTANGO_PNG: &[u8] = include_bytes!("../static/rustango.png");
@@ -76,6 +78,56 @@ struct ConsoleState {
     pools: Option<Arc<TenantPools>>,
     session_secret: Arc<SessionSecret>,
     tera: Arc<Tera>,
+    /// Storage backend for per-tenant brand assets (logo, favicon).
+    /// Defaults to `LocalStorage` rooted at `./var/brand` — override
+    /// via `RUSTANGO_BRAND_STORAGE_DIR`.
+    brand_storage: BoxedStorage,
+    /// Operator console's own (non-per-tenant) brand. Read at boot
+    /// from env, stamped into every render context so a deployment
+    /// can rebrand the console without touching templates.
+    op_brand: Arc<OpBrand>,
+}
+
+/// Operator console branding read from env at boot. Static for the
+/// lifetime of the process; per-tenant branding lives on `Org`.
+#[derive(Debug, Clone)]
+struct OpBrand {
+    name: String,
+    tagline: Option<String>,
+    logo_url: String,
+    primary_color: Option<String>,
+    theme_mode: String,
+}
+
+impl OpBrand {
+    /// Read the operator console branding from env. Every value has
+    /// a sensible default so this never fails — at worst the
+    /// console renders with the rustango defaults.
+    fn from_env() -> Self {
+        let name =
+            std::env::var("RUSTANGO_OPERATOR_BRAND_NAME").unwrap_or_else(|_| "rustango".to_owned());
+        let tagline = std::env::var("RUSTANGO_OPERATOR_TAGLINE")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let logo_url = std::env::var("RUSTANGO_OPERATOR_LOGO_URL")
+            .unwrap_or_else(|_| "/__static__/rustango.png".to_owned());
+        let primary_color = std::env::var("RUSTANGO_OPERATOR_PRIMARY_COLOR")
+            .ok()
+            .and_then(|v| branding::validate_hex_color(&v));
+        let theme_mode = std::env::var("RUSTANGO_OPERATOR_THEME_MODE")
+            .ok()
+            .as_deref()
+            .and_then(branding::validate_theme_mode)
+            .unwrap_or("auto")
+            .to_owned();
+        Self {
+            name,
+            tagline,
+            logo_url,
+            primary_color,
+            theme_mode,
+        }
+    }
 }
 
 /// Build the read-only operator-console `axum::Router`. Mount at the
@@ -87,9 +139,15 @@ struct ConsoleState {
 /// active flag, `database_url`) live from the UI — that variant
 /// needs the [`TenantPools`] handle to evict the cached pool when
 /// `database_url` rotates.
+///
+/// Brand assets (logo / favicon uploads) go to the default
+/// [`branding::default_brand_storage`] (a `LocalStorage` rooted at
+/// `./var/brand` or `RUSTANGO_BRAND_STORAGE_DIR`). To plug in S3 /
+/// R2 / B2 / MinIO / a CDN-fronted bucket, use
+/// [`router_with_brand_storage`].
 #[must_use]
 pub fn router(registry: PgPool, secret: SessionSecret) -> Router {
-    router_inner(registry, None, secret)
+    router_inner(registry, None, secret, branding::default_brand_storage())
 }
 
 /// Like [`router`] but also exposes `GET`/`POST /orgs/{slug}/edit`,
@@ -103,22 +161,70 @@ pub fn router_with_pools(
     pools: Arc<TenantPools>,
     secret: SessionSecret,
 ) -> Router {
-    router_inner(registry, Some(pools), secret)
+    router_inner(
+        registry,
+        Some(pools),
+        secret,
+        branding::default_brand_storage(),
+    )
+}
+
+/// Full-control entry point — takes any [`BoxedStorage`] for brand
+/// asset storage. Use this with `S3Storage` (AWS / R2 / B2 / MinIO),
+/// a `LocalStorage` configured with `with_base_url` for CDN
+/// pre-fronting, or any user-supplied `Storage` impl. When the
+/// configured backend exposes URLs via `Storage::url`, rendered
+/// `<img src>` tags point straight at it — the framework's
+/// `/__brand__/{slug}/{filename}` static handler is only used as
+/// the fallback for backends that return `None` from `url()` (the
+/// default `LocalStorage` without `with_base_url`).
+///
+/// `pools = Some(...)` mounts the org-edit + branding upload
+/// routes; `None` keeps the console read-only (matches `router`).
+#[must_use]
+pub fn router_with_brand_storage(
+    registry: PgPool,
+    pools: Option<Arc<TenantPools>>,
+    secret: SessionSecret,
+    brand_storage: BoxedStorage,
+) -> Router {
+    router_inner(registry, pools, secret, brand_storage)
 }
 
 fn router_inner(
     registry: PgPool,
     pools: Option<Arc<TenantPools>>,
     secret: SessionSecret,
+    brand_storage: BoxedStorage,
 ) -> Router {
     let mut tera = Tera::default();
     tera.add_raw_templates([
-        ("op_layout.html", include_str!("../templates/op_layout.html")),
+        (
+            "_theme_tokens.html",
+            include_str!("../../styles/theme_tokens.html"),
+        ),
+        (
+            "_op_styles.html",
+            include_str!("../templates/_op_styles.html"),
+        ),
+        (
+            "op_layout.html",
+            include_str!("../templates/op_layout.html"),
+        ),
         ("op_login.html", include_str!("../templates/op_login.html")),
-        ("op_welcome.html", include_str!("../templates/op_welcome.html")),
-        ("op_operators.html", include_str!("../templates/op_operators.html")),
+        (
+            "op_welcome.html",
+            include_str!("../templates/op_welcome.html"),
+        ),
+        (
+            "op_operators.html",
+            include_str!("../templates/op_operators.html"),
+        ),
         ("op_orgs.html", include_str!("../templates/op_orgs.html")),
-        ("op_orgs_edit.html", include_str!("../templates/op_orgs_edit.html")),
+        (
+            "op_orgs_edit.html",
+            include_str!("../templates/op_orgs_edit.html"),
+        ),
     ])
     .expect("operator-console templates parse");
     let edit_enabled = pools.is_some();
@@ -127,13 +233,18 @@ fn router_inner(
         pools,
         session_secret: Arc::new(secret),
         tera: Arc::new(tera),
+        brand_storage,
+        op_brand: Arc::new(OpBrand::from_env()),
     };
 
-    // Public routes (login + static asset) skip the auth gate.
+    // Public routes (login + static asset + brand asset) skip the
+    // auth gate. Brand assets are public images and need to be
+    // reachable from un-authenticated tenant pages.
     let public = Router::new()
         .route("/login", get(login_form).post(login_submit))
         .route("/logout", post(logout))
-        .route("/__static__/rustango.png", get(static_rustango_png));
+        .route("/__static__/rustango.png", get(static_rustango_png))
+        .route("/__brand__/{slug}/{filename}", get(serve_brand_asset));
 
     // Authenticated routes: the middleware injects an `Extension<auth::Operator>`.
     let mut private = Router::new()
@@ -142,7 +253,11 @@ fn router_inner(
         .route("/orgs", get(orgs_list));
     if edit_enabled {
         private = private
-            .route("/orgs/{slug}/edit", get(org_edit_form).post(org_edit_submit));
+            .route(
+                "/orgs/{slug}/edit",
+                get(org_edit_form).post(org_edit_submit),
+            )
+            .route("/orgs/{slug}/edit/branding", post(org_edit_branding));
     }
     let private = private.route_layer(middleware::from_fn_with_state(
         state.clone(),
@@ -150,6 +265,20 @@ fn router_inner(
     ));
 
     public.merge(private).with_state(state)
+}
+
+/// Stamp the operator-console branding fields onto every render
+/// context. Centralizing the keys keeps op_layout.html and op_login.html
+/// in sync without each handler remembering the four template names.
+fn inject_op_brand(ctx: &mut Context, brand: &OpBrand) {
+    ctx.insert("brand_name", &brand.name);
+    ctx.insert("brand_tagline", &brand.tagline);
+    ctx.insert("brand_logo_url", &brand.logo_url);
+    ctx.insert("theme_mode", &brand.theme_mode);
+    ctx.insert(
+        "brand_css",
+        &branding::build_op_brand_css(brand.primary_color.as_deref()),
+    );
 }
 
 // ----------------------------- session middleware
@@ -213,6 +342,7 @@ async fn login_form(
     Query(q): Query<LoginQuery>,
 ) -> Html<String> {
     let mut ctx = Context::new();
+    inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("next", &q.next.unwrap_or_else(|| "/".into()));
     ctx.insert("error", &q.error);
     Html(state.tera.render("op_login.html", &ctx).unwrap_or_default())
@@ -231,26 +361,21 @@ async fn login_submit(
     Form(form): Form<LoginSubmit>,
 ) -> Response<Body> {
     let next = sanitize_next(form.next.as_deref());
-    let principal = match auth::authenticate_operator(
-        &state.registry,
-        &form.username,
-        &form.password,
-    )
-    .await
-    {
-        Ok(Some(op)) => op,
-        Ok(None) => {
-            return Redirect::to(&format!(
-                "/login?error=Invalid+credentials&next={}",
-                urlencoding_lite(&next)
-            ))
-            .into_response();
-        }
-        Err(e) => {
-            tracing::warn!(target: "crate::tenancy::operator_console", error = %e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
-        }
-    };
+    let principal =
+        match auth::authenticate_operator(&state.registry, &form.username, &form.password).await {
+            Ok(Some(op)) => op,
+            Ok(None) => {
+                return Redirect::to(&format!(
+                    "/login?error=Invalid+credentials&next={}",
+                    urlencoding_lite(&next)
+                ))
+                .into_response();
+            }
+            Err(e) => {
+                tracing::warn!(target: "crate::tenancy::operator_console", error = %e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
+            }
+        };
     let oid = principal.id.get().copied().unwrap_or_default();
     let payload = SessionPayload::new(oid, SESSION_TTL_SECS);
     let cookie_value = session::encode(&state.session_secret, &payload);
@@ -290,6 +415,7 @@ async fn welcome(
     Extension(op): Extension<auth::Operator>,
 ) -> Html<String> {
     let mut ctx = Context::new();
+    inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("section", "home");
     ctx.insert("operator_username", &op.username);
     Html(
@@ -320,6 +446,7 @@ async fn operators_list(
         })
         .collect();
     let mut ctx = Context::new();
+    inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("section", "operators");
     ctx.insert("operator_username", &op.username);
     ctx.insert("operators", &view);
@@ -354,6 +481,7 @@ async fn orgs_list(
         })
         .collect();
     let mut ctx = Context::new();
+    inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("section", "orgs");
     ctx.insert("operator_username", &op.username);
     ctx.insert("orgs", &view);
@@ -385,12 +513,17 @@ async fn orgs_list(
 //   cached pool with new credentials.
 
 /// Names of `Org` fields that are display-only on the edit form.
+/// `logo_path` / `favicon_path` are populated by the multipart
+/// upload sub-form (`POST /orgs/{slug}/edit/branding`) — never via
+/// the regular config edit, so they live in the locked section.
 const LOCKED_ORG_FIELDS: &[&str] = &[
     "id",
     "slug",
     "storage_mode",
     "schema_name",
     "created_at",
+    "logo_path",
+    "favicon_path",
 ];
 
 /// `database_url` is editable but special: empty submit means "keep
@@ -413,6 +546,7 @@ async fn org_edit_form(
 ) -> Response<Body> {
     use crate::admin::render;
     use crate::core::Model as _;
+    use crate::sql::sqlx::Row;
 
     // Fetch the row via the same select_one_row admin uses, so the
     // `render_value_for_input` calls below see the same column
@@ -474,12 +608,23 @@ async fn org_edit_form(
         }));
     }
 
+    // Pull current logo / favicon paths off the row so the template
+    // can render a small preview next to the upload control.
+    let logo_path: Option<String> = row.try_get("logo_path").ok().flatten();
+    let favicon_path: Option<String> = row.try_get("favicon_path").ok().flatten();
+    let logo_url = branding::brand_asset_url(&slug, logo_path.as_deref(), &state.brand_storage);
+    let favicon_url =
+        branding::brand_asset_url(&slug, favicon_path.as_deref(), &state.brand_storage);
+
     let mut ctx = Context::new();
+    inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("section", "orgs");
     ctx.insert("operator_username", &op.username);
     ctx.insert("slug", &slug);
     ctx.insert("editable_rows", &editable_rows);
     ctx.insert("locked_rows", &locked_rows);
+    ctx.insert("logo_url", &logo_url);
+    ctx.insert("favicon_url", &favicon_url);
     ctx.insert("error", &q.error);
     ctx.insert("notice", &q.notice);
     Html(
@@ -534,11 +679,7 @@ async fn org_edit_submit(
     // which returns `false` for missing bool fields. Nothing to do
     // here — just trust the parser.
 
-    let collected = match crate::forms::collect_values(
-        super::Org::SCHEMA,
-        &form,
-        &skip,
-    ) {
+    let collected = match crate::forms::collect_values(super::Org::SCHEMA, &form, &skip) {
         Ok(v) => v,
         Err(e) => return redirect_with_error(&slug, &e.to_string()),
     };
@@ -555,7 +696,9 @@ async fn org_edit_submit(
     .await
     {
         Ok(Some(v)) => v,
-        Ok(None) => return (StatusCode::NOT_FOUND, format!("org `{slug}` not found")).into_response(),
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, format!("org `{slug}` not found")).into_response()
+        }
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
     };
     let new_database_url = collected.iter().find_map(|(c, v)| {
@@ -623,9 +766,17 @@ fn redirect_with_error(slug: &str, msg: &str) -> Response<Body> {
 /// operator console doesn't reach across module boundaries for
 /// admin-internal helpers.
 fn bind_sql_value<'a>(
-    q: crate::sql::sqlx::query::Query<'a, crate::sql::sqlx::Postgres, crate::sql::sqlx::postgres::PgArguments>,
+    q: crate::sql::sqlx::query::Query<
+        'a,
+        crate::sql::sqlx::Postgres,
+        crate::sql::sqlx::postgres::PgArguments,
+    >,
     v: &crate::core::SqlValue,
-) -> crate::sql::sqlx::query::Query<'a, crate::sql::sqlx::Postgres, crate::sql::sqlx::postgres::PgArguments> {
+) -> crate::sql::sqlx::query::Query<
+    'a,
+    crate::sql::sqlx::Postgres,
+    crate::sql::sqlx::postgres::PgArguments,
+> {
     use crate::core::SqlValue;
     match v {
         SqlValue::Null => q.bind(None::<i64>),
@@ -641,6 +792,126 @@ fn bind_sql_value<'a>(
         SqlValue::Uuid(v) => q.bind(*v),
         SqlValue::Json(v) => q.bind(crate::sql::sqlx::types::Json(v.clone())),
         SqlValue::List(_) => panic!("List not expected in op_orgs UPDATE"),
+    }
+}
+
+// ----------------------------- /orgs/{slug}/edit/branding (multipart)
+//
+// The main `/orgs/{slug}/edit` form is `application/x-www-form-urlencoded`
+// and posts the org's scalar config. Asset uploads need multipart, so
+// they ride a dedicated sub-form. Each part is independently validated
+// (content-type + size) by `branding::save_brand_asset`. After the
+// file lands on disk we update the matching `Org.{logo,favicon}_path`
+// column so subsequent renders pick it up.
+async fn org_edit_branding(
+    State(state): State<ConsoleState>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+    Extension(_op): Extension<auth::Operator>,
+    mut mp: Multipart,
+) -> Response<Body> {
+    let mut updates: Vec<(&'static str, Option<String>)> = Vec::new();
+    while let Ok(Some(field)) = mp.next_field().await {
+        let name = field.name().map(str::to_owned);
+        let kind = match name.as_deref() {
+            Some("logo") => BrandAssetKind::Logo,
+            Some("favicon") => BrandAssetKind::Favicon,
+            _ => continue,
+        };
+        let content_type = field.content_type().map(str::to_owned);
+        // An empty file part means "user didn't choose a file" — skip
+        // without touching the column. Browsers send the part with
+        // a filename of "" and zero bytes when the input is empty.
+        let bytes = match field.bytes().await {
+            Ok(b) if b.is_empty() => continue,
+            Ok(b) => b.to_vec(),
+            Err(e) => return redirect_with_error(&slug, &format!("multipart: {e}")),
+        };
+        match branding::save_brand_asset(
+            &slug,
+            kind,
+            &bytes,
+            content_type.as_deref(),
+            &state.brand_storage,
+        )
+        .await
+        {
+            Ok(filename) => {
+                let column = match kind {
+                    BrandAssetKind::Logo => "logo_path",
+                    BrandAssetKind::Favicon => "favicon_path",
+                };
+                updates.push((column, Some(filename)));
+            }
+            Err(branding::BrandError::TooLarge { actual, max }) => {
+                return redirect_with_error(
+                    &slug,
+                    &format!("file too large: {actual} bytes (max {max})"),
+                );
+            }
+            Err(branding::BrandError::UnsupportedContentType(ct)) => {
+                return redirect_with_error(
+                    &slug,
+                    &format!("unsupported file type `{ct}` — use PNG/JPEG/WebP/ICO"),
+                );
+            }
+            Err(e) => return redirect_with_error(&slug, &format!("upload failed: {e}")),
+        }
+    }
+    if updates.is_empty() {
+        return redirect_with_error(&slug, "no file chosen");
+    }
+    // Apply all updates in one statement.
+    use crate::core::Model as _;
+    use std::fmt::Write as _;
+    let mut sql = format!(r#"UPDATE "{}" SET "#, super::Org::SCHEMA.table);
+    for (i, (col, _)) in updates.iter().enumerate() {
+        if i > 0 {
+            sql.push_str(", ");
+        }
+        let _ = write!(sql, r#""{col}" = ${}"#, i + 1);
+    }
+    let _ = write!(sql, r#" WHERE "slug" = ${}"#, updates.len() + 1);
+    let mut q = crate::sql::sqlx::query(&sql);
+    for (_, v) in &updates {
+        q = q.bind(v.clone());
+    }
+    q = q.bind(&slug);
+    if let Err(e) = q.execute(&state.registry).await {
+        return redirect_with_error(&slug, &format!("update failed: {e}"));
+    }
+    let notice = format!("uploaded {} brand asset(s) for `{slug}`", updates.len());
+    Redirect::to(&format!(
+        "/orgs/{}/edit?notice={}",
+        urlencoding_lite(&slug),
+        urlencoding_lite(&notice),
+    ))
+    .into_response()
+}
+
+/// `GET /__brand__/{slug}/{filename}` — public asset serve. Validates
+/// the slug + filename via the branding module, reads bytes from the
+/// brand storage, returns with the correct `Content-Type` and a
+/// short cache TTL (operators may iterate during onboarding).
+async fn serve_brand_asset(
+    State(state): State<ConsoleState>,
+    axum::extract::Path((slug, filename)): axum::extract::Path<(String, String)>,
+) -> Response<Body> {
+    match branding::load_brand_asset(&slug, &filename, &state.brand_storage).await {
+        Ok((bytes, ct)) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, ct)
+            .header(header::CACHE_CONTROL, "public, max-age=300")
+            .body(Body::from(bytes))
+            .expect("response builds"),
+        Err(
+            branding::BrandError::NotFound
+            | branding::BrandError::InvalidSlug
+            | branding::BrandError::InvalidFilename,
+        ) => (StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(e) => {
+            tracing::warn!(target: "crate::tenancy::operator_console", error = %e, "brand asset");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
     }
 }
 

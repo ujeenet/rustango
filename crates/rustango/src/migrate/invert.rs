@@ -129,13 +129,15 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
             from: *to,
             to: *from,
         })),
-        Operation::Schema(SchemaChange::AlterColumnUnique { table, column, unique }) => {
-            Ok(Operation::Schema(SchemaChange::AlterColumnUnique {
-                table: table.clone(),
-                column: column.clone(),
-                unique: !unique,
-            }))
-        }
+        Operation::Schema(SchemaChange::AlterColumnUnique {
+            table,
+            column,
+            unique,
+        }) => Ok(Operation::Schema(SchemaChange::AlterColumnUnique {
+            table: table.clone(),
+            column: column.clone(),
+            unique: !unique,
+        })),
         Operation::Schema(SchemaChange::RenameTable { old_name, new_name }) => {
             Ok(Operation::Schema(SchemaChange::RenameTable {
                 old_name: new_name.clone(),
@@ -170,7 +172,9 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
             }))
         }
         Operation::Schema(SchemaChange::CreateIndex { name, .. }) => {
-            Ok(Operation::Schema(SchemaChange::DropIndex { name: name.clone() }))
+            Ok(Operation::Schema(SchemaChange::DropIndex {
+                name: name.clone(),
+            }))
         }
         Operation::Schema(SchemaChange::DropIndex { name }) => {
             let idx = prev.index(name).ok_or_else(|| {
@@ -191,7 +195,9 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
             src_col: _,
             dst_table: _,
             dst_col: _,
-        }) => Ok(Operation::Schema(SchemaChange::DropM2MTable { through: through.clone() })),
+        }) => Ok(Operation::Schema(SchemaChange::DropM2MTable {
+            through: through.clone(),
+        })),
         Operation::Schema(SchemaChange::DropM2MTable { through }) => {
             if prev.m2m_table(through).is_none() {
                 return Err(MigrateError::Validation(format!(

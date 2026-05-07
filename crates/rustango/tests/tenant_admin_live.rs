@@ -12,11 +12,11 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use rustango::sql::{sqlx, Auto};
-use rustango::{migrate as rmig, Model};
 use rustango::tenancy::{
     admin::TenantAdminBuilder, ChainResolver, HeaderResolver, Org, StorageMode, SubdomainResolver,
     TenantPools,
 };
+use rustango::{migrate as rmig, Model};
 use tower::ServiceExt;
 
 static UNIQ: AtomicU64 = AtomicU64::new(0);
@@ -88,6 +88,12 @@ async fn database_mode_admin_serves_tenant_data() {
         path_prefix: None,
         active: true,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     org.insert(&pool).await.unwrap();
 
@@ -134,10 +140,7 @@ async fn no_tenant_match_returns_404() {
     let app = TenantAdminBuilder::new(pools, url, HeaderResolver::default()).build();
 
     // No X-Org header → resolver returns None → 404.
-    let req = Request::builder()
-        .uri("/")
-        .body(Body::empty())
-        .unwrap();
+    let req = Request::builder().uri("/").body(Body::empty()).unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
@@ -233,6 +236,12 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
         path_prefix: None,
         active: true,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     acme_org.insert(&pool).await.unwrap();
 
@@ -248,6 +257,12 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
         path_prefix: None,
         active: true,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     globex_org.insert(&pool).await.unwrap();
 
@@ -265,7 +280,10 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_text(resp).await;
-    assert!(body.contains("acme_only_widget"), "acme widget missing: {body}");
+    assert!(
+        body.contains("acme_only_widget"),
+        "acme widget missing: {body}"
+    );
     assert!(
         !body.contains("globex_only_widget"),
         "globex data leaked into acme view: {body}"
@@ -280,7 +298,10 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_text(resp).await;
-    assert!(body.contains("globex_only_widget"), "globex widget missing: {body}");
+    assert!(
+        body.contains("globex_only_widget"),
+        "globex widget missing: {body}"
+    );
     assert!(
         !body.contains("acme_only_widget"),
         "acme data leaked into globex view: {body}"
@@ -314,6 +335,12 @@ async fn subdomain_chain_resolves_via_host_header() {
         path_prefix: None,
         active: true,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     org.insert(&pool).await.unwrap();
 

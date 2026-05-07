@@ -133,20 +133,35 @@ mod tests {
     fn sign_and_verify_hex_with_prefix() {
         let sig = sign(SignatureFormat::HexSha256WithPrefix, SECRET, BODY);
         assert!(sig.starts_with("sha256="));
-        assert!(verify_signature(SignatureFormat::HexSha256WithPrefix, SECRET, BODY, &sig));
+        assert!(verify_signature(
+            SignatureFormat::HexSha256WithPrefix,
+            SECRET,
+            BODY,
+            &sig
+        ));
     }
 
     #[test]
     fn sign_and_verify_hex_no_prefix() {
         let sig = sign(SignatureFormat::HexSha256, SECRET, BODY);
         assert_eq!(sig.len(), 64); // 32 bytes hex
-        assert!(verify_signature(SignatureFormat::HexSha256, SECRET, BODY, &sig));
+        assert!(verify_signature(
+            SignatureFormat::HexSha256,
+            SECRET,
+            BODY,
+            &sig
+        ));
     }
 
     #[test]
     fn sign_and_verify_base64() {
         let sig = sign(SignatureFormat::Base64Sha256, SECRET, BODY);
-        assert!(verify_signature(SignatureFormat::Base64Sha256, SECRET, BODY, &sig));
+        assert!(verify_signature(
+            SignatureFormat::Base64Sha256,
+            SECRET,
+            BODY,
+            &sig
+        ));
     }
 
     #[test]
@@ -194,7 +209,12 @@ mod tests {
 
     #[test]
     fn empty_signature_fails() {
-        assert!(!verify_signature(SignatureFormat::HexSha256, SECRET, BODY, ""));
+        assert!(!verify_signature(
+            SignatureFormat::HexSha256,
+            SECRET,
+            BODY,
+            ""
+        ));
     }
 
     #[test]
@@ -219,6 +239,11 @@ mod tests {
     fn cross_format_does_not_verify() {
         // A hex signature should NOT verify against the base64 format
         let hex_sig = sign(SignatureFormat::HexSha256, SECRET, BODY);
-        assert!(!verify_signature(SignatureFormat::Base64Sha256, SECRET, BODY, &hex_sig));
+        assert!(!verify_signature(
+            SignatureFormat::Base64Sha256,
+            SECRET,
+            BODY,
+            &hex_sig
+        ));
     }
 }

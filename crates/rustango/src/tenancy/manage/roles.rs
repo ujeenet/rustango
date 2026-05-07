@@ -31,9 +31,7 @@ pub(super) async fn create_role_cmd<W: Write + Send>(
                 writeln!(w, "create-role <slug> <name> [--description <s>]")?;
                 return Ok(());
             }
-            other => {
-                return Err(TenancyError::Validation(format!("unknown flag `{other}`")))
-            }
+            other => return Err(TenancyError::Validation(format!("unknown flag `{other}`"))),
         }
     }
     let pool = tenant_pool_for_slug(pools, &slug).await?;
@@ -115,10 +113,16 @@ async fn role_membership_cmd<W: Write + Send>(
 
     if assign {
         permissions::assign_role(user_id, role_id, &pool).await?;
-        writeln!(w, "assigned role `{role_name}` to `{username}` on tenant `{slug}`")?;
+        writeln!(
+            w,
+            "assigned role `{role_name}` to `{username}` on tenant `{slug}`"
+        )?;
     } else {
         permissions::remove_role(user_id, role_id, &pool).await?;
-        writeln!(w, "removed role `{role_name}` from `{username}` on tenant `{slug}`")?;
+        writeln!(
+            w,
+            "removed role `{role_name}` from `{username}` on tenant `{slug}`"
+        )?;
     }
     Ok(())
 }
@@ -136,18 +140,26 @@ pub(super) async fn grant_perm_cmd<W: Write + Send>(
     let codename = next_value(&mut iter, "<codename>")?;
     let mut to_role = false;
     while let Some(flag) = iter.next() {
-        if flag == "--role" { to_role = true; }
+        if flag == "--role" {
+            to_role = true;
+        }
     }
 
     let pool = tenant_pool_for_slug(pools, &slug).await?;
     if to_role {
         let role_id = role_id_by_name(&target, &pool).await?;
         permissions::grant_role_perm(role_id, &codename, &pool).await?;
-        writeln!(w, "granted `{codename}` to role `{target}` on tenant `{slug}`")?;
+        writeln!(
+            w,
+            "granted `{codename}` to role `{target}` on tenant `{slug}`"
+        )?;
     } else {
         let user_id = user_id_by_username(&target, &pool).await?;
         permissions::set_user_perm(user_id, &codename, true, &pool).await?;
-        writeln!(w, "granted `{codename}` to user `{target}` on tenant `{slug}`")?;
+        writeln!(
+            w,
+            "granted `{codename}` to user `{target}` on tenant `{slug}`"
+        )?;
     }
     Ok(())
 }
@@ -163,18 +175,26 @@ pub(super) async fn revoke_perm_cmd<W: Write + Send>(
     let codename = next_value(&mut iter, "<codename>")?;
     let mut to_role = false;
     while let Some(flag) = iter.next() {
-        if flag == "--role" { to_role = true; }
+        if flag == "--role" {
+            to_role = true;
+        }
     }
 
     let pool = tenant_pool_for_slug(pools, &slug).await?;
     if to_role {
         let role_id = role_id_by_name(&target, &pool).await?;
         permissions::revoke_role_perm(role_id, &codename, &pool).await?;
-        writeln!(w, "revoked `{codename}` from role `{target}` on tenant `{slug}`")?;
+        writeln!(
+            w,
+            "revoked `{codename}` from role `{target}` on tenant `{slug}`"
+        )?;
     } else {
         let user_id = user_id_by_username(&target, &pool).await?;
         permissions::set_user_perm(user_id, &codename, false, &pool).await?;
-        writeln!(w, "denied `{codename}` for user `{target}` on tenant `{slug}`")?;
+        writeln!(
+            w,
+            "denied `{codename}` for user `{target}` on tenant `{slug}`"
+        )?;
     }
     Ok(())
 }
@@ -197,11 +217,16 @@ pub(super) async fn create_api_key_cmd<W: Write + Send>(
             "--expires-days" => {
                 let raw = next_value(&mut iter, "--expires-days")?;
                 expires_days = Some(raw.parse::<i64>().map_err(|_| {
-                    TenancyError::Validation(format!("--expires-days expects an integer, got `{raw}`"))
+                    TenancyError::Validation(format!(
+                        "--expires-days expects an integer, got `{raw}`"
+                    ))
                 })?);
             }
             "--help" | "-h" => {
-                writeln!(w, "create-api-key <slug> <username> [--label <s>] [--expires-days <N>]")?;
+                writeln!(
+                    w,
+                    "create-api-key <slug> <username> [--label <s>] [--expires-days <N>]"
+                )?;
                 return Ok(());
             }
             other => return Err(TenancyError::Validation(format!("unknown flag `{other}`"))),
@@ -229,9 +254,10 @@ async fn tenant_pool_for_slug(pools: &TenantPools, slug: &str) -> Result<PgPool,
         .where_(Org::slug.eq(slug.to_owned()))
         .fetch(pools.registry())
         .await?;
-    let org = orgs.into_iter().next().ok_or_else(|| {
-        TenancyError::Validation(format!("tenant `{slug}` not found"))
-    })?;
+    let org = orgs
+        .into_iter()
+        .next()
+        .ok_or_else(|| TenancyError::Validation(format!("tenant `{slug}` not found")))?;
     pools.scoped_pool(&org).await
 }
 

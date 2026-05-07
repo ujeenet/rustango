@@ -1412,9 +1412,9 @@ async fn concurrent_migrate_calls_serialize_via_advisory_lock() {
     for _ in 0..n_tasks {
         let pool = pool.clone();
         let dir = dir.clone();
-        handles.push(tokio::spawn(async move {
-            migrate::migrate(&pool, &dir).await
-        }));
+        handles.push(tokio::spawn(
+            async move { migrate::migrate(&pool, &dir).await },
+        ));
     }
 
     let mut total_applied = 0_usize;

@@ -24,13 +24,10 @@ use sqlx::PgPool;
 async fn seed_media_rows_for_inspection() {
     let url = std::env::var("DATABASE_URL").expect("set DATABASE_URL");
     let key = std::env::var("RUSTANGO_S3_TEST_KEY").expect("set RUSTANGO_S3_TEST_KEY");
-    let secret =
-        std::env::var("RUSTANGO_S3_TEST_SECRET").expect("set RUSTANGO_S3_TEST_SECRET");
-    let bucket =
-        std::env::var("RUSTANGO_S3_TEST_BUCKET").expect("set RUSTANGO_S3_TEST_BUCKET");
+    let secret = std::env::var("RUSTANGO_S3_TEST_SECRET").expect("set RUSTANGO_S3_TEST_SECRET");
+    let bucket = std::env::var("RUSTANGO_S3_TEST_BUCKET").expect("set RUSTANGO_S3_TEST_BUCKET");
     let endpoint = std::env::var("RUSTANGO_S3_TEST_ENDPOINT").ok();
-    let region =
-        std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
+    let region = std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
 
     let pool = PgPool::connect(&url).await.expect("connect");
     Media::ensure_table(&pool).await.expect("ensure_table");
@@ -53,8 +50,16 @@ async fn seed_media_rows_for_inspection() {
 
     // Two server-side uploads.
     for (name, body, mime) in [
-        ("alice.png", &b"\x89PNG\r\n\x1a\n-alice-png-bytes-"[..], "image/png"),
-        ("bob.jpg", &b"\xff\xd8\xff\xe0-jpeg-bob-bytes-"[..], "image/jpeg"),
+        (
+            "alice.png",
+            &b"\x89PNG\r\n\x1a\n-alice-png-bytes-"[..],
+            "image/png",
+        ),
+        (
+            "bob.jpg",
+            &b"\xff\xd8\xff\xe0-jpeg-bob-bytes-"[..],
+            "image/jpeg",
+        ),
     ] {
         let m = manager
             .save_bytes(SaveOpts {
@@ -124,5 +129,7 @@ async fn seed_media_rows_for_inspection() {
     println!();
     println!("Postgres rows:");
     println!("  psql {url} \\");
-    println!("    -c \"SELECT id, disk, storage_key, mime, size_bytes, status FROM rustango_media;\"");
+    println!(
+        "    -c \"SELECT id, disk, storage_key, mime, size_bytes, status FROM rustango_media;\""
+    );
 }

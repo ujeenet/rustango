@@ -176,7 +176,8 @@ fn insert_validate_accepts_in_bounds_values() {
             SqlValue::I64(0),
             SqlValue::Bool(true),
         ],
-        returning: Vec::new(), on_conflict: None,
+        returning: Vec::new(),
+        on_conflict: None,
     };
     assert!(q.validate().is_ok());
 }
@@ -187,7 +188,8 @@ fn insert_validate_rejects_too_long_string() {
         model: User::SCHEMA,
         columns: vec!["name"],
         values: vec![SqlValue::String("a".repeat(50))],
-        returning: Vec::new(), on_conflict: None,
+        returning: Vec::new(),
+        on_conflict: None,
     };
     let err = q.validate().unwrap_err();
     assert!(matches!(err, QueryError::MaxLengthExceeded { max: 8, .. }));
@@ -199,7 +201,8 @@ fn insert_validate_rejects_out_of_range_int() {
         model: User::SCHEMA,
         columns: vec!["age"],
         values: vec![SqlValue::I32(200)],
-        returning: Vec::new(), on_conflict: None,
+        returning: Vec::new(),
+        on_conflict: None,
     };
     let err = q.validate().unwrap_err();
     assert!(matches!(err, QueryError::OutOfRange { value: 200, .. }));
@@ -211,7 +214,8 @@ fn insert_validate_reports_unknown_column() {
         model: User::SCHEMA,
         columns: vec!["nope"],
         values: vec![SqlValue::I32(1)],
-        returning: Vec::new(), on_conflict: None,
+        returning: Vec::new(),
+        on_conflict: None,
     };
     let err = q.validate().unwrap_err();
     assert_eq!(

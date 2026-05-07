@@ -20,8 +20,8 @@
 
 {% if has_searchable %}
 <form method="get" action="/__admin/{{ model.table }}" class="search">
-  <input type="search" name="q" value="{{ q }}" placeholder="search&hellip;">
-  <button type="submit">go</button>
+  <input type="search" name="q" value="{{ q }}" placeholder="Search&hellip;">
+  <button type="submit">Go</button>
   {% for f in active_filters %}
     <input type="hidden" name="{{ f.key }}" value="{{ f.value }}">
   {% endfor %}
@@ -44,7 +44,7 @@
   <div class="action-bar">
     <label>Action:
       <select name="action">
-        <option value="">— select —</option>
+        <option value="">— Select —</option>
         {% for a in actions %}
         <option value="{{ a.name }}">{{ a.label }}</option>
         {% endfor %}
@@ -72,7 +72,7 @@
         <td class="checkbox-col">{% if row.pk %}<input type="checkbox" name="_selected" value="{{ row.pk }}">{% endif %}</td>
         {% endif %}
         {% for cell in row.cells %}<td>{{ cell | safe }}</td>{% endfor %}
-        <td>{% if row.pk %}<a href="/__admin/{{ model.table }}/{{ row.pk }}">view</a>{% endif %}</td>
+        <td>{% if row.pk %}<a href="/__admin/{{ model.table }}/{{ row.pk }}">View</a>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>
@@ -87,7 +87,7 @@
   {% else %}
     <span class="muted">&larr; prev</span>
   {% endif %}
-  &middot; page {{ page }} of {{ last_page }} &middot;
+  &middot; Page {{ page }} of {{ last_page }} &middot;
   {% if page < last_page %}
     <a href="/__admin/{{ model.table }}?page={{ page + 1 }}{{ pager_suffix | safe }}">next &rarr;</a>
   {% else %}

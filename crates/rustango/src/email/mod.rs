@@ -220,7 +220,9 @@ pub struct InMemoryMailer {
 impl InMemoryMailer {
     #[must_use]
     pub fn new() -> Self {
-        Self { sent: Mutex::new(Vec::new()) }
+        Self {
+            sent: Mutex::new(Vec::new()),
+        }
     }
 
     /// Snapshot all emails sent so far. Doesn't clear the buffer.
@@ -245,7 +247,10 @@ impl InMemoryMailer {
 impl Mailer for InMemoryMailer {
     async fn send(&self, email: &Email) -> Result<(), MailError> {
         email.validate()?;
-        self.sent.lock().expect("sent mutex poisoned").push(email.clone());
+        self.sent
+            .lock()
+            .expect("sent mutex poisoned")
+            .push(email.clone());
         Ok(())
     }
 }
@@ -297,8 +302,12 @@ mod tests {
     #[tokio::test]
     async fn in_memory_mailer_captures_sent() {
         let m = InMemoryMailer::new();
-        m.send(&Email::new().to("a@x").subject("s").body("b")).await.unwrap();
-        m.send(&Email::new().to("b@x").subject("s2").body("b2")).await.unwrap();
+        m.send(&Email::new().to("a@x").subject("s").body("b"))
+            .await
+            .unwrap();
+        m.send(&Email::new().to("b@x").subject("s2").body("b2"))
+            .await
+            .unwrap();
         assert_eq!(m.count(), 2);
         assert_eq!(m.sent()[0].to, vec!["a@x"]);
         m.clear();
@@ -308,7 +317,9 @@ mod tests {
     #[tokio::test]
     async fn null_mailer_succeeds_silently() {
         let m = NullMailer;
-        m.send(&Email::new().to("x@y").subject("s").body("b")).await.unwrap();
+        m.send(&Email::new().to("x@y").subject("s").body("b"))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

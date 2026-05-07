@@ -6,12 +6,12 @@
 
 use std::collections::HashMap;
 
-use axum::extract::{Form, Path, Query, State};
-use axum::response::{Html, IntoResponse, Redirect, Response};
 use crate::core::{
     Assignment, CountQuery, DeleteQuery, FieldSchema, Filter, InsertQuery, ModelEntry, Op,
     SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
+use axum::extract::{Form, Path, Query, State};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 
 use super::errors::AdminError;
 use super::forms;
@@ -36,7 +36,8 @@ pub(crate) async fn index(State(state): State<AppState>) -> Html<String> {
         .collect();
     entries.sort_by_key(|e| e.schema.name);
 
-    let mut by_app: indexmap::IndexMap<String, Vec<&'static ModelEntry>> = indexmap::IndexMap::new();
+    let mut by_app: indexmap::IndexMap<String, Vec<&'static ModelEntry>> =
+        indexmap::IndexMap::new();
     for e in entries {
         let label = e
             .resolved_app_label()
@@ -288,9 +289,7 @@ pub(crate) async fn table_view(
     // render a right-rail card. Each value link toggles the
     // `?<col>=<value>` query param: clicking the active value clears
     // the filter; clicking a different value swaps to it.
-    let show_all_facet = params
-        .get("facet_show_all")
-        .map(String::as_str);
+    let show_all_facet = params.get("facet_show_all").map(String::as_str);
     let facets_ctx: Vec<serde_json::Value> = compute_facets(
         &state,
         model,
@@ -378,8 +377,7 @@ async fn compute_facets(
         // or FK targets without a `display = "..."` attribute.
         let fk_join: Option<(&'static str, &'static str, &'static str)> =
             field.relation.and_then(|rel| match rel {
-                crate::core::Relation::Fk { to, on }
-                | crate::core::Relation::O2O { to, on } => {
+                crate::core::Relation::Fk { to, on } | crate::core::Relation::O2O { to, on } => {
                     let target = lookup_model(state, to)?;
                     let display_field = target.display_field()?;
                     Some((target.table, on, display_field.column))
@@ -422,19 +420,17 @@ async fn compute_facets(
             // Stringify the value at the `facet_value` column alias.
             // Same shape `parse_form_value` accepts back when the URL
             // round-trips through the filter machinery.
-            let raw = render::read_value_as_string_at(row, field, "facet_value")
-                .unwrap_or_default();
+            let raw =
+                render::read_value_as_string_at(row, field, "facet_value").unwrap_or_default();
             // Display: for FK fields with a JOIN, prefer the target's
             // display value; otherwise fall back to the raw key.
             let display = if raw.is_empty() {
                 "—".to_owned()
             } else if fk_join.is_some() {
-                let display_text: Option<String> = sqlx::Row::try_get::<Option<String>, _>(
-                    row,
-                    "facet_display",
-                )
-                .ok()
-                .flatten();
+                let display_text: Option<String> =
+                    sqlx::Row::try_get::<Option<String>, _>(row, "facet_display")
+                        .ok()
+                        .flatten();
                 match display_text {
                     Some(t) if !t.is_empty() => render::escape(&t),
                     _ => render::escape(&raw),
@@ -896,7 +892,6 @@ pub(crate) async fn update_submit(
     super::audit::emit_admin_audit_diff(&state, model, &pk_raw, before_row.as_ref(), &form).await;
     Ok(Redirect::to(&format!("/__admin/{}/{}", model.table, pk_raw)).into_response())
 }
-
 
 // ============================================================== DELETE
 

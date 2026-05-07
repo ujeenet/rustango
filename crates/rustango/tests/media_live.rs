@@ -32,8 +32,7 @@ async fn maybe_setup() -> Option<MediaManager> {
     let secret = std::env::var("RUSTANGO_S3_TEST_SECRET").ok()?;
     let bucket = std::env::var("RUSTANGO_S3_TEST_BUCKET").ok()?;
     let endpoint = std::env::var("RUSTANGO_S3_TEST_ENDPOINT").ok();
-    let region =
-        std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
+    let region = std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
 
     let pool = PgPool::connect(&url).await.expect("connect Postgres");
     Media::ensure_table(&pool).await.expect("ensure_table");
@@ -85,9 +84,7 @@ async fn save_bytes_inserts_row_and_uploads_object() {
     assert_eq!(media.size_bytes, payload.len() as i64);
     assert_eq!(media.uploaded_by_id, Some(99));
     assert_eq!(media.metadata["alt"], "test fixture");
-    assert!(media
-        .storage_key
-        .starts_with("media-live/save-bytes/"));
+    assert!(media.storage_key.starts_with("media-live/save-bytes/"));
     assert!(media.storage_key.ends_with("-test.png"));
 
     // Storage object actually exists + matches what we wrote.

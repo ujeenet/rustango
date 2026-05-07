@@ -458,7 +458,11 @@ async fn create_submit_for_auto_pk_assigns_pk_and_redirects() {
 
     let app = rustango::admin::router(pool.clone());
     let response = app
-        .oneshot(form_request(Method::POST, "/admin_widget", "label=auto-pk-test"))
+        .oneshot(form_request(
+            Method::POST,
+            "/admin_widget",
+            "label=auto-pk-test",
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
@@ -1744,10 +1748,7 @@ async fn list_display_attr_renders_only_named_columns() {
         .await
         .unwrap();
     let body = body_string(resp).await;
-    let head = body
-        .split("<tbody")
-        .next()
-        .expect("tbody marker present");
+    let head = body.split("<tbody").next().expect("tbody marker present");
     assert!(head.contains(">name<"), "name column missing: {head}");
     assert!(head.contains(">color<"), "color column missing: {head}");
     assert!(
@@ -1843,10 +1844,7 @@ async fn no_admin_attr_falls_back_to_all_scalar_fields() {
         .await
         .unwrap();
     let body = body_string(resp).await;
-    let head = body
-        .split("<tbody")
-        .next()
-        .expect("tbody marker present");
+    let head = body.split("<tbody").next().expect("tbody marker present");
     for col in ["id", "name", "age", "is_active"] {
         assert!(
             head.contains(&format!(">{col}")),
@@ -1873,12 +1871,7 @@ async fn sidebar_renders_on_admin_pages() {
     for path in ["/", "/admin_user", "/admin_user/1"] {
         let resp = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(path)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
             .await
             .unwrap();
         let body = body_string(resp).await;
@@ -1928,10 +1921,7 @@ async fn list_filter_attr_renders_facet_card_with_distinct_values() {
         .await
         .unwrap();
     let body = body_string(resp).await;
-    assert!(
-        body.contains("By color"),
-        "facet header missing: {body}"
-    );
+    assert!(body.contains("By color"), "facet header missing: {body}");
     for color in ["red", "green", "blue"] {
         assert!(
             body.contains(&format!(">{color}<")),
@@ -1966,7 +1956,10 @@ async fn list_filter_active_value_highlights_and_filters_rows() {
         .unwrap();
     let body = body_string(resp).await;
     assert!(body.contains(">alpha<"), "alpha row missing: {body}");
-    assert!(!body.contains(">bravo<"), "bravo leaked through filter: {body}");
+    assert!(
+        !body.contains(">bravo<"),
+        "bravo leaked through filter: {body}"
+    );
     assert!(!body.contains(">charlie<"), "charlie leaked: {body}");
     assert!(
         body.contains(r#"class="active">red<"#),
@@ -2027,17 +2020,13 @@ async fn delete_selected_action_removes_named_rows() {
     let app = rustango::admin::router(pool.clone());
     // `axum::http::Form` doesn't support repeated keys for `Vec` —
     // we simulate the browser's classic form encoding by hand.
-    let body =
-        "action=delete_selected&_selected=1&_selected=2".to_owned();
+    let body = "action=delete_selected&_selected=1&_selected=2".to_owned();
     let resp = app
         .oneshot(
             Request::builder()
                 .method(Method::POST)
                 .uri("/admin_django/__action")
-                .header(
-                    header::CONTENT_TYPE,
-                    "application/x-www-form-urlencoded",
-                )
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(Body::from(body))
                 .unwrap(),
         )
@@ -2051,17 +2040,15 @@ async fn delete_selected_action_removes_named_rows() {
         Some("/admin_django"),
     );
 
-    let remaining: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM admin_django")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_django")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(remaining, 1, "expected 1 row left after deleting 2 of 3");
-    let last: String =
-        sqlx::query_scalar("SELECT name FROM admin_django")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let last: String = sqlx::query_scalar("SELECT name FROM admin_django")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(last, "charlie", "unexpected survivor: {last}");
 
     migrate::drop_all(&pool).await.unwrap();
@@ -2084,21 +2071,17 @@ async fn unknown_action_returns_500() {
             Request::builder()
                 .method(Method::POST)
                 .uri("/admin_django/__action")
-                .header(
-                    header::CONTENT_TYPE,
-                    "application/x-www-form-urlencoded",
-                )
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(Body::from(body))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let remaining: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM admin_django")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_django")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(remaining, 3, "rows must not be touched on unknown action");
 
     migrate::drop_all(&pool).await.unwrap();
@@ -2118,10 +2101,7 @@ pub struct FkParent {
 
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "fk_child", display = "label")]
-#[rustango(admin(
-    list_display = "label, parent_id",
-    list_filter = "parent_id",
-))]
+#[rustango(admin(list_display = "label, parent_id", list_filter = "parent_id",))]
 pub struct FkChild {
     #[rustango(primary_key)]
     id: i64,
@@ -2151,11 +2131,7 @@ async fn list_filter_renders_fk_target_display_name() {
         .await
         .unwrap();
     }
-    for (id, label, parent_id) in [
-        (1_i64, "x", 1_i64),
-        (2, "y", 1),
-        (3, "z", 2),
-    ] {
+    for (id, label, parent_id) in [(1_i64, "x", 1_i64), (2, "y", 1), (3, "z", 2)] {
         FkChild {
             id,
             label: label.into(),
@@ -2177,7 +2153,10 @@ async fn list_filter_renders_fk_target_display_name() {
         .await
         .unwrap();
     let body = body_string(resp).await;
-    assert!(body.contains("Ada"), "Ada display name missing in facet: {body}");
+    assert!(
+        body.contains("Ada"),
+        "Ada display name missing in facet: {body}"
+    );
     assert!(body.contains("Linus"), "Linus display name missing: {body}");
     // The raw PK numbers should NOT appear inside the facet card's
     // `<a>` text — only the display name. (The PK still appears in
@@ -2319,17 +2298,13 @@ async fn readonly_fields_are_skipped_on_update_submit() {
     // Note: we deliberately set `created_by=mallory` to attempt the
     // override. The expected outcome is "ignored, server keeps the
     // existing value `alice`".
-    let body =
-        "id=1&title=updated&created_by=mallory".to_owned();
+    let body = "id=1&title=updated&created_by=mallory".to_owned();
     let resp = app
         .oneshot(
             Request::builder()
                 .method(Method::POST)
                 .uri("/fs_doc/1")
-                .header(
-                    header::CONTENT_TYPE,
-                    "application/x-www-form-urlencoded",
-                )
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(Body::from(body))
                 .unwrap(),
         )
@@ -2337,12 +2312,11 @@ async fn readonly_fields_are_skipped_on_update_submit() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    let stored: (String, String) = sqlx::query_as(
-        "SELECT title, created_by FROM fs_doc WHERE id = 1",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let stored: (String, String) =
+        sqlx::query_as("SELECT title, created_by FROM fs_doc WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(stored.0, "updated", "title should be updated");
     assert_eq!(
         stored.1, "alice",
@@ -2404,9 +2378,7 @@ async fn user_defined_action_runs_via_register_action() {
                 .bind(&ids)
                 .execute(&pool)
                 .await
-                .map_err(|e| {
-                    rustango::admin::AdminError::Internal(e.to_string())
-                })?;
+                .map_err(|e| rustango::admin::AdminError::Internal(e.to_string()))?;
                 Ok(())
             })
         })
@@ -2418,10 +2390,7 @@ async fn user_defined_action_runs_via_register_action() {
             Request::builder()
                 .method(Method::POST)
                 .uri("/ua_post/__action")
-                .header(
-                    header::CONTENT_TYPE,
-                    "application/x-www-form-urlencoded",
-                )
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(Body::from(body))
                 .unwrap(),
         )
@@ -2429,12 +2398,10 @@ async fn user_defined_action_runs_via_register_action() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    let rows: Vec<(i64, bool)> = sqlx::query_as(
-        "SELECT id, is_published FROM ua_post ORDER BY id",
-    )
-    .fetch_all(&pool)
-    .await
-    .unwrap();
+    let rows: Vec<(i64, bool)> = sqlx::query_as("SELECT id, is_published FROM ua_post ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
     assert_eq!(rows, vec![(1, true), (2, false), (3, true)]);
 
     migrate::drop_all(&pool).await.unwrap();
@@ -2466,10 +2433,7 @@ async fn allowlisted_action_without_handler_returns_500() {
             Request::builder()
                 .method(Method::POST)
                 .uri("/ua_post/__action")
-                .header(
-                    header::CONTENT_TYPE,
-                    "application/x-www-form-urlencoded",
-                )
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(Body::from(body))
                 .unwrap(),
         )

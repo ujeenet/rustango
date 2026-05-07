@@ -97,7 +97,9 @@ impl RetryPolicy {
 
     fn backoff_for(&self, attempt: u32) -> Duration {
         let exp = 1u64 << attempt.min(20);
-        let proposed = self.initial_backoff.saturating_mul(u32::try_from(exp).unwrap_or(u32::MAX));
+        let proposed = self
+            .initial_backoff
+            .saturating_mul(u32::try_from(exp).unwrap_or(u32::MAX));
         proposed.min(self.max_backoff)
     }
 }
@@ -238,8 +240,8 @@ impl HttpClientBuilder {
         value: impl AsRef<str>,
     ) -> Result<Self, HttpError> {
         let name = HeaderName::from_static(name);
-        let value = HeaderValue::from_str(value.as_ref())
-            .map_err(|e| HttpError::Header(e.to_string()))?;
+        let value =
+            HeaderValue::from_str(value.as_ref()).map_err(|e| HttpError::Header(e.to_string()))?;
         self.default_headers.insert(name, value);
         Ok(self)
     }
@@ -303,14 +305,10 @@ impl RequestBuilder {
     ///
     /// # Errors
     /// Returns `HttpError::Header` when the value isn't valid.
-    pub fn header(
-        mut self,
-        name: &'static str,
-        value: impl AsRef<str>,
-    ) -> Result<Self, HttpError> {
+    pub fn header(mut self, name: &'static str, value: impl AsRef<str>) -> Result<Self, HttpError> {
         let name = HeaderName::from_static(name);
-        let value = HeaderValue::from_str(value.as_ref())
-            .map_err(|e| HttpError::Header(e.to_string()))?;
+        let value =
+            HeaderValue::from_str(value.as_ref()).map_err(|e| HttpError::Header(e.to_string()))?;
         self.headers.insert(name, value);
         Ok(self)
     }
@@ -548,7 +546,11 @@ mod tests {
             .unwrap();
         let resp = client.post(url).body(b"x".to_vec()).send().await.unwrap();
         assert_eq!(resp.status(), 503);
-        assert_eq!(counter.load(Ordering::SeqCst), 1, "POST is not retried by default");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "POST is not retried by default"
+        );
         srv.abort();
     }
 
@@ -653,7 +655,9 @@ mod tests {
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("")
                     .to_owned();
-                let body = axum::body::to_bytes(req.into_body(), 1 << 16).await.unwrap();
+                let body = axum::body::to_bytes(req.into_body(), 1 << 16)
+                    .await
+                    .unwrap();
                 axum::Json(serde_json::json!({"ct": ct, "body": String::from_utf8_lossy(&body)}))
             }),
         );
@@ -708,7 +712,10 @@ mod tests {
         );
         let (url, srv) = start(app).await;
 
-        let client = HttpClient::builder().user_agent("acme/1.0").build().unwrap();
+        let client = HttpClient::builder()
+            .user_agent("acme/1.0")
+            .build()
+            .unwrap();
         let resp = client.get(url).send().await.unwrap();
         assert_eq!(resp.text().await.unwrap(), "acme/1.0");
         srv.abort();

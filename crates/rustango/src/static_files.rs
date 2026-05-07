@@ -81,10 +81,7 @@ impl StaticFiles {
     /// changes.
     #[must_use]
     pub fn immutable(mut self, max_age: Duration) -> Self {
-        self.cache_control = format!(
-            "public, max-age={}, immutable",
-            max_age.as_secs()
-        );
+        self.cache_control = format!("public, max-age={}, immutable", max_age.as_secs());
         self
     }
 
@@ -166,10 +163,7 @@ async fn serve(
             h.insert(header::CACHE_CONTROL, v);
         }
     }
-    h.insert(
-        header::CONTENT_LENGTH,
-        HeaderValue::from(meta.len()),
-    );
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(meta.len()));
     if let Some(secs) = mtime {
         if let Ok(v) = HeaderValue::from_str(&format_http_date(secs)) {
             h.insert(header::LAST_MODIFIED, v);
@@ -289,11 +283,8 @@ fn mime_for(path: &Path) -> HeaderValue {
 /// date-formatting dep into the always-on path.
 fn format_http_date(secs: u64) -> String {
     // chrono is already a workspace dep, lean on it for date math.
-    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(
-        i64::try_from(secs).unwrap_or(0),
-        0,
-    )
-    .unwrap_or_else(chrono::Utc::now);
+    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(i64::try_from(secs).unwrap_or(0), 0)
+        .unwrap_or_else(chrono::Utc::now);
     // chrono's RFC 2822 format is "Wed, 02 May 2026 12:34:56 +0000" —
     // we want "Wed, 02 May 2026 12:34:56 GMT". Same shape, swap the
     // timezone tag.
@@ -305,8 +296,12 @@ fn format_http_date(secs: u64) -> String {
 fn parse_http_date(s: &str) -> Option<u64> {
     let dt = chrono::DateTime::parse_from_rfc2822(s)
         .or_else(|_| {
-            chrono::NaiveDateTime::parse_from_str(s, "%a, %d %b %Y %H:%M:%S GMT")
-                .map(|n| chrono::DateTime::from_naive_utc_and_offset(n, chrono::FixedOffset::east_opt(0).unwrap()))
+            chrono::NaiveDateTime::parse_from_str(s, "%a, %d %b %Y %H:%M:%S GMT").map(|n| {
+                chrono::DateTime::from_naive_utc_and_offset(
+                    n,
+                    chrono::FixedOffset::east_opt(0).unwrap(),
+                )
+            })
         })
         .ok()?;
     let ts = dt.timestamp();
@@ -358,11 +353,17 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(
-            resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap(),
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "text/css; charset=utf-8"
         );
         assert!(resp.headers().get(header::CACHE_CONTROL).is_some());
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
         assert_eq!(&bytes[..], b"body{}");
     }
 
@@ -401,12 +402,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_file(&dir, ".env", b"SECRET=hunter2");
         let resp = server(&dir)
-            .oneshot(
-                Request::builder()
-                    .uri("/.env")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/.env").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), 404);
@@ -416,9 +412,7 @@ mod tests {
     async fn serves_hidden_when_opted_in() {
         let dir = TempDir::new().unwrap();
         write_file(&dir, ".well-known/x.txt", b"hi");
-        let app = static_router(
-            StaticFiles::new(dir.path().to_path_buf()).serve_hidden(true),
-        );
+        let app = static_router(StaticFiles::new(dir.path().to_path_buf()).serve_hidden(true));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -436,12 +430,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("sub")).unwrap();
         let resp = server(&dir)
-            .oneshot(
-                Request::builder()
-                    .uri("/sub")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/sub").body(Body::empty()).unwrap())
             .await
             .unwrap();
         // Directory listing is intentionally NOT supported — 404.
@@ -504,7 +493,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
         assert!(resp.headers().get(header::CONTENT_LENGTH).is_some());
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
         assert!(bytes.is_empty(), "HEAD must not return a body");
     }
 
@@ -525,7 +516,12 @@ mod tests {
             )
             .await
             .unwrap();
-        let cc = resp.headers().get(header::CACHE_CONTROL).unwrap().to_str().unwrap();
+        let cc = resp
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(cc.contains("immutable"));
         assert!(cc.contains("max-age=31536000"));
     }
@@ -557,8 +553,7 @@ mod tests {
     #[test]
     fn http_date_parses_rfc2822_form() {
         // chrono RFC 2822 → numeric offset, not "GMT".
-        let parsed =
-            parse_http_date("Thu, 02 May 2024 12:00:00 +0000").unwrap();
+        let parsed = parse_http_date("Thu, 02 May 2024 12:00:00 +0000").unwrap();
         assert_eq!(parsed, 1_714_651_200);
     }
 }

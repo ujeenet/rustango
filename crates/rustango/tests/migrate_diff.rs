@@ -11,7 +11,12 @@ use rustango::migrate::{
 // ---------------- helpers ----------------
 
 fn empty_snapshot() -> SchemaSnapshot {
-    SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![], checks: vec![] }
+    SchemaSnapshot {
+        tables: vec![],
+        m2m_tables: vec![],
+        indexes: vec![],
+        checks: vec![],
+    }
 }
 
 fn user_table() -> TableSnapshot {
@@ -97,7 +102,7 @@ fn schema_change_drop_column_round_trips() {
 fn detect_changes_identity_is_empty() {
     let snap = SchemaSnapshot {
         tables: vec![user_table(), post_table()],
-                    ..Default::default()
+        ..Default::default()
     };
     let changes = detect_changes(&snap, &snap);
     assert!(
@@ -119,7 +124,7 @@ fn detect_changes_new_column_on_new_table_is_just_create_table() {
     let prev = empty_snapshot();
     let current = SchemaSnapshot {
         tables: vec![user_table()],
-                    ..Default::default()
+        ..Default::default()
     };
     let changes = detect_changes(&prev, &current);
     assert_eq!(changes.len(), 1);
@@ -132,7 +137,7 @@ fn detect_changes_dropped_column_on_dropped_table_is_just_drop_table() {
     // `id` and `name` — `DROP TABLE ... CASCADE` handles them.
     let prev = SchemaSnapshot {
         tables: vec![user_table()],
-                    ..Default::default()
+        ..Default::default()
     };
     let current = empty_snapshot();
     let changes = detect_changes(&prev, &current);
@@ -148,7 +153,7 @@ fn detect_changes_complex_multi_table_diff() {
     // - user gains a `bio` column
     let prev = SchemaSnapshot {
         tables: vec![user_table(), post_table()],
-                    ..Default::default()
+        ..Default::default()
     };
 
     let mut user_with_bio = user_table();
@@ -172,7 +177,7 @@ fn detect_changes_complex_multi_table_diff() {
 
     let current = SchemaSnapshot {
         tables: vec![user_with_bio, comment],
-                    ..Default::default()
+        ..Default::default()
     };
 
     let changes = detect_changes(&prev, &current);
@@ -189,11 +194,11 @@ fn detect_changes_complex_multi_table_diff() {
 fn detect_changes_table_appears_in_both_with_no_field_changes_emits_nothing() {
     let prev = SchemaSnapshot {
         tables: vec![user_table()],
-                    ..Default::default()
+        ..Default::default()
     };
     let current = SchemaSnapshot {
         tables: vec![user_table()],
-                    ..Default::default()
+        ..Default::default()
     };
     assert!(detect_changes(&prev, &current).is_empty());
 }
@@ -214,7 +219,7 @@ fn detect_then_render_orders_create_before_add_before_drop_col_before_drop_table
     // (CREATE → ADD → DROP COLUMN → DROP TABLE → new-table FK ALTERs).
     let prev = SchemaSnapshot {
         tables: vec![user_table(), post_table()],
-                    ..Default::default()
+        ..Default::default()
     };
 
     // current: drop post, drop a column from user, add bio to user, create comment.
@@ -237,7 +242,7 @@ fn detect_then_render_orders_create_before_add_before_drop_col_before_drop_table
     .unwrap();
     let current = SchemaSnapshot {
         tables: vec![comment, user],
-                    ..Default::default()
+        ..Default::default()
     };
 
     let changes = detect_changes(&prev, &current);
@@ -261,7 +266,7 @@ fn render_changes_preserves_caller_order_except_for_new_table_fks() {
     // to the end so they're emitted after every CREATE TABLE has run.
     let current = SchemaSnapshot {
         tables: vec![user_table(), post_table()],
-                    ..Default::default()
+        ..Default::default()
     };
 
     // Intentionally awkward order — render emits as supplied.
@@ -299,7 +304,7 @@ fn render_changes_preserves_caller_order_except_for_new_table_fks() {
 fn render_changes_emits_fk_alters_at_the_end_of_create_tables() {
     let current = SchemaSnapshot {
         tables: vec![user_table(), post_table()],
-                    ..Default::default()
+        ..Default::default()
     };
     let ddl = render_changes(
         &[
@@ -339,7 +344,7 @@ fn render_changes_create_table_missing_in_snapshot_is_an_error() {
 fn render_changes_add_column_missing_field_is_an_error() {
     let current = SchemaSnapshot {
         tables: vec![user_table()],
-                    ..Default::default()
+        ..Default::default()
     };
     let err = render_changes(
         &[SchemaChange::AddColumn {
@@ -389,7 +394,7 @@ fn render_changes_drop_column_does_not_consult_snapshot() {
 fn schema_snapshot_table_lookup_by_name() {
     let snap = SchemaSnapshot {
         tables: vec![user_table(), post_table()],
-                    ..Default::default()
+        ..Default::default()
     };
     assert!(snap.table("diff_user").is_some());
     assert!(snap.table("diff_post").is_some());
@@ -407,7 +412,12 @@ fn table_snapshot_field_lookup_by_column() {
 // ---------------- AlterField + Rename DDL (v0.4 Slice 3) ----------------
 
 fn empty_snap() -> SchemaSnapshot {
-    SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![], checks: vec![] }
+    SchemaSnapshot {
+        tables: vec![],
+        m2m_tables: vec![],
+        indexes: vec![],
+        checks: vec![],
+    }
 }
 
 #[test]
@@ -559,21 +569,15 @@ fn detect_changes_emits_alter_column_type_for_metadata_diff() {
                     ..Default::default()
     };
     let changes = detect_changes(&prev, &current);
-    assert!(
-        changes
-            .iter()
-            .any(|c| matches!(c, SchemaChange::AlterColumnType { .. }))
-    );
-    assert!(
-        changes
-            .iter()
-            .any(|c| matches!(c, SchemaChange::AlterColumnNullable { .. }))
-    );
-    assert!(
-        changes
-            .iter()
-            .any(|c| matches!(c, SchemaChange::AlterColumnDefault { .. }))
-    );
+    assert!(changes
+        .iter()
+        .any(|c| matches!(c, SchemaChange::AlterColumnType { .. })));
+    assert!(changes
+        .iter()
+        .any(|c| matches!(c, SchemaChange::AlterColumnNullable { .. })));
+    assert!(changes
+        .iter()
+        .any(|c| matches!(c, SchemaChange::AlterColumnDefault { .. })));
 }
 
 // ---------------- composite-FK diff (F.5b) ----------------
@@ -701,11 +705,7 @@ fn create_table_emits_composite_fks_in_deferred_bucket() {
         tables: vec![pair_table_with_composite_fk("diff_pair")],
         ..Default::default()
     };
-    let ddl = render_changes(
-        &[SchemaChange::CreateTable("diff_pair".into())],
-        &snap,
-    )
-    .unwrap();
+    let ddl = render_changes(&[SchemaChange::CreateTable("diff_pair".into())], &snap).unwrap();
     assert!(
         ddl[0].starts_with(r#"CREATE TABLE "diff_pair""#),
         "first stmt should be CREATE TABLE; got: {}",
@@ -738,16 +738,25 @@ fn changing_index_columns_keeps_name_emits_drop_then_create() {
     let prev = snap_with_index("uq", &["a", "b"], true);
     let current = snap_with_index("uq", &["a", "c"], true);
     let changes = detect_changes(&prev, &current);
-    let drop_idx = changes.iter().position(|c|
-        matches!(c, SchemaChange::DropIndex { name } if name == "uq")
-    );
-    let create_idx = changes.iter().position(|c|
+    let drop_idx = changes
+        .iter()
+        .position(|c| matches!(c, SchemaChange::DropIndex { name } if name == "uq"));
+    let create_idx = changes.iter().position(|c| {
         matches!(c, SchemaChange::CreateIndex { name, columns, .. }
             if name == "uq" && columns == &vec!["a".to_string(), "c".into()])
+    });
+    assert!(
+        drop_idx.is_some(),
+        "expected DropIndex(uq) — diff missed in-place column change: {changes:?}"
     );
-    assert!(drop_idx.is_some(), "expected DropIndex(uq) — diff missed in-place column change: {changes:?}");
-    assert!(create_idx.is_some(), "expected CreateIndex(uq) with new columns: {changes:?}");
-    assert!(drop_idx.unwrap() < create_idx.unwrap(), "drop must come before create");
+    assert!(
+        create_idx.is_some(),
+        "expected CreateIndex(uq) with new columns: {changes:?}"
+    );
+    assert!(
+        drop_idx.unwrap() < create_idx.unwrap(),
+        "drop must come before create"
+    );
 }
 
 #[test]
@@ -755,8 +764,12 @@ fn flipping_unique_flag_emits_drop_then_create() {
     let prev = snap_with_index("idx", &["a"], false);
     let current = snap_with_index("idx", &["a"], true);
     let changes = detect_changes(&prev, &current);
-    assert!(changes.iter().any(|c| matches!(c, SchemaChange::DropIndex { name } if name == "idx")));
-    assert!(changes.iter().any(|c| matches!(c, SchemaChange::CreateIndex { name, unique, .. } if name == "idx" && *unique)));
+    assert!(changes
+        .iter()
+        .any(|c| matches!(c, SchemaChange::DropIndex { name } if name == "idx")));
+    assert!(changes.iter().any(
+        |c| matches!(c, SchemaChange::CreateIndex { name, unique, .. } if name == "idx" && *unique)
+    ));
 }
 
 #[test]
@@ -765,7 +778,10 @@ fn unchanged_index_emits_nothing() {
     let current = snap_with_index("uq", &["a", "b"], true);
     let changes = detect_changes(&prev, &current);
     assert!(
-        !changes.iter().any(|c| matches!(c, SchemaChange::DropIndex { .. } | SchemaChange::CreateIndex { .. })),
+        !changes.iter().any(|c| matches!(
+            c,
+            SchemaChange::DropIndex { .. } | SchemaChange::CreateIndex { .. }
+        )),
         "no index change → no Drop/CreateIndex; got {changes:?}",
     );
 }

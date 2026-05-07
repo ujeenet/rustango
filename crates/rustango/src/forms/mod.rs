@@ -53,7 +53,10 @@
 
 use std::collections::HashMap;
 
-use crate::core::{Assignment, FieldSchema, FieldType, Filter, ModelSchema, Op, SqlValue, UpdateQuery, WhereExpr, InsertQuery};
+use crate::core::{
+    Assignment, FieldSchema, FieldType, Filter, InsertQuery, ModelSchema, Op, SqlValue,
+    UpdateQuery, WhereExpr,
+};
 
 #[cfg(feature = "csrf")]
 pub mod csrf;
@@ -74,7 +77,10 @@ pub struct FormErrors {
 impl FormErrors {
     /// Add an error for a specific field.
     pub fn add(&mut self, field: impl Into<String>, msg: impl Into<String>) {
-        self.fields.entry(field.into()).or_default().push(msg.into());
+        self.fields
+            .entry(field.into())
+            .or_default()
+            .push(msg.into());
     }
 
     /// Add an error not tied to any specific field.
@@ -314,14 +320,14 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
             if raw.is_empty() {
                 Ok(SqlValue::Json(serde_json::json!({})))
             } else {
-                serde_json::from_str::<serde_json::Value>(raw).map(SqlValue::Json).map_err(|e| {
-                    FormError::Parse {
+                serde_json::from_str::<serde_json::Value>(raw)
+                    .map(SqlValue::Json)
+                    .map_err(|e| FormError::Parse {
                         field: field.name.to_owned(),
                         ty: "Json",
                         value: raw.to_owned(),
                         detail: e.to_string(),
-                    }
-                })
+                    })
             }
         }
     }
@@ -401,7 +407,12 @@ pub struct ModelForm {
 impl ModelForm {
     /// Create a form for **inserting** a new row.
     pub fn new(schema: &'static ModelSchema, data: HashMap<String, String>) -> Self {
-        Self { schema, data, pk_value: None, include_fields: None }
+        Self {
+            schema,
+            data,
+            pk_value: None,
+            include_fields: None,
+        }
     }
 
     /// Create a form for **updating** the row identified by `pk`.
@@ -410,7 +421,12 @@ impl ModelForm {
         data: HashMap<String, String>,
         pk: SqlValue,
     ) -> Self {
-        Self { schema, data, pk_value: Some(pk), include_fields: None }
+        Self {
+            schema,
+            data,
+            pk_value: Some(pk),
+            include_fields: None,
+        }
     }
 
     /// Restrict the form to only the named fields. By default all
@@ -461,19 +477,16 @@ impl ModelForm {
     /// # Errors
     /// [`ModelFormError::Validation`] if any field is invalid.
     /// [`ModelFormError::Database`] for driver-level failures.
-    pub async fn save(
-        &self,
-        pool: &crate::sql::sqlx::PgPool,
-    ) -> Result<SqlValue, ModelFormError> {
+    pub async fn save(&self, pool: &crate::sql::sqlx::PgPool) -> Result<SqlValue, ModelFormError> {
         let errors = self.validate();
         if !errors.is_empty() {
             return Err(ModelFormError::Validation(errors));
         }
 
         let pk_field = self.schema.primary_key().ok_or_else(|| {
-            ModelFormError::Database(crate::sql::ExecError::Driver(
-                sqlx::Error::Protocol("model has no primary key".into()),
-            ))
+            ModelFormError::Database(crate::sql::ExecError::Driver(sqlx::Error::Protocol(
+                "model has no primary key".into(),
+            )))
         })?;
 
         if let Some(pk_val) = &self.pk_value {
@@ -484,7 +497,10 @@ impl ModelForm {
                 .filter(|f| self.should_include(f))
                 .filter_map(|f| {
                     let raw = self.data.get(f.name).map(String::as_str);
-                    parse_form_value(f, raw).ok().map(|v| Assignment { column: f.column, value: v })
+                    parse_form_value(f, raw).ok().map(|v| Assignment {
+                        column: f.column,
+                        value: v,
+                    })
                 })
                 .collect();
 
@@ -579,7 +595,9 @@ pub struct DynamicField {
     pub help_text: String,
 }
 
-fn bool_true() -> bool { true }
+fn bool_true() -> bool {
+    true
+}
 
 /// Runtime JSON-schema driven form.
 ///
@@ -653,7 +671,9 @@ impl DynamicForm {
             let raw = data.get(&field.name).map(String::as_str);
 
             match raw {
-                None | Some("") if field.required && field.field_type != DynamicFieldType::Boolean => {
+                None | Some("")
+                    if field.required && field.field_type != DynamicFieldType::Boolean =>
+                {
                     errors.add(&field.name, "This field is required.");
                     continue;
                 }
@@ -669,12 +689,18 @@ impl DynamicForm {
                             Ok(n) => {
                                 if let Some(min) = field.min {
                                     if (n as f64) < min {
-                                        errors.add(&field.name, format!("Ensure this value is ≥ {min}."));
+                                        errors.add(
+                                            &field.name,
+                                            format!("Ensure this value is ≥ {min}."),
+                                        );
                                     }
                                 }
                                 if let Some(max) = field.max {
                                     if (n as f64) > max {
-                                        errors.add(&field.name, format!("Ensure this value is ≤ {max}."));
+                                        errors.add(
+                                            &field.name,
+                                            format!("Ensure this value is ≤ {max}."),
+                                        );
                                     }
                                 }
                             }
@@ -688,12 +714,18 @@ impl DynamicForm {
                             Ok(n) => {
                                 if let Some(min) = field.min {
                                     if n < min {
-                                        errors.add(&field.name, format!("Ensure this value is ≥ {min}."));
+                                        errors.add(
+                                            &field.name,
+                                            format!("Ensure this value is ≥ {min}."),
+                                        );
                                     }
                                 }
                                 if let Some(max) = field.max {
                                     if n > max {
-                                        errors.add(&field.name, format!("Ensure this value is ≤ {max}."));
+                                        errors.add(
+                                            &field.name,
+                                            format!("Ensure this value is ≤ {max}."),
+                                        );
                                     }
                                 }
                             }
@@ -701,15 +733,24 @@ impl DynamicForm {
                         }
                     }
                 }
-                DynamicFieldType::Text | DynamicFieldType::Textarea | DynamicFieldType::Email | DynamicFieldType::Url => {
+                DynamicFieldType::Text
+                | DynamicFieldType::Textarea
+                | DynamicFieldType::Email
+                | DynamicFieldType::Url => {
                     if let Some(max) = field.max_length {
                         if raw_str.len() > max {
-                            errors.add(&field.name, format!("Ensure this value has at most {max} characters."));
+                            errors.add(
+                                &field.name,
+                                format!("Ensure this value has at most {max} characters."),
+                            );
                         }
                     }
                     if let Some(min) = field.min_length {
                         if !raw_str.is_empty() && raw_str.len() < min {
-                            errors.add(&field.name, format!("Ensure this value has at least {min} characters."));
+                            errors.add(
+                                &field.name,
+                                format!("Ensure this value has at least {min} characters."),
+                            );
                         }
                     }
                     if field.field_type == DynamicFieldType::Email && !raw_str.is_empty() {
@@ -741,8 +782,10 @@ impl DynamicForm {
                 DynamicFieldType::Datetime => {
                     if !raw_str.is_empty() {
                         let ok = chrono::DateTime::parse_from_rfc3339(raw_str).is_ok()
-                            || chrono::NaiveDateTime::parse_from_str(raw_str, "%Y-%m-%dT%H:%M:%S").is_ok()
-                            || chrono::NaiveDateTime::parse_from_str(raw_str, "%Y-%m-%dT%H:%M").is_ok();
+                            || chrono::NaiveDateTime::parse_from_str(raw_str, "%Y-%m-%dT%H:%M:%S")
+                                .is_ok()
+                            || chrono::NaiveDateTime::parse_from_str(raw_str, "%Y-%m-%dT%H:%M")
+                                .is_ok();
                         if !ok {
                             errors.add(&field.name, "Enter a valid date/time.");
                         }
@@ -794,9 +837,10 @@ impl DynamicForm {
                         serde_json::json!(raw.parse::<f64>().unwrap_or(0.0))
                     }
                 }
-                DynamicFieldType::Boolean => serde_json::Value::Bool(
-                    !matches!(raw.to_ascii_lowercase().as_str(), "" | "false" | "0" | "off" | "no"),
-                ),
+                DynamicFieldType::Boolean => serde_json::Value::Bool(!matches!(
+                    raw.to_ascii_lowercase().as_str(),
+                    "" | "false" | "0" | "off" | "no"
+                )),
                 DynamicFieldType::MultiSelect => {
                     let parts: Vec<serde_json::Value> = raw
                         .split(',')
@@ -1007,11 +1051,19 @@ impl<T: crate::core::Model> ModelFormFor<T> {
             let mut all_present = true;
             for col in idx.columns {
                 match self.columns.iter().position(|c| c == col) {
-                    Some(i) => bound.push((idx.columns.iter().find(|c| c == &col).copied().unwrap(), &self.values[i])),
-                    None => { all_present = false; break; }
+                    Some(i) => bound.push((
+                        idx.columns.iter().find(|c| c == &col).copied().unwrap(),
+                        &self.values[i],
+                    )),
+                    None => {
+                        all_present = false;
+                        break;
+                    }
                 }
             }
-            if !all_present { continue; }
+            if !all_present {
+                continue;
+            }
             // Build `SELECT 1 FROM "<table>" WHERE c1 = $1 AND c2 = $2 [...] [AND pk <> $N] LIMIT 1`
             let mut sql = format!(r#"SELECT 1 FROM "{}" WHERE "#, T::SCHEMA.table);
             let mut sep = "";
@@ -1022,12 +1074,17 @@ impl<T: crate::core::Model> ModelFormFor<T> {
             }
             let extra_pk_idx = bound.len() + 1;
             if let (Some(pk_field), Some(_pk_value)) = (pk_field, pk_value) {
-                sql.push_str(&format!(r#" AND "{}" <> ${}"#, pk_field.column, extra_pk_idx));
+                sql.push_str(&format!(
+                    r#" AND "{}" <> ${}"#,
+                    pk_field.column, extra_pk_idx
+                ));
             }
             sql.push_str(" LIMIT 1");
             let mut q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> =
                 sqlx::query(&sql);
-            for (_, v) in &bound { q = bind_sql_value_inline(q, v); }
+            for (_, v) in &bound {
+                q = bind_sql_value_inline(q, v);
+            }
             if let (Some(_), Some(pk_value)) = (pk_field, pk_value) {
                 q = bind_sql_value_inline(q, pk_value);
             }
@@ -1040,12 +1097,14 @@ impl<T: crate::core::Model> ModelFormFor<T> {
                     }
                 }
                 Ok(None) => {}
-                Err(e) => errors.add_non_field(format!(
-                    "unique-together pre-check failed: {e}"
-                )),
+                Err(e) => errors.add_non_field(format!("unique-together pre-check failed: {e}")),
             }
         }
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     // (continued)
@@ -1100,24 +1159,32 @@ impl<T: crate::core::Model> ModelFormFor<T> {
 /// Bind a [`SqlValue`] onto a Postgres `sqlx::Query`. Free helper used
 /// by [`ModelFormFor::validate_unique_together`]'s pre-check SELECT.
 fn bind_sql_value_inline<'a>(
-    q: crate::sql::sqlx::query::Query<'a, crate::sql::sqlx::Postgres, crate::sql::sqlx::postgres::PgArguments>,
+    q: crate::sql::sqlx::query::Query<
+        'a,
+        crate::sql::sqlx::Postgres,
+        crate::sql::sqlx::postgres::PgArguments,
+    >,
     v: &crate::core::SqlValue,
-) -> crate::sql::sqlx::query::Query<'a, crate::sql::sqlx::Postgres, crate::sql::sqlx::postgres::PgArguments> {
+) -> crate::sql::sqlx::query::Query<
+    'a,
+    crate::sql::sqlx::Postgres,
+    crate::sql::sqlx::postgres::PgArguments,
+> {
     use crate::core::SqlValue;
     match v {
-        SqlValue::Null         => q.bind(None::<i64>),
-        SqlValue::I16(v)       => q.bind(*v),
-        SqlValue::I32(v)       => q.bind(*v),
-        SqlValue::I64(v)       => q.bind(*v),
-        SqlValue::F32(v)       => q.bind(*v),
-        SqlValue::F64(v)       => q.bind(*v),
-        SqlValue::Bool(v)      => q.bind(*v),
-        SqlValue::String(v)    => q.bind(v.clone()),
-        SqlValue::DateTime(v)  => q.bind(*v),
-        SqlValue::Date(v)      => q.bind(*v),
-        SqlValue::Uuid(v)      => q.bind(*v),
-        SqlValue::Json(v)      => q.bind(v.clone()),
-        SqlValue::List(_)      => panic!("validate_unique_together: List not supported in pre-check"),
+        SqlValue::Null => q.bind(None::<i64>),
+        SqlValue::I16(v) => q.bind(*v),
+        SqlValue::I32(v) => q.bind(*v),
+        SqlValue::I64(v) => q.bind(*v),
+        SqlValue::F32(v) => q.bind(*v),
+        SqlValue::F64(v) => q.bind(*v),
+        SqlValue::Bool(v) => q.bind(*v),
+        SqlValue::String(v) => q.bind(v.clone()),
+        SqlValue::DateTime(v) => q.bind(*v),
+        SqlValue::Date(v) => q.bind(*v),
+        SqlValue::Uuid(v) => q.bind(*v),
+        SqlValue::Json(v) => q.bind(v.clone()),
+        SqlValue::List(_) => panic!("validate_unique_together: List not supported in pre-check"),
     }
 }
 

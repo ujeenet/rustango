@@ -14,8 +14,7 @@ fn maybe_storage() -> Option<S3Storage> {
     let secret = std::env::var("RUSTANGO_S3_TEST_SECRET").ok()?;
     let bucket = std::env::var("RUSTANGO_S3_TEST_BUCKET").ok()?;
     let endpoint = std::env::var("RUSTANGO_S3_TEST_ENDPOINT").ok();
-    let region =
-        std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
+    let region = std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
     Some(S3Storage::new(S3Config {
         bucket,
         region,

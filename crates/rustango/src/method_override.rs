@@ -216,10 +216,18 @@ fn header_method(headers: &HeaderMap, name: &str) -> Option<Method> {
 }
 
 fn is_form_content_type(headers: &HeaderMap) -> bool {
-    let Some(ct) = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()) else {
+    let Some(ct) = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+    else {
         return false;
     };
-    let main = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let main = ct
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     main == "application/x-www-form-urlencoded"
 }
 
@@ -379,7 +387,10 @@ mod tests {
         let (router, p, _, _, d) = router_with_flags();
         let svc = wrap(router, MethodOverrideLayer::default());
         let resp = svc
-            .oneshot(req_with_header(Method::POST, Some(("x-http-method-override", "DELETE"))))
+            .oneshot(req_with_header(
+                Method::POST,
+                Some(("x-http-method-override", "DELETE")),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
@@ -392,7 +403,10 @@ mod tests {
         let (router, _, pu, _, _) = router_with_flags();
         let svc = wrap(router, MethodOverrideLayer::default());
         let resp = svc
-            .oneshot(req_with_header(Method::POST, Some(("x-http-method-override", "PUT"))))
+            .oneshot(req_with_header(
+                Method::POST,
+                Some(("x-http-method-override", "PUT")),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
@@ -404,7 +418,10 @@ mod tests {
         let (router, _, _, pa, _) = router_with_flags();
         let svc = wrap(router, MethodOverrideLayer::default());
         let resp = svc
-            .oneshot(req_with_header(Method::POST, Some(("x-http-method-override", "patch"))))
+            .oneshot(req_with_header(
+                Method::POST,
+                Some(("x-http-method-override", "patch")),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
@@ -416,7 +433,10 @@ mod tests {
         let (router, p, _, _, _) = router_with_flags();
         let svc = wrap(router, MethodOverrideLayer::default());
         let resp = svc
-            .oneshot(req_with_header(Method::POST, Some(("x-http-method-override", "GET"))))
+            .oneshot(req_with_header(
+                Method::POST,
+                Some(("x-http-method-override", "GET")),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
@@ -427,7 +447,10 @@ mod tests {
     async fn form_field_override() {
         let (router, _, _, _, d) = router_with_flags();
         let svc = wrap(router, MethodOverrideLayer::default());
-        let resp = svc.oneshot(req_form_body("_method=DELETE&id=42")).await.unwrap();
+        let resp = svc
+            .oneshot(req_form_body("_method=DELETE&id=42"))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
         assert!(d.load(Ordering::SeqCst));
     }
@@ -484,11 +507,16 @@ mod tests {
         );
         let svc = wrap(r, MethodOverrideLayer::default());
         let resp = svc
-            .oneshot(req_with_header(Method::GET, Some(("x-http-method-override", "DELETE"))))
+            .oneshot(req_with_header(
+                Method::GET,
+                Some(("x-http-method-override", "DELETE")),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
         assert_eq!(&bytes[..], b"get");
     }
 
@@ -512,11 +540,16 @@ mod tests {
             .method(Method::POST)
             .uri("/r")
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(Body::from("_method=DELETE&pad=".to_owned() + &"x".repeat(100)))
+            .body(Body::from(
+                "_method=DELETE&pad=".to_owned() + &"x".repeat(100),
+            ))
             .unwrap();
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
-        assert!(p.load(Ordering::SeqCst), "body too large -> handler stays POST");
+        assert!(
+            p.load(Ordering::SeqCst),
+            "body too large -> handler stays POST"
+        );
     }
 
     #[tokio::test]

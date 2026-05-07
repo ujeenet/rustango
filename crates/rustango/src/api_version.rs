@@ -76,8 +76,12 @@ impl VersionStrategy {
 
     /// Wrap as an axum middleware that injects [`ApiVersion`] into request extensions.
     #[must_use]
-    pub fn as_layer<S: Clone + Send + Sync + 'static>(self) -> impl tower::Layer<Router<S>> + Clone {
-        VersionLayerBuilder { strategy: Arc::new(self) }
+    pub fn as_layer<S: Clone + Send + Sync + 'static>(
+        self,
+    ) -> impl tower::Layer<Router<S>> + Clone {
+        VersionLayerBuilder {
+            strategy: Arc::new(self),
+        }
     }
 }
 
@@ -122,10 +126,7 @@ impl ApiVersion {
 impl<S: Send + Sync> FromRequestParts<S> for ApiVersion {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         Ok(parts
             .extensions
             .get::<ApiVersion>()
@@ -139,10 +140,7 @@ impl<S: Send + Sync> FromRequestParts<S> for ApiVersion {
 ///
 /// # Errors
 /// Returns the rejected version string for the caller to surface in 400 / 406.
-pub fn require_supported<'a>(
-    requested: &str,
-    supported: &'a [&'a str],
-) -> Result<&'a str, String> {
+pub fn require_supported<'a>(requested: &str, supported: &'a [&'a str]) -> Result<&'a str, String> {
     supported
         .iter()
         .find(|s| **s == requested)

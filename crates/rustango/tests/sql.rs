@@ -185,7 +185,8 @@ fn insert_emits_columns_and_placeholders() {
             SqlValue::String("alice".into()),
             SqlValue::Bool(true),
         ],
-        returning: Vec::new(), on_conflict: None,
+        returning: Vec::new(),
+        on_conflict: None,
     };
     let stmt = pg().compile_insert(&query).unwrap();
     assert_eq!(
@@ -245,7 +246,8 @@ fn insert_with_no_columns_is_rejected() {
         model: User::SCHEMA,
         columns: vec![],
         values: vec![],
-        returning: Vec::new(), on_conflict: None,
+        returning: Vec::new(),
+        on_conflict: None,
     };
     let err = pg().compile_insert(&query).unwrap_err();
     assert!(matches!(err, SqlError::EmptyInsert));
@@ -257,7 +259,8 @@ fn insert_with_mismatched_lengths_is_rejected() {
         model: User::SCHEMA,
         columns: vec!["id"],
         values: vec![SqlValue::I64(1), SqlValue::I64(2)],
-        returning: Vec::new(), on_conflict: None,
+        returning: Vec::new(),
+        on_conflict: None,
     };
     let err = pg().compile_insert(&query).unwrap_err();
     assert!(matches!(
@@ -288,7 +291,8 @@ fn bulk_insert_emits_one_values_tuple_per_row() {
                 SqlValue::Bool(false),
             ],
         ],
-        returning: Vec::new(), on_conflict: None,
+        returning: Vec::new(),
+        on_conflict: None,
     };
     let stmt = pg().compile_bulk_insert(&query).unwrap();
     assert_eq!(
@@ -307,7 +311,8 @@ fn bulk_insert_with_returning_appends_clause() {
             vec![SqlValue::String("alice".into()), SqlValue::Bool(true)],
             vec![SqlValue::String("bob".into()), SqlValue::Bool(false)],
         ],
-        returning: vec!["id"], on_conflict: None,
+        returning: vec!["id"],
+        on_conflict: None,
     };
     let stmt = pg().compile_bulk_insert(&query).unwrap();
     assert!(stmt.sql.ends_with(r#"RETURNING "id""#), "{}", stmt.sql);
@@ -319,7 +324,8 @@ fn bulk_insert_empty_rows_is_rejected() {
         model: User::SCHEMA,
         columns: vec!["name"],
         rows: vec![],
-        returning: Vec::new(), on_conflict: None,
+        returning: Vec::new(),
+        on_conflict: None,
     };
     let err = pg().compile_bulk_insert(&query).unwrap_err();
     assert!(matches!(err, SqlError::EmptyBulkInsert));
@@ -334,7 +340,8 @@ fn bulk_insert_row_shape_mismatch_is_rejected() {
             vec![SqlValue::I64(1), SqlValue::String("alice".into())],
             vec![SqlValue::I64(2)],
         ],
-        returning: Vec::new(), on_conflict: None,
+        returning: Vec::new(),
+        on_conflict: None,
     };
     let err = pg().compile_bulk_insert(&query).unwrap_err();
     assert!(matches!(err, SqlError::InsertShapeMismatch { .. }));

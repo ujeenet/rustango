@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use rustango::migrate::{
-    self, file, manage, DataOp, MigrateError, Migration, Operation, SchemaChange, SchemaSnapshot,
-    TableSnapshot, append_data_op, make_data_migration,
+    self, append_data_op, file, make_data_migration, manage, DataOp, MigrateError, Migration,
+    Operation, SchemaChange, SchemaSnapshot, TableSnapshot,
 };
 use rustango::sql::sqlx::{self, PgPool, Row};
 
@@ -97,7 +97,15 @@ fn make_empty_writes_scaffold_with_empty_forward() {
     assert_eq!(mig.name, "0001_backfill_slugs");
     assert!(mig.prev.is_none());
     assert!(mig.forward.is_empty());
-    assert_eq!(mig.snapshot, SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![], checks: vec![] });
+    assert_eq!(
+        mig.snapshot,
+        SchemaSnapshot {
+            tables: vec![],
+            m2m_tables: vec![],
+            indexes: vec![],
+            checks: vec![]
+        }
+    );
 
     // File exists and round-trips.
     let loaded = file::load(&dir.join("0001_backfill_slugs.json")).unwrap();
@@ -142,14 +150,18 @@ fn make_data_migration_creates_file_with_data_op() {
         "backfill_slugs",
         "UPDATE posts SET slug = lower(title)",
         Some("UPDATE posts SET slug = NULL"),
-    ).unwrap();
+    )
+    .unwrap();
 
     assert_eq!(mig.name, "0001_backfill_slugs");
     assert_eq!(mig.forward.len(), 1);
     match &mig.forward[0] {
         Operation::Data(d) => {
             assert_eq!(d.sql, "UPDATE posts SET slug = lower(title)");
-            assert_eq!(d.reverse_sql.as_deref(), Some("UPDATE posts SET slug = NULL"));
+            assert_eq!(
+                d.reverse_sql.as_deref(),
+                Some("UPDATE posts SET slug = NULL")
+            );
             assert!(d.reversible);
         }
         _ => panic!("expected Data op"),
@@ -177,24 +189,30 @@ fn make_data_migration_irreversible_when_no_reverse_sql() {
 #[test]
 fn make_data_migration_indexes_after_existing_chain() {
     let dir = fresh_dir("data_after_chain");
-    write_migration(&dir, &Migration {
-        name: "0001_initial".into(),
-        created_at: "2026-01-01T00:00:00Z".into(),
-        prev: None,
-        atomic: true,
-        scope: rustango::migrate::MigrationScope::default(),
-        snapshot: snapshot_with_table("t"),
-        forward: vec![],
-    });
-    write_migration(&dir, &Migration {
-        name: "0002_add_col".into(),
-        created_at: "2026-01-01T00:00:00Z".into(),
-        prev: Some("0001_initial".into()),
-        atomic: true,
-        scope: rustango::migrate::MigrationScope::default(),
-        snapshot: snapshot_with_table("t"),
-        forward: vec![],
-    });
+    write_migration(
+        &dir,
+        &Migration {
+            name: "0001_initial".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            prev: None,
+            atomic: true,
+            scope: rustango::migrate::MigrationScope::default(),
+            snapshot: snapshot_with_table("t"),
+            forward: vec![],
+        },
+    );
+    write_migration(
+        &dir,
+        &Migration {
+            name: "0002_add_col".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            prev: Some("0001_initial".into()),
+            atomic: true,
+            scope: rustango::migrate::MigrationScope::default(),
+            snapshot: snapshot_with_table("t"),
+            forward: vec![],
+        },
+    );
     let mig = make_data_migration(&dir, "backfill", "UPDATE t SET x = 1", None).unwrap();
     assert_eq!(mig.name, "0003_backfill");
     assert_eq!(mig.prev.as_deref(), Some("0002_add_col"));
@@ -207,22 +225,26 @@ fn make_data_migration_indexes_after_existing_chain() {
 fn append_data_op_adds_op_to_existing_migration() {
     let dir = fresh_dir("append");
     // Seed an initial migration with no ops
-    write_migration(&dir, &Migration {
-        name: "0001_initial".into(),
-        created_at: "2026-01-01T00:00:00Z".into(),
-        prev: None,
-        atomic: true,
-        scope: rustango::migrate::MigrationScope::default(),
-        snapshot: snapshot_with_table("t"),
-        forward: vec![],
-    });
+    write_migration(
+        &dir,
+        &Migration {
+            name: "0001_initial".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            prev: None,
+            atomic: true,
+            scope: rustango::migrate::MigrationScope::default(),
+            snapshot: snapshot_with_table("t"),
+            forward: vec![],
+        },
+    );
 
     append_data_op(
         &dir,
         "0001_initial",
         "UPDATE t SET x = 1",
         Some("UPDATE t SET x = 0"),
-    ).unwrap();
+    )
+    .unwrap();
 
     let loaded = file::load(&dir.join("0001_initial.json")).unwrap();
     assert_eq!(loaded.forward.len(), 1);
@@ -258,18 +280,24 @@ async fn add_data_op_cmd_creates_new_migration() {
         &dir,
         args(&[
             "add-data-op",
-            "--sql", "UPDATE t SET x = 1",
-            "--reverse-sql", "UPDATE t SET x = 0",
-            "--name", "backfill_x",
+            "--sql",
+            "UPDATE t SET x = 1",
+            "--reverse-sql",
+            "UPDATE t SET x = 0",
+            "--name",
+            "backfill_x",
         ]),
         &mut out,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     let output = String::from_utf8(out).unwrap();
     assert!(output.contains("backfill_x"), "output: {output}");
     assert!(output.contains("reversible"), "output: {output}");
 
-    let files: Vec<_> = std::fs::read_dir(&dir).unwrap()
+    let files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
         .filter_map(|e| e.ok())
         .collect();
     assert_eq!(files.len(), 1);
@@ -287,7 +315,9 @@ async fn add_data_op_cmd_missing_sql_is_error() {
         &dir,
         args(&["add-data-op", "--name", "oops"]),
         &mut out,
-    ).await.unwrap_err();
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(err, MigrateError::Validation(_)));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -605,9 +635,15 @@ async fn migrate_dry_run_subcommand_prints_sql_no_writes() {
         out.contains("DRY RUN"),
         "expected DRY RUN banner, got: {out}"
     );
-    assert!(out.contains(&mig_name), "expected migration name, got: {out}");
+    assert!(
+        out.contains(&mig_name),
+        "expected migration name, got: {out}"
+    );
     assert!(out.contains("CREATE TABLE"), "expected DDL, got: {out}");
-    assert!(out.contains("BEGIN"), "atomic migration should show BEGIN, got: {out}");
+    assert!(
+        out.contains("BEGIN"),
+        "atomic migration should show BEGIN, got: {out}"
+    );
 
     // No side effects.
     let exists: bool = sqlx::query(
@@ -706,7 +742,9 @@ async fn version_command_prints_framework_version() {
     let dir = fresh_dir("version");
     let pool = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
     let mut out = Vec::<u8>::new();
-    manage::run_with_writer(&pool, &dir, args(&["version"]), &mut out).await.unwrap();
+    manage::run_with_writer(&pool, &dir, args(&["version"]), &mut out)
+        .await
+        .unwrap();
     let output = String::from_utf8(out).unwrap();
     assert!(output.contains("rustango"));
     assert!(output.contains(env!("CARGO_PKG_VERSION")));
@@ -717,7 +755,9 @@ async fn version_dash_dash_alias_works() {
     let dir = fresh_dir("version_alias");
     let pool = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
     let mut out = Vec::<u8>::new();
-    manage::run_with_writer(&pool, &dir, args(&["--version"]), &mut out).await.unwrap();
+    manage::run_with_writer(&pool, &dir, args(&["--version"]), &mut out)
+        .await
+        .unwrap();
     assert!(String::from_utf8(out).unwrap().contains("rustango"));
 }
 
@@ -726,7 +766,9 @@ async fn docs_command_prints_url() {
     let dir = fresh_dir("docs");
     let pool = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
     let mut out = Vec::<u8>::new();
-    manage::run_with_writer(&pool, &dir, args(&["docs"]), &mut out).await.unwrap();
+    manage::run_with_writer(&pool, &dir, args(&["docs"]), &mut out)
+        .await
+        .unwrap();
     assert!(String::from_utf8(out).unwrap().contains("docs.rs/rustango"));
 }
 
@@ -735,7 +777,9 @@ async fn help_lists_new_commands() {
     let dir = fresh_dir("help_new");
     let pool = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
     let mut out = Vec::<u8>::new();
-    manage::run_with_writer(&pool, &dir, args(&["--help"]), &mut out).await.unwrap();
+    manage::run_with_writer(&pool, &dir, args(&["--help"]), &mut out)
+        .await
+        .unwrap();
     let output = String::from_utf8(out).unwrap();
     for cmd in &["about", "check", "docs", "version"] {
         assert!(output.contains(cmd), "help missing `{cmd}`");

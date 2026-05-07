@@ -146,19 +146,13 @@ async fn annotate_count_children_groups_per_parent() {
         p.save(&pool).await.unwrap();
     }
 
-    let counts: Vec<(Author, i64)> = annotate_count_children::<Author>(
-        Author::objects(),
-        "rustango_ob_post",
-        "author",
-        &pool,
-    )
-    .await
-    .unwrap();
+    let counts: Vec<(Author, i64)> =
+        annotate_count_children::<Author>(Author::objects(), "rustango_ob_post", "author", &pool)
+            .await
+            .unwrap();
     assert_eq!(counts.len(), 3);
-    let by_name: std::collections::HashMap<&str, i64> = counts
-        .iter()
-        .map(|(a, n)| (a.name.as_str(), *n))
-        .collect();
+    let by_name: std::collections::HashMap<&str, i64> =
+        counts.iter().map(|(a, n)| (a.name.as_str(), *n)).collect();
     assert_eq!(by_name.get("Ada"), Some(&3));
     assert_eq!(by_name.get("Grace"), Some(&1));
     assert_eq!(by_name.get("Linus"), Some(&0));
@@ -204,19 +198,16 @@ async fn annotate_count_children_on_works_against_acquired_connection() {
     }
 
     let mut conn = pool.acquire().await.unwrap();
-    let counts: Vec<(Author, i64)> =
-        annotate_count_children_on::<Author, _>(
-            Author::objects(),
-            "rustango_ob_post",
-            "author",
-            &mut *conn,
-        )
-        .await
-        .unwrap();
-    let by_name: std::collections::HashMap<&str, i64> = counts
-        .iter()
-        .map(|(a, n)| (a.name.as_str(), *n))
-        .collect();
+    let counts: Vec<(Author, i64)> = annotate_count_children_on::<Author, _>(
+        Author::objects(),
+        "rustango_ob_post",
+        "author",
+        &mut *conn,
+    )
+    .await
+    .unwrap();
+    let by_name: std::collections::HashMap<&str, i64> =
+        counts.iter().map(|(a, n)| (a.name.as_str(), *n)).collect();
     assert_eq!(by_name.get("Ada"), Some(&2));
     assert_eq!(by_name.get("Grace"), Some(&1));
 }

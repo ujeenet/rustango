@@ -231,7 +231,10 @@ async fn handle(cfg: Arc<SecurityHeadersLayer>, req: Request<Body>, next: Next) 
         }
     }
     if cfg.nosniff {
-        headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+        headers.insert(
+            "x-content-type-options",
+            HeaderValue::from_static("nosniff"),
+        );
     }
     if let Some(v) = cfg.referrer_policy {
         if let Ok(hv) = HeaderValue::from_str(v) {
@@ -307,14 +310,21 @@ pub fn csp_report_router(path: &str) -> axum::Router {
     axum::Router::new().route(&path, post(handle_csp_report))
 }
 
-async fn handle_csp_report(
-    body: axum::extract::Json<serde_json::Value>,
-) -> axum::http::StatusCode {
+async fn handle_csp_report(body: axum::extract::Json<serde_json::Value>) -> axum::http::StatusCode {
     // Standard CSP report format wraps the body in {"csp-report": {...}}
     let report = body.0.get("csp-report").unwrap_or(&body.0);
-    let document_uri = report.get("document-uri").and_then(|v| v.as_str()).unwrap_or("?");
-    let violated = report.get("violated-directive").and_then(|v| v.as_str()).unwrap_or("?");
-    let blocked = report.get("blocked-uri").and_then(|v| v.as_str()).unwrap_or("?");
+    let document_uri = report
+        .get("document-uri")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let violated = report
+        .get("violated-directive")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let blocked = report
+        .get("blocked-uri")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
     tracing::warn!(
         document_uri = %document_uri,
         violated_directive = %violated,
@@ -350,8 +360,10 @@ impl CspBuilder {
     }
 
     fn set(&mut self, name: &str, sources: &[&str]) {
-        self.directives
-            .insert(name.to_owned(), sources.iter().map(|s| (*s).to_owned()).collect());
+        self.directives.insert(
+            name.to_owned(),
+            sources.iter().map(|s| (*s).to_owned()).collect(),
+        );
     }
 
     #[must_use]
@@ -463,7 +475,10 @@ mod tests {
     #[test]
     fn dev_preset_only_nosniff() {
         let l = SecurityHeadersLayer::dev();
-        assert!(l.hsts.is_none(), "dev must NOT set HSTS — would lock localhost to https");
+        assert!(
+            l.hsts.is_none(),
+            "dev must NOT set HSTS — would lock localhost to https"
+        );
         assert!(l.xfo.is_none());
         assert!(l.nosniff);
     }

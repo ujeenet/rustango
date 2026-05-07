@@ -71,7 +71,9 @@ impl TracingLayer {
 impl<S> tower::Layer<S> for TracingLayer {
     type Service = TracingService<S>;
     fn layer(&self, inner: S) -> Self::Service {
-        TracingService { inner: Arc::new(tokio::sync::Mutex::new(inner)) }
+        TracingService {
+            inner: Arc::new(tokio::sync::Mutex::new(inner)),
+        }
     }
 }
 
@@ -83,7 +85,9 @@ pub struct TracingService<S> {
 
 impl<S> Clone for TracingService<S> {
     fn clone(&self) -> Self {
-        Self { inner: Arc::clone(&self.inner) }
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
     }
 }
 
@@ -222,8 +226,7 @@ fn parse_traceparent_str(s: &str) -> Option<ParsedTraceparent<'_>> {
     if version.len() != 2 || !is_hex(version) {
         return None;
     }
-    if trace_id.len() != 32 || !is_hex(trace_id) || trace_id == "00000000000000000000000000000000"
-    {
+    if trace_id.len() != 32 || !is_hex(trace_id) || trace_id == "00000000000000000000000000000000" {
         return None;
     }
     if parent_id.len() != 16 || !is_hex(parent_id) || parent_id == "0000000000000000" {
@@ -335,7 +338,10 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri("/r?x=1")
-                    .header("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+                    .header(
+                        "traceparent",
+                        "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )

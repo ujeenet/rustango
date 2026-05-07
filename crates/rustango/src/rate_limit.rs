@@ -108,9 +108,10 @@ impl RateLimitLayer {
         let cap = self.capacity as f64;
         let rate = self.rate_per_sec();
         let mut store = self.store.lock().await;
-        let bucket = store
-            .entry(key.to_owned())
-            .or_insert(Bucket { tokens: cap, last_refill: now });
+        let bucket = store.entry(key.to_owned()).or_insert(Bucket {
+            tokens: cap,
+            last_refill: now,
+        });
 
         // Refill since last access
         let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
@@ -123,7 +124,11 @@ impl RateLimitLayer {
         } else {
             // How many seconds until 1 token is available?
             let need = 1.0 - bucket.tokens;
-            let retry = if rate > 0.0 { (need / rate).ceil() as u64 } else { u64::MAX };
+            let retry = if rate > 0.0 {
+                (need / rate).ceil() as u64
+            } else {
+                u64::MAX
+            };
             Err(retry.max(1))
         }
     }
@@ -235,6 +240,9 @@ mod tests {
         assert!(l.take("k").await.is_err());
         // Wait 30ms — should refill ~3 tokens
         tokio::time::sleep(Duration::from_millis(35)).await;
-        assert!(l.take("k").await.is_ok(), "should have refilled at least 1 token");
+        assert!(
+            l.take("k").await.is_ok(),
+            "should have refilled at least 1 token"
+        );
     }
 }

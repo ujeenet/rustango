@@ -127,7 +127,10 @@ impl NotificationDispatch {
     /// Convenience: an email-only dispatch.
     #[must_use]
     pub fn email_only(email: Email) -> Self {
-        Self { email: Some(email), ..Self::default() }
+        Self {
+            email: Some(email),
+            ..Self::default()
+        }
     }
 }
 
@@ -143,7 +146,10 @@ pub trait Notification<N: Notifiable> {
 /// Broadcast callback — invoked once per `notify()` call when the dispatch
 /// has a `broadcast` payload. Wire a WebSocket / SSE / pub-sub here.
 pub type BroadcastFn = Arc<
-    dyn Fn(serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+    dyn Fn(
+            serde_json::Value,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
         + Send
         + Sync,
 >;
@@ -273,7 +279,11 @@ pub async fn notify<N: Notifiable, T: Notification<N>>(
 
     // Database
     if let Some(payload) = &dispatch.database {
-        result.database = match (&ctx.database_pool, &ctx.database_table, recipient.notification_id()) {
+        result.database = match (
+            &ctx.database_pool,
+            &ctx.database_table,
+            recipient.notification_id(),
+        ) {
             (Some(pool), Some(table), Some(id)) => {
                 let kind = payload
                     .get("type")
@@ -334,9 +344,8 @@ async fn insert_database_notification(
     payload: &serde_json::Value,
 ) -> Result<(), String> {
     validate_table_name(table)?;
-    let sql = format!(
-        r#"INSERT INTO "{table}" ("notifiable_id", "type", "data") VALUES ($1, $2, $3)"#,
-    );
+    let sql =
+        format!(r#"INSERT INTO "{table}" ("notifiable_id", "type", "data") VALUES ($1, $2, $3)"#,);
     crate::sql::sqlx::query(&sql)
         .bind(notifiable_id)
         .bind(kind)
@@ -386,9 +395,14 @@ mod tests {
     use crate::email::{Email, InMemoryMailer, Mailer};
     use std::sync::Mutex;
 
-    struct TestUser { id: i64, email: String }
+    struct TestUser {
+        id: i64,
+        email: String,
+    }
     impl Notifiable for TestUser {
-        fn notification_id(&self) -> Option<i64> { Some(self.id) }
+        fn notification_id(&self) -> Option<i64> {
+            Some(self.id)
+        }
     }
 
     struct WelcomeEmail;
@@ -414,12 +428,15 @@ mod tests {
         let mailer_clone = mailer.clone();
         let ctx = NotificationContext::new().with_mailer(mailer_clone as _);
 
-        let u = TestUser { id: 1, email: "a@x.com".into() };
+        let u = TestUser {
+            id: 1,
+            email: "a@x.com".into(),
+        };
         let r = notify(&u, &WelcomeEmail, &ctx).await;
 
         assert_eq!(r.mail, ChannelOutcome::Delivered);
         assert_eq!(r.log, ChannelOutcome::Delivered);
-        assert_eq!(r.database, ChannelOutcome::Skipped);    // no payload
+        assert_eq!(r.database, ChannelOutcome::Skipped); // no payload
         assert_eq!(r.broadcast, ChannelOutcome::Skipped);
         assert_eq!(mailer.count(), 1);
     }
@@ -427,11 +444,18 @@ mod tests {
     #[tokio::test]
     async fn missing_mailer_records_failure_without_aborting_other_channels() {
         let ctx = NotificationContext::new(); // no mailer
-        let u = TestUser { id: 1, email: "a@x.com".into() };
+        let u = TestUser {
+            id: 1,
+            email: "a@x.com".into(),
+        };
         let r = notify(&u, &WelcomeEmail, &ctx).await;
 
         assert!(matches!(r.mail, ChannelOutcome::Failed(_)));
-        assert_eq!(r.log, ChannelOutcome::Delivered, "log channel should still fire");
+        assert_eq!(
+            r.log,
+            ChannelOutcome::Delivered,
+            "log channel should still fire"
+        );
         assert!(!r.no_failures());
         assert!(r.any_delivered());
     }
@@ -445,7 +469,10 @@ mod tests {
             }
         }
         let ctx = NotificationContext::new();
-        let u = TestUser { id: 1, email: "a@x.com".into() };
+        let u = TestUser {
+            id: 1,
+            email: "a@x.com".into(),
+        };
         let r = notify(&u, &NoOp, &ctx).await;
         assert_eq!(r.mail, ChannelOutcome::Skipped);
         assert_eq!(r.log, ChannelOutcome::Skipped);
@@ -477,7 +504,10 @@ mod tests {
             }
         }
 
-        let u = TestUser { id: 1, email: "a@x.com".into() };
+        let u = TestUser {
+            id: 1,
+            email: "a@x.com".into(),
+        };
         let r = notify(&u, &WithBroadcast, &ctx).await;
         assert_eq!(r.broadcast, ChannelOutcome::Delivered);
         assert_eq!(captured.lock().unwrap().len(), 1);
@@ -487,9 +517,18 @@ mod tests {
     async fn notify_many_returns_one_result_per_recipient() {
         let ctx = NotificationContext::new();
         let users = vec![
-            TestUser { id: 1, email: "a@x".into() },
-            TestUser { id: 2, email: "b@x".into() },
-            TestUser { id: 3, email: "c@x".into() },
+            TestUser {
+                id: 1,
+                email: "a@x".into(),
+            },
+            TestUser {
+                id: 2,
+                email: "b@x".into(),
+            },
+            TestUser {
+                id: 3,
+                email: "c@x".into(),
+            },
         ];
         let refs: Vec<&TestUser> = users.iter().collect();
         let results = notify_many(&refs, &WelcomeEmail, &ctx).await;
@@ -503,7 +542,10 @@ mod tests {
     async fn delivered_count_matches_actual_deliveries() {
         let mailer: Arc<dyn Mailer> = Arc::new(InMemoryMailer::new());
         let ctx = NotificationContext::new().with_mailer(mailer);
-        let u = TestUser { id: 1, email: "a@x".into() };
+        let u = TestUser {
+            id: 1,
+            email: "a@x".into(),
+        };
         let r = notify(&u, &WelcomeEmail, &ctx).await;
         assert_eq!(r.delivered_count(), 2); // mail + log
     }

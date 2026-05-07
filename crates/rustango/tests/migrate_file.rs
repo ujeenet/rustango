@@ -8,7 +8,12 @@ use rustango::migrate::{
 };
 
 fn empty_snapshot() -> SchemaSnapshot {
-    SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![], checks: vec![] }
+    SchemaSnapshot {
+        tables: vec![],
+        m2m_tables: vec![],
+        indexes: vec![],
+        checks: vec![],
+    }
 }
 
 fn user_table() -> TableSnapshot {
@@ -100,7 +105,7 @@ fn round_trip_schema_only_migration() {
         scope: rustango::migrate::MigrationScope::default(),
         snapshot: SchemaSnapshot {
             tables: vec![user_table()],
-                                    ..Default::default()
+            ..Default::default()
         },
         forward: vec![Operation::Schema(SchemaChange::CreateTable(
             "snap_user".into(),
@@ -121,7 +126,7 @@ fn round_trip_mixed_schema_and_data_ops() {
         scope: rustango::migrate::MigrationScope::default(),
         snapshot: SchemaSnapshot {
             tables: vec![user_table()],
-                                    ..Default::default()
+            ..Default::default()
         },
         forward: vec![
             Operation::Schema(SchemaChange::AddColumn {
@@ -179,7 +184,7 @@ fn write_then_load_round_trip_via_filesystem() {
         scope: rustango::migrate::MigrationScope::default(),
         snapshot: SchemaSnapshot {
             tables: vec![user_table()],
-                                    ..Default::default()
+            ..Default::default()
         },
         forward: vec![Operation::Schema(SchemaChange::CreateTable(
             "snap_user".into(),

@@ -184,11 +184,10 @@ impl SessionStore {
         let Some(raw) = self.cache.get(&self.cache_key(id)).await? else {
             return Ok(None);
         };
-        let mut session: Session =
-            match serde_json::from_str(&raw) {
-                Ok(s) => s,
-                Err(_) => return Ok(None),
-            };
+        let mut session: Session = match serde_json::from_str(&raw) {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
         // Loaded session starts clean — only later modifications mark dirty.
         session.dirty = false;
         Ok(Some(session))
@@ -313,7 +312,10 @@ mod tests {
         s.set("b", 2);
         let mut keys: Vec<&String> = s.keys().collect();
         keys.sort();
-        assert_eq!(keys.iter().map(|s| s.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!(
+            keys.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
     }
 
     // -------- SessionStore
@@ -390,7 +392,11 @@ mod tests {
         // Plant garbage under a session key.
         store
             .cache
-            .set("session:corrupt", "not-json-{}", Some(Duration::from_secs(60)))
+            .set(
+                "session:corrupt",
+                "not-json-{}",
+                Some(Duration::from_secs(60)),
+            )
             .await
             .unwrap();
         // load() should NOT panic; returns None.
@@ -413,7 +419,9 @@ mod tests {
         let id = generate_id();
         // 24 bytes encoded = ceil(24*4/3) = 32 chars (no padding).
         assert_eq!(id.len(), 32);
-        assert!(id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     }
 
     #[test]

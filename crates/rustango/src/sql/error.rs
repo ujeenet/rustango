@@ -81,9 +81,7 @@ pub enum SqlError {
         "{dialect} dialect query compilation is not implemented yet — \
          lands in a future rustango v0.23.0 batch."
     )]
-    DialectQueryCompilationNotImplemented {
-        dialect: &'static str,
-    },
+    DialectQueryCompilationNotImplemented { dialect: &'static str },
 
     /// A query operator is supported by the rustango IR but has no
     /// equivalent (or no equivalent yet) in the active dialect.
@@ -146,7 +144,5 @@ pub enum ExecError {
     /// no `#[rustango(primary_key)]` field. Programming error;
     /// surfaces only if a model deriving `Model` somehow lacks a PK.
     #[error("model `{table}` has no `#[rustango(primary_key)]` field — required for FK lookup")]
-    MissingPrimaryKey {
-        table: &'static str,
-    },
+    MissingPrimaryKey { table: &'static str },
 }

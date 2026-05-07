@@ -187,19 +187,27 @@ impl ValidatedSerializer {
         if self.title.is_empty() {
             errors.add("title", "title cannot be empty");
         }
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 }
 
 #[test]
 fn custom_validate_fires_on_empty_title() {
-    let s = ValidatedSerializer { title: String::new() };
+    let s = ValidatedSerializer {
+        title: String::new(),
+    };
     assert!(s.validate().is_err());
 }
 
 #[test]
 fn custom_validate_passes_with_title() {
-    let s = ValidatedSerializer { title: "Hi".to_owned() };
+    let s = ValidatedSerializer {
+        title: "Hi".to_owned(),
+    };
     assert!(s.validate().is_ok());
 }
 
@@ -292,8 +300,7 @@ mod openapi_auto_derive {
     #[test]
     fn schema_for_serializer_helper_returns_the_same_schema() {
         let direct = serde_json::to_value(PostSerializer::openapi_schema()).unwrap();
-        let via_helper =
-            serde_json::to_value(Schema::for_serializer::<PostSerializer>()).unwrap();
+        let via_helper = serde_json::to_value(Schema::for_serializer::<PostSerializer>()).unwrap();
         assert_eq!(direct, via_helper);
     }
 }

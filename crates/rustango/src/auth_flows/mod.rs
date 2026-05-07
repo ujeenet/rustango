@@ -65,7 +65,9 @@ pub enum AuthFlowError {
 impl From<SignedUrlError> for AuthFlowError {
     fn from(e: SignedUrlError) -> Self {
         match e {
-            SignedUrlError::MissingSignature | SignedUrlError::MalformedSignature => Self::Malformed,
+            SignedUrlError::MissingSignature | SignedUrlError::MalformedSignature => {
+                Self::Malformed
+            }
             SignedUrlError::InvalidSignature => Self::InvalidSignature,
             SignedUrlError::Expired => Self::Expired,
         }
@@ -107,7 +109,9 @@ impl PasswordReset {
             return Err(AuthFlowError::WrongPurpose(purpose));
         }
         let user_id_str = extract_query(url, "user_id").ok_or(AuthFlowError::Malformed)?;
-        user_id_str.parse::<i64>().map_err(|_| AuthFlowError::Malformed)
+        user_id_str
+            .parse::<i64>()
+            .map_err(|_| AuthFlowError::Malformed)
     }
 }
 
@@ -153,7 +157,9 @@ impl EmailVerification {
             return Err(AuthFlowError::WrongPurpose(purpose));
         }
         let user_id_str = extract_query(url, "user_id").ok_or(AuthFlowError::Malformed)?;
-        let user_id = user_id_str.parse::<i64>().map_err(|_| AuthFlowError::Malformed)?;
+        let user_id = user_id_str
+            .parse::<i64>()
+            .map_err(|_| AuthFlowError::Malformed)?;
         let email = extract_query(url, "email").ok_or(AuthFlowError::Malformed)?;
         Ok((user_id, email))
     }
@@ -350,7 +356,11 @@ mod tests {
     #[test]
     fn missing_purpose_param_treated_as_malformed() {
         // Hand-crafted signed URL without purpose
-        let url = sign("https://x/r?user_id=42", SECRET, Some(Duration::from_secs(60)));
+        let url = sign(
+            "https://x/r?user_id=42",
+            SECRET,
+            Some(Duration::from_secs(60)),
+        );
         let r = PasswordReset::verify(&url, SECRET);
         assert_eq!(r.unwrap_err(), AuthFlowError::Malformed);
     }

@@ -176,10 +176,12 @@ impl Translator {
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
             let raw = std::fs::read_to_string(&path).map_err(|e| I18nError::Io(e.to_string()))?;
-            let catalog: HashMap<String, String> = serde_json::from_str(&raw)
-                .map_err(|e| I18nError::Parse {
+            let catalog: HashMap<String, String> =
+                serde_json::from_str(&raw).map_err(|e| I18nError::Parse {
                     file: path.display().to_string(),
                     detail: e.to_string(),
                 })?;
@@ -226,7 +228,10 @@ pub fn negotiate_language<S: AsRef<str>>(accept_language: &str, available: &[S])
         }
         // Base-language match
         let base = lang_lower.split('-').next().unwrap_or(&lang_lower);
-        if let Some(matched) = avail_lower.iter().find(|a| **a == base || a.starts_with(&format!("{base}-"))) {
+        if let Some(matched) = avail_lower
+            .iter()
+            .find(|a| **a == base || a.starts_with(&format!("{base}-")))
+        {
             return Some(matched.clone());
         }
     }
@@ -282,8 +287,14 @@ mod tests {
     #[test]
     fn translate_substitutes_params() {
         let t = make_translator();
-        assert_eq!(t.translate("en", "greet", &[("name", "Alice")]), "Hi, Alice!");
-        assert_eq!(t.translate("fr", "greet", &[("name", "Alice")]), "Salut, Alice !");
+        assert_eq!(
+            t.translate("en", "greet", &[("name", "Alice")]),
+            "Hi, Alice!"
+        );
+        assert_eq!(
+            t.translate("fr", "greet", &[("name", "Alice")]),
+            "Salut, Alice !"
+        );
     }
 
     #[test]

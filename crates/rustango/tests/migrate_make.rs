@@ -46,7 +46,10 @@ fn post_table() -> TableSnapshot {
 }
 
 fn snapshot_with(tables: Vec<TableSnapshot>) -> SchemaSnapshot {
-    SchemaSnapshot { tables, ..Default::default() }
+    SchemaSnapshot {
+        tables,
+        ..Default::default()
+    }
 }
 
 // ---------- empty dir → 0001_initial ----------
@@ -426,7 +429,8 @@ fn user_table_with_age_i32() -> TableSnapshot {
             {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true},
             {"name": "age", "column": "age", "ty": "i32", "nullable": false, "primary_key": false}
         ]
-    })).unwrap()
+    }))
+    .unwrap()
 }
 
 fn user_table_with_age_i64() -> TableSnapshot {
@@ -437,7 +441,8 @@ fn user_table_with_age_i64() -> TableSnapshot {
             {"name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true},
             {"name": "age", "column": "age", "ty": "i64", "nullable": false, "primary_key": false}
         ]
-    })).unwrap()
+    }))
+    .unwrap()
 }
 
 #[test]
@@ -569,7 +574,11 @@ fn primary_key_change_still_hits_the_hard_error() {
     // (CHECK), FK, and Auto add/remove.
     let dir = fresh_dir("pk_change");
     let mut t = user_table();
-    t.fields.iter_mut().find(|f| f.column == "id").unwrap().primary_key = true;
+    t.fields
+        .iter_mut()
+        .find(|f| f.column == "id")
+        .unwrap()
+        .primary_key = true;
     make_migrations_from(&dir, &snapshot_with(vec![t.clone()]), None)
         .unwrap()
         .unwrap();
@@ -577,7 +586,11 @@ fn primary_key_change_still_hits_the_hard_error() {
     // Flip primary_key off — change isn't supported by AlterColumn
     // ops, so we expect the hard error.
     let mut t2 = t.clone();
-    t2.fields.iter_mut().find(|f| f.column == "id").unwrap().primary_key = false;
+    t2.fields
+        .iter_mut()
+        .find(|f| f.column == "id")
+        .unwrap()
+        .primary_key = false;
     let err = make_migrations_from(&dir, &snapshot_with(vec![t2]), None).unwrap_err();
     let msg = match err {
         MigrateError::Validation(m) => m,

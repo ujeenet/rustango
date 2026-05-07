@@ -129,11 +129,7 @@ impl CacheRateLimitLayer {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         let window_start = (now / window_secs) * window_secs;
-        let cache_key = format!(
-            "{}:{}:{window_start}",
-            self.key_prefix.as_str(),
-            key,
-        );
+        let cache_key = format!("{}:{}:{window_start}", self.key_prefix.as_str(), key,);
 
         let count = match self
             .cache
@@ -143,10 +139,7 @@ impl CacheRateLimitLayer {
             Ok(n) => n,
             Err(_e) => {
                 // Fail-open: cache outage shouldn't deny all traffic.
-                tracing::warn!(
-                    cache_key,
-                    "rate-limit cache incr failed; allowing request"
-                );
+                tracing::warn!(cache_key, "rate-limit cache incr failed; allowing request");
                 return Ok((0, 0));
             }
         };
@@ -257,8 +250,8 @@ mod tests {
     #[tokio::test]
     async fn separate_prefixes_have_independent_counters() {
         let cache: BoxedCache = Arc::new(InMemoryCache::new());
-        let a = CacheRateLimitLayer::new(cache.clone(), 1, Duration::from_secs(60))
-            .key_prefix("login");
+        let a =
+            CacheRateLimitLayer::new(cache.clone(), 1, Duration::from_secs(60)).key_prefix("login");
         let b = CacheRateLimitLayer::new(cache, 1, Duration::from_secs(60)).key_prefix("signup");
         assert!(a.take("alice").await.is_ok());
         assert!(a.take("alice").await.is_err());

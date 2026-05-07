@@ -222,7 +222,10 @@ mod tests {
 
     #[test]
     fn html_escape_special_chars() {
-        assert_eq!(html_escape("<a>&\"'</a>"), "&lt;a&gt;&amp;&quot;&#x27;&lt;/a&gt;");
+        assert_eq!(
+            html_escape("<a>&\"'</a>"),
+            "&lt;a&gt;&amp;&quot;&#x27;&lt;/a&gt;"
+        );
     }
 
     #[test]
@@ -281,7 +284,11 @@ mod tests {
     fn unique_slug_keeps_incrementing_until_free() {
         let mut existing = std::collections::HashSet::new();
         for i in 1..=5 {
-            let s = if i == 1 { "hello".to_owned() } else { format!("hello-{i}") };
+            let s = if i == 1 {
+                "hello".to_owned()
+            } else {
+                format!("hello-{i}")
+            };
             existing.insert(s);
         }
         let result = unique_slug("Hello", |s| existing.contains(s));
@@ -297,7 +304,8 @@ mod tests {
         let result = unique_slug_async("foo", |candidate| {
             let existing = existing.clone();
             async move { existing.contains(&candidate) }
-        }).await;
+        })
+        .await;
         assert_eq!(result, "foo-3");
     }
 }

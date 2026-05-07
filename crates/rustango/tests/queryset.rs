@@ -107,7 +107,10 @@ fn null_value_skips_type_check() {
         .filter("name", Op::Eq, Option::<String>::None)
         .compile()
         .unwrap();
-    assert_eq!(q.where_clause.as_flat_and().unwrap()[0].value, SqlValue::Null);
+    assert_eq!(
+        q.where_clause.as_flat_and().unwrap()[0].value,
+        SqlValue::Null
+    );
 }
 
 // ---------------- compile_delete ----------------

@@ -38,7 +38,7 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 
 use crate::tenancy::auth::{Operator, User};
-use crate::tenancy::{operator_console, OrgResolver as _, tenant_console};
+use crate::tenancy::{operator_console, tenant_console, OrgResolver as _};
 
 use super::TenantContext;
 
@@ -59,10 +59,7 @@ pub struct SessionUser(pub Option<User>);
 impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let Some(ctx) = parts.extensions.get::<Arc<TenantContext>>().cloned() else {
             return Ok(SessionUser(None));
         };
@@ -79,11 +76,10 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
             None => return Ok(SessionUser(None)),
         };
 
-        let payload =
-            match tenant_console::decode(&ctx.session_secret, &org.slug, &cookie_value) {
-                Ok(p) => p,
-                Err(_) => return Ok(SessionUser(None)),
-            };
+        let payload = match tenant_console::decode(&ctx.session_secret, &org.slug, &cookie_value) {
+            Ok(p) => p,
+            Err(_) => return Ok(SessionUser(None)),
+        };
 
         let mut conn = match ctx.pools.acquire(&org).await {
             Ok(c) => c,
@@ -115,25 +111,20 @@ pub struct SessionOperator(pub Option<Operator>);
 impl<S: Send + Sync> FromRequestParts<S> for SessionOperator {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let Some(ctx) = parts.extensions.get::<Arc<TenantContext>>().cloned() else {
             return Ok(SessionOperator(None));
         };
 
-        let cookie_value =
-            match extract_cookie(parts, operator_console::session::COOKIE_NAME) {
-                Some(v) => v,
-                None => return Ok(SessionOperator(None)),
-            };
+        let cookie_value = match extract_cookie(parts, operator_console::session::COOKIE_NAME) {
+            Some(v) => v,
+            None => return Ok(SessionOperator(None)),
+        };
 
-        let payload =
-            match operator_console::session::decode(&ctx.operator_secret, &cookie_value) {
-                Ok(p) => p,
-                Err(_) => return Ok(SessionOperator(None)),
-            };
+        let payload = match operator_console::session::decode(&ctx.operator_secret, &cookie_value) {
+            Ok(p) => p,
+            Err(_) => return Ok(SessionOperator(None)),
+        };
 
         use crate::core::Column as _;
         use crate::sql::Fetcher as _;

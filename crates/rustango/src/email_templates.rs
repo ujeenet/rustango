@@ -140,13 +140,13 @@ impl EmailRenderer {
             .trim()
             .to_owned();
 
-        let body = self
-            .tera
-            .render(&text_name, context)
-            .map_err(|e| match underlying_kind(&e) {
-                TemplateMissing::Yes => EmailRenderError::Missing(text_name.clone()),
-                TemplateMissing::No => e.into(),
-            })?;
+        let body =
+            self.tera
+                .render(&text_name, context)
+                .map_err(|e| match underlying_kind(&e) {
+                    TemplateMissing::Yes => EmailRenderError::Missing(text_name.clone()),
+                    TemplateMissing::No => e.into(),
+                })?;
 
         let mut email = Email::new().subject(subject).body(body);
 
@@ -194,10 +194,7 @@ mod tests {
         .unwrap();
         let email = r.render("welcome", &ctx_alice()).unwrap();
         assert_eq!(email.subject, "Welcome, Alice");
-        assert_eq!(
-            email.body,
-            "Hi Alice, visit https://example.com/verify/abc"
-        );
+        assert_eq!(email.body, "Hi Alice, visit https://example.com/verify/abc");
         assert!(email.html_body.is_none());
     }
 
@@ -237,11 +234,9 @@ mod tests {
     fn subject_is_trimmed() {
         // Subject lines often gain leading whitespace from indentation
         // in templates — trim it.
-        let r = EmailRenderer::from_pairs(vec![
-            ("hi.subject.txt", "  Hello\n"),
-            ("hi.txt", "body"),
-        ])
-        .unwrap();
+        let r =
+            EmailRenderer::from_pairs(vec![("hi.subject.txt", "  Hello\n"), ("hi.txt", "body")])
+                .unwrap();
         let e = r.render("hi", &Context::new()).unwrap();
         assert_eq!(e.subject, "Hello");
     }
@@ -249,10 +244,8 @@ mod tests {
     #[test]
     fn template_syntax_error_propagates() {
         // Garbled template — Tera should reject at parse time.
-        let r = EmailRenderer::from_pairs(vec![
-            ("hi.subject.txt", "{{ unbalanced"),
-            ("hi.txt", "x"),
-        ]);
+        let r =
+            EmailRenderer::from_pairs(vec![("hi.subject.txt", "{{ unbalanced"), ("hi.txt", "x")]);
         assert!(r.is_err(), "parse error should bubble out of from_pairs");
     }
 
@@ -272,13 +265,11 @@ mod tests {
 
     #[test]
     fn tera_mut_lets_caller_register_filters() {
-        let mut r = EmailRenderer::from_pairs(vec![
-            ("hi.subject.txt", "x"),
-            ("hi.txt", "x"),
-        ])
-        .unwrap();
+        let mut r =
+            EmailRenderer::from_pairs(vec![("hi.subject.txt", "x"), ("hi.txt", "x")]).unwrap();
         // Register a no-op filter; just verifying the access works.
-        r.tera_mut().register_filter("noop", |v: &tera::Value, _: &_| Ok(v.clone()));
+        r.tera_mut()
+            .register_filter("noop", |v: &tera::Value, _: &_| Ok(v.clone()));
         // Smoke test that rendering still works.
         let _ = r.render("hi", &Context::new()).unwrap();
     }
@@ -295,10 +286,7 @@ mod tests {
         .unwrap();
         let mut c = Context::new();
         c.insert("user", &serde_json::json!({"name": "Alice"}));
-        c.insert(
-            "order",
-            &serde_json::json!({"id": 42, "items": [1, 2, 3]}),
-        );
+        c.insert("order", &serde_json::json!({"id": 42, "items": [1, 2, 3]}));
         let e = r.render("o", &c).unwrap();
         assert_eq!(e.subject, "Order 42");
         assert_eq!(e.body, "Alice ordered 3 items.");

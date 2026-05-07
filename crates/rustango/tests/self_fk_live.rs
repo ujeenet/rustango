@@ -65,37 +65,65 @@ async fn live_self_fk_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     let pool = sqlx::PgPool::connect(&url).await?;
 
     sqlx::query("DROP TABLE IF EXISTS rustango_self_fk_page CASCADE")
-        .execute(&pool).await?;
+        .execute(&pool)
+        .await?;
     sqlx::query(
         r#"CREATE TABLE rustango_self_fk_page (
             id BIGSERIAL PRIMARY KEY,
             title VARCHAR(64) NOT NULL,
             parent_id BIGINT NULL
         )"#,
-    ).execute(&pool).await?;
+    )
+    .execute(&pool)
+    .await?;
     sqlx::query(
         r#"ALTER TABLE rustango_self_fk_page
            ADD CONSTRAINT rustango_self_fk_page_parent_id_fkey
            FOREIGN KEY (parent_id) REFERENCES rustango_self_fk_page (id)
            ON DELETE CASCADE"#,
-    ).execute(&pool).await?;
+    )
+    .execute(&pool)
+    .await?;
 
-    let mut root = Page { id: Auto::Unset, title: "root".into(), parent_id: None };
+    let mut root = Page {
+        id: Auto::Unset,
+        title: "root".into(),
+        parent_id: None,
+    };
     root.save(&pool).await?;
-    let root_id = match root.id { Auto::Set(v) => v, Auto::Unset => panic!("root id unset") };
+    let root_id = match root.id {
+        Auto::Set(v) => v,
+        Auto::Unset => panic!("root id unset"),
+    };
 
-    let mut child_a = Page { id: Auto::Unset, title: "child_a".into(), parent_id: Some(root_id) };
+    let mut child_a = Page {
+        id: Auto::Unset,
+        title: "child_a".into(),
+        parent_id: Some(root_id),
+    };
     child_a.save(&pool).await?;
-    let mut child_b = Page { id: Auto::Unset, title: "child_b".into(), parent_id: Some(root_id) };
+    let mut child_b = Page {
+        id: Auto::Unset,
+        title: "child_b".into(),
+        parent_id: Some(root_id),
+    };
     child_b.save(&pool).await?;
-    let child_b_id = match child_b.id { Auto::Set(v) => v, Auto::Unset => panic!("child_b id unset") };
+    let child_b_id = match child_b.id {
+        Auto::Set(v) => v,
+        Auto::Unset => panic!("child_b id unset"),
+    };
 
-    let mut grand = Page { id: Auto::Unset, title: "grand".into(), parent_id: Some(child_b_id) };
+    let mut grand = Page {
+        id: Auto::Unset,
+        title: "grand".into(),
+        parent_id: Some(child_b_id),
+    };
     grand.save(&pool).await?;
 
     let mut root_children: Vec<Page> = Page::objects()
         .filter("parent_id", Op::Eq, root_id)
-        .fetch(&pool).await?;
+        .fetch(&pool)
+        .await?;
     root_children.sort_by(|a, b| a.title.cmp(&b.title));
     assert_eq!(root_children.len(), 2);
     assert_eq!(root_children[0].title, "child_a");
@@ -103,11 +131,13 @@ async fn live_self_fk_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 
     let grandkids: Vec<Page> = Page::objects()
         .filter("parent_id", Op::Eq, child_b_id)
-        .fetch(&pool).await?;
+        .fetch(&pool)
+        .await?;
     assert_eq!(grandkids.len(), 1);
     assert_eq!(grandkids[0].title, "grand");
 
     sqlx::query("DROP TABLE IF EXISTS rustango_self_fk_page CASCADE")
-        .execute(&pool).await?;
+        .execute(&pool)
+        .await?;
     Ok(())
 }

@@ -88,7 +88,12 @@ impl IdempotencyLayer {
             header: DEFAULT_HEADER,
             scope: Arc::new(String::new()),
             ttl: Duration::from_secs(24 * 60 * 60),
-            methods: Arc::new(vec![Method::POST, Method::PUT, Method::PATCH, Method::DELETE]),
+            methods: Arc::new(vec![
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::DELETE,
+            ]),
             body_cap: DEFAULT_BODY_CAP,
             cache_status: Arc::new(|s| s.is_success()),
         }
@@ -162,11 +167,7 @@ impl<S: Clone + Send + Sync + 'static> IdempotencyRouterExt for Router<S> {
     }
 }
 
-async fn handle(
-    cfg: Arc<IdempotencyLayer>,
-    req: Request<Body>,
-    next: Next,
-) -> Response<Body> {
+async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> Response<Body> {
     if !cfg.methods.is_empty() && !cfg.methods.contains(req.method()) {
         return next.run(req).await;
     }
@@ -215,10 +216,7 @@ async fn handle(
                     v.to_str().ok().map(|s| (k, s.to_owned()))
                 })
                 .collect(),
-            body_b64: base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                &bytes,
-            ),
+            body_b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes),
         };
         // Best-effort write — failure here is logged + ignored so the
         // caller still gets their successful response.
@@ -244,17 +242,17 @@ fn rebuild(stored: StoredResponse) -> Response<Body> {
     )
     .unwrap_or_default();
 
-    let mut builder = Response::builder()
-        .status(StatusCode::from_u16(stored.status).unwrap_or(StatusCode::OK));
+    let mut builder =
+        Response::builder().status(StatusCode::from_u16(stored.status).unwrap_or(StatusCode::OK));
     for (k, v) in &stored.headers {
         if let (Ok(name), Ok(value)) = (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v))
         {
             builder = builder.header(name, value);
         }
     }
-    let mut resp = builder.body(Body::from(body_bytes)).unwrap_or_else(|_| {
-        Response::new(Body::empty())
-    });
+    let mut resp = builder
+        .body(Body::from(body_bytes))
+        .unwrap_or_else(|_| Response::new(Body::empty()));
     // Mark replays so observability + clients can spot dedup'd traffic.
     resp.headers_mut().insert(
         HeaderName::from_static("idempotent-replayed"),
@@ -290,7 +288,9 @@ mod tests {
     }
 
     async fn body_string(resp: Response<Body>) -> String {
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
         String::from_utf8(bytes.to_vec()).unwrap()
     }
 
@@ -325,7 +325,11 @@ mod tests {
                 .unwrap();
             assert_eq!(resp.status(), 200);
         }
-        assert_eq!(counter.load(Ordering::SeqCst), 3, "no key -> handler runs every time");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            3,
+            "no key -> handler runs every time"
+        );
     }
 
     #[tokio::test]
@@ -362,7 +366,9 @@ mod tests {
         assert_eq!(r2.status(), 200);
         // The replayed response should be IDENTICAL to call 0, not call 1.
         assert_eq!(
-            r2.headers().get("idempotent-replayed").and_then(|v| v.to_str().ok()),
+            r2.headers()
+                .get("idempotent-replayed")
+                .and_then(|v| v.to_str().ok()),
             Some("true")
         );
         assert_eq!(body_string(r2).await, "call-0");
@@ -603,7 +609,9 @@ mod tests {
         assert_eq!(r2.status(), 409);
         // Conflict was cached + replayed.
         assert_eq!(
-            r2.headers().get("idempotent-replayed").and_then(|v| v.to_str().ok()),
+            r2.headers()
+                .get("idempotent-replayed")
+                .and_then(|v| v.to_str().ok()),
             Some("true")
         );
         assert_eq!(counter.load(Ordering::SeqCst), 1);

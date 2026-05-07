@@ -244,7 +244,9 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     // Dropped indexes — present in prev, absent from current.
     for idx in &prev.indexes {
         if current.index(&idx.name).is_none() {
-            changes.push(SchemaChange::DropIndex { name: idx.name.clone() });
+            changes.push(SchemaChange::DropIndex {
+                name: idx.name.clone(),
+            });
         }
     }
     // Changed indexes — same name in both, but columns / table /
@@ -259,7 +261,9 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
                 || prev_idx.unique != idx.unique
                 || prev_idx.table != idx.table
             {
-                changes.push(SchemaChange::DropIndex { name: idx.name.clone() });
+                changes.push(SchemaChange::DropIndex {
+                    name: idx.name.clone(),
+                });
                 changes.push(SchemaChange::CreateIndex {
                     name: idx.name.clone(),
                     table: idx.table.clone(),
@@ -303,7 +307,9 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     // Dropped M2M junction tables.
     for mt in &prev.m2m_tables {
         if current.m2m_table(&mt.through).is_none() {
-            changes.push(SchemaChange::DropM2MTable { through: mt.through.clone() });
+            changes.push(SchemaChange::DropM2MTable {
+                through: mt.through.clone(),
+            });
         }
     }
     // New composite FK constraints (added on existing tables, or on
@@ -572,7 +578,11 @@ pub fn render_changes_split(
                 column,
                 nullable,
             } => {
-                let action = if *nullable { "DROP NOT NULL" } else { "SET NOT NULL" };
+                let action = if *nullable {
+                    "DROP NOT NULL"
+                } else {
+                    "SET NOT NULL"
+                };
                 out.immediate.push(format!(
                     r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" {action}"#,
                 ));
@@ -604,7 +614,11 @@ pub fn render_changes_split(
                     r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
                 ));
             }
-            SchemaChange::AlterColumnUnique { table, column, unique } => {
+            SchemaChange::AlterColumnUnique {
+                table,
+                column,
+                unique,
+            } => {
                 if *unique {
                     out.immediate.push(format!(
                         r#"ALTER TABLE "{table}" ADD CONSTRAINT "{table}_{column}_key" UNIQUE ("{column}")"#,
@@ -629,15 +643,25 @@ pub fn render_changes_split(
                     r#"ALTER TABLE "{table}" RENAME COLUMN "{old_column}" TO "{new_column}""#,
                 ));
             }
-            SchemaChange::CreateIndex { name, table, columns, unique } => {
+            SchemaChange::CreateIndex {
+                name,
+                table,
+                columns,
+                unique,
+            } => {
                 let unique_kw = if *unique { "UNIQUE " } else { "" };
-                let cols = columns.iter().map(|c| format!(r#""{c}""#)).collect::<Vec<_>>().join(", ");
+                let cols = columns
+                    .iter()
+                    .map(|c| format!(r#""{c}""#))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 out.immediate.push(format!(
                     r#"CREATE {unique_kw}INDEX IF NOT EXISTS "{name}" ON "{table}" ({cols})"#,
                 ));
             }
             SchemaChange::DropIndex { name } => {
-                out.immediate.push(format!(r#"DROP INDEX IF EXISTS "{name}""#));
+                out.immediate
+                    .push(format!(r#"DROP INDEX IF EXISTS "{name}""#));
             }
             SchemaChange::AddCheckConstraint { name, table, expr } => {
                 out.immediate.push(format!(
@@ -649,7 +673,13 @@ pub fn render_changes_split(
                     r#"ALTER TABLE "{table}" DROP CONSTRAINT IF EXISTS "{name}""#,
                 ));
             }
-            SchemaChange::CreateM2MTable { through, src_table, src_col, dst_table, dst_col } => {
+            SchemaChange::CreateM2MTable {
+                through,
+                src_table,
+                src_col,
+                dst_table,
+                dst_col,
+            } => {
                 out.immediate.push(format!(
                     r#"CREATE TABLE "{through}" ("{src_col}" BIGINT NOT NULL, "{dst_col}" BIGINT NOT NULL, PRIMARY KEY ("{src_col}", "{dst_col}"))"#,
                 ));
@@ -661,11 +691,26 @@ pub fn render_changes_split(
                 ));
             }
             SchemaChange::DropM2MTable { through } => {
-                out.immediate.push(format!(r#"DROP TABLE IF EXISTS "{through}" CASCADE"#));
+                out.immediate
+                    .push(format!(r#"DROP TABLE IF EXISTS "{through}" CASCADE"#));
             }
-            SchemaChange::AddCompositeFk { table, name, to, from, on } => {
-                let from_cols = from.iter().map(|c| format!(r#""{c}""#)).collect::<Vec<_>>().join(", ");
-                let on_cols = on.iter().map(|c| format!(r#""{c}""#)).collect::<Vec<_>>().join(", ");
+            SchemaChange::AddCompositeFk {
+                table,
+                name,
+                to,
+                from,
+                on,
+            } => {
+                let from_cols = from
+                    .iter()
+                    .map(|c| format!(r#""{c}""#))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let on_cols = on
+                    .iter()
+                    .map(|c| format!(r#""{c}""#))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 out.deferred_fks.push(format!(
                     r#"ALTER TABLE "{table}" ADD CONSTRAINT "{name}" FOREIGN KEY ({from_cols}) REFERENCES "{to}" ({on_cols})"#,
                 ));
@@ -765,8 +810,18 @@ fn constraints_sql_from_snapshot(t: &TableSnapshot) -> Vec<String> {
         })
         .collect();
     for cf in &t.composite_fks {
-        let from_cols = cf.from.iter().map(|c| format!(r#""{c}""#)).collect::<Vec<_>>().join(", ");
-        let on_cols = cf.on.iter().map(|c| format!(r#""{c}""#)).collect::<Vec<_>>().join(", ");
+        let from_cols = cf
+            .from
+            .iter()
+            .map(|c| format!(r#""{c}""#))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let on_cols = cf
+            .on
+            .iter()
+            .map(|c| format!(r#""{c}""#))
+            .collect::<Vec<_>>()
+            .join(", ");
         out.push(format!(
             r#"ALTER TABLE "{}" ADD CONSTRAINT "{}" FOREIGN KEY ({}) REFERENCES "{}" ({})"#,
             t.name, cf.name, from_cols, cf.to, on_cols,

@@ -250,10 +250,7 @@ mod tests {
 
     #[test]
     fn redact_query_replaces_password() {
-        let r = redact_query(
-            "user=alice&password=hunter2",
-            &["password".to_owned()],
-        );
+        let r = redact_query("user=alice&password=hunter2", &["password".to_owned()]);
         assert_eq!(r, "user=alice&password=[redacted]");
     }
 

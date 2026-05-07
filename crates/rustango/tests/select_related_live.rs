@@ -127,7 +127,11 @@ async fn select_related_loads_fk_target_in_one_query() {
             p.title
         );
         let author = p.author.value().expect("just asserted Loaded");
-        let expected_name = if p.author.pk() == ada_pk { "Ada" } else { "Grace" };
+        let expected_name = if p.author.pk() == ada_pk {
+            "Ada"
+        } else {
+            "Grace"
+        };
         assert_eq!(author.name, expected_name);
     }
 }

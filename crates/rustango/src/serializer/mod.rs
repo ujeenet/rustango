@@ -113,7 +113,12 @@ pub trait ModelSerializer: serde::Serialize + Sized {
 
     /// Serialize a slice of model instances directly to a JSON array.
     fn many_to_value(models: &[Self::Model]) -> Value {
-        Value::Array(models.iter().map(|m| Self::from_model(m).to_value()).collect())
+        Value::Array(
+            models
+                .iter()
+                .map(|m| Self::from_model(m).to_value())
+                .collect(),
+        )
     }
 
     /// Field names accepted on create/update requests (excludes `read_only`

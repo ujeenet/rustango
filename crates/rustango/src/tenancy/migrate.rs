@@ -227,10 +227,7 @@ async fn run_for_one_tenant(
     })?;
     match mode {
         StorageMode::Schema => {
-            let schema = org
-                .schema_name
-                .clone()
-                .unwrap_or_else(|| org.slug.clone());
+            let schema = org.schema_name.clone().unwrap_or_else(|| org.slug.clone());
             let pool = build_schema_scoped_pool(registry_url, &schema).await?;
             let applied = migrate::migrate(&pool, dir).await?;
             // v0.13.0: ensure the per-tenant audit log table exists so

@@ -174,10 +174,7 @@ impl Dialect for Postgres {
         Ok(b.finish())
     }
 
-    fn compile_bulk_insert(
-        &self,
-        query: &BulkInsertQuery,
-    ) -> Result<CompiledStatement, SqlError> {
+    fn compile_bulk_insert(&self, query: &BulkInsertQuery) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::with_capacity(self, query.columns.len() * query.rows.len());
         write_bulk_insert(&mut b, query)?;
         Ok(b.finish())

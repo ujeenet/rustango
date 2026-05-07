@@ -161,14 +161,12 @@ impl S3Storage {
         let payload_hash = sha256_hex(body);
 
         // Canonical headers — sorted lowercase.
-        let canonical_headers = format!(
-            "host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"
-        );
+        let canonical_headers =
+            format!("host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n");
         let signed_headers = "host;x-amz-content-sha256;x-amz-date";
 
-        let canonical_request = format!(
-            "{method}\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
-        );
+        let canonical_request =
+            format!("{method}\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
         let cr_hash = sha256_hex(canonical_request.as_bytes());
 
         let scope = format!("{date_stamp}/{}/s3/aws4_request", self.cfg.region);
@@ -355,12 +353,9 @@ impl Storage for S3Storage {
         Some(self.full_url(key))
     }
 
-    async fn presigned_get_url(
-        &self,
-        key: &str,
-        ttl: std::time::Duration,
-    ) -> Option<String> {
-        self.build_presigned_url("GET", key, ttl.as_secs(), None).ok()
+    async fn presigned_get_url(&self, key: &str, ttl: std::time::Duration) -> Option<String> {
+        self.build_presigned_url("GET", key, ttl.as_secs(), None)
+            .ok()
     }
 
     async fn presigned_put_url(
@@ -369,7 +364,8 @@ impl Storage for S3Storage {
         ttl: std::time::Duration,
         content_type: Option<&str>,
     ) -> Option<String> {
-        self.build_presigned_url("PUT", key, ttl.as_secs(), content_type).ok()
+        self.build_presigned_url("PUT", key, ttl.as_secs(), content_type)
+            .ok()
     }
 }
 
@@ -618,9 +614,9 @@ mod tests {
             .await
             .unwrap();
         // Hostname + path are correct.
-        assert!(url.starts_with(
-            "https://examplebucket.s3.us-east-1.amazonaws.com/avatars/alice.png?"
-        ));
+        assert!(
+            url.starts_with("https://examplebucket.s3.us-east-1.amazonaws.com/avatars/alice.png?")
+        );
         // SigV4 query params present.
         for k in [
             "X-Amz-Algorithm=AWS4-HMAC-SHA256",
@@ -657,11 +653,7 @@ mod tests {
     async fn presigned_put_url_without_content_type_only_signs_host() {
         let s = S3Storage::new(cfg());
         let url = s
-            .presigned_put_url(
-                "uploads/x.bin",
-                std::time::Duration::from_secs(300),
-                None,
-            )
+            .presigned_put_url("uploads/x.bin", std::time::Duration::from_secs(300), None)
             .await
             .unwrap();
         assert!(url.contains("X-Amz-SignedHeaders=host"));
@@ -692,9 +684,7 @@ mod tests {
             .presigned_get_url("uploads/x.png", std::time::Duration::from_secs(60))
             .await
             .unwrap();
-        assert!(url.starts_with(
-            "https://minio.example.com/examplebucket/uploads/x.png?"
-        ));
+        assert!(url.starts_with("https://minio.example.com/examplebucket/uploads/x.png?"));
     }
 
     #[tokio::test]

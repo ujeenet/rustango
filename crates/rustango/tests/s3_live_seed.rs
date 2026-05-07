@@ -23,8 +23,7 @@ fn maybe_storage() -> Option<S3Storage> {
     let secret = std::env::var("RUSTANGO_S3_TEST_SECRET").ok()?;
     let bucket = std::env::var("RUSTANGO_S3_TEST_BUCKET").ok()?;
     let endpoint = std::env::var("RUSTANGO_S3_TEST_ENDPOINT").ok();
-    let region =
-        std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
+    let region = std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
     Some(S3Storage::new(S3Config {
         bucket,
         region,
@@ -45,9 +44,21 @@ async fn upload_visible_seed_files() {
     // Three files at different paths so the console shows folder
     // navigation working.
     let files: &[(&str, &[u8], &str)] = &[
-        ("seed/hello.txt", b"hello from rustango S3Storage", "text/plain"),
-        ("seed/avatars/alice.png", b"\x89PNG\r\n\x1a\n-fake-image-data", "image/png"),
-        ("seed/docs/2026/launch.md", b"# Launch Notes\n\nFrom rustango.", "text/markdown"),
+        (
+            "seed/hello.txt",
+            b"hello from rustango S3Storage",
+            "text/plain",
+        ),
+        (
+            "seed/avatars/alice.png",
+            b"\x89PNG\r\n\x1a\n-fake-image-data",
+            "image/png",
+        ),
+        (
+            "seed/docs/2026/launch.md",
+            b"# Launch Notes\n\nFrom rustango.",
+            "text/markdown",
+        ),
     ];
 
     println!("\n=== uploading {} files to MinIO ===", files.len());

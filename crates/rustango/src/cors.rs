@@ -94,8 +94,13 @@ impl CorsLayer {
         Self {
             allow_origin: AllowOrigin::Any,
             allow_methods: vec![
-                "GET".into(), "POST".into(), "PUT".into(), "PATCH".into(),
-                "DELETE".into(), "HEAD".into(), "OPTIONS".into(),
+                "GET".into(),
+                "POST".into(),
+                "PUT".into(),
+                "PATCH".into(),
+                "DELETE".into(),
+                "HEAD".into(),
+                "OPTIONS".into(),
             ],
             allow_headers: vec!["*".into()],
             expose_headers: Vec::new(),
@@ -111,9 +116,8 @@ impl CorsLayer {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.allow_origin = AllowOrigin::List(Arc::new(
-            origins.into_iter().map(Into::into).collect(),
-        ));
+        self.allow_origin =
+            AllowOrigin::List(Arc::new(origins.into_iter().map(Into::into).collect()));
         self
     }
 
@@ -181,7 +185,10 @@ impl CorsLayer {
             (AllowOrigin::Any, None) => Some("*".to_owned()),
             (AllowOrigin::List(list), Some(o)) => {
                 let lower = o.to_ascii_lowercase();
-                if list.iter().any(|allowed| allowed.eq_ignore_ascii_case(&lower)) {
+                if list
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(&lower))
+                {
                     Some(o.to_owned())
                 } else {
                     None
@@ -202,10 +209,12 @@ pub trait CorsRouterExt {
 impl<S: Clone + Send + Sync + 'static> CorsRouterExt for Router<S> {
     fn cors(self, layer: CorsLayer) -> Self {
         let cfg = Arc::new(layer);
-        self.layer(axum::middleware::from_fn(move |req: Request<Body>, next: Next| {
-            let cfg = cfg.clone();
-            async move { handle(cfg, req, next).await }
-        }))
+        self.layer(axum::middleware::from_fn(
+            move |req: Request<Body>, next: Next| {
+                let cfg = cfg.clone();
+                async move { handle(cfg, req, next).await }
+            },
+        ))
     }
 }
 
@@ -228,7 +237,12 @@ async fn handle(cfg: Arc<CorsLayer>, req: Request<Body>, next: Next) -> Response
             .get(ACCESS_CONTROL_REQUEST_HEADERS)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
-        attach_cors_headers(&cfg, req_origin.as_deref(), request_headers.as_deref(), &mut response);
+        attach_cors_headers(
+            &cfg,
+            req_origin.as_deref(),
+            request_headers.as_deref(),
+            &mut response,
+        );
         return response;
     }
 
@@ -301,7 +315,10 @@ mod tests {
     #[test]
     fn resolve_any_with_origin() {
         let l = CorsLayer::new().allow_any_origin();
-        assert_eq!(l.resolve_origin(Some("https://x.com")).as_deref(), Some("https://x.com"));
+        assert_eq!(
+            l.resolve_origin(Some("https://x.com")).as_deref(),
+            Some("https://x.com")
+        );
     }
 
     #[test]

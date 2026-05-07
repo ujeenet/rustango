@@ -186,7 +186,11 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY);
         assert_eq!(
-            resp.headers().get(header::LOCATION).unwrap().to_str().unwrap(),
+            resp.headers()
+                .get(header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "/foo/"
         );
     }
@@ -220,7 +224,11 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY);
         assert_eq!(
-            resp.headers().get(header::LOCATION).unwrap().to_str().unwrap(),
+            resp.headers()
+                .get(header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "/foo"
         );
     }
@@ -256,7 +264,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            resp.headers().get(header::LOCATION).unwrap().to_str().unwrap(),
+            resp.headers()
+                .get(header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "/foo/?page=2&sort=desc"
         );
     }
@@ -285,9 +297,7 @@ mod tests {
     async fn empty_methods_list_redirects_every_method() {
         let app = Router::new()
             .route("/foo/", post(|| async { "ok" }))
-            .trailing_slash(
-                TrailingSlashLayer::new(SlashStyle::Append).methods(Vec::new()),
-            );
+            .trailing_slash(TrailingSlashLayer::new(SlashStyle::Append).methods(Vec::new()));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -306,8 +316,7 @@ mod tests {
         let resp = Router::new()
             .route("/foo/", get(|| async { "ok" }))
             .trailing_slash(
-                TrailingSlashLayer::new(SlashStyle::Append)
-                    .status(StatusCode::PERMANENT_REDIRECT),
+                TrailingSlashLayer::new(SlashStyle::Append).status(StatusCode::PERMANENT_REDIRECT),
             )
             .oneshot(
                 Request::builder()
@@ -323,17 +332,29 @@ mod tests {
 
     #[test]
     fn canonical_path_append_logic() {
-        assert_eq!(canonical_path("/foo", SlashStyle::Append), Some("/foo/".into()));
+        assert_eq!(
+            canonical_path("/foo", SlashStyle::Append),
+            Some("/foo/".into())
+        );
         assert_eq!(canonical_path("/foo/", SlashStyle::Append), None);
-        assert_eq!(canonical_path("/a/b/c", SlashStyle::Append), Some("/a/b/c/".into()));
+        assert_eq!(
+            canonical_path("/a/b/c", SlashStyle::Append),
+            Some("/a/b/c/".into())
+        );
     }
 
     #[test]
     fn canonical_path_strip_logic() {
-        assert_eq!(canonical_path("/foo/", SlashStyle::Strip), Some("/foo".into()));
+        assert_eq!(
+            canonical_path("/foo/", SlashStyle::Strip),
+            Some("/foo".into())
+        );
         assert_eq!(canonical_path("/foo", SlashStyle::Strip), None);
         // Multiple trailing slashes get collapsed.
-        assert_eq!(canonical_path("/foo///", SlashStyle::Strip), Some("/foo".into()));
+        assert_eq!(
+            canonical_path("/foo///", SlashStyle::Strip),
+            Some("/foo".into())
+        );
     }
 
     #[test]

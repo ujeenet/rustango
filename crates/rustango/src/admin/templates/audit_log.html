@@ -20,13 +20,13 @@
 <form method="post" action="/__audit/cleanup" class="audit-cleanup" onsubmit="return confirm('Apply audit cleanup? This is irreversible.');">
   <label>
     <input type="radio" name="mode" value="older_than" checked>
-    older than
+    Older than
     <input type="number" name="days" value="90" min="0" step="1" style="width: 5rem;">
     days
   </label>
   <label>
     <input type="radio" name="mode" value="keep_last">
-    keep last
+    Keep last
     <input type="number" name="keep" value="50" min="0" step="1" style="width: 5rem;">
     per row
   </label>
@@ -65,7 +65,7 @@
   {% else %}
     <span class="muted">&larr; prev</span>
   {% endif %}
-  &middot; page {{ page }} of {{ last_page }} &middot;
+  &middot; Page {{ page }} of {{ last_page }} &middot;
   {% if page < last_page %}
     <a href="/__audit?page={{ page + 1 }}{{ pager_extras | safe }}">next &rarr;</a>
   {% else %}

@@ -1,5 +1,5 @@
 {% extends "op_layout.html" %}
-{% block title %}Edit {{ slug }} — rustango operator console{% endblock %}
+{% block title %}Edit {{ slug }} — {{ brand_name | default(value='rustango operator console') }}{% endblock %}
 {% block content %}
 
 <nav class="breadcrumb" aria-label="breadcrumb">
@@ -31,7 +31,7 @@
       {% for row in locked_rows %}
       <tr>
         <th>{{ row.name }}</th>
-        <td>{% if row.value %}<code>{{ row.value }}</code>{% else %}<span class="empty">none</span>{% endif %}</td>
+        <td>{% if row.value %}<code>{{ row.value }}</code>{% else %}<span class="empty">None</span>{% endif %}</td>
       </tr>
       {% endfor %}
     </table>
@@ -55,6 +55,33 @@
   <div class="form-actions">
     <button type="submit" class="btn btn-primary">Save</button>
     <a href="/orgs" class="btn-link">Cancel</a>
+  </div>
+</form>
+
+<form method="post" action="/orgs/{{ slug }}/edit/branding" enctype="multipart/form-data" class="edit-form">
+  <fieldset class="section">
+    <legend>Branding assets</legend>
+    <table>
+      <tr>
+        <th><label for="logo">Logo</label></th>
+        <td>
+          {% if logo_url %}<img class="brand-asset-preview" src="{{ logo_url }}" alt="">{% endif %}
+          <input type="file" id="logo" name="logo" accept="image/png,image/jpeg,image/webp">
+          <div class="field-helper">PNG, JPEG, or WebP. Max 1 MB. Leave empty to keep the current logo.</div>
+        </td>
+      </tr>
+      <tr>
+        <th><label for="favicon">Favicon</label></th>
+        <td>
+          {% if favicon_url %}<img class="brand-asset-preview" src="{{ favicon_url }}" alt="">{% endif %}
+          <input type="file" id="favicon" name="favicon" accept="image/png,image/x-icon">
+          <div class="field-helper">PNG or ICO. Max 1 MB. Leave empty to keep the current favicon.</div>
+        </td>
+      </tr>
+    </table>
+  </fieldset>
+  <div class="form-actions">
+    <button type="submit" class="btn btn-primary">Upload</button>
   </div>
 </form>
 

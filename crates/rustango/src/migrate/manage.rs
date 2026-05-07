@@ -154,33 +154,60 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "      Print the SQL each pending migration would run; never"
     )?;
-    writeln!(w, "      writes. Reads the ledger so the preview is accurate.\n")?;
-    writeln!(w, "  downgrade [N]")?;
     writeln!(
         w,
-        "      Step back N applied migrations (default 1).\n"
+        "      writes. Reads the ledger so the preview is accurate.\n"
     )?;
+    writeln!(w, "  downgrade [N]")?;
+    writeln!(w, "      Step back N applied migrations (default 1).\n")?;
     writeln!(w, "  showmigrations | status")?;
     writeln!(w, "      List migrations with [X]/[ ] applied marker.\n")?;
-    writeln!(w, "  add-data-op --sql <SQL> [--reverse-sql <SQL>] [--name <name>] [--to <migration>]")?;
-    writeln!(w, "      Add a data transformation op (up + optional down).")?;
+    writeln!(
+        w,
+        "  add-data-op --sql <SQL> [--reverse-sql <SQL>] [--name <name>] [--to <migration>]"
+    )?;
+    writeln!(
+        w,
+        "      Add a data transformation op (up + optional down)."
+    )?;
     writeln!(w, "      --sql        Forward SQL to run (required).")?;
-    writeln!(w, "      --reverse-sql  Rollback SQL. Omit for irreversible ops.")?;
-    writeln!(w, "      --name       Name suffix for the new migration file.")?;
-    writeln!(w, "      --to         Append to an existing migration instead of creating one.\n")?;
+    writeln!(
+        w,
+        "      --reverse-sql  Rollback SQL. Omit for irreversible ops."
+    )?;
+    writeln!(
+        w,
+        "      --name       Name suffix for the new migration file."
+    )?;
+    writeln!(
+        w,
+        "      --to         Append to an existing migration instead of creating one.\n"
+    )?;
     writeln!(w, "  about")?;
     writeln!(w, "      Print framework version, registered models/apps,")?;
     writeln!(w, "      and detected backend configuration.\n")?;
     writeln!(w, "  check [--deploy]")?;
-    writeln!(w, "      Run system audits — pending migrations, missing models, common")?;
-    writeln!(w, "      misconfigurations. With --deploy: production hardening checks.")?;
+    writeln!(
+        w,
+        "      Run system audits — pending migrations, missing models, common"
+    )?;
+    writeln!(
+        w,
+        "      misconfigurations. With --deploy: production hardening checks."
+    )?;
     writeln!(w, "      Exits non-zero on any error-level finding.\n")?;
     writeln!(w, "  docs")?;
     writeln!(w, "      Open docs.rs/rustango in the default browser.\n")?;
     writeln!(w, "  version | --version")?;
     writeln!(w, "      Print the rustango framework version.\n")?;
-    writeln!(w, "  (To bootstrap a new project from scratch, install + run")?;
-    writeln!(w, "  `cargo install cargo-rustango` then `cargo rustango new <name>`.)\n")?;
+    writeln!(
+        w,
+        "  (To bootstrap a new project from scratch, install + run"
+    )?;
+    writeln!(
+        w,
+        "  `cargo install cargo-rustango` then `cargo rustango new <name>`.)\n"
+    )?;
     writeln!(w, "  make:viewset <Name> [--model <Model>]")?;
     writeln!(w, "  make:serializer <Name> [--model <Model>]")?;
     writeln!(w, "  make:form <Name>")?;
@@ -188,19 +215,49 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(w, "  make:notification <Name>")?;
     writeln!(w, "  make:middleware <Name>")?;
     writeln!(w, "  make:test <Name>")?;
-    writeln!(w, "      Scaffold a single source file with the chosen shape.")?;
-    writeln!(w, "      Writes to src/<snake_name>.rs (skips if exists).\n")?;
-    writeln!(w, "  db:dump [--out <file>] [--data-only|--schema-only] [--no-owner]")?;
-    writeln!(w, "      Run pg_dump against $DATABASE_URL. Default: prints SQL to")?;
-    writeln!(w, "      stdout (omit --out to pipe). --data-only / --schema-only")?;
-    writeln!(w, "      mirror pg_dump's flags. --no-owner skips OWNER lines.\n")?;
+    writeln!(
+        w,
+        "      Scaffold a single source file with the chosen shape."
+    )?;
+    writeln!(
+        w,
+        "      Writes to src/<snake_name>.rs (skips if exists).\n"
+    )?;
+    writeln!(
+        w,
+        "  db:dump [--out <file>] [--data-only|--schema-only] [--no-owner]"
+    )?;
+    writeln!(
+        w,
+        "      Run pg_dump against $DATABASE_URL. Default: prints SQL to"
+    )?;
+    writeln!(
+        w,
+        "      stdout (omit --out to pipe). --data-only / --schema-only"
+    )?;
+    writeln!(
+        w,
+        "      mirror pg_dump's flags. --no-owner skips OWNER lines.\n"
+    )?;
     writeln!(w, "  db:restore <file> [--clean]")?;
-    writeln!(w, "      Run psql against $DATABASE_URL with `\\i <file>`. With")?;
-    writeln!(w, "      --clean, prepend a `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`")?;
+    writeln!(
+        w,
+        "      Run psql against $DATABASE_URL with `\\i <file>`. With"
+    )?;
+    writeln!(
+        w,
+        "      --clean, prepend a `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`"
+    )?;
     writeln!(w, "      so the restore lands on a clean database.\n")?;
     writeln!(w, "  db:info")?;
-    writeln!(w, "      Print the resolved DB URL (password redacted), detected")?;
-    writeln!(w, "      backend, and which `postgres`/`mysql` Cargo features are")?;
+    writeln!(
+        w,
+        "      Print the resolved DB URL (password redacted), detected"
+    )?;
+    writeln!(
+        w,
+        "      backend, and which `postgres`/`mysql` Cargo features are"
+    )?;
     writeln!(w, "      compiled in. Read-only — does not connect.\n")?;
     writeln!(w, "  startapp <name> [--with-manage-bin]")?;
     writeln!(
@@ -219,11 +276,7 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     Ok(())
 }
 
-fn makemigrations<W: Write>(
-    dir: &Path,
-    args: &[String],
-    w: &mut W,
-) -> Result<(), MigrateError> {
+fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let mut empty = false;
     let mut name: Option<String> = None;
     let mut app: Option<String> = None;
@@ -233,25 +286,20 @@ fn makemigrations<W: Write>(
         match arg.as_str() {
             "--empty" => empty = true,
             "--app" => {
-                app = Some(
-                    iter.next()
-                        .cloned()
-                        .ok_or_else(|| {
-                            MigrateError::Validation("--app requires an app name".into())
-                        })?,
-                );
+                app = Some(iter.next().cloned().ok_or_else(|| {
+                    MigrateError::Validation("--app requires an app name".into())
+                })?);
             }
             "--scope" => {
                 let raw = iter.next().cloned().ok_or_else(|| {
-                    MigrateError::Validation(
-                        "--scope requires \"registry\" or \"tenant\"".into(),
-                    )
+                    MigrateError::Validation("--scope requires \"registry\" or \"tenant\"".into())
                 })?;
-                scope_override = Some(crate::core::ModelScope::from_str(&raw).ok_or_else(|| {
-                    MigrateError::Validation(format!(
-                        "--scope must be \"registry\" or \"tenant\", got {raw:?}"
-                    ))
-                })?);
+                scope_override =
+                    Some(crate::core::ModelScope::from_str(&raw).ok_or_else(|| {
+                        MigrateError::Validation(format!(
+                            "--scope must be \"registry\" or \"tenant\", got {raw:?}"
+                        ))
+                    })?);
             }
             "--help" | "-h" => {
                 writeln!(
@@ -335,12 +383,11 @@ fn makemigrations<W: Write>(
         .any(|e| e.schema.scope == crate::core::ModelScope::Registry);
     if has_registry_scoped {
         let mut wrote_any = false;
-        for scope in [crate::core::ModelScope::Registry, crate::core::ModelScope::Tenant] {
-            let mig = crate::migrate::make::make_migrations_for_scope(
-                dir,
-                scope,
-                name.as_deref(),
-            )?;
+        for scope in [
+            crate::core::ModelScope::Registry,
+            crate::core::ModelScope::Tenant,
+        ] {
+            let mig = crate::migrate::make::make_migrations_for_scope(dir, scope, name.as_deref())?;
             match mig {
                 Some(m) => {
                     writeln!(
@@ -354,11 +401,7 @@ fn makemigrations<W: Write>(
                     }
                     wrote_any = true;
                 }
-                None => writeln!(
-                    w,
-                    "no changes for {} scope",
-                    scope.as_str(),
-                )?,
+                None => writeln!(w, "no changes for {} scope", scope.as_str(),)?,
             }
         }
         if !wrote_any {
@@ -559,9 +602,15 @@ async fn showmigrations<W: Write>(
 /// As [`super::file::list_dir`] / [`super::file::write`].
 pub fn make_empty(dir: &Path, name: &str) -> Result<Migration, MigrateError> {
     let prior = file::list_dir(dir)?;
-    let prev_snapshot = prior
-        .last()
-        .map_or_else(|| SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![], checks: vec![] }, |m| m.snapshot.clone());
+    let prev_snapshot = prior.last().map_or_else(
+        || SchemaSnapshot {
+            tables: vec![],
+            m2m_tables: vec![],
+            indexes: vec![],
+            checks: vec![],
+        },
+        |m| m.snapshot.clone(),
+    );
     let prev_name = prior.last().map(|m| m.name.clone());
     let next_index = prior
         .last()
@@ -681,32 +730,26 @@ fn add_data_op_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--sql" => {
-                sql = Some(
-                    iter.next()
-                        .cloned()
-                        .ok_or_else(|| MigrateError::Validation("--sql requires a value".into()))?,
-                );
+                sql =
+                    Some(iter.next().cloned().ok_or_else(|| {
+                        MigrateError::Validation("--sql requires a value".into())
+                    })?);
             }
             "--reverse-sql" => {
-                reverse_sql = Some(
-                    iter.next().cloned().ok_or_else(|| {
-                        MigrateError::Validation("--reverse-sql requires a value".into())
-                    })?,
-                );
+                reverse_sql = Some(iter.next().cloned().ok_or_else(|| {
+                    MigrateError::Validation("--reverse-sql requires a value".into())
+                })?);
             }
             "--name" => {
-                name = Some(
-                    iter.next().cloned().ok_or_else(|| {
+                name =
+                    Some(iter.next().cloned().ok_or_else(|| {
                         MigrateError::Validation("--name requires a value".into())
-                    })?,
-                );
+                    })?);
             }
             "--to" => {
-                to = Some(
-                    iter.next().cloned().ok_or_else(|| {
-                        MigrateError::Validation("--to requires a migration name".into())
-                    })?,
-                );
+                to = Some(iter.next().cloned().ok_or_else(|| {
+                    MigrateError::Validation("--to requires a migration name".into())
+                })?);
             }
             "--help" | "-h" => {
                 writeln!(
@@ -734,7 +777,11 @@ fn add_data_op_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(
     } else {
         let name = name.unwrap_or_else(|| "data_op".to_owned());
         let mig = make_data_migration(dir, &name, &sql, reverse_sql.as_deref())?;
-        let rev_note = if reverse_sql.is_some() { " (reversible)" } else { " (irreversible)" };
+        let rev_note = if reverse_sql.is_some() {
+            " (reversible)"
+        } else {
+            " (irreversible)"
+        };
         writeln!(w, "wrote {}{rev_note}", file_path(dir, &mig.name).display())?;
     }
     Ok(())
@@ -772,15 +819,9 @@ fn startapp<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
         match arg.as_str() {
             "--with-manage-bin" => with_manage_bin = true,
             "--into" => {
-                into = Some(
-                    iter.next()
-                        .cloned()
-                        .ok_or_else(|| {
-                            MigrateError::Validation(
-                                "--into requires a directory argument".into(),
-                            )
-                        })?,
-                );
+                into = Some(iter.next().cloned().ok_or_else(|| {
+                    MigrateError::Validation("--into requires a directory argument".into())
+                })?);
             }
             "--help" | "-h" => {
                 writeln!(w, "{}", usage())?;
@@ -863,8 +904,7 @@ async fn about_cmd<W: Write>(pool: &PgPool, w: &mut W) -> Result<(), MigrateErro
     let registered_models = crate::core::inventory::iter::<crate::core::ModelEntry>
         .into_iter()
         .count();
-    let mut apps: std::collections::BTreeSet<&'static str> =
-        std::collections::BTreeSet::new();
+    let mut apps: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
     for entry in crate::core::inventory::iter::<crate::core::ModelEntry> {
         if let Some(app) = entry.resolved_app_label() {
             apps.insert(app);
@@ -874,10 +914,15 @@ async fn about_cmd<W: Write>(pool: &PgPool, w: &mut W) -> Result<(), MigrateErro
     writeln!(w, "rustango")?;
     writeln!(w, "  version:        {}", env!("CARGO_PKG_VERSION"))?;
     writeln!(w, "  models:         {registered_models} registered")?;
-    writeln!(w, "  apps:           {} ({})",
+    writeln!(
+        w,
+        "  apps:           {} ({})",
         apps.len(),
-        if apps.is_empty() { "none".to_owned() }
-        else { apps.iter().copied().collect::<Vec<_>>().join(", ") }
+        if apps.is_empty() {
+            "none".to_owned()
+        } else {
+            apps.iter().copied().collect::<Vec<_>>().join(", ")
+        }
     )?;
     let env_label = std::env::var("RUSTANGO_ENV").unwrap_or_else(|_| "(unset)".into());
     writeln!(w, "  RUSTANGO_ENV:   {env_label}")?;
@@ -914,7 +959,11 @@ async fn check_cmd<W: Write>(
     let mut warnings: Vec<String> = Vec::new();
     let mut info: Vec<String> = Vec::new();
 
-    writeln!(w, "running rustango system check{}...", if deploy { " (deploy mode)" } else { "" })?;
+    writeln!(
+        w,
+        "running rustango system check{}...",
+        if deploy { " (deploy mode)" } else { "" }
+    )?;
 
     // Always-on checks
     let model_count = crate::core::inventory::iter::<crate::core::ModelEntry>
@@ -937,7 +986,9 @@ async fn check_cmd<W: Write>(
     if dir.exists() {
         let prior = file::list_dir(dir)?;
         if prior.is_empty() && model_count > 0 {
-            warnings.push("models registered but no migrations on disk — run `manage makemigrations`".into());
+            warnings.push(
+                "models registered but no migrations on disk — run `manage makemigrations`".into(),
+            );
         } else {
             info.push(format!("{} migration(s) on disk", prior.len()));
         }
@@ -954,10 +1005,15 @@ async fn check_cmd<W: Write>(
         // Secret key length
         match std::env::var("SECRET_KEY") {
             Ok(s) if s.len() < 32 => {
-                errors.push(format!("SECRET_KEY is only {} bytes — need ≥ 32 for cookie signing", s.len()));
+                errors.push(format!(
+                    "SECRET_KEY is only {} bytes — need ≥ 32 for cookie signing",
+                    s.len()
+                ));
             }
             Err(_) => {
-                warnings.push("SECRET_KEY env var not set (operator console / sessions need this)".into());
+                warnings.push(
+                    "SECRET_KEY env var not set (operator console / sessions need this)".into(),
+                );
             }
             _ => info.push("SECRET_KEY length OK".into()),
         }
@@ -1016,7 +1072,6 @@ fn version_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
     Ok(())
 }
 
-
 // ============================================================ make:* generators
 
 fn parse_name_and_model(args: &[String]) -> Result<(String, Option<String>), MigrateError> {
@@ -1026,14 +1081,13 @@ fn parse_name_and_model(args: &[String]) -> Result<(String, Option<String>), Mig
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--model" => {
-                model = Some(iter.next().cloned().ok_or_else(|| {
-                    MigrateError::Validation("--model requires a value".into())
-                })?);
+                model =
+                    Some(iter.next().cloned().ok_or_else(|| {
+                        MigrateError::Validation("--model requires a value".into())
+                    })?);
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!(
-                    "unknown flag `{other}`"
-                )));
+                return Err(MigrateError::Validation(format!("unknown flag `{other}`")));
             }
             other => {
                 if name.is_some() {
@@ -1093,7 +1147,11 @@ fn write_generated<W: Write>(
     }
     std::fs::write(&path, contents)?;
     writeln!(w, "wrote {}", path.display())?;
-    writeln!(w, "  add `mod {};` to src/main.rs (or `pub mod ...;` to src/lib.rs)", file_name.trim_end_matches(".rs"))?;
+    writeln!(
+        w,
+        "  add `mod {};` to src/main.rs (or `pub mod ...;` to src/lib.rs)",
+        file_name.trim_end_matches(".rs")
+    )?;
     Ok(())
 }
 
@@ -1320,18 +1378,14 @@ fn parse_db_dump_args(args: &[String]) -> Result<DbDumpArgs, MigrateError> {
                 out = Some(
                     iter.next()
                         .cloned()
-                        .ok_or_else(|| {
-                            MigrateError::Validation("--out requires a path".into())
-                        })?,
+                        .ok_or_else(|| MigrateError::Validation("--out requires a path".into()))?,
                 );
             }
             "--data-only" => data_only = true,
             "--schema-only" => schema_only = true,
             "--no-owner" => no_owner = true,
             other => {
-                return Err(MigrateError::Validation(format!(
-                    "unknown flag: {other}"
-                )));
+                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
             }
         }
     }
@@ -1383,9 +1437,7 @@ fn db_dump_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError>
         .args(&argv)
         .status()
         .map_err(|e| {
-            MigrateError::Validation(format!(
-                "could not run pg_dump (is it on PATH?): {e}"
-            ))
+            MigrateError::Validation(format!("could not run pg_dump (is it on PATH?): {e}"))
         })?;
     if !status.success() {
         return Err(MigrateError::Validation(format!(
@@ -1408,9 +1460,7 @@ fn parse_db_restore_args(args: &[String]) -> Result<DbRestoreArgs, MigrateError>
         match arg.as_str() {
             "--clean" => clean = true,
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!(
-                    "unknown flag: {other}"
-                )));
+                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
             }
             other => {
                 if file.is_some() {
@@ -1438,9 +1488,7 @@ fn build_psql_argv(parsed: &DbRestoreArgs, database_url: &str) -> Vec<String> {
     argv.push("ON_ERROR_STOP=1".into());
     if parsed.clean {
         argv.push("-c".into());
-        argv.push(
-            "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;".into(),
-        );
+        argv.push("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;".into());
     }
     argv.push("-f".into());
     argv.push(parsed.file.clone());
@@ -1462,9 +1510,7 @@ fn db_restore_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateErr
         .args(&argv)
         .status()
         .map_err(|e| {
-            MigrateError::Validation(format!(
-                "could not run psql (is it on PATH?): {e}"
-            ))
+            MigrateError::Validation(format!("could not run psql (is it on PATH?): {e}"))
         })?;
     if !status.success() {
         return Err(MigrateError::Validation(format!(
@@ -1499,10 +1545,7 @@ fn db_info_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
 
     match crate::env::database_url_from_env() {
         Ok(url) => {
-            let scheme = url
-                .split("://")
-                .next()
-                .unwrap_or("(unknown)");
+            let scheme = url.split("://").next().unwrap_or("(unknown)");
             writeln!(w, "  resolved URL:       {}", redact_url(&url))?;
             writeln!(w, "  detected backend:   {scheme}")?;
             // Soft warning when scheme + feature don't line up — caught
@@ -1592,9 +1635,9 @@ mod gen_tests {
     #[test]
     fn is_valid_type_name_rejects_invalid() {
         assert!(!is_valid_type_name(""));
-        assert!(!is_valid_type_name("post"));     // lowercase
-        assert!(!is_valid_type_name("123Foo"));   // starts with digit
-        assert!(!is_valid_type_name("Post!"));    // bad char
+        assert!(!is_valid_type_name("post")); // lowercase
+        assert!(!is_valid_type_name("123Foo")); // starts with digit
+        assert!(!is_valid_type_name("Post!")); // bad char
     }
 
     #[test]

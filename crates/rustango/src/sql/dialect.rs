@@ -343,7 +343,6 @@ pub trait Dialect {
 
     // ====== Compilation (always overridden) ======
 
-
     /// Lower a `SelectQuery` to a `CompiledStatement` for this dialect.
     ///
     /// # Errors
@@ -367,10 +366,7 @@ pub trait Dialect {
     /// `columns` is empty without `returning`, or
     /// [`SqlError::InsertShapeMismatch`] when any row's value count
     /// disagrees with `columns.len()`.
-    fn compile_bulk_insert(
-        &self,
-        query: &BulkInsertQuery,
-    ) -> Result<CompiledStatement, SqlError>;
+    fn compile_bulk_insert(&self, query: &BulkInsertQuery) -> Result<CompiledStatement, SqlError>;
 
     /// Lower an `UpdateQuery` to a `CompiledStatement` for this dialect.
     ///

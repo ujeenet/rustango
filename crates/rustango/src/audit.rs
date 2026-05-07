@@ -168,10 +168,7 @@ where
 ///
 /// # Errors
 /// As [`emit_one`].
-pub async fn emit_many<'c, E>(
-    executor: E,
-    entries: &[PendingEntry],
-) -> Result<(), sqlx::Error>
+pub async fn emit_many<'c, E>(executor: E, entries: &[PendingEntry]) -> Result<(), sqlx::Error>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
 {
@@ -342,10 +339,7 @@ CREATE INDEX IF NOT EXISTS "rustango_audit_log_occurred_idx"
 ///
 /// # Errors
 /// Driver / SQL failures from the DELETE.
-pub async fn cleanup_older_than(
-    pool: &PgPool,
-    cutoff_days: i64,
-) -> Result<u64, sqlx::Error> {
+pub async fn cleanup_older_than(pool: &PgPool, cutoff_days: i64) -> Result<u64, sqlx::Error> {
     let cutoff = cutoff_days.max(0);
     let result = sqlx::query(
         r#"DELETE FROM "rustango_audit_log"
@@ -374,10 +368,7 @@ pub async fn cleanup_older_than(
 ///
 /// # Errors
 /// Driver / SQL failures from the DELETE.
-pub async fn cleanup_keep_last_n(
-    pool: &PgPool,
-    keep: i64,
-) -> Result<u64, sqlx::Error> {
+pub async fn cleanup_keep_last_n(pool: &PgPool, keep: i64) -> Result<u64, sqlx::Error> {
     let keep = keep.max(0);
     let result = sqlx::query(
         r#"DELETE FROM "rustango_audit_log" WHERE "id" IN (
@@ -513,10 +504,7 @@ fn is_mysql_dup_index_error(_e: &sqlx::Error) -> bool {
 /// # Errors
 /// Driver / SQL failures from the INSERT.
 #[cfg(feature = "mysql")]
-pub async fn emit_one_my<'c, E>(
-    executor: E,
-    entry: &PendingEntry,
-) -> Result<(), sqlx::Error>
+pub async fn emit_one_my<'c, E>(executor: E, entry: &PendingEntry) -> Result<(), sqlx::Error>
 where
     E: sqlx::Executor<'c, Database = sqlx::MySql>,
 {
@@ -582,11 +570,8 @@ pub async fn delete_one_with_audit_pool(
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
             let mut tx = pg.begin().await?;
-            let mut q: sqlx::query::Query<
-                '_,
-                sqlx::Postgres,
-                sqlx::postgres::PgArguments,
-            > = sqlx::query(&stmt.sql);
+            let mut q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> =
+                sqlx::query(&stmt.sql);
             for v in stmt.params {
                 q = bind_value_pg(q, v);
             }
@@ -598,11 +583,8 @@ pub async fn delete_one_with_audit_pool(
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
             let mut tx = my.begin().await?;
-            let mut q: sqlx::query::Query<
-                '_,
-                sqlx::MySql,
-                sqlx::mysql::MySqlArguments,
-            > = sqlx::query(&stmt.sql);
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
             for v in stmt.params {
                 q = bind_value_my(q, v);
             }
@@ -642,11 +624,8 @@ pub async fn save_one_with_audit_pool(
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
             let mut tx = pg.begin().await?;
-            let mut q: sqlx::query::Query<
-                '_,
-                sqlx::Postgres,
-                sqlx::postgres::PgArguments,
-            > = sqlx::query(&stmt.sql);
+            let mut q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> =
+                sqlx::query(&stmt.sql);
             for v in stmt.params {
                 q = bind_value_pg(q, v);
             }
@@ -658,11 +637,8 @@ pub async fn save_one_with_audit_pool(
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
             let mut tx = my.begin().await?;
-            let mut q: sqlx::query::Query<
-                '_,
-                sqlx::MySql,
-                sqlx::mysql::MySqlArguments,
-            > = sqlx::query(&stmt.sql);
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
             for v in stmt.params {
                 q = bind_value_my(q, v);
             }
@@ -708,11 +684,8 @@ pub async fn insert_one_with_audit_pool(
         crate::sql::Pool::Postgres(pg) => {
             let stmt = pool.dialect().compile_insert(query)?;
             let mut tx = pg.begin().await?;
-            let mut q: sqlx::query::Query<
-                '_,
-                sqlx::Postgres,
-                sqlx::postgres::PgArguments,
-            > = sqlx::query(&stmt.sql);
+            let mut q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> =
+                sqlx::query(&stmt.sql);
             for v in stmt.params {
                 q = bind_value_pg(q, v);
             }
@@ -740,11 +713,8 @@ pub async fn insert_one_with_audit_pool(
             };
             let stmt = pool.dialect().compile_insert(&plain)?;
             let mut tx = my.begin().await?;
-            let mut q: sqlx::query::Query<
-                '_,
-                sqlx::MySql,
-                sqlx::mysql::MySqlArguments,
-            > = sqlx::query(&stmt.sql);
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
             for v in stmt.params {
                 q = bind_value_my(q, v);
             }

@@ -52,13 +52,17 @@ impl RequestIdLayer {
     /// Default: honor inbound `X-Request-Id`, generate one if absent.
     #[must_use]
     pub fn new() -> Self {
-        Self { always_generate: false }
+        Self {
+            always_generate: false,
+        }
     }
 
     /// Always generate a fresh ID — ignore any client-supplied value.
     #[must_use]
     pub fn always_generate() -> Self {
-        Self { always_generate: true }
+        Self {
+            always_generate: true,
+        }
     }
 }
 
@@ -88,10 +92,7 @@ pub struct RequestId(pub String);
 impl<S: Send + Sync> FromRequestParts<S> for RequestId {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         Ok(parts
             .extensions
             .get::<RequestId>()
@@ -132,9 +133,8 @@ fn generate_id() -> String {
 /// Defends against header-injection attacks via X-Request-Id.
 fn is_safe(s: &str) -> bool {
     s.len() <= 128
-        && s.chars().all(|c| {
-            !c.is_control() && c != '\n' && c != '\r' && c != '\0'
-        })
+        && s.chars()
+            .all(|c| !c.is_control() && c != '\n' && c != '\r' && c != '\0')
 }
 
 #[cfg(test)]

@@ -281,11 +281,7 @@ fn embed_migrations_chain_is_validated_at_compile_time() {
     assert_eq!(EMBEDDED_FIXTURE.len(), 2);
     let prev_field = EMBEDDED_FIXTURE
         .iter()
-        .map(|(_name, json)| {
-            file::parse(json)
-                .expect("fixture parses")
-                .prev
-        })
+        .map(|(_name, json)| file::parse(json).expect("fixture parses").prev)
         .collect::<Vec<_>>();
     assert_eq!(prev_field[0], None, "0001 has no prev");
     assert_eq!(

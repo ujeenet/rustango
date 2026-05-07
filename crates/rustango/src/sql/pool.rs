@@ -116,11 +116,7 @@ impl Pool {
     /// - [`PoolError::Connect`] — sqlx couldn't reach the database.
     /// - [`PoolError::MysqlNotYetImplemented`] — see error variant.
     pub async fn connect(url: &str) -> Result<Self, PoolError> {
-        let scheme = url
-            .split("://")
-            .next()
-            .unwrap_or("")
-            .to_ascii_lowercase();
+        let scheme = url.split("://").next().unwrap_or("").to_ascii_lowercase();
         match scheme.as_str() {
             "postgres" | "postgresql" => Self::connect_postgres_inner(url).await,
             "mysql" => Self::connect_mysql_inner(url).await,
@@ -136,11 +132,7 @@ impl Pool {
     /// Same set as [`Self::connect`], plus a `Connect` error if `sqlx`
     /// times out before the database accepts the connection.
     pub async fn connect_with_timeout(url: &str, timeout: Duration) -> Result<Self, PoolError> {
-        let scheme = url
-            .split("://")
-            .next()
-            .unwrap_or("")
-            .to_ascii_lowercase();
+        let scheme = url.split("://").next().unwrap_or("").to_ascii_lowercase();
         match scheme.as_str() {
             #[cfg(feature = "postgres")]
             "postgres" | "postgresql" => {
@@ -326,7 +318,9 @@ mod tests {
     #[cfg(all(feature = "postgres", not(feature = "mysql")))]
     #[tokio::test]
     async fn mysql_url_errors_when_feature_not_enabled() {
-        let err = Pool::connect("mysql://user:pass@host:3306/db").await.unwrap_err();
+        let err = Pool::connect("mysql://user:pass@host:3306/db")
+            .await
+            .unwrap_err();
         match err {
             PoolError::FeatureNotEnabled { scheme, feature } => {
                 assert_eq!(scheme, "mysql");

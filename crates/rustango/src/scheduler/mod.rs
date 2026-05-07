@@ -72,7 +72,9 @@ impl Scheduler {
     /// New empty scheduler.
     #[must_use]
     pub fn new() -> Self {
-        Self { tasks: Mutex::new(Vec::new()) }
+        Self {
+            tasks: Mutex::new(Vec::new()),
+        }
     }
 
     /// Register a task to run every `period`. The first invocation occurs
@@ -89,7 +91,11 @@ impl Scheduler {
         self.tasks
             .lock()
             .expect("scheduler tasks poisoned")
-            .push(Task { name: name.to_owned(), period, factory });
+            .push(Task {
+                name: name.to_owned(),
+                period,
+                factory,
+            });
     }
 
     /// Number of registered tasks (not yet running).
@@ -240,7 +246,10 @@ mod tests {
         let handle = s.start();
         tokio::time::sleep(Duration::from_millis(80)).await;
         let count = counter.load(Ordering::SeqCst);
-        assert!(count >= 1, "loop must keep running after a panic, got count={count}");
+        assert!(
+            count >= 1,
+            "loop must keep running after a panic, got count={count}"
+        );
         handle.shutdown().await;
     }
 
@@ -253,11 +262,15 @@ mod tests {
         let b = b_count.clone();
         s.every("a", Duration::from_millis(15), move || {
             let a = a.clone();
-            async move { a.fetch_add(1, Ordering::SeqCst); }
+            async move {
+                a.fetch_add(1, Ordering::SeqCst);
+            }
         });
         s.every("b", Duration::from_millis(15), move || {
             let b = b.clone();
-            async move { b.fetch_add(1, Ordering::SeqCst); }
+            async move {
+                b.fetch_add(1, Ordering::SeqCst);
+            }
         });
         let handle = s.start();
         assert_eq!(handle.running_count(), 2);

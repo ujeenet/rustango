@@ -6,8 +6,8 @@
 //!
 //! Reads `DATABASE_URL`. Skips silently when unset.
 
-use rustango::sql::{sqlx, Auto};
 use rustango::migrate;
+use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::{Org, StorageMode, TenantPool, TenantPools};
 
 async fn pool() -> Option<sqlx::PgPool> {
@@ -42,6 +42,12 @@ async fn seed_org(
         path_prefix: None,
         active: true,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     org.insert(pool).await.unwrap();
     org
@@ -74,7 +80,14 @@ async fn schema_mode_pool_for_org_returns_schema_variant() {
     migrate::apply_all(&pool).await.unwrap();
     drop_schema(&pool, "acme_tp_t1").await;
 
-    let acme = seed_org(&pool, "acme_tp_t1", StorageMode::Schema, Some("acme_tp_t1"), None).await;
+    let acme = seed_org(
+        &pool,
+        "acme_tp_t1",
+        StorageMode::Schema,
+        Some("acme_tp_t1"),
+        None,
+    )
+    .await;
 
     let pools = TenantPools::new(pool.clone());
     let tp = pools.pool_for_org(&acme).await.unwrap();
@@ -98,12 +111,22 @@ async fn schema_mode_acquire_sets_search_path_to_tenant_schema() {
     drop_schema(&pool, "acme_tp_t2").await;
     create_schema(&pool, "acme_tp_t2").await;
 
-    let acme = seed_org(&pool, "acme_tp_t2", StorageMode::Schema, Some("acme_tp_t2"), None).await;
+    let acme = seed_org(
+        &pool,
+        "acme_tp_t2",
+        StorageMode::Schema,
+        Some("acme_tp_t2"),
+        None,
+    )
+    .await;
 
     let pools = TenantPools::new(pool.clone());
     let mut conn = pools.acquire(&acme).await.unwrap();
     let schema = current_schema(&mut conn).await;
-    assert_eq!(schema, "acme_tp_t2", "current_schema should be the tenant's");
+    assert_eq!(
+        schema, "acme_tp_t2",
+        "current_schema should be the tenant's"
+    );
     assert_eq!(conn.schema(), Some("acme_tp_t2"));
 
     drop_schema(&pool, "acme_tp_t2").await;
@@ -161,14 +184,7 @@ async fn database_mode_pool_caches_per_slug() {
     migrate::drop_all(&pool).await.unwrap();
     migrate::apply_all(&pool).await.unwrap();
 
-    let dbm = seed_org(
-        &pool,
-        "dbm_tp_t5",
-        StorageMode::Database,
-        None,
-        Some(&url),
-    )
-    .await;
+    let dbm = seed_org(&pool, "dbm_tp_t5", StorageMode::Database, None, Some(&url)).await;
 
     let pools = TenantPools::new(pool.clone());
     assert_eq!(pools.cached_database_pool_count().await, 0);

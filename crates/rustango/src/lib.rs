@@ -316,11 +316,7 @@ pub(crate) mod crypto;
 
 /// Tiny `application/x-www-form-urlencoded` decoder shared by
 /// [`signed_url`], [`auth_flows`], and [`tenancy::admin`]. Internal.
-#[cfg(any(
-    feature = "signed_url",
-    feature = "auth_flows",
-    feature = "tenancy",
-))]
+#[cfg(any(feature = "signed_url", feature = "auth_flows", feature = "tenancy",))]
 pub(crate) mod url_codec;
 
 /// AWS-style canonical request signed with SHA-256, replay-bounded

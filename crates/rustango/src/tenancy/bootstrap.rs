@@ -113,9 +113,9 @@ pub fn tenant_bootstrap_migration_for<U: TenantUserModel>() -> Migration {
         atomic: true,
         scope: MigrationScope::Tenant,
         snapshot: full_snapshot_for::<U>(),
-        forward: vec![
-            Operation::Schema(SchemaChange::CreateTable("rustango_users".into())),
-        ],
+        forward: vec![Operation::Schema(SchemaChange::CreateTable(
+            "rustango_users".into(),
+        ))],
     }
 }
 
@@ -263,11 +263,17 @@ mod tests {
     #[test]
     fn user_model_override_lands_extras_in_tenant_snapshot() {
         let m = tenant_bootstrap_migration_for::<AppUserExt>();
-        let users = m.snapshot.table("rustango_users").expect("rustango_users in snapshot");
+        let users = m
+            .snapshot
+            .table("rustango_users")
+            .expect("rustango_users in snapshot");
         let cols: Vec<&str> = users.fields.iter().map(|f| f.column.as_str()).collect();
         // framework defaults still present
         for required in super::super::auth::REQUIRED_USER_COLUMNS {
-            assert!(cols.contains(required), "missing required column {required}");
+            assert!(
+                cols.contains(required),
+                "missing required column {required}"
+            );
         }
         // extras present
         assert!(cols.contains(&"display_name"), "extras must be in snapshot");

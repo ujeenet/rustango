@@ -1,19 +1,18 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="{{ theme_mode | default(value='auto') }}">
 <head>
   <meta charset="utf-8">
-  <title>Sign in — rustango operator console</title>
+  <title>Sign in — {{ brand_name | default(value='rustango operator console') }}</title>
+  {% include "_theme_tokens.html" %}
+  {% if brand_css %}<style>:root { {{ brand_css | safe }} }</style>{% endif %}
   <style>
-    :root {
-      --accent: #b04a2c;
-      --border: #d0d0d0;
-      --muted: #666;
-    }
     body {
       margin: 0;
-      font: 14px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
-      background: #fdfdfd;
-      color: #222;
+      font-family: var(--font-family-base);
+      font-size: var(--font-size-base);
+      line-height: var(--line-height-base);
+      background: var(--color-bg);
+      color: var(--color-fg);
       display: flex;
       min-height: 100vh;
       align-items: center;
@@ -21,65 +20,74 @@
     }
     .card {
       width: 320px;
-      padding: 2rem;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: white;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+      padding: var(--space-6);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-lg);
+      background: var(--color-bg-surface);
+      box-shadow: var(--shadow-sm);
+    }
+    .card .brand-logo {
+      display: block;
+      max-height: 56px;
+      max-width: 100%;
+      margin: 0 auto var(--space-3) auto;
     }
     h1 {
-      color: var(--accent);
+      color: var(--color-accent);
       font-size: 1.4rem;
-      margin: 0 0 0.5rem 0;
+      margin: 0 0 var(--space-2) 0;
     }
     p.sub {
-      color: var(--muted);
-      margin: 0 0 1.5rem 0;
+      color: var(--color-fg-muted);
+      margin: 0 0 var(--space-5) 0;
     }
     label {
       display: block;
-      font-size: 12px;
-      color: var(--muted);
-      margin-top: 0.75rem;
+      font-size: var(--font-size-sm);
+      color: var(--color-fg-muted);
+      margin-top: var(--space-3);
       text-transform: uppercase;
       letter-spacing: 0.05em;
     }
     input[type=text], input[type=password] {
       width: 100%;
-      padding: 0.5rem 0.6rem;
-      border: 1px solid var(--border);
-      border-radius: 4px;
+      padding: var(--space-2) 0.6rem;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-md);
       font: inherit;
-      margin-top: 0.25rem;
+      background: var(--color-bg-input);
+      color: var(--color-fg);
+      margin-top: var(--space-1);
     }
-    input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    input:focus { outline: 2px solid var(--color-accent); outline-offset: 1px; }
     button {
-      margin-top: 1.5rem;
+      margin-top: var(--space-5);
       width: 100%;
       padding: 0.6rem;
-      background: var(--accent);
-      color: white;
+      background: var(--color-accent);
+      color: var(--color-fg-on-accent);
       border: 0;
-      border-radius: 4px;
+      border-radius: var(--radius-md);
       font: inherit;
-      font-weight: 600;
+      font-weight: var(--font-weight-bold);
       cursor: pointer;
     }
     button:hover { filter: brightness(1.1); }
     .error {
-      color: var(--accent);
-      background: #fdecec;
-      padding: 0.5rem 0.75rem;
-      border-radius: 4px;
-      margin: 1rem 0 0 0;
+      color: var(--color-error-fg);
+      background: var(--color-error-bg);
+      padding: var(--space-2) var(--space-3);
+      border-radius: var(--radius-md);
+      margin: var(--space-4) 0 0 0;
       font-size: 13px;
     }
   </style>
 </head>
 <body>
   <form class="card" method="post" action="/login">
-    <h1>rustango</h1>
-    <p class="sub">operator console</p>
+    {% if brand_logo_url %}<img class="brand-logo" src="{{ brand_logo_url }}" alt="">{% endif %}
+    <h1>{{ brand_name | default(value='rustango') }}</h1>
+    <p class="sub">{{ brand_tagline | default(value='Operator console') }}</p>
     {% if error %}<div class="error">{{ error }}</div>{% endif %}
     <label for="username">Username</label>
     <input type="text" id="username" name="username" autocomplete="username" autofocus required>

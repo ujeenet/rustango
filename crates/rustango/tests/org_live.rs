@@ -8,8 +8,8 @@
 //! TenantPools, and scoped migrations land in slices 2-3.
 
 use rustango::core::Column as _;
-use rustango::sql::{sqlx, Auto, Fetcher};
 use rustango::migrate;
+use rustango::sql::{sqlx, Auto, Fetcher};
 use rustango::tenancy::{Org, StorageMode};
 
 async fn pool() -> Option<sqlx::PgPool> {
@@ -46,6 +46,12 @@ async fn org_round_trip_insert_and_fetch() {
         path_prefix: None,
         active: true,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     acme.insert(&pool).await.unwrap();
     let acme_id = *acme.id.get().unwrap();
@@ -82,6 +88,12 @@ async fn org_filter_by_slug_returns_single_match() {
             path_prefix: None,
             active: true,
             created_at: now(),
+            brand_name: None,
+            brand_tagline: None,
+            logo_path: None,
+            favicon_path: None,
+            primary_color: None,
+            theme_mode: None,
         };
         org.insert(&pool).await.unwrap();
     }
@@ -133,6 +145,12 @@ async fn org_inactive_orgs_are_persistable_and_queryable() {
         path_prefix: None,
         active: false,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     frozen.insert(&pool).await.unwrap();
 

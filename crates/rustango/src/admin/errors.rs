@@ -4,10 +4,10 @@
 //! impl turns each variant into the right HTTP status with a small JSON
 //! payload describing what went wrong.
 
+use crate::sql::sqlx;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
-use crate::sql::sqlx;
 
 use super::forms::FormError;
 
@@ -19,16 +19,25 @@ use super::forms::FormError;
 pub enum AdminError {
     /// The table is in the model registry but not in the URL — i.e.
     /// the user hit a bad slug.
-    TableNotFound { table: String },
+    TableNotFound {
+        table: String,
+    },
     /// The table IS registered but the underlying SQL table doesn't
     /// exist in the connected DB. Typically means migrations haven't
     /// been run yet (or haven't been run for the current tenant in a
     /// multi-tenant setup). Friendly HTML page nudges the user toward
     /// `cargo run -- migrate` / `migrate-tenants` instead of a raw
     /// Postgres error.
-    TableMissing { table: String },
-    RowNotFound { table: String, pk: String },
-    ReadOnly { table: String },
+    TableMissing {
+        table: String,
+    },
+    RowNotFound {
+        table: String,
+        pk: String,
+    },
+    ReadOnly {
+        table: String,
+    },
     Form(FormError),
     Internal(String),
 }
@@ -134,5 +143,8 @@ applied yet for this tenant / database.</p>
 }
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }

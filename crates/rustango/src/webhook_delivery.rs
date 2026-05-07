@@ -108,7 +108,11 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
         // Bad payload — won't fix itself.
         JobError::Fatal(format!("payload serialize: {e}"))
     })?;
-    let signature = sign_body(event.signature_format, event.signing_secret.as_bytes(), &body);
+    let signature = sign_body(
+        event.signature_format,
+        event.signing_secret.as_bytes(),
+        &body,
+    );
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(event.timeout_secs.max(1)))
@@ -295,7 +299,9 @@ mod tests {
                 let status = status_clone.clone();
                 async move {
                     let (parts, body) = req.into_parts();
-                    let bytes = axum::body::to_bytes(body, 1 << 20).await.unwrap_or_default();
+                    let bytes = axum::body::to_bytes(body, 1 << 20)
+                        .await
+                        .unwrap_or_default();
                     let mut hdrs = HashMap::new();
                     for (k, v) in parts.headers.iter() {
                         if let Ok(s) = v.to_str() {
@@ -351,7 +357,10 @@ mod tests {
         assert_eq!(recv.len(), 1, "expected one delivery");
         let (_status, hdrs, body) = &recv[0];
         assert_eq!(hdrs.get("x-webhook-id"), Some(&id));
-        assert_eq!(hdrs.get("x-webhook-event").map(String::as_str), Some("order.created"));
+        assert_eq!(
+            hdrs.get("x-webhook-event").map(String::as_str),
+            Some("order.created")
+        );
         assert!(hdrs.get("x-webhook-signature").is_some());
         assert_eq!(hdrs.get("x-tenant").map(String::as_str), Some("acme"));
         let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
@@ -419,7 +428,11 @@ mod tests {
 
         // Wait a beat for delivery + dead-letter callback.
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(received.lock().unwrap().len(), 1, "tried once, then gave up");
+        assert_eq!(
+            received.lock().unwrap().len(),
+            1,
+            "tried once, then gave up"
+        );
         assert_eq!(dl_count.load(Ordering::SeqCst), 1, "dead-letter fired");
 
         srv.abort();
@@ -444,8 +457,9 @@ mod tests {
                     let status_seq = status_seq.clone();
                     async move {
                         let (parts, body) = req.into_parts();
-                        let bytes =
-                            axum::body::to_bytes(body, 1 << 20).await.unwrap_or_default();
+                        let bytes = axum::body::to_bytes(body, 1 << 20)
+                            .await
+                            .unwrap_or_default();
                         let mut hdrs = HashMap::new();
                         for (k, v) in parts.headers.iter() {
                             if let Ok(s) = v.to_str() {

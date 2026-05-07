@@ -68,4 +68,3 @@ pub fn ask_password(prompt: &str) -> io::Result<Option<String>> {
         Ok(Some(trimmed))
     }
 }
-

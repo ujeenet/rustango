@@ -6,10 +6,10 @@ use rustango::{Model, ViewSet};
     table = "author",
     display = "name",
     admin(
-        list_display  = "name, bio",
+        list_display = "name, bio",
         search_fields = "name, bio",
-        ordering      = "name",
-    ),
+        ordering = "name",
+    )
 )]
 pub struct Author {
     #[rustango(primary_key)]
@@ -25,11 +25,11 @@ pub struct Author {
     table = "post",
     display = "title",
     admin(
-        list_display  = "title, author_id, published_at",
+        list_display = "title, author_id, published_at",
         search_fields = "title, body",
-        ordering      = "-published_at",
-        list_filter   = "author_id",
-    ),
+        ordering = "-published_at",
+        list_filter = "author_id",
+    )
 )]
 pub struct Post {
     #[rustango(primary_key)]

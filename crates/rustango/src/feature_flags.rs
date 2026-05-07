@@ -269,7 +269,10 @@ mod tests {
         assert!(f.is_enabled_for("new", "alice").await);
         // Per-user override is checked FIRST so it should still win.
         f.disable("new").await;
-        assert!(f.is_enabled_for("new", "alice").await, "per-user override beats global");
+        assert!(
+            f.is_enabled_for("new", "alice").await,
+            "per-user override beats global"
+        );
         // Use the killswitch the right way: kill the per-user override too.
         f.disable_for_user("new", "alice").await;
         assert!(!f.is_enabled_for("new", "alice").await);
@@ -361,7 +364,10 @@ mod tests {
                 break;
             }
         }
-        assert!(differs, "two flags at 50% should disagree on at least one user");
+        assert!(
+            differs,
+            "two flags at 50% should disagree on at least one user"
+        );
     }
 
     #[tokio::test]

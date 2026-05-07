@@ -76,12 +76,7 @@ pub trait Cache: Send + Sync + 'static {
     /// Store `value` under `key` with an optional TTL.
     ///
     /// `ttl = None` means "no expiry" (store indefinitely).
-    async fn set(
-        &self,
-        key: &str,
-        value: &str,
-        ttl: Option<Duration>,
-    ) -> Result<(), CacheError>;
+    async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError>;
 
     /// Remove `key` from the cache. No-op if absent.
     async fn delete(&self, key: &str) -> Result<(), CacheError>;
@@ -104,12 +99,7 @@ pub trait Cache: Send + Sync + 'static {
     ///
     /// Returns 0 if the existing value isn't a valid integer (the entry
     /// is overwritten with `by` in that case).
-    async fn incr(
-        &self,
-        key: &str,
-        by: i64,
-        ttl: Option<Duration>,
-    ) -> Result<i64, CacheError> {
+    async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
         let cur = self
             .get(key)
             .await?
@@ -157,8 +147,7 @@ pub async fn set_json<T: serde::Serialize>(
     value: &T,
     ttl: Option<Duration>,
 ) -> Result<(), CacheError> {
-    let s = serde_json::to_string(value)
-        .map_err(|e| CacheError::Serialization(e.to_string()))?;
+    let s = serde_json::to_string(value).map_err(|e| CacheError::Serialization(e.to_string()))?;
     cache.set(key, &s, ttl).await
 }
 
@@ -208,7 +197,12 @@ impl Cache for NullCache {
         Ok(None)
     }
 
-    async fn set(&self, _key: &str, _value: &str, _ttl: Option<Duration>) -> Result<(), CacheError> {
+    async fn set(
+        &self,
+        _key: &str,
+        _value: &str,
+        _ttl: Option<Duration>,
+    ) -> Result<(), CacheError> {
         Ok(())
     }
 
@@ -293,14 +287,24 @@ impl Cache for InMemoryCache {
     async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
         let map = self.inner.read().await;
         Ok(map.get(key).and_then(|e| {
-            if e.is_expired() { None } else { Some(e.value.clone()) }
+            if e.is_expired() {
+                None
+            } else {
+                Some(e.value.clone())
+            }
         }))
     }
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
         let expires_at = self.resolve_ttl(ttl);
         let mut map = self.inner.write().await;
-        map.insert(key.to_owned(), CacheEntry { value: value.to_owned(), expires_at });
+        map.insert(
+            key.to_owned(),
+            CacheEntry {
+                value: value.to_owned(),
+                expires_at,
+            },
+        );
         Ok(())
     }
 

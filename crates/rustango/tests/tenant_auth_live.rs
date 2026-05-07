@@ -10,11 +10,11 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use rustango::sql::{sqlx, Auto};
-use rustango::{migrate as rmig, Model};
 use rustango::tenancy::{
     admin::TenantAdminBuilder, tenant_console::SessionSecret, HeaderResolver, Org, StorageMode,
     TenantPools,
 };
+use rustango::{migrate as rmig, Model};
 use tower::ServiceExt;
 
 static UNIQ: AtomicU64 = AtomicU64::new(0);
@@ -70,6 +70,12 @@ async fn seed_db_mode_tenant(pool: &sqlx::PgPool, slug: &str, url: &str) -> Org 
         path_prefix: None,
         active: true,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     org.insert(pool).await.unwrap();
     org
@@ -269,8 +275,8 @@ async fn superuser_login_grants_read_write_admin() {
     let app = build_app(pools, url);
 
     // Login.
-    let form = serde_urlencoded::to_string([("username", "alice"), ("password", "hunter2")])
-        .unwrap();
+    let form =
+        serde_urlencoded::to_string([("username", "alice"), ("password", "hunter2")]).unwrap();
     let login_req = Request::builder()
         .method("POST")
         .uri("/__login")
@@ -392,8 +398,8 @@ async fn cookie_from_one_tenant_is_rejected_at_another() {
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let app = build_app(pools, url);
 
-    let form = serde_urlencoded::to_string([("username", "alice"), ("password", "hunter2")])
-        .unwrap();
+    let form =
+        serde_urlencoded::to_string([("username", "alice"), ("password", "hunter2")]).unwrap();
     let login_req = Request::builder()
         .method("POST")
         .uri("/__login")
@@ -442,12 +448,11 @@ async fn admin_write_records_user_source_via_with_source_install() {
     seed_db_mode_tenant(&pool, &slug, &url).await;
     reset_users_table(&pool).await;
     insert_user(&pool, "alice", "hunter2", true).await;
-    let alice_uid: i64 = sqlx::query_scalar(
-        r#"SELECT "id" FROM "rustango_users" WHERE "username" = 'alice'"#,
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let alice_uid: i64 =
+        sqlx::query_scalar(r#"SELECT "id" FROM "rustango_users" WHERE "username" = 'alice'"#)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
 
     let mut w = Widget {
         id: Auto::default(),
@@ -460,8 +465,8 @@ async fn admin_write_records_user_source_via_with_source_install() {
     let app = build_app(pools, url);
 
     // Login.
-    let form = serde_urlencoded::to_string([("username", "alice"), ("password", "hunter2")])
-        .unwrap();
+    let form =
+        serde_urlencoded::to_string([("username", "alice"), ("password", "hunter2")]).unwrap();
     let login_req = Request::builder()
         .method("POST")
         .uri("/__login")
@@ -490,20 +495,21 @@ async fn admin_write_records_user_source_via_with_source_install() {
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
     // Audit entry must be attributed to alice.
-    let entries = rustango::audit::fetch_for_entity(
-        &pool,
-        "tenauth_widget",
-        &widget_pk.to_string(),
-    )
-    .await
-    .unwrap();
+    let entries =
+        rustango::audit::fetch_for_entity(&pool, "tenauth_widget", &widget_pk.to_string())
+            .await
+            .unwrap();
     assert!(
         entries.iter().any(|e| e.operation == "update"),
         "no update entry recorded: {entries:?}",
     );
     let upd = entries.iter().find(|e| e.operation == "update").unwrap();
-    assert_eq!(upd.source, format!("user:{alice_uid}"),
-        "expected user:{alice_uid} attribution, got `{}`", upd.source);
+    assert_eq!(
+        upd.source,
+        format!("user:{alice_uid}"),
+        "expected user:{alice_uid} attribution, got `{}`",
+        upd.source
+    );
 
     rmig::drop_all(&pool).await.unwrap();
 }

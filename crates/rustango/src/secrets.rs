@@ -80,13 +80,17 @@ impl EnvSecrets {
     /// New env-secrets reader with no prefix — reads env vars verbatim.
     #[must_use]
     pub fn new() -> Self {
-        Self { prefix: String::new() }
+        Self {
+            prefix: String::new(),
+        }
     }
 
     /// New env-secrets reader that prepends `prefix` to every key lookup.
     #[must_use]
     pub fn with_prefix(prefix: impl Into<String>) -> Self {
-        Self { prefix: prefix.into() }
+        Self {
+            prefix: prefix.into(),
+        }
     }
 }
 
@@ -121,7 +125,9 @@ pub struct InMemorySecrets {
 impl InMemorySecrets {
     #[must_use]
     pub fn new() -> Self {
-        Self { inner: Mutex::new(HashMap::new()) }
+        Self {
+            inner: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Pre-populate with key→value pairs. Builder-style.
@@ -159,7 +165,12 @@ impl Default for InMemorySecrets {
 #[async_trait]
 impl Secrets for InMemorySecrets {
     async fn get(&self, key: &str) -> Result<Option<String>, SecretsError> {
-        Ok(self.inner.lock().expect("secrets poisoned").get(key).cloned())
+        Ok(self
+            .inner
+            .lock()
+            .expect("secrets poisoned")
+            .get(key)
+            .cloned())
     }
 }
 

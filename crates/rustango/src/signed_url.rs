@@ -116,7 +116,12 @@ pub fn verify_at(url: &str, secret: &[u8], now_secs: u64) -> Result<(), SignedUr
     let canonical = canonicalize(&base, &params);
     let expected = compute_signature(&canonical, secret);
 
-    if expected.as_bytes().ct_eq(provided_sig.as_bytes()).unwrap_u8() != 1 {
+    if expected
+        .as_bytes()
+        .ct_eq(provided_sig.as_bytes())
+        .unwrap_u8()
+        != 1
+    {
         return Err(SignedUrlError::InvalidSignature);
     }
     Ok(())

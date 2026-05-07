@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustango::sql::{sqlx, Fetcher};
-use rustango::{core::Column as _, migrate as rmig};
 use rustango::tenancy::{manage, Org, TenantPools};
+use rustango::{core::Column as _, migrate as rmig};
 
 static UNIQ: AtomicU64 = AtomicU64::new(0);
 
@@ -178,10 +178,7 @@ async fn create_tenant_rejects_duplicate_slug() {
     )
     .await;
     let err = res.unwrap_err();
-    assert!(
-        format!("{err}").contains("already exists"),
-        "got: {err}"
-    );
+    assert!(format!("{err}").contains("already exists"), "got: {err}");
 
     drop_schema(&pool, &slug).await;
     rmig::drop_all(&pool).await.unwrap();
@@ -273,20 +270,23 @@ async fn list_tenants_prints_all_orgs() {
     // Two tenants.
     let s1 = unique("alpha");
     let s2 = unique("beta");
+    run(&pools, &url, &dir, &["create-tenant", &s1, "--no-migrate"])
+        .await
+        .1
+        .unwrap();
     run(
         &pools,
         &url,
         &dir,
-        &["create-tenant", &s1, "--no-migrate"],
-    )
-    .await
-    .1
-    .unwrap();
-    run(
-        &pools,
-        &url,
-        &dir,
-        &["create-tenant", &s2, "--mode", "database", "--database-url", &url, "--no-migrate"],
+        &[
+            "create-tenant",
+            &s2,
+            "--mode",
+            "database",
+            "--database-url",
+            &url,
+            "--no-migrate",
+        ],
     )
     .await
     .1
@@ -418,13 +418,7 @@ async fn purge_tenant_schema_mode_drops_schema_and_org_row() {
         &pools,
         &url,
         &dir,
-        &[
-            "create-tenant",
-            &slug,
-            "--mode",
-            "schema",
-            "--no-migrate",
-        ],
+        &["create-tenant", &slug, "--mode", "schema", "--no-migrate"],
     )
     .await
     .1
@@ -459,14 +453,13 @@ async fn purge_tenant_schema_mode_drops_schema_and_org_row() {
     assert!(!exists, "schema `{slug}` should be gone");
 
     // Org row deleted.
-    let row_count: i64 = sqlx::query_as::<_, (i64,)>(
-        "SELECT COUNT(*)::bigint FROM rustango_orgs WHERE slug = $1",
-    )
-    .bind(&slug)
-    .fetch_one(&pool)
-    .await
-    .unwrap()
-    .0;
+    let row_count: i64 =
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*)::bigint FROM rustango_orgs WHERE slug = $1")
+            .bind(&slug)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .0;
     assert_eq!(row_count, 0);
 
     rmig::drop_all(&pool).await.unwrap();
@@ -566,14 +559,13 @@ async fn purge_tenant_database_mode_requires_purge_database_flag() {
     assert!(err.contains("unrecoverable"), "{err}");
 
     // Org row still present.
-    let row_count: i64 = sqlx::query_as::<_, (i64,)>(
-        "SELECT COUNT(*)::bigint FROM rustango_orgs WHERE slug = $1",
-    )
-    .bind(&slug)
-    .fetch_one(&pool)
-    .await
-    .unwrap()
-    .0;
+    let row_count: i64 =
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*)::bigint FROM rustango_orgs WHERE slug = $1")
+            .bind(&slug)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .0;
     assert_eq!(row_count, 1);
 
     rmig::drop_all(&pool).await.unwrap();
@@ -633,34 +625,42 @@ async fn purge_tenant_works_on_soft_deleted_org() {
     .await
     .1
     .unwrap();
-    run(&pools, &url, &dir, &["drop-tenant", &slug, "--confirm", &slug])
-        .await
-        .1
-        .unwrap();
+    run(
+        &pools,
+        &url,
+        &dir,
+        &["drop-tenant", &slug, "--confirm", &slug],
+    )
+    .await
+    .1
+    .unwrap();
 
     // Sanity: soft-deleted but still present.
-    let active: bool = sqlx::query_as::<_, (bool,)>(
-        "SELECT active FROM rustango_orgs WHERE slug = $1",
-    )
-    .bind(&slug)
-    .fetch_one(&pool)
-    .await
-    .unwrap()
-    .0;
+    let active: bool =
+        sqlx::query_as::<_, (bool,)>("SELECT active FROM rustango_orgs WHERE slug = $1")
+            .bind(&slug)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .0;
     assert!(!active);
 
-    let (_out, res) =
-        run(&pools, &url, &dir, &["purge-tenant", &slug, "--confirm", &slug]).await;
+    let (_out, res) = run(
+        &pools,
+        &url,
+        &dir,
+        &["purge-tenant", &slug, "--confirm", &slug],
+    )
+    .await;
     res.unwrap();
 
-    let row_count: i64 = sqlx::query_as::<_, (i64,)>(
-        "SELECT COUNT(*)::bigint FROM rustango_orgs WHERE slug = $1",
-    )
-    .bind(&slug)
-    .fetch_one(&pool)
-    .await
-    .unwrap()
-    .0;
+    let row_count: i64 =
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*)::bigint FROM rustango_orgs WHERE slug = $1")
+            .bind(&slug)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .0;
     assert_eq!(row_count, 0);
 
     rmig::drop_all(&pool).await.unwrap();
@@ -707,7 +707,10 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
     // Re-running is idempotent — both files are reported as skipped.
     let (out2, res2) = run(&pools, &url, &dir, &["init-tenancy"]).await;
     res2.unwrap();
-    assert!(out2.contains("already exists"), "second run should skip: {out2}");
+    assert!(
+        out2.contains("already exists"),
+        "second run should skip: {out2}"
+    );
 
     // 2. Scope-aware `migrate` applies registry bootstrap (and runs
     //    the tenant phase, which is a no-op pre-tenants).
@@ -803,7 +806,10 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
     .await
     .unwrap()
     .0;
-    assert_eq!(users_unique, 1, "rustango_users.username UNIQUE missing in {slug}");
+    assert_eq!(
+        users_unique, 1,
+        "rustango_users.username UNIQUE missing in {slug}"
+    );
 
     // 6. create-user writes into the tenant schema.
     let (out5, res5) = run(
@@ -833,14 +839,13 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
     assert_eq!(user_count, 1);
 
     // 7. Org row landed.
-    let org_count: i64 = sqlx::query_as::<_, (i64,)>(
-        "SELECT COUNT(*)::bigint FROM rustango_orgs WHERE slug = $1",
-    )
-    .bind(&slug)
-    .fetch_one(&pool)
-    .await
-    .unwrap()
-    .0;
+    let org_count: i64 =
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*)::bigint FROM rustango_orgs WHERE slug = $1")
+            .bind(&slug)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .0;
     assert_eq!(org_count, 1);
 
     // Cleanup.
@@ -852,4 +857,3 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
         .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
-

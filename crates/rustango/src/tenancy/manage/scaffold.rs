@@ -45,10 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ";
 
-pub(super) fn startapp_cmd<W: Write>(
-    args: &[String],
-    w: &mut W,
-) -> Result<(), TenancyError> {
+pub(super) fn startapp_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), TenancyError> {
     let mut iter = args.iter();
     let app_name = iter
         .next()
@@ -87,8 +84,8 @@ pub(super) fn startapp_cmd<W: Write>(
         base_dir: into.map(std::path::PathBuf::from),
     };
     let cwd = std::env::current_dir().map_err(TenancyError::Io)?;
-    let report = rustango::migrate::scaffold::startapp(&cwd, &opts)
-        .map_err(TenancyError::Migrate)?;
+    let report =
+        rustango::migrate::scaffold::startapp(&cwd, &opts).map_err(TenancyError::Migrate)?;
 
     // Optional: drop the framework's registry+tenant bootstrap
     // migrations into the new app's `migrations/` subdirectory so a
@@ -96,7 +93,11 @@ pub(super) fn startapp_cmd<W: Write>(
     // `init-tenancy` step.
     let bootstrap_report = if with_bootstrap {
         let migrations_dir = cwd
-            .join(opts.base_dir.clone().unwrap_or_else(|| std::path::PathBuf::from("src")))
+            .join(
+                opts.base_dir
+                    .clone()
+                    .unwrap_or_else(|| std::path::PathBuf::from("src")),
+            )
             .join(&app_name)
             .join("migrations");
         Some(crate::tenancy::init_tenancy(&migrations_dir)?)
@@ -104,7 +105,13 @@ pub(super) fn startapp_cmd<W: Write>(
         None
     };
 
-    write_report(w, &app_name, &base_label, &report, bootstrap_report.as_ref())
+    write_report(
+        w,
+        &app_name,
+        &base_label,
+        &report,
+        bootstrap_report.as_ref(),
+    )
 }
 
 fn write_report<W: Write>(

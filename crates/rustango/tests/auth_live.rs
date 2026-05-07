@@ -6,8 +6,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustango::core::Column as _;
-use rustango::sql::{sqlx, Fetcher};
 use rustango::migrate as rmig;
+use rustango::sql::{sqlx, Fetcher};
 use rustango::tenancy::{
     authenticate_operator, authenticate_user, manage, password, Org, TenantPools,
 };
@@ -77,16 +77,22 @@ async fn create_operator_and_authenticate_round_trip() {
     .unwrap();
 
     // Right password authenticates.
-    let op = authenticate_operator(&pool, &username, "hunter2").await.unwrap();
+    let op = authenticate_operator(&pool, &username, "hunter2")
+        .await
+        .unwrap();
     assert!(op.is_some(), "right password should authenticate");
     assert_eq!(op.unwrap().username, username);
 
     // Wrong password rejects.
-    let op = authenticate_operator(&pool, &username, "wrong").await.unwrap();
+    let op = authenticate_operator(&pool, &username, "wrong")
+        .await
+        .unwrap();
     assert!(op.is_none(), "wrong password should reject");
 
     // Unknown username rejects.
-    let op = authenticate_operator(&pool, "nobody", "hunter2").await.unwrap();
+    let op = authenticate_operator(&pool, "nobody", "hunter2")
+        .await
+        .unwrap();
     assert!(op.is_none(), "unknown user should reject");
 
     rmig::drop_all(&pool).await.unwrap();
@@ -193,7 +199,9 @@ async fn create_user_in_schema_mode_tenant_authenticates_against_that_schema() {
     // Authenticate via a schema-scoped connection from TenantPools.
     let org = lookup_org(pools.registry(), &slug).await;
     let mut conn = pools.acquire(&org).await.unwrap();
-    let auth = authenticate_user(&mut conn, &user, "hunter2").await.unwrap();
+    let auth = authenticate_user(&mut conn, &user, "hunter2")
+        .await
+        .unwrap();
     assert!(auth.is_some(), "right password should authenticate");
     let u = auth.unwrap();
     assert_eq!(u.username, user);
@@ -269,7 +277,9 @@ async fn hard_wall_operator_credential_does_not_authenticate_against_tenant() {
     let mut conn = pools.acquire(&org).await.unwrap();
     // Operator's exact username + password — should NOT authenticate
     // as a tenant user (the hard wall).
-    let auth = authenticate_user(&mut conn, &op_user, "secret").await.unwrap();
+    let auth = authenticate_user(&mut conn, &op_user, "secret")
+        .await
+        .unwrap();
     assert!(
         auth.is_none(),
         "operator credentials must not authenticate against a tenant"

@@ -89,7 +89,9 @@ async fn memory_cache_overwrite_replaces_value() {
 #[tokio::test]
 async fn memory_cache_entry_expires_after_ttl() {
     let c = InMemoryCache::new();
-    c.set("tmp", "value", Some(Duration::from_millis(10))).await.unwrap();
+    c.set("tmp", "value", Some(Duration::from_millis(10)))
+        .await
+        .unwrap();
     // Before expiry
     assert!(c.get("tmp").await.unwrap().is_some());
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -111,7 +113,9 @@ async fn memory_cache_with_default_ttl_applies_to_no_ttl_sets() {
 async fn memory_cache_explicit_ttl_overrides_default() {
     let c = InMemoryCache::with_default_ttl(Duration::from_millis(50));
     // Explicit None-TTL-override: pass a longer explicit TTL
-    c.set("k", "v", Some(Duration::from_secs(60))).await.unwrap();
+    c.set("k", "v", Some(Duration::from_secs(60)))
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(60)).await;
     // Still alive because explicit TTL is 60s
     assert!(c.get("k").await.unwrap().is_some());
@@ -159,20 +163,14 @@ async fn get_json_missing_key_returns_none() {
 #[tokio::test]
 async fn get_or_set_computes_on_miss() {
     let c = InMemoryCache::new();
-    let val: i64 = get_or_set(
-        &c,
-        "answer",
-        || async { 42_i64 },
-        None,
-    ).await.unwrap();
+    let val: i64 = get_or_set(&c, "answer", || async { 42_i64 }, None)
+        .await
+        .unwrap();
     assert_eq!(val, 42);
     // Second call hits cache, factory not called again
-    let val2: i64 = get_or_set(
-        &c,
-        "answer",
-        || async { 99_i64 },
-        None,
-    ).await.unwrap();
+    let val2: i64 = get_or_set(&c, "answer", || async { 99_i64 }, None)
+        .await
+        .unwrap();
     assert_eq!(val2, 42, "cache miss should not re-compute");
 }
 
@@ -180,12 +178,9 @@ async fn get_or_set_computes_on_miss() {
 async fn get_or_set_uses_cached_value_on_hit() {
     let c = InMemoryCache::new();
     c.set("x", "100", None).await.unwrap();
-    let val: i64 = get_or_set(
-        &c,
-        "x",
-        || async { 999_i64 },
-        None,
-    ).await.unwrap();
+    let val: i64 = get_or_set(&c, "x", || async { 999_i64 }, None)
+        .await
+        .unwrap();
     assert_eq!(val, 100);
 }
 

@@ -44,8 +44,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use hmac::{Hmac, Mac};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -263,9 +263,11 @@ impl OAuth2Provider {
         let issuer = issuer.as_ref().trim_end_matches('/');
         let url = format!("{issuer}/.well-known/openid-configuration");
         let http = reqwest::Client::new();
-        let resp = http.get(&url).send().await.map_err(|e| {
-            OAuthError::Discovery(format!("GET {url}: {e}"))
-        })?;
+        let resp = http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| OAuthError::Discovery(format!("GET {url}: {e}")))?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -273,9 +275,10 @@ impl OAuth2Provider {
                 "GET {url} -> {status}: {body}"
             )));
         }
-        let doc: DiscoveryDoc = resp.json().await.map_err(|e| {
-            OAuthError::Discovery(format!("decode discovery doc: {e}"))
-        })?;
+        let doc: DiscoveryDoc = resp
+            .json()
+            .await
+            .map_err(|e| OAuthError::Discovery(format!("decode discovery doc: {e}")))?;
         Ok(Self {
             name: name.into(),
             client_id: client_id.into(),
@@ -325,7 +328,11 @@ impl OAuth2Provider {
             url.push_str(&urlencoding::encode(v));
         }
 
-        let flow = OAuth2Flow { state, pkce_verifier, created_at: now };
+        let flow = OAuth2Flow {
+            state,
+            pkce_verifier,
+            created_at: now,
+        };
         (url, flow)
     }
 
@@ -338,7 +345,13 @@ impl OAuth2Provider {
         code: &str,
         callback_state: &str,
     ) -> Result<(NormalizedUser, TokenResponse), OAuthError> {
-        if flow.state.as_bytes().ct_eq(callback_state.as_bytes()).unwrap_u8() == 0 {
+        if flow
+            .state
+            .as_bytes()
+            .ct_eq(callback_state.as_bytes())
+            .unwrap_u8()
+            == 0
+        {
             return Err(OAuthError::StateMismatch);
         }
 
@@ -396,11 +409,17 @@ async fn decode_or_error<T: serde::de::DeserializeOwned>(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(OAuthError::BadStatus { status: status.as_u16(), body });
+        return Err(OAuthError::BadStatus {
+            status: status.as_u16(),
+            body,
+        });
     }
     let bytes = resp.bytes().await?;
     serde_json::from_slice(&bytes).map_err(|e| {
-        let preview = String::from_utf8_lossy(&bytes).chars().take(200).collect::<String>();
+        let preview = String::from_utf8_lossy(&bytes)
+            .chars()
+            .take(200)
+            .collect::<String>();
         OAuthError::BadResponse(format!("{e} (body: {preview})"))
     })
 }
@@ -426,7 +445,10 @@ pub fn default_user_mapper(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let name = raw.get("name").and_then(|v| v.as_str()).map(str::to_owned);
-    let avatar_url = raw.get("picture").and_then(|v| v.as_str()).map(str::to_owned);
+    let avatar_url = raw
+        .get("picture")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
     Ok(NormalizedUser {
         provider: provider.to_owned(),
         provider_user_id: sub,
@@ -550,7 +572,9 @@ mod tests {
     #[test]
     fn random_token_is_url_safe() {
         let t = random_token(32);
-        assert!(t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(t
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     }
 
     #[test]

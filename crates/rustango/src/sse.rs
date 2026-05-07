@@ -86,7 +86,9 @@ impl<T: Clone + Send + 'static> EventBus<T> {
 
 impl<T: Clone + Send + 'static> Clone for EventBus<T> {
     fn clone(&self) -> Self {
-        Self { tx: self.tx.clone() }
+        Self {
+            tx: self.tx.clone(),
+        }
     }
 }
 
@@ -96,7 +98,10 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
-    struct TestEvent { kind: String, value: i32 }
+    struct TestEvent {
+        kind: String,
+        value: i32,
+    }
 
     #[tokio::test]
     async fn fresh_bus_has_no_subscribers() {
@@ -125,7 +130,10 @@ mod tests {
     #[tokio::test]
     async fn send_with_no_subscribers_returns_zero() {
         let bus: EventBus<TestEvent> = EventBus::new(10);
-        let n = bus.send(TestEvent { kind: "x".into(), value: 1 });
+        let n = bus.send(TestEvent {
+            kind: "x".into(),
+            value: 1,
+        });
         assert_eq!(n, 0);
     }
 
@@ -134,7 +142,10 @@ mod tests {
         let bus: EventBus<TestEvent> = EventBus::new(10);
         let _rx1 = bus.subscribe();
         let _rx2 = bus.subscribe();
-        let n = bus.send(TestEvent { kind: "x".into(), value: 1 });
+        let n = bus.send(TestEvent {
+            kind: "x".into(),
+            value: 1,
+        });
         assert_eq!(n, 2);
     }
 
@@ -142,7 +153,10 @@ mod tests {
     async fn message_received_by_subscriber() {
         let bus: EventBus<TestEvent> = EventBus::new(10);
         let mut rx = bus.subscribe();
-        let event = TestEvent { kind: "ping".into(), value: 42 };
+        let event = TestEvent {
+            kind: "ping".into(),
+            value: 42,
+        };
         bus.send(event.clone());
         let received = rx.recv().await.unwrap();
         assert_eq!(received, event);
@@ -153,7 +167,10 @@ mod tests {
         let bus: EventBus<TestEvent> = EventBus::new(10);
         let bus_clone = bus.clone();
         let mut rx = bus.subscribe();
-        bus_clone.send(TestEvent { kind: "via_clone".into(), value: 1 });
+        bus_clone.send(TestEvent {
+            kind: "via_clone".into(),
+            value: 1,
+        });
         let received = rx.recv().await.unwrap();
         assert_eq!(received.kind, "via_clone");
     }
@@ -169,7 +186,10 @@ mod tests {
         let mut rx1 = bus.subscribe();
         let mut rx2 = bus.subscribe();
         let mut rx3 = bus.subscribe();
-        bus.send(TestEvent { kind: "broadcast".into(), value: 99 });
+        bus.send(TestEvent {
+            kind: "broadcast".into(),
+            value: 99,
+        });
         for rx in [&mut rx1, &mut rx2, &mut rx3].iter_mut() {
             let received = rx.recv().await.unwrap();
             assert_eq!(received.value, 99);

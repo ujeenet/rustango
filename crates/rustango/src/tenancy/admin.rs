@@ -56,23 +56,25 @@
 
 use std::sync::Arc;
 
+use crate::sql::sqlx::postgres::{PgPool, PgPoolOptions};
+use crate::sql::sqlx::Row;
 use axum::body::Body;
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Router;
 use cookie::time::Duration as CookieDuration;
 use cookie::{Cookie, SameSite};
-use crate::sql::sqlx::postgres::{PgPool, PgPoolOptions};
-use crate::sql::sqlx::Row;
 use tera::{Context, Tera};
 use tower::ServiceExt;
 use tracing::warn;
 
+use super::branding;
 use super::error::TenancyError;
 use super::org::{Org, StorageMode};
 use super::pools::TenantPools;
 use super::resolver::OrgResolver;
 use super::tenant_console::{self, TenantSessionPayload};
+use crate::storage::BoxedStorage;
 
 /// Builder for the tenant-aware admin router.
 pub struct TenantAdminBuilder {
@@ -85,6 +87,7 @@ pub struct TenantAdminBuilder {
     actions: Vec<RegisteredAction>,
     title: Option<String>,
     subtitle: Option<String>,
+    brand_storage: Option<BoxedStorage>,
 }
 
 /// One row in the action registry threaded through the tenant admin
@@ -125,6 +128,7 @@ impl TenantAdminBuilder {
             actions: Vec::new(),
             title: None,
             subtitle: None,
+            brand_storage: None,
         }
     }
 
@@ -139,6 +143,22 @@ impl TenantAdminBuilder {
     #[must_use]
     pub fn subtitle(mut self, subtitle: impl Into<String>) -> Self {
         self.subtitle = Some(subtitle.into());
+        self
+    }
+
+    /// Override the storage backend used for per-tenant brand assets
+    /// (logo / favicon). Accepts any [`BoxedStorage`] — `LocalStorage`,
+    /// `S3Storage` (AWS / R2 / B2 / MinIO), `InMemoryStorage` for
+    /// tests, or any user-supplied `Storage` impl. When the backend
+    /// exposes URLs via `Storage::url`, rendered `<img src>` tags
+    /// point straight at the origin/CDN — no proxy through this
+    /// process. When `None` is configured (the default), the
+    /// framework falls back to
+    /// [`super::branding::default_brand_storage`] (a `LocalStorage`
+    /// rooted at `./var/brand` or `RUSTANGO_BRAND_STORAGE_DIR`).
+    #[must_use]
+    pub fn brand_storage(mut self, storage: BoxedStorage) -> Self {
+        self.brand_storage = Some(storage);
         self
     }
 
@@ -230,6 +250,14 @@ impl TenantAdminBuilder {
         let actions = Arc::new(self.actions);
         let title = Arc::new(self.title);
         let subtitle = Arc::new(self.subtitle);
+        // Brand storage: explicit injection via `brand_storage(...)`,
+        // or default to a `LocalStorage` rooted at
+        // `RUSTANGO_BRAND_STORAGE_DIR` (default `./var/brand`). The
+        // same backend serves both the operator console and the
+        // tenant admin's `/__brand__/{slug}/{filename}` fallback.
+        let brand_storage: BoxedStorage = self
+            .brand_storage
+            .unwrap_or_else(branding::default_brand_storage);
 
         Router::new().fallback(move |req: Request<Body>| {
             let pools = pools.clone();
@@ -241,6 +269,7 @@ impl TenantAdminBuilder {
             let actions = actions.clone();
             let title = title.clone();
             let subtitle = subtitle.clone();
+            let brand_storage = brand_storage.clone();
             async move {
                 handle_request(
                     req,
@@ -253,6 +282,7 @@ impl TenantAdminBuilder {
                     &actions,
                     title.as_deref().as_deref(),
                     subtitle.as_deref().as_deref(),
+                    &brand_storage,
                 )
                 .await
             }
@@ -271,7 +301,19 @@ async fn handle_request(
     actions: &[RegisteredAction],
     title: Option<&str>,
     subtitle: Option<&str>,
+    brand_storage: &BoxedStorage,
 ) -> Response {
+    // Public brand asset surface — `/__brand__/{slug}/{filename}`.
+    // Served before the resolver runs so the assets are reachable
+    // even when the requesting host doesn't match a known tenant
+    // (the slug in the path is validated by the branding module).
+    if let Some(rest) = req.uri().path().strip_prefix("/__brand__/") {
+        if let Some((slug, filename)) = rest.split_once('/') {
+            return serve_brand_asset(slug, filename, brand_storage).await;
+        }
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+
     let (mut parts, body) = req.into_parts();
     let org = match resolver.resolve(&parts, pools.registry()).await {
         Ok(Some(o)) => o,
@@ -310,9 +352,7 @@ async fn handle_request(
         }
         if path == "/__login" {
             return match method {
-                axum::http::Method::GET => {
-                    login_form(&org, cfg, parts.uri.query()).into_response()
-                }
+                axum::http::Method::GET => login_form(&org, cfg, parts.uri.query()).into_response(),
                 axum::http::Method::POST => {
                     login_submit(&org, cfg, pool.pg_pool(), parts.headers, body).await
                 }
@@ -347,7 +387,10 @@ async fn handle_request(
                                 error = %e,
                                 "failed to fetch user permissions",
                             );
-                            return (StatusCode::INTERNAL_SERVER_ERROR, "permission lookup failed")
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "permission lookup failed",
+                            )
                                 .into_response();
                         }
                     }
@@ -371,6 +414,8 @@ async fn handle_request(
         actions,
         title,
         subtitle,
+        &org,
+        brand_storage,
     );
 
     // Strip the `/__admin` mount prefix from the request URI so the
@@ -494,7 +539,11 @@ fn redirect_to_tenant_login(next_path: &str) -> Redirect {
     Redirect::to(&location)
 }
 
-fn login_form(org: &Org, cfg: &TenantSessionConfig, query: Option<&str>) -> axum::response::Html<String> {
+fn login_form(
+    org: &Org,
+    cfg: &TenantSessionConfig,
+    query: Option<&str>,
+) -> axum::response::Html<String> {
     let mut next: Option<String> = None;
     let mut error: Option<String> = None;
     if let Some(q) = query {
@@ -515,7 +564,11 @@ fn login_form(org: &Org, cfg: &TenantSessionConfig, query: Option<&str>) -> axum
     ctx.insert("tenant_name", &org.display_name);
     ctx.insert("next", &next.unwrap_or_else(|| "/".into()));
     ctx.insert("error", &error);
-    axum::response::Html(cfg.tera.render("tenant_login.html", &ctx).unwrap_or_default())
+    axum::response::Html(
+        cfg.tera
+            .render("tenant_login.html", &ctx)
+            .unwrap_or_default(),
+    )
 }
 
 #[derive(serde::Deserialize)]
@@ -718,9 +771,9 @@ async fn build_admin_pool_for_tenant(
             let tp = pools.pool_for_org(org).await?;
             match tp {
                 super::pools::TenantPool::Database { pool } => Ok(AdminPool::Database(pool)),
-                super::pools::TenantPool::Schema { .. } => unreachable!(
-                    "StorageMode::Database parsed but pool_for_org returned Schema"
-                ),
+                super::pools::TenantPool::Schema { .. } => {
+                    unreachable!("StorageMode::Database parsed but pool_for_org returned Schema")
+                }
             }
         }
         StorageMode::Schema => {
@@ -746,10 +799,7 @@ async fn build_short_lived_schema_pool(
         .after_connect(move |conn, _meta| {
             let schema = Arc::clone(&schema_owned);
             Box::pin(async move {
-                let stmt = format!(
-                    "SET search_path TO {}, public",
-                    quote_ident(&schema)
-                );
+                let stmt = format!("SET search_path TO {}, public", quote_ident(&schema));
                 rustango::sql::sqlx::query(&stmt).execute(conn).await?;
                 Ok(())
             })
@@ -767,6 +817,8 @@ fn build_inner_admin_router(
     actions: &[RegisteredAction],
     title: Option<&str>,
     subtitle: Option<&str>,
+    org: &Org,
+    brand_storage: &BoxedStorage,
 ) -> Router {
     let mut builder = crate::admin::Builder::new(pool);
     if let Some(allow) = show_only {
@@ -784,6 +836,34 @@ fn build_inner_admin_router(
     if let Some(s) = subtitle {
         builder = builder.subtitle(s);
     }
+
+    // Per-tenant branding overrides the static title/subtitle when
+    // set on the resolved Org. Fall through to `display_name` as a
+    // last resort so the sidebar always names the current tenant.
+    if let Some(name) = org.brand_name.as_deref() {
+        builder = builder.brand_name(name);
+    } else if !org.display_name.is_empty() {
+        builder = builder.brand_name(&org.display_name);
+    }
+    if let Some(tag) = org.brand_tagline.as_deref() {
+        builder = builder.brand_tagline(tag);
+    }
+    if let Some(logo_url) =
+        branding::brand_asset_url(&org.slug, org.logo_path.as_deref(), brand_storage)
+    {
+        builder = builder.brand_logo_url(logo_url);
+    }
+    if let Some(mode) = org
+        .theme_mode
+        .as_deref()
+        .and_then(branding::validate_theme_mode)
+    {
+        builder = builder.theme_mode(mode);
+    }
+    if let Some(css) = branding::build_brand_css(org) {
+        builder = builder.tenant_brand_css(css);
+    }
+
     for action in actions {
         let handler = action.handler.clone();
         builder = builder.register_action(action.table, action.name, move |pool, pks| {
@@ -791,6 +871,30 @@ fn build_inner_admin_router(
         });
     }
     builder.build()
+}
+
+/// Serve a per-tenant brand asset from the shared brand storage.
+/// The slug + filename are validated by the branding module — any
+/// path-traversal attempt comes back as a 404.
+async fn serve_brand_asset(slug: &str, filename: &str, brand_storage: &BoxedStorage) -> Response {
+    match branding::load_brand_asset(slug, filename, brand_storage).await {
+        Ok((bytes, ct)) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, ct)
+            .header(header::CACHE_CONTROL, "public, max-age=300")
+            .body(Body::from(bytes))
+            .expect("response builds")
+            .into_response(),
+        Err(
+            branding::BrandError::NotFound
+            | branding::BrandError::InvalidSlug
+            | branding::BrandError::InvalidFilename,
+        ) => (StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(e) => {
+            warn!(target: "crate::tenancy::admin", error = %e, "brand asset");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
 }
 
 fn quote_ident(name: &str) -> String {

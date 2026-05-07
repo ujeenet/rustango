@@ -91,9 +91,9 @@ pub struct EnvSecretsResolver;
 #[async_trait]
 impl SecretsResolver for EnvSecretsResolver {
     async fn resolve(&self, reference: &str) -> Result<String, SecretsError> {
-        let var = reference
-            .strip_prefix("env://")
-            .ok_or_else(|| SecretsError::Invalid(format!("expected env:// prefix, got `{reference}`")))?;
+        let var = reference.strip_prefix("env://").ok_or_else(|| {
+            SecretsError::Invalid(format!("expected env:// prefix, got `{reference}`"))
+        })?;
         if var.is_empty() {
             return Err(SecretsError::Invalid(format!(
                 "env:// reference has empty variable name: `{reference}`"
@@ -171,7 +171,11 @@ mod tests {
         // Workspace lints `unsafe_code = forbid`, so we can't mutate
         // env vars in tests. Read one that's guaranteed to be set on
         // every platform we run CI on instead.
-        let key = if std::env::var("PATH").is_ok() { "PATH" } else { "USER" };
+        let key = if std::env::var("PATH").is_ok() {
+            "PATH"
+        } else {
+            "USER"
+        };
         let r = EnvSecretsResolver;
         let v = r.resolve(&format!("env://{key}")).await.unwrap();
         assert!(!v.is_empty(), "{key} should be a non-empty env var");

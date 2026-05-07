@@ -309,10 +309,7 @@ pub(super) fn write_insert(b: &mut Sql<'_>, query: &InsertQuery) -> Result<(), S
 // BULK INSERT
 // ====================================================================
 
-pub(super) fn write_bulk_insert(
-    b: &mut Sql<'_>,
-    query: &BulkInsertQuery,
-) -> Result<(), SqlError> {
+pub(super) fn write_bulk_insert(b: &mut Sql<'_>, query: &BulkInsertQuery) -> Result<(), SqlError> {
     if query.rows.is_empty() {
         return Err(SqlError::EmptyBulkInsert);
     }
@@ -536,8 +533,7 @@ pub(super) fn write_where_with_search(
         // case-insensitive LIKE — keep the case-insensitive guarantee
         // by lowercasing both sides on those backends.
         let supports_ilike = b.d.supports_op(Op::ILike);
-        b.params
-            .push(SqlValue::String(format!("%{}%", s.query)));
+        b.params.push(SqlValue::String(format!("%{}%", s.query)));
         let placeholder = b.d.placeholder(b.params.len());
         b.sql.push('(');
         for (i, col) in s.columns.iter().enumerate() {
@@ -645,7 +641,12 @@ fn write_filter(
             require_op(b.d, filter.op)?;
             b.params.push(filter.value.clone());
             let p = b.d.placeholder(b.params.len());
-            b.d.write_ilike(&mut b.sql, &qualified_col, &p, matches!(filter.op, Op::NotILike));
+            b.d.write_ilike(
+                &mut b.sql,
+                &qualified_col,
+                &p,
+                matches!(filter.op, Op::NotILike),
+            );
         }
         Op::In | Op::NotIn => {
             let SqlValue::List(elements) = &filter.value else {
@@ -655,8 +656,11 @@ fn write_filter(
                 return Err(SqlError::EmptyInList);
             }
             b.sql.push_str(&qualified_col);
-            b.sql
-                .push_str(if matches!(filter.op, Op::In) { " IN (" } else { " NOT IN (" });
+            b.sql.push_str(if matches!(filter.op, Op::In) {
+                " IN ("
+            } else {
+                " NOT IN ("
+            });
             let mut first = true;
             for elem in elements {
                 if !first {

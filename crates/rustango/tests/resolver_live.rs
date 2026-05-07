@@ -7,11 +7,11 @@
 
 use http::request::Parts;
 use http::{HeaderName, HeaderValue, Request};
-use rustango::sql::{sqlx, Auto};
 use rustango::migrate;
+use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::{
-    ChainResolver, HeaderResolver, Org, OrgResolver, PathPrefixResolver, PortResolver,
-    StorageMode, SubdomainResolver,
+    ChainResolver, HeaderResolver, Org, OrgResolver, PathPrefixResolver, PortResolver, StorageMode,
+    SubdomainResolver,
 };
 
 async fn pool() -> Option<sqlx::PgPool> {
@@ -41,6 +41,12 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         path_prefix: Some("/acme".into()),
         active: true,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     acme.insert(pool).await.unwrap();
 
@@ -57,6 +63,12 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         path_prefix: None,
         active: true,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     globex.insert(pool).await.unwrap();
 
@@ -73,6 +85,12 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         path_prefix: None,
         active: true,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     initech.insert(pool).await.unwrap();
 
@@ -89,6 +107,12 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         path_prefix: None,
         active: false,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     frozen.insert(pool).await.unwrap();
 }
@@ -108,7 +132,10 @@ fn parts_with_uri(uri: &str) -> Parts {
 }
 
 fn parts_with_header(header: &'static str, value: &str) -> Parts {
-    let mut req = Request::builder().uri("http://example.test/").body(()).unwrap();
+    let mut req = Request::builder()
+        .uri("http://example.test/")
+        .body(())
+        .unwrap();
     req.headers_mut().insert(
         HeaderName::from_static(header),
         HeaderValue::from_str(value).unwrap(),

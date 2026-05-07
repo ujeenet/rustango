@@ -234,10 +234,14 @@ admin = [
 # Multi-tenancy module (`rustango::tenancy`). Implies `admin` (the
 # tenant admin builder wraps `rustango::admin`). Pulls in Argon2 +
 # HMAC-SHA256 + cookie + tower for the per-tenant + operator
-# authentication paths.
+# authentication paths. Implies `storage` + `uploads` so the operator
+# console can persist per-tenant brand assets (logo / favicon) on
+# disk and serve them via the tenancy router.
 tenancy = [
     "admin",
     "runtime",
+    "storage",
+    "uploads",
     "dep:async-trait",
     "dep:argon2",
     "dep:cookie",

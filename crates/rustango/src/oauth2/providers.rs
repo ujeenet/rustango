@@ -476,13 +476,16 @@ mod tests {
             "csec",
             "https://app.test/cb",
         );
-        assert!(p.auth_url.ends_with("/realms/demo/protocol/openid-connect/auth"));
-        assert!(p.token_url.ends_with("/realms/demo/protocol/openid-connect/token"));
-        assert!(
-            p.userinfo_url
-                .as_deref()
-                .unwrap()
-                .ends_with("/realms/demo/protocol/openid-connect/userinfo")
-        );
+        assert!(p
+            .auth_url
+            .ends_with("/realms/demo/protocol/openid-connect/auth"));
+        assert!(p
+            .token_url
+            .ends_with("/realms/demo/protocol/openid-connect/token"));
+        assert!(p
+            .userinfo_url
+            .as_deref()
+            .unwrap()
+            .ends_with("/realms/demo/protocol/openid-connect/userinfo"));
     }
 }

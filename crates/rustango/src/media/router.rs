@@ -63,13 +63,25 @@ pub fn media_router(manager: MediaManager) -> Router {
     Router::new()
         .route("/uploads/begin", post(begin_upload_handler))
         .route("/uploads/{id}/finalize", post(finalize_upload_handler))
-        .route("/media/{id}", get(get_media_handler).delete(delete_media_handler))
+        .route(
+            "/media/{id}",
+            get(get_media_handler).delete(delete_media_handler),
+        )
         .route("/media/{id}/move", post(move_media_handler))
         .route("/media/{id}/tags", post(set_tags_handler))
         .route("/media/{id}/tags/{slug}", delete(untag_handler))
-        .route("/collections", post(create_collection_handler).get(list_collections_handler))
-        .route("/collections/{id}", get(get_collection_handler).delete(delete_collection_handler))
-        .route("/collections/{id}/contents", get(collection_contents_handler))
+        .route(
+            "/collections",
+            post(create_collection_handler).get(list_collections_handler),
+        )
+        .route(
+            "/collections/{id}",
+            get(get_collection_handler).delete(delete_collection_handler),
+        )
+        .route(
+            "/collections/{id}/contents",
+            get(collection_contents_handler),
+        )
         .route("/tags", post(create_tag_handler).get(list_tags_handler))
         .route("/tags/popular", get(popular_tags_handler))
         .route("/tags/{slug}/media", get(media_with_tag_handler))
@@ -137,7 +149,9 @@ impl MediaResponse {
             _ => 0,
         };
         let url = manager.url(&m);
-        let presigned = manager.presigned_get(&m, Duration::from_secs(DEFAULT_PRESIGN_TTL_SECS)).await;
+        let presigned = manager
+            .presigned_get(&m, Duration::from_secs(DEFAULT_PRESIGN_TTL_SECS))
+            .await;
         let tags = manager
             .tags_for(id)
             .await?

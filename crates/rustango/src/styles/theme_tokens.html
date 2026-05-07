@@ -1,0 +1,149 @@
+<style>
+/* rustango theme tokens — shared by tenant admin + operator console.
+   Override any variable in a per-tenant <style> block to retheme without
+   touching component CSS. The data-theme attribute on <html> picks the
+   active scheme: "light" (forced light), "dark" (forced dark), or "auto"
+   / unset (follow prefers-color-scheme). */
+:root {
+  /* surfaces */
+  --color-bg: #fafafa;
+  --color-bg-surface: #ffffff;
+  --color-bg-sidebar: #f5f0eb;
+  --color-bg-input: #ffffff;
+  --color-bg-hover: rgba(0, 0, 0, 0.04);
+  --color-bg-code: #f7f4ee;
+
+  /* foreground */
+  --color-fg: #222222;
+  --color-fg-muted: #666666;
+  --color-fg-subtle: #888888;
+  --color-fg-on-accent: #ffffff;
+
+  /* border */
+  --color-border: #e0d8cc;
+  --color-border-strong: #d0d0d0;
+
+  /* link */
+  --color-link: #0a4d2c;
+  --color-link-hover: var(--color-accent);
+
+  /* accent (per-tenant override target) */
+  --color-accent: #b04a2c;
+  --color-accent-hover: #993f25;
+  --color-accent-bg-soft: #f7e9e1;
+
+  /* status */
+  --color-success-bg: #e6f4ea;
+  --color-success-fg: #1d6a30;
+  --color-error-bg: #fde7e7;
+  --color-error-fg: #b03a2e;
+  --color-error-border: #d9534f;
+  --color-warning-bg: #fff4e0;
+  --color-warning-fg: #8a5a00;
+  --color-info-bg: #e7eefb;
+  --color-info-fg: #1f3c80;
+
+  /* audit-op badges (alias to status) */
+  --color-audit-create-bg: var(--color-success-bg);
+  --color-audit-create-fg: var(--color-success-fg);
+  --color-audit-update-bg: var(--color-warning-bg);
+  --color-audit-update-fg: var(--color-warning-fg);
+  --color-audit-delete-bg: var(--color-error-bg);
+  --color-audit-delete-fg: var(--color-error-fg);
+  --color-audit-restore-bg: var(--color-success-bg);
+  --color-audit-restore-fg: var(--color-success-fg);
+  --color-audit-action-bg: var(--color-info-bg);
+  --color-audit-action-fg: var(--color-info-fg);
+
+  /* typography */
+  --font-family-base: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-family-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-base: 14px;
+  --font-size-md: 14px;
+  --font-size-lg: 16px;
+  --font-weight-normal: 400;
+  --font-weight-bold: 600;
+  --line-height-base: 1.45;
+
+  /* spacing scale */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  /* radius + shadow */
+  --radius-sm: 3px;
+  --radius-md: 4px;
+  --radius-lg: 8px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+/* explicit dark — set when html[data-theme="dark"] */
+[data-theme="dark"] {
+  --color-bg: #18171a;
+  --color-bg-surface: #1f1e22;
+  --color-bg-sidebar: #16151a;
+  --color-bg-input: #25232a;
+  --color-bg-hover: rgba(255, 255, 255, 0.04);
+  --color-bg-code: #25232a;
+  --color-fg: #eaeaea;
+  --color-fg-muted: #a8a8a8;
+  --color-fg-subtle: #888888;
+  --color-fg-on-accent: #ffffff;
+  --color-border: #2e2c30;
+  --color-border-strong: #3e3c40;
+  --color-link: #6fb38c;
+  --color-accent: #d97552;
+  --color-accent-hover: #e88a6a;
+  --color-accent-bg-soft: #2c1e1a;
+  --color-success-bg: #1a2e22;
+  --color-success-fg: #6fb38c;
+  --color-error-bg: #2e1a1a;
+  --color-error-fg: #e8826f;
+  --color-error-border: #c25a47;
+  --color-warning-bg: #2e2618;
+  --color-warning-fg: #d4b376;
+  --color-info-bg: #1a1f2e;
+  --color-info-fg: #8fa6d4;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+/* auto / unset — follow OS preference, but never override an explicit "light" */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    --color-bg: #18171a;
+    --color-bg-surface: #1f1e22;
+    --color-bg-sidebar: #16151a;
+    --color-bg-input: #25232a;
+    --color-bg-hover: rgba(255, 255, 255, 0.04);
+    --color-bg-code: #25232a;
+    --color-fg: #eaeaea;
+    --color-fg-muted: #a8a8a8;
+    --color-fg-subtle: #888888;
+    --color-fg-on-accent: #ffffff;
+    --color-border: #2e2c30;
+    --color-border-strong: #3e3c40;
+    --color-link: #6fb38c;
+    --color-accent: #d97552;
+    --color-accent-hover: #e88a6a;
+    --color-accent-bg-soft: #2c1e1a;
+    --color-success-bg: #1a2e22;
+    --color-success-fg: #6fb38c;
+    --color-error-bg: #2e1a1a;
+    --color-error-fg: #e8826f;
+    --color-error-border: #c25a47;
+    --color-warning-bg: #2e2618;
+    --color-warning-fg: #d4b376;
+    --color-info-bg: #1a1f2e;
+    --color-info-fg: #8fa6d4;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.5);
+  }
+}
+</style>

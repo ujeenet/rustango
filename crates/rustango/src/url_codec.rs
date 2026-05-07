@@ -141,7 +141,10 @@ mod tests {
         assert!(got.starts_with("hello"), "got: {got:?}");
         // Trailing U+FFFD or kept literal `%C3` (since `i+2 < len`
         // fails on the 2-char tail, we hit the literal-keep arm).
-        assert!(got.contains("%C3") || got.contains('\u{FFFD}'), "got: {got:?}");
+        assert!(
+            got.contains("%C3") || got.contains('\u{FFFD}'),
+            "got: {got:?}"
+        );
     }
 
     #[test]
@@ -153,7 +156,10 @@ mod tests {
         let got = url_decode("a%C3%28b");
         assert!(got.starts_with('a'), "got: {got:?}");
         assert!(got.ends_with('b'), "got: {got:?}");
-        assert!(got.contains('\u{FFFD}'), "expected replacement char, got: {got:?}");
+        assert!(
+            got.contains('\u{FFFD}'),
+            "expected replacement char, got: {got:?}"
+        );
     }
 
     #[test]

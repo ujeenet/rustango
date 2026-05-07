@@ -133,7 +133,11 @@ pub(super) async fn migrate_all_cmd<W: Write + Send>(
     if registry_applied.is_empty() {
         writeln!(w, "registry: nothing to migrate (already up to date)")?;
     } else {
-        writeln!(w, "registry: applied {} migration(s)", registry_applied.len())?;
+        writeln!(
+            w,
+            "registry: applied {} migration(s)",
+            registry_applied.len()
+        )?;
         for m in &registry_applied {
             writeln!(w, "  + {}", m.name)?;
         }
@@ -158,11 +162,7 @@ pub(super) fn init_tenancy_cmd_with<W: Write>(
         writeln!(w, "init-tenancy: no migrations to write")?;
         return Ok(());
     }
-    writeln!(
-        w,
-        "init-tenancy: bootstrap migrations in {}",
-        dir.display()
-    )?;
+    writeln!(w, "init-tenancy: bootstrap migrations in {}", dir.display())?;
     for name in &report.written {
         writeln!(w, "  + wrote {name}.json")?;
     }

@@ -3,7 +3,12 @@
 use rustango::migrate::{invert, DataOp, Operation, SchemaChange, SchemaSnapshot, TableSnapshot};
 
 fn empty() -> SchemaSnapshot {
-    SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![], checks: vec![] }
+    SchemaSnapshot {
+        tables: vec![],
+        m2m_tables: vec![],
+        indexes: vec![],
+        checks: vec![],
+    }
 }
 
 fn user_table() -> TableSnapshot {
@@ -43,7 +48,7 @@ fn invert_drop_table_yields_create_table_when_in_prev() {
     // the runner needs to render CREATE TABLE for the inverted op.
     let prev = SchemaSnapshot {
         tables: vec![user_table()],
-                    ..Default::default()
+        ..Default::default()
     };
     let forward = vec![Operation::Schema(SchemaChange::DropTable("user".into()))];
     let out = invert(&forward, &prev).unwrap();
@@ -86,7 +91,7 @@ fn invert_drop_column_yields_add_column_using_prev_metadata() {
     // so the runner can pull its type/nullability when rendering.
     let prev = SchemaSnapshot {
         tables: vec![user_table()],
-                    ..Default::default()
+        ..Default::default()
     };
     let forward = vec![Operation::Schema(SchemaChange::DropColumn {
         table: "user".into(),
@@ -116,7 +121,7 @@ fn invert_drop_column_missing_table_in_prev_is_error() {
 fn invert_drop_column_missing_column_in_prev_is_error() {
     let prev = SchemaSnapshot {
         tables: vec![user_table()],
-                    ..Default::default()
+        ..Default::default()
     };
     // user has `id` and `name`, NOT `phantom`.
     let forward = vec![Operation::Schema(SchemaChange::DropColumn {
@@ -181,7 +186,7 @@ fn invert_data_with_reversible_true_but_no_reverse_sql_is_error() {
 fn invert_walks_forward_in_reverse_order() {
     let prev = SchemaSnapshot {
         tables: vec![user_table()],
-                    ..Default::default()
+        ..Default::default()
     };
     let forward = vec![
         Operation::Schema(SchemaChange::AddColumn {

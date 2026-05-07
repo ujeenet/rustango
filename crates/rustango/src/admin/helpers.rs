@@ -49,12 +49,31 @@ pub(crate) fn inventory_entries_dedup_by_table() -> Vec<&'static ModelEntry> {
 /// Build the standard chrome context (sidebar + active-link state)
 /// that every admin page renders. Pass the active table (or `None` on
 /// the index page) so the matching sidebar link gets `class="active"`.
+///
+/// Brand fields are layered: `brand_name` falls back to `admin_title`
+/// (set by [`crate::admin::Builder::title`]) which falls back to
+/// `"rustango admin"`. Same chain for `brand_tagline` → `admin_subtitle`.
+/// Logos / theme mode / per-tenant CSS overrides come straight off
+/// the config — they're set per-request by the tenancy admin from
+/// the resolved [`crate::tenancy::Org`].
 pub(crate) fn chrome_context(state: &AppState, active_table: Option<&str>) -> serde_json::Value {
+    let admin_title = state.config.title.as_deref().unwrap_or("rustango admin");
+    let brand_name = state.config.brand_name.as_deref().unwrap_or(admin_title);
+    let brand_tagline = state
+        .config
+        .brand_tagline
+        .as_deref()
+        .or(state.config.subtitle.as_deref());
     serde_json::json!({
         "sidebar_groups": sidebar_context(state, active_table),
         "active_table": active_table.unwrap_or(""),
-        "admin_title": state.config.title.as_deref().unwrap_or("rustango admin"),
+        "admin_title": admin_title,
         "admin_subtitle": state.config.subtitle.as_deref(),
+        "brand_name": brand_name,
+        "brand_tagline": brand_tagline,
+        "brand_logo_url": state.config.brand_logo_url.as_deref(),
+        "theme_mode": state.config.theme_mode.as_deref().unwrap_or("auto"),
+        "tenant_brand_css": state.config.tenant_brand_css.as_deref(),
     })
 }
 
@@ -286,8 +305,7 @@ pub(crate) fn render_form(
         let value = prefill
             .and_then(|m| m.get(f.name))
             .map_or("", String::as_str);
-        let is_readonly_field =
-            admin_cfg.readonly_fields.iter().any(|n| *n == f.name);
+        let is_readonly_field = admin_cfg.readonly_fields.iter().any(|n| *n == f.name);
         let extra = if f.primary_key {
             " <small>(pk)</small>"
         } else if is_readonly_field {

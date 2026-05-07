@@ -91,11 +91,7 @@ impl Builder {
     ///
     /// # Errors
     /// As [`migrate`].
-    pub async fn migrate(
-        &self,
-        pool: &PgPool,
-        dir: &Path,
-    ) -> Result<Vec<Migration>, MigrateError> {
+    pub async fn migrate(&self, pool: &PgPool, dir: &Path) -> Result<Vec<Migration>, MigrateError> {
         migrate_with_ledger(pool, dir, self.ledger).await
     }
 
@@ -308,12 +304,8 @@ pub async fn drop_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> 
     // Cascade only emitted for PG — MySQL parses it as syntax error.
     let cascade = dialect.name() == "postgres";
     for model in registered_models() {
-        let sql = ddl::drop_table_sql_with_dialect(
-            dialect,
-            model,
-            /* if_exists */ true,
-            cascade,
-        );
+        let sql =
+            ddl::drop_table_sql_with_dialect(dialect, model, /* if_exists */ true, cascade);
         crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
     }
     Ok(())
@@ -414,10 +406,7 @@ pub async fn applied_set(pool: &PgPool) -> Result<HashSet<String>, MigrateError>
     applied_set_for(pool, LEDGER_TABLE).await
 }
 
-async fn applied_set_for(
-    pool: &PgPool,
-    ledger: &str,
-) -> Result<HashSet<String>, MigrateError> {
+async fn applied_set_for(pool: &PgPool, ledger: &str) -> Result<HashSet<String>, MigrateError> {
     let rows = sqlx::query(&format!("SELECT name FROM {ledger}"))
         .fetch_all(pool)
         .await?;
@@ -559,11 +548,7 @@ fn preview_migration(mig: &Migration, ledger: &str) -> Result<MigrationPreview, 
     })
 }
 
-async fn apply_atomic(
-    pool: &PgPool,
-    mig: &Migration,
-    ledger: &str,
-) -> Result<(), MigrateError> {
+async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (atomic)");
     let mut tx = pool.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
@@ -969,7 +954,12 @@ async fn unapply_locked(
         })?;
 
     let prev_snapshot = match &target.prev {
-        None => SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![], checks: vec![] },
+        None => SchemaSnapshot {
+            tables: vec![],
+            m2m_tables: vec![],
+            indexes: vec![],
+            checks: vec![],
+        },
         Some(prev_name) => all
             .iter()
             .find(|m| &m.name == prev_name)
@@ -1124,10 +1114,7 @@ pub async fn ensure_ledger_pool(pool: &crate::sql::Pool) -> Result<(), MigrateEr
     ensure_ledger_pool_for(pool, LEDGER_TABLE).await
 }
 
-async fn ensure_ledger_pool_for(
-    pool: &crate::sql::Pool,
-    ledger: &str,
-) -> Result<(), MigrateError> {
+async fn ensure_ledger_pool_for(pool: &crate::sql::Pool, ledger: &str) -> Result<(), MigrateError> {
     let dialect_name = pool.dialect().name();
     let timestamp_col = match dialect_name {
         "postgres" => "TIMESTAMPTZ NOT NULL DEFAULT NOW()",
@@ -1157,9 +1144,7 @@ async fn ensure_ledger_pool_for(
 /// # Errors
 /// Returns [`MigrateError::Exec`] for any read failure (including a
 /// missing ledger table — call [`ensure_ledger_pool`] first).
-pub async fn applied_set_pool(
-    pool: &crate::sql::Pool,
-) -> Result<HashSet<String>, MigrateError> {
+pub async fn applied_set_pool(pool: &crate::sql::Pool) -> Result<HashSet<String>, MigrateError> {
     applied_set_pool_for(pool, LEDGER_TABLE).await
 }
 
@@ -1258,10 +1243,7 @@ async fn migrate_pool_with_ledger(
 /// The lock is acquired on a checked-out connection and held until
 /// `body` returns; release happens on the same connection so MySQL's
 /// connection-scoped `GET_LOCK` semantics work correctly.
-async fn with_migrate_lock_pool<F, R>(
-    pool: &crate::sql::Pool,
-    body: F,
-) -> Result<R, MigrateError>
+async fn with_migrate_lock_pool<F, R>(pool: &crate::sql::Pool, body: F) -> Result<R, MigrateError>
 where
     F: std::future::Future<Output = Result<R, MigrateError>>,
 {
@@ -1417,7 +1399,6 @@ async fn apply_nonatomic_pool(
     Ok(())
 }
 
-
 // ====================================================================
 // Direction-aware `_pool` runners — v0.23.0-batch14
 // ====================================================================
@@ -1552,8 +1533,7 @@ async fn downgrade_pool_with_ledger(
         }
 
         let n = steps.min(applied_in_order.len());
-        let to_unapply: Vec<Migration> =
-            applied_in_order.into_iter().rev().take(n).collect();
+        let to_unapply: Vec<Migration> = applied_in_order.into_iter().rev().take(n).collect();
 
         let mut touched = Vec::with_capacity(to_unapply.len());
         for mig in to_unapply {
@@ -1697,10 +1677,7 @@ async fn unapply_locked_pool(
         .find(|m| m.name == name)
         .cloned()
         .ok_or_else(|| {
-            MigrateError::Validation(format!(
-                "migration `{name}` not found in {}",
-                dir.display()
-            ))
+            MigrateError::Validation(format!("migration `{name}` not found in {}", dir.display()))
         })?;
 
     let prev_snapshot = match &target.prev {
@@ -1776,9 +1753,8 @@ async fn unapply_atomic_pool(
             for op in inverted {
                 match op {
                     Operation::Schema(change) => {
-                        let batch =
-                            render_changes_split(std::slice::from_ref(change), snapshot)
-                                .map_err(MigrateError::Validation)?;
+                        let batch = render_changes_split(std::slice::from_ref(change), snapshot)
+                            .map_err(MigrateError::Validation)?;
                         for stmt in batch.immediate {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
@@ -1805,9 +1781,8 @@ async fn unapply_atomic_pool(
             for op in inverted {
                 match op {
                     Operation::Schema(change) => {
-                        let batch =
-                            render_changes_split(std::slice::from_ref(change), snapshot)
-                                .map_err(MigrateError::Validation)?;
+                        let batch = render_changes_split(std::slice::from_ref(change), snapshot)
+                            .map_err(MigrateError::Validation)?;
                         for stmt in batch.immediate {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }

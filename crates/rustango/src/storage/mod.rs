@@ -87,11 +87,7 @@ pub trait Storage: Send + Sync + 'static {
     ///
     /// `ttl` is how long the URL stays valid. AWS caps at 7 days
     /// (604_800 s); shorter is safer.
-    async fn presigned_get_url(
-        &self,
-        _key: &str,
-        _ttl: std::time::Duration,
-    ) -> Option<String> {
+    async fn presigned_get_url(&self, _key: &str, _ttl: std::time::Duration) -> Option<String> {
         None
     }
 
@@ -123,10 +119,14 @@ pub fn validate_key(key: &str) -> Result<(), StorageError> {
         return Err(StorageError::InvalidPath("empty key".into()));
     }
     if key.starts_with('/') {
-        return Err(StorageError::InvalidPath(format!("key must be relative: {key}")));
+        return Err(StorageError::InvalidPath(format!(
+            "key must be relative: {key}"
+        )));
     }
     if key.contains("..") {
-        return Err(StorageError::InvalidPath(format!("key contains `..`: {key}")));
+        return Err(StorageError::InvalidPath(format!(
+            "key contains `..`: {key}"
+        )));
     }
     if key.contains('\0') {
         return Err(StorageError::InvalidPath(format!("key contains null byte")));
@@ -150,7 +150,10 @@ impl LocalStorage {
     /// on first save if it doesn't exist.
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self { root, base_url: None }
+        Self {
+            root,
+            base_url: None,
+        }
     }
 
     /// Set the public URL prefix for files served from this storage. The
@@ -227,7 +230,9 @@ pub struct InMemoryStorage {
 impl InMemoryStorage {
     #[must_use]
     pub fn new() -> Self {
-        Self { files: Mutex::new(HashMap::new()) }
+        Self {
+            files: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -281,18 +286,30 @@ mod tests {
 
     #[test]
     fn validate_rejects_empty() {
-        assert!(matches!(validate_key(""), Err(StorageError::InvalidPath(_))));
+        assert!(matches!(
+            validate_key(""),
+            Err(StorageError::InvalidPath(_))
+        ));
     }
 
     #[test]
     fn validate_rejects_leading_slash() {
-        assert!(matches!(validate_key("/etc/passwd"), Err(StorageError::InvalidPath(_))));
+        assert!(matches!(
+            validate_key("/etc/passwd"),
+            Err(StorageError::InvalidPath(_))
+        ));
     }
 
     #[test]
     fn validate_rejects_dotdot() {
-        assert!(matches!(validate_key("../escape"), Err(StorageError::InvalidPath(_))));
-        assert!(matches!(validate_key("safe/../bad"), Err(StorageError::InvalidPath(_))));
+        assert!(matches!(
+            validate_key("../escape"),
+            Err(StorageError::InvalidPath(_))
+        ));
+        assert!(matches!(
+            validate_key("safe/../bad"),
+            Err(StorageError::InvalidPath(_))
+        ));
     }
 
     #[test]

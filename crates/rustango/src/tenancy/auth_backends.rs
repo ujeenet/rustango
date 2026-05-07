@@ -163,10 +163,10 @@ impl AuthBackend for ModelBackend {
 #[rustango(
     table = "rustango_api_keys",
     admin(
-        list_display  = "user_id, key_prefix, label, expires_at, created_at",
-        ordering      = "-created_at",
+        list_display = "user_id, key_prefix, label, expires_at, created_at",
+        ordering = "-created_at",
         readonly_fields = "key_prefix, key_hash, created_at",
-    ),
+    )
 )]
 pub struct ApiKey {
     #[rustango(primary_key)]
@@ -209,7 +209,11 @@ CREATE TABLE IF NOT EXISTS "rustango_api_keys" (
 /// # Errors
 /// Driver failures.
 pub async fn ensure_api_keys_table(pool: &PgPool) -> Result<(), sqlx::Error> {
-    for stmt in API_KEY_ENSURE_SQL.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+    for stmt in API_KEY_ENSURE_SQL
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         sqlx::query(stmt).execute(pool).await?;
     }
     Ok(())
@@ -272,8 +276,7 @@ impl AuthBackend for ApiKeyBackend {
         }
 
         let stored_hash: String = row.try_get("key_hash").unwrap_or_default();
-        let ok = password::verify(secret, &stored_hash)
-            .map_err(|_| AuthError::InvalidToken)?;
+        let ok = password::verify(secret, &stored_hash).map_err(|_| AuthError::InvalidToken)?;
         if !ok {
             return Ok(None);
         }
@@ -340,7 +343,10 @@ impl JwtBackend {
     /// Build a backend from raw key bytes.
     #[must_use]
     pub fn new(secret: Vec<u8>) -> Self {
-        Self { secret, ttl_secs: 3600 }
+        Self {
+            secret,
+            ttl_secs: 3600,
+        }
     }
 
     /// Build from the operator-console session secret (convenient for
@@ -362,8 +368,7 @@ impl JwtBackend {
             &super::operator_console::SessionSecret::from_bytes(self.secret.clone()),
             payload_b64.as_bytes(),
         );
-        let sig_b64 =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
         format!("{payload_b64}.{sig_b64}")
     }
 
@@ -385,8 +390,7 @@ impl JwtBackend {
         let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload_b64)
             .ok()?;
-        let payload: serde_json::Value =
-            serde_json::from_slice(&payload_bytes).ok()?;
+        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
         let exp = payload.get("exp")?.as_i64()?;
         if chrono::Utc::now().timestamp() >= exp {
             return None; // expired

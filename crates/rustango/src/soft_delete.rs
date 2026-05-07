@@ -29,7 +29,9 @@
 //! the input unchanged, and [`soft_delete`] errors with a clear message
 //! so callers don't silently leak rows that were supposed to be hidden.
 
-use crate::core::{Assignment, DeleteQuery, Filter, ModelSchema, Op, SqlValue, UpdateQuery, WhereExpr};
+use crate::core::{
+    Assignment, DeleteQuery, Filter, ModelSchema, Op, SqlValue, UpdateQuery, WhereExpr,
+};
 use crate::sql::sqlx::PgPool;
 use crate::sql::{delete as sql_delete, update as sql_update, ExecError};
 
@@ -65,10 +67,7 @@ pub fn trashed_filter(model: &'static ModelSchema) -> Option<WhereExpr> {
 ///   active filter alone.
 /// - Otherwise returns `WhereExpr::And([existing, active_filter])`.
 #[must_use]
-pub fn compose_with_active(
-    model: &'static ModelSchema,
-    existing: WhereExpr,
-) -> WhereExpr {
+pub fn compose_with_active(model: &'static ModelSchema, existing: WhereExpr) -> WhereExpr {
     let Some(active) = active_filter(model) else {
         return existing;
     };
@@ -80,10 +79,7 @@ pub fn compose_with_active(
 
 /// Same as [`compose_with_active`] but selects trashed rows instead.
 #[must_use]
-pub fn compose_with_trashed(
-    model: &'static ModelSchema,
-    existing: WhereExpr,
-) -> WhereExpr {
+pub fn compose_with_trashed(model: &'static ModelSchema, existing: WhereExpr) -> WhereExpr {
     let Some(trashed) = trashed_filter(model) else {
         return existing;
     };
@@ -331,7 +327,10 @@ mod tests {
     #[test]
     fn compose_with_active_returns_filter_when_existing_is_empty() {
         let composed = compose_with_active(&MODEL_WITH_SD, WhereExpr::And(vec![]));
-        assert!(matches!(composed, WhereExpr::Predicate(Filter { op: Op::IsNull, .. })));
+        assert!(matches!(
+            composed,
+            WhereExpr::Predicate(Filter { op: Op::IsNull, .. })
+        ));
     }
 
     #[test]

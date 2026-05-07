@@ -267,10 +267,7 @@ fn try_register_app_in_entry(
 ///
 /// Bail-out: if the file doesn't have a `Router::new()` call, return
 /// `CouldNotFindAnchor` and let the caller surface a manual-step hint.
-fn try_merge_app_into_urls(
-    path: &Path,
-    app_name: &str,
-) -> Result<EntryEditOutcome, MigrateError> {
+fn try_merge_app_into_urls(path: &Path, app_name: &str) -> Result<EntryEditOutcome, MigrateError> {
     let body = std::fs::read_to_string(path)?;
     let merge_call = format!(".merge(crate::{app_name}::urls::api())");
     if body.contains(&merge_call) {
@@ -353,12 +350,16 @@ fn render_models_template(app_name: &str) -> String {
         .filter(|s| !s.is_empty())
         .map(|s| {
             let mut chars = s.chars();
-            chars.next().map(|c| c.to_ascii_uppercase()).into_iter()
+            chars
+                .next()
+                .map(|c| c.to_ascii_uppercase())
+                .into_iter()
                 .chain(chars.flat_map(char::to_lowercase))
                 .collect::<String>()
         })
         .collect::<String>();
-    format!("//! App models — every `#[derive(Model)]` lives here.
+    format!(
+        "//! App models — every `#[derive(Model)]` lives here.
 //!
 //! Adding a struct here makes it admin-visible automatically: the
 //! macro populates the `inventory` registry that
@@ -377,7 +378,8 @@ pub struct {struct_name} {{
     pub name: String,
     pub active: bool,
 }}
-")
+"
+    )
 }
 
 /// Default `views.rs` body — placeholder handler.

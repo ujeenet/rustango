@@ -153,17 +153,17 @@ pub fn livereload_router_with(layer: LiveReloadLayer) -> Router {
         .layer(axum::Extension(EndpointSession { session }))
 }
 
-async fn check(
-    axum::Extension(es): axum::Extension<EndpointSession>,
-) -> impl IntoResponse {
-    ([(SESSION_HEADER, HeaderValue::from_str(&es.session).unwrap_or(HeaderValue::from_static("?")))], es.session.clone())
+async fn check(axum::Extension(es): axum::Extension<EndpointSession>) -> impl IntoResponse {
+    (
+        [(
+            SESSION_HEADER,
+            HeaderValue::from_str(&es.session).unwrap_or(HeaderValue::from_static("?")),
+        )],
+        es.session.clone(),
+    )
 }
 
-async fn handle(
-    cfg: Arc<LiveReloadLayer>,
-    req: Request<Body>,
-    next: Next,
-) -> Response<Body> {
+async fn handle(cfg: Arc<LiveReloadLayer>, req: Request<Body>, next: Next) -> Response<Body> {
     let response = next.run(req).await;
 
     if !cfg.inject_into_html {
@@ -194,7 +194,9 @@ async fn handle(
     let mut response = Response::from_parts(parts, Body::from(injected));
     // Recompute Content-Length is handled by axum implicitly when no header was set;
     // explicit override needed for old clients
-    response.headers_mut().remove(axum::http::header::CONTENT_LENGTH);
+    response
+        .headers_mut()
+        .remove(axum::http::header::CONTENT_LENGTH);
     response
 }
 

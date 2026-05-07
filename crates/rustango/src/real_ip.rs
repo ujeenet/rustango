@@ -107,12 +107,12 @@ impl<S: Clone + Send + Sync + 'static> RealIpRouterExt for Router<S> {
 fn extract(req: &Request<Body>, strategy: &HeaderStrategy) -> Option<IpAddr> {
     let h = req.headers();
     match strategy {
-        HeaderStrategy::ForwardedRfc7239 => parse_forwarded_rfc7239(
-            h.get("forwarded").and_then(|v| v.to_str().ok())?,
-        ),
-        HeaderStrategy::XForwardedFor => parse_x_forwarded_for(
-            h.get("x-forwarded-for").and_then(|v| v.to_str().ok())?,
-        ),
+        HeaderStrategy::ForwardedRfc7239 => {
+            parse_forwarded_rfc7239(h.get("forwarded").and_then(|v| v.to_str().ok())?)
+        }
+        HeaderStrategy::XForwardedFor => {
+            parse_x_forwarded_for(h.get("x-forwarded-for").and_then(|v| v.to_str().ok())?)
+        }
         HeaderStrategy::XRealIp => h
             .get("x-real-ip")
             .and_then(|v| v.to_str().ok())
@@ -306,7 +306,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
         assert_eq!(std::str::from_utf8(&bytes).unwrap(), "192.0.2.1");
     }
 }

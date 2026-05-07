@@ -10,9 +10,7 @@
 
 use std::sync::OnceLock;
 
-use rustango::audit::{
-    self, AuditOp, AuditSource, PendingEntry,
-};
+use rustango::audit::{self, AuditOp, AuditSource, PendingEntry};
 use rustango::sql::sqlx;
 use rustango::Model;
 use serde_json::json;
@@ -100,7 +98,10 @@ async fn emit_one_persists_a_pending_entry() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].operation, "create");
     assert_eq!(rows[0].source, "user:alice");
-    assert_eq!(rows[0].changes, json!({ "title": "first", "body": "hello" }));
+    assert_eq!(
+        rows[0].changes,
+        json!({ "title": "first", "body": "hello" })
+    );
 }
 
 #[tokio::test]
@@ -194,14 +195,8 @@ async fn with_source_scope_overrides_default_system() {
 
 #[test]
 fn diff_changes_skips_unchanged_fields() {
-    let before = vec![
-        ("title", json!("old")),
-        ("body", json!("hello")),
-    ];
-    let after = vec![
-        ("title", json!("new")),
-        ("body", json!("hello")),
-    ];
+    let before = vec![("title", json!("old")), ("body", json!("hello"))];
+    let after = vec![("title", json!("new")), ("body", json!("hello"))];
     let diff = audit::diff_changes(&before, &after);
     assert_eq!(
         diff,
@@ -211,10 +206,7 @@ fn diff_changes_skips_unchanged_fields() {
 
 #[test]
 fn snapshot_changes_captures_all_after_values() {
-    let after = vec![
-        ("title", json!("first")),
-        ("body", json!("hello")),
-    ];
+    let after = vec![("title", json!("first")), ("body", json!("hello"))];
     let snap = audit::snapshot_changes(&after);
     assert_eq!(snap, json!({ "title": "first", "body": "hello" }));
 }
@@ -366,10 +358,9 @@ async fn macro_emits_audit_with_user_source_inside_with_source_scope() {
         };
         row.insert_on(&mut *conn).await.unwrap();
         let pk = row.id.get().copied().unwrap();
-        let entries =
-            audit::fetch_for_entity(&pool, "rustango_audit_post", &pk.to_string())
-                .await
-                .unwrap();
+        let entries = audit::fetch_for_entity(&pool, "rustango_audit_post", &pk.to_string())
+            .await
+            .unwrap();
         assert_eq!(entries[0].source, "user:alice");
     })
     .await;
@@ -400,10 +391,9 @@ async fn macro_emits_audit_update_entry_with_before_after_diff() {
     // body left at "unchanged" — must NOT appear in the diff.
     row.save_on(&mut *conn).await.unwrap();
 
-    let entries =
-        audit::fetch_for_entity(&pool, "rustango_audit_post", &pk.to_string())
-            .await
-            .unwrap();
+    let entries = audit::fetch_for_entity(&pool, "rustango_audit_post", &pk.to_string())
+        .await
+        .unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].operation, "update");
     assert_eq!(
@@ -432,18 +422,14 @@ async fn save_on_with_overrides_audit_source_for_one_call() {
         title: "system-default".into(),
         body: "x".into(),
     };
-    row.save_on_with(
-        &mut *conn,
-        AuditSource::Custom("seed-script".into()),
-    )
-    .await
-    .unwrap();
+    row.save_on_with(&mut *conn, AuditSource::Custom("seed-script".into()))
+        .await
+        .unwrap();
     let pk = row.id.get().copied().unwrap();
 
-    let entries =
-        audit::fetch_for_entity(&pool, "rustango_audit_post", &pk.to_string())
-            .await
-            .unwrap();
+    let entries = audit::fetch_for_entity(&pool, "rustango_audit_post", &pk.to_string())
+        .await
+        .unwrap();
     assert_eq!(entries[0].source, "seed-script");
 }
 
@@ -491,10 +477,8 @@ async fn bulk_insert_on_emits_one_batched_audit_for_all_rows() {
     assert_eq!(total, 3);
 
     // Bulk audit: every entry must point at one of the bulk-inserted PKs.
-    let pks: std::collections::HashSet<i64> = rows
-        .iter()
-        .map(|r| r.id.get().copied().unwrap())
-        .collect();
+    let pks: std::collections::HashSet<i64> =
+        rows.iter().map(|r| r.id.get().copied().unwrap()).collect();
     let recorded: Vec<String> = sqlx::query_scalar(
         r#"SELECT "entity_pk" FROM "rustango_audit_log" WHERE "entity_table" = 'rustango_audit_post' ORDER BY "id""#,
     )
@@ -503,7 +487,10 @@ async fn bulk_insert_on_emits_one_batched_audit_for_all_rows() {
     .unwrap();
     for pk_str in &recorded {
         let pk: i64 = pk_str.parse().unwrap();
-        assert!(pks.contains(&pk), "bulk audit recorded an unexpected PK {pk}");
+        assert!(
+            pks.contains(&pk),
+            "bulk audit recorded an unexpected PK {pk}"
+        );
     }
 }
 
@@ -536,21 +523,19 @@ async fn cleanup_older_than_drops_rows_past_the_cutoff() {
         .unwrap();
     }
 
-    let total_before: i64 =
-        sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log""#)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let total_before: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log""#)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(total_before, 3);
 
     let removed = audit::cleanup_older_than(&pool, 7).await.unwrap();
     assert_eq!(removed, 1, "exactly one row past the 7-day cutoff");
 
-    let total_after: i64 =
-        sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log""#)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let total_after: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log""#)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(total_after, 2, "two recent entries remain");
 }
 
@@ -573,11 +558,10 @@ async fn cleanup_older_than_zero_clears_table() {
     }
     let removed = audit::cleanup_older_than(&pool, 0).await.unwrap();
     assert_eq!(removed, 2);
-    let total: i64 =
-        sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log""#)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let total: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log""#)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(total, 0);
 }
 
@@ -647,18 +631,16 @@ async fn cleanup_keep_last_n_keeps_n_per_row() {
     let removed = audit::cleanup_keep_last_n(&pool, 2).await.unwrap();
     assert_eq!(removed, 2, "row 1 had 4 entries; should drop 2 oldest");
 
-    let row1: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*) FROM "rustango_audit_log" WHERE "entity_pk" = '1'"#,
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    let row2: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*) FROM "rustango_audit_log" WHERE "entity_pk" = '2'"#,
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let row1: i64 =
+        sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log" WHERE "entity_pk" = '1'"#)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let row2: i64 =
+        sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log" WHERE "entity_pk" = '2'"#)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(row1, 2);
     assert_eq!(row2, 2);
 }
@@ -682,21 +664,17 @@ async fn cleanup_keep_last_n_zero_clears_table() {
     }
     let removed = audit::cleanup_keep_last_n(&pool, 0).await.unwrap();
     assert_eq!(removed, 3);
-    let total: i64 =
-        sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log""#)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let total: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log""#)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(total, 0);
 }
 
 #[test]
 fn audit_source_token_is_stable() {
     assert_eq!(AuditSource::System.as_token(), "system");
-    assert_eq!(
-        AuditSource::User { id: "42".into() }.as_token(),
-        "user:42"
-    );
+    assert_eq!(AuditSource::User { id: "42".into() }.as_token(), "user:42");
     assert_eq!(
         AuditSource::Custom("webhook:stripe".into()).as_token(),
         "webhook:stripe"

@@ -140,7 +140,10 @@ impl Default for Setup {
 /// Returns `true` when env is `prod` or `production`.
 #[must_use]
 pub fn should_use_json_for_env() -> bool {
-    matches!(std::env::var("RUSTANGO_ENV").as_deref(), Ok("prod") | Ok("production"))
+    matches!(
+        std::env::var("RUSTANGO_ENV").as_deref(),
+        Ok("prod") | Ok("production")
+    )
 }
 
 /// One-call setup that picks the right format based on `RUSTANGO_ENV`:

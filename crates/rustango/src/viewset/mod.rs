@@ -85,15 +85,15 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{header, StatusCode};
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
 use serde_json::{json, Value};
 
 use crate::core::{
-    CountQuery, DeleteQuery, FieldType, Filter, InsertQuery, ModelSchema, Op, OrderClause,
-    SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr, Assignment,
+    Assignment, CountQuery, DeleteQuery, FieldType, Filter, InsertQuery, ModelSchema, Op,
+    OrderClause, SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
 use crate::forms::{collect_values, parse_form_value, parse_pk_string, FormError};
 use crate::sql::sqlx::{PgPool, Row as _};
@@ -142,7 +142,9 @@ pub enum PaginationStyle {
 impl PaginationStyle {
     /// Default — 1-based page numbering.
     #[must_use]
-    pub const fn page_number() -> Self { Self::PageNumber }
+    pub const fn page_number() -> Self {
+        Self::PageNumber
+    }
 
     /// Cursor pagination on the named field, ascending.
     #[must_use]
@@ -164,9 +166,7 @@ impl PaginationStyle {
 /// (`T::from_row`) then runs it through the serializer's `from_model`
 /// + `to_value`, so SerializerMethodField / read_only / source /
 /// many overrides all apply to the JSON output.
-type RowRender = std::sync::Arc<
-    dyn Fn(&crate::sql::sqlx::postgres::PgRow) -> Value + Send + Sync,
->;
+type RowRender = std::sync::Arc<dyn Fn(&crate::sql::sqlx::postgres::PgRow) -> Value + Send + Sync>;
 
 /// Builder for a set of REST CRUD endpoints over a single [`Model`] table.
 ///
@@ -220,8 +220,8 @@ impl ViewSet {
     pub fn serializer<S>(mut self) -> Self
     where
         S: crate::serializer::ModelSerializer + 'static,
-        S::Model: for<'r> crate::sql::sqlx::FromRow<'r, crate::sql::sqlx::postgres::PgRow>
-            + Send + Unpin,
+        S::Model:
+            for<'r> crate::sql::sqlx::FromRow<'r, crate::sql::sqlx::postgres::PgRow> + Send + Unpin,
     {
         let render: RowRender = std::sync::Arc::new(|row| {
             match <S::Model as crate::sql::sqlx::FromRow<_>>::from_row(row) {
@@ -377,19 +377,12 @@ impl ViewSetState {
     fn effective_fields(&self) -> Vec<&'static crate::core::FieldSchema> {
         let schema = self.vs.schema;
         match &self.vs.fields {
-            Some(names) => names
-                .iter()
-                .filter_map(|n| schema.field(n))
-                .collect(),
+            Some(names) => names.iter().filter_map(|n| schema.field(n)).collect(),
             None => schema.scalar_fields().collect(),
         }
     }
 
-    async fn check_perm(
-        &self,
-        codenames: &[String],
-        parts: &axum::http::request::Parts,
-    ) -> bool {
+    async fn check_perm(&self, codenames: &[String], parts: &axum::http::request::Parts) -> bool {
         if codenames.is_empty() {
             return true;
         }
@@ -522,16 +515,27 @@ fn build_lookup_filter(
     raw: &str,
 ) -> Option<WhereExpr> {
     let column = field.column;
-    let predicate = |op: Op, value: SqlValue| {
-        Some(WhereExpr::Predicate(Filter { column, op, value }))
-    };
+    let predicate =
+        |op: Op, value: SqlValue| Some(WhereExpr::Predicate(Filter { column, op, value }));
     match lookup.unwrap_or("exact") {
-        "exact" => parse_form_value(field, Some(raw)).ok().and_then(|v| predicate(Op::Eq, v)),
-        "ne" => parse_form_value(field, Some(raw)).ok().and_then(|v| predicate(Op::Ne, v)),
-        "gt" => parse_form_value(field, Some(raw)).ok().and_then(|v| predicate(Op::Gt, v)),
-        "gte" => parse_form_value(field, Some(raw)).ok().and_then(|v| predicate(Op::Gte, v)),
-        "lt" => parse_form_value(field, Some(raw)).ok().and_then(|v| predicate(Op::Lt, v)),
-        "lte" => parse_form_value(field, Some(raw)).ok().and_then(|v| predicate(Op::Lte, v)),
+        "exact" => parse_form_value(field, Some(raw))
+            .ok()
+            .and_then(|v| predicate(Op::Eq, v)),
+        "ne" => parse_form_value(field, Some(raw))
+            .ok()
+            .and_then(|v| predicate(Op::Ne, v)),
+        "gt" => parse_form_value(field, Some(raw))
+            .ok()
+            .and_then(|v| predicate(Op::Gt, v)),
+        "gte" => parse_form_value(field, Some(raw))
+            .ok()
+            .and_then(|v| predicate(Op::Gte, v)),
+        "lt" => parse_form_value(field, Some(raw))
+            .ok()
+            .and_then(|v| predicate(Op::Lt, v)),
+        "lte" => parse_form_value(field, Some(raw))
+            .ok()
+            .and_then(|v| predicate(Op::Lte, v)),
         "in" | "not_in" => {
             let parts: Vec<SqlValue> = raw
                 .split(',')
@@ -542,7 +546,11 @@ fn build_lookup_filter(
             if parts.is_empty() {
                 return None;
             }
-            let op = if lookup == Some("not_in") { Op::NotIn } else { Op::In };
+            let op = if lookup == Some("not_in") {
+                Op::NotIn
+            } else {
+                Op::In
+            };
             predicate(op, SqlValue::List(parts))
         }
         "contains" => predicate(Op::Like, SqlValue::String(format!("%{raw}%"))),
@@ -602,7 +610,9 @@ async fn handle_list(
         if !state.vs.filter_fields.iter().any(|f| f == field_name) {
             continue;
         }
-        let Some(field) = state.vs.schema.field(field_name) else { continue };
+        let Some(field) = state.vs.schema.field(field_name) else {
+            continue;
+        };
         if let Some(predicate) = build_lookup_filter(field, lookup, raw_val) {
             filters.push(predicate);
         }
@@ -620,7 +630,10 @@ async fn handle_list(
     let search = params.get("search").filter(|s| !s.is_empty()).cloned();
     let search_clause = search.map(|q| SearchClause {
         query: q,
-        columns: state.vs.search_fields.iter()
+        columns: state
+            .vs
+            .search_fields
+            .iter()
             .filter_map(|n| state.vs.schema.field(n).map(|f| f.column))
             .collect(),
     });
@@ -646,7 +659,10 @@ async fn handle_list(
                 .collect()
         })
         .unwrap_or_else(|| {
-            state.vs.default_ordering.iter()
+            state
+                .vs
+                .default_ordering
+                .iter()
                 .filter_map(|(name, desc)| {
                     state.vs.schema.field(name).map(|f| OrderClause {
                         column: f.column,
@@ -676,7 +692,10 @@ async fn handle_list(
                 limit: Some(page_size),
                 offset: Some(offset),
             };
-            let count_q = CountQuery { model: state.vs.schema, where_clause };
+            let count_q = CountQuery {
+                model: state.vs.schema,
+                where_clause,
+            };
 
             let (rows_result, count_result) = tokio::join!(
                 crate::sql::select_rows(&state.pool, &select_q),
@@ -704,7 +723,10 @@ async fn handle_list(
                 "results": results,
             }))
         }
-        PaginationStyle::Cursor { field: cursor_field, desc } => {
+        PaginationStyle::Cursor {
+            field: cursor_field,
+            desc,
+        } => {
             handle_list_cursor(
                 state.as_ref(),
                 params,
@@ -799,7 +821,11 @@ async fn handle_list_cursor(
     };
 
     let has_more = rows.len() as i64 > page_size;
-    let page_rows = if has_more { &rows[..page_size as usize] } else { &rows[..] };
+    let page_rows = if has_more {
+        &rows[..page_size as usize]
+    } else {
+        &rows[..]
+    };
 
     let next_cursor = if has_more {
         // Read the cursor field value from the last row in this page
@@ -823,7 +849,10 @@ async fn handle_list_cursor(
 
     let results: Vec<Value> = match &state.vs.row_render {
         Some(render) => page_rows.iter().map(|r| (render)(r)).collect(),
-        None => page_rows.iter().map(|row| row_to_json(row, &fields)).collect(),
+        None => page_rows
+            .iter()
+            .map(|row| row_to_json(row, &fields))
+            .collect(),
     };
     json_response(json!({
         "page_size": page_size,
@@ -837,7 +866,7 @@ fn encode_cursor(value: i64) -> String {
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string().as_bytes())
 }
- 
+
 /// Decode a cursor token. Returns `None` for malformed input.
 fn decode_cursor(token: &str) -> Option<i64> {
     use base64::Engine;
@@ -859,7 +888,10 @@ async fn handle_retrieve(
     }
 
     let Some(pk_field) = state.pk_field() else {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "model has no primary key");
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "model has no primary key",
+        );
     };
     let pk_val = match parse_pk_string(pk_field, &pk_raw) {
         Ok(v) => v,
@@ -921,7 +953,12 @@ async fn handle_create(
 
     let pk_field = match state.pk_field() {
         Some(f) => f,
-        None => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "model has no primary key"),
+        None => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "model has no primary key",
+            )
+        }
     };
     let query = InsertQuery {
         model: state.vs.schema,
@@ -946,7 +983,10 @@ async fn handle_create(
     let fields = state.effective_fields();
     match fetch_by_pk(&state, pk_field, pk_val, &fields).await {
         Some(obj) => json_created(obj),
-        None => json_error(StatusCode::INTERNAL_SERVER_ERROR, "created but could not retrieve"),
+        None => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "created but could not retrieve",
+        ),
     }
 }
 
@@ -978,7 +1018,10 @@ async fn update_inner(
     }
 
     let Some(pk_field) = state.pk_field() else {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "model has no primary key");
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "model has no primary key",
+        );
     };
     let pk_val = match parse_pk_string(pk_field, &pk_raw) {
         Ok(v) => v,
@@ -1000,7 +1043,10 @@ async fn update_inner(
         }
         let raw = form.get(field.name).map(String::as_str);
         match parse_form_value(field, raw) {
-            Ok(v) => assignments.push(Assignment { column: field.column, value: v }),
+            Ok(v) => assignments.push(Assignment {
+                column: field.column,
+                value: v,
+            }),
             Err(FormError::Missing { .. }) if partial => continue,
             Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
         }
@@ -1042,7 +1088,10 @@ async fn handle_destroy(
     }
 
     let Some(pk_field) = state.pk_field() else {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "model has no primary key");
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "model has no primary key",
+        );
     };
     let pk_val = match parse_pk_string(pk_field, &pk_raw) {
         Ok(v) => v,
@@ -1116,8 +1165,7 @@ async fn extract_form_body(
 
     if content_type.contains("application/json") {
         // JSON body: flatten top-level string/number values to strings
-        let value: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         let obj = value.as_object().ok_or("expected a JSON object")?;
         let mut form = HashMap::new();
         for (k, v) in obj {
@@ -1133,8 +1181,7 @@ async fn extract_form_body(
         Ok(form)
     } else {
         // form-urlencoded (default)
-        serde_urlencoded::from_bytes::<HashMap<String, String>>(&bytes)
-            .map_err(|e| e.to_string())
+        serde_urlencoded::from_bytes::<HashMap<String, String>>(&bytes).map_err(|e| e.to_string())
     }
 }
 
@@ -1235,8 +1282,11 @@ mod lookup_tests {
     #[test]
     fn comparison_lookups() {
         for (lk, expected) in [
-            ("gt", Op::Gt), ("gte", Op::Gte),
-            ("lt", Op::Lt), ("lte", Op::Lte), ("ne", Op::Ne),
+            ("gt", Op::Gt),
+            ("gte", Op::Gte),
+            ("lt", Op::Lt),
+            ("lte", Op::Lte),
+            ("ne", Op::Ne),
         ] {
             let f = extract_pred(build_lookup_filter(int_field(), Some(lk), "10").unwrap());
             assert_eq!(f.op, expected, "lookup {lk}");
@@ -1270,7 +1320,8 @@ mod lookup_tests {
 
     #[test]
     fn contains_wraps_with_percents_and_uses_like() {
-        let f = extract_pred(build_lookup_filter(string_field(), Some("contains"), "hello").unwrap());
+        let f =
+            extract_pred(build_lookup_filter(string_field(), Some("contains"), "hello").unwrap());
         assert_eq!(f.op, Op::Like);
         assert!(matches!(f.value, SqlValue::String(ref s) if s == "%hello%"));
     }
@@ -1284,7 +1335,8 @@ mod lookup_tests {
 
     #[test]
     fn startswith_only_trailing_percent() {
-        let f = extract_pred(build_lookup_filter(string_field(), Some("startswith"), "pre").unwrap());
+        let f =
+            extract_pred(build_lookup_filter(string_field(), Some("startswith"), "pre").unwrap());
         assert!(matches!(f.value, SqlValue::String(ref s) if s == "pre%"));
     }
 
@@ -1338,8 +1390,8 @@ mod typed_perms_tests {
     #[test]
     fn permissions_for_model_fills_all_four_crud_codenames() {
         use crate::core::Model;
-        let vs = ViewSet::for_model(<PermPost as Model>::SCHEMA)
-            .permissions_for_model::<PermPost>();
+        let vs =
+            ViewSet::for_model(<PermPost as Model>::SCHEMA).permissions_for_model::<PermPost>();
         assert_eq!(vs.perms.list, vec!["vs_typed_perm_post.view"]);
         assert_eq!(vs.perms.retrieve, vec!["vs_typed_perm_post.view"]);
         assert_eq!(vs.perms.create, vec!["vs_typed_perm_post.add"]);

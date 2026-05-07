@@ -9,17 +9,16 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use axum::routing::{get, post};
-use axum::Router;
 use crate::core::SqlValue;
 use crate::sql::sqlx::PgPool;
+use axum::routing::{get, post};
+use axum::Router;
 
 use super::errors::AdminError;
 use super::views;
 
 /// Future returned by an [`AdminAction`] handler.
-pub type AdminActionFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<(), AdminError>> + Send + 'a>>;
+pub type AdminActionFuture<'a> = Pin<Box<dyn Future<Output = Result<(), AdminError>> + Send + 'a>>;
 
 /// Bulk action handler. Receives the model's `&PgPool` (not a tenant
 /// connection — the admin runs with the connection the request lives
@@ -27,18 +26,14 @@ pub type AdminActionFuture<'a> =
 /// the rows the operator selected. Return `Ok(())` on success;
 /// `AdminError::Internal(...)` for failure (renders as 500). Built-in
 /// `delete_selected` uses this signature.
-pub type AdminActionFn = Arc<
-    dyn for<'a> Fn(&'a PgPool, &'a [SqlValue]) -> AdminActionFuture<'a>
-        + Send
-        + Sync,
->;
+pub type AdminActionFn =
+    Arc<dyn for<'a> Fn(&'a PgPool, &'a [SqlValue]) -> AdminActionFuture<'a> + Send + Sync>;
 
 /// Per-table action registry: model `table` name → action name →
 /// handler. The action name must also appear in the model's
 /// `admin(actions = "...")` allowlist; the registry just maps the
 /// allowlisted names to their callables.
-pub(crate) type AdminActionRegistry =
-    HashMap<&'static str, HashMap<&'static str, AdminActionFn>>;
+pub(crate) type AdminActionRegistry = HashMap<&'static str, HashMap<&'static str, AdminActionFn>>;
 
 /// Mount the admin under any prefix using axum's nesting:
 /// `Router::new().nest("/admin", crate::admin::router(pool))`.
@@ -69,6 +64,20 @@ pub(crate) struct Config {
     pub(crate) title: Option<String>,
     /// Optional subtitle shown below the title in the sidebar.
     pub(crate) subtitle: Option<String>,
+    /// Per-tenant brand name override. Falls back to `title` when
+    /// `None`. Set per-request by the tenancy admin from `Org.brand_name`.
+    pub(crate) brand_name: Option<String>,
+    /// Per-tenant brand tagline. Falls back to `subtitle` when `None`.
+    pub(crate) brand_tagline: Option<String>,
+    /// Public URL of the tenant logo (e.g. `/__brand__/{slug}/logo.png`).
+    pub(crate) brand_logo_url: Option<String>,
+    /// Theme mode — `"light"`, `"dark"`, `"auto"`. `None` → `"auto"`.
+    pub(crate) theme_mode: Option<String>,
+    /// Pre-built CSS variable assignments derived from the tenant's
+    /// `primary_color`. Inlined verbatim into `<style>:root{ ... }`;
+    /// the tenancy admin builds it via [`branding::build_brand_css`]
+    /// which guarantees the body is safelisted.
+    pub(crate) tenant_brand_css: Option<String>,
     /// Tables visible in the admin. `None` = every registered model.
     pub(crate) allowed_tables: Option<HashSet<String>>,
     /// Tables whose mutating routes are blocked and whose write-buttons
@@ -149,6 +158,48 @@ impl Builder {
         self
     }
 
+    /// Per-tenant brand name (overrides [`Self::title`] for the
+    /// sidebar header). Wired by the tenancy admin from
+    /// `Org.brand_name` per request.
+    #[must_use]
+    pub fn brand_name(mut self, name: impl Into<String>) -> Self {
+        self.config.brand_name = Some(name.into());
+        self
+    }
+
+    /// Per-tenant brand tagline. Same fallback semantics as
+    /// [`Self::brand_name`] — overrides [`Self::subtitle`] when set.
+    #[must_use]
+    pub fn brand_tagline(mut self, tagline: impl Into<String>) -> Self {
+        self.config.brand_tagline = Some(tagline.into());
+        self
+    }
+
+    /// Public URL of the tenant logo. Rendered as an `<img>` above
+    /// the brand name in the sidebar when present.
+    #[must_use]
+    pub fn brand_logo_url(mut self, url: impl Into<String>) -> Self {
+        self.config.brand_logo_url = Some(url.into());
+        self
+    }
+
+    /// Theme mode — `"light"`, `"dark"`, or `"auto"`. Sets the
+    /// `data-theme` attribute on the rendered `<html>` element.
+    #[must_use]
+    pub fn theme_mode(mut self, mode: impl Into<String>) -> Self {
+        self.config.theme_mode = Some(mode.into());
+        self
+    }
+
+    /// Pre-built per-tenant CSS variable override block. Inlined
+    /// inside `<style>:root{ ... }`. Build it via
+    /// `crate::tenancy::branding::build_brand_css(&org)`.
+    #[must_use]
+    pub fn tenant_brand_css(mut self, css: impl Into<String>) -> Self {
+        self.config.tenant_brand_css = Some(css.into());
+        self
+    }
+
     /// Restrict visible and writable tables to the authenticated user's
     /// effective permission set. Pass the codenames returned by
     /// `rustango::tenancy::permissions::user_permissions(uid, pool)`.
@@ -199,10 +250,7 @@ impl Builder {
         handler: F,
     ) -> Self
     where
-        F: for<'a> Fn(&'a PgPool, &'a [SqlValue]) -> AdminActionFuture<'a>
-            + Send
-            + Sync
-            + 'static,
+        F: for<'a> Fn(&'a PgPool, &'a [SqlValue]) -> AdminActionFuture<'a> + Send + Sync + 'static,
     {
         self.config
             .actions
@@ -217,7 +265,10 @@ impl Builder {
             .route("/", get(views::index))
             .route("/__audit", get(super::audit::audit_log_view))
             .route("/__audit/cleanup", post(super::audit::audit_cleanup_submit))
-            .route("/{table}", get(views::table_view).post(views::create_submit))
+            .route(
+                "/{table}",
+                get(views::table_view).post(views::create_submit),
+            )
             .route("/{table}/new", get(views::create_form))
             .route("/{table}/__action", post(views::action_submit))
             .route(
@@ -296,11 +347,7 @@ impl AppState {
     /// Look up a registered action handler. Returns `None` for the
     /// built-in `delete_selected` (which the handler short-circuits)
     /// and for action names that haven't been registered.
-    pub(crate) fn action_handler(
-        &self,
-        table: &str,
-        action: &str,
-    ) -> Option<AdminActionFn> {
+    pub(crate) fn action_handler(&self, table: &str, action: &str) -> Option<AdminActionFn> {
         self.config
             .actions
             .get(table)

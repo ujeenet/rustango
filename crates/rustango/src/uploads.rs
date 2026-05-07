@@ -246,7 +246,10 @@ mod tests {
         // Client sends a full path; we keep only the basename.
         assert_eq!(sanitize_filename("/etc/passwd"), "passwd");
         assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
-        assert_eq!(sanitize_filename("C:\\windows\\evil.exe"), "C__windows_evil.exe");
+        assert_eq!(
+            sanitize_filename("C:\\windows\\evil.exe"),
+            "C__windows_evil.exe"
+        );
     }
 
     #[test]
@@ -340,10 +343,13 @@ mod tests {
             post(move |mp: Multipart| {
                 let storage = storage_for_handler.clone();
                 async move {
-                    let cfg = UploadConfig::new("uploads/")
-                        .randomize_filename(false);
+                    let cfg = UploadConfig::new("uploads/").randomize_filename(false);
                     let saved = save_uploads(mp, &cfg, &storage).await.unwrap();
-                    saved.into_iter().map(|s| s.key).collect::<Vec<_>>().join(",")
+                    saved
+                        .into_iter()
+                        .map(|s| s.key)
+                        .collect::<Vec<_>>()
+                        .join(",")
                 }
             }),
         );
@@ -369,7 +375,9 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
-        let body_bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
         let body_str = std::str::from_utf8(&body_bytes).unwrap();
         assert_eq!(body_str, "uploads/hello.txt");
 
@@ -429,7 +437,9 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 400);
         let body_str = std::str::from_utf8(
-            &axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), 1 << 16)
+                .await
+                .unwrap(),
         )
         .unwrap()
         .to_owned();
@@ -454,8 +464,7 @@ mod tests {
             post(move |mp: Multipart| {
                 let storage = storage_for_handler.clone();
                 async move {
-                    let cfg = UploadConfig::new("u/")
-                        .allowed_extensions(&["png", "jpg"]);
+                    let cfg = UploadConfig::new("u/").allowed_extensions(&["png", "jpg"]);
                     match save_uploads(mp, &cfg, &storage).await {
                         Ok(_) => (axum::http::StatusCode::OK, "ok".to_owned()),
                         Err(e) => (axum::http::StatusCode::BAD_REQUEST, e.to_string()),
@@ -485,7 +494,9 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 400);
         let body_str = std::str::from_utf8(
-            &axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), 1 << 16)
+                .await
+                .unwrap(),
         )
         .unwrap()
         .to_owned();

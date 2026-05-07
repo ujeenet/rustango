@@ -103,7 +103,11 @@ impl ApiError {
     /// `422 Unprocessable Entity` — `code = "validation_failed"`.
     #[must_use]
     pub fn validation(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::UNPROCESSABLE_ENTITY, "validation_failed", message)
+        Self::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "validation_failed",
+            message,
+        )
     }
 
     /// `429 Too Many Requests` — `code = "rate_limited"`.
@@ -121,7 +125,11 @@ impl ApiError {
     /// `503 Service Unavailable` — `code = "service_unavailable"`.
     #[must_use]
     pub fn service_unavailable(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable", message)
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service_unavailable",
+            message,
+        )
     }
 
     /// Render to a JSON value (without going through `IntoResponse`).
@@ -133,7 +141,9 @@ impl ApiError {
             "status":  self.status.as_u16(),
         });
         if let Some(details) = &self.details {
-            body.as_object_mut().unwrap().insert("details".into(), details.clone());
+            body.as_object_mut()
+                .unwrap()
+                .insert("details".into(), details.clone());
         }
         body
     }
@@ -181,10 +191,22 @@ mod tests {
         assert_eq!(ApiError::forbidden("x").status, StatusCode::FORBIDDEN);
         assert_eq!(ApiError::not_found("x").status, StatusCode::NOT_FOUND);
         assert_eq!(ApiError::conflict("x").status, StatusCode::CONFLICT);
-        assert_eq!(ApiError::validation("x").status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(ApiError::rate_limited("x").status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(ApiError::internal("x").status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(ApiError::service_unavailable("x").status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            ApiError::validation("x").status,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            ApiError::rate_limited("x").status,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            ApiError::internal("x").status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            ApiError::service_unavailable("x").status,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[test]

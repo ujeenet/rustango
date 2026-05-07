@@ -77,10 +77,7 @@ pub enum MyReturningRow {}
 /// # Errors
 /// `sqlx::Error` from the underlying decode.
 #[cfg(feature = "postgres")]
-pub fn try_get_returning<'r, T>(
-    row: &'r PgReturningRow,
-    name: &str,
-) -> Result<T, sqlx::Error>
+pub fn try_get_returning<'r, T>(row: &'r PgReturningRow, name: &str) -> Result<T, sqlx::Error>
 where
     T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
 {
@@ -101,10 +98,7 @@ pub fn try_get_returning<T>(row: &PgReturningRow, _name: &str) -> Result<T, sqlx
 /// # Errors
 /// `sqlx::Error` from the underlying decode.
 #[cfg(feature = "mysql")]
-pub fn try_get_returning_my<'r, T>(
-    row: &'r MyReturningRow,
-    name: &str,
-) -> Result<T, sqlx::Error>
+pub fn try_get_returning_my<'r, T>(row: &'r MyReturningRow, name: &str) -> Result<T, sqlx::Error>
 where
     T: sqlx::Decode<'r, sqlx::MySql> + sqlx::Type<sqlx::MySql>,
 {
@@ -165,10 +159,12 @@ impl MysqlAutoIdSet for i32 {
 /// reaches this branch is misconfigured for MySQL.
 impl MysqlAutoIdSet for uuid::Uuid {
     fn rustango_from_mysql_auto_id(_id: i64) -> Result<Self, ExecError> {
-        Err(ExecError::Sql(super::SqlError::OperatorNotSupportedInDialect {
-            op: "Auto<Uuid> assigned by AUTO_INCREMENT",
-            dialect: "mysql",
-        }))
+        Err(ExecError::Sql(
+            super::SqlError::OperatorNotSupportedInDialect {
+                op: "Auto<Uuid> assigned by AUTO_INCREMENT",
+                dialect: "mysql",
+            },
+        ))
     }
 }
 
@@ -177,10 +173,12 @@ impl MysqlAutoIdSet for uuid::Uuid {
 /// actually tries to use AUTO_INCREMENT to fill in a string PK.
 impl MysqlAutoIdSet for String {
     fn rustango_from_mysql_auto_id(_id: i64) -> Result<Self, ExecError> {
-        Err(ExecError::Sql(super::SqlError::OperatorNotSupportedInDialect {
-            op: "Auto<String> assigned by AUTO_INCREMENT",
-            dialect: "mysql",
-        }))
+        Err(ExecError::Sql(
+            super::SqlError::OperatorNotSupportedInDialect {
+                op: "Auto<String> assigned by AUTO_INCREMENT",
+                dialect: "mysql",
+            },
+        ))
     }
 }
 
@@ -191,10 +189,12 @@ impl MysqlAutoIdSet for String {
 /// the timestamp with `LAST_INSERT_ID()`.
 impl MysqlAutoIdSet for chrono::DateTime<chrono::Utc> {
     fn rustango_from_mysql_auto_id(_id: i64) -> Result<Self, ExecError> {
-        Err(ExecError::Sql(super::SqlError::OperatorNotSupportedInDialect {
-            op: "Auto<DateTime> assigned by AUTO_INCREMENT",
-            dialect: "mysql",
-        }))
+        Err(ExecError::Sql(
+            super::SqlError::OperatorNotSupportedInDialect {
+                op: "Auto<DateTime> assigned by AUTO_INCREMENT",
+                dialect: "mysql",
+            },
+        ))
     }
 }
 
@@ -216,10 +216,7 @@ pub trait AssignAutoPkPool {
     /// # Errors
     /// `sqlx::Error` from any column decode, wrapped into
     /// [`ExecError`].
-    fn __rustango_assign_from_pg_row(
-        &mut self,
-        row: &PgReturningRow,
-    ) -> Result<(), ExecError>;
+    fn __rustango_assign_from_pg_row(&mut self, row: &PgReturningRow) -> Result<(), ExecError>;
 
     /// Assign the single `Auto<T>` PK from a MySQL `LAST_INSERT_ID()`.
     /// Models with multiple `Auto` columns surface
@@ -228,10 +225,7 @@ pub trait AssignAutoPkPool {
     /// # Errors
     /// [`ExecError::Sql`] when the model has more than one `Auto<T>`
     /// column (unsupported on MySQL).
-    fn __rustango_assign_from_mysql_id(
-        &mut self,
-        id: i64,
-    ) -> Result<(), ExecError>;
+    fn __rustango_assign_from_mysql_id(&mut self, id: i64) -> Result<(), ExecError>;
 }
 
 /// Apply an `InsertReturningPool` result to a model's `Auto<T>` PK

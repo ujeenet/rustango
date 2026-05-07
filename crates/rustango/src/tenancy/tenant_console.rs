@@ -27,8 +27,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
-pub use super::operator_console::SessionSecret;
 use super::operator_console::session::{sign, SessionError};
+pub use super::operator_console::SessionSecret;
 
 /// Default tenant cookie name. Distinct from the operator console's
 /// `rustango_op_session` so the two never collide on a host that
@@ -39,8 +39,7 @@ pub const COOKIE_NAME: &str = "rustango_tenant_session";
 pub const SESSION_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 
 /// Embedded brand image, served at `/__static__/rustango.png`.
-pub(crate) const RUSTANGO_PNG: &[u8] =
-    include_bytes!("static/rustango.png");
+pub(crate) const RUSTANGO_PNG: &[u8] = include_bytes!("static/rustango.png");
 
 /// Principal payload carried inside the cookie. Compact field names
 /// (`uid`, `slug`, `exp`) keep the cookie short.

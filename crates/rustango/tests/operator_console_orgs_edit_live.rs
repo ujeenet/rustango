@@ -23,11 +23,11 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use rustango::core::Column as _;
 use rustango::sql::{sqlx, Auto, Fetcher};
-use rustango::{migrate as rmig, Model};
 use rustango::tenancy::{
     operator_console::{router_with_pools, SessionSecret},
     Org, StorageMode, TenantPools,
 };
+use rustango::{migrate as rmig, Model};
 use tower::ServiceExt;
 
 static UNIQ: AtomicU64 = AtomicU64::new(0);
@@ -123,6 +123,12 @@ async fn seed_org(pool: &sqlx::PgPool, slug: &str, mode: StorageMode, db_url: Op
         path_prefix: None,
         active: true,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     org.insert(pool).await.unwrap();
 }
@@ -171,10 +177,7 @@ async fn get_edit_form_renders_with_prefill_and_no_creds() {
 
     // database_url field present BUT the literal secret must not
     // round-trip back to the browser.
-    assert!(
-        html.contains("database_url"),
-        "database_url field missing"
-    );
+    assert!(html.contains("database_url"), "database_url field missing");
     assert!(
         !html.contains("hidden:secret@example.com"),
         "literal credential leaked into rendered form"

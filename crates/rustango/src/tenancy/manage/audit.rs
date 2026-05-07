@@ -44,9 +44,7 @@ pub(super) async fn audit_cleanup_cmd<W: Write + Send>(
             "--keep-last" => {
                 let raw = next_value(&mut iter, "--keep-last")?;
                 keep_last = Some(raw.parse::<i64>().map_err(|_| {
-                    TenancyError::Validation(format!(
-                        "--keep-last expects an integer, got `{raw}`"
-                    ))
+                    TenancyError::Validation(format!("--keep-last expects an integer, got `{raw}`"))
                 })?);
             }
             "--tenant" => {
@@ -125,7 +123,10 @@ pub(super) async fn audit_cleanup_cmd<W: Write + Send>(
 }
 
 fn write_verb_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
-    writeln!(w, "audit-cleanup — remove old entries from each tenant's audit log")?;
+    writeln!(
+        w,
+        "audit-cleanup — remove old entries from each tenant's audit log"
+    )?;
     writeln!(w)?;
     writeln!(w, "USAGE:")?;
     writeln!(
@@ -144,17 +145,8 @@ fn write_verb_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(w)?;
     writeln!(w, "EXAMPLES:")?;
-    writeln!(
-        w,
-        "  cargo run -- audit-cleanup --days 90"
-    )?;
-    writeln!(
-        w,
-        "  cargo run -- audit-cleanup --keep-last 50"
-    )?;
-    writeln!(
-        w,
-        "  cargo run -- audit-cleanup --tenant acme --days 90"
-    )?;
+    writeln!(w, "  cargo run -- audit-cleanup --days 90")?;
+    writeln!(w, "  cargo run -- audit-cleanup --keep-last 50")?;
+    writeln!(w, "  cargo run -- audit-cleanup --tenant acme --days 90")?;
     Ok(())
 }

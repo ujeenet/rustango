@@ -168,11 +168,26 @@ pub(crate) fn coerce_form_to_json(field: &FieldSchema, raw: &str) -> serde_json:
         return Value::Null;
     }
     match field.ty {
-        FieldType::I16 => raw.parse::<i16>().map(Value::from).unwrap_or_else(|_| Value::String(raw.to_owned())),
-        FieldType::I32 => raw.parse::<i32>().map(Value::from).unwrap_or_else(|_| Value::String(raw.to_owned())),
-        FieldType::I64 => raw.parse::<i64>().map(Value::from).unwrap_or_else(|_| Value::String(raw.to_owned())),
-        FieldType::F32 => raw.parse::<f32>().map(Value::from).unwrap_or_else(|_| Value::String(raw.to_owned())),
-        FieldType::F64 => raw.parse::<f64>().map(Value::from).unwrap_or_else(|_| Value::String(raw.to_owned())),
+        FieldType::I16 => raw
+            .parse::<i16>()
+            .map(Value::from)
+            .unwrap_or_else(|_| Value::String(raw.to_owned())),
+        FieldType::I32 => raw
+            .parse::<i32>()
+            .map(Value::from)
+            .unwrap_or_else(|_| Value::String(raw.to_owned())),
+        FieldType::I64 => raw
+            .parse::<i64>()
+            .map(Value::from)
+            .unwrap_or_else(|_| Value::String(raw.to_owned())),
+        FieldType::F32 => raw
+            .parse::<f32>()
+            .map(Value::from)
+            .unwrap_or_else(|_| Value::String(raw.to_owned())),
+        FieldType::F64 => raw
+            .parse::<f64>()
+            .map(Value::from)
+            .unwrap_or_else(|_| Value::String(raw.to_owned())),
         FieldType::Bool => match raw.to_ascii_lowercase().as_str() {
             "true" | "on" | "1" | "yes" => Value::Bool(true),
             "false" | "off" | "0" | "no" | "" => Value::Bool(false),
@@ -227,7 +242,9 @@ pub(crate) fn render_value_for_input(row: &PgRow, field: &FieldSchema) -> String
             .try_get::<serde_json::Value, _>(field.column)
             .ok()
             .map(|v| {
-                if v == serde_json::Value::Object(serde_json::Map::new()) || v == serde_json::json!({}) {
+                if v == serde_json::Value::Object(serde_json::Map::new())
+                    || v == serde_json::json!({})
+                {
                     String::new()
                 } else {
                     serde_json::to_string_pretty(&v).unwrap_or_default()
@@ -242,11 +259,12 @@ pub(crate) fn render_value_for_input(row: &PgRow, field: &FieldSchema) -> String
 pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) -> String {
     let name = escape(field.name);
     let val = escape(value);
-    let required = if field.nullable || field.ty == FieldType::Bool || field.auto || field.primary_key {
-        ""
-    } else {
-        " required"
-    };
+    let required =
+        if field.nullable || field.ty == FieldType::Bool || field.auto || field.primary_key {
+            ""
+        } else {
+            " required"
+        };
     // Caller passes `pk_locked=true` to mean "render this field as
     // read-only" — used both for PKs on edit forms (slice 10.5
     // pre-existing behavior) and for `readonly_fields` flagged via

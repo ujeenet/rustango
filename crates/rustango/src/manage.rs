@@ -35,7 +35,8 @@ use crate::sql::sqlx::PgPool;
 
 /// Boxed seed-hook future. Keeps the public method signature simple
 /// while accepting any `async fn(&PgPool) -> Result<…>` closure.
-type SeedFut<'a> = Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + 'a>>;
+type SeedFut<'a> =
+    Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + 'a>>;
 type SeedFn = Box<dyn for<'a> FnOnce(&'a PgPool) -> SeedFut<'a> + Send>;
 
 /// One-builder dispatcher. Hand it your API router (and optionally a
@@ -164,12 +165,20 @@ impl Cli {
         // read help without configuring Postgres first.
         let no_db_verb = matches!(
             args.first().map(String::as_str),
-            Some("help") | Some("--help") | Some("-h")
-                | Some("startapp") | Some("makemigrations")
-                | Some("docs") | Some("version") | Some("--version")
-                | Some("make:viewset") | Some("make:serializer")
-                | Some("make:form") | Some("make:job")
-                | Some("make:notification") | Some("make:middleware")
+            Some("help")
+                | Some("--help")
+                | Some("-h")
+                | Some("startapp")
+                | Some("makemigrations")
+                | Some("docs")
+                | Some("version")
+                | Some("--version")
+                | Some("make:viewset")
+                | Some("make:serializer")
+                | Some("make:form")
+                | Some("make:job")
+                | Some("make:notification")
+                | Some("make:middleware")
                 | Some("make:test")
         );
         let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://offline".into());
@@ -240,9 +249,7 @@ impl Cli {
             // Tenancy Builder's seed_with takes (Arc<TenantPools>, PgPool,
             // String); we forward the registry pool and discard the rest.
             builder = builder
-                .seed_with(move |_pools, registry, _url| async move {
-                    seed(&registry).await
-                })
+                .seed_with(move |_pools, registry, _url| async move { seed(&registry).await })
                 .await?;
         }
         builder.serve(&self.bind).await
@@ -275,7 +282,10 @@ mod tests {
             .migrations_dir("custom/migrations")
             .tenancy();
         assert_eq!(cli.bind, "127.0.0.1:7777");
-        assert_eq!(cli.migrations_dir, std::path::PathBuf::from("custom/migrations"));
+        assert_eq!(
+            cli.migrations_dir,
+            std::path::PathBuf::from("custom/migrations")
+        );
         assert!(cli.tenancy);
     }
 

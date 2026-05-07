@@ -50,9 +50,9 @@ use crate::tenancy::TenancyError;
 
 pub use crate::tenancy::permissions::{
     assign_role, auto_create_permissions, clear_user_perm, create_role, ensure_tables,
-    get_or_create_role, grant_role_perm, has_all_perms, has_any_perm, has_perm,
-    model_codenames, remove_role, revoke_role_perm, set_user_perm, user_permissions,
-    user_roles, user_roles_qs, Role, RolePermission, UserPermission, UserRole,
+    get_or_create_role, grant_role_perm, has_all_perms, has_any_perm, has_perm, model_codenames,
+    remove_role, revoke_role_perm, set_user_perm, user_permissions, user_roles, user_roles_qs,
+    Role, RolePermission, UserPermission, UserRole,
 };
 
 // ----- typed entry points (v0.16.0 Option G) -----

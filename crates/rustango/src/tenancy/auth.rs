@@ -39,11 +39,11 @@
 //! your project's binary name if different; the verbs route through
 //! `rustango::manage::Cli`.)
 
-use base64::Engine;
 use crate::core::Column as _;
 use crate::sql::sqlx::{PgConnection, PgPool};
 use crate::sql::{Auto, Fetcher};
 use crate::Model;
+use base64::Engine;
 
 use super::error::TenancyError;
 use super::password;
@@ -75,11 +75,11 @@ pub struct Operator {
     table = "rustango_users",
     display = "username",
     admin(
-        list_display    = "username, is_superuser, active, created_at",
-        search_fields   = "username",
-        ordering        = "username",
+        list_display = "username, is_superuser, active, created_at",
+        search_fields = "username",
+        ordering = "username",
         readonly_fields = "password_hash, created_at",
-    ),
+    )
 )]
 #[allow(dead_code)]
 pub struct User {
@@ -180,7 +180,9 @@ pub async fn authenticate_user(
         is_superuser: row.try_get::<bool, _>("is_superuser")?,
         active: row.try_get::<bool, _>("active")?,
         created_at: row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")?,
-        data: row.try_get::<serde_json::Value, _>("data").unwrap_or_else(|_| serde_json::json!({})),
+        data: row
+            .try_get::<serde_json::Value, _>("data")
+            .unwrap_or_else(|_| serde_json::json!({})),
     };
     if !user.active {
         return Ok(None);
@@ -255,9 +257,7 @@ pub const REQUIRED_USER_COLUMNS: &[&str] = &[
 /// # Errors
 /// Returns [`TenancyError::Validation`] when the table name is wrong
 /// or a required column is missing.
-pub fn validate_tenant_user_schema(
-    schema: &crate::core::ModelSchema,
-) -> Result<(), TenancyError> {
+pub fn validate_tenant_user_schema(schema: &crate::core::ModelSchema) -> Result<(), TenancyError> {
     if schema.table != "rustango_users" {
         return Err(TenancyError::Validation(format!(
             "TenantUserModel must point at table \"rustango_users\", got \"{}\"",

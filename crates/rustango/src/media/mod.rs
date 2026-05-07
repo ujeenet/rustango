@@ -197,11 +197,9 @@ impl Media {
         // Idempotent ALTER for deployments that ran the v0.21.51
         // ensure_table before `collection_id` existed. No-op on
         // fresh installs (column is already in the CREATE above).
-        sqlx::query(
-            "ALTER TABLE rustango_media ADD COLUMN IF NOT EXISTS collection_id BIGINT",
-        )
-        .execute(pool)
-        .await?;
+        sqlx::query("ALTER TABLE rustango_media ADD COLUMN IF NOT EXISTS collection_id BIGINT")
+            .execute(pool)
+            .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS rustango_media_disk_key_idx
                 ON rustango_media (disk, storage_key)",
@@ -422,10 +420,7 @@ impl MediaManager {
     /// # Errors
     /// `UnknownDisk` / `Db` / a `Storage` error if the backend doesn't
     /// support presigned URLs.
-    pub async fn begin_upload(
-        &self,
-        intent: UploadIntent,
-    ) -> Result<UploadTicket, MediaError> {
+    pub async fn begin_upload(&self, intent: UploadIntent) -> Result<UploadTicket, MediaError> {
         let storage = self.resolve_disk(&intent.disk)?;
         let key = build_key(&intent.key_prefix, &intent.original_filename);
         let upload_url = storage
@@ -677,10 +672,7 @@ impl MediaManager {
     }
 
     /// Look up by id (excludes soft-deleted).
-    pub async fn get_collection(
-        &self,
-        id: i64,
-    ) -> Result<Option<MediaCollection>, MediaError> {
+    pub async fn get_collection(&self, id: i64) -> Result<Option<MediaCollection>, MediaError> {
         let row = sqlx::query(
             "SELECT id, name, slug, parent_id, description, created_at, deleted_at
                FROM rustango_media_collections
@@ -752,12 +744,10 @@ impl MediaManager {
     /// rows are orphaned (`collection_id` set to NULL) so they remain
     /// queryable and the storage objects survive.
     pub async fn delete_collection(&self, id: i64) -> Result<(), MediaError> {
-        sqlx::query(
-            "UPDATE rustango_media SET collection_id = NULL WHERE collection_id = $1",
-        )
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE rustango_media SET collection_id = NULL WHERE collection_id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         sqlx::query(
             "UPDATE rustango_media_collections
                 SET deleted_at = NOW()
@@ -828,7 +818,9 @@ impl MediaManager {
         .bind(root)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(|r| r.try_get::<i64, _>("id").map_err(MediaError::Db)).collect()
+        rows.into_iter()
+            .map(|r| r.try_get::<i64, _>("id").map_err(MediaError::Db))
+            .collect()
     }
 
     // =================================================================
@@ -906,11 +898,7 @@ impl MediaManager {
     /// Replace the entire tag set for a media row. Tags not in
     /// `slugs` are removed; tags in `slugs` are added (auto-created
     /// if needed).
-    pub async fn set_tags(
-        &self,
-        media_id: i64,
-        slugs: &[&str],
-    ) -> Result<(), MediaError> {
+    pub async fn set_tags(&self, media_id: i64, slugs: &[&str]) -> Result<(), MediaError> {
         sqlx::query("DELETE FROM rustango_media_tag_links WHERE media_id = $1")
             .bind(media_id)
             .execute(&self.pool)
@@ -964,10 +952,7 @@ impl MediaManager {
     }
 
     /// Top tags by usage count, descending. Limit clamped at 1000.
-    pub async fn popular_tags(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<(MediaTag, i64)>, MediaError> {
+    pub async fn popular_tags(&self, limit: i64) -> Result<Vec<(MediaTag, i64)>, MediaError> {
         let rows = sqlx::query(
             "SELECT t.id, t.name, t.slug, t.created_at, COUNT(l.media_id) AS use_count
                FROM rustango_media_tags t
@@ -1079,7 +1064,11 @@ mod tests {
 
     #[test]
     fn media_status_round_trips_through_string() {
-        for s in [MediaStatus::Pending, MediaStatus::Ready, MediaStatus::Failed] {
+        for s in [
+            MediaStatus::Pending,
+            MediaStatus::Ready,
+            MediaStatus::Failed,
+        ] {
             let str_form = s.as_str();
             let parsed = MediaStatus::from_str(str_form).unwrap();
             assert_eq!(parsed, s);

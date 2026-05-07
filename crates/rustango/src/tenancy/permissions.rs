@@ -46,8 +46,8 @@
 //!     .await?;
 //! ```
 
-use crate::core::{DeleteQuery, Filter, Op, SqlValue, WhereExpr};
 use crate::core::Model as _;
+use crate::core::{DeleteQuery, Filter, Op, SqlValue, WhereExpr};
 use crate::sql::sqlx::{self, PgPool, Row};
 use crate::sql::Auto;
 use crate::Model;
@@ -65,10 +65,10 @@ use super::error::TenancyError;
     table = "rustango_roles",
     display = "name",
     admin(
-        list_display  = "name, description",
+        list_display = "name, description",
         search_fields = "name, description",
-        ordering      = "name",
-    ),
+        ordering = "name",
+    )
 )]
 pub struct Role {
     #[rustango(primary_key)]
@@ -192,7 +192,11 @@ ALTER TABLE "rustango_users"
 /// # Errors
 /// Driver failures from `CREATE TABLE IF NOT EXISTS`.
 pub async fn ensure_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
-    for stmt in ENSURE_SQL.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+    for stmt in ENSURE_SQL
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         sqlx::query(stmt).execute(pool).await?;
     }
     Ok(())
@@ -446,23 +450,30 @@ pub async fn revoke_role_perm(
     codename: &str,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
-    crate::sql::delete(pool, &DeleteQuery {
-        model: RolePermission::SCHEMA,
-        where_clause: WhereExpr::and_predicates(vec![
-            Filter { column: "role_id", op: Op::Eq, value: SqlValue::from(role_id) },
-            Filter { column: "codename", op: Op::Eq, value: SqlValue::from(codename) },
-        ]),
-    })
+    crate::sql::delete(
+        pool,
+        &DeleteQuery {
+            model: RolePermission::SCHEMA,
+            where_clause: WhereExpr::and_predicates(vec![
+                Filter {
+                    column: "role_id",
+                    op: Op::Eq,
+                    value: SqlValue::from(role_id),
+                },
+                Filter {
+                    column: "codename",
+                    op: Op::Eq,
+                    value: SqlValue::from(codename),
+                },
+            ]),
+        },
+    )
     .await?;
     Ok(())
 }
 
 /// Assign a user to a role. No-op if already assigned.
-pub async fn assign_role(
-    user_id: i64,
-    role_id: i64,
-    pool: &PgPool,
-) -> Result<(), TenancyError> {
+pub async fn assign_role(user_id: i64, role_id: i64, pool: &PgPool) -> Result<(), TenancyError> {
     sqlx::query(
         r#"INSERT INTO "rustango_user_roles" (user_id, role_id)
            VALUES ($1, $2)
@@ -476,18 +487,25 @@ pub async fn assign_role(
 }
 
 /// Remove a user from a role.
-pub async fn remove_role(
-    user_id: i64,
-    role_id: i64,
-    pool: &PgPool,
-) -> Result<(), TenancyError> {
-    crate::sql::delete(pool, &DeleteQuery {
-        model: UserRole::SCHEMA,
-        where_clause: WhereExpr::and_predicates(vec![
-            Filter { column: "user_id", op: Op::Eq, value: SqlValue::from(user_id) },
-            Filter { column: "role_id", op: Op::Eq, value: SqlValue::from(role_id) },
-        ]),
-    })
+pub async fn remove_role(user_id: i64, role_id: i64, pool: &PgPool) -> Result<(), TenancyError> {
+    crate::sql::delete(
+        pool,
+        &DeleteQuery {
+            model: UserRole::SCHEMA,
+            where_clause: WhereExpr::and_predicates(vec![
+                Filter {
+                    column: "user_id",
+                    op: Op::Eq,
+                    value: SqlValue::from(user_id),
+                },
+                Filter {
+                    column: "role_id",
+                    op: Op::Eq,
+                    value: SqlValue::from(role_id),
+                },
+            ]),
+        },
+    )
     .await?;
     Ok(())
 }
@@ -518,13 +536,24 @@ pub async fn clear_user_perm(
     codename: &str,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
-    crate::sql::delete(pool, &DeleteQuery {
-        model: UserPermission::SCHEMA,
-        where_clause: WhereExpr::and_predicates(vec![
-            Filter { column: "user_id", op: Op::Eq, value: SqlValue::from(user_id) },
-            Filter { column: "codename", op: Op::Eq, value: SqlValue::from(codename) },
-        ]),
-    })
+    crate::sql::delete(
+        pool,
+        &DeleteQuery {
+            model: UserPermission::SCHEMA,
+            where_clause: WhereExpr::and_predicates(vec![
+                Filter {
+                    column: "user_id",
+                    op: Op::Eq,
+                    value: SqlValue::from(user_id),
+                },
+                Filter {
+                    column: "codename",
+                    op: Op::Eq,
+                    value: SqlValue::from(codename),
+                },
+            ]),
+        },
+    )
     .await?;
     Ok(())
 }
@@ -547,7 +576,9 @@ pub async fn user_roles_qs(user_id: i64, pool: &PgPool) -> Result<Vec<Role>, sql
                 id: Auto::Set(row.try_get::<i64, _>("id")?),
                 name: row.try_get("name")?,
                 description: row.try_get("description")?,
-                data: row.try_get::<serde_json::Value, _>("data").unwrap_or_else(|_| serde_json::json!({})),
+                data: row
+                    .try_get::<serde_json::Value, _>("data")
+                    .unwrap_or_else(|_| serde_json::json!({})),
             })
         })
         .collect()

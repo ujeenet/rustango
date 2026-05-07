@@ -207,22 +207,32 @@ async fn fresh_pool_str() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     sqlx::query("DROP TABLE IF EXISTS rustango_fk_str_post CASCADE")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("DROP TABLE IF EXISTS rustango_fk_str_user CASCADE")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query(
         r#"CREATE TABLE rustango_fk_str_user (
               user_uuid VARCHAR(36) PRIMARY KEY,
               name VARCHAR(64) NOT NULL
            )"#,
-    ).execute(&pool).await.unwrap();
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query(
         r#"CREATE TABLE rustango_fk_str_post (
               id BIGSERIAL PRIMARY KEY,
               title VARCHAR(128) NOT NULL,
               author VARCHAR(36) NOT NULL REFERENCES rustango_fk_str_user (user_uuid)
            )"#,
-    ).execute(&pool).await.unwrap();
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     Some(pool)
 }
 
@@ -234,7 +244,10 @@ async fn string_pk_fk_round_trips_with_lazy_load() {
     };
 
     let alice_uuid = "alice-uuid-0000".to_owned();
-    let alice = StrUser { user_uuid: alice_uuid.clone(), name: "alice".into() };
+    let alice = StrUser {
+        user_uuid: alice_uuid.clone(),
+        name: "alice".into(),
+    };
     alice.insert(&pool).await.unwrap();
 
     let mut post = StrPost {
@@ -247,7 +260,9 @@ async fn string_pk_fk_round_trips_with_lazy_load() {
     // Round-trip through fetch — confirms FromRow decodes a String FK.
     let mut rows: Vec<StrPost> = StrPost::objects()
         .filter("id", Op::Eq, post.id)
-        .fetch(&pool).await.unwrap();
+        .fetch(&pool)
+        .await
+        .unwrap();
     let mut fetched = rows.pop().expect("post round-trip");
     assert_eq!(fetched.author.pk(), alice_uuid);
     assert!(!fetched.author.is_loaded());
@@ -265,8 +280,7 @@ async fn string_pk_fk_missing_target_renders_pk_in_error() {
         return;
     };
 
-    let mut orphan: ForeignKey<StrUser, String> =
-        ForeignKey::unloaded("does-not-exist".to_owned());
+    let mut orphan: ForeignKey<StrUser, String> = ForeignKey::unloaded("does-not-exist".to_owned());
     let err = orphan.get(&pool).await.unwrap_err();
     match err {
         ExecError::ForeignKeyTargetMissing { table, pk } => {
@@ -303,22 +317,32 @@ async fn fresh_pool_nl() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     sqlx::query("DROP TABLE IF EXISTS rustango_fk_nl_book CASCADE")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("DROP TABLE IF EXISTS rustango_fk_nl_author CASCADE")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query(
         r#"CREATE TABLE rustango_fk_nl_author (
               id BIGSERIAL PRIMARY KEY,
               name VARCHAR(64) NOT NULL
            )"#,
-    ).execute(&pool).await.unwrap();
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query(
         r#"CREATE TABLE rustango_fk_nl_book (
               id BIGSERIAL PRIMARY KEY,
               title VARCHAR(128) NOT NULL,
               author BIGINT NULL REFERENCES rustango_fk_nl_author (id)
            )"#,
-    ).execute(&pool).await.unwrap();
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     Some(pool)
 }
 
@@ -329,7 +353,10 @@ async fn nullable_fk_round_trip_with_some_and_none() {
         return;
     };
 
-    let mut alice = NlAuthor { id: Auto::default(), name: "alice".into() };
+    let mut alice = NlAuthor {
+        id: Auto::default(),
+        name: "alice".into(),
+    };
     alice.insert(&pool).await.unwrap();
     let alice_pk = match alice.id {
         Auto::Set(v) => v,
@@ -352,7 +379,9 @@ async fn nullable_fk_round_trip_with_some_and_none() {
 
     let rows: Vec<NlBook> = NlBook::objects()
         .order_by(&[("id", false)])
-        .fetch(&pool).await.unwrap();
+        .fetch(&pool)
+        .await
+        .unwrap();
     assert_eq!(rows.len(), 2);
     let by_title: std::collections::HashMap<String, NlBook> =
         rows.into_iter().map(|b| (b.title.clone(), b)).collect();
@@ -360,7 +389,10 @@ async fn nullable_fk_round_trip_with_some_and_none() {
     let authored = &by_title["Authored"];
     let anonymous = &by_title["Anonymous"];
 
-    assert!(authored.author.is_some(), "Authored book should keep its FK");
+    assert!(
+        authored.author.is_some(),
+        "Authored book should keep its FK"
+    );
     assert_eq!(
         authored.author.as_ref().unwrap().pk(),
         alice_pk,
@@ -370,7 +402,13 @@ async fn nullable_fk_round_trip_with_some_and_none() {
 
     // Lazy-load on the Some branch.
     let mut authored_mut = authored.clone();
-    let parent = authored_mut.author.as_mut().unwrap().get(&pool).await.unwrap();
+    let parent = authored_mut
+        .author
+        .as_mut()
+        .unwrap()
+        .get(&pool)
+        .await
+        .unwrap();
     assert_eq!(parent.name, "alice");
 }
 
@@ -392,7 +430,9 @@ async fn fresh_pool_i16() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     sqlx::query("DROP TABLE IF EXISTS rustango_i16_status CASCADE")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query(
         r#"CREATE TABLE rustango_i16_status (
               id BIGSERIAL PRIMARY KEY,
@@ -400,7 +440,10 @@ async fn fresh_pool_i16() -> Option<sqlx::PgPool> {
               label VARCHAR(64) NOT NULL,
               priority SMALLINT NULL
            )"#,
-    ).execute(&pool).await.unwrap();
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     Some(pool)
 }
 
@@ -437,7 +480,9 @@ async fn i16_field_round_trips_against_smallint() {
 
     let rows: Vec<StatusRow> = StatusRow::objects()
         .order_by(&[("id", false)])
-        .fetch(&pool).await.unwrap();
+        .fetch(&pool)
+        .await
+        .unwrap();
     assert_eq!(rows.len(), 3);
     let by_label: std::collections::HashMap<String, StatusRow> =
         rows.into_iter().map(|r| (r.label.clone(), r)).collect();

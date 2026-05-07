@@ -124,9 +124,7 @@ async fn login_handler(
     let (auth_url, flow) = provider.begin();
     let sealed = seal_flow(&flow, &state.flow_secret);
     // 5-minute window — if the user takes longer to log in we issue a fresh flow.
-    let cookie = format!(
-        "{FLOW_COOKIE}={sealed}; Path=/; HttpOnly; SameSite=Lax; Max-Age=300"
-    );
+    let cookie = format!("{FLOW_COOKIE}={sealed}; Path=/; HttpOnly; SameSite=Lax; Max-Age=300");
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
@@ -172,8 +170,7 @@ async fn callback_handler(
     let flow = match open_flow(&sealed, &state.flow_secret) {
         Ok(f) => f,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("invalid flow cookie: {e}"))
-                .into_response()
+            return (StatusCode::BAD_REQUEST, format!("invalid flow cookie: {e}")).into_response()
         }
     };
 
@@ -230,10 +227,7 @@ mod tests {
     #[tokio::test]
     async fn login_route_redirects_with_cookie_and_location() {
         let registry = OAuth2Registry::new();
-        registry.register(
-            "acme",
-            providers::google("cid", "csec", "https://app/cb"),
-        );
+        registry.register("acme", providers::google("cid", "csec", "https://app/cb"));
         let app = oauth2_router(registry, b"signing".to_vec(), dummy_success());
 
         let resp = app
@@ -247,7 +241,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-        let loc = resp.headers().get(header::LOCATION).unwrap().to_str().unwrap();
+        let loc = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(loc.contains("accounts.google.com"));
         let cookie = resp
             .headers()
@@ -279,10 +278,7 @@ mod tests {
     #[tokio::test]
     async fn callback_propagates_provider_error_param() {
         let registry = OAuth2Registry::new();
-        registry.register(
-            "acme",
-            providers::google("cid", "csec", "https://app/cb"),
-        );
+        registry.register("acme", providers::google("cid", "csec", "https://app/cb"));
         let app = oauth2_router(registry, b"signing".to_vec(), dummy_success());
 
         let resp = app
@@ -295,7 +291,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let body = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
         let body = std::str::from_utf8(&body).unwrap();
         assert!(body.contains("access_denied"));
     }
@@ -303,10 +301,7 @@ mod tests {
     #[tokio::test]
     async fn callback_without_cookie_rejects() {
         let registry = OAuth2Registry::new();
-        registry.register(
-            "acme",
-            providers::google("cid", "csec", "https://app/cb"),
-        );
+        registry.register("acme", providers::google("cid", "csec", "https://app/cb"));
         let app = oauth2_router(registry, b"signing".to_vec(), dummy_success());
         let resp = app
             .oneshot(
@@ -318,26 +313,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let body = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
         assert!(std::str::from_utf8(&body).unwrap().contains("flow cookie"));
     }
 
     #[tokio::test]
     async fn callback_with_tampered_cookie_rejects() {
         let registry = OAuth2Registry::new();
-        registry.register(
-            "acme",
-            providers::google("cid", "csec", "https://app/cb"),
-        );
+        registry.register("acme", providers::google("cid", "csec", "https://app/cb"));
         let app = oauth2_router(registry, b"signing".to_vec(), dummy_success());
         let resp = app
             .oneshot(
                 Request::builder()
                     .uri("/auth/acme/google/callback?code=abc&state=xyz")
-                    .header(
-                        header::COOKIE,
-                        format!("{FLOW_COOKIE}=garbage.value"),
-                    )
+                    .header(header::COOKIE, format!("{FLOW_COOKIE}=garbage.value"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -351,12 +342,11 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::COOKIE,
-            "session=abc; rustango_oauth_flow=xyz; theme=dark".parse().unwrap(),
+            "session=abc; rustango_oauth_flow=xyz; theme=dark"
+                .parse()
+                .unwrap(),
         );
-        assert_eq!(
-            read_cookie(&headers, FLOW_COOKIE).as_deref(),
-            Some("xyz")
-        );
+        assert_eq!(read_cookie(&headers, FLOW_COOKIE).as_deref(), Some("xyz"));
         assert!(read_cookie(&headers, "missing").is_none());
     }
 }

@@ -108,8 +108,16 @@ impl ContentType {
         model_name: &str,
     ) -> Result<Option<Self>, ExecError> {
         let rows: Vec<Self> = Self::objects()
-            .filter("app_label", crate::core::Op::Eq, SqlValue::String(app_label.into()))
-            .filter("model_name", crate::core::Op::Eq, SqlValue::String(model_name.into()))
+            .filter(
+                "app_label",
+                crate::core::Op::Eq,
+                SqlValue::String(app_label.into()),
+            )
+            .filter(
+                "model_name",
+                crate::core::Op::Eq,
+                SqlValue::String(model_name.into()),
+            )
             .limit(1)
             .fetch(pool)
             .await?;
@@ -198,16 +206,18 @@ impl GenericForeignKey {
         pool: &PgPool,
         object_pk: i64,
     ) -> Result<Self, ExecError> {
-        let ct = ContentType::for_model::<T>(pool)
-            .await?
-            .ok_or_else(|| ExecError::MissingPrimaryKey {
-                table: T::SCHEMA.table,
-            })?;
-        let id = ct.id.get().copied().ok_or_else(|| {
+        let ct = ContentType::for_model::<T>(pool).await?.ok_or_else(|| {
             ExecError::MissingPrimaryKey {
-                table: ContentType::SCHEMA.table,
+                table: T::SCHEMA.table,
             }
         })?;
+        let id = ct
+            .id
+            .get()
+            .copied()
+            .ok_or_else(|| ExecError::MissingPrimaryKey {
+                table: ContentType::SCHEMA.table,
+            })?;
         Ok(Self::new(id, object_pk))
     }
 }
@@ -336,8 +346,7 @@ where
         )
         .fetch(pool)
         .await?;
-    let mut grouped: ::std::collections::HashMap<i64, Vec<C>> =
-        ::std::collections::HashMap::new();
+    let mut grouped: ::std::collections::HashMap<i64, Vec<C>> = ::std::collections::HashMap::new();
     for child in children {
         let key = extract(&child);
         grouped.entry(key).or_default().push(child);
@@ -391,16 +400,19 @@ where
     // Resolve C's ContentType once — every (ct_id, pk) pair whose
     // ct_id doesn't match drops out of the result map (caller's
     // expectation: typed-target prefetch).
-    let target_ct = ContentType::for_model::<C>(pool)
-        .await?
+    let target_ct =
+        ContentType::for_model::<C>(pool)
+            .await?
+            .ok_or_else(|| ExecError::MissingPrimaryKey {
+                table: C::SCHEMA.table,
+            })?;
+    let target_ct_id = target_ct
+        .id
+        .get()
+        .copied()
         .ok_or_else(|| ExecError::MissingPrimaryKey {
-            table: C::SCHEMA.table,
-        })?;
-    let target_ct_id = target_ct.id.get().copied().ok_or_else(|| {
-        ExecError::MissingPrimaryKey {
             table: ContentType::SCHEMA.table,
-        }
-    })?;
+        })?;
 
     let mut wanted_pks: Vec<i64> = pairs
         .iter()
@@ -470,7 +482,10 @@ pub async fn ensure_seeded(pool: &PgPool) -> Result<usize, ExecError> {
         let app = entry.resolved_app_label().unwrap_or("project").to_owned();
         let name = entry.schema.name.to_ascii_lowercase();
         // Probe natural key first; skip if already seeded.
-        if ContentType::by_natural_key(pool, &app, &name).await?.is_some() {
+        if ContentType::by_natural_key(pool, &app, &name)
+            .await?
+            .is_some()
+        {
             continue;
         }
         let mut row = ContentType {

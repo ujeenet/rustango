@@ -76,7 +76,7 @@ pub struct Pair {
         name = "target",
         ct_column = "target_content_type_id",
         pk_column = "target_object_pk",
-    ),
+    )
 )]
 #[allow(dead_code)]
 pub struct ActivityEntry {
@@ -393,14 +393,10 @@ async fn prefetch_soft_groups_children_by_fk_value() {
     }
 
     let parent_pks = vec![p1_id, p2_id];
-    let by_post = contenttypes::prefetch_soft::<Comment, _>(
-        &pool,
-        &parent_pks,
-        "post_id",
-        |c| c.post_id,
-    )
-    .await
-    .expect("prefetch_soft");
+    let by_post =
+        contenttypes::prefetch_soft::<Comment, _>(&pool, &parent_pks, "post_id", |c| c.post_id)
+            .await
+            .expect("prefetch_soft");
 
     let p1_kids = by_post.get(&p1_id).expect("p1 has kids");
     assert_eq!(p1_kids.len(), 2);
@@ -416,14 +412,9 @@ async fn prefetch_soft_short_circuits_on_empty_parent_list() {
         eprintln!("DATABASE_URL unset — skipping");
         return;
     };
-    let by_post = contenttypes::prefetch_soft::<Comment, _>(
-        &pool,
-        &[],
-        "post_id",
-        |c| c.post_id,
-    )
-    .await
-    .expect("prefetch_soft");
+    let by_post = contenttypes::prefetch_soft::<Comment, _>(&pool, &[], "post_id", |c| c.post_id)
+        .await
+        .expect("prefetch_soft");
     assert!(by_post.is_empty());
 }
 
@@ -484,11 +475,15 @@ async fn prefetch_generic_hydrates_typed_targets() {
         "should hydrate both posts and ignore the user-typed pair"
     );
     assert_eq!(
-        posts.get(&(g_p1.content_type_id, p1_pk)).map(|p| p.title.as_str()),
+        posts
+            .get(&(g_p1.content_type_id, p1_pk))
+            .map(|p| p.title.as_str()),
         Some("alpha")
     );
     assert_eq!(
-        posts.get(&(g_p2.content_type_id, p2_pk)).map(|p| p.title.as_str()),
+        posts
+            .get(&(g_p2.content_type_id, p2_pk))
+            .map(|p| p.title.as_str()),
         Some("beta")
     );
     assert!(

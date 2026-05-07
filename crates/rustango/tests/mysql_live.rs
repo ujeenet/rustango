@@ -87,7 +87,10 @@ async fn auto_pk_insert_pool_round_trips() {
     // LAST_INSERT_ID() — first row → 1.
     assert_eq!(u.id.get().copied(), Some(1));
 
-    let n = LiveUser::objects().count_pool(&pool).await.expect("count_pool");
+    let n = LiveUser::objects()
+        .count_pool(&pool)
+        .await
+        .expect("count_pool");
     assert_eq!(n, 1);
 }
 
@@ -133,8 +136,7 @@ async fn save_pool_updates_existing_row() {
     u.name = "Carol".into();
     u.save_pool(&pool).await.expect("save_pool");
 
-    let users: Vec<LiveUser> =
-        LiveUser::objects().fetch_pool(&pool).await.expect("fetch");
+    let users: Vec<LiveUser> = LiveUser::objects().fetch_pool(&pool).await.expect("fetch");
     assert_eq!(users[0].name, "Carol");
 }
 
@@ -194,10 +196,10 @@ async fn audited_save_pool_emits_diff_audit_row() {
     .expect("audit row");
     let op: String = row.try_get("operation").expect("operation col");
     assert_eq!(op, "update");
-    let changes: serde_json::Value =
-        row.try_get::<sqlx::types::Json<serde_json::Value>, _>("changes")
-            .expect("changes col")
-            .0;
+    let changes: serde_json::Value = row
+        .try_get::<sqlx::types::Json<serde_json::Value>, _>("changes")
+        .expect("changes col")
+        .0;
     let name_diff = &changes["name"];
     assert_eq!(name_diff["before"], serde_json::json!("before"));
     assert_eq!(name_diff["after"], serde_json::json!("after"));
@@ -216,14 +218,12 @@ async fn transaction_pool_commit_persists() {
         .expect("begin tx");
     match tx {
         PoolTx::Mysql(mut t) => {
-            sqlx::query(
-                "INSERT INTO `live_users` (`name`, `is_active`) VALUES (?, ?)",
-            )
-            .bind("inside-tx")
-            .bind(true)
-            .execute(&mut *t)
-            .await
-            .expect("insert in tx");
+            sqlx::query("INSERT INTO `live_users` (`name`, `is_active`) VALUES (?, ?)")
+                .bind("inside-tx")
+                .bind(true)
+                .execute(&mut *t)
+                .await
+                .expect("insert in tx");
             // Commit via the wrapper.
             PoolTx::Mysql(t).commit().await.expect("commit");
         }
@@ -231,10 +231,7 @@ async fn transaction_pool_commit_persists() {
         _ => unreachable!("test runs with mysql feature"),
     }
 
-    let n = LiveUser::objects()
-        .count_pool(&pool)
-        .await
-        .expect("count");
+    let n = LiveUser::objects().count_pool(&pool).await.expect("count");
     assert_eq!(n, 1);
 }
 

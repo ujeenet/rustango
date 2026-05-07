@@ -151,8 +151,10 @@ pub fn make_migrations_scoped(
         return Ok(None);
     }
 
-    let suffix =
-        name_override.map_or_else(|| auto_name(&changes, prior_scoped.is_empty()), str::to_owned);
+    let suffix = name_override.map_or_else(
+        || auto_name(&changes, prior_scoped.is_empty()),
+        str::to_owned,
+    );
     let name = format!("{next_index:04}_{suffix}");
     let created_at = chrono::Utc::now().to_rfc3339();
 
@@ -240,7 +242,12 @@ pub fn make_migrations_from(
 }
 
 fn empty_snapshot() -> SchemaSnapshot {
-    SchemaSnapshot { tables: vec![], m2m_tables: vec![], indexes: vec![], checks: vec![] }
+    SchemaSnapshot {
+        tables: vec![],
+        m2m_tables: vec![],
+        indexes: vec![],
+        checks: vec![],
+    }
 }
 
 fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
@@ -374,7 +381,7 @@ mod tests {
     // partitioning helpers without touching the global inventory.
 
     use crate::core::ModelScope;
-    use crate::migrate::snapshot::{TableSnapshot, FieldSnapshot, SchemaSnapshot};
+    use crate::migrate::snapshot::{FieldSnapshot, SchemaSnapshot, TableSnapshot};
     use crate::migrate::MigrationScope;
 
     fn snap_with(tables: Vec<TableSnapshot>) -> SchemaSnapshot {

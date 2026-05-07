@@ -64,7 +64,10 @@ impl IpFilterLayer {
         S: AsRef<str>,
     {
         let nets = parse_all(nets)?;
-        Ok(Self { mode: Mode::AllowOnly(nets), allow_no_ip: false })
+        Ok(Self {
+            mode: Mode::AllowOnly(nets),
+            allow_no_ip: false,
+        })
     }
 
     /// BLOCK these CIDR ranges or single IPs. All others pass.
@@ -77,7 +80,10 @@ impl IpFilterLayer {
         S: AsRef<str>,
     {
         let nets = parse_all(nets)?;
-        Ok(Self { mode: Mode::Block(nets), allow_no_ip: true })
+        Ok(Self {
+            mode: Mode::Block(nets),
+            allow_no_ip: true,
+        })
     }
 
     /// When `true`, requests without `ConnectInfo` are allowed through.
@@ -145,12 +151,8 @@ enum CidrRange {
 impl CidrRange {
     fn contains(&self, ip: IpAddr) -> bool {
         match (self, ip) {
-            (Self::V4 { addr, mask }, IpAddr::V4(v4)) => {
-                u32::from(v4) & mask == *addr & mask
-            }
-            (Self::V6 { addr, mask }, IpAddr::V6(v6)) => {
-                u128::from(v6) & mask == *addr & mask
-            }
+            (Self::V4 { addr, mask }, IpAddr::V4(v4)) => u32::from(v4) & mask == *addr & mask,
+            (Self::V6 { addr, mask }, IpAddr::V6(v6)) => u128::from(v6) & mask == *addr & mask,
             _ => false, // address family mismatch
         }
     }
@@ -184,8 +186,15 @@ fn parse_cidr(s: &str) -> Result<CidrRange, IpFilterError> {
             if bits > 32 {
                 return Err(IpFilterError::InvalidCidr(s.to_owned()));
             }
-            let mask = if bits == 0 { 0 } else { u32::MAX << (32 - bits) };
-            Ok(CidrRange::V4 { addr: u32::from(v4) & mask, mask })
+            let mask = if bits == 0 {
+                0
+            } else {
+                u32::MAX << (32 - bits)
+            };
+            Ok(CidrRange::V4 {
+                addr: u32::from(v4) & mask,
+                mask,
+            })
         }
         IpAddr::V6(v6) => {
             let bits: u32 = match prefix {
@@ -197,8 +206,15 @@ fn parse_cidr(s: &str) -> Result<CidrRange, IpFilterError> {
             if bits > 128 {
                 return Err(IpFilterError::InvalidCidr(s.to_owned()));
             }
-            let mask = if bits == 0 { 0u128 } else { u128::MAX << (128 - bits) };
-            Ok(CidrRange::V6 { addr: u128::from(v6) & mask, mask })
+            let mask = if bits == 0 {
+                0u128
+            } else {
+                u128::MAX << (128 - bits)
+            };
+            Ok(CidrRange::V6 {
+                addr: u128::from(v6) & mask,
+                mask,
+            })
         }
     }
 }

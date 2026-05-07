@@ -54,7 +54,7 @@ pub struct StorageRegistry {
 #[derive(Default)]
 struct RegistryInner {
     disks: HashMap<String, BoxedStorage>,
-    cdns: HashMap<String, String>,    // disk -> CDN base URL
+    cdns: HashMap<String, String>, // disk -> CDN base URL
     default_name: Option<String>,
 }
 
@@ -70,7 +70,9 @@ impl StorageRegistry {
     pub fn set(self, name: impl Into<String>, storage: BoxedStorage) -> Self {
         let mut inner = (*self.inner).rebuild();
         inner.disks.insert(name.into(), storage);
-        Self { inner: Arc::new(inner) }
+        Self {
+            inner: Arc::new(inner),
+        }
     }
 
     /// Set the CDN base URL for a disk. The URL is joined with `/` +
@@ -82,7 +84,9 @@ impl StorageRegistry {
         let mut inner = (*self.inner).rebuild();
         let base = base.into().trim_end_matches('/').to_owned();
         inner.cdns.insert(disk.into(), base);
-        Self { inner: Arc::new(inner) }
+        Self {
+            inner: Arc::new(inner),
+        }
     }
 
     /// Mark `name` as the default disk. `default_disk()` returns it +
@@ -93,7 +97,9 @@ impl StorageRegistry {
     pub fn with_default(self, name: impl Into<String>) -> Self {
         let mut inner = (*self.inner).rebuild();
         inner.default_name = Some(name.into());
-        Self { inner: Arc::new(inner) }
+        Self {
+            inner: Arc::new(inner),
+        }
     }
 
     /// Resolve a disk by name. Returns `None` for unknown names.
@@ -338,7 +344,10 @@ mod tests {
             .set("z", mem())
             .set("a", mem())
             .set("m", mem());
-        assert_eq!(r.names(), vec!["a".to_owned(), "m".to_owned(), "z".to_owned()]);
+        assert_eq!(
+            r.names(),
+            vec!["a".to_owned(), "m".to_owned(), "z".to_owned()]
+        );
     }
 
     #[test]

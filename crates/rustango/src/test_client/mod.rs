@@ -203,8 +203,15 @@ impl TestResponse {
             .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
             .collect();
         // Use a generous limit (16 MiB) for test responses
-        let body = to_bytes(body, 16 * 1024 * 1024).await.unwrap_or_default().to_vec();
-        Self { status, headers, body }
+        let body = to_bytes(body, 16 * 1024 * 1024)
+            .await
+            .unwrap_or_default()
+            .to_vec();
+        Self {
+            status,
+            headers,
+            body,
+        }
     }
 
     /// True when the status is 2xx.
@@ -223,8 +230,12 @@ impl TestResponse {
     /// (call this in tests where you want loud failures).
     #[must_use]
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> T {
-        serde_json::from_slice(&self.body)
-            .unwrap_or_else(|e| panic!("response body is not valid JSON: {e}\nbody: {}", self.text()))
+        serde_json::from_slice(&self.body).unwrap_or_else(|e| {
+            panic!(
+                "response body is not valid JSON: {e}\nbody: {}",
+                self.text()
+            )
+        })
     }
 
     /// Body parsed as a generic JSON value (no panic — returns Value::Null on parse error).
@@ -275,12 +286,21 @@ mod tests {
                     axum::Json(json!({"received": body.0}))
                 }),
             )
-            .route("/status/{code}", get(|axum::extract::Path(code): axum::extract::Path<u16>| async move {
-                axum::http::StatusCode::from_u16(code).unwrap_or(axum::http::StatusCode::OK)
-            }))
-            .route("/header_check", get(|h: axum::http::HeaderMap| async move {
-                h.get("x-custom").map_or("missing".to_owned(), |v| v.to_str().unwrap().to_owned())
-            }))
+            .route(
+                "/status/{code}",
+                get(
+                    |axum::extract::Path(code): axum::extract::Path<u16>| async move {
+                        axum::http::StatusCode::from_u16(code).unwrap_or(axum::http::StatusCode::OK)
+                    },
+                ),
+            )
+            .route(
+                "/header_check",
+                get(|h: axum::http::HeaderMap| async move {
+                    h.get("x-custom")
+                        .map_or("missing".to_owned(), |v| v.to_str().unwrap().to_owned())
+                }),
+            )
     }
 
     #[tokio::test]
@@ -312,7 +332,11 @@ mod tests {
     #[tokio::test]
     async fn header_round_trip() {
         let c = TestClient::new(app());
-        let r = c.get("/header_check").header("x-custom", "value42").send().await;
+        let r = c
+            .get("/header_check")
+            .header("x-custom", "value42")
+            .send()
+            .await;
         assert_eq!(r.text(), "value42");
     }
 
@@ -343,7 +367,11 @@ mod tests {
     #[tokio::test]
     async fn form_body_encodes_correctly() {
         let c = TestClient::new(app());
-        let r = c.post("/echo").form(&[("name", "alice & bob"), ("age", "30")]).send().await;
+        let r = c
+            .post("/echo")
+            .form(&[("name", "alice & bob"), ("age", "30")])
+            .send()
+            .await;
         let text = r.text();
         assert!(text.contains("name=alice%20%26%20bob"));
         assert!(text.contains("age=30"));

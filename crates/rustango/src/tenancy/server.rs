@@ -32,16 +32,16 @@
 use std::io::Write;
 use std::sync::Arc;
 
+use crate::sql::sqlx::PgPool;
 use axum::body::Body;
 use axum::http::{header, Request, Response};
-use crate::sql::sqlx::PgPool;
 use tower::ServiceExt as _;
 
-use crate::tenancy::admin::TenantAdminBuilder;
 use super::error::TenancyError;
 use super::operator_console::{self, SessionSecret};
 use super::pools::TenantPools;
 use super::resolver::ChainResolver;
+use crate::tenancy::admin::TenantAdminBuilder;
 
 /// Defaults for `manage run-server`. All fields are env-overridable;
 /// the struct is exposed so programmatic callers can tweak them.
@@ -57,10 +57,7 @@ impl Default for ServerConfig {
         Self {
             bind: "0.0.0.0:8080".into(),
             apex_domain: "localhost".into(),
-            operator_show_only: vec![
-                "rustango_orgs".into(),
-                "rustango_operators".into(),
-            ],
+            operator_show_only: vec!["rustango_orgs".into(), "rustango_operators".into()],
         }
     }
 }

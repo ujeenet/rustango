@@ -94,15 +94,13 @@ mod tests {
     use tower::ServiceExt;
 
     fn sample_spec() -> OpenApiSpec {
-        OpenApiSpec::new("Demo", "1.2.3")
-            .add_path(
-                "/ping",
-                PathItem::new().get(
-                    Operation::new()
-                        .summary("Ping")
-                        .response("200", OpenApiResponse::new("pong").json_content(Schema::string())),
-                ),
-            )
+        OpenApiSpec::new("Demo", "1.2.3").add_path(
+            "/ping",
+            PathItem::new().get(Operation::new().summary("Ping").response(
+                "200",
+                OpenApiResponse::new("pong").json_content(Schema::string()),
+            )),
+        )
     }
 
     #[tokio::test]
@@ -126,7 +124,9 @@ mod tests {
                 .unwrap(),
             "application/json; charset=utf-8"
         );
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["info"]["title"], "Demo");
         assert_eq!(v["info"]["version"], "1.2.3");
@@ -141,7 +141,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
         let body = std::str::from_utf8(&bytes).unwrap();
         assert!(body.contains("swagger-ui"));
         assert!(body.contains("/openapi.json"));
@@ -151,11 +153,18 @@ mod tests {
     async fn redoc_serves_redoc_html() {
         let app = openapi_router(sample_spec());
         let resp = app
-            .oneshot(Request::builder().uri("/redoc").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/redoc")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
         let body = std::str::from_utf8(&bytes).unwrap();
         assert!(body.contains("redoc"));
         assert!(body.contains("/openapi.json"));

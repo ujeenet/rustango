@@ -90,7 +90,9 @@ where
     T: FromStr,
     T::Err: std::fmt::Display,
 {
-    let Some(raw) = lookup(name) else { return Ok(default) };
+    let Some(raw) = lookup(name) else {
+        return Ok(default);
+    };
     raw.parse::<T>().map_err(|e| EnvError::Parse {
         name: name.to_owned(),
         ty: std::any::type_name::<T>(),
@@ -107,7 +109,9 @@ where
     T: FromStr,
     T::Err: std::fmt::Display,
 {
-    let Some(raw) = lookup(name) else { return Ok(None) };
+    let Some(raw) = lookup(name) else {
+        return Ok(None);
+    };
     raw.parse::<T>().map(Some).map_err(|e| EnvError::Parse {
         name: name.to_owned(),
         ty: std::any::type_name::<T>(),
@@ -127,7 +131,9 @@ where
     T: FromStr,
     T::Err: std::fmt::Display,
 {
-    let Some(raw) = lookup(name) else { return Ok(None) };
+    let Some(raw) = lookup(name) else {
+        return Ok(None);
+    };
     let mut out = Vec::new();
     for part in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let v = part.parse::<T>().map_err(|e| EnvError::Parse {
@@ -617,10 +623,14 @@ mod tests {
 
     #[test]
     fn list_parses_comma_separated() {
-        with_env("RUSTANGO_TEST_HOSTS", "a.example.com, b.example.com,c.example.com", || {
-            let v: Vec<String> = list("RUSTANGO_TEST_HOSTS").unwrap().unwrap();
-            assert_eq!(v, vec!["a.example.com", "b.example.com", "c.example.com"]);
-        });
+        with_env(
+            "RUSTANGO_TEST_HOSTS",
+            "a.example.com, b.example.com,c.example.com",
+            || {
+                let v: Vec<String> = list("RUSTANGO_TEST_HOSTS").unwrap().unwrap();
+                assert_eq!(v, vec!["a.example.com", "b.example.com", "c.example.com"]);
+            },
+        );
     }
 
     #[test]
@@ -675,8 +685,7 @@ mod tests {
     #[test]
     fn validator_check_lists_missing_required() {
         without_env("RUSTANGO_TEST_MISSING_REQ", || {
-            let v = Validator::new()
-                .require("RUSTANGO_TEST_MISSING_REQ", "needed for X");
+            let v = Validator::new().require("RUSTANGO_TEST_MISSING_REQ", "needed for X");
             let missing = v.check();
             assert_eq!(missing.len(), 1);
             assert_eq!(missing[0].name, "RUSTANGO_TEST_MISSING_REQ");
@@ -694,8 +703,7 @@ mod tests {
     #[test]
     fn validator_check_or_error_returns_formatted_message() {
         without_env("RUSTANGO_TEST_FORMAT_REQ", || {
-            let v = Validator::new()
-                .require("RUSTANGO_TEST_FORMAT_REQ", "Postgres URL");
+            let v = Validator::new().require("RUSTANGO_TEST_FORMAT_REQ", "Postgres URL");
             let err = v.check_or_error().unwrap_err();
             assert!(err.contains("RUSTANGO_TEST_FORMAT_REQ"));
             assert!(err.contains("Postgres URL"));
@@ -734,7 +742,10 @@ mod tests {
             .database("app")
             .params("sslmode=require")
             .build();
-        assert_eq!(url, "postgres://svc:secret@db.internal:6543/app?sslmode=require");
+        assert_eq!(
+            url,
+            "postgres://svc:secret@db.internal:6543/app?sslmode=require"
+        );
     }
 
     #[test]
@@ -745,7 +756,10 @@ mod tests {
             .password("p@ss:/word#?%")
             .database("db")
             .build();
-        assert_eq!(url, "postgres://u:p%40ss%3A%2Fword%23%3F%25@localhost:5432/db");
+        assert_eq!(
+            url,
+            "postgres://u:p%40ss%3A%2Fword%23%3F%25@localhost:5432/db"
+        );
     }
 
     #[test]
@@ -779,10 +793,7 @@ mod tests {
     }
     impl EnvSnapshot {
         fn capture(names: &[&'static str]) -> Self {
-            let saved = names
-                .iter()
-                .map(|n| (*n, std::env::var(n).ok()))
-                .collect();
+            let saved = names.iter().map(|n| (*n, std::env::var(n).ok())).collect();
             for n in names {
                 std::env::remove_var(n);
             }

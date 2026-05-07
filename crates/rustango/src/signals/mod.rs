@@ -95,7 +95,9 @@ fn insert_receiver<R: Any + Send + Sync>(key: (TypeId, SignalKind), receiver: R)
 
 fn remove_receiver(key: (TypeId, SignalKind), id: ReceiverId) -> bool {
     let mut reg = registry().write().expect("signals registry poisoned");
-    let Some(bag) = reg.get_mut(&key) else { return false };
+    let Some(bag) = reg.get_mut(&key) else {
+        return false;
+    };
     let before = bag.len();
     bag.retain(|(rid, _)| *rid != id);
     bag.len() != before
@@ -106,7 +108,9 @@ fn remove_receiver(key: (TypeId, SignalKind), id: ReceiverId) -> bool {
 /// across await points.
 fn snapshot<R: Any + Send + Sync + Clone>(key: (TypeId, SignalKind)) -> Vec<R> {
     let reg = registry().read().expect("signals registry poisoned");
-    let Some(bag) = reg.get(&key) else { return Vec::new() };
+    let Some(bag) = reg.get(&key) else {
+        return Vec::new();
+    };
     bag.iter()
         .filter_map(|(_, b)| b.downcast_ref::<R>().cloned())
         .collect()
@@ -251,7 +255,10 @@ pub async fn send_post_delete<T: Model + Clone + 'static>(instance: &T) {
 /// Useful in tests to reset registry state between cases. Production
 /// code rarely needs this.
 pub fn clear_all() {
-    registry().write().expect("signals registry poisoned").clear();
+    registry()
+        .write()
+        .expect("signals registry poisoned")
+        .clear();
 }
 
 /// Number of currently registered receivers across all signals for `T`.
@@ -259,9 +266,13 @@ pub fn clear_all() {
 pub fn receiver_count<T: Model + 'static>() -> usize {
     let reg = registry().read().expect("signals registry poisoned");
     let id = TypeId::of::<T>();
-    [SignalKind::PreSave, SignalKind::PostSave, SignalKind::PreDelete, SignalKind::PostDelete]
-        .iter()
-        .map(|kind| reg.get(&(id, *kind)).map_or(0, Vec::len))
-        .sum()
+    [
+        SignalKind::PreSave,
+        SignalKind::PostSave,
+        SignalKind::PreDelete,
+        SignalKind::PostDelete,
+    ]
+    .iter()
+    .map(|kind| reg.get(&(id, *kind)).map_or(0, Vec::len))
+    .sum()
 }
-

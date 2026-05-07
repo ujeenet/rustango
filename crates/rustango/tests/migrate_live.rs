@@ -377,7 +377,10 @@ async fn bulk_insert_auto_model_mixed_set_unset_is_rejected() {
 
     let err = AutoUser::bulk_insert(&mut rows, &pool).await.unwrap_err();
     let msg = format!("{err}");
-    assert!(msg.contains("mixed Set/Unset") || msg.contains("Auto"), "got: {msg}");
+    assert!(
+        msg.contains("mixed Set/Unset") || msg.contains("Auto"),
+        "got: {msg}"
+    );
 
     // No rows should have been inserted.
     let fetched: Vec<AutoUser> = AutoUser::objects().fetch(&pool).await.unwrap();

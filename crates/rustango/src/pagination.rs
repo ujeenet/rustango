@@ -59,12 +59,15 @@ impl LinkHeaderBuilder {
     pub fn with_page_info(mut self, info: PageInfo) -> Self {
         if info.total_pages > 1 {
             self.rels.push(("first".into(), "1".into()));
-            self.rels.push(("last".into(), info.total_pages.to_string()));
+            self.rels
+                .push(("last".into(), info.total_pages.to_string()));
             if info.current_page > 1 {
-                self.rels.push(("prev".into(), (info.current_page - 1).to_string()));
+                self.rels
+                    .push(("prev".into(), (info.current_page - 1).to_string()));
             }
             if info.current_page < info.total_pages {
-                self.rels.push(("next".into(), (info.current_page + 1).to_string()));
+                self.rels
+                    .push(("next".into(), (info.current_page + 1).to_string()));
             }
         }
         self
@@ -80,7 +83,8 @@ impl LinkHeaderBuilder {
     /// Add a cursor-style rel: `?cursor=<token>`.
     #[must_use]
     pub fn cursor_rel(mut self, rel: impl Into<String>, cursor: impl Into<String>) -> Self {
-        self.rels.push((format!("cursor:{}", rel.into()), cursor.into()));
+        self.rels
+            .push((format!("cursor:{}", rel.into()), cursor.into()));
         self
     }
 
@@ -295,7 +299,10 @@ mod tests {
     #[test]
     fn page_info_middle_emits_all_four_rels() {
         let h = LinkHeaderBuilder::new("/api/posts")
-            .with_page_info(PageInfo { current_page: 3, total_pages: 5 })
+            .with_page_info(PageInfo {
+                current_page: 3,
+                total_pages: 5,
+            })
             .build();
         assert!(h.contains(r#"rel="first""#));
         assert!(h.contains(r#"rel="prev""#));
@@ -308,7 +315,10 @@ mod tests {
     #[test]
     fn page_info_first_page_omits_prev() {
         let h = LinkHeaderBuilder::new("/api/posts")
-            .with_page_info(PageInfo { current_page: 1, total_pages: 5 })
+            .with_page_info(PageInfo {
+                current_page: 1,
+                total_pages: 5,
+            })
             .build();
         assert!(!h.contains(r#"rel="prev""#));
         assert!(h.contains(r#"rel="next""#));
@@ -317,7 +327,10 @@ mod tests {
     #[test]
     fn page_info_last_page_omits_next() {
         let h = LinkHeaderBuilder::new("/api/posts")
-            .with_page_info(PageInfo { current_page: 5, total_pages: 5 })
+            .with_page_info(PageInfo {
+                current_page: 5,
+                total_pages: 5,
+            })
             .build();
         assert!(h.contains(r#"rel="prev""#));
         assert!(!h.contains(r#"rel="next""#));
@@ -326,7 +339,10 @@ mod tests {
     #[test]
     fn page_info_single_page_emits_nothing() {
         let h = LinkHeaderBuilder::new("/api/posts")
-            .with_page_info(PageInfo { current_page: 1, total_pages: 1 })
+            .with_page_info(PageInfo {
+                current_page: 1,
+                total_pages: 1,
+            })
             .build();
         assert_eq!(h, "");
     }
@@ -335,7 +351,10 @@ mod tests {
     fn keep_param_preserves_filter() {
         let h = LinkHeaderBuilder::new("/api/posts")
             .keep_param("search", "rust")
-            .with_page_info(PageInfo { current_page: 1, total_pages: 3 })
+            .with_page_info(PageInfo {
+                current_page: 1,
+                total_pages: 3,
+            })
             .build();
         assert!(h.contains("search=rust"));
         assert!(h.contains("page=2"));
@@ -369,7 +388,10 @@ mod tests {
     #[test]
     fn multiple_entries_comma_separated() {
         let h = LinkHeaderBuilder::new("/api/posts")
-            .with_page_info(PageInfo { current_page: 2, total_pages: 5 })
+            .with_page_info(PageInfo {
+                current_page: 2,
+                total_pages: 5,
+            })
             .build();
         // Should be a single comma-separated string
         let count = h.matches("rel=").count();

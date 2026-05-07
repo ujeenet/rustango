@@ -80,14 +80,8 @@ impl IntoResponse for CsvResponse {
             HeaderValue::from_static("text/csv; charset=utf-8"),
         );
         let disposition = match (&self.filename, self.attachment) {
-            (Some(name), true) => format!(
-                "attachment; filename=\"{}\"",
-                escape_filename(name)
-            ),
-            (Some(name), false) => format!(
-                "inline; filename=\"{}\"",
-                escape_filename(name)
-            ),
+            (Some(name), true) => format!("attachment; filename=\"{}\"", escape_filename(name)),
+            (Some(name), false) => format!("inline; filename=\"{}\"", escape_filename(name)),
             (None, true) => "attachment".to_owned(),
             (None, false) => "inline".to_owned(),
         };
@@ -125,11 +119,19 @@ mod tests {
         let resp = CsvResponse::new(writer()).into_response();
         assert_eq!(resp.status(), 200);
         assert_eq!(
-            resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap(),
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "text/csv; charset=utf-8"
         );
         assert_eq!(
-            resp.headers().get(header::CONTENT_DISPOSITION).unwrap().to_str().unwrap(),
+            resp.headers()
+                .get(header::CONTENT_DISPOSITION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "attachment"
         );
         let bytes = to_bytes(resp.into_body(), 1 << 16).await.unwrap();
@@ -144,7 +146,11 @@ mod tests {
             .filename("users.csv")
             .into_response();
         assert_eq!(
-            resp.headers().get(header::CONTENT_DISPOSITION).unwrap().to_str().unwrap(),
+            resp.headers()
+                .get(header::CONTENT_DISPOSITION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "attachment; filename=\"users.csv\""
         );
     }
@@ -153,7 +159,11 @@ mod tests {
     async fn inline_changes_disposition_type() {
         let resp = CsvResponse::new(writer()).inline().into_response();
         assert_eq!(
-            resp.headers().get(header::CONTENT_DISPOSITION).unwrap().to_str().unwrap(),
+            resp.headers()
+                .get(header::CONTENT_DISPOSITION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "inline"
         );
     }
@@ -169,10 +179,7 @@ mod tests {
             .unwrap()
             .to_str()
             .unwrap();
-        assert_eq!(
-            v,
-            r#"attachment; filename="oddly named \"users\".csv""#
-        );
+        assert_eq!(v, r#"attachment; filename="oddly named \"users\".csv""#);
     }
 
     #[tokio::test]

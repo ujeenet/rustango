@@ -76,8 +76,7 @@ const DEFAULT_BODY_LIMIT: usize = 10 * 1024 * 1024;
 /// Closure that maps `key_id` → `Option<secret>`. Implementors typically
 /// look up the key in a DB / cache. Returning `None` rejects the
 /// request with 401.
-pub type KeyResolver =
-    Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
+pub type KeyResolver = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct HmacAuthLayer {
@@ -254,9 +253,7 @@ fn parse_auth(value: &str) -> Option<ParsedAuth> {
             key_id = Some(v.trim_matches('"').to_owned());
         } else if let Some(v) = pair.strip_prefix("signature=") {
             let raw = v.trim_matches('"');
-            signature = base64::engine::general_purpose::STANDARD
-                .decode(raw)
-                .ok();
+            signature = base64::engine::general_purpose::STANDARD.decode(raw).ok();
         }
     }
     Some(ParsedAuth {
@@ -359,7 +356,13 @@ mod tests {
     use tower::{Layer, ServiceExt};
 
     fn resolver_for(key: &'static str, secret: &'static [u8]) -> KeyResolver {
-        Arc::new(move |k| if k == key { Some(secret.to_vec()) } else { None })
+        Arc::new(move |k| {
+            if k == key {
+                Some(secret.to_vec())
+            } else {
+                None
+            }
+        })
     }
 
     fn app() -> Router {
@@ -372,7 +375,13 @@ mod tests {
         )
     }
 
-    fn build_signed(method: &str, path_query: &str, body: &[u8], key_id: &str, secret: &[u8]) -> Request<Body> {
+    fn build_signed(
+        method: &str,
+        path_query: &str,
+        body: &[u8],
+        key_id: &str,
+        secret: &[u8],
+    ) -> Request<Body> {
         // Split path + query from a "/r?x=1" style input.
         let (path, query) = path_query.split_once('?').unwrap_or((path_query, ""));
         let (date, auth) = sign_now(key_id, secret, method, path, query, body);
@@ -478,8 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn old_date_rejected_outside_tolerance() {
-        let layer = HmacAuthLayer::new(resolver_for("k1", b"secret"))
-            .tolerance_secs(60); // 1 min
+        let layer = HmacAuthLayer::new(resolver_for("k1", b"secret")).tolerance_secs(60); // 1 min
         let svc = layer.layer(app().into_service::<Body>());
         // Sign with a date 10 min in the past.
         let old = (chrono::Utc::now() - chrono::Duration::minutes(10))

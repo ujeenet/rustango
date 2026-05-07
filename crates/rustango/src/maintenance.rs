@@ -179,10 +179,7 @@ fn build_503(cfg: &MaintenanceLayer) -> Response<Body> {
     if let Ok(v) = HeaderValue::from_str(&secs) {
         h.insert(header::RETRY_AFTER, v);
     }
-    h.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     resp
 }
 
@@ -229,14 +226,24 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(resp.headers().get(header::RETRY_AFTER).is_some());
         assert_eq!(
-            resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap(),
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "application/json"
         );
         assert_eq!(
-            resp.headers().get(header::CACHE_CONTROL).unwrap().to_str().unwrap(),
+            resp.headers()
+                .get(header::CACHE_CONTROL)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "no-store"
         );
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["error"], "under maintenance");
     }
@@ -319,7 +326,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["eta_minutes"], 2);
     }
@@ -329,9 +338,7 @@ mod tests {
         let flag = MaintenanceFlag::with_state(true);
         let app = Router::new()
             .route("/", get(|| async { "ok" }))
-            .maintenance(
-                MaintenanceLayer::new(flag).retry_after(Duration::from_secs(123)),
-            );
+            .maintenance(MaintenanceLayer::new(flag).retry_after(Duration::from_secs(123)));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -341,7 +348,12 @@ mod tests {
             )
             .await
             .unwrap();
-        let v = resp.headers().get(header::RETRY_AFTER).unwrap().to_str().unwrap();
+        let v = resp
+            .headers()
+            .get(header::RETRY_AFTER)
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert_eq!(v, "123");
     }
 

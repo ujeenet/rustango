@@ -302,7 +302,10 @@ impl HistogramInner {
     }
 
     fn bucket_counts(&self) -> Vec<u64> {
-        self.counts.iter().map(|a| a.load(Ordering::Relaxed)).collect()
+        self.counts
+            .iter()
+            .map(|a| a.load(Ordering::Relaxed))
+            .collect()
     }
     fn total_count(&self) -> u64 {
         self.total.load(Ordering::Relaxed)
@@ -349,7 +352,10 @@ pub fn metrics_router(reg: MetricsRegistry) -> axum::Router {
         let body = reg.render();
         Response::builder()
             .status(200)
-            .header(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")
+            .header(
+                header::CONTENT_TYPE,
+                "text/plain; version=0.0.4; charset=utf-8",
+            )
             .body(axum::body::Body::from(body))
             .unwrap_or_else(|_| Response::new(axum::body::Body::empty()))
     }
@@ -479,7 +485,10 @@ mod tests {
         let s = r.render();
         assert!(s.contains("# TYPE dur histogram"));
         // Bucket 0.1 saw the 0.05 observation only.
-        assert!(s.contains(r#"dur_bucket{le="0.1",op="ping"} 1"#), "got: {s}");
+        assert!(
+            s.contains(r#"dur_bucket{le="0.1",op="ping"} 1"#),
+            "got: {s}"
+        );
         // Bucket 1 saw both.
         assert!(s.contains(r#"dur_bucket{le="1",op="ping"} 2"#));
         // +Inf bucket equals total_count.
@@ -495,10 +504,7 @@ mod tests {
         r.counter("custom", &[("path", r#"/a"b\c"#)]).inc();
         let s = r.render();
         // " -> \", \ -> \\
-        assert!(
-            s.contains(r#"custom{path="/a\"b\\c"} 1"#),
-            "got: {s}"
-        );
+        assert!(s.contains(r#"custom{path="/a\"b\\c"} 1"#), "got: {s}");
     }
 
     // -------- axum endpoint
@@ -524,7 +530,11 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(
-            resp.headers().get("content-type").unwrap().to_str().unwrap(),
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "text/plain; version=0.0.4; charset=utf-8"
         );
         let bytes = to_bytes(resp.into_body(), 1 << 16).await.unwrap();

@@ -13,11 +13,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rustango::sql::{sqlx, Auto};
 use rustango::migrate as rmig;
-use rustango::tenancy::{
-    migrate_registry, migrate_tenants, Org, StorageMode, TenantPools,
-};
+use rustango::sql::{sqlx, Auto};
+use rustango::tenancy::{migrate_registry, migrate_tenants, Org, StorageMode, TenantPools};
 
 static UNIQ: AtomicU64 = AtomicU64::new(0);
 
@@ -97,10 +95,12 @@ async fn table_exists_in_schema(pool: &sqlx::PgPool, schema: &str, table: &str) 
 }
 
 async fn ledger_entry_count_in_schema(pool: &sqlx::PgPool, schema: &str, name: &str) -> i64 {
-    let sql = format!(
-        r#"SELECT COUNT(*) FROM "{schema}".__rustango_migrations__ WHERE name = $1"#
-    );
-    let row: (i64,) = sqlx::query_as(&sql).bind(name).fetch_one(pool).await.unwrap();
+    let sql = format!(r#"SELECT COUNT(*) FROM "{schema}".__rustango_migrations__ WHERE name = $1"#);
+    let row: (i64,) = sqlx::query_as(&sql)
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap();
     row.0
 }
 
@@ -204,6 +204,12 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
         path_prefix: None,
         active: true,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     acme.insert(&pool).await.unwrap();
 
@@ -219,6 +225,12 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
         path_prefix: None,
         active: true,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     globex.insert(&pool).await.unwrap();
 
@@ -242,7 +254,11 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
     let pools = TenantPools::new(pool.clone());
     let report = migrate_tenants(&pools, &dir, &url).await.unwrap();
 
-    assert!(report.all_ok(), "all tenants should migrate cleanly: {:?}", report);
+    assert!(
+        report.all_ok(),
+        "all tenants should migrate cleanly: {:?}",
+        report
+    );
     assert_eq!(report.tenants.len(), 2);
     for outcome in &report.tenants {
         assert_eq!(outcome.applied.len(), 1, "exactly one migration per tenant");
@@ -255,8 +271,14 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
     assert!(!table_exists_in_schema(&pool, "public", "items").await);
 
     // Each tenant's ledger has the entry.
-    assert_eq!(ledger_entry_count_in_schema(&pool, &acme_schema, &mig_name).await, 1);
-    assert_eq!(ledger_entry_count_in_schema(&pool, &globex_schema, &mig_name).await, 1);
+    assert_eq!(
+        ledger_entry_count_in_schema(&pool, &acme_schema, &mig_name).await,
+        1
+    );
+    assert_eq!(
+        ledger_entry_count_in_schema(&pool, &globex_schema, &mig_name).await,
+        1
+    );
 
     drop_schema(&pool, &acme_schema).await;
     drop_schema(&pool, &globex_schema).await;
@@ -291,6 +313,12 @@ async fn tenant_migrate_skips_inactive_orgs() {
         path_prefix: None,
         active: true,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     active.insert(&pool).await.unwrap();
 
@@ -306,6 +334,12 @@ async fn tenant_migrate_skips_inactive_orgs() {
         path_prefix: None,
         active: false,
         created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     inactive.insert(&pool).await.unwrap();
 

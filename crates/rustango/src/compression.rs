@@ -257,7 +257,10 @@ fn cache_control_no_transform(resp: &Response<Body>) -> bool {
     resp.headers()
         .get(CACHE_CONTROL)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.split(',').any(|d| d.trim().eq_ignore_ascii_case("no-transform")))
+        .map(|s| {
+            s.split(',')
+                .any(|d| d.trim().eq_ignore_ascii_case("no-transform"))
+        })
         .unwrap_or(false)
 }
 
@@ -342,10 +345,9 @@ mod tests {
                 get(|| async {
                     // 2 KiB of repetitive JSON — well over min_size + super
                     // compressible.
-                    let body = serde_json::to_string(
-                        &(0..200).map(|i| ("k", i)).collect::<Vec<_>>(),
-                    )
-                    .unwrap();
+                    let body =
+                        serde_json::to_string(&(0..200).map(|i| ("k", i)).collect::<Vec<_>>())
+                            .unwrap();
                     ([(CONTENT_TYPE, "application/json")], body).into_response()
                 }),
             )
@@ -483,11 +485,7 @@ mod tests {
                 "/v",
                 get(|| async {
                     let body = "x".repeat(2048);
-                    (
-                        [(CONTENT_TYPE, "text/plain"), (VARY, "Origin")],
-                        body,
-                    )
-                        .into_response()
+                    ([(CONTENT_TYPE, "text/plain"), (VARY, "Origin")], body).into_response()
                 }),
             )
             .compression(CompressionLayer::default());

@@ -55,7 +55,11 @@ pub struct AuthenticatedUser {
 
 impl From<AuthUser> for AuthenticatedUser {
     fn from(u: AuthUser) -> Self {
-        Self { id: u.id, username: u.username, is_superuser: u.is_superuser }
+        Self {
+            id: u.id,
+            username: u.username,
+            is_superuser: u.is_superuser,
+        }
     }
 }
 
@@ -78,11 +82,10 @@ pub struct CurrentUser(pub Option<AuthenticatedUser>);
 impl<S: Send + Sync> FromRequestParts<S> for CurrentUser {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        Ok(CurrentUser(parts.extensions.get::<AuthenticatedUser>().cloned()))
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(CurrentUser(
+            parts.extensions.get::<AuthenticatedUser>().cloned(),
+        ))
     }
 }
 
@@ -116,7 +119,9 @@ async fn auth_middleware(
     for (k, v) in &headers {
         builder = builder.header(k, v);
     }
-    let dummy = builder.body(()).unwrap_or_else(|_| axum::http::Request::new(()));
+    let dummy = builder
+        .body(())
+        .unwrap_or_else(|_| axum::http::Request::new(()));
     let (dummy_parts, _) = dummy.into_parts();
 
     let mut authenticated: Option<AuthUser> = None;
@@ -124,7 +129,10 @@ async fn auth_middleware(
 
     for backend in state.backends.iter() {
         match backend.authenticate(&dummy_parts, &state.pool).await {
-            Ok(Some(user)) => { authenticated = Some(user); break; }
+            Ok(Some(user)) => {
+                authenticated = Some(user);
+                break;
+            }
             Ok(None) => {}
             Err(AuthError::Inactive) => {
                 error_response = Some((StatusCode::FORBIDDEN, "account inactive").into_response());
@@ -202,12 +210,20 @@ pub trait RouterAuthExt<S> {
 
 impl<S: Clone + Send + Sync + 'static> RouterAuthExt<S> for Router<S> {
     fn require_auth(self, backends: Vec<BoxedBackend>, pool: PgPool) -> Self {
-        let state = AuthState { backends: Arc::new(backends), pool, required: true };
+        let state = AuthState {
+            backends: Arc::new(backends),
+            pool,
+            required: true,
+        };
         self.layer(axum::middleware::from_fn_with_state(state, auth_middleware))
     }
 
     fn optional_auth(self, backends: Vec<BoxedBackend>, pool: PgPool) -> Self {
-        let state = AuthState { backends: Arc::new(backends), pool, required: false };
+        let state = AuthState {
+            backends: Arc::new(backends),
+            pool,
+            required: false,
+        };
         self.layer(axum::middleware::from_fn_with_state(state, auth_middleware))
     }
 

@@ -30,12 +30,12 @@
 //! tenant-aware admin in Slice 4) translates that into a 404 for
 //! tenant routes and bypasses the resolver entirely for `/operator`.
 
-use async_trait::async_trait;
-use http::request::Parts;
-use http::HeaderName;
 use crate::core::Column as _;
 use crate::sql::sqlx::PgPool;
 use crate::sql::Fetcher;
+use async_trait::async_trait;
+use http::request::Parts;
+use http::HeaderName;
 
 use super::error::TenancyError;
 use super::org::Org;
@@ -59,11 +59,7 @@ pub trait OrgResolver: Send + Sync + 'static {
     /// rows, or [`TenancyError::Resolution`] for explicit "no
     /// tenant" with diagnostic context (rare — most no-match cases
     /// return `Ok(None)`).
-    async fn resolve(
-        &self,
-        parts: &Parts,
-        registry: &PgPool,
-    ) -> Result<Option<Org>, TenancyError>;
+    async fn resolve(&self, parts: &Parts, registry: &PgPool) -> Result<Option<Org>, TenancyError>;
 }
 
 // ---------------- SubdomainResolver ----------------
@@ -97,11 +93,7 @@ impl SubdomainResolver {
 
 #[async_trait]
 impl OrgResolver for SubdomainResolver {
-    async fn resolve(
-        &self,
-        parts: &Parts,
-        registry: &PgPool,
-    ) -> Result<Option<Org>, TenancyError> {
+    async fn resolve(&self, parts: &Parts, registry: &PgPool) -> Result<Option<Org>, TenancyError> {
         let Some(host) = host_from_parts(parts) else {
             return Ok(None);
         };
@@ -109,11 +101,7 @@ impl OrgResolver for SubdomainResolver {
         if host == self.apex_domain {
             return Ok(None);
         }
-        find_active_org_by(
-            registry,
-            Org::host_pattern.eq(host.to_owned()),
-        )
-        .await
+        find_active_org_by(registry, Org::host_pattern.eq(host.to_owned())).await
     }
 }
 
@@ -130,11 +118,7 @@ pub struct PathPrefixResolver;
 
 #[async_trait]
 impl OrgResolver for PathPrefixResolver {
-    async fn resolve(
-        &self,
-        parts: &Parts,
-        registry: &PgPool,
-    ) -> Result<Option<Org>, TenancyError> {
+    async fn resolve(&self, parts: &Parts, registry: &PgPool) -> Result<Option<Org>, TenancyError> {
         let path = parts.uri.path();
         let Some(first) = path
             .trim_start_matches('/')
@@ -179,11 +163,7 @@ impl Default for HeaderResolver {
 
 #[async_trait]
 impl OrgResolver for HeaderResolver {
-    async fn resolve(
-        &self,
-        parts: &Parts,
-        registry: &PgPool,
-    ) -> Result<Option<Org>, TenancyError> {
+    async fn resolve(&self, parts: &Parts, registry: &PgPool) -> Result<Option<Org>, TenancyError> {
         let Some(value) = parts.headers.get(&self.header_name) else {
             return Ok(None);
         };
@@ -208,11 +188,7 @@ pub struct PortResolver;
 
 #[async_trait]
 impl OrgResolver for PortResolver {
-    async fn resolve(
-        &self,
-        parts: &Parts,
-        registry: &PgPool,
-    ) -> Result<Option<Org>, TenancyError> {
+    async fn resolve(&self, parts: &Parts, registry: &PgPool) -> Result<Option<Org>, TenancyError> {
         let Some(port) = parts.uri.port_u16() else {
             return Ok(None);
         };
@@ -271,11 +247,7 @@ impl Default for ChainResolver {
 
 #[async_trait]
 impl OrgResolver for ChainResolver {
-    async fn resolve(
-        &self,
-        parts: &Parts,
-        registry: &PgPool,
-    ) -> Result<Option<Org>, TenancyError> {
+    async fn resolve(&self, parts: &Parts, registry: &PgPool) -> Result<Option<Org>, TenancyError> {
         for resolver in &self.resolvers {
             match resolver.resolve(parts, registry).await? {
                 Some(org) => return Ok(Some(org)),
@@ -304,10 +276,7 @@ fn host_from_parts(parts: &Parts) -> Option<&str> {
 /// Run `Org::objects().where_(filter).where_(active=true)` and
 /// return the first match. Helper extracted because every resolver
 /// shape ends in this same query.
-async fn find_active_org_by<F>(
-    registry: &PgPool,
-    filter: F,
-) -> Result<Option<Org>, TenancyError>
+async fn find_active_org_by<F>(registry: &PgPool, filter: F) -> Result<Option<Org>, TenancyError>
 where
     F: Into<rustango::core::TypedFilter<Org>>,
 {

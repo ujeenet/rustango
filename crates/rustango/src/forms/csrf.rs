@@ -130,7 +130,10 @@ pub struct CsrfService<S> {
 
 impl<S> Service<Request<Body>> for CsrfService<S>
 where
-    S: Service<Request<Body>, Response = Response<Body>, Error = Infallible> + Clone + Send + 'static,
+    S: Service<Request<Body>, Response = Response<Body>, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
     S::Future: Send + 'static,
 {
     type Response = Response<Body>;
@@ -187,7 +190,10 @@ where
 }
 
 fn is_safe_method(m: &Method) -> bool {
-    matches!(*m, Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE)
+    matches!(
+        *m,
+        Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
+    )
 }
 
 fn read_csrf_cookie(req: &Request<Body>, name: &str) -> Option<String> {
@@ -275,7 +281,10 @@ mod tests {
             .header("cookie", "session=abc; rustango_csrf=hello; theme=dark")
             .body(Body::empty())
             .unwrap();
-        assert_eq!(read_csrf_cookie(&req, "rustango_csrf").as_deref(), Some("hello"));
+        assert_eq!(
+            read_csrf_cookie(&req, "rustango_csrf").as_deref(),
+            Some("hello")
+        );
         assert_eq!(read_csrf_cookie(&req, "missing").as_deref(), None);
     }
 

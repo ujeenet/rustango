@@ -91,6 +91,46 @@ pub struct Org {
     pub active: bool,
 
     pub created_at: chrono::DateTime<chrono::Utc>,
+
+    // ----- Branding (v0.26+).
+    //
+    // Per-tenant branding for the admin UI. All optional — when unset
+    // the admin falls back to the static `Builder.title()/subtitle()`
+    // defaults. Logo / favicon paths point inside the brand storage
+    // root (configurable via `RUSTANGO_BRAND_STORAGE_DIR`); the
+    // operator console serves them at `/__brand__/{slug}/{filename}`.
+    /// Display name shown in the tenant admin sidebar header. When
+    /// `None`, the admin falls back to `display_name`, then to the
+    /// static admin title.
+    #[rustango(max_length = 80)]
+    pub brand_name: Option<String>,
+
+    /// Optional tagline shown below the brand name.
+    #[rustango(max_length = 200)]
+    pub brand_tagline: Option<String>,
+
+    /// Relative filename of the uploaded logo inside the per-org brand
+    /// directory. Set by `POST /orgs/{slug}/edit/branding`. Read-only
+    /// in the regular config form — uploads happen through the
+    /// multipart sub-form.
+    #[rustango(max_length = 120)]
+    pub logo_path: Option<String>,
+
+    /// Relative filename of the uploaded favicon. Same shape as
+    /// `logo_path`.
+    #[rustango(max_length = 120)]
+    pub favicon_path: Option<String>,
+
+    /// Hex primary color (e.g. `"#b04a2c"`). Maps to the
+    /// `--color-accent` CSS variable; the branding module derives
+    /// hover + soft-bg shades from it.
+    #[rustango(max_length = 7)]
+    pub primary_color: Option<String>,
+
+    /// Theme mode — one of `"light"`, `"dark"`, `"auto"`. `None` is
+    /// treated as `"auto"` (follow `prefers-color-scheme`).
+    #[rustango(max_length = 8)]
+    pub theme_mode: Option<String>,
 }
 
 /// Convenience enum for [`Org::storage_mode`]. The model field stays

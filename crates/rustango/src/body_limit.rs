@@ -98,9 +98,7 @@ async fn handle(cfg: Arc<BodyLimitLayer>, req: Request<Body>, next: Next) -> Res
 }
 
 fn too_large(limit: usize) -> Response {
-    let body = format!(
-        r#"{{"error":"payload too large","limit_bytes":{limit}}}"#
-    );
+    let body = format!(r#"{{"error":"payload too large","limit_bytes":{limit}}}"#);
     let mut resp = Response::builder()
         .status(StatusCode::PAYLOAD_TOO_LARGE)
         .body(Body::from(body))
@@ -180,7 +178,9 @@ mod tests {
                 .unwrap(),
             "application/json"
         );
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["error"], "payload too large");
         assert_eq!(v["limit_bytes"], 10);

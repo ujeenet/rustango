@@ -36,11 +36,7 @@ impl ViewSet {
     /// spec's `components.schemas` (typically the model name, e.g. `"Post"`).
     /// Both create/update bodies and retrieve responses reference it.
     #[must_use]
-    pub fn openapi_paths(
-        &self,
-        prefix: &str,
-        item_schema_ref: &str,
-    ) -> Vec<(String, PathItem)> {
+    pub fn openapi_paths(&self, prefix: &str, item_schema_ref: &str) -> Vec<(String, PathItem)> {
         let prefix = prefix.trim_end_matches('/').to_owned();
         let collection_path = prefix.clone();
         let item_path = format!("{prefix}/{{pk}}");
@@ -95,7 +91,10 @@ impl ViewSet {
             .summary(format!("Retrieve {tag}"))
             .operation_id(format!("retrieve_{}", snake(tag)))
             .tag(tag)
-            .response("200", Response::new("found").json_content(Schema::ref_(item_ref)))
+            .response(
+                "200",
+                Response::new("found").json_content(Schema::ref_(item_ref)),
+            )
             .response("404", Response::new("not found"));
         p = p.get(retrieve_op);
 
@@ -105,7 +104,10 @@ impl ViewSet {
                 .operation_id(format!("update_{}", snake(tag)))
                 .tag(tag)
                 .request_body(RequestBody::json(Schema::ref_(item_ref)))
-                .response("200", Response::new("updated").json_content(Schema::ref_(item_ref)))
+                .response(
+                    "200",
+                    Response::new("updated").json_content(Schema::ref_(item_ref)),
+                )
                 .response("404", Response::new("not found"));
             p = p.put(update_op);
 
@@ -114,7 +116,10 @@ impl ViewSet {
                 .operation_id(format!("partial_update_{}", snake(tag)))
                 .tag(tag)
                 .request_body(RequestBody::json(Schema::ref_(item_ref)))
-                .response("200", Response::new("updated").json_content(Schema::ref_(item_ref)))
+                .response(
+                    "200",
+                    Response::new("updated").json_content(Schema::ref_(item_ref)),
+                )
                 .response("404", Response::new("not found"));
             p = p.patch(patch_op);
 
@@ -143,8 +148,7 @@ impl ViewSet {
         match self.pagination {
             PaginationStyle::PageNumber => {
                 out.push(
-                    Parameter::query("page", Schema::int32())
-                        .description("1-based page number"),
+                    Parameter::query("page", Schema::int32()).description("1-based page number"),
                 );
                 out.push(
                     Parameter::query("page_size", Schema::int32())
@@ -188,13 +192,12 @@ impl ViewSet {
                 .field(f)
                 .map_or_else(Schema::string, |fs| field_type_to_schema(fs.ty));
             out.push(
-                Parameter::query(f.clone(), field_schema)
-                    .description(format!(
-                        "Exact filter. Lookups: `{f}__gt`, `__gte`, `__lt`, `__lte`, \
+                Parameter::query(f.clone(), field_schema).description(format!(
+                    "Exact filter. Lookups: `{f}__gt`, `__gte`, `__lt`, `__lte`, \
                          `__ne`, `__in`, `__not_in`, `__contains`, `__icontains`, \
                          `__startswith`, `__istartswith`, `__endswith`, `__iendswith`, \
                          `__isnull`."
-                    )),
+                )),
             );
         }
         out

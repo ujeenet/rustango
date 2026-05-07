@@ -65,10 +65,7 @@ pub enum TenantPool {
     /// Tenant data is in a schema in the registry DB. The pool is
     /// the registry pool; the schema name is set on each
     /// connection acquired through [`TenantPools::acquire`].
-    Schema {
-        schema: String,
-        registry: PgPool,
-    },
+    Schema { schema: String, registry: PgPool },
     /// Tenant data is in a dedicated DB. Pool is owned by this
     /// variant and shared via `Arc` so callers can clone cheaply.
     Database { pool: Arc<PgPool> },
@@ -165,10 +162,7 @@ impl TenantPools {
 
         match mode {
             StorageMode::Schema => {
-                let schema = org
-                    .schema_name
-                    .clone()
-                    .unwrap_or_else(|| org.slug.clone());
+                let schema = org.schema_name.clone().unwrap_or_else(|| org.slug.clone());
                 Ok(TenantPool::Schema {
                     schema,
                     registry: self.registry.clone(),
@@ -202,10 +196,7 @@ impl TenantPools {
                 // queries from A's data. The TenantConn type is the
                 // only way to acquire scoped connections; this is
                 // the enforcement point.
-                let stmt = format!(
-                    "SET search_path TO {}, public",
-                    quote_ident(schema)
-                );
+                let stmt = format!("SET search_path TO {}, public", quote_ident(schema));
                 rustango::sql::sqlx::query(&stmt)
                     .execute(&mut *conn)
                     .await?;
@@ -216,7 +207,10 @@ impl TenantPools {
             }
             TenantPool::Database { pool } => {
                 let conn = pool.acquire().await?;
-                Ok(TenantConn { inner: conn, schema: None })
+                Ok(TenantConn {
+                    inner: conn,
+                    schema: None,
+                })
             }
         }
     }
@@ -241,8 +235,7 @@ impl TenantPools {
         match self.pool_for_org(org).await? {
             TenantPool::Schema { schema, registry } => {
                 let mut opts = (*registry.connect_options()).clone();
-                opts =
-                    opts.options([("search_path", &format!("{schema},public") as &str)]);
+                opts = opts.options([("search_path", &format!("{schema},public") as &str)]);
                 let scoped = PgPoolOptions::new()
                     .max_connections(2)
                     .connect_with(opts)

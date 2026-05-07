@@ -272,8 +272,8 @@ pub fn decode(secret: &SessionSecret, value: &str) -> Result<SessionPayload, Ses
 /// length). Crate-visible so the tenant console can share the same
 /// MAC primitive without duplicating crypto.
 pub(crate) fn sign(secret: &SessionSecret, msg: &[u8]) -> [u8; 32] {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.key())
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.key()).expect("HMAC accepts any key length");
     mac.update(msg);
     let bytes = mac.finalize().into_bytes();
     let mut out = [0u8; 32];

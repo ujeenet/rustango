@@ -65,9 +65,7 @@ use sqlx::{PgPool, Row};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
-use super::{
-    DeadLetterFn, HandlerRegistry, Job, JobDeadLetter, JobError, JobQueue,
-};
+use super::{DeadLetterFn, HandlerRegistry, Job, JobDeadLetter, JobError, JobQueue};
 
 /// Postgres-backed job queue.
 ///
@@ -235,7 +233,16 @@ impl JobQueue for PgJobQueue {
             let poll = self.poll_interval;
             let worker_id = format!("{}:w{}", self.worker_id_prefix, n);
             let h = tokio::spawn(async move {
-                worker_loop(pool, registry, dead_letter, shutdown, notify, poll, worker_id).await;
+                worker_loop(
+                    pool,
+                    registry,
+                    dead_letter,
+                    shutdown,
+                    notify,
+                    poll,
+                    worker_id,
+                )
+                .await;
             });
             workers.push(h);
         }
@@ -364,8 +371,7 @@ async fn run_one(
             if next_attempt >= job.max_attempts {
                 handle_dead_letter(pool, dead_letter, &job, static_name, &msg).await;
             } else {
-                let backoff_ms =
-                    1000u64.saturating_mul(1u64 << (next_attempt as u32).min(10));
+                let backoff_ms = 1000u64.saturating_mul(1u64 << (next_attempt as u32).min(10));
                 let _ = sqlx::query(
                     "UPDATE rustango_jobs
                         SET attempt = $1,
@@ -426,10 +432,7 @@ impl HandlerRegistry {
     /// Variant of `lookup` that returns the registered &'static str
     /// alongside the handler. Workers need the static name to feed
     /// JobDeadLetter without losing &'static-ness.
-    fn lookup_owned(
-        &self,
-        name: &str,
-    ) -> Option<(super::HandlerFn, &'static str)> {
+    fn lookup_owned(&self, name: &str) -> Option<(super::HandlerFn, &'static str)> {
         let (handler, _) = self.handlers.get(name)?;
         let static_name = self.handlers.keys().find(|k| **k == name).copied()?;
         Some((handler.clone(), static_name))
@@ -464,8 +467,7 @@ mod tests {
 
     #[tokio::test]
     async fn poll_interval_is_overridable() {
-        let q = PgJobQueue::with_workers(dummy_pool(), 0)
-            .poll_interval(Duration::from_millis(250));
+        let q = PgJobQueue::with_workers(dummy_pool(), 0).poll_interval(Duration::from_millis(250));
         assert_eq!(q.poll_interval, Duration::from_millis(250));
     }
 

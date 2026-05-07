@@ -62,7 +62,12 @@ pub(super) async fn create_tenant<W: Write + Send>(
         .clone()
         .unwrap_or_else(|| parsed.slug.clone());
     let schema_name = match parsed.mode {
-        StorageMode::Schema => Some(parsed.schema_name.clone().unwrap_or_else(|| parsed.slug.clone())),
+        StorageMode::Schema => Some(
+            parsed
+                .schema_name
+                .clone()
+                .unwrap_or_else(|| parsed.slug.clone()),
+        ),
         StorageMode::Database => None,
     };
 
@@ -95,6 +100,12 @@ pub(super) async fn create_tenant<W: Write + Send>(
         path_prefix: parsed.path_prefix.clone(),
         active: true,
         created_at: chrono::Utc::now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
     };
     org.insert(pools.registry()).await?;
     let id = org.id.get().copied().unwrap_or_default();
@@ -137,9 +148,7 @@ fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, Tenancy
         None => manage_interactive::ask("Tenant slug: ")
             .map_err(TenancyError::Io)?
             .ok_or_else(|| {
-                TenancyError::Validation(
-                    "create-tenant requires a slug positional argument".into(),
-                )
+                TenancyError::Validation("create-tenant requires a slug positional argument".into())
             })?,
     };
     let mut out = CreateTenantArgs {
@@ -179,7 +188,8 @@ fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, Tenancy
                 return Err(TenancyError::Validation(
                     "create-tenant <slug> [--mode schema|database] [--display-name <s>] \
                      [--database-url <url>] [--schema-name <s>] [--host-pattern <s>] \
-                     [--port <n>] [--path-prefix <s>] [--no-migrate]".into(),
+                     [--port <n>] [--path-prefix <s>] [--no-migrate]"
+                        .into(),
                 ));
             }
             other => {
@@ -212,7 +222,8 @@ pub(super) async fn drop_tenant<W: Write + Send>(
                     "drop-tenant <slug> [--confirm <slug>]\n  \
                      Soft-delete: sets active=false. Data is preserved.\n  \
                      `--confirm` must repeat the slug verbatim — interactive\n  \
-                     terminals can omit it and answer the prompt instead.".into(),
+                     terminals can omit it and answer the prompt instead."
+                        .into(),
                 ));
             }
             other => {
@@ -227,9 +238,7 @@ pub(super) async fn drop_tenant<W: Write + Send>(
         None => manage_interactive::ask("Tenant slug to drop: ")
             .map_err(TenancyError::Io)?
             .ok_or_else(|| {
-                TenancyError::Validation(
-                    "drop-tenant requires a slug positional argument".into(),
-                )
+                TenancyError::Validation("drop-tenant requires a slug positional argument".into())
             })?,
     };
     let confirm = match confirm {
@@ -268,9 +277,11 @@ pub(super) async fn drop_tenant<W: Write + Send>(
     }
 
     // Soft-delete: UPDATE rustango_orgs SET active = false WHERE id = $1.
-    let id = org.id.get().copied().ok_or_else(|| {
-        TenancyError::Validation("dropped Org row has no PK".into())
-    })?;
+    let id = org
+        .id
+        .get()
+        .copied()
+        .ok_or_else(|| TenancyError::Validation("dropped Org row has no PK".into()))?;
     let updated = Org::objects()
         .where_(Org::id.eq(id))
         .update()
@@ -282,7 +293,10 @@ pub(super) async fn drop_tenant<W: Write + Send>(
             "drop-tenant: no row updated for id {id} — race condition?"
         )));
     }
-    writeln!(w, "soft-deleted tenant `{slug}` (active=false). Data preserved.")?;
+    writeln!(
+        w,
+        "soft-deleted tenant `{slug}` (active=false). Data preserved."
+    )?;
     writeln!(
         w,
         "  to hard-delete (drop schema or DB), use `purge-tenant`."
@@ -332,9 +346,7 @@ pub(super) async fn purge_tenant<W: Write + Send>(
         None => manage_interactive::ask("Tenant slug to PURGE: ")
             .map_err(TenancyError::Io)?
             .ok_or_else(|| {
-                TenancyError::Validation(
-                    "purge-tenant requires a slug positional argument".into(),
-                )
+                TenancyError::Validation("purge-tenant requires a slug positional argument".into())
             })?,
     };
     let confirm = match confirm {
@@ -343,9 +355,7 @@ pub(super) async fn purge_tenant<W: Write + Send>(
             // Interactive confirmation — make the operator retype the
             // slug to prove they meant THIS tenant. Mirrors drop-tenant
             // but the consequence is hard-delete, so the message is louder.
-            let prompt = format!(
-                "HARD-DELETE: type `{slug}` to confirm permanent deletion: "
-            );
+            let prompt = format!("HARD-DELETE: type `{slug}` to confirm permanent deletion: ");
             manage_interactive::ask(&prompt)
                 .map_err(TenancyError::Io)?
                 .ok_or_else(|| {
@@ -372,9 +382,7 @@ pub(super) async fn purge_tenant<W: Write + Send>(
     };
 
     let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
-        TenancyError::Validation(format!(
-            "org `{slug}` has unknown storage_mode `{got}`"
-        ))
+        TenancyError::Validation(format!("org `{slug}` has unknown storage_mode `{got}`"))
     })?;
 
     match mode {
@@ -407,9 +415,11 @@ pub(super) async fn purge_tenant<W: Write + Send>(
 
     // DELETE the Org row. Use a raw query so we don't depend on a
     // model-level delete API (rustango doesn't ship one yet).
-    let id = org.id.get().copied().ok_or_else(|| {
-        TenancyError::Validation("purge-tenant: Org row has no PK".into())
-    })?;
+    let id = org
+        .id
+        .get()
+        .copied()
+        .ok_or_else(|| TenancyError::Validation("purge-tenant: Org row has no PK".into()))?;
     let result = rustango::sql::sqlx::query("DELETE FROM rustango_orgs WHERE id = $1")
         .bind(id)
         .execute(pools.registry())
@@ -447,7 +457,8 @@ async fn drop_database_at<W: Write + Send>(
                 .into(),
         )
     })?;
-    if dbname.eq_ignore_ascii_case("postgres") || dbname.eq_ignore_ascii_case("template0")
+    if dbname.eq_ignore_ascii_case("postgres")
+        || dbname.eq_ignore_ascii_case("template0")
         || dbname.eq_ignore_ascii_case("template1")
     {
         return Err(TenancyError::Validation(format!(
@@ -459,9 +470,7 @@ async fn drop_database_at<W: Write + Send>(
     let mut admin = admin_opts.connect().await?;
     let sql = format!("DROP DATABASE IF EXISTS {}", quote_ident(&dbname));
     writeln!(w, "  issuing {sql}")?;
-    rustango::sql::sqlx::query(&sql)
-        .execute(&mut admin)
-        .await?;
+    rustango::sql::sqlx::query(&sql).execute(&mut admin).await?;
     Ok(())
 }
 

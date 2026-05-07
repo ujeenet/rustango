@@ -100,7 +100,10 @@ async fn pre_save_receiver_fires() {
         }
     });
 
-    let m = PreSaveSig { id: instance::<PreSaveSig>(), name: "x".into() };
+    let m = PreSaveSig {
+        id: instance::<PreSaveSig>(),
+        name: "x".into(),
+    };
     send_pre_save(&m).await;
     assert_eq!(counter.load(Ordering::SeqCst), 1);
 }
@@ -121,7 +124,10 @@ async fn post_save_receiver_gets_context() {
         }
     });
 
-    let m = PostSaveSig { id: instance::<PostSaveSig>(), name: "y".into() };
+    let m = PostSaveSig {
+        id: instance::<PostSaveSig>(),
+        name: "y".into(),
+    };
     send_post_save(&m, PostSaveContext { created: true }).await;
     assert_eq!(*captured.lock().unwrap(), Some(true));
 
@@ -140,10 +146,14 @@ async fn pre_delete_receiver_fires() {
     let f = fired.clone();
     connect_pre_delete::<PreDeleteSig, _, _>(move |_inst| {
         let f = f.clone();
-        async move { f.fetch_add(1, Ordering::SeqCst); }
+        async move {
+            f.fetch_add(1, Ordering::SeqCst);
+        }
     });
 
-    let m = PreDeleteSig { id: instance::<PreDeleteSig>() };
+    let m = PreDeleteSig {
+        id: instance::<PreDeleteSig>(),
+    };
     send_pre_delete(&m).await;
     assert_eq!(fired.load(Ordering::SeqCst), 1);
 }
@@ -159,10 +169,14 @@ async fn post_delete_receiver_fires() {
     let f = fired.clone();
     connect_post_delete::<PostDeleteSig, _, _>(move |_inst| {
         let f = f.clone();
-        async move { f.fetch_add(1, Ordering::SeqCst); }
+        async move {
+            f.fetch_add(1, Ordering::SeqCst);
+        }
     });
 
-    let m = PostDeleteSig { id: instance::<PostDeleteSig>() };
+    let m = PostDeleteSig {
+        id: instance::<PostDeleteSig>(),
+    };
     send_post_delete(&m).await;
     assert_eq!(fired.load(Ordering::SeqCst), 1);
 }
@@ -180,11 +194,16 @@ async fn multiple_receivers_run_in_registration_order() {
         let o = order.clone();
         connect_pre_save::<PreSaveSig, _, _>(move |_inst| {
             let o = o.clone();
-            async move { o.lock().unwrap().push(i); }
+            async move {
+                o.lock().unwrap().push(i);
+            }
         });
     }
 
-    let m = PreSaveSig { id: instance::<PreSaveSig>(), name: "n".into() };
+    let m = PreSaveSig {
+        id: instance::<PreSaveSig>(),
+        name: "n".into(),
+    };
     send_pre_save(&m).await;
     assert_eq!(*order.lock().unwrap(), vec![0, 1, 2]);
 }
@@ -200,10 +219,14 @@ async fn disconnect_removes_receiver() {
     let f = fired.clone();
     let id = connect_pre_save::<DisconnectSig, _, _>(move |_inst| {
         let f = f.clone();
-        async move { f.fetch_add(1, Ordering::SeqCst); }
+        async move {
+            f.fetch_add(1, Ordering::SeqCst);
+        }
     });
 
-    let m = DisconnectSig { id: instance::<DisconnectSig>() };
+    let m = DisconnectSig {
+        id: instance::<DisconnectSig>(),
+    };
     send_pre_save(&m).await;
     assert_eq!(fired.load(Ordering::SeqCst), 1);
 
@@ -211,7 +234,11 @@ async fn disconnect_removes_receiver() {
     assert!(removed);
 
     send_pre_save(&m).await;
-    assert_eq!(fired.load(Ordering::SeqCst), 1, "removed receiver must not fire");
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        1,
+        "removed receiver must not fire"
+    );
 }
 
 #[tokio::test]
@@ -240,19 +267,29 @@ async fn signals_are_isolated_per_model_type() {
     let i_f = isolated_fired.clone();
     connect_pre_save::<IsolatedSig, _, _>(move |_inst| {
         let f = i_f.clone();
-        async move { f.fetch_add(1, Ordering::SeqCst); }
+        async move {
+            f.fetch_add(1, Ordering::SeqCst);
+        }
     });
     let o_f = other_fired.clone();
     connect_pre_save::<OtherSig, _, _>(move |_inst| {
         let f = o_f.clone();
-        async move { f.fetch_add(1, Ordering::SeqCst); }
+        async move {
+            f.fetch_add(1, Ordering::SeqCst);
+        }
     });
 
     // Fire only IsolatedSig
-    let m = IsolatedSig { id: instance::<IsolatedSig>() };
+    let m = IsolatedSig {
+        id: instance::<IsolatedSig>(),
+    };
     send_pre_save(&m).await;
     assert_eq!(isolated_fired.load(Ordering::SeqCst), 1);
-    assert_eq!(other_fired.load(Ordering::SeqCst), 0, "OtherSig receiver must NOT fire");
+    assert_eq!(
+        other_fired.load(Ordering::SeqCst),
+        0,
+        "OtherSig receiver must NOT fire"
+    );
 }
 
 // ------------------------------------------------------------------ receiver_count

@@ -147,7 +147,10 @@ pub trait Column: Copy + 'static {
         self,
         keys: I,
     ) -> TypedFilter<Self::Model> {
-        let list: Vec<SqlValue> = keys.into_iter().map(|k| SqlValue::String(k.into())).collect();
+        let list: Vec<SqlValue> = keys
+            .into_iter()
+            .map(|k| SqlValue::String(k.into()))
+            .collect();
         TypedFilter::scalar(Self::COLUMN, Op::JsonHasAnyKey, SqlValue::List(list))
     }
 
@@ -156,7 +159,10 @@ pub trait Column: Copy + 'static {
         self,
         keys: I,
     ) -> TypedFilter<Self::Model> {
-        let list: Vec<SqlValue> = keys.into_iter().map(|k| SqlValue::String(k.into())).collect();
+        let list: Vec<SqlValue> = keys
+            .into_iter()
+            .map(|k| SqlValue::String(k.into()))
+            .collect();
         TypedFilter::scalar(Self::COLUMN, Op::JsonHasAllKeys, SqlValue::List(list))
     }
 

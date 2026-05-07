@@ -283,7 +283,12 @@ mod tests {
         Postgres
     }
 
-    fn fld(name: &'static str, ty: FieldType, auto: bool, default: Option<&'static str>) -> FieldSchema {
+    fn fld(
+        name: &'static str,
+        ty: FieldType,
+        auto: bool,
+        default: Option<&'static str>,
+    ) -> FieldSchema {
         FieldSchema {
             name,
             column: name,
@@ -348,7 +353,10 @@ mod tests {
         );
         assert!(col_def.contains("TIMESTAMPTZ"), "got: {col_def}");
         assert!(col_def.contains("DEFAULT now()"), "got: {col_def}");
-        assert!(!col_def.contains("BIGSERIAL"), "must not emit BIGSERIAL: {col_def}");
+        assert!(
+            !col_def.contains("BIGSERIAL"),
+            "must not emit BIGSERIAL: {col_def}"
+        );
     }
 
     #[test]
@@ -371,12 +379,11 @@ mod tests {
         // emits `BIGSERIAL` and NO `DEFAULT` clause (BIGSERIAL implies
         // its own nextval default).
         let mut col_def = String::new();
-        write_column_def(
-            &mut col_def,
-            &pg(),
-            &fld("id", FieldType::I64, true, None),
-        );
+        write_column_def(&mut col_def, &pg(), &fld("id", FieldType::I64, true, None));
         assert!(col_def.contains("BIGSERIAL"), "got: {col_def}");
-        assert!(!col_def.contains(" DEFAULT "), "BIGSERIAL must not get an explicit DEFAULT: {col_def}");
+        assert!(
+            !col_def.contains(" DEFAULT "),
+            "BIGSERIAL must not get an explicit DEFAULT: {col_def}"
+        );
     }
 }

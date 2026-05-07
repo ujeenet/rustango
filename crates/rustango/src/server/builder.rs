@@ -52,9 +52,8 @@ impl Builder {
     /// Connection to `DATABASE_URL` failures.
     pub async fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
         let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
-        let registry_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgres://rustango:rustango@localhost:5432/rustango_test".into()
-        });
+        let registry_url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://rustango:rustango@localhost:5432/rustango_test".into());
         let registry = PgPool::connect(&registry_url).await?;
         let pools = Arc::new(TenantPools::new(registry.clone()));
         Ok(Self {
@@ -161,7 +160,12 @@ impl Builder {
         F: FnOnce(Arc<TenantPools>, PgPool, String) -> Fut,
         Fut: Future<Output = Result<(), Box<dyn std::error::Error>>>,
     {
-        hook(self.pools.clone(), self.registry.clone(), self.registry_url.clone()).await?;
+        hook(
+            self.pools.clone(),
+            self.registry.clone(),
+            self.registry_url.clone(),
+        )
+        .await?;
         Ok(self)
     }
 
@@ -287,25 +291,24 @@ impl Builder {
         // Without this, axum's path extractor sees params from the outer
         // `/__admin/{*rest}` match stacked on top of the inner admin router's
         // own params, producing "Wrong number of path arguments" errors.
-        let make_admin_handler =
-            |svc: Router| {
-                move |req: axum::http::Request<axum::body::Body>| {
-                    let svc = svc.clone();
-                    async move {
-                        let (parts, body) = req.into_parts();
-                        let mut builder = axum::http::Request::builder()
-                            .method(&parts.method)
-                            .uri(&parts.uri);
-                        for (k, v) in &parts.headers {
-                            builder = builder.header(k, v);
-                        }
-                        let fresh = builder.body(body).expect("valid request");
-                        svc.oneshot(fresh)
-                            .await
-                            .unwrap_or_else(|_| unreachable!("Router is Infallible"))
+        let make_admin_handler = |svc: Router| {
+            move |req: axum::http::Request<axum::body::Body>| {
+                let svc = svc.clone();
+                async move {
+                    let (parts, body) = req.into_parts();
+                    let mut builder = axum::http::Request::builder()
+                        .method(&parts.method)
+                        .uri(&parts.uri);
+                    for (k, v) in &parts.headers {
+                        builder = builder.header(k, v);
                     }
+                    let fresh = builder.body(body).expect("valid request");
+                    svc.oneshot(fresh)
+                        .await
+                        .unwrap_or_else(|_| unreachable!("Router is Infallible"))
                 }
-            };
+            }
+        };
         let tenant_app = match self.api {
             Some(router) => {
                 let h1 = make_admin_handler(tenant_admin.clone());
@@ -337,11 +340,8 @@ impl Builder {
         // new credentials — without eviction the operator could
         // change the URL in the DB and the cached pool would happily
         // keep authenticating with stale creds until process restart.
-        let operator_admin = operator_console::router_with_pools(
-            self.registry,
-            self.pools.clone(),
-            operator_secret,
-        );
+        let operator_admin =
+            operator_console::router_with_pools(self.registry, self.pools.clone(), operator_secret);
 
         let app = Router::new().fallback_service(tower::service_fn({
             let operator = operator_admin.clone();

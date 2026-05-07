@@ -81,11 +81,20 @@ async fn prefetch_groups_children_under_parents() {
     };
     setup(&pool).await;
 
-    let mut ada = Author { id: Auto::default(), name: "Ada".into() };
+    let mut ada = Author {
+        id: Auto::default(),
+        name: "Ada".into(),
+    };
     ada.save(&pool).await.unwrap();
-    let mut grace = Author { id: Auto::default(), name: "Grace".into() };
+    let mut grace = Author {
+        id: Auto::default(),
+        name: "Grace".into(),
+    };
     grace.save(&pool).await.unwrap();
-    let mut linus = Author { id: Auto::default(), name: "Linus".into() };
+    let mut linus = Author {
+        id: Auto::default(),
+        name: "Linus".into(),
+    };
     linus.save(&pool).await.unwrap(); // no posts — should still appear with empty Vec
 
     let ada_pk = ada.id.get().copied().unwrap();

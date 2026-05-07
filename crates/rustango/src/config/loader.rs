@@ -56,11 +56,7 @@ pub(super) fn load_with_root(root: &Path, env: &str) -> Result<Settings, ConfigE
 /// instead of reading the process environment. Avoids
 /// `std::env::set_var` (which requires `unsafe` and is forbidden by
 /// the workspace lint policy) in unit tests.
-fn load_with_root_and_env<I>(
-    root: &Path,
-    env: &str,
-    env_vars: I,
-) -> Result<Settings, ConfigError>
+fn load_with_root_and_env<I>(root: &Path, env: &str, env_vars: I) -> Result<Settings, ConfigError>
 where
     I: IntoIterator<Item = (String, String)>,
 {
@@ -69,8 +65,8 @@ where
 
     // `read_toml(path, required = true)` returns Some(_) or errors,
     // so this expect can never trip.
-    let mut tree = read_toml(&default_path, true)?
-        .expect("read_toml(_, required=true) returns Some on Ok");
+    let mut tree =
+        read_toml(&default_path, true)?.expect("read_toml(_, required=true) returns Some on Ok");
     if let Some(overlay) = read_toml(&env_path, false)? {
         merge(&mut tree, overlay);
     }
@@ -86,10 +82,12 @@ where
 fn read_toml(path: &Path, required: bool) -> Result<Option<toml::Value>, ConfigError> {
     match std::fs::read_to_string(path) {
         Ok(s) => {
-            let value = s.parse::<toml::Value>().map_err(|source| ConfigError::Parse {
-                path: path.display().to_string(),
-                source,
-            })?;
+            let value = s
+                .parse::<toml::Value>()
+                .map_err(|source| ConfigError::Parse {
+                    path: path.display().to_string(),
+                    source,
+                })?;
             Ok(Some(value))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => Ok(None),

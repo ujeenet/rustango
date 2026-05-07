@@ -55,7 +55,10 @@ impl Fixture {
     /// New empty fixture with the given name (used in error messages).
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), rows: Vec::new() }
+        Self {
+            name: name.into(),
+            rows: Vec::new(),
+        }
     }
 
     /// Add one row to the fixture.
@@ -135,10 +138,7 @@ impl Fixture {
 ///
 /// # Errors
 /// First fixture error encountered.
-pub async fn load_all(
-    fixtures: &[(&str, &Fixture)],
-    pool: &PgPool,
-) -> Result<usize, FixtureError> {
+pub async fn load_all(fixtures: &[(&str, &Fixture)], pool: &PgPool) -> Result<usize, FixtureError> {
     let mut total = 0;
     for (table, fixture) in fixtures {
         total += fixture.load_into(table, pool).await?;
@@ -174,7 +174,9 @@ async fn insert_row(
         let val = &row[col.as_str()];
         q = bind_value(q, val);
     }
-    q.execute(pool).await.map_err(|e| FixtureError::Database(e.to_string()))?;
+    q.execute(pool)
+        .await
+        .map_err(|e| FixtureError::Database(e.to_string()))?;
     Ok(())
 }
 
@@ -304,11 +306,12 @@ mod tests {
     #[test]
     fn from_file_invalid_json_is_format_error() {
         use std::io::Write;
-        let path = std::env::temp_dir().join(format!(
-            "rustango_fixture_bad_{}.json",
-            std::process::id()
-        ));
-        std::fs::File::create(&path).unwrap().write_all(b"{not valid json").unwrap();
+        let path =
+            std::env::temp_dir().join(format!("rustango_fixture_bad_{}.json", std::process::id()));
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(b"{not valid json")
+            .unwrap();
         let r = Fixture::new("x").from_file(&path);
         assert!(matches!(r, Err(FixtureError::Format { .. })));
         let _ = std::fs::remove_file(&path);

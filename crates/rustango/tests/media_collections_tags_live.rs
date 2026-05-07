@@ -8,9 +8,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use rustango::media::router::media_router;
-use rustango::media::{
-    ensure_all_tables, MediaManager, SaveOpts, UploadIntent,
-};
+use rustango::media::{ensure_all_tables, MediaManager, SaveOpts, UploadIntent};
 use rustango::storage::s3::{S3Config, S3Storage};
 use rustango::storage::{BoxedStorage, StorageRegistry};
 use sqlx::PgPool;
@@ -24,8 +22,7 @@ async fn maybe_setup() -> Option<MediaManager> {
     let secret = std::env::var("RUSTANGO_S3_TEST_SECRET").ok()?;
     let bucket = std::env::var("RUSTANGO_S3_TEST_BUCKET").ok()?;
     let endpoint = std::env::var("RUSTANGO_S3_TEST_ENDPOINT").ok();
-    let region =
-        std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
+    let region = std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
 
     let pool = PgPool::connect(&url).await.expect("connect Postgres");
     ensure_all_tables(&pool).await.expect("ensure_all_tables");
@@ -115,17 +112,26 @@ async fn collection_path_walks_parent_chain() {
         .create_collection("Products", "products", None, "")
         .await
         .unwrap();
-    let root_id = match root.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let root_id = match root.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
     let mid = manager
         .create_collection("2026", "2026", Some(root_id), "")
         .await
         .unwrap();
-    let mid_id = match mid.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let mid_id = match mid.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
     let leaf = manager
         .create_collection("Launch", "launch", Some(mid_id), "")
         .await
         .unwrap();
-    let leaf_id = match leaf.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let leaf_id = match leaf.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
     let path = manager.collection_path(leaf_id).await.unwrap();
     assert_eq!(path, "products/2026/launch");
 }
@@ -136,20 +142,32 @@ async fn list_in_collection_recursive_descends_subfolders() {
         return;
     };
     let root = manager.create_collection("R", "r", None, "").await.unwrap();
-    let root_id = match root.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let root_id = match root.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
     let sub = manager
         .create_collection("S", "s", Some(root_id), "")
         .await
         .unwrap();
-    let sub_id = match sub.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let sub_id = match sub.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
 
     // One file in root, one in sub.
     let m_root = manager
-        .save_bytes(SaveOpts { collection_id: Some(root_id), ..save_opts("root-file") })
+        .save_bytes(SaveOpts {
+            collection_id: Some(root_id),
+            ..save_opts("root-file")
+        })
         .await
         .unwrap();
     let m_sub = manager
-        .save_bytes(SaveOpts { collection_id: Some(sub_id), ..save_opts("sub-file") })
+        .save_bytes(SaveOpts {
+            collection_id: Some(sub_id),
+            ..save_opts("sub-file")
+        })
         .await
         .unwrap();
 
@@ -172,12 +190,21 @@ async fn delete_collection_orphans_media_not_storage() {
         return;
     };
     let c = manager.create_collection("X", "x", None, "").await.unwrap();
-    let cid = match c.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let cid = match c.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
     let m = manager
-        .save_bytes(SaveOpts { collection_id: Some(cid), ..save_opts("orphan-me") })
+        .save_bytes(SaveOpts {
+            collection_id: Some(cid),
+            ..save_opts("orphan-me")
+        })
         .await
         .unwrap();
-    let mid = match m.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let mid = match m.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
 
     manager.delete_collection(cid).await.unwrap();
 
@@ -185,7 +212,10 @@ async fn delete_collection_orphans_media_not_storage() {
     assert!(manager.get_collection(cid).await.unwrap().is_none());
     // Media still queryable, but collection_id cleared.
     let still = manager.get(mid).await.unwrap().unwrap();
-    assert_eq!(still.collection_id, None, "Media collection_id should be NULL after orphan");
+    assert_eq!(
+        still.collection_id, None,
+        "Media collection_id should be NULL after orphan"
+    );
     // Storage object still present.
     let bytes = manager.load_bytes(&still).await.unwrap();
     assert!(!bytes.is_empty());
@@ -200,13 +230,25 @@ async fn move_to_collection_updates_fk() {
     };
     let a = manager.create_collection("A", "a", None, "").await.unwrap();
     let b = manager.create_collection("B", "b", None, "").await.unwrap();
-    let aid = match a.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
-    let bid = match b.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let aid = match a.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
+    let bid = match b.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
     let m = manager
-        .save_bytes(SaveOpts { collection_id: Some(aid), ..save_opts("move-me") })
+        .save_bytes(SaveOpts {
+            collection_id: Some(aid),
+            ..save_opts("move-me")
+        })
         .await
         .unwrap();
-    let mid = match m.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let mid = match m.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
 
     manager.move_to_collection(mid, Some(bid)).await.unwrap();
     let updated = manager.get(mid).await.unwrap().unwrap();
@@ -230,9 +272,15 @@ async fn tag_then_tags_for_round_trips() {
         return;
     };
     let m = manager.save_bytes(save_opts("tagged")).await.unwrap();
-    let mid = match m.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let mid = match m.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
 
-    manager.tag(mid, &["featured", "homepage", "approved"]).await.unwrap();
+    manager
+        .tag(mid, &["featured", "homepage", "approved"])
+        .await
+        .unwrap();
     let mut slugs: Vec<String> = manager
         .tags_for(mid)
         .await
@@ -243,7 +291,11 @@ async fn tag_then_tags_for_round_trips() {
     slugs.sort();
     assert_eq!(
         slugs,
-        vec!["approved".to_owned(), "featured".to_owned(), "homepage".to_owned()]
+        vec![
+            "approved".to_owned(),
+            "featured".to_owned(),
+            "homepage".to_owned()
+        ]
     );
 
     // Idempotent — re-tagging the same slug doesn't duplicate.
@@ -259,7 +311,10 @@ async fn untag_removes_one_keeps_others() {
         return;
     };
     let m = manager.save_bytes(save_opts("untag-me")).await.unwrap();
-    let mid = match m.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let mid = match m.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
 
     manager.tag(mid, &["a", "b", "c"]).await.unwrap();
     manager.untag(mid, "b").await.unwrap();
@@ -282,10 +337,16 @@ async fn set_tags_replaces_entire_set() {
         return;
     };
     let m = manager.save_bytes(save_opts("set-tags")).await.unwrap();
-    let mid = match m.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let mid = match m.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
 
     manager.tag(mid, &["old1", "old2"]).await.unwrap();
-    manager.set_tags(mid, &["new1", "new2", "new3"]).await.unwrap();
+    manager
+        .set_tags(mid, &["new1", "new2", "new3"])
+        .await
+        .unwrap();
     let mut slugs: Vec<String> = manager
         .tags_for(mid)
         .await
@@ -294,7 +355,10 @@ async fn set_tags_replaces_entire_set() {
         .map(|t| t.slug)
         .collect();
     slugs.sort();
-    assert_eq!(slugs, vec!["new1".to_owned(), "new2".to_owned(), "new3".to_owned()]);
+    assert_eq!(
+        slugs,
+        vec!["new1".to_owned(), "new2".to_owned(), "new3".to_owned()]
+    );
 
     manager.purge(&m).await.ok();
 }
@@ -307,9 +371,18 @@ async fn list_with_tag_returns_matching_media() {
     let a = manager.save_bytes(save_opts("a")).await.unwrap();
     let b = manager.save_bytes(save_opts("b")).await.unwrap();
     let c = manager.save_bytes(save_opts("c")).await.unwrap();
-    let aid = match a.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
-    let bid = match b.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
-    let cid = match c.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let aid = match a.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
+    let bid = match b.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
+    let cid = match c.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
 
     manager.tag(aid, &["featured"]).await.unwrap();
     manager.tag(bid, &["featured", "draft"]).await.unwrap();
@@ -333,18 +406,33 @@ async fn popular_tags_orders_by_use_count() {
     let m1 = manager.save_bytes(save_opts("m1")).await.unwrap();
     let m2 = manager.save_bytes(save_opts("m2")).await.unwrap();
     let m3 = manager.save_bytes(save_opts("m3")).await.unwrap();
-    let m1id = match m1.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
-    let m2id = match m2.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
-    let m3id = match m3.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let m1id = match m1.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
+    let m2id = match m2.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
+    let m3id = match m3.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
 
     // popular should be top: 3, mid: 2, niche: 1.
-    manager.tag(m1id, &["popular", "mid", "niche"]).await.unwrap();
+    manager
+        .tag(m1id, &["popular", "mid", "niche"])
+        .await
+        .unwrap();
     manager.tag(m2id, &["popular", "mid"]).await.unwrap();
     manager.tag(m3id, &["popular"]).await.unwrap();
 
     let top = manager.popular_tags(3).await.unwrap();
     let order: Vec<String> = top.into_iter().map(|(t, _)| t.slug).collect();
-    assert_eq!(order, vec!["popular".to_owned(), "mid".to_owned(), "niche".to_owned()]);
+    assert_eq!(
+        order,
+        vec!["popular".to_owned(), "mid".to_owned(), "niche".to_owned()]
+    );
 
     manager.purge(&m1).await.ok();
     manager.purge(&m2).await.ok();
@@ -361,7 +449,10 @@ async fn router_get_media_returns_full_response() {
         return;
     };
     let m = manager.save_bytes(save_opts("via-router")).await.unwrap();
-    let mid = match m.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let mid = match m.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
     manager.tag(mid, &["api"]).await.unwrap();
 
     let app = media_router(manager.clone());
@@ -377,7 +468,9 @@ async fn router_get_media_returns_full_response() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+        .await
+        .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(v["id"], mid);
     assert_eq!(v["mime"], "image/png");
@@ -417,7 +510,9 @@ async fn router_create_collection_then_list_and_get() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+        .await
+        .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let cid = v["id"].as_i64().unwrap();
     assert_eq!(v["slug"], "hero-images");
@@ -433,7 +528,9 @@ async fn router_create_collection_then_list_and_get() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+        .await
+        .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(v["slug"], "hero-images");
 
@@ -446,7 +543,9 @@ async fn router_create_collection_then_list_and_get() {
         )
         .await
         .unwrap();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+        .await
+        .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(v.as_array().unwrap().len(), 1);
 }
@@ -482,7 +581,9 @@ async fn router_begin_then_finalize_upload_via_axum() {
         .await
         .unwrap();
     assert_eq!(begin.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(begin.into_body(), 1 << 16).await.unwrap();
+    let bytes = axum::body::to_bytes(begin.into_body(), 1 << 16)
+        .await
+        .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let media_id = v["media_id"].as_i64().unwrap();
     let upload_url = v["upload_url"].as_str().unwrap().to_owned();
@@ -509,7 +610,9 @@ async fn router_begin_then_finalize_upload_via_axum() {
         .await
         .unwrap();
     assert_eq!(fin.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(fin.into_body(), 1 << 16).await.unwrap();
+    let bytes = axum::body::to_bytes(fin.into_body(), 1 << 16)
+        .await
+        .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(v["status"], "ready");
 
@@ -524,7 +627,10 @@ async fn router_set_tags_and_query_via_tag_endpoint() {
         return;
     };
     let m = manager.save_bytes(save_opts("router-tags")).await.unwrap();
-    let mid = match m.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let mid = match m.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
     let app = media_router(manager.clone());
 
     let resp = app
@@ -557,7 +663,9 @@ async fn router_set_tags_and_query_via_tag_endpoint() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+        .await
+        .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let arr = v.as_array().unwrap();
     assert_eq!(arr.len(), 1);
@@ -572,19 +680,31 @@ async fn router_collection_contents_with_recursive_query() {
         return;
     };
     let root = manager.create_collection("R", "r", None, "").await.unwrap();
-    let root_id = match root.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let root_id = match root.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
     let sub = manager
         .create_collection("S", "s", Some(root_id), "")
         .await
         .unwrap();
-    let sub_id = match sub.id { rustango::sql::Auto::Set(v) => v, _ => unreachable!() };
+    let sub_id = match sub.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
 
     let _root_m = manager
-        .save_bytes(SaveOpts { collection_id: Some(root_id), ..save_opts("rf") })
+        .save_bytes(SaveOpts {
+            collection_id: Some(root_id),
+            ..save_opts("rf")
+        })
         .await
         .unwrap();
     let _sub_m = manager
-        .save_bytes(SaveOpts { collection_id: Some(sub_id), ..save_opts("sf") })
+        .save_bytes(SaveOpts {
+            collection_id: Some(sub_id),
+            ..save_opts("sf")
+        })
         .await
         .unwrap();
 
@@ -601,7 +721,9 @@ async fn router_collection_contents_with_recursive_query() {
         )
         .await
         .unwrap();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+        .await
+        .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(v.as_array().unwrap().len(), 1);
 
@@ -615,7 +737,9 @@ async fn router_collection_contents_with_recursive_query() {
         )
         .await
         .unwrap();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+        .await
+        .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(v.as_array().unwrap().len(), 2);
 

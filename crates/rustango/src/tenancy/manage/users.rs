@@ -135,9 +135,7 @@ pub(super) async fn create_user_cmd<W: Write + Send>(
         Some(p) => p,
         None => manage_interactive::ask_password("Password: ")
             .map_err(TenancyError::Io)?
-            .ok_or_else(|| {
-                TenancyError::Validation("create-user requires --password".into())
-            })?,
+            .ok_or_else(|| TenancyError::Validation("create-user requires --password".into()))?,
     };
 
     // Look up the tenant.
@@ -155,12 +153,10 @@ pub(super) async fn create_user_cmd<W: Write + Send>(
     // We bypass `User::insert` because that uses `pools.registry()`'s
     // pool by default and we need a connection scoped to the tenant.
     // Hand-write an INSERT against the scoped connection.
-    use crate::tenancy::org::StorageMode;
     use crate::sql::sqlx::Row;
+    use crate::tenancy::org::StorageMode;
     let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
-        TenancyError::Validation(format!(
-            "org `{slug}` has unknown storage_mode `{got}`"
-        ))
+        TenancyError::Validation(format!("org `{slug}` has unknown storage_mode `{got}`"))
     })?;
     let row_id: i64 = match mode {
         StorageMode::Schema => {

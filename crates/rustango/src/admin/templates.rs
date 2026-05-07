@@ -12,6 +12,14 @@ fn templates() -> &'static tera::Tera {
     T.get_or_init(|| {
         let mut tera = tera::Tera::default();
         tera.add_raw_templates([
+            (
+                "_theme_tokens.html",
+                include_str!("../styles/theme_tokens.html"),
+            ),
+            (
+                "_admin_styles.html",
+                include_str!("templates/_admin_styles.html"),
+            ),
             ("base.html", include_str!("templates/base.html")),
             ("_sidebar.html", include_str!("templates/_sidebar.html")),
             ("index.html", include_str!("templates/index.html")),
