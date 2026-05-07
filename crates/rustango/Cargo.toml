@@ -261,7 +261,7 @@ tenancy = [
 # `info,sqlx=warn` env-filter logger before the user body runs. Apps
 # that don't want this dep can opt out by skipping the macro and
 # using `#[tokio::main]` directly.
-runtime = ["dep:tracing-subscriber"]
+runtime = ["dep:tracing-subscriber", "dep:tracing-appender"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
@@ -314,6 +314,7 @@ flate2 = { workspace = true, optional = true }
 # `runtime` feature dep — used by `#[rustango::main]` to install a
 # default tracing subscriber (env-filter) before the user body runs.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "json"], optional = true }
+tracing-appender = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio          = { workspace = true }

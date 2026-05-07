@@ -52,6 +52,7 @@ thiserror = "1"
 
 # Logging
 tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-appender = "0.2"
 
 # Async-trait for dyn-dispatchable async traits (e.g. OrgResolver)
 async-trait = "0.1"
