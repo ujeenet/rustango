@@ -2,6 +2,75 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.26.0] — admin theming + branding + ORM polish
+
+### Added
+
+- **Per-tenant branding** — six new `Org` columns (`brand_name`,
+  `brand_tagline`, `logo_path`, `favicon_path`, `primary_color`,
+  `theme_mode`) editable live through the operator-console org-edit
+  form, plus a dedicated multipart sub-form for logo / favicon
+  upload. Brand asset storage rides the framework's existing
+  `Storage` trait — `TenantAdminBuilder::brand_storage(...)` and
+  `operator_console::router_with_brand_storage(...)` accept any
+  `BoxedStorage` (LocalStorage, S3, R2, B2, MinIO, custom). When
+  the backend exposes URLs (`Storage::url`), rendered `<img src>`
+  goes straight at the origin or CDN; the
+  `/__brand__/{slug}/{filename}` static handler is a fallback only.
+- **Token-driven theme system** — shared `:root` CSS-variable
+  vocabulary in `src/styles/theme_tokens.html` covering surface,
+  foreground, border, accent, status, audit-op badges, typography,
+  spacing, radius, shadow. `[data-theme="dark"]` override +
+  `prefers-color-scheme` auto-switch. Theme toggle UI cycles auto →
+  light → dark, persists to `localStorage`, no-flash inline `<head>`
+  script.
+- **Operator-console env branding** — `RUSTANGO_OPERATOR_BRAND_NAME`
+  / `_TAGLINE` / `_LOGO_URL` / `_PRIMARY_COLOR` / `_THEME_MODE`
+  rebrand the global console without touching templates.
+- **`migrate-tenant-storage` CLI verb** — flip a populated tenant
+  between schema and database storage modes via `pg_dump` → `psql`
+  pipe, Org row update, cached pool eviction, and a `SELECT 1 FROM
+  rustango_users LIMIT 1` smoke check at the new location.
+  `--dry-run` previews without touching state. Closes future-feature
+  backlog #58.
+- **`QuerySet::explain` / `explain_on`** — Postgres planner output
+  for any compiled queryset. `ExplainOptions` opts into ANALYZE /
+  BUFFERS / VERBOSE and `ExplainFormat` selects text / json / yaml
+  / xml. Closes future-feature backlog #5.
+- **`#[rustango(generated_as = "EXPR")]`** field attribute — emits
+  `GENERATED ALWAYS AS (EXPR) STORED`. The macro skips the column
+  from every INSERT and UPDATE; the database recomputes on every
+  write. Closes future-feature backlog #35.
+- **`fetch_with_prefetch` for non-i64 FK PKs** — parents flow as
+  `Vec<SqlValue>` (was `Vec<i64>`); child grouping keys on
+  `SqlValue::to_display_string()`. `ForeignKey<T, String>` /
+  `ForeignKey<T, Uuid>` parents now get their children back instead
+  of an empty list. Closes ORM-improvements P10.
+- **Macro `upsert()` picks `unique_together` as conflict target** —
+  when the model declares one, the first such group beats the PK
+  default. Surrogate-Auto<T> + composite-UNIQUE shapes finally
+  upsert correctly instead of silently inserting duplicates.
+- **In-repo git hooks** — `.githooks/pre-commit` (rustfmt + secret
+  scan + debris check) + `.githooks/pre-push` (cargo check + scoped
+  clippy + lib tests) + `bin/install-hooks.sh` for one-line setup.
+  Optional `typos` / `cargo-deny` env-var opt-in.
+
+### Changed
+
+- `permissions.rs` raw-SQL upserts in `grant_role_perm` /
+  `assign_role` / `set_user_perm` migrated to the ORM's
+  `InsertQuery` + `ConflictClause` IR.
+
+### Tests
+
+Lib tests 1042 → 1069. Eight new live integration test files:
+`branding_live`, `operator_branding_env`, `permissions_upsert_live`,
+`upsert_unique_together_live`, `prefetch_non_i64_pk_live`,
+`migrate_tenant_storage_live`, `explain_live`,
+`generated_columns_live`.
+
+---
+
 ## [Unreleased] — v0.15.0 series (ContentType framework, Option F)
 
 Schema substrate that the rest of v0.15+ (permissions, audit-history admin, generic FKs, soft-FK prefetch) sits on. Three sub-slices, all merged to `main`:
