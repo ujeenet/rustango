@@ -47,7 +47,7 @@
 //! ```
 
 use crate::core::Model as _;
-use crate::core::{DeleteQuery, Filter, Op, SqlValue, WhereExpr};
+use crate::core::{ConflictClause, DeleteQuery, Filter, InsertQuery, Op, SqlValue, WhereExpr};
 use crate::sql::sqlx::{self, PgPool, Row};
 use crate::sql::Auto;
 use crate::Model;
@@ -427,20 +427,24 @@ pub async fn get_or_create_role(
 }
 
 /// Grant a codename to a role. No-op if already granted.
+///
+/// Routed through the ORM's [`InsertQuery`] IR with
+/// [`ConflictClause::DoNothing`] — the writer emits `INSERT … ON
+/// CONFLICT DO NOTHING`, which matches the `(role_id, codename)`
+/// unique constraint declared in [`ENSURE_SQL`].
 pub async fn grant_role_perm(
     role_id: i64,
     codename: &str,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
-    sqlx::query(
-        r#"INSERT INTO "rustango_role_permissions" (role_id, codename)
-           VALUES ($1, $2)
-           ON CONFLICT (role_id, codename) DO NOTHING"#,
-    )
-    .bind(role_id)
-    .bind(codename)
-    .execute(pool)
-    .await?;
+    let query = InsertQuery {
+        model: RolePermission::SCHEMA,
+        columns: vec!["role_id", "codename"],
+        values: vec![SqlValue::from(role_id), SqlValue::from(codename.to_owned())],
+        returning: vec![],
+        on_conflict: Some(ConflictClause::DoNothing),
+    };
+    crate::sql::insert(pool, &query).await?;
     Ok(())
 }
 
@@ -473,16 +477,17 @@ pub async fn revoke_role_perm(
 }
 
 /// Assign a user to a role. No-op if already assigned.
+///
+/// Same IR-routed pattern as [`grant_role_perm`].
 pub async fn assign_role(user_id: i64, role_id: i64, pool: &PgPool) -> Result<(), TenancyError> {
-    sqlx::query(
-        r#"INSERT INTO "rustango_user_roles" (user_id, role_id)
-           VALUES ($1, $2)
-           ON CONFLICT (user_id, role_id) DO NOTHING"#,
-    )
-    .bind(user_id)
-    .bind(role_id)
-    .execute(pool)
-    .await?;
+    let query = InsertQuery {
+        model: UserRole::SCHEMA,
+        columns: vec!["user_id", "role_id"],
+        values: vec![SqlValue::from(user_id), SqlValue::from(role_id)],
+        returning: vec![],
+        on_conflict: Some(ConflictClause::DoNothing),
+    };
+    crate::sql::insert(pool, &query).await?;
     Ok(())
 }
 
@@ -511,22 +516,35 @@ pub async fn remove_role(user_id: i64, role_id: i64, pool: &PgPool) -> Result<()
 }
 
 /// Set a per-user permission override. Updates `granted` if a row already exists.
+///
+/// Routed through the ORM's [`InsertQuery`] IR with
+/// [`ConflictClause::DoUpdate`] — the writer emits `INSERT … ON
+/// CONFLICT (user_id, codename) DO UPDATE SET granted = EXCLUDED.granted`,
+/// matching the composite unique constraint in [`ENSURE_SQL`]. `data`
+/// is omitted from `update_columns` so the existing JSONB context
+/// (reason / granted-by / etc.) survives a re-grant.
 pub async fn set_user_perm(
     user_id: i64,
     codename: &str,
     granted: bool,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
-    sqlx::query(
-        r#"INSERT INTO "rustango_user_permissions" (user_id, codename, granted, data)
-           VALUES ($1, $2, $3, '{}')
-           ON CONFLICT (user_id, codename) DO UPDATE SET granted = EXCLUDED.granted"#,
-    )
-    .bind(user_id)
-    .bind(codename)
-    .bind(granted)
-    .execute(pool)
-    .await?;
+    let query = InsertQuery {
+        model: UserPermission::SCHEMA,
+        columns: vec!["user_id", "codename", "granted", "data"],
+        values: vec![
+            SqlValue::from(user_id),
+            SqlValue::from(codename.to_owned()),
+            SqlValue::from(granted),
+            SqlValue::Json(serde_json::json!({})),
+        ],
+        returning: vec![],
+        on_conflict: Some(ConflictClause::DoUpdate {
+            target: vec!["user_id", "codename"],
+            update_columns: vec!["granted"],
+        }),
+    };
+    crate::sql::insert(pool, &query).await?;
     Ok(())
 }
 
