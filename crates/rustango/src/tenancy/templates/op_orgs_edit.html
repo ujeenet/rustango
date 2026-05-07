@@ -1,0 +1,62 @@
+{% extends "op_layout.html" %}
+{% block title %}Edit {{ slug }} — rustango operator console{% endblock %}
+{% block content %}
+<h1>Edit <code>{{ slug }}</code></h1>
+<p style="color:#666;font-size:.95em;">
+  Adjust the live config for this tenant. Locked fields stay where they
+  are — re-provisioning needs <code>cargo run -- create-tenant</code> /
+  <code>drop-tenant</code>. Form HTML for each editable field is
+  generated from <code>Org::SCHEMA</code> via
+  <code>rustango::admin::render::render_input</code>, so new columns
+  on <code>Org</code> show up here automatically.
+</p>
+
+{% if error %}
+  <div style="padding:.75rem;background:#fbe3e3;border:1px solid #d9534f;color:#a00;margin:1rem 0;">
+    {{ error }}
+  </div>
+{% endif %}
+{% if notice %}
+  <div style="padding:.75rem;background:#e6f4ea;border:1px solid #5cb85c;color:#1a4421;margin:1rem 0;">
+    {{ notice }}
+  </div>
+{% endif %}
+
+<form method="post" action="/orgs/{{ slug }}/edit" style="max-width:640px;">
+  <fieldset style="border:1px solid #ddd;padding:1rem;margin-bottom:1rem;">
+    <legend style="color:#888;font-size:.85em;text-transform:uppercase;">Locked</legend>
+    <table>
+      {% for row in locked_rows %}
+      <tr>
+        <th style="text-align:left;font-weight:600;padding:.25rem .75rem .25rem 0;">{{ row.name }}</th>
+        <td><code>{% if row.value %}{{ row.value }}{% else %}<em style="color:#aaa">none</em>{% endif %}</code></td>
+      </tr>
+      {% endfor %}
+    </table>
+  </fieldset>
+
+  <fieldset style="border:1px solid #ddd;padding:1rem;margin-bottom:1rem;">
+    <legend style="color:#888;font-size:.85em;text-transform:uppercase;">Editable</legend>
+    <table>
+      {% for row in editable_rows %}
+      <tr>
+        <th style="text-align:left;font-weight:600;padding:.5rem .75rem .25rem 0;vertical-align:top;">
+          <label for="{{ row.name }}">{{ row.name }}</label>
+        </th>
+        <td style="padding-bottom:.5rem;">
+          {{ row.input | safe }}
+          {% if row.helper %}<div style="color:#888;font-size:.85em;margin-top:.25rem;">{{ row.helper }}</div>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+  </fieldset>
+
+  <p>
+    <button type="submit" style="padding:.5rem 1.25rem;background:#5cb85c;color:#fff;border:0;cursor:pointer;">
+      Save
+    </button>
+    <a href="/orgs" style="margin-left:.75rem;color:#888;">Cancel</a>
+  </p>
+</form>
+{% endblock %}

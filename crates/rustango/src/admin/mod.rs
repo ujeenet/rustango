@@ -44,7 +44,11 @@ mod auth;
 mod errors;
 mod forms;
 mod helpers;
-mod render;
+// `pub(crate)` so the operator console can reuse `render_input` /
+// `render_value_for_input` for its `/orgs/{slug}/edit` form. Stays
+// non-public outside the crate — the helpers' signatures are still
+// internal-only.
+pub(crate) mod render;
 mod templates;
 mod urls;
 mod views;

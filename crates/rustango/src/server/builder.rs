@@ -330,7 +330,18 @@ impl Builder {
             }
         };
 
-        let operator_admin = operator_console::router(self.registry, operator_secret);
+        // `router_with_pools` (rather than `router`) so the operator
+        // console exposes /orgs/{slug}/edit. The pool handle is needed
+        // because rotating `database_url` must evict the cached
+        // `TenantPool` for that org so the next request rebuilds with
+        // new credentials — without eviction the operator could
+        // change the URL in the DB and the cached pool would happily
+        // keep authenticating with stale creds until process restart.
+        let operator_admin = operator_console::router_with_pools(
+            self.registry,
+            self.pools.clone(),
+            operator_secret,
+        );
 
         let app = Router::new().fallback_service(tower::service_fn({
             let operator = operator_admin.clone();
