@@ -2,11 +2,11 @@
 
 **A Django-shaped, batteries-included web framework for Rust.**
 
-ORM with auto-migrations, multi-tenancy, auto-admin, sessions + JWT + OAuth2/OIDC + HMAC auth, signals, caching, first-class media (Postgres rows + S3/R2/B2/MinIO + presigned uploads + collections + tags), email pipeline (renderer + jobs + Mailable), background jobs (in-mem + Postgres), webhook delivery, OpenAPI 3.1 auto-derive from serializers + viewsets, JSON:API + RFC 7807 Problem Details, scheduled tasks, RFC 6238 TOTP, signed URLs, Prometheus metrics, OTel-shape tracing, distributed locks + rate limits + feature flags, every standard middleware (CSRF, CSP nonce, gzip/deflate, body limit, real-IP, idempotency, maintenance, trailing slash, static files, method override, server-timing, …) — all shipped, all opt-out via cargo features.
+ORM with auto-migrations, multi-tenancy, auto-admin (token-driven theme system + dark mode + per-tenant branding via pluggable `Storage` trait — S3/R2/B2/MinIO/Local), sessions + JWT + OAuth2/OIDC + HMAC auth, signals, caching, first-class media (Postgres rows + S3/R2/B2/MinIO + presigned uploads + collections + tags), email pipeline (renderer + jobs + Mailable), background jobs (in-mem + Postgres), webhook delivery, OpenAPI 3.1 auto-derive from serializers + viewsets, JSON:API + RFC 7807 Problem Details, scheduled tasks, RFC 6238 TOTP, signed URLs, Prometheus metrics, OTel-shape tracing, distributed locks + rate limits + feature flags, every standard middleware (CSRF, CSP nonce, gzip/deflate, body limit, real-IP, idempotency, maintenance, trailing slash, static files, method override, server-timing, …) — all shipped, all opt-out via cargo features.
 
 ```toml
 [dependencies]
-rustango = "0.23"
+rustango = "0.26"
 ```
 
 ---
@@ -30,6 +30,7 @@ rustango = "0.23"
 - [i18n](#i18n)
 - [Testing](#testing)
 - [Feature flags](#feature-flags)
+- [Contributing — git hooks](#contributing--git-hooks)
 - [Production checklist](#production-checklist)
 
 ---
@@ -237,6 +238,13 @@ cargo run -- create-user acme alice --password hunter2 --superuser
 cargo run -- list-tenants
 cargo run -- audit-cleanup --days 90
 cargo run -- audit-cleanup --keep-last 50 --tenant acme
+
+# Move a populated tenant between schema and database storage modes
+# (pg_dump → psql pipe, Org row update, pool eviction, smoke check):
+cargo run -- migrate-tenant-storage acme --to database \
+    --database-url "postgres://acme:secret@db.example.com/acme" --dry-run
+cargo run -- migrate-tenant-storage acme --to database \
+    --database-url "postgres://acme:secret@db.example.com/acme"
 ```
 
 ---
@@ -454,6 +462,7 @@ Attribute on the field carries column-level options:
 | `#[rustango(auto_now)]` | Same as above + bound to `now()` on every UPDATE too. |
 | `#[rustango(auto_uuid)]` | DB sets `gen_random_uuid()` on INSERT. Pair with `Auto<Uuid>`. |
 | `#[rustango(soft_delete)]` | Routes admin DELETE through `UPDATE … = NOW()`. Requires `Option<DateTime<Utc>>`. |
+| `#[rustango(generated_as = "EXPR")]` | DB-computed column — emits `GENERATED ALWAYS AS (EXPR) STORED`. The macro skips the column from every INSERT and UPDATE; Postgres recomputes the value from `EXPR`. Read-back via `FromRow` works as for any other column. |
 | `#[rustango(fk = "table")]` | Raw foreign-key constraint on a plain field. |
 | `#[rustango(on = "column")]` | Override the FK target column (default `"id"`). |
 
@@ -469,7 +478,8 @@ Attributes on the struct itself, all wrapped in `#[rustango(...)]`:
 | `admin(...)` | Auto-admin config: `list_display`, `search_fields`, `list_filter`, `ordering`, `list_per_page`, `readonly_fields`. |
 | `audit(track = "f1, f2")` | Per-write before/after diff captured for these fields. Empty list = all scalar fields. |
 | `permissions` | Auto-seed the four CRUD codenames (`add`, `change`, `delete`, `view`). |
-| `index("a, b")` / `unique_together = "a, b"` | Composite (multi-column) index / unique constraint. |
+| `index("a, b")` / `unique_together = "a, b"` | Composite (multi-column) index / unique constraint. The first declared `unique_together` doubles as the `ON CONFLICT` target for the macro-generated `Model::upsert()` — useful for surrogate-PK + composite-UNIQUE shapes (junction rows, membership tables) where conflicting on a `BIGSERIAL` PK would never fire. |
+| `unique_together(columns = "a, b", name = "my_idx")` | Same with an explicit constraint name override. |
 | `check(name = "n", expr = "raw SQL")` | Table-level `CHECK` constraint. |
 | `m2m(name = "...", to = "...", through = "...", src = "...", dst = "...")` | Many-to-many relation through a junction table. |
 | `fk_composite(name = "...", to = "...", from = (...), on = (...))` | Multi-column FK (see above). |
@@ -557,6 +567,37 @@ rustango::sql::transaction(&pool, |conn| async move {
 }).await?;
 ```
 
+### EXPLAIN — query planner output for any queryset
+
+```rust
+use rustango::sql::{ExplainFormat, ExplainOptions};
+
+// Plain EXPLAIN — safe (no execution).
+let plan = Post::objects()
+    .where_(Post::author_id.eq(7_i64))
+    .explain(&pool).await?;
+for line in plan { println!("{line}"); }
+
+// EXPLAIN (ANALYZE, BUFFERS) — actually runs the query.
+let plan = Post::objects()
+    .where_(Post::status.eq("published"))
+    .explain_on(&pool, ExplainOptions {
+        analyze: true,
+        buffers: true,
+        ..Default::default()
+    })
+    .await?;
+
+// EXPLAIN (FORMAT JSON) — parseable payload.
+let plan = Post::objects()
+    .explain_on(&pool, ExplainOptions {
+        format: ExplainFormat::Json,
+        ..Default::default()
+    })
+    .await?;
+let parsed: serde_json::Value = serde_json::from_str(&plan.join("\n"))?;
+```
+
 ### Bi-dialect (Postgres + MySQL) via `&Pool`
 
 The classic API takes `&PgPool` (Postgres-only). The v0.23.0 series
@@ -565,7 +606,7 @@ adds a parallel `&Pool` API that targets either backend; pick MySQL
 
 ```toml
 # Cargo.toml — opt in to MySQL alongside the default postgres feature
-rustango = { version = "0.23", features = ["mysql"] }
+rustango = { version = "0.26", features = ["mysql"] }
 ```
 
 ```rust
@@ -901,6 +942,43 @@ let result = registry.run("delete_selected", "posts", &[1, 2, 3], &pool).await?;
 println!("affected {} rows", result.affected);
 ```
 
+### Theming + per-tenant branding (v0.26)
+
+Both admin surfaces — the per-tenant Django-shape admin and the
+operator console — share a CSS-variable token vocabulary
+(`--color-bg`, `--color-fg`, `--color-accent`, `--space-*`,
+`--font-*`, `--radius-*`, `--shadow-*`). Total customization without
+rewriting HTML, just CSS-variable overrides. Light by default,
+`[data-theme="dark"]` override, `prefers-color-scheme` auto-switch.
+A fixed-position theme toggle button (auto → light → dark) persists
+to `localStorage` with a no-flash inline `<head>` script.
+
+**Per-tenant branding** rides the framework's existing `Storage`
+trait — wire any backend (LocalStorage, S3, R2, B2, MinIO, custom)
+through `TenantAdminBuilder::brand_storage(...)` /
+`operator_console::router_with_brand_storage(...)`. When the backend
+exposes URLs (`Storage::url(key)`), rendered `<img src>` tags point
+straight at the origin or CDN — the `/__brand__/{slug}/{filename}`
+fallback handler is only mounted for backends that return `None`.
+
+`Org` carries six brand columns: `brand_name`, `brand_tagline`,
+`logo_path`, `favicon_path`, `primary_color`, `theme_mode`. Edit live
+through the existing operator-console org-edit form; logo / favicon
+upload via the same form's multipart sub-form. `primary_color`
+drives a derived `--color-accent` / `--color-accent-hover` /
+`--color-accent-bg-soft` triple via `branding::build_brand_css(&org)`,
+safelisted to hex-only values (no raw CSS from operator input).
+
+Operator-console branding is env-driven for the global UI:
+
+```bash
+RUSTANGO_OPERATOR_BRAND_NAME="Acme Operations"
+RUSTANGO_OPERATOR_TAGLINE="Internal admin"
+RUSTANGO_OPERATOR_LOGO_URL="https://cdn.example.com/acme-ops.png"
+RUSTANGO_OPERATOR_PRIMARY_COLOR="#2c5fb0"
+RUSTANGO_OPERATOR_THEME_MODE="auto"
+```
+
 ---
 
 ## APIs (ViewSet + Serializer + JWT)
@@ -1094,6 +1172,13 @@ Auto-resolves `Tenant` from request via, in order:
 
 - **Schema mode** — one Postgres schema per tenant, single database
 - **Database mode** — full database per tenant; `TenantPools` lazily opens connections
+
+Flip a populated tenant between modes with `cargo run --
+migrate-tenant-storage <slug> --to schema|database` (since v0.26).
+The verb runs `pg_dump` → `psql`, updates the `Org` row in a single
+transaction, evicts the cached pool, and smoke-checks the new
+location with `SELECT 1 FROM rustango_users LIMIT 1`. `--dry-run`
+short-circuits before any pg_dump call to preview the move.
 
 ### Programmatic provisioning
 
@@ -1814,16 +1899,16 @@ The default features cover everything most apps need. Trim them when shipping a 
 
 ```toml
 # Default — everything except tenancy + cache-redis
-rustango = "0.23"
+rustango = "0.26"
 
 # Multi-tenant
-rustango = { version = "0.23", features = ["tenancy"] }
+rustango = { version = "0.26", features = ["tenancy"] }
 
 # With Redis cache
-rustango = { version = "0.23", features = ["cache-redis"] }
+rustango = { version = "0.26", features = ["cache-redis"] }
 
 # Bare ORM only (no admin, no forms, no email, no storage)
-rustango = { version = "0.23", default-features = false, features = ["postgres"] }
+rustango = { version = "0.26", default-features = false, features = ["postgres"] }
 ```
 
 | Feature | What it adds | On by default? |
@@ -1847,6 +1932,34 @@ rustango = { version = "0.23", default-features = false, features = ["postgres"]
 | `signed_url` | HMAC-SHA256 signed URLs | yes |
 | `tenancy` | multi-tenancy + operator console + permissions | no |
 | `csrf` | CSRF middleware (depends on `forms`) | implied by admin |
+
+---
+
+## Contributing — git hooks
+
+Since v0.26 the rustango repo ships in-repo git hooks that catch
+formatting + obvious regressions before they hit CI. One-line setup
+per clone:
+
+```bash
+bin/install-hooks.sh
+```
+
+This sets `git config core.hooksPath .githooks`, after which:
+
+- **pre-commit** (fast, blocking) — `cargo fmt --check` on staged
+  Rust files, secret-shape scan (`.env`/`*.pem` files, AWS / GitHub
+  / Stripe / Slack token prefixes anywhere in the diff), debris
+  check (`dbg!`, `todo!()`, `unimplemented!()` in `src/`/`tests/`).
+- **pre-push** (slower, blocking) — `cargo check --workspace
+  --all-features`, scoped clippy on the rustango lib, lib tests.
+
+Per-step env-var overrides documented at the top of each script.
+Optional tools the hooks pick up when installed:
+`cargo install typos-cli` (then `PRECOMMIT_TYPOS=1`),
+`cargo install cargo-deny` (then `PREPUSH_DENY=1`).
+`git commit --no-verify` / `git push --no-verify` bypass everything
+when needed.
 
 ---
 
