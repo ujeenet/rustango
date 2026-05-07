@@ -1,0 +1,46 @@
+<button type="button" class="theme-toggle" data-rustango-theme-toggle aria-label="Toggle theme">
+  <span data-rustango-theme-icon>🌗</span>
+  <span data-rustango-theme-label>Auto</span>
+</button>
+<script>
+// Theme toggle — cycles auto → light → dark → auto. Persists choice
+// to localStorage so it survives page navigation. Pairs with the
+// no-flash <head> script that re-applies the saved value before
+// stylesheet evaluation.
+(function () {
+  const STORAGE_KEY = 'rustango-theme';
+  const ORDER = ['auto', 'light', 'dark'];
+  const ICONS = { auto: '🌗', light: '☀️', dark: '🌙' };
+  const LABELS = { auto: 'Auto', light: 'Light', dark: 'Dark' };
+
+  const read = () => {
+    try { return localStorage.getItem(STORAGE_KEY); } catch (e) { return null; }
+  };
+  const write = (v) => {
+    try { localStorage.setItem(STORAGE_KEY, v); } catch (e) { /* private mode */ }
+  };
+  const apply = (mode) => {
+    document.documentElement.dataset.theme = mode;
+    document.querySelectorAll('[data-rustango-theme-icon]').forEach((el) => {
+      el.textContent = ICONS[mode] || ICONS.auto;
+    });
+    document.querySelectorAll('[data-rustango-theme-label]').forEach((el) => {
+      el.textContent = LABELS[mode] || LABELS.auto;
+    });
+  };
+
+  // Sync icon/label with whichever theme the no-flash script picked.
+  const stored = read();
+  apply(stored && ORDER.includes(stored) ? stored : (document.documentElement.dataset.theme || 'auto'));
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-rustango-theme-toggle]');
+    if (!btn) return;
+    const cur = read();
+    const idx = ORDER.indexOf(cur && ORDER.includes(cur) ? cur : 'auto');
+    const next = ORDER[(idx + 1) % ORDER.length];
+    write(next);
+    apply(next);
+  });
+})();
+</script>

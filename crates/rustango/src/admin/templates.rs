@@ -20,6 +20,10 @@ fn templates() -> &'static tera::Tera {
                 "_admin_styles.html",
                 include_str!("templates/_admin_styles.html"),
             ),
+            (
+                "_theme_toggle.html",
+                include_str!("templates/_theme_toggle.html"),
+            ),
             ("base.html", include_str!("templates/base.html")),
             ("_sidebar.html", include_str!("templates/_sidebar.html")),
             ("index.html", include_str!("templates/index.html")),

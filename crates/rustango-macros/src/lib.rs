@@ -188,10 +188,7 @@ pub fn main(args: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-fn expand_main(
-    args: TokenStream2,
-    item: TokenStream2,
-) -> syn::Result<TokenStream2> {
+fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStream2> {
     let mut input: syn::ItemFn = syn::parse2(item)?;
     if input.sig.asyncness.is_none() {
         return Err(syn::Error::new(
@@ -327,10 +324,7 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
                 ),
             ));
         }
-        let prev = json
-            .get("prev")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
+        let prev = json.get("prev").and_then(|v| v.as_str()).map(str::to_owned);
         chain_names.push(name.clone());
         prev_refs.push((name, prev));
     }
@@ -482,7 +476,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     for field in &named.named {
         let ident = field.ident.as_ref().expect("named");
         let col = to_snake_case(&ident.to_string()); // column name fallback
-        // Re-parse field attrs to check for index flag
+                                                     // Re-parse field attrs to check for index flag
         if let Ok(fa) = parse_field_attrs(field) {
             if fa.index {
                 let col_name = fa.column.clone().unwrap_or_else(|| col.clone());
@@ -578,10 +572,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 /// return `Ok(false)` for any field name) so the `T: LoadRelated`
 /// trait bound on `fetch_on` is universally satisfied — users
 /// never have to think about implementing it.
-fn load_related_impl_tokens(
-    struct_name: &syn::Ident,
-    fk_relations: &[FkRelation],
-) -> TokenStream2 {
+fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation]) -> TokenStream2 {
     let arms = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
         let fk_col = rel.fk_column.as_str();
@@ -718,10 +709,7 @@ fn load_related_impl_my_tokens(
 ///
 /// Always emitted (with `_ => None` for FK-less models) so the
 /// trait bound on `fetch_with_prefetch` is universally satisfied.
-fn fk_pk_access_impl_tokens(
-    struct_name: &syn::Ident,
-    fk_relations: &[FkRelation],
-) -> TokenStream2 {
+fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation]) -> TokenStream2 {
     let arms = fk_relations.iter().map(|rel| {
         let fk_col = rel.fk_column.as_str();
         let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
@@ -773,10 +761,7 @@ fn fk_pk_access_impl_tokens(
 /// Reads the parent's PK via the macro-generated `__rustango_pk_value`
 /// and runs a single `SELECT … FROM <child_table> WHERE <fk_column> = $1`
 /// — the canonical reverse-FK fetch. One round trip, no N+1.
-fn reverse_helper_tokens(
-    child_ident: &syn::Ident,
-    fk_relations: &[FkRelation],
-) -> TokenStream2 {
+fn reverse_helper_tokens(child_ident: &syn::Ident, fk_relations: &[FkRelation]) -> TokenStream2 {
     if fk_relations.is_empty() {
         return TokenStream2::new();
     }
@@ -1842,29 +1827,30 @@ fn inherent_impl_tokens(
             // is `(col_lit, try_get_returning<value_ty>(row, col_lit) → Json)`.
             // The Row alias resolves to PgRow / MySqlRow per call site,
             // so the same template generates both the PG and MySQL bodies.
-            let mk_before_pairs = |getter: proc_macro2::TokenStream| -> Vec<proc_macro2::TokenStream> {
-                tracked
-                    .iter()
-                    .map(|c| {
-                        let column_lit = c.column.as_str();
-                        let value_ty = &c.value_ty;
-                        quote! {
-                            (
-                                #column_lit,
-                                match #getter::<#value_ty>(
-                                    _audit_before_row, #column_lit,
-                                ) {
-                                    ::core::result::Result::Ok(v) => {
-                                        ::serde_json::to_value(&v)
-                                            .unwrap_or(::serde_json::Value::Null)
-                                    }
-                                    ::core::result::Result::Err(_) => ::serde_json::Value::Null,
-                                },
-                            )
-                        }
-                    })
-                    .collect()
-            };
+            let mk_before_pairs =
+                |getter: proc_macro2::TokenStream| -> Vec<proc_macro2::TokenStream> {
+                    tracked
+                        .iter()
+                        .map(|c| {
+                            let column_lit = c.column.as_str();
+                            let value_ty = &c.value_ty;
+                            quote! {
+                                (
+                                    #column_lit,
+                                    match #getter::<#value_ty>(
+                                        _audit_before_row, #column_lit,
+                                    ) {
+                                        ::core::result::Result::Ok(v) => {
+                                            ::serde_json::to_value(&v)
+                                                .unwrap_or(::serde_json::Value::Null)
+                                        }
+                                        ::core::result::Result::Err(_) => ::serde_json::Value::Null,
+                                    },
+                                )
+                            }
+                        })
+                        .collect()
+                };
             let before_pairs_pg: Vec<proc_macro2::TokenStream> =
                 mk_before_pairs(quote!(::rustango::sql::try_get_returning));
             let before_pairs_my: Vec<proc_macro2::TokenStream> =
@@ -1959,9 +1945,7 @@ fn inherent_impl_tokens(
     //   which opens a per-backend transaction wrapping DELETE +
     //   audit emit so the data write and audit row commit atomically.
     let pool_delete_method = {
-        let pk_column_lit = primary_key
-            .map(|(_, col)| col.as_str())
-            .unwrap_or("id");
+        let pk_column_lit = primary_key.map(|(_, col)| col.as_str()).unwrap_or("id");
         let pk_ident_for_pool = primary_key.map(|(ident, _)| ident);
         if let Some(pk_ident) = pk_ident_for_pool {
             if audited_fields.is_some() {
@@ -2046,103 +2030,102 @@ fn inherent_impl_tokens(
     // Two-fragment shape: `audit_update_pre` runs before the UPDATE
     // and binds `_audit_before_pairs`; `audit_update_post` runs
     // after the UPDATE and emits the PendingEntry.
-    let (audit_update_pre, audit_update_post): (TokenStream2, TokenStream2) =
-        if let Some(tracked) = audited_fields {
-            if tracked.is_empty() {
-                (quote!(), quote!())
-            } else {
-                let select_cols: String = tracked
-                    .iter()
-                    .map(|c| format!("\"{}\"", c.column.replace('"', "\"\"")))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let pk_column_for_select = primary_key
-                    .map(|(_, col)| col.clone())
-                    .unwrap_or_default();
-                let select_cols_lit = select_cols;
-                let pk_column_lit_for_select = pk_column_for_select;
-                let pk_value_for_bind = if let Some((pk_ident, _)) = primary_key {
-                    if fields.pk_is_auto {
-                        quote!(self.#pk_ident.get().copied().unwrap_or_default())
-                    } else {
-                        quote!(::core::clone::Clone::clone(&self.#pk_ident))
-                    }
-                } else {
-                    quote!(0_i64)
-                };
-                let before_pairs = tracked.iter().map(|c| {
-                    let column_lit = c.column.as_str();
-                    let value_ty = &c.value_ty;
-                    quote! {
-                        (
-                            #column_lit,
-                            match ::rustango::sql::sqlx::Row::try_get::<#value_ty, _>(
-                                &_audit_before_row, #column_lit,
-                            ) {
-                                ::core::result::Result::Ok(v) => {
-                                    ::serde_json::to_value(&v)
-                                        .unwrap_or(::serde_json::Value::Null)
-                                }
-                                ::core::result::Result::Err(_) => ::serde_json::Value::Null,
-                            },
-                        )
-                    }
-                });
-                let after_pairs = tracked.iter().map(|c| {
-                    let column_lit = c.column.as_str();
-                    let ident = &c.ident;
-                    quote! {
-                        (
-                            #column_lit,
-                            ::serde_json::to_value(&self.#ident)
-                                .unwrap_or(::serde_json::Value::Null),
-                        )
-                    }
-                });
-                let pk_str = audit_pk_to_string.clone();
-                let pre = quote! {
-                    let _audit_select_sql = ::std::format!(
-                        r#"SELECT {} FROM "{}" WHERE "{}" = $1"#,
-                        #select_cols_lit,
-                        <Self as ::rustango::core::Model>::SCHEMA.table,
-                        #pk_column_lit_for_select,
-                    );
-                    let _audit_before_pairs:
-                        ::std::option::Option<::std::vec::Vec<(&'static str, ::serde_json::Value)>> =
-                        match ::rustango::sql::sqlx::query(&_audit_select_sql)
-                            .bind(#pk_value_for_bind)
-                            .fetch_optional(&mut *_executor)
-                            .await
-                        {
-                            ::core::result::Result::Ok(::core::option::Option::Some(_audit_before_row)) => {
-                                ::core::option::Option::Some(::std::vec![ #( #before_pairs ),* ])
-                            }
-                            _ => ::core::option::Option::None,
-                        };
-                };
-                let post = quote! {
-                    if let ::core::option::Option::Some(_audit_before) = _audit_before_pairs {
-                        let _audit_after:
-                            ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
-                            ::std::vec![ #( #after_pairs ),* ];
-                        let _audit_entry = ::rustango::audit::PendingEntry {
-                            entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
-                            entity_pk: #pk_str,
-                            operation: ::rustango::audit::AuditOp::Update,
-                            source: ::rustango::audit::current_source(),
-                            changes: ::rustango::audit::diff_changes(
-                                &_audit_before,
-                                &_audit_after,
-                            ),
-                        };
-                        ::rustango::audit::emit_one(&mut *_executor, &_audit_entry).await?;
-                    }
-                };
-                (pre, post)
-            }
-        } else {
+    let (audit_update_pre, audit_update_post): (TokenStream2, TokenStream2) = if let Some(tracked) =
+        audited_fields
+    {
+        if tracked.is_empty() {
             (quote!(), quote!())
-        };
+        } else {
+            let select_cols: String = tracked
+                .iter()
+                .map(|c| format!("\"{}\"", c.column.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let pk_column_for_select = primary_key.map(|(_, col)| col.clone()).unwrap_or_default();
+            let select_cols_lit = select_cols;
+            let pk_column_lit_for_select = pk_column_for_select;
+            let pk_value_for_bind = if let Some((pk_ident, _)) = primary_key {
+                if fields.pk_is_auto {
+                    quote!(self.#pk_ident.get().copied().unwrap_or_default())
+                } else {
+                    quote!(::core::clone::Clone::clone(&self.#pk_ident))
+                }
+            } else {
+                quote!(0_i64)
+            };
+            let before_pairs = tracked.iter().map(|c| {
+                let column_lit = c.column.as_str();
+                let value_ty = &c.value_ty;
+                quote! {
+                    (
+                        #column_lit,
+                        match ::rustango::sql::sqlx::Row::try_get::<#value_ty, _>(
+                            &_audit_before_row, #column_lit,
+                        ) {
+                            ::core::result::Result::Ok(v) => {
+                                ::serde_json::to_value(&v)
+                                    .unwrap_or(::serde_json::Value::Null)
+                            }
+                            ::core::result::Result::Err(_) => ::serde_json::Value::Null,
+                        },
+                    )
+                }
+            });
+            let after_pairs = tracked.iter().map(|c| {
+                let column_lit = c.column.as_str();
+                let ident = &c.ident;
+                quote! {
+                    (
+                        #column_lit,
+                        ::serde_json::to_value(&self.#ident)
+                            .unwrap_or(::serde_json::Value::Null),
+                    )
+                }
+            });
+            let pk_str = audit_pk_to_string.clone();
+            let pre = quote! {
+                let _audit_select_sql = ::std::format!(
+                    r#"SELECT {} FROM "{}" WHERE "{}" = $1"#,
+                    #select_cols_lit,
+                    <Self as ::rustango::core::Model>::SCHEMA.table,
+                    #pk_column_lit_for_select,
+                );
+                let _audit_before_pairs:
+                    ::std::option::Option<::std::vec::Vec<(&'static str, ::serde_json::Value)>> =
+                    match ::rustango::sql::sqlx::query(&_audit_select_sql)
+                        .bind(#pk_value_for_bind)
+                        .fetch_optional(&mut *_executor)
+                        .await
+                    {
+                        ::core::result::Result::Ok(::core::option::Option::Some(_audit_before_row)) => {
+                            ::core::option::Option::Some(::std::vec![ #( #before_pairs ),* ])
+                        }
+                        _ => ::core::option::Option::None,
+                    };
+            };
+            let post = quote! {
+                if let ::core::option::Option::Some(_audit_before) = _audit_before_pairs {
+                    let _audit_after:
+                        ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
+                        ::std::vec![ #( #after_pairs ),* ];
+                    let _audit_entry = ::rustango::audit::PendingEntry {
+                        entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
+                        entity_pk: #pk_str,
+                        operation: ::rustango::audit::AuditOp::Update,
+                        source: ::rustango::audit::current_source(),
+                        changes: ::rustango::audit::diff_changes(
+                            &_audit_before,
+                            &_audit_after,
+                        ),
+                    };
+                    ::rustango::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+                }
+            };
+            (pre, post)
+        }
+    } else {
+        (quote!(), quote!())
+    };
 
     // Bulk-insert audit: capture every row's tracked fields after the
     // RETURNING populates each PK, then push one batched INSERT INTO
@@ -2157,20 +2140,17 @@ fn inherent_impl_tokens(
         } else {
             quote!(::std::string::String::new())
         };
-        let row_pairs = audited_fields
-            .unwrap_or(&[])
-            .iter()
-            .map(|c| {
-                let column_lit = c.column.as_str();
-                let ident = &c.ident;
-                quote! {
-                    (
-                        #column_lit,
-                        ::serde_json::to_value(&_row.#ident)
-                            .unwrap_or(::serde_json::Value::Null),
-                    )
-                }
-            });
+        let row_pairs = audited_fields.unwrap_or(&[]).iter().map(|c| {
+            let column_lit = c.column.as_str();
+            let ident = &c.ident;
+            quote! {
+                (
+                    #column_lit,
+                    ::serde_json::to_value(&_row.#ident)
+                        .unwrap_or(::serde_json::Value::Null),
+                )
+            }
+        });
         quote! {
             let _audit_source = ::rustango::audit::current_source();
             let mut _audit_entries:
@@ -2194,8 +2174,7 @@ fn inherent_impl_tokens(
     };
 
     let save_method = if fields.pk_is_auto {
-        let (pk_ident, pk_column) = primary_key
-            .expect("pk_is_auto implies primary_key is Some");
+        let (pk_ident, pk_column) = primary_key.expect("pk_is_auto implies primary_key is Some");
         let pk_column_lit = pk_column.as_str();
         let assignments = &fields.update_assignments;
         let upsert_cols = &fields.upsert_update_columns;
@@ -2892,10 +2871,8 @@ fn inherent_impl_tokens(
         });
     };
 
-    let load_related_impl =
-        load_related_impl_tokens(struct_name, &fields.fk_relations);
-    let load_related_impl_my =
-        load_related_impl_my_tokens(struct_name, &fields.fk_relations);
+    let load_related_impl = load_related_impl_tokens(struct_name, &fields.fk_relations);
+    let load_related_impl_my = load_related_impl_my_tokens(struct_name, &fields.fk_relations);
 
     quote! {
         impl #struct_name {
@@ -3583,9 +3560,11 @@ fn parse_together_attr(
         }
         Err(inner.error("unknown sub-attribute (supported: `columns`, `name`)"))
     })?;
-    let columns = columns.ok_or_else(|| meta.error(format!(
-        "{attr}(...) requires a `columns = \"col1, col2\"` argument",
-    )))?;
+    let columns = columns.ok_or_else(|| {
+        meta.error(format!(
+            "{attr}(...) requires a `columns = \"col1, col2\"` argument",
+        ))
+    })?;
     check_together_columns(meta, attr, &columns)?;
     Ok((columns, name))
 }
@@ -3623,9 +3602,7 @@ fn parse_fieldset_list(raw: &str) -> Vec<(String, Vec<String>)> {
         .map(|section| {
             // Split off an optional `Title:` prefix (first colon).
             let (title, rest) = match section.split_once(':') {
-                Some((title, rest)) if !title.contains(',') => {
-                    (title.trim().to_owned(), rest)
-                }
+                Some((title, rest)) if !title.contains(',') => (title.trim().to_owned(), rest),
                 _ => (String::new(), section),
             };
             let fields = split_field_list(rest);
@@ -3642,7 +3619,9 @@ fn parse_ordering_list(raw: &str) -> Vec<(String, bool)> {
         .filter(|s| !s.is_empty())
         .map(|spec| {
             spec.strip_prefix('-')
-                .map_or((spec.to_owned(), false), |rest| (rest.trim().to_owned(), true))
+                .map_or((spec.to_owned(), false), |rest| {
+                    (rest.trim().to_owned(), true)
+                })
         })
         .collect()
 }
@@ -3804,7 +3783,8 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                             out.index_name = Some(s.value());
                             return Ok(());
                         }
-                        Err(inner.error("unknown index sub-attribute (supported: `unique`, `name`)"))
+                        Err(inner
+                            .error("unknown index sub-attribute (supported: `unique`, `name`)"))
                     })?;
                 }
                 return Ok(());
@@ -4292,10 +4272,7 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
         let inner = generic_inner(ty, &last.arguments, "Auto")?;
         let inner_det = detect_type(inner)?;
         if inner_det.auto {
-            return Err(syn::Error::new_spanned(
-                ty,
-                "nested Auto is not supported",
-            ));
+            return Err(syn::Error::new_spanned(ty, "nested Auto is not supported"));
         }
         if inner_det.nullable {
             return Err(syn::Error::new_spanned(
@@ -5036,10 +5013,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
     }
 
     let model = model.ok_or_else(|| {
-        syn::Error::new_spanned(
-            &input.ident,
-            "`#[viewset(model = SomeModel)]` is required",
-        )
+        syn::Error::new_spanned(&input.ident, "`#[viewset(model = SomeModel)]` is required")
     })?;
 
     Ok(ViewSetAttrs {
@@ -5309,17 +5283,20 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // Per-field validators (DRF-shape `validators=[...]`). Emit a
     // `validate(&self)` method that runs each user-defined validator
     // and aggregates errors into `FormErrors`.
-    let validator_calls: Vec<_> = fields_info.iter().filter_map(|fi| {
-        let ident = &fi.ident;
-        let name_lit = ident.to_string();
-        let method = fi.attrs.validate.as_ref()?;
-        let method_ident = syn::Ident::new(method, ident.span());
-        Some(quote! {
-            if let ::core::result::Result::Err(__e) = Self::#method_ident(&self.#ident) {
-                __errors.add(#name_lit.to_owned(), __e);
-            }
+    let validator_calls: Vec<_> = fields_info
+        .iter()
+        .filter_map(|fi| {
+            let ident = &fi.ident;
+            let name_lit = ident.to_string();
+            let method = fi.attrs.validate.as_ref()?;
+            let method_ident = syn::Ident::new(method, ident.span());
+            Some(quote! {
+                if let ::core::result::Result::Err(__e) = Self::#method_ident(&self.#ident) {
+                    __errors.add(#name_lit.to_owned(), __e);
+                }
+            })
         })
-    }).collect();
+        .collect();
     let validate_method = if validator_calls.is_empty() {
         quote! {}
     } else {
@@ -5344,26 +5321,29 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // For every `#[serializer(many = S)]` field, emit a
     // `pub fn set_<field>(&mut self, models: &[<S::Model>]) -> &mut Self`
     // helper that maps the parents through `S::from_model`.
-    let many_setters: Vec<_> = fields_info.iter().filter_map(|fi| {
-        let many_ty = fi.attrs.many.as_ref()?;
-        let ident = &fi.ident;
-        let setter = syn::Ident::new(&format!("set_{ident}"), ident.span());
-        Some(quote! {
-            /// Populate this `many` field by mapping each parent model
-            /// through the inner serializer's `from_model`. Call after
-            /// fetching the M2M / one-to-many children since
-            /// `from_model` itself can't await an SQL query.
-            pub fn #setter(
-                &mut self,
-                models: &[<#many_ty as ::rustango::serializer::ModelSerializer>::Model],
-            ) -> &mut Self {
-                self.#ident = models.iter()
-                    .map(<#many_ty as ::rustango::serializer::ModelSerializer>::from_model)
-                    .collect();
-                self
-            }
+    let many_setters: Vec<_> = fields_info
+        .iter()
+        .filter_map(|fi| {
+            let many_ty = fi.attrs.many.as_ref()?;
+            let ident = &fi.ident;
+            let setter = syn::Ident::new(&format!("set_{ident}"), ident.span());
+            Some(quote! {
+                /// Populate this `many` field by mapping each parent model
+                /// through the inner serializer's `from_model`. Call after
+                /// fetching the M2M / one-to-many children since
+                /// `from_model` itself can't await an SQL query.
+                pub fn #setter(
+                    &mut self,
+                    models: &[<#many_ty as ::rustango::serializer::ModelSerializer>::Model],
+                ) -> &mut Self {
+                    self.#ident = models.iter()
+                        .map(<#many_ty as ::rustango::serializer::ModelSerializer>::from_model)
+                        .collect();
+                    self
+                }
+            })
         })
-    }).collect();
+        .collect();
     let many_setters_impl = if many_setters.is_empty() {
         quote! {}
     } else {

@@ -208,6 +208,10 @@ fn router_inner(
             include_str!("../templates/_op_styles.html"),
         ),
         (
+            "_theme_toggle.html",
+            include_str!("../../admin/templates/_theme_toggle.html"),
+        ),
+        (
             "op_layout.html",
             include_str!("../templates/op_layout.html"),
         ),

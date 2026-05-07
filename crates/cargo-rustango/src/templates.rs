@@ -305,7 +305,7 @@ pub fn api() -> Router<()> {
         .route(\"/healthz\", get(views::healthz))
 }
 "
-                .to_owned()
+            .to_owned()
         }
         Template::Fullstack => {
             // Stateless aggregator + a separate `admin_router(pool)`
@@ -337,7 +337,7 @@ pub fn admin_router(pool: PgPool) -> Router {
     admin::Builder::new(pool).build()
 }
 "
-                .to_owned()
+            .to_owned()
         }
         Template::Tenant => {
             // Multi-tenant: main.rs uses `rustango::server::Builder`,
@@ -373,7 +373,7 @@ pub fn api() -> Router<()> {
         .route(\"/healthz\", get(views::healthz))
 }
 "
-                .to_owned()
+            .to_owned()
         }
     }
 }
@@ -396,4 +396,3 @@ pub const BOOTSTRAP_REGISTRY_MIGRATION: &str =
 /// each tenant's schema/database when `manage migrate-tenants` runs.
 pub const BOOTSTRAP_TENANT_MIGRATION: &str =
     include_str!("../templates/0001_rustango_tenant_initial.json");
-

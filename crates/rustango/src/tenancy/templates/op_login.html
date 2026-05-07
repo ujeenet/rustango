@@ -85,7 +85,7 @@
 </head>
 <body>
   <form class="card" method="post" action="/login">
-    {% if brand_logo_url %}<img class="brand-logo" src="{{ brand_logo_url }}" alt="">{% endif %}
+    {% if brand_logo_url %}<img class="brand-logo" src="{{ brand_logo_url | safe }}" alt="">{% endif %}
     <h1>{{ brand_name | default(value='rustango') }}</h1>
     <p class="sub">{{ brand_tagline | default(value='Operator console') }}</p>
     {% if error %}<div class="error">{{ error }}</div>{% endif %}

@@ -480,7 +480,10 @@ mod tests {
         let storage: BoxedStorage = Arc::new(crate::storage::InMemoryStorage::new());
         assert_eq!(brand_asset_url("acme", None, &storage), None);
         assert_eq!(brand_asset_url("acme", Some(""), &storage), None);
-        assert_eq!(brand_asset_url("acme", Some("../etc/passwd"), &storage), None);
+        assert_eq!(
+            brand_asset_url("acme", Some("../etc/passwd"), &storage),
+            None
+        );
         assert_eq!(brand_asset_url("../bad", Some("logo.png"), &storage), None);
     }
 

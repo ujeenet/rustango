@@ -113,7 +113,9 @@ impl Template {
     fn rustango_features(self) -> &'static str {
         match self {
             // Bare ORM + axum + manage dispatcher; no auto-admin UI.
-            Self::Api => r#"{ version = "0.23", default-features = false, features = ["postgres", "manage"] }"#,
+            Self::Api => {
+                r#"{ version = "0.23", default-features = false, features = ["postgres", "manage"] }"#
+            }
             Self::Fullstack => r#""0.23""#,
             Self::Tenant => r#"{ version = "0.23", features = ["tenancy"] }"#,
         }
@@ -185,13 +187,17 @@ fn parse_new_args(args: &[String]) -> Result<NewArgs, String> {
             }
         }
     }
-    let name = name.ok_or_else(|| "missing project name (e.g. `cargo rustango new myapp`)".to_owned())?;
+    let name =
+        name.ok_or_else(|| "missing project name (e.g. `cargo rustango new myapp`)".to_owned())?;
     Ok(NewArgs { name, template })
 }
 
 fn validate_name(name: &str) -> Result<(), String> {
     let valid = !name.is_empty()
-        && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
@@ -214,8 +220,7 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     write(root, "docker-compose.yml", &templates::docker_compose(name))?;
     write(root, "README.md", &templates::readme(name, template))?;
 
-    fs::create_dir_all(root.join("migrations"))
-        .map_err(|e| format!("create migrations/: {e}"))?;
+    fs::create_dir_all(root.join("migrations")).map_err(|e| format!("create migrations/: {e}"))?;
 
     write(root, "src/main.rs", templates::main_rs(template))?;
     write(root, "src/models.rs", &templates::models_rs(template))?;

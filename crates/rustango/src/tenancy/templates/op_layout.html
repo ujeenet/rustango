@@ -3,6 +3,10 @@
 <head>
   <meta charset="utf-8">
   <title>{% block title %}{{ brand_name | default(value='rustango operator console') }}{% endblock %}</title>
+  <script>
+  // No-flash theme application — see _theme_toggle.html for the cycle UI.
+  (function(){try{var t=localStorage.getItem('rustango-theme');if(t==='light'||t==='dark'||t==='auto'){document.documentElement.dataset.theme=t;}}catch(e){}})();
+  </script>
   {% include "_theme_tokens.html" %}
   {% include "_op_styles.html" %}
   {% if brand_css %}<style>:root { {{ brand_css | safe }} }</style>{% endif %}
@@ -29,5 +33,6 @@
       {% block content %}{% endblock %}
     </main>
   </div>
+  {% include "_theme_toggle.html" %}
 </body>
 </html>

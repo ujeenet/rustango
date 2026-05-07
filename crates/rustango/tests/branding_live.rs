@@ -94,7 +94,10 @@ async fn upload_then_serve_round_trip() {
     rustango::migrate::apply_all(&pool).await.unwrap();
 
     // Seed an operator + an org. Pre-hashed password = "letmein".
-    let username = format!("brand_op_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+    let username = format!(
+        "brand_op_{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    );
     let password = "letmein".to_owned();
     let hash = rustango::tenancy::password::hash(&password).unwrap();
     let mut op = rustango::tenancy::Operator {
@@ -106,7 +109,10 @@ async fn upload_then_serve_round_trip() {
     };
     op.insert(&pool).await.unwrap();
 
-    let slug = format!("brand_acme_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+    let slug = format!(
+        "brand_acme_{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    );
     let mut org = Org {
         id: Auto::default(),
         slug: slug.clone(),
@@ -253,7 +259,10 @@ async fn tenant_admin_renders_brand_overrides() {
     rustango::migrate::apply_all(&pool).await.unwrap();
 
     // Seed an org with all brand fields populated.
-    let slug = format!("brand_render_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+    let slug = format!(
+        "brand_render_{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    );
     let mut org = Org {
         id: Auto::default(),
         slug: slug.clone(),
@@ -327,4 +336,3 @@ async fn tenant_admin_renders_brand_overrides() {
         .await;
     std::env::remove_var(branding::BRAND_STORAGE_ROOT_ENV);
 }
-

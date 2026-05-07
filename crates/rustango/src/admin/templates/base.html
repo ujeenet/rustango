@@ -3,6 +3,12 @@
 <head>
 <meta charset="utf-8">
 <title>{% block title %}{{ brand_name | default(value='rustango admin') }}{% endblock title %}</title>
+<script>
+// No-flash theme application — runs before any CSS so the page never
+// paints the wrong theme. localStorage overrides the server-supplied
+// data-theme attribute set above.
+(function(){try{var t=localStorage.getItem('rustango-theme');if(t==='light'||t==='dark'||t==='auto'){document.documentElement.dataset.theme=t;}}catch(e){}})();
+</script>
 {% include "_theme_tokens.html" %}
 {% include "_admin_styles.html" %}
 {% if tenant_brand_css %}<style>:root { {{ tenant_brand_css | safe }} }</style>{% endif %}
@@ -14,5 +20,6 @@
 {% block body %}{% endblock body %}
   </main>
 </div>
+{% include "_theme_toggle.html" %}
 </body>
 </html>
