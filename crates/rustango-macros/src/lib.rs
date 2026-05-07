@@ -744,12 +744,48 @@ fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
             }
         }
     });
+    // PK-type-agnostic version: every FK arm emits an
+    // `Option<SqlValue>` so `fetch_with_prefetch` can group by any
+    // PK type (i64, i32, String, Uuid). Models with non-i64 FK PKs
+    // opt OUT of the legacy i64 method (it returns None) but opt IN
+    // here.
+    let value_arms = fk_relations.iter().map(|rel| {
+        let fk_col = rel.fk_column.as_str();
+        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        if rel.nullable {
+            quote! {
+                #fk_col => self.#field_ident
+                    .as_ref()
+                    .map(|fk| ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                        ::rustango::sql::ForeignKey::pk(fk)
+                    )),
+            }
+        } else {
+            quote! {
+                #fk_col => ::core::option::Option::Some(
+                    ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                        self.#field_ident.pk()
+                    )
+                ),
+            }
+        }
+    });
     quote! {
         impl ::rustango::sql::FkPkAccess for #struct_name {
             #[allow(unused_variables)]
             fn __rustango_fk_pk(&self, field_name: &str) -> ::core::option::Option<i64> {
                 match field_name {
                     #( #arms )*
+                    _ => ::core::option::Option::None,
+                }
+            }
+            #[allow(unused_variables)]
+            fn __rustango_fk_pk_value(
+                &self,
+                field_name: &str,
+            ) -> ::core::option::Option<::rustango::core::SqlValue> {
+                match field_name {
+                    #( #value_arms )*
                     _ => ::core::option::Option::None,
                 }
             }

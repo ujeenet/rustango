@@ -22,8 +22,17 @@ use super::{Dialect, ExecError, Postgres};
 #[doc(hidden)]
 pub trait FkPkAccess {
     /// Read the i64 PK stored in a `ForeignKey<T>` field by name.
-    /// `None` for unknown field names or non-FK fields.
+    /// `None` for unknown field names, non-FK fields, or FKs whose
+    /// PK type isn't `i64` (use [`Self::__rustango_fk_pk_value`] for
+    /// those).
     fn __rustango_fk_pk(&self, field_name: &str) -> Option<i64>;
+
+    /// Read the PK stored in a `ForeignKey<T, K>` field by name as a
+    /// dialect-neutral [`crate::core::SqlValue`]. Works for every PK
+    /// type — `i64`, `i32`, `String`, `Uuid`, etc. — so
+    /// `fetch_with_prefetch` no longer has to force-cast to `i64`.
+    /// `None` for unknown field names or non-FK fields.
+    fn __rustango_fk_pk_value(&self, field_name: &str) -> Option<crate::core::SqlValue>;
 }
 
 /// Hidden trait every `#[derive(Model)]` type implements via the
@@ -644,55 +653,63 @@ where
         return Ok(Vec::new());
     }
 
-    // Collect parent PKs. Models without an integer PK can't be
-    // batch-prefetched this way; treat as "no children" for those
-    // parents (consistent with empty-set behaviour).
+    // Collect parent PKs as dialect-neutral `SqlValue`s — works for
+    // every PK type (i64, i32, String, Uuid). Pre-v0.26 this path
+    // force-cast to `i64` and silently dropped non-integer-keyed
+    // parents; closes the P10 gap from `orm-improvements.md`.
     let pk_field = P::SCHEMA
         .primary_key()
         .ok_or(ExecError::MissingPrimaryKey {
             table: P::SCHEMA.table,
         })?;
-    let mut parent_pks: Vec<i64> = Vec::with_capacity(parents.len());
+    let mut parent_pks: Vec<crate::core::SqlValue> = Vec::with_capacity(parents.len());
     for parent in &parents {
-        if let Some(pk) = sql_value_as_i64(&extract_pk_value(parent)) {
+        let pk = extract_pk_value(parent);
+        if !matches!(pk, crate::core::SqlValue::Null) {
             parent_pks.push(pk);
         }
     }
-    parent_pks.sort_unstable();
-    parent_pks.dedup();
+    // Dedupe via the display-string form so parents with the same PK
+    // (shouldn't happen, but cheap insurance) only land once in the
+    // IN clause.
+    {
+        let mut seen = std::collections::HashSet::new();
+        parent_pks.retain(|v| seen.insert(v.to_display_string()));
+    }
     if parent_pks.is_empty() {
         return Ok(parents.into_iter().map(|p| (p, Vec::new())).collect());
     }
 
     // Batch-fetch the children where their FK column points at any
     // of the parent PKs.
-    let pk_values: Vec<crate::core::SqlValue> = parent_pks
-        .iter()
-        .copied()
-        .map(crate::core::SqlValue::I64)
-        .collect();
     let children: Vec<C> = crate::query::QuerySet::<C>::new()
         .filter(
             child_fk_column,
             crate::core::Op::In,
-            crate::core::SqlValue::List(pk_values),
+            crate::core::SqlValue::List(parent_pks),
         )
         .fetch(pool)
         .await?;
 
-    // Group children by FK PK.
-    let mut grouped: std::collections::HashMap<i64, Vec<C>> = std::collections::HashMap::new();
+    // Group children by FK PK. Key is the `SqlValue::to_display_string`
+    // form — unambiguous for every PK type used as a key (integers,
+    // strings, UUIDs all stringify uniquely; floats wouldn't but PKs
+    // aren't floats).
+    let mut grouped: std::collections::HashMap<String, Vec<C>> = std::collections::HashMap::new();
     for child in children {
-        let Some(fk_pk) = child.__rustango_fk_pk(child_fk_column) else {
+        let Some(fk_pk) = child.__rustango_fk_pk_value(child_fk_column) else {
             continue;
         };
-        grouped.entry(fk_pk).or_default().push(child);
+        grouped
+            .entry(fk_pk.to_display_string())
+            .or_default()
+            .push(child);
     }
 
     // Stitch.
     let mut out = Vec::with_capacity(parents.len());
     for parent in parents {
-        let pk = sql_value_as_i64(&extract_pk_value(&parent)).unwrap_or(0);
+        let pk = extract_pk_value(&parent).to_display_string();
         let kids = grouped.remove(&pk).unwrap_or_default();
         out.push((parent, kids));
     }
@@ -717,14 +734,6 @@ where
 /// that the macro impls; its body just calls the inherent method.
 fn extract_pk_value<P: HasPkValue>(parent: &P) -> crate::core::SqlValue {
     parent.__rustango_pk_value_impl()
-}
-
-fn sql_value_as_i64(v: &crate::core::SqlValue) -> Option<i64> {
-    match v {
-        crate::core::SqlValue::I64(n) => Some(*n),
-        crate::core::SqlValue::I32(n) => Some(i64::from(*n)),
-        _ => None,
-    }
 }
 
 /// Hidden trait — exposes the macro-generated inherent
@@ -1809,48 +1818,51 @@ where
         return Ok(Vec::new());
     }
 
+    // Same `SqlValue`-keyed grouping as `fetch_with_prefetch` so
+    // non-i64 FK PKs work end-to-end on both Postgres and MySQL.
     let pk_field = P::SCHEMA
         .primary_key()
         .ok_or(ExecError::MissingPrimaryKey {
             table: P::SCHEMA.table,
         })?;
-    let mut parent_pks: Vec<i64> = Vec::with_capacity(parents.len());
+    let mut parent_pks: Vec<crate::core::SqlValue> = Vec::with_capacity(parents.len());
     for parent in &parents {
-        if let Some(pk) = sql_value_as_i64(&extract_pk_value(parent)) {
+        let pk = extract_pk_value(parent);
+        if !matches!(pk, crate::core::SqlValue::Null) {
             parent_pks.push(pk);
         }
     }
-    parent_pks.sort_unstable();
-    parent_pks.dedup();
+    {
+        let mut seen = std::collections::HashSet::new();
+        parent_pks.retain(|v| seen.insert(v.to_display_string()));
+    }
     if parent_pks.is_empty() {
         return Ok(parents.into_iter().map(|p| (p, Vec::new())).collect());
     }
 
-    let pk_values: Vec<crate::core::SqlValue> = parent_pks
-        .iter()
-        .copied()
-        .map(crate::core::SqlValue::I64)
-        .collect();
     let children: Vec<C> = crate::query::QuerySet::<C>::new()
         .filter(
             child_fk_column,
             crate::core::Op::In,
-            crate::core::SqlValue::List(pk_values),
+            crate::core::SqlValue::List(parent_pks),
         )
         .fetch_pool(pool)
         .await?;
 
-    let mut grouped: std::collections::HashMap<i64, Vec<C>> = std::collections::HashMap::new();
+    let mut grouped: std::collections::HashMap<String, Vec<C>> = std::collections::HashMap::new();
     for child in children {
-        let Some(fk_pk) = child.__rustango_fk_pk(child_fk_column) else {
+        let Some(fk_pk) = child.__rustango_fk_pk_value(child_fk_column) else {
             continue;
         };
-        grouped.entry(fk_pk).or_default().push(child);
+        grouped
+            .entry(fk_pk.to_display_string())
+            .or_default()
+            .push(child);
     }
 
     let mut out = Vec::with_capacity(parents.len());
     for parent in parents {
-        let pk = sql_value_as_i64(&extract_pk_value(&parent)).unwrap_or(0);
+        let pk = extract_pk_value(&parent).to_display_string();
         let kids = grouped.remove(&pk).unwrap_or_default();
         out.push((parent, kids));
     }
