@@ -786,6 +786,144 @@ impl<T: Model + Send> QuerySet<T> {
         )
         .await
     }
+
+    /// Run `EXPLAIN [(...)] <select>` against this queryset and return
+    /// the planner output as a `Vec<String>` (one row per plan line).
+    ///
+    /// Use [`Self::explain_on`] for full control over the executor +
+    /// `EXPLAIN` options. This shorthand runs against `&PgPool` with
+    /// the default options (plain `EXPLAIN`, no `ANALYZE` — safe to
+    /// call without executing the query).
+    ///
+    /// ```ignore
+    /// use rustango::sql::ExplainOptions;
+    /// let plan = Post::objects()
+    ///     .where_(Post::author_id.eq(7_i64))
+    ///     .explain(&pool)
+    ///     .await?;
+    /// for line in plan { println!("{line}"); }
+    /// ```
+    ///
+    /// # Errors
+    /// SQL-writing or driver failures from the EXPLAIN.
+    pub async fn explain(self, pool: &PgPool) -> Result<Vec<String>, ExecError> {
+        self.explain_on(pool, ExplainOptions::default()).await
+    }
+
+    /// Like [`Self::explain`] but accepts any sqlx executor + custom
+    /// [`ExplainOptions`]. Setting `analyze = true` actually runs the
+    /// query — caveat: side effects, slow scans — so it's opt-in.
+    ///
+    /// # Errors
+    /// As [`Self::explain`].
+    pub async fn explain_on<'c, E>(
+        self,
+        executor: E,
+        options: ExplainOptions,
+    ) -> Result<Vec<String>, ExecError>
+    where
+        E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+    {
+        let select = self.compile()?;
+        let stmt = Postgres.compile_select(&select)?;
+        let mut sql = String::with_capacity(stmt.sql.len() + 32);
+        sql.push_str("EXPLAIN ");
+        let prefix = options.to_clause();
+        if !prefix.is_empty() {
+            sql.push_str(&prefix);
+            sql.push(' ');
+        }
+        sql.push_str(&stmt.sql);
+
+        let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&sql);
+        for value in stmt.params {
+            q = bind_query(q, value);
+        }
+        let rows = q.fetch_all(executor).await?;
+        let mut out = Vec::with_capacity(rows.len());
+        // EXPLAIN's row-shape varies by `FORMAT`: text/yaml/xml come
+        // back as `TEXT`, but `FORMAT JSON` returns column 0 as the
+        // `JSON` SQL type. Try the json decoder first when that's
+        // the requested format; otherwise the text path.
+        for row in &rows {
+            let line: String = match options.format {
+                ExplainFormat::Json => {
+                    let v: serde_json::Value = sqlx::Row::try_get(row, 0)?;
+                    v.to_string()
+                }
+                ExplainFormat::Text | ExplainFormat::Yaml | ExplainFormat::Xml => {
+                    sqlx::Row::try_get(row, 0)?
+                }
+            };
+            out.push(line);
+        }
+        Ok(out)
+    }
+}
+
+/// Knobs for [`QuerySet::explain_on`]. Defaults render plain
+/// `EXPLAIN <stmt>` — safe to call (no execution, no side effects).
+/// Opt into `analyze` / `buffers` / `format = ExplainFormat::Json`
+/// for richer output; `ANALYZE` actually runs the query so it
+/// reflects real I/O + timing.
+#[derive(Debug, Clone, Default)]
+pub struct ExplainOptions {
+    /// `EXPLAIN (ANALYZE)` — actually runs the query and reports
+    /// real timings + row counts. Off by default; turning it on for
+    /// a write query (UPDATE/DELETE — not currently exposed via
+    /// QuerySet::explain) would mutate state.
+    pub analyze: bool,
+    /// `EXPLAIN (BUFFERS)` — reports cache hit / disk read counts.
+    /// Requires `analyze = true` to surface buffer numbers.
+    pub buffers: bool,
+    /// `EXPLAIN (VERBOSE)` — adds output column lists and schema-
+    /// qualified table names.
+    pub verbose: bool,
+    /// Output format. Default = text. JSON is parseable; YAML/XML
+    /// are also Postgres-supported but rarely useful here.
+    pub format: ExplainFormat,
+}
+
+/// Output format selector for [`ExplainOptions::format`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ExplainFormat {
+    #[default]
+    Text,
+    Json,
+    Yaml,
+    Xml,
+}
+
+impl ExplainOptions {
+    /// Render the parenthesized option list (e.g. `(ANALYZE,
+    /// BUFFERS, FORMAT JSON)`). Empty when every option is at its
+    /// default.
+    fn to_clause(&self) -> String {
+        let mut bits: Vec<&'static str> = Vec::new();
+        if self.analyze {
+            bits.push("ANALYZE");
+        }
+        if self.buffers {
+            bits.push("BUFFERS");
+        }
+        if self.verbose {
+            bits.push("VERBOSE");
+        }
+        let format_bit = match self.format {
+            ExplainFormat::Text => None,
+            ExplainFormat::Json => Some("FORMAT JSON"),
+            ExplainFormat::Yaml => Some("FORMAT YAML"),
+            ExplainFormat::Xml => Some("FORMAT XML"),
+        };
+        if let Some(f) = format_bit {
+            bits.push(f);
+        }
+        if bits.is_empty() {
+            String::new()
+        } else {
+            format!("({})", bits.join(", "))
+        }
+    }
 }
 
 /// Extension trait that drives a `QuerySet` to a bulk `DELETE`.
