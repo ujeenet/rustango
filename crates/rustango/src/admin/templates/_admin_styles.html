@@ -17,9 +17,13 @@ aside.sidebar {
   font-size: 0.9em;
 }
 aside.sidebar img.brand-logo {
+  /* See _op_styles.html for the flex `min-height: auto` rationale (#73). */
   display: block;
-  max-height: 48px;
+  height: 40px;
+  width: auto;
   max-width: 100%;
+  align-self: flex-start;
+  object-fit: contain;
   margin: 0 0 var(--space-3) 0;
 }
 aside.sidebar h2 {

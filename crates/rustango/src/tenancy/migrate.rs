@@ -240,6 +240,16 @@ async fn run_for_one_tenant(
             if let Err(e) = super::permissions::ensure_tables(&pool).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "permissions::ensure_tables failed for schema-mode tenant");
             }
+            // v0.27.2 — seed the `rustango_permissions` catalog with
+            // the four CRUD codenames for every registered Model
+            // whose `permissions` flag is on. Idempotent. Without
+            // this, non-superuser tenant admins could never view
+            // scaffolded models because `is_visible(table)` checks
+            // `{table}.view ∈ user_perms` and the catalog row is
+            // the prerequisite for any role to grant it. (#61)
+            if let Err(e) = super::permissions::auto_create_permissions(&pool).await {
+                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "auto_create_permissions failed for schema-mode tenant");
+            }
             if let Err(e) = super::auth_backends::ensure_api_keys_table(&pool).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "ensure_api_keys_table failed for schema-mode tenant");
             }
@@ -254,6 +264,10 @@ async fn run_for_one_tenant(
             }
             if let Err(e) = super::permissions::ensure_tables(tenant_pool.pool()).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "permissions::ensure_tables failed for database-mode tenant");
+            }
+            // See schema-mode comment above (#61).
+            if let Err(e) = super::permissions::auto_create_permissions(tenant_pool.pool()).await {
+                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "auto_create_permissions failed for database-mode tenant");
             }
             if let Err(e) = super::auth_backends::ensure_api_keys_table(tenant_pool.pool()).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "ensure_api_keys_table failed for database-mode tenant");

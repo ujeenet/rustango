@@ -23,3 +23,6 @@ crates/rustango/examples/*/Cargo.lock
 # SQLite app demo runtime artifacts
 /var/
 
+
+# Persisted session secrets (#69) — dev fallback when RUSTANGO_SESSION_SECRET unset
+.rustango_*_session.key

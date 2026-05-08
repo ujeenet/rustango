@@ -297,3 +297,63 @@ fn i16_field_emits_i16_field_type() {
     assert_eq!(priority.ty, FieldType::I16);
     assert!(priority.nullable);
 }
+
+// ----- v0.27.2 (#62, #67) — admin visibility regression guard -----
+//
+// Pre-0.27.2: `permissions: bool` defaulted to `false`. Models without
+// an explicit `#[rustango(permissions)]` attribute were skipped by
+// `auto_create_permissions`, never had `{table}.view` codenames seeded
+// in the catalog, and were therefore invisible to non-superuser tenant
+// admins. The startapp scaffolder produced models without the flag, so
+// fresh apps appeared to be broken (#62).
+//
+// Post-0.27.2: default flipped to `true`; opt out with
+// `#[rustango(permissions = false)]`. These tests assert the default
+// across the three relevant cases.
+
+#[derive(Model, Debug)]
+#[rustango(table = "perm_default")]
+#[allow(dead_code)]
+pub struct PermDefault {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+#[derive(Model, Debug)]
+#[rustango(table = "perm_explicit_true", permissions)]
+#[allow(dead_code)]
+pub struct PermExplicitTrue {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+#[derive(Model, Debug)]
+#[rustango(table = "perm_explicit_false", permissions = false)]
+#[allow(dead_code)]
+pub struct PermExplicitFalse {
+    #[rustango(primary_key)]
+    pub id: i64,
+}
+
+#[test]
+fn permissions_defaults_to_true() {
+    // Without `#[rustango(permissions)]` the model still gets the
+    // catalog seeded — the historical regression that hid scaffolded
+    // models from the tenant admin sidebar.
+    assert!(
+        PermDefault::SCHEMA.permissions,
+        "regression: default `permissions` should be `true` so non-superusers see scaffolded models"
+    );
+}
+
+#[test]
+fn permissions_explicit_true_round_trips() {
+    assert!(PermExplicitTrue::SCHEMA.permissions);
+}
+
+#[test]
+fn permissions_explicit_false_opts_out() {
+    // Registry-internal models that don't want to appear in tenant
+    // permissions catalog opt out.
+    assert!(!PermExplicitFalse::SCHEMA.permissions);
+}

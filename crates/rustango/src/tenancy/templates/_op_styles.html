@@ -28,9 +28,17 @@ aside .brand {
   gap: var(--space-2);
 }
 aside .brand img.brand-logo {
+  /* Explicit `height` (not `max-height`) because the parent
+     `.brand` is a flex column whose default `min-height: auto`
+     resolves to the image's intrinsic 1024px and overrides
+     `max-height: 48px`. `align-self: flex-start` stops the
+     stretch-to-cross-axis behavior. (#73) */
   display: block;
-  max-height: 48px;
+  height: 40px;
+  width: auto;
   max-width: 100%;
+  align-self: flex-start;
+  object-fit: contain;
 }
 aside .brand .brand-tagline {
   font-weight: var(--font-weight-normal);
@@ -134,7 +142,11 @@ code {
   border-color: var(--color-success-fg);
   color: var(--color-success-fg);
 }
-form.edit-form { max-width: 720px; }
+/* `margin-bottom` keeps the branding sub-form clear of the
+   primary edit form's Save row when both render on the same
+   page (#70). */
+form.edit-form { max-width: 720px; margin-bottom: var(--space-6); }
+form.edit-form + form.edit-form { margin-top: var(--space-6); }
 fieldset.section {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -198,6 +210,24 @@ fieldset.section th {
   border: 0;
 }
 .btn-link:hover { color: var(--color-accent); text-decoration: underline; }
+/* Inline action button in tables (#75). Pill-shaped, accent-tinted,
+   doesn't compete visually with the row data. */
+.btn-row-action {
+  display: inline-block;
+  padding: 0.2rem 0.7rem;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent-bg-soft);
+  color: var(--color-accent);
+  font-size: 12px;
+  text-decoration: none;
+  border: 1px solid transparent;
+}
+.btn-row-action:hover {
+  background: var(--color-accent);
+  color: var(--color-fg-on-accent);
+  text-decoration: none;
+}
+th.actions-col, td.actions-col { text-align: right; white-space: nowrap; }
 fieldset.section input[type="text"],
 fieldset.section input[type="number"],
 fieldset.section input[type="date"],

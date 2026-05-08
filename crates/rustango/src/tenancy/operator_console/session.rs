@@ -178,6 +178,84 @@ impl SessionSecret {
         Self(buf)
     }
 
+    /// Dev-friendly variant of [`Self::from_env_or_random`] that
+    /// persists the generated key to disk so sessions survive
+    /// server restarts even without `RUSTANGO_SESSION_SECRET` set.
+    ///
+    /// Resolution order:
+    /// 1. `RUSTANGO_SESSION_SECRET` env var (same shape as
+    ///    [`Self::from_env_or_random`]) — production path.
+    /// 2. Read `disk_path` if it exists and contains ≥ 32 bytes.
+    /// 3. Generate a random key, atomically write it to
+    ///    `disk_path` (creating parent directories as needed),
+    ///    and return it.
+    /// 4. If the write fails (read-only filesystem, no perms),
+    ///    fall back to ephemeral random + a `tracing::warn!`.
+    ///
+    /// Used by the runserver boot path so dev `cargo run` cycles
+    /// don't sign every operator out on every reload (#69).
+    /// Production deployments should still set
+    /// `RUSTANGO_SESSION_SECRET` so the secret lives in env/secret-
+    /// manager rather than the filesystem.
+    #[must_use]
+    pub fn from_env_or_disk(disk_path: &std::path::Path) -> Self {
+        // Env var path: identical to `from_env_or_random`'s first
+        // branch. Duplicating here rather than calling the existing
+        // method because that method falls through to ephemeral
+        // random — we want disk fallback in between.
+        if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
+                if bytes.len() >= 32 {
+                    return Self(bytes);
+                }
+            }
+            // Bad env var — fall through to disk/random with the
+            // same loud warnings as `from_env_or_random` would emit.
+            // (We don't re-emit them here to keep the boot log
+            // tidy — the env-var path is exercised by
+            // `from_env_or_random` if anyone wants the warnings.)
+        }
+        // Disk path: read existing key if present.
+        if let Ok(bytes) = std::fs::read(disk_path) {
+            if bytes.len() >= 32 {
+                tracing::debug!(
+                    target: "crate::tenancy::session",
+                    path = %disk_path.display(),
+                    "loaded persistent session secret from disk",
+                );
+                return Self(bytes);
+            }
+        }
+        // Generate a fresh key and try to persist it.
+        let mut buf = vec![0u8; 32];
+        rand::thread_rng().fill(&mut buf[..]);
+        if let Some(parent) = disk_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Atomic write: tmp file → rename. Avoids half-written
+        // keys if the process is killed mid-write.
+        let tmp_path = disk_path.with_extension("tmp");
+        match std::fs::write(&tmp_path, &buf).and_then(|_| std::fs::rename(&tmp_path, disk_path)) {
+            Ok(()) => {
+                tracing::info!(
+                    target: "crate::tenancy::session",
+                    path = %disk_path.display(),
+                    "persisted new session secret to disk (dev fallback)",
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "crate::tenancy::session",
+                    path = %disk_path.display(),
+                    error = %e,
+                    "could not persist session secret to disk — using ephemeral random key (sessions will not survive restart)",
+                );
+                let _ = std::fs::remove_file(&tmp_path);
+            }
+        }
+        Self(buf)
+    }
+
     /// Strict variant of [`Self::from_env_or_random`]: returns
     /// `Err(...)` when the env var is *set but unparseable* or
     /// *too short*. Use this from production boot paths where a

@@ -3352,7 +3352,15 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         app: None,
         admin: None,
         audit: None,
-        permissions: false,
+        // Default `permissions = true` so every `#[derive(Model)]`
+        // gets the four CRUD codenames seeded by `auto_create_permissions`
+        // and is visible to non-superusers in the tenant admin without
+        // manual per-model annotation. Models that intentionally don't
+        // want permission rows (registry-internal types, framework
+        // tables operators shouldn't manage directly) opt out via
+        // `#[rustango(permissions = false)]`. v0.27.2 — fixes the
+        // out-of-the-box admin invisibility regression (#62).
+        permissions: true,
         m2m: Vec::new(),
         indexes: Vec::new(),
         checks: Vec::new(),
@@ -3470,7 +3478,16 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("permissions") {
-                out.permissions = true;
+                // Two forms accepted:
+                //   #[rustango(permissions)]          — flag form, true
+                //   #[rustango(permissions = false)]  — explicit opt-out
+                //   #[rustango(permissions = true)]   — explicit opt-in
+                if let Ok(v) = meta.value() {
+                    let lit: syn::LitBool = v.parse()?;
+                    out.permissions = lit.value;
+                } else {
+                    out.permissions = true;
+                }
                 return Ok(());
             }
             if meta.path.is_ident("unique_together") {

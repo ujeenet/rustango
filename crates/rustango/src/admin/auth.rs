@@ -48,7 +48,7 @@ async fn basic_auth_middleware(
     let mut resp = (StatusCode::UNAUTHORIZED, "Authentication required").into_response();
     resp.headers_mut().insert(
         header::WWW_AUTHENTICATE,
-        HeaderValue::from_static(r#"Basic realm="rustango admin""#),
+        HeaderValue::from_static(r#"Basic realm="Rustango Admin""#),
     );
     resp
 }

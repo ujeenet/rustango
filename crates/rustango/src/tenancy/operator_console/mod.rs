@@ -105,7 +105,7 @@ impl OpBrand {
     /// console renders with the rustango defaults.
     fn from_env() -> Self {
         let name =
-            std::env::var("RUSTANGO_OPERATOR_BRAND_NAME").unwrap_or_else(|_| "rustango".to_owned());
+            std::env::var("RUSTANGO_OPERATOR_BRAND_NAME").unwrap_or_else(|_| "Rustango".to_owned());
         let tagline = std::env::var("RUSTANGO_OPERATOR_TAGLINE")
             .ok()
             .filter(|s| !s.is_empty());

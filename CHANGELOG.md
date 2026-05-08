@@ -2,6 +2,76 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.27.2] — admin-registration UX rescue + sidebar/branding polish
+
+Fixes the cluster of papercuts that hit anyone scaffolding a new
+app on the tenant admin (#61–#75 in the backlog). Out-of-the-box
+flow `manage startapp <name>` → add a `#[derive(Model)]` →
+`cargo run -- migrate` → log in as a non-superuser tenant user
+now actually surfaces the new model in the admin sidebar.
+
+### Fixed
+
+- **Models default to `permissions = true`** (#62). Prior to
+  this, models without an explicit `#[rustango(permissions)]`
+  attribute were skipped by `auto_create_permissions`, never had
+  `{table}.view` codenames seeded, and were therefore invisible
+  to non-superuser tenant admins. The startapp scaffolder
+  emitted models without the flag, so fresh apps appeared
+  broken. Default is now `true`; opt out via
+  `#[rustango(permissions = false)]` (registry-internal models).
+- **`auto_create_permissions` is now auto-invoked** after every
+  tenant migrate, both schema-mode and database-mode. The
+  catalog stays in sync with the registered model set without
+  manual wiring (#61).
+- **`SessionSecret::from_env_or_disk()`** persists the
+  operator-console + tenant-admin session secrets to
+  `./var/.rustango_*_session.key` so dev `cargo run` cycles
+  don't sign every operator out on restart (#69). Production
+  should still set `RUSTANGO_SESSION_SECRET` so the secret
+  lives in env / secret-manager rather than the filesystem.
+- **Sidebar logo no longer renders stretched** (#73). The
+  rule `max-height: 48px` was being silently overridden by a
+  flex-parent's default `min-height: auto` resolving to the
+  image's intrinsic 1024px. Replaced with explicit `height: 40px;
+  width: auto; align-self: flex-start; object-fit: contain` in
+  both `_op_styles.html` and `_admin_styles.html`.
+- **Branding sub-form layout collision** (#70). Two consecutive
+  `form.edit-form`s on the operator-console org-edit page had
+  no margin separating them; the second form's fieldset legend
+  rendered at the same vertical band as the first form's Save
+  button. Fixed with `margin-bottom: var(--space-6)` on
+  `.edit-form` plus `+ form.edit-form { margin-top: ... }`.
+  Also renamed the sub-form button "Upload" → "Save branding
+  assets" so it doesn't compete visually with the primary Save.
+- **Operator console org-list "Edit" link is a styled action
+  button** (#75) — pill-shaped with accent-tinted background,
+  not a bare purple-underlined text link. Empty `<th></th>`
+  replaced with `<th>Actions</th>` for accessibility.
+- **Brand-name fallbacks Title Case** (#72): "Rustango Admin"
+  / "Rustango" everywhere a human reads them
+  (`admin/helpers.rs`, `_sidebar.html`,
+  `tenancy/operator_console/mod.rs`, `admin/auth.rs` Basic auth
+  realm). Crate-level identifier (`rustango = "0.27"`) stays
+  lowercase.
+
+### Added
+
+- New regression tests in `tests/derive_model.rs`:
+  `permissions_defaults_to_true`,
+  `permissions_explicit_true_round_trips`,
+  `permissions_explicit_false_opts_out`. These guard the
+  out-of-the-box admin-visibility flow (#67) so the regression
+  can't sneak back in.
+
+### Verified
+
+- `cargo build -p rustango --features tenancy,sqlite` — clean
+- `cargo test -p rustango --features tenancy --lib` —
+  **1077/1077 pass**
+- `cargo test -p rustango --test derive_model` — **16/16 pass**
+  including the three new permissions-default tests
+
 ## [0.27.1] — `cargo test` cleanup for default features
 
 ### Fixed

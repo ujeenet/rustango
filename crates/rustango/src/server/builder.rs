@@ -241,8 +241,17 @@ impl Builder {
     pub async fn serve(self, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         let resolver_for_admin = build_resolver(&self.apex);
 
-        let session_secret_for_tenant = SessionSecret::from_env_or_random();
-        let operator_secret = SessionSecret::from_env_or_random();
+        // v0.27.2 — persist generated secrets to disk so dev
+        // `cargo run` cycles don't sign every operator out on
+        // restart (#69). Production should still set
+        // `RUSTANGO_SESSION_SECRET`. Two distinct paths so a
+        // tenant cookie and an operator cookie can't be confused.
+        let session_secret_for_tenant = SessionSecret::from_env_or_disk(std::path::Path::new(
+            "./var/.rustango_tenant_session.key",
+        ));
+        let operator_secret = SessionSecret::from_env_or_disk(std::path::Path::new(
+            "./var/.rustango_operator_session.key",
+        ));
         let ctx = Arc::new(TenantContext {
             pools: self.pools.clone(),
             resolver: build_resolver(&self.apex),

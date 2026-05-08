@@ -19,7 +19,7 @@
       <th>Host pattern</th>
       <th>Active</th>
       <th>Created</th>
-      {% if edit_enabled %}<th></th>{% endif %}
+      {% if edit_enabled %}<th class="actions-col">Actions</th>{% endif %}
     </tr>
   </thead>
   <tbody>
@@ -31,7 +31,7 @@
       <td>{% if org.host_pattern %}{{ org.host_pattern }}{% else %}<em style="color:#aaa">—</em>{% endif %}</td>
       <td>{% if org.active %}✓{% else %}—{% endif %}</td>
       <td>{{ org.created_at }}</td>
-      {% if edit_enabled %}<td><a href="/orgs/{{ org.slug }}/edit">Edit</a></td>{% endif %}
+      {% if edit_enabled %}<td class="actions-col"><a class="btn-row-action" href="/orgs/{{ org.slug }}/edit">Edit</a></td>{% endif %}
     </tr>
     {% endfor %}
   </tbody>

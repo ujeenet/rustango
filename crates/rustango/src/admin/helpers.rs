@@ -57,7 +57,7 @@ pub(crate) fn inventory_entries_dedup_by_table() -> Vec<&'static ModelEntry> {
 /// the config — they're set per-request by the tenancy admin from
 /// the resolved [`crate::tenancy::Org`].
 pub(crate) fn chrome_context(state: &AppState, active_table: Option<&str>) -> serde_json::Value {
-    let admin_title = state.config.title.as_deref().unwrap_or("rustango admin");
+    let admin_title = state.config.title.as_deref().unwrap_or("Rustango Admin");
     let brand_name = state.config.brand_name.as_deref().unwrap_or(admin_title);
     let brand_tagline = state
         .config
