@@ -2,6 +2,43 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.27.10] — fix POST→GET 405 after session-expiry redirect (#68)
+
+### Fixed
+
+- **Operator no longer hits 405 Method Not Allowed after a
+  session-expiry redirect on a POST-only route.** Pre-fix:
+  operator clicks Save on `/orgs/{slug}/edit/branding`,
+  cookie has expired → middleware 303s to `/login?next=…`,
+  browser converts the POST to GET, operator logs in →
+  another 303 → GET `/orgs/{slug}/edit/branding` → 405
+  because the route is POST-only. Operator stares at a
+  Method-Not-Allowed page with no clear path forward.
+  Two-part fix:
+  1. **`sanitize_next_for_method(method, path)`** rewrites
+     non-GET request URLs to a safe-GET parent before they
+     get encoded into `?next=…`. POST to
+     `/orgs/{slug}/edit/branding` or
+     `/orgs/{slug}/impersonate` now rewrites to
+     `/orgs/{slug}/edit` (the GET-renderable parent edit
+     form). Unknown POST paths fall back to `/`.
+  2. **GET fallbacks** mounted on the POST-only routes
+     (`org_post_only_redirect`) so a manual URL hit
+     (browser tab restored from history, link-prefetch,
+     etc.) bounces back to the parent edit form instead of
+     405-ing.
+
+### Verified
+
+- `cargo build -p rustango --features tenancy` — clean
+- `cargo test -p rustango --features tenancy --lib` —
+  **1096/1096 pass** (6 new tests covering GET pass-through,
+  POST→branding rewrite, POST→impersonate rewrite,
+  POST→edit pass-through, unknown-POST fallback, and
+  query-string dropping).
+
+Step 3 of the v0.28 plan. Workspace 0.27.9 → 0.27.10.
+
 ## [0.27.9] — admin_prefix template variable (#59)
 
 ### Fixed

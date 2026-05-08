@@ -325,7 +325,14 @@ fn router_inner(
                 "/orgs/{slug}/edit",
                 get(org_edit_form).post(org_edit_submit),
             )
-            .route("/orgs/{slug}/edit/branding", post(org_edit_branding));
+            // v0.27.10 (#68) — branding endpoint accepts POST for
+            // multipart upload. Add a GET that bounces back to
+            // the parent edit form so a manual URL hit (or a
+            // browser session-expiry replay) doesn't 405.
+            .route(
+                "/orgs/{slug}/edit/branding",
+                get(org_post_only_redirect).post(org_edit_branding),
+            );
     }
     if impersonation_enabled {
         // v0.27.8 (#78) — operator-as-superuser tenant admin login.
@@ -333,7 +340,11 @@ fn router_inner(
         // the tenant admin's `/__admin/`. Audit-log entry recorded
         // on every mint so each session is traceable to an
         // operator id.
-        private = private.route("/orgs/{slug}/impersonate", post(org_impersonate));
+        // v0.27.10 (#68) — same GET fallback as branding above.
+        private = private.route(
+            "/orgs/{slug}/impersonate",
+            get(org_post_only_redirect).post(org_impersonate),
+        );
     }
     let private = private.route_layer(middleware::from_fn_with_state(
         state.clone(),
@@ -370,9 +381,19 @@ async fn require_session(
     let payload = cookie_value
         .as_deref()
         .and_then(|v| session::decode(&state.session_secret, v).ok());
+    // v0.27.10 (#68) — when a non-GET request hits an expired
+    // session, redirecting straight to login makes the browser
+    // turn the original POST into a GET on the way back (303 →
+    // GET), which then 405s on POST-only routes like
+    // `/orgs/{slug}/edit/branding` and `/orgs/{slug}/impersonate`.
+    // Sanitize the `next` URL down to the parent GET URL before
+    // the bounce. The operator loses unsaved form data either
+    // way; at least they don't see a 405 page.
+    let method = req.method().clone();
+    let raw_next = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let safe_next = sanitize_next_for_method(&method, raw_next);
     let Some(payload) = payload else {
-        return redirect_to_login(uri.path_and_query().map(|p| p.as_str()).unwrap_or("/"))
-            .into_response();
+        return redirect_to_login(&safe_next).into_response();
     };
     match auth::Operator::objects()
         .where_(auth::Operator::id.eq(payload.oid))
@@ -381,7 +402,7 @@ async fn require_session(
     {
         Ok(rows) => {
             let Some(op) = rows.into_iter().next().filter(|o| o.active) else {
-                return redirect_to_login("/").into_response();
+                return redirect_to_login(&safe_next).into_response();
             };
             req.extensions_mut().insert(op);
             next.run(req).await
@@ -391,6 +412,51 @@ async fn require_session(
             (StatusCode::INTERNAL_SERVER_ERROR, "registry lookup failed").into_response()
         }
     }
+}
+
+/// v0.27.10 (#68) — GET handler for POST-only sub-form routes
+/// (`/orgs/{slug}/edit/branding`, `/orgs/{slug}/impersonate`).
+/// A bare GET on these used to 405; now it bounces back to
+/// the parent edit form so the operator lands somewhere
+/// useful instead of staring at a Method-Not-Allowed page.
+async fn org_post_only_redirect(
+    axum::extract::Path(slug): axum::extract::Path<String>,
+) -> Redirect {
+    Redirect::to(&format!("/orgs/{slug}/edit"))
+}
+
+/// v0.27.10 (#68) — when an unauthenticated non-GET request
+/// would round-trip through `/login?next=…` and back, the
+/// resulting GET re-issues the original URL — which 405s on
+/// POST-only routes. Rewrite `path` to a safe-GET equivalent
+/// based on the original method.
+///
+/// Conservative table: when the method is GET / HEAD, the
+/// raw path is fine. Otherwise we strip back to the closest
+/// known parent that has a GET handler. For paths we don't
+/// recognize, we strip down to `/` so the operator at least
+/// lands somewhere reachable.
+fn sanitize_next_for_method(method: &axum::http::Method, path: &str) -> String {
+    if method == axum::http::Method::GET || method == axum::http::Method::HEAD {
+        return path.to_owned();
+    }
+    // Drop query string so the rewrite is path-only.
+    let path_only = path.split('?').next().unwrap_or(path);
+    // Known operator-console POST-only routes → parent GET URL.
+    // Pattern matching is intentionally explicit (a regex would
+    // hide the route taxonomy here).
+    if let Some(rest) = path_only.strip_prefix("/orgs/") {
+        // /orgs/{slug}/edit/branding → /orgs/{slug}/edit
+        // /orgs/{slug}/impersonate    → /orgs/{slug}/edit
+        // /orgs/{slug}/edit          → /orgs/{slug}/edit (GET form)
+        if let Some(slug_end) = rest.find('/') {
+            let slug = &rest[..slug_end];
+            return format!("/orgs/{slug}/edit");
+        }
+    }
+    // Unknown POST path — fall back to the welcome page so the
+    // operator isn't stranded.
+    "/".to_owned()
 }
 
 fn redirect_to_login(next_path: &str) -> Response<Body> {
@@ -1179,4 +1245,69 @@ async fn org_impersonate(
         "minted impersonation cookie",
     );
     resp
+}
+
+#[cfg(test)]
+mod sanitize_next_method_tests {
+    use super::sanitize_next_for_method;
+    use axum::http::Method;
+
+    // v0.27.10 (#68) — guard against the regression that made
+    // a POST → /login?next=… → POST chain land on a 405.
+
+    #[test]
+    fn get_passes_through_unchanged() {
+        assert_eq!(
+            sanitize_next_for_method(&Method::GET, "/orgs/acme/edit"),
+            "/orgs/acme/edit"
+        );
+        assert_eq!(
+            sanitize_next_for_method(&Method::HEAD, "/anywhere"),
+            "/anywhere"
+        );
+    }
+
+    #[test]
+    fn post_to_branding_rewrites_to_parent_edit() {
+        assert_eq!(
+            sanitize_next_for_method(&Method::POST, "/orgs/acme/edit/branding"),
+            "/orgs/acme/edit"
+        );
+    }
+
+    #[test]
+    fn post_to_impersonate_rewrites_to_parent_edit() {
+        assert_eq!(
+            sanitize_next_for_method(&Method::POST, "/orgs/acme/impersonate"),
+            "/orgs/acme/edit"
+        );
+    }
+
+    #[test]
+    fn post_to_edit_rewrites_to_get_edit_form() {
+        assert_eq!(
+            sanitize_next_for_method(&Method::POST, "/orgs/acme/edit"),
+            "/orgs/acme/edit"
+        );
+    }
+
+    #[test]
+    fn unknown_post_path_falls_back_to_root() {
+        assert_eq!(
+            sanitize_next_for_method(&Method::POST, "/some/random/post"),
+            "/"
+        );
+    }
+
+    #[test]
+    fn query_string_dropped_from_rewrite_target() {
+        // Operator submitted a form with extra query — we don't
+        // try to preserve it across the rewrite. The point is
+        // that they land on a GET-able page, not that we
+        // re-execute the form.
+        assert_eq!(
+            sanitize_next_for_method(&Method::POST, "/orgs/acme/impersonate?return=foo"),
+            "/orgs/acme/edit"
+        );
+    }
 }
