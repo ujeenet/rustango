@@ -52,7 +52,7 @@ pub(crate) fn inventory_entries_dedup_by_table() -> Vec<&'static ModelEntry> {
 ///
 /// Brand fields are layered: `brand_name` falls back to `admin_title`
 /// (set by [`crate::admin::Builder::title`]) which falls back to
-/// `"rustango admin"`. Same chain for `brand_tagline` → `admin_subtitle`.
+/// `"Rustango Admin"`. Same chain for `brand_tagline` → `admin_subtitle`.
 /// Logos / theme mode / per-tenant CSS overrides come straight off
 /// the config — they're set per-request by the tenancy admin from
 /// the resolved [`crate::tenancy::Org`].

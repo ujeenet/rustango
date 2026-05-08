@@ -2,7 +2,7 @@
 //!
 //! Wraps every request: if the `Authorization: Basic <base64>` header
 //! decodes to the configured credentials, the request proceeds. Otherwise
-//! a 401 with `WWW-Authenticate: Basic realm="rustango admin"` is returned.
+//! a 401 with `WWW-Authenticate: Basic realm="Rustango Admin"` is returned.
 //!
 //! The comparison is byte-equality, **not** constant-time — fine for an
 //! admin gate but don't reuse this layer for high-security auth.
