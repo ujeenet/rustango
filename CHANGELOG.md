@@ -2,6 +2,62 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.28.4] — `password_changed_at` cookie invalidation (#77 follow-up)
+
+Patch release closing the only out-of-scope item flagged when v0.28.2
+shipped: sessions issued before a password rotation now expire on
+the next request instead of remaining valid until their TTL elapses.
+
+### Added
+
+- **`User::password_changed_at: Option<DateTime<Utc>>`** and the
+  matching column on `Operator`. Stamped to `NOW()` on every
+  password rotation path (`reset-password`,
+  `reset-operator-password`, `change-password`,
+  `change-operator-password`, the self-serve UI). `None` for
+  accounts that haven't rotated since v0.28.4 — those sessions
+  stay valid until they expire normally.
+- **`TenantSessionPayload::iat: i64`** and `SessionPayload::iat`
+  (operator console). Set to `now` on every newly-minted cookie.
+  `#[serde(default)]` keeps pre-0.28.4 cookies parseable; their
+  `iat` decodes as `0`, which the comparison treats as "issued
+  at the dawn of time" so any post-rotation login wins.
+- **Runtime ALTER**: `permissions::ENSURE_SQL` now adds the
+  `password_changed_at` column to existing tenants on the next
+  `migrate`. The matching column on `rustango_operators` is
+  added by `migrate_registry` against the registry pool.
+
+### Changed
+
+- **`validate_session` (tenant admin)** rejects cookies whose
+  `iat` is strictly less than the user's `password_changed_at`.
+  The lookup is folded into the existing per-request
+  `is_superuser` / `active` query — no extra round-trip.
+- **`require_session` (operator console)** does the same against
+  `rustango_operators.password_changed_at`.
+
+### Tests
+
+- 2 new unit tests on `TenantSessionPayload`: `iat` is stamped on
+  every newly-minted payload; pre-0.28.4 cookies decode with
+  `iat = 0` (preserves the security guarantee on upgrade).
+- 1 new live test
+  (`session_minted_before_password_rotation_is_rejected`):
+  provisions a user, mints a cookie with a fixed past `iat`,
+  verifies it works while `password_changed_at IS NULL`, stamps
+  it to NOW(), confirms the same cookie now bounces to login.
+
+### Migration notes
+
+- **No schema migration required.** Existing tenants pick up the
+  new column on the next `cargo run -- migrate` (idempotent
+  `ALTER TABLE … ADD COLUMN IF NOT EXISTS`). Existing sessions
+  remain valid until their TTL expires *or* a password is
+  rotated — there's no global flush.
+- Running `migrate` against a v0.28.3 database is safe and
+  reversible: removing the column on rollback leaves the
+  feature inert (no NULL becomes a check failure).
+
 ## [0.28.3] — startapp scaffolder polish (#63)
 
 Patch release that flushes the `manage startapp` template through

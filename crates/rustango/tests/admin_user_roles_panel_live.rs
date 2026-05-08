@@ -58,6 +58,7 @@ async fn user_detail_page_renders_roles_and_effective_perms() {
         active: true,
         created_at: chrono::Utc::now(),
         data: serde_json::json!({}),
+        password_changed_at: None,
     };
     user.insert(&pool).await.unwrap();
     let user_id = *user.id.get().expect("PK assigned");

@@ -195,6 +195,7 @@ pub async fn create_operator_if_missing(
         password_hash: crate::tenancy::password::hash(password)?,
         active: true,
         created_at: chrono::Utc::now(),
+        password_changed_at: None,
     };
     op.insert(pools.registry()).await?;
     Ok(op)
@@ -235,6 +236,7 @@ pub async fn create_user_if_missing(
         active: true,
         created_at: chrono::Utc::now(),
         data: serde_json::json!({}),
+        password_changed_at: None,
     };
     user.insert_on(&mut *conn_ref).await?;
     Ok(user)

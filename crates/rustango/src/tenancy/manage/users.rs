@@ -88,6 +88,7 @@ pub(super) async fn create_operator_cmd<W: Write + Send>(
         password_hash: crate::tenancy::password::hash(&plain)?,
         active: true,
         created_at: chrono::Utc::now(),
+        password_changed_at: None,
     };
     op.insert(pools.registry()).await?;
     let id = op.id.get().copied().unwrap_or_default();
@@ -427,7 +428,7 @@ pub(super) async fn reset_password_cmd<W: Write + Send>(
     let hash = crate::tenancy::password::hash(&plain)?;
     let pool = scoped_tenant_pool(pools, registry_url, &slug).await?;
     let result = rustango::sql::sqlx::query(
-        "UPDATE rustango_users SET password_hash = $1 WHERE username = $2",
+        "UPDATE rustango_users SET password_hash = $1, password_changed_at = NOW() WHERE username = $2",
     )
     .bind(&hash)
     .bind(&username)
@@ -504,7 +505,7 @@ pub(super) async fn reset_operator_password_cmd<W: Write + Send>(
     };
     let hash = crate::tenancy::password::hash(&plain)?;
     let result = rustango::sql::sqlx::query(
-        "UPDATE rustango_operators SET password_hash = $1 WHERE username = $2",
+        "UPDATE rustango_operators SET password_hash = $1, password_changed_at = NOW() WHERE username = $2",
     )
     .bind(&hash)
     .bind(&username)
@@ -619,7 +620,7 @@ pub(super) async fn change_password_cmd<W: Write + Send>(
         ));
     }
     let new_hash = crate::tenancy::password::hash(&new_plain)?;
-    rustango::sql::sqlx::query("UPDATE rustango_users SET password_hash = $1 WHERE username = $2")
+    rustango::sql::sqlx::query("UPDATE rustango_users SET password_hash = $1, password_changed_at = NOW() WHERE username = $2")
         .bind(&new_hash)
         .bind(&username)
         .execute(&pool)
@@ -723,7 +724,7 @@ pub(super) async fn change_operator_password_cmd<W: Write + Send>(
     }
     let new_hash = crate::tenancy::password::hash(&new_plain)?;
     rustango::sql::sqlx::query(
-        "UPDATE rustango_operators SET password_hash = $1 WHERE username = $2",
+        "UPDATE rustango_operators SET password_hash = $1, password_changed_at = NOW() WHERE username = $2",
     )
     .bind(&new_hash)
     .bind(&username)

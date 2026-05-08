@@ -65,6 +65,7 @@ async fn make_user(pool: &sqlx::PgPool, username_prefix: &str) -> i64 {
         active: true,
         created_at: chrono::Utc::now(),
         data: serde_json::json!({}),
+        password_changed_at: None,
     };
     user.insert(pool).await.unwrap();
     *user.id.get().expect("PK assigned by RETURNING")

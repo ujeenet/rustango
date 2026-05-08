@@ -371,3 +371,124 @@ async fn change_password_post_rejects_wrong_current() {
 
     rmig::drop_all(&pool).await.unwrap();
 }
+
+/// v0.28.4 (#77 follow-up) — sessions issued before the latest
+/// password rotation must be rejected. Provision a user, mint a
+/// cookie with a fixed (past) `iat`, stamp `password_changed_at`
+/// to "now", then try to use the cookie. validate_session should
+/// see `payload.iat < password_changed_at.timestamp()` and bounce
+/// to login.
+#[tokio::test]
+async fn session_minted_before_password_rotation_is_rejected() {
+    let Some(pool) = pool().await else {
+        eprintln!("skipping: DATABASE_URL not set");
+        return;
+    };
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rmig::drop_all(&pool).await.unwrap();
+    rmig::apply_all(&pool).await.unwrap();
+
+    let slug = unique("chpw_pwd_at");
+    let host_pattern = format!("{slug}.app.test");
+    let mut org = Org {
+        id: Auto::default(),
+        slug: slug.clone(),
+        display_name: "Test".into(),
+        storage_mode: StorageMode::Database.as_str().into(),
+        database_url: Some(url.clone()),
+        schema_name: None,
+        host_pattern: Some(host_pattern.clone()),
+        port: None,
+        path_prefix: None,
+        active: true,
+        created_at: now(),
+        brand_name: None,
+        brand_tagline: None,
+        logo_path: None,
+        favicon_path: None,
+        primary_color: None,
+        theme_mode: None,
+    };
+    org.insert(&pool).await.unwrap();
+    let hash = rustango::tenancy::password::hash("starting-pw").unwrap();
+    let user_id: i64 = sqlx::query_scalar(
+        "INSERT INTO rustango_users (username, password_hash, is_superuser, active, created_at) \
+         VALUES ('alice', $1, TRUE, TRUE, NOW()) RETURNING id",
+    )
+    .bind(&hash)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let secret = test_secret();
+    let pools = Arc::new(TenantPools::new(pool.clone()));
+    let resolver = ChainResolver::new().push(SubdomainResolver::new("app.test"));
+    let app = TenantAdminBuilder::new(pools, url.clone(), resolver)
+        .with_session(secret.clone())
+        .build();
+
+    // Mint a cookie *before* the password rotation. The fixed `iat`
+    // (= now - 60s) lets us deterministically stamp
+    // `password_changed_at` later in this test to a value strictly
+    // greater than `iat`.
+    let now_ts = chrono::Utc::now().timestamp();
+    let mut payload = TenantSessionPayload::new(user_id, &slug, 3600);
+    payload.iat = now_ts - 60;
+    payload.exp = now_ts + 3600;
+    let cookie = format!("{COOKIE_NAME}={}", encode_session(&secret, &payload));
+
+    // Sanity: cookie works while password_changed_at is NULL.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/__change-password")
+                .header("Host", &host_pattern)
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "pre-rotation cookie must work while password_changed_at IS NULL",
+    );
+
+    // Now simulate a rotation: stamp password_changed_at = NOW().
+    sqlx::query("UPDATE rustango_users SET password_changed_at = NOW() WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Same cookie should now bounce to login.
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/__change-password")
+                .header("Host", &host_pattern)
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::SEE_OTHER,
+        "post-rotation cookie with stale iat must redirect",
+    );
+    let loc = res
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        loc.contains("/__login") || loc.contains("/login"),
+        "expected redirect to login, got: {loc}",
+    );
+
+    rmig::drop_all(&pool).await.unwrap();
+}

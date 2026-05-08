@@ -597,9 +597,12 @@ async fn validate_session(
     // Look up the user in the tenant's storage; this gives us a
     // fresh `is_superuser` and `active` flag (operator can toggle
     // either mid-session). The query mirrors `auth::authenticate_user`
-    // but without the password verify.
+    // but without the password verify. v0.28.4 (#77) — also fetches
+    // `password_changed_at` so a session minted before the latest
+    // password rotation is rejected.
     match rustango::sql::sqlx::query(
-        "SELECT is_superuser, active FROM rustango_users WHERE id = $1",
+        "SELECT is_superuser, active, password_changed_at \
+         FROM rustango_users WHERE id = $1",
     )
     .bind(payload.uid)
     .fetch_optional(tenant_pool)
@@ -609,6 +612,17 @@ async fn validate_session(
             let active: bool = row.try_get("active").unwrap_or(false);
             if !active {
                 return SessionCheck::Anonymous;
+            }
+            // v0.28.4 — invalidate sessions issued before the latest
+            // password rotation. `password_changed_at IS NULL` means
+            // the account predates v0.28.4 and never rotated, so
+            // we don't enforce.
+            let pwd_changed: Option<chrono::DateTime<chrono::Utc>> =
+                row.try_get("password_changed_at").ok().flatten();
+            if let Some(ts) = pwd_changed {
+                if payload.iat < ts.timestamp() {
+                    return SessionCheck::Anonymous;
+                }
             }
             let is_superuser: bool = row.try_get("is_superuser").unwrap_or(false);
             SessionCheck::Authenticated {
@@ -1000,12 +1014,13 @@ async fn change_password_submit(
             return redir_err(&format!("hash failed: {e}"));
         }
     };
-    if let Err(e) =
-        rustango::sql::sqlx::query("UPDATE rustango_users SET password_hash = $1 WHERE id = $2")
-            .bind(&new_hash)
-            .bind(user_id)
-            .execute(tenant_pool)
-            .await
+    if let Err(e) = rustango::sql::sqlx::query(
+        "UPDATE rustango_users SET password_hash = $1, password_changed_at = NOW() WHERE id = $2",
+    )
+    .bind(&new_hash)
+    .bind(user_id)
+    .execute(tenant_pool)
+    .await
     {
         warn!(target: "crate::tenancy::admin", error = %e, "change-password update");
         return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();

@@ -1034,6 +1034,23 @@ RUSTANGO_OPERATOR_PRIMARY_COLOR="#2c5fb0"
 RUSTANGO_OPERATOR_THEME_MODE="auto"
 ```
 
+### Session invalidation on password rotation (v0.28.4)
+
+Sessions minted before a password change are now invalidated on
+the next request instead of remaining valid until their TTL
+expires. Both consoles (tenant admin + operator console) check the
+cookie's `iat` (issued-at, stamped at mint time) against the
+account's `password_changed_at` column on every authenticated
+request — sessions older than the rotation get bounced to login.
+
+The lookup is folded into the existing per-request `is_superuser`
+/ `active` query, so there's no extra round-trip. Existing
+deployments pick up the new column on the next `cargo run --
+migrate` (idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS`).
+Cookies minted by pre-0.28.4 servers stay parseable
+(`#[serde(default)]` on the new field) — their `iat` decodes as
+`0` so they're invalidated by any future password change.
+
 ### Self-serve change-password page + CLI ergonomics (v0.28.2)
 
 Tenant users can change their own password without an operator

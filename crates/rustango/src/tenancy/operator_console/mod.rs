@@ -404,6 +404,15 @@ async fn require_session(
             let Some(op) = rows.into_iter().next().filter(|o| o.active) else {
                 return redirect_to_login(&safe_next).into_response();
             };
+            // v0.28.4 (#77) — invalidate sessions issued before the
+            // operator's last password rotation. NULL means the
+            // operator hasn't rotated since v0.28.4 — those
+            // sessions stay valid.
+            if let Some(ts) = op.password_changed_at {
+                if payload.iat < ts.timestamp() {
+                    return redirect_to_login(&safe_next).into_response();
+                }
+            }
             req.extensions_mut().insert(op);
             next.run(req).await
         }

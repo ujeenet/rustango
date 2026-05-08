@@ -201,6 +201,8 @@ ALTER TABLE "rustango_user_permissions"
     ADD COLUMN IF NOT EXISTS "data" JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE "rustango_users"
     ADD COLUMN IF NOT EXISTS "data" JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE "rustango_users"
+    ADD COLUMN IF NOT EXISTS "password_changed_at" TIMESTAMPTZ NULL;
 "#;
 
 /// Ensure all four permission tables exist in `pool`'s schema.

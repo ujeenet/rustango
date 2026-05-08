@@ -115,6 +115,24 @@ pub async fn migrate_registry(
         }
         ScopedDir::Original => migrate::migrate(pools.registry(), dir).await?,
     };
+    // v0.28.4 (#77) — runtime ALTER for the password_changed_at
+    // column on the registry-scoped operator table. Existing
+    // rustango_orgs / rustango_operators bootstrap snapshots predate
+    // this column, so we ALTER ADD COLUMN IF NOT EXISTS instead of
+    // shipping a migration the user would have to run.
+    if let Err(e) = rustango::sql::sqlx::query(
+        r#"ALTER TABLE "rustango_operators"
+           ADD COLUMN IF NOT EXISTS "password_changed_at" TIMESTAMPTZ NULL"#,
+    )
+    .execute(pools.registry())
+    .await
+    {
+        tracing::warn!(
+            target: "crate::tenancy",
+            error = %e,
+            "ALTER rustango_operators password_changed_at failed",
+        );
+    }
     info!(
         target: "crate::tenancy",
         applied = applied.len(),

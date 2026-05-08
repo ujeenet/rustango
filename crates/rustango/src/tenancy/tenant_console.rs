@@ -78,17 +78,27 @@ pub struct TenantSessionPayload {
     /// servers parseable when the user upgrades.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imp: Option<i64>,
+    /// Issued-at as Unix seconds (v0.28.4, #77 follow-up). The
+    /// session middleware compares this to `rustango_users.password_changed_at`
+    /// — sessions issued before the latest password rotation are
+    /// rejected. `0` for cookies minted on pre-0.28.4 servers
+    /// (`#[serde(default)]` keeps them parseable; the comparison
+    /// treats `0` as "issued at the dawn of time" so they're
+    /// invalidated by any password change).
+    #[serde(default)]
+    pub iat: i64,
 }
 
 impl TenantSessionPayload {
     #[must_use]
     pub fn new(user_id: i64, slug: impl Into<String>, ttl_secs: i64) -> Self {
-        let exp = chrono::Utc::now().timestamp() + ttl_secs;
+        let now = chrono::Utc::now().timestamp();
         Self {
             uid: user_id,
             slug: slug.into(),
-            exp,
+            exp: now + ttl_secs,
             imp: None,
+            iat: now,
         }
     }
 
@@ -97,12 +107,13 @@ impl TenantSessionPayload {
     /// the call site reads as intent. (#78)
     #[must_use]
     pub fn impersonation(operator_id: i64, slug: impl Into<String>, ttl_secs: i64) -> Self {
-        let exp = chrono::Utc::now().timestamp() + ttl_secs;
+        let now = chrono::Utc::now().timestamp();
         Self {
             uid: 0,
             slug: slug.into(),
-            exp,
+            exp: now + ttl_secs,
             imp: Some(operator_id),
+            iat: now,
         }
     }
 
@@ -279,5 +290,43 @@ mod tests {
         let cookie = encode(&secret, &TenantSessionPayload::new(1, "acme", -10));
         let err = decode(&secret, "acme", &cookie).unwrap_err();
         assert!(matches!(err, SessionError::Expired));
+    }
+
+    /// v0.28.4 (#77) — `iat` is set on every newly-minted payload so
+    /// the session middleware can compare it against
+    /// `rustango_users.password_changed_at`.
+    #[test]
+    fn new_payload_stamps_iat_at_construction_time() {
+        let p = TenantSessionPayload::new(7, "acme", 3600);
+        let now = chrono::Utc::now().timestamp();
+        // iat lands within ±2s of "now" — wide enough to absorb
+        // schedule jitter, tight enough to fail if we forgot to
+        // populate it.
+        assert!((p.iat - now).abs() < 2, "iat = {} but now = {now}", p.iat);
+        assert!(p.iat > 0);
+        assert_eq!(p.exp - p.iat, 3600);
+    }
+
+    /// Pre-0.28.4 cookies don't carry `iat`. `#[serde(default)]` on
+    /// the field keeps them parseable; `iat` decodes as `0`. The
+    /// session middleware treats `0 < password_changed_at.timestamp()`
+    /// as "issued at the dawn of time, invalidate", so any
+    /// post-rotation login wins. This test pins the parse
+    /// behavior — losing it would silently break the security
+    /// guarantee on upgrade.
+    #[test]
+    fn legacy_pre_v0_28_4_cookie_decodes_with_iat_zero() {
+        // Hand-write a payload JSON without `iat` to simulate a
+        // pre-0.28.4 cookie.
+        use base64::Engine;
+        let secret = key();
+        let json = br#"{"uid":7,"slug":"acme","exp":99999999999}"#;
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
+        let sig = sign(&secret, payload_b64.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
+        let cookie = format!("{payload_b64}.{sig_b64}");
+        let p = decode(&secret, "acme", &cookie).expect("legacy cookie still parses");
+        assert_eq!(p.uid, 7);
+        assert_eq!(p.iat, 0, "missing iat should default to 0");
     }
 }

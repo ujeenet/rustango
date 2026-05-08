@@ -70,6 +70,7 @@ async fn boot() -> Option<(axum::Router, String, sqlx::PgPool, String)> {
         password_hash: hash,
         active: true,
         created_at: now(),
+        password_changed_at: None,
     };
     op.insert(&pool).await.unwrap();
 

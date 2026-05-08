@@ -59,15 +59,25 @@ pub struct SessionPayload {
     pub oid: i64,
     /// Expiry as Unix seconds.
     pub exp: i64,
+    /// Issued-at as Unix seconds (v0.28.4, #77 follow-up).
+    /// Compared to `rustango_operators.password_changed_at` —
+    /// sessions issued before the latest password rotation are
+    /// rejected. `0` for cookies minted on pre-0.28.4 servers
+    /// (`#[serde(default)]` keeps them parseable; the comparison
+    /// treats `0` as "issued at the dawn of time" so they're
+    /// invalidated by any password change).
+    #[serde(default)]
+    pub iat: i64,
 }
 
 impl SessionPayload {
     #[must_use]
     pub fn new(operator_id: i64, ttl_secs: i64) -> Self {
-        let exp = chrono::Utc::now().timestamp() + ttl_secs;
+        let now = chrono::Utc::now().timestamp();
         Self {
             oid: operator_id,
-            exp,
+            exp: now + ttl_secs,
+            iat: now,
         }
     }
 

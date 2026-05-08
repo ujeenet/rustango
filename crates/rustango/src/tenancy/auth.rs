@@ -65,6 +65,12 @@ pub struct Operator {
     /// Soft-disable — `false` rejects login without dropping the row.
     pub active: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Timestamp of the last password rotation (v0.28.4, #77).
+    /// Set on every reset / change-password verb. Sessions whose
+    /// `iat` (issued-at) is strictly less than this value are
+    /// rejected by `validate_session`. `None` for accounts that
+    /// haven't rotated since v0.28.4 — those sessions stay valid.
+    pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Per-tenant user. Lives in the tenant's storage (schema or
@@ -103,6 +109,13 @@ pub struct User {
     /// own column. Never read by the framework itself.
     #[rustango(default = "'{}'")]
     pub data: serde_json::Value,
+    /// Timestamp of the last password rotation (v0.28.4, #77).
+    /// Set on every reset / change-password verb. Sessions whose
+    /// `iat` is strictly less than this value are rejected by
+    /// `validate_session`. `None` for accounts that haven't
+    /// rotated since v0.28.4 — those sessions stay valid until
+    /// they expire normally.
+    pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Look up an operator by username and verify the password.
@@ -183,6 +196,10 @@ pub async fn authenticate_user(
         data: row
             .try_get::<serde_json::Value, _>("data")
             .unwrap_or_else(|_| serde_json::json!({})),
+        password_changed_at: row
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("password_changed_at")
+            .ok()
+            .flatten(),
     };
     if !user.active {
         return Ok(None);

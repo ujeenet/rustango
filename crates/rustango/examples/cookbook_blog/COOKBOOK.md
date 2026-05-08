@@ -886,7 +886,9 @@ cargo run -- reset-password acme alice --generate
 - 3 live tests in `tests/manage_change_password_live.rs` (CLI round-trip, `--generate` prints + verifies, mutually-exclusive flags rejected).
 - 4 live tests in `tests/admin_change_password_ui_live.rs` (anonymous → 303 to login; authenticated GET renders form; POST with correct current rotates the hash; POST with wrong current shows error and leaves hash unchanged).
 
-**Out of scope (v0.29 follow-ups)**: `password_changed_at` cookie invalidation — sessions issued before a password change currently remain valid until they expire; the schema change + session-payload `iat` comparison is queued. Also: operator-driven password reset on a tenant user via the operator console UI (the `reset-password` CLI verb already covers this path; UI sugar deferred); password strength enforcement at the form layer (the `passwords::strength_score` helper exists but isn't wired in).
+**Out of scope (v0.29 follow-ups)**: operator-driven password reset on a tenant user via the operator console UI (the `reset-password` CLI verb already covers this path; UI sugar deferred); password strength enforcement at the form layer (the `passwords::strength_score` helper exists but isn't wired in).
+
+**Shipped in v0.28.4**: `password_changed_at` column on `User` / `Operator` is stamped to `NOW()` on every password rotation path. The session payload now carries `iat` (issued-at); `validate_session` and `require_session` reject cookies whose `iat` is strictly less than `password_changed_at.timestamp()`. Pre-0.28.4 cookies stay parseable (`#[serde(default)]` on `iat` decodes as `0`) — they're invalidated by any future password change, which is the intended security posture. Verified by `tenant_console::tests::new_payload_stamps_iat_at_construction_time`, `tenant_console::tests::legacy_pre_v0_28_4_cookie_decodes_with_iat_zero`, and the live test `admin_change_password_ui_live::session_minted_before_password_rotation_is_rejected`.
 
 ## Chapter 6 — Auth + permissions
 
