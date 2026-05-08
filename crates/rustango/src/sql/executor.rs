@@ -1232,6 +1232,8 @@ pub enum PoolTx<'a> {
     Postgres(sqlx::Transaction<'a, sqlx::Postgres>),
     #[cfg(feature = "mysql")]
     Mysql(sqlx::Transaction<'a, sqlx::MySql>),
+    #[cfg(feature = "sqlite")]
+    Sqlite(sqlx::Transaction<'a, sqlx::Sqlite>),
 }
 
 impl<'a> PoolTx<'a> {
@@ -1245,6 +1247,8 @@ impl<'a> PoolTx<'a> {
             PoolTx::Postgres(tx) => tx.commit().await,
             #[cfg(feature = "mysql")]
             PoolTx::Mysql(tx) => tx.commit().await,
+            #[cfg(feature = "sqlite")]
+            PoolTx::Sqlite(tx) => tx.commit().await,
         }
     }
 
@@ -1260,6 +1264,8 @@ impl<'a> PoolTx<'a> {
             PoolTx::Postgres(tx) => tx.rollback().await,
             #[cfg(feature = "mysql")]
             PoolTx::Mysql(tx) => tx.rollback().await,
+            #[cfg(feature = "sqlite")]
+            PoolTx::Sqlite(tx) => tx.rollback().await,
         }
     }
 }
@@ -1307,7 +1313,7 @@ pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'_>, ExecError> {
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => Ok(PoolTx::Mysql(my.begin().await?)),
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(_) => unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)"),
+        Pool::Sqlite(sq) => Ok(PoolTx::Sqlite(sq.begin().await?)),
     }
 }
 
@@ -1341,6 +1347,19 @@ fn bind_query_my(
     q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments>,
     value: SqlValue,
 ) -> sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> {
+    bind_match!(q, value)
+}
+
+/// SQLite counterpart of [`bind_query_my`] / [`bind_query`]. sqlx-sqlite
+/// supports the same `bind` API for the scalar `SqlValue` variants this
+/// crate emits (chrono types route through the `chrono` feature, JSON
+/// values go through the `json` feature into TEXT — both feature flags
+/// are pulled in by the runtime feature set when `sqlite` is on).
+#[cfg(feature = "sqlite")]
+fn bind_query_sqlite<'a>(
+    q: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>,
+    value: SqlValue,
+) -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>> {
     bind_match!(q, value)
 }
 
@@ -1439,8 +1458,20 @@ pub async fn insert_returning_pool(
             Ok(InsertReturningPool::MySqlAutoId(id))
         }
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        Pool::Sqlite(sq) => {
+            // SQLite ≥ 3.35 supports `INSERT … RETURNING <cols>` with
+            // the same shape as Postgres, so the flow mirrors PG: bind
+            // params, fetch the row, hand it to the macro-emitted
+            // `__rustango_assign_from_sqlite_row` body via
+            // `apply_auto_pk_pool`.
+            let stmt = pool.dialect().compile_insert(query)?;
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_sqlite(q, v);
+            }
+            let row = q.fetch_one(sq).await?;
+            Ok(InsertReturningPool::SqliteRow(row))
         }
     }
 }
@@ -1453,12 +1484,26 @@ pub async fn insert_returning_pool(
 /// store every `RETURNING` column from the PG variant; store the
 /// single `i64` into the model's `Auto<T>` PK field on the MySQL
 /// variant.
-#[derive(Debug)]
 pub enum InsertReturningPool {
     #[cfg(feature = "postgres")]
     PgRow(PgRow),
     #[cfg(feature = "mysql")]
     MySqlAutoId(i64),
+    #[cfg(feature = "sqlite")]
+    SqliteRow(sqlx::sqlite::SqliteRow),
+}
+
+impl ::core::fmt::Debug for InsertReturningPool {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::PgRow(_) => f.debug_tuple("PgRow").field(&"<PgRow>").finish(),
+            #[cfg(feature = "mysql")]
+            Self::MySqlAutoId(id) => f.debug_tuple("MySqlAutoId").field(id).finish(),
+            #[cfg(feature = "sqlite")]
+            Self::SqliteRow(_) => f.debug_tuple("SqliteRow").field(&"<SqliteRow>").finish(),
+        }
+    }
 }
 
 /// `UPDATE` against either backend; returns rows affected.
@@ -1556,8 +1601,13 @@ async fn execute_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<u6
             Ok(q.execute(my).await?.rows_affected())
         }
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        Pool::Sqlite(sq) => {
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(sql);
+            for v in binds {
+                q = bind_query_sqlite(q, v);
+            }
+            Ok(q.execute(sq).await?.rows_affected())
         }
     }
 }
@@ -1589,8 +1639,15 @@ async fn fetch_scalar_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Resu
             Ok(row.try_get::<i64, _>(0)?)
         }
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        Pool::Sqlite(sq) => {
+            use sqlx::Row as _;
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(sql);
+            for v in binds {
+                q = bind_query_sqlite(q, v);
+            }
+            let row = q.fetch_one(sq).await?;
+            Ok(row.try_get::<i64, _>(0)?)
         }
     }
 }
@@ -1664,6 +1721,51 @@ pub trait MaybeMyLoadRelated {}
 #[cfg(not(feature = "mysql"))]
 impl<T> MaybeMyLoadRelated for T {}
 
+// ---- v0.27 Phase 3 — SQLite parallels of the MySQL marker traits ----
+//
+// Same shape as `MaybeMyFromRow` / `LoadRelatedMy` /
+// `MaybeMyLoadRelated`, gated on `sqlite` instead of `mysql`. The
+// `_pool` executor functions add these as additional bounds on `T`
+// so a `Pool::Sqlite` arm can decode `T` from a `SqliteRow`.
+
+#[cfg(feature = "sqlite")]
+pub trait MaybeSqliteFromRow: for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> {}
+#[cfg(feature = "sqlite")]
+impl<T> MaybeSqliteFromRow for T where T: for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> {}
+#[cfg(not(feature = "sqlite"))]
+#[allow(dead_code)]
+pub trait MaybeSqliteFromRow {}
+#[cfg(not(feature = "sqlite"))]
+impl<T> MaybeSqliteFromRow for T {}
+
+/// SQLite counterpart of [`LoadRelated`] / [`LoadRelatedMy`]. The
+/// proc-macro emits this alongside the Postgres + MySQL impls so
+/// `select_related` joins can stitch parents onto FK fields when
+/// decoding from a `SqliteRow`.
+#[cfg(feature = "sqlite")]
+pub trait LoadRelatedSqlite {
+    /// Same contract as [`LoadRelated::__rustango_load_related`].
+    ///
+    /// # Errors
+    /// `sqlx::Error` from `try_get` decoding the joined columns.
+    fn __rustango_load_related_sqlite(
+        &mut self,
+        row: &sqlx::sqlite::SqliteRow,
+        field_name: &str,
+        alias: &str,
+    ) -> Result<bool, sqlx::Error>;
+}
+
+#[cfg(feature = "sqlite")]
+pub trait MaybeSqliteLoadRelated: LoadRelatedSqlite {}
+#[cfg(feature = "sqlite")]
+impl<T> MaybeSqliteLoadRelated for T where T: LoadRelatedSqlite {}
+#[cfg(not(feature = "sqlite"))]
+#[allow(dead_code)]
+pub trait MaybeSqliteLoadRelated {}
+#[cfg(not(feature = "sqlite"))]
+impl<T> MaybeSqliteLoadRelated for T {}
+
 /// Run a `SelectQuery` against either backend and decode each row
 /// into `T`. Equivalent to [`select_rows`] but takes [`Pool`] and
 /// dispatches per backend. Joins (`select_related`) are not yet
@@ -1674,7 +1776,7 @@ impl<T> MaybeMyLoadRelated for T {}
 /// As [`select_rows`].
 pub async fn select_rows_pool<T>(pool: &Pool, query: &SelectQuery) -> Result<Vec<T>, ExecError>
 where
-    T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + Send + Unpin,
+    T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
@@ -1697,8 +1799,17 @@ where
             Ok(q.fetch_all(my).await?)
         }
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        Pool::Sqlite(sq) => {
+            let mut q: sqlx::query::QueryAs<
+                '_,
+                sqlx::Sqlite,
+                T,
+                sqlx::sqlite::SqliteArguments<'_>,
+            > = sqlx::query_as::<_, T>(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_as_sqlite(q, v);
+            }
+            Ok(q.fetch_all(sq).await?)
         }
     }
 }
@@ -1713,7 +1824,7 @@ pub async fn select_one_row_pool<T>(
     query: &SelectQuery,
 ) -> Result<Option<T>, ExecError>
 where
-    T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + Send + Unpin,
+    T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
@@ -1736,8 +1847,17 @@ where
             Ok(q.fetch_optional(my).await?)
         }
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        Pool::Sqlite(sq) => {
+            let mut q: sqlx::query::QueryAs<
+                '_,
+                sqlx::Sqlite,
+                T,
+                sqlx::sqlite::SqliteArguments<'_>,
+            > = sqlx::query_as::<_, T>(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_as_sqlite(q, v);
+            }
+            Ok(q.fetch_optional(sq).await?)
         }
     }
 }
@@ -1748,6 +1868,15 @@ fn bind_query_as_my<T>(
     q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments>,
     value: SqlValue,
 ) -> sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> {
+    bind_match!(q, value)
+}
+
+/// SQLite-typed `QueryAs` binding helper, symmetric with [`bind_query_as`].
+#[cfg(feature = "sqlite")]
+fn bind_query_as_sqlite<'a, T>(
+    q: sqlx::query::QueryAs<'a, sqlx::Sqlite, T, sqlx::sqlite::SqliteArguments<'a>>,
+    value: SqlValue,
+) -> sqlx::query::QueryAs<'a, sqlx::Sqlite, T, sqlx::sqlite::SqliteArguments<'a>> {
     bind_match!(q, value)
 }
 
@@ -1767,7 +1896,7 @@ pub async fn fetch_aggregate_pool<T>(
     query: &AggregateQuery,
 ) -> Result<Vec<T>, ExecError>
 where
-    T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + Send + Unpin,
+    T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
     let stmt = pool.dialect().compile_aggregate(query)?;
     match pool {
@@ -1790,8 +1919,17 @@ where
             Ok(q.fetch_all(my).await?)
         }
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        Pool::Sqlite(sq) => {
+            let mut q: sqlx::query::QueryAs<
+                '_,
+                sqlx::Sqlite,
+                T,
+                sqlx::sqlite::SqliteArguments<'_>,
+            > = sqlx::query_as::<_, T>(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_as_sqlite(q, v);
+            }
+            Ok(q.fetch_all(sq).await?)
         }
     }
 }
@@ -1813,7 +1951,7 @@ pub async fn raw_query_pool<T>(
     pool: &Pool,
 ) -> Result<Vec<T>, ExecError>
 where
-    T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + Send + Unpin,
+    T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
     match pool {
         #[cfg(feature = "postgres")]
@@ -1834,8 +1972,17 @@ where
             Ok(q.fetch_all(my).await?)
         }
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        Pool::Sqlite(sq) => {
+            let mut q: sqlx::query::QueryAs<
+                '_,
+                sqlx::Sqlite,
+                T,
+                sqlx::sqlite::SqliteArguments<'_>,
+            > = sqlx::query_as::<_, T>(sql);
+            for v in binds {
+                q = bind_query_as_sqlite(q, v);
+            }
+            Ok(q.fetch_all(sq).await?)
         }
     }
 }
@@ -1895,7 +2042,12 @@ pub async fn fetch_paginated_pool<T>(
     pool: &Pool,
 ) -> Result<Page<T>, ExecError>
 where
-    T: Model + for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + Send + Unpin,
+    T: Model
+        + for<'r> sqlx::FromRow<'r, PgRow>
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + Send
+        + Unpin,
 {
     let select = qs.compile()?;
     let stmt = pool.dialect().compile_select(&select)?;
@@ -1943,8 +2095,26 @@ where
             Ok(Page { rows, total })
         }
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        Pool::Sqlite(sq) => {
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(&sql);
+            for v in stmt.params {
+                q = bind_query_sqlite(q, v);
+            }
+            use sqlx::Row as _;
+            let raw_rows: Vec<sqlx::sqlite::SqliteRow> = q.fetch_all(sq).await?;
+            let total: i64 = raw_rows
+                .first()
+                .map(|row| row.try_get::<i64, _>("__rustango_total"))
+                .transpose()?
+                .unwrap_or(0);
+            let mut rows = Vec::with_capacity(raw_rows.len());
+            for row in &raw_rows {
+                rows.push(<T as sqlx::FromRow<sqlx::sqlite::SqliteRow>>::from_row(
+                    row,
+                )?);
+            }
+            Ok(Page { rows, total })
         }
     }
 }
@@ -1971,16 +2141,20 @@ where
     P: Model
         + for<'r> sqlx::FromRow<'r, PgRow>
         + MaybeMyFromRow
+        + MaybeSqliteFromRow
         + LoadRelated
         + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
         + HasPkValue
         + Send
         + Unpin,
     C: Model
         + for<'r> sqlx::FromRow<'r, PgRow>
         + MaybeMyFromRow
+        + MaybeSqliteFromRow
         + LoadRelated
         + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
         + FkPkAccess
         + Send
         + Unpin,
@@ -2062,8 +2236,10 @@ pub async fn select_rows_pool_with_related<T>(
 where
     T: for<'r> sqlx::FromRow<'r, PgRow>
         + MaybeMyFromRow
+        + MaybeSqliteFromRow
         + LoadRelated
         + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
         + Send
         + Unpin,
 {
@@ -2127,8 +2303,36 @@ where
             Ok(out)
         }
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        Pool::Sqlite(sq) => {
+            if aliases.is_empty() {
+                let mut q: sqlx::query::QueryAs<
+                    '_,
+                    sqlx::Sqlite,
+                    T,
+                    sqlx::sqlite::SqliteArguments<'_>,
+                > = sqlx::query_as::<_, T>(&stmt.sql);
+                for v in stmt.params {
+                    q = bind_query_as_sqlite(q, v);
+                }
+                return Ok(q.fetch_all(sq).await?);
+            }
+            // Join path on SQLite — same shape as PG / MySQL arms,
+            // routed through LoadRelatedSqlite::__rustango_load_related_sqlite.
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_sqlite(q, v);
+            }
+            let raw_rows = q.fetch_all(sq).await?;
+            let mut out = Vec::with_capacity(raw_rows.len());
+            for row in &raw_rows {
+                let mut t = <T as sqlx::FromRow<sqlx::sqlite::SqliteRow>>::from_row(row)?;
+                for alias in &aliases {
+                    let _ = t.__rustango_load_related_sqlite(row, alias, alias)?;
+                }
+                out.push(t);
+            }
+            Ok(out)
         }
     }
 }
@@ -2147,8 +2351,10 @@ where
     T: Model
         + for<'r> sqlx::FromRow<'r, PgRow>
         + MaybeMyFromRow
+        + MaybeSqliteFromRow
         + LoadRelated
         + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
         + Send
         + Unpin,
 {
@@ -2169,8 +2375,10 @@ where
     T: Model
         + for<'r> sqlx::FromRow<'r, PgRow>
         + MaybeMyFromRow
+        + MaybeSqliteFromRow
         + LoadRelated
         + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
         + Send
         + Unpin,
 {

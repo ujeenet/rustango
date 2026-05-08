@@ -432,6 +432,28 @@ CREATE INDEX `rustango_audit_log_occurred_idx`
     ON `rustango_audit_log` (`occurred_at` DESC);
 "#;
 
+/// SQLite-shape audit-log DDL. Same column shape as the Postgres
+/// version, but: `INTEGER PRIMARY KEY AUTOINCREMENT` (the SQLite
+/// auto-PK token), `TEXT` for VARCHAR / JSON / TIMESTAMP (SQLite
+/// affinities), `CURRENT_TIMESTAMP` for the default. `CREATE INDEX
+/// IF NOT EXISTS` is supported, so the bootstrap stays idempotent
+/// without per-error fallback.
+pub const CREATE_TABLE_SQL_SQLITE: &str = r#"
+CREATE TABLE IF NOT EXISTS "rustango_audit_log" (
+    "id"           INTEGER PRIMARY KEY AUTOINCREMENT,
+    "entity_table" TEXT NOT NULL,
+    "entity_pk"    TEXT NOT NULL,
+    "operation"    TEXT NOT NULL,
+    "source"       TEXT NOT NULL,
+    "changes"      TEXT NOT NULL,
+    "occurred_at"  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS "rustango_audit_log_entity_idx"
+    ON "rustango_audit_log" ("entity_table", "entity_pk");
+CREATE INDEX IF NOT EXISTS "rustango_audit_log_occurred_idx"
+    ON "rustango_audit_log" ("occurred_at" DESC);
+"#;
+
 /// Bootstrap the audit-log table against either backend. Routes the
 /// per-dialect DDL through the right driver via [`crate::sql::Pool`].
 ///
@@ -447,9 +469,10 @@ pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Erro
     let ddl = match dialect.name() {
         "postgres" => CREATE_TABLE_SQL,
         "mysql" => CREATE_TABLE_SQL_MYSQL,
+        "sqlite" => CREATE_TABLE_SQL_SQLITE,
         // Future dialects fall through to a portable best-effort using
         // `Dialect::column_type` for the timestamp + JSON columns; for
-        // the two backends rustango ships against, hand-rolled DDL is
+        // the backends rustango ships against, hand-rolled DDL is
         // simpler and produces tighter SQL.
         _ => CREATE_TABLE_SQL,
     };
@@ -477,8 +500,8 @@ pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Erro
                 }
             }
             #[cfg(feature = "sqlite")]
-            crate::sql::Pool::Sqlite(_) => {
-                unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+            crate::sql::Pool::Sqlite(sq) => {
+                sqlx::query(trimmed).execute(sq).await?;
             }
         }
     }
@@ -527,6 +550,33 @@ where
     Ok(())
 }
 
+/// SQLite counterpart of [`emit_one`]. Identifier quoting is
+/// double-quote (same as Postgres) and placeholders are positional
+/// `?` (sqlx-sqlite supports both `?` and `?N`). The `changes` JSON
+/// goes into a TEXT column via `sqlx::types::Json`.
+///
+/// # Errors
+/// Driver / SQL failures from the INSERT.
+#[cfg(feature = "sqlite")]
+pub async fn emit_one_sqlite<'c, E>(executor: E, entry: &PendingEntry) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'c, Database = sqlx::Sqlite>,
+{
+    sqlx::query(
+        r#"INSERT INTO "rustango_audit_log"
+              ("entity_table", "entity_pk", "operation", "source", "changes")
+           VALUES (?, ?, ?, ?, ?)"#,
+    )
+    .bind(entry.entity_table)
+    .bind(&entry.entity_pk)
+    .bind(entry.operation.as_str())
+    .bind(entry.source.as_token())
+    .bind(sqlx::types::Json(&entry.changes))
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 /// Per-row audit emit via [`crate::sql::Pool`] — dispatches to
 /// [`emit_one`] (Postgres) or [`emit_one_my`] (MySQL). **Not
 /// transactional** with the data write — for write-and-audit
@@ -545,7 +595,7 @@ pub async fn emit_one_pool(
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => emit_one_my(my, entry).await,
         #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(_) => unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)"),
+        crate::sql::Pool::Sqlite(sq) => emit_one_sqlite(sq, entry).await,
     }
 }
 
@@ -600,8 +650,17 @@ pub async fn delete_one_with_audit_pool(
             Ok(affected)
         }
         #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        crate::sql::Pool::Sqlite(sq) => {
+            let mut tx = sq.begin().await?;
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_value_sqlite(q, v);
+            }
+            let affected = q.execute(&mut *tx).await?.rows_affected();
+            emit_one_sqlite(&mut *tx, entry).await?;
+            tx.commit().await?;
+            Ok(affected)
         }
     }
 }
@@ -658,8 +717,17 @@ pub async fn save_one_with_audit_pool(
             Ok(affected)
         }
         #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        crate::sql::Pool::Sqlite(sq) => {
+            let mut tx = sq.begin().await?;
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_value_sqlite(q, v);
+            }
+            let affected = q.execute(&mut *tx).await?.rows_affected();
+            emit_one_sqlite(&mut *tx, entry).await?;
+            tx.commit().await?;
+            Ok(affected)
         }
     }
 }
@@ -744,8 +812,20 @@ pub async fn insert_one_with_audit_pool(
             Ok(crate::sql::InsertReturningPool::MySqlAutoId(id))
         }
         #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        crate::sql::Pool::Sqlite(sq) => {
+            // SQLite has full RETURNING (≥ 3.35) — same flow as PG.
+            let stmt = pool.dialect().compile_insert(query)?;
+            let mut tx = sq.begin().await?;
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_value_sqlite(q, v);
+            }
+            use sqlx::Executor as _;
+            let row = (&mut *tx).fetch_one(q).await?;
+            emit_one_sqlite(&mut *tx, entry).await?;
+            tx.commit().await?;
+            Ok(crate::sql::InsertReturningPool::SqliteRow(row))
         }
     }
 }
@@ -777,6 +857,17 @@ pub fn __bind_value_my(
     value: crate::core::SqlValue,
 ) -> sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> {
     bind_value_my(q, value)
+}
+
+/// SQLite counterpart of [`__bind_value_pg`] — same purpose, SQLite
+/// driver type.
+#[doc(hidden)]
+#[cfg(feature = "sqlite")]
+pub fn __bind_value_sqlite<'q>(
+    q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
+    value: crate::core::SqlValue,
+) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
+    bind_value_sqlite(q, value)
 }
 
 #[cfg(feature = "postgres")]
@@ -825,6 +916,29 @@ fn bind_value_my(
     }
 }
 
+#[cfg(feature = "sqlite")]
+fn bind_value_sqlite<'q>(
+    q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
+    value: crate::core::SqlValue,
+) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
+    use crate::core::SqlValue;
+    match value {
+        SqlValue::Null => q.bind(None::<String>),
+        SqlValue::I16(v) => q.bind(v),
+        SqlValue::I32(v) => q.bind(v),
+        SqlValue::I64(v) => q.bind(v),
+        SqlValue::F32(v) => q.bind(v),
+        SqlValue::F64(v) => q.bind(v),
+        SqlValue::Bool(v) => q.bind(v),
+        SqlValue::String(v) => q.bind(v),
+        SqlValue::DateTime(v) => q.bind(v),
+        SqlValue::Date(v) => q.bind(v),
+        SqlValue::Uuid(v) => q.bind(v),
+        SqlValue::Json(v) => q.bind(sqlx::types::Json(v)),
+        SqlValue::List(_) => unreachable!("List expanded to scalars by SQL writer"),
+    }
+}
+
 /// Per-row audited save against either backend.
 ///
 /// Slice 17.1 — moved out of the macro into rustango so the
@@ -849,7 +963,7 @@ fn bind_value_my(
 /// Any [`crate::sql::ExecError`] from the UPDATE/SELECT, plus
 /// `sqlx::Error` from the audit emit (mapped through `From`).
 #[allow(clippy::too_many_arguments)]
-pub async fn save_one_with_diff_pool<F1, F2>(
+pub async fn save_one_with_diff_pool<F1, F2, F3>(
     pool: &crate::sql::Pool,
     update_query: &crate::core::UpdateQuery,
     pk_column: &'static str,
@@ -859,15 +973,18 @@ pub async fn save_one_with_diff_pool<F1, F2>(
     after_pairs: Vec<(&'static str, serde_json::Value)>,
     select_cols_pg: &str,
     select_cols_my: &str,
+    select_cols_sqlite: &str,
     decode_before_pg: F1,
     decode_before_my: F2,
+    decode_before_sqlite: F3,
 ) -> Result<(), crate::sql::ExecError>
 where
     F1: FnOnce(&crate::sql::PgReturningRow) -> Vec<(&'static str, serde_json::Value)>,
     F2: FnOnce(&crate::sql::MyReturningRow) -> Vec<(&'static str, serde_json::Value)>,
+    F3: FnOnce(&crate::sql::SqliteReturningRow) -> Vec<(&'static str, serde_json::Value)>,
 {
-    let _ = (&decode_before_pg, &decode_before_my);
-    let _ = (select_cols_pg, select_cols_my);
+    let _ = (&decode_before_pg, &decode_before_my, &decode_before_sqlite);
+    let _ = (select_cols_pg, select_cols_my, select_cols_sqlite);
     let stmt = pool.dialect().compile_update(update_query)?;
     match pool {
         #[cfg(feature = "postgres")]
@@ -935,8 +1052,36 @@ where
             Ok(())
         }
         #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        crate::sql::Pool::Sqlite(sq) => {
+            let mut tx = sq.begin().await?;
+            let select_sql = format!(
+                r#"SELECT {} FROM "{}" WHERE "{}" = ?"#,
+                select_cols_sqlite, entity_table, pk_column,
+            );
+            let pk_q = sqlx::query(&select_sql);
+            let pk_q = bind_value_sqlite(pk_q, pk_value);
+            let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
+                match pk_q.fetch_optional(&mut *tx).await {
+                    Ok(Some(row)) => Some(decode_before_sqlite(&row)),
+                    _ => None,
+                };
+            let mut q = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_value_sqlite(q, v);
+            }
+            q.execute(&mut *tx).await?;
+            if let Some(before) = before_pairs {
+                let entry = PendingEntry {
+                    entity_table,
+                    entity_pk,
+                    operation: AuditOp::Update,
+                    source: current_source(),
+                    changes: diff_changes(&before, &after_pairs),
+                };
+                emit_one_sqlite(&mut *tx, &entry).await?;
+            }
+            tx.commit().await?;
+            Ok(())
         }
     }
 }

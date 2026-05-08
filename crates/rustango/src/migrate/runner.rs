@@ -1119,9 +1119,13 @@ async fn ensure_ledger_pool_for(pool: &crate::sql::Pool, ledger: &str) -> Result
     let timestamp_col = match dialect_name {
         "postgres" => "TIMESTAMPTZ NOT NULL DEFAULT NOW()",
         "mysql" => "DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)",
+        // SQLite has no native TIMESTAMP type — TEXT with affinity
+        // and `CURRENT_TIMESTAMP` (UTC, ISO-8601 to second precision)
+        // is the conventional shape. Sufficient for ledger ordering.
+        "sqlite" => "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
         // Future dialects: a `Dialect::current_timestamp_default()` +
         // `Dialect::timestamp_type()` pair would let this branch go
-        // away. For now the runner only knows the two backends rustango
+        // away. For now the runner only knows the backends rustango
         // ships against.
         other => {
             return Err(MigrateError::Validation(format!(
@@ -1173,8 +1177,13 @@ async fn applied_set_pool_for(
             Ok(out)
         }
         #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        crate::sql::Pool::Sqlite(sq) => {
+            let rows = sqlx::query(&sql).fetch_all(sq).await?;
+            let mut out = HashSet::with_capacity(rows.len());
+            for row in rows {
+                out.insert(row.try_get::<String, _>("name")?);
+            }
+            Ok(out)
         }
     }
 }
@@ -1287,7 +1296,13 @@ where
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+            // SQLite has no advisory-lock primitive comparable to PG's
+            // `pg_advisory_lock` or MySQL's `GET_LOCK`. The single-writer
+            // semantics of SQLite (and the typical single-process
+            // deployment shape) make migration coordination unnecessary
+            // — concurrent migrations would serialize on the database
+            // file lock anyway. Run the body without an additional lock.
+            body.await
         }
     }
 }
@@ -1365,8 +1380,35 @@ async fn apply_atomic_pool(
             tx.commit().await?;
         }
         #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        crate::sql::Pool::Sqlite(sq) => {
+            // SQLite supports the same BEGIN/COMMIT/ROLLBACK shape as
+            // PG/MySQL, with `?` placeholders. Mirror the PG arm.
+            let mut tx = sq.begin().await?;
+            let mut deferred_fks: Vec<String> = Vec::new();
+            for op in &mig.forward {
+                match op {
+                    Operation::Schema(change) => {
+                        let batch =
+                            render_changes_split(std::slice::from_ref(change), &mig.snapshot)
+                                .map_err(MigrateError::Validation)?;
+                        for stmt in batch.immediate {
+                            sqlx::query(&stmt).execute(&mut *tx).await?;
+                        }
+                        deferred_fks.extend(batch.deferred_fks);
+                    }
+                    Operation::Data(d) => {
+                        sqlx::query(&d.sql).execute(&mut *tx).await?;
+                    }
+                }
+            }
+            for stmt in deferred_fks {
+                sqlx::query(&stmt).execute(&mut *tx).await?;
+            }
+            sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES (?)"))
+                .bind(&mig.name)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
         }
     }
     Ok(())
@@ -1815,8 +1857,32 @@ async fn unapply_atomic_pool(
             tx.commit().await?;
         }
         #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(_) => {
-            unimplemented!("rustango SQLite runtime is Phase 3 — Pool::Sqlite variant exists for future use but `_pool` helpers don't dispatch to it yet (#37)");
+        crate::sql::Pool::Sqlite(sq) => {
+            let mut tx = sq.begin().await?;
+            let mut deferred_fks: Vec<String> = Vec::new();
+            for op in inverted {
+                match op {
+                    Operation::Schema(change) => {
+                        let batch = render_changes_split(std::slice::from_ref(change), snapshot)
+                            .map_err(MigrateError::Validation)?;
+                        for stmt in batch.immediate {
+                            sqlx::query(&stmt).execute(&mut *tx).await?;
+                        }
+                        deferred_fks.extend(batch.deferred_fks);
+                    }
+                    Operation::Data(d) => {
+                        sqlx::query(&d.sql).execute(&mut *tx).await?;
+                    }
+                }
+            }
+            for stmt in deferred_fks {
+                sqlx::query(&stmt).execute(&mut *tx).await?;
+            }
+            sqlx::query(&format!("DELETE FROM {ledger} WHERE name = ?"))
+                .bind(&target.name)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
         }
     }
     Ok(())

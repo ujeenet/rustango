@@ -24,8 +24,8 @@ mod writers;
 
 pub use auto::Auto;
 pub use backend::{
-    apply_auto_pk_pool, try_get_returning, try_get_returning_my, AssignAutoPkPool, MyReturningRow,
-    MysqlAutoIdSet, PgReturningRow,
+    apply_auto_pk_pool, try_get_returning, try_get_returning_my, try_get_returning_sqlite,
+    AssignAutoPkPool, MyReturningRow, MysqlAutoIdSet, PgReturningRow, SqliteReturningRow,
 };
 pub use compiled::CompiledStatement;
 pub use dialect::Dialect;
@@ -46,6 +46,8 @@ pub use executor::{
 
 #[cfg(feature = "mysql")]
 pub use executor::LoadRelatedMy;
+#[cfg(feature = "sqlite")]
+pub use executor::{LoadRelatedSqlite, MaybeSqliteFromRow, MaybeSqliteLoadRelated};
 pub use foreign_key::ForeignKey;
 pub use m2m::M2MManager;
 #[cfg(feature = "mysql")]

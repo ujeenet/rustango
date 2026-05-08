@@ -209,6 +209,37 @@ where
     }
 }
 
+/// SQLite Decode mirror for the bi-dialect path. Mirrors the
+/// Postgres + MySQL impls so `#[derive(Model)]` types with
+/// `ForeignKey<T>` fields satisfy `FromRow<SqliteRow>`.
+#[cfg(feature = "sqlite")]
+impl<'r, T, K> sqlx::Decode<'r, sqlx::Sqlite> for ForeignKey<T, K>
+where
+    K: sqlx::Decode<'r, sqlx::Sqlite>,
+{
+    fn decode(
+        value: <sqlx::Sqlite as sqlx::Database>::ValueRef<'r>,
+    ) -> Result<Self, sqlx::error::BoxDynError> {
+        Ok(Self::Unloaded(<K as sqlx::Decode<sqlx::Sqlite>>::decode(
+            value,
+        )?))
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl<T, K> sqlx::Type<sqlx::Sqlite> for ForeignKey<T, K>
+where
+    K: sqlx::Type<sqlx::Sqlite>,
+{
+    fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+        <K as sqlx::Type<sqlx::Sqlite>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::sqlite::SqliteTypeInfo) -> bool {
+        <K as sqlx::Type<sqlx::Sqlite>>::compatible(ty)
+    }
+}
+
 impl<T, K> ForeignKey<T, K>
 where
     T: Model + for<'r> FromRow<'r, PgRow> + Send + Unpin + crate::sql::LoadRelated,

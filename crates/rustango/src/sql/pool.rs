@@ -172,12 +172,12 @@ impl Pool {
             }),
             #[cfg(feature = "sqlite")]
             "sqlite" => {
-                // Phase 3 pending — see `connect_sqlite_inner`.
-                let _ = timeout;
-                Err(PoolError::FeatureNotEnabled {
-                    scheme: "sqlite",
-                    feature: "sqlite (Phase 3 — runtime + macro decoder pending)",
-                })
+                let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                    .acquire_timeout(timeout)
+                    .connect(url)
+                    .await
+                    .map_err(|e| PoolError::Connect(e.to_string()))?;
+                Ok(Self::Sqlite(pool))
             }
             #[cfg(not(feature = "sqlite"))]
             "sqlite" => Err(PoolError::FeatureNotEnabled {
@@ -313,23 +313,19 @@ impl Pool {
     }
 
     #[cfg(feature = "sqlite")]
-    #[allow(clippy::unused_async)]
-    async fn connect_sqlite_inner(_url: &str) -> Result<Self, PoolError> {
-        // Phase 2 (this batch) wires the `Pool::Sqlite` variant +
-        // dialect dispatch + From<SqlitePool> impl, but the
-        // bi-dialect executor surface (`_pool` family in
-        // `crate::sql::executor`) still has stub arms that panic
-        // with `unimplemented!`. Until Phase 3 lights up the macro
-        // SqliteRow decoder, `Pool::connect("sqlite:…")` would
-        // return a Pool that the framework can't read back rows
-        // from — better to surface the Phase-3-pending state at
-        // construction time than at the first query. Users who
-        // explicitly want to experiment with the variant can build
-        // it via `Pool::from(SqlitePool::connect(...).await?)`.
-        Err(PoolError::FeatureNotEnabled {
-            scheme: "sqlite",
-            feature: "sqlite (Phase 3 — runtime + macro decoder pending)",
-        })
+    async fn connect_sqlite_inner(url: &str) -> Result<Self, PoolError> {
+        // Phase 3 — bi-dialect executor surface now dispatches to
+        // SqliteRow, so `Pool::connect("sqlite:…")` returns a usable
+        // pool. SQLite URL forms accepted by sqlx:
+        //   - `sqlite::memory:` — anonymous in-memory database
+        //   - `sqlite:./path.db` — relative path
+        //   - `sqlite:///abs/path.db` — absolute path
+        //   - `sqlite:?mode=memory&cache=shared` — query-string options
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect(url)
+            .await
+            .map_err(|e| PoolError::Connect(e.to_string()))?;
+        Ok(Self::Sqlite(pool))
     }
 
     #[cfg(not(feature = "sqlite"))]
@@ -445,21 +441,13 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[tokio::test]
-    async fn sqlite_url_returns_phase3_pending() {
-        // Phase 2: variant exists, but connect rejects so users
-        // don't construct a Pool::Sqlite that the bi-dialect
-        // executor surface can't dispatch to yet.
-        let err = Pool::connect("sqlite::memory:").await.unwrap_err();
-        match err {
-            PoolError::FeatureNotEnabled { scheme, feature } => {
-                assert_eq!(scheme, "sqlite");
-                assert!(
-                    feature.contains("Phase 3"),
-                    "expected Phase 3 hint, got `{feature}`"
-                );
-            }
-            other => panic!("wrong variant: {other:?}"),
-        }
+    async fn sqlite_url_connect_succeeds_in_memory() {
+        // Phase 3: `Pool::connect("sqlite::memory:")` returns a
+        // usable pool now that the bi-dialect executor surface
+        // dispatches to SqliteRow.
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        assert_eq!(pool.backend_name(), "sqlite");
+        assert!(pool.as_sqlite().is_some());
     }
 
     #[cfg(feature = "sqlite")]

@@ -157,6 +157,39 @@ where
     }
 }
 
+// ---- SQLite Decode/Type for Auto<T> (v0.27 Phase 3) ----
+//
+// Mirror of the Postgres + MySQL impls above so `#[derive(Model)]`
+// types with `Auto<T>` PKs satisfy `FromRow<SqliteRow>`.
+// `INTEGER PRIMARY KEY AUTOINCREMENT` resolves to `INTEGER`, which
+// sqlx-sqlite decodes as `i64`.
+
+#[cfg(feature = "sqlite")]
+impl<'r, T> sqlx::Decode<'r, sqlx::Sqlite> for Auto<T>
+where
+    T: sqlx::Decode<'r, sqlx::Sqlite>,
+{
+    fn decode(
+        value: <sqlx::Sqlite as sqlx::Database>::ValueRef<'r>,
+    ) -> Result<Self, sqlx::error::BoxDynError> {
+        Ok(Self::Set(T::decode(value)?))
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl<T> sqlx::Type<sqlx::Sqlite> for Auto<T>
+where
+    T: sqlx::Type<sqlx::Sqlite>,
+{
+    fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+        T::type_info()
+    }
+
+    fn compatible(ty: &sqlx::sqlite::SqliteTypeInfo) -> bool {
+        T::compatible(ty)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

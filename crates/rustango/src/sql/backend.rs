@@ -68,6 +68,16 @@ pub type MyReturningRow = sqlx::mysql::MySqlRow;
 #[cfg(not(feature = "mysql"))]
 pub enum MyReturningRow {}
 
+/// SQLite row alias — same role as [`PgReturningRow`] / [`MyReturningRow`]
+/// for the SQLite RETURNING-row decode path. SQLite supports
+/// `INSERT … RETURNING` since 3.35, so the Postgres-shaped flow
+/// (decode every column from the row) applies cleanly.
+#[cfg(feature = "sqlite")]
+pub type SqliteReturningRow = sqlx::sqlite::SqliteRow;
+
+#[cfg(not(feature = "sqlite"))]
+pub enum SqliteReturningRow {}
+
 /// Macro-emitted code calls this in place of `sqlx::Row::try_get` on
 /// a Postgres returning row, so the call site carries no `#[cfg]`
 /// guard. With the `postgres` feature on this is a thin forward to
@@ -109,6 +119,33 @@ where
 #[cfg(not(feature = "mysql"))]
 #[allow(clippy::missing_errors_doc)]
 pub fn try_get_returning_my<T>(row: &MyReturningRow, _name: &str) -> Result<T, sqlx::Error> {
+    match *row {}
+}
+
+/// SQLite counterpart of [`try_get_returning`] — used by the macro-emitted
+/// `__rustango_assign_from_sqlite_row` body to decode RETURNING columns
+/// from a `SqliteRow` without the macro carrying any `#[cfg]` guards.
+///
+/// # Errors
+/// `sqlx::Error` from the underlying decode.
+#[cfg(feature = "sqlite")]
+pub fn try_get_returning_sqlite<'r, T>(
+    row: &'r SqliteReturningRow,
+    name: &str,
+) -> Result<T, sqlx::Error>
+where
+    T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+{
+    use sqlx::Row as _;
+    row.try_get(name)
+}
+
+#[cfg(not(feature = "sqlite"))]
+#[allow(clippy::missing_errors_doc)]
+pub fn try_get_returning_sqlite<T>(
+    row: &SqliteReturningRow,
+    _name: &str,
+) -> Result<T, sqlx::Error> {
     match *row {}
 }
 
@@ -226,6 +263,20 @@ pub trait AssignAutoPkPool {
     /// [`ExecError::Sql`] when the model has more than one `Auto<T>`
     /// column (unsupported on MySQL).
     fn __rustango_assign_from_mysql_id(&mut self, id: i64) -> Result<(), ExecError>;
+
+    /// Assign every `Auto<T>` PK from a SQLite RETURNING row. Mirror
+    /// of [`Self::__rustango_assign_from_pg_row`] — SQLite ≥ 3.35
+    /// supports the same RETURNING shape as Postgres, so the macro
+    /// emits a structurally identical body, just decoding from a
+    /// `SqliteRow` via [`try_get_returning_sqlite`].
+    ///
+    /// # Errors
+    /// `sqlx::Error` from any column decode, wrapped into
+    /// [`ExecError`].
+    fn __rustango_assign_from_sqlite_row(
+        &mut self,
+        row: &SqliteReturningRow,
+    ) -> Result<(), ExecError>;
 }
 
 /// Apply an `InsertReturningPool` result to a model's `Auto<T>` PK
@@ -244,5 +295,7 @@ pub fn apply_auto_pk_pool<M: AssignAutoPkPool + ?Sized>(
         super::InsertReturningPool::PgRow(row) => model.__rustango_assign_from_pg_row(&row),
         #[cfg(feature = "mysql")]
         super::InsertReturningPool::MySqlAutoId(id) => model.__rustango_assign_from_mysql_id(id),
+        #[cfg(feature = "sqlite")]
+        super::InsertReturningPool::SqliteRow(row) => model.__rustango_assign_from_sqlite_row(&row),
     }
 }

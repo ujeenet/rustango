@@ -47,7 +47,7 @@
 use std::io::Write;
 use std::process::Stdio;
 
-use crate::core::{Column as _, Model as _};
+use crate::core::Column as _;
 use crate::sql::Fetcher;
 use crate::tenancy::error::TenancyError;
 use crate::tenancy::manage::args::{next_value, quote_ident};
