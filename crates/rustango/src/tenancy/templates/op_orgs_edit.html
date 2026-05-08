@@ -85,4 +85,30 @@
   </div>
 </form>
 
+{# v0.27.8 (#78) — Open admin as superuser. Posts to
+   /orgs/{slug}/impersonate which mints a short-lived tenant
+   session cookie (1h default), pinned to this slug, and 302s
+   to the tenant admin's /__admin/. Banner + audit entries make
+   the session visible + traceable. Hidden if impersonation
+   wasn't enabled at boot (the operator console route only
+   mounts when the tenant session secret is shared). #}
+{% if impersonate_enabled %}
+<form method="post" action="/orgs/{{ slug }}/impersonate" class="edit-form">
+  <fieldset class="section">
+    <legend>Impersonate (sign in as superuser)</legend>
+    <p style="margin: 0 0 var(--space-3) 0; color: var(--color-fg-muted); font-size: 13px">
+      Open this tenant's admin as a synthetic operator-superuser.
+      You'll see an unmissable banner during the session; every
+      write is recorded as
+      <code>operator:&lt;your-id&gt;:impersonating</code> in the
+      tenant's audit log. Session expires after the configured
+      TTL (default 1&nbsp;hour).
+    </p>
+  </fieldset>
+  <div class="form-actions">
+    <button type="submit" class="btn btn-primary">Open admin as superuser →</button>
+  </div>
+</form>
+{% endif %}
+
 {% endblock %}

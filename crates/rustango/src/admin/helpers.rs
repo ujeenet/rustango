@@ -74,6 +74,11 @@ pub(crate) fn chrome_context(state: &AppState, active_table: Option<&str>) -> se
         "brand_logo_url": state.config.brand_logo_url.as_deref(),
         "theme_mode": state.config.theme_mode.as_deref().unwrap_or("auto"),
         "tenant_brand_css": state.config.tenant_brand_css.as_deref(),
+        // v0.27.8 (#78) — impersonation banner. Templates render
+        // an unmissable warning when this is non-null so the
+        // operator can't accidentally mutate tenant data while
+        // forgetting they're impersonating.
+        "impersonated_by_operator_id": state.config.impersonated_by,
     })
 }
 

@@ -38,6 +38,14 @@ pub const COOKIE_NAME: &str = "rustango_tenant_session";
 /// Default lifetime — 7 days, matches the operator console.
 pub const SESSION_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 
+/// Default lifetime for an *impersonation* session (operator
+/// "Open admin as superuser →"). 1 hour by default — short
+/// enough that an idle operator gets dropped before they can
+/// forget they're impersonating, long enough for a debugging
+/// session. Override via `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS`.
+/// (#78, v0.27.8)
+pub const IMPERSONATION_TTL_SECS: i64 = 60 * 60;
+
 /// Embedded brand image, served at `/__static__/rustango.png`.
 pub(crate) const RUSTANGO_PNG: &[u8] = include_bytes!("static/rustango.png");
 
@@ -49,12 +57,27 @@ pub(crate) const RUSTANGO_PNG: &[u8] = include_bytes!("static/rustango.png");
 /// resolved org's slug doesn't match.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TenantSessionPayload {
-    /// `rustango_users.id` in the tenant's storage.
+    /// `rustango_users.id` in the tenant's storage. For
+    /// **impersonation** cookies (#78), this is `0` — the
+    /// operator is acting as a synthetic principal that doesn't
+    /// correspond to any real tenant user. The middleware
+    /// branches on `imp.is_some()` rather than `uid`.
     pub uid: i64,
     /// Tenant slug the cookie was minted for.
     pub slug: String,
     /// Expiry as Unix seconds.
     pub exp: i64,
+    /// `Some(operator_id)` when this cookie was minted by the
+    /// operator console's "Open admin as superuser →" flow
+    /// (#78). The tenant admin treats it as superuser, renders
+    /// an impersonation banner, and tags audit-log entries with
+    /// `source = "operator:<id>:impersonating"`. `None` for
+    /// regular tenant-user logins.
+    ///
+    /// `#[serde(default)]` keeps cookies minted on pre-0.27.8
+    /// servers parseable when the user upgrades.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imp: Option<i64>,
 }
 
 impl TenantSessionPayload {
@@ -65,11 +88,34 @@ impl TenantSessionPayload {
             uid: user_id,
             slug: slug.into(),
             exp,
+            imp: None,
+        }
+    }
+
+    /// Mint an impersonation payload — operator-as-superuser
+    /// for the named tenant. Distinct from [`Self::new`] so
+    /// the call site reads as intent. (#78)
+    #[must_use]
+    pub fn impersonation(operator_id: i64, slug: impl Into<String>, ttl_secs: i64) -> Self {
+        let exp = chrono::Utc::now().timestamp() + ttl_secs;
+        Self {
+            uid: 0,
+            slug: slug.into(),
+            exp,
+            imp: Some(operator_id),
         }
     }
 
     fn is_expired(&self) -> bool {
         chrono::Utc::now().timestamp() >= self.exp
+    }
+
+    /// `true` for impersonation payloads (operator opened the
+    /// tenant admin from the operator console). The middleware
+    /// uses this to switch on the auth path. (#78)
+    #[must_use]
+    pub fn is_impersonation(&self) -> bool {
+        self.imp.is_some()
     }
 }
 
@@ -145,6 +191,64 @@ mod tests {
         let cookie = encode(&secret, &payload);
         let err = decode(&secret, "globex", &cookie).unwrap_err();
         assert!(matches!(err, SessionError::WrongTenant));
+    }
+
+    // v0.27.8 (#78) — impersonation cookie shape regression
+    // tests. Pin the wire format so an upgrade can't silently
+    // change `imp` semantics.
+
+    #[test]
+    fn impersonation_payload_has_imp_set() {
+        let p = TenantSessionPayload::impersonation(42, "acme", 3600);
+        assert_eq!(p.uid, 0);
+        assert_eq!(p.slug, "acme");
+        assert_eq!(p.imp, Some(42));
+        assert!(p.is_impersonation());
+    }
+
+    #[test]
+    fn regular_payload_has_no_imp_field() {
+        let p = TenantSessionPayload::new(7, "acme", 3600);
+        assert_eq!(p.imp, None);
+        assert!(!p.is_impersonation());
+    }
+
+    #[test]
+    fn impersonation_round_trip_through_cookie() {
+        let secret = key();
+        let p = TenantSessionPayload::impersonation(99, "acme", 3600);
+        let cookie = encode(&secret, &p);
+        let back = decode(&secret, "acme", &cookie).unwrap();
+        assert_eq!(back, p);
+        assert_eq!(back.imp, Some(99));
+    }
+
+    #[test]
+    fn impersonation_cookie_still_pinned_to_slug() {
+        // Cross-tenant replay must fail even for impersonation
+        // cookies — operator opening tenant A shouldn't have a
+        // cookie that authenticates them at tenant B.
+        let secret = key();
+        let p = TenantSessionPayload::impersonation(99, "acme", 3600);
+        let cookie = encode(&secret, &p);
+        let err = decode(&secret, "globex", &cookie).unwrap_err();
+        assert!(matches!(err, SessionError::WrongTenant));
+    }
+
+    #[test]
+    fn pre_0_27_8_cookie_without_imp_still_decodes() {
+        // Old cookie format omits the `imp` field. `serde_default`
+        // must fill in `None` so a server upgrade doesn't sign
+        // every operator out.
+        let secret = key();
+        let json = br#"{"uid":7,"slug":"acme","exp":99999999999}"#;
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
+        let sig = sign(&secret, payload_b64.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
+        let cookie = format!("{payload_b64}.{sig_b64}");
+        let back = decode(&secret, "acme", &cookie).unwrap();
+        assert_eq!(back.uid, 7);
+        assert_eq!(back.imp, None);
     }
 
     #[test]

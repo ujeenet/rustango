@@ -110,6 +110,12 @@ pub(crate) struct Config {
     /// admins (no tenancy) leave this false and see every model
     /// regardless of scope.
     pub(crate) tenant_mode: bool,
+    /// v0.27.8 (#78) — `Some(operator_id)` when the current
+    /// session is an operator-impersonation cookie. Drives the
+    /// "you are impersonating" banner in admin layouts and
+    /// tags audit-log entries. `None` for regular tenant-user
+    /// logins.
+    pub(crate) impersonated_by: Option<i64>,
 }
 
 impl Builder {
@@ -152,6 +158,18 @@ impl Builder {
     /// don't want to enumerate every table per request.
     pub fn read_only_all(mut self) -> Self {
         self.config.read_only_all = true;
+        self
+    }
+
+    /// Mark the current session as an operator impersonation
+    /// (v0.27.8 #78). Threads `operator_id` into `chrome_context`
+    /// so the admin layout renders an unmissable banner +
+    /// "End impersonation" button. Wired by
+    /// `TenantAdminBuilder::build()` from the validated session
+    /// cookie.
+    #[must_use]
+    pub fn impersonated_by(mut self, operator_id: i64) -> Self {
+        self.config.impersonated_by = Some(operator_id);
         self
     }
 

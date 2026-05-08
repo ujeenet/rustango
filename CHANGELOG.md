@@ -2,6 +2,62 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.27.8] — operator-as-superuser tenant admin impersonation (#78)
+
+### Added
+
+- **"Open admin as superuser →"** button on the operator console's
+  `/orgs/{slug}/edit` page. Mints a tenant-bound impersonation
+  cookie signed with the same `SessionSecret` the tenant admin
+  uses, sets it on the apex domain so subdomains receive it,
+  and redirects the operator to `<slug>.<apex>/__admin/`.
+- **Impersonation banner** on every tenant admin page when the
+  current session is an operator-impersonation. Sticky at top,
+  high-contrast warning style, "End impersonation" button posts
+  to `/__admin/__end-impersonation` which clears the cookie and
+  redirects back to the operator console.
+- **Audit-log entries** for impersonation start (recorded on the
+  registry side at mint time, `source = "operator:<id>:impersonating"`).
+  Every write made during the impersonation session is tagged
+  with the same source so post-hoc forensics can pinpoint
+  operator-driven changes.
+- **`TenantSessionPayload.imp: Option<i64>`** — backward-compatible
+  extension via `#[serde(default)]`. Pre-0.27.8 cookies (no `imp`
+  field) still decode cleanly. New `TenantSessionPayload::impersonation()`
+  constructor + `is_impersonation()` accessor.
+- **`operator_console::router_with_impersonation`** — new
+  constructor that takes the tenant session secret + cookie
+  domain, mounts the `POST /orgs/{slug}/impersonate` route.
+  `Server::Builder::serve` calls it automatically since v0.27.8;
+  custom mount points opt in.
+- **`Builder::impersonated_by(operator_id)`** setter on the admin
+  builder threads the operator id into `chrome_context` for
+  the banner.
+- **`IMPERSONATION_TTL_SECS`** constant (1h default), overridable
+  via `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS`. Short by
+  design — long enough for a debugging session, short enough
+  that an idle operator gets dropped.
+
+### Security guards
+
+- Impersonation cookie is HMAC-SHA256 signed with the tenant
+  secret — operator can't forge one without it.
+- Cookie is **slug-pinned** (`SessionError::WrongTenant` rejects
+  cross-tenant replay).
+- Impersonation refused against `org.active = false` tenants
+  (returns 409 Conflict).
+- Operator console route is only mounted when the tenant secret
+  was supplied — no risk of accidental mint when running with
+  the legacy `router_with_pools` constructor.
+
+### Verified
+
+- `cargo build -p rustango --features tenancy` — clean
+- `cargo test -p rustango --features tenancy --lib` —
+  **1087/1087 pass** (5 new impersonation cookie tests:
+  `imp` field shape, round-trip, slug-pin against cross-tenant
+  replay, backward-compat decode of pre-0.27.8 cookies).
+
 ## [0.27.7] — tenant-pool tuning + registry-scope filter for tenant admin
 
 ### Added

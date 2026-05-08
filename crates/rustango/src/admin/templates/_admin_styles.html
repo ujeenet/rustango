@@ -282,6 +282,43 @@ dt { font-weight: var(--font-weight-bold); }
   z-index: 100;
 }
 .theme-toggle:hover { border-color: var(--color-accent); color: var(--color-accent); }
+/* v0.27.8 (#78) — operator impersonation banner. Bright,
+   high-contrast, sticky at the top so it can't be missed
+   while scrolling the admin. */
+.impersonation-banner {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  padding: 0.6rem 1rem;
+  background: var(--color-warning-bg, #fff4cc);
+  color: var(--color-warning-fg, #6b4500);
+  border-bottom: 2px solid var(--color-warning-fg, #6b4500);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.impersonation-banner code {
+  background: rgba(0, 0, 0, 0.08);
+  padding: 0.05em 0.35em;
+  border-radius: 0.2em;
+  font-size: 12px;
+}
+.impersonation-banner .btn-end-impersonation {
+  margin-left: auto;
+  padding: 0.3rem 0.8rem;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--color-warning-fg, #6b4500);
+  color: var(--color-bg-surface, #fff);
+  border: 0;
+  font: inherit;
+  font-weight: var(--font-weight-bold, 600);
+  cursor: pointer;
+}
+.impersonation-banner .btn-end-impersonation:hover {
+  filter: brightness(1.15);
+}
 .theme-toggle:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 @media (max-width: 1000px) {
   .list-shell { grid-template-columns: 1fr; }

@@ -86,6 +86,25 @@ struct ConsoleState {
     /// from env, stamped into every render context so a deployment
     /// can rebrand the console without touching templates.
     op_brand: Arc<OpBrand>,
+    /// Tenant-side session secret. When `Some`, the operator
+    /// console exposes `POST /orgs/{slug}/impersonate` — a flow
+    /// that mints a tenant-bound `TenantSessionPayload` with
+    /// `imp = Some(operator_id)` so the operator can open the
+    /// tenant admin as superuser without knowing a tenant
+    /// user's password. (#78, v0.27.8)
+    /// Wired by `Server::Builder::serve` (sharing the same
+    /// `SessionSecret::from_env_or_disk` instance the tenant
+    /// admin uses); custom mount points can opt in via the
+    /// `_with_impersonation` constructor variants.
+    tenant_session_secret: Option<Arc<SessionSecret>>,
+    /// Cookie domain for impersonation cookies. Set when the
+    /// operator console is mounted at the apex and tenant
+    /// admins live on subdomains — e.g. apex `localhost`,
+    /// cookie domain `.localhost` lets a cookie set by the
+    /// operator console reach `osu.localhost`. `None` keeps
+    /// the cookie host-only (rare; only useful when operator
+    /// console + tenant admin share a host). (#78)
+    tenant_cookie_domain: Option<String>,
 }
 
 /// Operator console branding read from env at boot. Static for the
@@ -147,7 +166,14 @@ impl OpBrand {
 /// [`router_with_brand_storage`].
 #[must_use]
 pub fn router(registry: PgPool, secret: SessionSecret) -> Router {
-    router_inner(registry, None, secret, branding::default_brand_storage())
+    router_inner(
+        registry,
+        None,
+        secret,
+        branding::default_brand_storage(),
+        None,
+        None,
+    )
 }
 
 /// Like [`router`] but also exposes `GET`/`POST /orgs/{slug}/edit`,
@@ -166,6 +192,39 @@ pub fn router_with_pools(
         Some(pools),
         secret,
         branding::default_brand_storage(),
+        None,
+        None,
+    )
+}
+
+/// Like [`router_with_pools`] but also wires the
+/// **operator-as-superuser tenant impersonation** flow (#78).
+/// Pass the same `tenant_session_secret` your `TenantAdminBuilder`
+/// uses so cookies the operator console mints will verify in the
+/// tenant admin. `tenant_cookie_domain` controls the cookie's
+/// `Domain` attribute — set to the apex (e.g. `.localhost` so
+/// `osu.localhost` receives it) when operator console and tenant
+/// admin live on different hostnames.
+///
+/// `Server::Builder::serve` calls this automatically since v0.27.8.
+/// Custom mount points opt in by replacing `router_with_pools` with
+/// this variant.
+#[must_use]
+pub fn router_with_impersonation(
+    registry: PgPool,
+    pools: Arc<TenantPools>,
+    secret: SessionSecret,
+    brand_storage: BoxedStorage,
+    tenant_session_secret: SessionSecret,
+    tenant_cookie_domain: Option<String>,
+) -> Router {
+    router_inner(
+        registry,
+        Some(pools),
+        secret,
+        brand_storage,
+        Some(tenant_session_secret),
+        tenant_cookie_domain,
     )
 }
 
@@ -188,7 +247,7 @@ pub fn router_with_brand_storage(
     secret: SessionSecret,
     brand_storage: BoxedStorage,
 ) -> Router {
-    router_inner(registry, pools, secret, brand_storage)
+    router_inner(registry, pools, secret, brand_storage, None, None)
 }
 
 fn router_inner(
@@ -196,6 +255,8 @@ fn router_inner(
     pools: Option<Arc<TenantPools>>,
     secret: SessionSecret,
     brand_storage: BoxedStorage,
+    tenant_session_secret: Option<SessionSecret>,
+    tenant_cookie_domain: Option<String>,
 ) -> Router {
     let mut tera = Tera::default();
     tera.add_raw_templates([
@@ -232,6 +293,7 @@ fn router_inner(
     ])
     .expect("operator-console templates parse");
     let edit_enabled = pools.is_some();
+    let impersonation_enabled = tenant_session_secret.is_some() && pools.is_some();
     let state = ConsoleState {
         registry,
         pools,
@@ -239,6 +301,8 @@ fn router_inner(
         tera: Arc::new(tera),
         brand_storage,
         op_brand: Arc::new(OpBrand::from_env()),
+        tenant_session_secret: tenant_session_secret.map(Arc::new),
+        tenant_cookie_domain,
     };
 
     // Public routes (login + static asset + brand asset) skip the
@@ -262,6 +326,14 @@ fn router_inner(
                 get(org_edit_form).post(org_edit_submit),
             )
             .route("/orgs/{slug}/edit/branding", post(org_edit_branding));
+    }
+    if impersonation_enabled {
+        // v0.27.8 (#78) — operator-as-superuser tenant admin login.
+        // Mints a tenant-bound impersonation cookie and 302s to
+        // the tenant admin's `/__admin/`. Audit-log entry recorded
+        // on every mint so each session is traceable to an
+        // operator id.
+        private = private.route("/orgs/{slug}/impersonate", post(org_impersonate));
     }
     let private = private.route_layer(middleware::from_fn_with_state(
         state.clone(),
@@ -631,6 +703,13 @@ async fn org_edit_form(
     ctx.insert("favicon_url", &favicon_url);
     ctx.insert("error", &q.error);
     ctx.insert("notice", &q.notice);
+    // v0.27.8 (#78) — show the "Open admin as superuser →"
+    // form only when the operator console was wired with a
+    // tenant session secret (i.e. via `router_with_impersonation`).
+    ctx.insert(
+        "impersonate_enabled",
+        &state.tenant_session_secret.is_some(),
+    );
     Html(
         state
             .tera
@@ -967,4 +1046,137 @@ fn sanitize_next(next: Option<&str>) -> String {
         Some(s) if s.starts_with('/') && !s.starts_with("//") && !s.contains("://") => s.to_owned(),
         _ => "/".to_owned(),
     }
+}
+
+// ============================================================== /orgs/{slug}/impersonate
+//
+// v0.27.8 (#78) — "Open admin as superuser →" button on
+// `/orgs/{slug}/edit`. Mints a tenant-bound `TenantSessionPayload`
+// with `imp = Some(operator_id)`, sets it as the tenant cookie on
+// the apex domain (so the subdomain receives it), and 302s to the
+// tenant admin's `/__admin/`. The tenant admin's `validate_session`
+// branches on `payload.imp.is_some()` and treats the request as
+// superuser. Banner + audit-log entries make impersonation visible
+// + traceable.
+
+async fn org_impersonate(
+    State(state): State<ConsoleState>,
+    Extension(op): Extension<auth::Operator>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+) -> Response<Body> {
+    let Some(tenant_secret) = state.tenant_session_secret.clone() else {
+        // Should never happen — the route is only mounted when
+        // the secret was supplied. Defensive guard.
+        return (StatusCode::SERVICE_UNAVAILABLE, "impersonation disabled").into_response();
+    };
+    // Look up the org so we can refuse impersonation against
+    // inactive tenants, and so the audit-log entry has the
+    // correct context.
+    let orgs: Vec<super::Org> = match super::Org::objects()
+        .where_(super::Org::slug.eq(slug.clone()))
+        .fetch(&state.registry)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(target: "crate::tenancy::operator_console", error = %e, "org lookup failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "registry lookup failed").into_response();
+        }
+    };
+    let Some(org) = orgs.into_iter().next() else {
+        return (StatusCode::NOT_FOUND, format!("no tenant `{slug}`")).into_response();
+    };
+    if !org.active {
+        return (
+            StatusCode::CONFLICT,
+            format!("tenant `{slug}` is inactive — refusing impersonation"),
+        )
+            .into_response();
+    }
+    let operator_id = op.id.get().copied().unwrap_or(0);
+    let ttl = std::env::var("RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(super::tenant_console::IMPERSONATION_TTL_SECS);
+    let payload =
+        super::tenant_console::TenantSessionPayload::impersonation(operator_id, slug.clone(), ttl);
+    let cookie_value = super::tenant_console::encode(&tenant_secret, &payload);
+
+    // Audit-log entry on the operator side. The tenant admin
+    // emits a separate entry the first time an impersonation
+    // session lands on a write — both ends are visible.
+    let audit_sql = r#"
+        INSERT INTO "rustango_audit_log"
+            ("entity_table", "entity_pk", "operation", "source", "changes")
+        VALUES ('rustango_orgs', $1, 'action', $2,
+                jsonb_build_object('action', 'impersonate.start',
+                                   'tenant_slug', $1::text,
+                                   'operator_id', $3::bigint))
+    "#;
+    if let Err(e) = rustango::sql::sqlx::query(audit_sql)
+        .bind(&slug)
+        .bind(format!("operator:{operator_id}:impersonating"))
+        .bind(operator_id)
+        .execute(&state.registry)
+        .await
+    {
+        tracing::warn!(
+            target: "crate::tenancy::operator_console",
+            error = %e,
+            slug = %slug,
+            operator_id,
+            "failed to record impersonation start in audit log",
+        );
+        // Continue anyway — audit failure must not block the
+        // operator's primary workflow. The tracing log line is
+        // the fallback record.
+    }
+
+    // Build the redirect URL. We send the operator to the
+    // tenant subdomain root which the tenant admin's session
+    // middleware re-redirects to /__admin/ when authenticated.
+    // Apex schema-aware: respect `RUSTANGO_TENANT_SCHEME`
+    // (defaults to http for local dev; ops set https in prod).
+    let scheme = std::env::var("RUSTANGO_TENANT_SCHEME").unwrap_or_else(|_| "http".into());
+    let host = if let Some(pat) = org.host_pattern.as_deref().filter(|s| !s.is_empty()) {
+        pat.to_owned()
+    } else {
+        // Fall back to apex composition: <slug>.<apex>. The
+        // apex isn't directly in ConsoleState; pull from env
+        // as the operator console already does in OpBrand.
+        let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
+        format!("{}.{}", slug, apex)
+    };
+    let port_suffix = std::env::var("RUSTANGO_TENANT_PORT")
+        .ok()
+        .filter(|s| !s.is_empty() && s != "80" && s != "443")
+        .map(|p| format!(":{p}"))
+        .unwrap_or_default();
+    let redirect_to = format!("{scheme}://{host}{port_suffix}/__admin/");
+
+    // Build the cookie. `Domain=` so subdomains receive it;
+    // `Path=/` so all admin routes pick it up.
+    let mut cookie = Cookie::build((super::tenant_console::COOKIE_NAME, cookie_value))
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .max_age(CookieDuration::seconds(ttl))
+        .build();
+    if let Some(domain) = state.tenant_cookie_domain.as_deref() {
+        cookie.set_domain(domain.to_owned());
+    }
+    let mut resp = Redirect::to(&redirect_to).into_response();
+    if let Ok(v) = HeaderValue::from_str(&cookie.to_string()) {
+        resp.headers_mut().append(header::SET_COOKIE, v);
+    }
+    tracing::info!(
+        target: "crate::tenancy::operator_console",
+        slug = %slug,
+        operator_id,
+        ttl_secs = ttl,
+        redirect_to = %redirect_to,
+        "minted impersonation cookie",
+    );
+    resp
 }

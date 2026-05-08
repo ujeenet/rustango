@@ -309,7 +309,7 @@ impl Builder {
             );
         }
         let tenant_admin = tenant_admin_builder
-            .with_session(session_secret_for_tenant)
+            .with_session(session_secret_for_tenant.clone())
             .build();
 
         // Admin CRUD lives under `/__admin/*` registered as explicit
@@ -376,8 +376,28 @@ impl Builder {
         // new credentials — without eviction the operator could
         // change the URL in the DB and the cached pool would happily
         // keep authenticating with stale creds until process restart.
-        let operator_admin =
-            operator_console::router_with_pools(self.registry, self.pools.clone(), operator_secret);
+        // v0.27.8 (#78) — `router_with_impersonation` instead of
+        // `router_with_pools` so the operator console can mint
+        // tenant impersonation cookies signed with the same
+        // secret the tenant admin uses. Cookie domain pinned to
+        // the apex so subdomains receive it.
+        let cookie_domain = if self.apex.contains('.') {
+            Some(format!(".{}", self.apex))
+        } else {
+            // bare hostname like `localhost` — most browsers
+            // accept Domain=localhost or omit-domain. Keep `None`
+            // (host-only cookie) and let SameSite=Lax handle it.
+            None
+        };
+        let brand_storage_for_op = crate::tenancy::branding::default_brand_storage();
+        let operator_admin = operator_console::router_with_impersonation(
+            self.registry,
+            self.pools.clone(),
+            operator_secret,
+            brand_storage_for_op,
+            session_secret_for_tenant.clone(),
+            cookie_domain,
+        );
 
         let app = Router::new().fallback_service(tower::service_fn({
             let operator = operator_admin.clone();

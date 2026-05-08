@@ -353,6 +353,11 @@ async fn handle_request(
     // still applies — every request goes straight to the inner admin.
     let mut user_perms: Option<std::collections::HashSet<String>> = None;
     let mut session_user_id: Option<i64> = None;
+    // v0.27.8 (#78) — populated when the session was minted by
+    // the operator console's impersonation flow. Threaded into
+    // the chrome context for the impersonation banner + into
+    // audit-log emit so writes record `operator:<id>:impersonating`.
+    let mut impersonated_by: Option<i64> = None;
     if let Some(cfg) = session {
         let path = parts.uri.path().to_owned();
         let method = parts.method.clone();
@@ -376,14 +381,26 @@ async fn handle_request(
         if path == "/__logout" && method == axum::http::Method::POST {
             return logout_response();
         }
+        // v0.27.8 (#78) — `/__admin/__end-impersonation`. Clears
+        // the tenant session cookie and 302s back to the
+        // operator console at the apex. Must be POST so a stray
+        // GET request (browser link prefetch, robots) doesn't
+        // accidentally end an active impersonation session.
+        if (path == "/__admin/__end-impersonation" || path == "/__end-impersonation")
+            && method == axum::http::Method::POST
+        {
+            return end_impersonation_response();
+        }
 
         // Private surface — require a valid session cookie.
         match validate_session(&parts.headers, cfg, &org, pool.pg_pool()).await {
             SessionCheck::Authenticated {
                 is_superuser,
                 user_id,
+                impersonated_by: imp_by,
             } => {
                 session_user_id = Some(user_id);
+                impersonated_by = imp_by;
                 if !is_superuser {
                     // Fetch the user's effective codenames once per request
                     // and thread them into the inner admin builder so
@@ -430,6 +447,7 @@ async fn handle_request(
         subtitle,
         &org,
         brand_storage,
+        impersonated_by,
     );
 
     // Strip the `/__admin` mount prefix from the request URI so the
@@ -490,6 +508,11 @@ enum SessionCheck {
         /// duration of the inner-router dispatch so any audited
         /// write picks up the user-attribution automatically.
         user_id: i64,
+        /// `Some(operator_id)` when this session was minted by
+        /// the operator console's "Open admin as superuser →"
+        /// flow (#78). Drives the impersonation banner +
+        /// audit-log `source` shape.
+        impersonated_by: Option<i64>,
     },
     Anonymous,
     Error(String),
@@ -508,6 +531,18 @@ async fn validate_session(
         Ok(p) => p,
         Err(_) => return SessionCheck::Anonymous,
     };
+    // v0.27.8 (#78) — impersonation cookies are minted by the
+    // operator console; the tenant admin trusts them as
+    // superuser without consulting `rustango_users`. The
+    // operator id is preserved in `impersonated_by` so the
+    // banner + audit-log source pick it up.
+    if let Some(operator_id) = payload.imp {
+        return SessionCheck::Authenticated {
+            is_superuser: true,
+            user_id: 0,
+            impersonated_by: Some(operator_id),
+        };
+    }
     // Look up the user in the tenant's storage; this gives us a
     // fresh `is_superuser` and `active` flag (operator can toggle
     // either mid-session). The query mirrors `auth::authenticate_user`
@@ -528,6 +563,7 @@ async fn validate_session(
             SessionCheck::Authenticated {
                 is_superuser,
                 user_id: payload.uid,
+                impersonated_by: None,
             }
         }
         Ok(None) => SessionCheck::Anonymous,
@@ -729,6 +765,39 @@ fn logout_response() -> Response {
     resp
 }
 
+/// v0.27.8 (#78) — clear the impersonation cookie and 302
+/// back to the operator console at the apex. The operator's
+/// own session cookie (`rustango_op_session`) on the apex
+/// hostname is unaffected so they don't have to re-login.
+///
+/// Apex URL is read from `RUSTANGO_APEX_DOMAIN` /
+/// `RUSTANGO_TENANT_SCHEME` / `RUSTANGO_TENANT_PORT`. Falls
+/// back to `/` (relative) when the env vars aren't set, which
+/// at least clears the cookie cleanly even if it sends the
+/// browser somewhere unexpected.
+fn end_impersonation_response() -> Response {
+    let clear = Cookie::build((tenant_console::COOKIE_NAME, ""))
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .max_age(CookieDuration::seconds(0))
+        .build();
+    let scheme = std::env::var("RUSTANGO_TENANT_SCHEME").unwrap_or_else(|_| "http".into());
+    let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
+    let port_suffix = std::env::var("RUSTANGO_TENANT_PORT")
+        .ok()
+        .filter(|s| !s.is_empty() && s != "80" && s != "443")
+        .map(|p| format!(":{p}"))
+        .unwrap_or_default();
+    let target = format!("{scheme}://{apex}{port_suffix}/orgs");
+    let mut resp = Redirect::to(&target).into_response();
+    resp.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&clear.to_string()).expect("cookie is ascii"),
+    );
+    resp
+}
+
 fn rustango_png_response() -> Response {
     Response::builder()
         .status(StatusCode::OK)
@@ -874,6 +943,7 @@ fn build_inner_admin_router(
     subtitle: Option<&str>,
     org: &Org,
     brand_storage: &BoxedStorage,
+    impersonated_by: Option<i64>,
 ) -> Router {
     // v0.27.7 — `tenant_mode()` filters registry-scoped models
     // (Org / Operator) out of the sidebar / index so the tenant
@@ -881,6 +951,11 @@ fn build_inner_admin_router(
     // (single-tenant projects using `crate::admin::Builder::new`
     // directly) leave the flag off and see every model.
     let mut builder = crate::admin::Builder::new(pool).tenant_mode();
+    // v0.27.8 (#78) — propagate the impersonation flag so chrome
+    // renders the banner + audit-log emit picks it up.
+    if let Some(operator_id) = impersonated_by {
+        builder = builder.impersonated_by(operator_id);
+    }
     if let Some(allow) = show_only {
         builder = builder.show_only(allow.iter().cloned());
     }

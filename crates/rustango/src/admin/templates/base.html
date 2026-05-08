@@ -14,6 +14,22 @@
 {% if tenant_brand_css %}<style>:root { {{ tenant_brand_css | safe }} }</style>{% endif %}
 </head>
 <body>
+{# v0.27.8 (#78) — impersonation banner. Threaded through every
+   admin page so an operator who's impersonating a tenant can't
+   forget. The end-impersonation form posts to the tenant admin's
+   /__admin/__end-impersonation route which clears the cookie and
+   redirects to the operator console. #}
+{% if impersonated_by_operator_id %}
+<div class="impersonation-banner" role="alert">
+  <strong>You are impersonating this tenant</strong>
+  as operator&nbsp;<code>#{{ impersonated_by_operator_id }}</code>.
+  Every write is recorded in the audit log with
+  <code>source = operator:{{ impersonated_by_operator_id }}:impersonating</code>.
+  <form method="post" action="/__admin/__end-impersonation" style="display:inline">
+    <button type="submit" class="btn-end-impersonation">End impersonation</button>
+  </form>
+</div>
+{% endif %}
 <div class="layout">
   {% include "_sidebar.html" %}
   <main class="content">
