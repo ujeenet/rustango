@@ -35,6 +35,10 @@ pub struct Builder {
     /// [`Builder::user_model`] for a custom
     /// [`crate::tenancy::TenantUserModel`].
     init_tenancy_fn: crate::tenancy::manage::InitTenancyFn,
+    /// v0.28.0 (#74) — configurable URL prefixes (login, admin,
+    /// audit, static, brand) + session TTLs. Defaults to
+    /// `RouteConfig::default()` (legacy `__`-prefixed paths).
+    routes: crate::tenancy::RouteConfig,
 }
 
 struct PendingAction {
@@ -67,7 +71,29 @@ impl Builder {
             api: None,
             admin_actions: Vec::new(),
             init_tenancy_fn: crate::tenancy::init_tenancy,
+            routes: crate::tenancy::RouteConfig::default(),
         })
+    }
+
+    /// Override the URL prefixes (login, admin, audit, static,
+    /// brand) and session TTLs (#74, v0.28.0). Defaults to the
+    /// legacy `__`-prefixed paths so upgrades are no-ops.
+    /// Friendly preset:
+    /// ```ignore
+    /// .routes(rustango::tenancy::RouteConfig::friendly())
+    /// ```
+    /// Custom:
+    /// ```ignore
+    /// .routes(rustango::tenancy::RouteConfig {
+    ///     login_url: "/sign-in".into(),
+    ///     admin_url: "/manage".into(),
+    ///     ..Default::default()
+    /// })
+    /// ```
+    #[must_use]
+    pub fn routes(mut self, routes: crate::tenancy::RouteConfig) -> Self {
+        self.routes = routes;
+        self
     }
 
     /// Swap the tenant user model used by [`Builder::migrate`]. Same
@@ -290,7 +316,8 @@ impl Builder {
             self.pools.clone(),
             self.registry_url.clone(),
             resolver_for_admin,
-        );
+        )
+        .routes(self.routes.clone());
         if !self.show_only.is_empty() {
             tenant_admin_builder = tenant_admin_builder.show_only(self.show_only.clone());
         }

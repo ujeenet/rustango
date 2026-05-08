@@ -2,6 +2,74 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.28.0] — configurable tenant URL prefixes via `RouteConfig` (#74)
+
+Minor version bump signals the new public
+`tenancy::RouteConfig` API. All defaults preserve pre-0.28
+behavior — upgrades are no-op until apps explicitly opt in.
+
+### Added
+
+- **`tenancy::RouteConfig`** — configurable URL prefixes for
+  the per-tenant admin: `login_url`, `logout_url`, `admin_url`,
+  `audit_url`, `static_url`, `brand_url`, plus `basic_auth_realm`
+  and three session TTLs (`tenant_session_ttl`,
+  `operator_session_ttl`, `impersonation_ttl`).
+- **`RouteConfig::default()`** matches every legacy
+  `__`-prefixed path (`/__login`, `/__admin`, …) so existing
+  apps see no behavior change.
+- **`RouteConfig::friendly()`** preset drops the underscores —
+  `/login`, `/admin`, `/audit`, `/_static`, `/_brand` — for
+  apps that have reserved their root namespace cleanly.
+- **`Server::Builder::routes(RouteConfig)`** setter propagates
+  the config through to `TenantAdminBuilder` (and impersonation
+  redirect URLs).
+- **`TenantAdminBuilder::routes(RouteConfig)`** for direct
+  callers building the admin without going through
+  `Server::Builder`.
+- Tenant admin Tera templates now consume `{{ login_url }}`,
+  `{{ logout_url }}`, `{{ admin_prefix }}` (already in 0.27.9),
+  `{{ static_url }}`, `{{ brand_url }}` so the rendered HTML
+  honors whatever `RouteConfig` was supplied.
+
+### Fixed
+
+- Tenant admin path matching (`validate_session`,
+  `redirect_to_tenant_login`, `login_form`, `login_submit`,
+  `logout_response`, brand asset serve, end-impersonation
+  redirect) now reads from `RouteConfig` instead of the
+  hardcoded `/__login` / `/__logout` / `/__admin` / `/__audit`
+  / `/__static__` / `/__brand__` literals. Path matching is
+  now table-driven — apps that flip to friendly URLs see the
+  middleware honor the new paths immediately.
+
+### Scope notes
+
+- The **operator console** (apex) keeps its existing
+  `/login` / `/logout` / `/orgs` / `/operators` URLs in this
+  release. Operator-side configurability is a follow-up
+  (`OperatorRouteConfig`) — the bigger and more user-visible
+  win was the tenant admin, which this release closes.
+- Settings-file integration (`config/default.toml [routes]`)
+  is also a follow-up. For 0.28.0 you build `RouteConfig`
+  explicitly:
+  ```rust
+  Server::Builder::from_env().await?
+      .routes(RouteConfig::friendly())
+      .api(my_app::urls::router())
+      .serve("0.0.0.0:8080").await
+  ```
+
+### Verified
+
+- `cargo build -p rustango --features tenancy` — clean
+- `cargo test -p rustango --features tenancy --lib` —
+  **1100/1100 pass** (4 new `RouteConfig` tests covering
+  default-matches-legacy, friendly preset, audit-full-url
+  joining, sensible TTL defaults).
+
+Step 4 of the v0.28 plan. Workspace 0.27.10 → 0.28.0.
+
 ## [0.27.10] — fix POST→GET 405 after session-expiry redirect (#68)
 
 ### Fixed

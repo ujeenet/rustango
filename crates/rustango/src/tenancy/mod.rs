@@ -55,6 +55,7 @@ pub mod password;
 pub mod permissions;
 mod pools;
 mod resolver;
+pub mod routes;
 mod secrets;
 pub mod server;
 pub mod tenant_console;
@@ -89,6 +90,7 @@ pub use pools::{PrewarmReport, TenantConn, TenantPool, TenantPools, TenantPoolsC
 pub use resolver::{
     ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver, PortResolver, SubdomainResolver,
 };
+pub use routes::RouteConfig;
 pub use secrets::{
     ChainSecretsResolver, EnvSecretsResolver, LiteralSecretsResolver, SecretsError, SecretsResolver,
 };

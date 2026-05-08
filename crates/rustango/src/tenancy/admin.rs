@@ -88,6 +88,10 @@ pub struct TenantAdminBuilder {
     title: Option<String>,
     subtitle: Option<String>,
     brand_storage: Option<BoxedStorage>,
+    /// v0.28.0 (#74) — configurable URL prefixes. Defaults to
+    /// `RouteConfig::default()` (legacy `__`-prefixed paths) so
+    /// upgrade is a no-op until apps set `routes(...)`.
+    routes: Arc<super::routes::RouteConfig>,
 }
 
 /// One row in the action registry threaded through the tenant admin
@@ -129,7 +133,18 @@ impl TenantAdminBuilder {
             title: None,
             subtitle: None,
             brand_storage: None,
+            routes: Arc::new(super::routes::RouteConfig::default()),
         }
+    }
+
+    /// Override the default URL prefixes (#74, v0.28.0). When
+    /// the operator console is also part of your app, pass the
+    /// same `RouteConfig` to `operator_console::router_*` so
+    /// both sides agree on `/login`, `/admin`, etc.
+    #[must_use]
+    pub fn routes(mut self, routes: super::routes::RouteConfig) -> Self {
+        self.routes = Arc::new(routes);
+        self
     }
 
     /// Set the display name shown in the admin sidebar header.
@@ -270,6 +285,7 @@ impl TenantAdminBuilder {
         let brand_storage: BoxedStorage = self
             .brand_storage
             .unwrap_or_else(branding::default_brand_storage);
+        let routes = self.routes;
 
         Router::new().fallback(move |req: Request<Body>| {
             let pools = pools.clone();
@@ -282,6 +298,7 @@ impl TenantAdminBuilder {
             let title = title.clone();
             let subtitle = subtitle.clone();
             let brand_storage = brand_storage.clone();
+            let routes = routes.clone();
             async move {
                 handle_request(
                     req,
@@ -295,6 +312,7 @@ impl TenantAdminBuilder {
                     title.as_deref().as_deref(),
                     subtitle.as_deref().as_deref(),
                     &brand_storage,
+                    &routes,
                 )
                 .await
             }
@@ -314,12 +332,14 @@ async fn handle_request(
     title: Option<&str>,
     subtitle: Option<&str>,
     brand_storage: &BoxedStorage,
+    routes: &super::routes::RouteConfig,
 ) -> Response {
-    // Public brand asset surface — `/__brand__/{slug}/{filename}`.
+    // Public brand asset surface — `<brand_url>/{slug}/{filename}`.
     // Served before the resolver runs so the assets are reachable
     // even when the requesting host doesn't match a known tenant
     // (the slug in the path is validated by the branding module).
-    if let Some(rest) = req.uri().path().strip_prefix("/__brand__/") {
+    let brand_prefix = format!("{}/", routes.brand_url);
+    if let Some(rest) = req.uri().path().strip_prefix(&brand_prefix) {
         if let Some((slug, filename)) = rest.split_once('/') {
             return serve_brand_asset(slug, filename, brand_storage).await;
         }
@@ -362,34 +382,37 @@ async fn handle_request(
         let path = parts.uri.path().to_owned();
         let method = parts.method.clone();
 
-        // Public surface — `/__login*`, `/__logout`, `/__static__/rustango.png`.
-        // These bypass the session check.
-        if path == "/__static__/rustango.png" {
+        // Public surface — login / logout / brand-static. v0.28.0
+        // (#74): paths come from `RouteConfig` so apps can map
+        // `/login` etc. without the `__` prefix.
+        let static_rustango_url = format!("{}/rustango.png", routes.static_url);
+        if path == static_rustango_url {
             return rustango_png_response();
         }
-        if path == "/__login" {
+        if path == routes.login_url {
             return match method {
                 axum::http::Method::GET => {
-                    login_form(&org, cfg, brand_storage, parts.uri.query()).into_response()
+                    login_form(&org, cfg, brand_storage, routes, parts.uri.query()).into_response()
                 }
                 axum::http::Method::POST => {
-                    login_submit(&org, cfg, pool.pg_pool(), parts.headers, body).await
+                    login_submit(&org, cfg, pool.pg_pool(), routes, parts.headers, body).await
                 }
                 _ => (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response(),
             };
         }
-        if path == "/__logout" && method == axum::http::Method::POST {
-            return logout_response();
+        if path == routes.logout_url && method == axum::http::Method::POST {
+            return logout_response(routes);
         }
-        // v0.27.8 (#78) — `/__admin/__end-impersonation`. Clears
-        // the tenant session cookie and 302s back to the
-        // operator console at the apex. Must be POST so a stray
-        // GET request (browser link prefetch, robots) doesn't
-        // accidentally end an active impersonation session.
-        if (path == "/__admin/__end-impersonation" || path == "/__end-impersonation")
+        // v0.27.8 (#78) — end-impersonation routes. Recognized
+        // both with and without the configurable admin prefix
+        // because the form action template emits the full path
+        // (`{{ admin_prefix }}/__end-impersonation`) but a
+        // direct API caller might POST to `/__end-impersonation`.
+        let end_imp_full = format!("{}/__end-impersonation", routes.admin_url);
+        if (path == end_imp_full || path == "/__end-impersonation")
             && method == axum::http::Method::POST
         {
-            return end_impersonation_response();
+            return end_impersonation_response(routes);
         }
 
         // Private surface — require a valid session cookie.
@@ -429,7 +452,7 @@ async fn handle_request(
                 // Superuser: user_perms stays None → all operations allowed.
             }
             SessionCheck::Anonymous => {
-                return redirect_to_tenant_login(&path).into_response();
+                return redirect_to_tenant_login(&path, routes).into_response();
             }
             SessionCheck::Error(msg) => {
                 return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
@@ -448,14 +471,16 @@ async fn handle_request(
         &org,
         brand_storage,
         impersonated_by,
+        routes.admin_url.as_str(),
     );
 
-    // Strip the `/__admin` mount prefix from the request URI so the
-    // inner admin router sees plain `/{table}` paths. Requests routed
-    // via the explicit `/__admin/{*rest}` route in the builder carry the
-    // full URI; session-only paths (`/__login`, `/__logout`) go through
-    // the fallback and are NOT prefixed.
-    if let Some(stripped) = parts.uri.path().strip_prefix("/__admin") {
+    // Strip the configurable admin mount prefix from the request
+    // URI so the inner admin router sees plain `/{table}` paths.
+    // Requests routed via the explicit `<admin_url>/{*rest}`
+    // route in the builder carry the full URI; session-only
+    // paths (login / logout) go through the fallback and are
+    // NOT prefixed. (#74, v0.28.0)
+    if let Some(stripped) = parts.uri.path().strip_prefix(routes.admin_url.as_str()) {
         let new_path = if stripped.is_empty() { "/" } else { stripped };
         let new_pq = if let Some(q) = parts.uri.query() {
             format!("{new_path}?{q}")
@@ -579,13 +604,13 @@ async fn validate_session(
     }
 }
 
-fn redirect_to_tenant_login(next_path: &str) -> Redirect {
-    let next = if next_path == "/__login" || next_path.starts_with("/__logout") {
+fn redirect_to_tenant_login(next_path: &str, routes: &super::routes::RouteConfig) -> Redirect {
+    let next = if next_path == routes.login_url || next_path.starts_with(&routes.logout_url) {
         "/".to_string()
     } else {
         next_path.to_string()
     };
-    let location = format!("/__login?next={}", urlencoding_lite(&next));
+    let location = format!("{}?next={}", routes.login_url, urlencoding_lite(&next));
     Redirect::to(&location)
 }
 
@@ -593,6 +618,7 @@ fn login_form(
     org: &Org,
     cfg: &TenantSessionConfig,
     brand_storage: &BoxedStorage,
+    routes: &super::routes::RouteConfig,
     query: Option<&str>,
 ) -> axum::response::Html<String> {
     let mut next: Option<String> = None;
@@ -642,6 +668,10 @@ fn login_form(
     ctx.insert("theme_mode", theme_mode);
     let brand_css = super::branding::build_brand_css(org);
     ctx.insert("brand_css", &brand_css);
+    // v0.28.0 (#74) — login form action / static asset paths
+    // come from RouteConfig so apps can flip to /login etc.
+    ctx.insert("login_url", &routes.login_url);
+    ctx.insert("static_url", &routes.static_url);
     // v0.27.5 — log render errors instead of silently rendering an
     // empty body. The previous `unwrap_or_default()` hid a real
     // template-include resolution bug from the operator.
@@ -674,6 +704,7 @@ async fn login_submit(
     org: &Org,
     cfg: &TenantSessionConfig,
     tenant_pool: &PgPool,
+    routes: &super::routes::RouteConfig,
     _headers: HeaderMap,
     body: Body,
 ) -> Response {
@@ -707,7 +738,8 @@ async fn login_submit(
     };
     let bad_creds = || -> Response {
         Redirect::to(&format!(
-            "/__login?error=Invalid+credentials&next={}",
+            "{}?error=Invalid+credentials&next={}",
+            routes.login_url,
             urlencoding_lite(&next)
         ))
         .into_response()
@@ -734,13 +766,15 @@ async fn login_submit(
         Ok(v) => v,
         Err(_) => return bad_creds(),
     };
-    let payload = TenantSessionPayload::new(uid, &org.slug, tenant_console::SESSION_TTL_SECS);
+    let ttl_secs = i64::try_from(routes.tenant_session_ttl.as_secs())
+        .unwrap_or(tenant_console::SESSION_TTL_SECS);
+    let payload = TenantSessionPayload::new(uid, &org.slug, ttl_secs);
     let cookie_value = tenant_console::encode(&cfg.secret, &payload);
     let cookie = Cookie::build((tenant_console::COOKIE_NAME, cookie_value))
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
-        .max_age(CookieDuration::seconds(tenant_console::SESSION_TTL_SECS))
+        .max_age(CookieDuration::seconds(ttl_secs))
         .build();
     let mut resp = Redirect::to(&next).into_response();
     resp.headers_mut().append(
@@ -750,14 +784,14 @@ async fn login_submit(
     resp
 }
 
-fn logout_response() -> Response {
+fn logout_response(routes: &super::routes::RouteConfig) -> Response {
     let clear = Cookie::build((tenant_console::COOKIE_NAME, ""))
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
         .max_age(CookieDuration::seconds(0))
         .build();
-    let mut resp = Redirect::to("/__login").into_response();
+    let mut resp = Redirect::to(&routes.login_url).into_response();
     resp.headers_mut().append(
         header::SET_COOKIE,
         HeaderValue::from_str(&clear.to_string()).expect("cookie is ascii"),
@@ -775,7 +809,7 @@ fn logout_response() -> Response {
 /// back to `/` (relative) when the env vars aren't set, which
 /// at least clears the cookie cleanly even if it sends the
 /// browser somewhere unexpected.
-fn end_impersonation_response() -> Response {
+fn end_impersonation_response(_routes: &super::routes::RouteConfig) -> Response {
     let clear = Cookie::build((tenant_console::COOKIE_NAME, ""))
         .path("/")
         .http_only(true)
@@ -836,13 +870,17 @@ fn urlencoding_lite(s: &str) -> String {
 use crate::url_codec::url_decode as url_decode_lite;
 
 fn sanitize_next(next: Option<&str>) -> String {
+    sanitize_next_with_routes(next, &super::routes::RouteConfig::default())
+}
+
+fn sanitize_next_with_routes(next: Option<&str>, routes: &super::routes::RouteConfig) -> String {
     match next {
         Some(s)
             if s.starts_with('/')
                 && !s.starts_with("//")
                 && !s.contains("://")
-                && !s.starts_with("/__login")
-                && !s.starts_with("/__logout") =>
+                && !s.starts_with(&routes.login_url)
+                && !s.starts_with(&routes.logout_url) =>
         {
             s.to_owned()
         }
@@ -944,13 +982,19 @@ fn build_inner_admin_router(
     org: &Org,
     brand_storage: &BoxedStorage,
     impersonated_by: Option<i64>,
+    admin_url_prefix: &str,
 ) -> Router {
     // v0.27.7 — `tenant_mode()` filters registry-scoped models
     // (Org / Operator) out of the sidebar / index so the tenant
     // admin can't surface cross-tenant data. Standalone admins
     // (single-tenant projects using `crate::admin::Builder::new`
     // directly) leave the flag off and see every model.
-    let mut builder = crate::admin::Builder::new(pool).tenant_mode();
+    let mut builder = crate::admin::Builder::new(pool)
+        .tenant_mode()
+        // v0.28.0 (#74) — pass the configurable admin prefix
+        // through to the inner admin's chrome_context so
+        // template hrefs resolve correctly under any mount.
+        .admin_prefix(admin_url_prefix);
     // v0.27.8 (#78) — propagate the impersonation flag so chrome
     // renders the banner + audit-log emit picks it up.
     if let Some(operator_id) = impersonated_by {
