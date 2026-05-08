@@ -2,6 +2,97 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.27.0] — SQLite ORM backend + bi-dialect AppBuilder
+
+### Added
+
+- **SQLite as a third dialect** alongside Postgres and MySQL (#37).
+  Behind a new `sqlite` feature flag. Every `_pool` ORM helper has a
+  `Pool::Sqlite` arm now: `insert_pool` (INSERT…RETURNING populates
+  `Auto<T>` PKs), `save_pool`, `delete_pool`, `count_pool`,
+  `fetch_pool`, `select_related` (FK joins decoded via new
+  `LoadRelatedSqlite` trait), `fetch_with_prefetch_pool`,
+  `bulk_insert_pool`, `transaction_pool`
+  (`PoolTx::Sqlite(Transaction<Sqlite>)`), `fetch_aggregate_pool`,
+  `raw_query_pool`, `raw_execute_pool`. The macro layer emits
+  `FromRow<SqliteRow>`, an aliased-row decoder for joins, and a
+  SQLite arm in `AssignAutoPkPool::__rustango_assign_from_sqlite_row`
+  — automatic for every `#[derive(Model)]` struct when the feature
+  is on, expanding to nothing when it's off (verified by
+  `tests/macro_no_backend_cfg.rs`). Audit log table + emitter +
+  diff-style `save_one_with_diff_pool` all work on SQLite. ILIKE
+  rewrites to `LOWER(col) LIKE LOWER(?)`. New `SqliteReturningRow`
+  type alias + `try_get_returning_sqlite` helper. New SQLite
+  Decode/Type impls for `Auto<T>` and `ForeignKey<T, K>`. Migrate
+  runner (`apply_atomic_pool`, `unapply_atomic_pool`,
+  `applied_set_pool`, `ensure_ledger_pool`) handles SQLite.
+- **`Pool::connect("sqlite::memory:")`** and
+  `sqlite:./path.db?mode=rwc` return a usable `Pool::Sqlite`
+  (was Phase-3-pending).
+- **`server::AppBuilder`** — bi-dialect single-pool runserver. Reads
+  `DATABASE_URL` (any backend), runs `CREATE TABLE IF NOT EXISTS`
+  for the supplied model schemas, mounts an axum router, serves.
+  Pool injected as `Extension<Arc<Pool>>` into every request — no
+  `with_state` ceremony. Behind a new `runserver` feature
+  (in defaults). The Django-style multi-tenant `Builder` stays
+  gated on `tenancy` (still PG-bound until `TenantPools` becomes
+  `Pool`-generic in v0.28).
+- **Cookbook chapter 13** — full SQLite tour: `Pool::connect`, Auto
+  PK round-trip, bi-dialect `_pool` API matrix, ILIKE translation,
+  gotchas (`sqlite_*` reserved prefix, no ALTER ADD CONSTRAINT,
+  no advisory lock), in-memory test harness, AppBuilder recipe.
+- **`examples/sqlite_orm_demo.rs`** — 12-section single-file demo
+  exercising the entire SQLite ORM surface against `sqlite::memory:`.
+- **`examples/sqlite_app_demo.rs`** — `AppBuilder` + axum + SQLite
+  end-to-end runnable.
+- **`tests/sqlite_live.rs`** — 5 in-memory live tests covering
+  CRUD + connect path through the public API.
+
+### Changed
+
+- `crates/rustango/src/server` is unconditional now (previously
+  gated on `tenancy`). The full multi-tenant `Builder` stays behind
+  the `tenancy` feature inside the module; the lighter `AppBuilder`
+  is reachable with just `runserver`.
+- `Dialect` trait grew `serial_type_includes_primary_key()` so
+  SQLite's `INTEGER PRIMARY KEY AUTOINCREMENT` (indivisible token)
+  doesn't get a redundant `PRIMARY KEY` appended.
+- `InsertReturningPool` enum: added `SqliteRow(sqlx::sqlite::SqliteRow)`
+  variant. `Debug` impl is now manual (sqlx's `SqliteRow` doesn't
+  derive `Debug`).
+- `keywords` in `Cargo.toml` swap `postgres` → `sqlite` to surface
+  the multi-backend story in crates.io discovery.
+
+### Limitations (known, tracked for v0.28)
+
+- `TenantPools` + the multi-tenant `server::Builder` are still
+  `PgPool`-bound. Workaround for SQLite tenants: roll a custom
+  per-tenant pool registry (cookbook discussion shows the shape).
+- `apply_all_pool` walks every registered framework model on
+  inventory, including PG-shape models (Org, Operator, Job…) whose
+  DDL doesn't compile on SQLite. `AppBuilder::bootstrap` takes an
+  explicit schema list as a workaround.
+- `ddl::create_constraints_sql_with_dialect` emits `ALTER TABLE …
+  ADD CONSTRAINT FOREIGN KEY` which SQLite's parser rejects. The
+  bi-dialect bootstrap path skips this loop on SQLite; FK
+  enforcement on SQLite needs the constraint to be inline at
+  CREATE TABLE time.
+
+### Verified
+
+- `cargo build -p rustango` (default features) — clean
+- `cargo build -p rustango --features tenancy,sqlite` — clean
+- `cargo test -p rustango --features tenancy,sqlite --lib` —
+  **1096/1096 pass**
+- `cargo test -p rustango --features tenancy,sqlite --test sqlite_live`
+  — **5/5 pass**
+- `cargo run -p rustango --example sqlite_orm_demo --features sqlite`
+  — all 12 sections succeed
+- `cargo run -p rustango --example sqlite_app_demo --features sqlite,runserver`
+  — boots, accepts POST/GET via curl
+- `cargo test -p rustango --test macro_no_backend_cfg` — passes
+  (regression invariant for macro hygiene)
+
 ## [0.26.0] — admin theming + branding + ORM polish
 
 ### Added

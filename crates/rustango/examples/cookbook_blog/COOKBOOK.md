@@ -30,6 +30,7 @@ quotes from a real, compiling, test-covered file.
 10. [Templates + static](#chapter-10--templates--static)
 11. [Async / IO / extensions](#chapter-11--async--io--extensions)
 12. [Bi-dialect + cross-cutting](#chapter-12--bi-dialect--cross-cutting)
+13. [SQLite backend (v0.27)](#chapter-13--sqlite-backend-v027)
 
 ---
 
@@ -972,6 +973,262 @@ hygiene), 12.150 (project-shape conventions) queued for Slice 12b.*
 
 ---
 
+## Chapter 13 — SQLite backend (v0.27)
+
+v0.27 lights up SQLite as a third dialect alongside Postgres and
+MySQL. Same `Pool` enum, same `_pool` ORM surface — the macro now
+emits `FromRow<SqliteRow>` + `LoadRelatedSqlite` + a SQLite arm in
+`AssignAutoPkPool` so every existing model with `Auto<T>` PK or
+`ForeignKey<T>` works against `Pool::Sqlite` without recompilation
+of the model itself, only a flip of the rustango feature set.
+
+Cookbook-grade smoke test for the dialect lives at
+[crates/rustango/examples/sqlite_orm_demo.rs](../sqlite_orm_demo.rs)
+— a single-file, runnable example that bootstraps an in-memory DB
+and exercises 12 ORM features end-to-end. No docker, no env vars,
+no setup:
+
+```sh
+PATH="$HOME/.cargo/bin:$PATH" \
+  cargo run -p rustango --example sqlite_orm_demo --features sqlite
+```
+
+### 13.151 `Pool::connect("sqlite::memory:")` — opening an in-memory pool
+
+What:        Construct a `Pool::Sqlite` from a sqlite URL.
+When:        Anywhere a `Pool` works — tests, dev bootstrap, CLI
+             tools, embedded systems where shipping a sqlx
+             postgres binary is awkward.
+API:         [`crates/rustango/src/sql/pool.rs`](../../src/sql/pool.rs)
+Recipe:
+```rust,ignore
+let pool = rustango::sql::Pool::connect("sqlite::memory:").await?;
+assert_eq!(pool.backend_name(), "sqlite");
+```
+Accepted URL forms (sqlx-sqlite):
+- `sqlite::memory:` — anonymous in-memory DB
+- `sqlite:./relative.db` / `sqlite:///abs/path.db` — file-backed
+- `sqlite:?mode=memory&cache=shared` — query-string options
+Verified by:  [`tests/sqlite_live.rs`](../../tests/sqlite_live.rs)
+              `pool_connect_sqlite_in_memory`
+
+### 13.152 Auto<T> PK round-trip via `INSERT … RETURNING`
+
+What:        SQLite ≥ 3.35 supports `INSERT … RETURNING <cols>` with
+             the same shape as Postgres. The macro emits
+             `__rustango_assign_from_sqlite_row` mirroring the PG
+             arm — `insert_pool` populates every `Auto<T>` field
+             from the returned row in one round trip.
+API:         [`crates/rustango/src/sql/backend.rs`](../../src/sql/backend.rs)
+Recipe:
+```rust,ignore
+let mut alice = Author { id: Auto::Unset, name: "Alice".into(), age: 32 };
+alice.insert_pool(&pool).await?;
+assert!(alice.id.is_set());  // populated from RETURNING
+```
+Verified by:  [`tests/sqlite_live.rs`](../../tests/sqlite_live.rs)
+              `auto_pk_insert_pool_round_trips`
+
+### 13.153 Bi-dialect `_pool` ORM API on SQLite
+
+Every `_pool` executor function has a SQLite arm now. The
+[`sqlite_orm_demo`](../sqlite_orm_demo.rs) example exercises:
+
+| Feature                       | API                                          |
+|-------------------------------|----------------------------------------------|
+| `INSERT … RETURNING`          | `Model::insert_pool`                         |
+| `UPDATE` single row           | `Model::save_pool`                           |
+| `DELETE` single row           | `Model::delete_pool`                         |
+| `SELECT *`                    | `QuerySet::fetch_pool` (`FetcherPool`)       |
+| `SELECT COUNT(*)`             | `QuerySet::count_pool` (`CounterPool`)       |
+| `WHERE col <op> v`            | `QuerySet::filter` (Eq/Gt/In/Like/ILike/Between) |
+| `ORDER BY` / `LIMIT`/ `OFFSET`| `QuerySet::order_by/limit/offset`            |
+| `INSERT …, …, …` batch        | `bulk_insert_pool(&pool, &BulkInsertQuery)`  |
+| FK join (`select_related`)    | `QuerySet::select_related` (`LoadRelatedSqlite`) |
+| Parents + children prefetch   | `fetch_with_prefetch_pool`                   |
+| `BEGIN` / `COMMIT`            | `transaction_pool` → `PoolTx::Sqlite(tx)`    |
+| `GROUP BY` + `MIN/MAX/AVG/SUM/COUNT` | `QuerySet::aggregate().compile()` + `fetch_aggregate_pool` |
+| Raw SQL (typed)               | `raw_query_pool::<T>(sql, binds, &pool)`     |
+| Raw SQL (rows affected)       | `raw_execute_pool(&pool, sql, binds)`        |
+
+### 13.154 ILIKE → `LOWER(col) LIKE LOWER(?)` translation
+
+What:        SQLite has no native `ILIKE`. The dialect rewrites
+             `Op::ILike` to `LOWER(col) LIKE LOWER(?)` so the same
+             cookbook recipes that ship Postgres-flavored
+             case-insensitive matching work unchanged on SQLite.
+API:         [`crates/rustango/src/sql/sqlite.rs`](../../src/sql/sqlite.rs)
+Recipe:
+```rust,ignore
+Post::objects()
+    .filter("title", Op::ILike, "%hello%")
+    .fetch_pool(&pool).await?;  // emits: WHERE LOWER(title) LIKE LOWER(?)
+```
+
+### 13.155 SQLite-specific gotchas the demo had to dance around
+
+Three frictions surface when running on SQLite:
+
+1. **No `ALTER TABLE … ADD CONSTRAINT FOREIGN KEY`.** SQLite only
+   accepts FK constraints declared inline at CREATE TABLE time.
+   `ddl::create_constraints_sql_with_dialect` emits ALTER-style
+   SQL that PG/MySQL accept; for SQLite the demo skips this loop.
+   FK referential integrity is enforced anyway by manual ordering
+   (insert parents before children) when `PRAGMA foreign_keys = ON`
+   is off (sqlx-sqlite default). Tracked for v0.28.
+
+2. **`sqlite_*` table names are reserved.** SQLite treats any
+   identifier starting with `sqlite_` as internal-use only. The
+   first attempt at the live test used `sqlite_live_users` and
+   hit `object name reserved for internal use`. Stick to neutral
+   prefixes (`live_users_sqlite`, `demo_…`).
+
+3. **No advisory-lock primitive.** PG has `pg_advisory_lock`,
+   MySQL has `GET_LOCK`, SQLite has nothing comparable. The
+   migrate runner's `with_migrate_lock_pool` is a no-op on SQLite
+   — adequate because SQLite's single-writer file-lock semantics
+   already serialize concurrent migrations.
+
+### 13.156 In-memory SQLite as a unit-test database
+
+What:        Anonymous `sqlite::memory:` is the fastest way to spin
+             up a real DB inside a `#[tokio::test]` — sub-millisecond
+             pool open, no docker, no port conflicts, parallel
+             tests get isolated DBs by default. Pin
+             `max_connections = 1` if you want one DB per pool
+             (default sqlx behavior would open multiple anonymous
+             DBs as connections come up).
+API:         `sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:")`
+Recipe (cookbook test pattern):
+```rust,ignore
+async fn fresh_pool() -> Pool {
+    let sqlite = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:").await.unwrap();
+    let pool: Pool = sqlite.into();
+    let dialect = pool.dialect();
+    let sql = ddl::create_table_sql_with_dialect(dialect, MyModel::SCHEMA);
+    raw_execute_pool(&pool, &sql, vec![]).await.unwrap();
+    pool
+}
+```
+Verified by:  [`tests/sqlite_live.rs`](../../tests/sqlite_live.rs)
+              — 5 live tests using exactly this harness.
+
+### 13.157a `AppBuilder::from_env()` — bootstrap the app on SQLite
+
+What:        Single-pool bi-dialect builder. Reads `DATABASE_URL`,
+             constructs a `Pool` (sqlite / postgres / mysql), runs
+             your model schemas as `CREATE TABLE IF NOT EXISTS`,
+             mounts an axum router, serves. The Django-style
+             multi-tenant `Builder` is `PgPool`-bound; this is the
+             non-tenancy alternative.
+When:        You want the rustango framework to bootstrap your app
+             on SQLite (or any backend) without rolling your own
+             axum + pool wiring.
+API:         [`crates/rustango/src/server/app.rs`](../../src/server/app.rs)
+             — gated on the `runserver` feature (in defaults).
+Recipe (full app, runs and serves):
+```rust,ignore
+use std::sync::Arc;
+use axum::{routing::get, Extension, Json, Router};
+use rustango::core::Model as _;
+use rustango::server::AppBuilder;
+use rustango::sql::{Auto, FetcherPool, Pool};
+use rustango::Model;
+
+#[derive(Model, Debug, Clone, serde::Serialize)]
+#[rustango(table = "demo_user")]
+pub struct User {
+    #[rustango(primary_key)] pub id: Auto<i64>,
+    #[rustango(max_length = 80)] pub name: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    AppBuilder::from_env().await?       // reads DATABASE_URL
+        .bootstrap(&[User::SCHEMA]).await?  // CREATE TABLE IF NOT EXISTS
+        .api(Router::new().route("/users", get(list_users)))
+        .serve("0.0.0.0:8080").await
+}
+
+async fn list_users(Extension(pool): Extension<Arc<Pool>>) -> Json<Vec<User>> {
+    Json(User::objects().fetch_pool(&pool).await.unwrap())
+}
+```
+Run:
+```sh
+DATABASE_URL='sqlite:./var/app.db?mode=rwc' \
+  cargo run --features sqlite,runserver
+# Switch backends without touching code:
+DATABASE_URL='postgres://…' cargo run --features postgres,runserver
+DATABASE_URL='mysql://…'    cargo run --features mysql,runserver
+```
+Verified by:  [`examples/sqlite_app_demo.rs`](../sqlite_app_demo.rs) +
+              `cargo test --features tenancy,sqlite --lib server::app`
+
+What `AppBuilder` does NOT include (compared to the multi-tenant
+`Builder`): operator console, tenant admin, tenant resolver chain,
+session middleware. Those all sit on top of `TenantPools` which is
+still PG-bound. For a SQLite-backed multi-tenant app you'd
+combine `AppBuilder` with the per-tenant pool registry sketch from
+the cookbook discussion ("How do I use SQLite for tenants").
+
+The pool is injected as `Extension<Arc<Pool>>` into every request,
+so handlers extract it directly — no per-app `with_state(...)`
+ceremony.
+
+### 13.157b `AppBuilder::from_pool` — inject any `Pool`
+
+When `from_env` is too rigid (custom `SqlitePoolOptions`,
+`max_connections(1)` for in-memory tests, dependency injection in
+tests):
+
+```rust,ignore
+let sqlx_pool = sqlx::sqlite::SqlitePoolOptions::new()
+    .max_connections(1).connect("sqlite::memory:").await?;
+let pool: rustango::sql::Pool = sqlx_pool.into();
+let app = AppBuilder::from_pool(pool).bootstrap(&[…]).await?;
+```
+
+### 13.157 Building rustango with the `sqlite` feature
+
+Add `features = ["sqlite"]` to your `Cargo.toml` rustango dep, or
+combine with the existing dialect features:
+
+```toml
+[dependencies]
+rustango = { version = "0.27", features = ["sqlite"] }
+# or both at once:
+rustango = { version = "0.27", features = ["postgres", "sqlite"] }
+```
+
+The macro emits per-backend trait impls only when the feature is
+on — `MaybeSqliteFromRow` / `MaybeSqliteLoadRelated` are blanket-
+implemented for every `T` when `sqlite` is off, so existing
+PG-only consumers compile unchanged. Verified by the macro
+hygiene regression test:
+[`tests/macro_no_backend_cfg.rs`](../../tests/macro_no_backend_cfg.rs).
+
+---
+
 ## Gaps surfaced while writing this cookbook
 
 *(populated as we discover them per chapter)*
+
+- **Chapter 13 / SQLite (v0.27, 2026-05-07):** the
+  `ddl::create_constraints_sql_with_dialect` emitter still produces
+  `ALTER TABLE … ADD CONSTRAINT FOREIGN KEY` SQL, which SQLite's
+  parser rejects (FK constraints must be inline at CREATE TABLE).
+  The `sqlite_orm_demo` example skips that loop on SQLite as a
+  workaround. Real fix: refactor the emitter to put FK constraints
+  in the inline column list when the dialect doesn't support
+  ALTER-style FK addition. Tracked for v0.28.
+- **Chapter 13 / SQLite (v0.27):** `apply_all_pool` walks the full
+  `inventory::registered_models()` list, which on a default build
+  includes framework models (Org, Operator, Job, etc.) whose DDL
+  emits Postgres-shape SQL — those CREATE TABLE statements fail
+  on SQLite. Workaround used in the demo: emit DDL manually for
+  just the test models. A `Dialect::supports_model(&ModelSchema)`
+  filter (or per-model dialect-compat flag) would let
+  `apply_all_pool` skip incompatible models cleanly.

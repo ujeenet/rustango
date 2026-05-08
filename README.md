@@ -2,12 +2,61 @@
 
 **A Django-shaped, batteries-included web framework for Rust.**
 
-ORM with auto-migrations, multi-tenancy, auto-admin (token-driven theme system + dark mode + per-tenant branding via pluggable `Storage` trait — S3/R2/B2/MinIO/Local), sessions + JWT + OAuth2/OIDC + HMAC auth, signals, caching, first-class media (Postgres rows + S3/R2/B2/MinIO + presigned uploads + collections + tags), email pipeline (renderer + jobs + Mailable), background jobs (in-mem + Postgres), webhook delivery, OpenAPI 3.1 auto-derive from serializers + viewsets, JSON:API + RFC 7807 Problem Details, scheduled tasks, RFC 6238 TOTP, signed URLs, Prometheus metrics, OTel-shape tracing, distributed locks + rate limits + feature flags, every standard middleware (CSRF, CSP nonce, gzip/deflate, body limit, real-IP, idempotency, maintenance, trailing slash, static files, method override, server-timing, …) — all shipped, all opt-out via cargo features.
+Bi-dialect ORM (Postgres / MySQL / **SQLite**) with auto-migrations, multi-tenancy, auto-admin (token-driven theme system + dark mode + per-tenant branding via pluggable `Storage` trait — S3/R2/B2/MinIO/Local), sessions + JWT + OAuth2/OIDC + HMAC auth, signals, caching, first-class media (Postgres rows + S3/R2/B2/MinIO + presigned uploads + collections + tags), email pipeline (renderer + jobs + Mailable), background jobs (in-mem + Postgres), webhook delivery, OpenAPI 3.1 auto-derive from serializers + viewsets, JSON:API + RFC 7807 Problem Details, scheduled tasks, RFC 6238 TOTP, signed URLs, Prometheus metrics, OTel-shape tracing, distributed locks + rate limits + feature flags, every standard middleware (CSRF, CSP nonce, gzip/deflate, body limit, real-IP, idempotency, maintenance, trailing slash, static files, method override, server-timing, …) — all shipped, all opt-out via cargo features.
 
 ```toml
 [dependencies]
-rustango = "0.26"
+# Postgres (default)
+rustango = "0.27"
+
+# SQLite — file-backed or in-memory, full bi-dialect ORM
+rustango = { version = "0.27", features = ["sqlite"] }
+
+# Multiple backends in one binary
+rustango = { version = "0.27", features = ["postgres", "sqlite"] }
 ```
+
+### Spin up an app on SQLite in 30 lines
+
+```rust
+use std::sync::Arc;
+use axum::{routing::get, Extension, Json, Router};
+use rustango::core::Model as _;
+use rustango::server::AppBuilder;
+use rustango::sql::{Auto, FetcherPool, Pool};
+use rustango::Model;
+
+#[derive(Model, Debug, Clone, serde::Serialize)]
+#[rustango(table = "demo_user")]
+pub struct User {
+    #[rustango(primary_key)] pub id: Auto<i64>,
+    #[rustango(max_length = 80)] pub name: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    AppBuilder::from_env().await?            // reads DATABASE_URL
+        .bootstrap(&[User::SCHEMA]).await?   // CREATE TABLE IF NOT EXISTS
+        .api(Router::new().route("/users", get(list)))
+        .serve("0.0.0.0:8080").await
+}
+
+async fn list(Extension(pool): Extension<Arc<Pool>>) -> Json<Vec<User>> {
+    Json(User::objects().fetch_pool(&pool).await.unwrap())
+}
+```
+
+```sh
+DATABASE_URL='sqlite:./var/app.db?mode=rwc' \
+  cargo run --features sqlite,runserver
+```
+
+Same code unchanged with `DATABASE_URL=postgres://…` boots on Postgres.
+
+> **Multi-tenant on SQLite?** The `tenancy` module's `TenantPools` /
+> `Builder` is still PG-only — pending refactor in v0.28. For SQLite
+> tenants today, see Cookbook chapter 13 for the per-tenant `Pool`
+> registry shape.
 
 ---
 
@@ -606,7 +655,7 @@ adds a parallel `&Pool` API that targets either backend; pick MySQL
 
 ```toml
 # Cargo.toml — opt in to MySQL alongside the default postgres feature
-rustango = { version = "0.26", features = ["mysql"] }
+rustango = { version = "0.27", features = ["mysql"] }
 ```
 
 ```rust
@@ -1899,16 +1948,16 @@ The default features cover everything most apps need. Trim them when shipping a 
 
 ```toml
 # Default — everything except tenancy + cache-redis
-rustango = "0.26"
+rustango = "0.27"
 
 # Multi-tenant
-rustango = { version = "0.26", features = ["tenancy"] }
+rustango = { version = "0.27", features = ["tenancy"] }
 
 # With Redis cache
-rustango = { version = "0.26", features = ["cache-redis"] }
+rustango = { version = "0.27", features = ["cache-redis"] }
 
 # Bare ORM only (no admin, no forms, no email, no storage)
-rustango = { version = "0.26", default-features = false, features = ["postgres"] }
+rustango = { version = "0.27", default-features = false, features = ["postgres"] }
 ```
 
 | Feature | What it adds | On by default? |

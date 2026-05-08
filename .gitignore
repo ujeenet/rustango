@@ -19,3 +19,7 @@ crates/rustango/examples/*/Cargo.lock
 .env
 # playwright-mcp debug output (screenshots, page snapshots, console logs)
 .playwright-mcp/
+
+# SQLite app demo runtime artifacts
+/var/
+
