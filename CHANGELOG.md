@@ -2,6 +2,54 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.27.6] — first-user auto-superuser + admin recovery CLI verbs
+
+Closes the "I just created my first tenant user but the admin sidebar
+shows 'No models registered.'" papercut. Three layered framework
+changes plus four new CLI verbs.
+
+### Added
+
+- **`create-superuser <slug> <username> [--password <s>]`** — Django-shape
+  alias for `create-user --superuser`. Cleaner entrypoint when an
+  operator wants to provision a tenant admin in one verb.
+- **`set-superuser <slug> <username> [--on|--off]`** — toggle
+  `rustango_users.is_superuser` on an existing tenant user. Direct
+  recovery path when an onboarding script created the first user
+  without `--superuser`.
+- **`reset-password <slug> <username> [--password <p>]`** — admin-driven
+  password reset for tenant users (no current password required).
+  Full self-serve UI for tenant users still pending in #77.
+- **`reset-operator-password <username> [--password <p>]`** — same
+  for operators on the registry pool. Recovery path when an
+  operator forgets their password and there's no other admin to
+  do it via UI.
+
+### Fixed
+
+- **First-user-of-a-tenant auto-superuser** in
+  `tenancy::manage::users::create_user_cmd`. When the tenant has
+  zero existing rows in `rustango_users`, the next user is
+  implicitly promoted to superuser even without `--superuser`,
+  with a notice in the CLI output. Pre-fix:
+  `cargo run -- create-user osu admin --password ...` (forgetting
+  `--superuser`) produced a tenant whose only user could log in
+  but saw an empty admin sidebar — every model filtered out by
+  `is_visible(table)` because the user had zero perm grants and
+  `auto_create_permissions` only seeds the catalog, doesn't grant
+  to anyone. Mirrors Django's `createsuperuser` first-user UX.
+
+### Verified end-to-end via Playwright
+
+- Reproduced the bug: logged in as a non-superuser → sidebar
+  showed "No models registered."
+- Confirmed the fix path: promoted the user via `set-superuser` →
+  sidebar populated with all 16 models including the user-defined
+  Country / Region / SubRegion / IntermediateRegion in the
+  `regions` app group.
+- `cargo build -p rustango --features tenancy` — clean
+- `cargo test -p rustango --features tenancy --lib` — **1077/1077**
+
 ## [0.27.5] — fix tenant login page blank screen (regression in 0.27.3)
 
 ### Fixed

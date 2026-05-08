@@ -168,6 +168,16 @@ pub async fn run_with_writer_and_init<W: Write + Send>(
         }
         "create-operator" => users::create_operator_cmd(pools, &args[1..], writer).await,
         "create-user" => users::create_user_cmd(pools, registry_url, &args[1..], writer).await,
+        "create-superuser" => {
+            users::create_superuser_cmd(pools, registry_url, &args[1..], writer).await
+        }
+        "set-superuser" => users::set_superuser_cmd(pools, registry_url, &args[1..], writer).await,
+        "reset-password" => {
+            users::reset_password_cmd(pools, registry_url, &args[1..], writer).await
+        }
+        "reset-operator-password" => {
+            users::reset_operator_password_cmd(pools, &args[1..], writer).await
+        }
         "run-server" | "runserver" => {
             server::run_server_cmd(pools, registry_url, &args[1..], writer).await
         }
@@ -277,6 +287,26 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "                       Tenant-scoped user; signs into <slug>.<apex>/__login."
+    )?;
+    writeln!(w, "  create-superuser <slug> <username> [--password <p>]")?;
+    writeln!(
+        w,
+        "                       Tenant-scoped superuser (alias for create-user --superuser)."
+    )?;
+    writeln!(w, "  set-superuser <slug> <username> [--on|--off]")?;
+    writeln!(
+        w,
+        "                       Promote / demote an existing tenant user."
+    )?;
+    writeln!(w, "  reset-password <slug> <username> [--password <p>]")?;
+    writeln!(
+        w,
+        "                       Reset a tenant user's password without their old one."
+    )?;
+    writeln!(w, "  reset-operator-password <username> [--password <p>]")?;
+    writeln!(
+        w,
+        "                       Reset an operator's password without their old one."
     )?;
     writeln!(w)?;
     writeln!(w, "MIGRATIONS:")?;
