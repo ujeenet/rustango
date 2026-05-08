@@ -32,6 +32,8 @@ pub(crate) async fn index(State(state): State<AppState>) -> Html<String> {
     // module path. Models with no app label land in a "Project" group.
     let mut entries: Vec<&'static ModelEntry> = super::helpers::inventory_entries_dedup_by_table()
         .into_iter()
+        // v0.27.7 — registry-scoped models hidden in tenant mode.
+        .filter(|e| state.scope_visible(e.schema.scope))
         .filter(|e| state.is_visible(e.schema.table))
         .collect();
     entries.sort_by_key(|e| e.schema.name);

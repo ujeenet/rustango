@@ -85,7 +85,7 @@ pub use migrate::{
     migrate_registry, migrate_tenants, TenantMigrationOutcome, TenantMigrationReport,
 };
 pub use org::{Org, StorageMode};
-pub use pools::{TenantConn, TenantPool, TenantPools, TenantPoolsConfig};
+pub use pools::{PrewarmReport, TenantConn, TenantPool, TenantPools, TenantPoolsConfig};
 pub use resolver::{
     ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver, PortResolver, SubdomainResolver,
 };

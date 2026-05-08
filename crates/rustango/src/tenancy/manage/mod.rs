@@ -158,6 +158,19 @@ pub async fn run_with_writer_and_init<W: Write + Send>(
         "drop-tenant" => tenants::drop_tenant(pools, &args[1..], writer).await,
         "purge-tenant" => tenants::purge_tenant(pools, &args[1..], writer).await,
         "list-tenants" => tenants::list_tenants(pools, writer).await,
+        "prewarm-pools" => {
+            // v0.27.7 (#60) — eagerly build pools for every active
+            // database-mode tenant. Useful as a post-deploy hook
+            // after credential rotation, or to validate that all
+            // tenants are reachable before flipping a load balancer.
+            let report = pools.prewarm_database_tenants().await?;
+            writeln!(
+                writer,
+                "prewarm: {} active tenants — warmed {}, failed {}, skipped (cap) {}",
+                report.total_active, report.warmed, report.failed, report.skipped_cap
+            )?;
+            Ok(())
+        }
         "migrate-tenants" => {
             migrations::migrate_tenants_cmd(pools, registry_url, dir, writer).await
         }
@@ -337,6 +350,14 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "  migrate-tenants      Apply tenant-scoped migrations to every active org."
+    )?;
+    writeln!(
+        w,
+        "  prewarm-pools        Eagerly build pools for every active database-mode tenant"
+    )?;
+    writeln!(
+        w,
+        "                       (drops first-request latency on the hot path)."
     )?;
     writeln!(
         w,

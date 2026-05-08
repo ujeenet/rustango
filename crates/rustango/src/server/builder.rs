@@ -241,6 +241,33 @@ impl Builder {
     pub async fn serve(self, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
         let resolver_for_admin = build_resolver(&self.apex);
 
+        // v0.27.7 (#60) — pre-warm tenant pools on boot when the
+        // app's `TenantPoolsConfig.prewarm_active_tenants` flag
+        // is on. Default is false so existing apps don't take
+        // a longer boot time on upgrade. Failures are logged per
+        // tenant but don't abort `serve` — the lazy hot-path
+        // build will retry on the first request.
+        if self.pools.pool_config().prewarm_active_tenants {
+            match self.pools.prewarm_database_tenants().await {
+                Ok(report) => {
+                    tracing::info!(
+                        target: "rustango::server",
+                        warmed = report.warmed,
+                        failed = report.failed,
+                        skipped_cap = report.skipped_cap,
+                        "tenant pools pre-warmed at boot",
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "rustango::server",
+                        error = %e,
+                        "tenant-pool pre-warm failed (non-fatal; lazy build will retry)",
+                    );
+                }
+            }
+        }
+
         // v0.27.2 — persist generated secrets to disk so dev
         // `cargo run` cycles don't sign every operator out on
         // restart (#69). Production should still set

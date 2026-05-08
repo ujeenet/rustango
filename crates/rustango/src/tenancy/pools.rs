@@ -47,6 +47,48 @@ pub struct TenantPoolsConfig {
     /// small so a tenant fan-out doesn't exhaust Postgres'
     /// `max_connections`. Default: 4.
     pub database_pool_max_connections: u32,
+
+    // v0.27.7 — connection-time tuning (#60). Pre-fix, every tenant
+    // pool was built with `PgPoolOptions::new().max_connections(...)`
+    // and nothing else, leaving sqlx's defaults to drive timeout /
+    // lifetime / idle behavior. Defaults are reasonable but apps
+    // that hit slow upstreams (vault-resolved DSNs, distant
+    // databases) had no way to tune them without bypassing
+    // TenantPools entirely.
+    /// Per-pool `min_connections` for database-mode tenants. When
+    /// non-zero, sqlx keeps that many connections warm at all
+    /// times — first-request latency drops because the TCP /
+    /// TLS / auth round-trip is paid at boot rather than on the
+    /// hot path. Recommend `1` for production tenants that get
+    /// regular traffic, `0` for cold tenants with sparse hits
+    /// (the default; preserves pre-0.27.7 behavior). Default: 0.
+    pub database_pool_min_connections: u32,
+
+    /// `acquire_timeout` for database-mode tenant pools — how long
+    /// `pool.acquire()` waits for an available connection before
+    /// erroring with `PoolTimedOut`. Sqlx's default is 30s.
+    /// Default: 30s.
+    pub database_pool_acquire_timeout: std::time::Duration,
+
+    /// `idle_timeout` — close connections that have sat idle this
+    /// long. `None` keeps idle connections forever (sqlx default).
+    /// Set when running against a load balancer / Postgres with
+    /// `idle_in_transaction_session_timeout` to avoid stale-
+    /// connection errors. Default: `Some(10 minutes)`.
+    pub database_pool_idle_timeout: Option<std::time::Duration>,
+
+    /// `max_lifetime` — force a connection to be recycled after
+    /// this duration, regardless of activity. Helps with rolling
+    /// PG credential rotations (vault leases, cloud IAM tokens).
+    /// `None` disables. Default: `Some(30 minutes)`.
+    pub database_pool_max_lifetime: Option<std::time::Duration>,
+
+    /// When `true`, [`TenantPools`] eagerly builds pools for every
+    /// active database-mode tenant at construction time (`new()` /
+    /// `with_secrets()`). Bounded by `max_cached_database_pools`.
+    /// Schema-mode tenants are never pre-warmed (they share the
+    /// registry pool which is already up). Default: `false`.
+    pub prewarm_active_tenants: bool,
 }
 
 impl Default for TenantPoolsConfig {
@@ -54,8 +96,36 @@ impl Default for TenantPoolsConfig {
         Self {
             max_cached_database_pools: 64,
             database_pool_max_connections: 4,
+            // Below: zeros / None preserve pre-0.27.7 behavior so
+            // existing apps don't see surprise behavior on upgrade.
+            // Apps that want hot pools opt in via `.config(...)`.
+            database_pool_min_connections: 0,
+            database_pool_acquire_timeout: std::time::Duration::from_secs(30),
+            database_pool_idle_timeout: Some(std::time::Duration::from_secs(10 * 60)),
+            database_pool_max_lifetime: Some(std::time::Duration::from_secs(30 * 60)),
+            prewarm_active_tenants: false,
         }
     }
+}
+
+/// Outcome of [`TenantPools::prewarm_database_tenants`]. Counts —
+/// not lists — so the type stays small enough to log + persist.
+/// Per-tenant errors are written to the tracing log during
+/// pre-warm; consumers needing them should subscribe to the
+/// `crate::tenancy::pools` target.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PrewarmReport {
+    /// Number of active database-mode tenants the registry returned.
+    pub total_active: usize,
+    /// Number of pools successfully built and cached.
+    pub warmed: usize,
+    /// Number of tenants whose pool build failed (skipped, not
+    /// fatal — see tracing logs for details).
+    pub failed: usize,
+    /// Number of tenants skipped because the cache cap was already
+    /// reached. Bump `TenantPoolsConfig::max_cached_database_pools`
+    /// to pre-warm more.
+    pub skipped_cap: usize,
 }
 
 /// One tenant's pool reference. Schema-mode tenants share the
@@ -131,6 +201,14 @@ impl TenantPools {
     pub fn config(mut self, config: TenantPoolsConfig) -> Self {
         self.config = config;
         self
+    }
+
+    /// Read access to the current config. Used by `Server::Builder`
+    /// to decide whether to call [`Self::prewarm_database_tenants`]
+    /// on boot. (#60, v0.27.7)
+    #[must_use]
+    pub fn pool_config(&self) -> &TenantPoolsConfig {
+        &self.config
     }
 
     /// The registry pool — for `migrate_registry`, operator-routes,
@@ -255,6 +333,78 @@ impl TenantPools {
         cache.remove(slug);
     }
 
+    /// Pre-warm pools for every active database-mode tenant. Useful
+    /// at boot so the *first* request per tenant doesn't pay TCP +
+    /// TLS + auth + sqlx-ramp-up on the hot path. Bounded by
+    /// `config.max_cached_database_pools` — extras beyond the cap
+    /// are skipped with a `tracing::warn!`. Schema-mode tenants
+    /// share the registry pool and are never pre-warmed.
+    ///
+    /// Failures on individual tenants don't abort the rest — the
+    /// returned report counts successes / failures. Apps that
+    /// require all-or-nothing pre-warm should inspect the report
+    /// and exit on non-zero `failed`. (#60, v0.27.7)
+    ///
+    /// # Errors
+    /// Returns [`TenancyError`] only for the registry-side `Org`
+    /// query that lists active tenants. Per-tenant connect failures
+    /// are surfaced in the returned [`PrewarmReport`] but don't
+    /// abort the loop.
+    pub async fn prewarm_database_tenants(&self) -> Result<PrewarmReport, TenancyError> {
+        use crate::core::Column as _;
+        use crate::sql::Fetcher;
+        let span = tracing::info_span!("tenant_pools_prewarm");
+        let _enter = span.enter();
+        let started = std::time::Instant::now();
+        let orgs: Vec<Org> = Org::objects()
+            .where_(Org::storage_mode.eq("database".to_owned()))
+            .where_(Org::active.eq(true))
+            .fetch(&self.registry)
+            .await?;
+        let total = orgs.len();
+        let mut report = PrewarmReport {
+            total_active: total,
+            warmed: 0,
+            failed: 0,
+            skipped_cap: 0,
+        };
+        for org in orgs {
+            // Capacity check — don't blow the cache cap.
+            if self.cache.read().await.len() >= self.config.max_cached_database_pools {
+                tracing::warn!(
+                    target: "crate::tenancy::pools",
+                    slug = %org.slug,
+                    cap = self.config.max_cached_database_pools,
+                    "skipping pre-warm: cache cap reached",
+                );
+                report.skipped_cap += 1;
+                continue;
+            }
+            match self.pool_for_database_mode(&org).await {
+                Ok(_) => report.warmed += 1,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "crate::tenancy::pools",
+                        slug = %org.slug,
+                        error = %e,
+                        "pre-warm failed for tenant",
+                    );
+                    report.failed += 1;
+                }
+            }
+        }
+        tracing::info!(
+            target: "crate::tenancy::pools",
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            total = report.total_active,
+            warmed = report.warmed,
+            failed = report.failed,
+            skipped_cap = report.skipped_cap,
+            "prewarm complete",
+        );
+        Ok(report)
+    }
+
     /// Resolve `org.database_url` through the configured
     /// [`SecretsResolver`] and return the literal connection URL.
     /// Called by `purge-tenant --purge-database` so it can reach the
@@ -291,6 +441,13 @@ impl TenantPools {
                 return Ok(Arc::clone(pool));
             }
         }
+        // Cache miss — instrument so the cold path is visible in
+        // tracing output. This is the most common cause of
+        // "first-request feels slow"; the span makes it
+        // grep-able. (#60, v0.27.7)
+        let span = tracing::info_span!("tenant_pool_init", slug = %org.slug, mode = "database");
+        let _enter = span.enter();
+        let resolve_start = std::time::Instant::now();
         // Resolve + connect outside the write lock so vault calls
         // don't block other tenants' lookups.
         let reference = org.database_url.as_deref().ok_or_else(|| {
@@ -300,10 +457,22 @@ impl TenantPools {
             ))
         })?;
         let url = self.secrets.resolve(reference).await?;
-        let pool = PgPoolOptions::new()
-            .max_connections(self.config.database_pool_max_connections)
-            .connect(&url)
-            .await?;
+        tracing::debug!(
+            target: "crate::tenancy::pools",
+            slug = %org.slug,
+            elapsed_ms = resolve_start.elapsed().as_millis() as u64,
+            "secrets resolver resolved tenant URL",
+        );
+        let connect_start = std::time::Instant::now();
+        let pool = build_database_pool(&url, &self.config).await?;
+        tracing::info!(
+            target: "crate::tenancy::pools",
+            slug = %org.slug,
+            elapsed_ms = connect_start.elapsed().as_millis() as u64,
+            min_conn = self.config.database_pool_min_connections,
+            max_conn = self.config.database_pool_max_connections,
+            "tenant pool connected (database mode)",
+        );
         let pool = Arc::new(pool);
 
         // Insert under write lock; check for race + capacity.
@@ -322,6 +491,27 @@ impl TenantPools {
         cache.insert(org.slug.clone(), Arc::clone(&pool));
         Ok(pool)
     }
+}
+
+/// Build a single database-mode tenant pool with the timeout /
+/// keepalive / lifetime settings from `config`. Extracted so the
+/// pre-warm path uses the same options as the lazy hot-path build.
+/// (#60, v0.27.7)
+async fn build_database_pool(
+    url: &str,
+    config: &TenantPoolsConfig,
+) -> Result<PgPool, TenancyError> {
+    let mut opts = PgPoolOptions::new()
+        .max_connections(config.database_pool_max_connections)
+        .min_connections(config.database_pool_min_connections)
+        .acquire_timeout(config.database_pool_acquire_timeout);
+    if let Some(idle) = config.database_pool_idle_timeout {
+        opts = opts.idle_timeout(idle);
+    }
+    if let Some(lifetime) = config.database_pool_max_lifetime {
+        opts = opts.max_lifetime(lifetime);
+    }
+    Ok(opts.connect(url).await?)
 }
 
 /// A connection scoped to a tenant. For schema mode the connection
@@ -387,5 +577,31 @@ mod tests {
         let c = TenantPoolsConfig::default();
         assert!(c.max_cached_database_pools >= 16);
         assert!(c.database_pool_max_connections >= 1);
+    }
+
+    // v0.27.7 (#60) — guard the new pool-timeout fields'
+    // backward-compatible defaults. Pre-warm must default off so
+    // upgrading apps don't add boot-time latency surprise; min
+    // connections must default 0 so existing pools don't get
+    // chatty against tiny PG instances; acquire timeout must be
+    // a non-trivial duration so apps don't see PoolTimedOut on
+    // a slow first connect.
+    #[test]
+    fn config_pool_timeout_defaults_preserve_pre_0_27_7_behavior() {
+        let c = TenantPoolsConfig::default();
+        assert!(!c.prewarm_active_tenants);
+        assert_eq!(c.database_pool_min_connections, 0);
+        assert!(c.database_pool_acquire_timeout >= std::time::Duration::from_secs(5));
+        assert!(c.database_pool_idle_timeout.is_some());
+        assert!(c.database_pool_max_lifetime.is_some());
+    }
+
+    #[test]
+    fn prewarm_report_zeroed_default() {
+        let r = PrewarmReport::default();
+        assert_eq!(r.total_active, 0);
+        assert_eq!(r.warmed, 0);
+        assert_eq!(r.failed, 0);
+        assert_eq!(r.skipped_cap, 0);
     }
 }

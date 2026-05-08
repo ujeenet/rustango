@@ -957,3 +957,70 @@ cargo run -- migrate-tenants             # tenant-scoped, fan-out across orgs
 cargo run -- drop-tenant acme            # soft (reversible)
 cargo run -- purge-tenant acme           # hard (drops schema/db)
 ```
+
+---
+
+## Tenant-pool tuning (v0.27.7+)
+
+Database-mode tenants get one `PgPool` each, cached by slug in
+[`TenantPools`](../crates/rustango/src/tenancy/pools.rs). The pool
+build happens **lazily on first request** unless you opt in to
+pre-warming. Settings live on `TenantPoolsConfig`:
+
+| Field | Default | Purpose |
+|---|---|---|
+| `max_cached_database_pools` | 64 | Pool cache cap. Once full, the next uncached tenant errors out (no silent eviction). |
+| `database_pool_max_connections` | 4 | Per-pool `max_connections`. Keep small so a tenant fan-out doesn't exhaust PG `max_connections`. |
+| `database_pool_min_connections` | 0 | Keeps N connections warm at all times. `≥1` drops first-request latency by paying the TCP/TLS/auth round-trip at boot. |
+| `database_pool_acquire_timeout` | 30s | How long `pool.acquire()` waits before erroring `PoolTimedOut`. |
+| `database_pool_idle_timeout` | 10 min | Close idle connections after this duration. Defends against load-balancer / `idle_in_transaction_session_timeout` cuts. |
+| `database_pool_max_lifetime` | 30 min | Force-rotate connections so vault-leased credentials get refreshed. |
+| `prewarm_active_tenants` | false | When true, `Server::Builder::serve` calls `prewarm_database_tenants()` at boot. |
+
+### Pre-warm at boot
+
+Two ways to trigger:
+
+1. **Automatic** — set `prewarm_active_tenants = true` on the
+   `TenantPoolsConfig` you hand `TenantPools::new(...).config(...)`.
+   `Server::Builder::serve` runs the pre-warm before binding.
+
+2. **CLI verb** — `cargo run -- prewarm-pools` builds pools for
+   every active database-mode tenant and exits. Useful as a
+   post-deploy hook (e.g. after credential rotation), or to
+   validate every tenant is reachable before flipping a load
+   balancer.
+
+Pre-warm walks `Org::objects().where(active = true, storage_mode =
+"database")` and short-circuits when the cache cap is reached
+(reported as `skipped_cap` in the [`PrewarmReport`]). Per-tenant
+build failures log a `tracing::warn!` but don't abort the loop.
+
+### Tracing
+
+`crate::tenancy::pools::tenant_pool_init` is a `tracing::info_span!`
+that wraps the cold-path pool build. Subscribe to it to see
+per-tenant build latency:
+
+```text
+INFO crate::tenancy::pools: tenant pool connected (database mode)
+     slug=acme elapsed_ms=42 min_conn=1 max_conn=4
+```
+
+### Setup gotcha — macOS `.local` TLDs
+
+If you hit the tenant admin via `http://acme.local:8080/__admin/`
+on macOS and see a 5-second pause on every request: that's
+**Bonjour / mDNS**, not rustango. macOS's resolver treats `.local`
+specially and waits the full mDNS timeout before falling back to
+`/etc/hosts`. Two fixes:
+
+1. **Use a different TLD**: `127.0.0.1 acme.localhost` works
+   without delay. `localhost` is reserved (RFC 6761) and skips
+   mDNS.
+2. **Run dnsmasq** with a `.local` zone pointing at 127.0.0.1
+   so the OS gets an immediate answer.
+
+Confirm with `curl -w "%{time_connect}\n"`: if `time_connect`
+shows ~5s but it drops to milliseconds with
+`--resolve acme.local:8080:127.0.0.1`, you're hitting mDNS.

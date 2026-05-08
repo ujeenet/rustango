@@ -100,6 +100,16 @@ pub(crate) struct Config {
     /// `Some(set)` = the effective codename set; `is_visible`,
     /// `is_read_only`, `can_add`, and `can_delete` consult it.
     pub(crate) user_perms: Option<HashSet<String>>,
+    /// v0.27.7 — when true, the admin filters out registry-scoped
+    /// models (`#[rustango(scope = "registry")]`, e.g. Org /
+    /// Operator) from the sidebar + index. Tenant admins live in
+    /// the per-tenant pool and can't show cross-tenant data
+    /// without leaking; the registry-only models belong to the
+    /// operator console. Set automatically by
+    /// `TenantAdminBuilder::build()`. Standalone single-tenant
+    /// admins (no tenancy) leave this false and see every model
+    /// regardless of scope.
+    pub(crate) tenant_mode: bool,
 }
 
 impl Builder {
@@ -142,6 +152,21 @@ impl Builder {
     /// don't want to enumerate every table per request.
     pub fn read_only_all(mut self) -> Self {
         self.config.read_only_all = true;
+        self
+    }
+
+    /// Tenant-mode filter (v0.27.7): hides registry-scoped models
+    /// (`#[rustango(scope = "registry")]`) from the admin sidebar
+    /// and index. Wired automatically by
+    /// `TenantAdminBuilder::build()`; standalone admins leave it
+    /// false. Pre-fix, registry-only models like `Org` / `Operator`
+    /// surfaced inside the tenant admin even though they don't
+    /// live in the tenant's storage — clicking through could leak
+    /// cross-tenant data via search_path on schema-mode tenants
+    /// (the registry's `public.rustango_orgs` would resolve).
+    #[must_use]
+    pub fn tenant_mode(mut self) -> Self {
+        self.config.tenant_mode = true;
         self
     }
 
@@ -309,6 +334,18 @@ impl AppState {
         true
     }
 
+    /// v0.27.7 — scope filter. Tenant admins (`tenant_mode = true`)
+    /// hide registry-only models (`#[rustango(scope = "registry")]`,
+    /// e.g. `Org` / `Operator`) so cross-tenant data can't surface
+    /// inside a tenant subdomain. Standalone admins return true for
+    /// every scope.
+    pub(crate) fn scope_visible(&self, scope: crate::core::ModelScope) -> bool {
+        if !self.config.tenant_mode {
+            return true;
+        }
+        scope == crate::core::ModelScope::Tenant
+    }
+
     /// Returns `true` when the table's mutating routes (edit/update)
     /// should be blocked. Checks the global/per-table read-only flags
     /// first; when `user_perms` is set also checks `{table}.change`.
@@ -353,5 +390,54 @@ impl AppState {
             .get(table)
             .and_then(|m| m.get(action))
             .cloned()
+    }
+}
+
+#[cfg(test)]
+mod scope_filter_tests {
+    use super::*;
+    use crate::core::ModelScope;
+    use std::sync::Arc;
+
+    fn state_with(tenant_mode: bool) -> AppState {
+        let mut cfg = Config::default();
+        cfg.tenant_mode = tenant_mode;
+        AppState {
+            // sqlx PgPool isn't trivially constructable in unit
+            // tests; use a lazy connect to a non-existent URL —
+            // none of the methods we exercise here touch the pool.
+            pool: PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused")
+                .expect("connect_lazy never fails"),
+            config: Arc::new(cfg),
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_admin_sees_every_scope() {
+        // v0.27.7 regression guard: single-tenant projects must
+        // continue to see registry-scoped models in their admin.
+        let state = state_with(false);
+        assert!(state.scope_visible(ModelScope::Tenant));
+        assert!(state.scope_visible(ModelScope::Registry));
+    }
+
+    #[tokio::test]
+    async fn tenant_admin_hides_registry_scoped_models() {
+        // v0.27.7 fix: tenant admins must NOT surface
+        // `#[rustango(scope = "registry")]` models (Org / Operator
+        // etc.) — those don't live in the tenant pool and clicking
+        // them on a schema-mode tenant would leak cross-tenant
+        // data via search_path.
+        let state = state_with(true);
+        assert!(state.scope_visible(ModelScope::Tenant));
+        assert!(!state.scope_visible(ModelScope::Registry));
+    }
+
+    #[tokio::test]
+    async fn tenant_mode_setter_flips_flag() {
+        let pool = PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused")
+            .expect("connect_lazy never fails");
+        let builder = Builder::new(pool).tenant_mode();
+        assert!(builder.config.tenant_mode);
     }
 }

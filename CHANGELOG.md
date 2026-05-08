@@ -2,6 +2,64 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.27.7] — tenant-pool tuning + registry-scope filter for tenant admin
+
+### Added
+
+- **`TenantPoolsConfig` exposes connection-time tuning**:
+  `database_pool_min_connections` (keep N warm),
+  `database_pool_acquire_timeout` (default 30s),
+  `database_pool_idle_timeout` (default 10 min),
+  `database_pool_max_lifetime` (default 30 min, helps with vault
+  credential rotation), and `prewarm_active_tenants` (opt-in
+  flag — when true, `Server::Builder::serve` builds pools for
+  every active database-mode tenant on boot). All defaults
+  preserve pre-0.27.7 behavior so upgrading is a no-op until
+  apps explicitly tune. (#60)
+- **`TenantPools::prewarm_database_tenants() -> PrewarmReport`** —
+  walks active database-mode orgs and lazily builds each pool.
+  Bounded by `max_cached_database_pools`; per-tenant build
+  failures log a `tracing::warn!` but don't abort the loop.
+- **`manage prewarm-pools` CLI verb** — explicit ops trigger,
+  e.g. as a post-deploy hook after credential rotation or to
+  validate every tenant is reachable before flipping a load
+  balancer.
+- **`tracing::info_span!("tenant_pool_init", slug, mode)`** wraps
+  the cold-path pool build with a per-tenant duration log line,
+  so first-request latency is grep-able instead of
+  unobservable.
+- **`docs/manage.md`** gained a "Tenant-pool tuning" section
+  with a settings table, pre-warm trigger guide, and a macOS
+  `.local` mDNS troubleshooting note (the 5-second pause some
+  users see hitting `<slug>.local:8080` is Bonjour, not the
+  framework — `--resolve <host>:8080:127.0.0.1` proves it).
+
+### Fixed
+
+- **Tenant admin no longer surfaces registry-scoped models** in
+  its sidebar / index / direct URL hits. Pre-fix, models declared
+  `#[rustango(scope = "registry")]` (Org, Operator) showed up in
+  the tenant admin even though they don't live in the tenant's
+  storage — clicking through could leak cross-tenant data via
+  `search_path` on schema-mode tenants (the registry's
+  `public.rustango_orgs` would resolve). Now:
+  - `crate::admin::Builder::tenant_mode()` setter (+ matching
+    `tenant_mode: bool` on `Config`).
+  - `TenantAdminBuilder::build()` flips it on automatically;
+    standalone single-tenant admins (no tenancy) leave it off
+    and see every scope.
+  - `AppState::scope_visible(ModelScope)` is the gate; called
+    from `sidebar_context`, `views::index`, and `lookup_model`
+    so direct URL hits like `/__admin/rustango_orgs` also 404
+    cleanly.
+
+### Verified
+
+- `cargo build -p rustango --features tenancy` — clean
+- `cargo test -p rustango --features tenancy --lib` —
+  **1082/1082 pass** (5 new tests: 2 for pool config defaults +
+  PrewarmReport, 3 for the scope filter / tenant_mode setter).
+
 ## [0.27.6] — first-user auto-superuser + admin recovery CLI verbs
 
 Closes the "I just created my first tenant user but the admin sidebar

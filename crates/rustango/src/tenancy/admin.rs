@@ -875,7 +875,12 @@ fn build_inner_admin_router(
     org: &Org,
     brand_storage: &BoxedStorage,
 ) -> Router {
-    let mut builder = crate::admin::Builder::new(pool);
+    // v0.27.7 — `tenant_mode()` filters registry-scoped models
+    // (Org / Operator) out of the sidebar / index so the tenant
+    // admin can't surface cross-tenant data. Standalone admins
+    // (single-tenant projects using `crate::admin::Builder::new`
+    // directly) leave the flag off and see every model.
+    let mut builder = crate::admin::Builder::new(pool).tenant_mode();
     if let Some(allow) = show_only {
         builder = builder.show_only(allow.iter().cloned());
     }
