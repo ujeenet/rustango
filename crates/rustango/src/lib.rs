@@ -4,19 +4,22 @@
 //! JWT + OAuth2/OIDC + HMAC auth, DRF-style serializers + viewsets,
 //! signals, caching, media (S3/R2/B2/MinIO), email pipeline,
 //! background jobs, scheduled tasks, OpenAPI 3.1 auto-derive, every
-//! standard middleware. Postgres + MySQL through the same `&Pool`
-//! API, opt-in via Cargo features.
+//! standard middleware. Postgres + MySQL + **SQLite** through the
+//! same `&Pool` API, opt-in via Cargo features.
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.23"
+//! rustango = "0.27"                                       # Postgres (default)
+//! rustango = { version = "0.27", features = ["sqlite"] }  # SQLite
 //! ```
 //!
-//! Defaults (`["postgres", "admin"]`) get you the ORM, migration
-//! runner, and auto-admin. Add `"tenancy"` for the multi-tenant
-//! resolver / pools / per-tenant auth pieces, `"mysql"` for MySQL
-//! 8.0+ alongside Postgres, or drop `default-features` for the bare
-//! ORM (no axum, no Tera).
+//! Defaults pull `postgres`, `admin`, and `runserver` (the bi-dialect
+//! single-pool [`server::AppBuilder`]). Add `"tenancy"` for the
+//! multi-tenant resolver / pools / per-tenant auth (PG-only until
+//! v0.28 makes [`tenancy::TenantPools`] `Pool`-generic). Add
+//! `"mysql"` or `"sqlite"` for additional backends — the same
+//! `#[derive(Model)]` types and `_pool` ORM API work against any of
+//! them. Drop `default-features` for the bare ORM (no axum, no Tera).
 //!
 //! # Quick start
 //!
@@ -204,6 +207,95 @@ macro_rules! __impl_my_load_related {
 #[cfg(not(feature = "mysql"))]
 #[macro_export]
 macro_rules! __impl_my_load_related {
+    ($struct:ty, |$self_:ident, $row:ident, $field:ident, $alias:ident| {
+        $($arms:tt)*
+    }) => {};
+}
+
+// ---- SQLite counterparts to the three MySQL macros above ----
+//
+// Phase 3 of #37 ("SQLite ORM backend"). Same hygiene-aware closure
+// pattern as the MySQL trio, gated on `sqlite` instead of `mysql`.
+// The proc-macro emits unconditional calls to each; the macro_rules
+// definitions below collapse to nothing when the feature is off.
+
+#[doc(hidden)]
+#[cfg(feature = "sqlite")]
+#[macro_export]
+macro_rules! __impl_sqlite_from_row {
+    ($struct:ty, |$row:ident| { $($body:tt)* }) => {
+        impl<'r> $crate::sql::sqlx::FromRow<'r, $crate::sql::sqlx::sqlite::SqliteRow>
+            for $struct
+        {
+            fn from_row(
+                $row: &'r $crate::sql::sqlx::sqlite::SqliteRow,
+            ) -> ::core::result::Result<Self, $crate::sql::sqlx::Error> {
+                ::core::result::Result::Ok(Self { $($body)* })
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+#[cfg(not(feature = "sqlite"))]
+#[macro_export]
+macro_rules! __impl_sqlite_from_row {
+    ($struct:ty, |$row:ident| { $($body:tt)* }) => {};
+}
+
+#[doc(hidden)]
+#[cfg(feature = "sqlite")]
+#[macro_export]
+macro_rules! __impl_sqlite_aliased_row_decoder {
+    ($struct:ty, |$row:ident, $prefix:ident| { $($body:tt)* }) => {
+        impl $struct {
+            #[doc(hidden)]
+            pub fn __rustango_from_aliased_sqlite_row(
+                $row: &$crate::sql::sqlx::sqlite::SqliteRow,
+                $prefix: &str,
+            ) -> ::core::result::Result<Self, $crate::sql::sqlx::Error> {
+                ::core::result::Result::Ok(Self { $($body)* })
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+#[cfg(not(feature = "sqlite"))]
+#[macro_export]
+macro_rules! __impl_sqlite_aliased_row_decoder {
+    ($struct:ty, |$row:ident, $prefix:ident| { $($body:tt)* }) => {};
+}
+
+#[doc(hidden)]
+#[cfg(feature = "sqlite")]
+#[macro_export]
+macro_rules! __impl_sqlite_load_related {
+    ($struct:ty, |$self_:ident, $row:ident, $field:ident, $alias:ident| {
+        $($arms:tt)*
+    }) => {
+        impl $crate::sql::LoadRelatedSqlite for $struct {
+            #[allow(unused_variables)]
+            fn __rustango_load_related_sqlite(
+                &mut self,
+                $row: &$crate::sql::sqlx::sqlite::SqliteRow,
+                $field: &str,
+                $alias: &str,
+            ) -> ::core::result::Result<bool, $crate::sql::sqlx::Error> {
+                let $self_ = self;
+                match $field {
+                    $($arms)*
+                    _ => ::core::result::Result::Ok(false),
+                }
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+#[cfg(not(feature = "sqlite"))]
+#[macro_export]
+macro_rules! __impl_sqlite_load_related {
     ($struct:ty, |$self_:ident, $row:ident, $field:ident, $alias:ident| {
         $($arms:tt)*
     }) => {};
@@ -669,7 +761,11 @@ pub mod viewset;
 /// Django-style runserver — [`server::Builder`] owns every line of
 /// boilerplate every tenancy app would otherwise rewrite (DB pool,
 /// resolver chain, host dispatch, operator console, bind + serve).
-#[cfg(feature = "tenancy")]
+///
+/// Module itself is unconditional so the bi-dialect single-pool
+/// [`server::AppBuilder`] is available without the `tenancy` feature.
+/// The full multi-tenant [`server::Builder`] is gated inside the
+/// module on `tenancy`.
 pub mod server;
 
 /// Unified manage runner — collapses `src/main.rs` + `src/bin/manage.rs`

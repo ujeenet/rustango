@@ -703,6 +703,60 @@ fn load_related_impl_my_tokens(
     }
 }
 
+/// Same shape as [`load_related_impl_my_tokens`] but for SQLite.
+/// Emits a call to `__impl_sqlite_load_related!` which expands to a
+/// `LoadRelatedSqlite` impl when the `sqlite` feature is on.
+fn load_related_impl_sqlite_tokens(
+    struct_name: &syn::Ident,
+    fk_relations: &[FkRelation],
+) -> TokenStream2 {
+    let arms = fk_relations.iter().map(|rel| {
+        let parent_ty = &rel.parent_type;
+        let fk_col = rel.fk_column.as_str();
+        let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
+        let (variant_ident, default_expr) = rel.pk_kind.sqlvalue_match_arm();
+        let assign = if rel.nullable {
+            quote! {
+                __self.#field_ident = ::core::option::Option::Some(
+                    ::rustango::sql::ForeignKey::loaded(_pk, _parent),
+                );
+            }
+        } else {
+            quote! {
+                __self.#field_ident = ::rustango::sql::ForeignKey::loaded(_pk, _parent);
+            }
+        };
+        quote! {
+            #fk_col => {
+                let _parent: #parent_ty =
+                    <#parent_ty>::__rustango_from_aliased_sqlite_row(row, alias)?;
+                let _pk = match <#parent_ty>::__rustango_pk_value(&_parent) {
+                    ::rustango::core::SqlValue::#variant_ident(v) => v,
+                    _other => {
+                        ::core::debug_assert!(
+                            false,
+                            "rustango macro bug: load_related on FK `{}` expected \
+                             SqlValue::{} from parent's __rustango_pk_value but got \
+                             {:?} — file a bug at https://github.com/ujeenet/rustango",
+                            #fk_col,
+                            ::core::stringify!(#variant_ident),
+                            _other,
+                        );
+                        #default_expr
+                    }
+                };
+                #assign
+                ::core::result::Result::Ok(true)
+            }
+        }
+    });
+    quote! {
+        ::rustango::__impl_sqlite_load_related!(#struct_name, |__self, row, field_name, alias| {
+            #( #arms )*
+        });
+    }
+}
+
 /// Emit `impl FkPkAccess for #StructName` — slice 9.0e. Pattern-
 /// matches `field_name` against the model's FK fields and returns
 /// the FK's stored PK as `i64`. Used by `fetch_with_prefetch` to
@@ -1911,6 +1965,8 @@ fn inherent_impl_tokens(
                 mk_before_pairs(quote!(::rustango::sql::try_get_returning));
             let before_pairs_my: Vec<proc_macro2::TokenStream> =
                 mk_before_pairs(quote!(::rustango::sql::try_get_returning_my));
+            let before_pairs_sqlite: Vec<proc_macro2::TokenStream> =
+                mk_before_pairs(quote!(::rustango::sql::try_get_returning_sqlite));
             let pg_select_cols: String = tracked
                 .iter()
                 .map(|c| format!("\"{}\"", c.column.replace('"', "\"\"")))
@@ -1921,6 +1977,10 @@ fn inherent_impl_tokens(
                 .map(|c| format!("`{}`", c.column.replace('`', "``")))
                 .collect::<Vec<_>>()
                 .join(", ");
+            // SQLite uses double-quote identifier quoting (same as
+            // Postgres in default config), so the column-list shape
+            // matches PG.
+            let sqlite_select_cols: String = pg_select_cols.clone();
             let pk_value_for_bind = if fields.pk_is_auto {
                 quote!(self.#pk_ident.get().copied().unwrap_or_default())
             } else {
@@ -1982,8 +2042,10 @@ fn inherent_impl_tokens(
                         _after_pairs,
                         #pg_select_cols,
                         #my_select_cols,
+                        #sqlite_select_cols,
                         |_audit_before_row| ::std::vec![ #( #before_pairs_pg ),* ],
                         |_audit_before_row| ::std::vec![ #( #before_pairs_my ),* ],
+                        |_audit_before_row| ::std::vec![ #( #before_pairs_sqlite ),* ],
                     ).await
                 }
             }
@@ -2866,6 +2928,22 @@ fn inherent_impl_tokens(
     // `insert_one_with_audit_pool` → `apply_auto_pk_pool`) link.
     let assign_auto_pk_pool_impl = {
         let auto_assigns = &fields.auto_assigns;
+        // SQLite ≥ 3.35 supports the same RETURNING shape as Postgres,
+        // so the body is structurally identical to `auto_assigns` —
+        // only the helper name swaps from `try_get_returning` to
+        // `try_get_returning_sqlite` so the closure typechecks against
+        // a `SqliteRow` instead of a `PgRow`.
+        let auto_assigns_sqlite: Vec<TokenStream2> = fields
+            .auto_field_idents
+            .iter()
+            .map(|(ident, column)| {
+                quote! {
+                    self.#ident = ::rustango::sql::try_get_returning_sqlite(
+                        _returning_row, #column
+                    )?;
+                }
+            })
+            .collect();
         let mysql_body = if let Some(first) = fields.first_auto_ident.as_ref() {
             // The MySQL `LAST_INSERT_ID()` is always i64. Route through
             // `MysqlAutoIdSet` so Auto<i32> narrows safely and
@@ -2915,6 +2993,13 @@ fn inherent_impl_tokens(
                 ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
                     #mysql_body
                 }
+                fn __rustango_assign_from_sqlite_row(
+                    &mut self,
+                    _returning_row: &::rustango::sql::SqliteReturningRow,
+                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    #( #auto_assigns_sqlite )*
+                    ::core::result::Result::Ok(())
+                }
             }
         }
     };
@@ -2944,8 +3029,18 @@ fn inherent_impl_tokens(
         });
     };
 
+    // v0.27 Phase 3 — SQLite counterpart, same hygiene-aware closure
+    // pattern + cfg gate on the `sqlite` feature.
+    let aliased_row_helper_sqlite = quote! {
+        ::rustango::__impl_sqlite_aliased_row_decoder!(#struct_name, |row, prefix| {
+            #( #from_aliased_row_inits ),*
+        });
+    };
+
     let load_related_impl = load_related_impl_tokens(struct_name, &fields.fk_relations);
     let load_related_impl_my = load_related_impl_my_tokens(struct_name, &fields.fk_relations);
+    let load_related_impl_sqlite =
+        load_related_impl_sqlite_tokens(struct_name, &fields.fk_relations);
 
     quote! {
         impl #struct_name {
@@ -2972,9 +3067,13 @@ fn inherent_impl_tokens(
 
         #aliased_row_helper_my
 
+        #aliased_row_helper_sqlite
+
         #load_related_impl
 
         #load_related_impl_my
+
+        #load_related_impl_sqlite
 
         #has_pk_value_impl
 
@@ -3090,6 +3189,10 @@ fn from_row_impl_tokens(struct_name: &syn::Ident, from_row_inits: &[TokenStream2
         }
 
         ::rustango::__impl_my_from_row!(#struct_name, |row| {
+            #( #from_row_inits ),*
+        });
+
+        ::rustango::__impl_sqlite_from_row!(#struct_name, |row| {
             #( #from_row_inits ),*
         });
     }
