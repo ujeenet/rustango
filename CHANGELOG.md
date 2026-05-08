@@ -2,6 +2,34 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.27.1] — `cargo test` cleanup for default features
+
+### Fixed
+
+- **`examples/blog_demo/` now gates on `tenancy`.** Cargo
+  auto-discovers `examples/<name>/main.rs` and compiles each one on
+  `cargo test` (no args). Under the default feature set (which does
+  not include `tenancy`), `blog_demo`'s imports
+  (`rustango::tenancy::*`, `rustango::extractors::Tenant`,
+  `#[derive(ViewSet)]`) failed to resolve. Registered as
+  `[[example]] required-features = ["tenancy"]` so it's skipped
+  cleanly without that feature.
+- **`#[derive(ViewSet)]` macro hygiene.** The derive emitted
+  `#model_path::SCHEMA` (inherent-path lookup), which required the
+  caller to also `use rustango::core::Model` for the trait method
+  to resolve. Switched to the fully-qualified
+  `<#model_path as ::rustango::core::Model>::SCHEMA` shape used
+  everywhere else in the macro layer.
+- **Unused-import warnings** in `forms/mod.rs`, `server/app.rs`,
+  `tests/cache_backends.rs`, `tests/contenttypes_live.rs`.
+
+### Verified
+
+- `cargo test --no-run` (default features) — all examples + tests
+  compile cleanly.
+- `cargo build --example blog_demo --features tenancy` — clean.
+- `cargo test -p rustango --features tenancy --lib` — **1077/1077**.
+
 ## [0.27.0] — SQLite ORM backend + bi-dialect AppBuilder
 
 ### Added
