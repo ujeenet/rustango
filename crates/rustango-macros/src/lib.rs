@@ -3375,7 +3375,18 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("table") {
                 let s: LitStr = meta.value()?.parse()?;
-                out.table = Some(s.value());
+                let name = s.value();
+                // v0.27.3 (#65) — macro-time guard against table names
+                // that compile but break SQL downstream. Hyphens are
+                // the common footgun: PostgreSQL accepts a quoted
+                // `"intermediate-region"` in CREATE TABLE, but the
+                // FK / index name derivation in `migrate::ddl`
+                // emits `intermediate-region_field_fkey` unquoted,
+                // which then fails the SQL parser. Same shape rule
+                // as Postgres regular identifiers so the safe path
+                // is the only path.
+                validate_table_name(&name, s.span())?;
+                out.table = Some(name);
                 return Ok(());
             }
             if meta.path.is_ident("display") {
@@ -4092,6 +4103,51 @@ struct FieldInfo<'a> {
     /// every INSERT and UPDATE path; the database recomputes the
     /// value from `EXPR`. Backlog item #35.
     generated_as: Option<String>,
+}
+
+/// Reject table names that won't survive SQL identifier
+/// derivation downstream. Postgres' regular-identifier rule
+/// (`[a-zA-Z_][a-zA-Z0-9_]*`) is the safe shape: it round-trips
+/// through the framework's unquoted FK / index / constraint name
+/// emission without surprises. We also disallow leading-digit and
+/// the empty string for clarity.
+///
+/// Reserved-word collisions (`select`, `from`, …) aren't flagged
+/// here — those produce a runtime error from the SQL parser,
+/// which is loud enough; statically enumerating reserved words
+/// across the three supported dialects is more friction than help.
+///
+/// Backlog item #65.
+fn validate_table_name(name: &str, span: proc_macro2::Span) -> syn::Result<()> {
+    if name.is_empty() {
+        return Err(syn::Error::new(
+            span,
+            "`table = \"\"` is not a valid SQL identifier",
+        ));
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return Err(syn::Error::new(
+            span,
+            format!("table name `{name}` must start with a letter or underscore (got {first:?})",),
+        ));
+    }
+    for c in chars {
+        if !(c.is_ascii_alphanumeric() || c == '_') {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "table name `{name}` contains invalid character {c:?} — \
+                     SQL identifiers must match `[a-zA-Z_][a-zA-Z0-9_]*`. \
+                     Hyphens in particular break FK / index name derivation \
+                     downstream; use underscores instead (e.g. `{}`)",
+                    name.replace(|x: char| !x.is_ascii_alphanumeric() && x != '_', "_"),
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInfo<'a>> {

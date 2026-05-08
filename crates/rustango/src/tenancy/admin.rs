@@ -352,7 +352,9 @@ async fn handle_request(
         }
         if path == "/__login" {
             return match method {
-                axum::http::Method::GET => login_form(&org, cfg, parts.uri.query()).into_response(),
+                axum::http::Method::GET => {
+                    login_form(&org, cfg, brand_storage, parts.uri.query()).into_response()
+                }
                 axum::http::Method::POST => {
                     login_submit(&org, cfg, pool.pg_pool(), parts.headers, body).await
                 }
@@ -542,6 +544,7 @@ fn redirect_to_tenant_login(next_path: &str) -> Redirect {
 fn login_form(
     org: &Org,
     cfg: &TenantSessionConfig,
+    brand_storage: &BoxedStorage,
     query: Option<&str>,
 ) -> axum::response::Html<String> {
     let mut next: Option<String> = None;
@@ -564,6 +567,33 @@ fn login_form(
     ctx.insert("tenant_name", &org.display_name);
     ctx.insert("next", &next.unwrap_or_else(|| "/".into()));
     ctx.insert("error", &error);
+    // v0.27.3 (#71) — thread per-tenant brand context so the
+    // unauthenticated login page picks up the org's logo,
+    // favicon, brand color, theme, and display name. Pre-fix
+    // these fields were absent from the context and the template
+    // hardcoded `/__static__/rustango.png` + `--accent: #2c6fb0`,
+    // so uploaded brand assets never reached the login screen.
+    let brand_name = org
+        .brand_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&org.display_name);
+    ctx.insert("brand_name", brand_name);
+    ctx.insert("brand_tagline", &org.brand_tagline);
+    let brand_logo_url =
+        super::branding::brand_asset_url(&org.slug, org.logo_path.as_deref(), brand_storage);
+    ctx.insert("brand_logo_url", &brand_logo_url);
+    let brand_favicon_url =
+        super::branding::brand_asset_url(&org.slug, org.favicon_path.as_deref(), brand_storage);
+    ctx.insert("brand_favicon_url", &brand_favicon_url);
+    let theme_mode = org
+        .theme_mode
+        .as_deref()
+        .and_then(super::branding::validate_theme_mode)
+        .unwrap_or("auto");
+    ctx.insert("theme_mode", theme_mode);
+    let brand_css = super::branding::build_brand_css(org);
+    ctx.insert("brand_css", &brand_css);
     axum::response::Html(
         cfg.tera
             .render("tenant_login.html", &ctx)

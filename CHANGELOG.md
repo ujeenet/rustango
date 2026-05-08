@@ -2,6 +2,50 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.27.3] — tenant login branding + table-name macro guard
+
+### Fixed
+
+- **Tenant admin login page now renders per-tenant branding** (#71).
+  Pre-fix, `tenant_login.html` hardcoded `/__static__/rustango.png`
+  and an inline `--accent: #2c6fb0` — uploaded logos / favicons /
+  brand colors had zero effect on the unauthenticated screen.
+  `login_form()` now threads `brand_logo_url`,
+  `brand_favicon_url`, `brand_name`, `brand_tagline`, `theme_mode`,
+  and `brand_css` through the template via the same helpers the
+  authenticated layouts already use. The template:
+  - imports `_theme_tokens.html` so colors honor the org's theme
+    (light / dark / auto)
+  - emits `<link rel="icon">` from `brand_favicon_url` (falls
+    back to embedded rustango icon)
+  - applies `brand_css` (derived from `org.primary_color`) so
+    the accent color matches the rest of the tenant admin
+  - falls back cleanly to the rustango defaults when no brand
+    is set so existing apps don't change
+
+### Added
+
+- **Macro-time guard against invalid table names** (#65).
+  `#[rustango(table = "intermediate-region")]` previously
+  compiled cleanly but then broke downstream when the
+  framework's FK / index name derivation emitted unquoted
+  identifiers like `intermediate-region_field_fkey`. Now
+  rejected at `#[derive(Model)]` expansion with a clear error:
+  > table name `intermediate-region` contains invalid
+  > character `'-'` — SQL identifiers must match
+  > `[a-zA-Z_][a-zA-Z0-9_]*`. Hyphens in particular break FK /
+  > index name derivation downstream; use underscores instead
+  > (e.g. `intermediate_region`)
+  Same `[a-zA-Z_][a-zA-Z0-9_]*` shape Postgres allows for
+  unquoted identifiers — the safe path is now the only path.
+
+### Verified
+
+- `cargo build -p rustango --features tenancy` — clean
+- `cargo test -p rustango --features tenancy --lib` —
+  **1077/1077 pass**
+- `cargo test -p rustango --test derive_model` — **16/16 pass**
+
 ## [0.27.2] — admin-registration UX rescue + sidebar/branding polish
 
 Fixes the cluster of papercuts that hit anyone scaffolding a new
