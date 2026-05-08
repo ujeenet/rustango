@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "manage", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3", "media"]
+default = ["postgres", "manage", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3", "media", "runserver"]
 postgres = ["sqlx/postgres"]
 
 # Unified `cargo run` / `cargo run -- <verb>` dispatcher. Pulls the
@@ -273,9 +273,15 @@ tenancy = [
 # using `#[tokio::main]` directly.
 runtime = ["dep:tracing-subscriber", "dep:tracing-appender"]
 
+# Minimal axum runserver — `rustango::server::AppBuilder`. Bi-dialect
+# single-pool bootstrap (SQLite / Postgres / MySQL). Implies axum +
+# tokio. The full multi-tenant `Builder` lives behind `tenancy` and
+# pulls in much more.
+runserver = ["dep:axum", "dep:tokio"]
+
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.26.0", path = "../rustango-macros" }
+rustango-macros = { version = "0.27.0", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono     = { workspace = true }
@@ -341,3 +347,16 @@ tempfile       = "3"
 # All example crates removed. Single-file examples are auto-detected
 # by Cargo; multi-file or required-features examples used to be
 # declared here. Re-add as needed.
+
+# SQLite ORM demo — single-file example, gated on the `sqlite` feature
+# so default `cargo build --examples` doesn't try to compile it.
+[[example]]
+name              = "sqlite_orm_demo"
+path              = "examples/sqlite_orm_demo.rs"
+required-features = ["sqlite"]
+
+# AppBuilder + SQLite — minimal runnable bootstrap shape.
+[[example]]
+name              = "sqlite_app_demo"
+path              = "examples/sqlite_app_demo.rs"
+required-features = ["sqlite", "runserver"]

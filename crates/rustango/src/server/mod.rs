@@ -22,6 +22,12 @@
 //! }
 //! ```
 
+#[cfg(feature = "runserver")]
+mod app;
+#[cfg(feature = "tenancy")]
 mod builder;
 
+#[cfg(feature = "runserver")]
+pub use app::AppBuilder;
+#[cfg(feature = "tenancy")]
 pub use builder::{ApiRouter, Builder};
