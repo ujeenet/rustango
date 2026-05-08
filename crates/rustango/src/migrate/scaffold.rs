@@ -95,12 +95,13 @@ pub fn startapp(
     }
 
     let mod_body = render_mod_template(&opts.app_name);
+    let singular = singularize(&opts.app_name);
     let entries: [(&str, String); 5] = [
         ("mod.rs", mod_body),
         ("models.rs", render_models_template(&opts.app_name)),
         ("views.rs", VIEWS_TEMPLATE.into()),
         ("urls.rs", URLS_TEMPLATE.into()),
-        ("tests.rs", TESTS_TEMPLATE.into()),
+        ("tests.rs", render_tests_template(&singular)),
     ];
     for (filename, body) in entries {
         let path = app_dir.join(filename);
@@ -340,13 +341,80 @@ fn render_mod_template(app_name: &str) -> String {
 }
 
 /// Default `models.rs` body — a single starter model named after
-/// the app (e.g. `startapp blog` → `pub struct Blog` on table
-/// `"blog"`). Parameterising the struct + table name avoids
-/// colliding with the project-root `Item` example or with another
-/// app's `Item`.
+/// the singularized app name (e.g. `startapp posts` → `pub struct Post`
+/// on table `"post"`; `startapp blog` → `pub struct Blog` on table
+/// `"blog"`). Parameterising the struct + table name avoids colliding
+/// with the project-root `Item` example or with another app's `Item`.
+///
+/// The starter model is admin-visible out of the box: rustango defaults
+/// `permissions = true`, so [`tenancy::permissions::auto_create_permissions`]
+/// seeds the four CRUD codenames during `migrate`. After running
+/// `cargo run -- migrate`, a freshly-created superuser sees the model
+/// in the admin sidebar without any manual permission-grant step.
+///
+/// Singularization is conservative: trailing `s` is stripped on names
+/// of length ≥ 5 (so `posts → post`, `comments → comment`, but
+/// `news` / `feed` / `cms` stay as-is). Users can rename either the
+/// struct or the `table = "..."` literal freely; the macro reads them
+/// independently.
 fn render_models_template(app_name: &str) -> String {
-    let struct_name = app_name
-        .split('_')
+    let singular = singularize(app_name);
+    let struct_name = pascal_case(&singular);
+    format!(
+        "//! App models — every `#[derive(Model)]` lives here.
+//!
+//! Adding a struct here makes it admin-visible automatically: the
+//! macro populates the `inventory` registry that
+//! `rustango::admin::router(pool)` walks. The four standard CRUD
+//! permission codenames (`{singular}.add`, `.change`, `.delete`,
+//! `.view`) are seeded by `auto_create_permissions` during the
+//! first `migrate`, so non-superuser tenant users see this model
+//! once granted an appropriate role.
+//!
+//! Rename `{struct_name}` / `\"{singular}\"` to suit your domain;
+//! the table name and struct identifier are independent.
+
+use rustango::sql::Auto;
+use rustango::Model;
+
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = \"{singular}\",
+    display = \"name\",
+    admin(
+        list_display = \"name, active, created_at\",
+        search_fields = \"name\",
+        ordering = \"-created_at\",
+    )
+)]
+pub struct {struct_name} {{
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 120)]
+    pub name: String,
+    pub active: bool,
+    #[rustango(auto_now_add)]
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}}
+"
+    )
+}
+
+/// Strip a trailing `s` for the common English-plural app names
+/// (`posts`, `comments`, `users`). Conservative — leaves anything
+/// shorter than 5 chars or not ending in `s` untouched. Users can
+/// always rename the struct + table literal manually if the
+/// heuristic guesses wrong (e.g. `categories` → `categorie`).
+fn singularize(name: &str) -> String {
+    if name.len() >= 5 && name.ends_with('s') && !name.ends_with("ss") && !name.ends_with("us") {
+        name[..name.len() - 1].to_owned()
+    } else {
+        name.to_owned()
+    }
+}
+
+fn pascal_case(name: &str) -> String {
+    name.split('_')
         .filter(|s| !s.is_empty())
         .map(|s| {
             let mut chars = s.chars();
@@ -357,29 +425,7 @@ fn render_models_template(app_name: &str) -> String {
                 .chain(chars.flat_map(char::to_lowercase))
                 .collect::<String>()
         })
-        .collect::<String>();
-    format!(
-        "//! App models — every `#[derive(Model)]` lives here.
-//!
-//! Adding a struct here makes it admin-visible automatically: the
-//! macro populates the `inventory` registry that
-//! `rustango::admin::router(pool)` walks. No per-model registration
-//! step.
-
-use rustango::sql::Auto;
-use rustango::Model;
-
-#[derive(Model, Debug, Clone)]
-#[rustango(table = \"{app_name}\", display = \"name\")]
-pub struct {struct_name} {{
-    #[rustango(primary_key)]
-    pub id: Auto<i64>,
-    #[rustango(max_length = 64)]
-    pub name: String,
-    pub active: bool,
-}}
-"
-    )
+        .collect::<String>()
 }
 
 /// Default `views.rs` body — placeholder handler.
@@ -437,26 +483,50 @@ pub fn api() -> Router<()> {
 }
 ";
 
-/// Default `tests.rs` body — integration test using `TestClient`.
-/// Run with `cargo test --lib`.
-const TESTS_TEMPLATE: &str = "//! App-level integration tests.
+/// Default `tests.rs` body — generated per-app so the inventory
+/// smoke test can reference the starter model's table by name.
+fn render_tests_template(singular_table: &str) -> String {
+    format!(
+        "//! App-level integration tests.
 //!
 //! Run with `cargo test`. Uses `rustango::test_client::TestClient` to
 //! exercise the app's router in-process — no network, no real socket.
 
 #[cfg(test)]
-mod tests {
+mod tests {{
     use super::urls::api;
 
     /// Smoke test — the empty router builds without panicking.
     /// Replace with real route assertions once you add `.route(...)`
     /// lines in `urls.rs`.
     #[tokio::test]
-    async fn router_builds() {
+    async fn router_builds() {{
         let _router = api();
-    }
+    }}
+
+    /// Smoke test — every `#[derive(Model)]` in `models.rs` registers
+    /// itself in `inventory` at link time. The auto-admin walks that
+    /// registry, so seeing your model here is the canonical
+    /// confirmation that the admin will pick it up.
+    ///
+    /// If you rename the starter model's `table = \"...\"`, update
+    /// the literal below.
+    #[test]
+    fn starter_model_registered_in_inventory() {{
+        use rustango::core::ModelEntry;
+        let tables: Vec<&'static str> = inventory::iter::<ModelEntry>
+            .into_iter()
+            .map(|e| e.schema.table)
+            .collect();
+        assert!(
+            tables.iter().any(|t| *t == \"{singular_table}\"),
+            \"`{singular_table}` missing from inventory; tables: {{tables:?}}\",
+        );
+    }}
+}}
+"
+    )
 }
-";
 
 /// Single-tenant `manage.rs` template — wires the standard
 /// `rustango::migrate::manage::run` dispatcher. Pass to
@@ -603,6 +673,99 @@ mod tests {
         // tests.rs is cfg-gated
         assert!(body.contains("#[cfg(test)]"));
         assert!(body.contains("mod tests;"));
+    }
+
+    #[test]
+    fn singularize_strips_trailing_s_only_for_long_words() {
+        assert_eq!(singularize("posts"), "post");
+        assert_eq!(singularize("comments"), "comment");
+        assert_eq!(singularize("users"), "user");
+        // Short words (< 5 chars) stay as-is to avoid mangling
+        // names like `cms` / `dms`.
+        assert_eq!(singularize("dms"), "dms");
+        // Words ending in `ss` / `us` / non-`s` are untouched.
+        assert_eq!(singularize("address"), "address");
+        assert_eq!(singularize("bus"), "bus");
+        assert_eq!(singularize("blog"), "blog");
+        assert_eq!(singularize("news"), "news");
+    }
+
+    #[test]
+    fn rendered_models_template_singularizes_app_name() {
+        let body = render_models_template("posts");
+        assert!(
+            body.contains("pub struct Post {"),
+            "expected singular `Post` struct, got: {body}"
+        );
+        assert!(
+            body.contains("table = \"post\""),
+            "expected singular table name, got: {body}"
+        );
+    }
+
+    #[test]
+    fn rendered_models_template_includes_admin_config_and_created_at() {
+        let body = render_models_template("blog");
+        assert!(
+            body.contains("admin("),
+            "expected admin(...) config block, got: {body}"
+        );
+        assert!(
+            body.contains("list_display = \"name, active, created_at\""),
+            "expected list_display, got: {body}"
+        );
+        assert!(
+            body.contains("created_at: chrono::DateTime<chrono::Utc>"),
+            "expected created_at field, got: {body}"
+        );
+        assert!(
+            body.contains("auto_now_add"),
+            "expected auto_now_add, got: {body}"
+        );
+    }
+
+    #[test]
+    fn rendered_tests_template_asserts_inventory_registration() {
+        let body = render_tests_template("post");
+        assert!(
+            body.contains("starter_model_registered_in_inventory"),
+            "expected inventory smoke test, got: {body}"
+        );
+        assert!(
+            body.contains("\"post\""),
+            "expected singular table literal in test, got: {body}"
+        );
+    }
+
+    #[test]
+    fn full_startapp_produces_singularized_polished_model() {
+        // End-to-end: invoke `startapp` against a temp project, read
+        // the materialized `models.rs` and `tests.rs`, assert the v0.28.2
+        // polish made it through (singularization, admin config, smoke
+        // test referencing the same singular table).
+        let root = fresh_root("polished_e2e");
+        let _ = startapp(
+            &root,
+            &StartAppOptions {
+                app_name: "posts".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let models =
+            std::fs::read_to_string(root.join("src").join("posts").join("models.rs")).unwrap();
+        assert!(models.contains("pub struct Post {"), "models: {models}");
+        assert!(models.contains("table = \"post\""), "models: {models}");
+        assert!(models.contains("admin("), "models: {models}");
+        assert!(models.contains("auto_now_add"), "models: {models}");
+        let tests =
+            std::fs::read_to_string(root.join("src").join("posts").join("tests.rs")).unwrap();
+        assert!(
+            tests.contains("starter_model_registered_in_inventory"),
+            "tests: {tests}"
+        );
+        assert!(tests.contains("\"post\""), "tests: {tests}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

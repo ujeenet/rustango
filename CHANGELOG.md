@@ -2,6 +2,56 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.28.3] — startapp scaffolder polish (#63)
+
+Patch release that flushes the `manage startapp` template through
+the lessons learned in v0.28.0–v0.28.2: scaffolded models now ship
+with an `admin(...)` config block, a `created_at` timestamp, a
+singularized struct name, and a smoke test that confirms the model
+registered itself in `inventory` (the canonical signal that the
+auto-admin will pick it up).
+
+### Changed
+
+- **Singularized starter model.** `manage startapp posts` now
+  generates `pub struct Post` on table `"post"` (was `Posts` /
+  `"posts"`). Conservative trailing-`s` strip on names of length
+  ≥ 5 — `comments → comment`, `users → user`, but `news` /
+  `address` / `bus` / short names stay untouched. The struct
+  identifier and the `table = "..."` literal are independent —
+  rename either freely to suit your domain.
+- **`admin(...)` config baked in.** The starter model now carries
+  `list_display = "name, active, created_at"`,
+  `search_fields = "name"`, `ordering = "-created_at"`. List view
+  is usable out of the box instead of dumping every column raw.
+- **`created_at: chrono::DateTime<chrono::Utc>` field with
+  `auto_now_add`.** Standard Django convention; pairs with the
+  default ordering above.
+- **Smoke test in `tests.rs`.** New `starter_model_registered_in_inventory`
+  test asserts the scaffolded model lands in `inventory::iter::<ModelEntry>` —
+  the canonical confirmation that the admin will pick it up. Joins
+  the existing `router_builds` test in the per-app `tests.rs`.
+- **Doc comments call out the `permissions = true` default.** The
+  `models.rs` header now mentions that codenames are auto-seeded
+  during `migrate`, so non-superusers see the model after a role
+  grant.
+
+### Tests
+
+- 4 new unit tests in `migrate::scaffold::tests` — singularization
+  rules; admin-config + `created_at` rendered into the model;
+  smoke test references the singularized table; full-pipeline
+  end-to-end verification reading materialized files back.
+
+### Out of scope (queued follow-ups)
+
+- Plural-aware singularization (e.g. `categories → category`,
+  `boxes → box`). Today's heuristic is intentionally conservative;
+  plural-engine territory belongs in a follow-up if anyone hits it.
+- Multi-model starter (`pub struct Post` + `pub struct Comment`).
+  Today's template ships one starter; a `--with-related` flag
+  could generate FK pairs.
+
 ## [0.28.2] — password reset UI + CLI ergonomics (#77)
 
 Patch release filling in the gaps around password rotation —

@@ -129,6 +129,12 @@ You should see the scaffolded landing page (`src/views.rs::index`) at `/` confir
 cargo run -- startapp blog     # scaffolds src/blog/
 ```
 
+Since v0.28.3 the scaffolder ships a singularized starter model
+(`startapp posts` → `pub struct Post` on table `"post"`), an
+`admin(...)` config block, a `created_at` timestamp, and a smoke
+test that asserts the model registered itself in `inventory`.
+Rename the struct or table literal freely once it doesn't fit.
+
 Edit `src/blog/models.rs`:
 
 ```rust

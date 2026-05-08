@@ -46,6 +46,14 @@ quotes from a real, compiling, test-covered file.
 
 **Recipe**: this very project was scaffolded by hand to match the layout `cargo rustango new --template tenant` produces. v0.16's unified `Cli::new()` dispatcher means there is no `src/bin/manage.rs` and no second binary — `cargo run` is `runserver`, `cargo run -- <verb>` is everything else.
 
+**Polished output (v0.28.3, #63)**: `manage startapp <name>` ships:
+
+- A **singularized starter model** — `startapp posts` produces `pub struct Post` on table `"post"`. Conservative trailing-`s` strip on names of length ≥ 5 (`comments → comment`, `users → user`); `news` / `address` / `bus` / short names stay untouched. Rename the struct or table literal freely.
+- An `admin(...)` config block (`list_display = "name, active, created_at"`, `search_fields = "name"`, `ordering = "-created_at"`) so the list view is usable out of the box.
+- A `created_at: DateTime<Utc>` field with `#[rustango(auto_now_add)]` — Django convention.
+- A `starter_model_registered_in_inventory` smoke test in `tests.rs` asserting the model lands in `inventory::iter::<ModelEntry>` (the canonical signal that the auto-admin will pick it up).
+- Doc comments calling out that `permissions = true` is the default and the four CRUD codenames (`{table}.add`, `.change`, `.delete`, `.view`) are auto-seeded by `auto_create_permissions` during the next `migrate`.
+
 ```text
 cookbook_blog/
 ├── Cargo.toml                  -- one [package], one binary
