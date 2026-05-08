@@ -79,6 +79,10 @@ pub(crate) fn chrome_context(state: &AppState, active_table: Option<&str>) -> se
         // operator can't accidentally mutate tenant data while
         // forgetting they're impersonating.
         "impersonated_by_operator_id": state.config.impersonated_by,
+        // v0.27.9 (#59) — URL prefix the admin Router is mounted
+        // under. Templates use `{{ admin_prefix }}/__audit` etc.
+        // so hrefs resolve correctly regardless of mount path.
+        "admin_prefix": &state.config.admin_prefix,
     })
 }
 

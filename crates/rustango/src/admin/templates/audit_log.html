@@ -3,7 +3,7 @@
 {% block body %}
 <nav class="breadcrumb" aria-label="breadcrumb">
   <ol>
-    <li><a href="/__admin/">{{ admin_title }}</a></li>
+    <li><a href="{{ admin_prefix }}/">{{ admin_title }}</a></li>
     <li><strong>Activity</strong></li>
   </ol>
 </nav>
@@ -13,11 +13,11 @@
 {% if active_filters | length > 0 %}
 <p class="active-filters">filtered by:
   {% for f in active_filters %}<code>{{ f.key }}={{ f.value }}</code> {% endfor %}
-  &middot; <a href="/__audit">clear</a>
+  &middot; <a href="{{ admin_prefix }}/__audit">clear</a>
 </p>
 {% endif %}
 
-<form method="post" action="/__audit/cleanup" class="audit-cleanup" onsubmit="return confirm('Apply audit cleanup? This is irreversible.');">
+<form method="post" action="{{ admin_prefix }}/__audit/cleanup" class="audit-cleanup" onsubmit="return confirm('Apply audit cleanup? This is irreversible.');">
   <label>
     <input type="radio" name="mode" value="older_than" checked>
     Older than
@@ -61,13 +61,13 @@
 {% if last_page > 1 %}
 <p class="pager">
   {% if page > 1 %}
-    <a href="/__audit?page={{ page - 1 }}{{ pager_extras | safe }}">&larr; prev</a>
+    <a href="{{ admin_prefix }}/__audit?page={{ page - 1 }}{{ pager_extras | safe }}">&larr; prev</a>
   {% else %}
     <span class="muted">&larr; prev</span>
   {% endif %}
   &middot; Page {{ page }} of {{ last_page }} &middot;
   {% if page < last_page %}
-    <a href="/__audit?page={{ page + 1 }}{{ pager_extras | safe }}">next &rarr;</a>
+    <a href="{{ admin_prefix }}/__audit?page={{ page + 1 }}{{ pager_extras | safe }}">next &rarr;</a>
   {% else %}
     <span class="muted">next &rarr;</span>
   {% endif %}

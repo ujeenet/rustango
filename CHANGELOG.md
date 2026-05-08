@@ -2,6 +2,55 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.27.9] — admin_prefix template variable (#59)
+
+### Fixed
+
+- **Tenant admin sidebar / audit / detail links no longer break
+  under `/__admin/{*rest}` mount.** Pre-fix, several templates
+  hardcoded paths that assumed the admin lived at `/__admin`
+  but emitted bare `/__audit` (no prefix) — clicking "Activity"
+  on the tenant sidebar 404'd because the actual route lives
+  at `/__admin/__audit` from the browser's perspective. Same
+  bug for `audit_log.html` clear / pager links and the "View
+  full history" link in `detail.html`.
+
+### Added
+
+- **`admin_prefix` template variable** threaded into every
+  rendered page via `chrome_context`. Defaults to `/__admin`
+  (matching the existing convention) so apps that already
+  mount the admin via `nest("/__admin", admin::router(pool))`
+  see no behavior change. Apps mounting under a different path
+  (e.g. `nest("/admin", admin::router(pool))`) override via:
+  ```rust
+  let app = admin::Builder::new(pool).admin_prefix("/admin").build();
+  ```
+- Setter strips trailing slash; empty string supported for the
+  "admin is the root router" case.
+
+### Templates swept
+
+22 hardcoded `href="/__admin/..."`, `action="/__admin/..."`,
+`href="/__audit..."`, `action="/__audit/cleanup"` references
+across `_sidebar.html`, `index.html`, `list.html`,
+`audit_log.html`, `detail.html`, `form.html`, `base.html`
+all rewritten to `{{ admin_prefix }}/...`.
+
+### Verified
+
+- `cargo build -p rustango --features tenancy` — clean
+- `cargo test -p rustango --features tenancy --lib` —
+  **1090/1090 pass** (3 new tests: default, trailing-slash
+  trim, empty-string-for-root).
+- `grep -rn 'href="/__\|action="/__' crates/rustango/src/admin/templates/`
+  returns zero hardcoded admin paths.
+
+This unblocks lane A's larger Step 4 (#74 — fully configurable
+URL prefixes via `[routes]` settings). The plumbing is now in
+place; #74 just adds env / config-file plumbing on top of the
+existing `admin_prefix` setter.
+
 ## [0.27.8] — operator-as-superuser tenant admin impersonation (#78)
 
 ### Added

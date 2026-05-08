@@ -3,8 +3,8 @@
 {% block body %}
 <nav class="breadcrumb" aria-label="breadcrumb">
   <ol>
-    <li><a href="/__admin/">{{ admin_title }}</a></li>
-    <li><a href="/__admin/{{ model.table }}">{{ model.name }}</a></li>
+    <li><a href="{{ admin_prefix }}/">{{ admin_title }}</a></li>
+    <li><a href="{{ admin_prefix }}/{{ model.table }}">{{ model.name }}</a></li>
     <li><strong>#{{ pk }}</strong></li>
   </ol>
 </nav>
@@ -19,8 +19,8 @@
 <p><em>This table is read-only.</em></p>
 {% else %}
 <p>
-  <a href="/__admin/{{ model.table }}/{{ pk }}/edit">Edit</a> &middot;
-  <form method="post" action="/__admin/{{ model.table }}/{{ pk }}/delete" style="display:inline" onsubmit="return confirm('Delete this row?')">
+  <a href="{{ admin_prefix }}/{{ model.table }}/{{ pk }}/edit">Edit</a> &middot;
+  <form method="post" action="{{ admin_prefix }}/{{ model.table }}/{{ pk }}/delete" style="display:inline" onsubmit="return confirm('Delete this row?')">
     <button type="submit">Delete</button>
   </form>
 </p>
@@ -28,7 +28,7 @@
 {% if audit_entries %}
 <section class="audit-trail">
   <h2>Audit trail{% if audit_entries | length > 0 %}
-    <small style="font-weight: normal; text-transform: none; letter-spacing: 0;"> &middot; <a href="/__audit?entity_table={{ model.table }}&entity_pk={{ pk }}">View full history</a></small>
+    <small style="font-weight: normal; text-transform: none; letter-spacing: 0;"> &middot; <a href="{{ admin_prefix }}/__audit?entity_table={{ model.table }}&entity_pk={{ pk }}">View full history</a></small>
   {% endif %}</h2>
   {% if audit_entries | length == 0 %}
     <p><em>No audit history for this row.</em></p>

@@ -116,14 +116,41 @@ pub(crate) struct Config {
     /// tags audit-log entries. `None` for regular tenant-user
     /// logins.
     pub(crate) impersonated_by: Option<i64>,
+    /// v0.27.9 (#59) — URL prefix the admin Router is mounted
+    /// under. Threaded into every template as `{{ admin_prefix }}`
+    /// so hrefs / form actions resolve correctly under any
+    /// mount path. Defaults to `/__admin` (the convention every
+    /// rustango-tenancy deployment uses); users mounting via
+    /// `nest("/admin", admin::router(pool))` override via
+    /// `Builder::admin_prefix("/admin")`. Empty string means
+    /// "the admin router is the root" — supported but uncommon.
+    pub(crate) admin_prefix: String,
 }
 
 impl Builder {
     pub fn new(pool: PgPool) -> Self {
-        Self {
-            pool,
-            config: Config::default(),
-        }
+        let mut config = Config::default();
+        // v0.27.9 (#59) — default admin mount prefix matches the
+        // convention every rustango-tenancy deployment uses.
+        // Users who mount under a different path (e.g.
+        // `nest("/admin", admin::router(pool))`) override via
+        // `Builder::admin_prefix(...)`.
+        config.admin_prefix = "/__admin".to_owned();
+        Self { pool, config }
+    }
+
+    /// URL prefix the admin Router is mounted under (#59,
+    /// v0.27.9). Threaded into every template as
+    /// `{{ admin_prefix }}` so hrefs / form actions resolve
+    /// correctly under any mount path. Default: `/__admin`.
+    /// Pass an empty string when the admin is the root router.
+    /// Trailing slash is stripped.
+    #[must_use]
+    pub fn admin_prefix(mut self, prefix: impl Into<String>) -> Self {
+        let s: String = prefix.into();
+        let trimmed = s.trim_end_matches('/').to_owned();
+        self.config.admin_prefix = trimmed;
+        self
     }
 
     /// Restrict the admin to these tables. Models not in the list are
@@ -457,5 +484,32 @@ mod scope_filter_tests {
             .expect("connect_lazy never fails");
         let builder = Builder::new(pool).tenant_mode();
         assert!(builder.config.tenant_mode);
+    }
+
+    // v0.27.9 (#59) — admin_prefix template variable regression
+    // guard. Default must be `/__admin` (the convention used by
+    // every rustango-tenancy deployment); setter must trim trailing
+    // slashes; empty string must be supported for "admin is the
+    // root router" mounts.
+
+    #[tokio::test]
+    async fn admin_prefix_defaults_to_admin_underscore() {
+        let pool = PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused").unwrap();
+        let builder = Builder::new(pool);
+        assert_eq!(builder.config.admin_prefix, "/__admin");
+    }
+
+    #[tokio::test]
+    async fn admin_prefix_setter_strips_trailing_slash() {
+        let pool = PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused").unwrap();
+        let b = Builder::new(pool).admin_prefix("/admin/");
+        assert_eq!(b.config.admin_prefix, "/admin");
+    }
+
+    #[tokio::test]
+    async fn admin_prefix_supports_empty_for_root_mount() {
+        let pool = PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused").unwrap();
+        let b = Builder::new(pool).admin_prefix("");
+        assert_eq!(b.config.admin_prefix, "");
     }
 }

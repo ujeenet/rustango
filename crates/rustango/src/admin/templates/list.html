@@ -3,7 +3,7 @@
 {% block body %}
 <nav class="breadcrumb" aria-label="breadcrumb">
   <ol>
-    <li><a href="/__admin/">{{ admin_title }}</a></li>
+    <li><a href="{{ admin_prefix }}/">{{ admin_title }}</a></li>
     <li><strong>{{ model.name }}</strong></li>
   </ol>
 </nav>
@@ -14,12 +14,12 @@
 {% if read_only %}
   &nbsp;&middot;&nbsp; <em>read-only</em>
 {% else %}
-  &nbsp;&middot;&nbsp; <a href="/__admin/{{ model.table }}/new">+ new {{ model.name }}</a>
+  &nbsp;&middot;&nbsp; <a href="{{ admin_prefix }}/{{ model.table }}/new">+ new {{ model.name }}</a>
 {% endif %}
 </p>
 
 {% if has_searchable %}
-<form method="get" action="/__admin/{{ model.table }}" class="search">
+<form method="get" action="{{ admin_prefix }}/{{ model.table }}" class="search">
   <input type="search" name="q" value="{{ q }}" placeholder="Search&hellip;">
   <button type="submit">Go</button>
   {% for f in active_filters %}
@@ -72,7 +72,7 @@
         <td class="checkbox-col">{% if row.pk %}<input type="checkbox" name="_selected" value="{{ row.pk }}">{% endif %}</td>
         {% endif %}
         {% for cell in row.cells %}<td>{{ cell | safe }}</td>{% endfor %}
-        <td>{% if row.pk %}<a href="/__admin/{{ model.table }}/{{ row.pk }}">View</a>{% endif %}</td>
+        <td>{% if row.pk %}<a href="{{ admin_prefix }}/{{ model.table }}/{{ row.pk }}">View</a>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>
@@ -83,13 +83,13 @@
 {% if last_page > 1 %}
 <p class="pager">
   {% if page > 1 %}
-    <a href="/__admin/{{ model.table }}?page={{ page - 1 }}{{ pager_suffix | safe }}">&larr; prev</a>
+    <a href="{{ admin_prefix }}/{{ model.table }}?page={{ page - 1 }}{{ pager_suffix | safe }}">&larr; prev</a>
   {% else %}
     <span class="muted">&larr; prev</span>
   {% endif %}
   &middot; Page {{ page }} of {{ last_page }} &middot;
   {% if page < last_page %}
-    <a href="/__admin/{{ model.table }}?page={{ page + 1 }}{{ pager_suffix | safe }}">next &rarr;</a>
+    <a href="{{ admin_prefix }}/{{ model.table }}?page={{ page + 1 }}{{ pager_suffix | safe }}">next &rarr;</a>
   {% else %}
     <span class="muted">next &rarr;</span>
   {% endif %}

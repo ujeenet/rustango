@@ -2,14 +2,14 @@
   {% if brand_logo_url %}<img class="brand-logo" src="{{ brand_logo_url | safe }}" alt="">{% endif %}
   <h2>{{ brand_name | default(value="Rustango Admin") }}</h2>
   {% if brand_tagline %}<p class="subtitle">{{ brand_tagline }}</p>{% endif %}
-  <p><a href="/__admin/" class="{% if active_table is undefined or active_table == '' %}active{% endif %}">Home</a></p>
-  <p><a href="/__audit" class="{% if active_table == '__audit' %}active{% endif %}">Activity</a></p>
+  <p><a href="{{ admin_prefix }}/" class="{% if active_table is undefined or active_table == '' %}active{% endif %}">Home</a></p>
+  <p><a href="{{ admin_prefix }}/__audit" class="{% if active_table == '__audit' %}active{% endif %}">Activity</a></p>
   {% if sidebar_groups %}
     {% for group in sidebar_groups %}
     <h3>{{ group.app }}</h3>
     <ul>
       {% for m in group.models %}
-      <li><a href="/__admin/{{ m.table }}"{% if m.active %} class="active"{% endif %}>{{ m.name }}</a></li>
+      <li><a href="{{ admin_prefix }}/{{ m.table }}"{% if m.active %} class="active"{% endif %}>{{ m.name }}</a></li>
       {% endfor %}
     </ul>
     {% endfor %}
