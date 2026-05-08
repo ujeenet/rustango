@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustango::cache::{
-    get_json, get_or_set, set_json, BoxedCache, Cache, CacheError, InMemoryCache, NullCache,
+    get_json, get_or_set, set_json, BoxedCache, Cache, InMemoryCache, NullCache,
 };
 
 // ------------------------------------------------------------------ NullCache

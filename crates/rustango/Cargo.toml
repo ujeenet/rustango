@@ -345,8 +345,18 @@ dotenvy        = { workspace = true }
 tempfile       = "3"
 
 # All example crates removed. Single-file examples are auto-detected
-# by Cargo; multi-file or required-features examples used to be
-# declared here. Re-add as needed.
+# by Cargo; multi-file or required-features examples are declared
+# here.
+
+# Multi-tenant blog demo (operator console + tenant admin + viewsets).
+# Auto-discovered by Cargo because it lives under `examples/blog_demo/`
+# with a `main.rs`, but its imports (rustango::tenancy, ::extractors,
+# #[viewset(...)]) require the `tenancy` feature — without this gate,
+# bare `cargo test` would compile it under default features and fail.
+[[example]]
+name              = "blog_demo"
+path              = "examples/blog_demo/main.rs"
+required-features = ["tenancy"]
 
 # SQLite ORM demo — single-file example, gated on the `sqlite` feature
 # so default `cargo build --examples` doesn't try to compile it.

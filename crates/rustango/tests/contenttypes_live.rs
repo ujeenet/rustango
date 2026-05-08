@@ -526,7 +526,6 @@ fn generic_fk_relation_is_emitted_on_model_schema() {
 #[tokio::test]
 async fn render_generic_fk_link_resolves_via_content_type() {
     use rustango::contenttypes::{render_generic_fk_link, GenericForeignKey};
-    use rustango::core::Model as _;
     let _g = ct_lock().lock().await;
     let Some(pool) = fresh_pool().await else {
         eprintln!("DATABASE_URL unset — skipping");

@@ -1191,7 +1191,6 @@ fn bind_sql_value_inline<'a>(
 #[cfg(test)]
 mod model_form_tests {
     use super::*;
-    use crate::core::Model as _;
     use crate::sql::Auto;
 
     #[derive(crate::Model, Debug)]

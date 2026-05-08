@@ -156,6 +156,7 @@ impl AppBuilder {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "sqlite")]
     use super::*;
 
     #[cfg(feature = "sqlite")]

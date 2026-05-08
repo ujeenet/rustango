@@ -5147,7 +5147,9 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
             /// Build an `axum::Router` with the six standard REST endpoints
             /// for this ViewSet, mounted at `prefix`.
             pub fn router(prefix: &str, pool: ::rustango::sql::sqlx::PgPool) -> ::axum::Router {
-                ::rustango::viewset::ViewSet::for_model(#model_path::SCHEMA)
+                ::rustango::viewset::ViewSet::for_model(
+                    <#model_path as ::rustango::core::Model>::SCHEMA
+                )
                     #fields_call
                     #filter_fields_call
                     #search_fields_call
