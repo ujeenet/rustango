@@ -2,6 +2,31 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.27.5] — fix tenant login page blank screen (regression in 0.27.3)
+
+### Fixed
+
+- **Tenant admin login page rendered as a blank body after 0.27.3**.
+  The v0.27.3 `tenant_login.html` rewrite (#71) added
+  `{% include "_theme_tokens.html" %}`, but the partial wasn't
+  registered in `TenantAdminBuilder::with_session`'s Tera registry
+  (only `tenant_login.html` itself was). Tera's `render` returned
+  an `Err`, which `login_form` swallowed via
+  `unwrap_or_default()` → empty `Html("")` → blank page at
+  `http://<tenant>:8080/__login`. Two-part fix:
+  - Register `_theme_tokens.html` alongside `tenant_login.html`
+    in the tenant Tera registry.
+  - Replace the `unwrap_or_default()` with a `tracing::error!` +
+    a fallback HTML body that points the operator at the server
+    logs, so future template bugs surface instead of silently
+    dropping the render.
+
+### Verified
+
+- `cargo build -p rustango --features tenancy` — clean
+- `cargo test -p rustango --features tenancy --lib` —
+  **1077/1077 pass**
+
 ## [0.27.4] — `migrate --fake` ledger drift recovery
 
 ### Added

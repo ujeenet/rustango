@@ -175,6 +175,18 @@ impl TenantAdminBuilder {
     #[must_use]
     pub fn with_session(mut self, secret: tenant_console::SessionSecret) -> Self {
         let mut tera = Tera::default();
+        // v0.27.5 — `tenant_login.html` includes `_theme_tokens.html`
+        // (added in 0.27.3 #71 for the brand-on-login page). The
+        // include must be registered in the same Tera registry or
+        // Tera fails to resolve it and `render` returns an error,
+        // which `login_form` swallows via `unwrap_or_default()` —
+        // the operator sees a blank page. Adding the partial here
+        // is the minimal fix.
+        tera.add_raw_template(
+            "_theme_tokens.html",
+            include_str!("../styles/theme_tokens.html"),
+        )
+        .expect("_theme_tokens.html parses");
         tera.add_raw_template(
             "tenant_login.html",
             include_str!("templates/tenant_login.html"),
@@ -594,11 +606,24 @@ fn login_form(
     ctx.insert("theme_mode", theme_mode);
     let brand_css = super::branding::build_brand_css(org);
     ctx.insert("brand_css", &brand_css);
-    axum::response::Html(
-        cfg.tera
-            .render("tenant_login.html", &ctx)
-            .unwrap_or_default(),
-    )
+    // v0.27.5 — log render errors instead of silently rendering an
+    // empty body. The previous `unwrap_or_default()` hid a real
+    // template-include resolution bug from the operator.
+    axum::response::Html(match cfg.tera.render("tenant_login.html", &ctx) {
+        Ok(html) => html,
+        Err(e) => {
+            tracing::error!(
+                target: "crate::tenancy::admin",
+                slug = %org.slug,
+                error = %e,
+                "tenant_login.html render failed",
+            );
+            "<!doctype html><html><body><h1>Login page unavailable</h1>\
+             <p>The tenant login template failed to render. Check the \
+             server logs for the underlying Tera error.</p></body></html>"
+                .to_owned()
+        }
+    })
 }
 
 #[derive(serde::Deserialize)]
