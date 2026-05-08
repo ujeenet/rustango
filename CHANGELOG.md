@@ -2,6 +2,42 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.27.4] — `migrate --fake` ledger drift recovery
+
+### Added
+
+- **`manage migrate --fake <name>`** verb (#64) — recovery path
+  for the "tables exist but the ledger row is missing" drift
+  that surfaces as `relation "X" already exists` (Postgres
+  `42P07`) on the next `migrate` attempt. Common after a manual
+  setup, an interrupted earlier migrate, or a schema dump that
+  brought in tables but not the `__rustango_migrations__` ledger.
+  ```sh
+  cargo run -- migrate --fake 0001_rustango_registry_initial
+  cargo run -- migrate --fake 0001_initial --fake 0002_initial   # multiple
+  ```
+  Validates each name against the migration directory before
+  the row lands so typos can't be backfilled. Idempotent
+  (`ON CONFLICT (name) DO NOTHING`) — safe to re-run. Operates
+  on the registry ledger; `migrate --fake` followed by `migrate`
+  picks up actually-pending migrations next.
+
+### Note
+
+- **Friendly missing-table page (#66) was already shipped**
+  pre-0.27 in `admin/errors.rs::AdminError::TableMissing`. Triage
+  for v0.27.2 incorrectly listed it as pending; verified during
+  this slice that the path is wired (every admin handler returns
+  `Result<_, AdminError>`, and `From<sqlx::Error>` /
+  `From<ExecError>` detect Postgres `42P01` and convert to
+  `TableMissing` with a friendly HTML response).
+
+### Verified
+
+- `cargo build -p rustango --features tenancy` — clean
+- `cargo test -p rustango --features tenancy --lib` —
+  **1077/1077 pass**
+
 ## [0.27.3] — tenant login branding + table-name macro guard
 
 ### Fixed

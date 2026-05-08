@@ -294,6 +294,14 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
+        "  migrate --fake <name>  Insert <name> into registry ledger WITHOUT running its SQL"
+    )?;
+    writeln!(
+        w,
+        "                         (recovery: \"relation X already exists\" 42P07 errors)."
+    )?;
+    writeln!(
+        w,
         "  migrate-registry     Apply registry-scoped migrations only."
     )?;
     writeln!(

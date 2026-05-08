@@ -83,10 +83,26 @@ pub(super) async fn migrate_all_cmd<W: Write + Send>(
     let mut help = false;
     let mut dry_run = false;
     let mut target: Option<&str> = None;
+    // v0.27.4 (#64) — `--fake <name>` backfills a ledger row
+    // without running the migration SQL. Recovery path for the
+    // "tables exist but ledger doesn't know" drift that surfaces
+    // as `relation "X" already exists` (Postgres 42P07) on the
+    // next `migrate` attempt. Multiple `--fake` flags accumulate
+    // so operators can repair a stretch of drifted rows in one
+    // command.
+    let mut fakes: Vec<String> = Vec::new();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--help" | "-h" => help = true,
             "--dry-run" => dry_run = true,
+            "--fake" => {
+                let name = iter.next().ok_or_else(|| {
+                    TenancyError::Migrate(rustango::migrate::MigrateError::Validation(
+                        "--fake requires a migration name (e.g. `--fake 0001_rustango_registry_initial`)".into(),
+                    ))
+                })?;
+                fakes.push(name.clone());
+            }
             other if other.starts_with('-') => {
                 return Err(TenancyError::Migrate(
                     rustango::migrate::MigrateError::Validation(format!(
@@ -112,10 +128,16 @@ pub(super) async fn migrate_all_cmd<W: Write + Send>(
             "migrate                         apply registry-scoped + every tenant's pending migrations\n\
              migrate <target>                forward or back to <target> (registry-scoped only — use migrate-tenants for tenants)\n\
              migrate --dry-run               preview SQL for registry-scoped pending migrations\n\
+             migrate --fake <name>           insert <name> into the registry ledger WITHOUT running its SQL\n\
+                                             (recovery path when tables exist but the ledger row is missing — fixes\n\
+                                             \"relation X already exists\" 42P07 errors after a manual setup)\n\
              migrate-registry                apply registry-scoped pending migrations only\n\
              migrate-tenants                 apply tenant-scoped pending migrations across active orgs"
         )?;
         return Ok(());
+    }
+    if !fakes.is_empty() {
+        return fake_apply_to_registry(pools, dir, &fakes, w).await;
     }
     if target.is_some() || dry_run {
         // Targeted / dry-run mode is registry-only — tenant-scoped
@@ -172,5 +194,70 @@ pub(super) fn init_tenancy_cmd_with<W: Write>(
     if !report.written.is_empty() {
         writeln!(w, "next: run `migrate` to apply them.")?;
     }
+    Ok(())
+}
+
+// ---------- migrate --fake ---------- (#64)
+
+/// Backfill the registry ledger with `names` without running any SQL.
+/// Recovery path for the "tables exist but the ledger row is missing"
+/// drift that surfaces as `relation "X" already exists` (Postgres
+/// 42P07) on the next `migrate` attempt — common when the registry
+/// DB was set up out-of-band, the ledger table was dropped, or a
+/// previous migration partially succeeded.
+///
+/// Each `name` is validated against the migration directory before
+/// the row lands so operators can't backfill a typo. The ledger
+/// schema is created if missing (same shape as `ensure_ledger`).
+async fn fake_apply_to_registry<W: Write>(
+    pools: &TenantPools,
+    dir: &Path,
+    names: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError> {
+    // Discover what's on disk to validate the names.
+    let migrations = rustango::migrate::file::list_dir(dir).map_err(TenancyError::Migrate)?;
+    let on_disk: std::collections::HashSet<&str> =
+        migrations.iter().map(|m| m.name.as_str()).collect();
+    for name in names {
+        if !on_disk.contains(name.as_str()) {
+            return Err(TenancyError::Migrate(
+                rustango::migrate::MigrateError::Validation(format!(
+                    "--fake: no migration named `{name}` in {} \
+                     (run `showmigrations` to list available names)",
+                    dir.display()
+                )),
+            ));
+        }
+    }
+
+    // Ensure the ledger table exists, then INSERT each row idempotently.
+    let pool = pools.registry();
+    rustango::migrate::ensure_ledger(pool)
+        .await
+        .map_err(TenancyError::Migrate)?;
+    let sql = format!(
+        "INSERT INTO {} (name) VALUES ($1) ON CONFLICT (name) DO NOTHING",
+        rustango::migrate::LEDGER_TABLE
+    );
+    for name in names {
+        let result = rustango::sql::sqlx::query(&sql)
+            .bind(name)
+            .execute(pool)
+            .await
+            .map_err(|e| {
+                TenancyError::Migrate(rustango::migrate::MigrateError::Driver(e.into()))
+            })?;
+        if result.rows_affected() == 0 {
+            writeln!(w, "  · {name} already in ledger — left untouched")?;
+        } else {
+            writeln!(w, "  + faked {name} (no SQL run; ledger row inserted)")?;
+        }
+    }
+    writeln!(
+        w,
+        "registry: {} fake row(s) processed. Run `migrate` to apply any actually-pending migrations.",
+        names.len()
+    )?;
     Ok(())
 }
