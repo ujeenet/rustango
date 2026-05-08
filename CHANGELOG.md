@@ -2,6 +2,124 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.28.2] — password reset UI + CLI ergonomics (#77)
+
+Patch release filling in the gaps around password rotation —
+self-serve change-password page on the tenant admin, two new
+CLI verbs that verify the current password, and a `--generate`
+flag on every password verb.
+
+### Added
+
+- **Self-serve `/__change-password` page on the tenant admin.**
+  GET renders a form (current pw / new pw / confirm); POST
+  verifies the current password against `rustango_users.password_hash`
+  and updates it. Anonymous visitors are bounced to login.
+  URL is configurable via `RouteConfig::change_password_url`
+  (default `/__change-password`; `RouteConfig::friendly()`
+  serves it at `/change-password`). The admin sidebar now
+  renders a "Change password" link when the URL is configured.
+- **`change-password <slug> <username>` CLI verb.** Symmetric
+  counterpart to `reset-password` for the case where the user
+  remembers their current password. Verifies current first,
+  then rotates. Reads `--current` and `--password` interactively
+  when omitted.
+- **`change-operator-password <username>` CLI verb.** Same
+  flow for operators.
+- **`--generate` flag on every password verb.** Available on
+  `create-operator`, `create-user`, `reset-password`,
+  `reset-operator-password`, `change-password`,
+  `change-operator-password`. Generates a 20-character
+  random password from a 58-char unambiguous alphabet
+  (no `0/O`, `1/l/I`), hashes it, and prints it to stdout
+  exactly once. Mutually exclusive with `--password`.
+- **`tenancy::password::generate(length)`** — public helper
+  used by the CLI. `OsRng`-backed; returns `String`.
+
+### Changed
+
+- `RouteConfig::default()` now also sets
+  `change_password_url = "/__change-password"`.
+  `RouteConfig::friendly()` sets `/change-password`.
+- `admin::Builder::change_password_url(url)` setter — surfaces
+  the link in the standalone-admin sidebar. Tenant admin
+  Builder threads it through automatically from `RouteConfig`.
+
+### Tests
+
+- 3 new unit tests in `tenancy::password` covering the
+  generator (length, charset, hash round-trip, uniqueness).
+- 3 live tests in `tests/manage_change_password_live.rs`
+  for the CLI verbs (round-trip, --generate prints + verifies,
+  mutually-exclusive flags rejected).
+- 4 live tests in `tests/admin_change_password_ui_live.rs`
+  for the UI (anonymous → 303 to login; authenticated GET
+  renders form; POST with correct current rotates the hash;
+  POST with wrong current shows error and leaves hash
+  unchanged).
+
+### Out of scope (queued follow-ups)
+
+- `password_changed_at` cookie invalidation — sessions
+  issued before a password change currently remain valid
+  until they expire. Schema change required (add column to
+  `rustango_users` and `rustango_operators`, bake `iat`
+  comparison into `validate_session`); deferred to v0.29.
+- Operator-driven password reset on a tenant user via the
+  operator console UI — the `reset-password` CLI verb
+  already covers this path; UI sugar is a follow-up.
+- Password strength enforcement at the UI / CLI layer
+  (the `passwords::strength_score` helper exists but isn't
+  wired into either flow yet).
+
+## [0.28.1] — users/roles/perms admin surface (#76)
+
+Patch release fleshing out the tenant admin coverage of the
+permission tables (auto-seeded by `ensure_permission_tables`) and
+adding a roles + effective-permissions panel on the
+`rustango_users` detail page.
+
+### Added
+
+- **Admin metadata on the permission junction models.** `Role`
+  already had `admin(...)` config; `RolePermission`, `UserRole`,
+  and `UserPermission` now do too. Their list pages render
+  `role_id, codename`, `user_id, role_id`, and
+  `user_id, codename, granted` respectively, with sensible
+  ordering. No schema impact — pure metadata.
+- **Roles & permissions panel on the user detail page.** Visiting
+  `/{admin_url}/rustango_users/{id}` now renders a side section
+  showing the user's assigned roles (linked to each role's
+  detail page) and their effective codenames (union of role
+  grants + direct grants minus explicit denials). Best-effort:
+  if the permission tables haven't been seeded the panel is
+  hidden, mirroring the audit-trail panel's posture. Quick
+  links to the four manage-able junction tables sit beneath
+  the panel.
+
+### Tests
+
+- `tenancy::permissions::admin_config_tests` — two unit tests
+  asserting the four permission models carry `admin(...)`
+  config and stay in `ModelScope::Tenant` (so they remain
+  visible in tenant-mode admins).
+- `tests/admin_user_roles_panel_live.rs` — end-to-end live
+  test that seeds a user with one role (granting `post.add`
+  and `post.change`), one direct grant (`comment.add`), and
+  one explicit denial (`post.change`); GETs the user detail
+  page; asserts the role + grants render and that the denial
+  suppresses the role-granted codename.
+
+### Out of scope (queued follow-ups)
+
+- Inline assign/revoke buttons on the User detail panel
+  (currently read-only — manage via the dedicated junction
+  table admin pages).
+- Surfacing the `rustango_permissions` catalog as an admin
+  page (it has no Rust `Model` today; adding one would diff
+  against existing tenants' bootstrap snapshots — handle as
+  a v0.29 schema-aware change).
+
 ## [0.28.0] — configurable tenant URL prefixes via `RouteConfig` (#74)
 
 Minor version bump signals the new public

@@ -21,12 +21,14 @@ pub(super) async fn create_operator_cmd<W: Write + Send>(
     let mut iter = args.iter();
     let username_arg = iter.next().cloned();
     let mut password: Option<String> = None;
+    let mut generate = false;
     while let Some(flag) = iter.next() {
         match flag.as_str() {
             "--password" => password = Some(next_value(&mut iter, "--password")?),
+            "--generate" => generate = true,
             "--help" | "-h" => {
                 return Err(TenancyError::Validation(
-                    "create-operator <username> --password <p>".into(),
+                    "create-operator <username> [--password <p> | --generate]".into(),
                 ));
             }
             other => {
@@ -35,6 +37,11 @@ pub(super) async fn create_operator_cmd<W: Write + Send>(
                 )));
             }
         }
+    }
+    if generate && password.is_some() {
+        return Err(TenancyError::Validation(
+            "create-operator: --generate and --password are mutually exclusive".into(),
+        ));
     }
     // Prompt for missing values when stdin is a TTY; programmatic
     // callers that pass `None` on a non-interactive stream still get
@@ -49,13 +56,19 @@ pub(super) async fn create_operator_cmd<W: Write + Send>(
                 )
             })?,
     };
-    let plain = match password {
-        Some(p) => p,
-        None => manage_interactive::ask_password("Password: ")
-            .map_err(TenancyError::Io)?
-            .ok_or_else(|| {
-                TenancyError::Validation("create-operator requires --password".into())
-            })?,
+    let (plain, generated) = if generate {
+        let p = crate::tenancy::password::generate(20);
+        (p, true)
+    } else {
+        let p = match password {
+            Some(p) => p,
+            None => manage_interactive::ask_password("Password: ")
+                .map_err(TenancyError::Io)?
+                .ok_or_else(|| {
+                    TenancyError::Validation("create-operator requires --password".into())
+                })?,
+        };
+        (p, false)
     };
 
     // Reject duplicate username up front.
@@ -78,7 +91,13 @@ pub(super) async fn create_operator_cmd<W: Write + Send>(
     };
     op.insert(pools.registry()).await?;
     let id = op.id.get().copied().unwrap_or_default();
-    writeln!(w, "created operator `{username}` (id {id})")?;
+    if generated {
+        writeln!(w, "created operator `{username}` (id {id})")?;
+        writeln!(w, "  generated password: {plain}")?;
+        writeln!(w, "  store this safely — it won't be shown again")?;
+    } else {
+        writeln!(w, "created operator `{username}` (id {id})")?;
+    }
     Ok(())
 }
 
@@ -94,14 +113,17 @@ pub(super) async fn create_user_cmd<W: Write + Send>(
     let slug_arg = iter.next().cloned();
     let username_arg = iter.next().cloned();
     let mut password: Option<String> = None;
+    let mut generate = false;
     let mut is_superuser = false;
     while let Some(flag) = iter.next() {
         match flag.as_str() {
             "--password" => password = Some(next_value(&mut iter, "--password")?),
+            "--generate" => generate = true,
             "--superuser" => is_superuser = true,
             "--help" | "-h" => {
                 return Err(TenancyError::Validation(
-                    "create-user <slug> <username> --password <p> [--superuser]".into(),
+                    "create-user <slug> <username> [--password <p> | --generate] [--superuser]"
+                        .into(),
                 ));
             }
             other => {
@@ -110,6 +132,11 @@ pub(super) async fn create_user_cmd<W: Write + Send>(
                 )));
             }
         }
+    }
+    if generate && password.is_some() {
+        return Err(TenancyError::Validation(
+            "create-user: --generate and --password are mutually exclusive".into(),
+        ));
     }
     let slug = match slug_arg {
         Some(s) => s,
@@ -131,11 +158,18 @@ pub(super) async fn create_user_cmd<W: Write + Send>(
                 )
             })?,
     };
-    let plain = match password {
-        Some(p) => p,
-        None => manage_interactive::ask_password("Password: ")
-            .map_err(TenancyError::Io)?
-            .ok_or_else(|| TenancyError::Validation("create-user requires --password".into()))?,
+    let (plain, generated) = if generate {
+        (crate::tenancy::password::generate(20), true)
+    } else {
+        let p = match password {
+            Some(p) => p,
+            None => manage_interactive::ask_password("Password: ")
+                .map_err(TenancyError::Io)?
+                .ok_or_else(|| {
+                    TenancyError::Validation("create-user requires --password".into())
+                })?,
+        };
+        (p, false)
     };
 
     // Look up the tenant.
@@ -244,6 +278,10 @@ pub(super) async fn create_user_cmd<W: Write + Send>(
             "created user `{username}` in tenant `{slug}` (id {row_id}, superuser={is_superuser})"
         )?;
     }
+    if generated {
+        writeln!(w, "  generated password: {plain}")?;
+        writeln!(w, "  store this safely — it won't be shown again")?;
+    }
     Ok(())
 }
 
@@ -342,19 +380,23 @@ pub(super) async fn reset_password_cmd<W: Write + Send>(
 ) -> Result<(), TenancyError> {
     let mut iter = args.iter();
     let slug = iter.next().cloned().ok_or_else(|| {
-        TenancyError::Validation("reset-password <slug> <username> [--password <s>]".into())
+        TenancyError::Validation(
+            "reset-password <slug> <username> [--password <s> | --generate]".into(),
+        )
     })?;
     let username = iter
         .next()
         .cloned()
         .ok_or_else(|| TenancyError::Validation("reset-password requires a username".into()))?;
     let mut password: Option<String> = None;
+    let mut generate = false;
     while let Some(flag) = iter.next() {
         match flag.as_str() {
             "--password" => password = Some(next_value(&mut iter, "--password")?),
+            "--generate" => generate = true,
             "--help" | "-h" => {
                 return Err(TenancyError::Validation(
-                    "reset-password <slug> <username> [--password <s>]".into(),
+                    "reset-password <slug> <username> [--password <s> | --generate]".into(),
                 ));
             }
             other => {
@@ -364,13 +406,23 @@ pub(super) async fn reset_password_cmd<W: Write + Send>(
             }
         }
     }
-    let plain = match password {
-        Some(p) => p,
-        None => manage_interactive::ask_password("New password: ")
-            .map_err(TenancyError::Io)?
-            .ok_or_else(|| {
-                TenancyError::Validation("reset-password requires --password (or a TTY)".into())
-            })?,
+    if generate && password.is_some() {
+        return Err(TenancyError::Validation(
+            "reset-password: --generate and --password are mutually exclusive".into(),
+        ));
+    }
+    let (plain, generated) = if generate {
+        (crate::tenancy::password::generate(20), true)
+    } else {
+        let p = match password {
+            Some(p) => p,
+            None => manage_interactive::ask_password("New password: ")
+                .map_err(TenancyError::Io)?
+                .ok_or_else(|| {
+                    TenancyError::Validation("reset-password requires --password (or a TTY)".into())
+                })?,
+        };
+        (p, false)
     };
     let hash = crate::tenancy::password::hash(&plain)?;
     let pool = scoped_tenant_pool(pools, registry_url, &slug).await?;
@@ -388,6 +440,10 @@ pub(super) async fn reset_password_cmd<W: Write + Send>(
         )));
     }
     writeln!(w, "password reset for user `{username}` in tenant `{slug}`")?;
+    if generated {
+        writeln!(w, "  generated password: {plain}")?;
+        writeln!(w, "  store this safely — it won't be shown again")?;
+    }
     Ok(())
 }
 
@@ -404,15 +460,19 @@ pub(super) async fn reset_operator_password_cmd<W: Write + Send>(
 ) -> Result<(), TenancyError> {
     let mut iter = args.iter();
     let username = iter.next().cloned().ok_or_else(|| {
-        TenancyError::Validation("reset-operator-password <username> [--password <s>]".into())
+        TenancyError::Validation(
+            "reset-operator-password <username> [--password <s> | --generate]".into(),
+        )
     })?;
     let mut password: Option<String> = None;
+    let mut generate = false;
     while let Some(flag) = iter.next() {
         match flag.as_str() {
             "--password" => password = Some(next_value(&mut iter, "--password")?),
+            "--generate" => generate = true,
             "--help" | "-h" => {
                 return Err(TenancyError::Validation(
-                    "reset-operator-password <username> [--password <s>]".into(),
+                    "reset-operator-password <username> [--password <s> | --generate]".into(),
                 ));
             }
             other => {
@@ -422,15 +482,25 @@ pub(super) async fn reset_operator_password_cmd<W: Write + Send>(
             }
         }
     }
-    let plain = match password {
-        Some(p) => p,
-        None => manage_interactive::ask_password("New password: ")
-            .map_err(TenancyError::Io)?
-            .ok_or_else(|| {
-                TenancyError::Validation(
-                    "reset-operator-password requires --password (or a TTY)".into(),
-                )
-            })?,
+    if generate && password.is_some() {
+        return Err(TenancyError::Validation(
+            "reset-operator-password: --generate and --password are mutually exclusive".into(),
+        ));
+    }
+    let (plain, generated) = if generate {
+        (crate::tenancy::password::generate(20), true)
+    } else {
+        let p = match password {
+            Some(p) => p,
+            None => manage_interactive::ask_password("New password: ")
+                .map_err(TenancyError::Io)?
+                .ok_or_else(|| {
+                    TenancyError::Validation(
+                        "reset-operator-password requires --password (or a TTY)".into(),
+                    )
+                })?,
+        };
+        (p, false)
     };
     let hash = crate::tenancy::password::hash(&plain)?;
     let result = rustango::sql::sqlx::query(
@@ -446,6 +516,224 @@ pub(super) async fn reset_operator_password_cmd<W: Write + Send>(
         )));
     }
     writeln!(w, "password reset for operator `{username}`")?;
+    if generated {
+        writeln!(w, "  generated password: {plain}")?;
+        writeln!(w, "  store this safely — it won't be shown again")?;
+    }
+    Ok(())
+}
+
+// ---------- change-password (v0.28.2, #77) ----------
+
+/// `change-password <slug> <username>` rotates a tenant user's
+/// password by first verifying the current password. Use this when
+/// the user remembers their current password — it's the symmetric
+/// CLI counterpart to the self-serve change-password UI. Operators
+/// recovering a locked-out user should use `reset-password` instead.
+///
+/// Both passwords are read interactively from a TTY when not passed
+/// on the command line; the prompts are echo-suppressed.
+pub(super) async fn change_password_cmd<W: Write + Send>(
+    pools: &TenantPools,
+    registry_url: &str,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError> {
+    let mut iter = args.iter();
+    let slug = iter.next().cloned().ok_or_else(|| {
+        TenancyError::Validation(
+            "change-password <slug> <username> [--current <s>] [--password <s> | --generate]"
+                .into(),
+        )
+    })?;
+    let username = iter
+        .next()
+        .cloned()
+        .ok_or_else(|| TenancyError::Validation("change-password requires a username".into()))?;
+    let mut current: Option<String> = None;
+    let mut password: Option<String> = None;
+    let mut generate = false;
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--current" => current = Some(next_value(&mut iter, "--current")?),
+            "--password" => password = Some(next_value(&mut iter, "--password")?),
+            "--generate" => generate = true,
+            "--help" | "-h" => {
+                return Err(TenancyError::Validation(
+                    "change-password <slug> <username> [--current <s>] [--password <s> | --generate]".into(),
+                ));
+            }
+            other => {
+                return Err(TenancyError::Validation(format!(
+                    "change-password: unknown argument `{other}`"
+                )));
+            }
+        }
+    }
+    if generate && password.is_some() {
+        return Err(TenancyError::Validation(
+            "change-password: --generate and --password are mutually exclusive".into(),
+        ));
+    }
+    let cur_plain = match current {
+        Some(p) => p,
+        None => manage_interactive::ask_password("Current password: ")
+            .map_err(TenancyError::Io)?
+            .ok_or_else(|| {
+                TenancyError::Validation("change-password requires --current (or a TTY)".into())
+            })?,
+    };
+    let (new_plain, generated) = if generate {
+        (crate::tenancy::password::generate(20), true)
+    } else {
+        let p = match password {
+            Some(p) => p,
+            None => manage_interactive::ask_password("New password: ")
+                .map_err(TenancyError::Io)?
+                .ok_or_else(|| {
+                    TenancyError::Validation(
+                        "change-password requires --password (or a TTY)".into(),
+                    )
+                })?,
+        };
+        (p, false)
+    };
+
+    let pool = scoped_tenant_pool(pools, registry_url, &slug).await?;
+    let stored: Option<String> = rustango::sql::sqlx::query_scalar(
+        "SELECT password_hash FROM rustango_users WHERE username = $1",
+    )
+    .bind(&username)
+    .fetch_optional(&pool)
+    .await?;
+    let Some(stored_hash) = stored else {
+        pool.close().await;
+        return Err(TenancyError::Validation(format!(
+            "change-password: no user `{username}` in tenant `{slug}`"
+        )));
+    };
+    if !crate::tenancy::password::verify(&cur_plain, &stored_hash)? {
+        pool.close().await;
+        return Err(TenancyError::Validation(
+            "change-password: current password did not match".into(),
+        ));
+    }
+    let new_hash = crate::tenancy::password::hash(&new_plain)?;
+    rustango::sql::sqlx::query("UPDATE rustango_users SET password_hash = $1 WHERE username = $2")
+        .bind(&new_hash)
+        .bind(&username)
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    writeln!(
+        w,
+        "password changed for user `{username}` in tenant `{slug}`"
+    )?;
+    if generated {
+        writeln!(w, "  generated password: {new_plain}")?;
+        writeln!(w, "  store this safely — it won't be shown again")?;
+    }
+    Ok(())
+}
+
+// ---------- change-operator-password (v0.28.2, #77) ----------
+
+/// `change-operator-password <username>` rotates an operator's
+/// password by first verifying the current password. Symmetric
+/// counterpart to `reset-operator-password` for the case where the
+/// operator still remembers their current credentials.
+pub(super) async fn change_operator_password_cmd<W: Write + Send>(
+    pools: &TenantPools,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError> {
+    let mut iter = args.iter();
+    let username = iter.next().cloned().ok_or_else(|| {
+        TenancyError::Validation(
+            "change-operator-password <username> [--current <s>] [--password <s> | --generate]"
+                .into(),
+        )
+    })?;
+    let mut current: Option<String> = None;
+    let mut password: Option<String> = None;
+    let mut generate = false;
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--current" => current = Some(next_value(&mut iter, "--current")?),
+            "--password" => password = Some(next_value(&mut iter, "--password")?),
+            "--generate" => generate = true,
+            "--help" | "-h" => {
+                return Err(TenancyError::Validation(
+                    "change-operator-password <username> [--current <s>] [--password <s> | --generate]".into(),
+                ));
+            }
+            other => {
+                return Err(TenancyError::Validation(format!(
+                    "change-operator-password: unknown argument `{other}`"
+                )));
+            }
+        }
+    }
+    if generate && password.is_some() {
+        return Err(TenancyError::Validation(
+            "change-operator-password: --generate and --password are mutually exclusive".into(),
+        ));
+    }
+    let cur_plain = match current {
+        Some(p) => p,
+        None => manage_interactive::ask_password("Current password: ")
+            .map_err(TenancyError::Io)?
+            .ok_or_else(|| {
+                TenancyError::Validation(
+                    "change-operator-password requires --current (or a TTY)".into(),
+                )
+            })?,
+    };
+    let (new_plain, generated) = if generate {
+        (crate::tenancy::password::generate(20), true)
+    } else {
+        let p = match password {
+            Some(p) => p,
+            None => manage_interactive::ask_password("New password: ")
+                .map_err(TenancyError::Io)?
+                .ok_or_else(|| {
+                    TenancyError::Validation(
+                        "change-operator-password requires --password (or a TTY)".into(),
+                    )
+                })?,
+        };
+        (p, false)
+    };
+
+    let stored: Option<String> = rustango::sql::sqlx::query_scalar(
+        "SELECT password_hash FROM rustango_operators WHERE username = $1",
+    )
+    .bind(&username)
+    .fetch_optional(pools.registry())
+    .await?;
+    let Some(stored_hash) = stored else {
+        return Err(TenancyError::Validation(format!(
+            "change-operator-password: no operator named `{username}`"
+        )));
+    };
+    if !crate::tenancy::password::verify(&cur_plain, &stored_hash)? {
+        return Err(TenancyError::Validation(
+            "change-operator-password: current password did not match".into(),
+        ));
+    }
+    let new_hash = crate::tenancy::password::hash(&new_plain)?;
+    rustango::sql::sqlx::query(
+        "UPDATE rustango_operators SET password_hash = $1 WHERE username = $2",
+    )
+    .bind(&new_hash)
+    .bind(&username)
+    .execute(pools.registry())
+    .await?;
+    writeln!(w, "password changed for operator `{username}`")?;
+    if generated {
+        writeln!(w, "  generated password: {new_plain}")?;
+        writeln!(w, "  store this safely — it won't be shown again")?;
+    }
     Ok(())
 }
 

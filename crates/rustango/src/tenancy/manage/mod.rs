@@ -191,6 +191,12 @@ pub async fn run_with_writer_and_init<W: Write + Send>(
         "reset-operator-password" => {
             users::reset_operator_password_cmd(pools, &args[1..], writer).await
         }
+        "change-password" => {
+            users::change_password_cmd(pools, registry_url, &args[1..], writer).await
+        }
+        "change-operator-password" => {
+            users::change_operator_password_cmd(pools, &args[1..], writer).await
+        }
         "run-server" | "runserver" => {
             server::run_server_cmd(pools, registry_url, &args[1..], writer).await
         }
@@ -288,14 +294,17 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(w)?;
     writeln!(w, "USER / OPERATOR MANAGEMENT:")?;
-    writeln!(w, "  create-operator <username> --password <p>")?;
+    writeln!(
+        w,
+        "  create-operator <username> [--password <p> | --generate]"
+    )?;
     writeln!(
         w,
         "                       Operator-level account; signs into the apex /login."
     )?;
     writeln!(
         w,
-        "  create-user <slug> <username> --password <p> [--superuser]"
+        "  create-user <slug> <username> [--password <p> | --generate] [--superuser]"
     )?;
     writeln!(
         w,
@@ -311,15 +320,37 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "                       Promote / demote an existing tenant user."
     )?;
-    writeln!(w, "  reset-password <slug> <username> [--password <p>]")?;
+    writeln!(
+        w,
+        "  reset-password <slug> <username> [--password <p> | --generate]"
+    )?;
     writeln!(
         w,
         "                       Reset a tenant user's password without their old one."
     )?;
-    writeln!(w, "  reset-operator-password <username> [--password <p>]")?;
+    writeln!(
+        w,
+        "  reset-operator-password <username> [--password <p> | --generate]"
+    )?;
     writeln!(
         w,
         "                       Reset an operator's password without their old one."
+    )?;
+    writeln!(
+        w,
+        "  change-password <slug> <username> [--current <p>] [--password <p> | --generate]"
+    )?;
+    writeln!(
+        w,
+        "                       Rotate a tenant user's password; verifies current first."
+    )?;
+    writeln!(
+        w,
+        "  change-operator-password <username> [--current <p>] [--password <p> | --generate]"
+    )?;
+    writeln!(
+        w,
+        "                       Rotate an operator's password; verifies current first."
     )?;
     writeln!(w)?;
     writeln!(w, "MIGRATIONS:")?;

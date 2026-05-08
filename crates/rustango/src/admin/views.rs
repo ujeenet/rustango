@@ -668,12 +668,28 @@ pub(crate) async fn detail_view(
             Err(_) => Vec::new(),
         };
 
+    // v0.28 — for `rustango_users`, render the user's roles +
+    // effective permissions in a side panel. Best-effort: if the
+    // permission tables don't exist (project hasn't seeded them) we
+    // render an empty section instead of failing the whole detail
+    // page — same posture as the audit panel above. Gated behind
+    // the `tenancy` feature since the panel reads tenant tables.
+    #[cfg(feature = "tenancy")]
+    let user_roles_ctx: Option<serde_json::Value> = if model.table == "rustango_users" {
+        user_roles_panel_ctx(&state, &pk_raw).await
+    } else {
+        None
+    };
+    #[cfg(not(feature = "tenancy"))]
+    let user_roles_ctx: Option<serde_json::Value> = None;
+
     let mut ctx = serde_json::json!({
         "model": { "name": model.name, "table": model.table },
         "pk": pk_raw,
         "cells": cells_ctx,
         "read_only": state.is_read_only(model.table),
         "audit_entries": audit_entries_ctx,
+        "user_roles_panel": user_roles_ctx,
     });
     let html = render_with_chrome(
         "detail.html",
@@ -681,6 +697,34 @@ pub(crate) async fn detail_view(
         chrome_context(&state, Some(model.table)),
     );
     Ok(Html(html))
+}
+
+/// Build the roles + effective-permissions panel for a `rustango_users`
+/// detail page. Returns `None` when either lookup fails (e.g. tables
+/// not yet ensured) — the template hides the section in that case.
+#[cfg(feature = "tenancy")]
+async fn user_roles_panel_ctx(state: &AppState, pk_raw: &str) -> Option<serde_json::Value> {
+    let user_id: i64 = pk_raw.parse().ok()?;
+    let roles = crate::tenancy::permissions::user_roles_qs(user_id, &state.pool)
+        .await
+        .ok()?;
+    let perms = crate::tenancy::permissions::user_permissions(user_id, &state.pool)
+        .await
+        .ok()?;
+    let roles_ctx: Vec<serde_json::Value> = roles
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id.get().copied().unwrap_or(0),
+                "name": r.name,
+                "description": r.description,
+            })
+        })
+        .collect();
+    Some(serde_json::json!({
+        "roles": roles_ctx,
+        "permissions": perms,
+    }))
 }
 
 // ============================================================== CREATE

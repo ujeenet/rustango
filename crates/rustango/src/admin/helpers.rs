@@ -83,6 +83,9 @@ pub(crate) fn chrome_context(state: &AppState, active_table: Option<&str>) -> se
         // under. Templates use `{{ admin_prefix }}/__audit` etc.
         // so hrefs resolve correctly regardless of mount path.
         "admin_prefix": &state.config.admin_prefix,
+        // v0.28.2 (#77) — sidebar "Change password" link target.
+        // Threaded from the tenant admin's RouteConfig.
+        "change_password_url": &state.config.change_password_url,
     })
 }
 

@@ -73,6 +73,14 @@ pub struct RouteConfig {
     /// `Storage` doesn't expose direct URLs. Default
     /// `/__brand__`.
     pub brand_url: String,
+    /// URL of the self-serve change-password page on the tenant
+    /// admin (#77, v0.28.2). GET renders a form (current password
+    /// + new password + confirm); POST verifies the current
+    /// password and updates `rustango_users.password_hash`. The
+    /// route lives outside [`Self::admin_url`] so it stays a
+    /// distinct namespace from per-table admin routes. Default
+    /// `/__change-password`.
+    pub change_password_url: String,
     /// HTTP Basic auth realm. Used by the legacy
     /// `protect_with_basic_auth` admin gate (pre-tenancy
     /// projects); displayed by the browser's auth dialog.
@@ -101,6 +109,7 @@ impl Default for RouteConfig {
             audit_url: "/__audit".to_owned(),
             static_url: "/__static__".to_owned(),
             brand_url: "/__brand__".to_owned(),
+            change_password_url: "/__change-password".to_owned(),
             basic_auth_realm: "Rustango Admin".to_owned(),
             tenant_session_ttl: Duration::from_secs(7 * 24 * 60 * 60),
             operator_session_ttl: Duration::from_secs(7 * 24 * 60 * 60),
@@ -124,6 +133,7 @@ impl RouteConfig {
             audit_url: "/audit".to_owned(),
             static_url: "/_static".to_owned(),
             brand_url: "/_brand".to_owned(),
+            change_password_url: "/change-password".to_owned(),
             ..Default::default()
         }
     }
@@ -152,6 +162,7 @@ mod tests {
         assert_eq!(r.audit_url, "/__audit");
         assert_eq!(r.static_url, "/__static__");
         assert_eq!(r.brand_url, "/__brand__");
+        assert_eq!(r.change_password_url, "/__change-password");
         assert_eq!(r.basic_auth_realm, "Rustango Admin");
     }
 
@@ -161,6 +172,7 @@ mod tests {
         assert_eq!(r.login_url, "/login");
         assert_eq!(r.admin_url, "/admin");
         assert_eq!(r.audit_url, "/audit");
+        assert_eq!(r.change_password_url, "/change-password");
         // Realm stays the same (it's a display string, not a path).
         assert_eq!(r.basic_auth_realm, "Rustango Admin");
     }

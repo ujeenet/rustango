@@ -207,6 +207,12 @@ impl TenantAdminBuilder {
             include_str!("templates/tenant_login.html"),
         )
         .expect("tenant_login.html parses");
+        // v0.28.2 (#77) — self-serve change-password page.
+        tera.add_raw_template(
+            "tenant_change_password.html",
+            include_str!("templates/tenant_change_password.html"),
+        )
+        .expect("tenant_change_password.html parses");
         self.session = Some(Arc::new(TenantSessionConfig { secret, tera }));
         self
     }
@@ -458,6 +464,25 @@ async fn handle_request(
                 return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
             }
         }
+
+        // v0.28.2 (#77) — self-serve change-password page. Lives
+        // outside `admin_url` so the prefix-strip logic below
+        // doesn't rewrite the path before we get here. Requires
+        // an authenticated session (handled above) — anonymous
+        // visitors are bounced to the login page.
+        if path == routes.change_password_url {
+            let user_id = session_user_id.unwrap_or(0);
+            return match parts.method {
+                axum::http::Method::GET => {
+                    change_password_form(&org, cfg, brand_storage, routes, parts.uri.query())
+                        .into_response()
+                }
+                axum::http::Method::POST => {
+                    change_password_submit(&org, pool.pg_pool(), routes, user_id, body).await
+                }
+                _ => (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response(),
+            };
+        }
     }
 
     let admin_router = build_inner_admin_router(
@@ -472,6 +497,7 @@ async fn handle_request(
         brand_storage,
         impersonated_by,
         routes.admin_url.as_str(),
+        routes.change_password_url.as_str(),
     );
 
     // Strip the configurable admin mount prefix from the request
@@ -832,6 +858,165 @@ fn end_impersonation_response(_routes: &super::routes::RouteConfig) -> Response 
     resp
 }
 
+// ---------- v0.28.2 (#77) self-serve change password ----------
+
+#[derive(serde::Deserialize)]
+struct ChangePasswordSubmitForm {
+    current_password: String,
+    new_password: String,
+    #[serde(default)]
+    confirm_password: String,
+}
+
+fn change_password_form(
+    org: &Org,
+    cfg: &TenantSessionConfig,
+    brand_storage: &BoxedStorage,
+    routes: &super::routes::RouteConfig,
+    query: Option<&str>,
+) -> axum::response::Html<String> {
+    let mut error: Option<String> = None;
+    let mut success: Option<String> = None;
+    if let Some(q) = query {
+        for pair in q.split('&') {
+            let Some((k, v)) = pair.split_once('=') else {
+                continue;
+            };
+            let v = url_decode_lite(v);
+            match k {
+                "error" => error = Some(v),
+                "ok" => success = Some(v),
+                _ => {}
+            }
+        }
+    }
+    let mut ctx = Context::new();
+    ctx.insert("tenant_slug", &org.slug);
+    ctx.insert("tenant_name", &org.display_name);
+    ctx.insert("error", &error);
+    ctx.insert("success", &success);
+    let brand_name = org
+        .brand_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&org.display_name);
+    ctx.insert("brand_name", brand_name);
+    ctx.insert("brand_tagline", &org.brand_tagline);
+    let brand_logo_url =
+        super::branding::brand_asset_url(&org.slug, org.logo_path.as_deref(), brand_storage);
+    ctx.insert("brand_logo_url", &brand_logo_url);
+    let brand_favicon_url =
+        super::branding::brand_asset_url(&org.slug, org.favicon_path.as_deref(), brand_storage);
+    ctx.insert("brand_favicon_url", &brand_favicon_url);
+    let theme_mode = org
+        .theme_mode
+        .as_deref()
+        .and_then(super::branding::validate_theme_mode)
+        .unwrap_or("auto");
+    ctx.insert("theme_mode", theme_mode);
+    let brand_css = super::branding::build_brand_css(org);
+    ctx.insert("brand_css", &brand_css);
+    ctx.insert("change_password_url", &routes.change_password_url);
+    ctx.insert("admin_url", &routes.admin_url);
+    ctx.insert("logout_url", &routes.logout_url);
+    ctx.insert("static_url", &routes.static_url);
+    axum::response::Html(match cfg.tera.render("tenant_change_password.html", &ctx) {
+        Ok(html) => html,
+        Err(e) => {
+            tracing::error!(
+                target: "crate::tenancy::admin",
+                slug = %org.slug,
+                error = %e,
+                "tenant_change_password.html render failed",
+            );
+            "<!doctype html><html><body><h1>Change-password page unavailable</h1>\
+             <p>The tenant change-password template failed to render. Check the \
+             server logs for the underlying Tera error.</p></body></html>"
+                .to_owned()
+        }
+    })
+}
+
+async fn change_password_submit(
+    _org: &Org,
+    tenant_pool: &PgPool,
+    routes: &super::routes::RouteConfig,
+    user_id: i64,
+    body: Body,
+) -> Response {
+    let bytes = match http_body_util::BodyExt::collect(body).await {
+        Ok(b) => b.to_bytes(),
+        Err(_) => return (StatusCode::BAD_REQUEST, "could not read body").into_response(),
+    };
+    let form: ChangePasswordSubmitForm = match serde_urlencoded::from_bytes(&bytes) {
+        Ok(f) => f,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "malformed change-password form").into_response()
+        }
+    };
+    let redir_err = |msg: &str| -> Response {
+        Redirect::to(&format!(
+            "{}?error={}",
+            routes.change_password_url,
+            urlencoding_lite(msg)
+        ))
+        .into_response()
+    };
+    if form.current_password.is_empty() || form.new_password.is_empty() {
+        return redir_err("All fields are required.");
+    }
+    if !form.confirm_password.is_empty() && form.confirm_password != form.new_password {
+        return redir_err("New password and confirmation did not match.");
+    }
+    if form.new_password == form.current_password {
+        return redir_err("New password must differ from the current password.");
+    }
+    if user_id <= 0 {
+        return redir_err("Session is missing a user id; please log in again.");
+    }
+    let stored: Option<String> = match rustango::sql::sqlx::query_scalar(
+        "SELECT password_hash FROM rustango_users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(tenant_pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(target: "crate::tenancy::admin", error = %e, "change-password lookup");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "lookup failed").into_response();
+        }
+    };
+    let Some(stored_hash) = stored else {
+        return redir_err("Your account no longer exists; please log in again.");
+    };
+    let ok = super::password::verify(&form.current_password, &stored_hash).unwrap_or(false);
+    if !ok {
+        return redir_err("Current password did not match.");
+    }
+    let new_hash = match super::password::hash(&form.new_password) {
+        Ok(h) => h,
+        Err(e) => {
+            return redir_err(&format!("hash failed: {e}"));
+        }
+    };
+    if let Err(e) =
+        rustango::sql::sqlx::query("UPDATE rustango_users SET password_hash = $1 WHERE id = $2")
+            .bind(&new_hash)
+            .bind(user_id)
+            .execute(tenant_pool)
+            .await
+    {
+        warn!(target: "crate::tenancy::admin", error = %e, "change-password update");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
+    }
+    Redirect::to(&format!(
+        "{}?ok=Password+updated",
+        routes.change_password_url
+    ))
+    .into_response()
+}
+
 fn rustango_png_response() -> Response {
     Response::builder()
         .status(StatusCode::OK)
@@ -983,6 +1168,7 @@ fn build_inner_admin_router(
     brand_storage: &BoxedStorage,
     impersonated_by: Option<i64>,
     admin_url_prefix: &str,
+    change_password_url: &str,
 ) -> Router {
     // v0.27.7 — `tenant_mode()` filters registry-scoped models
     // (Org / Operator) out of the sidebar / index so the tenant
@@ -994,7 +1180,10 @@ fn build_inner_admin_router(
         // v0.28.0 (#74) — pass the configurable admin prefix
         // through to the inner admin's chrome_context so
         // template hrefs resolve correctly under any mount.
-        .admin_prefix(admin_url_prefix);
+        .admin_prefix(admin_url_prefix)
+        // v0.28.2 (#77) — surface the self-serve change-password
+        // page in the sidebar.
+        .change_password_url(change_password_url);
     // v0.27.8 (#78) — propagate the impersonation flag so chrome
     // renders the banner + audit-log emit picks it up.
     if let Some(operator_id) = impersonated_by {

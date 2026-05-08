@@ -1,53 +1,127 @@
 {% extends "base.html" %}
-{% block title %}{{ model.name }} #{{ pk }} — rustango admin{% endblock title %}
+{% block title %}
+    {{ model.name }} #{{ pk }} — rustango admin
+{% endblock title %}
 {% block body %}
-<nav class="breadcrumb" aria-label="breadcrumb">
-  <ol>
-    <li><a href="{{ admin_prefix }}/">{{ admin_title }}</a></li>
-    <li><a href="{{ admin_prefix }}/{{ model.table }}">{{ model.name }}</a></li>
-    <li><strong>#{{ pk }}</strong></li>
-  </ol>
-</nav>
-<h1>{{ model.name }} <small>#{{ pk }}</small></h1>
-<dl>
-{% for cell in cells %}
-  <dt>{{ cell.label }}</dt>
-  <dd>{{ cell.value | safe }}</dd>
-{% endfor %}
-</dl>
-{% if read_only %}
-<p><em>This table is read-only.</em></p>
-{% else %}
-<p>
-  <a href="{{ admin_prefix }}/{{ model.table }}/{{ pk }}/edit">Edit</a> &middot;
-  <form method="post" action="{{ admin_prefix }}/{{ model.table }}/{{ pk }}/delete" style="display:inline" onsubmit="return confirm('Delete this row?')">
-    <button type="submit">Delete</button>
-  </form>
-</p>
-{% endif %}
-{% if audit_entries %}
-<section class="audit-trail">
-  <h2>Audit trail{% if audit_entries | length > 0 %}
-    <small style="font-weight: normal; text-transform: none; letter-spacing: 0;"> &middot; <a href="{{ admin_prefix }}/__audit?entity_table={{ model.table }}&entity_pk={{ pk }}">View full history</a></small>
-  {% endif %}</h2>
-  {% if audit_entries | length == 0 %}
-    <p><em>No audit history for this row.</em></p>
-  {% else %}
-  <ol>
-    {% for e in audit_entries %}
-    <li>
-      {% if e.action_name %}
-        <span class="audit-op audit-op-action">action: {{ e.action_name }}</span>
-      {% else %}
-        <span class="audit-op audit-op-{{ e.operation }}">{{ e.operation }}</span>
-      {% endif %}
-      by <strong>{{ e.source }}</strong>
-      <small>at {{ e.occurred_at }}</small>
-      <pre class="audit-changes">{{ e.changes }}</pre>
-    </li>
-    {% endfor %}
-  </ol>
-  {% endif %}
-</section>
-{% endif %}
+    <nav class="breadcrumb" aria-label="breadcrumb">
+        <ol>
+            <li>
+                <a href="{{ admin_prefix }}/">{{ admin_title }}</a>
+            </li>
+            <li>
+                <a href="{{ admin_prefix }}/{{ model.table }}">{{ model.name }}</a>
+            </li>
+            <li>
+                <strong>#{{ pk }}</strong>
+            </li>
+        </ol>
+    </nav>
+    <h1>
+        {{ model.name }} <small>#{{ pk }}</small>
+    </h1>
+    <dl>
+        {% for cell in cells %}
+            <dt>{{ cell.label }}</dt>
+            <dd>
+                {{ cell.value | safe }}
+            </dd>
+        {% endfor %}
+    </dl>
+    {% if read_only %}
+        <p>
+            <em>This table is read-only.</em>
+        </p>
+    {% else %}
+        <p>
+            <a href="{{ admin_prefix }}/{{ model.table }}/{{ pk }}/edit">Edit</a> &middot;
+            <form method="post"
+                  action="{{ admin_prefix }}/{{ model.table }}/{{ pk }}/delete"
+                  style="display:inline"
+                  onsubmit="return confirm('Delete this row?')">
+                <button type="submit">Delete</button>
+            </form>
+        </p>
+    {% endif %}
+    {% if user_roles_panel %}
+        <section class="user-roles-panel">
+            <h2>Roles &amp; permissions</h2>
+            <div class="user-roles-grid">
+                <div>
+                    <h3>Roles</h3>
+                    {% if user_roles_panel.roles | length == 0 %}
+                        <p>
+                            <em>No roles assigned.</em>
+                        </p>
+                    {% else %}
+                        <ul class="user-roles-list">
+                            {% for role in user_roles_panel.roles %}
+                                <li>
+                                    <a href="{{ admin_prefix }}/rustango_roles/{{ role.id }}">{{ role.name }}</a>
+                                    {% if role.description %}<small>&mdash; {{ role.description }}</small>{% endif %}
+                                </li>
+                            {% endfor %}
+                        </ul>
+                    {% endif %}
+                </div>
+                <div>
+                    <h3>Effective permissions</h3>
+                    {% if user_roles_panel.permissions | length == 0 %}
+                        <p>
+                            <em>No permissions granted
+                                {% if cells %}(superuser flag still applies){% endif %}
+                            .</em>
+                        </p>
+                    {% else %}
+                        <ul class="user-perms-list">
+                            {% for perm in user_roles_panel.permissions %}
+                                <li>
+                                    <code>{{ perm }}</code>
+                                </li>
+                            {% endfor %}
+                        </ul>
+                    {% endif %}
+                </div>
+            </div>
+            <p class="user-roles-help">
+                <small>
+                    Manage role memberships in
+                    <a href="{{ admin_prefix }}/rustango_user_roles">User roles</a>;
+                    manage per-user overrides in
+                    <a href="{{ admin_prefix }}/rustango_user_permissions">User permissions</a>;
+                    manage role-level grants in
+                    <a href="{{ admin_prefix }}/rustango_role_permissions">Role permissions</a>.
+                </small>
+            </p>
+        </section>
+    {% endif %}
+    {% if audit_entries %}
+        <section class="audit-trail">
+            <h2>
+                Audit trail
+                {% if audit_entries | length > 0 %}
+                    <small style="font-weight: normal; text-transform: none; letter-spacing: 0;"> &middot; <a href="{{ admin_prefix }}/__audit?entity_table={{ model.table }}&entity_pk={{ pk }}">View full history</a></small>
+                {% endif %}
+            </h2>
+            {% if audit_entries | length == 0 %}
+                <p>
+                    <em>No audit history for this row.</em>
+                </p>
+            {% else %}
+                <ol>
+                    {% for e in audit_entries %}
+                        <li>
+                            {% if e.action_name %}
+                                <span class="audit-op audit-op-action">action: {{ e.action_name }}</span>
+                            {% else %}
+                                <span class="audit-op audit-op-{{ e.operation }}">{{ e.operation }}</span>
+                            {% endif %}
+                            by <strong>{{ e.source }}</strong>
+                            <small>at {{ e.occurred_at }}</small>
+                            <pre class="audit-changes">{{ e.changes }}</pre>
+                        </li>
+                    {% endfor %}
+                </ol>
+            {% endif %}
+        </section>
+    {% endif %}
 {% endblock body %}

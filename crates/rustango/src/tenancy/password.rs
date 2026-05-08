@@ -38,6 +38,47 @@ pub fn hash(plaintext: &str) -> Result<String, TenancyError> {
     Ok(phc.to_string())
 }
 
+/// Generate a random password of the requested length.
+///
+/// Uses an alphabet of 58 characters (a–z, A–Z, 2–9; ambiguous
+/// characters `0`, `O`, `1`, `l`, `I` are excluded so the password
+/// can be read aloud or transcribed without confusion). The generator
+/// is `OsRng`-backed; output is suitable for one-shot operator-driven
+/// resets and for first-boot bootstrap accounts.
+///
+/// Caller must surface the generated password to the operator —
+/// [`hash`] discards it on the way to the database, so a forgotten
+/// `--generate` output cannot be recovered.
+///
+/// # Panics
+/// If `length` is zero. Lengths under 12 are accepted but should be
+/// avoided for production use.
+#[must_use]
+pub fn generate(length: usize) -> String {
+    assert!(length > 0, "password length must be > 0");
+    use argon2::password_hash::rand_core::RngCore;
+    // 58 unambiguous chars (no 0/O, 1/l/I).
+    const ALPHABET: &[u8] = b"abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut rng = OsRng;
+    let mut out = String::with_capacity(length);
+    let mut buf = [0u8; 64];
+    let mut filled = 0;
+    while out.len() < length {
+        if filled == 0 {
+            rng.fill_bytes(&mut buf);
+            filled = buf.len();
+        }
+        let byte = buf[buf.len() - filled];
+        filled -= 1;
+        // Reject-and-retry to avoid modulo bias.
+        let max = u8::try_from(ALPHABET.len() - 1).expect("alphabet < 256 chars");
+        if byte <= max.saturating_mul(255 / max) {
+            out.push(ALPHABET[(byte as usize) % ALPHABET.len()] as char);
+        }
+    }
+    out
+}
+
 /// Verify a plaintext password against a PHC-format hash.
 ///
 /// Returns `true` for a match, `false` for a mismatch. **Constant-
@@ -80,6 +121,35 @@ mod tests {
         let err = verify("hunter2", "not-a-phc-string").unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("malformed"), "got: {msg}");
+    }
+
+    #[test]
+    fn generate_produces_correct_length_and_charset() {
+        let p = generate(24);
+        assert_eq!(p.len(), 24);
+        for c in p.chars() {
+            assert!(
+                c.is_ascii_alphanumeric(),
+                "generated char outside expected alphabet: {c:?}"
+            );
+            assert!(
+                !"0O1lI".contains(c),
+                "ambiguous char in generated password: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_round_trips_through_hash_and_verify() {
+        let p = generate(20);
+        let h = hash(&p).unwrap();
+        assert!(verify(&p, &h).unwrap());
+    }
+
+    #[test]
+    fn two_calls_to_generate_differ() {
+        // Best-effort uniqueness — collisions on 58^16 are vanishingly rare.
+        assert_ne!(generate(16), generate(16));
     }
 
     #[test]

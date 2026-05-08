@@ -125,6 +125,12 @@ pub(crate) struct Config {
     /// `Builder::admin_prefix("/admin")`. Empty string means
     /// "the admin router is the root" — supported but uncommon.
     pub(crate) admin_prefix: String,
+    /// v0.28.2 (#77) — URL of the self-serve change-password
+    /// page. Rendered as a sidebar link when set so users can
+    /// find it. The tenant admin Builder pulls this from
+    /// `RouteConfig::change_password_url`. Standalone admins
+    /// leave it `None` (no auth surface to wire it to).
+    pub(crate) change_password_url: Option<String>,
 }
 
 impl Builder {
@@ -150,6 +156,17 @@ impl Builder {
         let s: String = prefix.into();
         let trimmed = s.trim_end_matches('/').to_owned();
         self.config.admin_prefix = trimmed;
+        self
+    }
+
+    /// URL of the self-serve change-password page (#77,
+    /// v0.28.2). When set, the admin sidebar renders a
+    /// "Change password" link pointing at this URL. The tenant
+    /// admin Builder pulls this from
+    /// [`crate::tenancy::RouteConfig::change_password_url`].
+    #[must_use]
+    pub fn change_password_url(mut self, url: impl Into<String>) -> Self {
+        self.config.change_password_url = Some(url.into());
         self
     }
 

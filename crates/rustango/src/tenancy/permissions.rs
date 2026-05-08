@@ -87,7 +87,15 @@ pub struct Role {
 /// One codename granted to a role. Composite key (role_id, codename)
 /// enforced by DB unique constraint; surrogate `id` for ORM compat.
 #[derive(Model, Debug, Clone)]
-#[rustango(table = "rustango_role_permissions")]
+#[rustango(
+    table = "rustango_role_permissions",
+    display = "codename",
+    admin(
+        list_display = "role_id, codename",
+        search_fields = "codename",
+        ordering = "role_id, codename",
+    )
+)]
 pub struct RolePermission {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
@@ -101,7 +109,10 @@ pub struct RolePermission {
 /// Membership row linking a user to a role.
 /// Surrogate `id` for ORM compat; unique constraint on `(user_id, role_id)`.
 #[derive(Model, Debug, Clone)]
-#[rustango(table = "rustango_user_roles")]
+#[rustango(
+    table = "rustango_user_roles",
+    admin(list_display = "user_id, role_id", ordering = "user_id, role_id",)
+)]
 pub struct UserRole {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
@@ -114,7 +125,15 @@ pub struct UserRole {
 /// Per-user permission override. `granted = true` adds a codename
 /// explicitly; `granted = false` denies it even if a role would grant it.
 #[derive(Model, Debug, Clone)]
-#[rustango(table = "rustango_user_permissions")]
+#[rustango(
+    table = "rustango_user_permissions",
+    display = "codename",
+    admin(
+        list_display = "user_id, codename, granted",
+        search_fields = "codename",
+        ordering = "user_id, codename",
+    )
+)]
 pub struct UserPermission {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
@@ -716,4 +735,42 @@ pub async fn auto_create_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod admin_config_tests {
+    use super::*;
+    use crate::core::Model;
+
+    /// v0.28 — every model in this module participates in the auto-admin.
+    /// Without admin config, list views render every column raw — usable
+    /// but noisy. The configs below pick sensible `list_display` so
+    /// operators see role/user IDs + codenames at a glance.
+    #[test]
+    fn perm_models_carry_admin_config() {
+        for (label, schema) in [
+            ("Role", Role::SCHEMA),
+            ("RolePermission", RolePermission::SCHEMA),
+            ("UserRole", UserRole::SCHEMA),
+            ("UserPermission", UserPermission::SCHEMA),
+        ] {
+            assert!(schema.admin.is_some(), "expected admin config on {label}");
+        }
+    }
+
+    #[test]
+    fn perm_models_keep_tenant_scope() {
+        // None of these are registry-scoped — they live in each
+        // tenant's storage. The scope filter on the admin sidebar
+        // must therefore include them when the admin is mounted in
+        // tenant mode (which it is by default in `server::Builder`).
+        for schema in [
+            Role::SCHEMA,
+            RolePermission::SCHEMA,
+            UserRole::SCHEMA,
+            UserPermission::SCHEMA,
+        ] {
+            assert_eq!(schema.scope, crate::core::ModelScope::Tenant);
+        }
+    }
 }

@@ -156,6 +156,37 @@ dt { font-weight: var(--font-weight-bold); }
 }
 .audit-cleanup label { display: inline-flex; gap: 0.35rem; align-items: center; }
 .audit-cleanup small.muted { font-size: 0.85em; }
+.user-roles-panel { margin-top: var(--space-6); padding-top: var(--space-4); border-top: 1px solid var(--color-border); }
+.user-roles-panel h2 {
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-fg-subtle);
+  margin-bottom: var(--space-2);
+}
+.user-roles-panel h3 {
+  font-size: 0.9em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-fg-subtle);
+  margin: 0 0 var(--space-2) 0;
+}
+.user-roles-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+}
+.user-roles-list, .user-perms-list { padding-left: 0; list-style: none; margin: 0; }
+.user-roles-list li, .user-perms-list li {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+  margin-bottom: var(--space-1);
+  font-size: 0.9em;
+}
+.user-perms-list code { font-family: var(--font-family-mono); font-size: 0.95em; }
+.user-roles-help { margin-top: var(--space-3); color: var(--color-fg-subtle); }
 .audit-trail { margin-top: var(--space-6); padding-top: var(--space-4); border-top: 1px solid var(--color-border); }
 .audit-trail h2 {
   font-size: 1rem;

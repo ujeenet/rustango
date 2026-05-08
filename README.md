@@ -7,13 +7,13 @@ Bi-dialect ORM (Postgres / MySQL / **SQLite**) with auto-migrations, multi-tenan
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.27"
+rustango = "0.28"
 
 # SQLite — file-backed or in-memory, full bi-dialect ORM
-rustango = { version = "0.27", features = ["sqlite"] }
+rustango = { version = "0.28", features = ["sqlite"] }
 
 # Multiple backends in one binary
-rustango = { version = "0.27", features = ["postgres", "sqlite"] }
+rustango = { version = "0.28", features = ["postgres", "sqlite"] }
 ```
 
 ### Spin up an app on SQLite in 30 lines
@@ -655,7 +655,7 @@ adds a parallel `&Pool` API that targets either backend; pick MySQL
 
 ```toml
 # Cargo.toml — opt in to MySQL alongside the default postgres feature
-rustango = { version = "0.27", features = ["mysql"] }
+rustango = { version = "0.28", features = ["mysql"] }
 ```
 
 ```rust
@@ -1028,6 +1028,71 @@ RUSTANGO_OPERATOR_PRIMARY_COLOR="#2c5fb0"
 RUSTANGO_OPERATOR_THEME_MODE="auto"
 ```
 
+### Self-serve change-password page + CLI ergonomics (v0.28.2)
+
+Tenant users can change their own password without an operator
+in the loop. The admin sidebar shows a **Change password** link
+when the tenant admin is wired with a session secret; clicking
+it lands on `/__change-password` (URL configurable via
+`RouteConfig::change_password_url`, defaults to
+`/change-password` under `friendly()`). The form takes the
+current password (verified server-side), a new password, and a
+confirmation; on success it stores the new Argon2id hash and
+redirects with a "Password updated" banner.
+
+Two new CLI verbs cover the symmetric flow:
+
+```sh
+# Self-serve symmetric: requires the current password.
+cargo run -- change-password acme alice
+cargo run -- change-operator-password admin
+
+# Operator-driven recovery (no current pw needed):
+cargo run -- reset-password acme alice
+cargo run -- reset-operator-password admin
+```
+
+Every password verb (`create-operator`, `create-user`,
+`reset-password`, `reset-operator-password`, `change-password`,
+`change-operator-password`) accepts a `--generate` flag that
+emits a 20-character secure random password from a 58-char
+unambiguous alphabet (no `0/O`, `1/l/I`):
+
+```sh
+cargo run -- create-superuser acme alice --generate
+# created user `alice` in tenant `acme` (id 1, superuser=true)
+#   generated password: kT3nx9pZQRgwYjvFmCdh
+#   store this safely — it won't be shown again
+```
+
+`--password` and `--generate` are mutually exclusive. Sessions
+issued before a password change currently remain valid until
+they expire — `password_changed_at` cookie invalidation is on
+the v0.29 roadmap.
+
+### Users / roles / permissions admin (v0.28.1)
+
+Every framework auth + RBAC table is admin-visible in a tenant
+admin: `rustango_users`, `rustango_roles`, `rustango_role_permissions`,
+`rustango_user_roles`, `rustango_user_permissions`. The four junction
+models carry `admin(...)` config so list views render
+`role_id, codename`, `user_id, role_id`, and
+`user_id, codename, granted` with sensible ordering.
+
+Visiting a user's detail page (`/{admin_url}/rustango_users/{id}`)
+renders a **Roles & permissions panel** showing the user's assigned
+roles (linked through to each role's detail page) and their
+**effective codenames** — the union of role grants + direct grants
+minus explicit denials, computed by the same SQL the runtime
+`has_perm` check uses. Quick links beneath the panel jump to the
+four manage-able junction tables for inline editing. The panel is
+read-only at the user level: assign / revoke flows go through the
+junction-table admin pages.
+
+When the permission tables haven't been seeded
+(`tenancy::ensure_permission_tables(&pool)` not called), the panel
+hides itself silently — same posture as the audit-trail panel.
+
 ---
 
 ## APIs (ViewSet + Serializer + JWT)
@@ -1206,8 +1271,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `RUSTANGO_APEX_DOMAIN` | `localhost` | Subdomain root → `<slug>.<apex>` |
 | `RUSTANGO_BIND` | `0.0.0.0:8080` | Bind address |
 | `RUSTANGO_SESSION_SECRET` | random (warns) | Base64-encoded 32-byte HMAC key |
+| `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS` | `3600` | "Open admin as superuser →" cookie lifetime (#78) |
 
 Generate a secret: `openssl rand -base64 32`.
+
+### Tenant pool tuning (v0.27.7+)
+
+Database-mode tenants get one cached `PgPool` each. Defaults
+preserve pre-0.27.7 behavior; override via `TenantPoolsConfig`:
+
+```rust
+use rustango::tenancy::{TenantPools, TenantPoolsConfig};
+
+let pools = TenantPools::new(registry).config(TenantPoolsConfig {
+    database_pool_min_connections: 1,                        // keep 1 conn warm
+    database_pool_acquire_timeout: Duration::from_secs(10),
+    database_pool_max_lifetime: Some(Duration::from_secs(60 * 60)),
+    prewarm_active_tenants: true,                            // build pools at boot
+    ..Default::default()
+});
+```
+
+CLI: `cargo run -- prewarm-pools` for an explicit ops trigger
+after credential rotation.
+
+### Configurable URL prefixes (v0.28.0)
+
+Default tenant admin paths use `__` prefixes (`/__login`,
+`/__admin`, `/__audit`, …). Apps that have reserved their root
+namespace cleanly can flip to friendly URLs:
+
+```rust
+use rustango::tenancy::RouteConfig;
+
+Builder::from_env().await?
+    .routes(RouteConfig::friendly())     // /login, /admin, /audit, …
+    // or build custom: RouteConfig { login_url: "/sign-in".into(), .. Default::default() }
+    .api(my_app::urls::router())
+    .serve("0.0.0.0:8080")
+    .await
+```
+
+Defaults preserve pre-0.28 paths so upgrading is a no-op until
+apps explicitly call `.routes(...)`.
+
+### Operator-as-superuser tenant impersonation (v0.27.8+)
+
+Operators logged into the apex console (`/orgs/<slug>/edit`)
+get an **"Open admin as superuser →"** button. Click → the
+operator console mints a tenant-bound, slug-pinned, signed
+cookie (1h TTL by default) and redirects to
+`<slug>.<apex>/__admin/`. The tenant admin recognizes the
+cookie as superuser; an unmissable banner reminds the operator
+they're impersonating; every audited write tags
+`source = operator:<id>:impersonating` so post-hoc forensics
+can pinpoint operator-driven changes. **End impersonation**
+button clears the cookie + redirects back to the operator
+console.
+
+### Recovery CLI verbs
+
+```sh
+cargo run -- create-superuser <slug> <username> --password <p>
+cargo run -- set-superuser <slug> <username> [--on|--off]
+cargo run -- reset-password <slug> <username> --password <new>
+cargo run -- reset-operator-password <username> --password <new>
+cargo run -- migrate --fake <name>      # backfill ledger without running SQL
+cargo run -- prewarm-pools              # warm every active database-mode pool
+```
+
+First user of a tenant is **auto-promoted to superuser** even
+without `--superuser` so an onboarding script that forgets the
+flag still produces a tenant with at least one functional admin.
 
 ### Tenant resolver chain
 
@@ -1948,16 +2083,16 @@ The default features cover everything most apps need. Trim them when shipping a 
 
 ```toml
 # Default — everything except tenancy + cache-redis
-rustango = "0.27"
+rustango = "0.28"
 
 # Multi-tenant
-rustango = { version = "0.27", features = ["tenancy"] }
+rustango = { version = "0.28", features = ["tenancy"] }
 
 # With Redis cache
-rustango = { version = "0.27", features = ["cache-redis"] }
+rustango = { version = "0.28", features = ["cache-redis"] }
 
 # Bare ORM only (no admin, no forms, no email, no storage)
-rustango = { version = "0.27", default-features = false, features = ["postgres"] }
+rustango = { version = "0.28", default-features = false, features = ["postgres"] }
 ```
 
 | Feature | What it adds | On by default? |
