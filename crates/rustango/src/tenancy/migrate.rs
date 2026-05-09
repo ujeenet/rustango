@@ -133,6 +133,23 @@ pub async fn migrate_registry(
             "ALTER rustango_operators password_changed_at failed",
         );
     }
+    // Registry-scope audit-log table for operator-side actions
+    // (impersonation start / end, org config edits via the
+    // operator console, etc.). Per-tenant audit lives in each
+    // tenant's schema and is created by `migrate_tenants` below;
+    // this is the operator-side mirror so cross-tenant operator
+    // history has a stable home. `CREATE TABLE IF NOT EXISTS`
+    // means re-runs are idempotent; pre-fix the table simply
+    // didn't exist on the registry pool, and the impersonate
+    // handler's INSERT silently dropped to a `tracing::warn` —
+    // no audit trail at all for operator actions.
+    if let Err(e) = crate::audit::ensure_table(pools.registry()).await {
+        tracing::warn!(
+            target: "crate::tenancy",
+            error = %e,
+            "audit::ensure_table failed for registry pool",
+        );
+    }
     info!(
         target: "crate::tenancy",
         applied = applied.len(),
