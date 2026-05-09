@@ -228,6 +228,46 @@ impl Default for InMemoryJobQueue {
     }
 }
 
+/// Build an [`InMemoryJobQueue`] sized from a loaded
+/// [`crate::config::JobsSettings`] section (#87 wiring, v0.29).
+/// Honors `s.concurrency` (defaults to 4 workers when unset).
+///
+/// ## Why memory-only?
+///
+/// The [`JobQueue`] trait is **not object-safe** — its `register<T:
+/// Job>` and `dispatch<T: Job>` methods are generic, so `Arc<dyn
+/// JobQueue>` can't compile. That precludes a runtime backend
+/// picker that returns a single shared type. Projects wanting
+/// [`pg::PgJobQueue`] (or any third-party backend) wire it
+/// directly:
+///
+/// ```ignore
+/// let queue = match cfg.jobs.backend.as_deref() {
+///     Some("pg") => Arc::new(rustango::jobs::pg::PgJobQueue::new(pool.clone())),
+///     _ => rustango::jobs::inmemory_from_settings(&cfg.jobs),
+/// };
+/// ```
+///
+/// `s.backend` is **read-only** at this layer; `manage check
+/// --deploy` warns if a non-memory value is set without a backend
+/// shipped to consume it.
+#[cfg(feature = "config")]
+#[must_use]
+pub fn inmemory_from_settings(s: &crate::config::JobsSettings) -> Arc<InMemoryJobQueue> {
+    let workers = s.concurrency.map_or(4, |c| c as usize);
+    if let Some(backend) = s.backend.as_deref() {
+        if backend != "memory" {
+            tracing::warn!(
+                target: "rustango::jobs",
+                backend = %backend,
+                "jobs.backend = `{backend}` but inmemory_from_settings only builds InMemoryJobQueue. \
+                 Wire the desired backend directly via Arc::new(...). See the docstring."
+            );
+        }
+    }
+    Arc::new(InMemoryJobQueue::with_workers(workers))
+}
+
 #[async_trait::async_trait]
 impl JobQueue for InMemoryJobQueue {
     async fn register<T: Job>(&self) {
@@ -525,5 +565,24 @@ mod tests {
             q.dispatch(&Increment).await.unwrap();
         }
         assert_eq!(q.pending_count().await, 3);
+    }
+
+    /// `inmemory_from_settings` honors `concurrency` and defaults
+    /// to 4 workers when unset (#87 wiring).
+    #[cfg(feature = "config")]
+    #[test]
+    fn inmemory_from_settings_uses_configured_concurrency() {
+        let mut s = crate::config::JobsSettings::default();
+        s.concurrency = Some(8);
+        let q = inmemory_from_settings(&s);
+        assert_eq!(q.worker_count, 8);
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn inmemory_from_settings_defaults_to_four_workers() {
+        let s = crate::config::JobsSettings::default();
+        let q = inmemory_from_settings(&s);
+        assert_eq!(q.worker_count, 4);
     }
 }

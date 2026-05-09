@@ -364,6 +364,10 @@ let cache: rustango::cache::BoxedCache = rustango::cache::from_settings(&cfg.cac
 
 // mailer backend selection — "console" / "memory" / "null" / "smtp"
 let mailer: rustango::email::BoxedMailer = rustango::email::from_settings(&cfg.mail);
+
+// jobs queue (memory only — JobQueue isn't object-safe so the trait
+// can't be a runtime backend picker; pg backend is wired manually):
+let queue = rustango::jobs::inmemory_from_settings(&cfg.jobs);
 ```
 
 The operator console **automatically** picks up `[brand]` from the
