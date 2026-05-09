@@ -244,7 +244,10 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "  `cargo install cargo-rustango` then `cargo rustango new <name>`.)\n"
     )?;
-    writeln!(w, "  make:viewset <Name> [--model <Model>] [--tenant]")?;
+    writeln!(
+        w,
+        "  make:viewset <Name> [--model <Model>] [--tenant | --no-tenant]"
+    )?;
     writeln!(
         w,
         "    --tenant emits a `ViewSet::for_model(...).tenant_router(...)`"
@@ -256,6 +259,14 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(
         w,
         "    instead of baking a pool at mount time (required for tenancy)."
+    )?;
+    writeln!(
+        w,
+        "    Auto-detected from Cargo.toml when the rustango dep enables"
+    )?;
+    writeln!(
+        w,
+        "    `tenancy` — pass `--no-tenant` to override the auto-detection."
     )?;
     writeln!(w, "  make:api_routes <app> [--tenant]")?;
     writeln!(
@@ -1397,19 +1408,40 @@ fn write_generated<W: Write>(
 }
 
 fn make_viewset_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
-    // Strip `--tenant` flag before passing to the shared name+model
-    // parser. Tenancy projects need a different scaffold shape — the
-    // single-pool `#[derive(ViewSet)]` is fatal for them (#80) — and
-    // this flag toggles between the two templates.
-    let mut tenant_aware = false;
+    // Tenancy projects need a different scaffold shape — the
+    // single-pool `#[derive(ViewSet)]` is fatal for them (#80) — so
+    // this command toggles between two templates. Resolution order:
+    //
+    //   1. `--no-tenant` flag → pool template (escape hatch when
+    //      auto-detection guesses wrong, or when a tenancy project
+    //      hand-rolls a single-pool viewset for some reason)
+    //   2. `--tenant` flag → tenant template (explicit)
+    //   3. Cargo.toml has `features = [..., "tenancy", ...]` on the
+    //      `rustango` dep → tenant template (auto-detected)
+    //   4. Otherwise → pool template
+    //
+    // The auto-detect path keeps Django-shape "you don't need a flag
+    // for the obvious thing" ergonomics: tenancy projects get
+    // `tenant_router` without the user having to remember `--tenant`.
+    let mut explicit_tenant = false;
+    let mut explicit_no_tenant = false;
     let mut filtered: Vec<String> = Vec::with_capacity(args.len());
     for a in args {
         if a == "--tenant" || a == "--tenant-aware" {
-            tenant_aware = true;
+            explicit_tenant = true;
+        } else if a == "--no-tenant" {
+            explicit_no_tenant = true;
         } else {
             filtered.push(a.clone());
         }
     }
+    let tenant_aware = if explicit_no_tenant {
+        false
+    } else if explicit_tenant {
+        true
+    } else {
+        project_uses_tenancy()
+    };
     let (name, model) = parse_name_and_model(&filtered)?;
     let snake = pascal_to_snake(&name);
     let model = model.unwrap_or_else(|| "Post".into());
@@ -1453,18 +1485,23 @@ pub struct {name};
 /// (#80) so each request resolves the per-tenant connection via the
 /// `Tenant` extractor instead of capturing a single pool at mount
 /// time. Required for tenancy projects.
+///
+/// Since v0.30, `tenant_router` carries the full static-router builder
+/// chain (filter / search / ordering / pagination / permissions) so
+/// the scaffold demonstrates each knob — same shape Django's class-
+/// based admin generators emit, just with `// uncomment to enable`
+/// markers next to each one.
 fn viewset_template_tenant(name: &str, model: &str, snake: &str) -> String {
     format!(
         r#"//! Auto-scaffolded by `manage make:viewset {name} --tenant`.
 //!
 //! Tenant-aware viewset: each request resolves the connection via
 //! `rustango::extractors::Tenant`, so the same `router()` serves
-//! every tenant under their own subdomain / schema.
+//! every tenant under their own subdomain / schema / database.
 //!
-//! v1 scope (per `ViewSet::tenant_router` docs): basic CRUD, no
-//! built-in filter/search/pagination/perm checks. Wrap with
-//! `RouterAuthExt::require_auth` — or use hand-rolled axum handlers
-//! taking the `Tenant` extractor — for advanced cases.
+//! Since v0.30 (#80), `tenant_router` carries the full static-router
+//! builder chain — filter_fields / search_fields / ordering /
+//! page_size / permissions_for_model all work in tenant mode too.
 
 use axum::Router;
 use rustango::core::Model as _;
@@ -1474,8 +1511,14 @@ use crate::models::{model};
 
 pub fn router() -> Router<()> {{
     ViewSet::for_model({model}::SCHEMA)
-        // .fields(&["id", "..."])
-        // .read_only()
+        // .fields(&["id", "name", "created_at"])    // restrict response shape
+        // .filter_fields(&["status", "owner_id"])    // ?status=draft&owner_id=42
+        // .search_fields(&["name", "description"])   // ?search=foo (ILIKE)
+        // .ordering(&[("created_at", true)])         // default ORDER BY
+        // .ordering_fields(&["name", "created_at"])  // ?ordering=-name allowlist
+        // .page_size(20)
+        // .permissions_for_model::<{model}>()        // CRUD codenames
+        // .read_only()                               // GET only
         .tenant_router("/api/{snake}")
 }}
 
@@ -1484,6 +1527,39 @@ pub fn router() -> Router<()> {{
 //   .merge(crate::viewsets::{snake}::router())
 "#
     )
+}
+
+/// Detect whether the project the scaffolder is running inside enables
+/// the `tenancy` feature on its `rustango` dep — used to default
+/// `make:viewset` to `--tenant` when no explicit flag is given.
+/// Reads `./Cargo.toml` from the current working directory; returns
+/// `false` (single-tenant default) on any read/parse failure so the
+/// scaffolder doesn't break in odd environments.
+///
+/// Heuristic: look for a `[dependencies.rustango]` table with
+/// `features = [..., "tenancy", ...]` OR an inline-table dep
+/// (`rustango = {{ version = "...", features = [..., "tenancy"] }}`).
+/// Cargo.toml syntax is well-defined; this is a substring check
+/// rather than a full TOML parse to keep the binary light, but it's
+/// strict enough — a `# tenancy` comment elsewhere wouldn't trigger.
+fn project_uses_tenancy() -> bool {
+    let Ok(s) = std::fs::read_to_string("Cargo.toml") else {
+        return false;
+    };
+    // Find the rustango dep block. Either a bare key
+    // `rustango = "..."` (no features at all → not tenancy) or a
+    // structured form (`rustango = { features = [...] }`) or a
+    // dedicated table `[dependencies.rustango]`. We scan the whole
+    // file for both shapes since the line carrying the features may
+    // be on its own.
+    let lower = s.to_ascii_lowercase();
+    let has_inline = lower.contains("rustango")
+        && lower
+            .lines()
+            .any(|line| line.contains("rustango") && line.contains("\"tenancy\""));
+    let has_table_block =
+        lower.contains("[dependencies.rustango]") && lower.contains("\"tenancy\"");
+    has_inline || has_table_block
 }
 
 /// `manage make:api_routes <app> [--tenant]` — emit
@@ -2443,6 +2519,98 @@ mod gen_tests {
             body.contains("pub fn router()"),
             "expected `pub fn router()` so api_routes.rs can `.merge(...)`, got: {body}"
         );
+        // v0.30.5 — the scaffolded body must demonstrate the v0.30
+        // unified builder chain (filter / search / ordering / page /
+        // perms) so users discover the surface without reading the
+        // docs. Stale "v1 scope" caveat must NOT appear.
+        assert!(
+            !body.contains("v1 scope"),
+            "v0.30 unification removed the v1 scope caveat — \
+             template must reflect full feature parity, got: {body}"
+        );
+        for knob in [
+            ".filter_fields(",
+            ".search_fields(",
+            ".ordering(",
+            ".page_size(",
+            ".permissions_for_model::",
+        ] {
+            assert!(
+                body.contains(knob),
+                "expected `{knob}` in tenant template (commented hint), got: {body}"
+            );
+        }
+    }
+
+    /// `project_uses_tenancy` reads Cargo.toml from CWD and looks for
+    /// the `tenancy` feature on the `rustango` dep. Tested by
+    /// pushing a fixture file into a tempdir, chdir-ing in, and
+    /// asserting the result.
+    #[test]
+    fn project_uses_tenancy_detects_inline_features_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let cargo = dir.path().join("Cargo.toml");
+        std::fs::write(
+            &cargo,
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustango = { version = "0.30", features = ["tenancy", "manage"] }
+"#,
+        )
+        .unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let detected = project_uses_tenancy();
+        std::env::set_current_dir(prev).unwrap();
+        assert!(
+            detected,
+            "inline-table dep with `tenancy` in features should auto-detect"
+        );
+    }
+
+    /// `project_uses_tenancy` returns false on the dedicated dep
+    /// table form when `tenancy` isn't listed.
+    #[test]
+    fn project_uses_tenancy_false_when_feature_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cargo = dir.path().join("Cargo.toml");
+        std::fs::write(
+            &cargo,
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustango = { version = "0.30", features = ["postgres", "manage"] }
+"#,
+        )
+        .unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let detected = project_uses_tenancy();
+        std::env::set_current_dir(prev).unwrap();
+        assert!(
+            !detected,
+            "no tenancy feature → must default to single-tenant scaffold"
+        );
+    }
+
+    /// Missing Cargo.toml (running outside a project) → false.
+    /// Scaffolder must not crash; auto-detect just falls back to
+    /// the safer single-tenant default.
+    #[test]
+    fn project_uses_tenancy_false_when_cargo_toml_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let detected = project_uses_tenancy();
+        std::env::set_current_dir(prev).unwrap();
+        assert!(!detected);
     }
 
     // -------- make:api_routes (#82-partial) --------

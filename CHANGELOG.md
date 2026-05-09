@@ -2,6 +2,46 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.5] — `make:viewset` auto-detects tenancy + modernized template
+
+`make:viewset` already had a `--tenant` flag, but two paper-cuts
+remained: (a) you had to remember to pass it in tenancy projects,
+and (b) the emitted tenant template still carried a "v1 scope: no
+filter / search / pagination / perm checks" caveat that became
+stale when v0.30.0 unified the feature parity.
+
+### Added
+
+- **Auto-detection of tenancy mode** — `make:viewset` reads
+  `Cargo.toml` for the `rustango` dep's feature list, and defaults
+  to the tenant template when `tenancy` is enabled. No flag
+  required for the obvious case. Resolution order:
+  1. `--no-tenant` (escape hatch override)
+  2. `--tenant` / `--tenant-aware` (explicit)
+  3. Cargo.toml has `tenancy` feature on rustango → tenant template
+  4. Otherwise → pool template
+- **`--no-tenant` flag** — escape hatch for a tenancy project that
+  wants to hand-roll a single-pool viewset (rare, but kept open).
+- **Modernized tenant template** — emits commented `// uncomment to
+  enable` hints for the *full* v0.30 builder chain
+  (`filter_fields` / `search_fields` / `ordering` /
+  `ordering_fields` / `page_size` / `permissions_for_model` /
+  `read_only`) so users discover the surface without reading the
+  `tenant_router` docs. The stale "v1 scope" caveat is gone.
+- Help text updated to mention auto-detection and the
+  `--no-tenant` override.
+
+### Tests
+
+- 1303 → 1306 lib tests (+3): `project_uses_tenancy` detects
+  inline-table dep features; returns false when feature absent;
+  returns false when Cargo.toml missing (graceful fallback).
+- Existing `viewset_template_tenant_uses_tenant_router` test now
+  asserts the v0.30 builder chain hints are present and the v1
+  caveat is gone.
+
+---
+
 ## [0.30.4] — Bulk actions on `ListView` (Django-admin shape)
 
 The v0.29 HTML CBVs covered list / detail / create / update /
