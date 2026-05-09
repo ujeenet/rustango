@@ -424,6 +424,12 @@ impl Builder {
             brand_storage_for_op,
             session_secret_for_tenant.clone(),
             cookie_domain,
+            // Tenant-admin URL prefix the impersonation flow redirects
+            // to. Threaded from RouteConfig so the operator console
+            // honors the project's actual mount path (default `/admin`
+            // since v0.29; #85). Pre-#85 projects on `/__admin` opt
+            // back via `Cli::routes(RouteConfig::legacy())`.
+            self.routes.admin_url.clone(),
         );
 
         let app = Router::new().fallback_service(tower::service_fn({

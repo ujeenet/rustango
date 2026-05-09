@@ -105,6 +105,16 @@ struct ConsoleState {
     /// the cookie host-only (rare; only useful when operator
     /// console + tenant admin share a host). (#78)
     tenant_cookie_domain: Option<String>,
+    /// URL prefix the tenant admin is mounted under — used to
+    /// build the impersonation-redirect target. Mirrors
+    /// [`super::routes::RouteConfig::admin_url`] so the operator
+    /// console respects whichever path the tenant admin actually
+    /// serves under (`/__admin` for legacy projects, `/admin`
+    /// since the v0.29 friendly default per #85). Default if
+    /// the operator console is constructed via the legacy
+    /// pre-RouteConfig entry points: `/admin` (matches the
+    /// v0.29 framework default).
+    tenant_admin_url: String,
 }
 
 /// Operator console branding read from env at boot. Static for the
@@ -173,6 +183,7 @@ pub fn router(registry: PgPool, secret: SessionSecret) -> Router {
         branding::default_brand_storage(),
         None,
         None,
+        default_tenant_admin_url(),
     )
 }
 
@@ -194,6 +205,7 @@ pub fn router_with_pools(
         branding::default_brand_storage(),
         None,
         None,
+        default_tenant_admin_url(),
     )
 }
 
@@ -217,6 +229,7 @@ pub fn router_with_impersonation(
     brand_storage: BoxedStorage,
     tenant_session_secret: SessionSecret,
     tenant_cookie_domain: Option<String>,
+    tenant_admin_url: String,
 ) -> Router {
     router_inner(
         registry,
@@ -225,6 +238,7 @@ pub fn router_with_impersonation(
         brand_storage,
         Some(tenant_session_secret),
         tenant_cookie_domain,
+        tenant_admin_url,
     )
 }
 
@@ -247,7 +261,24 @@ pub fn router_with_brand_storage(
     secret: SessionSecret,
     brand_storage: BoxedStorage,
 ) -> Router {
-    router_inner(registry, pools, secret, brand_storage, None, None)
+    router_inner(
+        registry,
+        pools,
+        secret,
+        brand_storage,
+        None,
+        None,
+        default_tenant_admin_url(),
+    )
+}
+
+/// Default tenant-admin URL prefix when the operator console is
+/// constructed via a pre-RouteConfig entry point. Matches the
+/// v0.29 friendly-by-default value from #85 so projects on
+/// current rustango Just Work; legacy projects opt in via
+/// `router_with_impersonation`'s `tenant_admin_url` parameter.
+fn default_tenant_admin_url() -> String {
+    super::routes::RouteConfig::default().admin_url
 }
 
 fn router_inner(
@@ -257,6 +288,7 @@ fn router_inner(
     brand_storage: BoxedStorage,
     tenant_session_secret: Option<SessionSecret>,
     tenant_cookie_domain: Option<String>,
+    tenant_admin_url: String,
 ) -> Router {
     let mut tera = Tera::default();
     tera.add_raw_templates([
@@ -307,6 +339,7 @@ fn router_inner(
         op_brand: Arc::new(OpBrand::from_env()),
         tenant_session_secret: tenant_session_secret.map(Arc::new),
         tenant_cookie_domain,
+        tenant_admin_url,
     };
 
     // Public routes (login + static asset + brand asset) skip the
@@ -1257,6 +1290,7 @@ fn sanitize_next(next: Option<&str>) -> String {
 async fn org_impersonate(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
+    headers: HeaderMap,
     axum::extract::Path(slug): axum::extract::Path<String>,
 ) -> Response<Body> {
     let Some(tenant_secret) = state.tenant_session_secret.clone() else {
@@ -1329,10 +1363,13 @@ async fn org_impersonate(
     }
 
     // Build the redirect URL. We send the operator to the
-    // tenant subdomain root which the tenant admin's session
-    // middleware re-redirects to /__admin/ when authenticated.
-    // Apex schema-aware: respect `RUSTANGO_TENANT_SCHEME`
-    // (defaults to http for local dev; ops set https in prod).
+    // tenant admin root (RouteConfig::admin_url; default `/admin`
+    // since v0.29 #85, `/__admin` for legacy projects). The
+    // tenant admin's session middleware accepts our impersonation
+    // cookie and renders as superuser.
+    //
+    // Scheme: respect `RUSTANGO_TENANT_SCHEME` for explicit
+    // overrides; otherwise default to http for local dev.
     let scheme = std::env::var("RUSTANGO_TENANT_SCHEME").unwrap_or_else(|_| "http".into());
     let host = if let Some(pat) = org.host_pattern.as_deref().filter(|s| !s.is_empty()) {
         pat.to_owned()
@@ -1343,12 +1380,31 @@ async fn org_impersonate(
         let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
         format!("{}.{}", slug, apex)
     };
+    // Port: prefer the explicit `RUSTANGO_TENANT_PORT` env var
+    // (deployments where the listener and the public-facing port
+    // differ — e.g. behind a reverse proxy). Otherwise reuse the
+    // port from the inbound request's Host header so dev (`:8080`)
+    // and apex-on-standard-port prod (no port suffix) both Just
+    // Work without configuration.
     let port_suffix = std::env::var("RUSTANGO_TENANT_PORT")
         .ok()
         .filter(|s| !s.is_empty() && s != "80" && s != "443")
         .map(|p| format!(":{p}"))
+        .or_else(|| {
+            headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|h| h.rsplit_once(':').map(|(_, port)| port.to_owned()))
+                .filter(|p| !p.is_empty() && p != "80" && p != "443")
+                .map(|p| format!(":{p}"))
+        })
         .unwrap_or_default();
-    let redirect_to = format!("{scheme}://{host}{port_suffix}/__admin/");
+    // `tenant_admin_url` already starts with a slash and has no
+    // trailing slash; append one so the tenant admin index handler
+    // is hit (e.g. `/admin/` -> matches `Router::route("/")` under
+    // the admin's nested mount).
+    let admin_path = state.tenant_admin_url.trim_end_matches('/');
+    let redirect_to = format!("{scheme}://{host}{port_suffix}{admin_path}/");
 
     // Build the cookie. `Domain=` so subdomains receive it;
     // `Path=/` so all admin routes pick it up.
