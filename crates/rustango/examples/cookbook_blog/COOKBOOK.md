@@ -1385,6 +1385,61 @@ on the router to enforce that the `_csrf` form field matches the
 cookie value. Without it the `csrf_token` context var still
 populates, but POSTs aren't validated.
 
+### Bulk actions on `ListView` (v0.30.4)
+
+Django-admin shape: row checkboxes + an action `<select>` that
+applies the same operation to every selected row. Opt in with
+`.bulk_actions(true)`:
+
+```rust,ignore
+use rustango::template_views::{BulkActionFn, ListView};
+use std::sync::Arc;
+
+let publish: BulkActionFn = Arc::new(|pool, pks| {
+    let pool = pool.clone();
+    let pks = pks.to_vec();
+    Box::pin(async move {
+        let ids: Vec<i64> = pks.iter()
+            .filter_map(|v| match v { SqlValue::I64(n) => Some(*n), _ => None })
+            .collect();
+        sqlx::query("UPDATE posts SET status = 'published' WHERE id = ANY($1)")
+            .bind(&ids).execute(&pool).await
+            .map(|_| ()).map_err(|e| e.to_string())
+    })
+});
+
+ListView::for_model(Post::SCHEMA)
+    .bulk_actions(true)                              // built-in delete_selected
+    .action("publish_selected", "Publish selected", publish)
+    .router("/posts", tera, pool)
+```
+
+Template glue:
+
+```html
+<form method="post">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <select name="action">
+    {% for a in bulk_actions %}
+      <option value="{{ a.name }}">{{ a.label }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Apply</button>
+
+  {% for row in object_list %}
+    <input type="checkbox" name="_selected_action" value="{{ row.id }}">
+    {{ row.title }}
+  {% endfor %}
+</form>
+```
+
+Tenancy projects use `.tenant_action(name, label, handler)` (the
+handler takes `&mut PgConnection` from `Tenant::conn()` instead of
+a captured pool) and mount via `.tenant_router(...)` instead of
+`.router(...)`. Mixing kinds — registering a `.action()` then
+mounting via `.tenant_router()` — surfaces a clear runtime error
+on dispatch.
+
 ### Business validation — `.validator(...)` and `.form::<T>()` (v0.30.2)
 
 Schema-level checks (`max_length`, `min`, `max`) ship for free.

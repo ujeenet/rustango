@@ -83,6 +83,57 @@ use crate::sql::{count_rows, row_to_json, select_one_row, select_rows};
 
 // ============================================================== ListView
 
+// ============================================================== Bulk actions
+
+/// Future returned by a [`ListView`] bulk action handler. Mirrors
+/// the shape `admin::AdminActionFuture` uses so handlers feel
+/// consistent across the framework. Errors render as a 400 response
+/// with the supplied string in the body.
+pub type BulkActionFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
+
+/// Handler closure for a bulk action mounted on the static-pool
+/// [`ListView::router`] path. Receives the captured `&PgPool` and
+/// the parsed list of selected primary keys (already type-coerced
+/// from the form's `_selected_action` strings).
+pub type BulkActionFn =
+    Arc<dyn for<'a> Fn(&'a PgPool, &'a [SqlValue]) -> BulkActionFuture<'a> + Send + Sync>;
+
+/// Tenant-mode counterpart — runs against the per-request tenant
+/// connection from [`crate::extractors::Tenant::conn`]. Wired via
+/// [`ListView::tenant_action`].
+#[cfg(feature = "tenancy")]
+pub type TenantBulkActionFn = Arc<
+    dyn for<'a> Fn(&'a mut crate::sql::sqlx::PgConnection, &'a [SqlValue]) -> BulkActionFuture<'a>
+        + Send
+        + Sync,
+>;
+
+/// One registered bulk action. The framework ships
+/// `delete_selected` as a built-in when [`ListView::bulk_actions`]
+/// is enabled; user-defined actions wire in via
+/// [`ListView::action`] (static pool) or
+/// [`ListView::tenant_action`] (per-request tenant connection).
+#[derive(Clone)]
+pub struct BulkAction {
+    pub name: String,
+    pub label: String,
+    pub handler: BulkActionHandler,
+}
+
+/// Either a static-pool handler or a tenant-mode handler. Built up
+/// by the builder methods and dispatched in the matching POST
+/// handler. Mixing kinds on the same `ListView` doesn't make sense
+/// (the router only mounts one handler shape), so the wrong-kind
+/// case surfaces a clear runtime error rather than corrupting the
+/// connection.
+#[derive(Clone)]
+pub enum BulkActionHandler {
+    Pool(BulkActionFn),
+    #[cfg(feature = "tenancy")]
+    Tenant(TenantBulkActionFn),
+}
+
 /// Render a paginated list of rows for `M`.
 ///
 /// See the [module docs] for the Tera context shape and template
@@ -104,6 +155,16 @@ pub struct ListView {
     /// Empty = no override allowed; the builder-side `order_by`
     /// is the only ordering applied.
     ordering_fields: Vec<String>,
+    /// When `true`, the list endpoint accepts POSTs that carry an
+    /// `action` form field plus `_selected_action[]` PK values, and
+    /// dispatches to the handler registered under that action name.
+    /// Built-in `delete_selected` is always included when on; user
+    /// actions stack via [`Self::action`] /
+    /// [`Self::tenant_action`].
+    bulk_actions_enabled: bool,
+    /// User-registered actions (not including the built-in
+    /// `delete_selected`).
+    actions: Vec<BulkAction>,
 }
 
 impl ListView {
@@ -123,6 +184,8 @@ impl ListView {
             filter_fields: Vec::new(),
             search_fields: Vec::new(),
             ordering_fields: Vec::new(),
+            bulk_actions_enabled: false,
+            actions: Vec::new(),
         }
     }
 
@@ -226,19 +289,108 @@ impl ListView {
         self
     }
 
+    /// Enable bulk actions (Django-admin shape). Mounts a `POST
+    /// <prefix>` route alongside the existing `GET`. The list
+    /// endpoint stamps a `bulk_actions` array into the Tera context
+    /// (`[{name, label}, ...]`) so templates can render an action
+    /// dropdown. The built-in `delete_selected` is always included
+    /// when on; register more via [`Self::action`] (static pool) or
+    /// [`Self::tenant_action`].
+    ///
+    /// Form shape the POST handler expects:
+    /// - `action`: the name of one registered action
+    /// - `_selected_action`: one or more values, each a row's PK
+    /// - `_csrf`: the CSRF token (when [`crate::manage::Cli::with_csrf`]
+    ///   is on, which is the recommended setup for form-driven CBVs)
+    ///
+    /// Successful action runs return `303 See Other` to the same
+    /// prefix so a refresh after the redirect doesn't replay the
+    /// action.
+    ///
+    /// ```rust,ignore
+    /// ListView::for_model(Post::SCHEMA)
+    ///     .bulk_actions(true)               // enables built-in delete_selected
+    ///     .action("publish_selected", "Publish selected", Arc::new(|pool, pks| {
+    ///         Box::pin(async move {
+    ///             let pks: Vec<i64> = pks.iter().filter_map(|v| match v {
+    ///                 SqlValue::I64(n) => Some(*n), _ => None,
+    ///             }).collect();
+    ///             sqlx::query("UPDATE posts SET status = 'published' WHERE id = ANY($1)")
+    ///                 .bind(&pks).execute(pool).await
+    ///                 .map(|_| ()).map_err(|e| e.to_string())
+    ///         })
+    ///     }))
+    ///     .router("/posts", tera, pool)
+    /// ```
+    #[must_use]
+    pub fn bulk_actions(mut self, on: bool) -> Self {
+        self.bulk_actions_enabled = on;
+        self
+    }
+
+    /// Register a custom static-pool bulk action. Pair with
+    /// [`Self::bulk_actions`] to actually mount the POST handler.
+    /// Use [`Self::tenant_action`] inside tenancy projects.
+    ///
+    /// `name` must be url-safe; it's matched against the form's
+    /// `action` field at request time. Duplicate names overwrite.
+    #[must_use]
+    pub fn action(
+        mut self,
+        name: impl Into<String>,
+        label: impl Into<String>,
+        handler: BulkActionFn,
+    ) -> Self {
+        let name = name.into();
+        self.actions.retain(|a| !same_action_name(&a.name, &name));
+        self.actions.push(BulkAction {
+            name,
+            label: label.into(),
+            handler: BulkActionHandler::Pool(handler),
+        });
+        self
+    }
+
+    /// Tenancy counterpart to [`Self::action`] — handler runs
+    /// against the per-request `&mut PgConnection` from the
+    /// [`crate::extractors::Tenant`] extractor instead of a captured
+    /// pool. Pair with [`Self::tenant_router`].
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn tenant_action(
+        mut self,
+        name: impl Into<String>,
+        label: impl Into<String>,
+        handler: TenantBulkActionFn,
+    ) -> Self {
+        let name = name.into();
+        self.actions.retain(|a| !same_action_name(&a.name, &name));
+        self.actions.push(BulkAction {
+            name,
+            label: label.into(),
+            handler: BulkActionHandler::Tenant(handler),
+        });
+        self
+    }
+
     /// Mount as `GET <prefix>` rendering through `tera` from `pool`.
     /// Single-tenant pool capture — every request runs against the
     /// same pool. For tenancy projects use [`Self::tenant_router`].
+    /// When [`Self::bulk_actions`] is on, also mounts `POST <prefix>`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: PgPool) -> Router<()> {
+        let bulk = self.bulk_actions_enabled;
         let state = Arc::new(ListViewState {
             vs: self,
             tera,
             pool,
         });
-        Router::new()
-            .route(prefix, get(handle_list))
-            .with_state(state)
+        let route = if bulk {
+            get(handle_list).post(handle_list_action)
+        } else {
+            get(handle_list)
+        };
+        Router::new().route(prefix, route).with_state(state)
     }
 
     /// Tenant-aware variant — each request resolves its own
@@ -246,14 +398,26 @@ impl ListView {
     /// instead of capturing a single pool at mount time.
     /// Required for multi-tenant projects (subdomain / schema /
     /// per-tenant database). Mirrors `viewset::ViewSet::tenant_router`.
+    /// When [`Self::bulk_actions`] is on, also mounts `POST <prefix>`.
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        let bulk = self.bulk_actions_enabled;
         let state = Arc::new(TenantListViewState { vs: self, tera });
-        Router::new()
-            .route(prefix, get(handle_list_tenant))
-            .with_state(state)
+        let route = if bulk {
+            get(handle_list_tenant).post(handle_list_action_tenant)
+        } else {
+            get(handle_list_tenant)
+        };
+        Router::new().route(prefix, route).with_state(state)
     }
+}
+
+/// Action-name comparison helper. Names are stored as `String`s but
+/// matched literal — no case-folding (consistency with Django's
+/// `action` form field).
+fn same_action_name(a: &str, b: &str) -> bool {
+    a == b
 }
 
 #[derive(Clone)]
@@ -338,8 +502,89 @@ async fn handle_list(
     ctx.insert("ordering", &active_ordering);
     insert_filter_context(&mut ctx, &state.vs.filter_fields, &params);
     insert_pagination_urls(&mut ctx, page, has_next, has_prev, &params);
+    insert_bulk_actions_context(&mut ctx, &state.vs);
 
     render(&state.tera, &state.vs.template, &ctx)
+}
+
+/// `POST <prefix>` — bulk-action dispatcher. Mounted only when
+/// [`ListView::bulk_actions`] is on (the `router` builder branches
+/// before nesting the route). On success returns `303 See Other`
+/// to the same prefix so the browser refresh after redirect doesn't
+/// replay the action; failures render a plain-text 400.
+async fn handle_list_action(
+    State(state): State<Arc<ListViewState>>,
+    req: axum::extract::Request,
+) -> Response {
+    let (parts, body) = req.into_parts();
+    let form = match read_repeating_form(body).await {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let (action, raws) = match parse_bulk_action_form(&form) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let Some(pk_field) = state.vs.schema.primary_key() else {
+        return template_error(&format!(
+            "model `{}` has no primary key — bulk actions require one",
+            state.vs.schema.table
+        ));
+    };
+    let pks = match coerce_selected_pks(pk_field, &raws) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+
+    // Dispatch: user-registered actions first, then built-ins.
+    let dispatch_path = parts.uri.path().to_owned();
+    let result: Result<(), String> = if let Some(custom) = state
+        .vs
+        .actions
+        .iter()
+        .find(|a| same_action_name(&a.name, &action))
+    {
+        match &custom.handler {
+            BulkActionHandler::Pool(f) => f(&state.pool, &pks).await,
+            #[cfg(feature = "tenancy")]
+            BulkActionHandler::Tenant(_) => Err("this action was registered via tenant_action — \
+                 mount the ListView via tenant_router(...) to dispatch it"
+                .into()),
+        }
+    } else if action == BUILTIN_DELETE_SELECTED {
+        run_delete_selected_pool(state.vs.schema, pk_field, &state.pool, &pks).await
+    } else {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("unknown action `{action}`"),
+        )
+            .into_response();
+    };
+
+    match result {
+        Ok(()) => axum::response::Redirect::to(&dispatch_path).into_response(),
+        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+    }
+}
+
+/// Read the request body as `application/x-www-form-urlencoded`,
+/// preserving repeated keys (every `_selected_action` value).
+/// `axum::Form<HashMap<...>>` collapses repeats into a single value,
+/// which would lose every selected row past the first.
+async fn read_repeating_form(
+    body: axum::body::Body,
+) -> Result<HashMap<String, Vec<String>>, String> {
+    use axum::body::to_bytes;
+    let bytes = to_bytes(body, 4 * 1024 * 1024)
+        .await
+        .map_err(|e| e.to_string())?;
+    let pairs: Vec<(String, String)> =
+        serde_urlencoded::from_bytes(&bytes).map_err(|e| e.to_string())?;
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for (k, v) in pairs {
+        out.entry(k).or_default().push(v);
+    }
+    Ok(out)
 }
 
 // ============================================================== DetailView
@@ -1914,6 +2159,160 @@ pub(super) fn insert_filter_context(
     ctx.insert("search", search);
 }
 
+/// Stamp `bulk_actions: [{name, label}]` into the Tera context when
+/// [`ListView::bulk_actions`] is on. Templates iterate this to build
+/// the action `<select>`. The list always leads with the built-in
+/// `delete_selected`; user-registered actions follow in registration
+/// order. When bulk actions are off, the array is empty so templates
+/// can branch on `{% if bulk_actions %}` without a separate flag.
+fn insert_bulk_actions_context(ctx: &mut Context, vs: &ListView) {
+    #[derive(serde::Serialize)]
+    struct Entry<'a> {
+        name: &'a str,
+        label: &'a str,
+    }
+    let mut entries: Vec<Entry> = Vec::new();
+    if vs.bulk_actions_enabled {
+        entries.push(Entry {
+            name: BUILTIN_DELETE_SELECTED,
+            label: "Delete selected",
+        });
+        for a in &vs.actions {
+            entries.push(Entry {
+                name: &a.name,
+                label: &a.label,
+            });
+        }
+    }
+    ctx.insert("bulk_actions", &entries);
+}
+
+/// Built-in `delete_selected` action name. Reserved — user-registered
+/// actions can't shadow it (registration silently overwrites the
+/// name, but the built-in is appended *after* user actions in the
+/// dropdown either way; matching the form `action` field at request
+/// time still finds the user's handler since user actions are
+/// dispatched first).
+const BUILTIN_DELETE_SELECTED: &str = "delete_selected";
+
+/// Parse the form fields for a bulk-action POST. Returns
+/// `(action_name, selected_pks_as_strings)` or an error string for
+/// the response body.
+fn parse_bulk_action_form(
+    form: &HashMap<String, Vec<String>>,
+) -> Result<(String, Vec<String>), String> {
+    let action = form
+        .get("action")
+        .and_then(|v| v.first())
+        .map(String::clone)
+        .ok_or_else(|| "missing `action` form field".to_owned())?;
+    let pks = form
+        .get("_selected_action")
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    if pks.is_empty() {
+        return Err("no rows selected (_selected_action missing)".into());
+    }
+    Ok((action, pks))
+}
+
+/// Coerce the form's stringified PKs into the schema's PK type so
+/// the action handler can `.bind(...)` them or pass them to a
+/// generic `IN ($1)` clause. Errors when any PK fails to parse —
+/// hostile clients shouldn't be able to inject mistyped PKs into
+/// the SQL layer.
+fn coerce_selected_pks(
+    pk_field: &'static crate::core::FieldSchema,
+    raws: &[String],
+) -> Result<Vec<SqlValue>, String> {
+    raws.iter()
+        .map(|s| coerce_pk_typed(pk_field, s))
+        .collect::<Result<Vec<_>, _>>()
+}
+
+/// Like `coerce_pk` but returns a typed error rather than falling
+/// back to `SqlValue::String`. The fallback is fine for URL-segment
+/// lookups (the SQL layer's implicit casts paper over the
+/// difference) but bulk-action PKs are bound as a list, where a
+/// type mismatch would crash the whole batch — fail fast.
+fn coerce_pk_typed(
+    pk_field: &'static crate::core::FieldSchema,
+    raw: &str,
+) -> Result<SqlValue, String> {
+    use crate::core::FieldType;
+    match pk_field.ty {
+        FieldType::I64 => raw
+            .parse::<i64>()
+            .map(SqlValue::I64)
+            .map_err(|e| format!("invalid i64 PK `{raw}`: {e}")),
+        FieldType::I32 => raw
+            .parse::<i32>()
+            .map(SqlValue::I32)
+            .map_err(|e| format!("invalid i32 PK `{raw}`: {e}")),
+        FieldType::I16 => raw
+            .parse::<i16>()
+            .map(SqlValue::I16)
+            .map_err(|e| format!("invalid i16 PK `{raw}`: {e}")),
+        FieldType::Uuid => uuid::Uuid::parse_str(raw)
+            .map(SqlValue::Uuid)
+            .map_err(|e| format!("invalid uuid PK `{raw}`: {e}")),
+        FieldType::String => Ok(SqlValue::String(raw.to_owned())),
+        other => Err(format!(
+            "PK type {other:?} is not supported for bulk actions"
+        )),
+    }
+}
+
+/// Run the built-in `delete_selected` action: `DELETE FROM <table>
+/// WHERE <pk> IN (...)`. Goes through `crate::core::DeleteQuery` +
+/// `crate::sql::delete{,_on}` so it composes the exact same SQL the
+/// per-row admin DELETE path uses.
+async fn run_delete_selected_pool(
+    schema: &'static ModelSchema,
+    pk_field: &'static crate::core::FieldSchema,
+    pool: &PgPool,
+    pks: &[SqlValue],
+) -> Result<(), String> {
+    use crate::core::{DeleteQuery, Filter, Op};
+    let q = DeleteQuery {
+        model: schema,
+        where_clause: WhereExpr::Predicate(Filter {
+            column: pk_field.column,
+            op: Op::In,
+            value: SqlValue::List(pks.to_vec()),
+        }),
+    };
+    crate::sql::delete(pool, &q)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "tenancy")]
+async fn run_delete_selected_conn(
+    schema: &'static ModelSchema,
+    pk_field: &'static crate::core::FieldSchema,
+    conn: &mut crate::sql::sqlx::PgConnection,
+    pks: &[SqlValue],
+) -> Result<(), String> {
+    use crate::core::{DeleteQuery, Filter, Op};
+    let q = DeleteQuery {
+        model: schema,
+        where_clause: WhereExpr::Predicate(Filter {
+            column: pk_field.column,
+            op: Op::In,
+            value: SqlValue::List(pks.to_vec()),
+        }),
+    };
+    crate::sql::delete_on(conn, &q)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Resolve the projection set — either every scalar field or the
 /// caller's explicit `fields` allowlist.
 fn resolved_fields(
@@ -2053,8 +2452,69 @@ mod tenant {
         ctx.insert("ordering", &active_ordering);
         super::insert_filter_context(&mut ctx, &state.vs.filter_fields, &params);
         super::insert_pagination_urls(&mut ctx, page, has_next, has_prev, &params);
+        super::insert_bulk_actions_context(&mut ctx, &state.vs);
 
         render(&state.tera, &state.vs.template, &ctx)
+    }
+
+    /// `POST <prefix>` — bulk-action dispatcher for tenancy mode.
+    /// Resolves the tenant connection per request, runs the named
+    /// action against it, and 303s back to the same prefix.
+    pub(super) async fn handle_list_action_tenant(
+        State(state): State<Arc<TenantListViewState>>,
+        mut t: Tenant,
+        req: axum::extract::Request,
+    ) -> Response {
+        let (parts, body) = req.into_parts();
+        let form = match super::read_repeating_form(body).await {
+            Ok(f) => f,
+            Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+        };
+        let (action, raws) = match super::parse_bulk_action_form(&form) {
+            Ok(v) => v,
+            Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+        };
+        let Some(pk_field) = state.vs.schema.primary_key() else {
+            return template_error(&format!(
+                "model `{}` has no primary key — bulk actions require one",
+                state.vs.schema.table
+            ));
+        };
+        let pks = match super::coerce_selected_pks(pk_field, &raws) {
+            Ok(v) => v,
+            Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+        };
+
+        let dispatch_path = parts.uri.path().to_owned();
+        let conn = t.conn();
+        let result: Result<(), String> = if let Some(custom) = state
+            .vs
+            .actions
+            .iter()
+            .find(|a| super::same_action_name(&a.name, &action))
+        {
+            match &custom.handler {
+                super::BulkActionHandler::Tenant(f) => f(conn, &pks).await,
+                super::BulkActionHandler::Pool(_) => {
+                    Err("this action was registered via .action(...) — \
+                     mount the ListView via router(...) (single-pool) to dispatch it"
+                        .into())
+                }
+            }
+        } else if action == super::BUILTIN_DELETE_SELECTED {
+            super::run_delete_selected_conn(state.vs.schema, pk_field, conn, &pks).await
+        } else {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("unknown action `{action}`"),
+            )
+                .into_response();
+        };
+
+        match result {
+            Ok(()) => axum::response::Redirect::to(&dispatch_path).into_response(),
+            Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+        }
     }
 
     // ---------- DetailView ----------
@@ -2387,8 +2847,8 @@ mod tenant {
 #[cfg(feature = "tenancy")]
 use tenant::{
     handle_create_get_tenant, handle_create_post_tenant, handle_delete_confirm_tenant,
-    handle_delete_submit_tenant, handle_detail_tenant, handle_list_tenant,
-    handle_update_get_tenant, handle_update_post_tenant, TenantDeleteViewState,
+    handle_delete_submit_tenant, handle_detail_tenant, handle_list_action_tenant,
+    handle_list_tenant, handle_update_get_tenant, handle_update_post_tenant, TenantDeleteViewState,
     TenantDetailViewState, TenantFormViewState, TenantListViewState,
 };
 
@@ -3592,6 +4052,138 @@ mod tests {
             cv2.validator.is_some(),
             ".form::<T>() must set the validator"
         );
+    }
+
+    // ---- Bulk actions on ListView (#80 v0.30.4) ----
+
+    /// `bulk_actions(true)` flips the flag, the default is off so
+    /// existing projects pay no overhead.
+    #[test]
+    fn bulk_actions_default_off_flag_flips_with_builder() {
+        let s = schema_two_fields();
+        let lv = ListView::for_model(s);
+        assert!(!lv.bulk_actions_enabled, "default off");
+        let lv2 = lv.bulk_actions(true);
+        assert!(lv2.bulk_actions_enabled, "true after .bulk_actions(true)");
+    }
+
+    /// `.action(name, label, handler)` accumulates user actions in
+    /// registration order; same name twice replaces (last write wins).
+    #[test]
+    fn action_builder_dedupes_by_name() {
+        let s = schema_two_fields();
+        let h: BulkActionFn = Arc::new(|_pool, _pks| Box::pin(async { Ok(()) }));
+        let lv = ListView::for_model(s)
+            .action("publish", "Publish", h.clone())
+            .action("archive", "Archive", h.clone())
+            .action("publish", "Publish (renamed)", h);
+        assert_eq!(lv.actions.len(), 2);
+        let publish = lv.actions.iter().find(|a| a.name == "publish").unwrap();
+        assert_eq!(
+            publish.label, "Publish (renamed)",
+            "second .action with same name should replace"
+        );
+    }
+
+    /// `parse_bulk_action_form` requires both `action` and at least
+    /// one `_selected_action` value. Empty selection is an error so
+    /// templates show the user a "select rows first" message rather
+    /// than silently running the action against zero rows.
+    #[test]
+    fn parse_bulk_action_form_requires_action_and_selection() {
+        // Missing action.
+        let mut f: HashMap<String, Vec<String>> = HashMap::new();
+        f.insert("_selected_action".into(), vec!["1".into()]);
+        assert!(parse_bulk_action_form(&f).is_err());
+
+        // Missing selection.
+        let mut f: HashMap<String, Vec<String>> = HashMap::new();
+        f.insert("action".into(), vec!["delete_selected".into()]);
+        assert!(parse_bulk_action_form(&f).is_err());
+
+        // Both present + non-empty PKs.
+        let mut f: HashMap<String, Vec<String>> = HashMap::new();
+        f.insert("action".into(), vec!["delete_selected".into()]);
+        f.insert(
+            "_selected_action".into(),
+            vec!["1".into(), "2".into(), "3".into()],
+        );
+        let (action, pks) = parse_bulk_action_form(&f).unwrap();
+        assert_eq!(action, "delete_selected");
+        assert_eq!(pks, vec!["1", "2", "3"]);
+    }
+
+    /// `coerce_pk_typed` converts to the right `SqlValue` per
+    /// `FieldType` and surfaces parse errors instead of falling
+    /// back to a string (which would corrupt the SQL `IN (...)`
+    /// bind).
+    #[test]
+    fn coerce_pk_typed_returns_correct_sqlvalue_per_type() {
+        use crate::core::FieldType;
+        let f = |ty: FieldType| {
+            Box::leak(Box::new(crate::core::FieldSchema {
+                name: "id",
+                column: "id",
+                ty,
+                nullable: false,
+                primary_key: true,
+                relation: None,
+                max_length: None,
+                min: None,
+                max: None,
+                default: None,
+                auto: false,
+                unique: false,
+                generated_as: None,
+            })) as &'static crate::core::FieldSchema
+        };
+        assert!(matches!(
+            coerce_pk_typed(f(FieldType::I64), "42"),
+            Ok(SqlValue::I64(42))
+        ));
+        assert!(matches!(
+            coerce_pk_typed(f(FieldType::I32), "42"),
+            Ok(SqlValue::I32(42))
+        ));
+        assert!(matches!(
+            coerce_pk_typed(f(FieldType::I16), "42"),
+            Ok(SqlValue::I16(42))
+        ));
+        assert!(coerce_pk_typed(f(FieldType::I64), "not-a-number").is_err());
+        assert!(coerce_pk_typed(f(FieldType::Uuid), "not-a-uuid").is_err());
+    }
+
+    /// `bulk_actions` Tera context entry leads with `delete_selected`,
+    /// then user-registered actions in order.
+    #[test]
+    fn bulk_actions_context_includes_built_in_then_user_actions() {
+        let s = schema_two_fields();
+        let h: BulkActionFn = Arc::new(|_p, _v| Box::pin(async { Ok(()) }));
+        let lv = ListView::for_model(s)
+            .bulk_actions(true)
+            .action("publish", "Publish", h);
+        let mut ctx = Context::new();
+        insert_bulk_actions_context(&mut ctx, &lv);
+        let v = ctx.into_json();
+        let arr = v["bulk_actions"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["name"], serde_json::json!("delete_selected"));
+        assert_eq!(arr[0]["label"], serde_json::json!("Delete selected"));
+        assert_eq!(arr[1]["name"], serde_json::json!("publish"));
+    }
+
+    /// When bulk_actions is off, the context entry is empty (rather
+    /// than missing) so templates can `{% if bulk_actions %}`
+    /// cleanly without a separate flag.
+    #[test]
+    fn bulk_actions_context_empty_when_disabled() {
+        let s = schema_two_fields();
+        let lv = ListView::for_model(s); // default off
+        let mut ctx = Context::new();
+        insert_bulk_actions_context(&mut ctx, &lv);
+        let v = ctx.into_json();
+        let arr = v["bulk_actions"].as_array().unwrap();
+        assert!(arr.is_empty());
     }
 
     /// Smoke: every CBV's `tenant_router` builds without panicking

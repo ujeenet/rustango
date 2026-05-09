@@ -2,6 +2,64 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.4] — Bulk actions on `ListView` (Django-admin shape)
+
+The v0.29 HTML CBVs covered list / detail / create / update /
+delete but didn't have an answer for "select N rows and run the
+same action against all of them" — Django admin's most-used
+power feature. v0.30.4 closes the gap.
+
+### Added
+
+- **`ListView::bulk_actions(true)`** — opt-in flag that mounts a
+  `POST <prefix>` route alongside the existing `GET`. The list
+  endpoint stamps a `bulk_actions: [{name, label}]` array into the
+  Tera context so templates can render an action `<select>`.
+- **Built-in `delete_selected`** — automatically registered when
+  `bulk_actions` is on. Runs `DELETE FROM <table> WHERE <pk> IN
+  (...)` via `core::DeleteQuery` + `sql::delete{,_on}`, so the
+  exact same SQL the per-row admin DELETE path uses.
+- **`ListView::action(name, label, handler)`** — register a
+  custom static-pool handler. Closure shape:
+  `for<'a> Fn(&'a PgPool, &'a [SqlValue]) -> BulkActionFuture<'a>`.
+  Mirrors the existing `admin::AdminActionFn` shape.
+- **`ListView::tenant_action(name, label, handler)`** — tenancy
+  counterpart, handler runs against the per-request `&mut
+  PgConnection` from `Tenant::conn()`. Mounting against the wrong
+  flavor's router (e.g. tenant_action + router) surfaces a clear
+  runtime error rather than corrupting the connection.
+- POST form shape (matches Django convention):
+  - `action`: name of one registered action
+  - `_selected_action`: one or more values, each a row's PK
+    (repeated form keys are preserved — `axum::Form<HashMap<...>>`
+    would have collapsed them into a single value, losing every
+    selection past the first)
+  - `_csrf`: token (when `Cli::with_csrf()` is on)
+- Successful runs return `303 See Other` to the same prefix so a
+  refresh after the redirect doesn't replay the action.
+
+### Tests
+
+- 1297 → 1303 lib tests (+6): builder default-off + flag flip,
+  `.action(...)` dedupe, `parse_bulk_action_form` rejects empty
+  selection / missing action, `coerce_pk_typed` per-FieldType,
+  `bulk_actions` Tera context shape (built-in first, user actions
+  after).
+- **5 new live tests** (`tests/template_views_bulk_actions_live.rs`,
+  DATABASE_URL-gated): `delete_selected` actually deletes the right
+  rows; user action runs and updates rows; empty selection → 400;
+  unknown action name → 400; GET stamps the `bulk_actions` Tera
+  variable so the template can render the dropdown.
+
+### Backward compatibility
+
+- Field on `ListView` defaults to off. Existing projects pay no
+  overhead and see no behavior change.
+- The bulk-action POST mounts only when the flag is on; without
+  it, POST to the list URL still 405s (axum default).
+
+---
+
 ## [0.30.3] — Cookbook Chapter 9d: documented `ViewSet::tenant_router`
 
 The v0.30.0/v0.30.1 work shipped with framework-side unit + live
