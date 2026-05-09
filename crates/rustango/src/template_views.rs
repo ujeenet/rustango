@@ -900,56 +900,157 @@ fn substitute_pk(template: &str, pk: &str) -> String {
     template.replace("{pk}", pk)
 }
 
-/// Substitute the `{pk}` placeholder in a `success_url` with the
-/// actual PK value pulled from the row that `INSERT ... RETURNING`
-/// just produced. Used by `CreateView` so projects can write
-/// `success_url("/posts/{pk}")` and redirect to the new row's
-/// detail page after creation.
+/// Substitute every `{column}` placeholder in a `success_url`
+/// with the matching column value pulled from the row that
+/// `INSERT ... RETURNING <cols>` just produced. Used by
+/// `CreateView` so projects can write
+/// `success_url("/posts/{slug}")` (or
+/// `success_url("/posts/{id}/draft/{slug}")` for the multi-column
+/// case) and redirect to the new row's detail page.
 ///
-/// Returns the original `template` unchanged when there's no
-/// placeholder. Surfaces a clear error string when the placeholder
-/// is present but `pk_field` is `None` (model with no PK — unusual
-/// but possible) or the row's PK column couldn't be read.
+/// `{pk}` is special-cased to map to the model's primary-key
+/// column — `success_url("/posts/{pk}")` works without requiring
+/// the user to know whether the PK column is named `id`, `pk`,
+/// `uuid`, etc.
+///
+/// Returns the original `template` unchanged when no placeholders
+/// are present. Surfaces a clear error string when:
+/// - A placeholder names a column that doesn't exist on the model
+/// - `{pk}` is present but the model has no primary key
+/// - The row's column couldn't be read at the expected SQL type
+///
+/// The caller (handle_create_post) computes the `RETURNING` list
+/// via [`success_url_returning_columns`] and feeds the resulting
+/// row in here.
 fn interpolate_success_url(
     template: &str,
     row: &sqlx::postgres::PgRow,
-    pk_field: Option<&'static crate::core::FieldSchema>,
+    schema: &'static crate::core::ModelSchema,
 ) -> Result<String, String> {
-    if !template.contains("{pk}") {
+    let placeholders = parse_success_url_placeholders(template);
+    if placeholders.is_empty() {
         return Ok(template.to_owned());
     }
-    let Some(pk) = pk_field else {
-        return Err(format!(
-            "success_url contains `{{pk}}` placeholder but the model has no primary key"
-        ));
-    };
-    let pk_str = pk_value_as_string(row, pk).map_err(|e| {
-        format!(
-            "success_url interpolation failed reading `{}`: {e}",
-            pk.column
-        )
-    })?;
-    Ok(template.replace("{pk}", &pk_str))
+    let mut out = template.to_owned();
+    for name in placeholders {
+        let column = if name == "pk" {
+            let Some(pk) = schema.primary_key() else {
+                return Err(
+                    "success_url contains `{pk}` placeholder but the model has no primary key"
+                        .to_owned(),
+                );
+            };
+            pk
+        } else {
+            schema.field(name).ok_or_else(|| {
+                format!(
+                    "success_url placeholder `{{{name}}}` does not match any field on `{}`",
+                    schema.table
+                )
+            })?
+        };
+        let v = column_value_as_string(row, column).map_err(|e| {
+            format!(
+                "success_url interpolation failed reading `{}`: {e}",
+                column.column
+            )
+        })?;
+        out = out.replace(&format!("{{{name}}}"), &v);
+    }
+    Ok(out)
 }
 
-/// Read the PK column from a `PgRow` and render it as a URL-safe
-/// string. Branches on the field's `FieldType` so `i64` PKs render
-/// as decimal digits and `Uuid` PKs render canonically without
-/// quoting. Falls through to text decoding for anything else.
-fn pk_value_as_string(
+/// Walk the template and collect every `{name}` placeholder. Plain
+/// strings without braces yield an empty vec — the caller
+/// short-circuits.
+///
+/// Recognizes `{name}` only when `name` is a valid field-shape
+/// identifier (alphanumeric + `_`). Stray `{` characters in the
+/// path (e.g. `/posts/{pk}/{}` — empty placeholder is treated as
+/// not-a-placeholder) are left intact.
+fn parse_success_url_placeholders(template: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('}') else {
+            break;
+        };
+        let candidate = &after[..end];
+        if !candidate.is_empty()
+            && candidate
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            out.push(candidate);
+        }
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+/// Compute the `RETURNING` column list for an INSERT that needs
+/// to feed `interpolate_success_url`. Maps each `{name}`
+/// placeholder to its schema column (special-casing `{pk}`).
+/// Empty when the template has no placeholders — caller skips the
+/// `_returning` SQL path entirely.
+///
+/// Surfaces an error early (before the INSERT runs) when a
+/// placeholder doesn't match any field — better to 500 the GET
+/// than ship a half-applied INSERT that violates the redirect.
+fn success_url_returning_columns(
+    template: &str,
+    schema: &'static crate::core::ModelSchema,
+) -> Result<Vec<&'static str>, String> {
+    let placeholders = parse_success_url_placeholders(template);
+    let mut out: Vec<&'static str> = Vec::new();
+    for name in placeholders {
+        let column = if name == "pk" {
+            let Some(pk) = schema.primary_key() else {
+                return Err(
+                    "success_url contains `{pk}` placeholder but the model has no primary key"
+                        .to_owned(),
+                );
+            };
+            pk.column
+        } else {
+            schema
+                .field(name)
+                .ok_or_else(|| {
+                    format!(
+                        "success_url placeholder `{{{name}}}` does not match any field on `{}`",
+                        schema.table
+                    )
+                })?
+                .column
+        };
+        if !out.contains(&column) {
+            out.push(column);
+        }
+    }
+    Ok(out)
+}
+
+/// Read a column from a `PgRow` and render it as a URL-safe
+/// string. Branches on the field's `FieldType` so `i64` columns
+/// render as decimal digits and `Uuid` columns render canonically
+/// without quoting. Falls through to text decoding for everything
+/// else (string, datetime, date, json — Postgres' text codec
+/// handles the latter three predictably).
+fn column_value_as_string(
     row: &sqlx::postgres::PgRow,
-    pk: &'static crate::core::FieldSchema,
+    field: &'static crate::core::FieldSchema,
 ) -> Result<String, sqlx::Error> {
     use crate::core::FieldType as T;
     use sqlx::Row as _;
-    match pk.ty {
-        T::I16 => row.try_get::<i16, _>(pk.column).map(|n| n.to_string()),
-        T::I32 => row.try_get::<i32, _>(pk.column).map(|n| n.to_string()),
-        T::I64 => row.try_get::<i64, _>(pk.column).map(|n| n.to_string()),
+    match field.ty {
+        T::I16 => row.try_get::<i16, _>(field.column).map(|n| n.to_string()),
+        T::I32 => row.try_get::<i32, _>(field.column).map(|n| n.to_string()),
+        T::I64 => row.try_get::<i64, _>(field.column).map(|n| n.to_string()),
         T::Uuid => row
-            .try_get::<uuid::Uuid, _>(pk.column)
+            .try_get::<uuid::Uuid, _>(field.column)
             .map(|u| u.to_string()),
-        _ => row.try_get::<String, _>(pk.column),
+        _ => row.try_get::<String, _>(field.column),
     }
 }
 
@@ -1058,16 +1159,15 @@ async fn handle_create_post(
     if !errors.is_empty() {
         return rerender_form(&state, &form, &errors, /*is_update=*/ false, &headers);
     }
-    // When `success_url` references the new row (`{pk}` placeholder),
-    // request the PK back via RETURNING so we can substitute before
-    // the redirect. Otherwise plain INSERT — saves the round-trip.
-    let need_pk = state.success_url.contains("{pk}");
-    let pk_field = state.schema.primary_key();
-    let returning = if need_pk {
-        pk_field.map(|f| vec![f.column]).unwrap_or_default()
-    } else {
-        vec![]
+    // When `success_url` carries `{column}` placeholders, request
+    // those columns back via RETURNING so we can substitute
+    // before the redirect. Otherwise plain INSERT — saves the
+    // round-trip.
+    let returning = match success_url_returning_columns(&state.success_url, state.schema) {
+        Ok(cols) => cols,
+        Err(e) => return template_error(&e),
     };
+    let need_returning = !returning.is_empty();
     let insert_q = crate::core::InsertQuery {
         model: state.schema,
         columns,
@@ -1075,9 +1175,9 @@ async fn handle_create_post(
         returning,
         on_conflict: None,
     };
-    let target_url = if need_pk {
+    let target_url = if need_returning {
         match crate::sql::insert_returning(&state.pool, &insert_q).await {
-            Ok(row) => match interpolate_success_url(&state.success_url, &row, pk_field) {
+            Ok(row) => match interpolate_success_url(&state.success_url, &row, state.schema) {
                 Ok(url) => url,
                 Err(e) => return template_error(&e),
             },
@@ -1985,13 +2085,12 @@ mod tenant {
                 &state, &form, &errors, /*is_update=*/ false, &headers,
             );
         }
-        let need_pk = state.success_url.contains("{pk}");
-        let pk_field = state.schema.primary_key();
-        let returning = if need_pk {
-            pk_field.map(|f| vec![f.column]).unwrap_or_default()
-        } else {
-            vec![]
+        let returning = match super::success_url_returning_columns(&state.success_url, state.schema)
+        {
+            Ok(cols) => cols,
+            Err(e) => return template_error(&e),
         };
+        let need_returning = !returning.is_empty();
         let insert_q = crate::core::InsertQuery {
             model: state.schema,
             columns,
@@ -1999,13 +2098,14 @@ mod tenant {
             returning,
             on_conflict: None,
         };
-        let target_url = if need_pk {
+        let target_url = if need_returning {
             match crate::sql::insert_returning_on(&mut *t.conn(), &insert_q).await {
-                Ok(row) => match super::interpolate_success_url(&state.success_url, &row, pk_field)
-                {
-                    Ok(url) => url,
-                    Err(e) => return template_error(&e),
-                },
+                Ok(row) => {
+                    match super::interpolate_success_url(&state.success_url, &row, state.schema) {
+                        Ok(url) => url,
+                        Err(e) => return template_error(&e),
+                    }
+                }
                 Err(e) => return template_error(&format!("insert row: {e}")),
             }
         } else {
@@ -2748,6 +2848,55 @@ mod tests {
         // Edge case: multiple {pk}s in a single template all
         // substitute. Not common but predictable.
         assert_eq!(substitute_pk("/{pk}/related/{pk}", "7"), "/7/related/7");
+    }
+
+    /// `parse_success_url_placeholders` recognizes `{name}`
+    /// placeholders with valid identifier shapes and ignores the
+    /// rest (stray braces, empty `{}`, special chars).
+    #[test]
+    fn parse_success_url_placeholders_extracts_valid_names() {
+        assert_eq!(parse_success_url_placeholders("/posts/{pk}"), vec!["pk"]);
+        assert_eq!(
+            parse_success_url_placeholders("/posts/{pk}/{slug}"),
+            vec!["pk", "slug"]
+        );
+        // Empty placeholder + stray brace → both ignored.
+        assert_eq!(parse_success_url_placeholders("/{}/{ok}"), vec!["ok"]);
+        // Special chars in placeholder → not a valid identifier,
+        // skipped (the literal `{a-b}` stays in the URL).
+        assert_eq!(parse_success_url_placeholders("/{a-b}/{ok}"), vec!["ok"]);
+        // No placeholders at all.
+        assert!(parse_success_url_placeholders("/posts").is_empty());
+        assert!(parse_success_url_placeholders("").is_empty());
+    }
+
+    /// `success_url_returning_columns` resolves `{pk}` to the
+    /// model's PK column and other names to their schema-declared
+    /// `column`. Empty placeholder set returns empty vec — caller
+    /// short-circuits the RETURNING SQL path.
+    #[test]
+    fn success_url_returning_columns_resolves_pk_and_names() {
+        let s = schema_two_fields();
+        let cols = success_url_returning_columns("/posts/{pk}", s).unwrap();
+        assert_eq!(cols, vec!["id"]);
+
+        let cols = success_url_returning_columns("/posts/{pk}/{title}", s).unwrap();
+        assert_eq!(cols, vec!["id", "title"]);
+
+        // Plain URL → empty.
+        assert!(success_url_returning_columns("/posts", s)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// Unknown placeholder name surfaces a clear error before the
+    /// INSERT runs.
+    #[test]
+    fn success_url_returning_columns_rejects_unknown_placeholder() {
+        let s = schema_two_fields();
+        let err = success_url_returning_columns("/posts/{nope}", s).unwrap_err();
+        assert!(err.contains("`{nope}`"), "got: {err}");
+        assert!(err.contains("posts"), "got: {err}");
     }
 
     /// `interpolate_success_url` is a no-op when no `{pk}`

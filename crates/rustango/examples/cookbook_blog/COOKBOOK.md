@@ -1319,7 +1319,7 @@ let app = axum::Router::new()
     .merge(DetailView::for_model(Post::SCHEMA)
         .router("/posts", tera.clone(), pool.clone()))
     .merge(CreateView::for_model(Post::SCHEMA)
-        .success_url("/posts/{pk}")    // {pk} substituted with new row's id
+        .success_url("/posts/{pk}/{slug}")  // any column from the new row
         .router("/posts", tera.clone(), pool.clone()))
     .merge(UpdateView::for_model(Post::SCHEMA)
         .success_url("/posts")
