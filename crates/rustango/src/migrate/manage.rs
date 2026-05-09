@@ -98,6 +98,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "startapp" => startapp(&args[1..], writer),
         "add-data-op" => add_data_op_cmd(dir, &args[1..], writer),
         "make:viewset" => make_viewset_cmd(&args[1..], writer),
+        "make:api_routes" => make_api_routes_cmd(&args[1..], writer),
         "make:serializer" => make_serializer_cmd(&args[1..], writer),
         "make:form" => make_form_cmd(&args[1..], writer),
         "make:job" => make_job_cmd(&args[1..], writer),
@@ -234,6 +235,15 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(
         w,
         "    instead of baking a pool at mount time (required for tenancy)."
+    )?;
+    writeln!(w, "  make:api_routes <app> [--tenant]")?;
+    writeln!(
+        w,
+        "    Scaffold src/<app>/api_routes.rs — the per-app composer that"
+    )?;
+    writeln!(
+        w,
+        "    merges every viewset's router into a single Router<()>."
     )?;
     writeln!(w, "  make:serializer <Name> [--model <Model>]")?;
     writeln!(w, "  make:form <Name>")?;
@@ -1361,6 +1371,163 @@ pub fn router() -> Router<()> {{
     )
 }
 
+/// `manage make:api_routes <app> [--tenant]` — emit
+/// `src/<app>/api_routes.rs`, the per-app composer that merges
+/// every viewset's router into a single `Router<()>` (#82).
+///
+/// Mirrors the working pattern in tango/src/regions/api_routes.rs:
+/// each per-model file under `viewsets/` exposes a router fn, and
+/// `api_routes::api()` composes them with `.merge(...)`. The
+/// scaffold is intentionally minimal — placeholder comments mark
+/// where to add `.merge(...)` lines as new viewsets are written.
+///
+/// Refuses to overwrite an existing file. Errors clearly when the
+/// `src/<app>/` directory is missing — tells the user to run
+/// `manage startapp <app>` first.
+fn make_api_routes_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let mut tenant_aware = false;
+    let mut filtered: Vec<String> = Vec::with_capacity(args.len());
+    for a in args {
+        if a == "--tenant" || a == "--tenant-aware" {
+            tenant_aware = true;
+        } else if a == "--help" || a == "-h" {
+            writeln!(w, "make:api_routes <app> [--tenant]")?;
+            writeln!(
+                w,
+                "  Scaffold src/<app>/api_routes.rs — the per-app router composer."
+            )?;
+            writeln!(
+                w,
+                "  Use --tenant for tenancy projects (no PgPool argument; each"
+            )?;
+            writeln!(
+                w,
+                "  viewset resolves its own per-request connection via the Tenant"
+            )?;
+            writeln!(w, "  extractor).")?;
+            return Ok(());
+        } else if a.starts_with('-') {
+            return Err(MigrateError::Validation(format!(
+                "make:api_routes: unrecognized flag `{a}`"
+            )));
+        } else {
+            filtered.push(a.clone());
+        }
+    }
+    let app = filtered.first().ok_or_else(|| {
+        MigrateError::Validation(
+            "app name is required (e.g. `manage make:api_routes regions`)".into(),
+        )
+    })?;
+    if filtered.len() > 1 {
+        return Err(MigrateError::Validation(format!(
+            "make:api_routes: expected one app name, got {} ({:?})",
+            filtered.len(),
+            filtered
+        )));
+    }
+    if !is_valid_app_name(app) {
+        return Err(MigrateError::Validation(format!(
+            "make:api_routes: app name `{app}` must match `[a-z_][a-z0-9_]*`"
+        )));
+    }
+
+    let app_dir = std::path::PathBuf::from("src").join(app);
+    if !app_dir.exists() {
+        return Err(MigrateError::Validation(format!(
+            "make:api_routes: src/{app}/ does not exist. Run `manage startapp {app}` first."
+        )));
+    }
+
+    let path = app_dir.join("api_routes.rs");
+    if path.exists() {
+        return Err(MigrateError::Validation(format!(
+            "{} already exists — refusing to overwrite",
+            path.display()
+        )));
+    }
+
+    let body = if tenant_aware {
+        api_routes_template_tenant(app)
+    } else {
+        api_routes_template_pool(app)
+    };
+    std::fs::write(&path, body)?;
+    writeln!(w, "wrote {}", path.display())?;
+    writeln!(
+        w,
+        "  add `pub mod api_routes;` to src/{app}/mod.rs (or `mod ...;`),"
+    )?;
+    writeln!(
+        w,
+        "  then `.merge({app}::api_routes::api())` from your top-level urls.rs."
+    )?;
+    Ok(())
+}
+
+fn is_valid_app_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// `--tenant` template — uses each viewset's `tenant_router(...)`,
+/// no `PgPool` threaded through `api()` since the per-tenant
+/// connection is resolved per-request via the `Tenant` extractor.
+fn api_routes_template_tenant(app: &str) -> String {
+    format!(
+        r#"//! Auto-scaffolded by `manage make:api_routes {app} --tenant`.
+//!
+//! API routing for the `{app}` app. Per-model viewsets live under
+//! `viewsets/` and each exposes a `pub fn viewset() -> ViewSet`;
+//! this file composes them into a single `Router<()>`.
+//!
+//! Adding a resource:
+//!   1. Drop a new file under `viewsets/` exposing
+//!      `pub fn viewset() -> ViewSet`.
+//!   2. Declare it in `viewsets/mod.rs`.
+//!   3. Add one `.merge(...)` line below.
+
+use axum::Router;
+
+pub fn api() -> Router<()> {{
+    Router::new()
+        // .merge(super::viewsets::<model>::viewset().tenant_router("/api/<model>"))
+}}
+"#
+    )
+}
+
+/// Default template (no `--tenant`) — single-pool projects. The
+/// `pool` argument is threaded into per-model `router(prefix, pool)`
+/// calls; the macro-derived ViewSet captures it at mount time.
+fn api_routes_template_pool(app: &str) -> String {
+    format!(
+        r#"//! Auto-scaffolded by `manage make:api_routes {app}`.
+//!
+//! API routing for the `{app}` app. Composes per-model viewsets
+//! into a single `Router<()>`. Each viewset captures the supplied
+//! `PgPool` at mount time.
+//!
+//! Adding a resource:
+//!   1. Run `manage make:viewset <Name> --model <Model>`.
+//!   2. Add one `.merge(...)` line below.
+
+use axum::Router;
+use rustango::sql::sqlx::PgPool;
+
+pub fn api(pool: PgPool) -> Router<()> {{
+    let _pool = pool;
+    Router::new()
+        // .merge(super::viewsets::<snake>::router("/api/<snake>", _pool.clone()))
+}}
+"#
+    )
+}
+
 fn make_serializer_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let (name, model) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
@@ -2033,6 +2200,56 @@ mod gen_tests {
             body.contains("pub fn router()"),
             "expected `pub fn router()` so api_routes.rs can `.merge(...)`, got: {body}"
         );
+    }
+
+    // -------- make:api_routes (#82-partial) --------
+
+    /// Tenancy template emits the no-arg `pub fn api()` shape and
+    /// references `tenant_router` in the placeholder hint.
+    #[test]
+    fn api_routes_template_tenant_emits_no_arg_fn() {
+        let body = api_routes_template_tenant("regions");
+        assert!(
+            body.contains("pub fn api() -> Router<()>"),
+            "expected no-arg `pub fn api()`, got: {body}"
+        );
+        assert!(
+            body.contains("tenant_router("),
+            "expected tenant_router hint comment, got: {body}"
+        );
+        assert!(
+            !body.contains("PgPool"),
+            "tenant template must NOT thread PgPool through api(), got: {body}"
+        );
+    }
+
+    /// Default template threads `PgPool` so per-model derived
+    /// viewsets have something to capture at mount time.
+    #[test]
+    fn api_routes_template_pool_threads_pgpool() {
+        let body = api_routes_template_pool("blog");
+        assert!(
+            body.contains("pub fn api(pool: PgPool) -> Router<()>"),
+            "expected pool-arg api fn, got: {body}"
+        );
+        assert!(
+            body.contains("use rustango::sql::sqlx::PgPool;"),
+            "expected PgPool import, got: {body}"
+        );
+    }
+
+    /// App-name validator accepts snake_case and rejects hyphens /
+    /// uppercase / leading digits — same rule we apply to table
+    /// names in the macro. Keeps `src/<app>/` shape Rust-friendly.
+    #[test]
+    fn is_valid_app_name_snake_case_only() {
+        assert!(is_valid_app_name("regions"));
+        assert!(is_valid_app_name("blog_posts"));
+        assert!(is_valid_app_name("_internal"));
+        assert!(!is_valid_app_name(""));
+        assert!(!is_valid_app_name("Regions"));
+        assert!(!is_valid_app_name("region-app"));
+        assert!(!is_valid_app_name("9_apps"));
     }
 
     // -------- run_deploy_audit (`manage check --deploy`) --------
