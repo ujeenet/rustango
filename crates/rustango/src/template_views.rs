@@ -165,6 +165,19 @@ pub struct ListView {
     /// User-registered actions (not including the built-in
     /// `delete_selected`).
     actions: Vec<BulkAction>,
+    /// When `true`, the built-in `delete_selected` action shows a
+    /// confirmation page (selected rows + a "Confirm delete" button)
+    /// before actually firing the DELETE — Django admin's two-step
+    /// shape. Custom actions registered via [`Self::action`] /
+    /// [`Self::tenant_action`] are not gated by this flag (mirrors
+    /// Django: only `delete_selected` is confirmed by default).
+    /// Default off — confirmations only mount when the user opts in
+    /// via [`Self::with_delete_confirmation`].
+    confirm_delete: bool,
+    /// Tera template name for the bulk-delete confirmation page.
+    /// Default `<table>_confirm_bulk_delete.html`. Override via
+    /// [`Self::with_delete_confirmation_template`].
+    confirm_delete_template: Option<String>,
 }
 
 impl ListView {
@@ -186,6 +199,8 @@ impl ListView {
             ordering_fields: Vec::new(),
             bulk_actions_enabled: false,
             actions: Vec::new(),
+            confirm_delete: false,
+            confirm_delete_template: None,
         }
     }
 
@@ -373,6 +388,48 @@ impl ListView {
         self
     }
 
+    /// Show a confirmation page before the built-in `delete_selected`
+    /// action fires. Mirrors Django admin's two-step delete flow
+    /// (select rows → submit → "are you sure?" → confirm → delete)
+    /// and closes the destructive-action footgun documented in the
+    /// v0.30.4 v1 of bulk actions.
+    ///
+    /// When on, a POST with `action=delete_selected` and no
+    /// `confirmed=true` form field renders the confirmation
+    /// template (default `<table>_confirm_bulk_delete.html`) with:
+    ///
+    /// - `action`: `"delete_selected"`
+    /// - `pks`: list of selected primary keys (string-coerced)
+    /// - `objects`: full row data for each selected PK so the
+    ///   template can show *what* will be deleted, not just the id
+    /// - `csrf_token`: re-stamped from cookies/headers so the
+    ///   second POST reuses the same CSRF token chain
+    ///
+    /// The confirm button submits the same form with
+    /// `confirmed=true` added; the handler short-circuits the
+    /// confirmation render and runs the actual DELETE.
+    ///
+    /// Custom actions registered via [`Self::action`] /
+    /// [`Self::tenant_action`] are NOT gated by this flag —
+    /// matches Django's convention (only `delete_selected` is
+    /// confirmed). Custom actions that need confirmation should
+    /// implement their own confirm+submit handler shape.
+    #[must_use]
+    pub fn with_delete_confirmation(mut self, on: bool) -> Self {
+        self.confirm_delete = on;
+        self
+    }
+
+    /// Override the Tera template name used for the bulk-delete
+    /// confirmation page. Default `<table>_confirm_bulk_delete.html`.
+    /// Implies [`Self::with_delete_confirmation`] is on.
+    #[must_use]
+    pub fn with_delete_confirmation_template(mut self, name: impl Into<String>) -> Self {
+        self.confirm_delete_template = Some(name.into());
+        self.confirm_delete = true;
+        self
+    }
+
     /// Tenancy counterpart to [`Self::action`] — handler runs
     /// against the per-request `&mut PgConnection` from the
     /// [`crate::extractors::Tenant`] extractor instead of a captured
@@ -557,6 +614,28 @@ async fn handle_list_action(
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
+
+    // v0.30.7 — confirmation gate for the built-in delete_selected.
+    // When `with_delete_confirmation(true)` is on AND the action
+    // matches the built-in DELETE name AND the form lacks a
+    // `confirmed=true` flag, render the confirmation template
+    // instead of running the DELETE. Custom actions are NOT gated
+    // by this flag (matches Django's convention).
+    if state.vs.confirm_delete && action == BUILTIN_DELETE_SELECTED && !is_form_confirmed(&form) {
+        let objects =
+            match fetch_pks_as_objects_pool(state.vs.schema, pk_field, &state.pool, &pks).await {
+                Ok(o) => o,
+                Err(e) => return template_error(&format!("fetch confirm rows: {e}")),
+            };
+        return render_bulk_delete_confirm(
+            &state.tera,
+            confirm_delete_template_name(&state.vs),
+            &action,
+            &raws,
+            &objects,
+            &parts.headers,
+        );
+    }
 
     // Dispatch: user-registered actions first, then built-ins.
     let dispatch_path = parts.uri.path().to_owned();
@@ -2305,6 +2384,107 @@ fn coerce_pk_typed(
     }
 }
 
+/// `confirmed=true` (case-insensitive) in the form payload short-
+/// circuits the bulk-delete confirmation render. The form values
+/// come in as `Vec<String>` because the same parser handles
+/// repeating keys (`_selected_action`); `confirmed` is only ever
+/// a single value, but the lookup matches the same shape.
+fn is_form_confirmed(form: &HashMap<String, Vec<String>>) -> bool {
+    form.get("confirmed")
+        .and_then(|v| v.first())
+        .map(|s| matches!(s.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+/// Resolve the confirmation template name — explicit override via
+/// [`ListView::with_delete_confirmation_template`] takes precedence,
+/// otherwise default to `<table>_confirm_bulk_delete.html`.
+fn confirm_delete_template_name(vs: &ListView) -> String {
+    vs.confirm_delete_template
+        .clone()
+        .unwrap_or_else(|| format!("{}_confirm_bulk_delete.html", vs.schema.table))
+}
+
+/// Render the confirmation page. Stamps in the action name, the
+/// raw PK list (so the second submit echoes the same selection),
+/// the full row objects (for showing *what* will be deleted), plus
+/// the CSRF token re-stamped from the request headers.
+fn render_bulk_delete_confirm(
+    tera: &Tera,
+    template_name: String,
+    action: &str,
+    pks: &[String],
+    objects: &[Value],
+    headers: &axum::http::HeaderMap,
+) -> Response {
+    let mut ctx = Context::new();
+    ctx.insert("action", action);
+    ctx.insert("pks", &pks);
+    ctx.insert("objects", &objects);
+    let set_cookie = stamp_csrf(headers, &mut ctx);
+    let mut resp = render(tera, &template_name, &ctx);
+    apply_csrf_cookie(&mut resp, set_cookie);
+    resp
+}
+
+/// Fetch the rows for the selected PKs so the confirmation
+/// template can render them. Selects every scalar field — the
+/// template branches on what to display. Errors here surface as
+/// 500 rather than 400 because they indicate a backend problem,
+/// not a bad request.
+async fn fetch_pks_as_objects_pool(
+    schema: &'static ModelSchema,
+    pk_field: &'static crate::core::FieldSchema,
+    pool: &PgPool,
+    pks: &[SqlValue],
+) -> Result<Vec<Value>, String> {
+    use crate::core::{Filter, Op};
+    let q = SelectQuery {
+        model: schema,
+        where_clause: WhereExpr::Predicate(Filter {
+            column: pk_field.column,
+            op: Op::In,
+            value: SqlValue::List(pks.to_vec()),
+        }),
+        search: None,
+        joins: vec![],
+        order_by: vec![],
+        limit: None,
+        offset: None,
+    };
+    let rows = select_rows(pool, &q).await.map_err(|e| e.to_string())?;
+    let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
+    Ok(rows.iter().map(|r| row_to_json(r, &fields)).collect())
+}
+
+#[cfg(feature = "tenancy")]
+async fn fetch_pks_as_objects_conn(
+    schema: &'static ModelSchema,
+    pk_field: &'static crate::core::FieldSchema,
+    conn: &mut crate::sql::sqlx::PgConnection,
+    pks: &[SqlValue],
+) -> Result<Vec<Value>, String> {
+    use crate::core::{Filter, Op};
+    let q = SelectQuery {
+        model: schema,
+        where_clause: WhereExpr::Predicate(Filter {
+            column: pk_field.column,
+            op: Op::In,
+            value: SqlValue::List(pks.to_vec()),
+        }),
+        search: None,
+        joins: vec![],
+        order_by: vec![],
+        limit: None,
+        offset: None,
+    };
+    let rows = crate::sql::select_rows_on(conn, &q)
+        .await
+        .map_err(|e| e.to_string())?;
+    let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
+    Ok(rows.iter().map(|r| row_to_json(r, &fields)).collect())
+}
+
 /// Run the built-in `delete_selected` action: `DELETE FROM <table>
 /// WHERE <pk> IN (...)`. Goes through `crate::core::DeleteQuery` +
 /// `crate::sql::delete{,_on}` so it composes the exact same SQL the
@@ -2523,6 +2703,30 @@ mod tenant {
             Ok(v) => v,
             Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
         };
+
+        // v0.30.7 — confirmation gate for built-in delete_selected.
+        // Tenant variant: fetch confirm-page rows on the per-request
+        // connection. Same shape as the static path.
+        if state.vs.confirm_delete
+            && action == super::BUILTIN_DELETE_SELECTED
+            && !super::is_form_confirmed(&form)
+        {
+            let conn = t.conn();
+            let objects =
+                match super::fetch_pks_as_objects_conn(state.vs.schema, pk_field, conn, &pks).await
+                {
+                    Ok(o) => o,
+                    Err(e) => return template_error(&format!("fetch confirm rows: {e}")),
+                };
+            return super::render_bulk_delete_confirm(
+                &state.tera,
+                super::confirm_delete_template_name(&state.vs),
+                &action,
+                &raws,
+                &objects,
+                &parts.headers,
+            );
+        }
 
         let dispatch_path = parts.uri.path().to_owned();
         let conn = t.conn();
@@ -4209,6 +4413,72 @@ mod tests {
         assert_eq!(arr[0]["name"], serde_json::json!("delete_selected"));
         assert_eq!(arr[0]["label"], serde_json::json!("Delete selected"));
         assert_eq!(arr[1]["name"], serde_json::json!("publish"));
+    }
+
+    /// `with_delete_confirmation(true)` flips both fields; the
+    /// `..._template(name)` variant implies the flag is on.
+    #[test]
+    fn with_delete_confirmation_flag_and_template_override() {
+        let s = schema_two_fields();
+        let lv = ListView::for_model(s);
+        assert!(!lv.confirm_delete, "default off");
+        assert!(lv.confirm_delete_template.is_none());
+
+        let lv2 = ListView::for_model(s).with_delete_confirmation(true);
+        assert!(lv2.confirm_delete);
+        assert!(
+            lv2.confirm_delete_template.is_none(),
+            "no override → resolves at request time"
+        );
+
+        let lv3 = ListView::for_model(s).with_delete_confirmation_template("custom.html");
+        assert!(
+            lv3.confirm_delete,
+            "with_delete_confirmation_template implies the flag"
+        );
+        assert_eq!(lv3.confirm_delete_template.as_deref(), Some("custom.html"));
+    }
+
+    /// `confirm_delete_template_name` resolves the explicit override
+    /// when set, otherwise falls back to `<table>_confirm_bulk_delete.html`.
+    #[test]
+    fn confirm_delete_template_name_resolves_default_or_override() {
+        let s = schema_two_fields();
+        let lv = ListView::for_model(s);
+        // Default — schema_two_fields() puts the table at "posts".
+        assert_eq!(
+            confirm_delete_template_name(&lv),
+            "posts_confirm_bulk_delete.html"
+        );
+        let lv2 = ListView::for_model(s).with_delete_confirmation_template("blog/confirm.html");
+        assert_eq!(confirm_delete_template_name(&lv2), "blog/confirm.html");
+    }
+
+    /// `is_form_confirmed` accepts every reasonable truthy form
+    /// value (true/1/yes/on, case-insensitive) so users don't have
+    /// to remember the exact magic string. Anything else is a no.
+    #[test]
+    fn is_form_confirmed_accepts_truthy_strings() {
+        let mk = |val: &str| {
+            let mut f: HashMap<String, Vec<String>> = HashMap::new();
+            f.insert("confirmed".into(), vec![val.into()]);
+            f
+        };
+        for truthy in ["true", "TRUE", "True", "1", "yes", "YES", "on", "On"] {
+            assert!(
+                is_form_confirmed(&mk(truthy)),
+                "expected {truthy:?} to read as confirmed"
+            );
+        }
+        for falsy in ["", "false", "0", "no", "off", "maybe", "anything-else"] {
+            assert!(
+                !is_form_confirmed(&mk(falsy)),
+                "expected {falsy:?} to read as NOT confirmed"
+            );
+        }
+        // Missing key → not confirmed.
+        let empty: HashMap<String, Vec<String>> = HashMap::new();
+        assert!(!is_form_confirmed(&empty));
     }
 
     /// When bulk_actions is off, the context entry is empty (rather

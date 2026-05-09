@@ -1440,6 +1440,30 @@ a captured pool) and mount via `.tenant_router(...)` instead of
 mounting via `.tenant_router()` — surfaces a clear runtime error
 on dispatch.
 
+#### Confirmation step for destructive actions (v0.30.7)
+
+`delete_selected` is a hard-to-undo operation; opt into a Django-
+admin-shape confirmation page with `.with_delete_confirmation(true)`:
+
+```rust,ignore
+ListView::for_model(Post::SCHEMA)
+    .bulk_actions(true)
+    .with_delete_confirmation(true)        // two-step flow
+    .router("/posts", tera, pool)
+```
+
+The first POST renders `<table>_confirm_bulk_delete.html` (override
+via `.with_delete_confirmation_template("…")`) with `action`,
+`pks`, `objects` (full row data), and `csrf_token` in the Tera
+context. The confirm button submits the same form with
+`confirmed=true` added; the handler then runs the DELETE and 303s
+back to the list.
+
+Custom actions registered via `.action(...)` are NOT gated by the
+flag — matches Django's convention (only `delete_selected` is
+confirmed by default). Build your own confirm-then-submit shape if
+a custom action needs it.
+
 ### Business validation — `.validator(...)` and `.form::<T>()` (v0.30.2)
 
 Schema-level checks (`max_length`, `min`, `max`) ship for free.

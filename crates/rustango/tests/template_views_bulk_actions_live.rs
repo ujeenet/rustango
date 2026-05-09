@@ -222,6 +222,141 @@ async fn unknown_action_name_yields_400() {
     assert!(msg.contains("teleport"), "got: {msg}");
 }
 
+/// `with_delete_confirmation(true)` makes the first POST render
+/// the confirmation template (status 200, body shows the rows)
+/// instead of running the DELETE. The second POST with
+/// `confirmed=true` actually deletes.
+#[tokio::test]
+async fn confirmation_renders_first_then_deletes_on_confirmed() {
+    let Some(pool) = pool().await else { return };
+    fresh_table(&pool).await;
+    let ids = seed_three(&pool).await;
+
+    // Custom Tera with both list and confirm templates.
+    let mut t = Tera::default();
+    t.add_raw_template(
+        "tv_bulk_widget_list.html",
+        "rows={{ object_list | length }}",
+    )
+    .unwrap();
+    t.add_raw_template(
+        "tv_bulk_widget_confirm_bulk_delete.html",
+        "CONFIRM action={{ action }} pks={{ pks | length }} \
+         objects={{ objects | length }} csrf={{ csrf_token }}",
+    )
+    .unwrap();
+    let tera = Arc::new(t);
+
+    let lv = ListView::for_model(Widget::SCHEMA)
+        .bulk_actions(true)
+        .with_delete_confirmation(true);
+    let app = lv.router("/widgets", tera, pool.clone());
+
+    // First POST — no `confirmed` field. Should render confirm
+    // page (200), NOT redirect.
+    let body = format!(
+        "action=delete_selected&_selected_action={}&_selected_action={}",
+        ids[0], ids[1]
+    );
+    let resp = app
+        .clone()
+        .oneshot(post_form("/widgets", &body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "confirm page renders 200");
+    let body_str = body_string(resp).await;
+    assert!(
+        body_str.contains("CONFIRM action=delete_selected"),
+        "confirm template body, got: {body_str}"
+    );
+    assert!(
+        body_str.contains("pks=2"),
+        "two PKs selected, got: {body_str}"
+    );
+    assert!(
+        body_str.contains("objects=2"),
+        "rows fetched for display, got: {body_str}"
+    );
+
+    // Confirm rows are still there (no DELETE happened).
+    let count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tv_bulk_widget")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count_before, 3,
+        "confirmation render must not touch the table"
+    );
+
+    // Second POST — same payload + confirmed=true. Should DELETE
+    // and 303 to /widgets.
+    let body = format!(
+        "action=delete_selected&_selected_action={}&_selected_action={}&confirmed=true",
+        ids[0], ids[1]
+    );
+    let resp = app.oneshot(post_form("/widgets", &body)).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "confirmed=true → redirect"
+    );
+    let labels: Vec<String> = sqlx::query_scalar("SELECT label FROM tv_bulk_widget ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(labels, vec!["gamma".to_string()]);
+}
+
+/// Confirmation flag is gated on `delete_selected` only — custom
+/// actions still run on the first POST without confirmation.
+#[tokio::test]
+async fn confirmation_does_not_gate_custom_actions() {
+    let Some(pool) = pool().await else { return };
+    fresh_table(&pool).await;
+    let ids = seed_three(&pool).await;
+
+    let publish: BulkActionFn = Arc::new(|pool, pks| {
+        let pool = pool.clone();
+        let pks = pks.to_vec();
+        Box::pin(async move {
+            let ids: Vec<i64> = pks
+                .iter()
+                .filter_map(|v| match v {
+                    rustango::core::SqlValue::I64(n) => Some(*n),
+                    _ => None,
+                })
+                .collect();
+            sqlx::query("UPDATE tv_bulk_widget SET published = TRUE WHERE id = ANY($1)")
+                .bind(&ids)
+                .execute(&pool)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+    });
+
+    let lv = ListView::for_model(Widget::SCHEMA)
+        .bulk_actions(true)
+        .with_delete_confirmation(true) // ON, but only gates delete_selected
+        .action("publish_selected", "Publish", publish);
+    let app = lv.router("/widgets", tera(), pool.clone());
+
+    // POST with publish_selected — runs immediately, no confirm.
+    let body = format!("action=publish_selected&_selected_action={}", ids[0]);
+    let resp = app.oneshot(post_form("/widgets", &body)).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "custom action → 303 immediately"
+    );
+    let pub0: bool = sqlx::query_scalar("SELECT published FROM tv_bulk_widget WHERE id = $1")
+        .bind(ids[0])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(pub0, "publish_selected ran without confirmation prompt");
+}
+
 #[tokio::test]
 async fn list_get_stamps_bulk_actions_into_template_context() {
     let Some(pool) = pool().await else { return };

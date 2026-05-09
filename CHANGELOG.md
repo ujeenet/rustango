@@ -2,6 +2,85 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.7] — `ListView::with_delete_confirmation` (Django two-step delete)
+
+Closes the destructive-action footgun documented in v0.30.6:
+bulk `delete_selected` POSTs no longer wipe rows on the first
+click. The flag adds Django admin's familiar two-step shape
+(select rows → submit → confirmation page → confirm → delete).
+
+### Added
+
+- **`ListView::with_delete_confirmation(true)`** — opt-in flag.
+  When on, a POST with `action=delete_selected` and no
+  `confirmed=true` form field renders the confirmation template
+  instead of running the DELETE.
+- **`ListView::with_delete_confirmation_template(name)`** —
+  override the default template name (`<table>_confirm_bulk_delete.html`).
+  Implies the flag is on.
+- **Confirmation template Tera context**:
+  - `action`: `"delete_selected"`
+  - `pks`: list of selected primary keys (string-coerced from
+    the form's `_selected_action` values, so the second submit
+    can echo them verbatim)
+  - `objects`: full row data fetched for each selected PK so
+    the template shows *what* will be deleted, not just the IDs
+  - `csrf_token`: re-stamped from cookies/headers; the second
+    submit reuses the same token chain
+- **Confirmed-form values**: the second submit confirms via any
+  truthy value on `confirmed`: `true` / `1` / `yes` / `on`
+  (case-insensitive). Anything else is treated as not confirmed.
+- Threaded through both `router(...)` (static pool) and
+  `tenant_router(...)` (per-request `Tenant::conn()`); the
+  confirm-page row fetch goes through the matching connection.
+
+### Behavior
+
+- Custom actions registered via `.action(...)` /
+  `.tenant_action(...)` are NOT gated by the flag — matches
+  Django's convention (only `delete_selected` is confirmed by
+  default). Custom destructive actions that need confirmation
+  should implement their own confirm-then-submit handler shape
+  via [`ListView::action`].
+- Default off; existing projects pay no overhead and see no
+  behavior change.
+
+### Tests
+
+- 1307 → 1310 lib tests (+3): builder flag flip, template-name
+  resolution (default + override), `is_form_confirmed` accepts
+  the full set of truthy strings.
+- 5/5 → 7/7 live tests in `tests/template_views_bulk_actions_live.rs`:
+  - `confirmation_renders_first_then_deletes_on_confirmed`
+    asserts the full two-step flow against a real Postgres
+  - `confirmation_does_not_gate_custom_actions` confirms
+    `publish_selected` runs immediately even with the flag on
+
+### Recommended template
+
+```html
+<!-- <table>_confirm_bulk_delete.html -->
+<h1>Confirm delete</h1>
+<p>The following {{ objects | length }} row(s) will be deleted:</p>
+<ul>
+  {% for o in objects %}
+    <li>{{ o.title | default(value=o.id) }}</li>
+  {% endfor %}
+</ul>
+<form method="post">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <input type="hidden" name="action" value="{{ action }}">
+  <input type="hidden" name="confirmed" value="true">
+  {% for pk in pks %}
+    <input type="hidden" name="_selected_action" value="{{ pk }}">
+  {% endfor %}
+  <button type="submit">Yes, delete</button>
+  <a href=".">Cancel</a>
+</form>
+```
+
+---
+
 ## [0.30.6] — paper-cut audit of v0.30.x
 
 Self-audit of v0.30.0 → v0.30.5 surfaced five flaws ranging from
