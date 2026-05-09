@@ -7,13 +7,13 @@ Bi-dialect ORM (Postgres / MySQL / **SQLite**) with auto-migrations, multi-tenan
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.28"
+rustango = "0.29"
 
 # SQLite — file-backed or in-memory, full bi-dialect ORM
-rustango = { version = "0.28", features = ["sqlite"] }
+rustango = { version = "0.29", features = ["sqlite"] }
 
 # Multiple backends in one binary
-rustango = { version = "0.28", features = ["postgres", "sqlite"] }
+rustango = { version = "0.29", features = ["postgres", "sqlite"] }
 ```
 
 ### Spin up an app on SQLite in 30 lines
@@ -792,7 +792,7 @@ adds a parallel `&Pool` API that targets either backend; pick MySQL
 
 ```toml
 # Cargo.toml — opt in to MySQL alongside the default postgres feature
-rustango = { version = "0.28", features = ["mysql"] }
+rustango = { version = "0.29", features = ["mysql"] }
 ```
 
 ```rust
@@ -2347,16 +2347,16 @@ The default features cover everything most apps need. Trim them when shipping a 
 
 ```toml
 # Default — everything except tenancy + cache-redis
-rustango = "0.28"
+rustango = "0.29"
 
 # Multi-tenant
-rustango = { version = "0.28", features = ["tenancy"] }
+rustango = { version = "0.29", features = ["tenancy"] }
 
 # With Redis cache
-rustango = { version = "0.28", features = ["cache-redis"] }
+rustango = { version = "0.29", features = ["cache-redis"] }
 
 # Bare ORM only (no admin, no forms, no email, no storage)
-rustango = { version = "0.28", default-features = false, features = ["postgres"] }
+rustango = { version = "0.29", default-features = false, features = ["postgres"] }
 ```
 
 | Feature | What it adds | On by default? |

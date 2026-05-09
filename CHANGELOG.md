@@ -2,6 +2,290 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.29.0] — tiered settings, HTML CBVs, friendly URLs by default
+
+The biggest release since v0.16's unified manage runner. Three
+headline themes:
+
+1. **Tiered settings (#87)** — `Settings::load_from_env()` plus
+   `dev_settings.toml` / `staging_settings.toml` /
+   `prod_settings.toml` files (auto-selected via `RUSTANGO_ENV`,
+   scaffolder emits all three). Six new sections (`server`,
+   `auth`, `brand`, `security`, `routes`, `audit`) cover ~30 knobs
+   that were env-only or hardcoded; eleven `from_settings`
+   constructors thread the values into the right runtime layer.
+   `Cli::with_settings_from_env()` makes wiring a one-liner that
+   auto-applies security_headers + CORS + access_log + body_limit
+   on the user's API router. `manage check --deploy` flags
+   dev-defaults left in prod (HSTS=0, weak Argon2, long JWT TTLs,
+   loopback bind, etc.).
+2. **Generic class-based views for HTML (A5)** — new
+   `template_views` module ships Django-shape `ListView`,
+   `DetailView`, `CreateView`, `UpdateView`, `DeleteView` over
+   any `#[derive(Model)]` schema, rendered through Tera. Each
+   ships in two flavors: `.router(prefix, tera, pool)` for
+   single-tenant projects, `.tenant_router(prefix, tera)` for
+   multi-tenant projects (resolves connection per-request via
+   the `Tenant` extractor). Closes the JSON-vs-HTML asymmetry —
+   rustango pitched itself as Django-shape but had no HTML-side
+   counterpart to `viewset`.
+3. **Dev-loop ergonomics + bug fixes batch** — friendly URL
+   preset (`/login`, `/admin`, `/audit`) is now the default
+   (#85); `Auto<T>` serializes as bare value instead of
+   tagged-enum (#83); URL-token impersonation handoff replaces
+   the cookie-domain handoff that broke on Chromium against
+   `localhost` (#88); built-in JWT auth endpoints land
+   (#81); `ViewSet::tenant_router` for multi-tenant CRUD
+   (#80); contenttype rows auto-populated on bootstrap (#89);
+   four new `manage` verbs
+   (`make:api_routes`, `migrate --squash`, `seed-permissions`,
+   `forget-pending`); plus 50+ smaller fixes.
+
+### Added
+
+- **`rustango::config::Settings::load_from_env()`** + the new
+  tier convention. Loader reads `RUSTANGO_ENV` (defaults to
+  `dev`), prefers `<env>_settings.toml` over the legacy
+  `<env>.toml` shape (legacy still loads when no `_settings`
+  variant exists). `Settings::current_env_tier()` exposes the
+  resolved tier. `Settings::detected_features()` introspects
+  `#[cfg(feature = "...")]` flags for telemetry / version
+  pages / deployment audits.
+- **Six new TOML sections**: `[server]` (bind,
+  request_timeout_secs, max_body_bytes), `[auth]` (argon2
+  memory/iterations/parallelism, lockout threshold/duration) +
+  `[auth.jwt]` (access_ttl_secs, refresh_ttl_secs, issuer,
+  audience), `[brand]` (name, tagline, logo_url, primary_color,
+  theme_mode), `[security]` (headers_preset, csp,
+  hsts_max_age_secs, cors_allowed_origins), `[routes]`
+  (legacy_preset + per-field URL prefix overrides), `[audit]`
+  (retention_days, redact_query_params).
+- **`Cli::with_settings(&Settings)`** + **`Cli::with_settings_from_env()`**
+  — apply Settings.server.bind, Settings.routes → RouteConfig,
+  and auto-mount security_headers + CORS + access_log +
+  body_limit layers on the user's API router. The one-liner
+  `Cli::new().api(urls::api()).with_settings_from_env().run()`
+  now drives the entire stack from the four scaffolder-emitted
+  TOML files.
+- **`from_settings` constructors** on `SecurityHeadersLayer`,
+  `CorsLayer`, `BodyLimitLayer`; `with_audit_settings` on
+  `AccessLogLayer`; `with_jwt_settings` on
+  `auth_routes::Config`; `cache::from_settings`,
+  `email::from_settings`, `jobs::inmemory_from_settings`. Each
+  fail-safe to a sensible default with a tracing::warn rather
+  than blocking startup on misconfig.
+- **`manage check --deploy`** now also loads
+  `Settings::load_from_env()` and audits the loaded values:
+  flags `headers_preset = "dev"` / `"none"` in prod tier,
+  `hsts_max_age_secs = 0`, `argon2_memory_kib < 19456` (OWASP
+  2024 floor), `access_ttl_secs > 3600`, loopback `[server]
+  bind`, missing `audit.retention_days`, `legacy_preset = true`.
+  Audit is a no-op on dev/staging tiers.
+- **`rustango::template_views`** — new module behind a default-on
+  `template_views` feature. `ListView`, `DetailView`, `CreateView`,
+  `UpdateView`, `DeleteView` over `#[derive(Model)]` schemas.
+  Each ships `.router(prefix, tera, pool)` (single-tenant) and
+  `.tenant_router(prefix, tera)` (multi-tenant via `Tenant`
+  extractor). Default template names follow Django convention
+  (`<table>_list.html` / `<table>_detail.html` / `<table>_form.html`
+  shared by Create+Update / `<table>_confirm_delete.html`).
+  Form views auto-skip PK + `Auto<T>` + `generated_as` columns,
+  parse form-encoded bodies, coerce values to the field's
+  declared SQL type, and re-render with `form.errors` populated
+  + 422 status on validation failure.
+- **`manage make:api_routes <app> [--tenant]`** (#82 companion) —
+  scaffolds `src/<app>/api_routes.rs`, the per-app composer that
+  `.merge(...)`-es every viewset's router into a single
+  `Router<()>`. Two templates: `--tenant` for tenancy projects
+  (no pool argument), default for single-tenant projects.
+- **`manage migrate --squash`** (#84a) — dev-iteration escape
+  hatch that deletes every pending (un-applied) migration JSON
+  and re-runs `makemigrations` to regenerate a single fresh diff
+  against the current model registry. Refuses to touch applied
+  rows. Closes the recovery flow gap when an evolving model
+  produces a migration the validator rejects (e.g. AddColumn NOT
+  NULL with no default).
+- **`manage forget-pending <name>`** (#84b) — delete a single
+  un-applied migration JSON so `makemigrations` regenerates the
+  diff. Accepts exact name or unique substring; refuses if the
+  named migration is already in the ledger.
+- **`manage seed-permissions [--slug <s>]`** (#61 follow-up) —
+  re-run `auto_create_permissions` against one (`--slug`) or
+  every active tenant. Idempotent. Useful after adding
+  `#[rustango(permissions)]` to a model without a fresh migrate
+  cycle.
+- **`auth_routes::jwt_router(Config)`** (#81) — built-in JWT auth
+  endpoints (login + refresh + logout + me) for tenancy
+  projects. Endpoints are tenant-aware via the `Tenant`
+  extractor; the JWT's `tenant` claim is matched against the
+  resolved subdomain so a token minted on `acme.example.com` is
+  rejected on `globex.example.com`.
+- **`ViewSet::tenant_router(prefix)`** (#80) — multi-tenant CRUD
+  resolving connection per-request via `Tenant` instead of
+  capturing a pool at mount time. The `make:viewset --tenant`
+  scaffolder template emits this shape.
+- **URL-token impersonation handoff** (#88) — new
+  `tenancy::impersonation_handoff` module. Operator console
+  mints a short-lived signed payload (HMAC over op/slug/exp/jti),
+  redirects to `<sub>.<apex><handoff_url>?token=<...>`, and the
+  tenant admin redeems it with single-use enforcement via
+  `JtiBlacklist`. Replaces the cookie-domain handoff that broke
+  on Chromium against the `localhost` PSL TLD.
+- **Auto-populate `rustango_content_types`** (#89) on bootstrap.
+  `contenttypes::ensure_seeded(pool)` is invoked from
+  `migrate_registry` and `run_for_one_tenant` (both schema and
+  database modes) so CT rows land for every registered model
+  without an explicit operator step. New helpers
+  `fetch_row_as_json(pool, ct, pk)` and
+  `for_each_row_of_ct(pool, ct, batch_size, f)` for the
+  "given a ContentType + pk, give me the row" pattern.
+  `crate::sql::row_to_json` is now public.
+- **Scaffolder emits `config/`** with `default.toml` +
+  `dev_settings.toml` + `staging_settings.toml` +
+  `prod_settings.toml`. Fresh `cargo run` works without env
+  vars (RUSTANGO_ENV defaults to `dev`).
+
+### Changed
+
+- **`RouteConfig::default()` now returns the friendly preset**
+  (#85) — `/login`, `/logout`, `/admin`, `/audit`, `/_static`,
+  `/_brand`, `/_impersonation_handoff`,
+  `/change-password`. Apps that need the v0.28 `__`-prefixed
+  shape opt in via `RouteConfig::legacy()` or set
+  `[routes] legacy_preset = true` in their TOML.
+  **Migration**: existing v0.28 deployments calling
+  `Default::default()` (or no override) will see their admin /
+  login URLs change shape — bookmarks and external integrations
+  need updating.
+- **`Auto<T>` JSON wire shape** (#83) — now serializes as the
+  bare inner value (`42` / `null`) instead of the tagged enum
+  (`{"Set": 42}` / `"Unset"`). Mirrors how `ForeignKey<T, K>`
+  lowers to its bare PK on the wire. Deserialize accepts both
+  shapes for backwards compat. Audit log JSON shape changes
+  too — that's a readability win, but means an audit row written
+  under v0.28 looks different from one written under v0.29.
+- **`router_with_impersonation` signature** (#88) — drops
+  `tenant_cookie_domain` and `tenant_admin_url` parameters; adds
+  `tenant_handoff_url`. The cookie path is gone; every
+  impersonation now goes through the URL-token handoff. Apps
+  using this directly (rare; the typical entry is
+  `Server::Builder`) need to update the call.
+- **`manage check --deploy`** rewrites the env-var list it
+  audits — `SECRET_KEY` is dropped (the framework reads
+  `RUSTANGO_SESSION_SECRET`), the placeholder check matches
+  `change-me` / `placeholder`, and `RUSTANGO_APEX_DOMAIN` /
+  `RUSTANGO_BIND` join the audit set.
+- **Cargo `Cargo.toml` scaffolder** — pins `rustango = "0.29"`
+  via `env!("CARGO_PKG_VERSION")` so newly-scaffolded projects
+  always match the framework version (#79). Yanked-version
+  detection guards against publishing a version that resolves
+  to a yanked rustango-macros.
+- **`manage startapp`** scaffold emits `auto_now_add`
+  timestamps wrapped in `Auto<…>` (compilable shape) — the prior
+  template wrote `chrono::DateTime<Utc>` directly, which the
+  Model derive correctly rejected.
+- **`make:viewset --tenant`** template uses
+  `ViewSet::for_model(...).tenant_router(...)` shape; default
+  template still emits `#[derive(ViewSet)]` for single-tenant
+  projects.
+- **Brand-name fallback strings** (#72) — Title Case across
+  `admin/helpers.rs`, `_sidebar.html`, `tenancy/operator_console`,
+  `admin/auth.rs` (was lowercase).
+- **Brand logo CSS** (#73) — `_op_styles.html` and
+  `_admin_styles.html` use explicit `height` + `align-self:
+  flex-start` + `object-fit: contain` instead of `max-height`
+  to prevent stretched rendering inside flex parents.
+
+### Fixed
+
+- **Operator-as-superuser impersonation** (#78 batch):
+  - Redirect respects `RouteConfig::admin_url` + preserves Host
+    port (`acme.localhost:8080/admin/` not `acme.localhost/__admin/`)
+  - Cookie domain always set even when project is single-host
+  - Operator-side audit rows emit through registry pool (not
+    silently dropped — `rustango_audit_log` provisioned by
+    `migrate_registry`)
+- **`audit_url` end-to-end** (#74 + #85 follow-up) — route +
+  templates + redirects all honor the configured audit URL;
+  fixes inconsistent `/__audit` Activity link under friendly URLs.
+- **POST→GET 405 after session-expiry redirect** (#68) —
+  `sanitize_next` rewrites POST-only paths to their parent edit
+  page so the post-login bounce doesn't 405.
+- **Persistent operator session secret** (#69) —
+  `tenancy::server::run` now uses the same on-disk secret as
+  `Server::Builder`, so operator sessions survive restart.
+- **Operator self-serve change-password endpoint** (#77) —
+  closes the missing operator-side surface alongside the tenant
+  flow.
+- **Title-Case admin index `<h1>`** (#72 follow-up) — uses the
+  brand-aware admin_title.
+- **Tenancy verbs reject leading-flag positional slug** (#79.3) —
+  `cargo run -- create-tenant --help` no longer creates a tenant
+  named `--help`.
+- **`manage startapp` model template** (#79 sub) — `auto_now_add`
+  timestamps wrapped in `Auto<…>` so the scaffold compiles out
+  of the box.
+- **AddColumn NOT NULL validator error** (#84a) — surfaces three
+  concrete recovery paths (`migrate --squash`, `forget-pending`,
+  manual JSON delete) instead of the prior unhelpful message.
+
+### Tests
+
+- 1153 → 1226 lib tests (+73 across the release): tier
+  resolution, section round-trips, every `from_settings`
+  constructor's branches, `Cli::with_settings` resolution
+  priority + auto-layer apply, deploy-audit warning paths,
+  template_views builder/coerce/parse_form/handle path,
+  tenant_router smoke for every CBV, JTI blacklist
+  prune-on-insert, contenttype seed/fetch helpers.
+
+### Migration notes
+
+- **Friendly URLs are now default**. If you depended on the
+  `/__login` / `/__admin` shape, add
+  `Cli::routes(RouteConfig::legacy())` or set
+  `[routes] legacy_preset = true` in TOML.
+- **Audit log shape changes** (`Auto<T>` JSON wire shape).
+  Existing audit rows written under v0.28 keep their old shape;
+  new rows use the bare value. If you parse audit rows
+  programmatically, accept both shapes.
+- **`router_with_impersonation` callers** — update the
+  signature: drop `tenant_cookie_domain` + `tenant_admin_url`,
+  add `tenant_handoff_url` (typical value: `routes.impersonation_handoff_url`).
+- **`SECRET_KEY` env var is gone** — set `RUSTANGO_SESSION_SECRET`
+  instead. `manage check --deploy` audits the new name.
+- **Tier convention is opt-in** — your existing
+  `config/<env>.toml` files keep loading. Rename to
+  `config/<env>_settings.toml` to use the new convention; the
+  loader prefers the new name when both exist.
+- **`template_views` feature** is default-on. Projects with
+  `default-features = false` need to add `template_views` to
+  their feature list to keep using `ListView` / `DetailView` /
+  etc.
+
+### Out of scope (queued follow-ups)
+
+- **`auth.argon2_*` wiring** — would require an invasive
+  refactor of every `passwords::hash()` call site to thread
+  Argon2Params through. Section already accepts the values; the
+  consumer side waits for the refactor.
+- **`audit.retention_days` wiring** — needs a scheduler/cron
+  integration that doesn't exist yet.
+- **`jobs.backend = "pg"` runtime selection** — `JobQueue`
+  trait isn't object-safe (generic methods on `Job`), so
+  `Arc<dyn JobQueue>` can't compile. Documented in the
+  `jobs::inmemory_from_settings` docstring as a manual wire-up.
+- **A3 service container** (typed DI registry) — convenience for
+  test substitution; deferred until a project actually wants it.
+- **A4 middleware-stack-as-data** — auto-layering already
+  handles 90% of the use case; configurable order is power-user
+  territory.
+- **ModelForm integration into CreateView/UpdateView** — would
+  replace the inline string coercion with the typed form
+  pipeline. Today's coercion is sufficient for most projects.
+
+---
+
 ## [0.28.4] — `password_changed_at` cookie invalidation (#77 follow-up)
 
 Patch release closing the only out-of-scope item flagged when v0.28.2

@@ -1740,9 +1740,9 @@ combine with the existing dialect features:
 
 ```toml
 [dependencies]
-rustango = { version = "0.28", features = ["sqlite"] }
+rustango = { version = "0.29", features = ["sqlite"] }
 # or both at once:
-rustango = { version = "0.28", features = ["postgres", "sqlite"] }
+rustango = { version = "0.29", features = ["postgres", "sqlite"] }
 ```
 
 The macro emits per-backend trait impls only when the feature is
