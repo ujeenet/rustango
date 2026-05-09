@@ -960,7 +960,7 @@ async fn org_edit_form(
 async fn org_edit_submit(
     State(state): State<ConsoleState>,
     axum::extract::Path(slug): axum::extract::Path<String>,
-    Extension(_op): Extension<auth::Operator>,
+    Extension(op): Extension<auth::Operator>,
     Form(mut form): Form<std::collections::HashMap<String, String>>,
 ) -> Response<Body> {
     use crate::core::Model as _;
@@ -1050,6 +1050,33 @@ async fn org_edit_submit(
         pools.invalidate(&slug).await;
     }
 
+    // Audit row: operator-side config edits should leave a trail
+    // alongside impersonation. We record the columns touched,
+    // omitting `database_url` itself even on rotation (it's a
+    // credentialed URL — we record the FACT of rotation, not the
+    // value).
+    let operator_id = op.id.get().copied().unwrap_or(0);
+    let mut detail = serde_json::Map::new();
+    detail.insert(
+        "action".into(),
+        serde_json::Value::String("org.edit".into()),
+    );
+    let touched_cols: Vec<String> = collected
+        .iter()
+        .filter_map(|(c, _)| {
+            if *c == DATABASE_URL_FIELD {
+                None
+            } else {
+                Some((*c).to_owned())
+            }
+        })
+        .collect();
+    detail.insert("fields".into(), serde_json::json!(touched_cols));
+    if database_url_changed {
+        detail.insert("database_url_rotated".into(), serde_json::json!(true));
+    }
+    emit_op_audit(&state.registry, &slug, operator_id, "edit", detail).await;
+
     let notice = if database_url_changed {
         format!("updated `{slug}` (pool evicted — next request rebuilds with new URL)")
     } else {
@@ -1070,6 +1097,56 @@ fn redirect_with_error(slug: &str, msg: &str) -> Response<Body> {
         urlencoding_lite(msg),
     ))
     .into_response()
+}
+
+/// Emit one audit row for an operator-side action against
+/// `rustango_orgs`. Always opens with `tenant_slug` + `operator_id`
+/// in the changes blob; callers add per-action keys via `extra`.
+/// Failure is logged but never blocks the primary workflow — same
+/// contract as the impersonation audit emission.
+///
+/// `source` shape: `operator:<id>:<verb>` (e.g.
+/// `operator:1:impersonating`, `operator:1:edit`,
+/// `operator:1:branding`). Lets post-hoc forensics filter
+/// operator activity from tenant-user activity.
+async fn emit_op_audit(
+    registry: &crate::sql::sqlx::PgPool,
+    slug: &str,
+    operator_id: i64,
+    verb: &str,
+    extra: serde_json::Map<String, serde_json::Value>,
+) {
+    let mut changes = serde_json::Map::new();
+    changes.insert(
+        "tenant_slug".into(),
+        serde_json::Value::String(slug.to_owned()),
+    );
+    changes.insert("operator_id".into(), serde_json::json!(operator_id));
+    for (k, v) in extra {
+        changes.insert(k, v);
+    }
+    let result = crate::sql::sqlx::query(
+        r#"INSERT INTO "rustango_audit_log"
+            ("entity_table", "entity_pk", "operation", "source", "changes")
+           VALUES ('rustango_orgs', $1, 'action', $2, $3)"#,
+    )
+    .bind(slug)
+    .bind(format!("operator:{operator_id}:{verb}"))
+    .bind(crate::sql::sqlx::types::Json(serde_json::Value::Object(
+        changes,
+    )))
+    .execute(registry)
+    .await;
+    if let Err(e) = result {
+        tracing::warn!(
+            target: "crate::tenancy::operator_console",
+            error = %e,
+            slug = slug,
+            operator_id,
+            verb,
+            "failed to record operator action in audit log",
+        );
+    }
 }
 
 /// Bind one `SqlValue` onto a Postgres `sqlx::Query`. Mirrors the
@@ -1117,7 +1194,7 @@ fn bind_sql_value<'a>(
 async fn org_edit_branding(
     State(state): State<ConsoleState>,
     axum::extract::Path(slug): axum::extract::Path<String>,
-    Extension(_op): Extension<auth::Operator>,
+    Extension(op): Extension<auth::Operator>,
     mut mp: Multipart,
 ) -> Response<Body> {
     let mut updates: Vec<(&'static str, Option<String>)> = Vec::new();
@@ -1190,6 +1267,28 @@ async fn org_edit_branding(
     if let Err(e) = q.execute(&state.registry).await {
         return redirect_with_error(&slug, &format!("update failed: {e}"));
     }
+
+    // Audit row — branding uploads touch the public-facing surface
+    // of a tenant; operators iterating during onboarding leave a
+    // breadcrumb trail. Records which assets landed (`logo`,
+    // `favicon`) without the binary blob.
+    let operator_id = op.id.get().copied().unwrap_or(0);
+    let assets: Vec<String> = updates
+        .iter()
+        .map(|(col, _)| match *col {
+            "logo_path" => "logo".to_owned(),
+            "favicon_path" => "favicon".to_owned(),
+            other => other.to_owned(),
+        })
+        .collect();
+    let mut detail = serde_json::Map::new();
+    detail.insert(
+        "action".into(),
+        serde_json::Value::String("org.branding.upload".into()),
+    );
+    detail.insert("assets".into(), serde_json::json!(assets));
+    emit_op_audit(&state.registry, &slug, operator_id, "branding", detail).await;
+
     let notice = format!("uploaded {} brand asset(s) for `{slug}`", updates.len());
     Redirect::to(&format!(
         "/orgs/{}/edit?notice={}",
@@ -1335,32 +1434,12 @@ async fn org_impersonate(
     // Audit-log entry on the operator side. The tenant admin
     // emits a separate entry the first time an impersonation
     // session lands on a write — both ends are visible.
-    let audit_sql = r#"
-        INSERT INTO "rustango_audit_log"
-            ("entity_table", "entity_pk", "operation", "source", "changes")
-        VALUES ('rustango_orgs', $1, 'action', $2,
-                jsonb_build_object('action', 'impersonate.start',
-                                   'tenant_slug', $1::text,
-                                   'operator_id', $3::bigint))
-    "#;
-    if let Err(e) = rustango::sql::sqlx::query(audit_sql)
-        .bind(&slug)
-        .bind(format!("operator:{operator_id}:impersonating"))
-        .bind(operator_id)
-        .execute(&state.registry)
-        .await
-    {
-        tracing::warn!(
-            target: "crate::tenancy::operator_console",
-            error = %e,
-            slug = %slug,
-            operator_id,
-            "failed to record impersonation start in audit log",
-        );
-        // Continue anyway — audit failure must not block the
-        // operator's primary workflow. The tracing log line is
-        // the fallback record.
-    }
+    let mut detail = serde_json::Map::new();
+    detail.insert(
+        "action".into(),
+        serde_json::Value::String("impersonate.start".into()),
+    );
+    emit_op_audit(&state.registry, &slug, operator_id, "impersonating", detail).await;
 
     // Build the redirect URL. We send the operator to the
     // tenant admin root (RouteConfig::admin_url; default `/admin`
