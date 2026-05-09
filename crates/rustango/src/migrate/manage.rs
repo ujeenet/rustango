@@ -1132,31 +1132,11 @@ async fn check_cmd<W: Write>(
 
     // Deploy checks
     if deploy {
-        // DEBUG/dev-mode env vars
-        if std::env::var("RUSTANGO_ENV").as_deref() != Ok("prod")
-            && std::env::var("RUSTANGO_ENV").as_deref() != Ok("production")
-        {
-            warnings.push("RUSTANGO_ENV is not 'prod' or 'production'".into());
-        }
-        // Secret key length
-        match std::env::var("SECRET_KEY") {
-            Ok(s) if s.len() < 32 => {
-                errors.push(format!(
-                    "SECRET_KEY is only {} bytes — need ≥ 32 for cookie signing",
-                    s.len()
-                ));
-            }
-            Err(_) => {
-                warnings.push(
-                    "SECRET_KEY env var not set (operator console / sessions need this)".into(),
-                );
-            }
-            _ => info.push("SECRET_KEY length OK".into()),
-        }
-        // DATABASE_URL set
-        if std::env::var("DATABASE_URL").is_err() {
-            errors.push("DATABASE_URL must be set in production".into());
-        }
+        let mut audit = DeployAuditFindings::default();
+        run_deploy_audit(&deploy_audit_env(), &mut audit);
+        info.extend(audit.info);
+        warnings.extend(audit.warnings);
+        errors.extend(audit.errors);
     }
 
     // Render
@@ -1812,6 +1792,144 @@ fn redact_url(s: &str) -> String {
     format!("{}://{user}:***{after_at}", &s[..scheme_end])
 }
 
+/// Snapshot of the env vars `manage check --deploy` cares about.
+/// Lifted out so the audit logic is pure (testable without
+/// `unsafe { env::set_var }` race conditions across `cargo test`'s
+/// parallel runners).
+#[derive(Debug, Default, Clone)]
+pub(crate) struct DeployAuditEnv {
+    pub rustango_env: Option<String>,
+    pub session_secret: Option<String>,
+    pub database_url: Option<String>,
+    pub apex_domain: Option<String>,
+    pub bind: Option<String>,
+}
+
+fn deploy_audit_env() -> DeployAuditEnv {
+    DeployAuditEnv {
+        rustango_env: std::env::var("RUSTANGO_ENV").ok(),
+        session_secret: std::env::var("RUSTANGO_SESSION_SECRET").ok(),
+        database_url: std::env::var("DATABASE_URL").ok(),
+        apex_domain: std::env::var("RUSTANGO_APEX_DOMAIN").ok(),
+        bind: std::env::var("RUSTANGO_BIND").ok(),
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct DeployAuditFindings {
+    pub info: Vec<String>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+/// Run the `manage check --deploy` audit checks against `env`.
+/// Pure function so callers can test it with arbitrary env
+/// snapshots without poking actual process env vars.
+///
+/// Modernized from the v0.27 shape that checked the wrong env
+/// var (`SECRET_KEY` — never read by the framework). The
+/// framework reads `RUSTANGO_SESSION_SECRET` for HMAC-signing
+/// the operator-console + tenant-admin cookies AND the JWT
+/// payloads issued by `auth_routes::jwt_router` (#81). Same key
+/// covers both surfaces.
+pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindings) {
+    // RUSTANGO_ENV — production should be explicitly tagged.
+    match env.rustango_env.as_deref() {
+        Some("prod" | "production") => {
+            out.info
+                .push("RUSTANGO_ENV is set to a production value".into());
+        }
+        Some(other) => {
+            out.warnings.push(format!(
+                "RUSTANGO_ENV is `{other}` — set to `prod` (or `production`) in deployed env"
+            ));
+        }
+        None => {
+            out.warnings.push(
+                "RUSTANGO_ENV is unset — set to `prod` so config loaders pick the right tier"
+                    .into(),
+            );
+        }
+    }
+
+    // RUSTANGO_SESSION_SECRET — required for cookie + JWT signing.
+    // Recommended: 32+ bytes of base64-encoded entropy
+    // (`openssl rand -base64 32`). The framework treats the raw
+    // value as the HMAC key, so length matters.
+    match env.session_secret.as_deref() {
+        None => {
+            out.errors.push(
+                "RUSTANGO_SESSION_SECRET is unset — operator + tenant cookies + JWTs would use \
+                 an ephemeral random secret that's regenerated on every restart, signing every \
+                 user out. Set via `openssl rand -base64 32`."
+                    .into(),
+            );
+        }
+        Some(s) if s.len() < 32 => {
+            out.errors.push(format!(
+                "RUSTANGO_SESSION_SECRET is only {} bytes — need ≥ 32 for HMAC key strength. \
+                 Regenerate with `openssl rand -base64 32`.",
+                s.len()
+            ));
+        }
+        Some(s) if s.contains("change-me") || s.contains("placeholder") => {
+            out.errors.push(
+                "RUSTANGO_SESSION_SECRET still contains the scaffolder placeholder \
+                 (`change-me-...`) — replace with a real secret via `openssl rand -base64 32`."
+                    .into(),
+            );
+        }
+        Some(_) => {
+            out.info.push("RUSTANGO_SESSION_SECRET length OK".into());
+        }
+    }
+
+    // DATABASE_URL — required.
+    match env.database_url.as_deref() {
+        None => out
+            .errors
+            .push("DATABASE_URL is unset — required in production".into()),
+        Some(url) if url.contains("localhost") || url.contains("127.0.0.1") => {
+            out.warnings.push(
+                "DATABASE_URL points at localhost / 127.0.0.1 — verify this is intended in \
+                 production (typically a managed service hostname)"
+                    .into(),
+            );
+        }
+        Some(_) => out.info.push("DATABASE_URL set".into()),
+    }
+
+    // RUSTANGO_APEX_DOMAIN — required for tenancy projects, but
+    // single-tenant projects don't need it. Surface as info, not
+    // warning, when unset (`localhost` is the framework default
+    // and works for non-tenancy deployments).
+    match env.apex_domain.as_deref() {
+        None | Some("localhost") => {
+            out.warnings.push(
+                "RUSTANGO_APEX_DOMAIN is unset / `localhost` — tenancy projects need this set to \
+                 the public-facing apex (e.g. `app.example.com`) so subdomain resolution + \
+                 cookie scoping work in production. Single-tenant projects can ignore."
+                    .into(),
+            );
+        }
+        Some(_) => out
+            .info
+            .push("RUSTANGO_APEX_DOMAIN set to a non-localhost value".into()),
+    }
+
+    // RUSTANGO_BIND — warn if loopback-only. Common typo in dev
+    // configs that get promoted to prod without rebinding.
+    match env.bind.as_deref() {
+        Some(b) if b.starts_with("127.0.0.1") => {
+            out.warnings.push(format!(
+                "RUSTANGO_BIND={b} only listens on loopback — production usually wants \
+                 `0.0.0.0:<port>` to accept external traffic"
+            ));
+        }
+        Some(_) | None => {} // either explicit non-loopback or framework default (0.0.0.0)
+    }
+}
+
 #[cfg(test)]
 mod gen_tests {
     use super::*;
@@ -1914,6 +2032,183 @@ mod gen_tests {
         assert!(
             body.contains("pub fn router()"),
             "expected `pub fn router()` so api_routes.rs can `.merge(...)`, got: {body}"
+        );
+    }
+
+    // -------- run_deploy_audit (`manage check --deploy`) --------
+
+    fn good_prod_env() -> DeployAuditEnv {
+        DeployAuditEnv {
+            rustango_env: Some("prod".into()),
+            session_secret: Some("a".repeat(48)),
+            database_url: Some("postgres://app:s3cr3t@db.example.com/app_prod".into()),
+            apex_domain: Some("app.example.com".into()),
+            bind: Some("0.0.0.0:8080".into()),
+        }
+    }
+
+    fn run(env: &DeployAuditEnv) -> DeployAuditFindings {
+        let mut out = DeployAuditFindings::default();
+        run_deploy_audit(env, &mut out);
+        out
+    }
+
+    #[test]
+    fn deploy_audit_clean_prod_env_has_no_warnings_or_errors() {
+        let r = run(&good_prod_env());
+        assert!(
+            r.errors.is_empty(),
+            "expected no errors in clean prod env, got: {:?}",
+            r.errors
+        );
+        assert!(
+            r.warnings.is_empty(),
+            "expected no warnings in clean prod env, got: {:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn deploy_audit_unset_session_secret_errors() {
+        let env = DeployAuditEnv {
+            session_secret: None,
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.contains("RUSTANGO_SESSION_SECRET")),
+            "expected error for unset RUSTANGO_SESSION_SECRET, got: {:?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn deploy_audit_short_session_secret_errors() {
+        let env = DeployAuditEnv {
+            session_secret: Some("too-short".into()),
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.contains("only") && e.contains("bytes")),
+            "expected length error for short secret, got: {:?}",
+            r.errors
+        );
+    }
+
+    /// The scaffolder writes
+    /// `RUSTANGO_SESSION_SECRET=change-me-base64-encoded-32-bytes-or-more`
+    /// to `.env.example`. A user who copied that to `.env` and never
+    /// ran `openssl rand -base64 32` should get a loud error in
+    /// `--deploy` mode rather than silently shipping a known-public
+    /// "secret".
+    #[test]
+    fn deploy_audit_placeholder_session_secret_errors() {
+        let env = DeployAuditEnv {
+            session_secret: Some("change-me-base64-encoded-32-bytes-or-more".into()),
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.contains("placeholder") || e.contains("change-me")),
+            "expected error for unchanged placeholder secret, got: {:?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn deploy_audit_unset_rustango_env_warns() {
+        let env = DeployAuditEnv {
+            rustango_env: None,
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("RUSTANGO_ENV")),
+            "expected warning for unset RUSTANGO_ENV, got: {:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn deploy_audit_dev_rustango_env_warns() {
+        let env = DeployAuditEnv {
+            rustango_env: Some("dev".into()),
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("`dev`")),
+            "expected warning for non-prod RUSTANGO_ENV, got: {:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn deploy_audit_unset_database_url_errors() {
+        let env = DeployAuditEnv {
+            database_url: None,
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.errors.iter().any(|e| e.contains("DATABASE_URL")),
+            "expected error for unset DATABASE_URL, got: {:?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn deploy_audit_localhost_database_url_warns() {
+        let env = DeployAuditEnv {
+            database_url: Some("postgres://app:p@localhost/db".into()),
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("DATABASE_URL") && w.contains("localhost")),
+            "expected warning for localhost DATABASE_URL, got: {:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn deploy_audit_localhost_apex_warns_for_tenancy() {
+        let env = DeployAuditEnv {
+            apex_domain: Some("localhost".into()),
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("RUSTANGO_APEX_DOMAIN")),
+            "expected warning for localhost apex, got: {:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn deploy_audit_loopback_bind_warns() {
+        let env = DeployAuditEnv {
+            bind: Some("127.0.0.1:8080".into()),
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("RUSTANGO_BIND") && w.contains("loopback")),
+            "expected warning for loopback bind, got: {:?}",
+            r.warnings
         );
     }
 }
