@@ -39,6 +39,29 @@
 //! query-string values where the whole input is already known to be
 //! `application/x-www-form-urlencoded`.
 
+/// Percent-encode bytes outside the RFC 3986 *unreserved* set
+/// (alphanumeric + `-` `_` `.` `~`). Used by URL-building
+/// helpers that need to safely round-trip user input through a
+/// query string. Does NOT encode `+` as space (that's a decoder
+/// convention, not an encoder one) — encoders should leave the
+/// space character as `%20`, which every browser accepts.
+///
+/// Mirror of the inline implementations in `template_views`'s
+/// pagination URL builder. Centralizing keeps the encoder
+/// table consistent across modules.
+#[must_use]
+pub fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// Decode a `application/x-www-form-urlencoded` string.
 ///
 /// See module docs for malformed-input handling.
@@ -177,5 +200,40 @@ mod tests {
         // without alteration. Caller is expected to have already
         // split on `&` / `=` etc.
         assert_eq!(url_decode("a=b&c=d"), "a=b&c=d");
+    }
+
+    // ---- url_encode ----
+
+    #[test]
+    fn url_encode_unreserved_pass_through() {
+        assert_eq!(url_encode("plain"), "plain");
+        assert_eq!(url_encode("foo-bar.baz_~"), "foo-bar.baz_~");
+        assert_eq!(url_encode("AaZz09"), "AaZz09");
+    }
+
+    #[test]
+    fn url_encode_reserved_chars_percent_encoded() {
+        assert_eq!(url_encode("hello world"), "hello%20world");
+        assert_eq!(url_encode("a&b=c"), "a%26b%3Dc");
+        assert_eq!(url_encode("?#"), "%3F%23");
+    }
+
+    /// Round-trip: encode then decode reproduces the input. Confirms
+    /// the encoder and decoder agree on the unreserved set.
+    #[test]
+    fn url_encode_decode_round_trip() {
+        for input in [
+            "plain",
+            "hello world",
+            "a&b=c",
+            "café",    // multibyte UTF-8
+            "100%off", // user input with `%`
+            "x_y-z.0", // mostly-unreserved
+            "?#&=+/!", // pile of reserved
+        ] {
+            let encoded = url_encode(input);
+            let decoded = url_decode(&encoded);
+            assert_eq!(decoded, input, "round-trip failed on `{input}`");
+        }
     }
 }

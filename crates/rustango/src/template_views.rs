@@ -1725,22 +1725,12 @@ fn build_pagination_query(params: &HashMap<String, String>, target_page: i64) ->
     out
 }
 
-/// Minimal RFC 3986 percent-encoder — encodes anything that's not
-/// `unreserved` (alphanumeric / `-` / `_` / `.` / `~`). Used by
-/// pagination URL building so values containing `&` / `=` /
-/// spaces / unicode survive round-tripping. A focused tiny impl
-/// keeps `template_views` from pulling in `percent-encoding` or
-/// `urlencoding` as a transitive dep.
+/// Local alias for the canonical [`crate::url_codec::url_encode`]
+/// helper. Kept as a private wrapper so the call sites stay
+/// readable + so we can swap encoders centrally without touching
+/// every caller.
 fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
+    crate::url_codec::url_encode(s)
 }
 
 /// Stamp the active filter values + search query back into the
