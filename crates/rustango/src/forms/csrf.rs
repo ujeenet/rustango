@@ -43,13 +43,12 @@ use base64::Engine as _;
 use rand::RngCore;
 use tower::Service;
 
-/// The cookie name set by the CSRF middleware. Distinct from
-/// tenancy's `rustango_session` / `rustango_tenant_session` cookie
-/// names so the two flows don't collide.
 /// Default cookie name set by the CSRF middleware. Distinct from
-/// the tenancy session cookies. Public so view code that wants to
-/// read or mint a token via [`ensure_token`] can use the canonical
-/// name without re-typing it.
+/// the tenancy session cookies (`rustango_session` /
+/// `rustango_tenant_session`) so the two flows don't collide.
+/// Public so view code that wants to read or mint a token via
+/// [`ensure_token`] can use the canonical name without re-typing
+/// it.
 pub const CSRF_COOKIE: &str = "rustango_csrf";
 
 /// HTTP header the middleware looks for on unsafe requests. SPAs
