@@ -150,6 +150,19 @@ pub async fn migrate_registry(
             "audit::ensure_table failed for registry pool",
         );
     }
+    // (#89) Auto-seed the `rustango_content_types` registry-side
+    // catalog — the operator console's audit log + future
+    // permissions UI consult it to resolve `entity_table` strings
+    // back to a stable per-model identifier. Pre-fix every fresh
+    // tango required a manual `ensure_seeded(&pool)` call which
+    // nobody remembers; now `migrate` Just Works.
+    if let Err(e) = crate::contenttypes::ensure_seeded(pools.registry()).await {
+        tracing::warn!(
+            target: "crate::tenancy",
+            error = %e,
+            "contenttypes::ensure_seeded failed for registry pool",
+        );
+    }
     info!(
         target: "crate::tenancy",
         applied = applied.len(),
@@ -285,6 +298,15 @@ async fn run_for_one_tenant(
             if let Err(e) = super::permissions::auto_create_permissions(&pool).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "auto_create_permissions failed for schema-mode tenant");
             }
+            // (#89) Auto-seed `rustango_content_types` from the
+            // inventory registry — the operator-facing CT catalog
+            // every framework feature reaching for "any model"
+            // (audit log, generic FKs, permissions UI) consults.
+            // Idempotent; pre-existing rows are unchanged thanks
+            // to the UNIQUE(app_label, model_name) constraint.
+            if let Err(e) = crate::contenttypes::ensure_seeded(&pool).await {
+                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for schema-mode tenant");
+            }
             if let Err(e) = super::auth_backends::ensure_api_keys_table(&pool).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "ensure_api_keys_table failed for schema-mode tenant");
             }
@@ -303,6 +325,10 @@ async fn run_for_one_tenant(
             // See schema-mode comment above (#61).
             if let Err(e) = super::permissions::auto_create_permissions(tenant_pool.pool()).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "auto_create_permissions failed for database-mode tenant");
+            }
+            // (#89) See schema-mode comment above.
+            if let Err(e) = crate::contenttypes::ensure_seeded(tenant_pool.pool()).await {
+                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for database-mode tenant");
             }
             if let Err(e) = super::auth_backends::ensure_api_keys_table(tenant_pool.pool()).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "ensure_api_keys_table failed for database-mode tenant");

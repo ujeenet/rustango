@@ -457,6 +457,47 @@ where
     Ok(out)
 }
 
+/// SQL that creates the `rustango_content_types` table + the
+/// `(app_label, model_name)` UNIQUE index. Idempotent
+/// (`IF NOT EXISTS`). Mounted as a runtime ensure-table so the
+/// registry pool (whose bootstrap migration only creates
+/// `rustango_orgs` + `rustango_operators`) gets the table without
+/// a separate migration JSON. Tenant schemas already get this
+/// table via the bootstrap migration's CreateTable op for every
+/// registered model.
+const CREATE_TABLE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS "rustango_content_types" (
+    "id"          BIGSERIAL PRIMARY KEY,
+    "app_label"   VARCHAR(100) NOT NULL,
+    "model_name"  VARCHAR(100) NOT NULL,
+    "table"       VARCHAR(100) NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "rustango_content_types_natural_key"
+    ON "rustango_content_types" ("app_label", "model_name");
+"#;
+
+/// Ensure `rustango_content_types` exists in `pool`'s database /
+/// schema. No-op when already present (`IF NOT EXISTS`). Used by
+/// [`ensure_seeded`] internally + callable directly for any
+/// registry-pool wiring that needs the table without a row walk.
+///
+/// Splits the statement on `;` because Postgres' simple-prepare
+/// path rejects multiple statements in one prepared call —
+/// each `CREATE TABLE` / `CREATE INDEX` runs as its own round-trip.
+///
+/// # Errors
+/// Driver / SQL failures.
+pub async fn ensure_table(pool: &PgPool) -> Result<(), crate::sql::sqlx::Error> {
+    for stmt in CREATE_TABLE_SQL.split(';') {
+        let trimmed = stmt.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        crate::sql::sqlx::query(trimmed).execute(pool).await?;
+    }
+    Ok(())
+}
+
 /// Walk the inventory of registered models and INSERT a ContentType
 /// row for every one missing. Idempotent.
 ///
@@ -471,6 +512,15 @@ where
 /// # Errors
 /// Driver / query failures from the SELECT-or-INSERT loop.
 pub async fn ensure_seeded(pool: &PgPool) -> Result<usize, ExecError> {
+    // Idempotent table-create — ensures the registry-side CT
+    // catalog has its physical home before we walk inventory.
+    // Tenant schemas already get this from the bootstrap-migration
+    // CreateTable op; the registry bootstrap doesn't include
+    // `rustango_content_types`, so the seed call would otherwise
+    // 42P01 on every fresh registry. Mirrors the
+    // `audit::ensure_table(registry)` pattern.
+    ensure_table(pool).await.map_err(ExecError::Driver)?;
+    let mut inserted = 0_usize;
     let mut inserted = 0_usize;
     for entry in inventory::iter::<ModelEntry> {
         let table = entry.schema.table;
