@@ -1050,10 +1050,20 @@ fn rerender_form(
 /// Resolve a `Vec<(name, desc)>` into the static-string `OrderClause`
 /// shape the SQL writer expects. Returns the original column name in
 /// the error string when it doesn't match any field.
+///
+/// **Stable-pagination guarantee**: when `spec` is empty, falls back
+/// to `ORDER BY <pk> ASC` so paginated [`ListView`] doesn't return
+/// rows in arbitrary Postgres-internal order (which would make
+/// page 2 overlap page 1 between requests). Models without a PK
+/// still get an empty `ORDER BY` — there's no canonical column to
+/// pick — but the paginated views warn-log when that happens.
 fn resolve_order_by(
     schema: &'static ModelSchema,
     spec: &[(String, bool)],
 ) -> Result<Vec<OrderClause>, String> {
+    if spec.is_empty() {
+        return Ok(default_order_by(schema));
+    }
     let mut out = Vec::with_capacity(spec.len());
     for (name, desc) in spec {
         let field = schema
@@ -1072,6 +1082,26 @@ fn resolve_order_by(
         });
     }
     Ok(out)
+}
+
+/// PK-based fallback ordering for paginated views without an
+/// explicit `.order_by(...)`. Postgres doesn't guarantee any
+/// particular row order without `ORDER BY` — between two requests,
+/// the same query can return rows in different order, so page 2
+/// might have rows that already appeared on page 1. Defaulting to
+/// `<pk> ASC` is cheap (the PK is indexed) and deterministic.
+///
+/// Models without a primary key fall through to an empty clause —
+/// the application is on its own (and pagination on a PK-less model
+/// is unusual anyway).
+fn default_order_by(schema: &'static ModelSchema) -> Vec<OrderClause> {
+    match schema.primary_key() {
+        Some(pk) => vec![OrderClause {
+            column: pk.column,
+            desc: false,
+        }],
+        None => Vec::new(),
+    }
 }
 
 /// Resolve the projection set — either every scalar field or the
@@ -1664,6 +1694,58 @@ mod tests {
         let err = resolve_order_by(s, &[("nope".into(), false)]).unwrap_err();
         assert!(err.contains("`nope`"), "got: {err}");
         assert!(err.contains("posts"), "got: {err}");
+    }
+
+    /// Empty `order_by` falls back to PK-ASC so paginated views
+    /// return rows in deterministic order (no page overlap between
+    /// requests).
+    #[test]
+    fn resolve_order_by_empty_falls_back_to_pk() {
+        let s = schema_two_fields();
+        let out = resolve_order_by(s, &[]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].column, "id");
+        assert!(!out[0].desc, "PK fallback is ASC");
+    }
+
+    /// Models without a PK fall through to empty `ORDER BY` —
+    /// pagination on PK-less models is unusual, and there's no
+    /// canonical column to pick.
+    #[test]
+    fn default_order_by_empty_when_no_pk() {
+        // Build a schema with no primary key.
+        let no_pk: &'static ModelSchema = Box::leak(Box::new(ModelSchema {
+            name: "Audit",
+            table: "audits",
+            fields: Box::leak(Box::new([crate::core::FieldSchema {
+                name: "msg",
+                column: "msg",
+                ty: FieldType::String,
+                nullable: false,
+                primary_key: false,
+                relation: None,
+                max_length: None,
+                min: None,
+                max: None,
+                default: None,
+                auto: false,
+                unique: false,
+                generated_as: None,
+            }])),
+            display: None,
+            app_label: None,
+            admin: None,
+            soft_delete_column: None,
+            permissions: false,
+            audit_track: None,
+            m2m: &[],
+            indexes: &[],
+            check_constraints: &[],
+            composite_relations: &[],
+            generic_relations: &[],
+            scope: crate::core::ModelScope::Tenant,
+        }));
+        assert!(default_order_by(no_pk).is_empty());
     }
 
     /// `resolved_fields(None)` returns every scalar field.
