@@ -65,6 +65,7 @@ Same code unchanged with `DATABASE_URL=postgres://…` boots on Postgres.
 - [Quick start](#quick-start)
 - [Project layout](#project-layout)
 - [`manage` CLI reference](#manage-cli-reference)
+- [Configuration](#configuration)
 - [ORM cookbook](#orm-cookbook)
 - [Migrations](#migrations)
 - [Auto-admin](#auto-admin)
@@ -187,6 +188,11 @@ myblog/
 ├── .env / .env.example         # DATABASE_URL, SECRET_KEY, RUSTANGO_ENV
 ├── docker-compose.yml          # Postgres in a container for local dev
 ├── README.md
+├── config/                     # tiered settings (#87, v0.29)
+│   ├── default.toml            # shared knobs, every section commented
+│   ├── dev_settings.toml       # local Postgres URL, relaxed headers, `(dev)` tagline
+│   ├── staging_settings.toml   # 0.0.0.0 bind, strict headers, 30d retention
+│   └── prod_settings.toml      # pool 5-50, strict headers, 365d retention
 ├── migrations/                 # JSON files written by `cargo run -- makemigrations`
 └── src/
     ├── main.rs                 # one binary — HTTP server + manage CLI; declares `mod`s here
@@ -194,6 +200,9 @@ myblog/
     ├── models.rs               # OR per-app: src/blog/models.rs
     └── views.rs
 ```
+
+The runtime picks a tier from `RUSTANGO_ENV` (defaults to `dev`); see
+[Configuration](#configuration) below.
 
 Since v0.16 the `manage` CLI is dispatched from `main.rs` via
 `rustango::manage::Cli` — running `cargo run` with no args starts
@@ -246,6 +255,10 @@ cargo run -- makemigrations --empty <name>           # scaffold for hand-authore
 cargo run -- migrate                                  # apply every pending
 cargo run -- migrate <target>                         # forward or back to <target>; `zero` wipes
 cargo run -- migrate --dry-run                        # print SQL without writing
+cargo run -- migrate --squash                         # delete every pending JSON + regenerate
+                                                      # one fresh diff (dev-iteration escape
+                                                      # hatch — refuses to touch applied rows)
+cargo run -- forget-pending <name>                    # rm one un-applied JSON; substring match
 cargo run -- downgrade [N]                            # step back N (default 1)
 cargo run -- showmigrations | status                  # [X] applied / [ ] pending list
 ```
@@ -265,7 +278,8 @@ cargo run -- add-data-op --to 0003_add_slug --sql "UPDATE posts SET slug = id::t
 
 ```bash
 cargo run -- startapp <name> [--with-manage-bin]
-cargo run -- make:viewset PostViewSet --model Post
+cargo run -- make:viewset PostViewSet --model Post [--tenant]
+cargo run -- make:api_routes <app> [--tenant]   # composer that .merges() per-model viewsets
 cargo run -- make:serializer PostSerializer --model Post
 cargo run -- make:form ContactForm
 cargo run -- make:job EmailDigestJob
@@ -279,7 +293,11 @@ cargo run -- make:test PostSmoke               # PascalCase — file is post_smo
 ```bash
 cargo run -- about                # version, model count, registered apps, DB connectivity
 cargo run -- check                # pending migrations, missing models, DB reachable
-cargo run -- check --deploy       # + SECRET_KEY length, RUSTANGO_ENV, DATABASE_URL
+cargo run -- check --deploy       # + RUSTANGO_SESSION_SECRET length, RUSTANGO_ENV,
+                                  #   DATABASE_URL, RUSTANGO_APEX_DOMAIN, RUSTANGO_BIND
+                                  #   PLUS Settings audit (#87): flags dev-defaults left
+                                  #   in prod tier — headers_preset=dev, hsts_max_age=0,
+                                  #   argon2 below OWASP floor, JWT TTL > 1h, loopback bind
 cargo run -- docs                 # opens https://docs.rs/rustango in browser
 cargo run -- version | --version  # framework version
 ```
@@ -294,6 +312,11 @@ cargo run -- list-tenants
 cargo run -- audit-cleanup --days 90
 cargo run -- audit-cleanup --keep-last 50 --tenant acme
 
+# Re-seed the rustango_permissions catalog after adding
+# `#[rustango(permissions)]` to a model — without --slug walks every
+# active tenant; idempotent (UNIQUE on (content_type_id, codename)).
+cargo run -- seed-permissions [--slug acme]
+
 # Move a populated tenant between schema and database storage modes
 # (pg_dump → psql pipe, Org row update, pool eviction, smoke check):
 cargo run -- migrate-tenant-storage acme --to database \
@@ -301,6 +324,93 @@ cargo run -- migrate-tenant-storage acme --to database \
 cargo run -- migrate-tenant-storage acme --to database \
     --database-url "postgres://acme:secret@db.example.com/acme"
 ```
+
+---
+
+## Configuration
+
+Tiered TOML settings (since v0.29, [#87](https://github.com/anthropics/claude-code/issues/87))
+— a fresh project ships four config files; the runtime picks the
+right tier from `RUSTANGO_ENV`.
+
+```
+config/
+├── default.toml             # shared defaults; every section commented + documented
+├── dev_settings.toml        # local Postgres URL, headers_preset = "dev",
+│                            #   hsts_max_age_secs = 0, tagline "(dev)"
+├── staging_settings.toml    # bind 0.0.0.0, strict headers, retention 30d
+└── prod_settings.toml       # pool 5-50, strict headers, retention 365d
+```
+
+### Loader pipeline
+
+1. `config/default.toml` — required, shared defaults.
+2. `config/<RUSTANGO_ENV>_settings.toml` — tier overlay (the legacy
+   `<env>.toml` shape still loads when no `_settings` variant exists).
+3. `RUSTANGO__SECTION__KEY=value` env vars — final override.
+
+```rust
+// Reads RUSTANGO_ENV (defaults to "dev"), runs the layered load.
+let cfg = rustango::config::Settings::load_from_env()?;
+
+// Or pick the tier explicitly:
+let cfg = rustango::config::Settings::load("prod")?;
+
+// Resolved tier (useful for telemetry / version pages):
+let tier = rustango::config::Settings::current_env_tier();
+```
+
+### Sections
+
+```toml
+# config/default.toml
+[database]              # url, pool_min_size, pool_max_size
+[admin]                 # allowed_tables, read_only_tables
+[server]                # bind, request_timeout_secs, max_body_bytes
+[auth]                  # argon2 cost, lockout threshold/duration
+[auth.jwt]              # access_ttl_secs, refresh_ttl_secs, issuer, audience
+[brand]                 # name, tagline, logo_url, primary_color, theme_mode
+[security]              # headers_preset, csp, hsts_max_age_secs, cors_allowed_origins
+[routes]                # legacy_preset + per-field URL prefix overrides
+[audit]                 # retention_days, redact_query_params
+[tenancy]               # apex_domain
+[cache]                 # backend, redis_url
+[jobs]                  # backend, concurrency
+[mail]                  # backend, smtp_host, from_address
+```
+
+Every field is `Option<T>` with sensible defaults documented in
+[`config::sections`](crates/rustango/src/config/sections.rs) — missing
+keys fall through to `Default::default()`, so your TOML stays
+forward-compatible.
+
+### Compile-time feature reflection
+
+```rust
+let feats = rustango::config::Settings::detected_features();
+// → ["postgres", "tenancy", "admin", "manage", "config", ...]
+```
+
+Useful on `/about` pages, in deployment audits, or as a sanity check
+that the prod binary was built with every feature its TOML
+references.
+
+### Deploy audit
+
+`cargo run -- check --deploy` flags dev-defaults that survived a
+promotion to the prod tier:
+
+- `[security] headers_preset = "dev"` or `"none"` → warning
+- `[security] hsts_max_age_secs = 0` → warning
+- `[auth] argon2_memory_kib < 19456` → warning (OWASP 2024 floor)
+- `[auth.jwt] access_ttl_secs > 3600` → warning (use refresh flow)
+- `[server] bind = 127.0.0.1:*` / `localhost:*` → warning
+- `[audit] retention_days` unset → info ("log grows forever")
+- `[routes] legacy_preset = true` → info (deliberate v0.28 shape)
+
+The audit is a no-op on dev/staging tiers — operators only want
+verbose feedback when something promoted to prod was incorrectly
+relaxed.
 
 ---
 
@@ -2178,12 +2288,19 @@ Run before deploy:
 cargo run -- check --deploy
 ```
 
-Audits:
+Audits the env + the loaded `Settings`:
 - ✅ DEBUG-style env (`RUSTANGO_ENV` is `prod` or `production`)
-- ✅ `SECRET_KEY` set and ≥ 32 bytes
-- ✅ `DATABASE_URL` set
+- ✅ `RUSTANGO_SESSION_SECRET` set and ≥ 32 bytes (no `change-me` placeholder)
+- ✅ `DATABASE_URL` set, not pointing at localhost in prod
+- ✅ `RUSTANGO_APEX_DOMAIN` set to a non-`localhost` value (tenancy projects)
+- ✅ `RUSTANGO_BIND` not loopback-only
 - ✅ Pending migrations applied
 - ✅ Models registered in inventory
+- ✅ `[security] headers_preset` is not `"dev"` / `"none"` in prod tier
+- ✅ `[security] hsts_max_age_secs` is not `0` in prod tier
+- ✅ `[auth] argon2_memory_kib` ≥ 19456 (OWASP 2024 floor)
+- ✅ `[auth.jwt] access_ttl_secs` ≤ 3600 (use the refresh flow for longer sessions)
+- ✅ `[server] bind` is not loopback in prod tier
 
 Then verify your stack has:
 

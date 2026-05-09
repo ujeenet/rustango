@@ -193,6 +193,53 @@ cargo run -- prewarm-pools
 
 ---
 
+### 1.6c Dev-iteration verbs (v0.29 — #82, #84a, #61, #84b)
+
+**What**: Four verbs that close the dev-loop friction surfaced by
+the 2026-05 batch. None of them touch applied rows; each is safe to
+run unattended and idempotent or refuse-on-conflict.
+
+| Verb | Purpose |
+|---|---|
+| `make:api_routes <app> [--tenant]` | Scaffold `src/<app>/api_routes.rs` — the per-app composer that `.merge(...)`-es every viewset's router into a single `Router<()>`. `--tenant` emits the no-arg shape (each viewset resolves its own per-request connection); default emits the `pool: PgPool` shape. Refuses to overwrite existing files. |
+| `forget-pending <name>` | Delete a single un-applied migration JSON so the next `makemigrations` regenerates against current models. Accepts exact name or unique substring; refuses if the named migration is already in the ledger. |
+| `migrate --squash` | Delete every pending JSON and re-run `makemigrations` to produce a single fresh diff. Dev-iteration escape hatch when an evolving model produces a migration the validator rejects (e.g. `AddColumn NOT NULL no default`). Refuses with zero pending or only one pending (`forget-pending` is the right verb for the single-file case). |
+| `seed-permissions [--slug <s>]` | Re-run `auto_create_permissions` against one (`--slug`) or every active tenant. Idempotent — `UNIQUE (content_type_id, codename)` makes re-running on a populated catalog a no-op. Useful after adding `#[rustango(permissions)]` to a model without a fresh migrate cycle. |
+
+**API**:
+[`migrate::manage::make_api_routes_cmd`](../../src/migrate/manage.rs),
+[`migrate::manage::forget_pending_cmd`](../../src/migrate/manage.rs),
+[`migrate::manage::migrate_squash`](../../src/migrate/manage.rs),
+[`tenancy::manage::roles::seed_permissions_cmd`](../../src/tenancy/manage/roles.rs).
+
+**Recipe**:
+
+```sh
+# Drop a fresh per-app api_routes.rs + start adding viewsets:
+cargo run -- startapp regions
+cargo run -- make:api_routes regions --tenant
+cargo run -- make:viewset CountryViewSet --model Country --tenant
+# Then in src/regions/api_routes.rs uncomment / add:
+#   .merge(super::viewsets::country::viewset().tenant_router("/api/countries"))
+
+# Got an `AddColumn NOT NULL no default` rejection on a fresh table?
+cargo run -- migrate --squash
+# (deletes pending JSONs, regenerates one fresh diff via makemigrations)
+
+# Or surgical: drop one named pending JSON and re-diff:
+cargo run -- forget-pending 0003_auto_20260509
+cargo run -- makemigrations
+
+# Add `#[rustango(permissions)]` to an existing model without a
+# fresh migrate cycle:
+cargo run -- seed-permissions             # every active tenant
+cargo run -- seed-permissions --slug acme # one tenant only
+```
+
+**Verified by**: scaffold/template tests in `crates/rustango/src/migrate/manage.rs::gen_tests`; `forget-pending` end-to-end via the validator-rejection recovery flow.
+
+---
+
 ### 1.7 `embed_migrations!` macro
 
 **What**: Compile-time embed of the `migrations/` JSON files as `&'static [Migration]` so binaries ship with no filesystem dependency.
@@ -212,21 +259,69 @@ const EMBEDDED: &[rustango::migrate::Migration] =
 
 ---
 
-### 1.8 Settings layering (`config/default.toml` → `config/{env}.toml` → env)
+### 1.8 Settings layering (`default.toml` → `<env>_settings.toml` → env vars)
 
-**What**: Three-tier config loader. Later layers shadow earlier; env vars take final precedence with `RUSTANGO__SECTION__KEY` syntax.
+**What**: Tiered TOML config loader (#87, v0.29). Three layers, last writer wins:
 
-**When**: Per-environment differences (dev/test/prod) without code changes.
+1. `config/default.toml` — required. Shared knobs across every environment.
+2. `config/<RUSTANGO_ENV>_settings.toml` — tier overlay (`dev_settings.toml`,
+   `staging_settings.toml`, `prod_settings.toml`). The legacy `<env>.toml`
+   shape (pre-v0.29) still loads when no `_settings` variant exists; the
+   `_settings` form wins when both are present.
+3. `RUSTANGO__SECTION__KEY=value` env vars — final override. Double
+   underscore is the path separator (`RUSTANGO__DATABASE__URL` overrides
+   `[database] url`).
 
-**API**: [`config::Settings::load`](../../src/config/mod.rs)
+**When**: Per-environment differences (dev/staging/prod) without code changes,
+or when secrets need to come from a secrets manager rather than version control.
 
-**Recipe** ([src/settings.rs](src/settings.rs)):
+**API**: [`config::Settings::load_from_env`](../../src/config/mod.rs),
+[`Settings::load`](../../src/config/mod.rs),
+[`Settings::current_env_tier`](../../src/config/mod.rs),
+[`Settings::detected_features`](../../src/config/sections.rs).
+
+**Recipe**:
 
 ```rust
-pub fn load() -> rustango::config::Settings {
-    rustango::config::Settings::load("config", &std::env::var("RUSTANGO_ENV").unwrap_or_else(|_| "default".into()))
-}
+// Reads RUSTANGO_ENV (defaults to "dev"), runs the layered load:
+let cfg = rustango::config::Settings::load_from_env()?;
+
+// Or explicit tier:
+let cfg = rustango::config::Settings::load("prod")?;
+
+// What tier did we land on?
+let tier = rustango::config::Settings::current_env_tier();
+
+// Compile-time feature reflection (telemetry, version pages):
+let feats = rustango::config::Settings::detected_features();
+// → ["postgres", "tenancy", "admin", "manage", "config", ...]
 ```
+
+**Sections** (every field is `Option<T>` with sensible defaults):
+
+```toml
+[database]              # url, pool_min_size, pool_max_size
+[admin]                 # allowed_tables, read_only_tables
+[server]                # bind, request_timeout_secs, max_body_bytes
+[auth]                  # argon2 cost, lockout threshold/duration
+[auth.jwt]              # access_ttl_secs, refresh_ttl_secs, issuer, audience
+[brand]                 # name, tagline, logo_url, primary_color, theme_mode
+[security]              # headers_preset, csp, hsts_max_age_secs, cors_allowed_origins
+[routes]                # legacy_preset + per-field URL prefix overrides
+[audit]                 # retention_days, redact_query_params
+[tenancy]               # apex_domain
+[cache]                 # backend, redis_url
+[jobs]                  # backend, concurrency
+[mail]                  # backend, smtp_host, from_address
+```
+
+The scaffolder writes all four files (`default.toml` + the three tier
+overlays) when you run `cargo rustango new <name>`. A fresh
+`cargo run` works without env vars (tier defaults to `dev`).
+
+**Deploy audit**: `cargo run -- check --deploy` flags dev-defaults left
+in the prod tier — `headers_preset = "dev"`, `hsts_max_age_secs = 0`,
+`argon2_memory_kib < 19456`, `access_ttl_secs > 3600`, loopback bind, etc.
 
 **Verified by**: `tests/cookbook_chapter01_manage.rs::settings_layer_resolves_env_overrides`
 
