@@ -2,6 +2,36 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.29.12] — `Cli::with_welcome()` builder
+
+The `welcome::welcome_router()` confidence page has shipped since
+v0.16 but every project hand-mounted it on `urls::api()`. Same
+shape as `with_health()` / `with_static()` / `with_csrf()`.
+
+### Added
+
+- **`Cli::with_welcome()`** — auto-mounts `welcome::welcome_router()`
+  at `/` so a freshly-scaffolded project boots to a friendly
+  "rustango — it works!" page instead of the empty-router 404.
+  Default off so existing projects with their own `/` route don't
+  panic at axum's route-collision check during merge.
+- Threaded through both single-tenant `runserver` and
+  `runserver_tenancy` so tenancy projects get the same on-the-tenant-
+  -subdomain welcome.
+
+### Tests
+
+- 1289 → 1290 lib tests (+1): `with_welcome_flips_flag` confirms
+  default-off + opt-in flips.
+
+### Recommended scaffolder additions
+
+`cargo rustango new` templates can now use `.with_welcome()` in their
+`src/main.rs` so a clean `cargo run` immediately renders the welcome
+page rather than 404. Tracked separately in the cargo-rustango crate.
+
+---
+
 ## [0.29.11] — macro-time validation for `#[rustango(column = "...")]`
 
 The same `[a-zA-Z_][a-zA-Z0-9_]*` rule the macro applies to

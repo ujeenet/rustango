@@ -86,6 +86,12 @@ pub struct Cli {
     /// `template_views` Create/Update/DeleteView) opt in.
     #[cfg(feature = "csrf")]
     csrf: Option<crate::forms::csrf::CsrfConfig>,
+    /// When `true`, mounts [`crate::welcome::welcome_router`] at `/`
+    /// at runserver time. Default off — projects that already have a
+    /// root handler (or want a 404 on `/`) shouldn't have their route
+    /// table silently rewritten by the framework. Set via
+    /// [`Cli::with_welcome`].
+    welcome_page: bool,
 }
 
 impl Cli {
@@ -110,6 +116,7 @@ impl Cli {
             static_dirs: Vec::new(),
             #[cfg(feature = "csrf")]
             csrf: None,
+            welcome_page: false,
         }
     }
 
@@ -266,6 +273,28 @@ impl Cli {
     #[must_use]
     pub fn with_csrf_config(mut self, cfg: crate::forms::csrf::CsrfConfig) -> Self {
         self.csrf = Some(cfg);
+        self
+    }
+
+    /// Auto-mount [`crate::welcome::welcome_router`] at `/` so a fresh
+    /// project boots to a friendly "rustango — it works!" page
+    /// instead of an empty-router 404. Default off — projects that
+    /// already have a root handler shouldn't have their route table
+    /// silently rewritten.
+    ///
+    /// ```ignore
+    /// rustango::manage::Cli::new()
+    ///     .api(urls::api())
+    ///     .with_welcome()                     // first-run friendliness
+    ///     .run().await
+    /// ```
+    ///
+    /// Mounted via `Router::merge`, which means a `/` route inside
+    /// `urls::api()` would collide and panic. Drop the call once your
+    /// own root handler is wired.
+    #[must_use]
+    pub fn with_welcome(mut self) -> Self {
+        self.welcome_page = true;
         self
     }
 
@@ -483,6 +512,11 @@ impl Cli {
             seed(&pool).await?;
         }
         let api = self.api;
+        let api = if self.welcome_page {
+            api.merge(crate::welcome::welcome_router())
+        } else {
+            api
+        };
         let api = if self.health_endpoints {
             api.merge(crate::health::health_router(pool.clone()))
         } else {
@@ -510,6 +544,11 @@ impl Cli {
     #[cfg(feature = "tenancy")]
     async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
         let api = self.api;
+        let api = if self.welcome_page {
+            api.merge(crate::welcome::welcome_router())
+        } else {
+            api
+        };
         #[cfg(feature = "csrf")]
         let api = match self.csrf.clone() {
             Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
@@ -875,6 +914,15 @@ mod tests {
             cli.static_dirs[1].1,
             std::path::PathBuf::from("./var/uploads")
         );
+    }
+
+    /// `Cli::with_welcome()` flips the flag for the runserver path.
+    #[test]
+    fn with_welcome_flips_flag() {
+        let cli_default = Cli::new();
+        assert!(!cli_default.welcome_page, "default off");
+        let cli_with = Cli::new().with_welcome();
+        assert!(cli_with.welcome_page);
     }
 
     /// `Cli::with_csrf()` flips the flag from `None` to `Some(default)`.
