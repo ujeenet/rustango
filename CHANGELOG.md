@@ -2,6 +2,49 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.29.1] — template_views polish (bounds validation + stable pagination)
+
+Two patches against the new `template_views` module from v0.29.0.
+Both surfaced from re-reading the code after the release tag —
+the kind of follow-up that's worth shipping fast before any user
+trips over them.
+
+### Fixed
+
+- **`ListView` pagination is now deterministic** when no explicit
+  `.order_by(...)` is set. Without `ORDER BY`, Postgres doesn't
+  promise stability between calls, so requesting page 2 could
+  return rows that already appeared on page 1. `resolve_order_by`
+  now defaults to `<pk> ASC` when the order spec is empty (the
+  PK is always indexed; cost is bounded). Models without a
+  primary key fall through to empty `ORDER BY` — pagination on
+  PK-less models is unusual and there's no canonical column.
+
+### Changed
+
+- **Form parsing in `CreateView` / `UpdateView` enforces the
+  bounds declared on the schema** (`max_length`, `min`, `max`)
+  via `core::validate_value`. Previously the values would slip
+  through the form layer and surface as a 500 from the SQL
+  layer's bounds check on insert. Now they surface as per-field
+  form errors with the user's input preserved (mirroring the
+  existing required-missing path). New `bounds_error_message`
+  helper renders `QueryError` variants without the framework's
+  `model.field` framing — the field name is already the error
+  key, so the message just needs the rule:
+  - `MaxLengthExceeded` → "must be 5 characters or fewer (got 12)"
+  - `OutOfRange` (two-sided) → "must be between 0 and 100 (got 150)"
+  - `OutOfRange` (one-sided) → "must be ≥ 0" / "must be ≤ 100"
+
+### Tests
+
+- 1226 → 1232 lib tests (+6): two for the PK-ASC fallback
+  (with-PK and without-PK), four for bounds validation
+  (max_length enforced, integer range enforced, two-sided
+  message format, one-sided message format).
+
+---
+
 ## [0.29.0] — tiered settings, HTML CBVs, friendly URLs by default
 
 The biggest release since v0.16's unified manage runner. Three
