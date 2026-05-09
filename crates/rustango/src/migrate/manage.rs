@@ -1254,6 +1254,11 @@ async fn check_cmd<W: Write>(
     if deploy {
         let mut audit = DeployAuditFindings::default();
         run_deploy_audit(&deploy_audit_env(), &mut audit);
+        // Settings audit (#87 slice 4) — flags dev-defaults left in
+        // prod (e.g. `headers_preset = "dev"` in `prod_settings.toml`).
+        // Gated by the `config` feature; no-op without it.
+        #[cfg(feature = "config")]
+        run_settings_audit(&mut audit);
         info.extend(audit.info);
         warnings.extend(audit.warnings);
         errors.extend(audit.errors);
@@ -2207,6 +2212,134 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
     }
 }
 
+/// `manage check --deploy` settings-side audit (#87 slice 4) —
+/// loads `Settings::load_from_env()` and flags dev-defaults left in
+/// the prod tier. Pure function over the loaded settings + resolved
+/// tier, no env-var poking.
+///
+/// Graceful: missing `config/default.toml` is silently skipped (the
+/// project might not use the layered loader at all). Bad TOML
+/// shape surfaces as a warning so the operator notices but the
+/// rest of the audit still runs.
+#[cfg(feature = "config")]
+fn run_settings_audit(out: &mut DeployAuditFindings) {
+    use crate::config::Settings;
+
+    let env_tier = Settings::current_env_tier();
+    out.info
+        .push(format!("config tier resolved to `{env_tier}`"));
+
+    let settings = match Settings::load_from_env() {
+        Ok(s) => s,
+        Err(crate::config::ConfigError::Io { .. }) => {
+            // `config/default.toml` not present — project doesn't use
+            // the layered loader. Skip silently.
+            return;
+        }
+        Err(e) => {
+            out.warnings.push(format!(
+                "config: failed to load settings for audit: {e} — fix the file shape \
+                 to enable the rest of the deploy audit"
+            ));
+            return;
+        }
+    };
+
+    settings_audit_check(&env_tier, &settings, out);
+}
+
+/// Pure-function half of [`run_settings_audit`] — caller supplies
+/// the resolved tier + settings. Lifted out so unit tests can run
+/// against any combination without touching the on-disk config
+/// pipeline (which would race against parallel test runners).
+#[cfg(feature = "config")]
+pub(crate) fn settings_audit_check(
+    env_tier: &str,
+    settings: &crate::config::Settings,
+    out: &mut DeployAuditFindings,
+) {
+    let in_prod = matches!(env_tier, "prod" | "production");
+    if !in_prod {
+        // Non-prod tiers don't need the dev-default-leak audit.
+        return;
+    }
+
+    // [security] headers_preset — must be `strict` (or unset →
+    // strict by default at the layer). `"dev"` / `"none"` in prod
+    // strips HSTS / XFO / nosniff / Referrer-Policy.
+    if let Some(preset) = settings.security.headers_preset.as_deref() {
+        if preset == "dev" || preset == "none" {
+            out.warnings.push(format!(
+                "[security] headers_preset = `{preset}` in prod tier — promote to `strict` \
+                 so HSTS / X-Frame-Options / X-Content-Type-Options / Referrer-Policy are emitted"
+            ));
+        }
+    }
+
+    // [security] hsts_max_age_secs = 0 in prod disables HSTS.
+    if matches!(settings.security.hsts_max_age_secs, Some(0)) {
+        out.warnings.push(
+            "[security] hsts_max_age_secs = 0 in prod tier — disables HSTS, leaving TLS-strip \
+             attacks viable on first request"
+                .into(),
+        );
+    }
+
+    // [auth] argon2 memory cost — OWASP 2024 floor is 19456 KiB.
+    if let Some(kib) = settings.auth.argon2_memory_kib {
+        if kib < 19_456 {
+            out.warnings.push(format!(
+                "[auth] argon2_memory_kib = {kib} in prod tier — OWASP 2024 recommends ≥ 19456 \
+                 for password hashing brute-force resistance"
+            ));
+        }
+    }
+
+    // [auth.jwt] access TTL too long. Anything over 1 hour is
+    // suspicious — refresh tokens should rotate access tokens.
+    if let Some(ttl) = settings.auth.jwt.access_ttl_secs {
+        if ttl > 3600 {
+            out.warnings.push(format!(
+                "[auth.jwt] access_ttl_secs = {ttl} in prod tier — access tokens > 1h widen \
+                 the leaked-token blast radius. The refresh flow rotates them; keep this short."
+            ));
+        }
+    }
+
+    // [audit] retention_days unset → log grows forever. Not an
+    // error (some compliance regimes mandate forever) but worth
+    // info-flagging so the operator decides intentionally.
+    if settings.audit.retention_days.is_none() {
+        out.info.push(
+            "[audit] retention_days unset — log grows forever; consider setting + scheduling \
+             `manage audit-cleanup --days <N>`"
+                .into(),
+        );
+    }
+
+    // [routes] legacy_preset = true is a deliberate choice (#85) but
+    // worth surfacing in audit output so operators rationalize the
+    // `/__admin` shape against the current Django-ish default.
+    if matches!(settings.routes.legacy_preset, Some(true)) {
+        out.info.push(
+            "[routes] legacy_preset = true — using the pre-v0.29 `__`-prefixed URLs \
+             (`/__login`, `/__admin`, …). Switch to the friendly defaults when bookmarks allow."
+                .into(),
+        );
+    }
+
+    // [server] bind on loopback in prod. The env-var path catches
+    // RUSTANGO_BIND; this catches the TOML case that bypasses it.
+    if let Some(bind) = settings.server.bind.as_deref() {
+        if bind.starts_with("127.0.0.1") || bind.starts_with("localhost") {
+            out.warnings.push(format!(
+                "[server] bind = `{bind}` in prod tier — only listens on loopback. \
+                 Production usually wants `0.0.0.0:<port>` to accept external traffic."
+            ));
+        }
+    }
+}
+
 #[cfg(test)]
 mod gen_tests {
     use super::*;
@@ -2535,6 +2668,153 @@ mod gen_tests {
                 .iter()
                 .any(|w| w.contains("RUSTANGO_BIND") && w.contains("loopback")),
             "expected warning for loopback bind, got: {:?}",
+            r.warnings
+        );
+    }
+
+    // -------- settings_audit_check (#87 slice 4) --------
+
+    #[cfg(feature = "config")]
+    fn settings_run(env_tier: &str, s: &crate::config::Settings) -> DeployAuditFindings {
+        let mut out = DeployAuditFindings::default();
+        settings_audit_check(env_tier, s, &mut out);
+        out
+    }
+
+    /// In dev/staging tiers, the audit is a no-op — operators
+    /// expect dev defaults to be loud only when promoted to prod.
+    #[cfg(feature = "config")]
+    #[test]
+    fn settings_audit_dev_tier_is_quiet() {
+        let mut s = crate::config::Settings::default();
+        s.security.headers_preset = Some("dev".into());
+        s.security.hsts_max_age_secs = Some(0);
+        s.auth.argon2_memory_kib = Some(1024); // dev-fast
+        let r = settings_run("dev", &s);
+        assert!(
+            r.warnings.is_empty(),
+            "dev tier should be quiet, got: {:?}",
+            r.warnings
+        );
+        assert!(
+            r.info.is_empty(),
+            "dev tier should be quiet, got: {:?}",
+            r.info
+        );
+    }
+
+    /// In prod, `headers_preset = "dev"` is a clear footgun —
+    /// emit a warning pointing at the fix.
+    #[cfg(feature = "config")]
+    #[test]
+    fn settings_audit_prod_with_dev_headers_preset_warns() {
+        let mut s = crate::config::Settings::default();
+        s.security.headers_preset = Some("dev".into());
+        let r = settings_run("prod", &s);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("headers_preset") && w.contains("dev")),
+            "expected warning for dev headers in prod, got: {:?}",
+            r.warnings
+        );
+    }
+
+    /// `hsts_max_age_secs = 0` in prod disables HSTS.
+    #[cfg(feature = "config")]
+    #[test]
+    fn settings_audit_prod_with_zero_hsts_warns() {
+        let mut s = crate::config::Settings::default();
+        s.security.hsts_max_age_secs = Some(0);
+        let r = settings_run("prod", &s);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("hsts_max_age_secs")),
+            "expected HSTS warning, got: {:?}",
+            r.warnings
+        );
+    }
+
+    /// argon2 below the OWASP 2024 floor warns. Default values
+    /// (None) don't warn — they fall through to the framework's
+    /// hardcoded sensible default.
+    #[cfg(feature = "config")]
+    #[test]
+    fn settings_audit_prod_low_argon2_warns_but_unset_is_quiet() {
+        let mut s = crate::config::Settings::default();
+        s.auth.argon2_memory_kib = Some(4096); // way below 19456
+        let r = settings_run("prod", &s);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("argon2_memory_kib") && w.contains("19456")),
+            "expected argon2 floor warning, got: {:?}",
+            r.warnings
+        );
+
+        // Unset = framework default. Quiet.
+        let s_default = crate::config::Settings::default();
+        let r = settings_run("prod", &s_default);
+        assert!(
+            !r.warnings.iter().any(|w| w.contains("argon2")),
+            "default argon2 should be quiet, got: {:?}",
+            r.warnings
+        );
+    }
+
+    /// JWT access TTL > 1h in prod warns.
+    #[cfg(feature = "config")]
+    #[test]
+    fn settings_audit_prod_long_jwt_access_ttl_warns() {
+        let mut s = crate::config::Settings::default();
+        s.auth.jwt.access_ttl_secs = Some(86400); // 24h
+        let r = settings_run("prod", &s);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("access_ttl_secs") && w.contains("86400")),
+            "expected access TTL warning, got: {:?}",
+            r.warnings
+        );
+    }
+
+    /// Loopback bind in TOML triggers the warning even when
+    /// RUSTANGO_BIND env var isn't set.
+    #[cfg(feature = "config")]
+    #[test]
+    fn settings_audit_prod_loopback_bind_warns() {
+        let mut s = crate::config::Settings::default();
+        s.server.bind = Some("127.0.0.1:8080".into());
+        let r = settings_run("prod", &s);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("[server] bind") && w.contains("loopback")),
+            "expected loopback warning, got: {:?}",
+            r.warnings
+        );
+    }
+
+    /// `legacy_preset = true` is a deliberate choice — info, not
+    /// warning. `retention_days = None` is also info-level.
+    #[cfg(feature = "config")]
+    #[test]
+    fn settings_audit_legacy_preset_and_unset_retention_are_info() {
+        let mut s = crate::config::Settings::default();
+        s.routes.legacy_preset = Some(true);
+        let r = settings_run("prod", &s);
+        assert!(
+            r.info.iter().any(|i| i.contains("legacy_preset")),
+            "expected legacy_preset info, got: {:?}",
+            r.info
+        );
+        assert!(
+            r.info.iter().any(|i| i.contains("retention_days")),
+            "expected retention_days info, got: {:?}",
+            r.info
+        );
+        assert!(
+            r.warnings.is_empty(),
+            "neither should be warnings, got: {:?}",
             r.warnings
         );
     }
