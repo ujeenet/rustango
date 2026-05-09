@@ -2,6 +2,91 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.14] — `manage wizard` interactive setup (roadmap #2)
+
+Replaces a 4-5 verb chain a new tenancy user has to learn
+(`init-tenancy` → `migrate-registry` → `create-operator` →
+`create-tenant` → `create-superuser`) with one conversational
+flow. Was the second-most-requested roadmap item after
+`inspectdb`; both done.
+
+### Added
+
+- **`manage wizard`** (alias: `manage init`) — interactive
+  prompt-driven setup. Walks five opt-in steps:
+  1. Scaffold a new app (`startapp <name>`)
+  2. Initialize tenancy (`init-tenancy`)
+  3. Apply registry migrations (`migrate-registry`)
+  4. Create an operator (`create-operator`)
+  5. Create a tenant + first superuser (`create-tenant` +
+     `create-superuser`)
+  Each step prompts `[Y/n]` and skips when the user answers `n`.
+  Defaults are echoed in the prompt (e.g.
+  `App name (default: blog):`); pressing Enter accepts.
+
+### Design
+
+- Reads from `BufRead` (the dispatcher passes
+  `std::io::stdin().lock()`) so unit tests inject canned input
+  via `Cursor` without touching the terminal.
+- Each step calls the existing internal verb function directly
+  — no process spawning, no argv reconstruction. A failed step
+  aborts the wizard so the user can retry from where they were
+  (no swallowed errors).
+- Prompts go to the same writer as the dispatcher's normal
+  output — a user piping wizard output to a file sees both
+  prompts and verb results in order.
+- Truthy-string parsing is permissive: `y` / `Y` / `yes` /
+  `YES` / `1` / `true` (case-insensitive) all read as yes.
+
+### Tests
+
+- 1341 → 1345 lib tests (+4 unit covering yes/no parsing +
+  default fall-through, `[Y/n]` vs `[y/N]` hint capitalization,
+  trimmed-input round-trip, default echo in prompt).
+- 1 new smoke test in `tests/wizard_live.rs` confirming the
+  wizard verb appears in the dispatcher's help text. End-to-end
+  interactive testing isn't practical from a Rust test process
+  (the wizard reads from real `std::io::stdin`); the prompt
+  flow is covered by the unit tests with a `Cursor` reader.
+
+### Usage
+
+```sh
+$ cargo run -- wizard
+
+rustango wizard — interactive setup
+===================================
+Press Enter to accept the default, or type your own value. Each
+step asks before running; type `n` to skip.
+
+Scaffold a new app? [Y/n]
+  App name (default: blog): blog
+  wrote src/blog/models.rs
+  wrote src/blog/views.rs
+  ...
+Initialize tenancy? [Y/n]
+Apply registry migrations now? [Y/n]
+Create an operator account? [Y/n]
+  Operator username (default: admin): admin
+  Operator password: hunter2
+  ...
+Create a tenant? [Y/n]
+  Tenant slug (default: acme): acme
+  Display name (default: acme): ACME Corp
+  ...
+  Create a superuser for this tenant? [Y/n]
+    Superuser username (default: admin): alice
+    Superuser password: ...
+
+Wizard complete. Next:
+  • cargo run                   (boot the server)
+  • visit /__login              (operator console)
+  • visit <slug>.localhost      (tenant admin)
+```
+
+---
+
 ## [0.30.13] — `manage inspectdb` (roadmap #1)
 
 Mirrors Django's `inspectdb`: point at an existing Postgres

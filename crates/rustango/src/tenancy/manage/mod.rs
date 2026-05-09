@@ -48,6 +48,7 @@ mod scaffold;
 mod server;
 mod tenants;
 mod users;
+mod wizard;
 
 /// Typed Rust API for tenancy provisioning — `create_tenant_if_missing`,
 /// `create_operator_if_missing`, `create_user_if_missing`, `find_org`.
@@ -201,6 +202,15 @@ pub async fn run_with_writer_and_init<W: Write + Send>(
             server::run_server_cmd(pools, registry_url, &args[1..], writer).await
         }
         "init-tenancy" => migrations::init_tenancy_cmd_with(dir, writer, init_fn),
+        "wizard" | "init" => {
+            // Interactive setup wizard (roadmap #2, v0.30.14).
+            // Reads from stdin, writes to the same writer the
+            // dispatcher uses. `init` is an alias the muscle
+            // memory of `cargo init` users will reach for.
+            let stdin = std::io::stdin();
+            let mut reader = stdin.lock();
+            wizard::wizard_cmd(pools, registry_url, dir, init_fn, &mut reader, writer).await
+        }
         // Intercepted before fall-through: tenancy ships its own
         // manage.rs template in `--with-manage-bin`, wiring
         // `crate::tenancy::manage::run` instead of the single-tenant
@@ -352,6 +362,20 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "                       Rotate an operator's password; verifies current first."
+    )?;
+    writeln!(w)?;
+    writeln!(w, "QUICK START:")?;
+    writeln!(
+        w,
+        "  wizard | init        Interactive setup — walks you from a fresh project to"
+    )?;
+    writeln!(
+        w,
+        "                       a working tenant + operator + tenant superuser through"
+    )?;
+    writeln!(
+        w,
+        "                       prompts. Each step is opt-in (press n to skip)."
     )?;
     writeln!(w)?;
     writeln!(w, "MIGRATIONS:")?;
