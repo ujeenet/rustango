@@ -90,6 +90,39 @@ impl Config {
             .with_access_ttl(self.access_ttl_secs)
             .with_refresh_ttl(self.refresh_ttl_secs)
     }
+
+    /// Apply values from a loaded [`crate::config::JwtSettings`]
+    /// section (#87 wiring, v0.29). Each field is `Option`-typed in
+    /// TOML — missing keys fall through to the existing `Config`
+    /// defaults (15 min access, 7 days refresh) so partial config
+    /// stays forward-compatible.
+    ///
+    /// Currently honors `access_ttl_secs` and `refresh_ttl_secs`.
+    /// `issuer` and `audience` are accepted by the section but not
+    /// yet threaded through `JwtLifecycle` — when that ships, the
+    /// wiring lands here automatically.
+    ///
+    /// ```ignore
+    /// let cfg = rustango::config::Settings::load_from_env()?;
+    /// let auth = auth_routes::Config::default()
+    ///     .with_jwt_settings(&cfg.auth.jwt);
+    /// api.merge(auth_routes::jwt_router(auth))
+    /// ```
+    #[cfg(feature = "config")]
+    #[must_use]
+    pub fn with_jwt_settings(mut self, s: &crate::config::JwtSettings) -> Self {
+        // u64 → i64 saturating conversion. Realistic TTLs cap out
+        // around 7 days (refresh) or 1h (access); the saturate path
+        // only trips for absurd configs (years), which would be
+        // wrong for a different reason — flag-not-fatal.
+        if let Some(v) = s.access_ttl_secs {
+            self.access_ttl_secs = i64::try_from(v).unwrap_or(i64::MAX);
+        }
+        if let Some(v) = s.refresh_ttl_secs {
+            self.refresh_ttl_secs = i64::try_from(v).unwrap_or(i64::MAX);
+        }
+        self
+    }
 }
 
 // ---------------------------------------------------------------- The router
@@ -361,5 +394,29 @@ mod tests {
         // registration is exercised via integration tests that send
         // requests against the constructed router.
         let _ = r;
+    }
+
+    /// `Config::with_jwt_settings` honors TOML access/refresh TTLs
+    /// when set; falls through to the Config default when None (#87).
+    #[cfg(feature = "config")]
+    #[test]
+    fn with_jwt_settings_overrides_ttls() {
+        let mut s = crate::config::JwtSettings::default();
+        s.access_ttl_secs = Some(60); // 1 min
+        s.refresh_ttl_secs = Some(3600); // 1h
+        let cfg = Config::default().with_jwt_settings(&s);
+        assert_eq!(cfg.access_ttl_secs, 60);
+        assert_eq!(cfg.refresh_ttl_secs, 3600);
+    }
+
+    /// Missing TOML keys preserve the Config defaults — partial
+    /// config files don't reset unspecified fields.
+    #[cfg(feature = "config")]
+    #[test]
+    fn with_jwt_settings_unset_preserves_defaults() {
+        let s = crate::config::JwtSettings::default(); // both fields None
+        let cfg = Config::default().with_jwt_settings(&s);
+        assert_eq!(cfg.access_ttl_secs, 900); // 15 min
+        assert_eq!(cfg.refresh_ttl_secs, 7 * 86400); // 7 days
     }
 }

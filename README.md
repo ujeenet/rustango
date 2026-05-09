@@ -1360,6 +1360,23 @@ jwt.revoke(&refresh_token);
 
 Reserved-claim defense: `sub`, `exp`, `jti`, `typ` cannot appear in `custom` (returns `JwtIssueError::ReservedClaim`).
 
+For tenancy projects there's a one-liner that mounts the four-route
+JWT auth surface (`/api/auth/login` / `/refresh` / `/logout` / `/me`):
+
+```rust
+use rustango::tenancy::auth_routes;
+
+// Pick up `[auth.jwt] access_ttl_secs / refresh_ttl_secs` from the
+// loaded Settings; falls through to defaults (15min / 7d) when unset.
+let cfg = rustango::config::Settings::load_from_env()?;
+let auth = auth_routes::Config::default().with_jwt_settings(&cfg.auth.jwt);
+let api = my_app::api().merge(auth_routes::jwt_router(auth));
+```
+
+The endpoints are tenant-aware via the `Tenant` extractor, so the
+JWT's `tenant` claim is matched against the resolved subdomain — a
+token minted on `acme.example.com` is rejected on `globex.example.com`.
+
 ---
 
 ## Forms
