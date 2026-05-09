@@ -287,7 +287,7 @@ runserver = ["dep:axum", "dep:tokio"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.30.14", path = "../rustango-macros" }
+rustango-macros = { version = "0.30.15", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono     = { workspace = true }

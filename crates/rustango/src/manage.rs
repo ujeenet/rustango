@@ -577,7 +577,7 @@ impl Cli {
         }
         let api = self.api;
         let api = if self.welcome_page {
-            api.merge(crate::welcome::welcome_router())
+            try_mount_welcome(api)
         } else {
             api
         };
@@ -609,7 +609,7 @@ impl Cli {
     async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
         let api = self.api;
         let api = if self.welcome_page {
-            api.merge(crate::welcome::welcome_router())
+            try_mount_welcome(api)
         } else {
             api
         };
@@ -654,6 +654,36 @@ impl Default for Cli {
 /// the API router. Pure function so the runserver path stays linear
 /// and unit tests can assert on the post-mount Router without
 /// spinning up a TCP listener.
+/// Try to merge `welcome_router()` into the user's API router.
+/// `Router::merge` panics when both sides claim the same route
+/// (the documented v0.29.12 footgun a tenancy project hit during
+/// the v0.30.x exercise: tango's `urls::api()` already routed
+/// `GET /` for a per-tenant index handler, and merging welcome's
+/// `GET /` triggered axum's "Overlapping method route" panic).
+///
+/// v0.30.15 — wrap the merge in `catch_unwind` so the conflict
+/// surfaces as a `tracing::warn!` instead of a process abort.
+/// `Router` implements `UnwindSafe` so the catch is sound; the
+/// fallback returns the original router unchanged.
+fn try_mount_welcome(api: Router) -> Router {
+    let api_for_probe = api.clone();
+    let merged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        api_for_probe.merge(crate::welcome::welcome_router())
+    }));
+    match merged {
+        Ok(r) => r,
+        Err(_) => {
+            tracing::warn!(
+                target: "rustango::manage",
+                "Cli::with_welcome() skipped: the API router already routes GET / \
+                 (axum: \"Overlapping method route\"). Drop the .with_welcome() call \
+                 once you wire your own root handler to silence this warning."
+            );
+            api
+        }
+    }
+}
+
 #[cfg(feature = "admin")]
 fn mount_static_dirs(api: Router, dirs: &[(String, PathBuf)]) -> Router {
     let mut r = api;
@@ -987,6 +1017,30 @@ mod tests {
         assert!(!cli_default.welcome_page, "default off");
         let cli_with = Cli::new().with_welcome();
         assert!(cli_with.welcome_page);
+    }
+
+    /// v0.30.15 fix — `try_mount_welcome` returns the original
+    /// router unchanged (no panic) when the user's api already
+    /// routes `GET /`. Pre-fix this aborted the process at boot
+    /// for any tenancy project with a per-tenant `/` handler.
+    #[test]
+    fn try_mount_welcome_skips_on_root_collision_no_panic() {
+        use axum::routing::get;
+        async fn user_root() -> &'static str {
+            "user index"
+        }
+        let api = Router::new().route("/", get(user_root));
+        // Returns without panicking — the inner merge would have.
+        let _ = try_mount_welcome(api);
+    }
+
+    /// `try_mount_welcome` mounts welcome cleanly when no
+    /// conflict exists (the common case for fresh projects with
+    /// no root handler).
+    #[test]
+    fn try_mount_welcome_succeeds_on_empty_router() {
+        let api = Router::new();
+        let _ = try_mount_welcome(api);
     }
 
     /// `Cli::with_logging()` flips the install flag — the actual

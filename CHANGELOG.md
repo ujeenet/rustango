@@ -2,6 +2,78 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.15] — `Cli::with_welcome()` no longer panics on root-route collision
+
+Live exercise of the v0.30.x surface against the tango playground
+project surfaced a real flaw in the v0.29.12 `Cli::with_welcome()`:
+when the user's `urls::api()` already routed `GET /` (the common
+case for any project with a per-tenant index handler), boot
+aborted with axum's "Overlapping method route" panic. The
+docstring warned about it but the runtime UX was unforgivable.
+
+### Fixed
+
+- **`Cli::with_welcome()` skip-with-warn on conflict.** The
+  internal `Router::merge` call is now wrapped in
+  `std::panic::catch_unwind`. When the user's API router
+  already claims `GET /`, the merge panic is caught and
+  `tracing::warn!` fires:
+  > Cli::with_welcome() skipped: the API router already routes
+  > GET / (axum: "Overlapping method route"). Drop the
+  > .with_welcome() call once you wire your own root handler.
+  Boot continues with the user's `/` handler intact. Same
+  behaviour applied to both single-tenant `runserver` and
+  `runserver_tenancy` paths.
+- `Router` implements `UnwindSafe` so the `catch_unwind` is
+  sound; the original router is returned unchanged on conflict.
+
+### Tests
+
+- 1345 → 1347 lib tests (+2):
+  `try_mount_welcome_skips_on_root_collision_no_panic` (the
+  regression guard for tango's exact crash shape) +
+  `try_mount_welcome_succeeds_on_empty_router` (the happy path
+  still works for fresh projects).
+
+### Live exercise notes (tango playground)
+
+The v0.30.x surface was exercised end-to-end in `../tango`
+(both host-cargo and `docker compose up`):
+
+- **Host cargo run + Playwright**: `/login` (operator console)
+  rendered with logo + form; `/admin` (RouteConfig::friendly)
+  rendered with full sidebar after tenant superuser login;
+  `/admin/country?count=skip` (v0.30.9) flipped header to "row
+  count hidden (large table)" + pager to "Page N" with
+  prev/next; `/items` (template_views::ListView with
+  `bulk_actions(true)` + `with_delete_confirmation(true)` +
+  `with_fk_display(true)` from v0.30.4/7/8) rendered the
+  3-row Item table with bulk-action selector + per-row delete
+  link; `/items/1/delete` (DeleteView v0.30.7) rendered the
+  confirm page with row data interpolated; access_log emitted
+  `method=GET path=... status=200 duration_ms=...` lines per
+  request (v0.30.11 with_logging from `[logging]` section in
+  `config/default.toml`).
+- **Docker compose**: `cargo watch` rebuilt rustango
+  in-container; the same routes return identical results on
+  port 8080. Confirms the path-dependency + `[patch.crates-io]`
+  flow works end-to-end.
+- **Bug surfaced + fixed in this session**: the
+  `with_welcome()` panic above. Five Playwright screenshots
+  archived at the repo root (login / operator-console /
+  tenant-admin / count-skip / items + confirm-delete).
+- **manage inspectdb** (v0.30.13) emitted FK + uuid + jsonb
+  models against the live tango DB, including correct
+  `Auto<i64>` PK detection from BIGSERIAL.
+- **manage wizard** (v0.30.14) ran the 5-prompt flow against
+  piped stdin; `[Y/n]` defaults + value defaults all worked
+  as the unit tests asserted.
+- **manage make:viewset** (v0.30.5) auto-detected tenancy from
+  tango's `Cargo.toml` and emitted the tenant-router scaffold;
+  `--no-tenant` override emitted the pool-based shape.
+
+---
+
 ## [0.30.14] — `manage wizard` interactive setup (roadmap #2)
 
 Replaces a 4-5 verb chain a new tenancy user has to learn
