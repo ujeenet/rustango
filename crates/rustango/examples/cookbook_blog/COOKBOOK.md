@@ -361,6 +361,9 @@ if let Some(layer) = rustango::body_limit::BodyLimitLayer::from_settings(&cfg.se
 
 // cache backend selection — "memory" / "redis" / "null" / unset
 let cache: rustango::cache::BoxedCache = rustango::cache::from_settings(&cfg.cache);
+
+// mailer backend selection — "console" / "memory" / "null" / "smtp"
+let mailer: rustango::email::BoxedMailer = rustango::email::from_settings(&cfg.mail);
 ```
 
 The operator console **automatically** picks up `[brand]` from the

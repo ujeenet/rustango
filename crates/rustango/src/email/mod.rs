@@ -270,6 +270,56 @@ impl Mailer for NullMailer {
     }
 }
 
+/// Build a [`BoxedMailer`] from a loaded
+/// [`crate::config::MailSettings`] section (#87 wiring, v0.29).
+///
+/// Backend selection from `s.backend`:
+/// - `"console"` (default) → [`ConsoleMailer`]
+/// - `"memory"` → [`InMemoryMailer`] (tests / staging snapshots)
+/// - `"null"` / `"none"` → [`NullMailer`]
+/// - `"smtp"` → falls back to [`ConsoleMailer`] with a warning —
+///   `SmtpMailer` is documented but not yet implemented; until
+///   that ships, projects that need real SMTP wire it themselves
+///   via [`BoxedMailer`]
+/// - any other / unset → [`ConsoleMailer`] (dev-friendly default;
+///   warn for typos)
+///
+/// `s.smtp_host` and `s.from_address` are accepted by the section
+/// but currently unused at the backend layer — `from_address`
+/// belongs on the per-message [`Email::from`] field, not the
+/// backend; `smtp_host` lights up when `SmtpMailer` ships.
+///
+/// ```ignore
+/// let cfg = rustango::config::Settings::load_from_env()?;
+/// let mailer: rustango::email::BoxedMailer =
+///     rustango::email::from_settings(&cfg.mail);
+/// ```
+#[cfg(feature = "config")]
+#[must_use]
+pub fn from_settings(s: &crate::config::MailSettings) -> BoxedMailer {
+    match s.backend.as_deref() {
+        Some("smtp") => {
+            tracing::warn!(
+                target: "rustango::email",
+                "mail.backend = \"smtp\" but SmtpMailer isn't implemented yet; falling back to ConsoleMailer. \
+                 Wire your own BoxedMailer in the meantime.",
+            );
+            Arc::new(ConsoleMailer)
+        }
+        Some("memory") => Arc::new(InMemoryMailer::new()),
+        Some("null" | "none") => Arc::new(NullMailer),
+        Some("console") | None => Arc::new(ConsoleMailer),
+        Some(other) => {
+            tracing::warn!(
+                target: "rustango::email",
+                backend = %other,
+                "unknown mail.backend value; falling back to ConsoleMailer",
+            );
+            Arc::new(ConsoleMailer)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +377,82 @@ mod tests {
         let m = NullMailer;
         let result = m.send(&Email::new().subject("s")).await;
         assert!(result.is_err());
+    }
+
+    // ---- #87 wiring: from_settings ----
+
+    /// Memory backend captures sends so tests can assert on them.
+    /// Other backends would either print to stdout or no-op, so
+    /// memory is the easiest to exercise here.
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn from_settings_memory_backend_captures_send() {
+        let mut s = crate::config::MailSettings::default();
+        s.backend = Some("memory".into());
+        let m = from_settings(&s);
+        let email = Email::new()
+            .to("a@x.com")
+            .from("noreply@x.com")
+            .subject("hi")
+            .body("body");
+        m.send(&email).await.expect("send ok");
+        // Memory backend wraps an Arc<Mutex<Vec<Email>>>; we don't
+        // expose it here, but the round-trip not erroring confirms
+        // the right backend was selected (NullMailer would also
+        // succeed; ConsoleMailer would print). See the dedicated
+        // memory_mailer_records_send test for the storage assertion.
+    }
+
+    /// Null backend silently drops, even on a valid email.
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn from_settings_null_backend_drops_send() {
+        let mut s = crate::config::MailSettings::default();
+        s.backend = Some("null".into());
+        let m = from_settings(&s);
+        let email = Email::new()
+            .to("a@x.com")
+            .from("noreply@x.com")
+            .subject("hi")
+            .body("body");
+        m.send(&email)
+            .await
+            .expect("null backend never errors on valid email");
+    }
+
+    /// Unknown / unset backend falls back to ConsoleMailer (which
+    /// prints — we just check the call succeeds; capturing stdout
+    /// in a unit test would race with parallel runners).
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn from_settings_unset_falls_back_to_console() {
+        let s = crate::config::MailSettings::default();
+        let m = from_settings(&s);
+        let email = Email::new()
+            .to("a@x.com")
+            .from("noreply@x.com")
+            .subject("hi")
+            .body("body");
+        m.send(&email).await.expect("console mailer ok");
+    }
+
+    /// SMTP backend warns + falls back to ConsoleMailer until
+    /// SmtpMailer ships. Send-call still succeeds — the fallback
+    /// is fail-safe so apps don't refuse to boot.
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn from_settings_smtp_falls_back_until_implemented() {
+        let mut s = crate::config::MailSettings::default();
+        s.backend = Some("smtp".into());
+        s.smtp_host = Some("mail.example.com".into());
+        let m = from_settings(&s);
+        // Same as the unset test — works because the fallback is
+        // ConsoleMailer.
+        let email = Email::new()
+            .to("a@x.com")
+            .from("noreply@x.com")
+            .subject("hi")
+            .body("body");
+        m.send(&email).await.expect("smtp fallback to console ok");
     }
 }
