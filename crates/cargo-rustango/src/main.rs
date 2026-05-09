@@ -110,16 +110,37 @@ impl Template {
         }
     }
 
-    fn rustango_features(self) -> &'static str {
+    fn rustango_features(self) -> String {
+        // Track our own (cargo-rustango) version, which is bumped
+        // in lockstep with the rustango crate via the workspace
+        // `version = "..."` declaration. Pin scaffolded projects
+        // to the same major.minor so a published scaffolder always
+        // produces a project that resolves against a real, current
+        // rustango release. Pre-v0.29 the version was hardcoded —
+        // and consequently rotted to `"0.23"` while the framework
+        // moved to v0.28+, breaking `cargo build` on every fresh
+        // tenant project (#79).
+        let v = mm_version();
         match self {
             // Bare ORM + axum + manage dispatcher; no auto-admin UI.
-            Self::Api => {
-                r#"{ version = "0.23", default-features = false, features = ["postgres", "manage"] }"#
-            }
-            Self::Fullstack => r#""0.23""#,
-            Self::Tenant => r#"{ version = "0.23", features = ["tenancy"] }"#,
+            Self::Api => format!(
+                r#"{{ version = "{v}", default-features = false, features = ["postgres", "manage"] }}"#
+            ),
+            Self::Fullstack => format!(r#""{v}""#),
+            Self::Tenant => format!(r#"{{ version = "{v}", features = ["tenancy"] }}"#),
         }
     }
+}
+
+/// Major.minor of the current `cargo-rustango` build — e.g.
+/// `"0.28.4"` → `"0.28"`. Cargo's caret semantics pin the same
+/// way (`"0.28"` = `"^0.28.0"`), so newly scaffolded projects
+/// resolve to whatever 0.28.x is current on crates.io.
+fn mm_version() -> String {
+    let full = env!("CARGO_PKG_VERSION");
+    full.rsplit_once('.')
+        .map(|(mm, _patch)| mm.to_owned())
+        .unwrap_or_else(|| full.to_owned())
 }
 
 struct NewArgs {
@@ -218,6 +239,7 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     write(root, ".gitignore", templates::GITIGNORE)?;
     write(root, "rust-toolchain.toml", templates::RUST_TOOLCHAIN)?;
     write(root, "docker-compose.yml", &templates::docker_compose(name))?;
+    write(root, "Dockerfile", templates::dockerfile())?;
     write(root, "README.md", &templates::readme(name, template))?;
 
     fs::create_dir_all(root.join("migrations")).map_err(|e| format!("create migrations/: {e}"))?;
@@ -258,4 +280,138 @@ fn write(root: &Path, rel: &str, body: &str) -> Result<(), String> {
     fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))?;
     println!("  + {rel}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mm_version_strips_patch() {
+        let v = mm_version();
+        // Must look like "MAJOR.MINOR" — no trailing ".PATCH" component.
+        assert!(
+            v.matches('.').count() == 1 || (v.matches('.').count() == 0 && !v.is_empty()),
+            "expected `major.minor` shape, got `{v}`"
+        );
+        // Sanity: matches the leading dotted prefix of CARGO_PKG_VERSION.
+        let full = env!("CARGO_PKG_VERSION");
+        assert!(
+            full.starts_with(&v),
+            "expected `{full}` to start with `{v}`"
+        );
+    }
+
+    /// Regression guard for #79: every scaffold template must pin
+    /// rustango to the same major.minor as the scaffolder build,
+    /// not a hardcoded literal that rots silently as the framework
+    /// version moves forward.
+    #[test]
+    fn every_template_pins_current_version() {
+        let mm = mm_version();
+        let needle = format!("\"{mm}\"");
+        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
+            let dep = template.rustango_features();
+            assert!(
+                dep.contains(&needle),
+                "template {template:?} dep `{dep}` does not pin v{mm}"
+            );
+        }
+    }
+
+    /// Regression guard against the original #79 footgun — no
+    /// scaffold template may emit a yanked version literal.
+    #[test]
+    fn no_template_pins_yanked_version() {
+        // Versions known to be yanked on crates.io (rustango-macros
+        // ^0.23.0 was yanked, breaking `rustango = "0.23"` resolution).
+        const YANKED: &[&str] = &["0.23"];
+        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
+            let dep = template.rustango_features();
+            for ver in YANKED {
+                let needle = format!("\"{ver}\"");
+                assert!(
+                    !dep.contains(&needle),
+                    "template {template:?} pins yanked rustango v{ver}: `{dep}`"
+                );
+            }
+        }
+    }
+
+    // ---- #86 — Dockerfile + cargo-watch rust service in scaffolder ----
+
+    /// `Dockerfile` template emits a working rust toolchain image
+    /// with `cargo-watch` preinstalled — the foundation of the
+    /// hot-reload dev loop the docker-compose.yml expects.
+    #[test]
+    fn dockerfile_emits_rust_toolchain_with_cargo_watch() {
+        let body = templates::dockerfile();
+        assert!(
+            body.contains("FROM rust:"),
+            "Dockerfile must base on a rust image, got `{body}`"
+        );
+        assert!(
+            body.contains("cargo install cargo-watch"),
+            "Dockerfile must preinstall cargo-watch (powers the docker-compose.yml \
+             hot-reload command), got `{body}`"
+        );
+        assert!(
+            body.contains("WORKDIR /app"),
+            "Dockerfile must set WORKDIR /app to match docker-compose.yml's bind \
+             mount target, got `{body}`"
+        );
+    }
+
+    /// `docker-compose.yml` ships both postgres AND a rust service
+    /// running `cargo watch -x run`, plus the three named cargo
+    /// volumes that preserve incremental build state.
+    #[test]
+    fn docker_compose_bundles_rust_service_with_cargo_watch() {
+        let body = templates::docker_compose("myapp");
+        // Postgres half (regression guard — don't lose the original
+        // service when adding the rust one).
+        assert!(body.contains("image: postgres:"), "{body}");
+        assert!(body.contains("POSTGRES_DB: myapp_dev"), "{body}");
+        // Rust half (#86 additions).
+        assert!(body.contains("rust:"), "rust service block missing: {body}");
+        assert!(
+            body.contains("cargo watch -x run"),
+            "rust service must run cargo-watch, got: {body}"
+        );
+        assert!(
+            body.contains("build: ."),
+            "rust service must build from the project Dockerfile, got: {body}"
+        );
+        // Cargo cache volumes — without these, every `up` triggers
+        // a full from-scratch rebuild (the worst dev UX possible).
+        for vol in ["cargo-target", "cargo-registry", "cargo-git"] {
+            assert!(
+                body.contains(vol),
+                "expected cargo cache volume `{vol}` in compose, got: {body}"
+            );
+        }
+        // depends_on healthy postgres so rust doesn't start before DB.
+        assert!(
+            body.contains("depends_on:"),
+            "rust service must depend on postgres being healthy, got: {body}"
+        );
+    }
+
+    /// `.env.example` defaults must work out-of-box for `docker
+    /// compose up -d` (host = `postgres`, bind = `0.0.0.0`). Users
+    /// running cargo on the host edit `postgres` -> `localhost`.
+    #[test]
+    fn env_example_defaults_to_docker_friendly_values() {
+        let body = templates::env_example("myapp");
+        assert!(
+            body.contains("@postgres:5432/"),
+            "DATABASE_URL host must default to `postgres` (compose service name), \
+             got: {body}"
+        );
+        assert!(
+            body.contains("RUSTANGO_BIND=0.0.0.0:8080"),
+            "bind must default to 0.0.0.0 so the container's exposed port is \
+             reachable from the host, got: {body}"
+        );
+    }
 }

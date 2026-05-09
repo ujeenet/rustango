@@ -53,11 +53,18 @@ pub fn env_example(name: &str) -> String {
     format!(
         "# Copy this file to .env and edit the values for your environment.
 # `dotenvy::dotenv()` in src/main.rs picks it up at startup.
+#
+# Defaults are Docker-friendly (`postgres` host, `0.0.0.0` bind) so
+# `docker compose up -d` boots a working stack without any edits.
+# If you run cargo on the host instead of in the rust container,
+# change `postgres` -> `localhost` in DATABASE_URL.
+#
 # Database name matches docker-compose.yml's POSTGRES_DB ({name}_dev).
-DATABASE_URL=postgres://rustango:rustango@localhost:5432/{name}_dev
-RUSTANGO_BIND=127.0.0.1:8080
+DATABASE_URL=postgres://rustango:rustango@postgres:5432/{name}_dev
+RUSTANGO_BIND=0.0.0.0:8080
 
 # Tenancy template only — apex domain + signing secret.
+# Generate a real secret with: openssl rand -base64 32
 RUSTANGO_APEX_DOMAIN=localhost
 RUSTANGO_SESSION_SECRET=change-me-base64-encoded-32-bytes-or-more
 "
@@ -85,6 +92,16 @@ channel = \"1.88\"
 
 // ---------------- docker-compose.yml ----------------
 
+/// Bundle a working Postgres + Rust hot-reload dev stack out of the
+/// box (#86). The `rust` service runs `cargo watch -x run` against
+/// the bind-mounted source tree; the three named volumes
+/// (`cargo-target`, `cargo-registry`, `cargo-git`) preserve
+/// incremental build state across container restarts so a fresh
+/// `docker compose up` doesn't trigger a full from-scratch rebuild.
+///
+/// Users who prefer running cargo on the host can simply ignore the
+/// `rust` service and run the postgres service standalone with
+/// `docker compose up -d postgres`.
 pub fn docker_compose(name: &str) -> String {
     format!(
         r#"services:
@@ -101,8 +118,55 @@ pub fn docker_compose(name: &str) -> String {
       interval: 2s
       timeout: 2s
       retries: 20
+
+  # Hot-reload Rust dev container. `cargo watch -x run` rebuilds and
+  # restarts the binary on every source edit. Skip this service (run
+  # cargo on the host) by passing `--no-deps postgres` to
+  # `docker compose up`, or remove it entirely if you don't want the
+  # Docker-based dev loop.
+  rust:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - ./:/app
+      - cargo-target:/app/target
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+    environment:
+      CARGO_TARGET_DIR: /app/target
+      CARGO_INCREMENTAL: "1"
+    command: bash -c "cargo watch -x run"
+    ports:
+      - "8080:8080"
+
+volumes:
+  cargo-target:
+  cargo-registry:
+  cargo-git:
 "#
     )
+}
+
+// ---------------- Dockerfile ----------------
+
+/// Companion to [`docker_compose`] — a thin Rust dev image with
+/// `cargo-watch` preinstalled. The image stays small because all
+/// project sources land via the bind mount; this image only needs
+/// the toolchain + cargo-watch installed.
+///
+/// The rust version is pinned to the same value as
+/// `rust-toolchain.toml`'s `channel`. Override by editing both
+/// files together if you bump the toolchain.
+pub fn dockerfile() -> &'static str {
+    "FROM rust:1.88\n\
+     \n\
+     WORKDIR /app\n\
+     \n\
+     RUN cargo install cargo-watch\n"
 }
 
 // ---------------- README.md ----------------
@@ -118,19 +182,35 @@ pub fn readme(name: &str, template: Template) -> String {
 
 Generated with `cargo rustango new {name}` — template `{template_label}`.
 
-## Run locally
+## Run locally — two paths
+
+### A. All-in-Docker (default; hot-reload via cargo-watch)
 
 ```sh
 cp .env.example .env
-docker compose up -d
+docker compose up -d                 # boots postgres + rust + cargo-watch
+docker compose run --rm rust cargo run -- migrate
+# server lives at http://localhost:8080 — edits to src/ trigger rebuild
+```
+
+The `rust` service runs `cargo watch -x run` against the bind-mounted
+source tree. Three named volumes preserve incremental build state
+across container restarts so a fresh `up` doesn't recompile from
+scratch.
+
+### B. Cargo on the host (Docker just for postgres)
+
+```sh
+cp .env.example .env                 # then change `postgres` -> `localhost` in DATABASE_URL
+docker compose up -d postgres        # only the DB
 cargo run -- migrate                 # apply pending migrations
 cargo run                            # boot the HTTP server
 cargo run -- --help                  # full verb list (makemigrations, startapp, etc.)
 ```
 
-`cargo run` (no args) is `runserver`. Every other Django-style verb
-flows through the same binary via `rustango::manage::Cli` — see
-`src/main.rs`.
+Either way: `cargo run` (no args) is `runserver`. Every other
+Django-style verb flows through the same binary via
+`rustango::manage::Cli` — see `src/main.rs`.
 
 ## Project layout
 

@@ -394,7 +394,7 @@ pub struct {struct_name} {{
     pub name: String,
     pub active: bool,
     #[rustango(auto_now_add)]
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
 }}
 "
     )
@@ -715,8 +715,8 @@ mod tests {
             "expected list_display, got: {body}"
         );
         assert!(
-            body.contains("created_at: chrono::DateTime<chrono::Utc>"),
-            "expected created_at field, got: {body}"
+            body.contains("created_at: Auto<chrono::DateTime<chrono::Utc>>"),
+            "expected created_at field wrapped in Auto<...>, got: {body}"
         );
         assert!(
             body.contains("auto_now_add"),
