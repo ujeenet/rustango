@@ -353,6 +353,11 @@ if let Some(cors) = rustango::cors::CorsLayer::from_settings(&cfg.security) {
 let log = rustango::access_log::AccessLogLayer::default()
     .with_audit_settings(&cfg.audit);   // redact_query_params extras
 let app = app.access_log(log);
+
+// body_limit — opt-in (returns None when max_body_bytes is unset)
+if let Some(layer) = rustango::body_limit::BodyLimitLayer::from_settings(&cfg.server) {
+    let app = app.body_limit(layer);
+}
 ```
 
 The operator console **automatically** picks up `[brand]` from the

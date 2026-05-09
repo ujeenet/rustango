@@ -61,6 +61,31 @@ impl BodyLimitLayer {
         self.methods = m;
         self
     }
+
+    /// Build the layer from a loaded
+    /// [`crate::config::ServerSettings`] section (#87 wiring).
+    /// Returns `None` when `max_body_bytes` is unset — opt-in
+    /// semantics, since most projects are happy with axum's
+    /// default. When set, uses the value as the cap; methods stay
+    /// at the default (POST/PUT/PATCH).
+    ///
+    /// ```ignore
+    /// let cfg = rustango::config::Settings::load_from_env()?;
+    /// if let Some(layer) = BodyLimitLayer::from_settings(&cfg.server) {
+    ///     app = app.body_limit(layer);
+    /// }
+    /// ```
+    #[cfg(feature = "config")]
+    #[must_use]
+    pub fn from_settings(s: &crate::config::ServerSettings) -> Option<Self> {
+        let max = s.max_body_bytes?;
+        // u64 → usize. On 32-bit targets a comically-large config
+        // value saturates rather than wrapping; not realistic in
+        // practice (max_body_bytes is typically MB-range), but the
+        // saturate is the safe fail-mode.
+        let max = usize::try_from(max).unwrap_or(usize::MAX);
+        Some(Self::new(max))
+    }
 }
 
 pub trait BodyLimitRouterExt {
@@ -254,5 +279,25 @@ mod tests {
         assert!(l.methods.contains(&Method::POST));
         assert!(l.methods.contains(&Method::PUT));
         assert!(l.methods.contains(&Method::PATCH));
+    }
+
+    /// Unset → None, so the caller skips mounting (opt-in).
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_unset_returns_none() {
+        let s = crate::config::ServerSettings::default();
+        assert!(BodyLimitLayer::from_settings(&s).is_none());
+    }
+
+    /// Configured value lands in `max_bytes`.
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_sets_max_bytes() {
+        let mut s = crate::config::ServerSettings::default();
+        s.max_body_bytes = Some(10_000_000); // 10 MB
+        let layer = BodyLimitLayer::from_settings(&s).expect("Some");
+        assert_eq!(layer.max_bytes, 10_000_000);
+        // Methods preserved at default.
+        assert_eq!(layer.methods.len(), 3);
     }
 }
