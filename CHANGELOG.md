@@ -2,6 +2,83 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.2] — `#[derive(Form)]` validators in `CreateView`/`UpdateView`
+
+The v0.29 HTML CBVs ran type coercion + schema-level bounds
+(`max_length` / `min` / `max`) on the form payload, but user-defined
+business validation (`#[form(min_length = 5, regex = "...")]`,
+custom `#[form(validator = "fn")]`, cross-field checks) had to be
+re-implemented per project on top. v0.30.2 closes the gap.
+
+### Added
+
+- **`CreateView::validator` / `UpdateView::validator`** — install
+  a closure-based hook that runs after schema-level checks but
+  before the SQL INSERT/UPDATE. Returning `Err(FormErrors)`
+  re-renders the form with the merged error map and a 422 status.
+
+  ```rust,ignore
+  CreateView::for_model(Post::SCHEMA)
+      .validator(|data| {
+          let mut errs = FormErrors::default();
+          if data.get("title").map_or(true, |s| s.len() < 5) {
+              errs.add("title", "must be at least 5 characters");
+          }
+          if errs.is_empty() { Ok(()) } else { Err(errs) }
+      })
+      .router("/posts", tera, pool)
+  ```
+- **`CreateView::form::<F: Form>()` / `UpdateView::form::<F>()`** —
+  convenience wrapper that auto-wires a `#[derive(Form)]` struct's
+  `parse(...)` method as the validator. Pulls in `min_length` /
+  `regex` / custom-validator-fn / cross-field checks from the
+  derive macro:
+
+  ```rust,ignore
+  #[derive(rustango::Form)]
+  pub struct PostForm {
+      #[form(min_length = 5)] title: String,
+      #[form(min_length = 1)] body: String,
+  }
+
+  CreateView::for_model(Post::SCHEMA)
+      .form::<PostForm>()
+      .router("/posts", tera, pool)
+  ```
+- **`Validator` type alias** — public for projects that want to
+  define their own validator factories outside the builder
+  closure.
+- Threaded through every variant: `router(...)` (static pool) and
+  `tenant_router(...)` (per-request `Tenant::conn()`) on both
+  `CreateView` and `UpdateView`. Same shape, no new `tenant_*`
+  methods.
+
+### Behavior
+
+- Validator errors *merge* with schema errors rather than
+  clobbering them — multi-error fields concatenate via `"; "`,
+  same as Django convention. Users see all errors in one
+  re-render rather than playing whack-a-mole.
+- Non-field errors (`FormErrors::add_non_field`) land under the
+  template variable `form.errors.__all__`. Templates render that
+  once at the top, separately from per-field errors.
+- Re-render still returns `422 Unprocessable Entity` (unchanged).
+- Validator field starts as `None` — existing projects pay no
+  overhead and get the same behavior they had before.
+
+### Tests
+
+- 1292 → 1297 lib tests (+5):
+  - `merge_validator_no_errors_leaves_map_untouched`
+  - `merge_validator_field_errors_land_under_field_key` (multi-error
+    join via `"; "`)
+  - `merge_validator_non_field_errors_land_under_all_key`
+  - `merge_validator_appends_to_existing_field_error` (no clobber)
+  - `validator_and_form_builders_set_validator_field` (closure +
+    typed `Form` shapes both compile)
+
+---
+
 ## [0.30.1] — live tests for `tenant_router` + `CountQuery` search bug fix
 
 Closing the v0.30.0 work with end-to-end validation against a real

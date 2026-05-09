@@ -636,6 +636,7 @@ pub struct CreateView {
     template: String,
     success_url: String,
     fields: Option<Vec<String>>,
+    validator: Option<Validator>,
 }
 
 impl CreateView {
@@ -648,6 +649,7 @@ impl CreateView {
             template: format!("{}_form.html", schema.table),
             success_url: "/".to_owned(),
             fields: None,
+            validator: None,
         }
     }
 
@@ -673,6 +675,58 @@ impl CreateView {
         self
     }
 
+    /// Install a closure-based validator that runs after schema-level
+    /// type coercion + bounds checks but before the SQL INSERT.
+    /// Returning `Err(FormErrors)` re-renders the form with the
+    /// merged error map and a 422 status.
+    ///
+    /// ```ignore
+    /// CreateView::for_model(Post::SCHEMA)
+    ///     .validator(|data| {
+    ///         let mut errs = FormErrors::default();
+    ///         if data.get("title").map_or(true, |s| s.len() < 5) {
+    ///             errs.add("title", "must be at least 5 characters");
+    ///         }
+    ///         if errs.is_empty() { Ok(()) } else { Err(errs) }
+    ///     })
+    ///     .router("/posts", tera, pool)
+    /// ```
+    #[must_use]
+    pub fn validator<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&HashMap<String, String>) -> Result<(), crate::forms::FormErrors>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.validator = Some(Arc::new(f));
+        self
+    }
+
+    /// Convenience: wire a `#[derive(Form)]` struct as the validator.
+    /// The view runs `F::parse(data)` on every POST and re-renders
+    /// the form with the collected errors when parse fails.
+    /// `min_length` / `regex` / custom-validator-fn / cross-field
+    /// validators all flow into the form's error map.
+    ///
+    /// ```ignore
+    /// #[derive(rustango::Form)]
+    /// pub struct PostForm {
+    ///     #[form(min_length = 5)]
+    ///     title: String,
+    ///     #[form(min_length = 1)]
+    ///     body: String,
+    /// }
+    ///
+    /// CreateView::for_model(Post::SCHEMA)
+    ///     .form::<PostForm>()
+    ///     .router("/posts", tera, pool)
+    /// ```
+    #[must_use]
+    pub fn form<F: crate::forms::Form>(self) -> Self {
+        self.validator(|data| F::parse(data).map(|_| ()))
+    }
+
     /// Mount as `GET`/`POST <prefix>/new`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: PgPool) -> Router<()> {
@@ -683,6 +737,7 @@ impl CreateView {
             fields: self.fields.clone(),
             tera,
             pool,
+            validator: self.validator.clone(),
         });
         let path = format!("{}/new", prefix.trim_end_matches('/'));
         Router::new()
@@ -703,6 +758,7 @@ impl CreateView {
             success_url: self.success_url,
             fields: self.fields,
             tera,
+            validator: self.validator,
         });
         let path = format!("{}/new", prefix.trim_end_matches('/'));
         Router::new()
@@ -728,6 +784,7 @@ pub struct UpdateView {
     template: String,
     success_url: String,
     fields: Option<Vec<String>>,
+    validator: Option<Validator>,
 }
 
 impl UpdateView {
@@ -738,6 +795,7 @@ impl UpdateView {
             template: format!("{}_form.html", schema.table),
             success_url: "/".to_owned(),
             fields: None,
+            validator: None,
         }
     }
 
@@ -759,6 +817,27 @@ impl UpdateView {
         self
     }
 
+    /// Install a closure-based validator. Same shape and semantics
+    /// as [`CreateView::validator`].
+    #[must_use]
+    pub fn validator<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&HashMap<String, String>) -> Result<(), crate::forms::FormErrors>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.validator = Some(Arc::new(f));
+        self
+    }
+
+    /// Wire a `#[derive(Form)]` struct as the validator. Same shape
+    /// and semantics as [`CreateView::form`].
+    #[must_use]
+    pub fn form<F: crate::forms::Form>(self) -> Self {
+        self.validator(|data| F::parse(data).map(|_| ()))
+    }
+
     /// Mount as `GET`/`POST <prefix>/{pk}/edit`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: PgPool) -> Router<()> {
@@ -769,6 +848,7 @@ impl UpdateView {
             fields: self.fields.clone(),
             tera,
             pool,
+            validator: self.validator.clone(),
         });
         let path = format!("{}/{{pk}}/edit", prefix.trim_end_matches('/'));
         Router::new()
@@ -789,6 +869,7 @@ impl UpdateView {
             success_url: self.success_url,
             fields: self.fields,
             tera,
+            validator: self.validator,
         });
         let path = format!("{}/{{pk}}/edit", prefix.trim_end_matches('/'));
         Router::new()
@@ -802,6 +883,16 @@ impl UpdateView {
 
 // ============================================================== form-view shared
 
+/// User-supplied validation hook installed on `CreateView` /
+/// `UpdateView` via [`CreateView::validator`] / [`UpdateView::validator`]
+/// (or the `Form`-trait convenience [`CreateView::form`] /
+/// [`UpdateView::form`]). Runs *after* schema-level type coercion +
+/// max_length / min / max bounds (which the framework owns) but
+/// *before* the SQL INSERT/UPDATE. Returning `Err(FormErrors)`
+/// re-renders the form with the merged error map and a 422 status.
+pub type Validator =
+    Arc<dyn Fn(&HashMap<String, String>) -> Result<(), crate::forms::FormErrors> + Send + Sync>;
+
 #[derive(Clone)]
 struct FormViewState {
     schema: &'static ModelSchema,
@@ -810,6 +901,11 @@ struct FormViewState {
     fields: Option<Vec<String>>,
     tera: Arc<Tera>,
     pool: PgPool,
+    /// Optional user-supplied validator (`#[derive(Form)]`-derived
+    /// `min_length` / `regex` / custom validator chain). v0.30.2
+    /// — closes the v0.29 gap where business validation had to be
+    /// re-implemented per project on top of the type-coercion path.
+    validator: Option<Validator>,
 }
 
 /// Field metadata stamped into the Tera context for `{% for field
@@ -1159,7 +1255,8 @@ async fn handle_create_post(
     headers: axum::http::HeaderMap,
     axum::Form(form): axum::Form<HashMap<String, String>>,
 ) -> Response {
-    let (columns, values, errors) = parse_form(state.schema, state.fields.as_deref(), &form);
+    let (columns, values, mut errors) = parse_form(state.schema, state.fields.as_deref(), &form);
+    merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
     if !errors.is_empty() {
         return rerender_form(&state, &form, &errors, /*is_update=*/ false, &headers);
     }
@@ -1267,7 +1364,8 @@ async fn handle_update_post(
             state.schema.table
         ));
     };
-    let (columns, values, errors) = parse_form(state.schema, state.fields.as_deref(), &form);
+    let (columns, values, mut errors) = parse_form(state.schema, state.fields.as_deref(), &form);
+    merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
     if !errors.is_empty() {
         return rerender_form(&state, &form, &errors, /*is_update=*/ true, &headers);
     }
@@ -1379,6 +1477,48 @@ fn bounds_error_message(e: &crate::core::QueryError) -> String {
 /// user's submitted values + per-field errors. Mirrors Django's
 /// "render with errors" pattern so the user doesn't lose what they
 /// typed.
+/// Run an optional user-supplied validator and merge any
+/// `FormErrors` it returns into the existing per-field error map.
+/// Multi-error fields are joined with `"; "` so the single-string-
+/// per-field shape rerender_form expects is preserved. Non-field
+/// errors land under the `"__all__"` key (matches Django convention
+/// for cross-field errors and lets templates render them once at
+/// the top of the form).
+fn merge_validator_errors(
+    validator: Option<&Validator>,
+    submitted: &HashMap<String, String>,
+    errors: &mut HashMap<String, String>,
+) {
+    let Some(v) = validator else { return };
+    let Err(form_errs) = v(submitted) else { return };
+    for (field, msgs) in form_errs.fields() {
+        if msgs.is_empty() {
+            continue;
+        }
+        let joined = msgs.join("; ");
+        // Don't clobber an existing schema-level error with the
+        // user validator's; users typically fix one issue at a
+        // time. Concatenate instead.
+        errors
+            .entry(field.clone())
+            .and_modify(|prev| {
+                prev.push_str("; ");
+                prev.push_str(&joined);
+            })
+            .or_insert(joined);
+    }
+    if !form_errs.non_field().is_empty() {
+        let joined = form_errs.non_field().join("; ");
+        errors
+            .entry("__all__".to_owned())
+            .and_modify(|prev| {
+                prev.push_str("; ");
+                prev.push_str(&joined);
+            })
+            .or_insert(joined);
+    }
+}
+
 fn rerender_form(
     state: &FormViewState,
     submitted: &HashMap<String, String>,
@@ -2048,6 +2188,9 @@ mod tenant {
         pub(super) success_url: String,
         pub(super) fields: Option<Vec<String>>,
         pub(super) tera: Arc<Tera>,
+        /// Optional `#[derive(Form)]` validator (#80 v0.30.2 parity
+        /// with the static `FormViewState` path).
+        pub(super) validator: Option<super::Validator>,
     }
 
     pub(super) async fn handle_create_get_tenant(
@@ -2074,7 +2217,9 @@ mod tenant {
         mut t: Tenant,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
-        let (columns, values, errors) = parse_form(state.schema, state.fields.as_deref(), &form);
+        let (columns, values, mut errors) =
+            parse_form(state.schema, state.fields.as_deref(), &form);
+        super::merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
         if !errors.is_empty() {
             return rerender_form_tenant(
                 &state, &form, &errors, /*is_update=*/ false, &headers,
@@ -2184,7 +2329,9 @@ mod tenant {
                 state.schema.table
             ));
         };
-        let (columns, values, errors) = parse_form(state.schema, state.fields.as_deref(), &form);
+        let (columns, values, mut errors) =
+            parse_form(state.schema, state.fields.as_deref(), &form);
+        super::merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
         if !errors.is_empty() {
             return rerender_form_tenant(
                 &state, &form, &errors, /*is_update=*/ true, &headers,
@@ -3353,6 +3500,98 @@ mod tests {
         params.insert("ordering".into(), String::new());
         let (_, active) = resolve_active_order(s, &[], &["title".into()], &params).unwrap();
         assert_eq!(active, "");
+    }
+
+    // ---- Validator hook (#80 v0.30.2) ----
+
+    /// `merge_validator_errors` — validator returns no errors → map
+    /// is unchanged.
+    #[test]
+    fn merge_validator_no_errors_leaves_map_untouched() {
+        let v: Validator = Arc::new(|_data| Ok(()));
+        let mut errors: HashMap<String, String> = HashMap::new();
+        merge_validator_errors(Some(&v), &HashMap::new(), &mut errors);
+        assert!(errors.is_empty());
+    }
+
+    /// Field errors from the validator land under the right keys
+    /// with multi-error joining via "; ".
+    #[test]
+    fn merge_validator_field_errors_land_under_field_key() {
+        let v: Validator = Arc::new(|_data| {
+            let mut e = crate::forms::FormErrors::default();
+            e.add("title", "must be at least 5 characters");
+            e.add("title", "must not contain whitespace");
+            e.add("body", "required");
+            Err(e)
+        });
+        let mut errors: HashMap<String, String> = HashMap::new();
+        merge_validator_errors(Some(&v), &HashMap::new(), &mut errors);
+        let title = errors.get("title").expect("title error");
+        assert!(title.contains("at least 5"), "got: {title}");
+        assert!(title.contains("whitespace"), "got: {title}");
+        assert_eq!(errors.get("body"), Some(&"required".to_owned()));
+    }
+
+    /// Non-field errors land under the special `__all__` key —
+    /// matches Django convention for cross-field errors.
+    #[test]
+    fn merge_validator_non_field_errors_land_under_all_key() {
+        let v: Validator = Arc::new(|_data| {
+            let mut e = crate::forms::FormErrors::default();
+            e.add_non_field("password and confirm_password must match");
+            Err(e)
+        });
+        let mut errors: HashMap<String, String> = HashMap::new();
+        merge_validator_errors(Some(&v), &HashMap::new(), &mut errors);
+        let all = errors.get("__all__").expect("non-field error");
+        assert!(all.contains("must match"), "got: {all}");
+    }
+
+    /// Pre-existing schema-level errors are preserved + appended to,
+    /// not clobbered by the validator's output.
+    #[test]
+    fn merge_validator_appends_to_existing_field_error() {
+        let v: Validator = Arc::new(|_data| {
+            let mut e = crate::forms::FormErrors::default();
+            e.add("title", "regex mismatch");
+            Err(e)
+        });
+        let mut errors: HashMap<String, String> = HashMap::new();
+        errors.insert("title".into(), "max_length 5 exceeded".into());
+        merge_validator_errors(Some(&v), &HashMap::new(), &mut errors);
+        let title = errors.get("title").unwrap();
+        assert!(title.contains("max_length"), "preserved: {title}");
+        assert!(title.contains("regex mismatch"), "appended: {title}");
+    }
+
+    /// CreateView/UpdateView builders accept a closure-based
+    /// validator + a typed Form via `.form::<T>()`. Smoke test that
+    /// both shapes compile + the field gets stamped on state.
+    #[test]
+    fn validator_and_form_builders_set_validator_field() {
+        // Closure form
+        let cv = CreateView::for_model(schema_two_fields()).validator(|_data| Ok(()));
+        assert!(
+            cv.validator.is_some(),
+            ".validator(closure) must set the field"
+        );
+
+        let uv = UpdateView::for_model(schema_two_fields()).validator(|_data| Ok(()));
+        assert!(uv.validator.is_some());
+
+        // Typed Form trait
+        struct Tiny;
+        impl crate::forms::Form for Tiny {
+            fn parse(_: &HashMap<String, String>) -> Result<Self, crate::forms::FormErrors> {
+                Ok(Tiny)
+            }
+        }
+        let cv2 = CreateView::for_model(schema_two_fields()).form::<Tiny>();
+        assert!(
+            cv2.validator.is_some(),
+            ".form::<T>() must set the validator"
+        );
     }
 
     /// Smoke: every CBV's `tenant_router` builds without panicking

@@ -1385,6 +1385,40 @@ on the router to enforce that the `_csrf` form field matches the
 cookie value. Without it the `csrf_token` context var still
 populates, but POSTs aren't validated.
 
+### Business validation — `.validator(...)` and `.form::<T>()` (v0.30.2)
+
+Schema-level checks (`max_length`, `min`, `max`) ship for free.
+Business validation (`min_length`, `regex`, custom validator fns,
+cross-field checks) hooks in via two builder methods on
+`CreateView` / `UpdateView`:
+
+```rust,ignore
+// Closure shape — no new types, just `data: &HashMap<String,String>`.
+CreateView::for_model(Post::SCHEMA)
+    .validator(|data| {
+        let mut errs = rustango::forms::FormErrors::default();
+        if data.get("title").map_or(true, |s| s.len() < 5) {
+            errs.add("title", "must be at least 5 characters");
+        }
+        if errs.is_empty() { Ok(()) } else { Err(errs) }
+    })
+    .router("/posts", tera, pool)
+
+// Typed Form — wires #[derive(Form)] validators automatically.
+#[derive(rustango::Form)]
+pub struct PostForm {
+    #[form(min_length = 5)] title: String,
+    #[form(min_length = 1)] body: String,
+}
+CreateView::for_model(Post::SCHEMA)
+    .form::<PostForm>()
+    .router("/posts", tera, pool)
+```
+
+Both work the same on `tenant_router(...)`. Errors merge with the
+schema-level error map via `"; "` joining; non-field errors land
+under `form.errors.__all__` for top-of-form rendering.
+
 ### Tenancy projects: `tenant_router(...)`
 
 For multi-tenant projects (subdomain / schema / per-tenant database)
