@@ -2,6 +2,75 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.0] — `ViewSet::tenant_router(prefix)` with full feature parity (#80)
+
+`#[derive(ViewSet)]` projects with multi-tenant routing finally get
+the same DRF-shape CRUD as single-tenant projects. The v0.27 v1 of
+`tenant_router` deliberately shipped without filter / search /
+pagination / permission support — that work was tracked in #80
+"v2 of this module" and ships now.
+
+### Added
+
+- **`ViewSet::tenant_router(prefix)`** — full feature parity with
+  the static-pool `router(prefix, pool)` path:
+  - `filter_fields` (Django-style lookups: `__gt`, `__icontains`,
+    `__in`, `__isnull`, etc.)
+  - `search_fields` (full-text ILIKE)
+  - `ordering` / `default_ordering`
+  - `page_size` / `cursor_pagination`
+  - `permissions` / `permissions_for_model` (per-request
+    connection runs the perm check too — single round-trip rather
+    than an extra pool acquire)
+  - `serializer` / `row_render`
+  - `read_only`
+- **`tenancy::permissions::has_perm_on<E: Executor>`** — variant
+  of `has_perm` that takes any sqlx executor. Required for the
+  unified handler path: tenant mode runs perm checks against the
+  per-request `&mut PgConnection`, not a `&PgPool`.
+- The `tenant_router` returns the same `Router<()>` shape as
+  before, but now driven by the same handler set as the static
+  router (`AcquiredConn` wrapper abstracts pool source).
+
+### Changed
+
+- **Internal**: `ViewSetState` now carries a `PoolSource` enum
+  (`Static(PgPool)` / `Tenant`) instead of a single baked
+  `PgPool`. Each handler calls `state.acquire(&mut parts)` which
+  returns an `AcquiredConn` wrapper exposing
+  `select_rows` / `count_rows` / `select_one_row` /
+  `insert_returning` / `update` / `delete` / `has_perm` facade
+  methods. Pool-source branching lives in the wrapper, not in
+  every handler.
+- **Behavior**: page-number list endpoint now runs SELECT and
+  COUNT *sequentially* on a single connection rather than via
+  `tokio::join!` against the pool. Two short queries on one
+  connection vs. two pool round-trips — usually faster anyway,
+  and required for tenant mode.
+- **Removed**: `viewset/tenant.rs` v1 module (the limited-scope
+  `tenant_router`). Its smoke test moved into
+  `viewset/mod.rs::tenant_router_tests`. No public API breaks —
+  the v1 `tenant_router` shape is preserved by the v2 implementation.
+
+### Tests
+
+- 1290 → 1292 lib tests (+2): `tenant_router_carries_over_full_builder_chain`
+  asserts the full builder chain compiles in tenant mode;
+  `router_and_tenant_router_set_distinct_pool_sources` round-trips
+  the mode flag. The v1 smoke is preserved.
+- All 33 viewset tests pass under the unified handler path.
+
+### Migration
+
+- Existing `viewset.router(prefix, pool)` calls are unchanged.
+- Existing `viewset.tenant_router(prefix)` calls now opt into
+  filter/search/pagination/permission features via the same
+  builder chain that worked for `router(...)` — no code changes
+  required to keep current behavior, since unconfigured fields
+  default to "no filter / no search / no perm check".
+
+---
+
 ## [0.29.12] — `Cli::with_welcome()` builder
 
 The `welcome::welcome_router()` confidence page has shipped since

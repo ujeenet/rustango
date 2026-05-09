@@ -239,6 +239,22 @@ pub async fn ensure_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
 /// # Errors
 /// Driver / SQL failures.
 pub async fn has_perm(uid: i64, codename: &str, pool: &PgPool) -> Result<bool, sqlx::Error> {
+    has_perm_on(uid, codename, pool).await
+}
+
+/// Like [`has_perm`] but accepts any sqlx executor. The
+/// [`crate::viewset::ViewSet::tenant_router`] path uses this with the
+/// per-request `&mut PgConnection` from
+/// [`crate::extractors::Tenant::conn`] — `&PgPool` isn't usable in
+/// schema-mode tenancy because each query needs `SET search_path`
+/// against the same connection that issued it.
+///
+/// # Errors
+/// As [`has_perm`].
+pub async fn has_perm_on<'c, E>(uid: i64, codename: &str, executor: E) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+{
     let row = sqlx::query(
         r#"
         WITH user_info AS (
@@ -267,7 +283,7 @@ pub async fn has_perm(uid: i64, codename: &str, pool: &PgPool) -> Result<bool, s
     )
     .bind(uid)
     .bind(codename)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     let is_super: bool = row.try_get("is_super").unwrap_or(false);

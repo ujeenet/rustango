@@ -1449,6 +1449,38 @@ The ViewSet builder also exposes `.search_fields` (?search=…),
 (see Chapter 6 §6.80 for the typed-perm shortcut). All exercised
 live in rustango's own viewset / order_by_annotate_live tests.
 
+### Tenancy projects: `.tenant_router(prefix)` (v0.30)
+
+`router(prefix, pool)` bakes a single pool at mount time — fine for
+single-tenant projects, broken for multi-tenant ones. Schema-mode
+tenants share the registry pool but rely on a per-checkout `SET
+search_path`, and database-mode tenants live in entirely separate
+Postgres databases. Mounting a normal ViewSet against `&pool` from
+inside a tenant project hits the wrong schema/database on every
+request.
+
+`tenant_router(prefix)` solves this by resolving the connection per
+request via the `Tenant` extractor:
+
+```rust,ignore
+let posts_router = ViewSet::for_model(Post::SCHEMA)
+    .filter_fields(&["author_id"])
+    .search_fields(&["title", "body"])
+    .ordering(&[("published_at", true)])
+    .page_size(20)
+    .permissions_for_model::<Post>()
+    .tenant_router("/api/posts");        // no pool!
+
+axum::Router::new().merge(posts_router)
+```
+
+v0.30 unification: every builder knob that worked for `router(...)`
+now works identically for `tenant_router(...)` — including
+permissions (the `has_perm` check runs against the same per-request
+connection, no second pool acquire). The earlier v0.27 v1 of
+`tenant_router` was filter-less and perm-less; that limitation is
+gone.
+
 *Sub-sections 9.114 (full pagination — count + next + prev),
 9.116b (typed permissions), 9.117 (OpenAPI auto-derive),
 9.118 (response shaping via `.fields(&[...])`) queued for Slice 9b.*

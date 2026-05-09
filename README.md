@@ -1445,9 +1445,9 @@ CSRF-protected scope when the POSTs are reachable from a browser.
 connection via the `Tenant` extractor instead of capturing a single
 pool at mount time. Same Tera context shape, same builder knobs.
 
-Single-tenant only today (captures a `PgPool` at mount time, like
-the original `viewset::ViewSet::router`). The `tenant_router`
-variant lands once the per-tenant pattern matches `viewset::tenant_router`.
+The companion JSON-CRUD `viewset::ViewSet::tenant_router` (v0.30,
+#80) carries the *full* builder chain — filter / search / ordering /
+pagination / permissions all work in tenant mode now, no v1 caveats.
 
 Behind the `template_views` Cargo feature (default-on).
 
