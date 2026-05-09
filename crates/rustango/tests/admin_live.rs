@@ -125,7 +125,7 @@ async fn index_lists_registered_models() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_string(response).await;
-    assert!(body.contains("rustango admin"), "missing title: {body}");
+    assert!(body.contains("Rustango Admin"), "missing title: {body}");
     assert!(body.contains("AdminUser"), "missing model name: {body}");
     assert!(
         body.contains("href=\"/admin_user\""),
@@ -897,7 +897,7 @@ async fn protected_router_returns_401_without_credentials() {
         "missing Basic challenge: {www_authenticate}",
     );
     assert!(
-        www_authenticate.contains("rustango admin"),
+        www_authenticate.contains("Rustango Admin"),
         "missing realm: {www_authenticate}",
     );
 
@@ -961,7 +961,7 @@ async fn protected_router_accepts_correct_credentials() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_string(response).await;
-    assert!(body.contains("rustango admin"), "missing title: {body}");
+    assert!(body.contains("Rustango Admin"), "missing title: {body}");
 
     migrate::drop_all(&pool).await.unwrap();
 }

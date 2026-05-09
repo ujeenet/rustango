@@ -2,7 +2,7 @@
 <html lang="en" data-theme="{{ theme_mode | default(value='auto') }}">
 <head>
   <meta charset="utf-8">
-  <title>Sign in — {{ brand_name | default(value='rustango operator console') }}</title>
+  <title>Sign in — {{ brand_name | default(value='Rustango Operator Console') }}</title>
   {% include "_theme_tokens.html" %}
   {% if brand_css %}<style>:root { {{ brand_css | safe }} }</style>{% endif %}
   <style>
@@ -86,7 +86,7 @@
 <body>
   <form class="card" method="post" action="/login">
     {% if brand_logo_url %}<img class="brand-logo" src="{{ brand_logo_url | safe }}" alt="">{% endif %}
-    <h1>{{ brand_name | default(value='rustango') }}</h1>
+    <h1>{{ brand_name | default(value='Rustango') }}</h1>
     <p class="sub">{{ brand_tagline | default(value='Operator console') }}</p>
     {% if error %}<div class="error">{{ error }}</div>{% endif %}
     <label for="username">Username</label>

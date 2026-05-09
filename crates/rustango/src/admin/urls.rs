@@ -60,7 +60,7 @@ pub struct Builder {
 
 #[derive(Clone, Default)]
 pub(crate) struct Config {
-    /// Display name shown in the sidebar header. `None` → "rustango admin".
+    /// Display name shown in the sidebar header. `None` → "Rustango Admin".
     pub(crate) title: Option<String>,
     /// Optional subtitle shown below the title in the sidebar.
     pub(crate) subtitle: Option<String>,
@@ -233,7 +233,7 @@ impl Builder {
     }
 
     /// Set the admin title shown in the sidebar header.
-    /// Defaults to `"rustango admin"` when not set.
+    /// Defaults to `"Rustango Admin"` when not set.
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.config.title = Some(title.into());
         self

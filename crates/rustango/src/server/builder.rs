@@ -105,7 +105,7 @@ impl Builder {
     }
 
     /// Set the display name shown in the tenant admin sidebar header.
-    /// Defaults to `"rustango admin"` when not called.
+    /// Defaults to `"Rustango Admin"` when not called.
     #[must_use]
     pub fn admin_title(mut self, title: impl Into<String>) -> Self {
         self.admin_title = Some(title.into());

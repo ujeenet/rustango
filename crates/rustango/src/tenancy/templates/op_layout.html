@@ -2,7 +2,7 @@
 <html lang="en" data-theme="{{ theme_mode | default(value='auto') }}">
 <head>
   <meta charset="utf-8">
-  <title>{% block title %}{{ brand_name | default(value='rustango operator console') }}{% endblock %}</title>
+  <title>{% block title %}{{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}</title>
   <script>
   // No-flash theme application — see _theme_toggle.html for the cycle UI.
   (function(){try{var t=localStorage.getItem('rustango-theme');if(t==='light'||t==='dark'||t==='auto'){document.documentElement.dataset.theme=t;}}catch(e){}})();
@@ -16,7 +16,7 @@
     <aside class="sidebar">
       <div class="brand">
         {% if brand_logo_url %}<img class="brand-logo" src="{{ brand_logo_url | safe }}" alt="">{% endif %}
-        <span>{{ brand_name | default(value='rustango') }}</span>
+        <span>{{ brand_name | default(value='Rustango') }}</span>
         {% if brand_tagline %}<span class="brand-tagline">{{ brand_tagline }}</span>{% endif %}
       </div>
       <nav>

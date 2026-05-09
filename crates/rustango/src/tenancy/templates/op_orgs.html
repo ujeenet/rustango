@@ -1,5 +1,5 @@
 {% extends "op_layout.html" %}
-{% block title %}Organizations — rustango operator console{% endblock %}
+{% block title %}Organizations — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
 {% block content %}
 <h1>Organizations</h1>
 <p>Tenants the registry knows about. Mutations go through

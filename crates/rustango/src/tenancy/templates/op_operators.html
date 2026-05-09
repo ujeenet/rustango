@@ -1,5 +1,5 @@
 {% extends "op_layout.html" %}
-{% block title %}Operators — rustango operator console{% endblock %}
+{% block title %}Operators — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
 {% block content %}
 <h1>Operators</h1>
 <p>Registry-scoped administrators. Mutations go through

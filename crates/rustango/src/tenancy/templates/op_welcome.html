@@ -1,5 +1,5 @@
 {% extends "op_layout.html" %}
-{% block title %}Welcome — {{ brand_name | default(value='rustango operator console') }}{% endblock %}
+{% block title %}Welcome — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
 {% block content %}
 <style>
   .welcome { max-width: 720px; margin: var(--space-4) auto; text-align: center; }
@@ -9,9 +9,9 @@
   .welcome ul code { font-size: 0.95em; }
 </style>
 <div class="welcome">
-  <img src="{{ brand_logo_url | default(value='/__static__/rustango.png') }}" alt="{{ brand_name | default(value='rustango') }}">
+  <img src="{{ brand_logo_url | default(value='/__static__/rustango.png') }}" alt="{{ brand_name | default(value='Rustango') }}">
   <h1>Welcome, {{ operator_username }}</h1>
-  <p>This is the {{ brand_name | default(value='rustango') }} operator console. From here you manage the registry —
+  <p>This is the {{ brand_name | default(value='Rustango') }} operator console. From here you manage the registry —
   the source of truth for every tenant in your deployment.</p>
   <ul>
     <li>Click <strong>Operators</strong> to browse main-system administrators.</li>
