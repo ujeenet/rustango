@@ -13,16 +13,69 @@
 //! `From<T>` for ergonomics: `let mut u = User { id: Auto::default(), … };`
 //! or `let mut u = User { id: 42_i64.into(), … };`.
 
-use serde::{Deserialize, Serialize};
-
 /// Server-assigned primary key wrapper. See module docs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// JSON shape (REST-friendly, since v0.29): `Auto::Set(v)` serializes
+/// as the bare inner value (`42`); `Auto::Unset` serializes as JSON
+/// `null`. Mirrors how `ForeignKey<T, K>` lowers to its bare PK on
+/// the wire. Deserialize is symmetric — accepts either the bare
+/// value (`42` → `Set(42)`, `null` → `Unset`) OR the legacy
+/// tagged-enum shape (`{"Set": 42}` / `"Unset"`) for callers that
+/// emit it from older serializers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Auto<T> {
     /// "Let the database fill this in." Default state for new rows.
     Unset,
     /// Explicit value — either supplied by the user or returned by the
     /// database after INSERT.
     Set(T),
+}
+
+impl<T: serde::Serialize> serde::Serialize for Auto<T> {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Set(v) => v.serialize(ser),
+            Self::Unset => ser.serialize_none(),
+        }
+    }
+}
+
+impl<'de, T> serde::Deserialize<'de> for Auto<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        // Three accepted shapes (Auto::Unset is normalized from the
+        // first two; the third is the v0.28 tagged-enum kept for
+        // backwards compat with payloads minted before the wire
+        // shape flipped):
+        //   1. Bare value:         42                  -> Set(42)
+        //   2. Bare null:          null                -> Unset
+        //   3. Legacy tag enum:    {"Set": 42} | "Unset"
+        //
+        // We read the input into a `serde_json::Value` first, branch on
+        // the shape, and then deserialize the matching variant. The
+        // `DeserializeOwned` bound on `T` is required because
+        // `serde_json::from_value` allocates owned data; that bound is
+        // never restrictive in practice — `Auto<T>` is used for
+        // server-assigned PKs (i32/i64/Uuid/DateTime) which are all
+        // owned types.
+        use serde::de::Error as _;
+        let value = serde_json::Value::deserialize(de)?;
+        match value {
+            serde_json::Value::Null => Ok(Self::Unset),
+            serde_json::Value::String(ref s) if s == "Unset" => Ok(Self::Unset),
+            serde_json::Value::Object(ref map) if map.len() == 1 && map.contains_key("Set") => {
+                let inner = map.get("Set").cloned().unwrap_or(serde_json::Value::Null);
+                let v: T = serde_json::from_value(inner).map_err(D::Error::custom)?;
+                Ok(Self::Set(v))
+            }
+            other => {
+                let v: T = serde_json::from_value(other).map_err(D::Error::custom)?;
+                Ok(Self::Set(v))
+            }
+        }
+    }
 }
 
 impl<T> Default for Auto<T> {
@@ -239,5 +292,63 @@ mod tests {
         let json = serde_json::to_string(&a).unwrap();
         let back: Auto<i64> = serde_json::from_str(&json).unwrap();
         assert_eq!(back, Auto::Unset);
+    }
+
+    /// The wire shape since v0.29: bare value, no enum tag.
+    #[test]
+    fn serialize_set_emits_bare_value() {
+        assert_eq!(serde_json::to_string(&Auto::Set(42_i64)).unwrap(), "42");
+        assert_eq!(
+            serde_json::to_string(&Auto::Set("hello".to_owned())).unwrap(),
+            "\"hello\""
+        );
+    }
+
+    #[test]
+    fn serialize_unset_emits_null() {
+        assert_eq!(serde_json::to_string(&Auto::<i64>::Unset).unwrap(), "null");
+    }
+
+    /// Bare values + null deserialize directly.
+    #[test]
+    fn deserialize_accepts_bare_shape() {
+        assert_eq!(
+            serde_json::from_str::<Auto<i64>>("42").unwrap(),
+            Auto::Set(42)
+        );
+        assert_eq!(
+            serde_json::from_str::<Auto<i64>>("null").unwrap(),
+            Auto::Unset
+        );
+    }
+
+    /// Backwards compat: the v0.28 tagged-enum shape still parses.
+    #[test]
+    fn deserialize_accepts_legacy_tagged_enum() {
+        assert_eq!(
+            serde_json::from_str::<Auto<i64>>("\"Unset\"").unwrap(),
+            Auto::Unset
+        );
+        assert_eq!(
+            serde_json::from_str::<Auto<i64>>(r#"{"Set": 42}"#).unwrap(),
+            Auto::Set(42)
+        );
+    }
+
+    #[test]
+    fn within_a_struct_round_trip_is_clean() {
+        #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+        struct Row {
+            id: Auto<i64>,
+            name: String,
+        }
+        let row = Row {
+            id: Auto::Set(7),
+            name: "x".to_owned(),
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        assert_eq!(json, r#"{"id":7,"name":"x"}"#);
+        let back: Row = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, row);
     }
 }
