@@ -444,12 +444,29 @@ where
 /// # Errors
 /// Returns [`ExecError`] for SQL-writing or driver failures.
 pub async fn select_rows(pool: &PgPool, query: &SelectQuery) -> Result<Vec<PgRow>, ExecError> {
+    select_rows_on(pool, query).await
+}
+
+/// Like [`select_rows`] but accepts any sqlx executor — `&PgPool`,
+/// `&mut PgConnection`, or a `Transaction`. Required for tenancy
+/// projects whose per-request connection comes from
+/// [`crate::extractors::Tenant`] rather than a single global pool.
+///
+/// # Errors
+/// As [`select_rows`].
+pub async fn select_rows_on<'c, E>(
+    executor: E,
+    query: &SelectQuery,
+) -> Result<Vec<PgRow>, ExecError>
+where
+    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+{
     let stmt = Postgres.compile_select(query)?;
     let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
     for value in stmt.params {
         q = bind_query(q, value);
     }
-    Ok(q.fetch_all(pool).await?)
+    Ok(q.fetch_all(executor).await?)
 }
 
 /// Run a `SelectQuery` and return at most one raw `PgRow`. Used by detail
@@ -461,12 +478,26 @@ pub async fn select_one_row(
     pool: &PgPool,
     query: &SelectQuery,
 ) -> Result<Option<PgRow>, ExecError> {
+    select_one_row_on(pool, query).await
+}
+
+/// Like [`select_one_row`] but accepts any sqlx executor.
+///
+/// # Errors
+/// As [`select_one_row`].
+pub async fn select_one_row_on<'c, E>(
+    executor: E,
+    query: &SelectQuery,
+) -> Result<Option<PgRow>, ExecError>
+where
+    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+{
     let stmt = Postgres.compile_select(query)?;
     let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
     for value in stmt.params {
         q = bind_query(q, value);
     }
-    Ok(q.fetch_optional(pool).await?)
+    Ok(q.fetch_optional(executor).await?)
 }
 
 /// Run a `CountQuery` and return the row count.

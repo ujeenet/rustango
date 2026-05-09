@@ -79,6 +79,8 @@
 
 #[cfg(feature = "openapi")]
 mod openapi;
+#[cfg(feature = "tenancy")]
+mod tenant;
 
 use std::collections::HashMap;
 use std::sync::Arc;

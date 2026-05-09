@@ -37,11 +37,11 @@ pub use executor::{
     fetch_aggregate_pool, fetch_paginated_pool, fetch_with_prefetch, fetch_with_prefetch_pool,
     insert, insert_on, insert_pool, insert_returning, insert_returning_on, insert_returning_pool,
     raw_execute, raw_execute_on, raw_execute_pool, raw_query, raw_query_on, raw_query_pool,
-    select_one_row, select_one_row_pool, select_rows, select_rows_pool,
-    select_rows_pool_with_related, transaction, transaction_pool, update, update_on, update_pool,
-    Counter, CounterPool, Deleter, ExplainFormat, ExplainOptions, Fetcher, FetcherPool, FkPkAccess,
-    HasPkValue, InsertReturningPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated, Page, PoolTx,
-    Updater,
+    select_one_row, select_one_row_on, select_one_row_pool, select_rows, select_rows_on,
+    select_rows_pool, select_rows_pool_with_related, transaction, transaction_pool, update,
+    update_on, update_pool, Counter, CounterPool, Deleter, ExplainFormat, ExplainOptions, Fetcher,
+    FetcherPool, FkPkAccess, HasPkValue, InsertReturningPool, LoadRelated, MaybeMyFromRow,
+    MaybeMyLoadRelated, Page, PoolTx, Updater,
 };
 
 #[cfg(feature = "mysql")]
