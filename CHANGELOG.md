@@ -2,6 +2,94 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.11] — settings-driven logging + `Cli::with_logging` (roadmap #8)
+
+The framework already shipped a solid `logging::Setup` builder
+(JSON, file rotation, env-filter) and an `access_log` middleware
+with TIMEIT-style request timing. The gap roadmap #8 called out:
+no settings-driven config, no `Cli` shortcut. Both closed.
+
+### Added
+
+- **`config::LoggingSettings`** — new `[logging]` TOML section.
+  Every field is `Option`-typed so missing keys fall through to
+  `Setup::new()` defaults. Knobs:
+  - `level` — `RUST_LOG`-style env filter (e.g.
+    `"info,sqlx=warn"`)
+  - `format` — `"pretty"` (default), `"json"`, `"compact"`
+  - `with_thread_ids`, `with_line_numbers`, `without_targets`
+  - `file_dir`, `file_prefix`, `file_rotation`
+    (`"daily"`/`"hourly"`/`"minutely"`/`"never"`), `file_only`
+  - Unknown enum values fall back with a `tracing::warn!` (not
+    a hard fail) so a TOML typo doesn't block boot.
+- **`logging::Setup::from_settings(&LoggingSettings)`** — pure
+  mapping from the config struct to the existing builder. Same
+  shape as `SecurityHeadersLayer::from_settings`,
+  `BodyLimitLayer::from_settings`, etc. so the whole framework
+  has consistent settings → component wiring.
+- **`Cli::with_logging()`** — opt-in builder method that
+  installs `tracing-subscriber` from the loaded
+  `Settings.logging` section at `run()` time. The returned
+  `WorkerGuard` (when a file sink is configured) is stashed in
+  `run()` so it outlives every runserver / management-verb path
+  uniformly. Default off — projects that already call
+  `rustango::logging::setup()` themselves don't get a duplicate
+  init.
+
+### Behavior
+
+- Install ordering: logging happens at the outermost dispatch
+  point (`Cli::run()`), BEFORE either runserver path or the
+  management-verb dispatcher. So `manage migrate`, `manage
+  startapp`, etc. all see the configured subscriber too.
+- Call ordering on the builder is irrelevant: `with_logging()`
+  before `with_settings_from_env()` works the same as the
+  reverse, because the install reads the final
+  `Settings.logging` snapshot at run time, not call time.
+
+### Tests
+
+- 1319 → 1324 lib tests (+5):
+  - `from_settings_empty_matches_new_defaults` (no surprises
+    when the `[logging]` section is empty)
+  - `from_settings_populated_fields_drive_builder` (every
+    populated field maps to the right builder call)
+  - `from_settings_file_sink_resolves_rotation` (every
+    rotation variant + unknown-falls-back-to-daily)
+  - `from_settings_file_only_requires_file_dir` (no-op when
+    the sink isn't configured)
+  - `with_logging_flips_install_flag` (Cli builder check)
+
+### Recommended config
+
+```toml
+# config/dev_settings.toml
+[logging]
+level = "info,sqlx=warn"
+format = "pretty"
+with_line_numbers = true
+
+# config/prod_settings.toml
+[logging]
+level = "info"
+format = "json"
+file_dir = "/var/log/myapp"
+file_prefix = "app"
+file_rotation = "daily"
+```
+
+Then in `src/main.rs`:
+
+```rust,ignore
+rustango::manage::Cli::new()
+    .with_settings_from_env()
+    .with_logging()
+    .api(urls::api())
+    .run().await
+```
+
+---
+
 ## [0.30.10] — welcome screen polish (roadmap #3)
 
 The v0.29.12 `Cli::with_welcome()` shipped a functional but plain

@@ -92,6 +92,15 @@ pub struct Cli {
     /// table silently rewritten by the framework. Set via
     /// [`Cli::with_welcome`].
     welcome_page: bool,
+    /// When `true`, install `tracing-subscriber` from the loaded
+    /// `Settings.logging` section before serving (roadmap #8,
+    /// v0.30.11). Default off so existing projects that call
+    /// `rustango::logging::setup()` themselves don't get a double
+    /// init. The returned `WorkerGuard` (when a file sink is
+    /// configured) is stashed on `Cli` for the lifetime of the
+    /// runserver future.
+    #[cfg(all(feature = "config", feature = "runtime"))]
+    install_logging: bool,
 }
 
 impl Cli {
@@ -117,6 +126,8 @@ impl Cli {
             #[cfg(feature = "csrf")]
             csrf: None,
             welcome_page: false,
+            #[cfg(all(feature = "config", feature = "runtime"))]
+            install_logging: false,
         }
     }
 
@@ -298,6 +309,39 @@ impl Cli {
         self
     }
 
+    /// Install `tracing-subscriber` from the loaded
+    /// [`crate::config::Settings::logging`] section at runserver
+    /// time. Equivalent to calling
+    /// [`crate::logging::Setup::from_settings`] yourself + holding
+    /// onto the returned `WorkerGuard` for the process lifetime —
+    /// just removes the boilerplate. Roadmap #8, v0.30.11.
+    ///
+    /// ```ignore
+    /// rustango::manage::Cli::new()
+    ///     .with_settings_from_env()
+    ///     .with_logging()                  // installs from Settings.logging
+    ///     .api(urls::api())
+    ///     .run().await
+    /// ```
+    ///
+    /// Default off so projects that call `rustango::logging::setup()`
+    /// themselves don't get a duplicate init. `tracing-subscriber`'s
+    /// `try_init` would silently no-op on the second call anyway,
+    /// but the explicit opt-in keeps the surface predictable.
+    ///
+    /// Call ordering: works regardless of where in the chain it
+    /// sits — the install happens at `run()` time, not when
+    /// `with_logging` is called. So
+    /// `Cli::new().with_logging().with_settings_from_env()` and
+    /// `Cli::new().with_settings_from_env().with_logging()` both
+    /// install based on the final `Settings.logging` snapshot.
+    #[cfg(all(feature = "config", feature = "runtime"))]
+    #[must_use]
+    pub fn with_logging(mut self) -> Self {
+        self.install_logging = true;
+        self
+    }
+
     /// Apply values from a loaded `Settings` struct (#87 wiring,
     /// v0.29). Honors:
     ///
@@ -426,6 +470,23 @@ impl Cli {
     /// # Errors
     /// Surfaces whatever the underlying dispatcher / server returns.
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+        // v0.30.11 — install logging here (the outermost dispatch
+        // point) so the WorkerGuard outlives BOTH the runserver
+        // future AND the management-verb dispatch path. Installing
+        // inside `runserver` would let the guard drop early when
+        // `runserver_tenancy` consumes `self`. Holding it here
+        // until `run()` returns covers every verb cleanly.
+        #[cfg(all(feature = "config", feature = "runtime"))]
+        let _logging_guard = if self.install_logging {
+            let s = self
+                .settings_for_layers
+                .as_ref()
+                .map(|s| s.logging.clone())
+                .unwrap_or_default();
+            crate::logging::Setup::from_settings(&s).install()
+        } else {
+            None
+        };
         let args: Vec<String> = std::env::args().skip(1).collect();
         let verb = args.first().map_or("", String::as_str);
 
@@ -495,6 +556,9 @@ impl Cli {
     }
 
     async fn runserver(self) -> Result<(), Box<dyn std::error::Error>> {
+        // Logging install lives in `run()` (the outermost dispatch
+        // point) so the WorkerGuard outlives every runserver +
+        // management-verb path uniformly.
         #[cfg(feature = "tenancy")]
         if self.tenancy {
             return self.runserver_tenancy().await;
@@ -923,6 +987,18 @@ mod tests {
         assert!(!cli_default.welcome_page, "default off");
         let cli_with = Cli::new().with_welcome();
         assert!(cli_with.welcome_page);
+    }
+
+    /// `Cli::with_logging()` flips the install flag — the actual
+    /// install only happens at `run()` time so this is a pure
+    /// builder check.
+    #[cfg(all(feature = "config", feature = "runtime"))]
+    #[test]
+    fn with_logging_flips_install_flag() {
+        let cli_default = Cli::new();
+        assert!(!cli_default.install_logging, "default off");
+        let cli_with = Cli::new().with_logging();
+        assert!(cli_with.install_logging);
     }
 
     /// `Cli::with_csrf()` flips the flag from `None` to `Some(default)`.

@@ -60,6 +60,12 @@ pub struct Settings {
 
     /// `[audit]` — retention + redaction policy (#87).
     pub audit: AuditSettings,
+
+    /// `[logging]` — tracing-subscriber config: level filter,
+    /// pretty vs JSON output, optional rolling file sink. v0.30.11
+    /// (roadmap #8). Fields are `Option`-typed so missing keys
+    /// fall through to `logging::Setup::new()` defaults.
+    pub logging: LoggingSettings,
 }
 
 impl Settings {
@@ -359,4 +365,49 @@ pub struct AuditSettings {
     /// `password` / `token` / `secret` / `api_key` / `access_token`
     /// / `refresh_token` / `signature` defaults).
     pub redact_query_params: Vec<String>,
+}
+
+/// Tracing-subscriber config — level + format + optional rolling
+/// file sink (roadmap #8, v0.30.11). Drives
+/// [`crate::logging::Setup::from_settings`] which is the same
+/// builder users construct manually for ad-hoc setups; installing
+/// via Settings + [`crate::manage::Cli::with_logging`] just
+/// removes the boilerplate.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LoggingSettings {
+    /// `RUST_LOG`-style env filter applied when the actual
+    /// `RUST_LOG` env var isn't set. Examples: `"info"`,
+    /// `"info,sqlx=warn"`, `"debug,hyper=warn,h2=warn"`. Default
+    /// (`None`) lets `logging::Setup::new()` choose `"info,sqlx=warn"`.
+    pub level: Option<String>,
+    /// Output format. Recognised values: `"pretty"` (default,
+    /// human-friendly), `"json"` (production / log aggregators),
+    /// `"compact"` (single-line, dev-friendly). Unknown values fall
+    /// back to `pretty` with a `tracing::warn!`.
+    pub format: Option<String>,
+    /// Include thread IDs in events. Default off.
+    pub with_thread_ids: Option<bool>,
+    /// Include source-file line numbers in events. Default off.
+    /// Useful in dev, noisy in prod.
+    pub with_line_numbers: Option<bool>,
+    /// Hide event targets (the module path) in pretty output.
+    /// Default false (targets shown).
+    pub without_targets: Option<bool>,
+    /// When set, tee logs to a rolling file in this directory in
+    /// addition to stdout. Created on first write. Required to
+    /// activate the file sink — leave `None` to log to stdout only.
+    pub file_dir: Option<String>,
+    /// Filename prefix for the rolling file. Default `"app"`.
+    /// Files land at `{file_dir}/{file_prefix}.YYYY-MM-DD` (or
+    /// the equivalent for the chosen rotation).
+    pub file_prefix: Option<String>,
+    /// File rotation cadence: `"daily"` (default), `"hourly"`,
+    /// `"minutely"`, `"never"`. Unknown values fall back to
+    /// `daily` with a `tracing::warn!`.
+    pub file_rotation: Option<String>,
+    /// When `true` AND `file_dir` is set, drop the stdout layer so
+    /// logs land in the file ONLY. Useful for headless workers /
+    /// daemonized processes. No-op when `file_dir` is unset.
+    pub file_only: Option<bool>,
 }

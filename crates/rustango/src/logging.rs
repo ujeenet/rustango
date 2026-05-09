@@ -198,6 +198,70 @@ impl Setup {
         self
     }
 
+    /// Build a `Setup` from a [`crate::config::LoggingSettings`]
+    /// section, mapping every TOML field to the matching builder
+    /// method. Unknown enum-shaped values (`format`, `file_rotation`)
+    /// fall back to the default + a `tracing::warn!` so a typo in
+    /// the TOML doesn't fail boot. Roadmap #8, v0.30.11.
+    ///
+    /// ```ignore
+    /// let settings = rustango::config::Settings::load_from_env()?;
+    /// let _guard = rustango::logging::Setup::from_settings(&settings.logging).install();
+    /// ```
+    ///
+    /// Or via the one-liner [`crate::manage::Cli::with_logging`].
+    #[cfg(feature = "config")]
+    #[must_use]
+    pub fn from_settings(s: &crate::config::LoggingSettings) -> Self {
+        let mut setup = Self::new();
+        if let Some(filter) = s.level.as_deref() {
+            setup = setup.with_default_env_filter(filter);
+        }
+        match s.format.as_deref() {
+            Some("json") => setup = setup.json(),
+            Some("pretty") | None => {} // default
+            Some("compact") => {}       // currently same as pretty; reserved
+            Some(other) => {
+                tracing::warn!(
+                    target: "rustango::logging",
+                    format = other,
+                    "unknown logging format; falling back to pretty"
+                );
+            }
+        }
+        if matches!(s.with_thread_ids, Some(true)) {
+            setup = setup.with_thread_ids();
+        }
+        if matches!(s.with_line_numbers, Some(true)) {
+            setup = setup.with_line_numbers();
+        }
+        if matches!(s.without_targets, Some(true)) {
+            setup = setup.without_targets();
+        }
+        if let Some(dir) = s.file_dir.as_deref() {
+            let prefix = s.file_prefix.as_deref().unwrap_or("app");
+            let rotation = match s.file_rotation.as_deref() {
+                Some("hourly") => Rotation::Hourly,
+                Some("minutely") => Rotation::Minutely,
+                Some("never") => Rotation::Never,
+                Some("daily") | None => Rotation::Daily,
+                Some(other) => {
+                    tracing::warn!(
+                        target: "rustango::logging",
+                        rotation = other,
+                        "unknown logging rotation; falling back to daily"
+                    );
+                    Rotation::Daily
+                }
+            };
+            setup = setup.with_file(dir, prefix, rotation);
+            if matches!(s.file_only, Some(true)) {
+                setup = setup.file_only();
+            }
+        }
+        setup
+    }
+
     /// Apply the config. Uses `try_init` under the hood — duplicate calls
     /// are silently ignored. When [`Self::with_file`] is configured,
     /// returns the `tracing_appender::WorkerGuard` that flushes
@@ -400,6 +464,108 @@ mod tests {
         let s = Setup::new()
             .with_file("/tmp/_logging_test", "app", Rotation::Hourly)
             .file_only();
+        assert!(!s.keep_stdout);
+    }
+
+    // ---- from_settings (roadmap #8, v0.30.11) ----
+
+    /// Empty `LoggingSettings` (every field `None`) builds a Setup
+    /// matching `Setup::new()` — the safer default that doesn't
+    /// surprise existing projects when they add an empty
+    /// `[logging]` section.
+    #[cfg(all(feature = "runtime", feature = "config"))]
+    #[test]
+    fn from_settings_empty_matches_new_defaults() {
+        let s = Setup::from_settings(&crate::config::LoggingSettings::default());
+        assert!(!s.json);
+        assert_eq!(s.default_filter, DEFAULT_FILTER);
+        assert!(!s.with_thread_ids);
+        assert!(!s.with_line_numbers);
+        assert!(s.with_targets);
+        assert!(s.file_sink.is_none());
+        assert!(s.keep_stdout);
+    }
+
+    /// Every populated field maps to the corresponding builder
+    /// method. `format = "json"` flips to JSON output;
+    /// `with_thread_ids` / `with_line_numbers` flip the format
+    /// flags; `without_targets` hides target paths.
+    #[cfg(all(feature = "runtime", feature = "config"))]
+    #[test]
+    fn from_settings_populated_fields_drive_builder() {
+        let cfg = crate::config::LoggingSettings {
+            level: Some("debug,sqlx=info".into()),
+            format: Some("json".into()),
+            with_thread_ids: Some(true),
+            with_line_numbers: Some(true),
+            without_targets: Some(true),
+            file_dir: None,
+            file_prefix: None,
+            file_rotation: None,
+            file_only: None,
+        };
+        let s = Setup::from_settings(&cfg);
+        assert!(s.json);
+        assert_eq!(s.default_filter, "debug,sqlx=info");
+        assert!(s.with_thread_ids);
+        assert!(s.with_line_numbers);
+        assert!(!s.with_targets);
+    }
+
+    /// `file_dir` set + every rotation variant maps to the right
+    /// `Rotation`. Unknown values fall back to `Daily` (with a
+    /// `tracing::warn!` we don't easily intercept here, but the
+    /// effective behavior is right).
+    #[cfg(all(feature = "runtime", feature = "config"))]
+    #[test]
+    fn from_settings_file_sink_resolves_rotation() {
+        let mk = |rot: Option<&str>| {
+            let mut cfg = crate::config::LoggingSettings::default();
+            cfg.file_dir = Some("/tmp/_logging_settings_test".into());
+            cfg.file_prefix = Some("app".into());
+            cfg.file_rotation = rot.map(str::to_owned);
+            Setup::from_settings(&cfg)
+        };
+        for (input, want) in [
+            (Some("daily"), Rotation::Daily),
+            (Some("hourly"), Rotation::Hourly),
+            (Some("minutely"), Rotation::Minutely),
+            (Some("never"), Rotation::Never),
+            (None, Rotation::Daily),             // missing → daily
+            (Some("nonsense"), Rotation::Daily), // unknown → daily fallback
+        ] {
+            let s = mk(input);
+            let sink = s
+                .file_sink
+                .as_ref()
+                .expect("file sink set when file_dir is");
+            assert!(
+                std::mem::discriminant(&sink.rotation) == std::mem::discriminant(&want),
+                "rotation `{input:?}` resolved wrong"
+            );
+        }
+    }
+
+    /// `file_only = true` only drops stdout when `file_dir` is also
+    /// set — `file_only` without a sink is a no-op (the boolean is
+    /// ignored, no panic).
+    #[cfg(all(feature = "runtime", feature = "config"))]
+    #[test]
+    fn from_settings_file_only_requires_file_dir() {
+        // file_only=true but no file_dir → no sink, stdout kept
+        // (file_only is a no-op without a sink to opt out of).
+        let mut cfg = crate::config::LoggingSettings::default();
+        cfg.file_only = Some(true);
+        let s = Setup::from_settings(&cfg);
+        assert!(s.file_sink.is_none());
+        assert!(s.keep_stdout, "no sink → stdout stays");
+
+        // file_dir set + file_only=true → sink set, stdout dropped.
+        let mut cfg = crate::config::LoggingSettings::default();
+        cfg.file_dir = Some("/tmp/_logging_settings_test".into());
+        cfg.file_only = Some(true);
+        let s = Setup::from_settings(&cfg);
+        assert!(s.file_sink.is_some());
         assert!(!s.keep_stdout);
     }
 }
