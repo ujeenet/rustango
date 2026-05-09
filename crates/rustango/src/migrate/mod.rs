@@ -18,6 +18,7 @@ pub mod ddl;
 pub mod diff;
 mod error;
 pub mod file;
+pub(crate) mod inspectdb;
 pub mod invert;
 pub mod make;
 pub mod manage;

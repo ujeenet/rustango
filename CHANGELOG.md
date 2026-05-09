@@ -2,6 +2,89 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.13] — `manage inspectdb` (roadmap #1)
+
+Mirrors Django's `inspectdb`: point at an existing Postgres
+database, get a copy-paste-ready `#[derive(Model)]` source file
+emitted to stdout. Adopts rustango against an existing schema
+without rewriting it. Was the highest-impact remaining roadmap
+item; v1 covers ~95% of the everyday types and constraints.
+
+### Added
+
+- **`manage inspectdb [--schema <name>] [--table <name>]`** —
+  new verb that connects to `DATABASE_URL`, walks
+  `information_schema`, and emits a Rust source file with one
+  `#[derive(Model)]` block per base table. Default schema is
+  `public`; `--table` filters to a single table. Pipe to a file
+  the user reviews + edits.
+- **Type mapping** — covers the common Postgres types:
+  `int2/int4/int8` → `i16/i32/i64`, `float4/float8` → `f32/f64`,
+  `varchar/bpchar/text/citext` → `String`, `bool` → `bool`,
+  `uuid` → `uuid::Uuid`, `jsonb/json` → `serde_json::Value`,
+  `timestamptz` → `chrono::DateTime<chrono::Utc>`, `date` →
+  `chrono::NaiveDate`, `numeric` → `rust_decimal::Decimal`
+  (with a TODO comment about the dep), `bytea` → `Vec<u8>`
+  (with a TODO note). Unknown types fall back to `String`
+  with a TODO comment so the user notices.
+- **Constraint detection**:
+  - `PRIMARY KEY` → `#[rustango(primary_key)]`
+  - `SERIAL` / `IDENTITY` columns → `Auto<T>` PK wrapper
+  - `NOT NULL` → required field; nullable → `Option<T>`
+  - `varchar(N)` → `#[rustango(max_length = N)]`
+  - FK references → `#[rustango(fk = "<target_table>")]`
+  - DEFAULT values echoed (typecast suffix stripped, e.g.
+    `"'pending'::character varying"` → `"'pending'"`)
+  - `nextval(...)` defaults dropped (implied by `Auto<T>`)
+- **Composite primary keys** — only the first PK column gets
+  `primary_key`; others are bare. The struct-level doc comment
+  flags the limitation so the user notices.
+- **Header comment** in the emitted file lists the edits a user
+  may need to make (composite PKs, custom enums → String, CHECK
+  constraints / triggers / generated columns / indexes not
+  reflected — run `manage makemigrations` to capture them after
+  hand-editing).
+
+### Tests
+
+- 1327 → 1341 lib tests (+14 unit covering arg parsing,
+  type mapping, struct-name PascalCase, keyword sanitization,
+  field-emit per-state, FK attribute attachment, composite-PK
+  warning, default typecast stripping, nextval drop).
+- 3 new live integration tests in
+  `tests/inspectdb_live.rs` (`DATABASE_URL`-gated): emits
+  full Author model with right attributes; emits FK + uuid
+  + jsonb correctly; unknown schema returns friendly empty
+  comment without crash.
+
+### Skipped (v1)
+
+- Views, materialized views, foreign tables — base tables only.
+- Custom enum types map to `String` with a TODO comment.
+- CHECK constraints — no rustango-side equivalent yet.
+- Triggers, sequences (other than as default-detect signal),
+  generated columns.
+- Index definitions — recommend `manage makemigrations` after
+  hand-editing to reflect them.
+
+### Usage
+
+```sh
+# Print every public-schema table
+cargo run -- inspectdb
+
+# Single table
+cargo run -- inspectdb --table users
+
+# Different schema
+cargo run -- inspectdb --schema reporting
+
+# Pipe to a reviewable file
+cargo run -- inspectdb > src/legacy/models.rs
+```
+
+---
+
 ## [0.30.12] — security audit follow-up (roadmap #5)
 
 Self-audit of the framework's security posture surfaced 3 fixes

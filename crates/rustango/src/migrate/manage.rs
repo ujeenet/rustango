@@ -112,6 +112,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "db:dump" => db_dump_cmd(&args[1..], writer),
         "db:restore" => db_restore_cmd(&args[1..], writer),
         "db:info" => db_info_cmd(writer),
+        "inspectdb" => super::inspectdb::inspectdb_cmd(pool, &args[1..], writer).await,
         other => Err(MigrateError::Validation(format!(
             "unknown subcommand: `{other}` (run with --help for usage)"
         ))),
@@ -327,6 +328,24 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         "      backend, and which `postgres`/`mysql` Cargo features are"
     )?;
     writeln!(w, "      compiled in. Read-only — does not connect.\n")?;
+    writeln!(w, "  inspectdb [--schema <name>] [--table <name>]")?;
+    writeln!(
+        w,
+        "      Connect to DATABASE_URL and emit `#[derive(Model)]`"
+    )?;
+    writeln!(
+        w,
+        "      source for every base table in `--schema` (default `public`)."
+    )?;
+    writeln!(
+        w,
+        "      Pipe to a file the user reviews + edits. Mirrors Django's"
+    )?;
+    writeln!(
+        w,
+        "      `inspectdb` shape — adopts rustango against an existing DB"
+    )?;
+    writeln!(w, "      without rewriting it.\n")?;
     writeln!(w, "  startapp <name> [--with-manage-bin]")?;
     writeln!(
         w,
