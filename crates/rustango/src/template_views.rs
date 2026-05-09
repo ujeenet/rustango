@@ -8,9 +8,9 @@
 //! |------|--------------|------------------|
 //! | [`ListView`] | Paginated list — `?page=N` query param | `<table>_list.html` |
 //! | [`DetailView`] | Single row by primary key — `/{pk}` | `<table>_detail.html` |
-//! | [`CreateView`] | (slice 3) GET form / POST insert | `<table>_form.html` |
-//! | [`UpdateView`] | (slice 3) GET form / POST update | `<table>_form.html` |
-//! | [`DeleteView`] | (slice 4) GET confirm / POST delete | `<table>_confirm_delete.html` |
+//! | [`CreateView`] | GET empty form / POST insert / 303 to `success_url` | `<table>_form.html` |
+//! | [`UpdateView`] | GET prefilled form / POST update / 303 | `<table>_form.html` |
+//! | [`DeleteView`] | GET confirm / POST delete / 303 | `<table>_confirm_delete.html` |
 //!
 //! ## Quick start
 //!
@@ -49,13 +49,22 @@
 //! - `has_next: bool`
 //! - `has_prev: bool`
 //!
-//! ## Single-tenant only (today)
+//! ## Pool capture vs per-tenant resolution
 //!
-//! These views take a `PgPool` at mount time, like the original
-//! `ViewSet::router`. Tenancy projects use the per-request
-//! `Tenant` extractor and hand-roll the equivalent for now — a
-//! `tenant_router` variant lands in a follow-up once the auto-
-//! admin's per-tenant pattern stabilises.
+//! Each view ships two router constructors:
+//!
+//! - `.router(prefix, tera, pool)` — single-tenant, captures a
+//!   `PgPool` at mount time. Mirrors the original
+//!   `ViewSet::router`.
+//! - `.tenant_router(prefix, tera)` — multi-tenant, resolves a
+//!   per-request connection via the
+//!   [`crate::extractors::Tenant`] extractor. Mirrors
+//!   `viewset::ViewSet::tenant_router`. Available behind the
+//!   combined `template_views` + `tenancy` features.
+//!
+//! Same builder API across both flavors; pick whichever matches
+//! the project's connection-management strategy. Templates port
+//! between them without edits.
 
 use std::collections::HashMap;
 use std::sync::Arc;
