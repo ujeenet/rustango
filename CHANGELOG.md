@@ -2,6 +2,44 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.29.6] — health endpoints + `{pk}` redirect interpolation
+
+Two ergonomic follow-ups for v0.29 deployments:
+
+### Added
+
+- **`Cli::with_health()`** — auto-mounts `/health` (liveness) and
+  `/ready` (readiness with `SELECT 1`) endpoints on the API
+  router. Default off — operators sometimes ship custom health
+  JSON or layer additional checks (Redis ping, queue depth) and
+  don't want the framework's defaults colliding. Single-tenant
+  runserver only today; tenancy mode skips because the registry
+  pool is built inside `Server::Builder` and isn't accessible to
+  feed `health_router` from the Cli layer (tracked as a follow-up).
+- **`{pk}` placeholder interpolation in `success_url`** for
+  `CreateView` / `UpdateView` / `DeleteView`. Mirrors Django's
+  template-style success_url:
+  - `CreateView::success_url("/posts/{pk}")` redirects to the
+    new row's detail page after insert. PK is read back via
+    `INSERT ... RETURNING <pk_col>` only when the placeholder is
+    present — without it the plain INSERT path stays a single
+    round-trip.
+  - `UpdateView::success_url("/posts/{pk}")` and
+    `DeleteView::success_url("/posts/{pk}")` substitute from the
+    URL path — no extra query needed, since the PK is already in
+    scope.
+  - PK is rendered type-aware: `i16`/`i32`/`i64` → decimal digits,
+    `Uuid` → canonical hex, anything else → text decode.
+
+### Tests
+
+- 1268 → 1273 lib tests (+5): `Cli::with_health` flag flips,
+  `substitute_pk` replaces / no-op / multi-occurrence cases, plus
+  a no-placeholder fast-path doc test for `interpolate_success_url`
+  (the placeholder branch needs a live PgRow → integration test).
+
+---
+
 ## [0.29.5] — pagination URL preservation + request timeout layer
 
 Two follow-ups that turn up the moment someone deploys the v0.29

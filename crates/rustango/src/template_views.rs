@@ -593,7 +593,15 @@ async fn handle_delete_submit(
     };
     match crate::sql::delete(&state.pool, &delete_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
-        Ok(_) => axum::response::Redirect::to(&state.vs.success_url).into_response(),
+        Ok(_) => {
+            // Note: typically `{pk}` in a delete success_url
+            // doesn't make sense — the row is gone. We support it
+            // anyway for symmetry with Create/Update; users with
+            // soft-delete models might want to redirect to the
+            // tombstone page.
+            let target = substitute_pk(&state.vs.success_url, &pk);
+            axum::response::Redirect::to(&target).into_response()
+        }
         Err(e) => template_error(&format!("delete row: {e}")),
     }
 }
@@ -875,6 +883,21 @@ fn field_type_label(ty: crate::core::FieldType) -> &'static str {
         T::Uuid => "uuid",
         T::Json => "json",
     }
+}
+
+/// Substitute the `{pk}` placeholder in a `success_url` with a
+/// known PK string. Used by `UpdateView` / `DeleteView` where the
+/// PK is already in scope from the URL path — no row read
+/// required. The CreateView equivalent is
+/// [`interpolate_success_url`], which reads the PK from a
+/// `RETURNING` row.
+///
+/// No-op when the placeholder isn't present.
+fn substitute_pk(template: &str, pk: &str) -> String {
+    if !template.contains("{pk}") {
+        return template.to_owned();
+    }
+    template.replace("{pk}", pk)
 }
 
 /// Substitute the `{pk}` placeholder in a `success_url` with the
@@ -1160,7 +1183,10 @@ async fn handle_update_post(
     };
     match crate::sql::update(&state.pool, &update_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
-        Ok(_) => axum::response::Redirect::to(&state.success_url).into_response(),
+        Ok(_) => {
+            let target = substitute_pk(&state.success_url, &pk);
+            axum::response::Redirect::to(&target).into_response()
+        }
         Err(e) => template_error(&format!("update row: {e}")),
     }
 }
@@ -1910,7 +1936,10 @@ mod tenant {
         };
         match crate::sql::delete_on(&mut *t.conn(), &delete_q).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
-            Ok(_) => axum::response::Redirect::to(&state.vs.success_url).into_response(),
+            Ok(_) => {
+                let target = super::substitute_pk(&state.vs.success_url, &pk);
+                axum::response::Redirect::to(&target).into_response()
+            }
             Err(e) => template_error(&format!("delete row: {e}")),
         }
     }
@@ -2082,7 +2111,10 @@ mod tenant {
         };
         match crate::sql::update_on(&mut *t.conn(), &update_q).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
-            Ok(_) => axum::response::Redirect::to(&state.success_url).into_response(),
+            Ok(_) => {
+                let target = super::substitute_pk(&state.success_url, &pk);
+                axum::response::Redirect::to(&target).into_response()
+            }
             Err(e) => template_error(&format!("update row: {e}")),
         }
     }
@@ -2691,6 +2723,31 @@ mod tests {
         values.insert("title".to_owned(), "Hello".to_owned());
         let ff = form_fields(s, None, &values);
         assert_eq!(ff[0].value, "Hello");
+    }
+
+    /// `substitute_pk` is the simpler sibling of
+    /// `interpolate_success_url` — used by Update/DeleteView where
+    /// the PK is already in scope from the URL.
+    #[test]
+    fn substitute_pk_replaces_placeholder() {
+        assert_eq!(substitute_pk("/posts/{pk}", "42"), "/posts/42");
+        assert_eq!(
+            substitute_pk("/posts/{pk}/edit", "abc-123"),
+            "/posts/abc-123/edit"
+        );
+    }
+
+    #[test]
+    fn substitute_pk_noop_when_no_placeholder() {
+        assert_eq!(substitute_pk("/posts", "42"), "/posts");
+        assert_eq!(substitute_pk("", "42"), "");
+    }
+
+    #[test]
+    fn substitute_pk_handles_multiple_occurrences() {
+        // Edge case: multiple {pk}s in a single template all
+        // substitute. Not common but predictable.
+        assert_eq!(substitute_pk("/{pk}/related/{pk}", "7"), "/7/related/7");
     }
 
     /// `interpolate_success_url` is a no-op when no `{pk}`
