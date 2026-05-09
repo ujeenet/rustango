@@ -88,6 +88,16 @@ pub struct RouteConfig {
     /// distinct namespace from per-table admin routes. Default
     /// `/change-password` (since v0.29; was `/__change-password`).
     pub change_password_url: String,
+    /// URL on the tenant admin where the operator console's
+    /// impersonation flow lands the browser to redeem a signed
+    /// handoff token (#88). Solves the Chromium-localhost
+    /// public-suffix-list cookie problem: the operator console
+    /// can't set a `Domain=.localhost` cookie that subdomains
+    /// receive, so it instead 302s to this URL with a `?token=`
+    /// query parameter, and the tenant admin sets a host-scoped
+    /// cookie (no `Domain=`) which Chromium accepts. Default
+    /// `/_impersonation_handoff` (since v0.29).
+    pub impersonation_handoff_url: String,
     /// HTTP Basic auth realm. Used by the legacy
     /// `protect_with_basic_auth` admin gate (pre-tenancy
     /// projects); displayed by the browser's auth dialog.
@@ -120,6 +130,7 @@ impl Default for RouteConfig {
             static_url: "/_static".to_owned(),
             brand_url: "/_brand".to_owned(),
             change_password_url: "/change-password".to_owned(),
+            impersonation_handoff_url: "/_impersonation_handoff".to_owned(),
             basic_auth_realm: "Rustango Admin".to_owned(),
             tenant_session_ttl: Duration::from_secs(7 * 24 * 60 * 60),
             operator_session_ttl: Duration::from_secs(7 * 24 * 60 * 60),
@@ -164,6 +175,11 @@ impl RouteConfig {
             static_url: "/__static__".to_owned(),
             brand_url: "/__brand__".to_owned(),
             change_password_url: "/__change-password".to_owned(),
+            // Note: keep the underscore-prefixed handoff URL even on
+            // the legacy preset — pre-#88 deployments didn't have
+            // this surface at all, so any path is non-breaking; the
+            // single underscore matches the rest of `legacy()` style.
+            impersonation_handoff_url: "/__impersonation_handoff".to_owned(),
             ..Default::default()
         }
     }
@@ -194,6 +210,7 @@ mod tests {
         assert_eq!(r.static_url, "/_static");
         assert_eq!(r.brand_url, "/_brand");
         assert_eq!(r.change_password_url, "/change-password");
+        assert_eq!(r.impersonation_handoff_url, "/_impersonation_handoff");
         assert_eq!(r.basic_auth_realm, "Rustango Admin");
     }
 
@@ -225,6 +242,7 @@ mod tests {
         assert_eq!(r.static_url, "/__static__");
         assert_eq!(r.brand_url, "/__brand__");
         assert_eq!(r.change_password_url, "/__change-password");
+        assert_eq!(r.impersonation_handoff_url, "/__impersonation_handoff");
     }
 
     #[test]

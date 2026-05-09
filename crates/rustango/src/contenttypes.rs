@@ -152,6 +152,149 @@ impl ContentType {
     }
 }
 
+// ============================================================ #89 part B — fetch helpers
+
+/// Look up a single row by ContentType + primary key, returning
+/// it as a JSON object keyed by Rust field names. Sidesteps
+/// Rust's compile-time-typed row decode (which would require
+/// each consumer to know `T: Model` at the call site) by
+/// driving the decode entirely from the runtime
+/// `inventory::ModelEntry` for the ContentType's table.
+///
+/// Used by the admin's audit log (resolves `entity_table` +
+/// `entity_pk` to the displayable target row), the generic-FK
+/// link renderer, and any future "operator clicks a row from a
+/// heterogeneous list" UI.
+///
+/// Returns `Ok(None)` when:
+///   - No model is registered at `ct.table` (e.g. CT row points
+///     at a table the binary no longer compiles in)
+///   - No row exists at the given PK in that table
+///
+/// `pk` accepts any `Into<SqlValue>` so callers can pass
+/// `i64` / `String` / `uuid::Uuid` / etc. — matches the
+/// underlying schema's PK type.
+///
+/// # Errors
+/// Driver / query failures from the SELECT.
+pub async fn fetch_row_as_json(
+    pool: &PgPool,
+    ct: &ContentType,
+    pk: impl Into<SqlValue>,
+) -> Result<Option<serde_json::Value>, ExecError> {
+    use crate::core::{Filter, Op, SelectQuery, WhereExpr};
+
+    // Look up the schema for the CT's table from inventory.
+    // Heterogeneous-by-design: a CT row may refer to a model
+    // that's no longer compiled in (e.g. an old app got
+    // dropped). Return None rather than erroring — the audit
+    // log + generic FK consumers want graceful degradation.
+    let entry = inventory::iter::<ModelEntry>
+        .into_iter()
+        .find(|e| e.schema.table == ct.table.as_str());
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    let pk_field = entry
+        .schema
+        .primary_key()
+        .ok_or(ExecError::MissingPrimaryKey {
+            table: entry.schema.table,
+        })?;
+
+    let select_q = SelectQuery {
+        model: entry.schema,
+        where_clause: WhereExpr::Predicate(Filter {
+            column: pk_field.column,
+            op: Op::Eq,
+            value: pk.into(),
+        }),
+        search: None,
+        joins: vec![],
+        order_by: vec![],
+        limit: Some(1),
+        offset: None,
+    };
+    let row_opt = crate::sql::select_one_row_on(pool, &select_q).await?;
+    let Some(row) = row_opt else {
+        return Ok(None);
+    };
+
+    let fields: Vec<&'static crate::core::FieldSchema> = entry.schema.scalar_fields().collect();
+    Ok(Some(crate::sql::row_to_json(&row, &fields)))
+}
+
+/// Stream every row of a given ContentType through `f`. Useful
+/// for cross-table maintenance (e.g. expire audit rows whose
+/// `entity_pk` no longer points at a live row in the target
+/// table). Loads in batches of `batch_size` rows so memory
+/// stays bounded for large tables.
+///
+/// `batch_size = 0` clamps to 1; very large values are accepted
+/// but Postgres will allocate intermediate buffers proportional
+/// to the page so default to 500-1000 for most use cases.
+///
+/// # Errors
+/// Driver / query failures + any `Err` returned by `f` short-
+/// circuits the iteration.
+pub async fn for_each_row_of_ct<F>(
+    pool: &PgPool,
+    ct: &ContentType,
+    batch_size: u32,
+    mut f: F,
+) -> Result<usize, ExecError>
+where
+    F: FnMut(serde_json::Value) -> Result<(), ExecError>,
+{
+    use crate::core::{OrderClause, SelectQuery, WhereExpr};
+
+    let entry = inventory::iter::<ModelEntry>
+        .into_iter()
+        .find(|e| e.schema.table == ct.table.as_str());
+    let Some(entry) = entry else {
+        return Ok(0);
+    };
+    let pk_field = entry
+        .schema
+        .primary_key()
+        .ok_or(ExecError::MissingPrimaryKey {
+            table: entry.schema.table,
+        })?;
+    let batch = batch_size.max(1) as i64;
+    let fields: Vec<&'static crate::core::FieldSchema> = entry.schema.scalar_fields().collect();
+
+    let mut visited = 0_usize;
+    let mut offset = 0_i64;
+    loop {
+        let select_q = SelectQuery {
+            model: entry.schema,
+            where_clause: WhereExpr::And(vec![]),
+            search: None,
+            joins: vec![],
+            order_by: vec![OrderClause {
+                column: pk_field.column,
+                desc: false,
+            }],
+            limit: Some(batch),
+            offset: Some(offset),
+        };
+        let rows = crate::sql::select_rows_on(pool, &select_q).await?;
+        if rows.is_empty() {
+            break;
+        }
+        for row in &rows {
+            let json = crate::sql::row_to_json(row, &fields);
+            f(json)?;
+            visited += 1;
+        }
+        if (rows.len() as i64) < batch {
+            break;
+        }
+        offset += batch;
+    }
+    Ok(visited)
+}
+
 /// "Generic foreign key" pair — a runtime pointer at any registered
 /// model's row, formed by `(content_type_id, object_pk)`. Sub-slice
 /// F.3 of the v0.15.0 ContentType plan.
@@ -520,7 +663,6 @@ pub async fn ensure_seeded(pool: &PgPool) -> Result<usize, ExecError> {
     // 42P01 on every fresh registry. Mirrors the
     // `audit::ensure_table(registry)` pattern.
     ensure_table(pool).await.map_err(ExecError::Driver)?;
-    let mut inserted = 0_usize;
     let mut inserted = 0_usize;
     for entry in inventory::iter::<ModelEntry> {
         let table = entry.schema.table;

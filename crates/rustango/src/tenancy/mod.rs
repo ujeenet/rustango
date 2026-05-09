@@ -45,6 +45,7 @@ pub mod auth_routes;
 pub mod bootstrap;
 pub mod branding;
 mod error;
+pub mod impersonation_handoff;
 pub mod jwt_lifecycle;
 pub mod manage;
 mod manage_interactive;

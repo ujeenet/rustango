@@ -97,24 +97,14 @@ struct ConsoleState {
     /// admin uses); custom mount points can opt in via the
     /// `_with_impersonation` constructor variants.
     tenant_session_secret: Option<Arc<SessionSecret>>,
-    /// Cookie domain for impersonation cookies. Set when the
-    /// operator console is mounted at the apex and tenant
-    /// admins live on subdomains — e.g. apex `localhost`,
-    /// cookie domain `.localhost` lets a cookie set by the
-    /// operator console reach `osu.localhost`. `None` keeps
-    /// the cookie host-only (rare; only useful when operator
-    /// console + tenant admin share a host). (#78)
-    tenant_cookie_domain: Option<String>,
-    /// URL prefix the tenant admin is mounted under — used to
-    /// build the impersonation-redirect target. Mirrors
-    /// [`super::routes::RouteConfig::admin_url`] so the operator
-    /// console respects whichever path the tenant admin actually
-    /// serves under (`/__admin` for legacy projects, `/admin`
-    /// since the v0.29 friendly default per #85). Default if
-    /// the operator console is constructed via the legacy
-    /// pre-RouteConfig entry points: `/admin` (matches the
-    /// v0.29 framework default).
-    tenant_admin_url: String,
+    /// URL on the tenant admin where the operator console's
+    /// impersonation flow lands the browser to redeem a signed
+    /// handoff token (#88). Mirrors
+    /// [`super::routes::RouteConfig::impersonation_handoff_url`].
+    /// Replaced the v0.27.8 cookie-domain handoff (which broke
+    /// on Chromium against the `localhost` PSL TLD). Default
+    /// `/_impersonation_handoff`.
+    tenant_handoff_url: String,
 }
 
 /// Operator console branding read from env at boot. Static for the
@@ -182,8 +172,7 @@ pub fn router(registry: PgPool, secret: SessionSecret) -> Router {
         secret,
         branding::default_brand_storage(),
         None,
-        None,
-        default_tenant_admin_url(),
+        default_tenant_handoff_url(),
     )
 }
 
@@ -204,19 +193,26 @@ pub fn router_with_pools(
         secret,
         branding::default_brand_storage(),
         None,
-        None,
-        default_tenant_admin_url(),
+        default_tenant_handoff_url(),
     )
 }
 
 /// Like [`router_with_pools`] but also wires the
 /// **operator-as-superuser tenant impersonation** flow (#78).
 /// Pass the same `tenant_session_secret` your `TenantAdminBuilder`
-/// uses so cookies the operator console mints will verify in the
-/// tenant admin. `tenant_cookie_domain` controls the cookie's
-/// `Domain` attribute — set to the apex (e.g. `.localhost` so
-/// `osu.localhost` receives it) when operator console and tenant
-/// admin live on different hostnames.
+/// uses so the handoff token the operator console mints will
+/// verify in the tenant admin.
+///
+/// Since v0.29 (#88), the flow is a URL-token handoff instead of
+/// a cookie-domain handoff: the operator console mints a signed
+/// token, redirects the browser to
+/// `<sub>.<apex><tenant_handoff_url>?token=<...>`, and the tenant
+/// admin redeems the token + sets a host-scoped cookie. This
+/// works on every browser/host combination, including Chromium
+/// against `localhost` (where the older cookie-domain approach
+/// broke because Chromium treats `localhost` as a public-suffix
+/// TLD). The legacy `tenant_cookie_domain` parameter is gone —
+/// no impersonation cookie is set on the operator-console origin.
 ///
 /// `Server::Builder::serve` calls this automatically since v0.27.8.
 /// Custom mount points opt in by replacing `router_with_pools` with
@@ -228,8 +224,7 @@ pub fn router_with_impersonation(
     secret: SessionSecret,
     brand_storage: BoxedStorage,
     tenant_session_secret: SessionSecret,
-    tenant_cookie_domain: Option<String>,
-    tenant_admin_url: String,
+    tenant_handoff_url: String,
 ) -> Router {
     router_inner(
         registry,
@@ -237,8 +232,7 @@ pub fn router_with_impersonation(
         secret,
         brand_storage,
         Some(tenant_session_secret),
-        tenant_cookie_domain,
-        tenant_admin_url,
+        tenant_handoff_url,
     )
 }
 
@@ -267,8 +261,7 @@ pub fn router_with_brand_storage(
         secret,
         brand_storage,
         None,
-        None,
-        default_tenant_admin_url(),
+        default_tenant_handoff_url(),
     )
 }
 
@@ -277,8 +270,8 @@ pub fn router_with_brand_storage(
 /// v0.29 friendly-by-default value from #85 so projects on
 /// current rustango Just Work; legacy projects opt in via
 /// `router_with_impersonation`'s `tenant_admin_url` parameter.
-fn default_tenant_admin_url() -> String {
-    super::routes::RouteConfig::default().admin_url
+fn default_tenant_handoff_url() -> String {
+    super::routes::RouteConfig::default().impersonation_handoff_url
 }
 
 fn router_inner(
@@ -287,8 +280,7 @@ fn router_inner(
     secret: SessionSecret,
     brand_storage: BoxedStorage,
     tenant_session_secret: Option<SessionSecret>,
-    tenant_cookie_domain: Option<String>,
-    tenant_admin_url: String,
+    tenant_handoff_url: String,
 ) -> Router {
     let mut tera = Tera::default();
     tera.add_raw_templates([
@@ -338,8 +330,7 @@ fn router_inner(
         brand_storage,
         op_brand: Arc::new(OpBrand::from_env()),
         tenant_session_secret: tenant_session_secret.map(Arc::new),
-        tenant_cookie_domain,
-        tenant_admin_url,
+        tenant_handoff_url,
     };
 
     // Public routes (login + static asset + brand asset) skip the
@@ -1378,13 +1369,18 @@ fn sanitize_next(next: Option<&str>) -> String {
 // ============================================================== /orgs/{slug}/impersonate
 //
 // v0.27.8 (#78) — "Open admin as superuser →" button on
-// `/orgs/{slug}/edit`. Mints a tenant-bound `TenantSessionPayload`
-// with `imp = Some(operator_id)`, sets it as the tenant cookie on
-// the apex domain (so the subdomain receives it), and 302s to the
-// tenant admin's `/__admin/`. The tenant admin's `validate_session`
-// branches on `payload.imp.is_some()` and treats the request as
-// superuser. Banner + audit-log entries make impersonation visible
-// + traceable.
+// `/orgs/{slug}/edit`. Originally minted a tenant-bound
+// `TenantSessionPayload` cookie on the apex domain and 302'd to
+// the tenant admin. v0.29 (#88) flipped the flow to a URL-token
+// handoff: the operator console mints a short-lived signed
+// `HandoffPayload` and 302s to
+// `<sub>.<apex><handoff_url>?token=<...>`. The tenant admin
+// redeems the token + sets a host-scoped cookie, which Chromium
+// accepts even on the `localhost` PSL TLD where the cookie-domain
+// approach failed.
+//
+// Banner + audit-log entries on both ends still make impersonation
+// visible + traceable.
 
 async fn org_impersonate(
     State(state): State<ConsoleState>,
@@ -1422,14 +1418,13 @@ async fn org_impersonate(
             .into_response();
     }
     let operator_id = op.id.get().copied().unwrap_or(0);
-    let ttl = std::env::var("RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS")
-        .ok()
-        .and_then(|s| s.parse::<i64>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(super::tenant_console::IMPERSONATION_TTL_SECS);
+
+    // Mint the short-lived URL handoff token. Includes a random
+    // single-use `jti` and the slug, both checked at redemption.
+    use super::impersonation_handoff as handoff;
     let payload =
-        super::tenant_console::TenantSessionPayload::impersonation(operator_id, slug.clone(), ttl);
-    let cookie_value = super::tenant_console::encode(&tenant_secret, &payload);
+        handoff::HandoffPayload::new(operator_id, slug.clone(), handoff::HANDOFF_TTL_SECS);
+    let token = handoff::mint(&tenant_secret, &payload);
 
     // Audit-log entry on the operator side. The tenant admin
     // emits a separate entry the first time an impersonation
@@ -1441,11 +1436,11 @@ async fn org_impersonate(
     );
     emit_op_audit(&state.registry, &slug, operator_id, "impersonating", detail).await;
 
-    // Build the redirect URL. We send the operator to the
-    // tenant admin root (RouteConfig::admin_url; default `/admin`
-    // since v0.29 #85, `/__admin` for legacy projects). The
-    // tenant admin's session middleware accepts our impersonation
-    // cookie and renders as superuser.
+    // Build the redirect URL: tenant subdomain + the configured
+    // impersonation handoff path + `?token=...`. The tenant admin
+    // redeems the token, sets the impersonation cookie host-scoped
+    // to its own subdomain, and bounces the browser onward to the
+    // admin index.
     //
     // Scheme: respect `RUSTANGO_TENANT_SCHEME` for explicit
     // overrides; otherwise default to http for local dev.
@@ -1478,35 +1473,26 @@ async fn org_impersonate(
                 .map(|p| format!(":{p}"))
         })
         .unwrap_or_default();
-    // `tenant_admin_url` already starts with a slash and has no
-    // trailing slash; append one so the tenant admin index handler
-    // is hit (e.g. `/admin/` -> matches `Router::route("/")` under
-    // the admin's nested mount).
-    let admin_path = state.tenant_admin_url.trim_end_matches('/');
-    let redirect_to = format!("{scheme}://{host}{port_suffix}{admin_path}/");
+    let handoff_path = state.tenant_handoff_url.trim_end_matches('/');
+    // The token is base64url (`URL_SAFE_NO_PAD`) + a single `.` —
+    // every character is already URL-safe, so no escaping needed.
+    let redirect_to = format!("{scheme}://{host}{port_suffix}{handoff_path}?token={token}");
 
-    // Build the cookie. `Domain=` so subdomains receive it;
-    // `Path=/` so all admin routes pick it up.
-    let mut cookie = Cookie::build((super::tenant_console::COOKIE_NAME, cookie_value))
-        .path("/")
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .max_age(CookieDuration::seconds(ttl))
-        .build();
-    if let Some(domain) = state.tenant_cookie_domain.as_deref() {
-        cookie.set_domain(domain.to_owned());
-    }
     let mut resp = Redirect::to(&redirect_to).into_response();
-    if let Ok(v) = HeaderValue::from_str(&cookie.to_string()) {
-        resp.headers_mut().append(header::SET_COOKIE, v);
-    }
+    // The token in the URL is single-use + short-lived, but
+    // `Referrer-Policy: no-referrer` keeps it from leaking to
+    // any third-party resource the destination page loads.
+    resp.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
     tracing::info!(
         target: "crate::tenancy::operator_console",
         slug = %slug,
         operator_id,
-        ttl_secs = ttl,
+        ttl_secs = handoff::HANDOFF_TTL_SECS,
         redirect_to = %redirect_to,
-        "minted impersonation cookie",
+        "minted impersonation handoff token",
     );
     resp
 }

@@ -414,61 +414,12 @@ impl ViewSetState {
 
 // ------------------------------------------------------------------ Serialization
 
-fn row_to_json(
-    row: &crate::sql::sqlx::postgres::PgRow,
-    fields: &[&'static crate::core::FieldSchema],
-) -> Value {
-    let mut map = serde_json::Map::new();
-    for field in fields {
-        let value = match field.ty {
-            FieldType::I16 => row
-                .try_get::<i16, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
-            FieldType::I32 => row
-                .try_get::<i32, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
-            FieldType::I64 => row
-                .try_get::<i64, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
-            FieldType::F32 => row
-                .try_get::<f32, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
-            FieldType::F64 => row
-                .try_get::<f64, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
-            FieldType::Bool => row
-                .try_get::<bool, _>(field.column)
-                .map(|b| json!(b))
-                .unwrap_or(Value::Null),
-            FieldType::String => row
-                .try_get::<String, _>(field.column)
-                .map(|s| json!(s))
-                .unwrap_or(Value::Null),
-            FieldType::Date => row
-                .try_get::<chrono::NaiveDate, _>(field.column)
-                .map(|d| json!(d.to_string()))
-                .unwrap_or(Value::Null),
-            FieldType::DateTime => row
-                .try_get::<chrono::DateTime<chrono::Utc>, _>(field.column)
-                .map(|dt| json!(dt.to_rfc3339()))
-                .unwrap_or(Value::Null),
-            FieldType::Uuid => row
-                .try_get::<uuid::Uuid, _>(field.column)
-                .map(|u| json!(u.to_string()))
-                .unwrap_or(Value::Null),
-            FieldType::Json => row
-                .try_get::<serde_json::Value, _>(field.column)
-                .unwrap_or(Value::Null),
-        };
-        map.insert(field.name.to_owned(), value);
-    }
-    Value::Object(map)
-}
+/// Re-export of the shared row-to-JSON helper. Lives in
+/// `crate::sql::row_to_json` since v0.29 (#89) so contenttypes
+/// + admin views can use it without reaching across module
+/// boundaries; this is a thin local alias for source-compat
+/// with the v0.28 callsite shape.
+pub(crate) use crate::sql::row_to_json;
 
 fn json_response(body: Value) -> Response {
     Response::builder()

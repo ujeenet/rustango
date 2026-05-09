@@ -403,30 +403,16 @@ impl Builder {
         // new credentials — without eviction the operator could
         // change the URL in the DB and the cached pool would happily
         // keep authenticating with stale creds until process restart.
-        // v0.27.8 (#78) — `router_with_impersonation` instead of
-        // `router_with_pools` so the operator console can mint
-        // tenant impersonation cookies signed with the same
-        // secret the tenant admin uses. Cookie domain pinned to
-        // the apex so subdomains receive it.
-        //
-        // Always emit `Domain=.<apex>` so subdomain cookies work
-        // on real domains (`example.com` → cookie reaches
-        // `acme.example.com`).
-        //
-        // **Local dev caveat**: when `apex = "localhost"`,
-        // Chromium-family browsers (incl. Playwright) treat
-        // `localhost` as a public-suffix-list TLD and refuse
-        // cookies for `Domain=localhost` on subdomains, so the
-        // impersonation cookie won't propagate to
-        // `acme.localhost`. Firefox is more lenient. The proper
-        // fix is a URL-token handoff: the operator console
-        // would redirect to `<sub>.<apex>/_impersonation_handoff?token=…`
-        // and the tenant admin would set a host-scoped cookie
-        // on the subdomain itself. Filed as a backlog item.
-        // For local-dev impersonation today, use a real-DNS
-        // alias (e.g. `localtest.me` resolves to 127.0.0.1 with
-        // a real TLD) so cookies cross subdomain boundaries.
-        let cookie_domain = Some(format!(".{}", self.apex));
+        // v0.27.8 (#78) wired the operator console's
+        // `/orgs/{slug}/impersonate` flow; v0.29 (#88) flipped it
+        // from a cookie-domain handoff to a URL-token handoff so
+        // it works on Chromium against the `localhost` PSL TLD
+        // (where `Domain=.localhost` cookies are silently
+        // rejected on subdomains). The operator console now mints
+        // a signed token, redirects to
+        // `<sub>.<apex><handoff_url>?token=<...>`, and the tenant
+        // admin redeems the token + sets a host-scoped cookie. No
+        // cookie is set on the operator-console origin.
         let brand_storage_for_op = crate::tenancy::branding::default_brand_storage();
         let operator_admin = operator_console::router_with_impersonation(
             self.registry,
@@ -434,13 +420,14 @@ impl Builder {
             operator_secret,
             brand_storage_for_op,
             session_secret_for_tenant.clone(),
-            cookie_domain,
-            // Tenant-admin URL prefix the impersonation flow redirects
-            // to. Threaded from RouteConfig so the operator console
-            // honors the project's actual mount path (default `/admin`
-            // since v0.29; #85). Pre-#85 projects on `/__admin` opt
-            // back via `Cli::routes(RouteConfig::legacy())`.
-            self.routes.admin_url.clone(),
+            // Handoff URL on the tenant admin where the token
+            // gets redeemed (#88). RouteConfig holds the canonical
+            // value; default `/_impersonation_handoff`. After
+            // redemption the tenant admin reads its own
+            // `routes.admin_url` to build the final redirect
+            // target — no need to thread it from the operator
+            // console.
+            self.routes.impersonation_handoff_url.clone(),
         );
 
         let app = Router::new().fallback_service(tower::service_fn({

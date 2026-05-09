@@ -395,6 +395,16 @@ async fn handle_request(
         if path == static_rustango_url {
             return rustango_png_response();
         }
+        // v0.29 (#88) — operator-as-superuser impersonation
+        // handoff. The operator console mints a signed
+        // `HandoffPayload` and 302s the browser here; we redeem
+        // the token, set a host-scoped impersonation cookie, and
+        // 302 onward to the admin index. Single-use enforced via
+        // `JtiBlacklist` so a leaked URL can't be replayed.
+        if path == routes.impersonation_handoff_url && method == axum::http::Method::GET {
+            return redeem_impersonation_handoff(&org, cfg, routes, parts.uri.query())
+                .into_response();
+        }
         if path == routes.login_url {
             return match method {
                 axum::http::Method::GET => {
@@ -838,6 +848,102 @@ fn logout_response(routes: &super::routes::RouteConfig) -> Response {
         HeaderValue::from_str(&clear.to_string()).expect("cookie is ascii"),
     );
     resp
+}
+
+/// v0.29 (#88) — redeem an operator-console-minted impersonation
+/// handoff token. Validates signature + expiry + slug binding +
+/// single-use, then mints the host-scoped impersonation cookie
+/// and 302s onward to the admin index.
+///
+/// All failure modes return a 401 with a generic body — the
+/// operator console emits descriptive logs on the mint side, and
+/// leaking detail here would help an attacker tune a brute-force
+/// against the token format.
+fn redeem_impersonation_handoff(
+    org: &super::Org,
+    cfg: &TenantSessionConfig,
+    routes: &super::routes::RouteConfig,
+    query: Option<&str>,
+) -> Response {
+    use super::impersonation_handoff::{decode, JtiBlacklist};
+
+    let token = match query.and_then(extract_token_param) {
+        Some(t) => t,
+        None => return (StatusCode::UNAUTHORIZED, "missing token").into_response(),
+    };
+    let payload = match decode(&cfg.secret, &org.slug, &token) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::info!(
+                target: "crate::tenancy::admin",
+                slug = %org.slug,
+                error = %e,
+                "handoff token rejected",
+            );
+            return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+        }
+    };
+    if let Err(e) = JtiBlacklist::shared().mark_used(&payload.jti, payload.exp) {
+        tracing::warn!(
+            target: "crate::tenancy::admin",
+            slug = %org.slug,
+            jti = %payload.jti,
+            error = %e,
+            "handoff token jti reuse rejected",
+        );
+        return (StatusCode::UNAUTHORIZED, "token already used").into_response();
+    }
+
+    // Valid token — mint the host-scoped impersonation cookie.
+    // No `Domain=` so Chromium accepts it on localhost.
+    let ttl_secs = i64::try_from(routes.impersonation_ttl.as_secs())
+        .unwrap_or(tenant_console::IMPERSONATION_TTL_SECS);
+    let session = TenantSessionPayload::impersonation(payload.op, &org.slug, ttl_secs);
+    let cookie_value = tenant_console::encode(&cfg.secret, &session);
+    let cookie = Cookie::build((tenant_console::COOKIE_NAME, cookie_value))
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .max_age(CookieDuration::seconds(ttl_secs))
+        .build();
+
+    // 302 to the admin index. Trailing slash so the path matches
+    // the inner admin's "/" route under the configured prefix.
+    let admin_path = routes.admin_url.trim_end_matches('/');
+    let target = format!("{admin_path}/");
+    let mut resp = Redirect::to(&target).into_response();
+    if let Ok(v) = HeaderValue::from_str(&cookie.to_string()) {
+        resp.headers_mut().append(header::SET_COOKIE, v);
+    }
+    // Belt-and-suspenders: prevent the destination page from
+    // leaking the still-fresh URL via Referer to anything it
+    // loads. The token is single-use anyway, but third-party
+    // scripts on the admin index would otherwise see the
+    // redeemed token in their access logs.
+    resp.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    tracing::info!(
+        target: "crate::tenancy::admin",
+        slug = %org.slug,
+        operator_id = payload.op,
+        ttl_secs,
+        "redeemed impersonation handoff token",
+    );
+    resp
+}
+
+/// Pull the `token` value out of a raw query string. Skips a
+/// dependency on `serde_urlencoded` — the only param we care
+/// about is `token`, and any extra params ride along harmlessly.
+fn extract_token_param(query: &str) -> Option<String> {
+    for pair in query.split('&') {
+        if let Some(value) = pair.strip_prefix("token=") {
+            return Some(value.to_owned());
+        }
+    }
+    None
 }
 
 /// v0.27.8 (#78) — clear the impersonation cookie and 302

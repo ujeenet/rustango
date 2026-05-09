@@ -447,6 +447,78 @@ pub async fn select_rows(pool: &PgPool, query: &SelectQuery) -> Result<Vec<PgRow
     select_rows_on(pool, query).await
 }
 
+/// Schema-driven decode of a Postgres row into a JSON object.
+/// Walks `fields` and pulls each column out via `try_get`,
+/// mapping the model's `FieldType` to the right Rust type, then
+/// to JSON. Used by the viewset list/retrieve handlers (#80) and
+/// by `contenttypes::fetch_row_as_json` (#89).
+///
+/// Failures on individual columns degrade gracefully to
+/// `Value::Null` — the response shape stays stable even if one
+/// field's bytes are unexpected (e.g. a NULL where the schema
+/// says NOT NULL because of a manual SQL edit). Strict
+/// row-to-T decoding lives on the Model derive's `from_row` path
+/// and is the right tool when you control the data shape.
+#[must_use]
+pub fn row_to_json(
+    row: &sqlx::postgres::PgRow,
+    fields: &[&'static crate::core::FieldSchema],
+) -> serde_json::Value {
+    use crate::core::FieldType;
+    use serde_json::{json, Value};
+    use sqlx::Row as _;
+    let mut map = serde_json::Map::new();
+    for field in fields {
+        let value = match field.ty {
+            FieldType::I16 => row
+                .try_get::<i16, _>(field.column)
+                .map(|n| json!(n))
+                .unwrap_or(Value::Null),
+            FieldType::I32 => row
+                .try_get::<i32, _>(field.column)
+                .map(|n| json!(n))
+                .unwrap_or(Value::Null),
+            FieldType::I64 => row
+                .try_get::<i64, _>(field.column)
+                .map(|n| json!(n))
+                .unwrap_or(Value::Null),
+            FieldType::F32 => row
+                .try_get::<f32, _>(field.column)
+                .map(|n| json!(n))
+                .unwrap_or(Value::Null),
+            FieldType::F64 => row
+                .try_get::<f64, _>(field.column)
+                .map(|n| json!(n))
+                .unwrap_or(Value::Null),
+            FieldType::Bool => row
+                .try_get::<bool, _>(field.column)
+                .map(|b| json!(b))
+                .unwrap_or(Value::Null),
+            FieldType::String => row
+                .try_get::<String, _>(field.column)
+                .map(|s| json!(s))
+                .unwrap_or(Value::Null),
+            FieldType::Date => row
+                .try_get::<chrono::NaiveDate, _>(field.column)
+                .map(|d| json!(d.to_string()))
+                .unwrap_or(Value::Null),
+            FieldType::DateTime => row
+                .try_get::<chrono::DateTime<chrono::Utc>, _>(field.column)
+                .map(|dt| json!(dt.to_rfc3339()))
+                .unwrap_or(Value::Null),
+            FieldType::Uuid => row
+                .try_get::<uuid::Uuid, _>(field.column)
+                .map(|u| json!(u.to_string()))
+                .unwrap_or(Value::Null),
+            FieldType::Json => row
+                .try_get::<serde_json::Value, _>(field.column)
+                .unwrap_or(Value::Null),
+        };
+        map.insert(field.name.to_owned(), value);
+    }
+    Value::Object(map)
+}
+
 /// Like [`select_rows`] but accepts any sqlx executor — `&PgPool`,
 /// `&mut PgConnection`, or a `Transaction`. Required for tenancy
 /// projects whose per-request connection comes from
