@@ -845,6 +845,7 @@ async fn handle_list(
             let count_q = CountQuery {
                 model: state.vs.schema,
                 where_clause,
+                search: search_clause.clone(),
             };
 
             // Tenant mode holds a single per-request connection, so

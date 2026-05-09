@@ -173,7 +173,13 @@ pub(super) fn write_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), S
 pub(super) fn write_count(b: &mut Sql<'_>, query: &CountQuery) -> Result<(), SqlError> {
     b.sql.push_str("SELECT COUNT(*) FROM ");
     b.write_ident(query.model.table);
-    write_where(b, &query.where_clause, Some(query.model))?;
+    write_where_with_search(
+        b,
+        &query.where_clause,
+        query.search.as_ref(),
+        None,
+        Some(query.model),
+    )?;
     Ok(())
 }
 

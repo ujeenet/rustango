@@ -2,6 +2,54 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.1] — live tests for `tenant_router` + `CountQuery` search bug fix
+
+Closing the v0.30.0 work with end-to-end validation against a real
+Postgres + tenant pool, plus a count-with-search correctness fix
+the integration test surfaced.
+
+### Added
+
+- **`tests/viewset_tenant_router_live.rs`** — 7 live integration
+  tests against a real `TenantContext` with `HeaderResolver`
+  dispatch:
+  - List endpoint: paginated payload (count, page, page_size,
+    last_page, results) against the per-request tenant connection
+  - `?search=…` ILIKE narrowing
+  - `?{field}=…` exact filter
+  - GET retrieve by PK
+  - POST create + JSON round-trip with returned id
+  - PUT update + DELETE destroy two-step flow
+  - Missing tenant header → 404 (extractor rejection surfaces cleanly,
+    not as a 500 from the inner SQL layer)
+
+### Fixed
+
+- **`CountQuery.search` field** — added to `core::query::CountQuery`.
+  Without it, `?search=…` on a paginated list reported the *total*
+  row count rather than the count *after* search-field ILIKE
+  filtering, so `last_page` computed an over-large pager. Affected
+  every `viewset::router` and `viewset::tenant_router` page-number
+  list response when the user typed in the search box.
+- **Admin pager** had a `// NOTE: count_rows ignores the search
+  clause; counts are approximate when ?q is set` workaround comment
+  in `admin/views.rs` from v0.2 — removed; the admin pager is now
+  exact when `?q=` is set.
+- **`QuerySet::count` / `count_pool`** propagated `search` from the
+  compiled SELECT into the count query, so `MyModel::objects()
+  .where_(...).search(...).count(...)` returns the correct number
+  rather than ignoring the search predicate.
+
+### Tests
+
+- 1292 lib tests still pass under the new `CountQuery` shape.
+- 7/7 new live tests pass against `DATABASE_URL`-backed Postgres.
+- All `CountQuery` constructors updated (5 callers across viewset,
+  template_views static + tenant paths, admin/views, and 2 in
+  sql/executor for `QuerySet::count{,_pool}`).
+
+---
+
 ## [0.30.0] — `ViewSet::tenant_router(prefix)` with full feature parity (#80)
 
 `#[derive(ViewSet)]` projects with multi-tenant routing finally get

@@ -426,6 +426,11 @@ pub struct DeleteQuery {
 pub struct CountQuery {
     pub model: &'static ModelSchema,
     pub where_clause: WhereExpr,
+    /// Optional ILIKE search across the supplied columns. When set
+    /// the count includes only rows that *also* match the search —
+    /// without this the page-number list endpoint reported the
+    /// wrong total whenever `?search=...` was active.
+    pub search: Option<SearchClause>,
 }
 
 /// Bulk per-row UPDATE using `UPDATE t SET … FROM (VALUES …)`. One row

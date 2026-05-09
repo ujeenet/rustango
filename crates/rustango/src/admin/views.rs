@@ -194,11 +194,14 @@ pub(crate) async fn table_view(
         &CountQuery {
             model,
             where_clause: where_clause.clone(),
+            // Apply the same ILIKE search the SELECT uses so the
+            // pager total matches the visible rows. Pre-v0.30 the
+            // count was approximate when ?q was set — fixed alongside
+            // the viewset count-with-search bug.
+            search: search.clone(),
         },
     )
     .await?;
-    // NOTE: count_rows ignores the search clause; counts are approximate
-    // when ?q is set. Acceptable for a v0.2 admin pager.
     let joins = build_fk_joins(&state, model);
     // Default ordering: PK ASC unless `admin.ordering` overrides.
     let order_by: Vec<crate::core::OrderClause> = if admin_cfg.ordering.is_empty() {

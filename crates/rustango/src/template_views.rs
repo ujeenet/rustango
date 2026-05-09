@@ -302,6 +302,10 @@ async fn handle_list(
     let count_q = crate::core::CountQuery {
         model: state.vs.schema,
         where_clause,
+        // template_views folds the search-fields ILIKE predicates
+        // into where_clause via build_list_where, so the dedicated
+        // SearchClause is unused here.
+        search: None,
     };
 
     let (rows_result, count_result) = tokio::join!(
@@ -1875,6 +1879,7 @@ mod tenant {
         let count_q = crate::core::CountQuery {
             model: state.vs.schema,
             where_clause,
+            search: None,
         };
 
         let conn = t.conn();
