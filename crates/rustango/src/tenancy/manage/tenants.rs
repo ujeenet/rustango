@@ -9,7 +9,7 @@ use crate::core::Column as _;
 use crate::sql::{Auto, Fetcher, Updater};
 
 use crate::tenancy::error::TenancyError;
-use crate::tenancy::manage::args::{next_value, quote_ident};
+use crate::tenancy::manage::args::{next_value, quote_ident, reject_leading_flag};
 use crate::tenancy::manage_interactive;
 use crate::tenancy::migrate as tenant_migrate;
 use crate::tenancy::org::{Org, StorageMode};
@@ -141,6 +141,14 @@ pub(super) async fn create_tenant<W: Write + Send>(
 }
 
 fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, TenancyError> {
+    reject_leading_flag(
+        args,
+        "create-tenant",
+        "slug",
+        "create-tenant <slug> [--mode schema|database] [--display-name <s>] \
+         [--database-url <url>] [--schema-name <s>] [--host-pattern <s>] \
+         [--port <n>] [--path-prefix <s>] [--no-migrate]",
+    )?;
     let mut iter = args.iter();
     let slug_arg = iter.next().cloned();
     let slug = match slug_arg {
@@ -209,6 +217,15 @@ pub(super) async fn drop_tenant<W: Write + Send>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), TenancyError> {
+    reject_leading_flag(
+        args,
+        "drop-tenant",
+        "slug",
+        "drop-tenant <slug> [--confirm <slug>]\n  \
+         Soft-delete: sets active=false. Data is preserved.\n  \
+         `--confirm` must repeat the slug verbatim — interactive\n  \
+         terminals can omit it and answer the prompt instead.",
+    )?;
     let mut iter = args.iter();
     let slug_arg = iter.next().cloned();
     let mut confirm: Option<String> = None;
@@ -311,6 +328,19 @@ pub(super) async fn purge_tenant<W: Write + Send>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), TenancyError> {
+    reject_leading_flag(
+        args,
+        "purge-tenant",
+        "slug",
+        "purge-tenant <slug> [--confirm <slug>] [--purge-database]\n  \
+         HARD-DELETE. Schema-mode: DROP SCHEMA <slug> CASCADE.\n  \
+         Database-mode: refuses unless `--purge-database` is also\n  \
+         passed; with it, runs `DROP DATABASE` against an admin\n  \
+         connection. The Org row is deleted in both cases.\n  \
+         Data is unrecoverable. Use `drop-tenant` for soft-delete.\n  \
+         `--confirm` must repeat the slug verbatim — interactive\n  \
+         terminals can omit it and answer the prompt instead.",
+    )?;
     let mut iter = args.iter();
     let slug_arg = iter.next().cloned();
     let mut confirm: Option<String> = None;

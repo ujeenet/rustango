@@ -7,7 +7,7 @@ use crate::core::Column as _;
 use crate::sql::{Auto, Fetcher};
 
 use crate::tenancy::error::TenancyError;
-use crate::tenancy::manage::args::{next_value, quote_ident};
+use crate::tenancy::manage::args::{next_value, quote_ident, reject_leading_flag};
 use crate::tenancy::manage_interactive;
 use crate::tenancy::pools::TenantPools;
 
@@ -18,6 +18,12 @@ pub(super) async fn create_operator_cmd<W: Write + Send>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), TenancyError> {
+    reject_leading_flag(
+        args,
+        "create-operator",
+        "username",
+        "create-operator <username> [--password <p> | --generate]",
+    )?;
     let mut iter = args.iter();
     let username_arg = iter.next().cloned();
     let mut password: Option<String> = None;
@@ -110,6 +116,12 @@ pub(super) async fn create_user_cmd<W: Write + Send>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), TenancyError> {
+    reject_leading_flag(
+        args,
+        "create-user",
+        "slug",
+        "create-user <slug> <username> [--password <p> | --generate] [--superuser]",
+    )?;
     let mut iter = args.iter();
     let slug_arg = iter.next().cloned();
     let username_arg = iter.next().cloned();
@@ -320,6 +332,12 @@ pub(super) async fn set_superuser_cmd<W: Write + Send>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), TenancyError> {
+    reject_leading_flag(
+        args,
+        "set-superuser",
+        "slug",
+        "set-superuser <slug> <username> [--on|--off]",
+    )?;
     let mut iter = args.iter();
     let slug = iter.next().cloned().ok_or_else(|| {
         TenancyError::Validation("set-superuser <slug> <username> [--on|--off]".into())
@@ -379,6 +397,12 @@ pub(super) async fn reset_password_cmd<W: Write + Send>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), TenancyError> {
+    reject_leading_flag(
+        args,
+        "reset-password",
+        "slug",
+        "reset-password <slug> <username> [--password <s> | --generate]",
+    )?;
     let mut iter = args.iter();
     let slug = iter.next().cloned().ok_or_else(|| {
         TenancyError::Validation(
@@ -459,6 +483,12 @@ pub(super) async fn reset_operator_password_cmd<W: Write + Send>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), TenancyError> {
+    reject_leading_flag(
+        args,
+        "reset-operator-password",
+        "username",
+        "reset-operator-password <username> [--password <s> | --generate]",
+    )?;
     let mut iter = args.iter();
     let username = iter.next().cloned().ok_or_else(|| {
         TenancyError::Validation(

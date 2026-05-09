@@ -11,7 +11,7 @@ use crate::sql::sqlx::{PgPool, Row};
 
 use super::super::error::TenancyError;
 use super::super::pools::TenantPools;
-use super::args::next_value;
+use super::args::{next_value, reject_leading_flag};
 
 // ------------------------------------------------------------------ create-role
 
@@ -20,6 +20,12 @@ pub(super) async fn create_role_cmd<W: Write + Send>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), TenancyError> {
+    reject_leading_flag(
+        args,
+        "create-role",
+        "slug",
+        "create-role <slug> <name> [--description <s>]",
+    )?;
     let mut iter = args.iter();
     let slug = next_value(&mut iter, "<tenant-slug>")?;
     let name = next_value(&mut iter, "<role-name>")?;
@@ -47,6 +53,7 @@ pub(super) async fn list_roles_cmd<W: Write + Send>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), TenancyError> {
+    reject_leading_flag(args, "list-roles", "slug", "list-roles <slug>")?;
     let mut iter = args.iter();
     let slug = next_value(&mut iter, "<tenant-slug>")?;
     let pool = tenant_pool_for_slug(pools, &slug).await?;
@@ -102,6 +109,13 @@ async fn role_membership_cmd<W: Write + Send>(
     w: &mut W,
     assign: bool,
 ) -> Result<(), TenancyError> {
+    let verb = if assign { "assign-role" } else { "revoke-role" };
+    let usage = if assign {
+        "assign-role <slug> <username> <role-name>"
+    } else {
+        "revoke-role <slug> <username> <role-name>"
+    };
+    reject_leading_flag(args, verb, "slug", usage)?;
     let mut iter = args.iter();
     let slug = next_value(&mut iter, "<tenant-slug>")?;
     let username = next_value(&mut iter, "<username>")?;
@@ -134,6 +148,12 @@ pub(super) async fn grant_perm_cmd<W: Write + Send>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), TenancyError> {
+    reject_leading_flag(
+        args,
+        "grant-perm",
+        "slug",
+        "grant-perm <slug> <role-name|username> <codename> [--role]",
+    )?;
     let mut iter = args.iter();
     let slug = next_value(&mut iter, "<tenant-slug>")?;
     let target = next_value(&mut iter, "<role-name|username>")?;
@@ -169,6 +189,12 @@ pub(super) async fn revoke_perm_cmd<W: Write + Send>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), TenancyError> {
+    reject_leading_flag(
+        args,
+        "revoke-perm",
+        "slug",
+        "revoke-perm <slug> <role-name|username> <codename> [--role]",
+    )?;
     let mut iter = args.iter();
     let slug = next_value(&mut iter, "<tenant-slug>")?;
     let target = next_value(&mut iter, "<role-name|username>")?;
@@ -206,6 +232,12 @@ pub(super) async fn create_api_key_cmd<W: Write + Send>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), TenancyError> {
+    reject_leading_flag(
+        args,
+        "create-api-key",
+        "slug",
+        "create-api-key <slug> <username> [--label <s>] [--expires-days <N>]",
+    )?;
     let mut iter = args.iter();
     let slug = next_value(&mut iter, "<tenant-slug>")?;
     let username = next_value(&mut iter, "<username>")?;
