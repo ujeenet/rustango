@@ -23,6 +23,7 @@
         <a href="/" class="{% if section == 'home' %}active{% endif %}">Home</a>
         <a href="/operators" class="{% if section == 'operators' %}active{% endif %}">Operators</a>
         <a href="/orgs" class="{% if section == 'orgs' %}active{% endif %}">Organizations</a>
+        <a href="/change-password" class="{% if section == 'change_password' %}active{% endif %}">Change password</a>
       </nav>
       <div class="who">Signed in as <strong>{{ operator_username }}</strong></div>
       <form class="logout" method="post" action="/logout">

@@ -290,6 +290,10 @@ fn router_inner(
             "op_orgs_edit.html",
             include_str!("../templates/op_orgs_edit.html"),
         ),
+        (
+            "op_change_password.html",
+            include_str!("../templates/op_change_password.html"),
+        ),
     ])
     .expect("operator-console templates parse");
     let edit_enabled = pools.is_some();
@@ -318,7 +322,11 @@ fn router_inner(
     let mut private = Router::new()
         .route("/", get(welcome))
         .route("/operators", get(operators_list))
-        .route("/orgs", get(orgs_list));
+        .route("/orgs", get(orgs_list))
+        .route(
+            "/change-password",
+            get(change_password_form).post(change_password_submit),
+        );
     if edit_enabled {
         private = private
             .route(
@@ -560,6 +568,118 @@ async fn logout(State(_state): State<ConsoleState>) -> Response<Body> {
 }
 
 // ----------------------------- views
+
+/// `GET /change-password` — render the operator self-serve
+/// change-password form (#77, v0.29). Lives behind
+/// `require_session` so unauthenticated requests bounce to login.
+async fn change_password_form(
+    State(state): State<ConsoleState>,
+    Extension(op): Extension<auth::Operator>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Html<String> {
+    let mut ctx = Context::new();
+    inject_op_brand(&mut ctx, &state.op_brand);
+    ctx.insert("section", "change_password");
+    ctx.insert("operator_username", &op.username);
+    ctx.insert("error", &params.get("error"));
+    ctx.insert("success", &params.get("ok"));
+    Html(
+        state
+            .tera
+            .render("op_change_password.html", &ctx)
+            .unwrap_or_else(|e| {
+                tracing::error!(target: "crate::tenancy::operator_console", error = %e, "op_change_password.html render");
+                "<!doctype html><h1>Change-password page unavailable</h1>".to_owned()
+            }),
+    )
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct OpChangePasswordForm {
+    current_password: String,
+    new_password: String,
+    #[serde(default)]
+    confirm_password: String,
+}
+
+/// `POST /change-password` — verify the operator's current
+/// password, hash the new one, persist it + bump
+/// `password_changed_at`. The session middleware
+/// (`require_session`) already invalidates cookies whose
+/// `iat` predates `password_changed_at`, so the session this
+/// request is running on may be the LAST request that cookie
+/// can serve — the next click bounces to login. Mirror of
+/// `tenancy::admin::change_password_submit` for tenant users.
+async fn change_password_submit(
+    State(state): State<ConsoleState>,
+    Extension(op): Extension<auth::Operator>,
+    Form(form): Form<OpChangePasswordForm>,
+) -> Response<Body> {
+    let redir = |query: &str| -> Response<Body> {
+        Redirect::to(&format!("/change-password?{query}")).into_response()
+    };
+    let redir_err = |msg: &str| redir(&format!("error={}", urlencoding::encode(msg)));
+
+    if form.current_password.is_empty() || form.new_password.is_empty() {
+        return redir_err("All fields are required.");
+    }
+    if !form.confirm_password.is_empty() && form.confirm_password != form.new_password {
+        return redir_err("New password and confirmation did not match.");
+    }
+    if form.new_password == form.current_password {
+        return redir_err("New password must differ from the current password.");
+    }
+    if form.new_password.chars().count() < 8 {
+        return redir_err("New password must be at least 8 characters.");
+    }
+
+    let op_id = op.id.get().copied().unwrap_or(0);
+    if op_id <= 0 {
+        return redir_err("Session is missing an operator id; please log in again.");
+    }
+
+    // Re-fetch the canonical hash. `op` from the extension is a
+    // snapshot taken in `require_session`; using the live registry
+    // value matches the tenant flow + protects against the rare
+    // race where a peer operator just rotated this account.
+    let stored: Option<String> = match crate::sql::sqlx::query_scalar(
+        "SELECT password_hash FROM rustango_operators WHERE id = $1",
+    )
+    .bind(op_id)
+    .fetch_optional(&state.registry)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(target: "crate::tenancy::operator_console", error = %e, "change-password lookup");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "lookup failed").into_response();
+        }
+    };
+    let Some(stored_hash) = stored else {
+        return redir_err("Your account no longer exists; please log in again.");
+    };
+    let ok = super::password::verify(&form.current_password, &stored_hash).unwrap_or(false);
+    if !ok {
+        return redir_err("Current password did not match.");
+    }
+    let new_hash = match super::password::hash(&form.new_password) {
+        Ok(h) => h,
+        Err(e) => return redir_err(&format!("hash failed: {e}")),
+    };
+    if let Err(e) = crate::sql::sqlx::query(
+        "UPDATE rustango_operators \
+         SET password_hash = $1, password_changed_at = NOW() WHERE id = $2",
+    )
+    .bind(&new_hash)
+    .bind(op_id)
+    .execute(&state.registry)
+    .await
+    {
+        tracing::warn!(target: "crate::tenancy::operator_console", error = %e, "change-password update");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
+    }
+    redir("ok=Password+updated")
+}
 
 async fn welcome(
     State(state): State<ConsoleState>,
