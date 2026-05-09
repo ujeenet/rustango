@@ -131,6 +131,18 @@ pub(crate) struct Config {
     /// `RouteConfig::change_password_url`. Standalone admins
     /// leave it `None` (no auth surface to wire it to).
     pub(crate) change_password_url: Option<String>,
+    /// URL suffix the audit-log view is mounted under (sibling
+    /// to `admin_prefix`). The cross-row activity feed renders
+    /// at `<admin_prefix><audit_url>` and the cleanup form at
+    /// `<admin_prefix><audit_url>/cleanup`. Threaded into every
+    /// template as `{{ audit_url }}` so the sidebar / audit-log
+    /// pager / detail-page "View full history" links resolve
+    /// correctly under any configuration. Default: `/__audit`
+    /// (matches the v0.28 hardcoded path); the tenancy admin
+    /// Builder pulls this from `RouteConfig::audit_url` —
+    /// which since v0.29 (#85) defaults to `/audit` (no
+    /// underscores) for friendly-URL projects.
+    pub(crate) audit_url: String,
 }
 
 impl Builder {
@@ -142,6 +154,11 @@ impl Builder {
         // `nest("/admin", admin::router(pool))`) override via
         // `Builder::admin_prefix(...)`.
         config.admin_prefix = "/__admin".to_owned();
+        // Default audit suffix matches v0.28 hardcoded path so
+        // standalone admins (no RouteConfig) keep their existing
+        // bookmarks. Tenancy admins override via
+        // `Builder::audit_url(...)` from `RouteConfig::audit_url`.
+        config.audit_url = "/__audit".to_owned();
         Self { pool, config }
     }
 
@@ -156,6 +173,20 @@ impl Builder {
         let s: String = prefix.into();
         let trimmed = s.trim_end_matches('/').to_owned();
         self.config.admin_prefix = trimmed;
+        self
+    }
+
+    /// URL suffix the audit-log view is mounted at (sibling to
+    /// `admin_prefix`). Trailing slash is stripped. Default:
+    /// `/__audit`. Tenant admins set this from
+    /// [`crate::tenancy::RouteConfig::audit_url`] (which since
+    /// v0.29 #85 defaults to `/audit` — no underscores —
+    /// for friendly-URL projects).
+    #[must_use]
+    pub fn audit_url(mut self, url: impl Into<String>) -> Self {
+        let s: String = url.into();
+        let trimmed = s.trim_end_matches('/').to_owned();
+        self.config.audit_url = trimmed;
         self
     }
 
@@ -348,10 +379,15 @@ impl Builder {
     }
 
     pub fn build(self) -> Router {
+        let audit_path = self.config.audit_url.clone();
+        let audit_cleanup_path = format!("{audit_path}/cleanup");
         Router::new()
             .route("/", get(views::index))
-            .route("/__audit", get(super::audit::audit_log_view))
-            .route("/__audit/cleanup", post(super::audit::audit_cleanup_submit))
+            .route(&audit_path, get(super::audit::audit_log_view))
+            .route(
+                &audit_cleanup_path,
+                post(super::audit::audit_cleanup_submit),
+            )
             .route(
                 "/{table}",
                 get(views::table_view).post(views::create_submit),

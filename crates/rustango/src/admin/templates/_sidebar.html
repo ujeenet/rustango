@@ -7,7 +7,7 @@
            class="{% if active_table is undefined or active_table == '' %}active{% endif %}">Home</a>
     </p>
     <p>
-        <a href="{{ admin_prefix }}/__audit"
+        <a href="{{ admin_prefix }}{{ audit_url }}"
            class="{% if active_table == '__audit' %}active{% endif %}">Activity</a>
     </p>
     {% if change_password_url %}

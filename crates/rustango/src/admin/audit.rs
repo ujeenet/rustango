@@ -147,7 +147,7 @@ pub(crate) async fn audit_log_view(
                 if !is_active {
                     params.push((col.into(), raw.clone()));
                 }
-                let mut url = String::from("/__audit");
+                let mut url = state.config.audit_url.clone();
                 if !params.is_empty() {
                     url.push('?');
                     let qs: Vec<String> = params
@@ -190,7 +190,7 @@ pub(crate) async fn audit_log_view(
                 params.push(((*k).into(), v.clone()));
             }
             params.push(("facet_show_all".into(), col.into()));
-            let mut url = String::from("/__audit?");
+            let mut url = format!("{}?", state.config.audit_url);
             let qs: Vec<String> = params
                 .iter()
                 .map(|(k, v)| format!("{}={}", url_encode_q(k), url_encode_q(v)))
@@ -340,7 +340,7 @@ pub(crate) async fn audit_cleanup_submit(
         tracing::warn!(target: "rustango::admin::audit",
             error = %e, "audit_cleanup self-audit emit failed");
     }
-    Ok(Redirect::to("/__audit").into_response())
+    Ok(Redirect::to(&state.config.audit_url).into_response())
 }
 
 /// Diff-shaped audit emit for admin UPDATE writes. Reads the

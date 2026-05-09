@@ -498,6 +498,7 @@ async fn handle_request(
         impersonated_by,
         routes.admin_url.as_str(),
         routes.change_password_url.as_str(),
+        routes.audit_url.as_str(),
     );
 
     // Strip the configurable admin mount prefix from the request
@@ -1184,6 +1185,7 @@ fn build_inner_admin_router(
     impersonated_by: Option<i64>,
     admin_url_prefix: &str,
     change_password_url: &str,
+    audit_url: &str,
 ) -> Router {
     // v0.27.7 — `tenant_mode()` filters registry-scoped models
     // (Org / Operator) out of the sidebar / index so the tenant
@@ -1196,6 +1198,11 @@ fn build_inner_admin_router(
         // through to the inner admin's chrome_context so
         // template hrefs resolve correctly under any mount.
         .admin_prefix(admin_url_prefix)
+        // Configurable audit suffix — drives both route
+        // registration and template hrefs. Friendly default
+        // (`/audit`) since v0.29 #85; legacy (`/__audit`)
+        // available via `RouteConfig::legacy()`.
+        .audit_url(audit_url)
         // v0.28.2 (#77) — surface the self-serve change-password
         // page in the sidebar.
         .change_password_url(change_password_url);

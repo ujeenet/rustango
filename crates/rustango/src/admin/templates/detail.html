@@ -99,7 +99,7 @@
             <h2>
                 Audit trail
                 {% if audit_entries | length > 0 %}
-                    <small style="font-weight: normal; text-transform: none; letter-spacing: 0;"> &middot; <a href="{{ admin_prefix }}/__audit?entity_table={{ model.table }}&entity_pk={{ pk }}">View full history</a></small>
+                    <small style="font-weight: normal; text-transform: none; letter-spacing: 0;"> &middot; <a href="{{ admin_prefix }}{{ audit_url }}?entity_table={{ model.table }}&entity_pk={{ pk }}">View full history</a></small>
                 {% endif %}
             </h2>
             {% if audit_entries | length == 0 %}

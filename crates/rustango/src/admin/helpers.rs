@@ -80,9 +80,14 @@ pub(crate) fn chrome_context(state: &AppState, active_table: Option<&str>) -> se
         // forgetting they're impersonating.
         "impersonated_by_operator_id": state.config.impersonated_by,
         // v0.27.9 (#59) — URL prefix the admin Router is mounted
-        // under. Templates use `{{ admin_prefix }}/__audit` etc.
+        // under. Templates use `{{ admin_prefix }}{{ audit_url }}` etc.
         // so hrefs resolve correctly regardless of mount path.
         "admin_prefix": &state.config.admin_prefix,
+        // Audit-log path suffix. Threaded from
+        // `RouteConfig::audit_url`; default `/__audit` for
+        // standalone admins. Templates compose the full
+        // audit URL as `{{ admin_prefix }}{{ audit_url }}`.
+        "audit_url": &state.config.audit_url,
         // v0.28.2 (#77) — sidebar "Change password" link target.
         // Threaded from the tenant admin's RouteConfig.
         "change_password_url": &state.config.change_password_url,
