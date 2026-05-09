@@ -1331,7 +1331,7 @@ Tera context (consistent across views so templates port cleanly):
 
 | view | context vars |
 |------|--------------|
-| `ListView` | `object_list` (Vec of row-as-JSON), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev` |
+| `ListView` | `object_list` (Vec of row-as-JSON), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev`, `filters` (Map of active filter values), `search` (String) |
 | `DetailView` | `object` (single row as JSON) |
 | `CreateView` (GET) | `form: { fields, errors }`, `is_create=true`, `is_update=false` |
 | `UpdateView` (GET) | `form: { fields, errors }`, `object`, `pk`, `is_create=false`, `is_update=true` |

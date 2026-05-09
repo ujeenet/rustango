@@ -279,6 +279,7 @@ async fn handle_list(
     ctx.insert("total_pages", &total_pages);
     ctx.insert("has_next", &(page < total_pages));
     ctx.insert("has_prev", &(page > 1));
+    insert_filter_context(&mut ctx, &state.vs.filter_fields, &params);
 
     render(&state.tera, &state.vs.template, &ctx)
 }
@@ -1238,6 +1239,43 @@ fn escape_like_pattern(input: &str) -> String {
         .replace('_', r"\_")
 }
 
+/// Stamp the active filter values + search query back into the
+/// Tera context so templates can repopulate filter form inputs.
+///
+/// Stamps two top-level vars:
+/// - `filters: Map<String, String>` — only fields in the
+///   `filter_fields` allowlist that the user actually supplied
+///   a value for. Empty map when no filter was active.
+/// - `search: String` — the active `?search=` value, or `""`
+///   when unset / empty.
+///
+/// Templates can then mark dropdowns / re-fill inputs:
+///
+/// ```html
+/// <input name="search" value="{{ search }}">
+/// <select name="status">
+///   <option value="published"
+///     {% if filters.status == "published" %}selected{% endif %}>
+///     Published
+///   </option>
+/// </select>
+/// ```
+pub(super) fn insert_filter_context(
+    ctx: &mut Context,
+    filter_fields: &[String],
+    params: &HashMap<String, String>,
+) {
+    let filters: HashMap<&str, &str> = params
+        .iter()
+        .filter(|(k, _)| filter_fields.iter().any(|f| f == *k))
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    ctx.insert("filters", &filters);
+
+    let search = params.get("search").map(String::as_str).unwrap_or_default();
+    ctx.insert("search", search);
+}
+
 /// Resolve the projection set — either every scalar field or the
 /// caller's explicit `fields` allowlist.
 fn resolved_fields(
@@ -1364,6 +1402,7 @@ mod tenant {
         ctx.insert("total_pages", &total_pages);
         ctx.insert("has_next", &(page < total_pages));
         ctx.insert("has_prev", &(page > 1));
+        super::insert_filter_context(&mut ctx, &state.vs.filter_fields, &params);
 
         render(&state.tera, &state.vs.template, &ctx)
     }
@@ -1985,6 +2024,44 @@ mod tests {
             WhereExpr::And(v) => assert!(v.is_empty()),
             other => panic!("expected empty And, got {other:?}"),
         }
+    }
+
+    /// `insert_filter_context` stamps `filters` (allowlisted-only)
+    /// and `search` into the Tera context so templates can
+    /// repopulate filter form inputs.
+    #[test]
+    fn insert_filter_context_stamps_active_values() {
+        let mut ctx = Context::new();
+        let mut params = HashMap::new();
+        params.insert("status".to_owned(), "published".to_owned());
+        params.insert("category".to_owned(), "tech".to_owned()); // not in allowlist
+        params.insert("search".to_owned(), "rustango".to_owned());
+        params.insert("page".to_owned(), "2".to_owned()); // never a filter
+        insert_filter_context(&mut ctx, &["status".into()], &params);
+
+        // Tera's Context doesn't expose direct read; serialize round-trip
+        // via the rendered template. `category` was outside the
+        // allowlist so it shouldn't appear in the filters map.
+        let mut tera = Tera::default();
+        tera.add_raw_template(
+            "t",
+            "{{ filters.status }}|{{ search }}|{{ filters | length }}",
+        )
+        .unwrap();
+        let rendered = tera.render("t", &ctx).unwrap();
+        assert_eq!(rendered, "published|rustango|1");
+    }
+
+    /// No filters/search → `filters` empty, `search` empty string.
+    #[test]
+    fn insert_filter_context_empty_params_yields_empty_values() {
+        let mut ctx = Context::new();
+        insert_filter_context(&mut ctx, &["status".into()], &HashMap::new());
+        let mut tera = Tera::default();
+        tera.add_raw_template("t", "[{{ search }}][{{ filters | length }}]")
+            .unwrap();
+        let rendered = tera.render("t", &ctx).unwrap();
+        assert_eq!(rendered, "[][0]");
     }
 
     /// Models without a PK fall through to empty `ORDER BY` —
