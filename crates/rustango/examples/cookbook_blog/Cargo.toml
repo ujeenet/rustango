@@ -29,7 +29,7 @@ rustango = { path = "../..", default-features = false, features = [
     "auth_flows", "sse", "websocket", "oauth2", "http-client",
     "compression", "openapi", "csp-nonce", "sessions", "hmac-auth",
     "jwt", "uploads", "storage-s3", "media", "tenancy", "csrf",
-    "runtime",
+    "runtime", "template_views",
 ] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }
