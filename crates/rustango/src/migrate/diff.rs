@@ -553,7 +553,20 @@ pub fn render_changes_split(
                 })?;
                 if !f.nullable && f.default.is_none() {
                     return Err(format!(
-                        "AddColumn `{table}.{column}` is NOT NULL with no `default` — Postgres can't backfill existing rows. Make the field `Option<…>` or set `#[rustango(default = \"…\")]`.",
+                        "AddColumn `{table}.{column}` is NOT NULL with no `default` — \
+                         Postgres can't backfill existing rows. Pick one:\n  \
+                         (1) Make the field `Option<…>` — column becomes nullable and existing \
+                         rows get NULL.\n  \
+                         (2) Set `#[rustango(default = \"…\")]` so existing rows get the \
+                         default backfill.\n  \
+                         (3) (dev iteration / fresh table only) Delete the pending migration \
+                         JSON that emitted this `AddColumn`, then re-run `makemigrations` so \
+                         `{column}` lands in the original `CreateTable` for `{table}` — \
+                         see #84 in the backlog for the full `migrate --squash` proposal.\n  \
+                         Note: option (3) requires the column to NOT exist in the database \
+                         yet (i.e. the `CreateTable` migration hasn't been applied, OR you're \
+                         willing to drop and recreate the table). Option (1) or (2) is the \
+                         right fix for any table that has production data.",
                     ));
                 }
                 out.immediate.push(add_column_sql(table, f));
