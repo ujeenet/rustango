@@ -70,6 +70,7 @@ Same code unchanged with `DATABASE_URL=postgres://…` boots on Postgres.
 - [Migrations](#migrations)
 - [Auto-admin](#auto-admin)
 - [APIs (ViewSet + Serializer + JWT)](#apis-viewset--serializer--jwt)
+- [HTML views (Django-shape CBVs)](#html-views-django-shape-cbvs)
 - [Forms](#forms)
 - [Multi-tenancy](#multi-tenancy)
 - [Authentication & permissions](#authentication--permissions)
@@ -1384,6 +1385,42 @@ token minted on `acme.example.com` is rejected on `globex.example.com`.
 
 ---
 
+## HTML views (Django-shape CBVs)
+
+`rustango::template_views` is the HTML-side sibling of `viewset` —
+generic class-based views that build a Tera-rendered axum `Router`
+over any `#[derive(Model)]` schema. Today: `ListView` + `DetailView`
+(slices 1-2 of A5); `CreateView` / `UpdateView` / `DeleteView` follow.
+
+```rust
+use rustango::template_views::{ListView, DetailView};
+use std::sync::Arc;
+use tera::Tera;
+
+let tera = Arc::new(/* …Tera with `posts_list.html` + `posts_detail.html`… */);
+
+let app = axum::Router::new()
+    .merge(ListView::for_model(Post::SCHEMA)
+        .page_size(20)
+        .order_by("created_at", true)        // DESC
+        .router("/posts", tera.clone(), pool.clone()))
+    .merge(DetailView::for_model(Post::SCHEMA)
+        .router("/posts", tera.clone(), pool.clone()));
+```
+
+| view | URL | template default | context |
+|------|-----|------------------|---------|
+| `ListView` | `GET <prefix>` | `<table>_list.html` | `object_list`, `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev` |
+| `DetailView` | `GET <prefix>/{pk}` | `<table>_detail.html` | `object` |
+
+Single-tenant only today (captures a `PgPool` at mount time, like
+the original `viewset::ViewSet::router`). The `tenant_router`
+variant lands once the per-tenant pattern matches `viewset::tenant_router`.
+
+Behind the `template_views` Cargo feature (default-on).
+
+---
+
 ## Forms
 
 ```rust
@@ -2315,6 +2352,7 @@ rustango = { version = "0.28", default-features = false, features = ["postgres"]
 | `signed_url` | HMAC-SHA256 signed URLs | yes |
 | `tenancy` | multi-tenancy + operator console + permissions | no |
 | `csrf` | CSRF middleware (depends on `forms`) | implied by admin |
+| `template_views` | Django-shape CBVs (`ListView`, `DetailView`, …) | yes |
 
 ---
 
