@@ -368,12 +368,17 @@ impl ViewSet {
     /// [`Self::permissions_for_model`]) run against the same per-request
     /// connection — no second pool acquire.
     ///
-    /// **Note on `tokio::join!` parallelism**: the static-pool path
-    /// runs SELECT + COUNT in parallel for the page-number list
-    /// endpoint. The tenant path serializes them on the single
-    /// per-request connection. Two short queries on one connection
-    /// vs. one round-trip-per-pool acquire — the former is usually
-    /// faster anyway.
+    /// **Note on list-endpoint parallelism (v0.30 behavior change)**:
+    /// pre-v0.30 the static-pool list endpoint ran SELECT + COUNT in
+    /// parallel via `tokio::join!`. v0.30 unified both pool-source
+    /// paths on the same handler, which serializes the two queries —
+    /// tenant mode can't `join!` because `Tenant::conn()` hands out
+    /// an exclusive `&mut PgConnection`, and unifying the code path
+    /// keeps the handler simple. In practice two short queries on
+    /// one connection are usually faster than two pool round-trips
+    /// anyway, so the regression is bounded; latency-sensitive
+    /// callers can opt out of the page-number COUNT entirely with
+    /// [`Self::cursor_pagination`].
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str) -> Router {

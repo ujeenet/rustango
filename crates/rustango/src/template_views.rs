@@ -307,6 +307,28 @@ impl ListView {
     /// prefix so a refresh after the redirect doesn't replay the
     /// action.
     ///
+    /// ## Destructive-action UX (built-in `delete_selected`)
+    ///
+    /// **The current implementation runs every action immediately
+    /// on POST — no confirmation step.** Django admin ships a
+    /// confirmation page for `delete_selected` (select rows →
+    /// submit → "are you sure?" page → confirm → delete). The
+    /// rustango v0.30.4 v1 of bulk actions skips that intermediate
+    /// page. Until a `confirm_template` builder lands, the
+    /// recommended pattern is:
+    ///
+    /// 1. Add a `<confirm>` JS handler in the template:
+    ///    `<form onsubmit="return confirmDestructive(this)">`
+    /// 2. Or wrap the destructive action with a custom action
+    ///    handler that spawns its own confirmation route via
+    ///    [`Self::action`] and only calls the framework's
+    ///    `delete_selected` after confirmation.
+    ///
+    /// Tracking item: a `with_delete_confirmation(true)` flag that
+    /// renders an inline confirmation page when the form's `action
+    /// = delete_selected` POST arrives without a `confirmed = true`
+    /// flag. v0.31 candidate.
+    ///
     /// ```rust,ignore
     /// ListView::for_model(Post::SCHEMA)
     ///     .bulk_actions(true)               // enables built-in delete_selected
@@ -954,6 +976,23 @@ impl CreateView {
     /// `min_length` / `regex` / custom-validator-fn / cross-field
     /// validators all flow into the form's error map.
     ///
+    /// ## What `.form::<F>()` does NOT do (yet)
+    ///
+    /// The parsed `F` value is **discarded** after validation —
+    /// only its `parse` method's pass/fail outcome is consumed.
+    /// The actual SQL INSERT still uses the framework's schema-
+    /// driven type coercion path
+    /// ([`crate::forms::collect_values`]), so `F`'s typed fields
+    /// are not the source of truth for column values. Differences
+    /// between `F` and the model schema (e.g. `F` has a
+    /// `confirm_password` field with no model column, or `F`'s
+    /// `i32 score` differs from the model's `i64 score`) are
+    /// silently ignored on the SQL side. Full Django-style
+    /// `ModelForm`-as-source-of-truth is a future enhancement;
+    /// for now `.form::<F>()` is a *validation-only* hook.
+    ///
+    /// ## Example
+    ///
     /// ```ignore
     /// #[derive(rustango::Form)]
     /// pub struct PostForm {
@@ -964,7 +1003,7 @@ impl CreateView {
     /// }
     ///
     /// CreateView::for_model(Post::SCHEMA)
-    ///     .form::<PostForm>()
+    ///     .form::<PostForm>()    // F's validators run; F's parsed value is dropped
     ///     .router("/posts", tera, pool)
     /// ```
     #[must_use]

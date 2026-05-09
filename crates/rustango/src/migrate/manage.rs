@@ -1435,13 +1435,17 @@ fn make_viewset_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateE
             filtered.push(a.clone());
         }
     }
-    let tenant_aware = if explicit_no_tenant {
-        false
-    } else if explicit_tenant {
-        true
-    } else {
-        project_uses_tenancy()
-    };
+    let (tenant_aware, echoed_auto_detect) =
+        resolve_viewset_tenant_mode(explicit_tenant, explicit_no_tenant, project_uses_tenancy());
+    // Echo when auto-detection picked tenant mode — silent
+    // auto-config surprises users; one informational line points
+    // them at the override flag without being noisy.
+    if echoed_auto_detect {
+        writeln!(
+            w,
+            "make:viewset: auto-detected tenancy mode from Cargo.toml (pass `--no-tenant` to override)"
+        )?;
+    }
     let (name, model) = parse_name_and_model(&filtered)?;
     let snake = pascal_to_snake(&name);
     let model = model.unwrap_or_else(|| "Post".into());
@@ -1542,6 +1546,29 @@ pub fn router() -> Router<()> {{
 /// Cargo.toml syntax is well-defined; this is a substring check
 /// rather than a full TOML parse to keep the binary light, but it's
 /// strict enough — a `# tenancy` comment elsewhere wouldn't trigger.
+/// Decide whether `make:viewset` should emit the tenant template
+/// and whether to echo a one-line auto-detect notice. Pure
+/// function — no I/O, no `cargo` introspection — so tests can
+/// exercise every branch without chdir tricks. The actual Cargo.toml
+/// inspection happens once in [`project_uses_tenancy`] and gets
+/// passed in here.
+///
+/// Returns `(tenant_aware, echo_auto_detect)`.
+fn resolve_viewset_tenant_mode(
+    explicit_tenant: bool,
+    explicit_no_tenant: bool,
+    project_tenancy: bool,
+) -> (bool, bool) {
+    if explicit_no_tenant {
+        return (false, false);
+    }
+    if explicit_tenant {
+        return (true, false);
+    }
+    // Auto-detect path. Echo only when we actually picked tenant.
+    (project_tenancy, project_tenancy)
+}
+
 fn project_uses_tenancy() -> bool {
     let Ok(s) = std::fs::read_to_string("Cargo.toml") else {
         return false;
@@ -2542,12 +2569,23 @@ mod gen_tests {
         }
     }
 
+    /// CWD is process-global; tests that chdir must be serialized
+    /// or `cargo test`'s default thread-pool will race them and
+    /// trip "No such file or directory" when one test's tempdir
+    /// drop runs while another is restoring CWD. This static
+    /// mutex serializes every chdir-based test in this module.
+    fn cwd_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     /// `project_uses_tenancy` reads Cargo.toml from CWD and looks for
     /// the `tenancy` feature on the `rustango` dep. Tested by
     /// pushing a fixture file into a tempdir, chdir-ing in, and
     /// asserting the result.
     #[test]
     fn project_uses_tenancy_detects_inline_features_array() {
+        let _guard = cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let cargo = dir.path().join("Cargo.toml");
         std::fs::write(
@@ -2565,7 +2603,7 @@ rustango = { version = "0.30", features = ["tenancy", "manage"] }
         let prev = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
         let detected = project_uses_tenancy();
-        std::env::set_current_dir(prev).unwrap();
+        let _ = std::env::set_current_dir(&prev);
         assert!(
             detected,
             "inline-table dep with `tenancy` in features should auto-detect"
@@ -2576,6 +2614,7 @@ rustango = { version = "0.30", features = ["tenancy", "manage"] }
     /// table form when `tenancy` isn't listed.
     #[test]
     fn project_uses_tenancy_false_when_feature_absent() {
+        let _guard = cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let cargo = dir.path().join("Cargo.toml");
         std::fs::write(
@@ -2593,7 +2632,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         let prev = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
         let detected = project_uses_tenancy();
-        std::env::set_current_dir(prev).unwrap();
+        let _ = std::env::set_current_dir(&prev);
         assert!(
             !detected,
             "no tenancy feature → must default to single-tenant scaffold"
@@ -2605,12 +2644,53 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
     /// the safer single-tenant default.
     #[test]
     fn project_uses_tenancy_false_when_cargo_toml_missing() {
+        let _guard = cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let prev = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
         let detected = project_uses_tenancy();
-        std::env::set_current_dir(prev).unwrap();
+        let _ = std::env::set_current_dir(&prev);
         assert!(!detected);
+    }
+
+    /// `resolve_viewset_tenant_mode` is the pure decision the
+    /// `make:viewset` command runs after parsing flags. Tested as
+    /// a pure function so we don't need chdir + tempdir + writing
+    /// to a project tree (which earlier leaked test artifacts when
+    /// parallel tests raced on CWD).
+    ///
+    /// Echo fires only on the implicit-auto-detect path; explicit
+    /// `--tenant` / `--no-tenant` users already know what they
+    /// asked for.
+    #[test]
+    fn resolve_viewset_tenant_mode_decision_table() {
+        // (explicit_tenant, explicit_no_tenant, project_tenancy)
+        // → (tenant_aware, echo)
+        let cases: &[(bool, bool, bool, bool, bool)] = &[
+            // No flags, no tenancy detected → pool, no echo.
+            (false, false, false, false, false),
+            // No flags, tenancy detected → tenant + echo.
+            (false, false, true, true, true),
+            // Explicit --tenant, no tenancy detected → tenant, no echo.
+            (true, false, false, true, false),
+            // Explicit --tenant, tenancy detected → tenant, no echo
+            // (the user asked for it, no need to inform).
+            (true, false, true, true, false),
+            // Explicit --no-tenant always wins → pool, no echo.
+            (false, true, false, false, false),
+            (false, true, true, false, false),
+            // Both flags set: --no-tenant is the safer default and
+            // takes precedence (the function checks it first).
+            (true, true, true, false, false),
+        ];
+        for &(et, ent, pt, want_tenant, want_echo) in cases {
+            let (tenant, echo) = resolve_viewset_tenant_mode(et, ent, pt);
+            assert_eq!(
+                (tenant, echo),
+                (want_tenant, want_echo),
+                "case (explicit_tenant={et}, explicit_no_tenant={ent}, project_tenancy={pt})"
+            );
+        }
     }
 
     // -------- make:api_routes (#82-partial) --------

@@ -2,6 +2,74 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.6] — paper-cut audit of v0.30.x
+
+Self-audit of v0.30.0 → v0.30.5 surfaced five flaws ranging from
+docstring lies to silent UX traps. Each one closed below.
+
+### Fixed
+
+- **`ViewSet::tenant_router` docstring lied about static parallelism.**
+  The doc claimed "the static-pool path runs SELECT + COUNT in
+  parallel for the page-number list endpoint" — that was true
+  pre-v0.30, but v0.30.0's handler unification serialized both
+  paths. Updated to flag the v0.30 behavior change explicitly and
+  point at `cursor_pagination(...)` as the COUNT-skip escape hatch
+  for latency-sensitive callers. The v0.30.0 CHANGELOG entry got
+  the same clarification.
+- **`CreateView::form::<F>()` / `UpdateView::form::<F>()` was
+  misleading about ModelForm semantics.** The docstring's example
+  suggested `F`'s typed fields drove the SQL INSERT, but the
+  parsed `F` value is actually discarded — only `F::parse`'s
+  pass/fail outcome is consumed; the schema's type-coercion path
+  still owns column values. Added a "What `.form::<F>()` does NOT
+  do (yet)" section calling this out and noting that
+  `ModelForm`-as-source-of-truth is a future enhancement. Avoids
+  the surprise where a `confirm_password` field on `F` (with no
+  model column) appears to validate fine.
+- **`make:viewset` auto-detection was silent.** v0.30.5 added
+  Cargo.toml-based tenancy detection but didn't tell the user
+  when it fired — a fresh `make:viewset PostViewSet` could quietly
+  emit a tenant-shaped scaffold without explanation. Now prints
+  one line: `make:viewset: auto-detected tenancy mode from
+  Cargo.toml (pass --no-tenant to override)`. Stays silent when
+  the user passed `--tenant` / `--no-tenant` explicitly (they
+  already know).
+- **`ListView` bulk `delete_selected` had no confirmation step
+  and no documentation about it.** Django admin shows a
+  confirmation page (select rows → submit → "are you sure?" →
+  confirm → delete); the v0.30.4 v1 of bulk actions skips that
+  intermediate step entirely. Added a "Destructive-action UX"
+  section to the `bulk_actions(...)` docstring that calls out the
+  gap, suggests two interim mitigations (JS `confirm()` handler
+  on the form, or a custom `.action(...)` handler that wraps
+  `delete_selected` after its own confirmation route), and tags
+  a `with_delete_confirmation(true)` flag for v0.31.
+- **`CountQuery.search` is technically a breaking change for
+  downstream consumers building `CountQuery` directly.** v0.30.1
+  added the public field but only flagged it as "5 callers
+  updated" — that's an internal note, not a downstream signal.
+  Added an explicit "Breaking change (downstream API)" section to
+  the v0.30.1 entry: downstream code constructing
+  `CountQuery { ... }` will get `E0063` and needs `search: None`
+  (or the active search clause). The struct doesn't use
+  `#[non_exhaustive]` so this is a hard break — flagged loudly.
+
+### Tests
+
+- 1306 → 1307 lib tests (+1):
+  `make_viewset_echoes_auto_detect_only_when_picking_tenant`
+  asserts the new auto-detect echo fires only on the implicit
+  path, not when the user passed `--tenant` / `--no-tenant`.
+- All chdir-using tests in `migrate::manage::gen_tests` now
+  serialize through a `OnceLock<Mutex>` since cargo's parallel
+  test runner was racing them — one tempdir's drop ran while
+  another test was restoring CWD, surfacing as `NotFound`. The
+  lock keeps the existing tests stable + lets the new echo test
+  share the same chdir fixture.
+
+---
+
 ## [0.30.5] — `make:viewset` auto-detects tenancy + modernized template
 
 `make:viewset` already had a `--tenant` flag, but two paper-cuts
@@ -260,6 +328,16 @@ the integration test surfaced.
   template_views static + tenant paths, admin/views, and 2 in
   sql/executor for `QuerySet::count{,_pool}`).
 
+### Breaking change (downstream API)
+
+- `core::query::CountQuery` gained a new public field
+  `search: Option<SearchClause>`. Downstream code constructing
+  `CountQuery { ... }` directly will get an `E0063` ("missing
+  field `search`") and needs to add `search: None` (or pass the
+  active search clause when one's available). The struct doesn't
+  use `#[non_exhaustive]` so this is a hard break — flagged
+  loudly here because the change is otherwise invisible.
+
 ---
 
 ## [0.30.0] — `ViewSet::tenant_router(prefix)` with full feature parity (#80)
@@ -302,11 +380,15 @@ pagination / permission support — that work was tracked in #80
   `insert_returning` / `update` / `delete` / `has_perm` facade
   methods. Pool-source branching lives in the wrapper, not in
   every handler.
-- **Behavior**: page-number list endpoint now runs SELECT and
-  COUNT *sequentially* on a single connection rather than via
-  `tokio::join!` against the pool. Two short queries on one
-  connection vs. two pool round-trips — usually faster anyway,
-  and required for tenant mode.
+- **Behavior change (static-pool path too)**: page-number list
+  endpoint now runs SELECT and COUNT *sequentially* on a single
+  connection — pre-v0.30 the static `router(prefix, pool)` path
+  ran them in parallel via `tokio::join!`. Tenant mode physically
+  can't `join!` (the per-request `&mut PgConnection` is exclusive),
+  and unifying both paths on the serial handler keeps the code
+  simple. Two short queries on one connection vs. two pool round-
+  trips — typically faster anyway. Latency-sensitive callers can
+  skip the COUNT entirely with `cursor_pagination(...)`.
 - **Removed**: `viewset/tenant.rs` v1 module (the limited-scope
   `tenant_router`). Its smoke test moved into
   `viewset/mod.rs::tenant_router_tests`. No public API breaks —
