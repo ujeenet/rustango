@@ -2,6 +2,42 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.29.11] — macro-time validation for `#[rustango(column = "...")]`
+
+The same `[a-zA-Z_][a-zA-Z0-9_]*` rule the macro applies to
+`#[rustango(table = "...")]` (#65, v0.27.3) now also applies to
+`#[rustango(column = "...")]` field renames. Hyphens / spaces / dots
+in column names compile fine on the SQL CREATE TABLE side (Postgres
+double-quotes the identifier) but break downstream FK / index name
+derivation in `migrate::ddl`, which emits `<table>_<column>_fkey`
+unquoted. Same fail-fast rule as the table check — the only safe
+path is the only path.
+
+### Added
+
+- `validate_sql_identifier(name, kind, span)` helper in the macro
+  crate, generalized from the existing `validate_table_name`.
+  `kind` is `"table"` or `"column"` so the error message points at
+  the right attribute. The old `validate_table_name` is now a
+  one-line wrapper that delegates.
+
+### Errors look like
+
+```
+error: column name `foo-bar` contains invalid character '-' — SQL
+       identifiers must match `[a-zA-Z_][a-zA-Z0-9_]*`. Hyphens in
+       particular break FK / index name derivation downstream; use
+       underscores instead (e.g. `foo_bar`)
+```
+
+### Tests
+
+- 1289 lib tests pass (no count change — the validator is exercised
+  via every existing `#[derive(Model)]` use site, all of which have
+  conformant column names).
+
+---
+
 ## [0.29.10] — `Cli::with_csrf()` builder
 
 Form-driven projects (anything using `template_views` HTML CBVs)

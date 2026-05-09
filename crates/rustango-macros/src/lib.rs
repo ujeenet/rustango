@@ -3907,7 +3907,9 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("column") {
                 let s: LitStr = meta.value()?.parse()?;
-                out.column = Some(s.value());
+                let name = s.value();
+                validate_sql_identifier(&name, "column", s.span())?;
+                out.column = Some(name);
                 return Ok(());
             }
             if meta.path.is_ident("primary_key") {
@@ -4119,10 +4121,18 @@ struct FieldInfo<'a> {
 ///
 /// Backlog item #65.
 fn validate_table_name(name: &str, span: proc_macro2::Span) -> syn::Result<()> {
+    validate_sql_identifier(name, "table", span)
+}
+
+/// Reject SQL identifiers that compile but break downstream SQL
+/// generation. Same rule for tables and columns: `[a-zA-Z_][a-zA-Z0-9_]*`.
+/// `kind` is "table" / "column" — used for the error message so users
+/// see which attribute caused the failure.
+fn validate_sql_identifier(name: &str, kind: &str, span: proc_macro2::Span) -> syn::Result<()> {
     if name.is_empty() {
         return Err(syn::Error::new(
             span,
-            "`table = \"\"` is not a valid SQL identifier",
+            format!("`{kind} = \"\"` is not a valid SQL identifier"),
         ));
     }
     let mut chars = name.chars();
@@ -4130,7 +4140,7 @@ fn validate_table_name(name: &str, span: proc_macro2::Span) -> syn::Result<()> {
     if !(first.is_ascii_alphabetic() || first == '_') {
         return Err(syn::Error::new(
             span,
-            format!("table name `{name}` must start with a letter or underscore (got {first:?})",),
+            format!("{kind} name `{name}` must start with a letter or underscore (got {first:?})"),
         ));
     }
     for c in chars {
@@ -4138,7 +4148,7 @@ fn validate_table_name(name: &str, span: proc_macro2::Span) -> syn::Result<()> {
             return Err(syn::Error::new(
                 span,
                 format!(
-                    "table name `{name}` contains invalid character {c:?} — \
+                    "{kind} name `{name}` contains invalid character {c:?} — \
                      SQL identifiers must match `[a-zA-Z_][a-zA-Z0-9_]*`. \
                      Hyphens in particular break FK / index name derivation \
                      downstream; use underscores instead (e.g. `{}`)",
