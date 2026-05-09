@@ -317,10 +317,18 @@ rustango::manage::Cli::new()
     .run().await
 ```
 
-Today `with_settings` consumes `Settings.server.bind`. Resolution
-priority for the bind address (most-specific wins): explicit
-`.bind(...)` call after `.with_settings(...)` → `RUSTANGO_BIND` env
-var → `Settings.server.bind` from TOML → hardcoded `0.0.0.0:8080`.
+Today `with_settings` consumes:
+
+- **`Settings.server.bind`** — bind address. Resolution: explicit
+  `.bind(...)` after `.with_settings(...)` → `RUSTANGO_BIND` env →
+  `Settings.server.bind` → hardcoded `0.0.0.0:8080`.
+- **`Settings.routes`** (tenancy projects) — pick the preset
+  (`legacy_preset = true` → `RouteConfig::legacy()`, otherwise the
+  friendly `default()`), then layer per-field overrides
+  (`login_url`, `admin_url`, …) on top. An explicit `.routes(rc)`
+  call BEFORE `.with_settings(...)` is preserved as the base, so
+  TOML overrides layer on top of any code-side construction.
+
 Future fields land here as the wiring catches up — the method is
 forward-compatible because every `Settings` field is `Option`-typed
 (missing keys fall through, don't reset).

@@ -168,6 +168,16 @@ impl Cli {
                 self.bind = bind.to_owned();
             }
         }
+
+        // Settings.routes → RouteConfig. Build the right preset
+        // (friendly default / legacy v0.28) and apply per-field
+        // overrides on top, so the TOML can mix-and-match.
+        // Single-tenant builds (no `tenancy` feature) skip this
+        // branch — RouteConfig is a tenancy-only construct.
+        #[cfg(feature = "tenancy")]
+        {
+            self.routes = Some(routes_from_settings(&s.routes, self.routes.take()));
+        }
         self
     }
 
@@ -358,6 +368,66 @@ impl Default for Cli {
     }
 }
 
+/// Build a [`crate::tenancy::RouteConfig`] from a
+/// [`crate::config::RoutesSettings`] section. Used by
+/// [`Cli::with_settings`] to translate the declarative TOML
+/// (`legacy_preset = true` + per-field overrides) into the
+/// runtime config.
+///
+/// Resolution order:
+/// 1. Pick the base preset — `legacy()` if `legacy_preset = true`,
+///    `default()` (friendly, post-#85) otherwise.
+/// 2. If `existing` is supplied (the user already called
+///    [`Cli::routes`]), use it as the base instead — explicit
+///    code-side calls win over `with_settings`.
+/// 3. Apply each per-field override that's `Some(...)`.
+///
+/// This way TOML-only projects don't need any code wiring;
+/// projects that want code-side construction can keep doing it; and
+/// hybrid projects can mix (e.g. set the apex via env, override
+/// just `admin_url` in TOML).
+#[cfg(all(feature = "config", feature = "tenancy"))]
+fn routes_from_settings(
+    s: &crate::config::RoutesSettings,
+    existing: Option<crate::tenancy::RouteConfig>,
+) -> crate::tenancy::RouteConfig {
+    use crate::tenancy::RouteConfig;
+    let mut rc = if let Some(rc) = existing {
+        // Explicit `.routes(...)` call already happened; honor it
+        // as the base + just layer per-field TOML overrides.
+        rc
+    } else if matches!(s.legacy_preset, Some(true)) {
+        RouteConfig::legacy()
+    } else {
+        RouteConfig::default()
+    };
+    if let Some(v) = s.login_url.as_deref() {
+        rc.login_url = v.to_owned();
+    }
+    if let Some(v) = s.logout_url.as_deref() {
+        rc.logout_url = v.to_owned();
+    }
+    if let Some(v) = s.admin_url.as_deref() {
+        rc.admin_url = v.to_owned();
+    }
+    if let Some(v) = s.audit_url.as_deref() {
+        rc.audit_url = v.to_owned();
+    }
+    if let Some(v) = s.static_url.as_deref() {
+        rc.static_url = v.to_owned();
+    }
+    if let Some(v) = s.brand_url.as_deref() {
+        rc.brand_url = v.to_owned();
+    }
+    if let Some(v) = s.change_password_url.as_deref() {
+        rc.change_password_url = v.to_owned();
+    }
+    if let Some(v) = s.impersonation_handoff_url.as_deref() {
+        rc.impersonation_handoff_url = v.to_owned();
+    }
+    rc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,6 +499,59 @@ mod tests {
         s.server.bind = Some("127.0.0.1:9090".into());
         let cli = Cli::new().with_settings(&s).bind("127.0.0.1:1111");
         assert_eq!(cli.bind, "127.0.0.1:1111");
+    }
+
+    /// `Settings.routes.legacy_preset = true` makes
+    /// `Cli::with_settings` produce a RouteConfig matching the v0.28
+    /// `__`-prefixed shape — without any code-side .routes() call.
+    #[cfg(all(feature = "config", feature = "tenancy"))]
+    #[test]
+    fn with_settings_routes_legacy_preset() {
+        let mut s = crate::config::Settings::default();
+        s.routes.legacy_preset = Some(true);
+        let cli = Cli::new().tenancy().with_settings(&s);
+        let rc = cli.routes.expect("routes set by with_settings");
+        assert_eq!(rc.login_url, "/__login");
+        assert_eq!(rc.admin_url, "/__admin");
+    }
+
+    /// Per-field overrides in TOML layer on top of the chosen preset.
+    #[cfg(all(feature = "config", feature = "tenancy"))]
+    #[test]
+    fn with_settings_routes_per_field_override() {
+        let mut s = crate::config::Settings::default();
+        s.routes.admin_url = Some("/manage".into());
+        s.routes.login_url = Some("/sign-in".into());
+        let cli = Cli::new().tenancy().with_settings(&s);
+        let rc = cli.routes.expect("routes set");
+        assert_eq!(rc.admin_url, "/manage");
+        assert_eq!(rc.login_url, "/sign-in");
+        // Non-overridden fields fall through to the friendly default.
+        assert_eq!(rc.audit_url, "/audit");
+        assert_eq!(rc.impersonation_handoff_url, "/_impersonation_handoff");
+    }
+
+    /// An explicit `.routes(custom)` call BEFORE `.with_settings(...)`
+    /// is preserved as the base — TOML overrides layer on top.
+    #[cfg(all(feature = "config", feature = "tenancy"))]
+    #[test]
+    fn explicit_routes_then_with_settings_layers_overrides() {
+        use crate::tenancy::RouteConfig;
+        let mut base = RouteConfig::legacy();
+        base.basic_auth_realm = "MyApp".into();
+        let mut s = crate::config::Settings::default();
+        s.routes.admin_url = Some("/console".into());
+        let cli = Cli::new().tenancy().routes(base).with_settings(&s);
+        let rc = cli.routes.expect("routes set");
+        assert_eq!(
+            rc.basic_auth_realm, "MyApp",
+            "explicit .routes() base preserved"
+        );
+        assert_eq!(rc.admin_url, "/console", "TOML override applied");
+        assert_eq!(
+            rc.login_url, "/__login",
+            "non-overridden legacy field preserved"
+        );
     }
 
     #[test]

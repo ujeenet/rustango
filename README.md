@@ -359,14 +359,21 @@ let cfg = rustango::config::Settings::load("prod")?;
 // Resolved tier (useful for telemetry / version pages):
 let tier = rustango::config::Settings::current_env_tier();
 
-// Wire into Cli — applies Settings.server.bind (env still wins,
-// explicit .bind() after this call still wins). Falls back silently
-// to Cli defaults when config files are missing.
+// Wire into Cli. Applies, today: Settings.server.bind (env still
+// wins, explicit .bind() after this call still wins) and
+// Settings.routes (tenancy projects — legacy_preset + per-field
+// URL overrides → tenancy::RouteConfig). Falls back silently to
+// Cli defaults when config files are missing.
 rustango::manage::Cli::new()
     .with_settings_from_env()
     .api(urls::api())
     .run().await
 ```
+
+Apps using only TOML-side routes config no longer need to call
+`.routes(RouteConfig::legacy())` from code — set
+`[routes] legacy_preset = true` in `prod_settings.toml` and
+`with_settings_from_env()` picks it up.
 
 ### Sections
 
