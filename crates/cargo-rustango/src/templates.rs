@@ -476,3 +476,156 @@ pub const BOOTSTRAP_REGISTRY_MIGRATION: &str =
 /// each tenant's schema/database when `manage migrate-tenants` runs.
 pub const BOOTSTRAP_TENANT_MIGRATION: &str =
     include_str!("../templates/0001_rustango_tenant_initial.json");
+
+// ---------------- Tiered settings files (#87) ----------------
+//
+// Every fresh project ships with four config files: `default.toml`
+// for shared knobs + one `<env>_settings.toml` per tier (dev /
+// staging / prod). The runtime picks the tier from `RUSTANGO_ENV`
+// (default `dev`). Sensible-by-default values mean a freshly-
+// scaffolded `cargo run` works without any TOML edits; production
+// deploys override the prod tier with their own values.
+
+/// `config/default.toml` — shared values that don't depend on tier.
+/// Intentionally sparse — every section is optional and defaults to
+/// the section's `Default` impl. Tier files override here.
+pub fn config_default_toml(name: &str) -> String {
+    format!(
+        r##"# {name} — shared defaults across every tier
+# (`config/default.toml` is loaded first; `config/<RUSTANGO_ENV>_settings.toml`
+# overrides on top.) Every section is optional — uncomment + edit
+# what you need.
+
+# [database]
+# url           = "postgres://localhost/{name}"
+# pool_min_size = 2
+# pool_max_size = 20
+
+# [admin]
+# allowed_tables   = []        # empty = every registered model
+# read_only_tables = []
+
+# [server]
+# bind                  = "127.0.0.1:8080"
+# request_timeout_secs  = 30
+# max_body_bytes        = 2097152      # 2 MiB
+
+# [auth]
+# argon2_memory_kib  = 19456    # OWASP 2024 floor
+# argon2_iterations  = 2
+# lockout_threshold  = 5
+# lockout_duration_secs = 900
+
+# [auth.jwt]
+# access_ttl_secs   = 900       # 15 min
+# refresh_ttl_secs  = 604800    # 7 days
+# issuer            = "{name}"
+
+# [brand]
+# name           = "{name}"
+# tagline        = ""
+# primary_color  = "#2c6fb0"
+# theme_mode     = "auto"       # auto | light | dark
+
+# [security]
+# headers_preset       = "strict"
+# hsts_max_age_secs    = 31536000     # 1 year
+# cors_allowed_origins = []
+
+# [routes]
+# legacy_preset = false
+# # Per-field overrides: login_url / admin_url / audit_url / static_url /
+# # brand_url / change_password_url / impersonation_handoff_url
+
+# [audit]
+# retention_days = 90
+"##
+    )
+}
+
+/// `config/dev_settings.toml` — local development. Loose defaults:
+/// short JWT TTLs (so token-rotation bugs surface early), no HSTS
+/// (so http→https rebinds don't lock the browser), debug-friendly
+/// settings.
+pub fn config_dev_settings_toml(name: &str) -> String {
+    format!(
+        r##"# {name} — local development tier
+# Loaded when RUSTANGO_ENV=dev (the default when unset).
+
+[database]
+url = "postgres://postgres:postgres@localhost:5432/{name}_dev"
+
+[server]
+bind = "127.0.0.1:8080"
+
+[security]
+# Drop strict headers in dev so http<->https rebinds don't lock the
+# browser into HSTS.
+headers_preset    = "dev"
+hsts_max_age_secs = 0
+
+[brand]
+# Make the dev tier visually distinguishable from prod.
+tagline = "(dev)"
+"##
+    )
+}
+
+/// `config/staging_settings.toml` — production-like but pointed at
+/// a separate database, with shorter retention.
+pub fn config_staging_settings_toml(name: &str) -> String {
+    format!(
+        r##"# {name} — staging tier
+# Loaded when RUSTANGO_ENV=staging. Production-shape security
+# headers, but pointed at a separate database with shorter retention
+# so QA volume doesn't bleed into prod analytics.
+
+# [database]
+# url = "postgres://staging-host/{name}_staging"
+
+[server]
+bind = "0.0.0.0:8080"
+
+[security]
+headers_preset    = "strict"
+hsts_max_age_secs = 31536000
+
+[brand]
+tagline = "(staging)"
+
+[audit]
+retention_days = 30
+"##
+    )
+}
+
+/// `config/prod_settings.toml` — production. Strict defaults; expects
+/// real values (DATABASE_URL, secret_key, etc.) supplied via env
+/// vars or out-of-band secret management. The TOML purposefully
+/// leaves the database url commented — operators set it via
+/// `RUSTANGO__DATABASE__URL` or a secrets manager.
+pub fn config_prod_settings_toml(name: &str) -> String {
+    format!(
+        r##"# {name} — production tier
+# Loaded when RUSTANGO_ENV=prod. Strict-by-default; sensitive values
+# (database url, secret key) come from RUSTANGO__* env vars or your
+# secrets manager — leaving them out of source control.
+
+# [database]
+# url = "set via RUSTANGO__DATABASE__URL or your secrets manager"
+pool_min_size = 5
+pool_max_size = 50
+
+[server]
+bind                 = "0.0.0.0:8080"
+request_timeout_secs = 30
+
+[security]
+headers_preset    = "strict"
+hsts_max_age_secs = 31536000
+
+[audit]
+retention_days = 365
+"##
+    )
+}

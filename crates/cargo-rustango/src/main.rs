@@ -242,6 +242,31 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     write(root, "Dockerfile", templates::dockerfile())?;
     write(root, "README.md", &templates::readme(name, template))?;
 
+    // Tiered settings (#87) — config/default.toml for shared knobs +
+    // one <env>_settings.toml per tier. Runtime picks the tier from
+    // RUSTANGO_ENV (default `dev`), so a fresh `cargo run` works
+    // without any TOML edits.
+    write(
+        root,
+        "config/default.toml",
+        &templates::config_default_toml(name),
+    )?;
+    write(
+        root,
+        "config/dev_settings.toml",
+        &templates::config_dev_settings_toml(name),
+    )?;
+    write(
+        root,
+        "config/staging_settings.toml",
+        &templates::config_staging_settings_toml(name),
+    )?;
+    write(
+        root,
+        "config/prod_settings.toml",
+        &templates::config_prod_settings_toml(name),
+    )?;
+
     fs::create_dir_all(root.join("migrations")).map_err(|e| format!("create migrations/: {e}"))?;
 
     write(root, "src/main.rs", templates::main_rs(template))?;
@@ -315,6 +340,38 @@ mod tests {
             assert!(
                 dep.contains(&needle),
                 "template {template:?} dep `{dep}` does not pin v{mm}"
+            );
+        }
+    }
+
+    /// Tiered settings (#87 slice 3) — every fresh project must
+    /// ship `default.toml` + the three `<env>_settings.toml` tiers.
+    /// The runtime auto-selects via `RUSTANGO_ENV`, defaulting to
+    /// `dev`, so `cargo run` Just Works without explicit env vars.
+    #[test]
+    fn config_templates_emit_default_plus_three_tiers() {
+        // Test the rendered bodies, not the on-disk write — keeps
+        // this a pure-string regression that doesn't need a tempdir.
+        for name in ["acme", "demo_app"] {
+            let default_body = templates::config_default_toml(name);
+            assert!(
+                default_body.contains(name),
+                "config_default_toml({name}) must mention the project name; got: {default_body}"
+            );
+            let dev = templates::config_dev_settings_toml(name);
+            assert!(
+                dev.contains("(dev)") || dev.contains("dev_settings"),
+                "dev tier should be visually distinguishable; got: {dev}"
+            );
+            let staging = templates::config_staging_settings_toml(name);
+            assert!(
+                staging.contains("staging") && staging.contains("retention_days"),
+                "staging tier missing retention_days; got: {staging}"
+            );
+            let prod = templates::config_prod_settings_toml(name);
+            assert!(
+                prod.contains("strict") && prod.contains("hsts_max_age_secs"),
+                "prod tier should default to strict security headers; got: {prod}"
             );
         }
     }
