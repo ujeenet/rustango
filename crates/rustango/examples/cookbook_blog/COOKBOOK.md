@@ -1440,6 +1440,31 @@ a captured pool) and mount via `.tenant_router(...)` instead of
 mounting via `.tenant_router()` — surfaces a clear runtime error
 on dispatch.
 
+#### FK display in list rows (v0.30.8)
+
+Admin-shape lists usually want to show the FK target's name, not
+its raw integer ID. Opt in with `.with_fk_display(true)`:
+
+```rust,ignore
+ListView::for_model(Post::SCHEMA)
+    .with_fk_display(true)               // adds `<col>_display` siblings
+    .router("/posts", tera, pool)
+```
+
+Each row's JSON now carries `<column>_display` for every FK on
+the schema, resolved via a batch `SELECT pk, display FROM
+<target> WHERE pk = ANY(...)` (one extra query per FK column per
+page). Templates render the display value with a graceful
+fallback:
+
+```html
+<td>{{ row.author_id_display | default(value=row.author_id) }}</td>
+```
+
+The `default(value=...)` keeps the template robust when the FK
+target is unregistered, lacks a `display` field, or points at a
+deleted row.
+
 #### Confirmation step for destructive actions (v0.30.7)
 
 `delete_selected` is a hard-to-undo operation; opt into a Django-

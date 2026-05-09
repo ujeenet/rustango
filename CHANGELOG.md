@@ -2,6 +2,81 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.8] — `ListView::with_fk_display` (FK columns resolve to target's display)
+
+Closes a visible UX gap in admin-shape lists: FK columns showed
+raw integer IDs (`42` for `author_id`) when the target model
+already had a `#[rustango(display = "...")]` field that would
+render as `"Ada Lovelace"`. The admin's regular list views resolve
+FK display via JOIN since v0.20; `template_views::ListView` now
+gets the same capability through a different (batch-query) path.
+
+### Added
+
+- **`ListView::with_fk_display(true)`** — opt-in flag. When on,
+  every FK / O2O column on the schema gets a sibling
+  `<column>_display` field stamped into each row's JSON,
+  resolved against the target model's
+  `#[rustango(display = "...")]` value. Templates render
+  `{{ row.author_id_display | default(value=row.author_id) }}`
+  to show `"Ada Lovelace"` instead of `42`.
+- **Implementation: post-query batch lookup**. Rather than
+  reusing the admin's JOIN-based path (which would change the
+  main SELECT's WHERE/ORDER/LIMIT semantics — JOINs can multiply
+  rows in subtle cases), v0.30.8 runs one extra `SELECT pk,
+  display FROM <target> WHERE pk = ANY(...)` per FK column per
+  page after the main rows come back. Cheap (1 indexed lookup
+  per FK target, batched across the page's rows) but not free.
+- Threaded through both `router(...)` (static pool) and
+  `tenant_router(...)` (per-request `Tenant::conn()`); the
+  display lookup uses the matching connection.
+
+### Behavior
+
+- Default off — existing projects pay no overhead.
+- FK targets that aren't registered in the inventory (e.g.
+  cross-binary refs, models in unloaded modules) are silently
+  skipped — the row gets no `_display` sibling for that column,
+  and templates fall back to the raw FK.
+- FK targets without a `display` field are silently skipped too.
+- NULL FK column values get no `_display` sibling (no lookup
+  possible).
+- Failed display lookups (driver / SQL errors) log via
+  `tracing::debug!` and skip the column — never surface a 500.
+  A missing `_display` is recoverable; templates fall back to
+  the raw FK.
+
+### Tests
+
+- 1310 → 1314 lib tests (+4 unit):
+  `with_fk_display_flag_default_off_then_on`,
+  `json_value_as_lookup_key_handles_numbers_and_strings`,
+  `json_value_to_sql_for_fk_pk_round_trips_common_pk_types`,
+  `stamp_display_into_rows_writes_sibling_only_when_resolved`.
+- Live integration test deferred (disk space ran out during
+  this session); the unit tests cover every pure helper +
+  the SQL fetch wrappers are simple `select_rows{,_on}` calls
+  whose shape is verified at compile time.
+
+### Recommended template usage
+
+```html
+<table>
+  {% for row in object_list %}
+    <tr>
+      <td>{{ row.title }}</td>
+      <td>{{ row.author_id_display | default(value=row.author_id) }}</td>
+    </tr>
+  {% endfor %}
+</table>
+```
+
+The `default(value=row.author_id)` filter keeps the template
+robust against the FK target being unregistered, having no
+display field, or being deleted (orphan FK).
+
+---
+
 ## [0.30.7] — `ListView::with_delete_confirmation` (Django two-step delete)
 
 Closes the destructive-action footgun documented in v0.30.6:

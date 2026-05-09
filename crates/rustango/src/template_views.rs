@@ -178,6 +178,17 @@ pub struct ListView {
     /// Default `<table>_confirm_bulk_delete.html`. Override via
     /// [`Self::with_delete_confirmation_template`].
     confirm_delete_template: Option<String>,
+    /// When `true`, every FK column on the schema gets a sibling
+    /// `<column>_display` field stamped into each row's JSON,
+    /// resolved against the FK target model's `#[rustango(display =
+    /// "...")]` value. Templates render
+    /// `{{ row.author_id_display | default(value=row.author_id) }}`
+    /// to show "Ada Lovelace" instead of `42`. Default off — the
+    /// resolution adds one extra `SELECT pk, display FROM <target>
+    /// WHERE pk = ANY(...)` per FK column per page, which is
+    /// usually cheap but isn't free. Opt in via
+    /// [`Self::with_fk_display`].
+    fk_display: bool,
 }
 
 impl ListView {
@@ -201,6 +212,7 @@ impl ListView {
             actions: Vec::new(),
             confirm_delete: false,
             confirm_delete_template: None,
+            fk_display: false,
         }
     }
 
@@ -430,6 +442,30 @@ impl ListView {
         self
     }
 
+    /// Stamp `<column>_display` sibling fields into each row's JSON
+    /// for every FK / O2O column on the schema, resolved against
+    /// the target model's `#[rustango(display = "...")]` field.
+    /// Lets templates render `{{ row.author_id_display }}`
+    /// (`"Ada Lovelace"`) instead of just `{{ row.author_id }}`
+    /// (`42`).
+    ///
+    /// Implementation: one extra `SELECT pk, display FROM <target>
+    /// WHERE pk = ANY(...)` per FK column per page, after the main
+    /// list SELECT. Cheap (1 indexed lookup per FK target, batched
+    /// across the page's rows) but not free — opt in only when the
+    /// templates actually need it.
+    ///
+    /// FK targets without a `display` field, or models not
+    /// registered in the inventory (e.g. cross-binary references),
+    /// are silently skipped — the row gets no `_display` sibling
+    /// for that column and templates can fall back to the raw FK.
+    /// NULL FK values are skipped too (no display lookup possible).
+    #[must_use]
+    pub fn with_fk_display(mut self, on: bool) -> Self {
+        self.fk_display = on;
+        self
+    }
+
     /// Tenancy counterpart to [`Self::action`] — handler runs
     /// against the per-request `&mut PgConnection` from the
     /// [`crate::extractors::Tenant`] extractor instead of a captured
@@ -565,7 +601,10 @@ async fn handle_list(
     };
 
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-    let object_list: Vec<Value> = rows.iter().map(|r| row_to_json(r, &fields)).collect();
+    let mut object_list: Vec<Value> = rows.iter().map(|r| row_to_json(r, &fields)).collect();
+    if state.vs.fk_display {
+        resolve_fk_displays_pool(state.vs.schema, &state.pool, &mut object_list).await;
+    }
 
     let total_pages = ((total - 1).max(0) / page_size) + 1;
     let mut ctx = Context::new();
@@ -2384,6 +2423,314 @@ fn coerce_pk_typed(
     }
 }
 
+/// Resolve `_display` sibling fields for every FK column on the
+/// schema. Mutates `object_list` in place: each row's JSON object
+/// gets `<column>_display` set to the FK target's display value
+/// when one resolves, or left absent when the target row is
+/// missing / unregistered / has no display field. Errors during
+/// the lookup are logged but don't fail the response — a missing
+/// `_display` is recoverable (templates fall back to the raw FK)
+/// while a 500 isn't.
+async fn resolve_fk_displays_pool(
+    schema: &'static ModelSchema,
+    pool: &PgPool,
+    object_list: &mut [Value],
+) {
+    let lookups = collect_fk_target_lookups(schema, object_list);
+    for fk in lookups {
+        let map = match fetch_fk_display_map_pool(&fk, pool).await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::debug!(
+                    target: "rustango::template_views",
+                    field = fk.local_field,
+                    target_table = fk.target_table,
+                    error = %e,
+                    "fk display lookup failed; templates fall back to raw FK"
+                );
+                continue;
+            }
+        };
+        stamp_display_into_rows(&fk, &map, object_list);
+    }
+}
+
+#[cfg(feature = "tenancy")]
+async fn resolve_fk_displays_conn(
+    schema: &'static ModelSchema,
+    conn: &mut crate::sql::sqlx::PgConnection,
+    object_list: &mut [Value],
+) {
+    let lookups = collect_fk_target_lookups(schema, object_list);
+    for fk in lookups {
+        let map = match fetch_fk_display_map_conn(&fk, conn).await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::debug!(
+                    target: "rustango::template_views",
+                    field = fk.local_field,
+                    target_table = fk.target_table,
+                    error = %e,
+                    "fk display lookup failed (tenant); templates fall back to raw FK"
+                );
+                continue;
+            }
+        };
+        stamp_display_into_rows(&fk, &map, object_list);
+    }
+}
+
+/// One FK column we need to resolve: which local field to read
+/// from each row, which target table+column to look up, and the
+/// distinct non-null source values that appeared in the page.
+struct FkLookup {
+    /// Local Rust field name on the source model — also the JSON
+    /// key in each row (rows are serialized via `row_to_json`
+    /// which keys by `field.name`).
+    local_field: &'static str,
+    target_table: &'static str,
+    target_pk_column: &'static str,
+    target_display_column: &'static str,
+    target_display_field_name: &'static str,
+    target_display_field_type: crate::core::FieldType,
+    /// Distinct stringified source values from the page (NULL
+    /// values are filtered out so the SQL doesn't bind a NULL
+    /// into the `ANY($1)` array).
+    distinct_values: Vec<Value>,
+}
+
+fn collect_fk_target_lookups(schema: &'static ModelSchema, object_list: &[Value]) -> Vec<FkLookup> {
+    use crate::core::Relation;
+    let mut out = Vec::new();
+    for field in schema.scalar_fields() {
+        let Some(rel) = field.relation else { continue };
+        let (to, on) = match rel {
+            Relation::Fk { to, on } | Relation::O2O { to, on } => (to, on),
+        };
+        let Some(target) = lookup_target_schema(to) else {
+            continue;
+        };
+        let Some(display_field) = target.display_field() else {
+            continue;
+        };
+        // The target's PK column is what we filter on; `on` from
+        // the Relation IR is the remote column the local FK
+        // references (usually the PK).
+        let mut distinct: Vec<Value> = Vec::new();
+        for row in object_list {
+            let Some(val) = row.get(field.name) else {
+                continue;
+            };
+            if val.is_null() {
+                continue;
+            }
+            if !distinct.iter().any(|v| v == val) {
+                distinct.push(val.clone());
+            }
+        }
+        if distinct.is_empty() {
+            continue;
+        }
+        out.push(FkLookup {
+            local_field: field.name,
+            target_table: target.table,
+            target_pk_column: on,
+            target_display_column: display_field.column,
+            target_display_field_name: display_field.name,
+            target_display_field_type: display_field.ty,
+            distinct_values: distinct,
+        });
+    }
+    out
+}
+
+/// Inventory walk to find the target model by table name. Mirrors
+/// what `admin::helpers::lookup_model` does but without the admin's
+/// scope filter (template_views isn't admin; it's a user-facing
+/// view that the user already chose to mount, so they've already
+/// decided the target is theirs to render).
+fn lookup_target_schema(table: &str) -> Option<&'static ModelSchema> {
+    crate::core::inventory::iter::<crate::core::ModelEntry>
+        .into_iter()
+        .find(|e| e.schema.table == table)
+        .map(|e| e.schema)
+}
+
+/// Run the FK display batch query against a static pool, return
+/// `(source_value_string → display_value)` map.
+async fn fetch_fk_display_map_pool(
+    fk: &FkLookup,
+    pool: &PgPool,
+) -> Result<HashMap<String, Value>, crate::sql::ExecError> {
+    let q = build_fk_display_query(fk);
+    let rows = select_rows(pool, &q).await?;
+    Ok(extract_fk_display_map(fk, &rows))
+}
+
+#[cfg(feature = "tenancy")]
+async fn fetch_fk_display_map_conn(
+    fk: &FkLookup,
+    conn: &mut crate::sql::sqlx::PgConnection,
+) -> Result<HashMap<String, Value>, crate::sql::ExecError> {
+    let q = build_fk_display_query(fk);
+    let rows = crate::sql::select_rows_on(conn, &q).await?;
+    Ok(extract_fk_display_map(fk, &rows))
+}
+
+fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
+    use crate::core::{Filter, Op};
+    // Synthesize a one-off `&'static ModelSchema` to use as the
+    // SelectQuery's model — actually no, we need a real schema
+    // because select_rows compiles the query against it. Use the
+    // target model's full schema (re-resolved below) and let the
+    // SQL writer project against the IN clause.
+    let target = lookup_target_schema(fk.target_table)
+        .expect("target table existed when collecting lookups");
+    SelectQuery {
+        model: target,
+        where_clause: WhereExpr::Predicate(Filter {
+            column: fk.target_pk_column,
+            op: Op::In,
+            value: SqlValue::List(
+                fk.distinct_values
+                    .iter()
+                    .map(json_value_to_sql_for_fk_pk)
+                    .collect(),
+            ),
+        }),
+        search: None,
+        joins: vec![],
+        order_by: vec![],
+        limit: None,
+        offset: None,
+    }
+}
+
+/// Convert a JSON-shaped value (read out of an object_list row)
+/// back into a `SqlValue` for re-binding into the FK lookup's
+/// `IN ($1)` clause. The JSON shape comes from `row_to_json`
+/// which serializes per FieldType, so we round-trip on the same
+/// type table.
+fn json_value_to_sql_for_fk_pk(v: &Value) -> SqlValue {
+    match v {
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                SqlValue::I64(i)
+            } else if let Some(u) = n.as_u64() {
+                SqlValue::I64(u as i64)
+            } else {
+                // Float PKs are unusual; bind as string and let PG cast.
+                SqlValue::String(n.to_string())
+            }
+        }
+        Value::String(s) => {
+            // Could be a UUID or a string PK. Try UUID first.
+            if let Ok(u) = uuid::Uuid::parse_str(s) {
+                SqlValue::Uuid(u)
+            } else {
+                SqlValue::String(s.clone())
+            }
+        }
+        _ => SqlValue::Null,
+    }
+}
+
+fn extract_fk_display_map(
+    fk: &FkLookup,
+    rows: &[crate::sql::sqlx::postgres::PgRow],
+) -> HashMap<String, Value> {
+    use crate::core::FieldType;
+    use crate::sql::sqlx::Row as _;
+    let mut map = HashMap::new();
+    for row in rows {
+        // Read the PK column as a string key (matches how the
+        // source FK value got stringified for the .iter().any
+        // distinct check).
+        let key: Option<String> = read_pk_as_string(row, fk.target_pk_column);
+        let Some(key) = key else { continue };
+        let display_val: Value = match fk.target_display_field_type {
+            FieldType::String => row
+                .try_get::<Option<String>, _>(fk.target_display_column)
+                .unwrap_or(None)
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+            FieldType::I64 => row
+                .try_get::<Option<i64>, _>(fk.target_display_column)
+                .unwrap_or(None)
+                .map(|n| Value::Number(n.into()))
+                .unwrap_or(Value::Null),
+            FieldType::I32 => row
+                .try_get::<Option<i32>, _>(fk.target_display_column)
+                .unwrap_or(None)
+                .map(|n| Value::Number(n.into()))
+                .unwrap_or(Value::Null),
+            FieldType::Uuid => row
+                .try_get::<Option<uuid::Uuid>, _>(fk.target_display_column)
+                .unwrap_or(None)
+                .map(|u| Value::String(u.to_string()))
+                .unwrap_or(Value::Null),
+            // Everything else: stringify what came back, best-effort.
+            _ => row
+                .try_get::<Option<String>, _>(fk.target_display_column)
+                .unwrap_or(None)
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        };
+        map.insert(key, display_val);
+    }
+    let _ = fk.target_display_field_name; // kept for future debug logging
+    map
+}
+
+fn read_pk_as_string(row: &crate::sql::sqlx::postgres::PgRow, column: &str) -> Option<String> {
+    use crate::sql::sqlx::Row as _;
+    if let Ok(Some(s)) = row.try_get::<Option<String>, _>(column) {
+        return Some(s);
+    }
+    if let Ok(Some(n)) = row.try_get::<Option<i64>, _>(column) {
+        return Some(n.to_string());
+    }
+    if let Ok(Some(n)) = row.try_get::<Option<i32>, _>(column) {
+        return Some(n.to_string());
+    }
+    if let Ok(Some(n)) = row.try_get::<Option<i16>, _>(column) {
+        return Some(n.to_string());
+    }
+    if let Ok(Some(u)) = row.try_get::<Option<uuid::Uuid>, _>(column) {
+        return Some(u.to_string());
+    }
+    None
+}
+
+/// Stringify a JSON value the same way `read_pk_as_string` does
+/// for SQL row values, so the lookup map's keys match the row's
+/// FK column values.
+fn json_value_as_lookup_key(v: &Value) -> Option<String> {
+    match v {
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn stamp_display_into_rows(fk: &FkLookup, map: &HashMap<String, Value>, object_list: &mut [Value]) {
+    let display_key = format!("{}_display", fk.local_field);
+    for row in object_list.iter_mut() {
+        let Some(obj) = row.as_object_mut() else {
+            continue;
+        };
+        let Some(fk_val) = obj.get(fk.local_field) else {
+            continue;
+        };
+        let Some(key) = json_value_as_lookup_key(fk_val) else {
+            continue;
+        };
+        if let Some(display) = map.get(&key) {
+            obj.insert(display_key.clone(), display.clone());
+        }
+    }
+}
+
 /// `confirmed=true` (case-insensitive) in the form payload short-
 /// circuits the bulk-delete confirmation render. The form values
 /// come in as `Vec<String>` because the same parser handles
@@ -2655,7 +3002,10 @@ mod tenant {
         };
 
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-        let object_list: Vec<Value> = rows.iter().map(|r| row_to_json(r, &fields)).collect();
+        let mut object_list: Vec<Value> = rows.iter().map(|r| row_to_json(r, &fields)).collect();
+        if state.vs.fk_display {
+            super::resolve_fk_displays_conn(state.vs.schema, conn, &mut object_list).await;
+        }
 
         let total_pages = ((total - 1).max(0) / page_size) + 1;
         let mut ctx = Context::new();
@@ -4452,6 +4802,114 @@ mod tests {
         );
         let lv2 = ListView::for_model(s).with_delete_confirmation_template("blog/confirm.html");
         assert_eq!(confirm_delete_template_name(&lv2), "blog/confirm.html");
+    }
+
+    // ---- FK display sibling resolution (#80, v0.30.8) ----
+
+    /// `with_fk_display(true)` flips the flag, default off.
+    #[test]
+    fn with_fk_display_flag_default_off_then_on() {
+        let s = schema_two_fields();
+        let lv = ListView::for_model(s);
+        assert!(!lv.fk_display, "default off");
+        let lv2 = ListView::for_model(s).with_fk_display(true);
+        assert!(lv2.fk_display);
+    }
+
+    /// `json_value_as_lookup_key` stringifies JSON numbers + strings
+    /// so the lookup map's keys match the FK column's values
+    /// regardless of integer vs UUID PK.
+    #[test]
+    fn json_value_as_lookup_key_handles_numbers_and_strings() {
+        assert_eq!(
+            json_value_as_lookup_key(&serde_json::json!(42)),
+            Some("42".to_string())
+        );
+        assert_eq!(
+            json_value_as_lookup_key(&serde_json::json!("550e8400-e29b-41d4-a716-446655440000")),
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
+        assert_eq!(
+            json_value_as_lookup_key(&serde_json::json!(null)),
+            None,
+            "NULL FK has no lookup key"
+        );
+        assert_eq!(json_value_as_lookup_key(&serde_json::json!(true)), None);
+    }
+
+    /// `json_value_to_sql_for_fk_pk` round-trips integer JSON →
+    /// SqlValue::I64 (the common FK shape) and string-shaped UUIDs
+    /// → SqlValue::Uuid (auto-detected via parse). Other strings
+    /// pass through as SqlValue::String.
+    #[test]
+    fn json_value_to_sql_for_fk_pk_round_trips_common_pk_types() {
+        match json_value_to_sql_for_fk_pk(&serde_json::json!(42)) {
+            SqlValue::I64(42) => {}
+            other => panic!("expected I64(42), got {other:?}"),
+        }
+        match json_value_to_sql_for_fk_pk(&serde_json::json!(
+            "550e8400-e29b-41d4-a716-446655440000"
+        )) {
+            SqlValue::Uuid(u) => assert_eq!(u.to_string(), "550e8400-e29b-41d4-a716-446655440000"),
+            other => panic!("expected Uuid, got {other:?}"),
+        }
+        match json_value_to_sql_for_fk_pk(&serde_json::json!("not-a-uuid")) {
+            SqlValue::String(s) => assert_eq!(s, "not-a-uuid"),
+            other => panic!("expected String, got {other:?}"),
+        }
+    }
+
+    /// `stamp_display_into_rows` walks a `Vec<Value>`, looks up
+    /// each row's FK column value in the map, and writes
+    /// `<column>_display` when a match exists. Missing keys
+    /// (NULL FK, target row missing) leave the row untouched.
+    #[test]
+    fn stamp_display_into_rows_writes_sibling_only_when_resolved() {
+        // Build a minimal FkLookup; field types don't matter for
+        // the stamping logic — only `local_field` is used.
+        let fk = FkLookup {
+            local_field: "author_id",
+            target_table: "tv_fk_author",
+            target_pk_column: "id",
+            target_display_column: "name",
+            target_display_field_name: "name",
+            target_display_field_type: crate::core::FieldType::String,
+            distinct_values: vec![],
+        };
+        let mut rows = vec![
+            serde_json::json!({"id": 1, "title": "first", "author_id": 7}),
+            serde_json::json!({"id": 2, "title": "second", "author_id": 99}),
+            serde_json::json!({"id": 3, "title": "third", "author_id": null}),
+        ];
+        let mut map: HashMap<String, serde_json::Value> = HashMap::new();
+        map.insert("7".into(), serde_json::json!("Alice"));
+        // No entry for 99 — target row missing.
+
+        stamp_display_into_rows(&fk, &map, &mut rows);
+
+        assert_eq!(
+            rows[0]["author_id_display"],
+            serde_json::json!("Alice"),
+            "resolved FK gets display sibling"
+        );
+        assert!(
+            rows[1]
+                .as_object()
+                .unwrap()
+                .get("author_id_display")
+                .is_none(),
+            "missing target row → no sibling stamped: {:?}",
+            rows[1]
+        );
+        assert!(
+            rows[2]
+                .as_object()
+                .unwrap()
+                .get("author_id_display")
+                .is_none(),
+            "NULL FK → no sibling stamped: {:?}",
+            rows[2]
+        );
     }
 
     /// `is_form_confirmed` accepts every reasonable truthy form
