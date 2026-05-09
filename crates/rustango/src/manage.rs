@@ -408,20 +408,15 @@ impl Cli {
     #[cfg(feature = "tenancy")]
     async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
         let api = self.api;
-        // For tenancy projects the registry pool is built inside
-        // `Server::Builder`; we don't have it here to feed
-        // `health_router`. Skip auto-mounting in tenancy mode for
-        // now — the tenant_router itself owns health concerns.
-        // (Wiring through `Server::Builder` is the follow-up if
-        // demand surfaces; today operators reach the registry
-        // pool via env vars and mount their own probe.)
-        let _ = self.health_endpoints;
         #[cfg(feature = "config")]
         let api = match self.settings_for_layers.as_ref() {
             Some(s) => apply_settings_layers(api, s),
             None => api,
         };
         let mut builder = crate::server::Builder::from_env().await?.api(api);
+        if self.health_endpoints {
+            builder = builder.with_health();
+        }
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
         }

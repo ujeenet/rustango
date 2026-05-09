@@ -2,6 +2,52 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.29.8] — multi-column success_url placeholders + tenancy health
+
+Two follow-ups closing limitations from earlier in v0.29:
+
+### Added
+
+- **`Cli::with_health()` works in tenancy mode**, via the new
+  `Server::Builder::with_health()` flag. Previously a no-op for
+  tenancy projects (the registry pool is built inside `Server::
+  Builder` and wasn't accessible to feed `health_router` from
+  the Cli layer). Now `/health` + `/ready` mount cleanly in both
+  single-tenant and tenancy projects. The `/ready` probe runs
+  `SELECT 1` against the registry pool — registry health gates
+  traffic to every tenant, which is the right scope.
+- **Multi-column `{field}` placeholders in `CreateView`
+  `success_url`** — was just `{pk}` in v0.29.6; now any column
+  name resolves against the schema. Example:
+  `success_url("/posts/{pk}/{slug}")` redirects using both the PK
+  and the slug column from the new row. The INSERT's RETURNING
+  list is computed from the placeholders found in the template,
+  so URLs without placeholders still take the single-round-trip
+  INSERT path. `{pk}` is special-cased to the model's primary
+  key column (so users don't need to know whether it's named
+  `id`, `uuid`, etc.).
+
+### Notes
+
+- UpdateView and DeleteView keep the simpler URL-only `{pk}`
+  substitution — multi-column placeholders for those would need
+  an extra row read or `UPDATE ... RETURNING` plumbing. Track
+  as a follow-up if demand surfaces.
+- Unknown placeholder names surface a clear error before the
+  INSERT runs ("does not match any field on `posts`") rather than
+  after — matches the same fail-fast policy as
+  `resolve_order_by`.
+
+### Tests
+
+- 1279 → 1282 lib tests (+3): `parse_success_url_placeholders`
+  recognizes valid identifier shapes, ignores stray braces /
+  empty `{}` / special chars; `success_url_returning_columns`
+  resolves `{pk}` + named columns, returns empty for plain URLs;
+  unknown placeholder rejection.
+
+---
+
 ## [0.29.7] — CSRF middleware now actually validates `_csrf` form field
 
 **Bugfix release.** The CSRF middleware's docstring promised it

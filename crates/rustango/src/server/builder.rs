@@ -39,6 +39,11 @@ pub struct Builder {
     /// audit, static, brand) + session TTLs. Defaults to
     /// `RouteConfig::default()` (legacy `__`-prefixed paths).
     routes: crate::tenancy::RouteConfig,
+    /// When `true`, the served Router gets `/health` + `/ready`
+    /// endpoints merged in (using the registry pool for the
+    /// `/ready` `SELECT 1` probe). Set via [`Builder::with_health`]
+    /// so projects with custom health JSON can opt out.
+    health_endpoints: bool,
 }
 
 struct PendingAction {
@@ -72,7 +77,23 @@ impl Builder {
             admin_actions: Vec::new(),
             init_tenancy_fn: crate::tenancy::init_tenancy,
             routes: crate::tenancy::RouteConfig::default(),
+            health_endpoints: false,
         })
+    }
+
+    /// Auto-mount `/health` (liveness) + `/ready` (readiness with
+    /// `SELECT 1` against the registry pool) on the served
+    /// router. Wired by [`crate::manage::Cli::with_health`] when
+    /// tenancy mode is on; can also be called directly when
+    /// constructing the server outside `Cli`.
+    ///
+    /// Default off — operators sometimes ship custom health JSON
+    /// with additional checks (queue depth, Redis ping) and don't
+    /// want the framework's defaults colliding.
+    #[must_use]
+    pub fn with_health(mut self) -> Self {
+        self.health_endpoints = true;
+        self
     }
 
     /// Override the URL prefixes (login, admin, audit, static,
@@ -372,7 +393,20 @@ impl Builder {
                 }
             }
         };
-        let tenant_app = match self.api {
+        // Optionally merge health endpoints onto the user's API
+        // router before we layer the admin fallback. Uses the
+        // registry pool for the `/ready` SELECT 1 probe — that's
+        // the right scope for tenancy projects (registry health
+        // gates traffic to every tenant).
+        let api = self.api.map(|r| {
+            if self.health_endpoints {
+                r.merge(crate::health::health_router(self.registry.clone()))
+            } else {
+                r
+            }
+        });
+
+        let tenant_app = match api {
             Some(router) => {
                 let h1 = make_admin_handler(tenant_admin.clone());
                 let h2 = make_admin_handler(tenant_admin.clone());
