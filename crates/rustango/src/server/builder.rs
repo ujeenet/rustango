@@ -44,6 +44,12 @@ pub struct Builder {
     /// `/ready` `SELECT 1` probe). Set via [`Builder::with_health`]
     /// so projects with custom health JSON can opt out.
     health_endpoints: bool,
+    /// `(prefix, root_dir)` pairs registered via [`Builder::with_static`].
+    /// Mounted at `serve` time as
+    /// `Router::nest(prefix, static_router(StaticFiles::new(root_dir)))`
+    /// before the admin fallback so they take precedence over the
+    /// admin's catch-all.
+    static_dirs: Vec<(String, std::path::PathBuf)>,
 }
 
 struct PendingAction {
@@ -78,6 +84,7 @@ impl Builder {
             init_tenancy_fn: crate::tenancy::init_tenancy,
             routes: crate::tenancy::RouteConfig::default(),
             health_endpoints: false,
+            static_dirs: Vec::new(),
         })
     }
 
@@ -93,6 +100,20 @@ impl Builder {
     #[must_use]
     pub fn with_health(mut self) -> Self {
         self.health_endpoints = true;
+        self
+    }
+
+    /// Auto-mount a [`crate::static_files::static_router`] at `prefix`
+    /// serving files under `root_dir` on the tenant subdomain. Repeat
+    /// to mount more than one directory. Wired by
+    /// [`crate::manage::Cli::with_static`] when tenancy mode is on.
+    #[must_use]
+    pub fn with_static(
+        mut self,
+        prefix: impl Into<String>,
+        root_dir: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.static_dirs.push((prefix.into(), root_dir.into()));
         self
     }
 
@@ -398,13 +419,30 @@ impl Builder {
         // registry pool for the `/ready` SELECT 1 probe — that's
         // the right scope for tenancy projects (registry health
         // gates traffic to every tenant).
-        let api = self.api.map(|r| {
-            if self.health_endpoints {
-                r.merge(crate::health::health_router(self.registry.clone()))
-            } else {
-                r
+        //
+        // Static-dir mounts happen on the same router so they take
+        // precedence over the admin fallback for paths under their
+        // prefix. If `self.api` is `None` we synthesize an empty
+        // router so static / health mounts still work without a
+        // user-supplied API.
+        let had_api = self.api.is_some();
+        let api = if had_api || self.health_endpoints || !self.static_dirs.is_empty() {
+            let mut r = self.api.unwrap_or_default();
+            for (prefix, root) in &self.static_dirs {
+                r = r.nest(
+                    prefix,
+                    crate::static_files::static_router(crate::static_files::StaticFiles::new(
+                        root.clone(),
+                    )),
+                );
             }
-        });
+            if self.health_endpoints {
+                r = r.merge(crate::health::health_router(self.registry.clone()));
+            }
+            Some(r)
+        } else {
+            None
+        };
 
         let tenant_app = match api {
             Some(router) => {

@@ -1469,6 +1469,28 @@ Chapter 2's `generic_fk_schema_and_content_type_lookup`.
 *Sub-section 10.120 (Tera rendering from view handlers) and 10.123
 (static-file serving) queued for Slice 10b.*
 
+### Auto-mounting `/static` — no boilerplate (v0.29.9)
+
+Same builder shape as `with_health()`:
+
+```rust,ignore
+rustango::manage::Cli::new()
+    .api(urls::api())
+    .with_static("/static", "./assets")        // CSS, JS, images
+    .with_static("/uploads", "./var/uploads")  // user-uploaded media
+    .run().await
+```
+
+Repeating `with_static` mounts more than one directory. Mount order is
+preserved — the first registered prefix is checked first when paths
+overlap. Defaults from `StaticFiles::new` apply: `Cache-Control:
+public, max-age=3600`, dotfiles 404, symlink escapes blocked, traversal
+rejected.
+
+For finer control (immutable hash-named bundles, `.well-known`
+whitelisting), keep mounting `static_router` directly on your own
+router and skip the shortcut.
+
 ## Chapter 11 — Async / IO / extensions
 
 7 tests on the most-used extension surfaces. No DB / network needed.

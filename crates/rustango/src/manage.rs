@@ -72,6 +72,13 @@ pub struct Cli {
     /// Default `false` because operators sometimes want their own
     /// health endpoint shape (custom JSON, additional checks).
     health_endpoints: bool,
+    /// `(prefix, root_dir)` pairs registered via [`Cli::with_static`].
+    /// Mounted at `runserver` time as
+    /// `Router::nest(prefix, static_router(StaticFiles::new(root_dir)))`.
+    /// Empty by default — projects that already mount their own
+    /// `static_files::static_router` keep doing it.
+    #[cfg(feature = "admin")]
+    static_dirs: Vec<(String, PathBuf)>,
 }
 
 impl Cli {
@@ -92,6 +99,8 @@ impl Cli {
             #[cfg(feature = "config")]
             settings_for_layers: None,
             health_endpoints: false,
+            #[cfg(feature = "admin")]
+            static_dirs: Vec::new(),
         }
     }
 
@@ -171,6 +180,33 @@ impl Cli {
     #[must_use]
     pub fn with_health(mut self) -> Self {
         self.health_endpoints = true;
+        self
+    }
+
+    /// Auto-mount a [`crate::static_files::static_router`] at `prefix`
+    /// serving files under `root_dir`. Repeat the call to mount more
+    /// than one directory (e.g. `/static` from `./assets`,
+    /// `/uploads` from `./var/uploads`).
+    ///
+    /// ```ignore
+    /// rustango::manage::Cli::new()
+    ///     .api(urls::api())
+    ///     .with_static("/static", "./assets")
+    ///     .with_static("/uploads", "./var/uploads")
+    ///     .run().await
+    /// ```
+    ///
+    /// Defaults from [`crate::static_files::StaticFiles::new`] —
+    /// `Cache-Control: public, max-age=3600`, dotfiles 404, symlink
+    /// escapes blocked. Projects that need finer control (immutable
+    /// hash-named bundles, `.well-known` whitelisting) keep mounting
+    /// `static_router` directly on their own router and skip this
+    /// shortcut. Mount order is preserved — first registered prefix
+    /// is checked first when paths overlap.
+    #[cfg(feature = "admin")]
+    #[must_use]
+    pub fn with_static(mut self, prefix: impl Into<String>, root_dir: impl Into<PathBuf>) -> Self {
+        self.static_dirs.push((prefix.into(), root_dir.into()));
         self
     }
 
@@ -393,6 +429,8 @@ impl Cli {
         } else {
             api
         };
+        #[cfg(feature = "admin")]
+        let api = mount_static_dirs(api, &self.static_dirs);
         #[cfg(feature = "config")]
         let api = match self.settings_for_layers.as_ref() {
             Some(s) => apply_settings_layers(api, s),
@@ -417,6 +455,9 @@ impl Cli {
         if self.health_endpoints {
             builder = builder.with_health();
         }
+        for (prefix, root) in self.static_dirs {
+            builder = builder.with_static(prefix, root);
+        }
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
         }
@@ -435,6 +476,22 @@ impl Default for Cli {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Nest each (prefix, root_dir) pair from [`Cli::with_static`] into
+/// the API router. Pure function so the runserver path stays linear
+/// and unit tests can assert on the post-mount Router without
+/// spinning up a TCP listener.
+#[cfg(feature = "admin")]
+fn mount_static_dirs(api: Router, dirs: &[(String, PathBuf)]) -> Router {
+    let mut r = api;
+    for (prefix, root) in dirs {
+        r = r.nest(
+            prefix,
+            crate::static_files::static_router(crate::static_files::StaticFiles::new(root.clone())),
+        );
+    }
+    r
 }
 
 /// Apply security_headers + CORS + access_log + body_limit layers
@@ -730,5 +787,56 @@ mod tests {
         assert!(!cli_default.health_endpoints, "default off");
         let cli_with = Cli::new().with_health();
         assert!(cli_with.health_endpoints);
+    }
+
+    /// `Cli::with_static` accumulates `(prefix, root_dir)` entries —
+    /// repeating the call mounts more than one directory and the
+    /// order is preserved.
+    #[cfg(feature = "admin")]
+    #[test]
+    fn with_static_accumulates_in_order() {
+        let cli = Cli::new()
+            .with_static("/static", "./assets")
+            .with_static("/uploads", "./var/uploads");
+        assert_eq!(cli.static_dirs.len(), 2);
+        assert_eq!(cli.static_dirs[0].0, "/static");
+        assert_eq!(cli.static_dirs[0].1, std::path::PathBuf::from("./assets"));
+        assert_eq!(cli.static_dirs[1].0, "/uploads");
+        assert_eq!(
+            cli.static_dirs[1].1,
+            std::path::PathBuf::from("./var/uploads")
+        );
+    }
+
+    /// `mount_static_dirs` actually serves a file from the configured
+    /// prefix end-to-end. Catches regressions like nesting the wrong
+    /// router or forgetting the leading slash on the prefix.
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn mount_static_dirs_serves_a_file() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use std::io::Write;
+        use tempfile::TempDir;
+        use tower::ServiceExt;
+
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("hello.txt");
+        std::fs::File::create(&p).unwrap().write_all(b"hi").unwrap();
+
+        let app = mount_static_dirs(
+            Router::new(),
+            &[("/static".into(), dir.path().to_path_buf())],
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/static/hello.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
     }
 }

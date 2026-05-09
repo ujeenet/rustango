@@ -2,6 +2,55 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.29.9] — `Cli::with_static(prefix, root_dir)` builder
+
+Common need that was previously boilerplate: serving CSS / JS / images
+from a directory at a URL prefix. The static-file server itself has
+existed since v0.24 (`crate::static_files::{StaticFiles,
+static_router}`), but every project hand-mounted it on their `apps()`
+router. Same builder shape as `with_health()`.
+
+### Added
+
+- **`Cli::with_static(prefix, root_dir)`** — auto-mounts a
+  `static_router(StaticFiles::new(root_dir))` at `prefix`. Repeat the
+  call to mount more than one directory:
+
+  ```rust
+  rustango::manage::Cli::new()
+      .api(urls::api())
+      .with_static("/static", "./assets")
+      .with_static("/uploads", "./var/uploads")
+      .run().await
+  ```
+
+  Defaults from `StaticFiles::new` apply — `Cache-Control: public,
+  max-age=3600`, dotfiles 404, symlink escapes blocked, traversal
+  rejected. Projects that need `immutable` for hashed bundles or
+  `serve_hidden` for `.well-known` keep mounting `static_router`
+  directly on their own router and skip this shortcut.
+- **`Server::Builder::with_static`** — same shape, used by
+  `Cli::with_static` when tenancy mode is on so static dirs land
+  on the tenant subdomain before the admin fallback.
+- Static dirs are nested before the admin's catch-all so they take
+  precedence for paths under their prefix; this matches the
+  health-router merge order.
+
+### Tests
+
+- 1282 → 1284 lib tests (+2): `with_static_accumulates_in_order`
+  asserts repeated calls preserve order; `mount_static_dirs_serves_a_file`
+  exercises the end-to-end nesting + 200 response on a tempdir-backed
+  router.
+
+### Feature gating
+
+- `Cli::with_static` is gated on the `admin` feature (same as the
+  underlying `static_files` module). Single-binary projects pulling
+  in `manage` already enable `admin` so this is a no-op for them.
+
+---
+
 ## [0.29.8] — multi-column success_url placeholders + tenancy health
 
 Two follow-ups closing limitations from earlier in v0.29:

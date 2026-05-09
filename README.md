@@ -369,6 +369,7 @@ rustango::manage::Cli::new()
     .api(urls::api())
     .with_settings_from_env()
     .with_health()                              // /health + /ready endpoints
+    .with_static("/static", "./assets")         // CSS, JS, images
     .run().await
 ```
 
