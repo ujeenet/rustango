@@ -2,6 +2,43 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.3] — Cookbook Chapter 9d: documented `ViewSet::tenant_router`
+
+The v0.30.0/v0.30.1 work shipped with framework-side unit + live
+tests but no user-facing documentation in the cookbook. Chapter 9d
+fills the gap with a copy-paste-ready reference template.
+
+### Added
+
+- **`tests/cookbook_chapter09d_viewset_tenant_router.rs`** —
+  5 live tests exercising `ViewSet::for_model(Author::SCHEMA).tenant_router("/api/authors")`
+  end-to-end against the cookbook's `Author` model:
+  - `tenant_router_lists_paginated_payload`
+  - `tenant_router_search_param_narrows_count_and_results`
+    (regression guard for the v0.30.1 `CountQuery.search` fix)
+  - `tenant_router_filter_param_exact_match`
+  - `tenant_router_full_crud_round_trip` (POST → GET → PUT →
+    DELETE → GET 404)
+  - `tenant_router_missing_header_yields_404_not_500`
+- **COOKBOOK.md Chapter 9d** narrative section explaining the
+  pool-baking-at-mount-time problem schema-mode and database-mode
+  tenants hit with `router(prefix, pool)`, plus the per-request
+  `Tenant::conn()` solution `tenant_router(prefix)` provides.
+- Fixture pattern in chapter 9d uses `tenancy::init_tenancy` +
+  `tenancy::migrate_registry` (matching Chapter 5's pattern) plus
+  explicit drop of the migration ledger table — chosen over
+  `rmig::apply_all` which can't order FKs across the cookbook's
+  full model set, and over leaving stale state which breaks
+  re-runs against the same database.
+
+### Tests
+
+- 1297 lib tests still pass.
+- 5/5 new cookbook chapter 9d tests pass against
+  `DATABASE_URL`-backed Postgres.
+
+---
+
 ## [0.30.2] — `#[derive(Form)]` validators in `CreateView`/`UpdateView`
 
 The v0.29 HTML CBVs ran type coercion + schema-level bounds

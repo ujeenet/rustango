@@ -1483,7 +1483,27 @@ The ViewSet builder also exposes `.search_fields` (?search=…),
 (see Chapter 6 §6.80 for the typed-perm shortcut). All exercised
 live in rustango's own viewset / order_by_annotate_live tests.
 
-### Tenancy projects: `.tenant_router(prefix)` (v0.30)
+## Chapter 9d — `tenant_router` for tenancy projects (v0.30, #80)
+
+5 live tests against `ViewSet::for_model(...).tenant_router(...)`
+mounted under a real `TenantContext` extension with header-based
+tenant resolution. Run with
+`DATABASE_URL=... cargo test --test cookbook_chapter09d_viewset_tenant_router -- --test-threads=1`.
+
+* §9.116 — paginated list against the per-request tenant connection.
+  → `tenant_router_lists_paginated_payload`
+* §9.116 — `?search=…` ILIKE narrowing matches `count` to results
+  (regression guard for the v0.30.1 `CountQuery.search` fix).
+  → `tenant_router_search_param_narrows_count_and_results`
+* §9.116 — `?{field}=…` exact filter via `filter_fields`.
+  → `tenant_router_filter_param_exact_match`
+* §9.116 — full CRUD round-trip (POST → GET → PUT → DELETE → GET 404).
+  → `tenant_router_full_crud_round_trip`
+* §9.116 — missing `x-org` header → 404 from the `Tenant`
+  extractor before any SQL runs.
+  → `tenant_router_missing_header_yields_404_not_500`
+
+### Why a separate router builder
 
 `router(prefix, pool)` bakes a single pool at mount time — fine for
 single-tenant projects, broken for multi-tenant ones. Schema-mode
