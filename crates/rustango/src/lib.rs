@@ -557,6 +557,15 @@ pub mod ip_filter;
 #[cfg(feature = "admin")]
 pub mod body_limit;
 
+/// Per-request handler timeout — kills handlers that exceed the
+/// configured duration and returns `504 Gateway Timeout`. Caps the
+/// blast radius of wedged DB queries / external HTTP calls. Wired
+/// from `Settings.server.request_timeout_secs` automatically by
+/// `Cli::with_settings_from_env()`. See
+/// [`request_timeout::RequestTimeoutLayer`].
+#[cfg(feature = "admin")]
+pub mod request_timeout;
+
 /// Real-IP extraction for apps behind a trusted reverse proxy
 /// (Cloudflare / nginx / ELB / etc). Parses `X-Forwarded-For`,
 /// `X-Real-IP`, `CF-Connecting-IP`, or RFC 7239 `Forwarded` and stuffs

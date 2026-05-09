@@ -418,12 +418,21 @@ fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> Router {
     use crate::access_log::{AccessLogLayer, AccessLogRouterExt as _};
     use crate::body_limit::{BodyLimitLayer, BodyLimitRouterExt as _};
     use crate::cors::{CorsLayer, CorsRouterExt as _};
+    use crate::request_timeout::{RequestTimeoutLayer, RequestTimeoutRouterExt as _};
     use crate::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt as _};
 
     let mut app = api;
 
-    // body_limit (innermost data-shape gate). Opt-in: from_settings
-    // returns None when max_body_bytes is unset.
+    // request_timeout (innermost — wraps the handler itself so a
+    // wedged future doesn't hold downstream layer state hostage).
+    // Opt-in: from_settings returns None when request_timeout_secs
+    // is unset or zero.
+    if let Some(layer) = RequestTimeoutLayer::from_settings(&s.server) {
+        app = app.request_timeout(layer);
+    }
+
+    // body_limit — gate on declared body size before the handler
+    // even starts.
     if let Some(layer) = BodyLimitLayer::from_settings(&s.server) {
         app = app.body_limit(layer);
     }

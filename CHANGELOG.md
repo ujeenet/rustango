@@ -2,6 +2,60 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.29.5] — pagination URL preservation + request timeout layer
+
+Two follow-ups that turn up the moment someone deploys the v0.29
+template_views to production:
+
+1. The `<a href="?page=2">next</a>` link drops the user's filter +
+   search + ordering state because templates have to manually
+   rebuild the query string
+2. A wedged DB query / external HTTP call holds a worker hostage
+   forever — no built-in cap on per-request latency, so a single
+   slow upstream can drag the entire pool into stalls
+
+### Added
+
+- **`ListView` `next_page_url` / `prev_page_url` Tera context
+  vars** — `Option<String>` query strings (`?status=draft&page=4`)
+  that preserve every other URL parameter and just bump the
+  `page` value. Templates render
+  `{% if next_page_url %}<a href="{{ next_page_url }}">next</a>{% endif %}`
+  without rebuilding the query manually. `None` when there's no
+  page in that direction.
+- **`rustango::request_timeout::RequestTimeoutLayer`** — new
+  per-request handler timeout middleware that returns
+  `504 Gateway Timeout` instead of letting a slow handler hang.
+  Honors `Settings.server.request_timeout_secs` automatically via
+  `Cli::with_settings_from_env()`; mount manually as
+  `app.request_timeout(RequestTimeoutLayer::new(Duration::from_secs(30)))`
+  for projects that build their server outside `Cli`. Opt-in:
+  `from_settings` returns `None` when the value is unset or 0.
+  Behind the existing `admin` feature (no new feature flag).
+  **Don't wrap streaming routes** (SSE, websocket upgrades) —
+  mount this on the API slice, not the entire app.
+
+### Notes
+
+- The auto-layering pipeline (`Cli::with_settings_from_env`) now
+  applies request_timeout as the innermost layer, so a wedged
+  handler doesn't hold downstream middleware state hostage.
+- `urlencode` helper used by the pagination URL builder is a
+  focused tiny RFC 3986 implementation — keeps `template_views`
+  from pulling `percent-encoding` / `urlencoding` as a
+  transitive dep.
+
+### Tests
+
+- 1257 → 1268 lib tests (+11): `urlencode` reserved-char
+  encoding, `build_pagination_query` preserves other params with
+  sorted keys, no-other-params fallback, `insert_pagination_urls`
+  both-directions / first-page-no-prev cases. Plus `RequestTimeoutLayer::new`,
+  `from_settings` (unset / zero / set), fast-handler-passes-through,
+  slow-handler-504s.
+
+---
+
 ## [0.29.4] — `ListView` URL overrides + PK type coercion
 
 Two follow-ups for `template_views` that surfaced from
