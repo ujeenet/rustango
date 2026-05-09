@@ -355,6 +355,14 @@ let log = rustango::access_log::AccessLogLayer::default()
 let app = app.access_log(log);
 ```
 
+The operator console **automatically** picks up `[brand]` from the
+loaded settings at boot — no wiring call needed. Resolution
+priority: defaults → `Settings.brand.*` (TOML) → `RUSTANGO_OPERATOR_*`
+env vars (which still win for deploy-time overrides). Empty strings
+in TOML skip (so `name = ""` falls through to the default rather
+than rendering as a blank brand name); invalid hex / theme_mode
+values are dropped.
+
 Future fields land here as the wiring catches up — every
 `Settings` field is `Option`-typed (missing keys fall through,
 don't reset).

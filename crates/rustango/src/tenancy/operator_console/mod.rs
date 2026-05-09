@@ -107,8 +107,13 @@ struct ConsoleState {
     tenant_handoff_url: String,
 }
 
-/// Operator console branding read from env at boot. Static for the
+/// Operator console branding resolved at boot. Static for the
 /// lifetime of the process; per-tenant branding lives on `Org`.
+///
+/// Resolution priority (most specific wins):
+/// 1. `RUSTANGO_OPERATOR_*` env vars (deploy-time override)
+/// 2. `[brand]` section in `config/<env>_settings.toml` (#87 wiring)
+/// 3. Hardcoded defaults
 #[derive(Debug, Clone)]
 struct OpBrand {
     name: String,
@@ -119,32 +124,89 @@ struct OpBrand {
 }
 
 impl OpBrand {
-    /// Read the operator console branding from env. Every value has
-    /// a sensible default so this never fails — at worst the
-    /// console renders with the rustango defaults.
+    /// Hardcoded fallback values applied first.
+    fn defaults() -> Self {
+        Self {
+            name: "Rustango".to_owned(),
+            tagline: None,
+            logo_url: "/__static__/rustango.png".to_owned(),
+            primary_color: None,
+            theme_mode: "auto".to_owned(),
+        }
+    }
+
+    /// Resolve the operator console branding from settings + env.
+    /// Order: defaults → `Settings.brand` (TOML) → env vars (which
+    /// win so deploy-time emergency overrides don't require a
+    /// config push). Best-effort on the TOML side — a missing
+    /// `config/default.toml` is silently skipped, same as
+    /// `Cli::with_settings_from_env`.
     fn from_env() -> Self {
-        let name =
-            std::env::var("RUSTANGO_OPERATOR_BRAND_NAME").unwrap_or_else(|_| "Rustango".to_owned());
-        let tagline = std::env::var("RUSTANGO_OPERATOR_TAGLINE")
+        let mut out = Self::defaults();
+        #[cfg(feature = "config")]
+        if let Ok(s) = crate::config::Settings::load_from_env() {
+            Self::apply_brand_settings(&mut out, &s.brand);
+        }
+        Self::apply_env_overrides(&mut out);
+        out
+    }
+
+    #[cfg(feature = "config")]
+    fn apply_brand_settings(out: &mut Self, b: &crate::config::BrandSettings) {
+        if let Some(n) = b.name.as_deref().filter(|s| !s.is_empty()) {
+            out.name = n.to_owned();
+        }
+        if let Some(t) = b.tagline.as_deref().filter(|s| !s.is_empty()) {
+            out.tagline = Some(t.to_owned());
+        }
+        if let Some(u) = b.logo_url.as_deref().filter(|s| !s.is_empty()) {
+            out.logo_url = u.to_owned();
+        }
+        if let Some(hex) = b
+            .primary_color
+            .as_deref()
+            .and_then(branding::validate_hex_color)
+        {
+            out.primary_color = Some(hex);
+        }
+        if let Some(mode) = b
+            .theme_mode
+            .as_deref()
+            .and_then(branding::validate_theme_mode)
+        {
+            out.theme_mode = mode.to_owned();
+        }
+    }
+
+    fn apply_env_overrides(out: &mut Self) {
+        if let Ok(v) = std::env::var("RUSTANGO_OPERATOR_BRAND_NAME") {
+            if !v.is_empty() {
+                out.name = v;
+            }
+        }
+        if let Ok(v) = std::env::var("RUSTANGO_OPERATOR_TAGLINE") {
+            if !v.is_empty() {
+                out.tagline = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("RUSTANGO_OPERATOR_LOGO_URL") {
+            if !v.is_empty() {
+                out.logo_url = v;
+            }
+        }
+        if let Some(hex) = std::env::var("RUSTANGO_OPERATOR_PRIMARY_COLOR")
             .ok()
-            .filter(|s| !s.is_empty());
-        let logo_url = std::env::var("RUSTANGO_OPERATOR_LOGO_URL")
-            .unwrap_or_else(|_| "/__static__/rustango.png".to_owned());
-        let primary_color = std::env::var("RUSTANGO_OPERATOR_PRIMARY_COLOR")
-            .ok()
-            .and_then(|v| branding::validate_hex_color(&v));
-        let theme_mode = std::env::var("RUSTANGO_OPERATOR_THEME_MODE")
+            .as_deref()
+            .and_then(branding::validate_hex_color)
+        {
+            out.primary_color = Some(hex);
+        }
+        if let Some(mode) = std::env::var("RUSTANGO_OPERATOR_THEME_MODE")
             .ok()
             .as_deref()
             .and_then(branding::validate_theme_mode)
-            .unwrap_or("auto")
-            .to_owned();
-        Self {
-            name,
-            tagline,
-            logo_url,
-            primary_color,
-            theme_mode,
+        {
+            out.theme_mode = mode.to_owned();
         }
     }
 }
@@ -1559,5 +1621,80 @@ mod sanitize_next_method_tests {
             sanitize_next_for_method(&Method::POST, "/orgs/acme/impersonate?return=foo"),
             "/orgs/acme/edit"
         );
+    }
+}
+
+#[cfg(test)]
+mod opbrand_tests {
+    use super::OpBrand;
+
+    /// Hardcoded fallback values when nothing is configured.
+    #[test]
+    fn defaults_match_documented_values() {
+        let b = OpBrand::defaults();
+        assert_eq!(b.name, "Rustango");
+        assert_eq!(b.theme_mode, "auto");
+        assert!(b.tagline.is_none());
+        assert!(b.primary_color.is_none());
+        assert_eq!(b.logo_url, "/__static__/rustango.png");
+    }
+
+    /// `BrandSettings` overrides the defaults — but the function
+    /// stays pure (no env reads), so the test doesn't need to
+    /// poke `std::env::set_var` (forbidden by workspace lint).
+    #[cfg(feature = "config")]
+    #[test]
+    fn apply_brand_settings_overrides_defaults() {
+        let mut b = OpBrand::defaults();
+        let mut s = crate::config::BrandSettings::default();
+        s.name = Some("Acme Operator".into());
+        s.tagline = Some("(prod)".into());
+        s.primary_color = Some("#ff8800".into());
+        s.theme_mode = Some("dark".into());
+        OpBrand::apply_brand_settings(&mut b, &s);
+        assert_eq!(b.name, "Acme Operator");
+        assert_eq!(b.tagline.as_deref(), Some("(prod)"));
+        assert_eq!(b.primary_color.as_deref(), Some("#ff8800"));
+        assert_eq!(b.theme_mode, "dark");
+    }
+
+    /// Empty strings in TOML don't override (different from
+    /// "explicitly absent" — a user typing `name = ""` almost
+    /// certainly meant the default, not the empty string).
+    #[cfg(feature = "config")]
+    #[test]
+    fn apply_brand_settings_empty_strings_skip() {
+        let mut b = OpBrand::defaults();
+        let original = b.name.clone();
+        let mut s = crate::config::BrandSettings::default();
+        s.name = Some(String::new());
+        OpBrand::apply_brand_settings(&mut b, &s);
+        assert_eq!(b.name, original);
+    }
+
+    /// Invalid hex colors are dropped, not propagated. Matches the
+    /// `from_env` pre-#87 behavior — bad input falls through to
+    /// the default.
+    #[cfg(feature = "config")]
+    #[test]
+    fn apply_brand_settings_rejects_bad_hex() {
+        let mut b = OpBrand::defaults();
+        let mut s = crate::config::BrandSettings::default();
+        s.primary_color = Some("not-a-color".into());
+        OpBrand::apply_brand_settings(&mut b, &s);
+        assert!(b.primary_color.is_none());
+    }
+
+    /// Invalid theme_mode values are dropped — the validator
+    /// only accepts `auto` / `light` / `dark`.
+    #[cfg(feature = "config")]
+    #[test]
+    fn apply_brand_settings_rejects_bad_theme_mode() {
+        let mut b = OpBrand::defaults();
+        let original = b.theme_mode.clone();
+        let mut s = crate::config::BrandSettings::default();
+        s.theme_mode = Some("midnight".into());
+        OpBrand::apply_brand_settings(&mut b, &s);
+        assert_eq!(b.theme_mode, original);
     }
 }
