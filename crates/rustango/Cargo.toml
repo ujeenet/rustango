@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "manage", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3", "media", "runserver"]
+default = ["postgres", "manage", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3", "media", "runserver", "template_views"]
 postgres = ["sqlx/postgres"]
 
 # Unified `cargo run` / `cargo run -- <verb>` dispatcher. Pulls the
@@ -224,6 +224,12 @@ cache-redis = ["cache", "dep:redis"]
 # (parsers without CSRF) don't pull cookie + rand + tower
 # transitively.
 csrf = ["forms", "dep:axum", "dep:base64", "dep:cookie", "dep:rand", "dep:tower"]
+
+# Generic class-based views for HTML templates (`rustango::template_views`)
+# — Django-shape `ListView` / `DetailView` / `CreateView` / `UpdateView` /
+# `DeleteView` over `#[derive(Model)]` types, rendered through Tera.
+# The JSON-API counterpart is `rustango::viewset` (always on).
+template_views = ["forms", "dep:axum", "dep:tera", "dep:tokio"]
 
 # Auto-admin HTTP layer (`rustango::admin`). Pulls in axum + Tera +
 # the supporting middleware deps. Implies `forms` + `csrf` so the

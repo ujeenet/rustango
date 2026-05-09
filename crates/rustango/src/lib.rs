@@ -758,6 +758,14 @@ pub mod extractors;
 #[cfg(feature = "tenancy")]
 pub mod viewset;
 
+/// Generic class-based views for HTML templates (Django-shape) —
+/// `ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`
+/// over `#[derive(Model)]` schemas, rendered through Tera. Sibling of
+/// [`viewset`] for the JSON/API side. See [`template_views`] for
+/// usage and the canonical Tera context shape.
+#[cfg(feature = "template_views")]
+pub mod template_views;
+
 /// Django-style runserver — [`server::Builder`] owns every line of
 /// boilerplate every tenancy app would otherwise rewrite (DB pool,
 /// resolver chain, host dispatch, operator console, bind + serve).
