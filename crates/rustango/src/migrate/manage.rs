@@ -208,7 +208,19 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "  `cargo install cargo-rustango` then `cargo rustango new <name>`.)\n"
     )?;
-    writeln!(w, "  make:viewset <Name> [--model <Model>]")?;
+    writeln!(w, "  make:viewset <Name> [--model <Model>] [--tenant]")?;
+    writeln!(
+        w,
+        "    --tenant emits a `ViewSet::for_model(...).tenant_router(...)`"
+    )?;
+    writeln!(
+        w,
+        "    shape that resolves a per-request connection via `Tenant`"
+    )?;
+    writeln!(
+        w,
+        "    instead of baking a pool at mount time (required for tenancy)."
+    )?;
     writeln!(w, "  make:serializer <Name> [--model <Model>]")?;
     writeln!(w, "  make:form <Name>")?;
     writeln!(w, "  make:job <Name>")?;
@@ -1156,10 +1168,36 @@ fn write_generated<W: Write>(
 }
 
 fn make_viewset_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
-    let (name, model) = parse_name_and_model(args)?;
+    // Strip `--tenant` flag before passing to the shared name+model
+    // parser. Tenancy projects need a different scaffold shape — the
+    // single-pool `#[derive(ViewSet)]` is fatal for them (#80) — and
+    // this flag toggles between the two templates.
+    let mut tenant_aware = false;
+    let mut filtered: Vec<String> = Vec::with_capacity(args.len());
+    for a in args {
+        if a == "--tenant" || a == "--tenant-aware" {
+            tenant_aware = true;
+        } else {
+            filtered.push(a.clone());
+        }
+    }
+    let (name, model) = parse_name_and_model(&filtered)?;
     let snake = pascal_to_snake(&name);
     let model = model.unwrap_or_else(|| "Post".into());
-    let body = format!(
+    let body = if tenant_aware {
+        viewset_template_tenant(&name, &model, &snake)
+    } else {
+        viewset_template_pool(&name, &model, &snake)
+    };
+    write_generated(w, &format!("{snake}.rs"), body)
+}
+
+/// Template emitted by `make:viewset <Name>` (default). Uses the
+/// `#[derive(ViewSet)]` shape with a mount-time `PgPool` —
+/// appropriate for single-tenant projects (api / fullstack
+/// templates).
+fn viewset_template_pool(name: &str, model: &str, snake: &str) -> String {
+    format!(
         r#"//! Auto-scaffolded by `manage make:viewset {name}`.
 
 use rustango::ViewSet;
@@ -1178,8 +1216,45 @@ pub struct {name};
 //
 //   .merge({name}::router("/api/{snake}", pool.clone()))
 "#
-    );
-    write_generated(w, &format!("{snake}.rs"), body)
+    )
+}
+
+/// Template emitted by `make:viewset <Name> --tenant`. Uses the
+/// runtime-built `ViewSet::for_model(...).tenant_router(...)` shape
+/// (#80) so each request resolves the per-tenant connection via the
+/// `Tenant` extractor instead of capturing a single pool at mount
+/// time. Required for tenancy projects.
+fn viewset_template_tenant(name: &str, model: &str, snake: &str) -> String {
+    format!(
+        r#"//! Auto-scaffolded by `manage make:viewset {name} --tenant`.
+//!
+//! Tenant-aware viewset: each request resolves the connection via
+//! `rustango::extractors::Tenant`, so the same `router()` serves
+//! every tenant under their own subdomain / schema.
+//!
+//! v1 scope (per `ViewSet::tenant_router` docs): basic CRUD, no
+//! built-in filter/search/pagination/perm checks. Wrap with
+//! `RouterAuthExt::require_auth` — or use hand-rolled axum handlers
+//! taking the `Tenant` extractor — for advanced cases.
+
+use axum::Router;
+use rustango::core::Model as _;
+use rustango::viewset::ViewSet;
+
+use crate::models::{model};
+
+pub fn router() -> Router<()> {{
+    ViewSet::for_model({model}::SCHEMA)
+        // .fields(&["id", "..."])
+        // .read_only()
+        .tenant_router("/api/{snake}")
+}}
+
+// Mount in your urls.rs:
+//
+//   .merge(crate::viewsets::{snake}::router())
+"#
+    )
 }
 
 fn make_serializer_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
@@ -1665,6 +1740,57 @@ mod gen_tests {
     fn parse_name_and_model_rejects_lowercase_name() {
         let r = parse_name_and_model(&["postviewset".into()]);
         assert!(r.is_err());
+    }
+
+    /// Default template (no `--tenant`) keeps the v0.28
+    /// `#[derive(ViewSet)]` shape — single-tenant projects rely on
+    /// the mount-time `pool` argument.
+    #[test]
+    fn viewset_template_pool_emits_derive_macro() {
+        let body = viewset_template_pool("PostViewSet", "Post", "post_view_set");
+        assert!(
+            body.contains("#[derive(ViewSet)]"),
+            "expected derive macro, got: {body}"
+        );
+        assert!(
+            body.contains("PostViewSet::router"),
+            "expected `Name::router(...)` mount hint, got: {body}"
+        );
+        assert!(
+            !body.contains("tenant_router"),
+            "pool template must NOT reference tenant_router, got: {body}"
+        );
+    }
+
+    /// `--tenant` template uses `ViewSet::for_model(...).tenant_router(...)`
+    /// and pulls `crate::extractors::Tenant`-shape connections instead
+    /// of baking a pool at mount time. Required for tenancy projects
+    /// (#80).
+    #[test]
+    fn viewset_template_tenant_uses_tenant_router() {
+        let body = viewset_template_tenant("PostViewSet", "Post", "post_view_set");
+        assert!(
+            body.contains("ViewSet::for_model"),
+            "expected runtime ViewSet::for_model builder, got: {body}"
+        );
+        assert!(
+            body.contains(".tenant_router("),
+            "expected `.tenant_router(...)` call, got: {body}"
+        );
+        assert!(
+            !body.contains("#[derive(ViewSet)]"),
+            "tenant template must NOT use the derive macro (pool-coupled), got: {body}"
+        );
+        assert!(
+            body.contains("/api/post_view_set"),
+            "expected snake-cased path, got: {body}"
+        );
+        // The hint comment in the template should match the actual
+        // function call site Devs will copy from it.
+        assert!(
+            body.contains("pub fn router()"),
+            "expected `pub fn router()` so api_routes.rs can `.merge(...)`, got: {body}"
+        );
     }
 }
 
