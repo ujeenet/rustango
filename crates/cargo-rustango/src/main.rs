@@ -454,6 +454,23 @@ mod tests {
         );
     }
 
+    /// Every scaffolded `src/main.rs` mounts `.with_welcome()` so a
+    /// fresh `cargo run` boots to the friendly "rustango — it works!"
+    /// page rather than a 404. Recommended for first-run UX since
+    /// v0.29.12 — drop the call manually once a real `/` handler is
+    /// wired.
+    #[test]
+    fn every_main_template_mounts_with_welcome() {
+        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
+            let body = templates::main_rs(template);
+            assert!(
+                body.contains(".with_welcome()"),
+                "template {template:?} src/main.rs should chain `.with_welcome()` \
+                 — the scaffolded entrypoint, got:\n{body}"
+            );
+        }
+    }
+
     /// `.env.example` defaults must work out-of-box for `docker
     /// compose up -d` (host = `postgres`, bind = `0.0.0.0`). Users
     /// running cargo on the host edit `postgres` -> `localhost`.

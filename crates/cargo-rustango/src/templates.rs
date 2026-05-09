@@ -260,7 +260,11 @@ mod views;
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    rustango::manage::Cli::new().api(urls::api()).run().await
+    rustango::manage::Cli::new()
+        .api(urls::api())
+        .with_welcome() // friendly `/` on first run; drop once you have a root handler
+        .run()
+        .await
 }
 ";
 
@@ -277,7 +281,12 @@ mod views;
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    rustango::manage::Cli::new().api(urls::api()).run().await
+    rustango::manage::Cli::new()
+        .api(urls::api())
+        .with_welcome() // friendly `/` on first run; drop once you have a root handler
+        .with_health() // /health + /ready endpoints for load balancers
+        .run()
+        .await
 }
 ";
 
@@ -294,7 +303,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rustango::manage::Cli::new()
         .tenancy()
         .api(urls::api())
-        .run().await
+        .with_welcome() // friendly `/` on first run; drop once you have a root handler
+        .with_health() // /health + /ready hit the registry pool
+        .run()
+        .await
 }
 "##;
 
