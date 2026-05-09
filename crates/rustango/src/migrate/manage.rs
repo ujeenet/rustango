@@ -94,6 +94,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "migrate" => migrate(pool, dir, &args[1..], writer).await,
         "downgrade" => downgrade(pool, dir, &args[1..], writer).await,
         "showmigrations" | "status" => showmigrations(pool, dir, writer).await,
+        "forget-pending" => forget_pending_cmd(pool, dir, &args[1..], writer).await,
         "startapp" => startapp(&args[1..], writer),
         "add-data-op" => add_data_op_cmd(dir, &args[1..], writer),
         "make:viewset" => make_viewset_cmd(&args[1..], writer),
@@ -162,6 +163,19 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(w, "      Step back N applied migrations (default 1).\n")?;
     writeln!(w, "  showmigrations | status")?;
     writeln!(w, "      List migrations with [X]/[ ] applied marker.\n")?;
+    writeln!(w, "  forget-pending <name>")?;
+    writeln!(
+        w,
+        "      Delete a migration JSON that has NOT been applied yet,"
+    )?;
+    writeln!(
+        w,
+        "      so the next `makemigrations` regenerates the diff."
+    )?;
+    writeln!(
+        w,
+        "      Refuses if the migration is recorded in the ledger.\n"
+    )?;
     writeln!(
         w,
         "  add-data-op --sql <SQL> [--reverse-sql <SQL>] [--name <name>] [--to <migration>]"
@@ -599,6 +613,116 @@ async fn showmigrations<W: Write>(
         };
         writeln!(w, "  {mark} {}", m.name)?;
     }
+    Ok(())
+}
+
+/// `manage forget-pending <name>` — delete a migration JSON that
+/// hasn't been applied yet, so the next `makemigrations` regenerates
+/// the diff from the current model registry. The actionable
+/// companion to the dev-iteration recovery path documented in the
+/// `AddColumn NOT NULL no default` validator error (#84).
+///
+/// Refuses if:
+///   - the migration name doesn't match any file in `dir`
+///   - the migration is recorded in `__rustango_migrations__` (i.e.
+///     it's been applied — removing the JSON without unapplying
+///     would orphan the ledger row and break further migrate runs)
+///   - more than one migration matches a partial-name query (use
+///     the full name to disambiguate)
+///
+/// On success: deletes the file, prints a one-line confirmation,
+/// and suggests `makemigrations` as the follow-up.
+async fn forget_pending_cmd<W: Write>(
+    pool: &PgPool,
+    dir: &Path,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    // --help / no args
+    let target = match args.first().map(String::as_str) {
+        Some("--help") | Some("-h") | None => {
+            writeln!(w, "forget-pending <name>")?;
+            writeln!(
+                w,
+                "  Delete a migration JSON that has NOT been applied yet, so the"
+            )?;
+            writeln!(
+                w,
+                "  next `makemigrations` regenerates the diff against current"
+            )?;
+            writeln!(
+                w,
+                "  models. Refuses to delete an already-applied migration (would"
+            )?;
+            writeln!(
+                w,
+                "  orphan the `{}` ledger row and break later runs).",
+                runner::LEDGER_TABLE
+            )?;
+            writeln!(w)?;
+            writeln!(
+                w,
+                "  <name> can be the full migration name (e.g. `0003_auto`)"
+            )?;
+            writeln!(w, "  or a unique substring; ambiguous matches error.")?;
+            return Ok(());
+        }
+        Some(s) if s.starts_with('-') => {
+            return Err(MigrateError::Validation(format!(
+                "forget-pending: expected positional <name> first, got flag `{s}`"
+            )));
+        }
+        Some(s) => s,
+    };
+
+    runner::ensure_ledger(pool).await?;
+    let all = file::list_dir(dir)?;
+    let applied = runner::applied_set(pool).await?;
+
+    // Resolve <name> against the file list — accept exact match OR
+    // unique substring (matches the "0003" use case).
+    let exact: Vec<&Migration> = all.iter().filter(|m| m.name == target).collect();
+    let candidates: Vec<&Migration> = if exact.len() == 1 {
+        exact
+    } else {
+        all.iter().filter(|m| m.name.contains(target)).collect()
+    };
+    let migration = match candidates.len() {
+        0 => {
+            return Err(MigrateError::Validation(format!(
+                "forget-pending: no migration matches `{target}` in {}",
+                dir.display()
+            )));
+        }
+        1 => candidates[0],
+        n => {
+            let names: Vec<&str> = candidates.iter().map(|m| m.name.as_str()).collect();
+            return Err(MigrateError::Validation(format!(
+                "forget-pending: `{target}` is ambiguous ({n} matches: {}); pass the full migration name",
+                names.join(", ")
+            )));
+        }
+    };
+
+    // Refuse if the migration has been applied — removing it would
+    // orphan the ledger row.
+    if applied.contains(&migration.name) {
+        return Err(MigrateError::Validation(format!(
+            "forget-pending: migration `{}` is already applied (recorded in `{}`). \
+             Use `migrate <prev>` or `downgrade` to unapply it first, then \
+             `forget-pending` to drop the JSON.",
+            migration.name,
+            runner::LEDGER_TABLE,
+        )));
+    }
+
+    let path = file_path(dir, &migration.name);
+    std::fs::remove_file(&path).map_err(|e| {
+        MigrateError::Validation(format!("forget-pending: rm {}: {e}", path.display()))
+    })?;
+    writeln!(w, "deleted {}", path.display())?;
+    writeln!(w, "  next: `cargo run -- makemigrations` will regenerate")?;
+    writeln!(w, "  the diff against the current model registry.")?;
     Ok(())
 }
 
