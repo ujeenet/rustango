@@ -2,6 +2,47 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.29.10] — `Cli::with_csrf()` builder
+
+Form-driven projects (anything using `template_views` HTML CBVs)
+needed CSRF mounted to enforce the `_csrf` field validation that
+v0.29.7 fixed. Until now every project hand-stacked
+`.layer(rustango::forms::csrf::layer())` on their `urls::api()`.
+Now it's one builder call, parallel to `with_health()` /
+`with_static()`.
+
+### Added
+
+- **`Cli::with_csrf()`** — auto-mounts
+  `crate::forms::csrf::layer()` (default `CsrfConfig`) on the API
+  router at `runserver` time. Default off so pure JSON+JWT APIs
+  don't pay the body-buffer cost on form-encoded POSTs they would
+  reject anyway.
+- **`Cli::with_csrf_config(CsrfConfig)`** — same, with overridable
+  `cookie_name` / `header_name` / `secure`. The right knob for
+  cross-framework hosting (different cookie name) and production
+  HTTPS deployments (`secure = true`).
+- Threading is symmetric: single-tenant runserver wraps the API
+  router directly; tenancy mode wraps before
+  `apply_settings_layers` so layer order is
+  `request → security_headers → CORS → access_log → body_limit → CSRF → handler`
+  (CSRF closest to handler — body-buffering happens after the
+  request-time guards have run).
+
+### Tests
+
+- 1287 → 1289 lib tests (+2): `with_csrf_flips_flag` (default off
+  → cookie name + secure-false defaults applied) and
+  `with_csrf_config_threads_overrides` (custom config lands
+  verbatim).
+
+### Feature gating
+
+- Builder methods gated on the `csrf` feature (`Cli` struct field
+  too), so non-CSRF builds compile without the type ever existing.
+
+---
+
 ## [0.29.9] — `Cli::with_static(prefix, root_dir)` builder
 
 Common need that was previously boilerplate: serving CSS / JS / images

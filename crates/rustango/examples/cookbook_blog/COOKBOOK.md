@@ -1491,6 +1491,30 @@ For finer control (immutable hash-named bundles, `.well-known`
 whitelisting), keep mounting `static_router` directly on your own
 router and skip the shortcut.
 
+### Auto-mounting CSRF — for form-driven CBVs (v0.29.10)
+
+`template_views` `CreateView` / `UpdateView` / `DeleteView` need the
+`_csrf` cookie + form field cycle wired. Same shape:
+
+```rust,ignore
+rustango::manage::Cli::new()
+    .api(urls::api())
+    .with_csrf()                                // default config
+    .run().await
+
+// Or with overrides for production HTTPS / cross-framework hosting:
+rustango::manage::Cli::new()
+    .api(urls::api())
+    .with_csrf_config(rustango::forms::csrf::CsrfConfig {
+        secure: true,
+        ..Default::default()
+    })
+    .run().await
+```
+
+Pure JSON APIs that authenticate via `Authorization: Bearer ...`
+don't need this — `with_csrf()` is opt-in for that reason.
+
 ## Chapter 11 — Async / IO / extensions
 
 7 tests on the most-used extension surfaces. No DB / network needed.

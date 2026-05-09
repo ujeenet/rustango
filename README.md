@@ -370,6 +370,7 @@ rustango::manage::Cli::new()
     .with_settings_from_env()
     .with_health()                              // /health + /ready endpoints
     .with_static("/static", "./assets")         // CSS, JS, images
+    .with_csrf()                                // form-driven app? mount CSRF
     .run().await
 ```
 

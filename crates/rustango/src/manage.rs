@@ -79,6 +79,13 @@ pub struct Cli {
     /// `static_files::static_router` keep doing it.
     #[cfg(feature = "admin")]
     static_dirs: Vec<(String, PathBuf)>,
+    /// CSRF middleware config registered via [`Cli::with_csrf`]. `None`
+    /// means no CSRF layer mounted — the right default for pure JSON
+    /// APIs that authenticate via JWT and reject form-encoded bodies
+    /// at the deserializer layer. Form-driven apps (anything using
+    /// `template_views` Create/Update/DeleteView) opt in.
+    #[cfg(feature = "csrf")]
+    csrf: Option<crate::forms::csrf::CsrfConfig>,
 }
 
 impl Cli {
@@ -101,6 +108,8 @@ impl Cli {
             health_endpoints: false,
             #[cfg(feature = "admin")]
             static_dirs: Vec::new(),
+            #[cfg(feature = "csrf")]
+            csrf: None,
         }
     }
 
@@ -207,6 +216,56 @@ impl Cli {
     #[must_use]
     pub fn with_static(mut self, prefix: impl Into<String>, root_dir: impl Into<PathBuf>) -> Self {
         self.static_dirs.push((prefix.into(), root_dir.into()));
+        self
+    }
+
+    /// Auto-mount the [`crate::forms::csrf::CsrfLayer`] on the API
+    /// router at `runserver` time using
+    /// [`crate::forms::csrf::CsrfConfig::default`]. Required for any
+    /// project using the HTML CBVs (`template_views`'s
+    /// `CreateView`/`UpdateView`/`DeleteView`) — those views call
+    /// `csrf::ensure_token` to mint the cookie + form value, and the
+    /// layer enforces it on POST/PUT/PATCH/DELETE.
+    ///
+    /// Default off — pure JSON APIs that authenticate via JWT
+    /// (`Authorization: Bearer ...`) don't need CSRF and shouldn't
+    /// pay the body-buffer cost on form-encoded POSTs that they'll
+    /// reject anyway.
+    ///
+    /// ```ignore
+    /// rustango::manage::Cli::new()
+    ///     .api(urls::api())
+    ///     .with_csrf()                      // form-driven app
+    ///     .run().await
+    /// ```
+    ///
+    /// To override the cookie name / `Secure` attribute, use
+    /// [`Cli::with_csrf_config`] instead.
+    #[cfg(feature = "csrf")]
+    #[must_use]
+    pub fn with_csrf(mut self) -> Self {
+        self.csrf = Some(crate::forms::csrf::CsrfConfig::default());
+        self
+    }
+
+    /// Same as [`Cli::with_csrf`] but with explicit
+    /// [`crate::forms::csrf::CsrfConfig`] — for projects that need a
+    /// non-default cookie name (when stacking against another
+    /// framework on the same host) or `Secure` flag in production.
+    ///
+    /// ```ignore
+    /// rustango::manage::Cli::new()
+    ///     .api(urls::api())
+    ///     .with_csrf_config(rustango::forms::csrf::CsrfConfig {
+    ///         secure: true,
+    ///         ..Default::default()
+    ///     })
+    ///     .run().await
+    /// ```
+    #[cfg(feature = "csrf")]
+    #[must_use]
+    pub fn with_csrf_config(mut self, cfg: crate::forms::csrf::CsrfConfig) -> Self {
+        self.csrf = Some(cfg);
         self
     }
 
@@ -431,6 +490,11 @@ impl Cli {
         };
         #[cfg(feature = "admin")]
         let api = mount_static_dirs(api, &self.static_dirs);
+        #[cfg(feature = "csrf")]
+        let api = match self.csrf {
+            Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
+            None => api,
+        };
         #[cfg(feature = "config")]
         let api = match self.settings_for_layers.as_ref() {
             Some(s) => apply_settings_layers(api, s),
@@ -446,6 +510,11 @@ impl Cli {
     #[cfg(feature = "tenancy")]
     async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
         let api = self.api;
+        #[cfg(feature = "csrf")]
+        let api = match self.csrf.clone() {
+            Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
+            None => api,
+        };
         #[cfg(feature = "config")]
         let api = match self.settings_for_layers.as_ref() {
             Some(s) => apply_settings_layers(api, s),
@@ -806,6 +875,36 @@ mod tests {
             cli.static_dirs[1].1,
             std::path::PathBuf::from("./var/uploads")
         );
+    }
+
+    /// `Cli::with_csrf()` flips the flag from `None` to `Some(default)`.
+    /// `with_csrf_config(...)` lets callers override.
+    #[cfg(feature = "csrf")]
+    #[test]
+    fn with_csrf_flips_flag() {
+        let cli_default = Cli::new();
+        assert!(cli_default.csrf.is_none(), "default off");
+
+        let cli_with = Cli::new().with_csrf();
+        let csrf = cli_with.csrf.expect("with_csrf should set csrf");
+        assert_eq!(csrf.cookie_name, crate::forms::csrf::CSRF_COOKIE);
+        assert!(!csrf.secure, "default Secure=false for dev over HTTP");
+    }
+
+    /// `with_csrf_config` overrides the default — verify the explicit
+    /// values land on the stored config.
+    #[cfg(feature = "csrf")]
+    #[test]
+    fn with_csrf_config_threads_overrides() {
+        let cli = Cli::new().with_csrf_config(crate::forms::csrf::CsrfConfig {
+            cookie_name: "custom_csrf".into(),
+            header_name: "X-Custom-CSRF".into(),
+            secure: true,
+        });
+        let csrf = cli.csrf.expect("with_csrf_config should set csrf");
+        assert_eq!(csrf.cookie_name, "custom_csrf");
+        assert_eq!(csrf.header_name, "X-Custom-CSRF");
+        assert!(csrf.secure);
     }
 
     /// `mount_static_dirs` actually serves a file from the configured
