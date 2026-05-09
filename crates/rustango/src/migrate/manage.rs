@@ -160,6 +160,27 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "      writes. Reads the ledger so the preview is accurate.\n"
     )?;
+    writeln!(w, "  migrate --squash")?;
+    writeln!(
+        w,
+        "      Delete every pending (un-applied) migration JSON and"
+    )?;
+    writeln!(
+        w,
+        "      regenerate a single fresh diff via makemigrations. Dev-"
+    )?;
+    writeln!(
+        w,
+        "      iteration escape hatch when an evolving model produces a"
+    )?;
+    writeln!(
+        w,
+        "      pending migration the validator rejects (e.g. AddColumn"
+    )?;
+    writeln!(
+        w,
+        "      NOT NULL with no default). Refuses to touch applied rows.\n"
+    )?;
     writeln!(w, "  downgrade [N]")?;
     writeln!(w, "      Step back N applied migrations (default 1).\n")?;
     writeln!(w, "  showmigrations | status")?;
@@ -494,16 +515,21 @@ async fn migrate<W: Write>(
     w: &mut W,
 ) -> Result<(), MigrateError> {
     let mut dry_run = false;
+    let mut squash = false;
     let mut positional: Option<&str> = None;
     for arg in args {
         match arg.as_str() {
             "--dry-run" => dry_run = true,
+            "--squash" => squash = true,
             "--help" | "-h" => {
                 writeln!(
                     w,
                     "migrate                    apply pending migrations\n\
                      migrate <target>           forward or back to <target> (`zero` wipes)\n\
-                     migrate --dry-run          preview the SQL without writing"
+                     migrate --dry-run          preview the SQL without writing\n\
+                     migrate --squash           delete every pending (un-applied) migration JSON\n\
+                                                and regenerate a single fresh diff. Dev-iteration\n\
+                                                escape hatch — refuses to touch applied rows."
                 )?;
                 return Ok(());
             }
@@ -519,6 +545,16 @@ async fn migrate<W: Write>(
                 positional = Some(other);
             }
         }
+    }
+
+    if squash {
+        if dry_run || positional.is_some() {
+            return Err(MigrateError::Validation(
+                "`migrate --squash` does not combine with `--dry-run` or a positional target"
+                    .into(),
+            ));
+        }
+        return migrate_squash(pool, dir, w).await;
     }
 
     if dry_run {
@@ -573,6 +609,80 @@ async fn migrate<W: Write>(
         }
     }
     Ok(())
+}
+
+/// `migrate --squash` (#84a) — dev-iteration escape hatch.
+///
+/// Deletes every pending (un-applied) migration JSON in `dir`, then
+/// re-runs `makemigrations` so the diff regenerates as a single
+/// fresh file against the current model registry. Recovers the
+/// "scaffolder shape → real shape" iteration cycle that hits the
+/// `AddColumn NOT NULL no default` validator rejection without
+/// touching the database.
+///
+/// Refuses if any pending migration is somehow already applied
+/// (impossible by definition — "pending" means absent from the
+/// ledger — but the check is cheap and guards against a future
+/// caller passing a stale `applied_set`). Refuses if there are zero
+/// pending migrations (nothing to do) or only one (`forget-pending`
+/// is the right verb for the single-file case).
+async fn migrate_squash<W: Write>(
+    pool: &PgPool,
+    dir: &Path,
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    runner::ensure_ledger(pool).await?;
+    let all = file::list_dir(dir)?;
+    let applied = runner::applied_set(pool).await?;
+
+    let pending: Vec<&Migration> = all.iter().filter(|m| !applied.contains(&m.name)).collect();
+    if pending.is_empty() {
+        writeln!(
+            w,
+            "no pending migrations to squash (every JSON is in the ledger)"
+        )?;
+        return Ok(());
+    }
+    if pending.len() == 1 {
+        return Err(MigrateError::Validation(format!(
+            "only one pending migration (`{}`) — use `forget-pending {}` instead of `--squash`",
+            pending[0].name, pending[0].name,
+        )));
+    }
+
+    // Defensive double-check: the filter above already guarantees
+    // none of these are applied. If a future refactor breaks that
+    // invariant we still fail loudly instead of clobbering the
+    // ledger.
+    for m in &pending {
+        if applied.contains(&m.name) {
+            return Err(MigrateError::Validation(format!(
+                "migrate --squash: refused — migration `{}` appears applied. \
+                 Use `migrate <prev>` or `downgrade` to unapply it first.",
+                m.name,
+            )));
+        }
+    }
+
+    writeln!(
+        w,
+        "squashing {} pending migration(s) into a fresh diff:",
+        pending.len()
+    )?;
+    for m in &pending {
+        let path = file_path(dir, &m.name);
+        std::fs::remove_file(&path).map_err(|e| {
+            MigrateError::Validation(format!("migrate --squash: rm {}: {e}", path.display()))
+        })?;
+        writeln!(w, "  removed {}", path.display())?;
+    }
+
+    writeln!(w, "regenerating diff against current model registry...")?;
+    // Empty args means "default makemigrations behavior" — splits
+    // registry vs tenant in tenancy projects, single file otherwise.
+    // Pass through to the existing entry point so any future flags
+    // gain consistent behavior automatically.
+    makemigrations(dir, &[], w)
 }
 
 async fn downgrade<W: Write>(
