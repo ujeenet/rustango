@@ -67,6 +67,11 @@ pub struct Cli {
     /// the whole stack.
     #[cfg(feature = "config")]
     settings_for_layers: Option<crate::config::Settings>,
+    /// When `true`, mounts `/health` + `/ready` endpoints on the
+    /// API router at runserver time. Set via [`Cli::with_health`].
+    /// Default `false` because operators sometimes want their own
+    /// health endpoint shape (custom JSON, additional checks).
+    health_endpoints: bool,
 }
 
 impl Cli {
@@ -86,6 +91,7 @@ impl Cli {
             init_tenancy_fn: crate::tenancy::init_tenancy,
             #[cfg(feature = "config")]
             settings_for_layers: None,
+            health_endpoints: false,
         }
     }
 
@@ -139,6 +145,32 @@ impl Cli {
     #[must_use]
     pub fn bind(mut self, addr: impl Into<String>) -> Self {
         self.bind = addr.into();
+        self
+    }
+
+    /// Auto-mount `/health` (liveness) and `/ready` (readiness +
+    /// `SELECT 1`) endpoints on the API router at `runserver` time.
+    /// Default off — operators sometimes ship custom health JSON
+    /// or layer additional checks (Redis ping, queue depth, etc.)
+    /// and don't want the framework's defaults colliding.
+    ///
+    /// ```ignore
+    /// rustango::manage::Cli::new()
+    ///     .api(urls::api())
+    ///     .with_settings_from_env()
+    ///     .with_health()
+    ///     .run().await
+    /// ```
+    ///
+    /// The mounted endpoints come from
+    /// [`crate::health::health_router`] — `/health` always 200s,
+    /// `/ready` 200s when the database is reachable and 503s
+    /// otherwise. Production deployments wire the load balancer
+    /// to `/ready` for traffic gating and `/health` for liveness
+    /// probes.
+    #[must_use]
+    pub fn with_health(mut self) -> Self {
+        self.health_endpoints = true;
         self
     }
 
@@ -356,6 +388,11 @@ impl Cli {
             seed(&pool).await?;
         }
         let api = self.api;
+        let api = if self.health_endpoints {
+            api.merge(crate::health::health_router(pool.clone()))
+        } else {
+            api
+        };
         #[cfg(feature = "config")]
         let api = match self.settings_for_layers.as_ref() {
             Some(s) => apply_settings_layers(api, s),
@@ -371,6 +408,14 @@ impl Cli {
     #[cfg(feature = "tenancy")]
     async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
         let api = self.api;
+        // For tenancy projects the registry pool is built inside
+        // `Server::Builder`; we don't have it here to feed
+        // `health_router`. Skip auto-mounting in tenancy mode for
+        // now — the tenant_router itself owns health concerns.
+        // (Wiring through `Server::Builder` is the follow-up if
+        // demand surfaces; today operators reach the registry
+        // pool via env vars and mount their own probe.)
+        let _ = self.health_endpoints;
         #[cfg(feature = "config")]
         let api = match self.settings_for_layers.as_ref() {
             Some(s) => apply_settings_layers(api, s),
@@ -681,5 +726,14 @@ mod tests {
         let s = crate::config::Settings::default();
         let router: Router = Router::new();
         let _ = apply_settings_layers(router, &s);
+    }
+
+    /// `Cli::with_health` flips the flag for the runserver path.
+    #[test]
+    fn with_health_flips_flag() {
+        let cli_default = Cli::new();
+        assert!(!cli_default.health_endpoints, "default off");
+        let cli_with = Cli::new().with_health();
+        assert!(cli_with.health_endpoints);
     }
 }

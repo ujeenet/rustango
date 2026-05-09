@@ -368,6 +368,7 @@ let tier = rustango::config::Settings::current_env_tier();
 rustango::manage::Cli::new()
     .api(urls::api())
     .with_settings_from_env()
+    .with_health()                              // /health + /ready endpoints
     .run().await
 ```
 
