@@ -2,6 +2,62 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.29.4] — `ListView` URL overrides + PK type coercion
+
+Two follow-ups for `template_views` that surfaced from
+imagining how a real user would build a `/posts` page on top of
+v0.29.0:
+
+1. They want sortable column headers — so `?ordering=col` /
+   `?ordering=-col` URL overrides
+2. They want a "show more" / "show less" page-size selector — so
+   `?page_size=N` URL overrides (clamped to a configured cap, so
+   `?page_size=999999` doesn't drag the database into a giant scan)
+3. They have a UUID PK and want `/posts/{uuid}/edit` to work
+   without leaning on Postgres' implicit string-to-UUID cast — so
+   `coerce_pk` based on the field's declared `FieldType`
+
+### Added
+
+- **`ListView::ordering_fields(&[&str])`** — allowlist of fields
+  the user can override sort on via `?ordering=col` (ASC) or
+  `?ordering=-col` (DESC). Mirrors Django's ListView convention.
+  Outside-allowlist values silently fall back to the builder
+  default (typos shouldn't 400).
+- **`ListView::max_page_size(usize)`** — hard cap on
+  `?page_size=N` URL overrides. Default 100. Clamps below the
+  floor (1) and above the cap.
+- **`ordering: String` Tera context var** — the active ordering
+  spec (`"title"` / `"-created_at"` / `""` for builder default).
+  Templates render sortable column headers like
+  `<a href="?ordering={% if ordering == 'title' %}-{% endif %}title">`.
+
+### Changed
+
+- **DetailView / UpdateView / DeleteView PK binding** now coerces
+  the URL `{pk}` segment to the field's declared `FieldType`
+  before binding the SQL parameter. `i16` / `i32` / `i64` parse to
+  `SqlValue::I64`; `Uuid` parses to `SqlValue::Uuid`; everything
+  else (including parse failures) falls through to
+  `SqlValue::String` — the previous behavior. Keeps queries
+  cleaner under stricter SQL modes without breaking existing
+  string-PK projects.
+- **Tera `page_size` context var** now reflects the *active* page
+  size, not the builder default. Same data shape; templates that
+  render `<select>` per-page-size dropdowns can show the user's
+  current choice.
+
+### Tests
+
+- 1246 → 1257 lib tests (+11): `resolve_page_size` default /
+  unparseable / clamping (above + below); `resolve_active_order`
+  URL ASC override / `-` DESC prefix / outside-allowlist fallback
+  / no-URL-uses-builder / empty-`?ordering=`-treated-as-no-override;
+  `coerce_pk` integer field success + garbage fallback / UUID
+  field success + garbage fallback / String pass-through.
+
+---
+
 ## [0.29.3] — `template_views` form CSRF threading
 
 Closes the most likely deployment-blocker for v0.29.0's form views:

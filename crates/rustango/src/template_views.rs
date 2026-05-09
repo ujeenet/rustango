@@ -94,26 +94,35 @@ pub struct ListView {
     schema: &'static ModelSchema,
     template: String,
     page_size: i64,
+    /// Hard cap on `?page_size=N` URL overrides. Default 100.
+    max_page_size: i64,
     fields: Option<Vec<String>>,
     order_by: Vec<(String, bool)>,
     filter_fields: Vec<String>,
     search_fields: Vec<String>,
+    /// Allowlist for `?ordering=col` / `?ordering=-col` overrides.
+    /// Empty = no override allowed; the builder-side `order_by`
+    /// is the only ordering applied.
+    ordering_fields: Vec<String>,
 }
 
 impl ListView {
     /// Start a `ListView` for the given schema. Defaults: template
-    /// name `<table>_list.html`, page size 20, no `ORDER BY`, all
-    /// fields included, no filters, no search.
+    /// name `<table>_list.html`, page size 20, max page size 100,
+    /// no `ORDER BY`, all fields included, no filters, no search,
+    /// no `?ordering=` override.
     #[must_use]
     pub fn for_model(schema: &'static ModelSchema) -> Self {
         Self {
             schema,
             template: format!("{}_list.html", schema.table),
             page_size: 20,
+            max_page_size: 100,
             fields: None,
             order_by: Vec::new(),
             filter_fields: Vec::new(),
             search_fields: Vec::new(),
+            ordering_fields: Vec::new(),
         }
     }
 
@@ -124,10 +133,21 @@ impl ListView {
         self
     }
 
-    /// Page size — clamped to `≥ 1`. Default 20.
+    /// Default page size — clamped to `≥ 1`. Default 20. Users can
+    /// override per-request via `?page_size=N`, clamped to
+    /// `[1, max_page_size]`.
     #[must_use]
     pub fn page_size(mut self, n: usize) -> Self {
         self.page_size = i64::try_from(n).unwrap_or(20).max(1);
+        self
+    }
+
+    /// Hard cap on `?page_size=N` URL overrides. Default 100.
+    /// Prevents a hostile client from issuing `?page_size=999999` and
+    /// dragging the database into a giant scan. Clamped to `≥ 1`.
+    #[must_use]
+    pub fn max_page_size(mut self, n: usize) -> Self {
+        self.max_page_size = i64::try_from(n).unwrap_or(100).max(1);
         self
     }
 
@@ -135,6 +155,30 @@ impl ListView {
     #[must_use]
     pub fn order_by(mut self, column: impl Into<String>, desc: bool) -> Self {
         self.order_by.push((column.into(), desc));
+        self
+    }
+
+    /// Allow `?ordering=col` / `?ordering=-col` URL overrides on
+    /// these fields. Without this, the ordering set via
+    /// [`Self::order_by`] is fixed. With it, users (or sortable
+    /// table headers in templates) can switch the active sort.
+    ///
+    /// Each name resolves against the schema by Rust field name OR
+    /// SQL column name; unmatched names are silently dropped at
+    /// request time so a typo in the URL doesn't 400. Mirrors the
+    /// `filter_fields` / `search_fields` allowlist shape — bare
+    /// names plus the `-` desc prefix.
+    ///
+    /// The active ordering string is stamped into the Tera context
+    /// as `ordering`, so templates can render sortable headers:
+    ///
+    /// ```html
+    /// {# Click to toggle asc/desc — `ordering` carries the active spec #}
+    /// <a href="?ordering={% if ordering == 'title' %}-{% endif %}title">Title</a>
+    /// ```
+    #[must_use]
+    pub fn ordering_fields(mut self, names: &[&str]) -> Self {
+        self.ordering_fields = names.iter().map(|s| (*s).to_owned()).collect();
         self
     }
 
@@ -228,9 +272,15 @@ async fn handle_list(
         .and_then(|p| p.parse().ok())
         .unwrap_or(1)
         .max(1);
-    let offset = (page - 1) * state.vs.page_size;
+    let page_size = resolve_page_size(state.vs.page_size, state.vs.max_page_size, &params);
+    let offset = (page - 1) * page_size;
 
-    let order_by = match resolve_order_by(state.vs.schema, &state.vs.order_by) {
+    let (order_by, active_ordering) = match resolve_active_order(
+        state.vs.schema,
+        &state.vs.order_by,
+        &state.vs.ordering_fields,
+        &params,
+    ) {
         Ok(v) => v,
         Err(msg) => return template_error(&msg),
     };
@@ -246,7 +296,7 @@ async fn handle_list(
         search: None,
         joins: vec![],
         order_by,
-        limit: Some(state.vs.page_size),
+        limit: Some(page_size),
         offset: Some(offset),
     };
     let count_q = crate::core::CountQuery {
@@ -270,15 +320,16 @@ async fn handle_list(
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object_list: Vec<Value> = rows.iter().map(|r| row_to_json(r, &fields)).collect();
 
-    let total_pages = ((total - 1).max(0) / state.vs.page_size) + 1;
+    let total_pages = ((total - 1).max(0) / page_size) + 1;
     let mut ctx = Context::new();
     ctx.insert("object_list", &object_list);
     ctx.insert("page", &page);
-    ctx.insert("page_size", &state.vs.page_size);
+    ctx.insert("page_size", &page_size);
     ctx.insert("total", &total);
     ctx.insert("total_pages", &total_pages);
     ctx.insert("has_next", &(page < total_pages));
     ctx.insert("has_prev", &(page > 1));
+    ctx.insert("ordering", &active_ordering);
     insert_filter_context(&mut ctx, &state.vs.filter_fields, &params);
 
     render(&state.tera, &state.vs.template, &ctx)
@@ -369,7 +420,7 @@ async fn handle_detail(
         where_clause: WhereExpr::Predicate(Filter {
             column: pk_field.column,
             op: Op::Eq,
-            value: SqlValue::String(pk),
+            value: coerce_pk(pk_field, &pk),
         }),
         search: None,
         joins: vec![],
@@ -496,7 +547,7 @@ async fn handle_delete_confirm(
         where_clause: WhereExpr::Predicate(Filter {
             column: pk_field.column,
             op: Op::Eq,
-            value: SqlValue::String(pk),
+            value: coerce_pk(pk_field, &pk),
         }),
         search: None,
         joins: vec![],
@@ -534,7 +585,7 @@ async fn handle_delete_submit(
         where_clause: WhereExpr::Predicate(Filter {
             column: pk_field.column,
             op: Op::Eq,
-            value: SqlValue::String(pk),
+            value: coerce_pk(pk_field, &pk),
         }),
     };
     match crate::sql::delete(&state.pool, &delete_q).await {
@@ -823,6 +874,40 @@ fn field_type_label(ty: crate::core::FieldType) -> &'static str {
     }
 }
 
+/// Coerce a URL-path PK string to the field's declared SQL type.
+/// Tighter than [`coerce_value`] — never returns `Null`, never
+/// allows empty strings (a `/{pk}` segment is always present).
+/// Used by DetailView / UpdateView / DeleteView to bind the
+/// `WHERE pk = $1` parameter without relying on Postgres'
+/// implicit string-to-int casts.
+///
+/// Returns the original `SqlValue::String(raw)` as a permissive
+/// fallback when:
+/// - Field type is not one of the integer / UUID variants we
+///   know how to parse from a URL string
+/// - Parsing fails (e.g. `i64` with non-numeric segment) — the
+///   resulting query will produce no rows / 404, which is the
+///   same effect as a typed-mismatch error and avoids leaking
+///   parse errors to the user
+fn coerce_pk(field: &crate::core::FieldSchema, raw: &str) -> SqlValue {
+    use crate::core::FieldType as T;
+    match field.ty {
+        T::I16 | T::I32 | T::I64 => raw
+            .parse::<i64>()
+            .map(SqlValue::I64)
+            .unwrap_or_else(|_| SqlValue::String(raw.to_owned())),
+        T::Uuid => raw
+            .parse::<uuid::Uuid>()
+            .map(SqlValue::Uuid)
+            .unwrap_or_else(|_| SqlValue::String(raw.to_owned())),
+        // Strings are the natural representation; everything else
+        // (Bool / Float / DateTime / Date / Json) doesn't normally
+        // serve as a PK. Pass the raw string through and let
+        // Postgres' implicit cast handle it.
+        _ => SqlValue::String(raw.to_owned()),
+    }
+}
+
 /// Coerce a form-encoded string into a `SqlValue` based on the
 /// field's declared type. Empty strings on nullable fields produce
 /// `SqlValue::Null`. Coercion failures surface as a per-field error
@@ -923,7 +1008,7 @@ async fn handle_update_get(
         where_clause: WhereExpr::Predicate(Filter {
             column: pk_field.column,
             op: Op::Eq,
-            value: SqlValue::String(pk.clone()),
+            value: coerce_pk(pk_field, &pk),
         }),
         search: None,
         joins: vec![],
@@ -993,7 +1078,7 @@ async fn handle_update_post(
         where_clause: WhereExpr::Predicate(Filter {
             column: pk_field.column,
             op: Op::Eq,
-            value: SqlValue::String(pk),
+            value: coerce_pk(pk_field, &pk),
         }),
     };
     match crate::sql::update(&state.pool, &update_q).await {
@@ -1170,6 +1255,72 @@ fn default_order_by(schema: &'static ModelSchema) -> Vec<OrderClause> {
         }],
         None => Vec::new(),
     }
+}
+
+/// Resolve the active page size from the URL `?page_size=N` param,
+/// clamped to `[1, max]`. Falls back to the builder default when
+/// the param is absent or unparseable. Saturates rather than
+/// erroring on overflow — the user's request still loads, just
+/// with the cap applied.
+fn resolve_page_size(default: i64, max: i64, params: &HashMap<String, String>) -> i64 {
+    let Some(raw) = params.get("page_size") else {
+        return default;
+    };
+    let Ok(n) = raw.parse::<i64>() else {
+        return default;
+    };
+    n.clamp(1, max)
+}
+
+/// Resolve the active ordering, honoring `?ordering=col` /
+/// `?ordering=-col` URL overrides when the bare column name is in
+/// the `ordering_fields` allowlist. Returns the resolved
+/// `OrderClause` slice plus the active spec string (for the Tera
+/// `ordering` context var).
+///
+/// Resolution priority:
+/// 1. `?ordering=...` URL param matching the allowlist (single
+///    column; the `-` prefix flips to DESC). Multi-column requires
+///    a hand-rolled handler.
+/// 2. Builder-side `.order_by(...)` calls
+/// 3. PK-ASC fallback (so pagination stays deterministic)
+///
+/// The active spec returned for the context var:
+/// - For URL overrides: `"col"` or `"-col"` exactly as the user typed
+/// - For builder default: empty string (templates render no
+///   "active sort" indicator)
+fn resolve_active_order(
+    schema: &'static ModelSchema,
+    builder_spec: &[(String, bool)],
+    ordering_fields: &[String],
+    params: &HashMap<String, String>,
+) -> Result<(Vec<OrderClause>, String), String> {
+    // URL override path.
+    if let Some(raw) = params.get("ordering").filter(|s| !s.is_empty()) {
+        let (name, desc) = if let Some(rest) = raw.strip_prefix('-') {
+            (rest, true)
+        } else {
+            (raw.as_str(), false)
+        };
+        if ordering_fields.iter().any(|f| f == name) {
+            if let Some(field) = schema.field(name) {
+                return Ok((
+                    vec![OrderClause {
+                        column: field.column,
+                        desc,
+                    }],
+                    raw.clone(),
+                ));
+            }
+        }
+        // Not in allowlist or unknown field — fall through to the
+        // builder default rather than erroring. Matches the same
+        // "typos shouldn't 400" policy used for filter_fields.
+    }
+
+    // Builder default path.
+    let resolved = resolve_order_by(schema, builder_spec)?;
+    Ok((resolved, String::new()))
 }
 
 /// Build the `WHERE` clause for a [`ListView`] handler from URL
@@ -1409,9 +1560,16 @@ mod tenant {
             .and_then(|p| p.parse().ok())
             .unwrap_or(1)
             .max(1);
-        let offset = (page - 1) * state.vs.page_size;
+        let page_size =
+            super::resolve_page_size(state.vs.page_size, state.vs.max_page_size, &params);
+        let offset = (page - 1) * page_size;
 
-        let order_by = match resolve_order_by(state.vs.schema, &state.vs.order_by) {
+        let (order_by, active_ordering) = match super::resolve_active_order(
+            state.vs.schema,
+            &state.vs.order_by,
+            &state.vs.ordering_fields,
+            &params,
+        ) {
             Ok(v) => v,
             Err(msg) => return template_error(&msg),
         };
@@ -1427,7 +1585,7 @@ mod tenant {
             search: None,
             joins: vec![],
             order_by,
-            limit: Some(state.vs.page_size),
+            limit: Some(page_size),
             offset: Some(offset),
         };
         let count_q = crate::core::CountQuery {
@@ -1452,15 +1610,16 @@ mod tenant {
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object_list: Vec<Value> = rows.iter().map(|r| row_to_json(r, &fields)).collect();
 
-        let total_pages = ((total - 1).max(0) / state.vs.page_size) + 1;
+        let total_pages = ((total - 1).max(0) / page_size) + 1;
         let mut ctx = Context::new();
         ctx.insert("object_list", &object_list);
         ctx.insert("page", &page);
-        ctx.insert("page_size", &state.vs.page_size);
+        ctx.insert("page_size", &page_size);
         ctx.insert("total", &total);
         ctx.insert("total_pages", &total_pages);
         ctx.insert("has_next", &(page < total_pages));
         ctx.insert("has_prev", &(page > 1));
+        ctx.insert("ordering", &active_ordering);
         super::insert_filter_context(&mut ctx, &state.vs.filter_fields, &params);
 
         render(&state.tera, &state.vs.template, &ctx)
@@ -1490,7 +1649,7 @@ mod tenant {
             where_clause: WhereExpr::Predicate(Filter {
                 column: pk_field.column,
                 op: Op::Eq,
-                value: SqlValue::String(pk),
+                value: coerce_pk(pk_field, &pk),
             }),
             search: None,
             joins: vec![],
@@ -1536,7 +1695,7 @@ mod tenant {
             where_clause: WhereExpr::Predicate(Filter {
                 column: pk_field.column,
                 op: Op::Eq,
-                value: SqlValue::String(pk),
+                value: coerce_pk(pk_field, &pk),
             }),
             search: None,
             joins: vec![],
@@ -1575,7 +1734,7 @@ mod tenant {
             where_clause: WhereExpr::Predicate(Filter {
                 column: pk_field.column,
                 op: Op::Eq,
-                value: SqlValue::String(pk),
+                value: coerce_pk(pk_field, &pk),
             }),
         };
         match crate::sql::delete_on(&mut *t.conn(), &delete_q).await {
@@ -1656,7 +1815,7 @@ mod tenant {
             where_clause: WhereExpr::Predicate(Filter {
                 column: pk_field.column,
                 op: Op::Eq,
-                value: SqlValue::String(pk.clone()),
+                value: coerce_pk(pk_field, &pk),
             }),
             search: None,
             joins: vec![],
@@ -1728,7 +1887,7 @@ mod tenant {
             where_clause: WhereExpr::Predicate(Filter {
                 column: pk_field.column,
                 op: Op::Eq,
-                value: SqlValue::String(pk),
+                value: coerce_pk(pk_field, &pk),
             }),
         };
         match crate::sql::update_on(&mut *t.conn(), &update_q).await {
@@ -2344,6 +2503,121 @@ mod tests {
         assert_eq!(ff[0].value, "Hello");
     }
 
+    /// `coerce_pk` for an integer PK parses to `SqlValue::I64`.
+    #[test]
+    fn coerce_pk_integer_field() {
+        let s = schema_two_fields();
+        let pk = s.primary_key().unwrap();
+        match coerce_pk(pk, "42") {
+            SqlValue::I64(n) => assert_eq!(n, 42),
+            other => panic!("expected I64, got {other:?}"),
+        }
+    }
+
+    /// `coerce_pk` falls back to `SqlValue::String` on parse
+    /// failure rather than panicking — the resulting query just
+    /// returns no rows / 404, same effect as a 400 but without
+    /// leaking parse errors.
+    #[test]
+    fn coerce_pk_integer_field_fallback_on_garbage() {
+        let s = schema_two_fields();
+        let pk = s.primary_key().unwrap();
+        match coerce_pk(pk, "not-a-number") {
+            SqlValue::String(raw) => assert_eq!(raw, "not-a-number"),
+            other => panic!("expected fallback String, got {other:?}"),
+        }
+    }
+
+    /// `coerce_pk` for a UUID PK parses to `SqlValue::Uuid`.
+    #[test]
+    fn coerce_pk_uuid_field() {
+        // Build a one-off schema with a UUID PK to exercise the
+        // branch — schema_two_fields uses I64 for `id`.
+        let uuid_schema: &'static ModelSchema = Box::leak(Box::new(ModelSchema {
+            name: "Doc",
+            table: "docs",
+            fields: Box::leak(Box::new([crate::core::FieldSchema {
+                name: "id",
+                column: "id",
+                ty: FieldType::Uuid,
+                nullable: false,
+                primary_key: true,
+                relation: None,
+                max_length: None,
+                min: None,
+                max: None,
+                default: None,
+                auto: false,
+                unique: false,
+                generated_as: None,
+            }])),
+            display: None,
+            app_label: None,
+            admin: None,
+            soft_delete_column: None,
+            permissions: false,
+            audit_track: None,
+            m2m: &[],
+            indexes: &[],
+            check_constraints: &[],
+            composite_relations: &[],
+            generic_relations: &[],
+            scope: crate::core::ModelScope::Tenant,
+        }));
+        let pk = uuid_schema.primary_key().unwrap();
+        let raw = "550e8400-e29b-41d4-a716-446655440000";
+        match coerce_pk(pk, raw) {
+            SqlValue::Uuid(_) => {} // success — variant matches
+            other => panic!("expected Uuid, got {other:?}"),
+        }
+        // Garbage UUID falls back to String.
+        match coerce_pk(pk, "not-a-uuid") {
+            SqlValue::String(s) => assert_eq!(s, "not-a-uuid"),
+            other => panic!("expected fallback String, got {other:?}"),
+        }
+    }
+
+    /// `coerce_pk` for a String PK passes through verbatim.
+    #[test]
+    fn coerce_pk_string_field() {
+        let str_schema: &'static ModelSchema = Box::leak(Box::new(ModelSchema {
+            name: "Slug",
+            table: "slugs",
+            fields: Box::leak(Box::new([crate::core::FieldSchema {
+                name: "slug",
+                column: "slug",
+                ty: FieldType::String,
+                nullable: false,
+                primary_key: true,
+                relation: None,
+                max_length: Some(64),
+                min: None,
+                max: None,
+                default: None,
+                auto: false,
+                unique: false,
+                generated_as: None,
+            }])),
+            display: None,
+            app_label: None,
+            admin: None,
+            soft_delete_column: None,
+            permissions: false,
+            audit_track: None,
+            m2m: &[],
+            indexes: &[],
+            check_constraints: &[],
+            composite_relations: &[],
+            generic_relations: &[],
+            scope: crate::core::ModelScope::Tenant,
+        }));
+        let pk = str_schema.primary_key().unwrap();
+        match coerce_pk(pk, "hello-world") {
+            SqlValue::String(s) => assert_eq!(s, "hello-world"),
+            other => panic!("expected String, got {other:?}"),
+        }
+    }
+
     /// `coerce_value` rejects garbage integers with a clear error.
     #[test]
     fn coerce_value_int_error_surfaces() {
@@ -2504,6 +2778,102 @@ mod tests {
             max: Some(100),
         };
         assert!(bounds_error_message(&only_max).contains("≤ 100"));
+    }
+
+    /// `resolve_page_size` falls back to the default when the param
+    /// is absent or unparseable.
+    #[test]
+    fn resolve_page_size_unset_returns_default() {
+        let params = HashMap::new();
+        assert_eq!(resolve_page_size(20, 100, &params), 20);
+
+        let mut params = HashMap::new();
+        params.insert("page_size".into(), "garbage".into());
+        assert_eq!(resolve_page_size(20, 100, &params), 20);
+    }
+
+    /// `resolve_page_size` clamps to `[1, max]`.
+    #[test]
+    fn resolve_page_size_clamps_to_range() {
+        let mut params = HashMap::new();
+        // Below the floor.
+        params.insert("page_size".into(), "0".into());
+        assert_eq!(resolve_page_size(20, 100, &params), 1);
+        params.insert("page_size".into(), "-5".into());
+        assert_eq!(resolve_page_size(20, 100, &params), 1);
+
+        // Above the cap — protects against ?page_size=999999 DoS.
+        params.insert("page_size".into(), "999999".into());
+        assert_eq!(resolve_page_size(20, 100, &params), 100);
+
+        // Within range.
+        params.insert("page_size".into(), "50".into());
+        assert_eq!(resolve_page_size(20, 100, &params), 50);
+    }
+
+    /// `?ordering=col` honored when the field is in the allowlist.
+    #[test]
+    fn resolve_active_order_url_override_asc() {
+        let s = schema_two_fields();
+        let mut params = HashMap::new();
+        params.insert("ordering".into(), "title".into());
+        let (clauses, active) = resolve_active_order(s, &[], &["title".into()], &params).unwrap();
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0].column, "title");
+        assert!(!clauses[0].desc);
+        assert_eq!(active, "title");
+    }
+
+    /// `?ordering=-col` flips to DESC.
+    #[test]
+    fn resolve_active_order_url_override_desc_prefix() {
+        let s = schema_two_fields();
+        let mut params = HashMap::new();
+        params.insert("ordering".into(), "-title".into());
+        let (clauses, active) = resolve_active_order(s, &[], &["title".into()], &params).unwrap();
+        assert_eq!(clauses[0].column, "title");
+        assert!(clauses[0].desc);
+        assert_eq!(active, "-title");
+    }
+
+    /// Override outside the allowlist falls back to the builder
+    /// default — matches the "typos shouldn't 400" policy used for
+    /// `filter_fields`.
+    #[test]
+    fn resolve_active_order_url_override_outside_allowlist_falls_back() {
+        let s = schema_two_fields();
+        let mut params = HashMap::new();
+        params.insert("ordering".into(), "id".into()); // not in allowlist
+        let (_, active) = resolve_active_order(s, &[], &["title".into()], &params).unwrap();
+        // Builder default has no order_by, so `default_order_by`
+        // returns PK-ASC; `active` is empty (templates render no
+        // "active sort" indicator since the user-requested sort
+        // wasn't applied).
+        assert_eq!(active, "");
+    }
+
+    /// No `?ordering=` URL param → builder default (with PK-ASC
+    /// fallback when no `.order_by(...)` was set), `active` empty.
+    #[test]
+    fn resolve_active_order_no_url_uses_builder_default() {
+        let s = schema_two_fields();
+        let params = HashMap::new();
+        let (clauses, active) = resolve_active_order(s, &[], &["title".into()], &params).unwrap();
+        // PK-ASC fallback.
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0].column, "id");
+        assert!(!clauses[0].desc);
+        assert_eq!(active, "");
+    }
+
+    /// Empty `?ordering=` (`?ordering=`) is treated as no override.
+    #[test]
+    fn resolve_active_order_empty_value_treated_as_no_override() {
+        let s = schema_two_fields();
+        let mut params = HashMap::new();
+        params.insert("ordering".into(), String::new());
+        let (_, active) = resolve_active_order(s, &[], &["title".into()], &params).unwrap();
+        assert_eq!(active, "");
     }
 
     /// Smoke: every CBV's `tenant_router` builds without panicking

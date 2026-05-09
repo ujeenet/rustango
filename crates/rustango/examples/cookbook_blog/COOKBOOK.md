@@ -1310,9 +1310,11 @@ use rustango::template_views::{CreateView, UpdateView, DeleteView};
 let app = axum::Router::new()
     .merge(ListView::for_model(Post::SCHEMA)
         .page_size(20)
+        .max_page_size(100)                         // cap for ?page_size= overrides
         .order_by("created_at", true)
         .filter_fields(&["author_id", "status"])    // ?author_id=42&status=published
         .search_fields(&["title", "body"])          // ?search=rustango → ILIKE %rustango%
+        .ordering_fields(&["title", "created_at"])  // ?ordering=title / ?ordering=-created_at
         .router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA)
         .router("/posts", tera.clone(), pool.clone()))
@@ -1331,7 +1333,7 @@ Tera context (consistent across views so templates port cleanly):
 
 | view | context vars |
 |------|--------------|
-| `ListView` | `object_list` (Vec of row-as-JSON), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev`, `filters` (Map of active filter values), `search` (String) |
+| `ListView` | `object_list` (Vec of row-as-JSON), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev`, `filters` (Map), `search` (String), `ordering` (String — active spec, or `""`) |
 | `DetailView` | `object` (single row as JSON) |
 | `CreateView` (GET) | `form: { fields, errors }`, `is_create=true`, `is_update=false` |
 | `UpdateView` (GET) | `form: { fields, errors }`, `object`, `pk`, `is_create=false`, `is_update=true` |
