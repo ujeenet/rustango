@@ -1311,6 +1311,8 @@ let app = axum::Router::new()
     .merge(ListView::for_model(Post::SCHEMA)
         .page_size(20)
         .order_by("created_at", true)
+        .filter_fields(&["author_id", "status"])    // ?author_id=42&status=published
+        .search_fields(&["title", "body"])          // ?search=rustango → ILIKE %rustango%
         .router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA)
         .router("/posts", tera.clone(), pool.clone()))

@@ -96,12 +96,14 @@ pub struct ListView {
     page_size: i64,
     fields: Option<Vec<String>>,
     order_by: Vec<(String, bool)>,
+    filter_fields: Vec<String>,
+    search_fields: Vec<String>,
 }
 
 impl ListView {
     /// Start a `ListView` for the given schema. Defaults: template
     /// name `<table>_list.html`, page size 20, no `ORDER BY`, all
-    /// fields included.
+    /// fields included, no filters, no search.
     #[must_use]
     pub fn for_model(schema: &'static ModelSchema) -> Self {
         Self {
@@ -110,6 +112,8 @@ impl ListView {
             page_size: 20,
             fields: None,
             order_by: Vec::new(),
+            filter_fields: Vec::new(),
+            search_fields: Vec::new(),
         }
     }
 
@@ -131,6 +135,42 @@ impl ListView {
     #[must_use]
     pub fn order_by(mut self, column: impl Into<String>, desc: bool) -> Self {
         self.order_by.push((column.into(), desc));
+        self
+    }
+
+    /// Allow exact-match filtering on these fields via URL query
+    /// parameters: `GET /posts?author_id=42&status=published` runs
+    /// `WHERE author_id = '42' AND status = 'published'` (when both
+    /// are in the allowlist; unknown query params are silently
+    /// ignored, matching the Django convention).
+    ///
+    /// Mirrors `viewset::ViewSet::filter_fields` but without the
+    /// Django-style `__lookup` syntax (just exact match) — keeps
+    /// the ListView surface minimal. Projects that want
+    /// `__gt` / `__in` / `__icontains` build their own filters in
+    /// a hand-rolled handler.
+    ///
+    /// Each name resolves against the schema by Rust field name OR
+    /// SQL column name; unmatched names are silently dropped at
+    /// request time so a typo here doesn't crash startup.
+    #[must_use]
+    pub fn filter_fields(mut self, names: &[&str]) -> Self {
+        self.filter_fields = names.iter().map(|s| (*s).to_owned()).collect();
+        self
+    }
+
+    /// Enable text search across these fields via the `?search=...`
+    /// query parameter: `GET /posts?search=rustango` runs
+    /// `WHERE title ILIKE '%rustango%' OR body ILIKE '%rustango%'`
+    /// against the listed fields. Mirrors
+    /// `viewset::ViewSet::search_fields`.
+    ///
+    /// Each name should be a `FieldType::String` field; non-string
+    /// fields would need a `::text` cast on the SQL side and aren't
+    /// handled today (they're silently dropped, matching the viewset).
+    #[must_use]
+    pub fn search_fields(mut self, names: &[&str]) -> Self {
+        self.search_fields = names.iter().map(|s| (*s).to_owned()).collect();
         self
     }
 
@@ -194,9 +234,15 @@ async fn handle_list(
         Ok(v) => v,
         Err(msg) => return template_error(&msg),
     };
+    let where_clause = build_list_where(
+        state.vs.schema,
+        &state.vs.filter_fields,
+        &state.vs.search_fields,
+        &params,
+    );
     let select_q = SelectQuery {
         model: state.vs.schema,
-        where_clause: WhereExpr::And(vec![]),
+        where_clause: where_clause.clone(),
         search: None,
         joins: vec![],
         order_by,
@@ -205,7 +251,7 @@ async fn handle_list(
     };
     let count_q = crate::core::CountQuery {
         model: state.vs.schema,
-        where_clause: WhereExpr::And(vec![]),
+        where_clause,
     };
 
     let (rows_result, count_result) = tokio::join!(
@@ -1104,6 +1150,94 @@ fn default_order_by(schema: &'static ModelSchema) -> Vec<OrderClause> {
     }
 }
 
+/// Build the `WHERE` clause for a [`ListView`] handler from URL
+/// query parameters + the configured `filter_fields` /
+/// `search_fields` allowlists.
+///
+/// Filter shape: `?<field>=<value>` — exact match (`Op::Eq`) only.
+/// Unknown query params (anything not in `filter_fields`, plus the
+/// reserved `page` / `page_size` / `search`) are silently ignored,
+/// so a typo in the URL doesn't 400 the request.
+///
+/// Search shape: `?search=<query>` — `ILIKE '%<query>%'` against
+/// each `search_field`, OR-combined. The search predicates land
+/// directly in the WHERE clause (rather than the IR's separate
+/// `SearchClause`) so `SelectQuery` and `CountQuery` see them
+/// equally — pagination's `total_pages` reflects the searched
+/// subset, not the unsearched total.
+///
+/// The `%` and `_` characters in the user's search input are
+/// escaped via the framework's `escape_like_pattern` so they
+/// match literally rather than acting as wildcards. This matches
+/// the viewset's behavior (defense against pattern injection).
+fn build_list_where(
+    schema: &'static ModelSchema,
+    filter_fields: &[String],
+    search_fields: &[String],
+    params: &HashMap<String, String>,
+) -> WhereExpr {
+    use crate::core::Filter;
+
+    let mut predicates: Vec<WhereExpr> = Vec::new();
+
+    // Exact-match filters from `?field=value` query params.
+    for (key, val) in params {
+        if matches!(key.as_str(), "page" | "page_size" | "search") {
+            continue;
+        }
+        if !filter_fields.iter().any(|f| f == key) {
+            continue;
+        }
+        let Some(field) = schema.field(key) else {
+            continue;
+        };
+        predicates.push(WhereExpr::Predicate(Filter {
+            column: field.column,
+            op: Op::Eq,
+            value: SqlValue::String(val.clone()),
+        }));
+    }
+
+    // ILIKE search across `search_fields`, OR-combined.
+    if let Some(q) = params.get("search").filter(|s| !s.is_empty()) {
+        let escaped = escape_like_pattern(q);
+        let pattern = format!("%{escaped}%");
+        let mut or_branches: Vec<WhereExpr> = Vec::new();
+        for name in search_fields {
+            if let Some(field) = schema.field(name) {
+                or_branches.push(WhereExpr::Predicate(Filter {
+                    column: field.column,
+                    op: Op::ILike,
+                    value: SqlValue::String(pattern.clone()),
+                }));
+            }
+        }
+        match or_branches.len() {
+            0 => {}
+            1 => predicates.push(or_branches.remove(0)),
+            _ => predicates.push(WhereExpr::Or(or_branches)),
+        }
+    }
+
+    if predicates.is_empty() {
+        WhereExpr::And(vec![])
+    } else if predicates.len() == 1 {
+        predicates.remove(0)
+    } else {
+        WhereExpr::And(predicates)
+    }
+}
+
+/// Escape `%` and `_` so the user's search input matches literally
+/// in `LIKE` / `ILIKE` rather than acting as wildcards. Mirrors
+/// what the viewset does with user input.
+fn escape_like_pattern(input: &str) -> String {
+    input
+        .replace('\\', r"\\")
+        .replace('%', r"\%")
+        .replace('_', r"\_")
+}
+
 /// Resolve the projection set — either every scalar field or the
 /// caller's explicit `fields` allowlist.
 fn resolved_fields(
@@ -1184,9 +1318,15 @@ mod tenant {
             Ok(v) => v,
             Err(msg) => return template_error(&msg),
         };
+        let where_clause = build_list_where(
+            state.vs.schema,
+            &state.vs.filter_fields,
+            &state.vs.search_fields,
+            &params,
+        );
         let select_q = SelectQuery {
             model: state.vs.schema,
-            where_clause: WhereExpr::And(vec![]),
+            where_clause: where_clause.clone(),
             search: None,
             joins: vec![],
             order_by,
@@ -1195,7 +1335,7 @@ mod tenant {
         };
         let count_q = crate::core::CountQuery {
             model: state.vs.schema,
-            where_clause: WhereExpr::And(vec![]),
+            where_clause,
         };
 
         let conn = t.conn();
@@ -1706,6 +1846,145 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].column, "id");
         assert!(!out[0].desc, "PK fallback is ASC");
+    }
+
+    /// `ListView` builder accepts filter_fields + search_fields.
+    #[test]
+    fn list_view_filter_and_search_chain() {
+        let lv = ListView::for_model(schema_two_fields())
+            .filter_fields(&["title"])
+            .search_fields(&["title"]);
+        assert_eq!(lv.filter_fields, vec!["title".to_owned()]);
+        assert_eq!(lv.search_fields, vec!["title".to_owned()]);
+    }
+
+    /// No filter params, no search → empty `WhereExpr::And(vec![])`.
+    #[test]
+    fn build_list_where_empty_params_returns_empty_and() {
+        let s = schema_two_fields();
+        let where_clause = build_list_where(s, &["title".into()], &[], &HashMap::new());
+        match where_clause {
+            WhereExpr::And(v) => assert!(v.is_empty()),
+            other => panic!("expected empty And, got {other:?}"),
+        }
+    }
+
+    /// Filter param matching the allowlist produces a single
+    /// `Predicate(Eq)` predicate.
+    #[test]
+    fn build_list_where_filter_field_in_allowlist() {
+        let s = schema_two_fields();
+        let mut params = HashMap::new();
+        params.insert("title".to_owned(), "Hello".to_owned());
+        let where_clause = build_list_where(s, &["title".into()], &[], &params);
+        match where_clause {
+            WhereExpr::Predicate(f) => {
+                assert_eq!(f.column, "title");
+                assert_eq!(f.op, Op::Eq);
+            }
+            other => panic!("expected single Predicate, got {other:?}"),
+        }
+    }
+
+    /// Filter params NOT in the allowlist are silently dropped —
+    /// matches Django's behavior (typos shouldn't 400).
+    #[test]
+    fn build_list_where_unknown_field_ignored() {
+        let s = schema_two_fields();
+        let mut params = HashMap::new();
+        params.insert("category".to_owned(), "tech".to_owned()); // not in allowlist
+        let where_clause = build_list_where(s, &["title".into()], &[], &params);
+        match where_clause {
+            WhereExpr::And(v) => assert!(v.is_empty()),
+            other => panic!("expected empty And, got {other:?}"),
+        }
+    }
+
+    /// Reserved keys (`page`, `page_size`, `search`) are skipped
+    /// even if a `filter_fields` allowlist names them.
+    #[test]
+    fn build_list_where_reserved_keys_skipped() {
+        let s = schema_two_fields();
+        let mut params = HashMap::new();
+        params.insert("page".to_owned(), "2".to_owned());
+        params.insert("page_size".to_owned(), "50".to_owned());
+        let where_clause = build_list_where(s, &["page".into(), "page_size".into()], &[], &params);
+        match where_clause {
+            WhereExpr::And(v) => assert!(v.is_empty()),
+            other => panic!("expected empty And, got {other:?}"),
+        }
+    }
+
+    /// `?search=foo` on a single search_field produces a single
+    /// `Predicate(ILike)` (no OR wrapper for one branch).
+    #[test]
+    fn build_list_where_search_single_field() {
+        let s = schema_two_fields();
+        let mut params = HashMap::new();
+        params.insert("search".to_owned(), "Hello".to_owned());
+        let where_clause = build_list_where(s, &[], &["title".into()], &params);
+        match where_clause {
+            WhereExpr::Predicate(f) => {
+                assert_eq!(f.column, "title");
+                assert_eq!(f.op, Op::ILike);
+                if let SqlValue::String(p) = f.value {
+                    assert!(p.contains("Hello"), "got: {p}");
+                    assert!(p.starts_with('%') && p.ends_with('%'), "got: {p}");
+                } else {
+                    panic!("expected SqlValue::String");
+                }
+            }
+            other => panic!("expected single Predicate, got {other:?}"),
+        }
+    }
+
+    /// Search with multiple fields produces an OR-combined branch.
+    /// Filter + search together AND-combine at the top level.
+    #[test]
+    fn build_list_where_filter_plus_search_and_combined() {
+        let s = schema_with_bounds(); // has id, title, score
+        let mut params = HashMap::new();
+        params.insert("title".to_owned(), "Hello".to_owned()); // filter
+        params.insert("search".to_owned(), "world".to_owned()); // search
+        let where_clause = build_list_where(
+            s,
+            &["title".into()],
+            &["title".into(), "score".into()],
+            &params,
+        );
+        match where_clause {
+            WhereExpr::And(branches) => {
+                assert_eq!(branches.len(), 2, "expected filter AND search");
+            }
+            other => panic!("expected And, got {other:?}"),
+        }
+    }
+
+    /// `%` and `_` in user input get escaped so they match
+    /// literally rather than acting as `LIKE` wildcards.
+    #[test]
+    fn escape_like_pattern_neutralizes_wildcards() {
+        assert_eq!(escape_like_pattern("100%"), r"100\%");
+        assert_eq!(escape_like_pattern("foo_bar"), r"foo\_bar");
+        assert_eq!(escape_like_pattern(r"a\b"), r"a\\b");
+        assert_eq!(escape_like_pattern("plain"), "plain");
+    }
+
+    /// Empty `?search=` is treated as "no search" — different from
+    /// "search for empty string". Otherwise navigating from a
+    /// search-active page back to the unfiltered list (via a link
+    /// with `?search=`) would still apply ILIKE '%%' and miss any
+    /// rows where the field is NULL.
+    #[test]
+    fn build_list_where_empty_search_param_skipped() {
+        let s = schema_two_fields();
+        let mut params = HashMap::new();
+        params.insert("search".to_owned(), String::new());
+        let where_clause = build_list_where(s, &[], &["title".into()], &params);
+        match where_clause {
+            WhereExpr::And(v) => assert!(v.is_empty()),
+            other => panic!("expected empty And, got {other:?}"),
+        }
     }
 
     /// Models without a PK fall through to empty `ORDER BY` —
