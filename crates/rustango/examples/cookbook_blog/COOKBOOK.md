@@ -1356,6 +1356,40 @@ confirmation page (so the user can change their mind), `POST
 project's responsibility — mount under a CSRF-protected scope when
 the POST is reachable from a browser.
 
+### Tenancy projects: `tenant_router(...)`
+
+For multi-tenant projects (subdomain / schema / per-tenant database)
+every CBV ships a `tenant_router(prefix, tera)` variant that drops
+the `pool` argument — each request resolves its own connection via
+the [`crate::extractors::Tenant`] extractor instead of capturing a
+single pool at mount time. Mirrors `viewset::ViewSet::tenant_router`.
+
+```rust
+use rustango::template_views::{ListView, DetailView, CreateView, UpdateView, DeleteView};
+
+let app = axum::Router::new()
+    .merge(ListView::for_model(Post::SCHEMA)
+        .page_size(20)
+        .tenant_router("/posts", tera.clone()))    // no pool!
+    .merge(DetailView::for_model(Post::SCHEMA)
+        .tenant_router("/posts", tera.clone()))
+    .merge(CreateView::for_model(Post::SCHEMA)
+        .success_url("/posts")
+        .tenant_router("/posts", tera.clone()))
+    .merge(UpdateView::for_model(Post::SCHEMA)
+        .success_url("/posts")
+        .tenant_router("/posts", tera.clone()))
+    .merge(DeleteView::for_model(Post::SCHEMA)
+        .success_url("/posts")
+        .tenant_router("/posts", tera));
+```
+
+Every other knob (template name, page size, ordering, fields,
+success_url) carries through unchanged. The Tera context shape is
+identical between `router` and `tenant_router` so templates port
+across without edits. Available behind the combined `template_views`
++ `tenancy` features.
+
 Single-tenant only today (capture a `PgPool` at mount time). The
 `tenant_router` variant lands once we settle on the `Tenant`-extractor
 pattern matching the `viewset::tenant_router` shape.

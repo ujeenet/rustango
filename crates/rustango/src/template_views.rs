@@ -134,8 +134,8 @@ impl ListView {
     }
 
     /// Mount as `GET <prefix>` rendering through `tera` from `pool`.
-    /// Single-tenant pool capture — hand-roll a `Tenant`-extractor
-    /// equivalent for tenancy projects until `tenant_router` ships.
+    /// Single-tenant pool capture — every request runs against the
+    /// same pool. For tenancy projects use [`Self::tenant_router`].
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: PgPool) -> Router<()> {
         let state = Arc::new(ListViewState {
@@ -145,6 +145,20 @@ impl ListView {
         });
         Router::new()
             .route(prefix, get(handle_list))
+            .with_state(state)
+    }
+
+    /// Tenant-aware variant — each request resolves its own
+    /// connection via the [`crate::extractors::Tenant`] extractor
+    /// instead of capturing a single pool at mount time.
+    /// Required for multi-tenant projects (subdomain / schema /
+    /// per-tenant database). Mirrors `viewset::ViewSet::tenant_router`.
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        let state = Arc::new(TenantListViewState { vs: self, tera });
+        Router::new()
+            .route(prefix, get(handle_list_tenant))
             .with_state(state)
     }
 }
@@ -264,6 +278,17 @@ impl DetailView {
             .route(&path, get(handle_detail))
             .with_state(state)
     }
+
+    /// Tenant-aware variant — see [`ListView::tenant_router`].
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        let state = Arc::new(TenantDetailViewState { vs: self, tera });
+        let path = format!("{}/{{pk}}", prefix.trim_end_matches('/'));
+        Router::new()
+            .route(&path, get(handle_detail_tenant))
+            .with_state(state)
+    }
 }
 
 #[derive(Clone)]
@@ -373,6 +398,20 @@ impl DeleteView {
             .route(
                 &path,
                 axum::routing::get(handle_delete_confirm).post(handle_delete_submit),
+            )
+            .with_state(state)
+    }
+
+    /// Tenant-aware variant — see [`ListView::tenant_router`].
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        let state = Arc::new(TenantDeleteViewState { vs: self, tera });
+        let path = format!("{}/{{pk}}/delete", prefix.trim_end_matches('/'));
+        Router::new()
+            .route(
+                &path,
+                axum::routing::get(handle_delete_confirm_tenant).post(handle_delete_submit_tenant),
             )
             .with_state(state)
     }
@@ -527,6 +566,26 @@ impl CreateView {
             )
             .with_state(state)
     }
+
+    /// Tenant-aware variant — see [`ListView::tenant_router`].
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        let state = Arc::new(TenantFormViewState {
+            schema: self.schema,
+            template: self.template,
+            success_url: self.success_url,
+            fields: self.fields,
+            tera,
+        });
+        let path = format!("{}/new", prefix.trim_end_matches('/'));
+        Router::new()
+            .route(
+                &path,
+                axum::routing::get(handle_create_get_tenant).post(handle_create_post_tenant),
+            )
+            .with_state(state)
+    }
 }
 
 // ============================================================== UpdateView
@@ -590,6 +649,26 @@ impl UpdateView {
             .route(
                 &path,
                 axum::routing::get(handle_update_get).post(handle_update_post),
+            )
+            .with_state(state)
+    }
+
+    /// Tenant-aware variant — see [`ListView::tenant_router`].
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        let state = Arc::new(TenantFormViewState {
+            schema: self.schema,
+            template: self.template,
+            success_url: self.success_url,
+            fields: self.fields,
+            tera,
+        });
+        let path = format!("{}/{{pk}}/edit", prefix.trim_end_matches('/'));
+        Router::new()
+            .route(
+                &path,
+                axum::routing::get(handle_update_get_tenant).post(handle_update_post_tenant),
             )
             .with_state(state)
     }
@@ -992,6 +1071,373 @@ fn template_error(msg: &str) -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, msg.to_owned()).into_response()
 }
 
+// ============================================================== tenant variants
+
+/// Tenant-aware state structs + handlers (#A5 follow-up). Each
+/// mirrors its single-tenant sibling but drops the captured pool —
+/// the [`crate::extractors::Tenant`] extractor resolves a per-
+/// request connection that handlers query via `t.conn()` against
+/// the `_on` SQL helpers.
+///
+/// Mirrors `viewset::tenant_router` so projects can mix
+/// `template_views::ListView::tenant_router(...)` and
+/// `viewset::ViewSet::for_model(...).tenant_router(...)` in the
+/// same `Router` without thinking about pool plumbing.
+#[cfg(feature = "tenancy")]
+mod tenant {
+    use super::*;
+    use crate::extractors::Tenant;
+
+    // ---------- ListView ----------
+
+    #[derive(Clone)]
+    pub(super) struct TenantListViewState {
+        pub(super) vs: ListView,
+        pub(super) tera: Arc<Tera>,
+    }
+
+    pub(super) async fn handle_list_tenant(
+        State(state): State<Arc<TenantListViewState>>,
+        Query(params): Query<HashMap<String, String>>,
+        mut t: Tenant,
+    ) -> Response {
+        let page: i64 = params
+            .get("page")
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(1)
+            .max(1);
+        let offset = (page - 1) * state.vs.page_size;
+
+        let order_by = match resolve_order_by(state.vs.schema, &state.vs.order_by) {
+            Ok(v) => v,
+            Err(msg) => return template_error(&msg),
+        };
+        let select_q = SelectQuery {
+            model: state.vs.schema,
+            where_clause: WhereExpr::And(vec![]),
+            search: None,
+            joins: vec![],
+            order_by,
+            limit: Some(state.vs.page_size),
+            offset: Some(offset),
+        };
+        let count_q = crate::core::CountQuery {
+            model: state.vs.schema,
+            where_clause: WhereExpr::And(vec![]),
+        };
+
+        let conn = t.conn();
+        // Run sequentially — `Tenant::conn()` hands out a `&mut`
+        // exclusive borrow, so we can't fan out the two queries
+        // in parallel like the pool path does. The latency hit is
+        // bounded by tokio's task switch.
+        let rows = match crate::sql::select_rows_on(&mut *conn, &select_q).await {
+            Ok(r) => r,
+            Err(e) => return template_error(&format!("query rows: {e}")),
+        };
+        let total = match crate::sql::count_rows_on(&mut *conn, &count_q).await {
+            Ok(c) => c,
+            Err(e) => return template_error(&format!("count rows: {e}")),
+        };
+
+        let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
+        let object_list: Vec<Value> = rows.iter().map(|r| row_to_json(r, &fields)).collect();
+
+        let total_pages = ((total - 1).max(0) / state.vs.page_size) + 1;
+        let mut ctx = Context::new();
+        ctx.insert("object_list", &object_list);
+        ctx.insert("page", &page);
+        ctx.insert("page_size", &state.vs.page_size);
+        ctx.insert("total", &total);
+        ctx.insert("total_pages", &total_pages);
+        ctx.insert("has_next", &(page < total_pages));
+        ctx.insert("has_prev", &(page > 1));
+
+        render(&state.tera, &state.vs.template, &ctx)
+    }
+
+    // ---------- DetailView ----------
+
+    #[derive(Clone)]
+    pub(super) struct TenantDetailViewState {
+        pub(super) vs: DetailView,
+        pub(super) tera: Arc<Tera>,
+    }
+
+    pub(super) async fn handle_detail_tenant(
+        State(state): State<Arc<TenantDetailViewState>>,
+        Path(pk): Path<String>,
+        mut t: Tenant,
+    ) -> Response {
+        let Some(pk_field) = state.vs.schema.primary_key() else {
+            return template_error(&format!(
+                "model `{}` has no primary key — DetailView can't probe by PK",
+                state.vs.schema.table
+            ));
+        };
+        let select_q = SelectQuery {
+            model: state.vs.schema,
+            where_clause: WhereExpr::Predicate(Filter {
+                column: pk_field.column,
+                op: Op::Eq,
+                value: SqlValue::String(pk),
+            }),
+            search: None,
+            joins: vec![],
+            order_by: vec![],
+            limit: Some(1),
+            offset: None,
+        };
+        let row = match crate::sql::select_one_row_on(&mut *t.conn(), &select_q).await {
+            Ok(Some(r)) => r,
+            Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+            Err(e) => return template_error(&format!("query row: {e}")),
+        };
+
+        let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
+        let object = row_to_json(&row, &fields);
+        let mut ctx = Context::new();
+        ctx.insert("object", &object);
+        render(&state.tera, &state.vs.template, &ctx)
+    }
+
+    // ---------- DeleteView ----------
+
+    #[derive(Clone)]
+    pub(super) struct TenantDeleteViewState {
+        pub(super) vs: DeleteView,
+        pub(super) tera: Arc<Tera>,
+    }
+
+    pub(super) async fn handle_delete_confirm_tenant(
+        State(state): State<Arc<TenantDeleteViewState>>,
+        Path(pk): Path<String>,
+        mut t: Tenant,
+    ) -> Response {
+        let Some(pk_field) = state.vs.schema.primary_key() else {
+            return template_error(&format!(
+                "model `{}` has no primary key — DeleteView can't probe by PK",
+                state.vs.schema.table
+            ));
+        };
+        let select_q = SelectQuery {
+            model: state.vs.schema,
+            where_clause: WhereExpr::Predicate(Filter {
+                column: pk_field.column,
+                op: Op::Eq,
+                value: SqlValue::String(pk),
+            }),
+            search: None,
+            joins: vec![],
+            order_by: vec![],
+            limit: Some(1),
+            offset: None,
+        };
+        let row = match crate::sql::select_one_row_on(&mut *t.conn(), &select_q).await {
+            Ok(Some(r)) => r,
+            Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+            Err(e) => return template_error(&format!("query row: {e}")),
+        };
+        let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
+        let object = row_to_json(&row, &fields);
+        let mut ctx = Context::new();
+        ctx.insert("object", &object);
+        render(&state.tera, &state.vs.template, &ctx)
+    }
+
+    pub(super) async fn handle_delete_submit_tenant(
+        State(state): State<Arc<TenantDeleteViewState>>,
+        Path(pk): Path<String>,
+        mut t: Tenant,
+    ) -> Response {
+        let Some(pk_field) = state.vs.schema.primary_key() else {
+            return template_error(&format!(
+                "model `{}` has no primary key — DeleteView can't delete by PK",
+                state.vs.schema.table
+            ));
+        };
+        let delete_q = crate::core::DeleteQuery {
+            model: state.vs.schema,
+            where_clause: WhereExpr::Predicate(Filter {
+                column: pk_field.column,
+                op: Op::Eq,
+                value: SqlValue::String(pk),
+            }),
+        };
+        match crate::sql::delete_on(&mut *t.conn(), &delete_q).await {
+            Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
+            Ok(_) => axum::response::Redirect::to(&state.vs.success_url).into_response(),
+            Err(e) => template_error(&format!("delete row: {e}")),
+        }
+    }
+
+    // ---------- CreateView / UpdateView ----------
+
+    #[derive(Clone)]
+    pub(super) struct TenantFormViewState {
+        pub(super) schema: &'static ModelSchema,
+        pub(super) template: String,
+        pub(super) success_url: String,
+        pub(super) fields: Option<Vec<String>>,
+        pub(super) tera: Arc<Tera>,
+    }
+
+    pub(super) async fn handle_create_get_tenant(
+        State(state): State<Arc<TenantFormViewState>>,
+    ) -> Response {
+        let mut ctx = Context::new();
+        let fields = form_fields(state.schema, state.fields.as_deref(), &HashMap::new());
+        ctx.insert(
+            "form",
+            &serde_json::json!({"fields": fields, "errors": serde_json::Map::new()}),
+        );
+        ctx.insert("is_create", &true);
+        ctx.insert("is_update", &false);
+        render(&state.tera, &state.template, &ctx)
+    }
+
+    pub(super) async fn handle_create_post_tenant(
+        State(state): State<Arc<TenantFormViewState>>,
+        mut t: Tenant,
+        axum::Form(form): axum::Form<HashMap<String, String>>,
+    ) -> Response {
+        let (columns, values, errors) = parse_form(state.schema, state.fields.as_deref(), &form);
+        if !errors.is_empty() {
+            return rerender_form_tenant(&state, &form, &errors, /*is_update=*/ false);
+        }
+        let insert_q = crate::core::InsertQuery {
+            model: state.schema,
+            columns,
+            values,
+            returning: vec![],
+            on_conflict: None,
+        };
+        match crate::sql::insert_on(&mut *t.conn(), &insert_q).await {
+            Ok(()) => axum::response::Redirect::to(&state.success_url).into_response(),
+            Err(e) => template_error(&format!("insert row: {e}")),
+        }
+    }
+
+    pub(super) async fn handle_update_get_tenant(
+        State(state): State<Arc<TenantFormViewState>>,
+        Path(pk): Path<String>,
+        mut t: Tenant,
+    ) -> Response {
+        let Some(pk_field) = state.schema.primary_key() else {
+            return template_error(&format!(
+                "model `{}` has no primary key — UpdateView can't probe by PK",
+                state.schema.table
+            ));
+        };
+        let select_q = SelectQuery {
+            model: state.schema,
+            where_clause: WhereExpr::Predicate(Filter {
+                column: pk_field.column,
+                op: Op::Eq,
+                value: SqlValue::String(pk.clone()),
+            }),
+            search: None,
+            joins: vec![],
+            order_by: vec![],
+            limit: Some(1),
+            offset: None,
+        };
+        let row = match crate::sql::select_one_row_on(&mut *t.conn(), &select_q).await {
+            Ok(Some(r)) => r,
+            Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+            Err(e) => return template_error(&format!("query row: {e}")),
+        };
+        let scalars: Vec<&'static crate::core::FieldSchema> =
+            state.schema.scalar_fields().collect();
+        let row_json = row_to_json(&row, &scalars);
+        let row_obj = row_json.as_object().cloned().unwrap_or_default();
+        let mut values: HashMap<String, String> = HashMap::with_capacity(row_obj.len());
+        for (k, v) in row_obj {
+            let s = match v {
+                serde_json::Value::Null => String::new(),
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            };
+            values.insert(k, s);
+        }
+        let fields = form_fields(state.schema, state.fields.as_deref(), &values);
+        let mut ctx = Context::new();
+        ctx.insert(
+            "form",
+            &serde_json::json!({"fields": fields, "errors": serde_json::Map::new()}),
+        );
+        ctx.insert("object", &row_json);
+        ctx.insert("pk", &pk);
+        ctx.insert("is_create", &false);
+        ctx.insert("is_update", &true);
+        render(&state.tera, &state.template, &ctx)
+    }
+
+    pub(super) async fn handle_update_post_tenant(
+        State(state): State<Arc<TenantFormViewState>>,
+        Path(pk): Path<String>,
+        mut t: Tenant,
+        axum::Form(form): axum::Form<HashMap<String, String>>,
+    ) -> Response {
+        let Some(pk_field) = state.schema.primary_key() else {
+            return template_error(&format!(
+                "model `{}` has no primary key — UpdateView can't update by PK",
+                state.schema.table
+            ));
+        };
+        let (columns, values, errors) = parse_form(state.schema, state.fields.as_deref(), &form);
+        if !errors.is_empty() {
+            return rerender_form_tenant(&state, &form, &errors, /*is_update=*/ true);
+        }
+        let assignments: Vec<crate::core::Assignment> = columns
+            .into_iter()
+            .zip(values)
+            .map(|(column, value)| crate::core::Assignment { column, value })
+            .collect();
+        let update_q = crate::core::UpdateQuery {
+            model: state.schema,
+            set: assignments,
+            where_clause: WhereExpr::Predicate(Filter {
+                column: pk_field.column,
+                op: Op::Eq,
+                value: SqlValue::String(pk),
+            }),
+        };
+        match crate::sql::update_on(&mut *t.conn(), &update_q).await {
+            Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
+            Ok(_) => axum::response::Redirect::to(&state.success_url).into_response(),
+            Err(e) => template_error(&format!("update row: {e}")),
+        }
+    }
+
+    fn rerender_form_tenant(
+        state: &TenantFormViewState,
+        submitted: &HashMap<String, String>,
+        errors: &HashMap<String, String>,
+        is_update: bool,
+    ) -> Response {
+        let fields = form_fields(state.schema, state.fields.as_deref(), submitted);
+        let mut ctx = Context::new();
+        ctx.insert(
+            "form",
+            &serde_json::json!({"fields": fields, "errors": errors}),
+        );
+        ctx.insert("is_create", &!is_update);
+        ctx.insert("is_update", &is_update);
+        let mut resp = render(&state.tera, &state.template, &ctx);
+        *resp.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+        resp
+    }
+}
+
+#[cfg(feature = "tenancy")]
+use tenant::{
+    handle_create_get_tenant, handle_create_post_tenant, handle_delete_confirm_tenant,
+    handle_delete_submit_tenant, handle_detail_tenant, handle_list_tenant,
+    handle_update_get_tenant, handle_update_post_tenant, TenantDeleteViewState,
+    TenantDetailViewState, TenantFormViewState, TenantListViewState,
+};
+
 // ============================================================== tests
 
 #[cfg(test)]
@@ -1252,5 +1698,29 @@ mod tests {
         assert_eq!(field_type_label(T::Date), "date");
         assert_eq!(field_type_label(T::Uuid), "uuid");
         assert_eq!(field_type_label(T::Json), "json");
+    }
+
+    /// Smoke: every CBV's `tenant_router` builds without panicking
+    /// on axum routing constraints. End-to-end live coverage lives
+    /// in the cookbook integration tests; these guard the trait
+    /// bound + state-cloning shape.
+    #[cfg(feature = "tenancy")]
+    #[test]
+    fn tenant_routers_build_for_basic_model() {
+        let s = schema_two_fields();
+        let tera = Arc::new(Tera::default());
+        let _ = ListView::for_model(s)
+            .page_size(10)
+            .tenant_router("/posts", tera.clone());
+        let _ = DetailView::for_model(s).tenant_router("/posts", tera.clone());
+        let _ = DeleteView::for_model(s)
+            .success_url("/posts")
+            .tenant_router("/posts", tera.clone());
+        let _ = CreateView::for_model(s)
+            .success_url("/posts")
+            .tenant_router("/posts", tera.clone());
+        let _ = UpdateView::for_model(s)
+            .success_url("/posts")
+            .tenant_router("/posts", tera);
     }
 }

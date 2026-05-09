@@ -1436,6 +1436,11 @@ status on validation failure (preserving what the user typed).
 CSRF protection is the project's responsibility — mount under a
 CSRF-protected scope when the POSTs are reachable from a browser.
 
+**Tenancy projects** swap `.router(prefix, tera, pool)` for
+`.tenant_router(prefix, tera)` — each request resolves its own
+connection via the `Tenant` extractor instead of capturing a single
+pool at mount time. Same Tera context shape, same builder knobs.
+
 Single-tenant only today (captures a `PgPool` at mount time, like
 the original `viewset::ViewSet::router`). The `tenant_router`
 variant lands once the per-tenant pattern matches `viewset::tenant_router`.
