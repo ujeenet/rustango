@@ -1339,9 +1339,16 @@ Tera context (consistent across views so templates port cleanly):
 records — branch on `ty` (`"string" | "i16" | "i32" | "i64" | "f32" |
 "f64" | "bool" | "datetime" | "date" | "uuid" | "json"`) to pick
 `<input type=…>` markup. The PK and `Auto<T>` columns are skipped
-automatically (DB-assigned). Validation failures (required-missing,
-type coercion errors) re-render the form with `form.errors` populated
-and a 422 status code, preserving what the user typed.
+automatically (DB-assigned). Validation failures re-render the form
+with `form.errors` populated and a 422 status code, preserving what
+the user typed:
+
+- **Required-missing** — empty value on a NOT NULL non-bool field
+- **Type coercion** — `"abc"` submitted for an `i64` column
+- **Bounds** — `max_length` exceeded on a string, `min`/`max`
+  violated on an integer (uses `core::validate_value` so the
+  error matches what the SQL layer would have caught on insert,
+  but surfaced server-side without a round-trip)
 
 Default template names follow Django convention:
 `<table>_list.html` / `<table>_detail.html` / `<table>_form.html`

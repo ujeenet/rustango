@@ -976,6 +976,14 @@ fn parse_form(
         }
         match coerce_value(f, &raw) {
             Ok(v) => {
+                // Bounds validation — `max_length` / `min` / `max`
+                // declared on the schema. Surface as a per-field
+                // form error so the user can fix it without an
+                // insert/update round-trip.
+                if let Err(e) = crate::core::validate_value(schema.name, f, &v) {
+                    errors.insert(f.name.to_owned(), bounds_error_message(&e));
+                    continue;
+                }
                 columns.push(f.column);
                 values.push(v);
             }
@@ -985,6 +993,31 @@ fn parse_form(
         }
     }
     (columns, values, errors)
+}
+
+/// Render a [`crate::core::QueryError`] from `validate_value` as a
+/// user-friendly form error string. The Display impl is fine for
+/// logs but leaks `model.field` framing that's noise in the UI;
+/// this strips that down to the bounds-side message.
+fn bounds_error_message(e: &crate::core::QueryError) -> String {
+    use crate::core::QueryError;
+    match e {
+        QueryError::MaxLengthExceeded { max, actual, .. } => {
+            format!("must be {max} characters or fewer (got {actual})")
+        }
+        QueryError::OutOfRange {
+            min, max, value, ..
+        } => match (min, max) {
+            (Some(lo), Some(hi)) => format!("must be between {lo} and {hi} (got {value})"),
+            (Some(lo), None) => format!("must be ≥ {lo} (got {value})"),
+            (None, Some(hi)) => format!("must be ≤ {hi} (got {value})"),
+            (None, None) => format!("invalid value: {value}"),
+        },
+        // Other variants aren't produced by validate_value; surface
+        // the framework's Display string as a fallback so the user
+        // sees something actionable rather than an empty message.
+        other => other.to_string(),
+    }
 }
 
 /// Re-render the form template after a validation failure with the
@@ -1506,6 +1539,75 @@ mod tests {
         }))
     }
 
+    /// Schema with declared bounds — `max_length = 5` on the
+    /// title, `min = 0 / max = 100` on a score field. Used by the
+    /// bounds-validation tests.
+    fn schema_with_bounds() -> &'static ModelSchema {
+        Box::leak(Box::new(ModelSchema {
+            name: "Post",
+            table: "posts",
+            fields: Box::leak(Box::new([
+                crate::core::FieldSchema {
+                    name: "id",
+                    column: "id",
+                    ty: FieldType::I64,
+                    nullable: false,
+                    primary_key: true,
+                    relation: None,
+                    max_length: None,
+                    min: None,
+                    max: None,
+                    default: None,
+                    auto: true,
+                    unique: false,
+                    generated_as: None,
+                },
+                crate::core::FieldSchema {
+                    name: "title",
+                    column: "title",
+                    ty: FieldType::String,
+                    nullable: false,
+                    primary_key: false,
+                    relation: None,
+                    max_length: Some(5),
+                    min: None,
+                    max: None,
+                    default: None,
+                    auto: false,
+                    unique: false,
+                    generated_as: None,
+                },
+                crate::core::FieldSchema {
+                    name: "score",
+                    column: "score",
+                    ty: FieldType::I32,
+                    nullable: false,
+                    primary_key: false,
+                    relation: None,
+                    max_length: None,
+                    min: Some(0),
+                    max: Some(100),
+                    default: None,
+                    auto: false,
+                    unique: false,
+                    generated_as: None,
+                },
+            ])),
+            display: None,
+            app_label: None,
+            admin: None,
+            soft_delete_column: None,
+            permissions: false,
+            audit_track: None,
+            m2m: &[],
+            indexes: &[],
+            check_constraints: &[],
+            composite_relations: &[],
+            generic_relations: &[],
+            scope: crate::core::ModelScope::Tenant,
+        }))
+    }
+
     /// Default template name follows the Django convention.
     #[test]
     fn list_view_default_template_matches_table() {
@@ -1707,6 +1809,100 @@ mod tests {
         assert_eq!(field_type_label(T::Date), "date");
         assert_eq!(field_type_label(T::Uuid), "uuid");
         assert_eq!(field_type_label(T::Json), "json");
+    }
+
+    /// `parse_form` enforces `max_length` declared on the schema —
+    /// the user gets a form-side error rather than a 500-on-insert
+    /// when the SQL layer rejects the over-long value.
+    #[test]
+    fn parse_form_enforces_max_length() {
+        let s = schema_with_bounds();
+        let mut submitted = HashMap::new();
+        submitted.insert("title".to_owned(), "way too long".to_owned()); // 12 > 5
+        submitted.insert("score".to_owned(), "50".to_owned());
+        let (cols, vals, errors) = parse_form(s, None, &submitted);
+        assert!(cols.is_empty() || !cols.contains(&"title"));
+        assert!(
+            vals.is_empty() || vals.len() == 1,
+            "title rejected, score still in"
+        );
+        let title_err = errors.get("title").expect("title error present");
+        assert!(
+            title_err.contains("5") && title_err.contains("12"),
+            "expected length detail, got: {title_err}"
+        );
+        // The other field validates fine.
+        assert!(!errors.contains_key("score"));
+    }
+
+    /// `parse_form` enforces `min`/`max` declared on integer fields.
+    #[test]
+    fn parse_form_enforces_int_range() {
+        let s = schema_with_bounds();
+        let mut submitted = HashMap::new();
+        submitted.insert("title".to_owned(), "ok".to_owned());
+        submitted.insert("score".to_owned(), "150".to_owned()); // > 100
+        let (_, _, errors) = parse_form(s, None, &submitted);
+        let score_err = errors.get("score").expect("score error present");
+        assert!(
+            score_err.contains("100") && score_err.contains("150"),
+            "expected range detail, got: {score_err}"
+        );
+    }
+
+    /// `bounds_error_message` produces user-friendly text without
+    /// the framework's `model.field` framing — the field name is
+    /// already the error key, so the message just needs the rule.
+    #[test]
+    fn bounds_error_message_strips_framing() {
+        use crate::core::QueryError;
+        let max = QueryError::MaxLengthExceeded {
+            model: "Post",
+            field: "title".into(),
+            max: 5,
+            actual: 12,
+        };
+        let msg = bounds_error_message(&max);
+        assert!(msg.contains("5") && msg.contains("12"), "got: {msg}");
+        assert!(!msg.contains("Post"), "should drop model framing: {msg}");
+        assert!(!msg.contains("title"), "should drop field framing: {msg}");
+
+        let range = QueryError::OutOfRange {
+            model: "Post",
+            field: "score".into(),
+            value: 150,
+            min: Some(0),
+            max: Some(100),
+        };
+        let msg = bounds_error_message(&range);
+        assert!(
+            msg.contains("0") && msg.contains("100") && msg.contains("150"),
+            "got: {msg}"
+        );
+    }
+
+    /// One-sided bounds (only `min` set, or only `max`) get a
+    /// readable "must be ≥ N" / "must be ≤ N" message.
+    #[test]
+    fn bounds_error_message_one_sided_range() {
+        use crate::core::QueryError;
+        let only_min = QueryError::OutOfRange {
+            model: "X",
+            field: "n".into(),
+            value: -5,
+            min: Some(0),
+            max: None,
+        };
+        assert!(bounds_error_message(&only_min).contains("≥ 0"));
+
+        let only_max = QueryError::OutOfRange {
+            model: "X",
+            field: "n".into(),
+            value: 200,
+            min: None,
+            max: Some(100),
+        };
+        assert!(bounds_error_message(&only_max).contains("≤ 100"));
     }
 
     /// Smoke: every CBV's `tenant_router` builds without panicking
