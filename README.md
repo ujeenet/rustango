@@ -1389,15 +1389,16 @@ token minted on `acme.example.com` is rejected on `globex.example.com`.
 
 `rustango::template_views` is the HTML-side sibling of `viewset` —
 generic class-based views that build a Tera-rendered axum `Router`
-over any `#[derive(Model)]` schema. Today: `ListView` + `DetailView`
-+ `DeleteView`; `CreateView` / `UpdateView` follow.
+over any `#[derive(Model)]` schema. The full Django-shape CRUD
+surface ships: `ListView`, `DetailView`, `CreateView`, `UpdateView`,
+`DeleteView`.
 
 ```rust
-use rustango::template_views::{ListView, DetailView, DeleteView};
+use rustango::template_views::{ListView, DetailView, CreateView, UpdateView, DeleteView};
 use std::sync::Arc;
 use tera::Tera;
 
-let tera = Arc::new(/* …Tera with posts_list.html / posts_detail.html / posts_confirm_delete.html… */);
+let tera = Arc::new(/* …Tera with posts_list / posts_detail / posts_form / posts_confirm_delete… */);
 
 let app = axum::Router::new()
     .merge(ListView::for_model(Post::SCHEMA)
@@ -1405,6 +1406,12 @@ let app = axum::Router::new()
         .order_by("created_at", true)        // DESC
         .router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA)
+        .router("/posts", tera.clone(), pool.clone()))
+    .merge(CreateView::for_model(Post::SCHEMA)
+        .success_url("/posts")
+        .router("/posts", tera.clone(), pool.clone()))
+    .merge(UpdateView::for_model(Post::SCHEMA)
+        .success_url("/posts")
         .router("/posts", tera.clone(), pool.clone()))
     .merge(DeleteView::for_model(Post::SCHEMA)
         .success_url("/posts")
@@ -1415,12 +1422,19 @@ let app = axum::Router::new()
 |------|-----|------------------|---------|
 | `ListView` | `GET <prefix>` | `<table>_list.html` | `object_list`, `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev` |
 | `DetailView` | `GET <prefix>/{pk}` | `<table>_detail.html` | `object` |
+| `CreateView` | `GET`/`POST <prefix>/new` | `<table>_form.html` | `form: { fields, errors }`, `is_create=true` |
+| `UpdateView` | `GET`/`POST <prefix>/{pk}/edit` | `<table>_form.html` | `form: { fields, errors }`, `object`, `pk`, `is_update=true` |
 | `DeleteView` | `GET`/`POST <prefix>/{pk}/delete` | `<table>_confirm_delete.html` | `object` (GET only) |
 
-`DeleteView` is two-step: GET renders a confirmation page, POST
-executes the delete + 303s to `success_url`. CSRF protection is the
-project's responsibility — mount under a CSRF-protected scope when
-the POST is reachable from a browser.
+CreateView/UpdateView/DeleteView are all two-step: GET renders a
+form/confirmation page, POST mutates and 303s to `success_url`.
+Form views auto-skip the PK and `Auto<T>` columns from the rendered
+field set, parse `application/x-www-form-urlencoded`, coerce values
+to the field's declared SQL type, and re-render with errors + a 422
+status on validation failure (preserving what the user typed).
+
+CSRF protection is the project's responsibility — mount under a
+CSRF-protected scope when the POSTs are reachable from a browser.
 
 Single-tenant only today (captures a `PgPool` at mount time, like
 the original `viewset::ViewSet::router`). The `tenant_router`

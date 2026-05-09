@@ -1279,12 +1279,15 @@ which would need a tenant-scoped cookbook migration applied.*
 
 **API**: [`template_views::ListView`](../../src/template_views.rs),
 [`template_views::DetailView`](../../src/template_views.rs),
+[`template_views::CreateView`](../../src/template_views.rs),
+[`template_views::UpdateView`](../../src/template_views.rs),
 [`template_views::DeleteView`](../../src/template_views.rs).
 
 The `template_views` module is the HTML-side sibling of `viewset` —
 generic class-based views that build a Tera-rendered `axum::Router`
-over any `#[derive(Model)]` schema. Today: `ListView` + `DetailView`
-+ `DeleteView`; `CreateView` / `UpdateView` follow.
+over any `#[derive(Model)]` schema. The full Django-shape CRUD
+surface ships: `ListView`, `DetailView`, `CreateView`, `UpdateView`,
+`DeleteView`.
 
 ```rust
 use rustango::template_views::{ListView, DetailView};
@@ -1302,7 +1305,7 @@ tera.add_raw_template("posts_detail.html", r#"
 "#).unwrap();
 let tera = Arc::new(tera);
 
-use rustango::template_views::DeleteView;
+use rustango::template_views::{CreateView, UpdateView, DeleteView};
 
 let app = axum::Router::new()
     .merge(ListView::for_model(Post::SCHEMA)
@@ -1310,6 +1313,12 @@ let app = axum::Router::new()
         .order_by("created_at", true)
         .router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA)
+        .router("/posts", tera.clone(), pool.clone()))
+    .merge(CreateView::for_model(Post::SCHEMA)
+        .success_url("/posts")
+        .router("/posts", tera.clone(), pool.clone()))
+    .merge(UpdateView::for_model(Post::SCHEMA)
+        .success_url("/posts")
         .router("/posts", tera.clone(), pool.clone()))
     .merge(DeleteView::for_model(Post::SCHEMA)
         .success_url("/posts")
@@ -1322,12 +1331,23 @@ Tera context (consistent across views so templates port cleanly):
 |------|--------------|
 | `ListView` | `object_list` (Vec of row-as-JSON), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev` |
 | `DetailView` | `object` (single row as JSON) |
+| `CreateView` (GET) | `form: { fields, errors }`, `is_create=true`, `is_update=false` |
+| `UpdateView` (GET) | `form: { fields, errors }`, `object`, `pk`, `is_create=false`, `is_update=true` |
 | `DeleteView` (GET confirm) | `object` (single row as JSON) |
 
+`form.fields` is a list of `{name, column, ty, required, max_length, value}`
+records — branch on `ty` (`"string" | "i16" | "i32" | "i64" | "f32" |
+"f64" | "bool" | "datetime" | "date" | "uuid" | "json"`) to pick
+`<input type=…>` markup. The PK and `Auto<T>` columns are skipped
+automatically (DB-assigned). Validation failures (required-missing,
+type coercion errors) re-render the form with `form.errors` populated
+and a 422 status code, preserving what the user typed.
+
 Default template names follow Django convention:
-`<table>_list.html` / `<table>_detail.html` / `<table>_confirm_delete.html`.
-Override via `.template("custom.html")`. Restrict columns rendered
-into the context via `.fields(&["id", "title"])`.
+`<table>_list.html` / `<table>_detail.html` / `<table>_form.html`
+(shared by Create + Update) / `<table>_confirm_delete.html`. Override
+via `.template("custom.html")`. Restrict columns rendered into the
+context via `.fields(&["id", "title"])`.
 
 `DeleteView` is two-step: `GET <prefix>/{pk}/delete` renders a
 confirmation page (so the user can change their mind), `POST
