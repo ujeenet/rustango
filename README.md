@@ -1390,14 +1390,14 @@ token minted on `acme.example.com` is rejected on `globex.example.com`.
 `rustango::template_views` is the HTML-side sibling of `viewset` —
 generic class-based views that build a Tera-rendered axum `Router`
 over any `#[derive(Model)]` schema. Today: `ListView` + `DetailView`
-(slices 1-2 of A5); `CreateView` / `UpdateView` / `DeleteView` follow.
++ `DeleteView`; `CreateView` / `UpdateView` follow.
 
 ```rust
-use rustango::template_views::{ListView, DetailView};
+use rustango::template_views::{ListView, DetailView, DeleteView};
 use std::sync::Arc;
 use tera::Tera;
 
-let tera = Arc::new(/* …Tera with `posts_list.html` + `posts_detail.html`… */);
+let tera = Arc::new(/* …Tera with posts_list.html / posts_detail.html / posts_confirm_delete.html… */);
 
 let app = axum::Router::new()
     .merge(ListView::for_model(Post::SCHEMA)
@@ -1405,6 +1405,9 @@ let app = axum::Router::new()
         .order_by("created_at", true)        // DESC
         .router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA)
+        .router("/posts", tera.clone(), pool.clone()))
+    .merge(DeleteView::for_model(Post::SCHEMA)
+        .success_url("/posts")
         .router("/posts", tera.clone(), pool.clone()));
 ```
 
@@ -1412,6 +1415,12 @@ let app = axum::Router::new()
 |------|-----|------------------|---------|
 | `ListView` | `GET <prefix>` | `<table>_list.html` | `object_list`, `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev` |
 | `DetailView` | `GET <prefix>/{pk}` | `<table>_detail.html` | `object` |
+| `DeleteView` | `GET`/`POST <prefix>/{pk}/delete` | `<table>_confirm_delete.html` | `object` (GET only) |
+
+`DeleteView` is two-step: GET renders a confirmation page, POST
+executes the delete + 303s to `success_url`. CSRF protection is the
+project's responsibility — mount under a CSRF-protected scope when
+the POST is reachable from a browser.
 
 Single-tenant only today (captures a `PgPool` at mount time, like
 the original `viewset::ViewSet::router`). The `tenant_router`

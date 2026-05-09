@@ -1278,12 +1278,13 @@ which would need a tenant-scoped cookbook migration applied.*
 ## Chapter 9b — Template views (Django-shape CBVs)
 
 **API**: [`template_views::ListView`](../../src/template_views.rs),
-[`template_views::DetailView`](../../src/template_views.rs).
+[`template_views::DetailView`](../../src/template_views.rs),
+[`template_views::DeleteView`](../../src/template_views.rs).
 
 The `template_views` module is the HTML-side sibling of `viewset` —
 generic class-based views that build a Tera-rendered `axum::Router`
-over any `#[derive(Model)]` schema. Today: `ListView` + `DetailView`;
-`CreateView` / `UpdateView` / `DeleteView` follow.
+over any `#[derive(Model)]` schema. Today: `ListView` + `DetailView`
++ `DeleteView`; `CreateView` / `UpdateView` follow.
 
 ```rust
 use rustango::template_views::{ListView, DetailView};
@@ -1301,12 +1302,17 @@ tera.add_raw_template("posts_detail.html", r#"
 "#).unwrap();
 let tera = Arc::new(tera);
 
+use rustango::template_views::DeleteView;
+
 let app = axum::Router::new()
     .merge(ListView::for_model(Post::SCHEMA)
         .page_size(20)
         .order_by("created_at", true)
         .router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA)
+        .router("/posts", tera.clone(), pool.clone()))
+    .merge(DeleteView::for_model(Post::SCHEMA)
+        .success_url("/posts")
         .router("/posts", tera.clone(), pool.clone()));
 ```
 
@@ -1316,11 +1322,19 @@ Tera context (consistent across views so templates port cleanly):
 |------|--------------|
 | `ListView` | `object_list` (Vec of row-as-JSON), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev` |
 | `DetailView` | `object` (single row as JSON) |
+| `DeleteView` (GET confirm) | `object` (single row as JSON) |
 
 Default template names follow Django convention:
-`<table>_list.html` / `<table>_detail.html`. Override via
-`.template("custom.html")`. Restrict columns rendered into the
-context via `.fields(&["id", "title"])`.
+`<table>_list.html` / `<table>_detail.html` / `<table>_confirm_delete.html`.
+Override via `.template("custom.html")`. Restrict columns rendered
+into the context via `.fields(&["id", "title"])`.
+
+`DeleteView` is two-step: `GET <prefix>/{pk}/delete` renders a
+confirmation page (so the user can change their mind), `POST
+<prefix>/{pk}/delete` executes the delete and 303s to `success_url`
+(default `/`; typically the list URL). CSRF protection is the
+project's responsibility — mount under a CSRF-protected scope when
+the POST is reachable from a browser.
 
 Single-tenant only today (capture a `PgPool` at mount time). The
 `tenant_router` variant lands once we settle on the `Tenant`-extractor

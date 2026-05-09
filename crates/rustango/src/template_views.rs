@@ -310,6 +310,141 @@ async fn handle_detail(
     render(&state.tera, &state.vs.template, &ctx)
 }
 
+// ============================================================== DeleteView
+
+/// Two-step delete: `GET <prefix>/{pk}/delete` renders a confirmation
+/// page, `POST <prefix>/{pk}/delete` executes the delete and 303s to
+/// `success_url`. Mirrors Django's `DeleteView`.
+///
+/// CSRF protection is the project's responsibility — mount this view
+/// under a CSRF-protected scope (`rustango::forms::csrf`) when the
+/// POST is reachable from a browser.
+#[derive(Clone)]
+pub struct DeleteView {
+    schema: &'static ModelSchema,
+    template: String,
+    success_url: String,
+    fields: Option<Vec<String>>,
+}
+
+impl DeleteView {
+    /// Start a `DeleteView` for the given schema. Defaults: template
+    /// `<table>_confirm_delete.html`, redirect on success to `/`.
+    #[must_use]
+    pub fn for_model(schema: &'static ModelSchema) -> Self {
+        Self {
+            schema,
+            template: format!("{}_confirm_delete.html", schema.table),
+            success_url: "/".to_owned(),
+            fields: None,
+        }
+    }
+
+    #[must_use]
+    pub fn template(mut self, name: impl Into<String>) -> Self {
+        self.template = name.into();
+        self
+    }
+
+    /// Where the browser is redirected after a successful POST.
+    /// Default `/`. Typical: the list view's URL (`/posts`).
+    #[must_use]
+    pub fn success_url(mut self, url: impl Into<String>) -> Self {
+        self.success_url = url.into();
+        self
+    }
+
+    #[must_use]
+    pub fn fields(mut self, names: &[&str]) -> Self {
+        self.fields = Some(names.iter().map(|s| (*s).to_owned()).collect());
+        self
+    }
+
+    /// Mount as `GET`/`POST <prefix>/{pk}/delete`.
+    #[must_use]
+    pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: PgPool) -> Router<()> {
+        let state = Arc::new(DeleteViewState {
+            vs: self,
+            tera,
+            pool,
+        });
+        let path = format!("{}/{{pk}}/delete", prefix.trim_end_matches('/'));
+        Router::new()
+            .route(
+                &path,
+                axum::routing::get(handle_delete_confirm).post(handle_delete_submit),
+            )
+            .with_state(state)
+    }
+}
+
+#[derive(Clone)]
+struct DeleteViewState {
+    vs: DeleteView,
+    tera: Arc<Tera>,
+    pool: PgPool,
+}
+
+async fn handle_delete_confirm(
+    State(state): State<Arc<DeleteViewState>>,
+    Path(pk): Path<String>,
+) -> Response {
+    let Some(pk_field) = state.vs.schema.primary_key() else {
+        return template_error(&format!(
+            "model `{}` has no primary key — DeleteView can't probe by PK",
+            state.vs.schema.table
+        ));
+    };
+    let select_q = SelectQuery {
+        model: state.vs.schema,
+        where_clause: WhereExpr::Predicate(Filter {
+            column: pk_field.column,
+            op: Op::Eq,
+            value: SqlValue::String(pk),
+        }),
+        search: None,
+        joins: vec![],
+        order_by: vec![],
+        limit: Some(1),
+        offset: None,
+    };
+    let row = match select_one_row(&state.pool, &select_q).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(e) => return template_error(&format!("query row: {e}")),
+    };
+    let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
+    let object = row_to_json(&row, &fields);
+    let mut ctx = Context::new();
+    ctx.insert("object", &object);
+    render(&state.tera, &state.vs.template, &ctx)
+}
+
+async fn handle_delete_submit(
+    State(state): State<Arc<DeleteViewState>>,
+    Path(pk): Path<String>,
+) -> Response {
+    let Some(pk_field) = state.vs.schema.primary_key() else {
+        return template_error(&format!(
+            "model `{}` has no primary key — DeleteView can't delete by PK",
+            state.vs.schema.table
+        ));
+    };
+    let delete_q = crate::core::DeleteQuery {
+        model: state.vs.schema,
+        where_clause: WhereExpr::Predicate(Filter {
+            column: pk_field.column,
+            op: Op::Eq,
+            value: SqlValue::String(pk),
+        }),
+    };
+    match crate::sql::delete(&state.pool, &delete_q).await {
+        Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
+        Ok(_) => axum::response::Redirect::to(&state.vs.success_url).into_response(),
+        Err(e) => template_error(&format!("delete row: {e}")),
+    }
+}
+
 // ============================================================== shared helpers
 
 /// Resolve a `Vec<(name, desc)>` into the static-string `OrderClause`
@@ -512,5 +647,27 @@ mod tests {
         let fields = resolved_fields(s, Some(&names));
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name, "title");
+    }
+
+    /// `DeleteView::for_model` produces the Django-convention
+    /// confirm-delete template name + a `/` success_url default
+    /// (caller almost always overrides to the list URL).
+    #[test]
+    fn delete_view_default_template_and_success_url() {
+        let dv = DeleteView::for_model(schema_two_fields());
+        assert_eq!(dv.template, "posts_confirm_delete.html");
+        assert_eq!(dv.success_url, "/");
+    }
+
+    /// `DeleteView` builder chains override the defaults.
+    #[test]
+    fn delete_view_builder_chains() {
+        let dv = DeleteView::for_model(schema_two_fields())
+            .template("custom_delete.html")
+            .success_url("/posts")
+            .fields(&["id", "title"]);
+        assert_eq!(dv.template, "custom_delete.html");
+        assert_eq!(dv.success_url, "/posts");
+        assert_eq!(dv.fields.as_deref().map(<[String]>::len), Some(2));
     }
 }
