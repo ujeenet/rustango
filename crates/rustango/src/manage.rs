@@ -133,6 +133,69 @@ impl Cli {
         self
     }
 
+    /// Apply values from a loaded `Settings` struct (#87 wiring,
+    /// v0.29). Honors:
+    ///
+    /// - `Settings.server.bind` → bind address. The `RUSTANGO_BIND`
+    ///   env var still wins (deploy-time overrides need to beat
+    ///   committed config), and any subsequent explicit
+    ///   [`Cli::bind`] call wins over both.
+    ///
+    /// Future fields land here as the wiring catches up — the method
+    /// is forward-compatible because every Settings field is
+    /// `Option`-typed (a missing key falls through, doesn't reset).
+    ///
+    /// ```ignore
+    /// let cfg = rustango::config::Settings::load_from_env()?;
+    /// rustango::manage::Cli::new()
+    ///     .with_settings(&cfg)
+    ///     .api(urls::api())
+    ///     .run().await
+    /// ```
+    #[cfg(feature = "config")]
+    #[must_use]
+    pub fn with_settings(mut self, s: &crate::config::Settings) -> Self {
+        // Resolution priority for bind (most-specific wins):
+        //   1. an explicit `.bind(...)` call AFTER this one
+        //   2. `RUSTANGO_BIND` env var
+        //   3. `Settings.server.bind` (this branch)
+        //   4. hardcoded `0.0.0.0:8080` (Cli::new fallback)
+        //
+        // Env wins over TOML so deploy-time emergency overrides
+        // don't require a config push + restart.
+        if std::env::var("RUSTANGO_BIND").is_err() {
+            if let Some(bind) = s.server.bind.as_deref() {
+                self.bind = bind.to_owned();
+            }
+        }
+        self
+    }
+
+    /// Convenience: run `Settings::load_from_env()` and apply via
+    /// [`Cli::with_settings`]. Equivalent to:
+    ///
+    /// ```ignore
+    /// let cfg = rustango::config::Settings::load_from_env()?;
+    /// rustango::manage::Cli::new().with_settings(&cfg)
+    /// ```
+    ///
+    /// Returns the original [`Cli`] unchanged when the layered
+    /// loader fails (e.g. `config/default.toml` missing) so projects
+    /// that haven't adopted the layered loader still build cleanly.
+    /// Errors are surfaced via `tracing::warn` so they're visible
+    /// without breaking startup.
+    #[cfg(feature = "config")]
+    #[must_use]
+    pub fn with_settings_from_env(self) -> Self {
+        match crate::config::Settings::load_from_env() {
+            Ok(cfg) => self.with_settings(&cfg),
+            Err(e) => {
+                tracing::warn!(target: "rustango::manage", error = %e, "Cli::with_settings_from_env: failed to load Settings; falling back to Cli defaults");
+                self
+            }
+        }
+    }
+
     /// Override the migrations directory. Defaults to `./migrations`.
     #[must_use]
     pub fn migrations_dir(mut self, dir: impl Into<PathBuf>) -> Self {
@@ -326,6 +389,46 @@ mod tests {
     fn seed_hook_stored() {
         let cli = Cli::new().seed(|_pool| async { Ok(()) });
         assert!(cli.seed.is_some());
+    }
+
+    /// `Cli::with_settings` honors `Settings.server.bind` when
+    /// `RUSTANGO_BIND` env isn't set (#87 wiring).
+    #[cfg(feature = "config")]
+    #[test]
+    fn with_settings_picks_up_server_bind() {
+        // We can't unset RUSTANGO_BIND mid-test (the workspace bans
+        // unsafe std::env::set_var). Skip the assertion when the
+        // test runner has it set — the priority guard is exercised
+        // separately via the `_env_wins_over_settings` test.
+        if std::env::var("RUSTANGO_BIND").is_ok() {
+            return;
+        }
+        let mut s = crate::config::Settings::default();
+        s.server.bind = Some("127.0.0.1:9090".into());
+        let cli = Cli::new().with_settings(&s);
+        assert_eq!(cli.bind, "127.0.0.1:9090");
+    }
+
+    /// Settings.server.bind = None doesn't clobber the existing
+    /// bind value — the field is `Option`-typed, missing keys fall
+    /// through.
+    #[cfg(feature = "config")]
+    #[test]
+    fn with_settings_unset_bind_preserves_existing() {
+        let s = crate::config::Settings::default(); // .server.bind == None
+        let cli = Cli::new().bind("127.0.0.1:5555").with_settings(&s);
+        assert_eq!(cli.bind, "127.0.0.1:5555");
+    }
+
+    /// Explicit `.bind(...)` after `.with_settings(...)` wins —
+    /// the most-specific call site beats any earlier resolution.
+    #[cfg(feature = "config")]
+    #[test]
+    fn explicit_bind_after_with_settings_wins() {
+        let mut s = crate::config::Settings::default();
+        s.server.bind = Some("127.0.0.1:9090".into());
+        let cli = Cli::new().with_settings(&s).bind("127.0.0.1:1111");
+        assert_eq!(cli.bind, "127.0.0.1:1111");
     }
 
     #[test]

@@ -358,6 +358,14 @@ let cfg = rustango::config::Settings::load("prod")?;
 
 // Resolved tier (useful for telemetry / version pages):
 let tier = rustango::config::Settings::current_env_tier();
+
+// Wire into Cli — applies Settings.server.bind (env still wins,
+// explicit .bind() after this call still wins). Falls back silently
+// to Cli defaults when config files are missing.
+rustango::manage::Cli::new()
+    .with_settings_from_env()
+    .api(urls::api())
+    .run().await
 ```
 
 ### Sections

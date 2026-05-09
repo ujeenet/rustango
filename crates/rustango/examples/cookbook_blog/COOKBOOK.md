@@ -297,6 +297,34 @@ let feats = rustango::config::Settings::detected_features();
 // → ["postgres", "tenancy", "admin", "manage", "config", ...]
 ```
 
+**Wiring into `Cli` (v0.29)**:
+
+```rust
+// One-liner that loads via load_from_env() + applies. Falls back
+// to Cli defaults (with a tracing::warn) if config files are missing,
+// so projects that don't use the layered loader still build cleanly.
+rustango::manage::Cli::new()
+    .with_settings_from_env()
+    .api(urls::api())
+    .run().await
+
+// Or explicit Settings handle (when you also want to read other sections):
+let cfg = rustango::config::Settings::load_from_env()?;
+my_setup(&cfg);
+rustango::manage::Cli::new()
+    .with_settings(&cfg)
+    .api(urls::api())
+    .run().await
+```
+
+Today `with_settings` consumes `Settings.server.bind`. Resolution
+priority for the bind address (most-specific wins): explicit
+`.bind(...)` call after `.with_settings(...)` → `RUSTANGO_BIND` env
+var → `Settings.server.bind` from TOML → hardcoded `0.0.0.0:8080`.
+Future fields land here as the wiring catches up — the method is
+forward-compatible because every `Settings` field is `Option`-typed
+(missing keys fall through, don't reset).
+
 **Sections** (every field is `Option<T>` with sensible defaults):
 
 ```toml
