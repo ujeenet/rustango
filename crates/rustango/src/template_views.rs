@@ -327,10 +327,13 @@ async fn handle_list(
     ctx.insert("page_size", &page_size);
     ctx.insert("total", &total);
     ctx.insert("total_pages", &total_pages);
-    ctx.insert("has_next", &(page < total_pages));
-    ctx.insert("has_prev", &(page > 1));
+    let has_next = page < total_pages;
+    let has_prev = page > 1;
+    ctx.insert("has_next", &has_next);
+    ctx.insert("has_prev", &has_prev);
     ctx.insert("ordering", &active_ordering);
     insert_filter_context(&mut ctx, &state.vs.filter_fields, &params);
+    insert_pagination_urls(&mut ctx, page, has_next, has_prev, &params);
 
     render(&state.tera, &state.vs.template, &ctx)
 }
@@ -1449,6 +1452,97 @@ fn apply_csrf_cookie(resp: &mut Response, set_cookie: Option<String>) {
     }
 }
 
+/// Stamp pre-built `next_page_url` / `prev_page_url` strings into
+/// the Tera context. Both preserve every other URL parameter
+/// (filters, search, ordering, page_size) and just bump the
+/// `page` value, so pagination links don't drop the user's
+/// active filter state — a common bug in hand-rolled
+/// pagination templates.
+///
+/// `next_page_url` is `Some` only when there's a next page;
+/// `prev_page_url` is `Some` only when `page > 1`. Templates
+/// render:
+///
+/// ```html
+/// {% if prev_page_url %}<a href="{{ prev_page_url }}">prev</a>{% endif %}
+/// {% if next_page_url %}<a href="{{ next_page_url }}">next</a>{% endif %}
+/// ```
+///
+/// Both values are query-string fragments starting with `?`; the
+/// path is left to the template (typically `request.path` or a
+/// hardcoded `/posts`). This keeps the helper independent of
+/// axum's path extraction — pure data shape.
+fn insert_pagination_urls(
+    ctx: &mut Context,
+    page: i64,
+    has_next: bool,
+    has_prev: bool,
+    params: &HashMap<String, String>,
+) {
+    let next_url = if has_next {
+        Some(build_pagination_query(params, page + 1))
+    } else {
+        None
+    };
+    let prev_url = if has_prev {
+        Some(build_pagination_query(params, page - 1))
+    } else {
+        None
+    };
+    ctx.insert("next_page_url", &next_url);
+    ctx.insert("prev_page_url", &prev_url);
+}
+
+/// Build a `?key=value&...` query string with the original
+/// params preserved + the `page` value replaced. URL-encodes
+/// values so `?search=hello world` round-trips correctly.
+fn build_pagination_query(params: &HashMap<String, String>, target_page: i64) -> String {
+    // Sort keys for deterministic output — makes test assertions
+    // easier and avoids surprising users who notice the order
+    // changing between requests.
+    let mut keys: Vec<&str> = params
+        .keys()
+        .map(String::as_str)
+        .filter(|k| *k != "page")
+        .collect();
+    keys.sort_unstable();
+
+    let mut out = String::from("?");
+    for k in keys {
+        let v = &params[k];
+        if !out.ends_with('?') {
+            out.push('&');
+        }
+        out.push_str(&urlencode(k));
+        out.push('=');
+        out.push_str(&urlencode(v));
+    }
+    if !out.ends_with('?') {
+        out.push('&');
+    }
+    out.push_str("page=");
+    out.push_str(&target_page.to_string());
+    out
+}
+
+/// Minimal RFC 3986 percent-encoder — encodes anything that's not
+/// `unreserved` (alphanumeric / `-` / `_` / `.` / `~`). Used by
+/// pagination URL building so values containing `&` / `=` /
+/// spaces / unicode survive round-tripping. A focused tiny impl
+/// keeps `template_views` from pulling in `percent-encoding` or
+/// `urlencoding` as a transitive dep.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// Stamp the active filter values + search query back into the
 /// Tera context so templates can repopulate filter form inputs.
 ///
@@ -1617,10 +1711,13 @@ mod tenant {
         ctx.insert("page_size", &page_size);
         ctx.insert("total", &total);
         ctx.insert("total_pages", &total_pages);
-        ctx.insert("has_next", &(page < total_pages));
-        ctx.insert("has_prev", &(page > 1));
+        let has_next = page < total_pages;
+        let has_prev = page > 1;
+        ctx.insert("has_next", &has_next);
+        ctx.insert("has_prev", &has_prev);
         ctx.insert("ordering", &active_ordering);
         super::insert_filter_context(&mut ctx, &state.vs.filter_fields, &params);
+        super::insert_pagination_urls(&mut ctx, page, has_next, has_prev, &params);
 
         render(&state.tera, &state.vs.template, &ctx)
     }
@@ -2778,6 +2875,74 @@ mod tests {
             max: Some(100),
         };
         assert!(bounds_error_message(&only_max).contains("≤ 100"));
+    }
+
+    /// `urlencode` encodes everything outside the unreserved set —
+    /// spaces become `%20`, `&` becomes `%26`, etc. Round-trips.
+    #[test]
+    fn urlencode_encodes_reserved_chars() {
+        assert_eq!(urlencode("hello world"), "hello%20world");
+        assert_eq!(urlencode("a&b=c"), "a%26b%3Dc");
+        assert_eq!(urlencode("plain"), "plain");
+        assert_eq!(urlencode("foo-bar.baz_~"), "foo-bar.baz_~");
+    }
+
+    /// `build_pagination_query` preserves every original param
+    /// except `page`, sorts keys for deterministic output, and
+    /// URL-encodes values.
+    #[test]
+    fn build_pagination_query_preserves_other_params() {
+        let mut params = HashMap::new();
+        params.insert("author_id".to_owned(), "42".to_owned());
+        params.insert("search".to_owned(), "hello world".to_owned());
+        params.insert("page".to_owned(), "1".to_owned()); // dropped + replaced
+        let q = build_pagination_query(&params, 3);
+        // Sorted keys: author_id, search, then page appended.
+        assert_eq!(q, "?author_id=42&search=hello%20world&page=3");
+    }
+
+    /// Empty params still yields a `?page=N` query string.
+    #[test]
+    fn build_pagination_query_no_other_params() {
+        let params = HashMap::new();
+        assert_eq!(build_pagination_query(&params, 5), "?page=5");
+    }
+
+    /// `insert_pagination_urls` stamps `Some(url)` for each
+    /// direction that's reachable, `None` otherwise.
+    #[test]
+    fn insert_pagination_urls_stamps_correct_directions() {
+        let mut ctx = Context::new();
+        let mut params = HashMap::new();
+        params.insert("status".to_owned(), "draft".to_owned());
+
+        // Middle of paginated range: both directions present.
+        insert_pagination_urls(
+            &mut ctx, 3, /*has_next=*/ true, /*has_prev=*/ true, &params,
+        );
+        let mut tera = Tera::default();
+        tera.add_raw_template("t", "{{ next_page_url }}|{{ prev_page_url }}")
+            .unwrap();
+        let rendered = tera.render("t", &ctx).unwrap();
+        assert_eq!(rendered, "?status=draft&page=4|?status=draft&page=2");
+    }
+
+    /// First page: prev is None, rendered as empty by Tera's
+    /// default-of-Option<String> semantics.
+    #[test]
+    fn insert_pagination_urls_first_page_no_prev() {
+        let mut ctx = Context::new();
+        let params = HashMap::new();
+        insert_pagination_urls(
+            &mut ctx, 1, /*has_next=*/ true, /*has_prev=*/ false, &params,
+        );
+        let mut tera = Tera::default();
+        tera.add_raw_template(
+            "t",
+            "{% if prev_page_url %}HAS_PREV{% else %}NO_PREV{% endif %}",
+        )
+        .unwrap();
+        assert_eq!(tera.render("t", &ctx).unwrap(), "NO_PREV");
     }
 
     /// `resolve_page_size` falls back to the default when the param
