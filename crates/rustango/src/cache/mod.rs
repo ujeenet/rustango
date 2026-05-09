@@ -114,6 +114,64 @@ pub trait Cache: Send + Sync + 'static {
 /// `Arc<dyn Cache>` alias — the standard way to share a cache instance.
 pub type BoxedCache = Arc<dyn Cache>;
 
+/// Build a [`BoxedCache`] from a loaded
+/// [`crate::config::CacheSettings`] section (#87 wiring, v0.29).
+///
+/// Backend selection from `s.backend`:
+/// - `"memory"` (default) → [`InMemoryCache`]
+/// - `"redis"` → [`redis_backend::RedisCache`] (requires
+///   `cache-redis` feature; falls back to `InMemoryCache` with a
+///   warning when the feature isn't compiled in)
+/// - `"null"` / `"none"` → [`NullCache`]
+/// - any other / unset → [`InMemoryCache`] with a warning if the
+///   value was non-empty (typo defense)
+///
+/// `redis_url` is required when `backend = "redis"` — without it
+/// the resolver falls back to `InMemoryCache` with a warning so
+/// startup doesn't block on a misconfig.
+///
+/// ```ignore
+/// let cfg = rustango::config::Settings::load_from_env()?;
+/// let cache: rustango::cache::BoxedCache =
+///     rustango::cache::from_settings(&cfg.cache);
+/// ```
+#[cfg(feature = "config")]
+#[must_use]
+pub fn from_settings(s: &crate::config::CacheSettings) -> BoxedCache {
+    match s.backend.as_deref() {
+        Some("redis") => {
+            #[cfg(feature = "cache-redis")]
+            {
+                if let Some(url) = s.redis_url.as_deref().filter(|u| !u.is_empty()) {
+                    return Arc::new(redis_backend::RedisCache::new(url));
+                }
+                tracing::warn!(
+                    target: "rustango::cache",
+                    "cache.backend = \"redis\" but redis_url is unset; falling back to InMemoryCache",
+                );
+            }
+            #[cfg(not(feature = "cache-redis"))]
+            {
+                tracing::warn!(
+                    target: "rustango::cache",
+                    "cache.backend = \"redis\" but the `cache-redis` feature isn't compiled in; falling back to InMemoryCache",
+                );
+            }
+            Arc::new(InMemoryCache::new())
+        }
+        Some("null" | "none") => Arc::new(NullCache),
+        Some("memory") | None => Arc::new(InMemoryCache::new()),
+        Some(other) => {
+            tracing::warn!(
+                target: "rustango::cache",
+                backend = %other,
+                "unknown cache.backend value; falling back to InMemoryCache",
+            );
+            Arc::new(InMemoryCache::new())
+        }
+    }
+}
+
 // ------------------------------------------------------------------ Typed helpers
 
 /// Retrieve a JSON-deserializable value from the cache.
@@ -321,5 +379,80 @@ impl Cache for InMemoryCache {
     async fn clear(&self) -> Result<(), CacheError> {
         self.inner.write().await.clear();
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "config"))]
+mod settings_tests {
+    use super::*;
+
+    /// Unset backend → InMemoryCache. The cache is non-trait-named,
+    /// but we can confirm by writing then reading.
+    #[tokio::test]
+    async fn unset_backend_returns_inmemory() {
+        let s = crate::config::CacheSettings::default();
+        let cache = from_settings(&s);
+        cache.set("k", "v", None).await.unwrap();
+        assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+    }
+
+    /// Explicit `"memory"` matches the unset behavior.
+    #[tokio::test]
+    async fn memory_backend_works() {
+        let mut s = crate::config::CacheSettings::default();
+        s.backend = Some("memory".into());
+        let cache = from_settings(&s);
+        cache.set("k", "v", None).await.unwrap();
+        assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+    }
+
+    /// `"null"` / `"none"` map to NullCache — every read returns None.
+    #[tokio::test]
+    async fn null_backend_drops_writes() {
+        let mut s = crate::config::CacheSettings::default();
+        s.backend = Some("null".into());
+        let cache = from_settings(&s);
+        cache.set("k", "v", None).await.unwrap();
+        assert!(cache.get("k").await.unwrap().is_none());
+    }
+
+    /// Unknown backend names fall back to InMemoryCache (the writes
+    /// land — different from the null backend).
+    #[tokio::test]
+    async fn unknown_backend_falls_back_to_inmemory() {
+        let mut s = crate::config::CacheSettings::default();
+        s.backend = Some("typo".into());
+        let cache = from_settings(&s);
+        cache.set("k", "v", None).await.unwrap();
+        assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+    }
+
+    /// `"redis"` without `cache-redis` feature falls back to
+    /// InMemoryCache (don't block startup on a misconfig).
+    /// Whether the redis arm runs depends on the feature; both paths
+    /// must yield a working cache.
+    #[tokio::test]
+    async fn redis_without_url_falls_back_to_inmemory() {
+        let mut s = crate::config::CacheSettings::default();
+        s.backend = Some("redis".into());
+        // No redis_url — the fallback path should still produce a
+        // usable cache.
+        let cache = from_settings(&s);
+        // Round-trip works only on the in-memory fallback. This
+        // test serves as both the "missing url" and "no feature"
+        // regression: in either case, the resulting cache is
+        // InMemoryCache.
+        #[cfg(not(feature = "cache-redis"))]
+        {
+            cache.set("k", "v", None).await.unwrap();
+            assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+        }
+        #[cfg(feature = "cache-redis")]
+        {
+            // With the feature on, missing url still falls back to
+            // in-memory.
+            cache.set("k", "v", None).await.unwrap();
+            assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+        }
     }
 }

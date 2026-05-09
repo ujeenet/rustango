@@ -358,6 +358,9 @@ let app = app.access_log(log);
 if let Some(layer) = rustango::body_limit::BodyLimitLayer::from_settings(&cfg.server) {
     let app = app.body_limit(layer);
 }
+
+// cache backend selection — "memory" / "redis" / "null" / unset
+let cache: rustango::cache::BoxedCache = rustango::cache::from_settings(&cfg.cache);
 ```
 
 The operator console **automatically** picks up `[brand]` from the
