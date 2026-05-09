@@ -408,14 +408,25 @@ impl Builder {
         // tenant impersonation cookies signed with the same
         // secret the tenant admin uses. Cookie domain pinned to
         // the apex so subdomains receive it.
-        let cookie_domain = if self.apex.contains('.') {
-            Some(format!(".{}", self.apex))
-        } else {
-            // bare hostname like `localhost` — most browsers
-            // accept Domain=localhost or omit-domain. Keep `None`
-            // (host-only cookie) and let SameSite=Lax handle it.
-            None
-        };
+        //
+        // Always emit `Domain=.<apex>` so subdomain cookies work
+        // on real domains (`example.com` → cookie reaches
+        // `acme.example.com`).
+        //
+        // **Local dev caveat**: when `apex = "localhost"`,
+        // Chromium-family browsers (incl. Playwright) treat
+        // `localhost` as a public-suffix-list TLD and refuse
+        // cookies for `Domain=localhost` on subdomains, so the
+        // impersonation cookie won't propagate to
+        // `acme.localhost`. Firefox is more lenient. The proper
+        // fix is a URL-token handoff: the operator console
+        // would redirect to `<sub>.<apex>/_impersonation_handoff?token=…`
+        // and the tenant admin would set a host-scoped cookie
+        // on the subdomain itself. Filed as a backlog item.
+        // For local-dev impersonation today, use a real-DNS
+        // alias (e.g. `localtest.me` resolves to 127.0.0.1 with
+        // a real TLD) so cookies cross subdomain boundaries.
+        let cookie_domain = Some(format!(".{}", self.apex));
         let brand_storage_for_op = crate::tenancy::branding::default_brand_storage();
         let operator_admin = operator_console::router_with_impersonation(
             self.registry,

@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block body %}
-<h1>rustango admin</h1>
+<h1>{{ admin_title | default(value='Rustango Admin') }}</h1>
 {% if models | length == 0 %}
 <p><em>No models registered.</em></p>
 {% else %}
