@@ -1377,7 +1377,10 @@ the `rustango_csrf` cookie when missing, so templates can render:
 </form>
 ```
 
-POST validation is a separate layer — mount `forms::csrf::layer()`
+POST validation is a separate layer. As of v0.29.10 the recommended
+shortcut is `Cli::with_csrf()` — see
+[Auto-mounting CSRF](#auto-mounting-csrf--for-form-driven-cbvs-v02910).
+For projects not using `Cli`, mount `forms::csrf::layer()` directly
 on the router to enforce that the `_csrf` form field matches the
 cookie value. Without it the `csrf_token` context var still
 populates, but POSTs aren't validated.
