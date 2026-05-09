@@ -48,6 +48,12 @@ pub struct Cli {
     bind: String,
     migrations_dir: PathBuf,
     tenancy: bool,
+    /// Optional override for the framework's reserved URL prefixes
+    /// (`/__login`, `/__admin`, `/__audit`, …). Plumbed through to
+    /// [`crate::server::Builder::routes`] when [`Cli::tenancy`] is on.
+    /// `None` keeps the v0.27 defaults.
+    #[cfg(feature = "tenancy")]
+    routes: Option<crate::tenancy::RouteConfig>,
     /// Bootstrap initializer used by the `init-tenancy` verb when
     /// [`Cli::tenancy`] is on. Defaults to
     /// [`crate::tenancy::init_tenancy`]; replaced by [`Cli::user_model`]
@@ -68,8 +74,32 @@ impl Cli {
             migrations_dir: PathBuf::from("./migrations"),
             tenancy: false,
             #[cfg(feature = "tenancy")]
+            routes: None,
+            #[cfg(feature = "tenancy")]
             init_tenancy_fn: crate::tenancy::init_tenancy,
         }
+    }
+
+    /// Override the framework's reserved URL prefixes. Equivalent to
+    /// calling [`crate::server::Builder::routes`] directly when
+    /// constructing the server outside of [`Cli`]. No-op when
+    /// [`Cli::tenancy`] is not enabled (single-tenant projects don't
+    /// have these reserved paths to begin with).
+    ///
+    /// ```ignore
+    /// use rustango::tenancy::RouteConfig;
+    ///
+    /// rustango::manage::Cli::new()
+    ///     .tenancy()
+    ///     .routes(RouteConfig::friendly())   // /login, /admin, /audit
+    ///     .api(urls::api())
+    ///     .run().await
+    /// ```
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn routes(mut self, routes: crate::tenancy::RouteConfig) -> Self {
+        self.routes = Some(routes);
+        self
     }
 
     /// Mount the user's stateless API router. Pool is injected via
@@ -245,6 +275,9 @@ impl Cli {
     #[cfg(feature = "tenancy")]
     async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
         let mut builder = crate::server::Builder::from_env().await?.api(self.api);
+        if let Some(routes) = self.routes {
+            builder = builder.routes(routes);
+        }
         if let Some(seed) = self.seed {
             // Tenancy Builder's seed_with takes (Arc<TenantPools>, PgPool,
             // String); we forward the registry pool and discard the rest.
