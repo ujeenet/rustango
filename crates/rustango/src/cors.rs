@@ -122,9 +122,23 @@ impl CorsLayer {
     }
 
     /// Allow any origin (echoes the incoming Origin back).
+    ///
+    /// v0.30.12 (security audit) — emits a `tracing::warn!` if
+    /// credentials are already enabled. Browsers reject `*` with
+    /// credentials, and while the framework works around this by
+    /// echoing the Origin per-request, preflights without an
+    /// Origin header fail. Build with an explicit allowlist
+    /// (`.allow_origins([...])`) for credentialed CORS.
     #[must_use]
     pub fn allow_any_origin(mut self) -> Self {
         self.allow_origin = AllowOrigin::Any;
+        if self.allow_credentials {
+            tracing::warn!(
+                target: "rustango::cors",
+                "CorsLayer.allow_any_origin() called with allow_credentials=true — \
+                 use .allow_origins([...]) with an explicit allowlist for credentialed CORS"
+            );
+        }
         self
     }
 
@@ -202,10 +216,29 @@ impl CorsLayer {
 
     /// Set `Access-Control-Allow-Credentials: true`. Note: when `true`
     /// you cannot use `allow_any_origin()` — browsers reject `*` with
-    /// credentials.
+    /// credentials, and the framework works around this by echoing
+    /// the request's `Origin` back instead of `*` (only on requests
+    /// that carry an `Origin` header). Preflight requests that omit
+    /// `Origin` will still get `*` in the response, which the
+    /// browser rejects with credentials.
+    ///
+    /// v0.30.12 (security audit) — this method emits a
+    /// `tracing::warn!` at construction time when `yes = true`
+    /// and the layer is configured with `allow_any_origin()`, so
+    /// the misconfig surfaces in logs instead of silently failing
+    /// preflights for some clients.
     #[must_use]
     pub fn allow_credentials(mut self, yes: bool) -> Self {
         self.allow_credentials = yes;
+        if yes && matches!(self.allow_origin, AllowOrigin::Any) {
+            tracing::warn!(
+                target: "rustango::cors",
+                "CorsLayer.allow_credentials(true) combined with allow_any_origin() — \
+                 the framework echoes the request Origin back per request, but preflights \
+                 that omit `Origin` will fail in browsers. Use .allow_origins([...]) with \
+                 an explicit allowlist for credentialed CORS."
+            );
+        }
         self
     }
 

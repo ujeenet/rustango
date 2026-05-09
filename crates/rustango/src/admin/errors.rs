@@ -133,13 +133,49 @@ applied yet for this tenant / database.</p>
                 Json(serde_json::json!({ "error": "form", "detail": e.to_string() })),
             )
                 .into_response(),
-            Self::Internal(msg) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "internal", "detail": msg })),
-            )
-                .into_response(),
+            Self::Internal(msg) => {
+                // v0.30.12 — log the raw message for the operator,
+                // return a generic body to the client. Pre-v0.30.12
+                // shape leaked DB error text (table names, column
+                // names, sometimes SQL fragments) to anyone who
+                // could trigger an internal error. The new shape
+                // emits a request-correlatable id so operators can
+                // grep their logs without exposing internals.
+                let id = short_correlation_id();
+                tracing::error!(
+                    target: "rustango::admin",
+                    correlation_id = %id,
+                    error = %msg,
+                    "admin internal error"
+                );
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "internal",
+                        "detail": "internal server error",
+                        "correlation_id": id,
+                    })),
+                )
+                    .into_response()
+            }
         }
     }
+}
+
+/// Short correlation id stamped into both the log line and the
+/// client response so operators can grep logs by the id the user
+/// reports without ever exposing internal details to that user.
+/// 8 bytes of `OsRng` rendered as 16 hex chars — collision-free
+/// for any realistic error-rate window, short enough to read aloud.
+fn short_correlation_id() -> String {
+    use rand::{rngs::OsRng, RngCore};
+    let mut bytes = [0u8; 8];
+    OsRng.fill_bytes(&mut bytes);
+    let mut out = String::with_capacity(16);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 
 fn html_escape(s: &str) -> String {
@@ -147,4 +183,78 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    /// `short_correlation_id` returns a 16-char hex string. Two
+    /// calls return different ids (entropy check). 32 calls
+    /// produce 32 distinct ids — collision-free at the rate any
+    /// single admin instance would observe.
+    #[test]
+    fn short_correlation_id_shape_and_uniqueness() {
+        for _ in 0..16 {
+            let id = short_correlation_id();
+            assert_eq!(id.len(), 16, "expected 16 hex chars, got `{id}`");
+            assert!(
+                id.chars().all(|c| c.is_ascii_hexdigit()),
+                "expected hex only, got `{id}`"
+            );
+        }
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for _ in 0..32 {
+            seen.insert(short_correlation_id());
+        }
+        assert_eq!(seen.len(), 32, "expected all distinct correlation ids");
+    }
+
+    /// v0.30.12 (security audit) — AdminError::Internal must NOT
+    /// echo the raw error text in the JSON body. Pre-fix the
+    /// `detail` field carried the SQL / table / file path text
+    /// straight to the client; post-fix it's a generic message
+    /// and the raw text only goes to the operator's log.
+    #[tokio::test]
+    async fn internal_error_response_is_redacted() {
+        let raw = "table \"sensitive_internal\" does not exist at SELECT * FROM sensitive_internal";
+        let err = AdminError::Internal(raw.to_owned());
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body);
+        assert!(
+            !body_str.contains("sensitive_internal"),
+            "raw error text leaked to client: {body_str}"
+        );
+        assert!(
+            !body_str.contains("SELECT"),
+            "SQL leaked to client: {body_str}"
+        );
+        assert!(
+            body_str.contains("internal server error"),
+            "expected generic message, got: {body_str}"
+        );
+        assert!(
+            body_str.contains("correlation_id"),
+            "expected correlation_id in body for log lookup, got: {body_str}"
+        );
+    }
+
+    /// TableMissing path is unchanged — it's already a sanitized
+    /// HTML page that mentions only the table name (which the
+    /// user already typed in the URL, so it's not a leak).
+    #[tokio::test]
+    async fn table_missing_response_keeps_friendly_html() {
+        let err = AdminError::TableMissing {
+            table: "posts".to_owned(),
+        };
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(resp.into_body(), 1 << 16).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body);
+        assert!(body_str.contains("posts"));
+        assert!(body_str.contains("migrations"));
+    }
 }

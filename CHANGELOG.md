@@ -2,6 +2,93 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.12] — security audit follow-up (roadmap #5)
+
+Self-audit of the framework's security posture surfaced 3 fixes
+worth shipping immediately + a backlog of follow-ups for later.
+This release closes the immediate-action items.
+
+### Fixed (security)
+
+- **Switch all CSPRNG sites to `OsRng` directly.** 5 sites across
+  3 files were using `rand::thread_rng()`, which IS cryptographically
+  secure (ChaCha-seeded from `OsRng`) but is an inconsistent
+  pattern — the rest of the framework (csrf.rs, passwords.rs)
+  uses `OsRng` directly. Fixed: `tenancy/operator_console/session.rs`
+  (3 fallback random key sites), `api_keys.rs` (key + secret
+  generation), `csp_nonce.rs` (CSP nonce generation). Net: every
+  cryptographic value the framework mints now goes through the
+  same primitive. No public API change; behavior unchanged on
+  the wire (both produce 32 bytes of CSPRNG output).
+- **Redact `AdminError::Internal` HTTP responses.** Pre-fix the
+  JSON `detail` field carried the raw error text — table names,
+  column names, sometimes SQL fragments — straight to the
+  client. Any unauthenticated user who could trigger an internal
+  error could enumerate schema details. Post-fix the body
+  carries a generic `"internal server error"` message + a
+  16-char hex `correlation_id`; the raw error text only goes
+  to `tracing::error!` for the operator. Operators can grep
+  their logs by the id the user reports without exposing
+  internals to that user.
+- **`CorsLayer` warns on misconfig** at construction time. The
+  `allow_any_origin() + allow_credentials(true)` combination is
+  documented as unsupported (browsers reject `*` with
+  credentials), but pre-v0.30.12 the framework silently
+  produced a layer that worked for most clients but failed
+  preflights without an `Origin` header. Now both
+  `.allow_credentials(true)` (when called after
+  `.allow_any_origin()`) and `.allow_any_origin()` (when called
+  after credentials are on) emit a `tracing::warn!` pointing
+  at `.allow_origins([...])` as the right shape for credentialed
+  CORS.
+
+### Tests
+
+- 1324 → 1327 lib tests (+3):
+  `short_correlation_id_shape_and_uniqueness` (16-char hex,
+  32 distinct ids), `internal_error_response_is_redacted`
+  (raw text doesn't appear in body, generic message + correlation
+  id do), `table_missing_response_keeps_friendly_html` (the
+  TableMissing path is intentionally NOT redacted — the table
+  name is what the user typed, no leak).
+
+### Audit findings deferred (see source / future-backlog memory)
+
+- **#3** Tenant isolation runtime guard for schema-mode pools —
+  `TenantPools::pool_for_org()` returns a raw `&PgPool` that
+  bypasses `SET search_path` if a developer uses it directly
+  instead of `acquire()`. Currently doc-enforced; runtime
+  guard requires reworking the pool API. Tracked for v0.31.
+- **#4** Session-secret persistence required-mode — when
+  `from_env_or_disk` fails to write, falls back to ephemeral
+  random with a `tracing::warn!`. A `manage check --deploy`
+  audit could flag this in prod. Tracked for v0.31.
+- **#7** Tenant admin session cookies — verify `Secure` /
+  `HttpOnly` are explicit on every path. Audit was inconclusive;
+  needs a focused sweep. Tracked for v0.31.
+- **#8** Built-in rate limiting for auth endpoints
+  (login / password-reset). Framework has `rate_limit/` module
+  but it's not auto-mounted on auth routes. Tracked for v0.31.
+- **#11** Static-files `no_canonicalize()` footgun — currently
+  a casual builder method; consider gating behind a feature
+  flag or `unsafe { ... }` block. Defensive, low priority.
+
+### Audit "what's done well" (for the record)
+
+- Constant-time comparisons everywhere passwords, tokens, API
+  keys, and signatures are checked (`subtle::ConstantTimeEq`).
+- Parameterized SQL via `sqlx::bind`; identifiers always
+  quoted via `quote_ident`.
+- argon2id password hashing with `OsRng` salt.
+- Uploaded filenames go through `sanitize_filename`.
+- Tera escapes by default; `| safe` is opt-in and clearly
+  marked in templates.
+- CSRF middleware uses double-submit-cookie + constant-time
+  compare + `SameSite=Lax`.
+- JWT decoder rejects `alg=none` attacks.
+
+---
+
 ## [0.30.11] — settings-driven logging + `Cli::with_logging` (roadmap #8)
 
 The framework already shipped a solid `logging::Setup` builder

@@ -22,7 +22,7 @@
 
 use base64::Engine;
 use hmac::{Hmac, Mac};
-use rand::Rng;
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -184,7 +184,9 @@ impl SessionSecret {
             );
         }
         let mut buf = vec![0u8; 32];
-        rand::thread_rng().fill(&mut buf[..]);
+        // v0.30.12 — use OsRng directly (cryptographic secret).
+        // Consistent with src/forms/csrf.rs + src/passwords.rs.
+        OsRng.fill_bytes(&mut buf);
         Self(buf)
     }
 
@@ -238,7 +240,9 @@ impl SessionSecret {
         }
         // Generate a fresh key and try to persist it.
         let mut buf = vec![0u8; 32];
-        rand::thread_rng().fill(&mut buf[..]);
+        // v0.30.12 — use OsRng directly (cryptographic secret).
+        // Consistent with src/forms/csrf.rs + src/passwords.rs.
+        OsRng.fill_bytes(&mut buf);
         if let Some(parent) = disk_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -302,7 +306,9 @@ impl SessionSecret {
              will not survive server restarts; set the env var for production)",
         );
         let mut buf = vec![0u8; 32];
-        rand::thread_rng().fill(&mut buf[..]);
+        // v0.30.12 — use OsRng directly (cryptographic secret).
+        // Consistent with src/forms/csrf.rs + src/passwords.rs.
+        OsRng.fill_bytes(&mut buf);
         Ok(Self(buf))
     }
 

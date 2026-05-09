@@ -54,7 +54,7 @@ use axum::middleware::Next;
 use axum::Router;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use rand::RngCore;
+use rand::{rngs::OsRng, RngCore};
 
 /// Placeholder string that should appear in your CSP wherever you want
 /// the per-request nonce to be substituted. Use it inside the source
@@ -145,7 +145,10 @@ impl<S: Clone + Send + Sync + 'static> CspNonceRouterExt for Router<S> {
 
 fn generate_nonce(byte_len: usize) -> String {
     let mut buf = vec![0u8; byte_len];
-    rand::thread_rng().fill_bytes(&mut buf);
+    // v0.30.12 — use OsRng directly. Predictable nonces would
+    // defeat the strict-CSP `script-src 'nonce-...'` model;
+    // OsRng matches the rest of the framework's crypto sites.
+    OsRng.fill_bytes(&mut buf);
     URL_SAFE_NO_PAD.encode(&buf)
 }
 

@@ -31,7 +31,7 @@
 //! }
 //! ```
 
-use rand::Rng;
+use rand::{rngs::OsRng, RngCore};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiKeyError {
@@ -49,10 +49,14 @@ pub enum ApiKeyError {
 /// # Errors
 /// [`ApiKeyError::Hash`] on argon2 failures (extremely rare).
 pub fn generate_key() -> Result<(String, String, String), ApiKeyError> {
-    let mut rng = rand::thread_rng();
-    let prefix_bytes: [u8; 4] = rng.gen();
+    // v0.30.12 — use OsRng directly. Cryptographic secret bytes
+    // for the user's bearer token; consistent with the rest of
+    // the framework (csrf.rs / passwords.rs / session.rs).
+    let mut prefix_bytes: [u8; 4] = [0; 4];
+    OsRng.fill_bytes(&mut prefix_bytes);
     let prefix = to_hex(&prefix_bytes);
-    let secret_bytes: [u8; 16] = rng.gen();
+    let mut secret_bytes: [u8; 16] = [0; 16];
+    OsRng.fill_bytes(&mut secret_bytes);
     let secret = to_hex(&secret_bytes);
     let hash = hash_secret(&secret)?;
     let token = format!("{prefix}.{secret}");
