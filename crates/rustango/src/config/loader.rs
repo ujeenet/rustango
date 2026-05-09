@@ -395,6 +395,88 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Section coverage (#87 slice 2): the new server/auth/brand/
+    /// security/routes/audit sections parse cleanly from a single
+    /// TOML and survive default-section merging without touching
+    /// pre-existing sections.
+    #[test]
+    fn slice2_sections_parse_and_merge() {
+        let root = fresh_root("slice2");
+        write(
+            &root,
+            "default.toml",
+            r##"
+[database]
+url = "postgres://localhost/dev"
+
+[server]
+bind = "127.0.0.1:9000"
+request_timeout_secs = 30
+
+[auth]
+argon2_memory_kib = 19456
+argon2_iterations = 2
+lockout_threshold = 5
+
+[auth.jwt]
+access_ttl_secs = 900
+refresh_ttl_secs = 604800
+issuer = "myapp"
+
+[brand]
+name = "Acme Operator"
+primary_color = "#2c6fb0"
+
+[security]
+headers_preset = "strict"
+hsts_max_age_secs = 31536000
+
+[routes]
+admin_url = "/admin"
+login_url = "/login"
+
+[audit]
+retention_days = 90
+"##,
+        );
+        let cfg = load_with_root(&root, "missing-env").unwrap();
+        // Pre-existing section unaffected.
+        assert_eq!(
+            cfg.database.url.as_deref(),
+            Some("postgres://localhost/dev")
+        );
+        // New sections.
+        assert_eq!(cfg.server.bind.as_deref(), Some("127.0.0.1:9000"));
+        assert_eq!(cfg.server.request_timeout_secs, Some(30));
+        assert_eq!(cfg.auth.argon2_memory_kib, Some(19456));
+        assert_eq!(cfg.auth.lockout_threshold, Some(5));
+        assert_eq!(cfg.auth.jwt.access_ttl_secs, Some(900));
+        assert_eq!(cfg.auth.jwt.issuer.as_deref(), Some("myapp"));
+        assert_eq!(cfg.brand.name.as_deref(), Some("Acme Operator"));
+        assert_eq!(cfg.brand.primary_color.as_deref(), Some("#2c6fb0"));
+        assert_eq!(cfg.security.headers_preset.as_deref(), Some("strict"));
+        assert_eq!(cfg.security.hsts_max_age_secs, Some(31536000));
+        assert_eq!(cfg.routes.admin_url.as_deref(), Some("/admin"));
+        assert_eq!(cfg.routes.login_url.as_deref(), Some("/login"));
+        assert_eq!(cfg.audit.retention_days, Some(90));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `Settings::detected_features` reflects compile-time feature
+    /// flags. The lib-test build pulls every default feature, so
+    /// the list is non-empty and includes a few we know are on
+    /// (postgres, tenancy, admin).
+    #[test]
+    fn detected_features_lists_compiled_in_features() {
+        use crate::config::Settings;
+        let feats = Settings::detected_features();
+        assert!(!feats.is_empty(), "expected at least one feature");
+        assert!(
+            feats.contains(&"postgres"),
+            "postgres feature is in the default set; got {feats:?}"
+        );
+    }
+
     #[test]
     fn parse_error_includes_path() {
         let root = fresh_root("parse_error");

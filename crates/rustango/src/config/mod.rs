@@ -43,8 +43,9 @@ mod sections;
 
 pub use loader::ConfigError;
 pub use sections::{
-    AdminSettings, CacheSettings, DatabaseSettings, JobsSettings, MailSettings, Settings,
-    TenancySettings,
+    AdminSettings, AuditSettings, AuthSettings, BrandSettings, CacheSettings, DatabaseSettings,
+    JobsSettings, JwtSettings, MailSettings, RoutesSettings, SecuritySettings, ServerSettings,
+    Settings, TenancySettings,
 };
 
 impl Settings {
