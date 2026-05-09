@@ -56,19 +56,51 @@ pub(super) fn load_with_root(root: &Path, env: &str) -> Result<Settings, ConfigE
 /// instead of reading the process environment. Avoids
 /// `std::env::set_var` (which requires `unsafe` and is forbidden by
 /// the workspace lint policy) in unit tests.
+///
+/// File-search order (each layer is optional except the first):
+/// 1. `default.toml` — shared defaults, REQUIRED.
+/// 2. `{env}_settings.toml` — tier convention (`dev_settings.toml`,
+///    `staging_settings.toml`, `prod_settings.toml`), preferred since
+///    v0.29 (#87) because the suffix makes the file's purpose clear
+///    next to `default.toml`.
+/// 3. `{env}.toml` — legacy convention (`prod.toml`, `staging.toml`),
+///    kept for back-compat with v0.28 deployments.
+/// 4. `RUSTANGO__*` env-var overrides.
+///
+/// If both `{env}_settings.toml` and `{env}.toml` exist, the `_settings`
+/// variant wins — same shape as a more-specific override beating a
+/// less-specific one, and the loader emits a stderr warning.
 fn load_with_root_and_env<I>(root: &Path, env: &str, env_vars: I) -> Result<Settings, ConfigError>
 where
     I: IntoIterator<Item = (String, String)>,
 {
     let default_path = root.join("default.toml");
-    let env_path = root.join(format!("{env}.toml"));
+    let tiered_path = root.join(format!("{env}_settings.toml"));
+    let legacy_path = root.join(format!("{env}.toml"));
 
     // `read_toml(path, required = true)` returns Some(_) or errors,
     // so this expect can never trip.
     let mut tree =
         read_toml(&default_path, true)?.expect("read_toml(_, required=true) returns Some on Ok");
-    if let Some(overlay) = read_toml(&env_path, false)? {
-        merge(&mut tree, overlay);
+
+    let tiered = read_toml(&tiered_path, false)?;
+    let legacy = read_toml(&legacy_path, false)?;
+    match (tiered, legacy) {
+        (Some(t), Some(_)) => {
+            // Both exist — _settings wins. Warn so the user notices
+            // the dead file (typically left from a mid-migration v0.28
+            // deployment that didn't clean up).
+            eprintln!(
+                "config: both {} and {} exist — using the `_settings` variant; \
+                 delete the legacy file to silence this warning",
+                tiered_path.display(),
+                legacy_path.display(),
+            );
+            merge(&mut tree, t);
+        }
+        (Some(t), None) => merge(&mut tree, t),
+        (None, Some(l)) => merge(&mut tree, l),
+        (None, None) => {}
     }
     apply_env_overrides(&mut tree, env_vars)?;
 
@@ -306,6 +338,60 @@ mod tests {
         let root = fresh_root("missing_default");
         let err = load_with_root(&root, "any").unwrap_err();
         assert!(matches!(err, ConfigError::Io { .. }));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Tier convention: `prod_settings.toml` is found before the
+    /// legacy `prod.toml` shape and overrides default settings.
+    #[test]
+    fn tiered_settings_filename_loads() {
+        let root = fresh_root("tiered");
+        write(
+            &root,
+            "default.toml",
+            "[database]\nurl = \"postgres://localhost/dev\"\npool_max_size = 5\n",
+        );
+        write(
+            &root,
+            "prod_settings.toml",
+            "[database]\npool_max_size = 100\n",
+        );
+        let cfg = load_with_root(&root, "prod").unwrap();
+        assert_eq!(cfg.database.pool_max_size, Some(100));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Legacy `<env>.toml` still loads when no `_settings` variant
+    /// exists — keeps v0.28 deployments working untouched.
+    #[test]
+    fn legacy_filename_still_loads() {
+        let root = fresh_root("legacy");
+        write(&root, "default.toml", "[database]\npool_max_size = 5\n");
+        write(&root, "prod.toml", "[database]\npool_max_size = 25\n");
+        let cfg = load_with_root(&root, "prod").unwrap();
+        assert_eq!(cfg.database.pool_max_size, Some(25));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Both files present: `_settings` wins. Mirrors how a more
+    /// specific override beats a less specific one — and the loader
+    /// emits a stderr warning so the dead legacy file is visible.
+    #[test]
+    fn both_filenames_present_settings_wins() {
+        let root = fresh_root("both");
+        write(&root, "default.toml", "[database]\npool_max_size = 5\n");
+        write(&root, "prod.toml", "[database]\npool_max_size = 25\n");
+        write(
+            &root,
+            "prod_settings.toml",
+            "[database]\npool_max_size = 100\n",
+        );
+        let cfg = load_with_root(&root, "prod").unwrap();
+        assert_eq!(
+            cfg.database.pool_max_size,
+            Some(100),
+            "_settings variant must win when both exist"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
