@@ -109,7 +109,14 @@ pub async fn run<W: Write + Send>(
     // Both consoles use HMAC-SHA256 over distinct cookie names + payload
     // shapes; sharing the key is safe and lets a single
     // RUSTANGO_SESSION_SECRET cover both surfaces.
-    let session_secret = SessionSecret::from_env_or_random();
+    //
+    // Persist the dev-mode random secret to disk so cargo-watch /
+    // cargo run cycles don't sign every operator out on restart
+    // (#69). Production should still set `RUSTANGO_SESSION_SECRET`.
+    // Matches the Builder path at `server/builder.rs:302` so both
+    // entrypoints behave the same.
+    let session_secret =
+        SessionSecret::from_env_or_disk(std::path::Path::new("./var/.rustango_session.key"));
 
     // --- Operator console at the apex ---
     let operator_console =
