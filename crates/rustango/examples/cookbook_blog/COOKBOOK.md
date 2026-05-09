@@ -329,16 +329,20 @@ Today `with_settings` consumes:
   call BEFORE `.with_settings(...)` is preserved as the base, so
   TOML overrides layer on top of any code-side construction.
 
-`Settings.auth.jwt` is consumed via the auth-routes builder —
-each section that needs runtime config exposes a typed entry
-point:
+Other sections expose typed entry points so any subsystem can
+consume the relevant slice without depending on the whole struct:
 
 ```rust
-// auth_routes mounting:
 let cfg = rustango::config::Settings::load_from_env()?;
+
+// auth_routes — access_ttl_secs / refresh_ttl_secs
 let auth = rustango::tenancy::auth_routes::Config::default()
-    .with_jwt_settings(&cfg.auth.jwt);   // access_ttl_secs, refresh_ttl_secs
-api.merge(rustango::tenancy::auth_routes::jwt_router(auth))
+    .with_jwt_settings(&cfg.auth.jwt);
+api.merge(rustango::tenancy::auth_routes::jwt_router(auth));
+
+// security_headers — preset + csp + hsts override
+let sec = rustango::security_headers::SecurityHeadersLayer::from_settings(&cfg.security);
+let app = app.layer(sec.into_layer());
 ```
 
 Future fields land here as the wiring catches up — every

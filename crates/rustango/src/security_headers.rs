@@ -196,6 +196,65 @@ impl SecurityHeadersLayer {
         self.custom.insert(name.into(), value.into());
         self
     }
+
+    /// Build the layer from a preset name (#87 wiring). Maps to:
+    ///
+    /// | name              | preset          |
+    /// |-------------------|-----------------|
+    /// | `"strict"`        | [`Self::strict`]  |
+    /// | `"relaxed"`       | [`Self::relaxed`] |
+    /// | `"dev"`           | [`Self::dev`]     |
+    /// | `"none"`/`"empty"`| [`Self::empty`]   |
+    /// | anything else     | [`Self::strict`]  (fail-safe — unknown preset names shouldn't strip security headers) |
+    #[must_use]
+    pub fn from_preset(name: &str) -> Self {
+        match name {
+            "strict" => Self::strict(),
+            "relaxed" => Self::relaxed(),
+            "dev" => Self::dev(),
+            "none" | "empty" => Self::empty(),
+            // Fail-safe: unknown preset names get strict headers
+            // rather than silently stripping protection. Mismatches
+            // surface via `manage check --deploy` if they happen in
+            // prod tier.
+            _ => Self::strict(),
+        }
+    }
+
+    /// Build the layer from a loaded [`crate::config::SecuritySettings`]
+    /// section (#87 wiring, v0.29). Picks the preset first via
+    /// [`Self::from_preset`] (`strict` if `headers_preset` is unset),
+    /// then layers per-field overrides:
+    ///
+    /// - `csp` → sets the Content-Security-Policy header verbatim
+    /// - `hsts_max_age_secs = 0` → disables HSTS entirely
+    /// - `hsts_max_age_secs > 0` → rebuilds the HSTS header with the
+    ///   configured age (preserves `; includeSubDomains; preload`)
+    ///
+    /// ```ignore
+    /// let cfg = rustango::config::Settings::load_from_env()?;
+    /// let layer = SecurityHeadersLayer::from_settings(&cfg.security);
+    /// app.layer(layer.into_layer())
+    /// ```
+    #[cfg(feature = "config")]
+    #[must_use]
+    pub fn from_settings(s: &crate::config::SecuritySettings) -> Self {
+        let mut layer = match s.headers_preset.as_deref() {
+            Some(name) => Self::from_preset(name),
+            None => Self::strict(),
+        };
+        if let Some(csp) = s.csp.as_ref() {
+            layer.csp = Some(csp.clone());
+        }
+        if let Some(secs) = s.hsts_max_age_secs {
+            layer.hsts = if secs == 0 {
+                None
+            } else {
+                Some(format!("max-age={secs}; includeSubDomains; preload"))
+            };
+        }
+        layer
+    }
 }
 
 /// Extension trait — `.security_headers(layer)` on Router.
@@ -568,5 +627,87 @@ mod tests {
         let csp = l.csp.unwrap();
         assert!(csp.contains("default-src 'self'"));
         assert!(csp.contains("report-uri"));
+    }
+
+    // ---- #87 wiring: from_preset + from_settings ----
+
+    #[test]
+    fn from_preset_maps_known_names() {
+        assert_eq!(
+            SecurityHeadersLayer::from_preset("strict").hsts.as_deref(),
+            SecurityHeadersLayer::strict().hsts.as_deref(),
+        );
+        assert!(SecurityHeadersLayer::from_preset("dev").hsts.is_none());
+        assert!(SecurityHeadersLayer::from_preset("none").hsts.is_none());
+        assert!(!SecurityHeadersLayer::from_preset("none").nosniff);
+    }
+
+    /// Unknown preset names fail-safe to `strict()` — a typo in
+    /// the TOML shouldn't silently strip security headers in prod.
+    /// (`manage check --deploy` warns separately.)
+    #[test]
+    fn from_preset_unknown_name_fails_safe_to_strict() {
+        let l = SecurityHeadersLayer::from_preset("strixt"); // typo
+        assert_eq!(
+            l.hsts.as_deref(),
+            SecurityHeadersLayer::strict().hsts.as_deref(),
+            "unknown preset should yield strict, not empty"
+        );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_default_picks_strict() {
+        let s = crate::config::SecuritySettings::default();
+        let l = SecurityHeadersLayer::from_settings(&s);
+        assert_eq!(
+            l.hsts.as_deref(),
+            SecurityHeadersLayer::strict().hsts.as_deref(),
+        );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_honors_preset_name() {
+        let mut s = crate::config::SecuritySettings::default();
+        s.headers_preset = Some("dev".into());
+        let l = SecurityHeadersLayer::from_settings(&s);
+        assert!(l.hsts.is_none());
+    }
+
+    /// `hsts_max_age_secs = 0` disables HSTS even when the preset
+    /// would have set it. Useful for staging tiers behind self-signed
+    /// certs where pinning HSTS would brick repeated rebinds.
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_zero_hsts_disables_header() {
+        let mut s = crate::config::SecuritySettings::default();
+        s.headers_preset = Some("strict".into());
+        s.hsts_max_age_secs = Some(0);
+        let l = SecurityHeadersLayer::from_settings(&s);
+        assert!(l.hsts.is_none(), "hsts_max_age_secs = 0 should drop HSTS");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_custom_hsts_max_age() {
+        let mut s = crate::config::SecuritySettings::default();
+        s.hsts_max_age_secs = Some(60);
+        let l = SecurityHeadersLayer::from_settings(&s);
+        let hsts = l.hsts.expect("hsts present");
+        assert!(hsts.contains("max-age=60"), "got: {hsts}");
+        assert!(
+            hsts.contains("includeSubDomains"),
+            "preserved subdomain inclusion"
+        );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_custom_csp_overrides_preset() {
+        let mut s = crate::config::SecuritySettings::default();
+        s.csp = Some("default-src 'self'; img-src *".into());
+        let l = SecurityHeadersLayer::from_settings(&s);
+        assert_eq!(l.csp.as_deref(), Some("default-src 'self'; img-src *"));
     }
 }

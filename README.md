@@ -1804,6 +1804,21 @@ let app = Router::new()
 | `SecurityHeadersLayer::dev()` | Local: nosniff only (no HSTS lockout) |
 | `SecurityHeadersLayer::empty()` | Build up from scratch |
 
+`SecurityHeadersLayer::from_settings(&Settings.security)` builds the
+layer from TOML — picks the preset by name (`headers_preset =
+"strict" | "relaxed" | "dev" | "none"`), then layers per-field
+overrides on top (`csp`, `hsts_max_age_secs`):
+
+```rust
+let cfg = rustango::config::Settings::load_from_env()?;
+app.layer(SecurityHeadersLayer::from_settings(&cfg.security).into_layer())
+```
+
+Unknown preset names fail-safe to `strict()` — a typo in the TOML
+shouldn't silently strip protection. (`manage check --deploy`
+warns separately when the resolved preset is `dev` / `none` in the
+prod tier.)
+
 ### CORS presets
 
 ```rust
