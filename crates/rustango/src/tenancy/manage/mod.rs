@@ -215,6 +215,7 @@ pub async fn run_with_writer_and_init<W: Write + Send>(
         "grant-perm" => roles::grant_perm_cmd(pools, &args[1..], writer).await,
         "revoke-perm" => roles::revoke_perm_cmd(pools, &args[1..], writer).await,
         "create-api-key" => roles::create_api_key_cmd(pools, &args[1..], writer).await,
+        "seed-permissions" => roles::seed_permissions_cmd(pools, &args[1..], writer).await,
         "startapp" => scaffold::startapp_cmd(&args[1..], writer),
         // Plain `migrate` is scope-aware here — registry-scoped
         // migrations apply to the registry pool first, then tenant-
@@ -435,6 +436,23 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "                       Issue a Bearer API key for a tenant user."
+    )?;
+    writeln!(w, "  seed-permissions [--slug <s>]")?;
+    writeln!(
+        w,
+        "                       Re-seed `rustango_permissions` for one (--slug)"
+    )?;
+    writeln!(
+        w,
+        "                       or every active tenant. Idempotent — safe to"
+    )?;
+    writeln!(
+        w,
+        "                       run after adding `#[rustango(permissions)]` to"
+    )?;
+    writeln!(
+        w,
+        "                       a model without a fresh migrate cycle."
     )?;
     writeln!(w)?;
     writeln!(w, "AUDIT:")?;

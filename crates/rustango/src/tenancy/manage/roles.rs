@@ -279,6 +279,95 @@ pub(super) async fn create_api_key_cmd<W: Write + Send>(
     Ok(())
 }
 
+// ------------------------------------------------------------------ seed-permissions
+//
+// `manage seed-permissions [--slug <s>]` — invoke
+// `auto_create_permissions` for one or every active tenant. The
+// auto-invoke at migrate time (#61) covers the typical case; this
+// verb is the ad-hoc reseed for situations where the tenant pool
+// existed before the model carried `#[rustango(permissions)]`,
+// when a model was added between full migrate runs, or when an
+// operator wants to verify the catalog is fully populated without
+// touching schema.
+
+/// `manage seed-permissions [--slug <slug>]` — re-run
+/// `auto_create_permissions` against one or every active tenant.
+///
+/// Without `--slug`, walks every active org and seeds each in
+/// turn. With `--slug <s>`, scopes to a single tenant. The
+/// underlying call is idempotent (UNIQUE on `(content_type_id,
+/// codename)` — re-running on a populated catalog is a no-op).
+///
+/// # Errors
+/// [`TenancyError::Validation`] if `--slug` references a missing
+/// tenant; [`TenancyError::Driver`] for SQL failures.
+pub(super) async fn seed_permissions_cmd<W: Write + Send>(
+    pools: &TenantPools,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError> {
+    let mut slug: Option<String> = None;
+    let mut iter = args.iter();
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--slug" => slug = Some(next_value(&mut iter, "--slug")?),
+            "--help" | "-h" => {
+                writeln!(
+                    w,
+                    "seed-permissions [--slug <s>]\n  \
+                     Re-run auto_create_permissions for one (with --slug) or every\n  \
+                     active tenant. Idempotent — UNIQUE on (content_type_id, codename)\n  \
+                     means re-running on a populated catalog is a no-op."
+                )?;
+                return Ok(());
+            }
+            other => {
+                return Err(TenancyError::Validation(format!(
+                    "seed-permissions: unknown flag `{other}`"
+                )));
+            }
+        }
+    }
+
+    let targets: Vec<Org> = if let Some(s) = slug.as_deref() {
+        let orgs: Vec<Org> = Org::objects()
+            .where_(Org::slug.eq(s.to_owned()))
+            .fetch(pools.registry())
+            .await?;
+        if orgs.is_empty() {
+            return Err(TenancyError::Validation(format!("tenant `{s}` not found")));
+        }
+        orgs
+    } else {
+        Org::objects()
+            .where_(Org::active.eq(true))
+            .fetch(pools.registry())
+            .await?
+    };
+
+    if targets.is_empty() {
+        writeln!(w, "no active tenants to seed permissions for")?;
+        return Ok(());
+    }
+
+    for org in &targets {
+        let pool = pools.scoped_pool(org).await?;
+        // ensure_tables first — the seeder writes to
+        // `rustango_permissions` + `rustango_content_types`, both
+        // of which are bootstrap-migration tables but might be
+        // missing on tenants migrated pre-#61.
+        permissions::ensure_tables(&pool)
+            .await
+            .map_err(TenancyError::Driver)?;
+        permissions::auto_create_permissions(&pool)
+            .await
+            .map_err(TenancyError::Driver)?;
+        writeln!(w, "seeded `{}`", org.slug)?;
+    }
+    writeln!(w, "done — {} tenant(s) processed", targets.len())?;
+    Ok(())
+}
+
 // ------------------------------------------------------------------ helpers
 
 async fn tenant_pool_for_slug(pools: &TenantPools, slug: &str) -> Result<PgPool, TenancyError> {
