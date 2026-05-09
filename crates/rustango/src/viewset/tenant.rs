@@ -431,6 +431,7 @@ mod tests {
     /// against a real Postgres + tenant pool.
     #[test]
     fn tenant_router_builds_for_a_basic_model() {
+        use crate::core::Model as _;
         // Use the framework's own User schema as a stand-in —
         // it's always available and has a PK.
         let _r = ViewSet::for_model(crate::tenancy::auth::User::SCHEMA)
