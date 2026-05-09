@@ -6,11 +6,17 @@
 //! user routes, but apps shipping to production want friendly URLs
 //! (`/login`, `/admin`) that match user expectations.
 //!
+//! **v0.29 default flip (#85):** [`RouteConfig::default`] now
+//! returns the friendly preset (`/login`, `/admin`, `/audit`, …).
+//! Projects that need to keep the v0.28 `__`-prefixed paths must
+//! opt in via `RouteConfig::legacy()` or set the relevant fields
+//! manually. Migration: existing v0.28 deployments calling
+//! `Default::default()` will see their admin/login URLs change
+//! shape — bookmarks and external integrations need updating.
+//!
 //! `RouteConfig` exposes those prefixes so any
 //! `Server::Builder` / `TenantAdminBuilder` /
-//! `operator_console::router_*` consumer can override them. Defaults
-//! preserve every pre-0.28 path so upgrading is a no-op until apps
-//! explicitly change `routes`.
+//! `operator_console::router_*` consumer can override them.
 //!
 //! ## Wiring
 //!
@@ -45,10 +51,10 @@ use std::time::Duration;
 pub struct RouteConfig {
     /// URL of the login form / submit endpoint, on both the
     /// tenant admin and the operator console. Default
-    /// `/__login`.
+    /// `/login` (since v0.29; was `/__login` pre-flip).
     pub login_url: String,
     /// URL of the logout endpoint (POST) on both consoles.
-    /// Default `/__logout`.
+    /// Default `/logout` (since v0.29; was `/__logout` pre-flip).
     pub logout_url: String,
     /// URL prefix for the per-tenant admin Router. Same value
     /// the `admin_prefix` template variable carries (#59). The
@@ -56,22 +62,23 @@ pub struct RouteConfig {
     /// match between the tenant admin and operator console
     /// when impersonation is enabled, since the operator
     /// console builds the tenant-admin redirect URL from this
-    /// value. Default `/__admin`.
+    /// value. Default `/admin` (since v0.29; was `/__admin`).
     pub admin_url: String,
     /// URL of the audit-log view inside the admin. Joined with
     /// `admin_url` in templates as
-    /// `{{ admin_prefix }}{{ audit_url }}`. Default `/__audit`.
+    /// `{{ admin_prefix }}{{ audit_url }}`. Default `/audit`
+    /// (since v0.29; was `/__audit`).
     pub audit_url: String,
     /// URL prefix for embedded static assets (rustango.png,
-    /// theme tokens served from `<scheme>://<apex>/__static__/...`
-    /// for the operator console and per-tenant admin. Default
-    /// `/__static__`.
+    /// theme tokens) served for the operator console and
+    /// per-tenant admin. Default `/_static` (since v0.29; was
+    /// `/__static__`).
     pub static_url: String,
     /// URL prefix for tenant brand asset serving fallback —
     /// `<brand_url>/{slug}/{filename}` resolves to the org's
     /// uploaded logo / favicon when the configured brand
     /// `Storage` doesn't expose direct URLs. Default
-    /// `/__brand__`.
+    /// `/_brand` (since v0.29; was `/__brand__`).
     pub brand_url: String,
     /// URL of the self-serve change-password page on the tenant
     /// admin (#77, v0.28.2). GET renders a form (current password
@@ -79,7 +86,7 @@ pub struct RouteConfig {
     /// password and updates `rustango_users.password_hash`. The
     /// route lives outside [`Self::admin_url`] so it stays a
     /// distinct namespace from per-table admin routes. Default
-    /// `/__change-password`.
+    /// `/change-password` (since v0.29; was `/__change-password`).
     pub change_password_url: String,
     /// HTTP Basic auth realm. Used by the legacy
     /// `protect_with_basic_auth` admin gate (pre-tenancy
@@ -100,16 +107,19 @@ pub struct RouteConfig {
     pub impersonation_ttl: Duration,
 }
 
+/// `Default` returns the friendly preset (Django-style) since
+/// v0.29 (#85). Projects that need the v0.28 `__`-prefixed URLs
+/// must opt in via [`RouteConfig::legacy`].
 impl Default for RouteConfig {
     fn default() -> Self {
         Self {
-            login_url: "/__login".to_owned(),
-            logout_url: "/__logout".to_owned(),
-            admin_url: "/__admin".to_owned(),
-            audit_url: "/__audit".to_owned(),
-            static_url: "/__static__".to_owned(),
-            brand_url: "/__brand__".to_owned(),
-            change_password_url: "/__change-password".to_owned(),
+            login_url: "/login".to_owned(),
+            logout_url: "/logout".to_owned(),
+            admin_url: "/admin".to_owned(),
+            audit_url: "/audit".to_owned(),
+            static_url: "/_static".to_owned(),
+            brand_url: "/_brand".to_owned(),
+            change_password_url: "/change-password".to_owned(),
             basic_auth_realm: "Rustango Admin".to_owned(),
             tenant_session_ttl: Duration::from_secs(7 * 24 * 60 * 60),
             operator_session_ttl: Duration::from_secs(7 * 24 * 60 * 60),
@@ -119,21 +129,41 @@ impl Default for RouteConfig {
 }
 
 impl RouteConfig {
-    /// Construct from a Django-style "production-friendly" preset:
-    /// `/login`, `/logout`, `/admin`, etc. without the `__`
-    /// prefix. Useful when an app has reserved its namespace
-    /// well enough that `/admin` doesn't collide with user
-    /// routes.
+    /// Alias for [`RouteConfig::default`] since v0.29 — friendly
+    /// is now the default. Kept for source-compatibility with code
+    /// written against v0.28 that explicitly opted into
+    /// `friendly()`.
     #[must_use]
     pub fn friendly() -> Self {
+        Self::default()
+    }
+
+    /// Pre-v0.29 default — `/__login`, `/__admin`, `/__audit`,
+    /// `/__static__`, `/__brand__`, `/__change-password`. Use
+    /// when:
+    /// - your app has user routes at `/admin` or `/login` that
+    ///   would collide with the friendly defaults, OR
+    /// - you're upgrading a v0.28 deployment and want to preserve
+    ///   bookmarks / external integrations / SSO callback URLs
+    ///   that point at the `__`-prefixed paths.
+    ///
+    /// ```ignore
+    /// rustango::manage::Cli::new()
+    ///     .tenancy()
+    ///     .routes(RouteConfig::legacy())
+    ///     .api(urls::api())
+    ///     .run().await
+    /// ```
+    #[must_use]
+    pub fn legacy() -> Self {
         Self {
-            login_url: "/login".to_owned(),
-            logout_url: "/logout".to_owned(),
-            admin_url: "/admin".to_owned(),
-            audit_url: "/audit".to_owned(),
-            static_url: "/_static".to_owned(),
-            brand_url: "/_brand".to_owned(),
-            change_password_url: "/change-password".to_owned(),
+            login_url: "/__login".to_owned(),
+            logout_url: "/__logout".to_owned(),
+            admin_url: "/__admin".to_owned(),
+            audit_url: "/__audit".to_owned(),
+            static_url: "/__static__".to_owned(),
+            brand_url: "/__brand__".to_owned(),
+            change_password_url: "/__change-password".to_owned(),
             ..Default::default()
         }
     }
@@ -151,11 +181,43 @@ impl RouteConfig {
 mod tests {
     use super::*;
 
+    /// Since v0.29 (#85), `Default::default()` returns the
+    /// friendly preset. Apps that haven't opted into `.routes(...)`
+    /// see `/login`, `/admin`, `/audit`, etc.
     #[test]
-    fn defaults_match_legacy_prefixes() {
-        // v0.27 → v0.28 compatibility guard. Apps that don't
-        // override `routes` must see identical URL behavior.
+    fn defaults_now_match_friendly() {
         let r = RouteConfig::default();
+        assert_eq!(r.login_url, "/login");
+        assert_eq!(r.logout_url, "/logout");
+        assert_eq!(r.admin_url, "/admin");
+        assert_eq!(r.audit_url, "/audit");
+        assert_eq!(r.static_url, "/_static");
+        assert_eq!(r.brand_url, "/_brand");
+        assert_eq!(r.change_password_url, "/change-password");
+        assert_eq!(r.basic_auth_realm, "Rustango Admin");
+    }
+
+    /// `friendly()` is now an alias for `default()` — same
+    /// shape, kept for source-compat with v0.28 code that
+    /// explicitly opted in.
+    #[test]
+    fn friendly_is_alias_for_default() {
+        let f = RouteConfig::friendly();
+        let d = RouteConfig::default();
+        assert_eq!(f.login_url, d.login_url);
+        assert_eq!(f.admin_url, d.admin_url);
+        assert_eq!(f.audit_url, d.audit_url);
+        assert_eq!(f.static_url, d.static_url);
+        assert_eq!(f.brand_url, d.brand_url);
+        assert_eq!(f.change_password_url, d.change_password_url);
+    }
+
+    /// `legacy()` returns the pre-v0.29 `__`-prefixed shape.
+    /// Use when upgrading deployments that need to preserve
+    /// bookmarks or external integrations.
+    #[test]
+    fn legacy_preset_keeps_underscores() {
+        let r = RouteConfig::legacy();
         assert_eq!(r.login_url, "/__login");
         assert_eq!(r.logout_url, "/__logout");
         assert_eq!(r.admin_url, "/__admin");
@@ -163,24 +225,12 @@ mod tests {
         assert_eq!(r.static_url, "/__static__");
         assert_eq!(r.brand_url, "/__brand__");
         assert_eq!(r.change_password_url, "/__change-password");
-        assert_eq!(r.basic_auth_realm, "Rustango Admin");
-    }
-
-    #[test]
-    fn friendly_preset_drops_underscores() {
-        let r = RouteConfig::friendly();
-        assert_eq!(r.login_url, "/login");
-        assert_eq!(r.admin_url, "/admin");
-        assert_eq!(r.audit_url, "/audit");
-        assert_eq!(r.change_password_url, "/change-password");
-        // Realm stays the same (it's a display string, not a path).
-        assert_eq!(r.basic_auth_realm, "Rustango Admin");
     }
 
     #[test]
     fn audit_full_url_joins_prefixes() {
-        assert_eq!(RouteConfig::default().audit_full_url(), "/__admin/__audit");
-        assert_eq!(RouteConfig::friendly().audit_full_url(), "/admin/audit");
+        assert_eq!(RouteConfig::default().audit_full_url(), "/admin/audit");
+        assert_eq!(RouteConfig::legacy().audit_full_url(), "/__admin/__audit");
     }
 
     #[test]
