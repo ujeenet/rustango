@@ -155,20 +155,50 @@ where
             let cookie_value = read_csrf_cookie(&req, &cfg.cookie_name);
 
             // Enforce on unsafe methods.
-            if !is_safe_method(req.method()) {
+            let req = if !is_safe_method(req.method()) {
                 let header_value = req
                     .headers()
                     .get(&cfg.header_name)
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_owned);
-                let token_match = match (&cookie_value, &header_value) {
-                    (Some(c), Some(h)) => constant_time_eq(c.as_bytes(), h.as_bytes()),
-                    _ => false,
-                };
-                if !token_match {
+                if let Some(h) = header_value {
+                    // Header path — short-circuit, no body buffering.
+                    let token_match = match &cookie_value {
+                        Some(c) => constant_time_eq(c.as_bytes(), h.as_bytes()),
+                        None => false,
+                    };
+                    if !token_match {
+                        return Ok(forbid_response("CSRF token missing or mismatched"));
+                    }
+                    req
+                } else if is_form_encoded(&req) {
+                    // Form-encoded POST without the header — read
+                    // `_csrf` from the body. Body is consumed once,
+                    // so we buffer + replace so the inner handler
+                    // can still parse it.
+                    let (parts, body) = req.into_parts();
+                    let bytes = match axum::body::to_bytes(body, BODY_BUFFER_LIMIT).await {
+                        Ok(b) => b,
+                        Err(_) => {
+                            return Ok(forbid_response("CSRF: form body exceeded buffer limit"));
+                        }
+                    };
+                    let form_token = read_form_field(&bytes, CSRF_FORM_FIELD);
+                    let token_match = match (&cookie_value, &form_token) {
+                        (Some(c), Some(f)) => constant_time_eq(c.as_bytes(), f.as_bytes()),
+                        _ => false,
+                    };
+                    if !token_match {
+                        return Ok(forbid_response("CSRF token missing or mismatched"));
+                    }
+                    Request::from_parts(parts, Body::from(bytes))
+                } else {
+                    // Neither header nor form body — reject.
                     return Ok(forbid_response("CSRF token missing or mismatched"));
                 }
-            }
+            } else {
+                req
+            };
 
             // Pass to inner. After the response comes back, ensure
             // the CSRF cookie is set so the next safe-method GET
@@ -192,6 +222,14 @@ where
     }
 }
 
+/// Cap the form-body buffer the CSRF middleware will consume
+/// while extracting the `_csrf` field. 64 KiB is generous for any
+/// realistic HTML form (typical forms are < 4 KiB; file uploads
+/// don't use form-encoded bodies). Bodies larger than this 403
+/// — the middleware can't safely buffer megabyte-scale form
+/// payloads in memory just to verify a token.
+const BODY_BUFFER_LIMIT: usize = 64 * 1024;
+
 fn is_safe_method(m: &Method) -> bool {
     matches!(
         *m,
@@ -214,6 +252,80 @@ fn read_csrf_cookie_from_headers(headers: &axum::http::HeaderMap, name: &str) ->
         }
     }
     None
+}
+
+/// `true` when the request body is `application/x-www-form-urlencoded`
+/// — the only format the CSRF middleware knows how to scan for the
+/// `_csrf` field. Multipart uploads use a different MIME and are
+/// expected to send the token via the `X-CSRF-Token` header.
+fn is_form_encoded(req: &Request<Body>) -> bool {
+    let Some(ct) = req
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    // Strip any `; charset=...` suffix and lowercase-compare.
+    let head = ct
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    head == "application/x-www-form-urlencoded"
+}
+
+/// Tiny form-encoded parser scoped to extracting one named field.
+/// Accepts `key=value&key2=value2` shape, percent-decoded, with
+/// `+` treated as space (the form-encoded convention). Returns
+/// the FIRST matching field's value — duplicates are rare in
+/// well-formed forms.
+fn read_form_field(body: &[u8], name: &str) -> Option<String> {
+    let s = std::str::from_utf8(body).ok()?;
+    for pair in s.split('&') {
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        let key = percent_decode(k.replace('+', " ").as_bytes())?;
+        if key == name {
+            return percent_decode(v.replace('+', " ").as_bytes());
+        }
+    }
+    None
+}
+
+/// Minimal RFC 3986 percent-decoder used by the form-field parser.
+/// Returns `None` on malformed `%xx` sequences (rejects rather
+/// than truncating).
+fn percent_decode(bytes: &[u8]) -> Option<String> {
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = hex_digit(bytes[i + 1])?;
+            let lo = hex_digit(bytes[i + 2])?;
+            out.push(hi * 16 + lo);
+            i += 3;
+        } else {
+            out.push(b);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Generate a fresh 32-byte token, base64url-encoded (no padding).
@@ -339,5 +451,81 @@ mod tests {
         use axum::http::Request;
         let req = Request::builder().body(Body::empty()).unwrap();
         assert_eq!(read_csrf_cookie(&req, "anything"), None);
+    }
+
+    /// `is_form_encoded` recognizes the canonical content type +
+    /// the `; charset=utf-8` variant browsers sometimes append.
+    /// Other types (multipart, JSON) return false.
+    #[test]
+    fn is_form_encoded_recognizes_canonical_and_charset_variants() {
+        use axum::http::Request;
+        let req = Request::builder()
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::empty())
+            .unwrap();
+        assert!(is_form_encoded(&req));
+
+        let req = Request::builder()
+            .header(
+                "content-type",
+                "application/x-www-form-urlencoded; charset=UTF-8",
+            )
+            .body(Body::empty())
+            .unwrap();
+        assert!(is_form_encoded(&req));
+
+        let req = Request::builder()
+            .header("content-type", "multipart/form-data; boundary=---")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!is_form_encoded(&req));
+
+        let req = Request::builder()
+            .header("content-type", "application/json")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!is_form_encoded(&req));
+
+        // No content-type header: false.
+        let req = Request::builder().body(Body::empty()).unwrap();
+        assert!(!is_form_encoded(&req));
+    }
+
+    /// `read_form_field` extracts the named field, percent-decoded,
+    /// `+` → space.
+    #[test]
+    fn read_form_field_extracts_named_value() {
+        let body = b"foo=bar&_csrf=tok123&other=baz";
+        assert_eq!(read_form_field(body, "_csrf").as_deref(), Some("tok123"));
+        assert_eq!(read_form_field(body, "foo").as_deref(), Some("bar"));
+        assert_eq!(read_form_field(body, "missing"), None);
+    }
+
+    #[test]
+    fn read_form_field_percent_decodes_value() {
+        let body = b"_csrf=abc%2Fxyz";
+        assert_eq!(read_form_field(body, "_csrf").as_deref(), Some("abc/xyz"));
+    }
+
+    #[test]
+    fn read_form_field_treats_plus_as_space() {
+        let body = b"q=hello+world";
+        assert_eq!(read_form_field(body, "q").as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn read_form_field_returns_none_for_malformed_pairs() {
+        // Pair without `=` sign — skipped.
+        let body = b"foo&_csrf=tok";
+        assert_eq!(read_form_field(body, "_csrf").as_deref(), Some("tok"));
+        assert_eq!(read_form_field(body, "foo"), None);
+    }
+
+    #[test]
+    fn percent_decode_rejects_malformed() {
+        assert!(percent_decode(b"%2").is_none()); // truncated
+        assert!(percent_decode(b"%ZZ").is_none()); // non-hex
+        assert_eq!(percent_decode(b"plain").as_deref(), Some("plain"));
+        assert_eq!(percent_decode(b"a%20b").as_deref(), Some("a b"));
     }
 }

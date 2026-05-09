@@ -2,6 +2,55 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.29.7] — CSRF middleware now actually validates `_csrf` form field
+
+**Bugfix release.** The CSRF middleware's docstring promised it
+checks the `_csrf` form field on `application/x-www-form-urlencoded`
+POSTs, but the implementation only ever checked the
+`X-CSRF-Token` header. That makes the middleware unusable with
+the v0.29.0 `template_views` form views, which submit the token
+via `<input type="hidden" name="_csrf">` (the canonical Django
+shape).
+
+Today's middleware silently 403s every browser form POST when
+mounted on top of `template_views::CreateView` /
+`UpdateView` / `DeleteView` — a real correctness gap.
+
+### Fixed
+
+- **`forms::csrf::layer()` now reads the `_csrf` form field** on
+  unsafe-method requests with `Content-Type:
+  application/x-www-form-urlencoded`. Header path stays the
+  short-circuit fast-path (no body buffering for SPA / fetch
+  callers).
+- **64 KiB body buffer cap** for the form-field code path. Forms
+  larger than this (vanishingly rare; typical forms are
+  < 4 KiB) get a clean 403 rather than letting the middleware
+  buffer megabytes in memory just to verify a token. File
+  uploads use multipart, not form-encoded — this cap doesn't
+  affect them.
+
+### Implementation notes
+
+- Tiny RFC 3986 percent-decoder + form-encoded scanner (~30
+  LOC each) avoid pulling `percent-encoding` / `urlencoding` /
+  `serde_urlencoded` as transitive deps for the middleware path
+- `+` → space conversion before percent-decoding (the
+  `application/x-www-form-urlencoded` convention)
+- Body is buffered + reconstructed via
+  `Request::from_parts(parts, Body::from(bytes))` so the inner
+  handler can still parse the form
+
+### Tests
+
+- 1273 → 1279 lib tests (+6): `is_form_encoded` recognizes
+  canonical + `; charset=...` variant + rejects multipart / JSON
+  / no-content-type, `read_form_field` extracts named values,
+  percent-decodes, treats `+` as space, skips malformed pairs;
+  `percent_decode` rejects truncated `%2` and non-hex `%ZZ`.
+
+---
+
 ## [0.29.6] — health endpoints + `{pk}` redirect interpolation
 
 Two ergonomic follow-ups for v0.29 deployments:
