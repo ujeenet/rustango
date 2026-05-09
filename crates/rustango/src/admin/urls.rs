@@ -143,6 +143,14 @@ pub(crate) struct Config {
     /// which since v0.29 (#85) defaults to `/audit` (no
     /// underscores) for friendly-URL projects.
     pub(crate) audit_url: String,
+    /// v0.30.9 — tables for which the admin list view skips the
+    /// `SELECT COUNT(*)` round-trip and renders a "Page N" pager
+    /// (driven by has-next-page detection on the row count) instead
+    /// of "Page N of M". Required for tables in the millions of
+    /// rows where COUNT(*) takes seconds even with indexes.
+    /// Per-request override: `?count=skip` (or `?count=0`) on the
+    /// list URL applies the same skip without a code change.
+    pub(crate) skip_count_tables: HashSet<String>,
 }
 
 impl Builder {
@@ -233,6 +241,33 @@ impl Builder {
     /// don't want to enumerate every table per request.
     pub fn read_only_all(mut self) -> Self {
         self.config.read_only_all = true;
+        self
+    }
+
+    /// Skip the admin list view's `SELECT COUNT(*)` round-trip for
+    /// these tables. The pager renders "Page N" (with prev/next
+    /// driven by has-next-page detection on the row count) instead
+    /// of "Page N of M". Required for tables in the millions of
+    /// rows where `COUNT(*)` with WHERE filters takes seconds.
+    ///
+    /// Per-request escape hatch: any list URL accepts
+    /// `?count=skip` (or `?count=0`) to apply the same skip without
+    /// a code change — useful for ad-hoc operator queries on big
+    /// tables that aren't pre-tagged.
+    ///
+    /// ```ignore
+    /// admin::Builder::new(pool)
+    ///     .skip_count_for(["audit_log", "events"])
+    ///     .build()
+    /// ```
+    pub fn skip_count_for<I, S>(mut self, tables: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.config
+            .skip_count_tables
+            .extend(tables.into_iter().map(Into::into));
         self
     }
 
@@ -457,6 +492,13 @@ impl AppState {
         false
     }
 
+    /// `true` when this table was tagged via
+    /// [`Builder::skip_count_for`] — the admin list view skips the
+    /// `SELECT COUNT(*)` round-trip and renders a no-total pager.
+    pub(crate) fn count_skipped_for_table(&self, table: &str) -> bool {
+        self.config.skip_count_tables.contains(table)
+    }
+
     /// `true` when the user may create rows in `table`.
     pub(crate) fn can_add(&self, table: &str) -> bool {
         if self.config.read_only_all || self.config.read_only_tables.contains(table) {
@@ -550,6 +592,39 @@ mod scope_filter_tests {
         let pool = PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused").unwrap();
         let builder = Builder::new(pool);
         assert_eq!(builder.config.admin_prefix, "/__admin");
+    }
+
+    /// `Builder::skip_count_for` accumulates table names; the
+    /// `count_skipped_for_table` checker returns true exactly for
+    /// the tagged tables. Untagged tables stay on the COUNT path.
+    #[tokio::test]
+    async fn skip_count_for_marks_tables_and_checker_reads_them() {
+        let pool = PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused").unwrap();
+        let b = Builder::new(pool).skip_count_for(["audit_log", "events"]);
+        let state = AppState {
+            pool: PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused").unwrap(),
+            config: Arc::new(b.config),
+        };
+        assert!(state.count_skipped_for_table("audit_log"));
+        assert!(state.count_skipped_for_table("events"));
+        assert!(!state.count_skipped_for_table("post"));
+        assert!(!state.count_skipped_for_table(""));
+    }
+
+    /// Multiple `.skip_count_for(...)` calls union the table sets
+    /// rather than replacing — same shape as `read_only` does.
+    #[tokio::test]
+    async fn skip_count_for_unions_across_calls() {
+        let pool = PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused").unwrap();
+        let b = Builder::new(pool)
+            .skip_count_for(["audit_log"])
+            .skip_count_for(["events"]);
+        let state = AppState {
+            pool: PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused").unwrap(),
+            config: Arc::new(b.config),
+        };
+        assert!(state.count_skipped_for_table("audit_log"));
+        assert!(state.count_skipped_for_table("events"));
     }
 
     #[tokio::test]

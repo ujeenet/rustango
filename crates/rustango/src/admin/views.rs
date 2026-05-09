@@ -102,7 +102,7 @@ pub(crate) async fn index(State(state): State<AppState>) -> Html<String> {
 const DEFAULT_PAGE_SIZE: i64 = 50;
 
 /// Reserved query parameters; everything else is treated as a per-field filter.
-const RESERVED_PARAMS: &[&str] = &["page", "q", "facet_show_all"];
+const RESERVED_PARAMS: &[&str] = &["page", "q", "facet_show_all", "count"];
 
 /// Default cap on how many values a single facet shows. v0.13.1 —
 /// keeps the right rail compact on high-cardinality columns. The
@@ -189,19 +189,35 @@ pub(crate) async fn table_view(
     });
 
     let where_clause = WhereExpr::and_predicates(filters.clone());
-    let total = crate::sql::count_rows(
-        &state.pool,
-        &CountQuery {
-            model,
-            where_clause: where_clause.clone(),
-            // Apply the same ILIKE search the SELECT uses so the
-            // pager total matches the visible rows. Pre-v0.30 the
-            // count was approximate when ?q was set — fixed alongside
-            // the viewset count-with-search bug.
-            search: search.clone(),
-        },
-    )
-    .await?;
+
+    // v0.30.9 — skip `SELECT COUNT(*)` for big tables. Triggered by
+    // `Builder::skip_count_for(...)` (per-table opt-in) OR
+    // `?count=skip` / `?count=0` (per-request override). Skipping
+    // means: no pager total, "Page N" instead of "Page N of M",
+    // and prev/next driven by has-next-page detection (we fetch
+    // `page_size + 1` rows and trim).
+    let count_skipped = state.count_skipped_for_table(model.table)
+        || matches!(
+            params.get("count").map(String::as_str),
+            Some("skip" | "0" | "false" | "no")
+        );
+    let total: i64 = if count_skipped {
+        0
+    } else {
+        crate::sql::count_rows(
+            &state.pool,
+            &CountQuery {
+                model,
+                where_clause: where_clause.clone(),
+                // Apply the same ILIKE search the SELECT uses so the
+                // pager total matches the visible rows. Pre-v0.30 the
+                // count was approximate when ?q was set — fixed alongside
+                // the viewset count-with-search bug.
+                search: search.clone(),
+            },
+        )
+        .await?
+    };
     let joins = build_fk_joins(&state, model);
     // Default ordering: PK ASC unless `admin.ordering` overrides.
     let order_by: Vec<crate::core::OrderClause> = if admin_cfg.ordering.is_empty() {
@@ -218,7 +234,15 @@ pub(crate) async fn table_view(
             })
             .collect()
     };
-    let rows = crate::sql::select_rows(
+    // When count is skipped, fetch one extra row so we can detect
+    // "has more" without counting the whole table. We trim the
+    // extra row before rendering.
+    let fetch_limit = if count_skipped {
+        page_size + 1
+    } else {
+        page_size
+    };
+    let mut rows = crate::sql::select_rows(
         &state.pool,
         &SelectQuery {
             model,
@@ -226,15 +250,25 @@ pub(crate) async fn table_view(
             search: search.clone(),
             joins,
             order_by,
-            limit: Some(page_size),
+            limit: Some(fetch_limit),
             offset: Some(offset),
         },
     )
     .await?;
+    let has_next_skipped = if count_skipped && rows.len() as i64 > page_size {
+        rows.truncate(page_size as usize);
+        true
+    } else {
+        false
+    };
 
     let fk_map = fk_map_from_joined_rows(&state, model, &rows);
 
-    let last_page = if total == 0 {
+    let last_page = if count_skipped {
+        // No total → no last page. Pager renders "Page N" with
+        // prev/next driven by `has_next_skipped` instead.
+        page
+    } else if total == 0 {
         1
     } else {
         ((total - 1) / page_size) + 1
@@ -334,6 +368,14 @@ pub(crate) async fn table_view(
         "page": page,
         "last_page": last_page,
         "pager_suffix": pager_suffix_str,
+        // v0.30.9 — count-skip pager fields. Templates branch on
+        // `count_skipped` to render "Page N" + prev/next driven by
+        // `has_next` instead of "Page N of M". Existing custom
+        // templates that ignore these vars keep working — they
+        // just see total=0 and last_page=page, which renders no
+        // pager (the existing `if last_page > 1` guard).
+        "count_skipped": count_skipped,
+        "has_next": has_next_skipped,
     });
     Ok(Html(render_with_chrome(
         "list.html",

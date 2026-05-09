@@ -10,7 +10,12 @@
 <h1>{{ model.name }}</h1>
 <div class="list-shell">
 <div class="list-main">
-<p>Table: <code>{{ model.table }}</code> &mdash; {{ total }} row{{ plural }}
+<p>Table: <code>{{ model.table }}</code>
+{% if count_skipped %}
+  &mdash; <em>row count hidden (large table)</em>
+{% else %}
+  &mdash; {{ total }} row{{ plural }}
+{% endif %}
 {% if read_only %}
   &nbsp;&middot;&nbsp; <em>read-only</em>
 {% else %}
@@ -80,7 +85,21 @@
 </form>
 {% endif %}
 
-{% if last_page > 1 %}
+{% if count_skipped %}
+<p class="pager">
+  {% if page > 1 %}
+    <a href="{{ admin_prefix }}/{{ model.table }}?page={{ page - 1 }}{{ pager_suffix | safe }}">&larr; prev</a>
+  {% else %}
+    <span class="muted">&larr; prev</span>
+  {% endif %}
+  &middot; Page {{ page }} &middot;
+  {% if has_next %}
+    <a href="{{ admin_prefix }}/{{ model.table }}?page={{ page + 1 }}{{ pager_suffix | safe }}">next &rarr;</a>
+  {% else %}
+    <span class="muted">next &rarr;</span>
+  {% endif %}
+</p>
+{% elif last_page > 1 %}
 <p class="pager">
   {% if page > 1 %}
     <a href="{{ admin_prefix }}/{{ model.table }}?page={{ page - 1 }}{{ pager_suffix | safe }}">&larr; prev</a>

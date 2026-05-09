@@ -2,6 +2,62 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.9] — admin pager `SELECT COUNT(*)` skip for large tables (roadmap #4)
+
+`SELECT COUNT(*) FROM <table> WHERE <filter>` runs the full filtered
+scan on every list page render. On tables in the millions of rows
+(audit logs, event streams, time-series data) this can take seconds
+even with indexes. v0.30.9 adds a per-table opt-out + a per-request
+override.
+
+### Added
+
+- **`admin::Builder::skip_count_for(tables)`** — accumulator
+  setter; tagged tables skip the COUNT round-trip on every list
+  request. The pager renders "Page N" with prev/next driven by
+  has-next-page detection (we fetch `page_size + 1` rows, trim
+  the extra, and use the trim signal as the "more pages" flag)
+  instead of "Page N of M".
+- **`?count=skip` URL parameter** — per-request escape hatch.
+  Accepts `skip` / `0` / `false` / `no` (case-sensitive matches
+  these literal lower-case values). Useful for ad-hoc operator
+  queries on big tables that aren't pre-tagged via
+  `skip_count_for`.
+- **`AppState::count_skipped_for_table(table)`** — internal
+  checker, called once per list request to decide which path
+  to take.
+
+### Behavior
+
+- Skipped count → `total = 0` and `last_page = page` so old
+  custom templates that branch on `last_page > 1` keep working
+  (they'll render no pager). New `count_skipped` + `has_next`
+  context vars drive the new shape; the bundled `list.html`
+  template branches on them.
+- The list header switches from `"Table: foo — 12345 rows"` to
+  `"Table: foo — row count hidden (large table)"` when count is
+  skipped, so it's visually obvious which mode the page is in.
+- Read-only label, "+ new …" link, search box, facets, filters
+  all keep working unchanged.
+
+### Tests
+
+- 1314 → 1316 lib tests (+2):
+  `skip_count_for_marks_tables_and_checker_reads_them` (Builder
+  marks the tables + checker matches), `skip_count_for_unions_across_calls`
+  (multiple calls accumulate, same shape as `read_only`).
+
+### Why a per-table opt-in instead of always-skipped
+
+Default behavior stays "show the count" because operators
+*want* the count on small tables — that's the whole point of a
+pager. The skip is targeted: tag the 1-3 monster tables in your
+schema, leave the rest. Estimated counts via `pg_class.reltuples`
+were considered but rejected for v1 — they're inaccurate for any
+WHERE-filtered query, which is the common admin case.
+
+---
+
 ## [0.30.8] — `ListView::with_fk_display` (FK columns resolve to target's display)
 
 Closes a visible UX gap in admin-shape lists: FK columns showed
