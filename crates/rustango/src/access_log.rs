@@ -99,6 +99,29 @@ impl AccessLogLayer {
         self.slow_threshold_ms = ms;
         self
     }
+
+    /// Apply values from a loaded
+    /// [`crate::config::AuditSettings`] section (#87 wiring,
+    /// v0.29). Currently honors `redact_query_params` — each name
+    /// in the list is appended to the layer's existing redaction
+    /// set (the framework's defaults aren't replaced; project
+    /// overrides extend them).
+    ///
+    /// Use [`AccessLogLayer::redact`] directly when you want to
+    /// REPLACE the default list rather than extend it.
+    ///
+    /// ```ignore
+    /// let cfg = rustango::config::Settings::load_from_env()?;
+    /// app.layer(AccessLogLayer::default().with_audit_settings(&cfg.audit).into_layer())
+    /// ```
+    #[cfg(feature = "config")]
+    #[must_use]
+    pub fn with_audit_settings(mut self, s: &crate::config::AuditSettings) -> Self {
+        for name in &s.redact_query_params {
+            self.redact_query_params.push(name.clone());
+        }
+        self
+    }
 }
 
 /// Extension trait — `.access_log(layer)` on Router.
@@ -296,5 +319,32 @@ mod tests {
     fn redact_replaces_default_list() {
         let l = AccessLogLayer::new().redact(vec!["only_this".into()]);
         assert_eq!(l.redact_query_params, vec!["only_this".to_owned()]);
+    }
+
+    /// `with_audit_settings` extends the redaction list — does NOT
+    /// replace it. Defaults stay in place; per-project additions
+    /// from TOML pile on top.
+    #[cfg(feature = "config")]
+    #[test]
+    fn with_audit_settings_extends_redact_list() {
+        let mut s = crate::config::AuditSettings::default();
+        s.redact_query_params = vec!["session_id".into(), "csrf_token".into()];
+        let l = AccessLogLayer::new().with_audit_settings(&s);
+        // Project additions present
+        assert!(l.redact_query_params.iter().any(|k| k == "session_id"));
+        assert!(l.redact_query_params.iter().any(|k| k == "csrf_token"));
+        // Framework defaults preserved
+        assert!(l.redact_query_params.iter().any(|k| k == "password"));
+        assert!(l.redact_query_params.iter().any(|k| k == "token"));
+    }
+
+    /// Empty TOML list is a no-op — same redaction set as default.
+    #[cfg(feature = "config")]
+    #[test]
+    fn with_audit_settings_empty_list_is_noop() {
+        let s = crate::config::AuditSettings::default();
+        let before = AccessLogLayer::new();
+        let after = AccessLogLayer::new().with_audit_settings(&s);
+        assert_eq!(before.redact_query_params, after.redact_query_params);
     }
 }

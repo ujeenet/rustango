@@ -348,6 +348,11 @@ let app = app.layer(sec.into_layer());
 if let Some(cors) = rustango::cors::CorsLayer::from_settings(&cfg.security) {
     let app = app.layer(cors.into_layer());
 }
+
+// access_log — extends the redact list with project additions
+let log = rustango::access_log::AccessLogLayer::default()
+    .with_audit_settings(&cfg.audit);   // redact_query_params extras
+let app = app.access_log(log);
 ```
 
 Future fields land here as the wiring catches up — every
