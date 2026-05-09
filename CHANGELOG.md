@@ -2,6 +2,64 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.29.2] — `ListView` filtering + search
+
+Adds the most likely first-touch feature gap in v0.29.0's
+`template_views::ListView`. Anyone who actually builds an HTML
+list page hits "how do I filter by category?" within minutes —
+hand-rolling an axum handler for that purpose defeats the
+"generic CBV" pitch. Mirrors the shape `viewset` already has on
+the JSON side.
+
+### Added
+
+- **`ListView::filter_fields(&[&str])`** — whitelists URL query
+  parameters for exact-match filtering. `?author_id=42&status=published`
+  runs `WHERE author_id = '42' AND status = 'published'` (when
+  both are in the allowlist). Unknown query params are silently
+  ignored — typos in URLs shouldn't 400. Each name resolves
+  against the schema by Rust field name OR SQL column name.
+- **`ListView::search_fields(&[&str])`** — enables `?search=<q>`
+  which translates to `ILIKE '%<q>%'` against each listed field,
+  OR-combined. `%` and `_` in user input are escaped via
+  `escape_like_pattern` so they match literally rather than
+  acting as wildcards (defense against pattern injection).
+- **Two new Tera context vars** stamped by `ListView` (both
+  `router` and `tenant_router` flavors) so templates can
+  repopulate filter form inputs:
+  - `filters: Map<String, String>` — active filter values
+    restricted to the allowlist
+  - `search: String` — active `?search=` value, or `""` when unset
+
+### Notes
+
+- Filter + search predicates land in the WHERE clause directly
+  (rather than the IR's separate `SearchClause`), so
+  `SelectQuery.where_clause` and `CountQuery.where_clause` see
+  them equally. That means pagination's `total_pages` reflects
+  the filtered/searched subset — it's NOT a bug carry-over from
+  viewset's COUNT-ignores-search behavior.
+- The simplified Django-shape filter syntax (exact match only)
+  is a deliberate small-surface choice. Projects wanting `__gt`
+  / `__icontains` / `__in` lookups build their own filters in a
+  hand-rolled handler. This keeps the ListView surface minimal
+  while covering the 80% case.
+- Available behind the existing `template_views` feature (no new
+  feature flag).
+
+### Tests
+
+- 1232 → 1243 lib tests (+11): builder accepting filter_fields
+  + search_fields, empty params → empty WHERE, filter in
+  allowlist → Eq predicate, filter not in allowlist → silently
+  dropped, reserved keys (page / page_size / search) skipped from
+  filters, single search field → no OR wrapper, filter + multi-
+  field search → top-level AND, escape_like_pattern neutralizes
+  wildcards, empty `?search=` skipped, filter context stamps
+  active values, empty params yield empty `{filters, search}`.
+
+---
+
 ## [0.29.1] — template_views polish (bounds validation + stable pagination)
 
 Two patches against the new `template_views` module from v0.29.0.
