@@ -343,6 +343,11 @@ api.merge(rustango::tenancy::auth_routes::jwt_router(auth));
 // security_headers — preset + csp + hsts override
 let sec = rustango::security_headers::SecurityHeadersLayer::from_settings(&cfg.security);
 let app = app.layer(sec.into_layer());
+
+// CORS — empty list = skip, "*" = permissive, otherwise allowlist
+if let Some(cors) = rustango::cors::CorsLayer::from_settings(&cfg.security) {
+    let app = app.layer(cors.into_layer());
+}
 ```
 
 Future fields land here as the wiring catches up — every

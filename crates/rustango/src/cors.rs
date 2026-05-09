@@ -128,6 +128,45 @@ impl CorsLayer {
         self
     }
 
+    /// Build the layer from a loaded
+    /// [`crate::config::SecuritySettings`] section (#87 wiring,
+    /// v0.29). Three branches:
+    ///
+    /// - `cors_allowed_origins` empty → returns `None`. CORS is
+    ///   opt-in; an empty list means "don't mount the layer at
+    ///   all" (different from "allow zero origins").
+    /// - List contains `"*"` → returns
+    ///   `Some(Self::permissive())`. Wildcard is the canonical way
+    ///   to write "any origin" in TOML; it maps to the existing
+    ///   permissive preset.
+    /// - Specific origins → returns `Some` with allowlist + the
+    ///   common methods/headers most APIs need. Callers that want
+    ///   tighter control build their own layer.
+    ///
+    /// ```ignore
+    /// let cfg = rustango::config::Settings::load_from_env()?;
+    /// if let Some(layer) = CorsLayer::from_settings(&cfg.security) {
+    ///     app = app.layer(layer.into_layer());
+    /// }
+    /// ```
+    #[cfg(feature = "config")]
+    #[must_use]
+    pub fn from_settings(s: &crate::config::SecuritySettings) -> Option<Self> {
+        if s.cors_allowed_origins.is_empty() {
+            return None;
+        }
+        if s.cors_allowed_origins.iter().any(|o| o == "*") {
+            return Some(Self::permissive());
+        }
+        Some(
+            Self::new()
+                .allow_origins(s.cors_allowed_origins.iter().cloned())
+                .allow_methods(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+                .allow_headers(["Content-Type", "Authorization"])
+                .max_age(Duration::from_secs(3600)),
+        )
+    }
+
     /// Allowed methods sent in preflight responses.
     #[must_use]
     pub fn allow_methods<I, S>(mut self, methods: I) -> Self
@@ -361,5 +400,44 @@ mod tests {
     fn permissive_allows_any() {
         let l = CorsLayer::permissive();
         assert!(l.resolve_origin(Some("https://anywhere.test")).is_some());
+    }
+
+    // ---- #87 wiring: from_settings ----
+
+    /// Empty `cors_allowed_origins` returns `None` so callers don't
+    /// mount the layer at all — different from "allow zero origins"
+    /// (which would 403 every preflight).
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_empty_returns_none() {
+        let s = crate::config::SecuritySettings::default();
+        assert!(CorsLayer::from_settings(&s).is_none());
+    }
+
+    /// Wildcard `"*"` maps to the permissive preset.
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_wildcard_returns_permissive() {
+        let mut s = crate::config::SecuritySettings::default();
+        s.cors_allowed_origins = vec!["*".into()];
+        let layer = CorsLayer::from_settings(&s).expect("Some");
+        assert!(layer.resolve_origin(Some("https://random.test")).is_some());
+    }
+
+    /// Specific origins build an allowlist; non-matching origins
+    /// reject. Methods + headers + max-age get sensible defaults so
+    /// the resulting layer is immediately usable.
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_specific_origins_build_allowlist() {
+        let mut s = crate::config::SecuritySettings::default();
+        s.cors_allowed_origins = vec!["https://app.example.com".into()];
+        let layer = CorsLayer::from_settings(&s).expect("Some");
+        assert!(layer
+            .resolve_origin(Some("https://app.example.com"))
+            .is_some());
+        assert!(layer
+            .resolve_origin(Some("https://other.example.com"))
+            .is_none());
     }
 }

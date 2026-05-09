@@ -1826,6 +1826,20 @@ CorsLayer::permissive()                          // dev: any origin, common meth
 CorsLayer::new().allow_origins(vec!["..."])      // prod: explicit allowlist
 ```
 
+`CorsLayer::from_settings(&Settings.security)` builds the layer
+from `[security] cors_allowed_origins` (#87 wiring). Returns
+`None` when the list is empty so callers skip mounting altogether
+(different from "allow zero origins" which would 403 every preflight).
+`["*"]` maps to `permissive()`; specific origins build an allowlist
+with sensible default methods + headers + 1h preflight cache:
+
+```rust
+let cfg = rustango::config::Settings::load_from_env()?;
+if let Some(layer) = CorsLayer::from_settings(&cfg.security) {
+    app = app.layer(layer.into_layer());
+}
+```
+
 ---
 
 ## Caching
