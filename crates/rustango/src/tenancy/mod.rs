@@ -41,6 +41,7 @@
 pub mod admin;
 pub mod auth;
 pub mod auth_backends;
+pub mod auth_routes;
 pub mod bootstrap;
 pub mod branding;
 mod error;
