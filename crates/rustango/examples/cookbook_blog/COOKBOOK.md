@@ -300,20 +300,23 @@ let feats = rustango::config::Settings::detected_features();
 **Wiring into `Cli` (v0.29)**:
 
 ```rust
-// One-liner that loads via load_from_env() + applies. Falls back
-// to Cli defaults (with a tracing::warn) if config files are missing,
-// so projects that don't use the layered loader still build cleanly.
+// One-liner that loads via load_from_env() and applies the entire
+// stack — bind address, RouteConfig, plus the security_headers /
+// CORS / access_log / body_limit layers — onto your API router at
+// runserver time. Falls back to Cli defaults (with a tracing::warn)
+// if config files are missing, so projects that don't use the
+// layered loader still build cleanly.
 rustango::manage::Cli::new()
-    .with_settings_from_env()
     .api(urls::api())
+    .with_settings_from_env()   // applies bind + routes + layered middleware
     .run().await
 
 // Or explicit Settings handle (when you also want to read other sections):
 let cfg = rustango::config::Settings::load_from_env()?;
 my_setup(&cfg);
 rustango::manage::Cli::new()
-    .with_settings(&cfg)
     .api(urls::api())
+    .with_settings(&cfg)
     .run().await
 ```
 
@@ -329,8 +332,16 @@ Today `with_settings` consumes:
   call BEFORE `.with_settings(...)` is preserved as the base, so
   TOML overrides layer on top of any code-side construction.
 
-Other sections expose typed entry points so any subsystem can
-consume the relevant slice without depending on the whole struct:
+**The `Cli::with_settings` path applies the security_headers + CORS
++ access_log + body_limit layers automatically** at `runserver` time
+in this innermost-first order: `body_limit → access_log → CORS →
+security_headers → handler`. So for the typical case, the one-liner
+above is all you need — no per-layer wiring required.
+
+For projects that build the server outside `Cli`, or want to swap
+in custom layer construction, each section also exposes a typed
+entry point so any subsystem can consume the relevant slice
+without depending on the whole struct:
 
 ```rust
 let cfg = rustango::config::Settings::load_from_env()?;

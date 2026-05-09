@@ -60,6 +60,13 @@ pub struct Cli {
     /// to swap in a custom [`crate::tenancy::TenantUserModel`].
     #[cfg(feature = "tenancy")]
     init_tenancy_fn: crate::tenancy::manage::InitTenancyFn,
+    /// Cloned [`Settings`] handle stored by [`Cli::with_settings`].
+    /// Consumed at `runserver` time to apply layers (security_headers,
+    /// CORS, access_log, body_limit) on top of the user's API
+    /// router so a single `with_settings_from_env()` call drives
+    /// the whole stack.
+    #[cfg(feature = "config")]
+    settings_for_layers: Option<crate::config::Settings>,
 }
 
 impl Cli {
@@ -77,6 +84,8 @@ impl Cli {
             routes: None,
             #[cfg(feature = "tenancy")]
             init_tenancy_fn: crate::tenancy::init_tenancy,
+            #[cfg(feature = "config")]
+            settings_for_layers: None,
         }
     }
 
@@ -178,6 +187,14 @@ impl Cli {
         {
             self.routes = Some(routes_from_settings(&s.routes, self.routes.take()));
         }
+
+        // Stash a clone for `runserver` to apply layered settings
+        // (security_headers, CORS, access_log, body_limit) on top
+        // of the user's `api` Router. Done at run time rather than
+        // here because `.api(...)` may be called either before or
+        // after `.with_settings(...)` and we want consistent
+        // behavior either way.
+        self.settings_for_layers = Some(s.clone());
         self
     }
 
@@ -338,7 +355,13 @@ impl Cli {
         if let Some(seed) = self.seed {
             seed(&pool).await?;
         }
-        let app = self.api.layer(axum::Extension(pool));
+        let api = self.api;
+        #[cfg(feature = "config")]
+        let api = match self.settings_for_layers.as_ref() {
+            Some(s) => apply_settings_layers(api, s),
+            None => api,
+        };
+        let app = api.layer(axum::Extension(pool));
         let listener = tokio::net::TcpListener::bind(&self.bind).await?;
         eprintln!("server listening on http://{}", listener.local_addr()?);
         axum::serve(listener, app).await?;
@@ -347,7 +370,13 @@ impl Cli {
 
     #[cfg(feature = "tenancy")]
     async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut builder = crate::server::Builder::from_env().await?.api(self.api);
+        let api = self.api;
+        #[cfg(feature = "config")]
+        let api = match self.settings_for_layers.as_ref() {
+            Some(s) => apply_settings_layers(api, s),
+            None => api,
+        };
+        let mut builder = crate::server::Builder::from_env().await?.api(api);
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
         }
@@ -366,6 +395,57 @@ impl Default for Cli {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Apply security_headers + CORS + access_log + body_limit layers
+/// derived from a loaded [`crate::config::Settings`] handle to the
+/// user's API router (#87 wiring). Called from `runserver` /
+/// `runserver_tenancy` when the user threaded settings via
+/// [`Cli::with_settings`] / [`Cli::with_settings_from_env`].
+///
+/// Layer order (innermost → outermost), matching the canonical
+/// recommendation in the README's Production checklist:
+///
+///   request → access_log → body_limit → CORS → security_headers → handler
+///
+/// `from_settings` constructors decide whether each layer mounts
+/// at all — most return `None` (or are no-ops) when the section
+/// has nothing configured, so `with_settings` on a near-empty
+/// `default.toml` doesn't surprise the user with unexpected
+/// middleware.
+#[cfg(feature = "config")]
+fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> Router {
+    use crate::access_log::{AccessLogLayer, AccessLogRouterExt as _};
+    use crate::body_limit::{BodyLimitLayer, BodyLimitRouterExt as _};
+    use crate::cors::{CorsLayer, CorsRouterExt as _};
+    use crate::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt as _};
+
+    let mut app = api;
+
+    // body_limit (innermost data-shape gate). Opt-in: from_settings
+    // returns None when max_body_bytes is unset.
+    if let Some(layer) = BodyLimitLayer::from_settings(&s.server) {
+        app = app.body_limit(layer);
+    }
+
+    // access_log — extends the redact list with project additions
+    // from `[audit] redact_query_params`. Defaults are sensible so
+    // the layer mounts unconditionally.
+    let log_layer = AccessLogLayer::default().with_audit_settings(&s.audit);
+    app = app.access_log(log_layer);
+
+    // CORS — opt-in (returns None when no origins configured).
+    if let Some(cors) = CorsLayer::from_settings(&s.security) {
+        app = app.cors(cors);
+    }
+
+    // security_headers (outermost — every response goes through).
+    // SecuritySettings::default() produces strict() so this mounts
+    // even when the [security] section is missing entirely.
+    let sec = SecurityHeadersLayer::from_settings(&s.security);
+    app = app.security_headers(sec);
+
+    app
 }
 
 /// Build a [`crate::tenancy::RouteConfig`] from a
@@ -561,5 +641,36 @@ mod tests {
         assert_eq!(a.bind, b.bind);
         assert_eq!(a.migrations_dir, b.migrations_dir);
         assert_eq!(a.tenancy, b.tenancy);
+    }
+
+    /// `Cli::with_settings` stashes the Settings clone so runserver
+    /// can apply security/cors/access_log/body_limit layers on top
+    /// of the user's API router. Without `.with_settings`, the
+    /// handle stays None — projects not using the layered loader
+    /// pay no overhead.
+    #[cfg(feature = "config")]
+    #[test]
+    fn with_settings_stashes_handle_for_runtime_layering() {
+        let s = crate::config::Settings::default();
+        let cli = Cli::new().with_settings(&s);
+        assert!(
+            cli.settings_for_layers.is_some(),
+            "with_settings must stash the handle so runserver can apply layers"
+        );
+
+        let cli_no_settings = Cli::new();
+        assert!(cli_no_settings.settings_for_layers.is_none());
+    }
+
+    /// `apply_settings_layers` runs to completion on default
+    /// settings without panicking on axum layer-stacking
+    /// constraints. End-to-end header-presence assertions live in
+    /// the per-module smoke tests for each layer.
+    #[cfg(feature = "config")]
+    #[test]
+    fn apply_settings_layers_smoke() {
+        let s = crate::config::Settings::default();
+        let router: Router = Router::new();
+        let _ = apply_settings_layers(router, &s);
     }
 }

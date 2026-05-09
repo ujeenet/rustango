@@ -359,14 +359,14 @@ let cfg = rustango::config::Settings::load("prod")?;
 // Resolved tier (useful for telemetry / version pages):
 let tier = rustango::config::Settings::current_env_tier();
 
-// Wire into Cli. Applies, today: Settings.server.bind (env still
-// wins, explicit .bind() after this call still wins) and
-// Settings.routes (tenancy projects — legacy_preset + per-field
-// URL overrides → tenancy::RouteConfig). Falls back silently to
-// Cli defaults when config files are missing.
+// One-liner wiring — at runserver time this picks up bind address,
+// RouteConfig, AND auto-applies the security_headers + CORS +
+// access_log + body_limit layers built from [security] / [audit] /
+// [server] settings. Falls back to Cli defaults silently if config
+// files are missing (with a tracing::warn).
 rustango::manage::Cli::new()
-    .with_settings_from_env()
     .api(urls::api())
+    .with_settings_from_env()
     .run().await
 ```
 
@@ -374,6 +374,11 @@ Apps using only TOML-side routes config no longer need to call
 `.routes(RouteConfig::legacy())` from code — set
 `[routes] legacy_preset = true` in `prod_settings.toml` and
 `with_settings_from_env()` picks it up.
+
+Layer order at runserver time (innermost → outermost):
+`body_limit → access_log → CORS → security_headers → handler`.
+This matches the canonical recommendation in the production
+checklist below — and you don't have to wire any of it manually.
 
 ### Sections
 
