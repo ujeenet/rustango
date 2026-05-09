@@ -46,7 +46,11 @@ use tower::Service;
 /// The cookie name set by the CSRF middleware. Distinct from
 /// tenancy's `rustango_session` / `rustango_tenant_session` cookie
 /// names so the two flows don't collide.
-const CSRF_COOKIE: &str = "rustango_csrf";
+/// Default cookie name set by the CSRF middleware. Distinct from
+/// the tenancy session cookies. Public so view code that wants to
+/// read or mint a token via [`ensure_token`] can use the canonical
+/// name without re-typing it.
+pub const CSRF_COOKIE: &str = "rustango_csrf";
 
 /// HTTP header the middleware looks for on unsafe requests. SPAs
 /// echo the cookie value here (the standard double-submit pattern).
@@ -197,11 +201,11 @@ fn is_safe_method(m: &Method) -> bool {
 }
 
 fn read_csrf_cookie(req: &Request<Body>, name: &str) -> Option<String> {
-    let raw = req
-        .headers()
-        .get(axum::http::header::COOKIE)?
-        .to_str()
-        .ok()?;
+    read_csrf_cookie_from_headers(req.headers(), name)
+}
+
+fn read_csrf_cookie_from_headers(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
     for part in raw.split(';') {
         let part = part.trim();
         if let Some((k, v)) = part.split_once('=') {
@@ -218,6 +222,49 @@ fn mint_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Read the existing CSRF cookie from request headers, or mint a
+/// fresh token. Returns `(token, Some(set_cookie_header_value))`
+/// when the cookie was missing — caller is responsible for adding
+/// the `Set-Cookie` header to the response so the template's
+/// `<input value="{{ csrf_token }}">` matches what the browser
+/// sends back on POST. Returns `(token, None)` when the cookie was
+/// already present (no `Set-Cookie` needed).
+///
+/// Usage from a Tera-rendering view (template_views, custom HTML
+/// handlers):
+///
+/// ```ignore
+/// let (token, set_cookie) = rustango::forms::csrf::ensure_token(
+///     req_headers,
+///     rustango::forms::csrf::CSRF_COOKIE,
+/// );
+/// ctx.insert("csrf_token", &token);
+/// let mut resp = render_template(...);
+/// if let Some(c) = set_cookie {
+///     resp.headers_mut().append(
+///         axum::http::header::SET_COOKIE,
+///         axum::http::HeaderValue::from_str(&c).unwrap(),
+///     );
+/// }
+/// ```
+///
+/// Without this helper, the first-ever GET to a form view would
+/// render with an empty `csrf_token`, the user's POST would fail
+/// CSRF validation, and only the second attempt would succeed.
+/// `ensure_token` makes the first GET idempotent.
+#[must_use]
+pub fn ensure_token(
+    headers: &axum::http::HeaderMap,
+    cookie_name: &str,
+) -> (String, Option<String>) {
+    if let Some(existing) = read_csrf_cookie_from_headers(headers, cookie_name) {
+        return (existing, None);
+    }
+    let token = mint_token();
+    let cookie = format!("{cookie_name}={token}; Path=/; SameSite=Lax");
+    (token, Some(cookie))
 }
 
 /// Constant-time byte-slice equality. Avoids a leaky `==` even

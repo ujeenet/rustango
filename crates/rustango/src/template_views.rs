@@ -483,6 +483,7 @@ struct DeleteViewState {
 async fn handle_delete_confirm(
     State(state): State<Arc<DeleteViewState>>,
     Path(pk): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
     let Some(pk_field) = state.vs.schema.primary_key() else {
         return template_error(&format!(
@@ -512,7 +513,10 @@ async fn handle_delete_confirm(
     let object = row_to_json(&row, &fields);
     let mut ctx = Context::new();
     ctx.insert("object", &object);
-    render(&state.tera, &state.vs.template, &ctx)
+    let set_cookie = stamp_csrf(&headers, &mut ctx);
+    let mut resp = render(&state.tera, &state.vs.template, &ctx);
+    apply_csrf_cookie(&mut resp, set_cookie);
+    resp
 }
 
 async fn handle_delete_submit(
@@ -863,7 +867,10 @@ fn coerce_value(field: &crate::core::FieldSchema, raw: &str) -> Result<SqlValue,
     }
 }
 
-async fn handle_create_get(State(state): State<Arc<FormViewState>>) -> Response {
+async fn handle_create_get(
+    State(state): State<Arc<FormViewState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     let mut ctx = Context::new();
     let fields = form_fields(state.schema, state.fields.as_deref(), &HashMap::new());
     ctx.insert(
@@ -872,16 +879,20 @@ async fn handle_create_get(State(state): State<Arc<FormViewState>>) -> Response 
     );
     ctx.insert("is_create", &true);
     ctx.insert("is_update", &false);
-    render(&state.tera, &state.template, &ctx)
+    let set_cookie = stamp_csrf(&headers, &mut ctx);
+    let mut resp = render(&state.tera, &state.template, &ctx);
+    apply_csrf_cookie(&mut resp, set_cookie);
+    resp
 }
 
 async fn handle_create_post(
     State(state): State<Arc<FormViewState>>,
+    headers: axum::http::HeaderMap,
     axum::Form(form): axum::Form<HashMap<String, String>>,
 ) -> Response {
     let (columns, values, errors) = parse_form(state.schema, state.fields.as_deref(), &form);
     if !errors.is_empty() {
-        return rerender_form(&state, &form, &errors, /*is_update=*/ false);
+        return rerender_form(&state, &form, &errors, /*is_update=*/ false, &headers);
     }
     let insert_q = crate::core::InsertQuery {
         model: state.schema,
@@ -899,6 +910,7 @@ async fn handle_create_post(
 async fn handle_update_get(
     State(state): State<Arc<FormViewState>>,
     Path(pk): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
     let Some(pk_field) = state.schema.primary_key() else {
         return template_error(&format!(
@@ -948,12 +960,16 @@ async fn handle_update_get(
     ctx.insert("pk", &pk);
     ctx.insert("is_create", &false);
     ctx.insert("is_update", &true);
-    render(&state.tera, &state.template, &ctx)
+    let set_cookie = stamp_csrf(&headers, &mut ctx);
+    let mut resp = render(&state.tera, &state.template, &ctx);
+    apply_csrf_cookie(&mut resp, set_cookie);
+    resp
 }
 
 async fn handle_update_post(
     State(state): State<Arc<FormViewState>>,
     Path(pk): Path<String>,
+    headers: axum::http::HeaderMap,
     axum::Form(form): axum::Form<HashMap<String, String>>,
 ) -> Response {
     let Some(pk_field) = state.schema.primary_key() else {
@@ -964,7 +980,7 @@ async fn handle_update_post(
     };
     let (columns, values, errors) = parse_form(state.schema, state.fields.as_deref(), &form);
     if !errors.is_empty() {
-        return rerender_form(&state, &form, &errors, /*is_update=*/ true);
+        return rerender_form(&state, &form, &errors, /*is_update=*/ true, &headers);
     }
     let assignments: Vec<crate::core::Assignment> = columns
         .into_iter()
@@ -1076,6 +1092,7 @@ fn rerender_form(
     submitted: &HashMap<String, String>,
     errors: &HashMap<String, String>,
     is_update: bool,
+    headers: &axum::http::HeaderMap,
 ) -> Response {
     let fields = form_fields(state.schema, state.fields.as_deref(), submitted);
     let mut ctx = Context::new();
@@ -1085,10 +1102,14 @@ fn rerender_form(
     );
     ctx.insert("is_create", &!is_update);
     ctx.insert("is_update", &is_update);
-    // 422 to match Django's "form invalid" response shape on the
-    // wire — most browsers render the body unchanged.
+    // The user POST'd here from an earlier GET, so the CSRF cookie
+    // is almost always already present. Stamp the same token back
+    // into the context so the re-rendered form's hidden input
+    // matches what the browser will send on the next attempt.
+    let set_cookie = stamp_csrf(headers, &mut ctx);
     let mut resp = render(&state.tera, &state.template, &ctx);
     *resp.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+    apply_csrf_cookie(&mut resp, set_cookie);
     resp
 }
 
@@ -1237,6 +1258,44 @@ fn escape_like_pattern(input: &str) -> String {
         .replace('\\', r"\\")
         .replace('%', r"\%")
         .replace('_', r"\_")
+}
+
+/// Read or mint a CSRF token and stamp it into the Tera context as
+/// `csrf_token`. Returns the optional `Set-Cookie` header value the
+/// caller should attach to the response when the cookie was missing
+/// (so the first-ever GET to the form doesn't render an empty
+/// token, which would make the subsequent POST fail CSRF
+/// validation).
+///
+/// Without the `csrf` feature compiled in, this is a no-op:
+/// `csrf_token` is stamped as an empty string and `None` is
+/// returned. The `<input type="hidden" name="_csrf" value="">`
+/// in the rendered HTML is harmless — CSRF validation isn't
+/// enforced when the feature is off.
+fn stamp_csrf(_headers: &axum::http::HeaderMap, ctx: &mut Context) -> Option<String> {
+    #[cfg(feature = "csrf")]
+    {
+        let (token, set_cookie) =
+            crate::forms::csrf::ensure_token(_headers, crate::forms::csrf::CSRF_COOKIE);
+        ctx.insert("csrf_token", &token);
+        set_cookie
+    }
+    #[cfg(not(feature = "csrf"))]
+    {
+        ctx.insert("csrf_token", "");
+        None
+    }
+}
+
+/// Append a `Set-Cookie` header to a ready response when
+/// [`stamp_csrf`] minted a fresh token. No-op for the common case
+/// where the cookie was already present.
+fn apply_csrf_cookie(resp: &mut Response, set_cookie: Option<String>) {
+    let Some(c) = set_cookie else { return };
+    if let Ok(hv) = axum::http::HeaderValue::from_str(&c) {
+        resp.headers_mut()
+            .append(axum::http::header::SET_COOKIE, hv);
+    }
 }
 
 /// Stamp the active filter values + search query back into the
@@ -1463,6 +1522,7 @@ mod tenant {
     pub(super) async fn handle_delete_confirm_tenant(
         State(state): State<Arc<TenantDeleteViewState>>,
         Path(pk): Path<String>,
+        headers: axum::http::HeaderMap,
         mut t: Tenant,
     ) -> Response {
         let Some(pk_field) = state.vs.schema.primary_key() else {
@@ -1493,7 +1553,10 @@ mod tenant {
         let object = row_to_json(&row, &fields);
         let mut ctx = Context::new();
         ctx.insert("object", &object);
-        render(&state.tera, &state.vs.template, &ctx)
+        let set_cookie = super::stamp_csrf(&headers, &mut ctx);
+        let mut resp = render(&state.tera, &state.vs.template, &ctx);
+        super::apply_csrf_cookie(&mut resp, set_cookie);
+        resp
     }
 
     pub(super) async fn handle_delete_submit_tenant(
@@ -1535,6 +1598,7 @@ mod tenant {
 
     pub(super) async fn handle_create_get_tenant(
         State(state): State<Arc<TenantFormViewState>>,
+        headers: axum::http::HeaderMap,
     ) -> Response {
         let mut ctx = Context::new();
         let fields = form_fields(state.schema, state.fields.as_deref(), &HashMap::new());
@@ -1544,17 +1608,23 @@ mod tenant {
         );
         ctx.insert("is_create", &true);
         ctx.insert("is_update", &false);
-        render(&state.tera, &state.template, &ctx)
+        let set_cookie = super::stamp_csrf(&headers, &mut ctx);
+        let mut resp = render(&state.tera, &state.template, &ctx);
+        super::apply_csrf_cookie(&mut resp, set_cookie);
+        resp
     }
 
     pub(super) async fn handle_create_post_tenant(
         State(state): State<Arc<TenantFormViewState>>,
+        headers: axum::http::HeaderMap,
         mut t: Tenant,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
         let (columns, values, errors) = parse_form(state.schema, state.fields.as_deref(), &form);
         if !errors.is_empty() {
-            return rerender_form_tenant(&state, &form, &errors, /*is_update=*/ false);
+            return rerender_form_tenant(
+                &state, &form, &errors, /*is_update=*/ false, &headers,
+            );
         }
         let insert_q = crate::core::InsertQuery {
             model: state.schema,
@@ -1572,6 +1642,7 @@ mod tenant {
     pub(super) async fn handle_update_get_tenant(
         State(state): State<Arc<TenantFormViewState>>,
         Path(pk): Path<String>,
+        headers: axum::http::HeaderMap,
         mut t: Tenant,
     ) -> Response {
         let Some(pk_field) = state.schema.primary_key() else {
@@ -1621,12 +1692,16 @@ mod tenant {
         ctx.insert("pk", &pk);
         ctx.insert("is_create", &false);
         ctx.insert("is_update", &true);
-        render(&state.tera, &state.template, &ctx)
+        let set_cookie = super::stamp_csrf(&headers, &mut ctx);
+        let mut resp = render(&state.tera, &state.template, &ctx);
+        super::apply_csrf_cookie(&mut resp, set_cookie);
+        resp
     }
 
     pub(super) async fn handle_update_post_tenant(
         State(state): State<Arc<TenantFormViewState>>,
         Path(pk): Path<String>,
+        headers: axum::http::HeaderMap,
         mut t: Tenant,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
@@ -1638,7 +1713,9 @@ mod tenant {
         };
         let (columns, values, errors) = parse_form(state.schema, state.fields.as_deref(), &form);
         if !errors.is_empty() {
-            return rerender_form_tenant(&state, &form, &errors, /*is_update=*/ true);
+            return rerender_form_tenant(
+                &state, &form, &errors, /*is_update=*/ true, &headers,
+            );
         }
         let assignments: Vec<crate::core::Assignment> = columns
             .into_iter()
@@ -1666,6 +1743,7 @@ mod tenant {
         submitted: &HashMap<String, String>,
         errors: &HashMap<String, String>,
         is_update: bool,
+        headers: &axum::http::HeaderMap,
     ) -> Response {
         let fields = form_fields(state.schema, state.fields.as_deref(), submitted);
         let mut ctx = Context::new();
@@ -1675,8 +1753,10 @@ mod tenant {
         );
         ctx.insert("is_create", &!is_update);
         ctx.insert("is_update", &is_update);
+        let set_cookie = super::stamp_csrf(headers, &mut ctx);
         let mut resp = render(&state.tera, &state.template, &ctx);
         *resp.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+        super::apply_csrf_cookie(&mut resp, set_cookie);
         resp
     }
 }
@@ -2050,6 +2130,89 @@ mod tests {
         .unwrap();
         let rendered = tera.render("t", &ctx).unwrap();
         assert_eq!(rendered, "published|rustango|1");
+    }
+
+    /// `stamp_csrf` reads the existing CSRF cookie when present
+    /// and stamps the same value into the Tera context (so the
+    /// rendered hidden input matches what the browser will send
+    /// back on POST). Returns `None` for the Set-Cookie since the
+    /// cookie was already there.
+    #[cfg(feature = "csrf")]
+    #[test]
+    fn stamp_csrf_reuses_existing_cookie() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            axum::http::HeaderValue::from_static("session=abc; rustango_csrf=existing-token"),
+        );
+        let mut ctx = Context::new();
+        let set_cookie = stamp_csrf(&headers, &mut ctx);
+        assert!(
+            set_cookie.is_none(),
+            "no Set-Cookie when cookie was present"
+        );
+        let mut tera = Tera::default();
+        tera.add_raw_template("t", "{{ csrf_token }}").unwrap();
+        let rendered = tera.render("t", &ctx).unwrap();
+        assert_eq!(rendered, "existing-token");
+    }
+
+    /// `stamp_csrf` mints a fresh token when the cookie is absent
+    /// and returns the Set-Cookie header for the caller to attach.
+    #[cfg(feature = "csrf")]
+    #[test]
+    fn stamp_csrf_mints_fresh_when_absent() {
+        let headers = axum::http::HeaderMap::new();
+        let mut ctx = Context::new();
+        let set_cookie = stamp_csrf(&headers, &mut ctx);
+        let cookie = set_cookie.expect("Set-Cookie returned when cookie absent");
+        assert!(cookie.starts_with("rustango_csrf="), "got: {cookie}");
+        // The token in the context matches what's in the Set-Cookie.
+        let token_in_cookie = cookie
+            .split_once('=')
+            .and_then(|(_, rest)| rest.split(';').next())
+            .unwrap();
+        let mut tera = Tera::default();
+        tera.add_raw_template("t", "{{ csrf_token }}").unwrap();
+        let rendered = tera.render("t", &ctx).unwrap();
+        assert_eq!(rendered, token_in_cookie);
+        // Token shape: 32 random bytes → base64url no-pad → 43 chars.
+        assert_eq!(rendered.len(), 43);
+    }
+
+    /// Without the `csrf` feature, `stamp_csrf` is a no-op that
+    /// stamps an empty `csrf_token`. The hidden input renders as
+    /// `<input value="">` — harmless when CSRF isn't enforced.
+    #[cfg(not(feature = "csrf"))]
+    #[test]
+    fn stamp_csrf_noop_when_feature_off() {
+        let headers = axum::http::HeaderMap::new();
+        let mut ctx = Context::new();
+        let set_cookie = stamp_csrf(&headers, &mut ctx);
+        assert!(set_cookie.is_none());
+        let mut tera = Tera::default();
+        tera.add_raw_template("t", "{{ csrf_token }}").unwrap();
+        assert_eq!(tera.render("t", &ctx).unwrap(), "");
+    }
+
+    /// `apply_csrf_cookie` appends a Set-Cookie header when given
+    /// `Some(value)`, no-op for `None`.
+    #[test]
+    fn apply_csrf_cookie_appends_when_some() {
+        let mut resp = (StatusCode::OK, "ok").into_response();
+        apply_csrf_cookie(&mut resp, Some("rustango_csrf=tok; Path=/".into()));
+        let cookies: Vec<_> = resp
+            .headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .collect();
+        assert_eq!(cookies.len(), 1);
+        assert!(cookies[0].to_str().unwrap().contains("rustango_csrf=tok"));
+
+        // None branch — no header added.
+        let mut resp = (StatusCode::OK, "ok").into_response();
+        apply_csrf_cookie(&mut resp, None);
+        assert!(resp.headers().get(axum::http::header::SET_COOKIE).is_none());
     }
 
     /// No filters/search → `filters` empty, `search` empty string.

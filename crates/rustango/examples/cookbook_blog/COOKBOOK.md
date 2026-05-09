@@ -1361,9 +1361,24 @@ context via `.fields(&["id", "title"])`.
 `DeleteView` is two-step: `GET <prefix>/{pk}/delete` renders a
 confirmation page (so the user can change their mind), `POST
 <prefix>/{pk}/delete` executes the delete and 303s to `success_url`
-(default `/`; typically the list URL). CSRF protection is the
-project's responsibility — mount under a CSRF-protected scope when
-the POST is reachable from a browser.
+(default `/`; typically the list URL).
+
+CSRF protection: every form GET (`CreateView`, `UpdateView`,
+`DeleteView`) stamps `csrf_token` into the Tera context and sets
+the `rustango_csrf` cookie when missing, so templates can render:
+
+```html
+<form method="post">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <!-- {% for field in form.fields %} … {% endfor %} -->
+  <button type="submit">Save</button>
+</form>
+```
+
+POST validation is a separate layer — mount `forms::csrf::layer()`
+on the router to enforce that the `_csrf` form field matches the
+cookie value. Without it the `csrf_token` context var still
+populates, but POSTs aren't validated.
 
 ### Tenancy projects: `tenant_router(...)`
 

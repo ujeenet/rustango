@@ -2,6 +2,48 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.29.3] — `template_views` form CSRF threading
+
+Closes the most likely deployment-blocker for v0.29.0's form views:
+templates had no way to render the CSRF hidden input because the
+view didn't expose the token. Today `<form>{% csrf %}…</form>` was
+"copy this from the admin's templates," which doesn't exist for
+the public-facing CBVs.
+
+### Added
+
+- **`rustango::forms::csrf::ensure_token(headers, cookie_name)`** —
+  read-or-mint helper that returns `(token, Option<set_cookie>)`.
+  Returns the existing CSRF cookie value if present, or mints a
+  fresh 32-byte base64url token + the matching `Set-Cookie` header
+  the caller should attach. Lives behind the existing `csrf`
+  feature.
+- **`rustango::forms::csrf::CSRF_COOKIE`** is now `pub` (was a
+  module-private const). Lets view code reference the canonical
+  cookie name without re-typing the literal.
+- **`csrf_token` Tera context var** — every `template_views` form
+  GET handler (`CreateView`, `UpdateView`, `DeleteView`, plus
+  every `tenant_router` variant) now stamps the token into the
+  context and attaches a `Set-Cookie` header when minting fresh.
+  Templates render `<input type="hidden" name="_csrf" value="{{
+  csrf_token }}">` and the user's POST validates cleanly against
+  `forms::csrf::layer()`.
+  Without the `csrf` feature compiled in, the variable is the
+  empty string — harmless when CSRF isn't enforced anyway.
+- The `rerender_form` path (validation-error 422 re-render) also
+  threads the same token, so a re-displayed form with
+  `form.errors` keeps the user's CSRF state.
+
+### Tests
+
+- 1243 → 1246 lib tests (+3): `stamp_csrf` reuses an existing
+  cookie, `stamp_csrf` mints fresh + returns Set-Cookie when
+  absent, `apply_csrf_cookie` appends Set-Cookie when `Some` /
+  no-op when `None`. The `csrf`-feature-off path is covered by a
+  separate test gated `#[cfg(not(feature = "csrf"))]`.
+
+---
+
 ## [0.29.2] — `ListView` filtering + search
 
 Adds the most likely first-touch feature gap in v0.29.0's
