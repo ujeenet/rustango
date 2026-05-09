@@ -2,6 +2,55 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.10] — welcome screen polish (roadmap #3)
+
+The v0.29.12 `Cli::with_welcome()` shipped a functional but plain
+welcome page. v0.30.10 polishes it: inline SVG logo, cards layout
+for commands + features, modern v0.30 verb mentions, doc links.
+
+### Added
+
+- **Inline SVG logo** — geometric "R" mark in two tones (rust-
+  orange + tango-blue gradient). No external image fetch, no
+  static-file router needed; the page is fully self-contained.
+- **Cards-grid layout** — three cards each for "Useful commands"
+  (Project / Migrations / Tenancy) and "Batteries included"
+  (Data / HTTP+UI / Auth+ops). Responsive `grid-template-columns:
+  repeat(auto-fit, minmax(240px, 1fr))` so the page reflows on
+  narrow viewports without a media query.
+- **Version pill** next to the heading, dark-mode-friendly.
+- **Outbound doc links** — `docs.rs/rustango`, GitHub repo,
+  examples directory, CHANGELOG.
+- **Disable instructions** — the page tells the reader exactly how
+  to remove it: `drop .with_welcome() from the Cli::new() chain`.
+  Without this, fresh projects keep the welcome page mounted
+  forever and can't find the toggle.
+
+### Updated
+
+- Demonstrates modern v0.30 verbs in the commands grid:
+  `make:viewset`, `make:api_routes`, `migrate --squash`,
+  `init-tenancy`, `create-tenant`, `check --deploy`. The pre-v0.30
+  page only mentioned the original `startapp` / `makemigrations` /
+  `migrate` trio.
+- Feature list now flags the v0.29/v0.30 additions:
+  Class-based views, ViewSets, OpenAPI auto-derive, JWT (refresh +
+  custom claims), TOTP/2FA, password reset, impersonation.
+
+### Tests
+
+- 1316 → 1319 lib tests (+3):
+  `welcome_html_demonstrates_modern_v030_surface` (locks in the
+  modern verb / feature mentions),
+  `welcome_html_has_outbound_doc_links` (catches link
+  regressions), `welcome_html_explains_how_to_disable_itself`
+  (regression guard for the "how do I turn this off" footgun).
+- Existing self-contained guard tightened: now also asserts
+  `<svg` present + no `<img>` tag, locking in the inline-asset
+  decision.
+
+---
+
 ## [0.30.9] — admin pager `SELECT COUNT(*)` skip for large tables (roadmap #4)
 
 `SELECT COUNT(*) FROM <table> WHERE <filter>` runs the full filtered
