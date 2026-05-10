@@ -2,6 +2,54 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.17] — `template_views::ListView` GET stamps CSRF token
+
+Third flaw uncovered during the tango playground exercise. v0.30.4
+shipped `bulk_actions(true)` but the GET handlers (`handle_list` /
+`handle_list_tenant`) didn't call `stamp_csrf` like the
+`Create/Update/DeleteView` handlers do. So when the project layered
+CSRF middleware over the route — the standard configuration —
+the form rendered with an empty `_csrf` field and every legitimate
+POST got `403 CSRF token missing or mismatched`. Bulk actions were
+unusable from a browser under any CSRF-protected setup.
+
+### Fixed
+
+- **`handle_list` and `handle_list_tenant` now extract `HeaderMap`,
+  call `stamp_csrf(&headers, &mut ctx)`, and `apply_csrf_cookie` on
+  the response.** Same shape every other `template_views` handler
+  already uses — this just brought the list handlers into
+  alignment.
+- The `csrf_token` Tera context variable is now populated for
+  every list-page render whether bulk actions are enabled or not
+  (other forms in the template — search, filters, custom user
+  forms — also benefit).
+
+### Live verification (tango docker)
+
+End-to-end bulk-delete chain now works in the browser:
+
+1. GET `/items` — page rendered with `<input name="_csrf"
+   value="Dxy8VvvnNyF_jP5tMiMsTw-OeAWciYvCHKrVll6zadA">` (real
+   token, was empty pre-fix).
+2. Select item, click "Apply" → POST `/items` with
+   `action=delete_selected`, `_selected_action=2`, `_csrf=…`
+3. CSRF middleware verifies, with_delete_confirmation renders the
+   `item_confirm_bulk_delete.html` page with `pks` + `objects`
+   context vars.
+4. Click "Yes, delete" → second POST with `confirmed=true` →
+   built-in `delete_selected` runs → 303 redirect to `/items`.
+5. List shows 2 items (was 3); deleted row is gone from the DB.
+
+### Spoof-safety guard remains intact
+
+POST without a token still 403s with the same `CSRF token missing
+or mismatched` body — verified before the fix as the
+spoof-prevention regression guard. The fix only enables legitimate
+posts; nothing about the rejection path changed.
+
+---
+
 ## [0.30.16] — access log emits real client IP (was always `"-"`)
 
 Second flaw uncovered during the tango playground exercise: the

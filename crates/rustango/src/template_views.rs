@@ -544,6 +544,7 @@ struct ListViewState {
 
 async fn handle_list(
     State(state): State<Arc<ListViewState>>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let page: i64 = params
@@ -622,7 +623,14 @@ async fn handle_list(
     insert_pagination_urls(&mut ctx, page, has_next, has_prev, &params);
     insert_bulk_actions_context(&mut ctx, &state.vs);
 
-    render(&state.tera, &state.vs.template, &ctx)
+    // v0.30.17 — stamp the CSRF token into the context AND set the
+    // cookie on the response. ListView's bulk-action POST is gated
+    // by the project's CSRF middleware (when on); without this the
+    // form-rendered token is empty and every legitimate POST 403s.
+    let set_cookie = stamp_csrf(&headers, &mut ctx);
+    let mut resp = render(&state.tera, &state.vs.template, &ctx);
+    apply_csrf_cookie(&mut resp, set_cookie);
+    resp
 }
 
 /// `POST <prefix>` — bulk-action dispatcher. Mounted only when
@@ -2945,6 +2953,7 @@ mod tenant {
 
     pub(super) async fn handle_list_tenant(
         State(state): State<Arc<TenantListViewState>>,
+        headers: axum::http::HeaderMap,
         Query(params): Query<HashMap<String, String>>,
         mut t: Tenant,
     ) -> Response {
@@ -3023,7 +3032,13 @@ mod tenant {
         super::insert_pagination_urls(&mut ctx, page, has_next, has_prev, &params);
         super::insert_bulk_actions_context(&mut ctx, &state.vs);
 
-        render(&state.tera, &state.vs.template, &ctx)
+        // v0.30.17 — same CSRF stamping as the static-pool variant
+        // (handle_list above). Without it, ListView with bulk_actions
+        // mounted under a CSRF-protected scope can't post anything.
+        let set_cookie = super::stamp_csrf(&headers, &mut ctx);
+        let mut resp = render(&state.tera, &state.vs.template, &ctx);
+        super::apply_csrf_cookie(&mut resp, set_cookie);
+        resp
     }
 
     /// `POST <prefix>` — bulk-action dispatcher for tenancy mode.
