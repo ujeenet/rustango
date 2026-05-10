@@ -83,6 +83,10 @@ pub(crate) fn chrome_context(state: &AppState, active_table: Option<&str>) -> se
         // under. Templates use `{{ admin_prefix }}{{ audit_url }}` etc.
         // so hrefs resolve correctly regardless of mount path.
         "admin_prefix": &state.config.admin_prefix,
+        // v0.30.19 — URL prefix for embedded static assets
+        // (logo + favicon). Templates use {{ static_url }}/icon.png
+        // for favicons.
+        "static_url": &state.config.static_url,
         // Audit-log path suffix. Threaded from
         // `RouteConfig::audit_url`; default `/__audit` for
         // standalone admins. Templates compose the full

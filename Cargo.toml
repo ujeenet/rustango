@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.30.18"
+version = "0.30.19"
 readme = "README.md"
 edition = "2021"
 rust-version = "1.88"
@@ -79,7 +79,7 @@ dotenvy   = "0.15"
 rpassword = "=7.3.1"
 
 # Admin (HTTP)
-axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query", "original-uri"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 serde_urlencoded = "0.7"

@@ -2,6 +2,78 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.19] — embedded `icon.png` favicon for admin + welcome
+
+User added `crates/rustango/src/tenancy/static/icon.png` (a square
+1254×1254 PNG, distinct from the existing wide `rustango.png`
+logo) and asked for it to render as the admin favicon AND
+replace the inline SVG mark on the welcome page.
+
+### Added
+
+- **Embedded `icon.png`** in two places:
+  - `tenant_console::RUSTANGO_ICON_PNG` → served by the tenancy
+    admin route at `<routes.static_url>/icon.png` (e.g.
+    `/_static/icon.png` under friendly RouteConfig,
+    `/__static__/icon.png` under default).
+  - `welcome::RUSTANGO_ICON_PNG` → served by `welcome_router()`
+    at `<welcome_mount_prefix>/welcome_icon.png`. Same bytes,
+    embedded again so welcome page works standalone with no
+    tenancy / static-file router required.
+- **Admin `<link rel="icon">`** in `admin/templates/base.html`,
+  defaulting to `{{ static_url }}/icon.png` and overridable via
+  `brand_favicon_url` (already wired through `Org.favicon_path`
+  for per-tenant branding).
+- **`admin::Builder::static_url(s)`** + `Config.static_url`
+  field + `static_url` chrome-context variable. Tenancy admin
+  builder pulls this from `RouteConfig::static_url` so admin
+  templates resolve the favicon link to the actual route under
+  any URL convention.
+- **`OriginalUri` extractor in `welcome_page`** — fixes a bug
+  surfaced during this slice: when `welcome_router()` is nested
+  at a prefix (e.g. `Router::nest("/welcome", welcome_router())`
+  in tango), axum strips the prefix from `req.uri().path()`
+  before the handler runs. The earlier code computed an
+  icon URL of `/welcome_icon.png` (relative to inner path)
+  which 404'd against the externally-visible
+  `/welcome/welcome_icon.png` route. `OriginalUri` preserves
+  the pre-nest path; the new computed URL is always correct.
+
+### Changed
+
+- **`welcome.rs` swapped from inline SVG to `<img src="...">`**
+  pointing at the sibling icon route. The page is no longer
+  fully self-contained on a single GET (one extra request for
+  the favicon), but it is still served entirely by
+  `welcome_router()` — no external CDN, no static-file mount
+  required.
+
+### Cargo
+
+- Added the `original-uri` axum feature to the workspace
+  `[dependencies] axum = ...` line so the `OriginalUri`
+  extractor is available.
+
+### Tests
+
+- 1351 → 1352 lib tests (+1):
+  `welcome_html_icon_url_is_pluggable_for_nested_mounts` —
+  asserts the welcome HTML's icon URL matches the request's
+  pre-nest path under each of `/`, `/welcome`,
+  `/admin/intro/`. Locks in the OriginalUri-based fix.
+
+### Live verification
+
+- **Welcome page** (tango at `/welcome`): icon now renders
+  correctly. `<img src="/welcome/welcome_icon.png">` matches
+  the route's actual mount path. Verified via Playwright
+  screenshot.
+- **Admin favicon** (tango at `/admin`): DOM
+  `link[rel=icon]` shows `href="/_static/icon.png"`
+  (friendly RouteConfig). The route returns 200 + image/png.
+
+---
+
 ## [0.30.18] — regression-test gap closures for v0.30.11 + v0.30.17
 
 Live exercise + audit found the v0.30.17 fix shipped without a

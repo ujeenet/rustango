@@ -395,6 +395,14 @@ async fn handle_request(
         if path == static_rustango_url {
             return rustango_png_response();
         }
+        // v0.30.19 — favicon route. Square `icon.png` chosen over
+        // `.ico` because the .ico file the brand assets shipped
+        // wraps a non-square inner image and renders poorly across
+        // browsers.
+        let static_icon_png_url = format!("{}/icon.png", routes.static_url);
+        if path == static_icon_png_url {
+            return rustango_icon_png_response();
+        }
         // v0.29 (#88) — operator-as-superuser impersonation
         // handoff. The operator console mints a signed
         // `HandoffPayload` and 302s the browser here; we redeem
@@ -509,6 +517,7 @@ async fn handle_request(
         routes.admin_url.as_str(),
         routes.change_password_url.as_str(),
         routes.audit_url.as_str(),
+        routes.static_url.as_str(),
     );
 
     // Strip the configurable admin mount prefix from the request
@@ -1148,6 +1157,19 @@ fn rustango_png_response() -> Response {
         .expect("response builds")
 }
 
+/// Serve the embedded square `icon.png` favicon at
+/// `/__static__/icon.png`. v0.30.19. Cached aggressively (24h)
+/// like the .png logo — both are framework-managed assets users
+/// don't override per-tenant.
+fn rustango_icon_png_response() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/png")
+        .header(header::CACHE_CONTROL, "public, max-age=86400")
+        .body(Body::from(tenant_console::RUSTANGO_ICON_PNG))
+        .expect("response builds")
+}
+
 fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let raw = headers.get(header::COOKIE)?.to_str().ok()?;
     for piece in raw.split(';') {
@@ -1292,6 +1314,7 @@ fn build_inner_admin_router(
     admin_url_prefix: &str,
     change_password_url: &str,
     audit_url: &str,
+    static_url: &str,
 ) -> Router {
     // v0.27.7 — `tenant_mode()` filters registry-scoped models
     // (Org / Operator) out of the sidebar / index so the tenant
@@ -1309,6 +1332,9 @@ fn build_inner_admin_router(
         // (`/audit`) since v0.29 #85; legacy (`/__audit`)
         // available via `RouteConfig::legacy()`.
         .audit_url(audit_url)
+        // v0.30.19 — pass the framework's static-asset URL so
+        // admin templates can resolve the favicon link.
+        .static_url(static_url)
         // v0.28.2 (#77) — surface the self-serve change-password
         // page in the sidebar.
         .change_password_url(change_password_url);

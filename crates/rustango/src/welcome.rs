@@ -14,48 +14,71 @@
 //!     .nest("/api", api_routes());
 //! ```
 
+use axum::extract::OriginalUri;
 use axum::http::header;
-use axum::response::Html;
+use axum::response::{Html, Response};
 use axum::routing::get;
 use axum::Router;
 
-/// Build a router that serves a welcome page at `/`.
+/// Embedded brand image (square `icon.png`). Welcome page
+/// references this via a sibling route so the page works
+/// standalone even in single-tenant projects with no static-file
+/// infrastructure. v0.30.19. Replaces the inline SVG mark used
+/// in v0.29.12 → v0.30.18; the .ico variant tested in interim
+/// rendered poorly because the embedded inner image was non-
+/// square.
+const RUSTANGO_ICON_PNG: &[u8] = include_bytes!("tenancy/static/icon.png");
+
+/// Build a router that serves a welcome page at `/` and the
+/// embedded favicon at `/welcome_icon.png` so the welcome page
+/// can render the real rustango brand mark without depending on
+/// the tenancy static-file infrastructure.
 #[must_use]
 pub fn welcome_router() -> Router {
-    Router::new().route("/", get(welcome_page))
+    Router::new()
+        .route("/", get(welcome_page))
+        .route("/welcome_icon.png", get(welcome_icon))
 }
 
-async fn welcome_page() -> ([(axum::http::HeaderName, &'static str); 1], Html<String>) {
+async fn welcome_page(
+    OriginalUri(uri): OriginalUri,
+) -> ([(axum::http::HeaderName, &'static str); 1], Html<String>) {
     let version = env!("CARGO_PKG_VERSION");
-    let html = welcome_html(version);
+    // The welcome router can be mounted at `/` (via Cli::with_welcome())
+    // OR nested at any prefix (e.g. `/welcome` in tango — see
+    // `urls.rs::api()`). axum's `Router::nest` strips the prefix
+    // from the inner request path before our handler runs, so
+    // `req.uri().path()` returns "/" in both cases — wrong for
+    // building an absolute icon URL when nested.
+    //
+    // `OriginalUri` preserves the pre-nest path: "/" when mounted
+    // via merge, "/welcome" when nested at "/welcome", etc. We
+    // strip the trailing "/" and append "/welcome_icon.png".
+    let req_path = uri.path();
+    let prefix = req_path.trim_end_matches('/');
+    let icon_url = format!("{prefix}/welcome_icon.png");
+    let html = welcome_html(version, &icon_url);
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         Html(html),
     )
 }
 
-/// Inline SVG mark used as the welcome page's logo. Self-contained
-/// (no external file dependency, no `<img>` to fetch) so the page
-/// renders correctly even when no static-file router is mounted.
-/// Geometric "R" mark in two tones — rust-orange + tango-blue —
-/// that scales cleanly from favicon size up to hero size.
-const RUSTANGO_LOGO_SVG: &str = r##"<svg viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg" aria-label="rustango">
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#e07a3a"/>
-      <stop offset="100%" stop-color="#3672e0"/>
-    </linearGradient>
-  </defs>
-  <rect x="4" y="4" width="88" height="88" rx="20" fill="url(#g)"/>
-  <path d="M28 22 h22 a18 18 0 0 1 18 18 v2 a18 18 0 0 1 -12 17 l14 17 h-12 l-13 -16 h-7 v16 h-10 z m10 10 v16 h12 a8 8 0 0 0 8 -8 v0 a8 8 0 0 0 -8 -8 z"
-        fill="white"/>
-</svg>"##;
+async fn welcome_icon() -> Response {
+    Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/png")
+        .header(header::CACHE_CONTROL, "public, max-age=86400")
+        .body(axum::body::Body::from(RUSTANGO_ICON_PNG))
+        .expect("response builds")
+}
 
-fn welcome_html(version: &str) -> String {
+fn welcome_html(version: &str, icon_url: &str) -> String {
     format!(
         r##"<!doctype html>
 <html lang="en">
 <head>
+<link rel="icon" type="image/png" href="{icon_url}">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>rustango — it works!</title>
@@ -81,10 +104,11 @@ body {{
   gap: 1.5rem;
   margin-bottom: 2rem;
 }}
-.hero svg {{
+.hero img {{
   width: 80px;
   height: 80px;
   flex-shrink: 0;
+  border-radius: 16px;
 }}
 h1 {{
   margin: 0 0 .15rem;
@@ -163,7 +187,7 @@ a:hover {{ text-decoration: underline; }}
 </head>
 <body>
 <header class="hero">
-  {RUSTANGO_LOGO_SVG}
+  <img src="{icon_url}" alt="rustango">
   <div>
     <h1>rustango is running<span class="pill">v{version}</span></h1>
     <p class="tag">Django-shape Rust web framework — ready to build something.</p>
@@ -263,13 +287,13 @@ mod tests {
 
     #[test]
     fn welcome_html_contains_version() {
-        let html = welcome_html("0.20.30");
+        let html = welcome_html("0.20.30", "/welcome_icon.png");
         assert!(html.contains("0.20.30"));
     }
 
     #[test]
     fn welcome_html_includes_next_steps() {
-        let html = welcome_html("x");
+        let html = welcome_html("x", "/welcome_icon.png");
         assert!(html.contains("startapp"));
         assert!(html.contains("makemigrations"));
         assert!(html.contains("migrate"));
@@ -277,17 +301,46 @@ mod tests {
 
     #[test]
     fn welcome_html_is_self_contained_no_external_deps() {
-        let html = welcome_html("x");
+        let html = welcome_html("x", "/welcome_icon.png");
         // No cdn references, no external js, fonts use system stack.
         // Outbound links to docs.rs / github.com are fine — those
         // are user-clickable, not loaded resources.
         assert!(!html.contains("cdn."));
         assert!(!html.contains("googleapis"));
         assert!(!html.contains("<script"));
-        // Inline SVG rather than <img src=...> means no asset
-        // pipeline / static-file mount required.
-        assert!(html.contains("<svg"));
-        assert!(!html.contains("<img"));
+        // v0.30.19 — the icon comes from a sibling route inside
+        // welcome_router (also embedded into the binary), so no
+        // external static-file pipeline is required, even though
+        // the page now uses <img> rather than inline SVG.
+        assert!(
+            html.contains(r#"<img src="/welcome_icon.png""#),
+            "expected hero <img> referencing the sibling PNG route"
+        );
+        assert!(
+            html.contains(r#"<link rel="icon" type="image/png" href="/welcome_icon.png""#),
+            "expected favicon <link> pointing at the same PNG"
+        );
+    }
+
+    /// v0.30.19 — the welcome handler picks the icon URL based on
+    /// the actual request path so the page works whether mounted
+    /// at `/` (via `Cli::with_welcome()`) or nested at any prefix
+    /// (e.g. `Router::nest("/welcome", welcome_router())`). Tests
+    /// the URL-shape contract rather than booting axum end-to-end.
+    #[test]
+    fn welcome_html_icon_url_is_pluggable_for_nested_mounts() {
+        // Mounted at /
+        let html = welcome_html("x", "/welcome_icon.png");
+        assert!(html.contains(r#"href="/welcome_icon.png""#));
+
+        // Nested at /welcome
+        let html = welcome_html("x", "/welcome/welcome_icon.png");
+        assert!(html.contains(r#"href="/welcome/welcome_icon.png""#));
+        assert!(html.contains(r#"src="/welcome/welcome_icon.png""#));
+
+        // Deeply nested (operator stash, etc.)
+        let html = welcome_html("x", "/admin/intro/welcome_icon.png");
+        assert!(html.contains(r#"src="/admin/intro/welcome_icon.png""#));
     }
 
     /// v0.30.10 — the polished welcome page demonstrates the v0.30
@@ -297,7 +350,7 @@ mod tests {
     /// developer would want to know exist.
     #[test]
     fn welcome_html_demonstrates_modern_v030_surface() {
-        let html = welcome_html("x");
+        let html = welcome_html("x", "/welcome_icon.png");
         for verb in [
             "make:viewset",
             "make:api_routes",
@@ -327,7 +380,7 @@ mod tests {
     /// trailing-slash / typo regressions.
     #[test]
     fn welcome_html_has_outbound_doc_links() {
-        let html = welcome_html("x");
+        let html = welcome_html("x", "/welcome_icon.png");
         for url in [
             "https://docs.rs/rustango",
             "https://github.com/ujeenet/rustango",
@@ -341,7 +394,7 @@ mod tests {
     /// the toggle. Regression guard for v0.30.10.
     #[test]
     fn welcome_html_explains_how_to_disable_itself() {
-        let html = welcome_html("x");
+        let html = welcome_html("x", "/welcome_icon.png");
         assert!(
             html.contains(".with_welcome()"),
             "page must reference the Cli builder method users disable"

@@ -143,6 +143,15 @@ pub(crate) struct Config {
     /// which since v0.29 (#85) defaults to `/audit` (no
     /// underscores) for friendly-URL projects.
     pub(crate) audit_url: String,
+    /// v0.30.19 — URL prefix at which the framework serves
+    /// embedded static assets (`rustango.png` logo, `icon.png`
+    /// favicon). Threaded into chrome context as `{{ static_url }}`
+    /// so admin templates can build absolute URLs (e.g. the
+    /// favicon `<link rel="icon" href="{{ static_url }}/icon.png">`).
+    /// Defaults to `/__static__`; tenancy admin Builder pulls this
+    /// from `RouteConfig::static_url` — `/_static` under
+    /// friendly RouteConfig, `/__static__` under default.
+    pub(crate) static_url: String,
     /// v0.30.9 — tables for which the admin list view skips the
     /// `SELECT COUNT(*)` round-trip and renders a "Page N" pager
     /// (driven by has-next-page detection on the row count) instead
@@ -167,6 +176,11 @@ impl Builder {
         // bookmarks. Tenancy admins override via
         // `Builder::audit_url(...)` from `RouteConfig::audit_url`.
         config.audit_url = "/__audit".to_owned();
+        // v0.30.19 — default static_url matches the framework's
+        // legacy hardcoded path. Tenancy admin overrides via
+        // `Builder::static_url(...)` from `RouteConfig::static_url`
+        // — `/_static` under friendly, `/__static__` under default.
+        config.static_url = "/__static__".to_owned();
         Self { pool, config }
     }
 
@@ -195,6 +209,20 @@ impl Builder {
         let s: String = url.into();
         let trimmed = s.trim_end_matches('/').to_owned();
         self.config.audit_url = trimmed;
+        self
+    }
+
+    /// URL prefix at which the framework serves embedded static
+    /// assets (logo + favicon). v0.30.19. Threaded into chrome
+    /// context so admin templates resolve the favicon `<link>`
+    /// to the actual route. Tenancy admin Builder pulls this
+    /// from [`crate::tenancy::RouteConfig::static_url`] —
+    /// `/_static` under friendly, `/__static__` under default.
+    #[must_use]
+    pub fn static_url(mut self, url: impl Into<String>) -> Self {
+        let s: String = url.into();
+        let trimmed = s.trim_end_matches('/').to_owned();
+        self.config.static_url = trimmed;
         self
     }
 

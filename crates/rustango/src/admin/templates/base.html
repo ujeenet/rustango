@@ -3,6 +3,13 @@
 <head>
 <meta charset="utf-8">
 <title>{% block title %}{{ brand_name | default(value='Rustango Admin') }}{% endblock title %}</title>
+{# v0.30.19 — admin favicon. Defaults to the framework's embedded
+   `icon.png` (served at `<static_url>/icon.png` by the tenancy
+   admin route, where static_url comes from RouteConfig — `/_static`
+   under friendly, `/__static__` under default). Per-tenant overrides
+   via `brand_favicon_url`. #}
+<link rel="icon" type="image/png"
+      href="{{ brand_favicon_url | default(value=static_url ~ '/icon.png') }}">
 <script>
 // No-flash theme application — runs before any CSS so the page never
 // paints the wrong theme. localStorage overrides the server-supplied

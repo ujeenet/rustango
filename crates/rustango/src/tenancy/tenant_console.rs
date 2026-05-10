@@ -49,6 +49,13 @@ pub const IMPERSONATION_TTL_SECS: i64 = 60 * 60;
 /// Embedded brand image, served at `/__static__/rustango.png`.
 pub(crate) const RUSTANGO_PNG: &[u8] = include_bytes!("static/rustango.png");
 
+/// Embedded favicon, served at `/__static__/icon.png`. v0.30.19.
+/// Square `image/png`; admin templates link it via
+/// `<link rel="icon" type="image/png" href="...">`. The .ico variant
+/// considered earlier rendered poorly because the embedded inner
+/// image was non-square.
+pub(crate) const RUSTANGO_ICON_PNG: &[u8] = include_bytes!("static/icon.png");
+
 /// Principal payload carried inside the cookie. Compact field names
 /// (`uid`, `slug`, `exp`) keep the cookie short.
 ///
