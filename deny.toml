@@ -8,6 +8,13 @@ no-default-features = false
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
+# v0.30.22 — RUSTSEC-2023-0071 (Marvin Attack on rsa v0.9.x)
+# is unfixable from our side: the only consumer is sqlx-mysql,
+# and no safe upgrade exists upstream. The mysql backend is
+# opt-in (cargo feature, not default), so projects that don't
+# enable it never link rsa. Track upstream:
+# https://github.com/RustCrypto/RSA/issues/626
+ignore = ["RUSTSEC-2023-0071"]
 
 [licenses]
 allow = [
@@ -15,6 +22,11 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # v0.30.22 — CDLA-Permissive-2.0 is the license on
+    # `webpki-roots` (TLS root certificate bundle). It's an
+    # OSI-tracked permissive license; allowed to keep
+    # `--all-features` builds lint-clean.
+    "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
     "Unicode-DFS-2016",

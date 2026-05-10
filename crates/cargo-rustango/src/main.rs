@@ -30,7 +30,7 @@
 //!
 //! Once written, the user typically runs:
 //!
-//!   $ cd <name> && docker compose up -d
+//!   $ cd `<name>` && docker compose up -d
 //!   $ cargo run -- migrate
 //!   $ cargo run
 

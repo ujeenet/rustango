@@ -98,7 +98,9 @@ pub fn derive_form(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Derive [`rustango::serializer::ModelSerializer`] for a struct.
+/// Derive `rustango::serializer::ModelSerializer` for a struct.
+/// (intra-doc link disabled — the macro crate doesn't depend on
+/// `rustango` itself, so rustdoc can't resolve the path.)
 ///
 /// # Container attribute (required)
 /// `#[serializer(model = TypeName)]` — the [`Model`] type this serializer maps from.
