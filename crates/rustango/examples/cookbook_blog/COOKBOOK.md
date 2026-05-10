@@ -31,6 +31,7 @@ quotes from a real, compiling, test-covered file.
 11. [Async / IO / extensions](#chapter-11--async--io--extensions)
 12. [Bi-dialect + cross-cutting](#chapter-12--bi-dialect--cross-cutting)
 13. [SQLite backend (v0.27 / v0.28)](#chapter-13--sqlite-backend-v027--v028)
+14. [v0.30 cycle: do less work](#chapter-14--v030-cycle-do-less-work) — `inspectdb`, `wizard`, ListView bulk + fk_display, admin COUNT skip, settings-driven logging
 
 ---
 
@@ -2016,6 +2017,268 @@ implemented for every `T` when `sqlite` is off, so existing
 PG-only consumers compile unchanged. Verified by the macro
 hygiene regression test:
 [`tests/macro_no_backend_cfg.rs`](../../tests/macro_no_backend_cfg.rs).
+
+---
+
+## Chapter 14 — v0.30 cycle: do less work
+
+The v0.30 release cycle (2026-05-08 → 2026-05-10) collapsed several
+common verb-chains and config writes into one-call APIs. Each
+recipe below maps a 4-5 step setup to a single line.
+
+### 14.1 `manage inspectdb` — adopt rustango against an existing DB (v0.30.13)
+
+**What**: Connects to `DATABASE_URL`, walks `information_schema`,
+emits `#[derive(Model)]` source for every base table — Django's
+`inspectdb` shape. Pipes to a file the user reviews + edits.
+
+**When**: You have an existing Postgres schema (legacy app,
+hand-rolled migrations from another framework, prod DB you want
+to read into a new admin) and don't want to retype every model
+by hand.
+
+**API**: [`migrate::inspectdb`](../../src/migrate/inspectdb.rs).
+
+```sh
+# Every public-schema table to stdout
+cargo run -- inspectdb
+
+# Single table
+cargo run -- inspectdb --table users
+
+# Different schema
+cargo run -- inspectdb --schema reporting
+
+# Pipe to a reviewable file
+cargo run -- inspectdb > src/legacy/models.rs
+```
+
+**Coverage**: PRIMARY KEY → `primary_key`; SERIAL/IDENTITY →
+`Auto<T>`; NOT NULL → required, nullable → `Option<T>`;
+`varchar(N)` → `max_length = N`; FK references → `fk = "..."`;
+DEFAULT values echoed (typecast suffix stripped).
+
+**Verified by**: `tests/inspectdb_live.rs` — full Author/Post
+fixture round-trip, FK + uuid + jsonb, unknown-schema friendly
+empty comment.
+
+---
+
+### 14.2 `manage wizard` — interactive one-call setup (v0.30.14)
+
+**What**: Five opt-in prompts: scaffold app → init tenancy →
+migrate registry → create operator → create tenant + first
+superuser. Each step is `[Y/n]`-skippable. Defaults echoed
+in the prompt; pressing Enter accepts.
+
+**When**: First-run setup. Replaces the chain new tenancy users
+otherwise have to learn (`init-tenancy` → `migrate-registry` →
+`create-operator` → `create-tenant` → `create-superuser`).
+
+**API**: [`tenancy::manage::wizard`](../../src/tenancy/manage/wizard.rs).
+
+```sh
+$ cargo run -- wizard         # alias: cargo run -- init
+
+rustango wizard — interactive setup
+===================================
+Scaffold a new app? [Y/n]
+  App name (default: blog): blog
+Initialize tenancy? [Y/n]
+Apply registry migrations now? [Y/n]
+Create an operator account? [Y/n]
+  Operator username (default: admin): admin
+  Operator password: hunter2
+Create a tenant? [Y/n]
+  Tenant slug (default: acme): acme
+  ...
+```
+
+**Verified by**: 4 unit tests on the prompt helpers (with
+`Cursor`-injected input) + `tests/wizard_live.rs` for the
+dispatcher wiring.
+
+---
+
+### 14.3 HTML CBV: bulk actions + delete-confirmation + FK display
+
+`template_views::ListView` shipped three Django-admin-shape
+flags this cycle. They stack:
+
+```rust,ignore
+use rustango::template_views::{DeleteView, ListView};
+
+ListView::for_model(Item::SCHEMA)
+    .bulk_actions(true)                    // v0.30.4 — built-in delete_selected
+    .with_delete_confirmation(true)        // v0.30.7 — two-step confirm before bulk DELETE
+    .with_fk_display(true)                 // v0.30.8 — FK columns auto-resolve to display
+    .tenant_router("/items", tera.clone())
+```
+
+#### v0.30.4 `bulk_actions(true)` + `tenant_action(...)`
+
+Mounts `POST <prefix>` alongside the GET list. Built-in
+`delete_selected` handler always available; user actions stack
+via `.tenant_action("publish_selected", "Publish", handler)`.
+Form posts `action=<name>` + repeated `_selected_action=<pk>`
+fields.
+
+**Template shape** (the form lives inside the list page):
+
+```html
+<form method="post" action="/items">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <select name="action">
+    {% for a in bulk_actions %}
+    <option value="{{ a.name }}">{{ a.label }}</option>
+    {% endfor %}
+  </select>
+  {% for row in object_list %}
+    <input type="checkbox" name="_selected_action" value="{{ row.id }}">
+  {% endfor %}
+  <button>Apply</button>
+</form>
+```
+
+**v0.30.17 fix**: `handle_list` / `handle_list_tenant` now stamp
+the CSRF token into the Tera context. Pre-fix the form rendered
+with `value=""` and every legitimate POST 403'd under any
+CSRF-protected setup. Regression test:
+`tests/template_views_bulk_actions_live::list_get_stamps_csrf_token_into_context`.
+
+#### v0.30.7 `with_delete_confirmation(true)` — bulk-confirm page
+
+When on, the first POST with `action=delete_selected` renders
+`<table>_confirm_bulk_delete.html` instead of running the
+DELETE. Context: `pks` (list of strings), `objects` (full row
+data so the template can show *what* will be deleted),
+`csrf_token`. The confirm form re-submits with `confirmed=true`
+which short-circuits the render and runs the DELETE → 303 to
+the list.
+
+#### v0.30.8 `with_fk_display(true)` — resolve FK ints to display
+
+For every FK column on the schema, runs one batched
+`SELECT pk, <display_field> FROM <target> WHERE pk = ANY(...)`
+per page and stamps `<column>_display` into each row's JSON.
+Templates then render:
+
+```html
+<td>{{ row.region_id_display | default(value=row.region_id) }}</td>
+```
+
+→ shows `"americas"` instead of `1`.
+
+**Verified by**: 6 live tests in
+`tests/template_views_bulk_actions_live.rs` (built-in delete +
+custom action + 303 redirect + 400 on empty-selection +
+confirm-page renders).
+
+---
+
+### 14.4 Admin pager `SELECT COUNT(*)` skip (v0.30.9)
+
+**What**: On tables in the millions of rows, the admin's
+`SELECT COUNT(*) FROM <table> WHERE <filters>` runs every page
+render and takes seconds even with indexes. Two opt-outs:
+
+```rust,ignore
+admin::Builder::new(pool)
+    .skip_count_for(["audit_log", "events"])  // per-table opt-in
+    .build()
+```
+
+Or per-request: `?count=skip` (also `0` / `false` / `no`) on
+any list URL. Pager renders "Page N" + prev/next driven by
+has-next-page detection (we fetch `page_size + 1` and trim).
+
+**API**: [`admin::Builder::skip_count_for`](../../src/admin/urls.rs).
+
+---
+
+### 14.5 Settings-driven logging (v0.30.11)
+
+**What**: `Cli::with_logging()` drives `tracing-subscriber`
+from a `[logging]` TOML section.
+
+```toml
+# config/dev_settings.toml
+[logging]
+level = "info,sqlx=warn"
+format = "pretty"
+with_line_numbers = true
+
+# config/prod_settings.toml
+[logging]
+level = "info"
+format = "json"
+file_dir = "/var/log/myapp"
+file_prefix = "app"
+file_rotation = "daily"
+```
+
+```rust,ignore
+rustango::manage::Cli::new()
+    .with_settings_from_env()
+    .with_logging()
+    .api(urls::api())
+    .run().await
+```
+
+`access_log` middleware emits per-request lines like
+`method=GET path=/items status=200 duration_ms=43 ip=192.168.65.1`.
+
+**v0.30.16 fix**: the IP field used to log `"-"` because the
+framework's `axum::serve` calls didn't enable `ConnectInfo`.
+Now both `manage.rs` and `server/builder.rs` use
+`into_make_service_with_connect_info::<SocketAddr>()`.
+
+For projects behind a reverse proxy:
+```rust,ignore
+AccessLogLayer::default().trust_proxy_headers(true)
+```
+honors `X-Forwarded-For` (leftmost = original client) → fall
+back to `X-Real-IP` → fall back to ConnectInfo. Off by default
+(both headers are spoofable by direct clients).
+
+**API**: [`config::LoggingSettings`](../../src/config/sections.rs),
+[`logging::Setup::from_settings`](../../src/logging.rs),
+[`access_log::AccessLogLayer::trust_proxy_headers`](../../src/access_log.rs).
+
+---
+
+### 14.6 `make:viewset` auto-detects tenancy (v0.30.5)
+
+**What**: `cargo run -- make:viewset Foo --model Bar` reads the
+project's `Cargo.toml`. If the `tenancy` feature is enabled on
+the `rustango` dep, emits a `tenant_router(...)` scaffold;
+otherwise the static-pool `#[derive(ViewSet)]` shape. Override
+with `--no-tenant`.
+
+```text
+$ cargo run -- make:viewset NewProductViewSet --model Product
+make:viewset: auto-detected tenancy mode from Cargo.toml (pass `--no-tenant` to override)
+wrote src/new_product_view_set.rs
+  add `mod new_product_view_set;` to src/main.rs (or `pub mod ...;` to src/lib.rs)
+```
+
+---
+
+### 14.7 Other v0.30 niceties worth knowing
+
+- `Cli::with_welcome()` no longer panics when your `urls::api()`
+  already routes `GET /` ([v0.30.15](../../../../CHANGELOG.md))
+  — emits a `tracing::warn!` and skips. Welcome page itself
+  polished with cards-grid layout + version pill
+  ([v0.30.10](../../../../CHANGELOG.md)) + real `icon.png` brand
+  mark ([v0.30.19](../../../../CHANGELOG.md)).
+- Admin `AdminError::Internal` redacts DB errors before
+  responding; raw text goes to `tracing::error!` with a
+  `correlation_id` the user can report
+  ([v0.30.12](../../../../CHANGELOG.md)).
+- `CountQuery.search` bug fix: pager total now matches visible
+  rows when `?q=...` is set
+  ([v0.30.1](../../../../CHANGELOG.md)).
 
 ---
 

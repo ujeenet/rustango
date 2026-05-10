@@ -2,6 +2,38 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.20] — README + cookbook bumped to v0.30 surface
+
+Doc-only release. Surfaced as a real gap when the user asked
+why the README still pinned `0.29` and the cookbook stopped
+at chapter 13 with no coverage of the v0.30 cycle.
+
+### Changed
+
+- **README** version pins bumped from `0.29` to `0.30` (3
+  sites: postgres-default, sqlite, multi-backend).
+- **README "What's new in v0.30" section** added between the
+  Cargo.toml block and the SQLite quickstart. Covers
+  `inspectdb`, `wizard`, `ViewSet::tenant_router`, ListView
+  flags (`bulk_actions` / `with_delete_confirmation` /
+  `with_fk_display`), admin SELECT COUNT skip, settings-driven
+  logging, security audit fixes, the new `Cli::with_*`
+  cluster, `make:viewset` auto-detect, the `ip="-"` fix +
+  `trust_proxy_headers`, and the embedded favicon.
+- **Cookbook chapter 14** added — "v0.30 cycle: do less work"
+  — covers all of the above with code recipes + test
+  citations. Table of contents updated.
+
+### Why this matters
+
+These docs are the surface every new user touches. Out-of-date
+version pins cause `cargo add rustango` to install the older
+version, masking the entire v0.30 surface. The cookbook is the
+recipe book the project's README points at; new chapters
+showcase the features the user is paying for.
+
+---
+
 ## [0.30.19] — embedded `icon.png` favicon for admin + welcome
 
 User added `crates/rustango/src/tenancy/static/icon.png` (a square

@@ -7,14 +7,80 @@ Bi-dialect ORM (Postgres / MySQL / **SQLite**) with auto-migrations, multi-tenan
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.29"
+rustango = "0.30"
 
 # SQLite — file-backed or in-memory, full bi-dialect ORM
-rustango = { version = "0.29", features = ["sqlite"] }
+rustango = { version = "0.30", features = ["sqlite"] }
 
 # Multiple backends in one binary
-rustango = { version = "0.29", features = ["postgres", "sqlite"] }
+rustango = { version = "0.30", features = ["postgres", "sqlite"] }
 ```
+
+### What's new in v0.30 (May 2026)
+
+**The "do less work" release** — every feature shipped this cycle
+removes a verb-chain or a config write the user previously had to
+do by hand.
+
+- **`manage inspectdb`** ([v0.30.13](CHANGELOG.md)) — emit
+  `#[derive(Model)]` source for every base table in a live PG
+  schema. Adopts rustango against an existing DB without
+  rewriting it. Type / FK / `Auto<T>` / `max_length` / DEFAULT
+  detection all built-in.
+- **`manage wizard`** (alias `manage init`,
+  [v0.30.14](CHANGELOG.md)) — interactive 5-step setup
+  (scaffold app → init tenancy → migrate → operator →
+  tenant + superuser). Replaces the chain new users had to
+  learn.
+- **`ViewSet::tenant_router(prefix)`** ([v0.30.0](CHANGELOG.md))
+  — every JSON CRUD viewset works seamlessly under tenancy
+  via `Tenant::conn()` per request. Full feature parity with
+  the static-pool router (filters, search, ordering, pagination,
+  permissions).
+- **HTML class-based views** (`template_views::ListView`):
+  - `.bulk_actions(true)` + `.tenant_action(...)` —
+    Django-admin-shape selectors with `delete_selected`
+    built-in, custom actions stack ([v0.30.4](CHANGELOG.md))
+  - `.with_delete_confirmation(true)` — two-step confirm
+    page before bulk DELETE ([v0.30.7](CHANGELOG.md))
+  - `.with_fk_display(true)` — FK columns auto-resolve to
+    the target model's `display = "..."` value
+    ([v0.30.8](CHANGELOG.md))
+- **Admin pager `SELECT COUNT(*)` skip** ([v0.30.9](CHANGELOG.md))
+  — `Builder::skip_count_for([...])` per-table opt-out OR
+  `?count=skip` URL param. Removes the multi-second pager hit
+  on tables in the millions of rows.
+- **Settings-driven logging** ([v0.30.11](CHANGELOG.md)) —
+  new `[logging]` TOML section + `Cli::with_logging()`. Drives
+  `tracing-subscriber` from config (`level` / `format` /
+  `file_dir` / `file_rotation`). `access_log` middleware
+  emits TIMEIT-shape per-request lines (`method=... path=...
+  status=... duration_ms=... ip=...`).
+- **Security audit fixes** ([v0.30.12](CHANGELOG.md)) — every
+  CSPRNG site now uses `OsRng` directly; admin
+  `AdminError::Internal` redacts DB error text + stamps a
+  correlation id; CORS misconfig (`allow_any + credentials`)
+  emits a runtime warning.
+- **New `Cli::with_*` cluster** — `with_static(prefix, dir)`
+  ([v0.29.9](CHANGELOG.md)), `with_csrf()`/`with_csrf_config(c)`
+  ([v0.29.10](CHANGELOG.md)), `with_welcome()`
+  ([v0.29.12](CHANGELOG.md), polished
+  [v0.30.10](CHANGELOG.md)), now panic-free under route
+  collision ([v0.30.15](CHANGELOG.md)),
+  `with_logging()` ([v0.30.11](CHANGELOG.md)).
+- **`make:viewset` auto-detects tenancy** from `Cargo.toml`
+  ([v0.30.5](CHANGELOG.md)) and emits the right scaffold
+  shape (tenant_router or pool-based). Override with
+  `--no-tenant`.
+- **`access_log` IP fix** ([v0.30.16](CHANGELOG.md)) — earlier
+  versions logged `ip="-"` because `axum::serve` wasn't using
+  `into_make_service_with_connect_info`. Fixed + opt-in
+  `trust_proxy_headers(true)` for projects behind nginx /
+  Cloudflare / ALB.
+- **Embedded `icon.png` favicon** for admin + welcome
+  ([v0.30.19](CHANGELOG.md)).
+
+Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
 ### Spin up an app on SQLite in 30 lines
 
@@ -2351,7 +2417,7 @@ The default features cover everything most apps need. Trim them when shipping a 
 
 ```toml
 # Default — everything except tenancy + cache-redis
-rustango = "0.29"
+rustango = "0.30"
 
 # Multi-tenant
 rustango = { version = "0.29", features = ["tenancy"] }
