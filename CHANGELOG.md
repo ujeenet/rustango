@@ -2,6 +2,78 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.16] — access log emits real client IP (was always `"-"`)
+
+Second flaw uncovered during the tango playground exercise: the
+`access_log` middleware always logged `ip="-"` because the
+framework's `axum::serve` calls didn't populate `ConnectInfo<SocketAddr>`
+in request extensions. v0.30.11 wired the layer + format
+correctly, but the IP field had no source to read from.
+
+### Fixed
+
+- **`axum::serve` now uses `into_make_service_with_connect_info::<SocketAddr>()`**
+  in both the single-tenant `runserver` (`manage.rs`) and the
+  tenancy `Server::Builder` (`server/builder.rs`). This is the
+  standard axum pattern for surfacing the TCP peer address —
+  required for any middleware that wants to read the client IP.
+
+### Added
+
+- **`AccessLogLayer::trust_proxy_headers(on)`** — opt-in
+  resolver step for projects behind a reverse proxy. When on,
+  the layer prefers the leftmost address in `X-Forwarded-For`
+  (per RFC 7239 conventions — the original client) over the TCP
+  peer; falls back to `X-Real-IP` when XFF is absent. Default
+  **OFF** because both headers are spoofable by direct clients.
+- **`resolve_client_ip(req, trust_proxy)` helper** — single
+  entry point for the resolution chain (XFF → X-Real-IP →
+  ConnectInfo → `None`). Whitespace-trimmed; empty leading
+  hops fall through cleanly.
+
+### Tests
+
+- 1347 → 1351 lib tests (+4):
+  - `trust_proxy_headers_defaults_off_and_setter_flips`
+  - `resolve_client_ip_xff_only_when_proxy_trusted` (the
+    spoof-prevention guard: XFF is only honored when the project
+    explicitly enables `trust_proxy_headers`)
+  - `resolve_client_ip_xff_handles_whitespace_and_empty`
+  - `resolve_client_ip_falls_back_to_connect_info`
+
+### Live verification (tango docker)
+
+Pre-fix:
+```
+INFO rustango::access_log: method=GET path=/items status=200 duration_ms=43 ip="-"
+```
+
+Post-fix:
+```
+INFO rustango::access_log: method=GET path=/items status=200 duration_ms=50 ip="192.168.65.1"
+```
+
+XFF spoofing test (trust_proxy_headers default off):
+- `curl -H "X-Forwarded-For: 203.0.113.42"` → log still shows
+  `ip="192.168.65.1"` (real peer). The header is correctly
+  ignored unless the project opts in.
+
+### Recommended config
+
+For projects behind nginx / Cloudflare / AWS ALB:
+
+```rust
+use rustango::access_log::AccessLogLayer;
+let log = AccessLogLayer::default()
+    .trust_proxy_headers(true);
+app.layer(log.into_layer())
+```
+
+For projects served directly to clients: leave `trust_proxy_headers`
+off — the TCP peer is the real IP.
+
+---
+
 ## [0.30.15] — `Cli::with_welcome()` no longer panics on root-route collision
 
 Live exercise of the v0.30.x surface against the tango playground

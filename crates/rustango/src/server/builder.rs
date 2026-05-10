@@ -530,7 +530,15 @@ impl Builder {
         }));
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app).await?;
+        // v0.30.16 — `into_make_service_with_connect_info` is what
+        // populates `ConnectInfo<SocketAddr>` in request extensions.
+        // Without it, `access_log` (and any other middleware that
+        // reads the peer address) sees "-".
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await?;
         Ok(())
     }
 }
