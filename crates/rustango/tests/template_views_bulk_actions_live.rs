@@ -379,3 +379,99 @@ async fn list_get_stamps_bulk_actions_into_template_context() {
     assert!(body.contains("rows=3"), "got: {body}");
     assert!(body.contains("actions=2"), "got: {body}");
 }
+
+/// Regression test for v0.30.17 — `handle_list` must call
+/// `stamp_csrf` so the `{{ csrf_token }}` Tera variable is
+/// non-empty AND the response carries a `Set-Cookie:
+/// rustango_csrf=…` header. Pre-fix the CSRF middleware would
+/// reject every legitimate POST because the rendered form had
+/// `value=""`.
+///
+/// The test mounts a custom template that prints the csrf_token
+/// on its own line, then asserts:
+/// 1. body contains `csrf:<token>` with a non-empty token
+/// 2. response has a `set-cookie` header naming `rustango_csrf=`
+/// 3. when the cookie is sent on the next GET, the token in the
+///    rendered body matches the cookie value (no mint, reused)
+#[tokio::test]
+async fn list_get_stamps_csrf_token_into_context() {
+    let Some(pool) = pool().await else { return };
+    fresh_table(&pool).await;
+    let _ = seed_three(&pool).await;
+    // Custom template that prints the csrf_token directly so the
+    // assertion is on the rendered HTML byte stream — exactly what
+    // the user's browser would receive.
+    let mut t = Tera::default();
+    t.add_raw_template(
+        "tv_bulk_widget_list.html",
+        "csrf:{{ csrf_token }}\nrows={{ object_list | length }}",
+    )
+    .unwrap();
+    let lv = ListView::for_model(Widget::SCHEMA).bulk_actions(true);
+    let app = lv.router("/widgets", Arc::new(t), pool);
+
+    // First GET: no cookie sent → handler mints + sets a fresh
+    // token + Set-Cookie. Body and cookie value must agree.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/widgets")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let set_cookie = resp
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .map(|v| v.to_str().unwrap().to_owned());
+    let body = body_string(resp).await;
+
+    // (1) body has a real token
+    let token = body
+        .lines()
+        .find_map(|line| line.strip_prefix("csrf:"))
+        .map(str::to_owned)
+        .expect("csrf: line missing in rendered body");
+    assert!(
+        !token.is_empty(),
+        "csrf_token rendered empty — v0.30.17 fix regressed; got body: {body}"
+    );
+
+    // (2) response set the cookie
+    let sc = set_cookie.expect("Set-Cookie header missing on first GET");
+    assert!(sc.starts_with("rustango_csrf="), "got: {sc}");
+    let cookie_token = sc
+        .split_once('=')
+        .and_then(|(_, rest)| rest.split(';').next())
+        .unwrap_or_default();
+    assert_eq!(
+        token, cookie_token,
+        "rendered token must match Set-Cookie value"
+    );
+
+    // (3) second GET WITH the cookie → handler reuses, no mint,
+    //     same token in the body. (No Set-Cookie expected.)
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/widgets")
+                .header(axum::http::header::COOKIE, format!("rustango_csrf={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_string(resp).await;
+    let token2 = body
+        .lines()
+        .find_map(|line| line.strip_prefix("csrf:"))
+        .map(str::to_owned)
+        .unwrap_or_default();
+    assert_eq!(
+        token, token2,
+        "second GET should reuse the cookie's token, not mint a new one"
+    );
+}

@@ -2,6 +2,61 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.18] — regression-test gap closures for v0.30.11 + v0.30.17
+
+Live exercise + audit found the v0.30.17 fix shipped without a
+regression test (the old GET handlers had no test asserting they
+stamp `csrf_token` into the context — only the helper itself was
+covered). Same for v0.30.11's file sink: the builder had unit
+tests, but no test exercised the actual disk write through
+`tracing-appender`. Both gaps closed.
+
+### Added
+
+- **`tests/template_views_bulk_actions_live.rs::list_get_stamps_csrf_token_into_context`**
+  — regression guard for v0.30.17. Mounts a `ListView` with a
+  custom template that prints `csrf_token` directly, then asserts:
+  1. First GET (no cookie) → response body has a non-empty token
+     AND the response carries `Set-Cookie: rustango_csrf=…`
+  2. Body token matches the cookie value (single source of truth)
+  3. Second GET WITH the cookie → handler reuses, no Set-Cookie,
+     same token
+  Verified bidirectionally — commenting out the
+  `stamp_csrf` + `apply_csrf_cookie` lines in `handle_list` makes
+  this test fail with the exact "rendered empty" assertion.
+- **`tests/logging_file_sink_live.rs::with_file_actually_writes_to_disk`**
+  — first end-to-end test of the v0.30.11 file sink. Lives in
+  its own integration test file so the global
+  `tracing-subscriber` install doesn't conflict with sibling
+  tests (each `cargo test --test FILE` runs in a fresh process).
+  Installs the subscriber with `with_file(tmpdir, "app",
+  Daily).file_only()`, emits a tracing event with a unique
+  marker line, drops the WorkerGuard to flush, then asserts the
+  rolling file exists at `<tmpdir>/app.YYYY-MM-DD` and contains
+  the marker.
+
+### Tested-coverage status (this session)
+
+Honest accounting after the audit:
+
+- **17 features shipped** (v0.29.9 → v0.30.17), 1351 lib tests
+  pass.
+- **All 18 fixes / features verified live in tango**, either via
+  Playwright (HTML routes), curl (JSON routes), or as DB-state
+  assertions (manage verbs).
+- **3 real flaws found + fixed** during the live exercise
+  (with_welcome panic, ip="-", ListView CSRF stamp).
+- **Regression tests**: every v0.30.x fix that touched a code
+  path now has a test that fails when the fix is reverted.
+- **Tenant-side variants** of features (`tenant_action`,
+  `tenant_router` POST/PUT/DELETE) covered by sibling unit
+  tests + the static-pool live tests + production-path
+  verification through tango. Not duplicated as separate live
+  tests for tenant variants — same dispatcher, different
+  connection source.
+
+---
+
 ## [0.30.17] — `template_views::ListView` GET stamps CSRF token
 
 Third flaw uncovered during the tango playground exercise. v0.30.4
