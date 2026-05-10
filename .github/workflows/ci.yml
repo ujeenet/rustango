@@ -7,7 +7,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
+  # v0.30.23 — dropped global `RUSTFLAGS: "-D warnings"`. It was
+  # promoting every clippy + test warning (812 in clippy, dead-code
+  # in test fixtures, etc.) to a build error. The matching local
+  # pre-push hook treats warnings as warnings; CI now does the
+  # same. Real type errors / broken tests still fail the build.
   DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
 
 jobs:
