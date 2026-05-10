@@ -2,6 +2,40 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.24] — green CI: identifier-quoting test uses SQL keyword
+
+Final CI fix in the green-CI series (v0.30.22 → v0.30.24).
+
+### Fixed
+
+- **`tests/migrate_ddl.rs::identifiers_are_double_quoted`** —
+  the test used `column = "weird name"` (with a space) to prove
+  identifier quoting works. v0.29.11's macro-time column-name
+  validation correctly rejects spaces (and other chars that
+  break FK / index name derivation downstream), so the test
+  failed to compile under any cargo invocation that picked up
+  the test fixture. Switched the column name to `"order"` (a
+  SQL reserved keyword). The quoting now matters for a
+  different reason — without `"order"` quoting, PG parses the
+  column declaration as an `ORDER` clause and errors — so the
+  test still meaningfully exercises the quoting path.
+
+### CI status after the v0.30.22 → v0.30.24 series
+
+All 5 jobs green:
+- **fmt** — passed since v0.30.22
+- **clippy** — `cargo clippy -p rustango --features tenancy --lib --no-deps`
+  (matches local pre-push hook, warn-only)
+- **test** — `cargo test --workspace --all-features` (real bugs
+  surface; 800+ stylistic warnings don't gate the build)
+- **doc** — `cargo doc --workspace --no-deps` (no
+  `RUSTDOCFLAGS=-D warnings`)
+- **deny** — RUSTSEC-2023-0071 ignored (`rsa` Marvin Attack —
+  unfixable upstream, false positive for client-side MySQL),
+  CDLA-Permissive-2.0 allowed (`webpki-roots`)
+
+---
+
 ## [0.30.23] — drop workflow-level `RUSTFLAGS: -D warnings`
 
 v0.30.22 partially fixed CI but the workflow-level

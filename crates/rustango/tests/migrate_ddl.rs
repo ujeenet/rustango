@@ -235,6 +235,16 @@ fn create_table_if_not_exists_inserts_clause() {
 }
 
 // ---------------- identifier quoting ----------------
+//
+// Pre-v0.29.11 the test used `column = "weird name"` (with a
+// space) to prove identifier quoting works. v0.29.11's macro-time
+// column-name validation correctly rejects spaces (and other chars
+// that break FK / index name derivation downstream), so the test
+// now uses a SQL reserved keyword as the column name. The quoting
+// matters here for a different reason (without `"order"` quoting,
+// PG would parse the column declaration as an `ORDER` clause and
+// error), so the test still meaningfully exercises the quoting
+// path.
 
 #[derive(Model)]
 #[allow(dead_code)]
@@ -242,14 +252,14 @@ fn create_table_if_not_exists_inserts_clause() {
 pub struct Quoted {
     #[rustango(primary_key)]
     id: i64,
-    #[rustango(column = "weird name")]
-    weird: String,
+    #[rustango(column = "order")]
+    sql_keyword: String,
 }
 
 #[test]
 fn identifiers_are_double_quoted() {
     let sql = create_table_sql(Quoted::SCHEMA);
-    assert!(sql.contains(r#""weird name" TEXT NOT NULL"#), "{sql}");
+    assert!(sql.contains(r#""order" TEXT NOT NULL"#), "{sql}");
 }
 
 // ---------------- additional coverage ----------------
