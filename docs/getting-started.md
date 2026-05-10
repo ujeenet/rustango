@@ -305,7 +305,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = axum::Router::new()
         .merge(rustango::welcome::welcome_router())
-        .nest("/__admin", admin);
+        .nest("/admin", admin);
 
     println!("listening on http://0.0.0.0:8080");
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
@@ -320,7 +320,7 @@ Run it:
 cargo run
 ```
 
-Open <http://localhost:8080/__admin/>. You should see the admin home with a `posts` link. Click it — see your draft post in the list. Click it — edit form. Save. Audit-trail tab shows your write.
+Open <http://localhost:8080/admin/>. You should see the admin home with a `posts` link. Click it — see your draft post in the list. Click it — edit form. Save. Audit-trail tab shows your write.
 
 ---
 
@@ -371,7 +371,7 @@ Update `src/main.rs` to include it:
 ```rust
 let app = axum::Router::new()
     .merge(rustango::welcome::welcome_router())
-    .nest("/__admin", admin)
+    .nest("/admin", admin)
     .merge(myblog::urls::router(pool.clone()));
 ```
 
@@ -478,7 +478,7 @@ use std::time::Duration;
 
 let app = axum::Router::new()
     .merge(rustango::welcome::welcome_router())
-    .nest("/__admin", admin)
+    .nest("/admin", admin)
     .merge(myblog::urls::router(pool.clone()))
     .merge(health_router(pool.clone()))                        // /health, /ready
     .request_id(RequestIdLayer::default())

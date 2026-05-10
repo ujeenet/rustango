@@ -7,14 +7,18 @@ Bi-dialect ORM (Postgres / MySQL / **SQLite**) with auto-migrations, multi-tenan
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.30"
+rustango = "0.31"
 
 # SQLite — file-backed or in-memory, full bi-dialect ORM
-rustango = { version = "0.30", features = ["sqlite"] }
+rustango = { version = "0.31", features = ["sqlite"] }
 
 # Multiple backends in one binary
-rustango = { version = "0.30", features = ["postgres", "sqlite"] }
+rustango = { version = "0.31", features = ["postgres", "sqlite"] }
 ```
+
+### What's new in v0.31 (May 2026)
+
+**Tenant admin no longer catches every URL.** The tenancy `Builder` used to attach the admin as `Router::fallback_service(...)`, which silently overrode any `.fallback()` on the user's API router. That made a CMS-style public site at `/` impossible: every unmatched URL got the admin's `/{table}` catch-all and you'd see `{"error":"table not found"}` instead of your page. The framework now mounts the admin via **explicit routes** for `routes.admin_url/*` + the auth / static / brand surfaces. The user's `.fallback()` runs for everything else. See [CHANGELOG.md](CHANGELOG.md#0310--tenant-admin-no-longer-catches-every-url) for the migration table.
 
 ### What's new in v0.30 (May 2026)
 
@@ -1170,7 +1174,7 @@ let app = rustango::admin::Builder::new(pool.clone())
     .build();
 ```
 
-Lives at `/__admin/`. Per-model customization via `#[rustango(admin(...))]`:
+Lives at `/admin/` by default (configurable via `RouteConfig::admin_url`; legacy `RouteConfig::legacy()` keeps the v0.30-and-earlier `/__admin/` prefix). Per-model customization via `#[rustango(admin(...))]`:
 
 | Knob | Effect |
 |---|---|
@@ -1600,25 +1604,29 @@ let pools = TenantPools::new(registry).config(TenantPoolsConfig {
 CLI: `cargo run -- prewarm-pools` for an explicit ops trigger
 after credential rotation.
 
-### Configurable URL prefixes (v0.28.0)
+### Configurable URL prefixes
 
-Default tenant admin paths use `__` prefixes (`/__login`,
-`/__admin`, `/__audit`, …). Apps that have reserved their root
-namespace cleanly can flip to friendly URLs:
+Since v0.29 the default tenant admin paths are friendly:
+`/login`, `/admin`, `/audit`, `/change-password`, `/__static__`
+(static + brand still use the `__` prefix). Override via
+`RouteConfig`:
 
 ```rust
 use rustango::tenancy::RouteConfig;
 
 Builder::from_env().await?
-    .routes(RouteConfig::friendly())     // /login, /admin, /audit, …
+    // legacy preset keeps the pre-0.29 `/__login`, `/__admin`, …
+    .routes(RouteConfig::legacy())
     // or build custom: RouteConfig { login_url: "/sign-in".into(), .. Default::default() }
     .api(my_app::urls::router())
     .serve("0.0.0.0:8080")
     .await
 ```
 
-Defaults preserve pre-0.28 paths so upgrading is a no-op until
-apps explicitly call `.routes(...)`.
+**v0.31 — the admin is mounted via explicit routes** for `admin_url`
++ its variants plus the auth / static / brand surfaces. Anything
+not claimed by those falls through to the user's API router (a
+real `.fallback()` finally fires, where it didn't before).
 
 ### Operator-as-superuser tenant impersonation (v0.27.8+)
 
@@ -1626,7 +1634,7 @@ Operators logged into the apex console (`/orgs/<slug>/edit`)
 get an **"Open admin as superuser →"** button. Click → the
 operator console mints a tenant-bound, slug-pinned, signed
 cookie (1h TTL by default) and redirects to
-`<slug>.<apex>/__admin/`. The tenant admin recognizes the
+`<slug>.<apex>/admin/` (or whatever `RouteConfig::admin_url` says). The tenant admin recognizes the
 cookie as superuser; an unmissable banner reminds the operator
 they're impersonating; every audited write tags
 `source = operator:<id>:impersonating` so post-hoc forensics
@@ -2417,7 +2425,7 @@ The default features cover everything most apps need. Trim them when shipping a 
 
 ```toml
 # Default — everything except tenancy + cache-redis
-rustango = "0.30"
+rustango = "0.31"
 
 # Multi-tenant
 rustango = { version = "0.29", features = ["tenancy"] }

@@ -2,6 +2,46 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.31.0] — tenant admin no longer catches every URL
+
+The tenancy server's `Builder` used to attach `tenant_admin` as `Router::fallback_service(...)`, which silently overrode any `.fallback()` set inside the user's API router (axum semantics). That made `rustango-cms`-style projects impossible without mounting the public site at an explicit non-root prefix: every unmatched URL went to the admin's `/{table}` catch-all and returned `{"error":"table not found"}` instead of running the user's resolver.
+
+In 0.31 the framework mounts the tenant admin via **explicit routes** — `routes.admin_url` + variants for admin proper, plus the auth / static / brand surfaces that live at the top level. The fallback service is gone, so the user's `.fallback()` is finally respected for every URL the admin doesn't own.
+
+### Changed (potentially breaking — see "Migration" below)
+
+- **`crates/rustango/src/server/builder.rs`** — `tenant_app` is now built by a new `build_admin_routes(&tenant_admin, &routes)` helper that registers explicit routes for:
+  - `routes.admin_url` + `routes.admin_url/` + `routes.admin_url/{*rest}`
+  - `routes.login_url`, `routes.logout_url`, `routes.change_password_url`, `routes.impersonation_handoff_url`
+  - `routes.static_url/{*rest}`, `routes.brand_url/{*rest}`
+  - `/__end-impersonation` (hardcoded fallback inside `handle_request`)
+  - Legacy `/__admin*` mounts kept for back-compat with apps still on `RouteConfig::legacy()` or hard-coded links, except when `admin_url == "/__admin"` (collision).
+- `Router::fallback_service(tenant_admin)` is no longer called.
+
+### Migration
+
+| App shape | Behavior change |
+| --- | --- |
+| Custom routes + `.fallback()` (e.g. `rustango-cms`) | Your fallback now runs for unmatched URLs. If you'd worked around the bug with explicit wildcards, you can simplify. |
+| Just rustango admin, no custom routes | `/random-url` now returns `404` instead of the admin's `{"error":"table not found"}` JSON. |
+| Custom routes, no `.fallback()` | Same as above — `404` for unclaimed URLs. |
+| Hardcoded `/admin/*` (default `admin_url`) or `/__admin/*` (legacy) links | Unchanged. |
+| Apps that *intentionally* relied on the admin's catch-all for random URLs | Will break — set a custom `.fallback()` on your API router to keep the old behavior. |
+
+If you'd been mounting `rustango-cms`'s public router via `router_at("/p", tera)` to dodge the fallback-clobber, you can now use `router(tera)` at the site root.
+
+### Companion changes in `rustango-cms`
+
+Shipped alongside `0.31.0`:
+
+- Templates fixed for the new `Auto<T>` JSON serialization (`{{ x.id.Set }}` → `{{ x.id }}`).
+- Edit-form action URL fixed (now correctly posts to `/cms-admin/pages/{id}/edit`).
+- `slug` field's `required` attribute is conditional on `parent` so root pages can use an empty slug.
+- `AdminError::IntoResponse` walks `Error::source()` so Tera template failures surface the actual cause line.
+- `render(t, tera, page, url_prefix)` — new `url_prefix` parameter, injected into the Tera context so templates can build correct breadcrumb / sibling links.
+- New `router_at(prefix, tera)` for non-root mounting (still useful when the CMS lives at, say, `/blog/`).
+- `View live ↗` button on every published row of the CMS admin page list + on the edit form header.
+
 ## [0.30.24] — green CI: identifier-quoting test uses SQL keyword
 
 Final CI fix in the green-CI series (v0.30.22 → v0.30.24).

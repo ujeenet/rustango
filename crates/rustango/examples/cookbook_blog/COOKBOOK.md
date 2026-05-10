@@ -32,6 +32,7 @@ quotes from a real, compiling, test-covered file.
 12. [Bi-dialect + cross-cutting](#chapter-12--bi-dialect--cross-cutting)
 13. [SQLite backend (v0.27 / v0.28)](#chapter-13--sqlite-backend-v027--v028)
 14. [v0.30 cycle: do less work](#chapter-14--v030-cycle-do-less-work) — `inspectdb`, `wizard`, ListView bulk + fk_display, admin COUNT skip, settings-driven logging
+15. [v0.31 — tenant admin no longer catches every URL](#chapter-15--v031--tenant-admin-no-longer-catches-every-url)
 
 ---
 
@@ -957,7 +958,7 @@ rustango::server::Builder::new(api_router)
     .await?;
 ```
 
-Also exposes session TTLs (`tenant_session_ttl`, `operator_session_ttl`, `impersonation_ttl`) and the basic-auth realm string. The full URL builder `audit_full_url()` joins admin + audit prefixes for callers (`/admin/audit` for friendly, `/__admin/__audit` for default).
+Also exposes session TTLs (`tenant_session_ttl`, `operator_session_ttl`, `impersonation_ttl`) and the basic-auth realm string. The full URL builder `audit_full_url()` joins admin + audit prefixes for callers (`/admin/audit` for the v0.29+ friendly default, `/__admin/__audit` if you opt back into `RouteConfig::legacy()`).
 
 **Verified by**: `routes::tests::*` (4 unit tests covering defaults, friendly preset, joined audit URL, TTL defaults).
 
@@ -1030,8 +1031,8 @@ Plus a **Roles & permissions panel** rendered on the user detail page (`/{admin_
 cargo run -- create-user acme alice --password hunter2
 
 # Then visit the user detail page; the panel is automatically there.
-# Edit role memberships at /__admin/rustango_user_roles
-# Edit role-level grants at /__admin/rustango_role_permissions
+# Edit role memberships at /admin/rustango_user_roles
+# Edit role-level grants at /admin/rustango_role_permissions
 ```
 
 **Verified by**: `tests/admin_user_roles_panel_live.rs::user_detail_page_renders_roles_and_effective_perms` (provisions a user with one role granting two codenames, one direct grant, one explicit denial; asserts the panel renders the role + effective grants and that the denial suppresses the role-granted codename); plus `tenancy::permissions::admin_config_tests` (asserts every junction model carries `admin(...)` and stays in `ModelScope::Tenant`).
@@ -1215,8 +1216,8 @@ test comes to a real browser session without playwright in the loop.
   - migrate registry → create operator → create acme + globex →
     create alice/tenantpw on acme.
   - spawn `cookbook_blog` on `127.0.0.1:8867`.
-  - `POST /__login` as alice (acme tenant).
-  - `POST /__admin/cookbook_author` with `name=ada lovelace` etc.
+  - `POST /login` as alice (acme tenant).
+  - `POST /admin/cookbook_author` with `name=ada lovelace` etc.
   - `GET /api/authors` (acme) → returns `[{id:1, name:"ada lovelace"}]`.
   - `GET /api/authors` (globex) → returns `[]`.
   - `GET /api/authors` (apex `localhost`) → `404` (no tenant route).
@@ -1255,7 +1256,7 @@ Verified browser-side via playwright MCP:
   with username/password/Sign in. Logging in as `admin / letmein`
   lands on the operator console (sidebar nav: Home, Operators,
   Organizations).
-* §8.0 `http://acme.localhost:8765/__login` — tenant login form
+* §8.0 `http://acme.localhost:8765/login` — tenant login form
   renders titled "Sign in to **acme**". Logging in as `alice /
   tenantpw` lands on the tenant admin index showing every registered
   model split by app group: `apps` (the cookbook's blog/auth/etc.
@@ -2279,6 +2280,118 @@ wrote src/new_product_view_set.rs
 - `CountQuery.search` bug fix: pager total now matches visible
   rows when `?q=...` is set
   ([v0.30.1](../../../../CHANGELOG.md)).
+
+---
+
+## Chapter 15 — v0.31 — tenant admin no longer catches every URL
+
+The big architectural fix this cycle. Through v0.30 the tenancy
+[`server::Builder`](../../../crates/rustango/src/server/builder.rs)
+attached the tenant admin as `Router::fallback_service(...)` on the
+merged user router. Axum semantics: that **overrides** any
+`.fallback()` set inside the user's API router — so a
+CMS-style public site at `/` was impossible. Every unmatched URL
+got the admin's `/{table}` catch-all and returned
+`{"error":"table not found"}` instead of running the user's
+resolver.
+
+### What changed
+
+The framework now mounts the admin via **explicit routes** (see
+[`build_admin_routes`](../../../crates/rustango/src/server/builder.rs)).
+The fallback_service is gone. Routes claimed by the admin:
+
+- `routes.admin_url` + `routes.admin_url/` + `routes.admin_url/{*rest}` — admin proper
+- `routes.login_url`, `routes.logout_url`, `routes.change_password_url`, `routes.impersonation_handoff_url`
+- `routes.static_url/{*rest}`, `routes.brand_url/{*rest}`
+- `/__end-impersonation` (hardcoded fallback inside `handle_request`)
+- Legacy `/__admin*` mounts for back-compat with `RouteConfig::legacy()` apps
+
+Everything else falls through to the user's `.fallback()` (or 404
+if no fallback is set).
+
+### What this enables
+
+The headline use case is a CMS-style public site on the same
+tenant subdomain as the admin. The companion `rustango-cms` 0.1
+crate ships a working setup:
+
+```rust
+let mut tera = Tera::new(&templates_glob)?;
+rustango_cms::admin::register_templates(&mut tera)?;
+let tera = std::sync::Arc::new(tera);
+
+// CMS admin at /cms-admin/...; public pages at the site root.
+let api = rustango_cms::admin::router(tera.clone())
+    .merge(rustango_cms::router(tera));
+
+rustango::manage::Cli::new()
+    .tenancy()
+    .api(api)
+    .seed(|registry| async move {
+        rustango_cms::ensure_seeded(&registry).await?;
+        Ok(())
+    })
+    .run()
+    .await
+```
+
+After this:
+- `/` → CMS root page
+- `/<slug>` → CMS resolver looks up the page
+- `/admin/...` → tenant admin
+- `/cms-admin/pages` → CMS-aware admin (path/depth/sort_order
+  computed correctly, type whitelists enforced)
+- `/random-thing` → CMS resolver returns `Page not found: …`
+  (404, not the admin's `{"error":"table not found"}`)
+
+### Migration
+
+| App shape | Behavior change |
+| --- | --- |
+| Custom routes + `.fallback()` (CMS-style) | Fallback now runs for unmatched URLs. If you worked around the bug with explicit `/{*path}` wildcards, you can simplify. |
+| Just rustango admin, no custom routes | `/random-url` now returns `404` instead of admin's `{"error":"table not found"}` JSON. |
+| Custom routes, no `.fallback()` | Same as above — `404` for unclaimed URLs. |
+| Hardcoded `/admin/*` or `/__admin/*` links | Unchanged. |
+| Apps that *intentionally* relied on the admin catching random URLs | Will break — set a custom `.fallback()` on your API router to keep the old behavior. |
+
+### Companion fixes shipped in `rustango-cms` 0.1
+
+The `rustango-cms` admin was unusable against the v0.30
+serialization shape; v0.31's matching `rustango-cms` release
+fixes the template / handler bugs that surfaced building the
+end-to-end demo:
+
+- **Template `.Set` references** — `Auto<T>` now serializes as the
+  bare value (e.g. `1`), not enum-tagged `{"Set": 1}`. The
+  R-CMS admin templates were stuck on the old shape and 500'd
+  with `Variable t.id.Set not found in context`. Replaced with
+  `{{ x.id }}` everywhere.
+- **Edit-form action URL** — the form POSTed to
+  `/cms-admin/pages/{id}` but the actual route is
+  `/cms-admin/pages/{id}/edit`. Saving a page worked because
+  the redirect-chain mostly worked out; the underlying mismatch
+  was real.
+- **`slug` field `required` attribute** — root pages need an
+  empty slug (the resolver matches `WHERE slug = ''`) but the
+  form blocked empty submit. The `required` is now conditional
+  on `parent` so root creation works.
+- **`AdminError::IntoResponse`** walks `Error::source()` so Tera
+  errors surface the actual cause line instead of the generic
+  "Failed to render 'template.html'".
+- **`render(t, tera, page, url_prefix)`** — new `url_prefix`
+  parameter, injected as `{{ url_prefix }}` into the Tera
+  context so user templates can build breadcrumb / sibling
+  links without hardcoding the host's URL layout.
+- **`router_at(prefix, tera)`** — kept alongside `router(tera)`
+  for projects that want their CMS at a non-root prefix (e.g.
+  `/blog/` alongside other site content). Includes a permanent
+  308 redirect for `{prefix}/` → `{prefix}` to handle axum's
+  strict trailing-slash matching.
+- **"View live ↗" button** on every published row of the CMS
+  admin's page list, and on the edit form header. URLs are
+  pre-computed server-side via a single-pass `build_live_url_map`
+  walk in tree order.
 
 ---
 

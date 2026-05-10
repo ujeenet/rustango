@@ -381,39 +381,6 @@ impl Builder {
             .with_session(session_secret_for_tenant.clone())
             .build();
 
-        // Admin CRUD lives under `/__admin/*` registered as explicit
-        // routes so they take priority over user routes like `/post/{slug}`
-        // whose typed Path extractor would otherwise capture `/__admin/post`
-        // before the fallback. Session routes (`/__login`, `/__logout`,
-        // `/__static__`) remain as fallback-only paths.
-        //
-        // We pass the full Request (including the `/__admin` prefix in the
-        // URI) to the tenant admin; `handle_request` strips the prefix before
-        // dispatching to the inner admin router so that redirect `next=` params
-        // correctly reference `/__admin/...` paths.
-        // Build a fresh request (method + URI + headers only, no outer-router
-        // path-param extensions) before forwarding to the admin service.
-        // Without this, axum's path extractor sees params from the outer
-        // `/__admin/{*rest}` match stacked on top of the inner admin router's
-        // own params, producing "Wrong number of path arguments" errors.
-        let make_admin_handler = |svc: Router| {
-            move |req: axum::http::Request<axum::body::Body>| {
-                let svc = svc.clone();
-                async move {
-                    let (parts, body) = req.into_parts();
-                    let mut builder = axum::http::Request::builder()
-                        .method(&parts.method)
-                        .uri(&parts.uri);
-                    for (k, v) in &parts.headers {
-                        builder = builder.header(k, v);
-                    }
-                    let fresh = builder.body(body).expect("valid request");
-                    svc.oneshot(fresh)
-                        .await
-                        .unwrap_or_else(|_| unreachable!("Router is Infallible"))
-                }
-            }
-        };
         // Optionally merge health endpoints onto the user's API
         // router before we layer the admin fallback. Uses the
         // registry pool for the `/ready` SELECT 1 probe — that's
@@ -444,28 +411,26 @@ impl Builder {
             None
         };
 
+        // Build a Router that claims every path tenant_admin owns —
+        // admin proper at `routes.admin_url/*`, plus the auth-,
+        // static-, and brand-surface paths that live outside the
+        // admin tree. The legacy `/__admin*` paths are also kept
+        // for back-compat with apps still on `RouteConfig::legacy()`
+        // or hard-coded links.
+        //
+        // Crucially we do NOT attach `tenant_admin` as a fallback
+        // here. That used to mean "the admin owns every unmatched
+        // URL", which clobbered any `.fallback()` set inside the
+        // user's API router (axum semantics) — most visibly:
+        // `/` on a CMS tenant rendered the admin index instead of
+        // the public CMS home, and `/<slug>` rendered the admin's
+        // `/{table}` catch-all ("table not found"). With explicit
+        // routes, the user's API router fallback is free to take
+        // every URL the admin doesn't claim.
+        let admin_routes = build_admin_routes(&tenant_admin, &self.routes);
         let tenant_app = match api {
-            Some(router) => {
-                let h1 = make_admin_handler(tenant_admin.clone());
-                let h2 = make_admin_handler(tenant_admin.clone());
-                let h3 = make_admin_handler(tenant_admin.clone());
-                router
-                    .layer(Extension(ctx.clone()))
-                    .route("/__admin", axum::routing::any(h1))
-                    .route("/__admin/", axum::routing::any(h2))
-                    .route("/__admin/{*rest}", axum::routing::any(h3))
-                    .fallback_service(tenant_admin)
-            }
-            None => {
-                let h1 = make_admin_handler(tenant_admin.clone());
-                let h2 = make_admin_handler(tenant_admin.clone());
-                let h3 = make_admin_handler(tenant_admin.clone());
-                Router::new()
-                    .route("/__admin", axum::routing::any(h1))
-                    .route("/__admin/", axum::routing::any(h2))
-                    .route("/__admin/{*rest}", axum::routing::any(h3))
-                    .fallback_service(tenant_admin)
-            }
+            Some(router) => router.layer(Extension(ctx.clone())).merge(admin_routes),
+            None => admin_routes,
         };
 
         // `router_with_pools` (rather than `router`) so the operator
@@ -547,6 +512,78 @@ fn build_resolver(apex: &str) -> ChainResolver {
     ChainResolver::new()
         .push(SubdomainResolver::new(apex.to_owned()))
         .push(HeaderResolver::default())
+}
+
+/// Build the axum router that claims every URL the tenant admin
+/// is responsible for — admin proper under `routes.admin_url`, plus
+/// the auth/static/brand surface that has to live at the top level.
+///
+/// All routes forward to a wrapper around the same `tenant_admin`
+/// service. The service's `handle_request` does its own path-based
+/// dispatch (login form vs. admin index vs. brand static), so the
+/// outer axum router just needs to enumerate every path it should
+/// claim. Everything else falls through to the user's API router.
+fn build_admin_routes(tenant_admin: &Router, routes: &crate::tenancy::RouteConfig) -> Router {
+    use axum::routing::any;
+
+    // Each `.route` call consumes its handler — `make` returns a
+    // fresh closure-handler each time. The inner service is cheap
+    // to clone (just an Arc-of-router under the hood).
+    let make = || {
+        let svc = tenant_admin.clone();
+        move |req: axum::http::Request<axum::body::Body>| {
+            let svc = svc.clone();
+            async move {
+                let (parts, body) = req.into_parts();
+                let mut builder = axum::http::Request::builder()
+                    .method(&parts.method)
+                    .uri(&parts.uri);
+                for (k, v) in &parts.headers {
+                    builder = builder.header(k, v);
+                }
+                let fresh = builder.body(body).expect("valid request");
+                svc.clone()
+                    .oneshot(fresh)
+                    .await
+                    .unwrap_or_else(|_| unreachable!("Router is Infallible"))
+            }
+        }
+    };
+
+    let admin_slash = format!("{}/", routes.admin_url);
+    let admin_glob = format!("{}/{{*rest}}", routes.admin_url);
+    let static_glob = format!("{}/{{*rest}}", routes.static_url);
+    let brand_glob = format!("{}/{{*rest}}", routes.brand_url);
+
+    let mut r = Router::new()
+        // Admin proper.
+        .route(&routes.admin_url, any(make()))
+        .route(&admin_slash, any(make()))
+        .route(&admin_glob, any(make()))
+        // Auth / session surface (lives outside admin_url).
+        .route(&routes.login_url, any(make()))
+        .route(&routes.logout_url, any(make()))
+        .route(&routes.change_password_url, any(make()))
+        .route(&routes.impersonation_handoff_url, any(make()))
+        // Static + brand assets.
+        .route(&static_glob, any(make()))
+        .route(&brand_glob, any(make()))
+        // End-impersonation has a hard-coded fallback inside
+        // `handle_request` for direct API callers.
+        .route("/__end-impersonation", any(make()));
+
+    // Legacy `/__admin*` mounts kept for back-compat with apps still
+    // on `RouteConfig::legacy()` or hard-coded URLs. Skip when the
+    // configured admin_url IS `/__admin` (would collide with the
+    // routes above).
+    if routes.admin_url != "/__admin" {
+        r = r
+            .route("/__admin", any(make()))
+            .route("/__admin/", any(make()))
+            .route("/__admin/{*rest}", any(make()));
+    }
+
+    r
 }
 
 /// Whether `root` contains any `*.json` files at the top level. Used

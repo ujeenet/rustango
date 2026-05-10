@@ -1009,7 +1009,7 @@ INFO crate::tenancy::pools: tenant pool connected (database mode)
 
 ### Setup gotcha — macOS `.local` TLDs
 
-If you hit the tenant admin via `http://acme.local:8080/__admin/`
+If you hit the tenant admin via `http://acme.local:8080/admin/`
 on macOS and see a 5-second pause on every request: that's
 **Bonjour / mDNS**, not rustango. macOS's resolver treats `.local`
 specially and waits the full mDNS timeout before falling back to
