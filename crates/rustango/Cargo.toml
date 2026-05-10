@@ -33,6 +33,12 @@ postgres = ["sqlx/postgres"]
 # extra opt-ins.
 manage = ["dep:axum", "dep:tokio", "runtime"]
 
+# Test-only constructors for downstream live tests. Currently
+# unlocks `Tenant::for_test(org, conn)` so tenancy-aware crates
+# (rustango-cms, etc.) can build a Tenant without booting a full
+# axum server with TenantContext. v0.30.26+.
+test_utils = []
+
 # MySQL 8.4+ backend. Lands fully in rustango v0.23.0-batch2 (when the
 # `MySqlDialect` impl + DDL writer dispatch ship); the `mysql` feature
 # in v0.23.0-batch1 wires the sqlx side so apps can already opt-in.
@@ -287,7 +293,7 @@ runserver = ["dep:axum", "dep:tokio"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.30.25", path = "../rustango-macros" }
+rustango-macros = { version = "0.30.26", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono     = { workspace = true }

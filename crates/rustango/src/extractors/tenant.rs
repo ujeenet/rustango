@@ -60,6 +60,30 @@ impl Tenant {
     pub fn into_conn(self) -> TenantConn {
         self.conn
     }
+
+    /// **Test-only** — construct a `Tenant` directly from an `Org`
+    /// row + an already-acquired [`TenantConn`]. Bypasses the
+    /// extractor flow that production handlers use.
+    ///
+    /// Gated behind the `test_utils` feature so production builds
+    /// can't reach for it accidentally. The expected pattern in
+    /// downstream crates' live tests:
+    ///
+    /// ```ignore
+    /// let pools = TenantPools::new(registry_pool);
+    /// let conn  = pools.acquire(&org).await?;
+    /// let mut t = Tenant::for_test(org, conn);
+    /// my_function_under_test(&mut t).await?;
+    /// ```
+    ///
+    /// Going through `pools.acquire(&org)` ensures schema-mode
+    /// tenants get `SET search_path` applied on the connection
+    /// before any query — same ceremony the extractor runs.
+    #[cfg(any(test, feature = "test_utils"))]
+    #[must_use]
+    pub fn for_test(org: Org, conn: TenantConn) -> Self {
+        Self { org, conn }
+    }
 }
 
 /// Failure modes for the [`Tenant`] extractor.
