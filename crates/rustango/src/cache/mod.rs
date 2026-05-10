@@ -142,13 +142,30 @@ pub fn from_settings(s: &crate::config::CacheSettings) -> BoxedCache {
         Some("redis") => {
             #[cfg(feature = "cache-redis")]
             {
-                if let Some(url) = s.redis_url.as_deref().filter(|u| !u.is_empty()) {
-                    return Arc::new(redis_backend::RedisCache::new(url));
+                if s.redis_url.as_deref().is_some_and(|u| !u.is_empty()) {
+                    // `RedisCache::new` is async (it pings the
+                    // server eagerly to surface bad URLs at boot)
+                    // but `from_settings` is sync — we can't .await
+                    // here without changing the public API. Users
+                    // who want redis must construct it explicitly:
+                    //
+                    //     let cache = RedisCache::new(&url).await?;
+                    //     let boxed: BoxedCache = Arc::new(cache);
+                    //
+                    // We fall back to InMemoryCache + warn rather
+                    // than silently returning the wrong backend.
+                    tracing::warn!(
+                        target: "rustango::cache",
+                        "cache.backend = \"redis\" requires async construction; \
+                         build `RedisCache::new(url).await?` and pass the Arc \
+                         directly. Falling back to InMemoryCache."
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "rustango::cache",
+                        "cache.backend = \"redis\" but redis_url is unset; falling back to InMemoryCache",
+                    );
                 }
-                tracing::warn!(
-                    target: "rustango::cache",
-                    "cache.backend = \"redis\" but redis_url is unset; falling back to InMemoryCache",
-                );
             }
             #[cfg(not(feature = "cache-redis"))]
             {

@@ -2,6 +2,50 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.30.21] — `cache::from_settings` no longer breaks `cargo check --all-features`
+
+Pre-push hook caught it: `cargo check --workspace --all-features`
+errored with:
+
+```
+the trait `Cache` is not implemented for
+`impl Future<Output = Result<RedisCache, CacheError>>`
+required for the cast from
+`Arc<impl Future<...>>` to `Arc<dyn Cache>`
+```
+
+`RedisCache::new(url)` is `async` (pings the server eagerly to
+surface bad URLs at boot) but `from_settings` is sync — the
+inner `Arc::new(RedisCache::new(url))` was wrapping the Future,
+not the resolved RedisCache. Slipped past the default-feature
+build because `cache-redis` is opt-in.
+
+### Fixed
+
+- **Sync resolver no longer attempts async construction.** When
+  `cache.backend = "redis"` and `redis_url` is set under the
+  `cache-redis` feature, the resolver now logs a `tracing::warn!`
+  pointing at the correct shape and falls back to InMemoryCache:
+  > cache.backend = "redis" requires async construction; build
+  > `RedisCache::new(url).await?` and pass the Arc directly.
+  > Falling back to InMemoryCache.
+  Users who need redis construct it explicitly in main.rs and
+  pass the `Arc<RedisCache>` directly — no auto-wire from
+  settings.
+- `cargo check --workspace --all-features` is now clean (the
+  exact command the pre-push hook runs).
+
+### Why not just `block_on`?
+
+Tempting but wrong: `from_settings` is typically called from
+within a tokio runtime (during `Cli::new()...run()`). Calling
+`block_on` from inside the executor deadlocks. The async
+`from_settings_async` shape was considered but rejected — it
+splits the API for one backend's benefit. Explicit construction
+in main.rs is clearer.
+
+---
+
 ## [0.30.20] — README + cookbook bumped to v0.30 surface
 
 Doc-only release. Surfaced as a real gap when the user asked
