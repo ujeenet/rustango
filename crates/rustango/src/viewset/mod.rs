@@ -216,6 +216,7 @@ impl ViewSet {
     ///
     /// Internally stores `Arc<dyn Fn(&PgRow) -> Value>` so the
     /// ViewSet itself stays type-erased — non-breaking add-on.
+    #[cfg(feature = "serializer")]
     #[must_use]
     pub fn serializer<S>(mut self) -> Self
     where

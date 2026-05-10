@@ -704,7 +704,7 @@ async fn change_password_submit(
     let redir = |query: &str| -> Response<Body> {
         Redirect::to(&format!("/change-password?{query}")).into_response()
     };
-    let redir_err = |msg: &str| redir(&format!("error={}", urlencoding::encode(msg)));
+    let redir_err = |msg: &str| redir(&format!("error={}", crate::url_codec::url_encode(msg)));
 
     if form.current_password.is_empty() || form.new_password.is_empty() {
         return redir_err("All fields are required.");
