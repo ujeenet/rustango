@@ -39,8 +39,12 @@
 
 use crate::core::{Model, Op, SqlValue};
 use crate::query::QuerySet;
-use sqlx::postgres::{PgPool, PgRow};
 use sqlx::FromRow;
+// PG-typed surfaces below import these. Pulled in only when the
+// `postgres` feature is on; sqlite/mysql-only builds get just the
+// tri-dialect `get_pool` entry point further down.
+#[cfg(feature = "postgres")]
+use sqlx::postgres::{PgPool, PgRow};
 
 use super::ExecError;
 
@@ -151,6 +155,7 @@ impl<T, K: Clone + Into<SqlValue>> From<ForeignKey<T, K>> for SqlValue {
 
 /// `ForeignKey<T, K>` decodes from the underlying column type into
 /// the `Unloaded` variant. The lazy-load happens later via `.get()`.
+#[cfg(feature = "postgres")]
 impl<'r, T, K> sqlx::Decode<'r, sqlx::Postgres> for ForeignKey<T, K>
 where
     K: sqlx::Decode<'r, sqlx::Postgres>,
@@ -167,6 +172,7 @@ where
 /// `ForeignKey<T, K>` claims `K`'s Postgres type. The DDL writer
 /// emits whatever column type the FK field's declared type maps to,
 /// so this matches by construction.
+#[cfg(feature = "postgres")]
 impl<T, K> sqlx::Type<sqlx::Postgres> for ForeignKey<T, K>
 where
     K: sqlx::Type<sqlx::Postgres>,
@@ -240,6 +246,9 @@ where
     }
 }
 
+// ============================================================ PG-typed get / get_on
+
+#[cfg(feature = "postgres")]
 impl<T, K> ForeignKey<T, K>
 where
     T: Model + for<'r> FromRow<'r, PgRow> + Send + Unpin + crate::sql::LoadRelated,
@@ -247,6 +256,9 @@ where
 {
     /// Resolve the parent row and cache it on the field. Subsequent
     /// calls return the cached reference without hitting the DB.
+    ///
+    /// PG-typed shim — for the tri-dialect entry point see
+    /// [`Self::get_pool`].
     ///
     /// # Errors
     /// * [`ExecError::ForeignKeyTargetMissing`] — no row in the
@@ -264,6 +276,9 @@ where
     /// tenant-scoped lookups, where the calling connection has the
     /// `search_path` already set and a fresh checkout from `&PgPool`
     /// would land in the wrong schema.
+    ///
+    /// PG-only by design (`sqlx::Executor<Database = Postgres>`) —
+    /// schema-mode tenancy is a Postgres feature.
     ///
     /// # Errors
     /// As [`Self::get`].
@@ -285,6 +300,66 @@ where
             let value = rows.pop().ok_or_else(|| {
                 // Render the missing PK using its `Into<SqlValue>` shape
                 // so error messages stay readable for non-integer keys.
+                let sv: SqlValue = pk.clone().into();
+                ExecError::ForeignKeyTargetMissing {
+                    table: T::SCHEMA.table,
+                    pk: sv.to_display_string(),
+                }
+            })?;
+            *self = Self::Loaded {
+                pk,
+                value: Box::new(value),
+            };
+        }
+        match self {
+            Self::Loaded { value, .. } => Ok(value),
+            Self::Unloaded(_) => unreachable!("just transitioned to Loaded above"),
+        }
+    }
+}
+
+// ============================================================ tri-dialect get_pool
+
+/// Tri-dialect FK resolution: works against any backend the
+/// [`crate::sql::Pool`] enum carries. Bounds mirror
+/// [`crate::sql::FetcherPool`] — every `#[derive(Model)]` target
+/// satisfies them via the macro's per-backend `FromRow` + `LoadRelated`
+/// emissions. Use this in new framework code so sqlite/mysql apps
+/// can lazy-load FK targets without going through the PG-typed
+/// [`Self::get`].
+impl<T, K> ForeignKey<T, K>
+where
+    T: Model
+        + for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+    K: Clone + Into<SqlValue> + Send + Sync + 'static,
+{
+    /// Resolve the parent row and cache it on the field. Backend-
+    /// agnostic counterpart of [`Self::get`] — routes through
+    /// [`crate::sql::FetcherPool::fetch_pool`].
+    ///
+    /// # Errors
+    /// As [`Self::get`].
+    pub async fn get_pool(&mut self, pool: &crate::sql::Pool) -> Result<&T, ExecError> {
+        use crate::sql::FetcherPool as _;
+        if matches!(self, Self::Unloaded(_)) {
+            let pk = self.pk_ref().clone();
+            let pk_field = T::SCHEMA
+                .primary_key()
+                .ok_or(ExecError::MissingPrimaryKey {
+                    table: T::SCHEMA.table,
+                })?;
+            let mut rows: Vec<T> = QuerySet::<T>::new()
+                .filter(pk_field.column, Op::Eq, pk.clone())
+                .fetch_pool(pool)
+                .await?;
+            let value = rows.pop().ok_or_else(|| {
                 let sv: SqlValue = pk.clone().into();
                 ExecError::ForeignKeyTargetMissing {
                     table: T::SCHEMA.table,

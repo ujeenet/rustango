@@ -41,13 +41,14 @@ pub use executor::{
     select_rows_on, select_rows_pool, select_rows_pool_with_related, transaction, transaction_pool,
     update, update_on, update_pool, Counter, CounterPool, Deleter, ExplainFormat, ExplainOptions,
     Fetcher, FetcherPool, FkPkAccess, HasPkValue, InsertReturningPool, LoadRelated, MaybeMyFromRow,
-    MaybeMyLoadRelated, Page, PoolTx, Updater, UpdaterPool,
+    MaybeMyLoadRelated, MaybeSqliteFromRow, MaybeSqliteLoadRelated, Page, PoolTx, Updater,
+    UpdaterPool,
 };
 
 #[cfg(feature = "mysql")]
 pub use executor::LoadRelatedMy;
 #[cfg(feature = "sqlite")]
-pub use executor::{LoadRelatedSqlite, MaybeSqliteFromRow, MaybeSqliteLoadRelated};
+pub use executor::LoadRelatedSqlite;
 pub use foreign_key::ForeignKey;
 pub use m2m::M2MManager;
 #[cfg(feature = "mysql")]

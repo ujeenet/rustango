@@ -149,7 +149,11 @@ where
 }
 
 /// Decoded `Auto<T>` is always `Set` — the database always returns a
-/// concrete value when reading rows.
+/// concrete value when reading rows. Per-backend `sqlx::Decode` /
+/// `sqlx::Type` impls are required by sqlx's row-decode machinery
+/// (no Pool-enum equivalent exists at the trait level); parallel
+/// MySQL + SQLite impls below.
+#[cfg(feature = "postgres")]
 impl<'r, T> sqlx::Decode<'r, sqlx::Postgres> for Auto<T>
 where
     T: sqlx::Decode<'r, sqlx::Postgres>,
@@ -163,6 +167,7 @@ where
 
 /// `Auto<T>` carries the same Postgres type as `T`. (`BIGSERIAL` on the
 /// DDL side resolves to `BIGINT`; reading it as `i64` is correct.)
+#[cfg(feature = "postgres")]
 impl<T> sqlx::Type<sqlx::Postgres> for Auto<T>
 where
     T: sqlx::Type<sqlx::Postgres>,
