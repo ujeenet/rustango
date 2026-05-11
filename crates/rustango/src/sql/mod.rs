@@ -30,19 +30,25 @@ pub use backend::{
 pub use compiled::CompiledStatement;
 pub use dialect::Dialect;
 pub use error::{ExecError, SqlError};
+// Always-on: tri-dialect entry points + traits that don't pin on PG.
 pub use executor::{
-    annotate_count_children, annotate_count_children_on, bulk_insert, bulk_insert_on,
-    bulk_insert_pool, bulk_update, bulk_update_on, bulk_update_pool, count_rows, count_rows_on,
-    count_rows_pool, delete, delete_on, delete_pool, fetch_aggregate, fetch_aggregate_on,
-    fetch_aggregate_pool, fetch_paginated_pool, fetch_with_prefetch, fetch_with_prefetch_pool,
-    insert, insert_on, insert_pool, insert_returning, insert_returning_on, insert_returning_pool,
-    raw_execute, raw_execute_on, raw_execute_pool, raw_query, raw_query_on, raw_query_pool,
-    row_to_json, select_one_row, select_one_row_on, select_one_row_pool, select_rows,
-    select_rows_on, select_rows_pool, select_rows_pool_with_related, transaction, transaction_pool,
-    update, update_on, update_pool, Counter, CounterPool, Deleter, ExplainFormat, ExplainOptions,
-    Fetcher, FetcherPool, FkPkAccess, HasPkValue, InsertReturningPool, LoadRelated, MaybeMyFromRow,
-    MaybeMyLoadRelated, MaybeSqliteFromRow, MaybeSqliteLoadRelated, Page, PoolTx, Updater,
+    bulk_insert_pool, bulk_update_pool, count_rows_pool, delete_pool, fetch_aggregate_pool,
+    fetch_paginated_pool, fetch_with_prefetch_pool, insert_pool, insert_returning_pool,
+    raw_execute_pool, raw_query_pool, select_one_row_pool, select_rows_pool,
+    select_rows_pool_with_related, transaction_pool, update_pool, CounterPool, ExplainFormat,
+    ExplainOptions, FetcherPool, FkPkAccess, HasPkValue, InsertReturningPool, LoadRelated,
+    MaybeMyFromRow, MaybeMyLoadRelated, MaybeSqliteFromRow, MaybeSqliteLoadRelated, Page, PoolTx,
     UpdaterPool,
+};
+// PG-typed back-compat surface: only re-exported when `postgres` is on.
+#[cfg(feature = "postgres")]
+pub use executor::{
+    annotate_count_children, annotate_count_children_on, bulk_insert, bulk_insert_on, bulk_update,
+    bulk_update_on, count_rows, count_rows_on, delete, delete_on, fetch_aggregate,
+    fetch_aggregate_on, fetch_with_prefetch, insert, insert_on, insert_returning,
+    insert_returning_on, raw_execute, raw_execute_on, raw_query, raw_query_on, row_to_json,
+    select_one_row, select_one_row_on, select_rows, select_rows_on, transaction, update, update_on,
+    Counter, Deleter, Fetcher, Updater,
 };
 
 #[cfg(feature = "mysql")]

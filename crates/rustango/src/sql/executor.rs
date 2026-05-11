@@ -5,10 +5,16 @@ use crate::core::{
     SelectQuery, SqlValue, UpdateQuery,
 };
 use crate::query::{QuerySet, UpdateBuilder};
-use sqlx::postgres::{PgArguments, PgPool, PgRow};
 use sqlx::query::{Query, QueryAs};
 
-use super::{Dialect, ExecError, Postgres};
+// PG-typed helpers below import these. Sqlite/MySQL-only builds only
+// see the bi/tri-dialect `_pool` entry points from this module.
+#[cfg(feature = "postgres")]
+use sqlx::postgres::{PgArguments, PgPool, PgRow};
+
+#[cfg(feature = "postgres")]
+use super::Postgres;
+use super::{Dialect, ExecError};
 
 /// Hidden trait every `#[derive(Model)]` type implements via the
 /// macro — slice 9.0e's bridge between `fetch_with_prefetch` and
@@ -47,6 +53,7 @@ pub trait FkPkAccess {
 /// `fetch_on` is universally satisfied — users don't have to think
 /// about it.
 #[doc(hidden)]
+#[cfg(feature = "postgres")]
 pub trait LoadRelated {
     /// Stitch a `select_related`-loaded parent onto this instance's
     /// FK field. `field_name` is the FK field's Rust name (e.g.
@@ -66,10 +73,19 @@ pub trait LoadRelated {
     ) -> Result<bool, sqlx::Error>;
 }
 
+/// Always-on marker when `postgres` is off — the macro emits an
+/// empty impl unconditionally so generic bounds resolve.
+#[cfg(not(feature = "postgres"))]
+#[doc(hidden)]
+pub trait LoadRelated {}
+#[cfg(not(feature = "postgres"))]
+impl<T> LoadRelated for T {}
+
 /// Extension trait that drives a `QuerySet` to completion against a Postgres pool.
 ///
 /// Adds `.fetch(&pool)` to any `QuerySet<T>` whose `T` is `Model + FromRow`.
 /// Pulled in via `use rustango::sql::Fetcher;`.
+#[cfg(feature = "postgres")]
 pub trait Fetcher<T>
 where
     T: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
@@ -85,6 +101,7 @@ where
     ) -> impl std::future::Future<Output = Result<Vec<T>, ExecError>> + Send;
 }
 
+#[cfg(feature = "postgres")]
 impl<T> Fetcher<T> for QuerySet<T>
 where
     T: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
@@ -102,6 +119,7 @@ where
     }
 }
 
+#[cfg(feature = "postgres")]
 impl<T> QuerySet<T>
 where
     T: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
@@ -276,6 +294,7 @@ fn inject_total_count(sql: &str) -> String {
 ///
 /// # Errors
 /// Returns [`ExecError`] for validation, SQL-writing, or driver failures.
+#[cfg(feature = "postgres")]
 pub async fn insert(pool: &PgPool, query: &InsertQuery) -> Result<(), ExecError> {
     insert_on(pool, query).await
 }
@@ -288,6 +307,7 @@ pub async fn insert(pool: &PgPool, query: &InsertQuery) -> Result<(), ExecError>
 ///
 /// # Errors
 /// As [`insert`].
+#[cfg(feature = "postgres")]
 pub async fn insert_on<'c, E>(executor: E, query: &InsertQuery) -> Result<(), ExecError>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
@@ -315,6 +335,7 @@ where
 /// Returns [`ExecError::EmptyReturning`] if `query.returning` is empty
 /// (use [`insert`] for those); validation, SQL-writing, or driver
 /// failures otherwise.
+#[cfg(feature = "postgres")]
 pub async fn insert_returning(pool: &PgPool, query: &InsertQuery) -> Result<PgRow, ExecError> {
     insert_returning_on(pool, query).await
 }
@@ -323,6 +344,7 @@ pub async fn insert_returning(pool: &PgPool, query: &InsertQuery) -> Result<PgRo
 ///
 /// # Errors
 /// As [`insert_returning`].
+#[cfg(feature = "postgres")]
 pub async fn insert_returning_on<'c, E>(
     executor: E,
     query: &InsertQuery,
@@ -354,6 +376,7 @@ where
 ///
 /// # Errors
 /// Returns [`ExecError`] for validation, SQL-writing, or driver failures.
+#[cfg(feature = "postgres")]
 pub async fn bulk_insert(pool: &PgPool, query: &BulkInsertQuery) -> Result<Vec<PgRow>, ExecError> {
     bulk_insert_on(pool, query).await
 }
@@ -362,6 +385,7 @@ pub async fn bulk_insert(pool: &PgPool, query: &BulkInsertQuery) -> Result<Vec<P
 ///
 /// # Errors
 /// As [`bulk_insert`].
+#[cfg(feature = "postgres")]
 pub async fn bulk_insert_on<'c, E>(
     executor: E,
     query: &BulkInsertQuery,
@@ -390,6 +414,7 @@ where
 ///
 /// # Errors
 /// Returns [`ExecError`] for validation, SQL-writing, or driver failures.
+#[cfg(feature = "postgres")]
 pub async fn update(pool: &PgPool, query: &UpdateQuery) -> Result<u64, ExecError> {
     update_on(pool, query).await
 }
@@ -398,6 +423,7 @@ pub async fn update(pool: &PgPool, query: &UpdateQuery) -> Result<u64, ExecError
 ///
 /// # Errors
 /// As [`update`].
+#[cfg(feature = "postgres")]
 pub async fn update_on<'c, E>(executor: E, query: &UpdateQuery) -> Result<u64, ExecError>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
@@ -416,6 +442,7 @@ where
 ///
 /// # Errors
 /// Returns [`ExecError`] for SQL-writing or driver failures.
+#[cfg(feature = "postgres")]
 pub async fn delete(pool: &PgPool, query: &DeleteQuery) -> Result<u64, ExecError> {
     delete_on(pool, query).await
 }
@@ -424,6 +451,7 @@ pub async fn delete(pool: &PgPool, query: &DeleteQuery) -> Result<u64, ExecError
 ///
 /// # Errors
 /// As [`delete`].
+#[cfg(feature = "postgres")]
 pub async fn delete_on<'c, E>(executor: E, query: &DeleteQuery) -> Result<u64, ExecError>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
@@ -443,6 +471,7 @@ where
 ///
 /// # Errors
 /// Returns [`ExecError`] for SQL-writing or driver failures.
+#[cfg(feature = "postgres")]
 pub async fn select_rows(pool: &PgPool, query: &SelectQuery) -> Result<Vec<PgRow>, ExecError> {
     select_rows_on(pool, query).await
 }
@@ -460,6 +489,7 @@ pub async fn select_rows(pool: &PgPool, query: &SelectQuery) -> Result<Vec<PgRow
 /// row-to-T decoding lives on the Model derive's `from_row` path
 /// and is the right tool when you control the data shape.
 #[must_use]
+#[cfg(feature = "postgres")]
 pub fn row_to_json(
     row: &sqlx::postgres::PgRow,
     fields: &[&'static crate::core::FieldSchema],
@@ -526,6 +556,7 @@ pub fn row_to_json(
 ///
 /// # Errors
 /// As [`select_rows`].
+#[cfg(feature = "postgres")]
 pub async fn select_rows_on<'c, E>(
     executor: E,
     query: &SelectQuery,
@@ -546,6 +577,7 @@ where
 ///
 /// # Errors
 /// Returns [`ExecError`] for SQL-writing or driver failures.
+#[cfg(feature = "postgres")]
 pub async fn select_one_row(
     pool: &PgPool,
     query: &SelectQuery,
@@ -557,6 +589,7 @@ pub async fn select_one_row(
 ///
 /// # Errors
 /// As [`select_one_row`].
+#[cfg(feature = "postgres")]
 pub async fn select_one_row_on<'c, E>(
     executor: E,
     query: &SelectQuery,
@@ -576,6 +609,7 @@ where
 ///
 /// # Errors
 /// Returns [`ExecError`] for SQL-writing or driver failures.
+#[cfg(feature = "postgres")]
 pub async fn count_rows(pool: &PgPool, query: &CountQuery) -> Result<i64, ExecError> {
     count_rows_on(pool, query).await
 }
@@ -584,6 +618,7 @@ pub async fn count_rows(pool: &PgPool, query: &CountQuery) -> Result<i64, ExecEr
 ///
 /// # Errors
 /// As [`count_rows`].
+#[cfg(feature = "postgres")]
 pub async fn count_rows_on<'c, E>(executor: E, query: &CountQuery) -> Result<i64, ExecError>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
@@ -620,6 +655,7 @@ where
 ///
 /// # Errors
 /// SQL-writing or driver failures from the single SELECT.
+#[cfg(feature = "postgres")]
 pub async fn annotate_count_children<P>(
     parent_qs: crate::query::QuerySet<P>,
     child_table: &'static str,
@@ -641,6 +677,7 @@ where
 ///
 /// # Errors
 /// As [`annotate_count_children`].
+#[cfg(feature = "postgres")]
 pub async fn annotate_count_children_on<'c, P, E>(
     parent_qs: crate::query::QuerySet<P>,
     child_table: &'static str,
@@ -742,6 +779,7 @@ where
 ///
 /// # Errors
 /// Anything either of the underlying `fetch` calls returns.
+#[cfg(feature = "postgres")]
 pub async fn fetch_with_prefetch<P, C>(
     parent_qs: crate::query::QuerySet<P>,
     child_fk_column: &'static str,
@@ -850,6 +888,7 @@ pub trait HasPkValue {
 
 /// Extension trait that runs a `SELECT COUNT(*)` against the queryset's
 /// filters. Pulled in via `use rustango::sql::Counter;`.
+#[cfg(feature = "postgres")]
 pub trait Counter<T: Model + Send> {
     /// Count rows matching the queryset's filters.
     ///
@@ -861,12 +900,14 @@ pub trait Counter<T: Model + Send> {
     ) -> impl std::future::Future<Output = Result<i64, ExecError>> + Send;
 }
 
+#[cfg(feature = "postgres")]
 impl<T: Model + Send> Counter<T> for QuerySet<T> {
     async fn count(self, pool: &PgPool) -> Result<i64, ExecError> {
         self.count_on(pool).await
     }
 }
 
+#[cfg(feature = "postgres")]
 impl<T: Model + Send> QuerySet<T> {
     /// Like [`Counter::count`] but accepts any sqlx executor — for
     /// tenant-scoped counts against a connection that has the
@@ -1033,6 +1074,7 @@ impl ExplainOptions {
 /// Extension trait that drives a `QuerySet` to a bulk `DELETE`.
 ///
 /// Pulled in via `use rustango::sql::Deleter;`.
+#[cfg(feature = "postgres")]
 pub trait Deleter<T: Model + Send> {
     /// Delete every row matching the queryset's filters. Returns rows affected.
     ///
@@ -1044,6 +1086,7 @@ pub trait Deleter<T: Model + Send> {
     ) -> impl std::future::Future<Output = Result<u64, ExecError>> + Send;
 }
 
+#[cfg(feature = "postgres")]
 impl<T: Model + Send> Deleter<T> for QuerySet<T> {
     async fn delete(self, pool: &PgPool) -> Result<u64, ExecError> {
         let query = self.compile_delete()?;
@@ -1054,6 +1097,7 @@ impl<T: Model + Send> Deleter<T> for QuerySet<T> {
 /// Extension trait that drives an `UpdateBuilder` to a bulk `UPDATE`.
 ///
 /// Pulled in via `use rustango::sql::Updater;`.
+#[cfg(feature = "postgres")]
 pub trait Updater<T: Model + Send> {
     /// Compile and execute the update. Returns rows affected.
     ///
@@ -1065,6 +1109,7 @@ pub trait Updater<T: Model + Send> {
     ) -> impl std::future::Future<Output = Result<u64, ExecError>> + Send;
 }
 
+#[cfg(feature = "postgres")]
 impl<T: Model + Send> Updater<T> for UpdateBuilder<T> {
     async fn execute(self, pool: &PgPool) -> Result<u64, ExecError> {
         let query = self.compile()?;
@@ -1122,6 +1167,7 @@ macro_rules! bind_match {
     };
 }
 
+#[cfg(feature = "postgres")]
 fn bind_query_as<T>(
     q: QueryAs<'_, sqlx::Postgres, T, PgArguments>,
     value: SqlValue,
@@ -1129,6 +1175,7 @@ fn bind_query_as<T>(
     bind_match!(q, value)
 }
 
+#[cfg(feature = "postgres")]
 fn bind_query(
     q: Query<'_, sqlx::Postgres, PgArguments>,
     value: SqlValue,
@@ -1144,6 +1191,7 @@ fn bind_query(
 /// # Errors
 /// SQL-writing or driver failures, or [`SqlError::EmptyBulkInsert`] if
 /// `query.rows` is empty (the caller should short-circuit).
+#[cfg(feature = "postgres")]
 pub async fn bulk_update(pool: &PgPool, query: &BulkUpdateQuery) -> Result<u64, ExecError> {
     bulk_update_on(pool, query).await
 }
@@ -1152,6 +1200,7 @@ pub async fn bulk_update(pool: &PgPool, query: &BulkUpdateQuery) -> Result<u64, 
 ///
 /// # Errors
 /// As [`bulk_update`].
+#[cfg(feature = "postgres")]
 pub async fn bulk_update_on<'c, E>(executor: E, query: &BulkUpdateQuery) -> Result<u64, ExecError>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
@@ -1178,6 +1227,7 @@ where
 ///
 /// # Errors
 /// Driver / SQL failures.
+#[cfg(feature = "postgres")]
 pub async fn raw_query<T>(
     sql: &str,
     binds: Vec<SqlValue>,
@@ -1193,6 +1243,7 @@ where
 ///
 /// # Errors
 /// As [`raw_query`].
+#[cfg(feature = "postgres")]
 pub async fn raw_query_on<'c, T, E>(
     sql: &str,
     binds: Vec<SqlValue>,
@@ -1214,6 +1265,7 @@ where
 ///
 /// # Errors
 /// Driver / SQL failures.
+#[cfg(feature = "postgres")]
 pub async fn raw_execute(sql: &str, binds: Vec<SqlValue>, pool: &PgPool) -> Result<u64, ExecError> {
     raw_execute_on(sql, binds, pool).await
 }
@@ -1222,6 +1274,7 @@ pub async fn raw_execute(sql: &str, binds: Vec<SqlValue>, pool: &PgPool) -> Resu
 ///
 /// # Errors
 /// As [`raw_execute`].
+#[cfg(feature = "postgres")]
 pub async fn raw_execute_on<'c, E>(
     sql: &str,
     binds: Vec<SqlValue>,
@@ -1245,6 +1298,7 @@ where
 ///
 /// # Errors
 /// SQL-writing or driver failures.
+#[cfg(feature = "postgres")]
 pub async fn fetch_aggregate(
     query: &AggregateQuery,
     pool: &PgPool,
@@ -1256,6 +1310,7 @@ pub async fn fetch_aggregate(
 ///
 /// # Errors
 /// As [`fetch_aggregate`].
+#[cfg(feature = "postgres")]
 pub async fn fetch_aggregate_on<'c, E>(
     query: &AggregateQuery,
     executor: E,
@@ -1317,6 +1372,7 @@ where
 /// # Errors
 /// Returns the first `ExecError` produced by `f`, or a driver error if
 /// `BEGIN` / `COMMIT` / `ROLLBACK` fails.
+#[cfg(feature = "postgres")]
 pub async fn transaction<F, Fut, T>(pool: &PgPool, f: F) -> Result<T, ExecError>
 where
     F: FnOnce(&mut sqlx::PgConnection) -> Fut,
@@ -1850,6 +1906,25 @@ pub trait MaybeMyLoadRelated {}
 #[cfg(not(feature = "mysql"))]
 impl<T> MaybeMyLoadRelated for T {}
 
+// ---- v0.35 — Postgres parallel of the MySQL/SQLite marker traits ----
+//
+// Lets the tri-dialect `_pool` executor functions bound `T` with
+// `MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow` so the
+// signature is satisfiable in any feature configuration. When
+// `postgres` is on the trait requires `FromRow<PgRow>`; when off
+// it's a marker trait blanket-impl'd for every `T`, so the bound
+// trivially holds and the `Pool::Postgres` arm (also gated) never
+// instantiates.
+
+#[cfg(feature = "postgres")]
+pub trait MaybePgFromRow: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> {}
+#[cfg(feature = "postgres")]
+impl<T> MaybePgFromRow for T where T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> {}
+#[cfg(not(feature = "postgres"))]
+pub trait MaybePgFromRow {}
+#[cfg(not(feature = "postgres"))]
+impl<T> MaybePgFromRow for T {}
+
 // ---- v0.27 Phase 3 — SQLite parallels of the MySQL marker traits ----
 //
 // Same shape as `MaybeMyFromRow` / `LoadRelatedMy` /
@@ -1905,7 +1980,7 @@ impl<T> MaybeSqliteLoadRelated for T {}
 /// As [`select_rows`].
 pub async fn select_rows_pool<T>(pool: &Pool, query: &SelectQuery) -> Result<Vec<T>, ExecError>
 where
-    T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+    T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
@@ -1953,7 +2028,7 @@ pub async fn select_one_row_pool<T>(
     query: &SelectQuery,
 ) -> Result<Option<T>, ExecError>
 where
-    T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+    T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
@@ -2025,7 +2100,7 @@ pub async fn fetch_aggregate_pool<T>(
     query: &AggregateQuery,
 ) -> Result<Vec<T>, ExecError>
 where
-    T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+    T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
     let stmt = pool.dialect().compile_aggregate(query)?;
     match pool {
@@ -2080,7 +2155,7 @@ pub async fn raw_query_pool<T>(
     pool: &Pool,
 ) -> Result<Vec<T>, ExecError>
 where
-    T: for<'r> sqlx::FromRow<'r, PgRow> + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+    T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
     match pool {
         #[cfg(feature = "postgres")]
@@ -2172,12 +2247,7 @@ pub async fn fetch_paginated_pool<T>(
     pool: &Pool,
 ) -> Result<Page<T>, ExecError>
 where
-    T: Model
-        + for<'r> sqlx::FromRow<'r, PgRow>
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + Send
-        + Unpin,
+    T: Model + MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
     let select = qs.compile()?;
     let stmt = pool.dialect().compile_select(&select)?;
@@ -2269,7 +2339,7 @@ pub async fn fetch_with_prefetch_pool<P, C>(
 ) -> Result<Vec<(P, Vec<C>)>, ExecError>
 where
     P: Model
-        + for<'r> sqlx::FromRow<'r, PgRow>
+        + MaybePgFromRow
         + MaybeMyFromRow
         + MaybeSqliteFromRow
         + LoadRelated
@@ -2279,7 +2349,7 @@ where
         + Send
         + Unpin,
     C: Model
-        + for<'r> sqlx::FromRow<'r, PgRow>
+        + MaybePgFromRow
         + MaybeMyFromRow
         + MaybeSqliteFromRow
         + LoadRelated
@@ -2364,7 +2434,7 @@ pub async fn select_rows_pool_with_related<T>(
     query: &SelectQuery,
 ) -> Result<Vec<T>, ExecError>
 where
-    T: for<'r> sqlx::FromRow<'r, PgRow>
+    T: MaybePgFromRow
         + MaybeMyFromRow
         + MaybeSqliteFromRow
         + LoadRelated
@@ -2479,7 +2549,7 @@ where
 pub trait FetcherPool<T>
 where
     T: Model
-        + for<'r> sqlx::FromRow<'r, PgRow>
+        + MaybePgFromRow
         + MaybeMyFromRow
         + MaybeSqliteFromRow
         + LoadRelated
@@ -2503,7 +2573,7 @@ where
 impl<T> FetcherPool<T> for QuerySet<T>
 where
     T: Model
-        + for<'r> sqlx::FromRow<'r, PgRow>
+        + MaybePgFromRow
         + MaybeMyFromRow
         + MaybeSqliteFromRow
         + LoadRelated
