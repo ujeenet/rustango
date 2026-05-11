@@ -268,8 +268,11 @@ pub fn snapshot_changes(after: &[(&str, Value)]) -> Value {
 /// pair, newest first. Convenience for the admin's per-row audit
 /// trail panel.
 ///
+/// PG-typed back-compat; for non-PG use [`fetch_for_entity_pool`].
+///
 /// # Errors
 /// Driver / SQL failures.
+#[cfg(feature = "postgres")]
 pub async fn fetch_for_entity(
     pool: &PgPool,
     entity_table: &str,
@@ -305,6 +308,7 @@ pub struct AuditEntry {
     pub occurred_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[cfg(feature = "postgres")]
 impl AuditEntry {
     fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
@@ -353,8 +357,15 @@ CREATE INDEX IF NOT EXISTS "rustango_audit_log_occurred_idx"
 /// `cutoff_days = 0` clears the entire table (use with caution); a
 /// negative value is clamped to 0.
 ///
+/// **PG-only by SQL syntax**: uses `NOW() - ($1::int8 * INTERVAL '1
+/// day')` which is Postgres-specific (`INTERVAL` literal + cast
+/// syntax). The tri-dialect rewrite computes the cutoff timestamp
+/// Rust-side (chrono) and binds it — future work; until then, MySQL/
+/// SQLite apps roll their own retention DELETEs.
+///
 /// # Errors
 /// Driver / SQL failures from the DELETE.
+#[cfg(feature = "postgres")]
 pub async fn cleanup_older_than(pool: &PgPool, cutoff_days: i64) -> Result<u64, sqlx::Error> {
     let cutoff = cutoff_days.max(0);
     let result = sqlx::query(
@@ -382,8 +393,15 @@ pub async fn cleanup_older_than(pool: &PgPool, cutoff_days: i64) -> Result<u64, 
 /// `keep = 0` clears the entire table; negative values clamp to 0.
 /// Returns the number of rows removed.
 ///
+/// **PG-only by SQL syntax**: uses `ROW_NUMBER() OVER (PARTITION
+/// BY …)` which is supported on PG but not uniformly across MySQL
+/// (8.0+ only) and not on older SQLite. Future work could emit a
+/// per-dialect equivalent; until then, MySQL/SQLite apps implement
+/// retention themselves.
+///
 /// # Errors
 /// Driver / SQL failures from the DELETE.
+#[cfg(feature = "postgres")]
 pub async fn cleanup_keep_last_n(pool: &PgPool, keep: i64) -> Result<u64, sqlx::Error> {
     let keep = keep.max(0);
     let result = sqlx::query(
@@ -408,12 +426,15 @@ pub async fn cleanup_keep_last_n(pool: &PgPool, keep: i64) -> Result<u64, sqlx::
 /// Convenience for tests + ad-hoc setup: ensure the table exists in
 /// `pool`'s database / schema. No-op when already present.
 ///
+/// PG-typed back-compat; for non-PG use [`ensure_table_pool`].
+///
 /// Splits [`CREATE_TABLE_SQL`] on `;` because Postgres' simple-prepare
 /// path rejects multiple commands in one prepared statement; each
 /// `CREATE TABLE` / `CREATE INDEX` runs as its own round-trip.
 ///
 /// # Errors
 /// Driver / SQL failures from `CREATE TABLE IF NOT EXISTS`.
+#[cfg(feature = "postgres")]
 pub async fn ensure_table(pool: &PgPool) -> Result<(), sqlx::Error> {
     for stmt in CREATE_TABLE_SQL.split(';') {
         let trimmed = stmt.trim();
