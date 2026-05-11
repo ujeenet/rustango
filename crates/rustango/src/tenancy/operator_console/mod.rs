@@ -41,8 +41,11 @@
 pub(crate) mod session;
 
 use crate::core::Column as _;
-use crate::sql::sqlx::PgPool;
-use crate::sql::Fetcher;
+// v0.34 — operator console no longer imports `PgPool` directly.
+// ConsoleState.registry is `crate::sql::Pool` (the backend-erasing
+// enum); all internal queries route through `fetch_pool` /
+// `insert_pool` / `save_pool` / `update_pool`.
+use crate::sql::FetcherPool;
 use crate::storage::BoxedStorage;
 use axum::body::Body;
 use axum::extract::{Form, Multipart, Query, State};
@@ -68,7 +71,11 @@ const RUSTANGO_PNG: &[u8] = include_bytes!("../static/rustango.png");
 
 #[derive(Clone)]
 struct ConsoleState {
-    registry: PgPool,
+    /// Backend-erasing registry pool. PG / MySQL / SQLite all share
+    /// one operator-console code path — every query inside the
+    /// console routes through `_pool` ORM helpers (`fetch_pool` /
+    /// `insert_pool` / `save_pool`) which dispatch per-backend.
+    registry: crate::sql::Pool,
     /// Optional pool cache. When `Some`, the operator console exposes
     /// the `/orgs/{slug}/edit` mutation routes — needed because a
     /// `database_url` rotation must drop the cached `TenantPool` for
@@ -227,9 +234,9 @@ impl OpBrand {
 /// R2 / B2 / MinIO / a CDN-fronted bucket, use
 /// [`router_with_brand_storage`].
 #[must_use]
-pub fn router(registry: PgPool, secret: SessionSecret) -> Router {
+pub fn router(registry: impl Into<crate::sql::Pool>, secret: SessionSecret) -> Router {
     router_inner(
-        registry,
+        registry.into(),
         None,
         secret,
         branding::default_brand_storage(),
@@ -245,12 +252,12 @@ pub fn router(registry: PgPool, secret: SessionSecret) -> Router {
 /// stale connection URL.
 #[must_use]
 pub fn router_with_pools(
-    registry: PgPool,
+    registry: impl Into<crate::sql::Pool>,
     pools: Arc<TenantPools>,
     secret: SessionSecret,
 ) -> Router {
     router_inner(
-        registry,
+        registry.into(),
         Some(pools),
         secret,
         branding::default_brand_storage(),
@@ -281,7 +288,7 @@ pub fn router_with_pools(
 /// this variant.
 #[must_use]
 pub fn router_with_impersonation(
-    registry: PgPool,
+    registry: impl Into<crate::sql::Pool>,
     pools: Arc<TenantPools>,
     secret: SessionSecret,
     brand_storage: BoxedStorage,
@@ -289,7 +296,7 @@ pub fn router_with_impersonation(
     tenant_handoff_url: String,
 ) -> Router {
     router_inner(
-        registry,
+        registry.into(),
         Some(pools),
         secret,
         brand_storage,
@@ -312,13 +319,13 @@ pub fn router_with_impersonation(
 /// routes; `None` keeps the console read-only (matches `router`).
 #[must_use]
 pub fn router_with_brand_storage(
-    registry: PgPool,
+    registry: impl Into<crate::sql::Pool>,
     pools: Option<Arc<TenantPools>>,
     secret: SessionSecret,
     brand_storage: BoxedStorage,
 ) -> Router {
     router_inner(
-        registry,
+        registry.into(),
         pools,
         secret,
         brand_storage,
@@ -337,7 +344,7 @@ fn default_tenant_handoff_url() -> String {
 }
 
 fn router_inner(
-    registry: PgPool,
+    registry: crate::sql::Pool,
     pools: Option<Arc<TenantPools>>,
     secret: SessionSecret,
     brand_storage: BoxedStorage,
@@ -491,7 +498,7 @@ async fn require_session(
     };
     match auth::Operator::objects()
         .where_(auth::Operator::id.eq(payload.oid))
-        .fetch(&state.registry)
+        .fetch_pool(&state.registry)
         .await
     {
         Ok(rows) => {
@@ -607,7 +614,9 @@ async fn login_submit(
 ) -> Response<Body> {
     let next = sanitize_next(form.next.as_deref());
     let principal =
-        match auth::authenticate_operator(&state.registry, &form.username, &form.password).await {
+        match auth::authenticate_operator_pool(&state.registry, &form.username, &form.password)
+            .await
+        {
             Ok(Some(op)) => op,
             Ok(None) => {
                 return Redirect::to(&format!(
@@ -724,27 +733,30 @@ async fn change_password_submit(
         return redir_err("Session is missing an operator id; please log in again.");
     }
 
-    // Re-fetch the canonical hash. `op` from the extension is a
-    // snapshot taken in `require_session`; using the live registry
-    // value matches the tenant flow + protects against the rare
-    // race where a peer operator just rotated this account.
-    let stored: Option<String> = match crate::sql::sqlx::query_scalar(
-        "SELECT password_hash FROM rustango_operators WHERE id = $1",
-    )
-    .bind(op_id)
-    .fetch_optional(&state.registry)
-    .await
+    // Re-fetch the canonical Operator row via the ORM so the lookup
+    // and the subsequent password rotate are bi-dialect. `op` from
+    // the extension is a snapshot taken in `require_session`; using
+    // the live registry row matches the tenant flow + protects
+    // against the rare race where a peer operator just rotated this
+    // account.
+    let mut op_row: auth::Operator = match auth::Operator::objects()
+        .where_(auth::Operator::id.eq(op_id))
+        .fetch_pool(&state.registry)
+        .await
     {
-        Ok(v) => v,
+        Ok(rows) => match rows.into_iter().next() {
+            Some(r) => r,
+            None => {
+                return redir_err("Your account no longer exists; please log in again.");
+            }
+        },
         Err(e) => {
             tracing::warn!(target: "crate::tenancy::operator_console", error = %e, "change-password lookup");
             return (StatusCode::INTERNAL_SERVER_ERROR, "lookup failed").into_response();
         }
     };
-    let Some(stored_hash) = stored else {
-        return redir_err("Your account no longer exists; please log in again.");
-    };
-    let ok = super::password::verify(&form.current_password, &stored_hash).unwrap_or(false);
+    let ok =
+        super::password::verify(&form.current_password, &op_row.password_hash).unwrap_or(false);
     if !ok {
         return redir_err("Current password did not match.");
     }
@@ -752,15 +764,9 @@ async fn change_password_submit(
         Ok(h) => h,
         Err(e) => return redir_err(&format!("hash failed: {e}")),
     };
-    if let Err(e) = crate::sql::sqlx::query(
-        "UPDATE rustango_operators \
-         SET password_hash = $1, password_changed_at = NOW() WHERE id = $2",
-    )
-    .bind(&new_hash)
-    .bind(op_id)
-    .execute(&state.registry)
-    .await
-    {
+    op_row.password_hash = new_hash;
+    op_row.password_changed_at = Some(chrono::Utc::now());
+    if let Err(e) = op_row.save_pool(&state.registry).await {
         tracing::warn!(target: "crate::tenancy::operator_console", error = %e, "change-password update");
         return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
     }
@@ -787,10 +793,11 @@ async fn operators_list(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
 ) -> Response<Body> {
-    let rows: Vec<auth::Operator> = match auth::Operator::objects().fetch(&state.registry).await {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
-    };
+    let rows: Vec<auth::Operator> =
+        match auth::Operator::objects().fetch_pool(&state.registry).await {
+            Ok(r) => r,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+        };
     let view: Vec<_> = rows
         .into_iter()
         .map(|o| {
@@ -820,7 +827,7 @@ async fn orgs_list(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
 ) -> Response<Body> {
-    let rows: Vec<super::Org> = match super::Org::objects().fetch(&state.registry).await {
+    let rows: Vec<super::Org> = match super::Org::objects().fetch_pool(&state.registry).await {
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
     };
@@ -910,25 +917,23 @@ async fn org_edit_form(
 ) -> Response<Body> {
     use crate::admin::render;
     use crate::core::Model as _;
-    use crate::sql::sqlx::Row;
 
-    // Fetch the row via the same select_one_row admin uses, so the
-    // `render_value_for_input` calls below see the same column
-    // shapes as the per-app admin's edit form would.
-    let row = match crate::sql::sqlx::query(&format!(
-        r#"SELECT * FROM "{}" WHERE "slug" = $1"#,
-        super::Org::SCHEMA.table
-    ))
-    .bind(&slug)
-    .fetch_optional(&state.registry)
-    .await
+    // Fetch via the ORM (bi-dialect) instead of `SELECT *` + PgRow.
+    let rows: Vec<super::Org> = match super::Org::objects()
+        .where_(super::Org::slug.eq(slug.clone()))
+        .fetch_pool(&state.registry)
+        .await
     {
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
     };
-    let Some(row) = row else {
+    let Some(org_row) = rows.into_iter().next() else {
         return (StatusCode::NOT_FOUND, format!("org `{slug}` not found")).into_response();
     };
+    // Serialize once to a JSON object so the per-field renderer can
+    // read each column by name without us hand-rolling a per-field
+    // match. Backend-agnostic — no PgRow.
+    let row_json = serde_json::to_value(&org_row).unwrap_or_else(|_| serde_json::json!({}));
 
     // Build per-field render contexts. Iterating `Org::SCHEMA.fields`
     // means new columns added to Org show up automatically — the
@@ -936,7 +941,7 @@ async fn org_edit_form(
     let mut editable_rows: Vec<serde_json::Value> = Vec::new();
     let mut locked_rows: Vec<serde_json::Value> = Vec::new();
     for field in super::Org::SCHEMA.scalar_fields() {
-        let prefill = render::render_value_for_input(&row, field);
+        let prefill = render::render_value_for_input_json(&row_json, field);
         if LOCKED_ORG_FIELDS.contains(&field.name) {
             locked_rows.push(serde_json::json!({
                 "name": field.name,
@@ -972,10 +977,9 @@ async fn org_edit_form(
         }));
     }
 
-    // Pull current logo / favicon paths off the row so the template
-    // can render a small preview next to the upload control.
-    let logo_path: Option<String> = row.try_get("logo_path").ok().flatten();
-    let favicon_path: Option<String> = row.try_get("favicon_path").ok().flatten();
+    // Pull current logo / favicon paths off the org row.
+    let logo_path: Option<String> = org_row.logo_path.clone();
+    let favicon_path: Option<String> = org_row.favicon_path.clone();
     let logo_url = branding::brand_asset_url(&slug, logo_path.as_deref(), &state.brand_storage);
     let favicon_url =
         branding::brand_asset_url(&slug, favicon_path.as_deref(), &state.brand_storage);
@@ -1059,18 +1063,17 @@ async fn org_edit_submit(
     }
 
     // Fetch existing for change detection (database_url rotation).
-    let existing_database_url = match crate::sql::sqlx::query_scalar::<_, Option<String>>(
-        r#"SELECT "database_url" FROM "rustango_orgs" WHERE "slug" = $1"#,
-    )
-    .bind(&slug)
-    .fetch_optional(&state.registry)
-    .await
+    // ORM path so registry-backend stays plug-and-play.
+    let existing_orgs: Vec<super::Org> = match super::Org::objects()
+        .where_(super::Org::slug.eq(slug.clone()))
+        .fetch_pool(&state.registry)
+        .await
     {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            return (StatusCode::NOT_FOUND, format!("org `{slug}` not found")).into_response()
-        }
+        Ok(rows) => rows,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    let Some(existing_org) = existing_orgs.into_iter().next() else {
+        return (StatusCode::NOT_FOUND, format!("org `{slug}` not found")).into_response();
     };
     let new_database_url = collected.iter().find_map(|(c, v)| {
         if *c == DATABASE_URL_FIELD {
@@ -1084,25 +1087,30 @@ async fn org_edit_submit(
     });
     let database_url_changed = new_database_url
         .as_deref()
-        .is_some_and(|new| existing_database_url.as_deref() != Some(new));
+        .is_some_and(|new| existing_org.database_url.as_deref() != Some(new));
 
-    // Build `UPDATE … SET col1 = $1, col2 = $2, … WHERE slug = $N`.
-    use std::fmt::Write as _;
-    let mut sql = format!(r#"UPDATE "{}" SET "#, super::Org::SCHEMA.table);
-    for (i, (col, _)) in collected.iter().enumerate() {
-        if i > 0 {
-            sql.push_str(", ");
-        }
-        let _ = write!(sql, r#""{col}" = ${}"#, i + 1);
-    }
-    let _ = write!(sql, r#" WHERE "slug" = ${}"#, collected.len() + 1);
-
-    let mut q = crate::sql::sqlx::query(&sql);
-    for (_, value) in &collected {
-        q = bind_sql_value(q, value);
-    }
-    q = q.bind(&slug);
-    if let Err(e) = q.execute(&state.registry).await {
+    // Build the UPDATE through the ORM's `UpdateQuery` IR + run it
+    // via `update_pool` so the SQL gets compiled with the right
+    // dialect (PG `$N` / MySQL `?` / SQLite `?`) + identifier
+    // quoting. Replaces the prior hand-rolled `UPDATE "…" SET … = $N
+    // WHERE …` string which was PG-only.
+    let assignments: Vec<crate::core::Assignment> = collected
+        .iter()
+        .map(|(col, val)| crate::core::Assignment {
+            column: *col,
+            value: val.clone(),
+        })
+        .collect();
+    let update_q = crate::core::UpdateQuery {
+        model: super::Org::SCHEMA,
+        set: assignments,
+        where_clause: crate::core::WhereExpr::and_predicates(vec![crate::core::Filter {
+            column: "slug",
+            op: crate::core::Op::Eq,
+            value: crate::core::SqlValue::String(slug.clone()),
+        }]),
+    };
+    if let Err(e) = crate::sql::update_pool(&state.registry, &update_q).await {
         return redirect_with_error(&slug, &format!("update failed: {e}"));
     }
 
@@ -1170,7 +1178,7 @@ fn redirect_with_error(slug: &str, msg: &str) -> Response<Body> {
 /// `operator:1:branding`). Lets post-hoc forensics filter
 /// operator activity from tenant-user activity.
 async fn emit_op_audit(
-    registry: &crate::sql::sqlx::PgPool,
+    registry: &crate::sql::Pool,
     slug: &str,
     operator_id: i64,
     verb: &str,
@@ -1185,19 +1193,14 @@ async fn emit_op_audit(
     for (k, v) in extra {
         changes.insert(k, v);
     }
-    let result = crate::sql::sqlx::query(
-        r#"INSERT INTO "rustango_audit_log"
-            ("entity_table", "entity_pk", "operation", "source", "changes")
-           VALUES ('rustango_orgs', $1, 'action', $2, $3)"#,
-    )
-    .bind(slug)
-    .bind(format!("operator:{operator_id}:{verb}"))
-    .bind(crate::sql::sqlx::types::Json(serde_json::Value::Object(
-        changes,
-    )))
-    .execute(registry)
-    .await;
-    if let Err(e) = result {
+    let entry = crate::audit::PendingEntry {
+        entity_table: "rustango_orgs",
+        entity_pk: slug.to_owned(),
+        operation: crate::audit::AuditOp::Action,
+        source: crate::audit::AuditSource::Custom(format!("operator:{operator_id}:{verb}")),
+        changes: serde_json::Value::Object(changes),
+    };
+    if let Err(e) = crate::audit::emit_one_pool(registry, &entry).await {
         tracing::warn!(
             target: "crate::tenancy::operator_console",
             error = %e,
@@ -1209,39 +1212,11 @@ async fn emit_op_audit(
     }
 }
 
-/// Bind one `SqlValue` onto a Postgres `sqlx::Query`. Mirrors the
-/// admin's `update_submit` bind path. Kept inline here so the
-/// operator console doesn't reach across module boundaries for
-/// admin-internal helpers.
-fn bind_sql_value<'a>(
-    q: crate::sql::sqlx::query::Query<
-        'a,
-        crate::sql::sqlx::Postgres,
-        crate::sql::sqlx::postgres::PgArguments,
-    >,
-    v: &crate::core::SqlValue,
-) -> crate::sql::sqlx::query::Query<
-    'a,
-    crate::sql::sqlx::Postgres,
-    crate::sql::sqlx::postgres::PgArguments,
-> {
-    use crate::core::SqlValue;
-    match v {
-        SqlValue::Null => q.bind(None::<i64>),
-        SqlValue::I16(v) => q.bind(*v),
-        SqlValue::I32(v) => q.bind(*v),
-        SqlValue::I64(v) => q.bind(*v),
-        SqlValue::F32(v) => q.bind(*v),
-        SqlValue::F64(v) => q.bind(*v),
-        SqlValue::Bool(v) => q.bind(*v),
-        SqlValue::String(v) => q.bind(v.clone()),
-        SqlValue::DateTime(v) => q.bind(*v),
-        SqlValue::Date(v) => q.bind(*v),
-        SqlValue::Uuid(v) => q.bind(*v),
-        SqlValue::Json(v) => q.bind(crate::sql::sqlx::types::Json(v.clone())),
-        SqlValue::List(_) => panic!("List not expected in op_orgs UPDATE"),
-    }
-}
+// v0.34 — `bind_sql_value` was used by the old hand-rolled UPDATE
+// path. The dynamic UPDATE now goes through
+// `crate::sql::update_pool(&Pool, &UpdateQuery)` which compiles
+// per-dialect SQL + binds via the ORM's internal `bind_query`. The
+// hand-rolled helper is dead code; left removed.
 
 // ----------------------------- /orgs/{slug}/edit/branding (multipart)
 //
@@ -1308,23 +1283,30 @@ async fn org_edit_branding(
     if updates.is_empty() {
         return redirect_with_error(&slug, "no file chosen");
     }
-    // Apply all updates in one statement.
+    // Apply all updates via the ORM's `UpdateQuery` so the SQL is
+    // compiled with the right dialect (PG `$N` vs MySQL/SQLite `?`)
+    // and identifier quoting per backend.
     use crate::core::Model as _;
-    use std::fmt::Write as _;
-    let mut sql = format!(r#"UPDATE "{}" SET "#, super::Org::SCHEMA.table);
-    for (i, (col, _)) in updates.iter().enumerate() {
-        if i > 0 {
-            sql.push_str(", ");
-        }
-        let _ = write!(sql, r#""{col}" = ${}"#, i + 1);
-    }
-    let _ = write!(sql, r#" WHERE "slug" = ${}"#, updates.len() + 1);
-    let mut q = crate::sql::sqlx::query(&sql);
-    for (_, v) in &updates {
-        q = q.bind(v.clone());
-    }
-    q = q.bind(&slug);
-    if let Err(e) = q.execute(&state.registry).await {
+    let assignments: Vec<crate::core::Assignment> = updates
+        .iter()
+        .map(|(col, v)| crate::core::Assignment {
+            column: *col,
+            value: v
+                .as_ref()
+                .map(|s| crate::core::SqlValue::String(s.clone()))
+                .unwrap_or(crate::core::SqlValue::Null),
+        })
+        .collect();
+    let update_q = crate::core::UpdateQuery {
+        model: super::Org::SCHEMA,
+        set: assignments,
+        where_clause: crate::core::WhereExpr::and_predicates(vec![crate::core::Filter {
+            column: "slug",
+            op: crate::core::Op::Eq,
+            value: crate::core::SqlValue::String(slug.clone()),
+        }]),
+    };
+    if let Err(e) = crate::sql::update_pool(&state.registry, &update_q).await {
         return redirect_with_error(&slug, &format!("update failed: {e}"));
     }
 
@@ -1467,7 +1449,7 @@ async fn org_impersonate(
     // correct context.
     let orgs: Vec<super::Org> = match super::Org::objects()
         .where_(super::Org::slug.eq(slug.clone()))
-        .fetch(&state.registry)
+        .fetch_pool(&state.registry)
         .await
     {
         Ok(rows) => rows,

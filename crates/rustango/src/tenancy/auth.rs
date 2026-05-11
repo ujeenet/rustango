@@ -41,7 +41,7 @@
 
 use crate::core::Column as _;
 use crate::sql::sqlx::{PgConnection, PgPool};
-use crate::sql::{Auto, Fetcher};
+use crate::sql::Auto;
 use crate::Model;
 use base64::Engine;
 
@@ -134,15 +134,33 @@ pub async fn authenticate_operator(
     username: &str,
     password: &str,
 ) -> Result<Option<Operator>, TenancyError> {
+    authenticate_operator_pool(
+        &crate::sql::Pool::Postgres(registry.clone()),
+        username,
+        password,
+    )
+    .await
+}
+
+/// Backend-agnostic counterpart of [`authenticate_operator`]. Routes
+/// the Operator lookup through [`crate::sql::FetcherPool`] so the same
+/// auth path works against `Pool::Postgres` / `Pool::Mysql` /
+/// `Pool::Sqlite`. Preferred for new code; the PG-typed wrapper above
+/// keeps existing callers compiling.
+///
+/// # Errors
+/// As [`authenticate_operator`].
+pub async fn authenticate_operator_pool(
+    registry: &crate::sql::Pool,
+    username: &str,
+    password: &str,
+) -> Result<Option<Operator>, TenancyError> {
+    use crate::sql::FetcherPool as _;
     let rows: Vec<Operator> = Operator::objects()
         .where_(Operator::username.eq(username.to_owned()))
-        .fetch(registry)
+        .fetch_pool(registry)
         .await?;
     let Some(op) = rows.into_iter().next() else {
-        // Run a dummy verify against a known-good hash to keep
-        // timing roughly even with the success path. Skipped here
-        // for simplicity — the registry pool is presumed not to be
-        // exposed to high-frequency probing in slice 6.
         return Ok(None);
     };
     if !op.active {

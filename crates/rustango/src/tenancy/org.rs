@@ -41,7 +41,7 @@ use crate::Model;
 /// linking `rustango-tenancy` automatically picks up the table when
 /// `migrate::apply_all` walks the registry — or via
 /// `make_migrations` against the registry DB.
-#[derive(Model, Debug, Clone)]
+#[derive(Model, Debug, Clone, serde::Serialize)]
 #[rustango(table = "rustango_orgs", display = "slug", scope = "registry")]
 #[allow(dead_code)] // Slices 2+ wire these fields into resolvers / pools / migrations.
 pub struct Org {

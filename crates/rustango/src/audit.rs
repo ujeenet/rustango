@@ -124,6 +124,12 @@ pub enum AuditOp {
     Delete,
     SoftDelete,
     Restore,
+    /// Non-CRUD operator-side action (e.g. impersonation start /
+    /// end, org config edit, branding upload). Used by the operator
+    /// console's [`crate::tenancy::operator_console`] audit writes.
+    /// (v0.34 — replaces hand-rolled `INSERT INTO rustango_audit_log
+    /// … VALUES ('action', …)` SQL.)
+    Action,
 }
 
 impl AuditOp {
@@ -135,6 +141,7 @@ impl AuditOp {
             Self::Delete => "delete",
             Self::SoftDelete => "soft_delete",
             Self::Restore => "restore",
+            Self::Action => "action",
         }
     }
 }

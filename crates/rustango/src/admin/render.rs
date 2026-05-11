@@ -216,6 +216,55 @@ pub(crate) fn coerce_form_to_json(field: &FieldSchema, raw: &str) -> serde_json:
     }
 }
 
+/// Backend-agnostic counterpart of [`render_value_for_input`]. Takes
+/// a `serde_json::Value` instead of a `PgRow` — call sites that fetch
+/// rows via the ORM (`Model::objects().fetch_pool` then
+/// `serde_json::to_value(&row)`) can render form inputs without
+/// pinning the registry to Postgres. Used by the v0.34 operator
+/// console.
+pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &FieldSchema) -> String {
+    let v = row.get(field.column).or_else(|| row.get(field.name));
+    let Some(v) = v else { return String::new() };
+    if v.is_null() {
+        return String::new();
+    }
+    match field.ty {
+        FieldType::I16 | FieldType::I32 | FieldType::I64 => v
+            .as_i64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| v.as_str().unwrap_or("").to_owned()),
+        FieldType::F32 | FieldType::F64 => v
+            .as_f64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| v.as_str().unwrap_or("").to_owned()),
+        FieldType::Bool => v
+            .as_bool()
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| v.as_str().unwrap_or("").to_owned()),
+        FieldType::String | FieldType::Uuid => v.as_str().unwrap_or("").to_owned(),
+        FieldType::Date => v.as_str().unwrap_or("").to_owned(),
+        FieldType::DateTime => {
+            // Truncate to `YYYY-MM-DDTHH:MM:SS` (no fractional / TZ)
+            // for the datetime-local input. Accept both with-T and
+            // with-space separators since serde_json may produce
+            // either depending on the underlying chrono Format.
+            let s = v.as_str().unwrap_or("");
+            if s.len() >= 19 {
+                s[..19].to_owned()
+            } else {
+                s.to_owned()
+            }
+        }
+        FieldType::Json => {
+            if v == &serde_json::Value::Object(serde_json::Map::new()) {
+                String::new()
+            } else {
+                serde_json::to_string_pretty(v).unwrap_or_default()
+            }
+        }
+    }
+}
+
 /// Best-effort string form of a column value for pre-populating form
 /// inputs. Returns an empty string for `NULL`, so the input renders blank.
 pub(crate) fn render_value_for_input(row: &PgRow, field: &FieldSchema) -> String {
