@@ -535,10 +535,14 @@ pub(super) fn write_where_with_search(
         if has_where {
             b.sql.push_str(" AND ");
         }
-        // Search uses ILIKE on Postgres, plain LIKE on dialects without
-        // case-insensitive LIKE — keep the case-insensitive guarantee
-        // by lowercasing both sides on those backends.
-        let supports_ilike = b.d.supports_op(Op::ILike);
+        // Search routes through the dialect's `write_ilike` so each
+        // backend emits the case-insensitive LIKE shape it actually
+        // supports — Postgres native `ILIKE`, MySQL/SQLite the
+        // `LOWER(col) LIKE LOWER(?)` fallback. v0.37 fix: previous
+        // code wrote the literal `ILIKE` token whenever
+        // `supports_op(Op::ILike)` returned true, but SQLite says
+        // true (because it can *lower* via `write_ilike`) yet has no
+        // native `ILIKE` keyword, so the emitted SQL failed at parse.
         b.params.push(SqlValue::String(format!("%{}%", s.query)));
         let placeholder = b.d.placeholder(b.params.len());
         b.sql.push('(');
@@ -546,19 +550,15 @@ pub(super) fn write_where_with_search(
             if i > 0 {
                 b.sql.push_str(" OR ");
             }
-            if !supports_ilike {
-                b.sql.push_str("LOWER(");
-            }
+            // Build the qualified column identifier the same way the
+            // rest of the writer does, then hand it to `write_ilike`.
+            let mut qualified = String::new();
             if let Some(table) = qualify_with {
-                b.write_ident(table);
-                b.sql.push('.');
+                qualified.push_str(&b.d.quote_ident(table));
+                qualified.push('.');
             }
-            b.write_ident(col);
-            if supports_ilike {
-                let _ = write!(b.sql, " ILIKE {placeholder}");
-            } else {
-                let _ = write!(b.sql, ") LIKE LOWER({placeholder})");
-            }
+            qualified.push_str(&b.d.quote_ident(col));
+            b.d.write_ilike(&mut b.sql, &qualified, &placeholder, false);
         }
         b.sql.push(')');
     }
