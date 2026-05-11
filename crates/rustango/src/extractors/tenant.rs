@@ -1,5 +1,12 @@
 //! `Tenant` extractor — resolves the request's tenant + acquires a
-//! tenant-scoped connection.
+//! tenant-scoped Postgres connection.
+//!
+//! **Postgres-only by language**: this extractor wraps
+//! [`crate::tenancy::TenantPools::acquire`] which handles schema-mode
+//! via `SET search_path` — a PG-only SQL statement. Sqlite / MySQL
+//! apps use [`super::DatabaseTenant`] instead (shipped v0.33,
+//! generic over the backend).
+#![cfg(feature = "postgres")]
 
 use std::sync::Arc;
 

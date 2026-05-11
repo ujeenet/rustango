@@ -24,9 +24,13 @@
 //! ```
 
 mod database_tenant;
+#[cfg(feature = "postgres")]
 mod session_user;
+#[cfg(feature = "postgres")]
 mod tenant;
 
 pub use database_tenant::{DatabaseTenant, DatabaseTenantContext, DatabaseTenantRejection};
+#[cfg(feature = "postgres")]
 pub use session_user::{SessionOperator, SessionUser};
+#[cfg(feature = "postgres")]
 pub use tenant::{Tenant, TenantContext, TenantRejection};

@@ -1262,6 +1262,7 @@ async fn build_admin_pool_for_tenant(
             let tp = pools.pool_for_org(org).await?;
             match tp {
                 super::pools::TenantPool::Database { pool } => Ok(AdminPool::Database(pool)),
+                #[cfg(feature = "postgres")]
                 super::pools::TenantPool::Schema { .. } => {
                     unreachable!("StorageMode::Database parsed but pool_for_org returned Schema")
                 }
