@@ -649,36 +649,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS "rustango_content_types_natural_key"
     ON "rustango_content_types" ("app_label", "model_name");
 "#;
 
-/// MySQL counterpart of [`CREATE_TABLE_SQL`]. `BIGINT AUTO_INCREMENT`
-/// for the auto-PK, backtick quoting for identifiers (needed when
-/// `ANSI_QUOTES=off`, the default), and the UNIQUE constraint inlined
-/// in the CREATE TABLE since MySQL has no `CREATE INDEX IF NOT EXISTS`.
-/// Mirrors the `audit::CREATE_TABLE_SQL_MYSQL` shape.
-const CREATE_TABLE_SQL_MYSQL: &str = r#"
-CREATE TABLE IF NOT EXISTS `rustango_content_types` (
-    `id`          BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `app_label`   VARCHAR(100) NOT NULL,
-    `model_name`  VARCHAR(100) NOT NULL,
-    `table`       VARCHAR(100) NOT NULL,
-    UNIQUE KEY `rustango_content_types_natural_key` (`app_label`, `model_name`)
-);
-"#;
-
-/// SQLite counterpart. `INTEGER PRIMARY KEY AUTOINCREMENT` for the
-/// auto-PK (SQLite's auto-PK affinity), TEXT for the VARCHAR columns
-/// (SQLite type affinity, no real length limit). `CREATE INDEX
-/// IF NOT EXISTS` is supported, so the index lives in its own
-/// statement like the Postgres version.
-const CREATE_TABLE_SQL_SQLITE: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_content_types" (
-    "id"          INTEGER PRIMARY KEY AUTOINCREMENT,
-    "app_label"   TEXT NOT NULL,
-    "model_name"  TEXT NOT NULL,
-    "table"       TEXT NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS "rustango_content_types_natural_key"
-    ON "rustango_content_types" ("app_label", "model_name");
-"#;
+// v0.34 — note: the legacy `CREATE_TABLE_SQL` Postgres constant above
+// is kept for `ensure_table(&PgPool)` back-compat. The bi-dialect
+// `ensure_table_pool` below no longer carries hand-rolled per-backend
+// DDL constants — it routes through
+// [`crate::migrate::ddl::create_table_if_not_exists_sql_with_dialect`]
+// which already knows how to emit the table for any backend rustango
+// supports. The UNIQUE INDEX on `(app_label, model_name)` is still
+// hand-emitted because `crate::migrate::diff::render_changes` (the
+// index renderer in the migration system) is currently Postgres-only;
+// when index emission goes bi-dialect that block collapses too.
 
 /// Ensure `rustango_content_types` exists in `pool`'s database /
 /// schema. No-op when already present (`IF NOT EXISTS`). Used by
@@ -767,36 +747,77 @@ pub async fn ensure_seeded(pool: &PgPool) -> Result<usize, ExecError> {
 /// # Errors
 /// Driver / SQL failures from `CREATE TABLE IF NOT EXISTS`.
 pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), crate::sql::sqlx::Error> {
-    let ddl = match pool.dialect().name() {
-        "postgres" => CREATE_TABLE_SQL,
-        "mysql" => CREATE_TABLE_SQL_MYSQL,
-        "sqlite" => CREATE_TABLE_SQL_SQLITE,
-        // Unknown dialects fall back to the Postgres shape — closer to
-        // ANSI SQL than the MySQL / SQLite forks; future backends
-        // should add an explicit arm.
-        _ => CREATE_TABLE_SQL,
+    use crate::core::Model as _;
+    let dialect = pool.dialect();
+    // v0.34 — route the table DDL through the same emitter the
+    // migration runner uses (`create_table_if_not_exists_sql_with_dialect`).
+    // Type names, identifier quoting and `Auto<T>` serial spelling all
+    // match what `make_migrations` would produce — keeps a single
+    // source of truth for "what does ContentType look like on this
+    // backend".
+    let table_ddl = crate::migrate::ddl::create_table_if_not_exists_sql_with_dialect(
+        dialect,
+        &ContentType::SCHEMA,
+    );
+    exec_one(pool, &table_ddl).await?;
+
+    // UNIQUE INDEX on the natural key. PG + SQLite support
+    // `CREATE UNIQUE INDEX IF NOT EXISTS`; MySQL doesn't — we drop
+    // the `IF NOT EXISTS` clause there and swallow the dup-index
+    // error (1061) so re-runs stay idempotent. Hand-rolled until
+    // `crate::migrate::diff::render_changes` goes bi-dialect; once
+    // it does, this collapses to a `SchemaChange::CreateIndex` op.
+    let table_q = dialect.quote_ident("rustango_content_types");
+    let idx_q = dialect.quote_ident("rustango_content_types_natural_key");
+    let col_app = dialect.quote_ident("app_label");
+    let col_name = dialect.quote_ident("model_name");
+    let supports_if_not_exists = matches!(dialect.name(), "postgres" | "sqlite");
+    let index_ddl = if supports_if_not_exists {
+        format!("CREATE UNIQUE INDEX IF NOT EXISTS {idx_q} ON {table_q} ({col_app}, {col_name})")
+    } else {
+        format!("CREATE UNIQUE INDEX {idx_q} ON {table_q} ({col_app}, {col_name})")
     };
-    for stmt in ddl.split(';') {
-        let trimmed = stmt.trim();
-        if trimmed.is_empty() {
-            continue;
+    match exec_one(pool, &index_ddl).await {
+        Ok(()) => Ok(()),
+        Err(e) if dialect.name() == "mysql" && is_mysql_dup_index_error(&e) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Execute a single SQL statement against `pool`, dispatching on the
+/// backend variant. Internal bootstrap helper — production code
+/// should reach for the ORM (`fetch_pool` / `insert_pool` / …).
+async fn exec_one(pool: &crate::sql::Pool, sql: &str) -> Result<(), crate::sql::sqlx::Error> {
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            crate::sql::sqlx::query(sql).execute(pg).await?;
         }
-        match pool {
-            #[cfg(feature = "postgres")]
-            crate::sql::Pool::Postgres(pg) => {
-                crate::sql::sqlx::query(trimmed).execute(pg).await?;
-            }
-            #[cfg(feature = "mysql")]
-            crate::sql::Pool::Mysql(my) => {
-                crate::sql::sqlx::query(trimmed).execute(my).await?;
-            }
-            #[cfg(feature = "sqlite")]
-            crate::sql::Pool::Sqlite(sq) => {
-                crate::sql::sqlx::query(trimmed).execute(sq).await?;
-            }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            crate::sql::sqlx::query(sql).execute(my).await?;
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => {
+            crate::sql::sqlx::query(sql).execute(sq).await?;
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "mysql")]
+fn is_mysql_dup_index_error(e: &crate::sql::sqlx::Error) -> bool {
+    if let crate::sql::sqlx::Error::Database(db) = e {
+        return db.code().as_deref() == Some("42000")
+            || db.message().contains("Duplicate key name");
+    }
+    false
+}
+
+#[cfg(not(feature = "mysql"))]
+#[allow(dead_code)]
+fn is_mysql_dup_index_error(_e: &crate::sql::sqlx::Error) -> bool {
+    false
 }
 
 /// Backend-agnostic counterpart of [`ensure_seeded`]. Walks the
