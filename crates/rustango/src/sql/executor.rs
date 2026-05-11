@@ -552,6 +552,258 @@ pub fn row_to_json(
     Value::Object(map)
 }
 
+/// MySQL counterpart of [`row_to_json`]. Decodes each column by
+/// `field.ty` against `&MySqlRow`. Type mappings mirror the
+/// `sqlx::Type<MySql>` impls emitted by `#[derive(Model)]` —
+/// `chrono::DateTime<Utc>` ↔ `DATETIME(6)`, `serde_json::Value` ↔
+/// `JSON`, `uuid::Uuid` ↔ `CHAR(36)` (sqlx-mysql's default).
+#[cfg(feature = "mysql")]
+#[must_use]
+pub fn row_to_json_my(
+    row: &sqlx::mysql::MySqlRow,
+    fields: &[&'static crate::core::FieldSchema],
+) -> serde_json::Value {
+    use crate::core::FieldType;
+    use serde_json::{json, Value};
+    use sqlx::Row as _;
+    let mut map = serde_json::Map::new();
+    for field in fields {
+        let value = match field.ty {
+            FieldType::I16 => row
+                .try_get::<i16, _>(field.column)
+                .map(|n| json!(n))
+                .unwrap_or(Value::Null),
+            FieldType::I32 => row
+                .try_get::<i32, _>(field.column)
+                .map(|n| json!(n))
+                .unwrap_or(Value::Null),
+            FieldType::I64 => row
+                .try_get::<i64, _>(field.column)
+                .map(|n| json!(n))
+                .unwrap_or(Value::Null),
+            FieldType::F32 => row
+                .try_get::<f32, _>(field.column)
+                .map(|n| json!(n))
+                .unwrap_or(Value::Null),
+            FieldType::F64 => row
+                .try_get::<f64, _>(field.column)
+                .map(|n| json!(n))
+                .unwrap_or(Value::Null),
+            FieldType::Bool => row
+                .try_get::<bool, _>(field.column)
+                .map(|b| json!(b))
+                .unwrap_or(Value::Null),
+            FieldType::String => row
+                .try_get::<String, _>(field.column)
+                .map(|s| json!(s))
+                .unwrap_or(Value::Null),
+            FieldType::Date => row
+                .try_get::<chrono::NaiveDate, _>(field.column)
+                .map(|d| json!(d.to_string()))
+                .unwrap_or(Value::Null),
+            FieldType::DateTime => row
+                .try_get::<chrono::DateTime<chrono::Utc>, _>(field.column)
+                .map(|dt| json!(dt.to_rfc3339()))
+                .unwrap_or(Value::Null),
+            FieldType::Uuid => row
+                .try_get::<uuid::Uuid, _>(field.column)
+                .map(|u| json!(u.to_string()))
+                .unwrap_or(Value::Null),
+            FieldType::Json => row
+                .try_get::<serde_json::Value, _>(field.column)
+                .unwrap_or(Value::Null),
+        };
+        map.insert(field.name.to_owned(), value);
+    }
+    Value::Object(map)
+}
+
+/// SQLite counterpart of [`row_to_json`]. SQLite's storage is more
+/// permissive (TEXT for VARCHAR + JSON + UUID, NUMERIC for DATE,
+/// REAL for f32/f64); decode targets here match the column types
+/// `crate::migrate::ddl::CREATE_TABLE_SQL_SQLITE` emits. Best-effort:
+/// any `try_get` failure yields `Value::Null` (matches the PG path's
+/// laxity for admin rendering).
+#[cfg(feature = "sqlite")]
+#[must_use]
+pub fn row_to_json_sqlite(
+    row: &sqlx::sqlite::SqliteRow,
+    fields: &[&'static crate::core::FieldSchema],
+) -> serde_json::Value {
+    use crate::core::FieldType;
+    use serde_json::{json, Value};
+    use sqlx::Row as _;
+    let mut map = serde_json::Map::new();
+    for field in fields {
+        let value = match field.ty {
+            FieldType::I16 => row
+                .try_get::<i16, _>(field.column)
+                .map(|n| json!(n))
+                .unwrap_or(Value::Null),
+            FieldType::I32 => row
+                .try_get::<i32, _>(field.column)
+                .map(|n| json!(n))
+                .unwrap_or(Value::Null),
+            FieldType::I64 => row
+                .try_get::<i64, _>(field.column)
+                .map(|n| json!(n))
+                .unwrap_or(Value::Null),
+            FieldType::F32 => row
+                .try_get::<f32, _>(field.column)
+                .map(|n| json!(n))
+                .unwrap_or(Value::Null),
+            FieldType::F64 => row
+                .try_get::<f64, _>(field.column)
+                .map(|n| json!(n))
+                .unwrap_or(Value::Null),
+            FieldType::Bool => row
+                .try_get::<bool, _>(field.column)
+                .map(|b| json!(b))
+                .unwrap_or(Value::Null),
+            FieldType::String => row
+                .try_get::<String, _>(field.column)
+                .map(|s| json!(s))
+                .unwrap_or(Value::Null),
+            FieldType::Date => row
+                .try_get::<chrono::NaiveDate, _>(field.column)
+                .map(|d| json!(d.to_string()))
+                .unwrap_or_else(|_| {
+                    // SQLite often stores DATE as TEXT — fall back to
+                    // a raw string decode so callers see what's there
+                    // instead of `null`.
+                    row.try_get::<String, _>(field.column)
+                        .map(|s| json!(s))
+                        .unwrap_or(Value::Null)
+                }),
+            FieldType::DateTime => row
+                .try_get::<chrono::DateTime<chrono::Utc>, _>(field.column)
+                .map(|dt| json!(dt.to_rfc3339()))
+                .unwrap_or_else(|_| {
+                    row.try_get::<String, _>(field.column)
+                        .map(|s| json!(s))
+                        .unwrap_or(Value::Null)
+                }),
+            FieldType::Uuid => row
+                .try_get::<String, _>(field.column)
+                .map(|u| json!(u))
+                .unwrap_or(Value::Null),
+            FieldType::Json => {
+                // SQLite stores JSON as TEXT; try parsing back to
+                // Value, else surface the raw string.
+                match row.try_get::<String, _>(field.column) {
+                    Ok(s) => serde_json::from_str(&s).unwrap_or(Value::String(s)),
+                    Err(_) => Value::Null,
+                }
+            }
+        };
+        map.insert(field.name.to_owned(), value);
+    }
+    Value::Object(map)
+}
+
+/// Tri-dialect SELECT → JSON: run `query` against `pool` and return
+/// each row as a `serde_json::Value` map (`field.name → value`). The
+/// canonical fetch path for admin / API surfaces that need to render
+/// rows without a typed `T: FromRow` struct.
+///
+/// Dispatches per [`Pool`] variant to `row_to_json` / `row_to_json_my`
+/// / `row_to_json_sqlite` and uses the appropriate sqlx query type.
+/// Field-by-field decode is best-effort (decode errors → `Value::Null`)
+/// to match the existing PG-only `row_to_json`'s laxity around admin
+/// rendering of dirty rows.
+///
+/// # Errors
+/// SQL compilation / driver failures only — per-cell decode errors
+/// are swallowed into `Value::Null`.
+pub async fn select_rows_as_json_pool(
+    pool: &Pool,
+    query: &SelectQuery,
+    fields: &[&'static crate::core::FieldSchema],
+) -> Result<Vec<serde_json::Value>, ExecError> {
+    let stmt = pool.dialect().compile_select(query)?;
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => {
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query(q, v);
+            }
+            let rows = q.fetch_all(pg).await?;
+            Ok(rows.iter().map(|r| row_to_json(r, fields)).collect())
+        }
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_my(q, v);
+            }
+            let rows = q.fetch_all(my).await?;
+            Ok(rows.iter().map(|r| row_to_json_my(r, fields)).collect())
+        }
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(sq) => {
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_sqlite(q, v);
+            }
+            let rows = q.fetch_all(sq).await?;
+            Ok(rows.iter().map(|r| row_to_json_sqlite(r, fields)).collect())
+        }
+    }
+}
+
+/// Single-row companion of [`select_rows_as_json_pool`]. Returns
+/// `Ok(None)` when no rows match.
+///
+/// # Errors
+/// As [`select_rows_as_json_pool`].
+pub async fn select_one_row_as_json_pool(
+    pool: &Pool,
+    query: &SelectQuery,
+    fields: &[&'static crate::core::FieldSchema],
+) -> Result<Option<serde_json::Value>, ExecError> {
+    let stmt = pool.dialect().compile_select(query)?;
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => {
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query(q, v);
+            }
+            Ok(q.fetch_optional(pg)
+                .await?
+                .as_ref()
+                .map(|r| row_to_json(r, fields)))
+        }
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_my(q, v);
+            }
+            Ok(q.fetch_optional(my)
+                .await?
+                .as_ref()
+                .map(|r| row_to_json_my(r, fields)))
+        }
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(sq) => {
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_sqlite(q, v);
+            }
+            Ok(q.fetch_optional(sq)
+                .await?
+                .as_ref()
+                .map(|r| row_to_json_sqlite(r, fields)))
+        }
+    }
+}
+
 /// Like [`select_rows`] but accepts any sqlx executor — `&PgPool`,
 /// `&mut PgConnection`, or a `Transaction`. Required for tenancy
 /// projects whose per-request connection comes from
