@@ -230,6 +230,7 @@ impl Builder {
     /// Imperative builder methods (`.title(...)`, `.read_only(...)`,
     /// `.admin_prefix(...)`, etc.) called *after* this still win — the
     /// settings frame is a starting point, not a lock.
+    #[cfg(feature = "config")]
     pub fn from_settings(pool: impl Into<Pool>, settings: &crate::config::Settings) -> Self {
         let mut builder = Self::new(pool);
 
@@ -817,6 +818,7 @@ mod scope_filter_tests {
     // v0.36 slice 7 — Settings-driven Builder construction. The
     // settings frame should populate every supported knob; per-call
     // imperative overrides after `from_settings` still win.
+    #[cfg(feature = "config")]
     #[tokio::test]
     async fn from_settings_applies_admin_section_overrides() {
         use crate::config::{AdminSettings, Settings};
@@ -848,6 +850,7 @@ mod scope_filter_tests {
         assert!(b.config.read_only_tables.contains("audit_log"));
     }
 
+    #[cfg(feature = "config")]
     #[tokio::test]
     async fn from_settings_falls_back_to_brand_section() {
         // When `settings.admin.title` is unset, the brand-section
@@ -870,6 +873,7 @@ mod scope_filter_tests {
         assert_eq!(b.config.theme_mode.as_deref(), Some("light"));
     }
 
+    #[cfg(feature = "config")]
     #[tokio::test]
     async fn from_settings_admin_url_prefix_wins_over_routes_section() {
         // `admin.url_prefix` is the most-specific knob and should

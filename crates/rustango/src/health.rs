@@ -75,7 +75,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
-use crate::sql::sqlx::{self, PgPool};
+use crate::sql::Pool;
 
 /// Async health-check function: returns `Ok(())` when healthy,
 /// `Err(message)` otherwise. Each check has a name shown in the JSON
@@ -85,18 +85,18 @@ pub type CheckFn =
 
 /// Builder for the health router.
 pub struct HealthRouter {
-    pool: PgPool,
+    pool: Pool,
     extra_checks: Vec<(String, CheckFn)>,
     per_check_timeout: Duration,
     /// Should the built-in `database` probe run? Set to false if your
-    /// app has a non-Postgres backend or you want to register your own
-    /// DB probe with a different connectivity sentinel.
+    /// app wants to register its own DB probe with a different
+    /// connectivity sentinel.
     include_db_probe: bool,
 }
 
 #[derive(Clone)]
 struct HealthState {
-    pool: PgPool,
+    pool: Pool,
     extra_checks: Arc<Vec<(String, CheckFn)>>,
     per_check_timeout: Duration,
     include_db_probe: bool,
@@ -104,12 +104,17 @@ struct HealthState {
 
 impl HealthRouter {
     /// Create a health router with the default `/health` + `/ready`
-    /// endpoints. `/ready` pings `pool` with `SELECT 1`. Default
-    /// per-check timeout: 5 seconds.
+    /// endpoints. `/ready` pings the pool with `SELECT 1` (universal
+    /// across Postgres / MySQL / SQLite). Default per-check timeout:
+    /// 5 seconds.
+    ///
+    /// v0.36 — accepts `impl Into<Pool>`, so existing `PgPool` callers
+    /// keep working via the `From<PgPool>` blanket; passing
+    /// `crate::sql::Pool` directly is the tri-dialect path.
     #[must_use]
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: impl Into<Pool>) -> Self {
         Self {
-            pool,
+            pool: pool.into(),
             extra_checks: Vec::new(),
             per_check_timeout: Duration::from_secs(5),
             include_db_probe: true,
@@ -255,7 +260,7 @@ impl HealthRouter {
 
 /// Convenience — `HealthRouter::new(pool).into_router()` in one call.
 #[must_use]
-pub fn health_router(pool: PgPool) -> Router {
+pub fn health_router(pool: impl Into<Pool>) -> Router {
     HealthRouter::new(pool).into_router()
 }
 
@@ -270,8 +275,11 @@ async fn handle_ready(State(state): State<HealthState>) -> Response {
     if state.include_db_probe {
         let pool = state.pool.clone();
         let outcome = run_with_timeout(state.per_check_timeout, async move {
-            sqlx::query("SELECT 1")
-                .execute(&pool)
+            // `SELECT 1` is universal — Postgres, MySQL, SQLite all
+            // accept it as a connectivity sentinel. We dispatch
+            // through the Pool enum so this works across backends
+            // without any per-dialect SQL.
+            crate::sql::raw_execute_pool(&pool, "SELECT 1", Vec::new())
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string())
@@ -354,11 +362,38 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn lazy_pool() -> PgPool {
-        sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect_lazy("postgres://localhost:1/none")
-            .unwrap()
+    fn lazy_pool() -> Pool {
+        // v0.36 — feature-gate by which backend is on. Tests run on
+        // whichever backend the test profile picked; the health
+        // router itself is tri-dialect (the db probe uses
+        // `raw_execute_pool` with `SELECT 1`).
+        #[cfg(feature = "postgres")]
+        {
+            return Pool::Postgres(
+                crate::sql::sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect_lazy("postgres://localhost:1/none")
+                    .unwrap(),
+            );
+        }
+        #[cfg(all(feature = "sqlite", not(feature = "postgres")))]
+        {
+            return Pool::Sqlite(
+                crate::sql::sqlx::sqlite::SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect_lazy("sqlite::memory:")
+                    .unwrap(),
+            );
+        }
+        #[cfg(all(feature = "mysql", not(feature = "postgres"), not(feature = "sqlite")))]
+        {
+            return Pool::Mysql(
+                crate::sql::sqlx::mysql::MySqlPoolOptions::new()
+                    .max_connections(1)
+                    .connect_lazy("mysql://root@localhost:1/none")
+                    .unwrap(),
+            );
+        }
     }
 
     async fn body_json(resp: Response) -> Value {
