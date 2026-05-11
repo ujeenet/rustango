@@ -264,6 +264,70 @@ pub fn snapshot_changes(after: &[(&str, Value)]) -> Value {
     Value::Object(out)
 }
 
+/// v0.37 — render the audit-log SELECT used by [`fetch_for_entity_pool`]
+/// through the framework's dialect emitters. The audit table is
+/// framework-owned (not a `#[derive(Model)]`) so it doesn't have a
+/// registered `ModelSchema`, but we still want zero hand-rolled SQL
+/// in here — `quote_ident` handles backticks-vs-double-quotes and
+/// `placeholder` handles `$N`-vs-`?` per dialect.
+fn audit_select_sql(dialect: &dyn crate::sql::Dialect) -> String {
+    use std::fmt::Write as _;
+    let t = dialect.quote_ident("rustango_audit_log");
+    let id = dialect.quote_ident("id");
+    let et = dialect.quote_ident("entity_table");
+    let ek = dialect.quote_ident("entity_pk");
+    let op = dialect.quote_ident("operation");
+    let src = dialect.quote_ident("source");
+    let ch = dialect.quote_ident("changes");
+    let oa = dialect.quote_ident("occurred_at");
+    let p1 = dialect.placeholder(1);
+    let p2 = dialect.placeholder(2);
+    let mut sql = String::new();
+    let _ = write!(
+        sql,
+        "SELECT {id}, {et}, {ek}, {op}, {src}, {ch}, {oa} \
+         FROM {t} \
+         WHERE {et} = {p1} AND {ek} = {p2} \
+         ORDER BY {oa} DESC, {id} DESC",
+    );
+    sql
+}
+
+/// v0.37 — render the `DELETE … WHERE occurred_at < $1` used by
+/// [`cleanup_older_than_pool`] through the dialect emitter.
+fn audit_cleanup_older_than_sql(dialect: &dyn crate::sql::Dialect) -> String {
+    let t = dialect.quote_ident("rustango_audit_log");
+    let oa = dialect.quote_ident("occurred_at");
+    let p1 = dialect.placeholder(1);
+    format!("DELETE FROM {t} WHERE {oa} < {p1}")
+}
+
+/// v0.37 — render the per-row retention DELETE used by
+/// [`cleanup_keep_last_n_pool`]. `ROW_NUMBER() OVER (PARTITION BY)` is
+/// supported on PG, MySQL 8+, SQLite 3.25+; only quoting + placeholders
+/// vary per dialect.
+fn audit_cleanup_keep_last_n_sql(dialect: &dyn crate::sql::Dialect) -> String {
+    let t = dialect.quote_ident("rustango_audit_log");
+    let id = dialect.quote_ident("id");
+    let et = dialect.quote_ident("entity_table");
+    let ek = dialect.quote_ident("entity_pk");
+    let oa = dialect.quote_ident("occurred_at");
+    let p1 = dialect.placeholder(1);
+    format!(
+        "DELETE FROM {t} WHERE {id} IN ( \
+            SELECT {id} FROM ( \
+              SELECT {id}, \
+                     ROW_NUMBER() OVER ( \
+                         PARTITION BY {et}, {ek} \
+                         ORDER BY {oa} DESC, {id} DESC \
+                     ) AS _rn \
+              FROM {t} \
+            ) ranked \
+            WHERE _rn > {p1} \
+         )"
+    )
+}
+
 /// Read every audit entry for a given (entity_table, entity_pk)
 /// pair, newest first. Convenience for the admin's per-row audit
 /// trail panel.
@@ -633,6 +697,214 @@ pub async fn emit_one_pool(
         crate::sql::Pool::Mysql(my) => emit_one_my(my, entry).await,
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => emit_one_sqlite(sq, entry).await,
+    }
+}
+
+/// v0.37 — tri-dialect batched audit emit. On Postgres dispatches to
+/// the one-statement multi-row [`emit_many`] INSERT; on MySQL/SQLite
+/// falls back to a per-row [`emit_one_*`] loop inside a single
+/// transaction (one round-trip per row but committed atomically, so
+/// admin bulk-action audit rows still all-or-nothing).
+///
+/// Used by the admin bulk-action handler and by macro-emitted
+/// `bulk_*_pool` paths. Empty input returns immediately.
+///
+/// # Errors
+/// Driver / SQL failures from the INSERT(s) or the transaction.
+pub async fn emit_many_pool(
+    pool: &crate::sql::Pool,
+    entries: &[PendingEntry],
+) -> Result<(), sqlx::Error> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => emit_many(pg, entries).await,
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            let mut tx = my.begin().await?;
+            for entry in entries {
+                emit_one_my(&mut *tx, entry).await?;
+            }
+            tx.commit().await
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => {
+            let mut tx = sq.begin().await?;
+            for entry in entries {
+                emit_one_sqlite(&mut *tx, entry).await?;
+            }
+            tx.commit().await
+        }
+    }
+}
+
+/// v0.37 — tri-dialect counterpart of [`fetch_for_entity`]. Decodes
+/// rows through the dialect-agnostic `serde_json::Value` bridge so
+/// the audit panel renders identically across backends. The `changes`
+/// column is JSON-typed on PG/MySQL and TEXT on SQLite — the JSON
+/// bridge decodes either shape into `serde_json::Value`.
+///
+/// # Errors
+/// Driver / SQL failures from the SELECT or JSON decode failures
+/// (e.g. SQLite TEXT that isn't valid JSON).
+pub async fn fetch_for_entity_pool(
+    pool: &crate::sql::Pool,
+    entity_table: &str,
+    entity_pk: &str,
+) -> Result<Vec<AuditEntry>, sqlx::Error> {
+    // Build the SELECT via the dialect's own quoting + placeholder
+    // emitters. Same template for every backend — only `quote_ident`
+    // ("/`) and `placeholder` ($1 / ?) differ.
+    let sql = audit_select_sql(pool.dialect());
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let rows = sqlx::query(&sql)
+                .bind(entity_table)
+                .bind(entity_pk)
+                .fetch_all(pg)
+                .await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                out.push(AuditEntry::from_row(&row)?);
+            }
+            Ok(out)
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            use sqlx::Row as _;
+            let rows = sqlx::query(&sql)
+                .bind(entity_table)
+                .bind(entity_pk)
+                .fetch_all(my)
+                .await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                let changes: sqlx::types::Json<Value> = row.try_get("changes")?;
+                out.push(AuditEntry {
+                    id: row.try_get("id")?,
+                    entity_table: row.try_get("entity_table")?,
+                    entity_pk: row.try_get("entity_pk")?,
+                    operation: row.try_get("operation")?,
+                    source: row.try_get("source")?,
+                    changes: changes.0,
+                    occurred_at: row.try_get("occurred_at")?,
+                });
+            }
+            Ok(out)
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => {
+            use sqlx::Row as _;
+            let rows = sqlx::query(&sql)
+                .bind(entity_table)
+                .bind(entity_pk)
+                .fetch_all(sq)
+                .await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                // SQLite stores `changes` as TEXT; parse to JSON
+                // Value. `occurred_at` is stored as ISO 8601 text and
+                // sqlx decodes that to chrono::DateTime<Utc> natively
+                // when the chrono feature is on.
+                let changes_text: String = row.try_get("changes")?;
+                let changes: Value = serde_json::from_str(&changes_text).map_err(|e| {
+                    sqlx::Error::Decode(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("audit `changes` is not valid JSON: {e}"),
+                    )))
+                })?;
+                out.push(AuditEntry {
+                    id: row.try_get("id")?,
+                    entity_table: row.try_get("entity_table")?,
+                    entity_pk: row.try_get("entity_pk")?,
+                    operation: row.try_get("operation")?,
+                    source: row.try_get("source")?,
+                    changes,
+                    occurred_at: row.try_get("occurred_at")?,
+                });
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// v0.37 — tri-dialect counterpart of [`cleanup_older_than`]. The
+/// cutoff timestamp is computed Rust-side (chrono) and bound as a
+/// `TIMESTAMPTZ` / `DATETIME` / ISO-8601 TEXT depending on backend,
+/// so the SQL stays portable (no `NOW() - INTERVAL '… day'`).
+///
+/// `cutoff_days = 0` clears the entire table (use with caution); a
+/// negative value is clamped to 0.
+///
+/// # Errors
+/// Driver / SQL failures from the DELETE.
+pub async fn cleanup_older_than_pool(
+    pool: &crate::sql::Pool,
+    cutoff_days: i64,
+) -> Result<u64, sqlx::Error> {
+    let cutoff = cutoff_days.max(0);
+    let cutoff_ts = chrono::Utc::now() - chrono::Duration::days(cutoff);
+    let sql = audit_cleanup_older_than_sql(pool.dialect());
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let r = sqlx::query(&sql).bind(cutoff_ts).execute(pg).await?;
+            Ok(r.rows_affected())
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            let r = sqlx::query(&sql).bind(cutoff_ts).execute(my).await?;
+            Ok(r.rows_affected())
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => {
+            // SQLite has no native TIMESTAMPTZ — sqlx encodes
+            // chrono::DateTime<Utc> as an ISO 8601 string which
+            // matches the `CURRENT_TIMESTAMP` default in
+            // `CREATE_TABLE_SQL_SQLITE`.
+            let r = sqlx::query(&sql).bind(cutoff_ts).execute(sq).await?;
+            Ok(r.rows_affected())
+        }
+    }
+}
+
+/// v0.37 — tri-dialect counterpart of [`cleanup_keep_last_n`].
+/// `ROW_NUMBER() OVER (PARTITION BY …)` is supported on PG and on
+/// MySQL 8+ / SQLite 3.25+ — the SQL stays the same, only the
+/// identifier quoting differs.
+///
+/// `keep = 0` clears the entire table; negative values clamp to 0.
+///
+/// # Errors
+/// Driver / SQL failures from the DELETE, or an "unsupported window
+/// function" error on ancient MySQL 5.7 / SQLite 3.24-. On those
+/// backends operators should drop in their own retention DELETE
+/// instead of calling this helper.
+pub async fn cleanup_keep_last_n_pool(
+    pool: &crate::sql::Pool,
+    keep: i64,
+) -> Result<u64, sqlx::Error> {
+    let keep = keep.max(0);
+    let sql = audit_cleanup_keep_last_n_sql(pool.dialect());
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let r = sqlx::query(&sql).bind(keep).execute(pg).await?;
+            Ok(r.rows_affected())
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            let r = sqlx::query(&sql).bind(keep).execute(my).await?;
+            Ok(r.rows_affected())
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => {
+            let r = sqlx::query(&sql).bind(keep).execute(sq).await?;
+            Ok(r.rows_affected())
+        }
     }
 }
 
