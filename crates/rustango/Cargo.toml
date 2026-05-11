@@ -242,16 +242,16 @@ template_views = ["forms", "dep:axum", "dep:tera", "dep:tokio"]
 # admin's CRUD handlers reuse the shared parsers and ship CSRF on
 # every mutation by default.
 admin = [
-    "postgres",        # v0.34 — bundled admin is PG-only by language
-    "forms",           # (raw PgRow rendering, PgPool everywhere). The
-    "csrf",            # bi-dialect admin rewrite is v0.35+ scope.
-    "dep:axum",        # Sqlite/MySQL apps that want their own admin
-    "dep:tera",        # routes wire them by hand using DatabaseTenant<DB>.
-    "dep:base64",
-    "dep:http",
-    "dep:http-body-util",
-    "dep:serde_urlencoded",
-    "dep:tokio",
+    "postgres",        # v0.36 — admin's *surface* is tri-dialect:
+    "forms",           #   Builder / AppState / actions all accept
+    "csrf",            #   `Pool`. Internals (fetch + audit) are
+    "dep:axum",        #   still PG-bound and a boot-time guard
+    "dep:tera",        #   rejects non-PG pools. Tri-dialect fetch
+    "dep:base64",      #   conversion is queued for v0.37+ (incremental
+    "dep:http",        #   `select_*_as_json_pool` rollout across
+    "dep:http-body-util", # views.rs + audit.rs). SQLite/MySQL apps
+    "dep:serde_urlencoded", # that want the admin today wait for
+    "dep:tokio",       #   v0.37; pure-Postgres apps stay unaffected.
 ]
 
 # Multi-tenancy module (`rustango::tenancy`). Implies `admin` (the

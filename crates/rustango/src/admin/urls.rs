@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::core::SqlValue;
-use crate::sql::sqlx::PgPool;
+use crate::sql::Pool;
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -69,7 +69,11 @@ pub(crate) type AdminActionRegistry = HashMap<&'static str, HashMap<&'static str
 ///
 /// Equivalent to `Builder::new(pool).build()`. For finer control (model
 /// allowlist, read-only tables) use [`Builder`].
-pub fn router(pool: PgPool) -> Router {
+///
+/// v0.36: accepts anything `Into<crate::sql::Pool>` — `PgPool` /
+/// `MySqlPool` / `SqlitePool` all convert via the existing `From`
+/// impls on `Pool`, so existing PG call sites keep compiling.
+pub fn router(pool: impl Into<Pool>) -> Router {
     Builder::new(pool).build()
 }
 
@@ -83,7 +87,7 @@ pub fn router(pool: PgPool) -> Router {
 /// ```
 #[must_use]
 pub struct Builder {
-    pool: PgPool,
+    pool: Pool,
     config: Config,
 }
 
@@ -192,7 +196,8 @@ pub(crate) struct Config {
 }
 
 impl Builder {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: impl Into<Pool>) -> Self {
+        let pool = pool.into();
         let mut config = Config::default();
         // v0.27.9 (#59) — default admin mount prefix matches the
         // convention every rustango-tenancy deployment uses.
@@ -474,6 +479,21 @@ impl Builder {
     }
 
     pub fn build(self) -> Router {
+        // v0.36 — admin surface accepts `Pool` but internals still
+        // require Postgres until v0.37 finishes the JSON-bridge fetch
+        // conversion. Reject non-PG pools at boot with a clear error
+        // so users don't trip a runtime panic mid-request.
+        #[cfg(feature = "postgres")]
+        {
+            assert!(
+                matches!(self.pool, Pool::Postgres(_)),
+                "rustango::admin currently requires a Postgres pool. Got backend = {}. \
+                 v0.36 makes the admin's public surface tri-dialect (Builder/AppState/\
+                 actions all accept `Pool`); the fetch internals are still PG-bound \
+                 and the tri-dialect rewrite ships in v0.37+.",
+                self.pool.backend_name(),
+            );
+        }
         let audit_path = self.config.audit_url.clone();
         let audit_cleanup_path = format!("{audit_path}/cleanup");
         Router::new()
@@ -506,7 +526,7 @@ impl Builder {
 /// Cloned on every request (Arc-wrapped Config makes that cheap).
 #[derive(Clone)]
 pub(crate) struct AppState {
-    pub(crate) pool: PgPool,
+    pub(crate) pool: Pool,
     pub(crate) config: Arc<Config>,
 }
 
@@ -591,23 +611,44 @@ impl AppState {
             .and_then(|m| m.get(action))
             .cloned()
     }
+
+    /// v0.36 — Extract the underlying `PgPool` for the legacy PG-bound
+    /// fetch sites in `views.rs` / `audit.rs`. The admin's *surface*
+    /// (Builder/AppState/actions) is tri-dialect from v0.36 onward;
+    /// the *internals* still require Postgres until v0.37 finishes
+    /// converting fetch sites to `select_*_as_json_pool`. Boot-time
+    /// guard in `Builder::build` rejects non-PG pools with a clear
+    /// error, so calling this never panics in practice.
+    #[cfg(feature = "postgres")]
+    pub(crate) fn pg_pool(&self) -> &sqlx::PgPool {
+        self.pool.as_postgres().expect(
+            "rustango::admin: AppState.pool is not Postgres. v0.36 admin still requires \
+             a Postgres pool internally; the boot-time guard in admin::Builder::build \
+             should have rejected this earlier — please file an issue.",
+        )
+    }
 }
 
 #[cfg(test)]
 mod scope_filter_tests {
     use super::*;
     use crate::core::ModelScope;
+    use sqlx::PgPool;
     use std::sync::Arc;
+
+    fn lazy_pg_pool() -> sqlx::PgPool {
+        // sqlx PgPool isn't trivially constructable in unit tests;
+        // use a lazy connect to a non-existent URL — none of the
+        // methods these tests exercise touch the pool.
+        PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused")
+            .expect("connect_lazy never fails")
+    }
 
     fn state_with(tenant_mode: bool) -> AppState {
         let mut cfg = Config::default();
         cfg.tenant_mode = tenant_mode;
         AppState {
-            // sqlx PgPool isn't trivially constructable in unit
-            // tests; use a lazy connect to a non-existent URL —
-            // none of the methods we exercise here touch the pool.
-            pool: PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused")
-                .expect("connect_lazy never fails"),
+            pool: Pool::Postgres(lazy_pg_pool()),
             config: Arc::new(cfg),
         }
     }
@@ -649,7 +690,7 @@ mod scope_filter_tests {
 
     #[tokio::test]
     async fn admin_prefix_defaults_to_admin_underscore() {
-        let pool = PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused").unwrap();
+        let pool = lazy_pg_pool();
         let builder = Builder::new(pool);
         assert_eq!(builder.config.admin_prefix, "/__admin");
     }
@@ -659,10 +700,10 @@ mod scope_filter_tests {
     /// the tagged tables. Untagged tables stay on the COUNT path.
     #[tokio::test]
     async fn skip_count_for_marks_tables_and_checker_reads_them() {
-        let pool = PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused").unwrap();
+        let pool = lazy_pg_pool();
         let b = Builder::new(pool).skip_count_for(["audit_log", "events"]);
         let state = AppState {
-            pool: PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused").unwrap(),
+            pool: Pool::Postgres(lazy_pg_pool()),
             config: Arc::new(b.config),
         };
         assert!(state.count_skipped_for_table("audit_log"));
@@ -675,12 +716,12 @@ mod scope_filter_tests {
     /// rather than replacing — same shape as `read_only` does.
     #[tokio::test]
     async fn skip_count_for_unions_across_calls() {
-        let pool = PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused").unwrap();
+        let pool = lazy_pg_pool();
         let b = Builder::new(pool)
             .skip_count_for(["audit_log"])
             .skip_count_for(["events"]);
         let state = AppState {
-            pool: PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused").unwrap(),
+            pool: Pool::Postgres(lazy_pg_pool()),
             config: Arc::new(b.config),
         };
         assert!(state.count_skipped_for_table("audit_log"));
@@ -689,14 +730,14 @@ mod scope_filter_tests {
 
     #[tokio::test]
     async fn admin_prefix_setter_strips_trailing_slash() {
-        let pool = PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused").unwrap();
+        let pool = lazy_pg_pool();
         let b = Builder::new(pool).admin_prefix("/admin/");
         assert_eq!(b.config.admin_prefix, "/admin");
     }
 
     #[tokio::test]
     async fn admin_prefix_supports_empty_for_root_mount() {
-        let pool = PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused").unwrap();
+        let pool = lazy_pg_pool();
         let b = Builder::new(pool).admin_prefix("");
         assert_eq!(b.config.admin_prefix, "");
     }

@@ -205,7 +205,7 @@ pub(crate) async fn table_view(
         0
     } else {
         crate::sql::count_rows(
-            &state.pool,
+            state.pg_pool(),
             &CountQuery {
                 model,
                 where_clause: where_clause.clone(),
@@ -243,7 +243,7 @@ pub(crate) async fn table_view(
         page_size
     };
     let mut rows = crate::sql::select_rows(
-        &state.pool,
+        state.pg_pool(),
         &SelectQuery {
             model,
             where_clause,
@@ -495,7 +495,7 @@ async fn compute_facets(
                 table = model.table.replace('"', "\"\""),
             )
         };
-        let rows = sqlx::query(&sql).fetch_all(&state.pool).await?;
+        let rows = sqlx::query(&sql).fetch_all(state.pg_pool()).await?;
         let mut values = Vec::with_capacity(rows.len());
         for row in &rows {
             // Stringify the value at the `facet_value` column alias.
@@ -682,7 +682,7 @@ pub(crate) async fn detail_view(
     let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
 
     let row = crate::sql::select_one_row(
-        &state.pool,
+        state.pg_pool(),
         &SelectQuery {
             model,
             where_clause: WhereExpr::Predicate(Filter {
@@ -742,7 +742,7 @@ pub(crate) async fn detail_view(
         let ct_id = sqlx::Row::try_get::<i64, _>(&row, gfk.ct_column).unwrap_or_default();
         let object_pk = sqlx::Row::try_get::<i64, _>(&row, gfk.pk_column).unwrap_or_default();
         let g = crate::contenttypes::GenericForeignKey::new(ct_id, object_pk);
-        let html = crate::contenttypes::render_generic_fk_link(&state.pool, g)
+        let html = crate::contenttypes::render_generic_fk_link(state.pg_pool(), g)
             .await
             .unwrap_or_else(|_| format!("<em>(ct={ct_id}, pk={object_pk})</em>"));
         cells_ctx.push(serde_json::json!({
@@ -756,7 +756,7 @@ pub(crate) async fn detail_view(
     // `audit::ensure_table` per tenant), the lookup returns Err and
     // we render an empty section instead of failing the whole page.
     let audit_entries_ctx: Vec<serde_json::Value> =
-        match crate::audit::fetch_for_entity(&state.pool, model.table, &pk_raw).await {
+        match crate::audit::fetch_for_entity(state.pg_pool(), model.table, &pk_raw).await {
             Ok(entries) => entries
                 .into_iter()
                 .map(|e| {
@@ -812,10 +812,10 @@ pub(crate) async fn detail_view(
 #[cfg(feature = "tenancy")]
 async fn user_roles_panel_ctx(state: &AppState, pk_raw: &str) -> Option<serde_json::Value> {
     let user_id: i64 = pk_raw.parse().ok()?;
-    let roles = crate::tenancy::permissions::user_roles_qs(user_id, &state.pool)
+    let roles = crate::tenancy::permissions::user_roles_qs(user_id, state.pg_pool())
         .await
         .ok()?;
-    let perms = crate::tenancy::permissions::user_permissions(user_id, &state.pool)
+    let perms = crate::tenancy::permissions::user_permissions(user_id, state.pg_pool())
         .await
         .ok()?;
     let roles_ctx: Vec<serde_json::Value> = roles
@@ -895,7 +895,7 @@ pub(crate) async fn create_submit(
         returning: vec![pk_field.column],
         on_conflict: None,
     };
-    let row = match crate::sql::insert_returning(&state.pool, &query).await {
+    let row = match crate::sql::insert_returning(state.pg_pool(), &query).await {
         Ok(row) => row,
         Err(e) => {
             let html = render_form(&state, model, Some(&form), false, Some(&e.to_string()));
@@ -936,7 +936,7 @@ pub(crate) async fn edit_form(
     let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
 
     let row = crate::sql::select_one_row(
-        &state.pool,
+        state.pg_pool(),
         &SelectQuery {
             model,
             where_clause: WhereExpr::Predicate(Filter {
@@ -1010,7 +1010,7 @@ pub(crate) async fn update_submit(
     // delete), we fall back to the snapshot path so the data write
     // still emits something useful.
     let before_row = crate::sql::select_one_row(
-        &state.pool,
+        state.pg_pool(),
         &SelectQuery {
             model,
             where_clause: WhereExpr::Predicate(Filter {
@@ -1038,7 +1038,7 @@ pub(crate) async fn update_submit(
             value: pk_value,
         }),
     };
-    if let Err(e) = crate::sql::update(&state.pool, &query).await {
+    if let Err(e) = crate::sql::update(state.pg_pool(), &query).await {
         let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));
         return Ok(Html(html).into_response());
     }
@@ -1078,7 +1078,7 @@ pub(crate) async fn delete_submit(
     // state). Best-effort — missing row falls back to an empty
     // changes payload, which still records the operation + source.
     let before_row = crate::sql::select_one_row(
-        &state.pool,
+        state.pg_pool(),
         &SelectQuery {
             model,
             where_clause: WhereExpr::Predicate(Filter {
@@ -1105,7 +1105,7 @@ pub(crate) async fn delete_submit(
 
     if let Some(col) = model.soft_delete_column {
         crate::sql::update(
-            &state.pool,
+            state.pg_pool(),
             &UpdateQuery {
                 model,
                 set: vec![Assignment {
@@ -1122,7 +1122,7 @@ pub(crate) async fn delete_submit(
         .await?;
     } else {
         crate::sql::delete(
-            &state.pool,
+            state.pg_pool(),
             &DeleteQuery {
                 model,
                 where_clause: WhereExpr::Predicate(Filter {
@@ -1151,7 +1151,7 @@ pub(crate) async fn delete_submit(
         source: crate::audit::current_source(),
         changes: crate::audit::snapshot_changes(&pairs),
     };
-    if let Err(e) = crate::audit::emit_one(&state.pool, &entry).await {
+    if let Err(e) = crate::audit::emit_one(state.pg_pool(), &entry).await {
         tracing::warn!(
             target: "rustango::admin::audit",
             error = %e,
@@ -1241,7 +1241,7 @@ pub(crate) async fn action_submit(
     // delete_selected this snapshots the gone rows; for user-defined
     // actions it records the row state at the time of action.
     let before_rows = crate::sql::select_rows(
-        &state.pool,
+        state.pg_pool(),
         &SelectQuery {
             model,
             where_clause: WhereExpr::Predicate(Filter {
@@ -1280,7 +1280,7 @@ pub(crate) async fn action_submit(
         if let Some(col) = model.soft_delete_column {
             // Soft model — stamp the deleted_at column instead of hard DELETE.
             crate::sql::update(
-                &state.pool,
+                state.pg_pool(),
                 &UpdateQuery {
                     model,
                     set: vec![Assignment {
@@ -1297,7 +1297,7 @@ pub(crate) async fn action_submit(
             .await?;
         } else {
             crate::sql::delete(
-                &state.pool,
+                state.pg_pool(),
                 &DeleteQuery {
                     model,
                     where_clause: WhereExpr::Predicate(Filter {
@@ -1320,7 +1320,7 @@ pub(crate) async fn action_submit(
         // the action is a no-op so users don't need to guard it.
         if let Some(col) = model.soft_delete_column {
             crate::sql::update(
-                &state.pool,
+                state.pg_pool(),
                 &UpdateQuery {
                     model,
                     set: vec![Assignment {
@@ -1342,10 +1342,10 @@ pub(crate) async fn action_submit(
                 table: model.table.to_owned(),
             });
         }
-        // v0.36 — wrap the PG-typed `state.pool` in the tri-dialect
-        // `Pool` enum at the action-handler boundary. Slice 6 makes
-        // `state.pool` natively a `Pool`, collapsing this wrap.
-        handler(&crate::sql::Pool::Postgres(state.pool.clone()), &pk_values).await?;
+        // v0.36 — `state.pool` is the tri-dialect `Pool` enum; action
+        // handlers receive it directly so user-defined actions can
+        // pattern-match on the backend.
+        handler(&state.pool, &pk_values).await?;
     } else {
         return Err(AdminError::Internal(format!(
             "action `{action}` is in `admin.actions` but no handler is registered \
@@ -1386,7 +1386,7 @@ pub(crate) async fn action_submit(
         })
         .collect();
     if !entries.is_empty() {
-        if let Err(e) = crate::audit::emit_many(&state.pool, &entries).await {
+        if let Err(e) = crate::audit::emit_many(state.pg_pool(), &entries).await {
             tracing::warn!(
                 target: "rustango::admin::audit",
                 error = %e,

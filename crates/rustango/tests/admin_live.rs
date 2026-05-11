@@ -2372,11 +2372,16 @@ async fn user_defined_action_runs_via_register_action() {
                         _ => None,
                     })
                     .collect();
+                // v0.36 — action handler receives `&Pool`; extract the
+                // underlying PgPool to run the legacy `UPDATE ... = ANY($1)`
+                // helper. New code should pattern-match on `Pool::Postgres`
+                // and dispatch per backend.
+                let pg = pool.as_postgres().expect("test uses Postgres backend");
                 rustango::sql::sqlx::query(
                     r#"UPDATE "ua_post" SET "is_published" = true WHERE "id" = ANY($1)"#,
                 )
                 .bind(&ids)
-                .execute(&pool)
+                .execute(pg)
                 .await
                 .map_err(|e| rustango::admin::AdminError::Internal(e.to_string()))?;
                 Ok(())

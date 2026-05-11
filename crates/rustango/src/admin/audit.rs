@@ -89,7 +89,7 @@ pub(crate) async fn audit_log_view(
     for v in &binds {
         count_q = count_q.bind(v);
     }
-    let total: i64 = count_q.fetch_one(&state.pool).await.unwrap_or(0);
+    let total: i64 = count_q.fetch_one(state.pg_pool()).await.unwrap_or(0);
 
     // Page of rows.
     let rows_sql = format!(
@@ -106,7 +106,7 @@ pub(crate) async fn audit_log_view(
         rows_q = rows_q.bind(v);
     }
     rows_q = rows_q.bind(AUDIT_PAGE_SIZE).bind(offset);
-    let rows = rows_q.fetch_all(&state.pool).await.unwrap_or_default();
+    let rows = rows_q.fetch_all(state.pg_pool()).await.unwrap_or_default();
 
     // Per-facet distinct values + counts. One small GROUP BY query
     // per facet column. Always runs against the unfiltered table so
@@ -127,7 +127,7 @@ pub(crate) async fn audit_log_view(
                ORDER BY facet_count DESC, "{col}""#,
         );
         let facet_rows = sqlx::query(&q_sql)
-            .fetch_all(&state.pool)
+            .fetch_all(state.pg_pool())
             .await
             .unwrap_or_default();
         let mut values: Vec<Value> = facet_rows
@@ -292,7 +292,7 @@ pub(crate) async fn audit_cleanup_submit(
                 .and_then(|s| s.parse::<i64>().ok())
                 .unwrap_or(50)
                 .max(0);
-            let removed = crate::audit::cleanup_keep_last_n(&state.pool, keep)
+            let removed = crate::audit::cleanup_keep_last_n(state.pg_pool(), keep)
                 .await
                 .unwrap_or_else(|e| {
                     tracing::warn!(target: "rustango::admin::audit",
@@ -315,7 +315,7 @@ pub(crate) async fn audit_cleanup_submit(
                 .and_then(|s| s.parse::<i64>().ok())
                 .unwrap_or(90)
                 .max(0);
-            let removed = crate::audit::cleanup_older_than(&state.pool, days)
+            let removed = crate::audit::cleanup_older_than(state.pg_pool(), days)
                 .await
                 .unwrap_or_else(|e| {
                     tracing::warn!(target: "rustango::admin::audit",
@@ -340,7 +340,7 @@ pub(crate) async fn audit_cleanup_submit(
         source: crate::audit::current_source(),
         changes,
     };
-    if let Err(e) = crate::audit::emit_one(&state.pool, &entry).await {
+    if let Err(e) = crate::audit::emit_one(state.pg_pool(), &entry).await {
         tracing::warn!(target: "rustango::admin::audit",
             error = %e, "audit_cleanup self-audit emit failed");
     }
@@ -401,7 +401,7 @@ pub(crate) async fn emit_admin_audit_diff(
         source: crate::audit::current_source(),
         changes: crate::audit::diff_changes(&before_pairs, &after_pairs),
     };
-    if let Err(e) = crate::audit::emit_one(&state.pool, &entry).await {
+    if let Err(e) = crate::audit::emit_one(state.pg_pool(), &entry).await {
         tracing::warn!(
             target: "rustango::admin::audit",
             error = %e,
@@ -447,7 +447,7 @@ pub(crate) async fn emit_admin_audit(
         source: crate::audit::current_source(),
         changes: crate::audit::snapshot_changes(&pairs),
     };
-    if let Err(e) = crate::audit::emit_one(&state.pool, &entry).await {
+    if let Err(e) = crate::audit::emit_one(state.pg_pool(), &entry).await {
         tracing::warn!(
             target: "rustango::admin::audit",
             error = %e,

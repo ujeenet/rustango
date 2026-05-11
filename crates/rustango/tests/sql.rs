@@ -628,6 +628,7 @@ fn count_with_no_filters() {
     let q = CountQuery {
         model: User::SCHEMA,
         where_clause: WhereExpr::And(vec![]),
+        search: None,
     };
     let stmt = pg().compile_count(&q).unwrap();
     assert_eq!(stmt.sql, r#"SELECT COUNT(*) FROM "user""#);
@@ -650,6 +651,7 @@ fn count_with_filters() {
                 value: SqlValue::I64(0),
             },
         ]),
+        search: None,
     };
     let stmt = pg().compile_count(&q).unwrap();
     assert_eq!(
@@ -668,6 +670,7 @@ fn count_propagates_filter_errors() {
             op: Op::In,
             value: SqlValue::List(vec![]),
         }),
+        search: None,
     };
     let err = pg().compile_count(&q).unwrap_err();
     assert!(matches!(err, SqlError::EmptyInList));
