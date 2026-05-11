@@ -31,6 +31,10 @@ pub use compiled::CompiledStatement;
 pub use dialect::Dialect;
 pub use error::{ExecError, SqlError};
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
+#[cfg(feature = "mysql")]
+pub use executor::row_to_json_my;
+#[cfg(feature = "sqlite")]
+pub use executor::row_to_json_sqlite;
 pub use executor::{
     bulk_insert_pool, bulk_update_pool, count_rows_pool, delete_pool, fetch_aggregate_pool,
     fetch_paginated_pool, fetch_with_prefetch_pool, insert_pool, insert_returning_pool,

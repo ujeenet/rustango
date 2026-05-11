@@ -959,10 +959,10 @@ pub(crate) async fn detail_view(
 #[cfg(feature = "tenancy")]
 async fn user_roles_panel_ctx(state: &AppState, pk_raw: &str) -> Option<serde_json::Value> {
     let user_id: i64 = pk_raw.parse().ok()?;
-    let roles = crate::tenancy::permissions::user_roles_qs(user_id, state.pg_pool())
+    let roles = crate::tenancy::permissions::user_roles_qs_pool(user_id, &state.pool)
         .await
         .ok()?;
-    let perms = crate::tenancy::permissions::user_permissions(user_id, state.pg_pool())
+    let perms = crate::tenancy::permissions::user_permissions_pool(user_id, &state.pool)
         .await
         .ok()?;
     let roles_ctx: Vec<serde_json::Value> = roles

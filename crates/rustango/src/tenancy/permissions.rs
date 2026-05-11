@@ -613,6 +613,179 @@ pub async fn clear_user_perm(
     Ok(())
 }
 
+/// v0.37 — tri-dialect counterpart of [`user_roles_qs`]. SQL is
+/// rendered via the dialect's emitter so identifier quoting +
+/// placeholder syntax come out right per backend.
+///
+/// # Errors
+/// Driver / SQL failures from the JOIN-SELECT.
+pub async fn user_roles_qs_pool(
+    user_id: i64,
+    pool: &crate::sql::Pool,
+) -> Result<Vec<Role>, sqlx::Error> {
+    use sqlx::Row as _;
+    let dialect = pool.dialect();
+    let roles_t = dialect.quote_ident("rustango_roles");
+    let user_roles_t = dialect.quote_ident("rustango_user_roles");
+    let p1 = dialect.placeholder(1);
+    // No table-aliasing — dialect emitters quote every identifier,
+    // and the columns we need are unambiguous since `rustango_roles`
+    // is the only side that has them.
+    let sql = format!(
+        "SELECT r.id, r.name, r.description, r.data \
+         FROM {roles_t} r \
+         JOIN {user_roles_t} ur ON ur.role_id = r.id \
+         WHERE ur.user_id = {p1} \
+         ORDER BY r.name"
+    );
+    let make_role = |id: i64, name: String, description: String, data: serde_json::Value| -> Role {
+        Role {
+            id: Auto::Set(id),
+            name,
+            description,
+            data,
+        }
+    };
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let rows = sqlx::query(&sql).bind(user_id).fetch_all(pg).await?;
+            rows.iter()
+                .map(|row| {
+                    Ok(make_role(
+                        row.try_get::<i64, _>("id")?,
+                        row.try_get("name")?,
+                        row.try_get("description")?,
+                        row.try_get::<serde_json::Value, _>("data")
+                            .unwrap_or_else(|_| serde_json::json!({})),
+                    ))
+                })
+                .collect()
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            let rows = sqlx::query(&sql).bind(user_id).fetch_all(my).await?;
+            rows.iter()
+                .map(|row| {
+                    let data: serde_json::Value = row
+                        .try_get::<sqlx::types::Json<serde_json::Value>, _>("data")
+                        .map(|j| j.0)
+                        .unwrap_or_else(|_| serde_json::json!({}));
+                    Ok(make_role(
+                        row.try_get::<i64, _>("id")?,
+                        row.try_get("name")?,
+                        row.try_get("description")?,
+                        data,
+                    ))
+                })
+                .collect()
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => {
+            let rows = sqlx::query(&sql).bind(user_id).fetch_all(sq).await?;
+            rows.iter()
+                .map(|row| {
+                    let data: serde_json::Value = row
+                        .try_get::<Option<String>, _>("data")
+                        .ok()
+                        .flatten()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    Ok(make_role(
+                        row.try_get::<i64, _>("id")?,
+                        row.try_get("name")?,
+                        row.try_get("description")?,
+                        data,
+                    ))
+                })
+                .collect()
+        }
+    }
+}
+
+/// v0.37 — tri-dialect counterpart of [`user_permissions`]. The CTE
+/// + UNION ALL shape is supported on PG, MySQL 8+ and SQLite 3.8+,
+/// so the query template is the same across backends — only quoting
+/// (`"…"` vs `` `…` ``) and placeholder syntax (`$1` vs `?`) differ,
+/// and the dialect emitter handles both.
+///
+/// # Errors
+/// Driver / SQL failures from the CTE SELECT.
+pub async fn user_permissions_pool(
+    uid: i64,
+    pool: &crate::sql::Pool,
+) -> Result<Vec<String>, TenancyError> {
+    use sqlx::Row as _;
+    let dialect = pool.dialect();
+    let user_perms_t = dialect.quote_ident("rustango_user_permissions");
+    let user_roles_t = dialect.quote_ident("rustango_user_roles");
+    let role_perms_t = dialect.quote_ident("rustango_role_permissions");
+    let p1 = dialect.placeholder(1);
+    let p2 = dialect.placeholder(2);
+    let p3 = dialect.placeholder(3);
+    let true_lit = dialect.bool_literal(true);
+    let false_lit = dialect.bool_literal(false);
+    let sql = format!(
+        "WITH denied AS ( \
+            SELECT codename FROM {user_perms_t} \
+            WHERE user_id = {p1} AND granted = {false_lit} \
+         ) \
+         SELECT DISTINCT codename FROM ( \
+            SELECT rp.codename \
+            FROM {user_roles_t} ur \
+            JOIN {role_perms_t} rp ON rp.role_id = ur.role_id \
+            WHERE ur.user_id = {p2} \
+              AND rp.codename NOT IN (SELECT codename FROM denied) \
+            UNION ALL \
+            SELECT codename FROM {user_perms_t} \
+            WHERE user_id = {p3} AND granted = {true_lit} \
+              AND codename NOT IN (SELECT codename FROM denied) \
+         ) effective \
+         ORDER BY codename"
+    );
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let rows = sqlx::query(&sql)
+                .bind(uid)
+                .bind(uid)
+                .bind(uid)
+                .fetch_all(pg)
+                .await?;
+            Ok(rows
+                .iter()
+                .map(|r| r.try_get::<String, _>("codename").unwrap_or_default())
+                .collect())
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            let rows = sqlx::query(&sql)
+                .bind(uid)
+                .bind(uid)
+                .bind(uid)
+                .fetch_all(my)
+                .await?;
+            Ok(rows
+                .iter()
+                .map(|r| r.try_get::<String, _>("codename").unwrap_or_default())
+                .collect())
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => {
+            let rows = sqlx::query(&sql)
+                .bind(uid)
+                .bind(uid)
+                .bind(uid)
+                .fetch_all(sq)
+                .await?;
+            Ok(rows
+                .iter()
+                .map(|r| r.try_get::<String, _>("codename").unwrap_or_default())
+                .collect())
+        }
+    }
+}
+
 /// List all roles a user belongs to.
 pub async fn user_roles_qs(user_id: i64, pool: &PgPool) -> Result<Vec<Role>, sqlx::Error> {
     let rows = sqlx::query(
