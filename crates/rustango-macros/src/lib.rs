@@ -199,21 +199,31 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
         ));
     }
 
-    // Parse optional `flavor = "..."` etc. from the attribute args
-    // and pass them straight through to `#[tokio::main(...)]`.
+    // v0.31.1 (#4): hand-roll the tokio runtime instead of delegating
+    // to `#[tokio::main]`. Tokio's proc-macro internally emits
+    // `::tokio::*` paths that resolve against the user crate's deps,
+    // so calling it through the rustango re-export still requires the
+    // user to add tokio to their own Cargo.toml. Building the
+    // runtime ourselves keeps the dep transitive through the
+    // `runtime` feature on rustango.
     //
-    // v0.31.1 (#4): qualify via the rustango re-export so user
-    // crates don't need a direct `tokio` dep — `#[rustango::main]`
-    // through `rustango = { ..., features = ["runtime"] }` is now
-    // sufficient.
-    let tokio_attr = if args.is_empty() {
-        quote! { #[::rustango::__private_runtime::tokio::main] }
-    } else {
-        quote! { #[::rustango::__private_runtime::tokio::main(#args)] }
+    // Parse optional `flavor = "current_thread"` / `flavor =
+    // "multi_thread"` from the attribute args. Unknown args are
+    // tolerated (forward-compat with tokio's own arg surface).
+    let flavor = parse_flavor(&args);
+    let builder_call = match flavor {
+        Flavor::CurrentThread => quote! {
+            ::rustango::__private_runtime::tokio::runtime::Builder::new_current_thread()
+        },
+        Flavor::MultiThread => quote! {
+            ::rustango::__private_runtime::tokio::runtime::Builder::new_multi_thread()
+        },
     };
 
-    // Re-block the body so the tracing init runs before user code.
-    let body = input.block.clone();
+    // Detach the user body and rewrite `main` as a sync fn that
+    // builds the runtime and blocks on the async body.
+    let user_body = input.block.clone();
+    input.sig.asyncness = None;
     input.block = syn::parse2(quote! {{
         {
             use ::rustango::__private_runtime::tracing_subscriber::{self, EnvFilter};
@@ -226,13 +236,33 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
                 )
                 .try_init();
         }
-        #body
+        let __rt = #builder_call
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime");
+        __rt.block_on(async move #user_body)
     }})?;
 
     Ok(quote! {
-        #tokio_attr
         #input
     })
+}
+
+enum Flavor {
+    MultiThread,
+    CurrentThread,
+}
+
+fn parse_flavor(args: &TokenStream2) -> Flavor {
+    // Cheap parser: look for the literal token sequence
+    // `flavor = "current_thread"`. Everything else (including
+    // bare `multi_thread` or no args) defaults to multi-thread.
+    let s = args.to_string();
+    if s.contains("current_thread") {
+        Flavor::CurrentThread
+    } else {
+        Flavor::MultiThread
+    }
 }
 
 fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {

@@ -2,6 +2,18 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.31.2] — `#[rustango::main]` actually no longer needs direct tokio
+
+0.31.1 attempted to resolve `#[rustango::main]` through the rustango facade, but the underlying expansion delegated to `tokio`'s own `#[tokio::main]` proc-macro — and tokio's macro emits `::tokio::*` paths that resolve against the user crate's deps, so the user still had to add tokio to their own `Cargo.toml`.
+
+0.31.2 bypasses tokio's macro entirely. `#[rustango::main]` now hand-rolls a `tokio::runtime::Builder::{new_multi_thread,new_current_thread}` directly through the rustango re-export, then `block_on`s the user body. Apps on `rustango = "0.31.2"` (with the default `runtime` feature, implied by `manage`) genuinely don't need a tokio dep at all.
+
+The optional `flavor = "current_thread"` / `flavor = "multi_thread"` attribute arg is preserved (anything else falls back to multi-thread).
+
+### Fixed
+
+- **#4 (round 2)** — [`crates/rustango-macros/src/lib.rs:193-280`](crates/rustango-macros/src/lib.rs#L193-L280). The macro emits its own `let __rt = ::rustango::__private_runtime::tokio::runtime::Builder::new_multi_thread().enable_all().build()` block now, with the user `async fn main` body lifted into an `async move {}` passed to `__rt.block_on(...)`. The output `fn` is non-async to satisfy Rust's `main`-must-not-be-async rule.
+
 ## [0.31.1] — paper cuts surfaced building rustango-cms
 
 Five small but visible bugs that bit first-time `rustango-cms` setup. None of these change documented public behavior; each was a silent failure or a misleading message.
