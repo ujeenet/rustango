@@ -33,7 +33,10 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::sql::sqlx::{self, PgPool};
+use crate::sql::sqlx;
+#[cfg(feature = "postgres")]
+use crate::sql::sqlx::PgPool;
+use crate::sql::Pool;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FixtureError {
@@ -119,35 +122,62 @@ impl Fixture {
         Ok(self)
     }
 
-    /// Insert every row into `table` against `pool`. Each row is a separate INSERT.
+    /// Insert every row into `table` against any rustango-supported
+    /// backend. Routes through the [`crate::sql::Pool`] enum +
+    /// per-dialect SQL emission (`pool.dialect().placeholder(n)` for
+    /// `$N` / `?`; `pool.dialect().quote_ident(c)` for `"col"` /
+    /// `` `col` ``).
     ///
     /// # Errors
     /// [`FixtureError::Database`] on driver-level failures.
-    pub async fn load_into(&self, table: &str, pool: &PgPool) -> Result<usize, FixtureError> {
+    pub async fn load_into_pool(&self, table: &str, pool: &Pool) -> Result<usize, FixtureError> {
         validate_ident(table)?;
         let mut count = 0;
         for row in &self.rows {
-            insert_row(pool, table, row).await?;
+            insert_row_pool(pool, table, row).await?;
             count += 1;
         }
         Ok(count)
     }
+
+    /// PG-typed back-compat shim around [`Self::load_into_pool`].
+    ///
+    /// # Errors
+    /// As [`Self::load_into_pool`].
+    #[cfg(feature = "postgres")]
+    pub async fn load_into(&self, table: &str, pool: &PgPool) -> Result<usize, FixtureError> {
+        self.load_into_pool(table, &Pool::Postgres(pool.clone()))
+            .await
+    }
 }
 
-/// Load multiple fixtures in registration order. Stops at first error.
+/// Load multiple fixtures in registration order against any
+/// rustango-supported backend. Stops at first error.
 ///
 /// # Errors
 /// First fixture error encountered.
-pub async fn load_all(fixtures: &[(&str, &Fixture)], pool: &PgPool) -> Result<usize, FixtureError> {
+pub async fn load_all_pool(
+    fixtures: &[(&str, &Fixture)],
+    pool: &Pool,
+) -> Result<usize, FixtureError> {
     let mut total = 0;
     for (table, fixture) in fixtures {
-        total += fixture.load_into(table, pool).await?;
+        total += fixture.load_into_pool(table, pool).await?;
     }
     Ok(total)
 }
 
-async fn insert_row(
-    pool: &PgPool,
+/// PG-typed back-compat shim around [`load_all_pool`].
+///
+/// # Errors
+/// First fixture error encountered.
+#[cfg(feature = "postgres")]
+pub async fn load_all(fixtures: &[(&str, &Fixture)], pool: &PgPool) -> Result<usize, FixtureError> {
+    load_all_pool(fixtures, &Pool::Postgres(pool.clone())).await
+}
+
+async fn insert_row_pool(
+    pool: &Pool,
     table: &str,
     row: &serde_json::Map<String, Value>,
 ) -> Result<(), FixtureError> {
@@ -161,26 +191,61 @@ async fn insert_row(
     for col in &columns {
         validate_ident(col)?;
     }
-    let cols_sql: Vec<String> = columns.iter().map(|c| format!(r#""{c}""#)).collect();
-    let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("${i}")).collect();
+    let dialect = pool.dialect();
+    let cols_sql: Vec<String> = columns.iter().map(|c| dialect.quote_ident(c)).collect();
+    let placeholders: Vec<String> = (1..=columns.len())
+        .map(|i| dialect.placeholder(i))
+        .collect();
     let sql = format!(
-        r#"INSERT INTO "{table}" ({}) VALUES ({})"#,
+        "INSERT INTO {} ({}) VALUES ({})",
+        dialect.quote_ident(table),
         cols_sql.join(", "),
         placeholders.join(", "),
     );
-
-    let mut q = sqlx::query(&sql);
-    for col in &columns {
-        let val = &row[col.as_str()];
-        q = bind_value(q, val);
+    // Bind per-backend. The JSON value → SQL parameter coercion is
+    // identical across backends for the scalar types fixtures carry;
+    // arrays / objects bind as `sqlx::types::Json<Value>` which all
+    // three sqlx backends support via the `json` feature.
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => {
+            let mut q = sqlx::query(&sql);
+            for col in &columns {
+                let val = &row[col.as_str()];
+                q = bind_pg(q, val);
+            }
+            q.execute(pg)
+                .await
+                .map_err(|e| FixtureError::Database(e.to_string()))?;
+        }
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            let mut q = sqlx::query(&sql);
+            for col in &columns {
+                let val = &row[col.as_str()];
+                q = bind_my(q, val);
+            }
+            q.execute(my)
+                .await
+                .map_err(|e| FixtureError::Database(e.to_string()))?;
+        }
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(sq) => {
+            let mut q = sqlx::query(&sql);
+            for col in &columns {
+                let val = &row[col.as_str()];
+                q = bind_sqlite(q, val);
+            }
+            q.execute(sq)
+                .await
+                .map_err(|e| FixtureError::Database(e.to_string()))?;
+        }
     }
-    q.execute(pool)
-        .await
-        .map_err(|e| FixtureError::Database(e.to_string()))?;
     Ok(())
 }
 
-fn bind_value<'a>(
+#[cfg(feature = "postgres")]
+fn bind_pg<'a>(
     q: sqlx::query::Query<'a, sqlx::Postgres, sqlx::postgres::PgArguments>,
     v: &'a Value,
 ) -> sqlx::query::Query<'a, sqlx::Postgres, sqlx::postgres::PgArguments> {
@@ -198,6 +263,50 @@ fn bind_value<'a>(
         }
         Value::String(s) => q.bind(s.as_str()),
         Value::Array(_) | Value::Object(_) => q.bind(v.clone()),
+    }
+}
+
+#[cfg(feature = "mysql")]
+fn bind_my<'a>(
+    q: sqlx::query::Query<'a, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+    v: &'a Value,
+) -> sqlx::query::Query<'a, sqlx::MySql, sqlx::mysql::MySqlArguments> {
+    match v {
+        Value::Null => q.bind(None::<i64>),
+        Value::Bool(b) => q.bind(*b),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                q.bind(i)
+            } else if let Some(f) = n.as_f64() {
+                q.bind(f)
+            } else {
+                q.bind(n.to_string())
+            }
+        }
+        Value::String(s) => q.bind(s.as_str()),
+        Value::Array(_) | Value::Object(_) => q.bind(sqlx::types::Json(v.clone())),
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn bind_sqlite<'a>(
+    q: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>,
+    v: &'a Value,
+) -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>> {
+    match v {
+        Value::Null => q.bind(None::<i64>),
+        Value::Bool(b) => q.bind(*b),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                q.bind(i)
+            } else if let Some(f) = n.as_f64() {
+                q.bind(f)
+            } else {
+                q.bind(n.to_string())
+            }
+        }
+        Value::String(s) => q.bind(s.as_str()),
+        Value::Array(_) | Value::Object(_) => q.bind(sqlx::types::Json(v.clone())),
     }
 }
 
