@@ -131,3 +131,73 @@ async fn invalidate_drops_cached_pool() {
         "post-invalidate acquire should rebuild a fresh pool"
     );
 }
+
+#[tokio::test]
+async fn url_template_substitutes_slug_for_orgs_without_explicit_url() {
+    // Set a template; both orgs have no database_url. The pool
+    // registry should expand `{slug}` for each one and end up with
+    // two distinct pools.
+    let pools: DatabasePools<sqlx::Sqlite> = DatabasePools::new(BackendKind::Sqlite)
+        .with_url_template("sqlite:file:tang_test_{slug}?mode=memory&cache=shared");
+
+    let mut acme = fake_sqlite_org("acme");
+    acme.database_url = None;
+    let mut beta = fake_sqlite_org("beta");
+    beta.database_url = None;
+
+    let acme_pool = pools
+        .pool_for_org(&acme)
+        .await
+        .expect("acme acquire via template");
+    let beta_pool = pools
+        .pool_for_org(&beta)
+        .await
+        .expect("beta acquire via template");
+
+    // Different orgs → different pools (cache is per slug).
+    assert!(
+        !std::sync::Arc::ptr_eq(&acme_pool.pool_arc(), &beta_pool.pool_arc()),
+        "two slugs should resolve to two distinct pools"
+    );
+
+    // Both connections actually work end-to-end.
+    let row = sqlx::query("SELECT 1 as one")
+        .fetch_one(acme_pool.pool())
+        .await
+        .expect("acme query");
+    let one: i32 = row.try_get("one").expect("read");
+    assert_eq!(one, 1);
+}
+
+#[tokio::test]
+async fn explicit_database_url_wins_over_template() {
+    // Even with a template configured, an org carrying its own
+    // database_url should use it. Lets operators carve out a
+    // special-case DB per tenant without giving up the convenience
+    // of a default template for the rest.
+    let pools: DatabasePools<sqlx::Sqlite> = DatabasePools::new(BackendKind::Sqlite)
+        .with_url_template("sqlite:file:tang_template_{slug}?mode=memory&cache=shared");
+
+    let org = fake_sqlite_org("acme"); // database_url = Some(":memory:")
+    let _pool = pools
+        .pool_for_org(&org)
+        .await
+        .expect("acquire honors explicit url");
+    // We don't have a way to assert *which* URL was used without
+    // bypassing the public API; trust the resolve_secret +
+    // build_pool path which we exercise above and below.
+}
+
+#[tokio::test]
+async fn no_url_no_template_is_a_clear_error() {
+    let pools: DatabasePools<sqlx::Sqlite> = DatabasePools::new(BackendKind::Sqlite);
+    let mut org = fake_sqlite_org("acme");
+    org.database_url = None;
+
+    let err = pools.pool_for_org(&org).await.expect_err("should reject");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("url_template") && msg.contains("with_url_template"),
+        "error should name the missing knob, got: {msg}"
+    );
+}

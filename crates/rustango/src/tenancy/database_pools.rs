@@ -106,6 +106,17 @@ pub struct DatabasePools<DB: Database> {
     /// `org.backend_kind` on `pool_for_org` so a mis-routed tenant
     /// fails loudly instead of silently building the wrong pool.
     backend: BackendKind,
+    /// Optional URL template for tenants that don't carry an explicit
+    /// `database_url`. Useful for SQLite: set
+    /// `"sqlite:./tenants/{slug}.db?mode=rwc"` and every SQLite tenant
+    /// gets its own file under `./tenants/` keyed by slug. `None`
+    /// means "require explicit `database_url` per org" — the v0.5
+    /// default and the safe-by-default production setting.
+    ///
+    /// The `{slug}` placeholder is replaced with `org.slug`; no other
+    /// placeholders are recognized. The template is only consulted
+    /// when `org.database_url is None`.
+    url_template: Option<String>,
 }
 
 impl<DB: Database> DatabasePools<DB> {
@@ -127,7 +138,31 @@ impl<DB: Database> DatabasePools<DB> {
             secrets: Arc::new(secrets),
             cache: RwLock::new(HashMap::new()),
             backend,
+            url_template: None,
         }
+    }
+
+    /// Set a URL template used when an org has no explicit
+    /// `database_url`. The `{slug}` placeholder is replaced with the
+    /// org's slug at acquire time.
+    ///
+    /// Most useful for SQLite, where the natural per-tenant shape is
+    /// one file per slug:
+    ///
+    /// ```ignore
+    /// let pools: DatabasePools<sqlx::Sqlite> =
+    ///     DatabasePools::new(BackendKind::Sqlite)
+    ///         .with_url_template("sqlite:./tenants/{slug}.db?mode=rwc");
+    /// // Orgs with database_url=None now auto-route to
+    /// // ./tenants/<slug>.db; sqlite creates the file on first
+    /// // write thanks to `mode=rwc`.
+    /// ```
+    ///
+    /// Returns `self` for builder chaining.
+    #[must_use]
+    pub fn with_url_template(mut self, template: impl Into<String>) -> Self {
+        self.url_template = Some(template.into());
+        self
     }
 
     /// Replace the config. Returns `self` for builder ergonomics.
@@ -210,17 +245,27 @@ impl<DB: Database> DatabasePools<DB> {
             }
         }
 
-        // Resolve the database_url secret. Same path TenantPools
-        // uses; cuts down on duplication.
-        let url_ref = org.database_url.as_deref().ok_or_else(|| {
-            TenancyError::Validation(format!(
-                "org `{}` is database-mode but has no database_url",
-                org.slug
-            ))
-        })?;
+        // Resolve the database_url — explicit `org.database_url`
+        // wins; otherwise fall back to the configured URL template
+        // with `{slug}` substituted. Templates make per-tenant SQLite
+        // files trivial: one config line, N orgs.
+        let url_ref = match org.database_url.as_deref() {
+            Some(u) => u.to_owned(),
+            None => match &self.url_template {
+                Some(tpl) => tpl.replace("{slug}", &org.slug),
+                None => {
+                    return Err(TenancyError::Validation(format!(
+                        "org `{}` is database-mode but has no database_url \
+                         and no url_template is configured on DatabasePools \
+                         (call `.with_url_template(...)` at boot)",
+                        org.slug
+                    )));
+                }
+            },
+        };
         let resolved = self
             .secrets
-            .resolve(url_ref)
+            .resolve(&url_ref)
             .await
             .map_err(TenancyError::Secrets)?;
 
@@ -275,13 +320,24 @@ impl<DB: Database> DatabasePools<DB> {
 
     /// Build a fresh pool for `url`. Generic across backends — sqlx
     /// dispatches on the `DB` parameter.
+    /// Build a fresh pool for `url` honoring every knob in
+    /// `TenantPoolsConfig` — min/max connections, acquire timeout,
+    /// idle timeout, max lifetime. Generic across backends; sqlx
+    /// dispatches on the `DB` parameter. The Postgres-side
+    /// `TenantPools` runs the same tuning; this brings MySQL and
+    /// SQLite to parity.
     async fn build_pool(&self, url: &str) -> Result<Pool<DB>, TenancyError> {
-        sqlx::pool::PoolOptions::<DB>::new()
+        let mut opts = sqlx::pool::PoolOptions::<DB>::new()
             .max_connections(self.config.database_pool_max_connections)
-            .acquire_timeout(self.config.database_pool_acquire_timeout)
-            .connect(url)
-            .await
-            .map_err(TenancyError::from)
+            .min_connections(self.config.database_pool_min_connections)
+            .acquire_timeout(self.config.database_pool_acquire_timeout);
+        if let Some(idle) = self.config.database_pool_idle_timeout {
+            opts = opts.idle_timeout(idle);
+        }
+        if let Some(lifetime) = self.config.database_pool_max_lifetime {
+            opts = opts.max_lifetime(lifetime);
+        }
+        opts.connect(url).await.map_err(TenancyError::from)
     }
 }
 
