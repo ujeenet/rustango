@@ -831,6 +831,7 @@ async fn orgs_list(
                 "slug": o.slug,
                 "display_name": o.display_name,
                 "storage_mode": o.storage_mode,
+                "backend_kind": o.backend_kind,
                 "host_pattern": o.host_pattern,
                 "active": o.active,
                 "created_at": o.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
@@ -873,10 +874,16 @@ async fn orgs_list(
 /// `logo_path` / `favicon_path` are populated by the multipart
 /// upload sub-form (`POST /orgs/{slug}/edit/branding`) — never via
 /// the regular config edit, so they live in the locked section.
+///
+/// `backend_kind` (v0.33) is locked too — changing the backend mid-life
+/// would orphan the tenant's data on the old driver. The
+/// `migrate-tenant-storage` verb is the supported migration path
+/// (issue #58 once it gains a backend-translation step).
 const LOCKED_ORG_FIELDS: &[&str] = &[
     "id",
     "slug",
     "storage_mode",
+    "backend_kind",
     "schema_name",
     "created_at",
     "logo_path",

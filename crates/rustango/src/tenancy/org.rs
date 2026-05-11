@@ -58,6 +58,16 @@ pub struct Org {
     #[rustango(max_length = 16)]
     pub storage_mode: String,
 
+    /// Backend driver for this tenant. `"postgres"` (default),
+    /// `"mysql"`, or `"sqlite"`. See [`BackendKind`]. v0.33
+    /// constrains `storage_mode = "schema" ⟹ backend_kind = "postgres"`
+    /// — see [`BackendKind::validate_storage_mode`].
+    ///
+    /// Defaults to `"postgres"` for orgs created before v0.33; the
+    /// migration backfills the column with that value.
+    #[rustango(max_length = 16, default = "'postgres'")]
+    pub backend_kind: String,
+
     /// Secret reference resolved by `SecretsResolver` at pool-build
     /// time. For `storage_mode = "schema"` this is `None` (the
     /// registry pool is reused). For `"database"` it is the
@@ -185,5 +195,160 @@ impl StorageMode {
 impl core::fmt::Display for StorageMode {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// Backend driver for a tenant's storage. Mirrors [`StorageMode`]'s
+/// string-on-the-row pattern — the column is a raw `String`, this
+/// enum is the typed bridge.
+///
+/// **Storage-mode constraint:** `StorageMode::Schema` is only valid
+/// for `BackendKind::Postgres`. MySQL "schema" ≡ "database" with
+/// different transaction semantics; SQLite has no namespaces at all.
+/// [`Self::validate_storage_mode`] enforces this — the admin's
+/// org form, the `manage create-tenant` CLI, and
+/// `migrate-tenant-storage` all call it before persisting.
+///
+/// ```
+/// use rustango::tenancy::{BackendKind, StorageMode};
+/// assert_eq!(BackendKind::Postgres.as_str(), "postgres");
+/// assert!(BackendKind::Postgres.validate_storage_mode(StorageMode::Schema).is_ok());
+/// assert!(BackendKind::Sqlite.validate_storage_mode(StorageMode::Schema).is_err());
+/// assert!(BackendKind::MySql.validate_storage_mode(StorageMode::Database).is_ok());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackendKind {
+    /// Postgres — the v0.5+ default. Supports schema-mode + database-mode.
+    #[default]
+    Postgres,
+    /// MySQL — database-mode only (schema-mode rejected at validation time).
+    MySql,
+    /// SQLite — database-mode only. Each tenant gets its own file.
+    Sqlite,
+}
+
+impl BackendKind {
+    /// Stable string form persisted to `Org.backend_kind`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Postgres => "postgres",
+            Self::MySql => "mysql",
+            Self::Sqlite => "sqlite",
+        }
+    }
+
+    /// Parse the string form.
+    ///
+    /// # Errors
+    /// Returns `Err(unrecognized_value)` when `s` doesn't match a
+    /// known variant — caller wraps in `TenancyError::Validation`.
+    pub fn parse(s: &str) -> Result<Self, &str> {
+        match s {
+            "postgres" | "postgresql" | "pg" => Ok(Self::Postgres),
+            "mysql" | "mariadb" => Ok(Self::MySql),
+            "sqlite" | "sqlite3" => Ok(Self::Sqlite),
+            other => Err(other),
+        }
+    }
+
+    /// Validate the `(storage_mode, backend_kind)` pair. Returns
+    /// `Err` with a human-readable explanation when the
+    /// combination isn't supported.
+    ///
+    /// The only currently-disallowed combination is
+    /// `Schema + (MySql | Sqlite)` — see the type-level comment on
+    /// [`Self`] for rationale. All other pairs are permitted.
+    ///
+    /// # Errors
+    /// `Err(&'static str)` on an unsupported combination.
+    pub const fn validate_storage_mode(self, mode: StorageMode) -> Result<(), &'static str> {
+        match (self, mode) {
+            (Self::Postgres, _) => Ok(()),
+            (_, StorageMode::Database) => Ok(()),
+            (Self::MySql, StorageMode::Schema) => {
+                Err("MySQL backend doesn't support schema-mode tenancy \
+                 (use storage_mode=database)")
+            }
+            (Self::Sqlite, StorageMode::Schema) => {
+                Err("SQLite backend doesn't support schema-mode tenancy \
+                 (use storage_mode=database; each tenant gets its own file)")
+            }
+        }
+    }
+}
+
+impl core::fmt::Display for BackendKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_accepts_aliases() {
+        assert_eq!(
+            BackendKind::parse("postgres").unwrap(),
+            BackendKind::Postgres
+        );
+        assert_eq!(
+            BackendKind::parse("postgresql").unwrap(),
+            BackendKind::Postgres
+        );
+        assert_eq!(BackendKind::parse("pg").unwrap(), BackendKind::Postgres);
+        assert_eq!(BackendKind::parse("mysql").unwrap(), BackendKind::MySql);
+        assert_eq!(BackendKind::parse("mariadb").unwrap(), BackendKind::MySql);
+        assert_eq!(BackendKind::parse("sqlite").unwrap(), BackendKind::Sqlite);
+        assert_eq!(BackendKind::parse("sqlite3").unwrap(), BackendKind::Sqlite);
+    }
+
+    #[test]
+    fn parse_rejects_unknown() {
+        assert!(BackendKind::parse("oracle").is_err());
+        assert!(BackendKind::parse("").is_err());
+    }
+
+    #[test]
+    fn validate_storage_mode_postgres_accepts_both() {
+        assert!(BackendKind::Postgres
+            .validate_storage_mode(StorageMode::Schema)
+            .is_ok());
+        assert!(BackendKind::Postgres
+            .validate_storage_mode(StorageMode::Database)
+            .is_ok());
+    }
+
+    #[test]
+    fn validate_storage_mode_mysql_rejects_schema() {
+        let err = BackendKind::MySql
+            .validate_storage_mode(StorageMode::Schema)
+            .unwrap_err();
+        assert!(err.contains("MySQL"));
+    }
+
+    #[test]
+    fn validate_storage_mode_sqlite_rejects_schema() {
+        let err = BackendKind::Sqlite
+            .validate_storage_mode(StorageMode::Schema)
+            .unwrap_err();
+        assert!(err.contains("SQLite"));
+    }
+
+    #[test]
+    fn non_postgres_accepts_database_mode() {
+        assert!(BackendKind::MySql
+            .validate_storage_mode(StorageMode::Database)
+            .is_ok());
+        assert!(BackendKind::Sqlite
+            .validate_storage_mode(StorageMode::Database)
+            .is_ok());
+    }
+
+    #[test]
+    fn default_is_postgres() {
+        assert_eq!(BackendKind::default(), BackendKind::Postgres);
     }
 }

@@ -63,6 +63,7 @@ async fn seed_db_mode_tenant(pool: &sqlx::PgPool, slug: &str, url: &str) -> Org 
         slug: slug.to_owned(),
         display_name: slug.to_owned(),
         storage_mode: StorageMode::Database.as_str().into(),
+        backend_kind: "postgres".to_owned(),
         database_url: Some(url.to_owned()),
         schema_name: None,
         host_pattern: Some(format!("{slug}.app.test")),

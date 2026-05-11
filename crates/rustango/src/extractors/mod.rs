@@ -23,8 +23,10 @@
 //! }
 //! ```
 
+mod database_tenant;
 mod session_user;
 mod tenant;
 
+pub use database_tenant::{DatabaseTenant, DatabaseTenantContext, DatabaseTenantRejection};
 pub use session_user::{SessionOperator, SessionUser};
 pub use tenant::{Tenant, TenantContext, TenantRejection};

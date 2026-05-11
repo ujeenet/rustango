@@ -12,7 +12,7 @@ use crate::tenancy::error::TenancyError;
 use crate::tenancy::manage::args::{next_value, quote_ident, reject_leading_flag};
 use crate::tenancy::manage_interactive;
 use crate::tenancy::migrate as tenant_migrate;
-use crate::tenancy::org::{Org, StorageMode};
+use crate::tenancy::org::{BackendKind, Org, StorageMode};
 use crate::tenancy::pools::TenantPools;
 
 // ---------- create-tenant ----------
@@ -20,6 +20,7 @@ use crate::tenancy::pools::TenantPools;
 struct CreateTenantArgs {
     slug: String,
     mode: StorageMode,
+    backend: BackendKind,
     display_name: Option<String>,
     database_url: Option<String>,
     schema_name: Option<String>,
@@ -93,6 +94,7 @@ pub(super) async fn create_tenant<W: Write + Send>(
         slug: parsed.slug.clone(),
         display_name,
         storage_mode: parsed.mode.as_str().into(),
+        backend_kind: parsed.backend.as_str().into(),
         database_url: parsed.database_url.clone(),
         schema_name,
         host_pattern,
@@ -141,14 +143,11 @@ pub(super) async fn create_tenant<W: Write + Send>(
 }
 
 fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, TenancyError> {
-    reject_leading_flag(
-        args,
-        "create-tenant",
-        "slug",
-        "create-tenant <slug> [--mode schema|database] [--display-name <s>] \
-         [--database-url <url>] [--schema-name <s>] [--host-pattern <s>] \
-         [--port <n>] [--path-prefix <s>] [--no-migrate]",
-    )?;
+    const HELP: &str = "create-tenant <slug> [--mode schema|database] \
+        [--backend postgres|mysql|sqlite] [--display-name <s>] \
+        [--database-url <url>] [--schema-name <s>] [--host-pattern <s>] \
+        [--port <n>] [--path-prefix <s>] [--no-migrate]";
+    reject_leading_flag(args, "create-tenant", "slug", HELP)?;
     let mut iter = args.iter();
     let slug_arg = iter.next().cloned();
     let slug = match slug_arg {
@@ -162,6 +161,7 @@ fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, Tenancy
     let mut out = CreateTenantArgs {
         slug,
         mode: StorageMode::Schema,
+        backend: BackendKind::Postgres,
         display_name: None,
         database_url: None,
         schema_name: None,
@@ -180,6 +180,14 @@ fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, Tenancy
                     ))
                 })?;
             }
+            "--backend" => {
+                let v = next_value(&mut iter, "--backend")?;
+                out.backend = BackendKind::parse(&v).map_err(|got| {
+                    TenancyError::Validation(format!(
+                        "--backend must be `postgres`, `mysql`, or `sqlite`, got `{got}`"
+                    ))
+                })?;
+            }
             "--display-name" => out.display_name = Some(next_value(&mut iter, "--display-name")?),
             "--database-url" => out.database_url = Some(next_value(&mut iter, "--database-url")?),
             "--schema-name" => out.schema_name = Some(next_value(&mut iter, "--schema-name")?),
@@ -192,14 +200,7 @@ fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, Tenancy
             }
             "--path-prefix" => out.path_prefix = Some(next_value(&mut iter, "--path-prefix")?),
             "--no-migrate" => out.no_migrate = true,
-            "--help" | "-h" => {
-                return Err(TenancyError::Validation(
-                    "create-tenant <slug> [--mode schema|database] [--display-name <s>] \
-                     [--database-url <url>] [--schema-name <s>] [--host-pattern <s>] \
-                     [--port <n>] [--path-prefix <s>] [--no-migrate]"
-                        .into(),
-                ));
-            }
+            "--help" | "-h" => return Err(TenancyError::Validation(HELP.to_owned())),
             other => {
                 return Err(TenancyError::Validation(format!(
                     "create-tenant: unknown argument `{other}`"
@@ -207,6 +208,12 @@ fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, Tenancy
             }
         }
     }
+    // v0.33 — guard the unsupported pairs early so a clear error
+    // surfaces instead of a generic schema-mode failure deep in the
+    // pool layer.
+    out.backend
+        .validate_storage_mode(out.mode)
+        .map_err(|msg| TenancyError::Validation(msg.to_owned()))?;
     Ok(out)
 }
 

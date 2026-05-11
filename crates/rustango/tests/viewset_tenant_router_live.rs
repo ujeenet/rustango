@@ -110,6 +110,7 @@ async fn fixture(pool: sqlx::PgPool) -> (String, sqlx::PgPool, axum::Router) {
         slug: slug.clone(),
         display_name: "VS Test".into(),
         storage_mode: StorageMode::Database.as_str().into(),
+        backend_kind: "postgres".to_owned(),
         database_url: Some(url.clone()),
         schema_name: None,
         host_pattern: Some(format!("{slug}.app.test")),

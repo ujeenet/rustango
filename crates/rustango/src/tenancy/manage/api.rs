@@ -29,6 +29,11 @@ use crate::tenancy::pools::TenantPools;
 /// time) — same convention the CLI verb uses.
 pub struct CreateTenantOpts {
     pub mode: StorageMode,
+    /// Backend driver (v0.33+). Defaults to `Postgres` for
+    /// back-compat. `validate_storage_mode` is called against the
+    /// `(mode, backend)` pair before the row is inserted — see
+    /// [`crate::tenancy::BackendKind::validate_storage_mode`].
+    pub backend: crate::tenancy::BackendKind,
     pub display_name: Option<String>,
     pub schema_name: Option<String>,
     pub database_url: Option<String>,
@@ -42,6 +47,7 @@ impl Default for CreateTenantOpts {
     fn default() -> Self {
         Self {
             mode: StorageMode::Schema,
+            backend: crate::tenancy::BackendKind::Postgres,
             display_name: None,
             schema_name: None,
             database_url: None,
@@ -92,6 +98,11 @@ pub async fn create_tenant(
             "create_tenant: mode=Database requires database_url".into(),
         ));
     }
+    // v0.33 — reject schema-mode for non-Postgres backends. MySQL +
+    // SQLite must use database-mode.
+    opts.backend
+        .validate_storage_mode(opts.mode)
+        .map_err(|msg| TenancyError::Validation(msg.to_owned()))?;
 
     let host_pattern = opts.host_pattern.clone().or_else(|| {
         std::env::var("RUSTANGO_APEX_DOMAIN")
@@ -120,6 +131,7 @@ pub async fn create_tenant(
         slug: slug.to_owned(),
         display_name,
         storage_mode: opts.mode.as_str().into(),
+        backend_kind: opts.backend.as_str().into(),
         database_url: opts.database_url.clone(),
         schema_name,
         host_pattern,

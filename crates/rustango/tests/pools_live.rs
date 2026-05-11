@@ -35,6 +35,7 @@ async fn seed_org(
         slug: slug.into(),
         display_name: slug.to_uppercase(),
         storage_mode: mode.as_str().into(),
+        backend_kind: "postgres".to_owned(),
         database_url: database_url.map(str::to_owned),
         schema_name: schema_name.map(str::to_owned),
         host_pattern: Some(format!("{slug}.app.test")),

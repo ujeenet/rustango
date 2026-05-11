@@ -44,6 +44,7 @@ pub mod auth_backends;
 pub mod auth_routes;
 pub mod bootstrap;
 pub mod branding;
+pub mod database_pools;
 mod error;
 pub mod impersonation_handoff;
 pub mod jwt_lifecycle;
@@ -83,11 +84,12 @@ pub use permissions::{
     user_permissions, user_roles,
 };
 
+pub use database_pools::{DatabaseConn, DatabasePool, DatabasePools};
 pub use error::TenancyError;
 pub use migrate::{
     migrate_registry, migrate_tenants, TenantMigrationOutcome, TenantMigrationReport,
 };
-pub use org::{Org, StorageMode};
+pub use org::{BackendKind, Org, StorageMode};
 pub use pools::{PrewarmReport, TenantConn, TenantPool, TenantPools, TenantPoolsConfig};
 pub use resolver::{
     ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver, PortResolver, SubdomainResolver,
