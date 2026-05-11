@@ -127,7 +127,7 @@ where
             .clone();
         let org = ctx
             .resolver
-            .resolve(parts, ctx.pools.registry())
+            .resolve(parts, &ctx.pools.registry_pool())
             .await
             .map_err(|e| TenantRejection::Internal(e.to_string()))?
             .ok_or(TenantRejection::NotFound)?;

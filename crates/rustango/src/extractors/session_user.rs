@@ -66,7 +66,11 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
 
         // Resolve the tenant — needed for the slug binding check and the
         // pool to look up the user row.
-        let org = match ctx.resolver.resolve(parts, ctx.pools.registry()).await {
+        let org = match ctx
+            .resolver
+            .resolve(parts, &ctx.pools.registry_pool())
+            .await
+        {
             Ok(Some(o)) => o,
             _ => return Ok(SessionUser(None)),
         };

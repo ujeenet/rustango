@@ -45,7 +45,7 @@ impl OrgResolver for HostResolver {
     async fn resolve(
         &self,
         parts: &axum::http::request::Parts,
-        _registry: &sqlx::PgPool,
+        _registry: &rustango::sql::Pool,
     ) -> Result<Option<Org>, TenancyError> {
         let host = parts
             .headers

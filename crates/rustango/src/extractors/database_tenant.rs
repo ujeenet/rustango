@@ -135,9 +135,13 @@ where
             .get::<Arc<DatabaseTenantContext<DB>>>()
             .ok_or(DatabaseTenantRejection::MissingContext)?
             .clone();
+        // v0.34 B.1 — resolver takes the backend-erasing Pool enum.
+        // The context still stores a raw `PgPool` (the registry stays
+        // Postgres in this slice; v0.34 B.4 will generalize it).
+        let registry_pool = crate::sql::Pool::Postgres(ctx.registry.clone());
         let org = ctx
             .resolver
-            .resolve(parts, &ctx.registry)
+            .resolve(parts, &registry_pool)
             .await
             .map_err(|e| DatabaseTenantRejection::Internal(e.to_string()))?
             .ok_or(DatabaseTenantRejection::NotFound)?;

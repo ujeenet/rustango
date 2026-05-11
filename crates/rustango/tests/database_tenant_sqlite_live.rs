@@ -37,7 +37,7 @@ impl OrgResolver for FixedResolver {
     async fn resolve(
         &self,
         _parts: &axum::http::request::Parts,
-        _registry: &sqlx::PgPool,
+        _registry: &rustango::sql::Pool,
     ) -> Result<Option<Org>, rustango::tenancy::TenancyError> {
         Ok(Some(self.0.clone()))
     }

@@ -218,6 +218,19 @@ impl TenantPools {
         &self.registry
     }
 
+    /// Same registry pool, wrapped in the backend-erasing
+    /// [`rustango::sql::Pool`] enum. Used by the v0.34 resolver
+    /// chain which is generic across backends — keeps a single
+    /// `TenantPools` API while letting the resolver implementations
+    /// route through `fetch_pool` / `insert_pool`.
+    ///
+    /// Cheap: `Pool` is `Arc`-shaped under sqlx, so the clone is a
+    /// reference bump.
+    #[must_use]
+    pub fn registry_pool(&self) -> crate::sql::Pool {
+        crate::sql::Pool::Postgres(self.registry.clone())
+    }
+
     /// Build (or fetch from cache) the pool for `org`. Schema-mode
     /// resolves immediately; database-mode reaches into the cache and
     /// builds-on-miss.

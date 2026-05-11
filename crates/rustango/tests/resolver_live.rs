@@ -158,7 +158,10 @@ async fn subdomain_resolver_matches_host_pattern() {
 
     let r = SubdomainResolver::new("app.test");
     let parts = parts_with_host("acme.app.test");
-    let org = r.resolve(&parts, &pool).await.unwrap();
+    let org = r
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap();
     assert!(org.is_some(), "acme.app.test should resolve to acme");
     assert_eq!(org.unwrap().slug, "acme");
 
@@ -178,7 +181,10 @@ async fn subdomain_resolver_apex_returns_none() {
     // Bare apex: no tenant. Apex hosts only operator UI per the
     // v0.5 design — resolver returns Ok(None).
     let parts = parts_with_host("app.test");
-    let org = r.resolve(&parts, &pool).await.unwrap();
+    let org = r
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap();
     assert!(org.is_none(), "apex must NEVER resolve to a tenant");
 
     migrate::drop_all(&pool).await.unwrap();
@@ -195,7 +201,10 @@ async fn subdomain_resolver_unknown_subdomain_returns_none() {
 
     let r = SubdomainResolver::new("app.test");
     let parts = parts_with_host("ghost.app.test");
-    let org = r.resolve(&parts, &pool).await.unwrap();
+    let org = r
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap();
     assert!(org.is_none(), "unknown subdomain → no match");
 
     migrate::drop_all(&pool).await.unwrap();
@@ -214,7 +223,10 @@ async fn subdomain_resolver_strips_port_from_host_header() {
 
     let r = SubdomainResolver::new("app.test");
     let parts = parts_with_host("acme.app.test:8080");
-    let org = r.resolve(&parts, &pool).await.unwrap();
+    let org = r
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap();
     assert_eq!(org.unwrap().slug, "acme");
 
     migrate::drop_all(&pool).await.unwrap();
@@ -232,7 +244,10 @@ async fn subdomain_resolver_skips_inactive_orgs() {
     let r = SubdomainResolver::new("app.test");
     // `frozen` has host_pattern set but active=false.
     let parts = parts_with_host("frozen.app.test");
-    let org = r.resolve(&parts, &pool).await.unwrap();
+    let org = r
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap();
     assert!(org.is_none(), "inactive orgs must not resolve");
 
     migrate::drop_all(&pool).await.unwrap();
@@ -249,14 +264,25 @@ async fn path_prefix_resolver_matches_first_segment() {
 
     let r = PathPrefixResolver;
     let parts = parts_with_uri("http://app.test/acme/dashboard");
-    let org = r.resolve(&parts, &pool).await.unwrap();
+    let org = r
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap();
     assert_eq!(org.unwrap().slug, "acme");
 
     let parts = parts_with_uri("http://app.test/");
-    assert!(r.resolve(&parts, &pool).await.unwrap().is_none());
+    assert!(r
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap()
+        .is_none());
 
     let parts = parts_with_uri("http://app.test/unknown/x");
-    assert!(r.resolve(&parts, &pool).await.unwrap().is_none());
+    assert!(r
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap()
+        .is_none());
 
     migrate::drop_all(&pool).await.unwrap();
 }
@@ -272,20 +298,35 @@ async fn header_resolver_matches_x_org() {
 
     let r = HeaderResolver::default();
     let parts = parts_with_header("x-org", "globex");
-    let org = r.resolve(&parts, &pool).await.unwrap();
+    let org = r
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap();
     assert_eq!(org.unwrap().slug, "globex");
 
     // Unknown slug.
     let parts = parts_with_header("x-org", "ghost");
-    assert!(r.resolve(&parts, &pool).await.unwrap().is_none());
+    assert!(r
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap()
+        .is_none());
 
     // Empty value.
     let parts = parts_with_header("x-org", "");
-    assert!(r.resolve(&parts, &pool).await.unwrap().is_none());
+    assert!(r
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap()
+        .is_none());
 
     // No header at all.
     let parts = parts_with_uri("http://app.test/");
-    assert!(r.resolve(&parts, &pool).await.unwrap().is_none());
+    assert!(r
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap()
+        .is_none());
 
     migrate::drop_all(&pool).await.unwrap();
 }
@@ -301,11 +342,18 @@ async fn port_resolver_matches_org_port() {
 
     let r = PortResolver;
     let parts = parts_with_uri("http://example.test:9001/x");
-    let org = r.resolve(&parts, &pool).await.unwrap();
+    let org = r
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap();
     assert_eq!(org.unwrap().slug, "initech");
 
     let parts = parts_with_uri("http://example.test:8080/x");
-    assert!(r.resolve(&parts, &pool).await.unwrap().is_none());
+    assert!(r
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap()
+        .is_none());
 
     migrate::drop_all(&pool).await.unwrap();
 }

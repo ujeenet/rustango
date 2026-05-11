@@ -353,7 +353,7 @@ async fn handle_request(
     }
 
     let (mut parts, body) = req.into_parts();
-    let org = match resolver.resolve(&parts, pools.registry()).await {
+    let org = match resolver.resolve(&parts, &pools.registry_pool()).await {
         Ok(Some(o)) => o,
         Ok(None) => return (StatusCode::NOT_FOUND, "tenant not found").into_response(),
         Err(e) => {
