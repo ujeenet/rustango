@@ -387,3 +387,12 @@ required-features = ["sqlite"]
 name              = "sqlite_app_demo"
 path              = "examples/sqlite_app_demo.rs"
 required-features = ["sqlite", "runserver"]
+
+# Multi-tenant SQLite demo (v0.33) — wires the DatabaseTenant<Sqlite>
+# extractor for per-tenant-file SQLite databases. Pairs with the
+# `database_pools_sqlite_*_live.rs` tests; this is the manual-running
+# shape downstream apps consume until the Cli builder lands.
+[[example]]
+name              = "sqlite_tenant_demo"
+path              = "examples/sqlite_tenant_demo.rs"
+required-features = ["sqlite", "tenancy", "runtime"]
