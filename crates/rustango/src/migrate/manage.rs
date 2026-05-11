@@ -2461,6 +2461,24 @@ pub(crate) fn settings_audit_check(
         }
     }
 
+    // v0.36 slice 9 — backend × tenancy alignment check. Schema-mode
+    // tenancy uses `SET search_path` which only Postgres supports.
+    // Flag config files that pair a non-PG backend with tenancy.
+    if let Some(backend) = settings.database.resolved_backend() {
+        let tenancy_on = crate::config::Settings::detected_features()
+            .iter()
+            .any(|f| *f == "tenancy");
+        if tenancy_on && backend != "postgres" {
+            out.warnings.push(format!(
+                "[database] backend = `{backend}` with `tenancy` feature on — \
+                 schema-mode multi-tenancy is Postgres-only by language semantics \
+                 (it relies on `SET search_path`). Either switch to a Postgres URL \
+                 in prod, or use `crate::tenancy::DatabasePools<DB>` for the \
+                 one-database-per-tenant model that works on sqlite/mysql."
+            ));
+        }
+    }
+
     // v0.36 slice 7+10 — [admin] section deploy audit. The new
     // settings-driven admin Builder reads these in
     // `admin::Builder::from_settings`; flag dev-defaults left in prod.
@@ -3264,6 +3282,31 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
                 .iter()
                 .any(|w| w.contains("[admin]") && w.contains("url_prefix")),
             "empty url_prefix should be quiet, got: {:?}",
+            r.warnings
+        );
+    }
+
+    /// v0.36 slice 9 — pairing `tenancy` feature with a non-PG backend
+    /// is a misconfiguration: schema-mode tenancy needs Postgres.
+    /// This test only runs when the test profile has tenancy on AND
+    /// postgres is the active backend — every other feature combo
+    /// makes the assertion logically unreachable.
+    #[cfg(all(
+        feature = "config",
+        feature = "tenancy",
+        feature = "postgres",
+        any(feature = "sqlite", feature = "mysql"),
+    ))]
+    #[test]
+    fn settings_audit_sqlite_backend_with_tenancy_warns_in_prod() {
+        let mut s = crate::config::Settings::default();
+        s.database.backend = Some("sqlite".into());
+        let r = settings_run("prod", &s);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("[database]") && w.contains("tenancy")),
+            "expected backend × tenancy warning, got: {:?}",
             r.warnings
         );
     }

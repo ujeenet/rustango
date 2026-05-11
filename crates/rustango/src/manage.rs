@@ -531,6 +531,22 @@ impl Cli {
 
         #[cfg(feature = "tenancy")]
         if self.tenancy {
+            // v0.36 — schema-mode tenancy (`TenantPools<sqlx::Postgres>`)
+            // is Postgres-only by language. Catch sqlite / mysql URLs
+            // here with a friendly error instead of letting `PgPool::connect`
+            // emit the sqlx-internal "unsupported scheme" message at a
+            // less helpful layer.
+            let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
+            if !matches!(scheme.as_str(), "postgres" | "postgresql") {
+                return Err(format!(
+                    "manage::Cli::tenancy() requires a Postgres DATABASE_URL (got scheme \
+                     `{scheme}`). Schema-mode multi-tenancy uses `SET search_path` which \
+                     is Postgres-only by language semantics. To run sqlite/mysql apps, \
+                     drop `.tenancy()` from the Cli setup; for multi-tenant sqlite/mysql \
+                     see `crate::tenancy::DatabasePools<DB>` (one database per tenant)."
+                )
+                .into());
+            }
             let pool = if no_db_verb {
                 PgPool::connect_lazy(&url)?
             } else {
