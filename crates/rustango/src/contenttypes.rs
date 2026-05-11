@@ -33,7 +33,11 @@
 //! foreign key everywhere else.
 
 use crate::core::{inventory, Model as _, ModelEntry, SqlValue};
-use crate::sql::{sqlx::PgPool, Auto, ExecError, Fetcher as _, FetcherPool as _};
+use crate::sql::{Auto, ExecError, FetcherPool as _};
+// PG-typed helpers below pull in `PgPool` + `Fetcher`. Sqlite/MySQL-
+// only builds get just the tri-dialect `*_pool` entry points.
+#[cfg(feature = "postgres")]
+use crate::sql::{sqlx::PgPool, Fetcher as _};
 use crate::Model;
 
 /// One row per registered model. The schema mirrors Django's
@@ -71,6 +75,9 @@ pub struct ContentType {
     pub table: String,
 }
 
+// v0.35 — PG-typed back-compat block. Sqlite/MySQL apps use the
+// tri-dialect `*_pool` variants further down.
+#[cfg(feature = "postgres")]
 impl ContentType {
     /// Look up a `ContentType` row for a registered model type.
     ///
@@ -124,6 +131,39 @@ impl ContentType {
         Ok(rows.into_iter().next())
     }
 
+    /// Lookup by primary key. Used by FK joins (audit log target,
+    /// permission scope, etc.).
+    ///
+    /// # Errors
+    /// As [`Self::for_model`].
+    pub async fn by_id(pool: &PgPool, id: i64) -> Result<Option<Self>, ExecError> {
+        let rows: Vec<Self> = Self::objects()
+            .filter("id", crate::core::Op::Eq, SqlValue::I64(id))
+            .limit(1)
+            .fetch(pool)
+            .await?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// All registered ContentTypes, ordered by `(app_label, model_name)`
+    /// for stable display in admin sidebars / API listings.
+    ///
+    /// # Errors
+    /// As [`Self::for_model`].
+    pub async fn all(pool: &PgPool) -> Result<Vec<Self>, ExecError> {
+        let rows: Vec<Self> = Self::objects()
+            .order_by(&[("app_label", false), ("model_name", false)])
+            .fetch(pool)
+            .await?;
+        Ok(rows)
+    }
+}
+
+// ============================================================ tri-dialect lookups
+
+/// Tri-dialect `ContentType` lookups — work against any backend the
+/// [`crate::sql::Pool`] enum carries.
+impl ContentType {
     /// Backend-agnostic counterpart of [`Self::by_natural_key`].
     /// Routes through [`FetcherPool::fetch_pool`] so the same call
     /// works against `Pool::Postgres` / `Pool::Mysql` / `Pool::Sqlite`.
@@ -153,33 +193,6 @@ impl ContentType {
             .await?;
         Ok(rows.into_iter().next())
     }
-
-    /// Lookup by primary key. Used by FK joins (audit log target,
-    /// permission scope, etc.).
-    ///
-    /// # Errors
-    /// As [`Self::for_model`].
-    pub async fn by_id(pool: &PgPool, id: i64) -> Result<Option<Self>, ExecError> {
-        let rows: Vec<Self> = Self::objects()
-            .filter("id", crate::core::Op::Eq, SqlValue::I64(id))
-            .limit(1)
-            .fetch(pool)
-            .await?;
-        Ok(rows.into_iter().next())
-    }
-
-    /// All registered ContentTypes, ordered by `(app_label, model_name)`
-    /// for stable display in admin sidebars / API listings.
-    ///
-    /// # Errors
-    /// As [`Self::for_model`].
-    pub async fn all(pool: &PgPool) -> Result<Vec<Self>, ExecError> {
-        let rows: Vec<Self> = Self::objects()
-            .order_by(&[("app_label", false), ("model_name", false)])
-            .fetch(pool)
-            .await?;
-        Ok(rows)
-    }
 }
 
 // ============================================================ #89 part B — fetch helpers
@@ -207,6 +220,7 @@ impl ContentType {
 ///
 /// # Errors
 /// Driver / query failures from the SELECT.
+#[cfg(feature = "postgres")]
 pub async fn fetch_row_as_json(
     pool: &PgPool,
     ct: &ContentType,
@@ -267,6 +281,7 @@ pub async fn fetch_row_as_json(
 /// # Errors
 /// Driver / query failures + any `Err` returned by `f` short-
 /// circuits the iteration.
+#[cfg(feature = "postgres")]
 pub async fn for_each_row_of_ct<F>(
     pool: &PgPool,
     ct: &ContentType,
@@ -375,6 +390,7 @@ impl GenericForeignKey {
     ///
     /// # Errors
     /// As [`ContentType::for_model`].
+    #[cfg(feature = "postgres")]
     pub async fn for_target<T: crate::core::Model>(
         pool: &PgPool,
         object_pk: i64,
@@ -415,6 +431,7 @@ impl GenericForeignKey {
 /// # Errors
 /// Driver / SQL failures from the ContentType lookup. Caller can
 /// `unwrap_or_else(|_| ...)` to a fallback rendering.
+#[cfg(feature = "postgres")]
 pub async fn render_generic_fk_link(
     pool: &PgPool,
     gfk: GenericForeignKey,
@@ -484,6 +501,7 @@ pub async fn render_generic_fk_link(
 ///
 /// # Errors
 /// Driver / SQL failures from the SELECT.
+#[cfg(feature = "postgres")]
 pub async fn prefetch_soft<C, F>(
     pool: &PgPool,
     parent_pks: &[i64],
@@ -555,6 +573,7 @@ where
 /// # Errors
 /// As [`ContentType::for_model`] + driver / SQL failures from the
 /// target SELECT.
+#[cfg(feature = "postgres")]
 pub async fn prefetch_generic<C>(
     pool: &PgPool,
     pairs: &[(i64, i64)],
@@ -671,6 +690,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "rustango_content_types_natural_key"
 ///
 /// # Errors
 /// Driver / SQL failures.
+#[cfg(feature = "postgres")]
 pub async fn ensure_table(pool: &PgPool) -> Result<(), crate::sql::sqlx::Error> {
     for stmt in CREATE_TABLE_SQL.split(';') {
         let trimmed = stmt.trim();
@@ -695,6 +715,7 @@ pub async fn ensure_table(pool: &PgPool) -> Result<(), crate::sql::sqlx::Error> 
 ///
 /// # Errors
 /// Driver / query failures from the SELECT-or-INSERT loop.
+#[cfg(feature = "postgres")]
 pub async fn ensure_seeded(pool: &PgPool) -> Result<usize, ExecError> {
     // Idempotent table-create — ensures the registry-side CT
     // catalog has its physical home before we walk inventory.

@@ -18,6 +18,11 @@ pub mod ddl;
 pub mod diff;
 mod error;
 pub mod file;
+// inspectdb is the migrate CLI's "emit Model derives from a live PG
+// schema" verb — PG-only by design (reads `information_schema` with
+// PG-typed FromRow / pg_catalog joins). Gated to PG; sqlite/MySQL
+// apps don't get this verb.
+#[cfg(feature = "postgres")]
 pub(crate) mod inspectdb;
 pub mod invert;
 pub mod make;

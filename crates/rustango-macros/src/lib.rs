@@ -666,6 +666,7 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
         }
     });
     quote! {
+        #[cfg(feature = "postgres")]
         impl ::rustango::sql::LoadRelated for #struct_name {
             #[allow(unused_variables)]
             fn __rustango_load_related(
@@ -2386,6 +2387,7 @@ fn inherent_impl_tokens(
             /// # Errors
             /// Returns [`::rustango::sql::ExecError`] for SQL-writing
             /// or driver failures.
+            #[cfg(feature = "postgres")]
             pub async fn save(
                 &mut self,
                 pool: &::rustango::sql::sqlx::PgPool,
@@ -2403,6 +2405,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::save`].
+            #[cfg(feature = "postgres")]
             pub async fn save_on #executor_generics (
                 &mut self,
                 #executor_param,
@@ -2444,6 +2447,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::save_on`].
+            #[cfg(feature = "postgres")]
             pub async fn save_on_with #executor_generics (
                 &mut self,
                 #executor_param,
@@ -2463,6 +2467,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::insert_on`].
+            #[cfg(feature = "postgres")]
             pub async fn upsert(
                 &mut self,
                 pool: &::rustango::sql::sqlx::PgPool,
@@ -2475,6 +2480,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::upsert`].
+            #[cfg(feature = "postgres")]
             pub async fn upsert_on #executor_generics (
                 &mut self,
                 #executor_param,
@@ -2609,6 +2615,7 @@ fn inherent_impl_tokens(
             /// # Errors
             /// Returns [`::rustango::sql::ExecError`] for SQL-writing or
             /// driver failures.
+            #[cfg(feature = "postgres")]
             pub async fn delete(
                 &self,
                 pool: &::rustango::sql::sqlx::PgPool,
@@ -2622,6 +2629,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::delete`].
+            #[cfg(feature = "postgres")]
             pub async fn delete_on #executor_generics (
                 &self,
                 #executor_param,
@@ -2653,6 +2661,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::delete_on`].
+            #[cfg(feature = "postgres")]
             pub async fn delete_on_with #executor_generics (
                 &self,
                 #executor_param,
@@ -2682,6 +2691,7 @@ fn inherent_impl_tokens(
             /// # Errors
             /// Returns [`::rustango::sql::ExecError`] for SQL-writing or
             /// driver failures.
+            #[cfg(feature = "postgres")]
             pub async fn insert(
                 &mut self,
                 pool: &::rustango::sql::sqlx::PgPool,
@@ -2694,6 +2704,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::insert`].
+            #[cfg(feature = "postgres")]
             pub async fn insert_on #executor_generics (
                 &mut self,
                 #executor_param,
@@ -2727,6 +2738,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::insert_on`].
+            #[cfg(feature = "postgres")]
             pub async fn insert_on_with #executor_generics (
                 &mut self,
                 #executor_param,
@@ -2746,6 +2758,7 @@ fn inherent_impl_tokens(
             /// # Errors
             /// Returns [`::rustango::sql::ExecError`] for SQL-writing or
             /// driver failures.
+            #[cfg(feature = "postgres")]
             pub async fn insert(
                 &self,
                 pool: &::rustango::sql::sqlx::PgPool,
@@ -2758,6 +2771,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::insert`].
+            #[cfg(feature = "postgres")]
             pub async fn insert_on<'_c, _E>(
                 &self,
                 _executor: _E,
@@ -2803,6 +2817,7 @@ fn inherent_impl_tokens(
             /// # Errors
             /// Returns [`::rustango::sql::ExecError`] for validation,
             /// SQL-writing, mixed-Auto rejection, or driver failures.
+            #[cfg(feature = "postgres")]
             pub async fn bulk_insert(
                 rows: &mut [Self],
                 pool: &::rustango::sql::sqlx::PgPool,
@@ -2815,6 +2830,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::bulk_insert`].
+            #[cfg(feature = "postgres")]
             pub async fn bulk_insert_on #executor_generics (
                 rows: &mut [Self],
                 #executor_param,
@@ -2892,6 +2908,7 @@ fn inherent_impl_tokens(
             /// # Errors
             /// Returns [`::rustango::sql::ExecError`] for validation,
             /// SQL-writing, or driver failures.
+            #[cfg(feature = "postgres")]
             pub async fn bulk_insert(
                 rows: &[Self],
                 pool: &::rustango::sql::sqlx::PgPool,
@@ -2904,6 +2921,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::bulk_insert`].
+            #[cfg(feature = "postgres")]
             pub async fn bulk_insert_on<'_c, _E>(
                 rows: &[Self],
                 _executor: _E,
@@ -3056,6 +3074,7 @@ fn inherent_impl_tokens(
         /// `format!("{prefix}__{col}")`, matching the alias the
         /// SELECT writer emitted. Slice 9.0d.
         #[doc(hidden)]
+        #[cfg(feature = "postgres")]
         pub fn __rustango_from_aliased_row(
             row: &::rustango::sql::sqlx::postgres::PgRow,
             prefix: &str,
@@ -3220,6 +3239,7 @@ fn from_row_impl_tokens(struct_name: &syn::Ident, from_row_inits: &[TokenStream2
     // back into a comma-separated list inside square brackets. Since each
     // entry is already in `field: expr` shape, the existing tokens slot in.
     quote! {
+        #[cfg(feature = "postgres")]
         impl<'r> ::rustango::sql::sqlx::FromRow<'r, ::rustango::sql::sqlx::postgres::PgRow>
             for #struct_name
         {
