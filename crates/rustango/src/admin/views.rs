@@ -1046,7 +1046,16 @@ pub(crate) async fn update_submit(
     // up the per-request `with_source(User { id })` install from
     // `tenancy::admin`, so operators get a "who changed what" trail
     // automatically.
-    super::audit::emit_admin_audit_diff(&state, model, &pk_raw, before_row.as_ref(), &form).await;
+    //
+    // v0.37 — convert the PG-typed before-row to JSON once for the
+    // audit emit helper. When views.rs fully migrates to the JSON
+    // bridge (slice 3+4), this `row_to_json` shim drops and the
+    // SELECT above uses `select_one_row_as_json_pool` directly.
+    let before_fields: Vec<&'static crate::core::FieldSchema> = model.scalar_fields().collect();
+    let before_json = before_row
+        .as_ref()
+        .map(|row| crate::sql::row_to_json(row, &before_fields));
+    super::audit::emit_admin_audit_diff(&state, model, &pk_raw, before_json.as_ref(), &form).await;
     Ok(Redirect::to(&format!(
         "{}/{}/{}",
         state.config.admin_prefix, model.table, pk_raw

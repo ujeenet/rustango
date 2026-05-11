@@ -182,3 +182,124 @@ async fn audit_log_table_quotes_identifiers_per_dialect() {
     // the database.
     let _ = audit::emit_many_pool(&pool, &[]).await.unwrap();
 }
+
+// v0.37 slice 2 — the activity-feed list/count/facet helpers used
+// by `admin/audit.rs::audit_log_view` against a real SQLite pool.
+// Proves the dialect-emitter SQL renders correctly for placeholders
+// (`?`) and identifier quoting (double-quote).
+
+#[tokio::test]
+async fn list_pool_filters_by_entity_table() {
+    let pool = pool().await;
+    ensure_table_pool(&pool).await.unwrap();
+    for (table, pk) in [("post", "1"), ("post", "2"), ("author", "5")] {
+        emit_one_pool(
+            &pool,
+            &entry(table, pk, AuditOp::Create, serde_json::json!({"x": 1})),
+        )
+        .await
+        .unwrap();
+    }
+    let filter = audit::AuditFilter {
+        entity_table: Some("post".into()),
+        ..Default::default()
+    };
+    let rows = audit::list_pool(&pool, &filter, 50, 0).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r.entity_table == "post"));
+    let total = audit::count_pool(&pool, &filter).await.unwrap();
+    assert_eq!(total, 2);
+}
+
+#[tokio::test]
+async fn list_pool_combines_multiple_filters() {
+    let pool = pool().await;
+    ensure_table_pool(&pool).await.unwrap();
+    emit_one_pool(
+        &pool,
+        &entry("post", "1", AuditOp::Create, serde_json::json!({"v": 1})),
+    )
+    .await
+    .unwrap();
+    emit_one_pool(
+        &pool,
+        &entry("post", "1", AuditOp::Update, serde_json::json!({"v": 2})),
+    )
+    .await
+    .unwrap();
+    emit_one_pool(
+        &pool,
+        &entry("post", "2", AuditOp::Update, serde_json::json!({"v": 3})),
+    )
+    .await
+    .unwrap();
+    // post + update + pk=1 → exactly one row.
+    let filter = audit::AuditFilter {
+        entity_table: Some("post".into()),
+        entity_pk: Some("1".into()),
+        operation: Some("update".into()),
+        source: None,
+    };
+    let rows = audit::list_pool(&pool, &filter, 50, 0).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].entity_pk, "1");
+    assert_eq!(rows[0].operation, "update");
+}
+
+#[tokio::test]
+async fn list_pool_paginates() {
+    let pool = pool().await;
+    ensure_table_pool(&pool).await.unwrap();
+    for i in 0..5 {
+        emit_one_pool(
+            &pool,
+            &entry("post", "1", AuditOp::Update, serde_json::json!({"i": i})),
+        )
+        .await
+        .unwrap();
+    }
+    let filter = audit::AuditFilter::default();
+    let page1 = audit::list_pool(&pool, &filter, 2, 0).await.unwrap();
+    let page2 = audit::list_pool(&pool, &filter, 2, 2).await.unwrap();
+    let page3 = audit::list_pool(&pool, &filter, 2, 4).await.unwrap();
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page2.len(), 2);
+    assert_eq!(page3.len(), 1);
+    // Newest-first ordering — id descends across pages.
+    assert!(page1[0].id > page2[0].id);
+    assert!(page2[0].id > page3[0].id);
+}
+
+#[tokio::test]
+async fn facet_counts_returns_groupby() {
+    let pool = pool().await;
+    ensure_table_pool(&pool).await.unwrap();
+    for (table, op) in [
+        ("post", AuditOp::Create),
+        ("post", AuditOp::Update),
+        ("post", AuditOp::Update),
+        ("author", AuditOp::Create),
+    ] {
+        emit_one_pool(&pool, &entry(table, "1", op, serde_json::json!({})))
+            .await
+            .unwrap();
+    }
+    // entity_table facet: post=3, author=1, sorted count-desc.
+    let facets = audit::facet_counts_pool(&pool, "entity_table")
+        .await
+        .unwrap();
+    assert_eq!(facets[0], ("post".to_string(), 3));
+    assert_eq!(facets[1], ("author".to_string(), 1));
+
+    let ops = audit::facet_counts_pool(&pool, "operation").await.unwrap();
+    assert!(ops.iter().find(|(v, c)| v == "update" && *c == 2).is_some());
+    assert!(ops.iter().find(|(v, c)| v == "create" && *c == 2).is_some());
+}
+
+#[tokio::test]
+async fn facet_counts_rejects_non_allowlisted_column() {
+    let pool = pool().await;
+    ensure_table_pool(&pool).await.unwrap();
+    let r = audit::facet_counts_pool(&pool, "no_such_column").await;
+    assert!(r.is_err(), "non-allowlisted column should be rejected");
+}

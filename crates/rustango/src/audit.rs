@@ -700,6 +700,294 @@ pub async fn emit_one_pool(
     }
 }
 
+/// v0.37 — filter shape for the admin's audit-log activity feed.
+/// Each field is optional; `None` means "don't constrain that column".
+/// The `list_pool` / `count_pool` helpers turn this into a WHERE clause
+/// rendered via [`Dialect::placeholder`] + [`Dialect::quote_ident`].
+#[derive(Debug, Clone, Default)]
+pub struct AuditFilter {
+    pub entity_table: Option<String>,
+    pub entity_pk: Option<String>,
+    pub operation: Option<String>,
+    pub source: Option<String>,
+}
+
+impl AuditFilter {
+    /// Walk the active filters and produce `(column, value)` pairs in
+    /// stable order — the order drives placeholder numbering.
+    fn active_pairs(&self) -> Vec<(&'static str, &str)> {
+        let mut out = Vec::with_capacity(4);
+        if let Some(v) = self.entity_table.as_deref() {
+            if !v.is_empty() {
+                out.push(("entity_table", v));
+            }
+        }
+        if let Some(v) = self.entity_pk.as_deref() {
+            if !v.is_empty() {
+                out.push(("entity_pk", v));
+            }
+        }
+        if let Some(v) = self.operation.as_deref() {
+            if !v.is_empty() {
+                out.push(("operation", v));
+            }
+        }
+        if let Some(v) = self.source.as_deref() {
+            if !v.is_empty() {
+                out.push(("source", v));
+            }
+        }
+        out
+    }
+}
+
+/// v0.37 — tri-dialect counterpart of the admin audit-log SELECT.
+/// Returns a page of `AuditEntry` rows ordered newest-first matching
+/// the supplied `AuditFilter`. SQL is rendered through the dialect's
+/// emitters; row decode uses the same JSON-bridge logic as
+/// [`fetch_for_entity_pool`].
+///
+/// # Errors
+/// Driver / SQL failures from the SELECT, or JSON decode failures on
+/// SQLite if the `changes` TEXT column isn't valid JSON.
+pub async fn list_pool(
+    pool: &crate::sql::Pool,
+    filter: &AuditFilter,
+    page_size: i64,
+    offset: i64,
+) -> Result<Vec<AuditEntry>, sqlx::Error> {
+    let pairs = filter.active_pairs();
+    let sql = audit_list_sql(pool.dialect(), &pairs);
+    let binds: Vec<&str> = pairs.iter().map(|(_, v)| *v).collect();
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let mut q = sqlx::query(&sql);
+            for v in &binds {
+                q = q.bind(*v);
+            }
+            let rows = q.bind(page_size).bind(offset).fetch_all(pg).await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                out.push(AuditEntry::from_row(&row)?);
+            }
+            Ok(out)
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            use sqlx::Row as _;
+            let mut q = sqlx::query(&sql);
+            for v in &binds {
+                q = q.bind(*v);
+            }
+            let rows = q.bind(page_size).bind(offset).fetch_all(my).await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                let changes: sqlx::types::Json<Value> = row.try_get("changes")?;
+                out.push(AuditEntry {
+                    id: row.try_get("id")?,
+                    entity_table: row.try_get("entity_table")?,
+                    entity_pk: row.try_get("entity_pk")?,
+                    operation: row.try_get("operation")?,
+                    source: row.try_get("source")?,
+                    changes: changes.0,
+                    occurred_at: row.try_get("occurred_at")?,
+                });
+            }
+            Ok(out)
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => {
+            use sqlx::Row as _;
+            let mut q = sqlx::query(&sql);
+            for v in &binds {
+                q = q.bind(*v);
+            }
+            let rows = q.bind(page_size).bind(offset).fetch_all(sq).await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                let changes_text: String = row.try_get("changes")?;
+                let changes: Value = serde_json::from_str(&changes_text).map_err(|e| {
+                    sqlx::Error::Decode(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("audit `changes` is not valid JSON: {e}"),
+                    )))
+                })?;
+                out.push(AuditEntry {
+                    id: row.try_get("id")?,
+                    entity_table: row.try_get("entity_table")?,
+                    entity_pk: row.try_get("entity_pk")?,
+                    operation: row.try_get("operation")?,
+                    source: row.try_get("source")?,
+                    changes,
+                    occurred_at: row.try_get("occurred_at")?,
+                });
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// v0.37 — tri-dialect total count for the admin audit-log pager,
+/// honoring the same `AuditFilter` as [`list_pool`].
+///
+/// # Errors
+/// Driver / SQL failures from the SELECT COUNT(*).
+pub async fn count_pool(pool: &crate::sql::Pool, filter: &AuditFilter) -> Result<i64, sqlx::Error> {
+    let pairs = filter.active_pairs();
+    let sql = audit_count_sql(pool.dialect(), &pairs);
+    let binds: Vec<&str> = pairs.iter().map(|(_, v)| *v).collect();
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let mut q = sqlx::query_scalar::<_, i64>(&sql);
+            for v in &binds {
+                q = q.bind(*v);
+            }
+            q.fetch_one(pg).await
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            let mut q = sqlx::query_scalar::<_, i64>(&sql);
+            for v in &binds {
+                q = q.bind(*v);
+            }
+            q.fetch_one(my).await
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => {
+            let mut q = sqlx::query_scalar::<_, i64>(&sql);
+            for v in &binds {
+                q = q.bind(*v);
+            }
+            q.fetch_one(sq).await
+        }
+    }
+}
+
+/// v0.37 — tri-dialect facet (column, count) groupby for the admin
+/// audit-log right rail. Returns rows ordered count-desc, value-asc.
+/// SQL is rendered via the dialect emitter — `column` is matched
+/// against an allowlist (`entity_table` / `operation` / `source`) to
+/// preclude injection.
+///
+/// # Errors
+/// Driver / SQL failures from the SELECT, or
+/// `Error::ColumnNotFound` when `column` isn't in the allowlist (the
+/// caller has a bug).
+pub async fn facet_counts_pool(
+    pool: &crate::sql::Pool,
+    column: &str,
+) -> Result<Vec<(String, i64)>, sqlx::Error> {
+    // Allowlist guards against injection — the admin handler always
+    // passes one of these three, but defense-in-depth is cheap.
+    if !matches!(column, "entity_table" | "operation" | "source") {
+        return Err(sqlx::Error::ColumnNotFound(column.to_owned()));
+    }
+    let sql = audit_facet_sql(pool.dialect(), column);
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            use sqlx::Row as _;
+            let rows = sqlx::query(&sql).fetch_all(pg).await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for r in rows {
+                let v: String = r.try_get("facet_value").unwrap_or_default();
+                let c: i64 = r.try_get("facet_count").unwrap_or(0);
+                out.push((v, c));
+            }
+            Ok(out)
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            use sqlx::Row as _;
+            let rows = sqlx::query(&sql).fetch_all(my).await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for r in rows {
+                let v: String = r.try_get("facet_value").unwrap_or_default();
+                let c: i64 = r.try_get("facet_count").unwrap_or(0);
+                out.push((v, c));
+            }
+            Ok(out)
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => {
+            use sqlx::Row as _;
+            let rows = sqlx::query(&sql).fetch_all(sq).await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for r in rows {
+                let v: String = r.try_get("facet_value").unwrap_or_default();
+                let c: i64 = r.try_get("facet_count").unwrap_or(0);
+                out.push((v, c));
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// v0.37 — render the audit-log activity-feed SELECT (paginated, with
+/// optional filter pairs) through the dialect's emitters. `pairs`
+/// supplies the active filter columns in stable order so placeholder
+/// numbering is deterministic.
+fn audit_list_sql(dialect: &dyn crate::sql::Dialect, pairs: &[(&'static str, &str)]) -> String {
+    use std::fmt::Write as _;
+    let t = dialect.quote_ident("rustango_audit_log");
+    let id = dialect.quote_ident("id");
+    let et = dialect.quote_ident("entity_table");
+    let ek = dialect.quote_ident("entity_pk");
+    let op = dialect.quote_ident("operation");
+    let src = dialect.quote_ident("source");
+    let ch = dialect.quote_ident("changes");
+    let oa = dialect.quote_ident("occurred_at");
+    let mut sql = String::new();
+    let _ = write!(
+        sql,
+        "SELECT {id}, {et}, {ek}, {op}, {src}, {ch}, {oa} FROM {t}",
+    );
+    let mut bind_idx = 1usize;
+    for (i, (col, _)) in pairs.iter().enumerate() {
+        let prefix = if i == 0 { " WHERE " } else { " AND " };
+        let col_q = dialect.quote_ident(col);
+        let ph = dialect.placeholder(bind_idx);
+        let _ = write!(sql, "{prefix}{col_q} = {ph}");
+        bind_idx += 1;
+    }
+    let p_limit = dialect.placeholder(bind_idx);
+    let p_offset = dialect.placeholder(bind_idx + 1);
+    let _ = write!(
+        sql,
+        " ORDER BY {oa} DESC, {id} DESC LIMIT {p_limit} OFFSET {p_offset}"
+    );
+    sql
+}
+
+/// v0.37 — `SELECT COUNT(*) FROM rustango_audit_log [WHERE ...]`
+/// rendered through the dialect emitter.
+fn audit_count_sql(dialect: &dyn crate::sql::Dialect, pairs: &[(&'static str, &str)]) -> String {
+    use std::fmt::Write as _;
+    let t = dialect.quote_ident("rustango_audit_log");
+    let mut sql = format!("SELECT COUNT(*) FROM {t}");
+    for (i, (col, _)) in pairs.iter().enumerate() {
+        let prefix = if i == 0 { " WHERE " } else { " AND " };
+        let col_q = dialect.quote_ident(col);
+        let ph = dialect.placeholder(i + 1);
+        let _ = write!(sql, "{prefix}{col_q} = {ph}");
+    }
+    sql
+}
+
+/// v0.37 — `SELECT col, COUNT(*) FROM rustango_audit_log GROUP BY col
+/// ORDER BY count DESC, col` rendered through the dialect emitter.
+/// `column` is one of the allowlisted facet columns.
+fn audit_facet_sql(dialect: &dyn crate::sql::Dialect, column: &str) -> String {
+    let t = dialect.quote_ident("rustango_audit_log");
+    let col = dialect.quote_ident(column);
+    format!(
+        "SELECT {col} AS facet_value, COUNT(*) AS facet_count \
+         FROM {t} GROUP BY {col} ORDER BY facet_count DESC, {col}"
+    )
+}
+
 /// v0.37 — tri-dialect batched audit emit. On Postgres dispatches to
 /// the one-statement multi-row [`emit_many`] INSERT; on MySQL/SQLite
 /// falls back to a per-row [`emit_one_*`] loop inside a single

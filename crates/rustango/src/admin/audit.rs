@@ -21,8 +21,6 @@ use axum::extract::{Form, Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use serde_json::Value;
 
-use crate::sql::sqlx;
-
 use super::errors::AdminError;
 use super::helpers::chrome_context;
 use super::render;
@@ -54,63 +52,52 @@ pub(crate) async fn audit_log_view(
         .max(1);
     let offset = (page - 1) * AUDIT_PAGE_SIZE;
 
-    // Build dynamic WHERE from the per-facet params. Each (column,
-    // value) pair is appended to the SQL with a $N placeholder; sqlx
-    // binds them positionally. `entity_pk` is filterable too — used
-    // by the "View full history" link on each row's detail page —
-    // but not in the facet rail (per-PK distinct-value cardinality
-    // is unbounded; appears only as an active-filter pill).
-    let mut where_sql = String::new();
-    let mut binds: Vec<String> = Vec::new();
+    // v0.37 — pull the active filter set off the query string into
+    // an `AuditFilter` so the listing helpers in `crate::audit` can
+    // render their SQL via the dialect emitter. `entity_pk` is
+    // filterable too — drives the "View full history" link on each
+    // row's detail page — but it's not in the facet rail (per-PK
+    // distinct-value cardinality is unbounded; appears only as an
+    // active-filter pill).
+    let filter = crate::audit::AuditFilter {
+        entity_table: params
+            .get("entity_table")
+            .filter(|s| !s.is_empty())
+            .cloned(),
+        entity_pk: params.get("entity_pk").filter(|s| !s.is_empty()).cloned(),
+        operation: params.get("operation").filter(|s| !s.is_empty()).cloned(),
+        source: params.get("source").filter(|s| !s.is_empty()).cloned(),
+    };
+    // Stable ordering for the active-filter pill render + pager
+    // extras builder below.
     let mut active_field_filters: Vec<(&'static str, String)> = Vec::new();
-    for (col_static, key) in [
-        ("entity_table", "entity_table"),
-        ("entity_pk", "entity_pk"),
-        ("operation", "operation"),
-        ("source", "source"),
+    for (col, val) in [
+        ("entity_table", &filter.entity_table),
+        ("entity_pk", &filter.entity_pk),
+        ("operation", &filter.operation),
+        ("source", &filter.source),
     ] {
-        if let Some(v) = params.get(key).filter(|s| !s.is_empty()) {
-            binds.push(v.clone());
-            let placeholder = binds.len();
-            if where_sql.is_empty() {
-                where_sql.push_str(" WHERE ");
-            } else {
-                where_sql.push_str(" AND ");
-            }
-            use std::fmt::Write as _;
-            let _ = write!(where_sql, r#""{col_static}" = ${placeholder}"#,);
-            active_field_filters.push((col_static, v.clone()));
+        if let Some(v) = val.as_deref().filter(|s| !s.is_empty()) {
+            active_field_filters.push((col, v.to_owned()));
         }
     }
 
-    // Total count for the pager.
-    let count_sql = format!(r#"SELECT COUNT(*) FROM "rustango_audit_log"{where_sql}"#,);
-    let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
-    for v in &binds {
-        count_q = count_q.bind(v);
-    }
-    let total: i64 = count_q.fetch_one(state.pg_pool()).await.unwrap_or(0);
+    // Total count + page of rows + per-facet groupby — all via the
+    // tri-dialect helpers in `crate::audit`. The SQL is rendered
+    // through `dialect.placeholder()` / `dialect.quote_ident()` so
+    // this view works against any backend the framework supports.
+    let total = crate::audit::count_pool(&state.pool, &filter)
+        .await
+        .unwrap_or(0);
+    let entries = crate::audit::list_pool(&state.pool, &filter, AUDIT_PAGE_SIZE, offset)
+        .await
+        .unwrap_or_default();
 
-    // Page of rows.
-    let rows_sql = format!(
-        r#"SELECT "id", "entity_table", "entity_pk", "operation", "source",
-                  "changes", "occurred_at"
-           FROM "rustango_audit_log"{where_sql}
-           ORDER BY "occurred_at" DESC, "id" DESC
-           LIMIT $%LIMIT% OFFSET $%OFFSET%"#,
-    )
-    .replace("$%LIMIT%", &format!("${}", binds.len() + 1))
-    .replace("$%OFFSET%", &format!("${}", binds.len() + 2));
-    let mut rows_q = sqlx::query(&rows_sql);
-    for v in &binds {
-        rows_q = rows_q.bind(v);
-    }
-    rows_q = rows_q.bind(AUDIT_PAGE_SIZE).bind(offset);
-    let rows = rows_q.fetch_all(state.pg_pool()).await.unwrap_or_default();
-
-    // Per-facet distinct values + counts. One small GROUP BY query
-    // per facet column. Always runs against the unfiltered table so
-    // operators can navigate to any value without losing them.
+    // Per-facet distinct values + counts. Always runs against the
+    // unfiltered table so operators can navigate to any value
+    // without losing them. v0.13.1: count desc with alpha tie-break
+    // — most active value first, deterministic output across
+    // requests.
     let mut facets_ctx: Vec<Value> = Vec::new();
     let show_all_facet = params.get("facet_show_all").map(String::as_str);
     for col in ["entity_table", "operation", "source"] {
@@ -118,24 +105,12 @@ pub(crate) async fn audit_log_view(
             .iter()
             .find(|(k, _)| *k == col)
             .map(|(_, v)| v.as_str());
-        // v0.13.1: count desc with alpha tie-break — most active
-        // value first, deterministic output across requests.
-        let q_sql = format!(
-            r#"SELECT "{col}" AS facet_value, COUNT(*) AS facet_count
-               FROM "rustango_audit_log"
-               GROUP BY "{col}"
-               ORDER BY facet_count DESC, "{col}""#,
-        );
-        let facet_rows = sqlx::query(&q_sql)
-            .fetch_all(state.pg_pool())
+        let facet_pairs = crate::audit::facet_counts_pool(&state.pool, col)
             .await
             .unwrap_or_default();
-        let mut values: Vec<Value> = facet_rows
+        let mut values: Vec<Value> = facet_pairs
             .iter()
-            .map(|r| {
-                use sqlx::Row;
-                let raw: String = r.try_get("facet_value").unwrap_or_default();
-                let count: i64 = r.try_get("facet_count").unwrap_or(0);
+            .map(|(raw, count)| {
                 let is_active = active_value.map(|v| v == raw).unwrap_or(false);
                 let mut params: Vec<(String, String)> = Vec::new();
                 for (k, v) in &active_field_filters {
@@ -158,7 +133,7 @@ pub(crate) async fn audit_log_view(
                 }
                 serde_json::json!({
                     "raw": raw.clone(),
-                    "display": render::escape(&raw),
+                    "display": render::escape(raw),
                     "count": count,
                     "active": is_active,
                     "toggle_url": url,
@@ -214,34 +189,24 @@ pub(crate) async fn audit_log_view(
         ((total - 1) / AUDIT_PAGE_SIZE) + 1
     };
 
-    let entries_ctx: Vec<Value> = rows
+    let entries_ctx: Vec<Value> = entries
         .iter()
-        .map(|r| {
-            use sqlx::Row;
-            let id: i64 = r.try_get("id").unwrap_or(0);
-            let entity_table: String = r.try_get("entity_table").unwrap_or_default();
-            let entity_pk: String = r.try_get("entity_pk").unwrap_or_default();
-            let operation: String = r.try_get("operation").unwrap_or_default();
-            let source: String = r.try_get("source").unwrap_or_default();
-            let raw_changes: Value = r.try_get("changes").unwrap_or(Value::Null);
-            let (action_name, cleaned) = split_action_marker(&raw_changes);
-            let occurred_at: chrono::DateTime<chrono::Utc> = r
-                .try_get("occurred_at")
-                .unwrap_or_else(|_| chrono::Utc::now());
+        .map(|e| {
+            let (action_name, cleaned) = split_action_marker(&e.changes);
             // v0.31.1 (#5): use the configured admin prefix instead of
             // hardcoded `/__admin`. Friendly defaults (`/admin`) had
             // broken audit-log "view this record" links.
             let admin_prefix = state.config.admin_prefix.as_str();
             serde_json::json!({
-                "id": id,
-                "entity_table": entity_table,
-                "entity_pk": entity_pk,
-                "detail_url": format!("{admin_prefix}/{entity_table}/{entity_pk}"),
-                "operation": operation,
+                "id": e.id,
+                "entity_table": e.entity_table,
+                "entity_pk": e.entity_pk,
+                "detail_url": format!("{admin_prefix}/{}/{}", e.entity_table, e.entity_pk),
+                "operation": e.operation,
                 "action_name": action_name,
-                "source": source,
+                "source": e.source,
                 "changes": serde_json::to_string_pretty(&cleaned).unwrap_or_default(),
-                "occurred_at": occurred_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                "occurred_at": e.occurred_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
             })
         })
         .collect();
@@ -292,11 +257,11 @@ pub(crate) async fn audit_cleanup_submit(
                 .and_then(|s| s.parse::<i64>().ok())
                 .unwrap_or(50)
                 .max(0);
-            let removed = crate::audit::cleanup_keep_last_n(state.pg_pool(), keep)
+            let removed = crate::audit::cleanup_keep_last_n_pool(&state.pool, keep)
                 .await
                 .unwrap_or_else(|e| {
                     tracing::warn!(target: "rustango::admin::audit",
-                        error = %e, "cleanup_keep_last_n failed");
+                        error = %e, "cleanup_keep_last_n_pool failed");
                     0
                 });
             (
@@ -315,11 +280,11 @@ pub(crate) async fn audit_cleanup_submit(
                 .and_then(|s| s.parse::<i64>().ok())
                 .unwrap_or(90)
                 .max(0);
-            let removed = crate::audit::cleanup_older_than(state.pg_pool(), days)
+            let removed = crate::audit::cleanup_older_than_pool(&state.pool, days)
                 .await
                 .unwrap_or_else(|e| {
                     tracing::warn!(target: "rustango::admin::audit",
-                        error = %e, "cleanup_older_than failed");
+                        error = %e, "cleanup_older_than_pool failed");
                     0
                 });
             (
@@ -340,7 +305,7 @@ pub(crate) async fn audit_cleanup_submit(
         source: crate::audit::current_source(),
         changes,
     };
-    if let Err(e) = crate::audit::emit_one(state.pg_pool(), &entry).await {
+    if let Err(e) = crate::audit::emit_one_pool(&state.pool, &entry).await {
         tracing::warn!(target: "rustango::admin::audit",
             error = %e, "audit_cleanup self-audit emit failed");
     }
@@ -353,11 +318,15 @@ pub(crate) async fn audit_cleanup_submit(
 /// `audit::diff_changes`, and emits an Update entry. Falls back to
 /// the snapshot path when the before-row is missing (rare:
 /// concurrent delete between SELECT and UPDATE).
+///
+/// v0.37 — `before_row` is now `Option<&serde_json::Value>` (the JSON
+/// bridge from slice 2 of v0.36) instead of `Option<&PgRow>`, so the
+/// caller can fetch via `select_one_row_as_json_pool` on any backend.
 pub(crate) async fn emit_admin_audit_diff(
     state: &AppState,
     model: &'static crate::core::ModelSchema,
     pk_str: &str,
-    before_row: Option<&sqlx::postgres::PgRow>,
+    before_row: Option<&serde_json::Value>,
     form: &HashMap<String, String>,
 ) {
     let Some(row) = before_row else {
@@ -370,6 +339,13 @@ pub(crate) async fn emit_admin_audit_diff(
     // typed values from the SELECTed row; `after` parses form
     // payloads back to the typed shape via `coerce_form_to_json`,
     // falling back to the row's prior value for absent keys.
+    //
+    // v0.37 — row reads route through the dialect-agnostic JSON
+    // bridge (`render::read_value_as_json_from_json`) so this works
+    // across PG / MySQL / SQLite. The row's column values are
+    // already typed (numbers, bools, strings, nulls) inside the
+    // serde_json::Value tree, so the helper just looks up the field
+    // name + normalizes per `FieldType`.
     let before_pairs: Vec<(&str, Value)> = model
         .scalar_fields()
         .filter(|f| {
@@ -377,7 +353,7 @@ pub(crate) async fn emit_admin_audit_diff(
                 .audit_track
                 .map_or(true, |names| names.is_empty() || names.contains(&f.name))
         })
-        .map(|f| (f.name, render::read_value_as_json(row, f)))
+        .map(|f| (f.name, render::read_value_as_json_from_json(row, f)))
         .collect();
     let after_pairs: Vec<(&str, Value)> = model
         .scalar_fields()
@@ -389,7 +365,7 @@ pub(crate) async fn emit_admin_audit_diff(
         .map(|f| {
             let v = match form.get(f.name) {
                 Some(s) => render::coerce_form_to_json(f, s),
-                None => render::read_value_as_json(row, f),
+                None => render::read_value_as_json_from_json(row, f),
             };
             (f.name, v)
         })
@@ -401,7 +377,7 @@ pub(crate) async fn emit_admin_audit_diff(
         source: crate::audit::current_source(),
         changes: crate::audit::diff_changes(&before_pairs, &after_pairs),
     };
-    if let Err(e) = crate::audit::emit_one(state.pg_pool(), &entry).await {
+    if let Err(e) = crate::audit::emit_one_pool(&state.pool, &entry).await {
         tracing::warn!(
             target: "rustango::admin::audit",
             error = %e,
@@ -447,7 +423,7 @@ pub(crate) async fn emit_admin_audit(
         source: crate::audit::current_source(),
         changes: crate::audit::snapshot_changes(&pairs),
     };
-    if let Err(e) = crate::audit::emit_one(state.pg_pool(), &entry).await {
+    if let Err(e) = crate::audit::emit_one_pool(&state.pool, &entry).await {
         tracing::warn!(
             target: "rustango::admin::audit",
             error = %e,
