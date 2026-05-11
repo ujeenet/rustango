@@ -41,6 +41,7 @@
 
 mod audit;
 mod auth;
+pub mod computed_fields;
 mod errors;
 mod forms;
 mod helpers;
@@ -54,5 +55,6 @@ mod urls;
 mod views;
 
 pub use auth::protect_with_basic_auth;
+pub use computed_fields::{ComputedField, ComputedFieldRenderFn};
 pub use errors::AdminError;
 pub use urls::{router, AdminActionFn, AdminActionFuture, Builder};

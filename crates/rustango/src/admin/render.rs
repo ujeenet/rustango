@@ -42,12 +42,30 @@ pub(crate) fn render_value(row: &PgRow, field: &FieldSchema) -> String {
         FieldType::I64 => format_display::<i64>(row, field),
         FieldType::F32 => format_display::<f32>(row, field),
         FieldType::F64 => format_display::<f64>(row, field),
-        FieldType::Bool => format_display::<bool>(row, field),
+        FieldType::Bool => format_bool_checkbox(row, field),
         FieldType::String => format_display::<String>(row, field),
         FieldType::DateTime => format_display::<chrono::DateTime<chrono::Utc>>(row, field),
         FieldType::Date => format_display::<chrono::NaiveDate>(row, field),
         FieldType::Uuid => format_display::<uuid::Uuid>(row, field),
         FieldType::Json => format_json(row, field),
+    }
+}
+
+/// Render a `bool` field as a checkbox glyph instead of the raw
+/// "true" / "false" text. Uses Unicode ☑ / ☐ so it works in the
+/// admin's default chrome without needing Material Symbols or any
+/// other icon font loaded.
+///
+/// NULL renders as the empty marker so the column stays a clean
+/// vertical line of ✓ / ☐ — eyes can scan tens of rows in one
+/// sweep, which the literal `true` / `false` text never allowed.
+fn format_bool_checkbox(row: &PgRow, field: &FieldSchema) -> String {
+    match row.try_get::<Option<bool>, _>(field.column) {
+        Ok(Some(true)) => r#"<span class="rcms-bool yes" aria-label="true">☑</span>"#.to_owned(),
+        Ok(Some(false)) | Ok(None) => {
+            r#"<span class="rcms-bool no" aria-label="false">☐</span>"#.to_owned()
+        }
+        Err(e) => format!("<em>&lt;error: {}&gt;</em>", escape(&e.to_string())),
     }
 }
 

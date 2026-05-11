@@ -90,6 +90,7 @@ pub async fn run(
                 body: "Notes on Babbage's design and how patterns of operation foreshadow software.".into(),
                 author_id: ForeignKey::unloaded(ada_id),
                 published_at: chrono::Utc::now(),
+                featured: true,
             },
             Post {
                 id: Auto::default(),
@@ -97,6 +98,7 @@ pub async fn run(
                 body: "How iteration was encoded before electricity powered the computation.".into(),
                 author_id: ForeignKey::unloaded(ada_id),
                 published_at: chrono::Utc::now(),
+                featured: false,
             },
             Post {
                 id: Auto::default(),
@@ -104,6 +106,7 @@ pub async fn run(
                 body: "The jump from machine code to human-readable language changed everything.".into(),
                 author_id: ForeignKey::unloaded(grace_id),
                 published_at: chrono::Utc::now(),
+                featured: false,
             },
             Post {
                 id: Auto::default(),
@@ -111,6 +114,7 @@ pub async fn run(
                 body: "The literal moth, the metaphor, and what rigorous testing really means.".into(),
                 author_id: ForeignKey::unloaded(grace_id),
                 published_at: chrono::Utc::now(),
+                featured: false,
             },
             Post {
                 id: Auto::default(),
@@ -118,6 +122,7 @@ pub async fn run(
                 body: "When a program has to work the first time, every time, there are no second chances.".into(),
                 author_id: ForeignKey::unloaded(margaret_id),
                 published_at: chrono::Utc::now(),
+                featured: false,
             },
             Post {
                 id: Auto::default(),
@@ -125,6 +130,7 @@ pub async fn run(
                 body: "How Apollo's onboard computer saved the mission by doing less, not more.".into(),
                 author_id: ForeignKey::unloaded(margaret_id),
                 published_at: chrono::Utc::now(),
+                featured: false,
             },
         ];
         for post in posts.iter_mut() {

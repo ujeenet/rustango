@@ -823,6 +823,13 @@ pub use rustango_macros as macros;
 /// / `save`.
 pub use rustango_macros::Model;
 
+/// Re-exported for `register_admin_computed!` and any user code that
+/// wants to submit inventory entries via macros that reference
+/// `$crate::inventory`. The runtime indirection costs nothing —
+/// `inventory` is a thin wrapper around static `ctor`-style entries.
+#[doc(hidden)]
+pub use inventory;
+
 /// Server-assigned PK wrapper. `id: Auto<i64>` → `BIGSERIAL`. See
 /// [`sql::Auto`] for details.
 pub use sql::Auto;

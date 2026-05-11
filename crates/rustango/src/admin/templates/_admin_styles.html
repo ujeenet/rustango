@@ -351,6 +351,14 @@ dt { font-weight: var(--font-weight-bold); }
   filter: brightness(1.15);
 }
 .theme-toggle:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+
+/* Boolean column rendering — replaces literal "true"/"false" text
+   with a checkbox glyph. Filled ☑ in the accent color when true,
+   empty ☐ in muted color otherwise. Lets eyes scan tens of rows
+   in a single sweep. */
+.rcms-bool { font-size: 1.2em; line-height: 1; }
+.rcms-bool.yes { color: var(--color-accent); }
+.rcms-bool.no { color: var(--color-text-muted); }
 @media (max-width: 1000px) {
   .list-shell { grid-template-columns: 1fr; }
 }

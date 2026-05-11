@@ -276,41 +276,69 @@ pub(crate) async fn table_view(
     let read_only = state.is_read_only(model.table);
 
     // Resolve the columns shown on the list. If `admin.list_display`
-    // is set, use those (in order, validated at compile time against
-    // declared field names — `model.field(name)` is `Some` here);
-    // otherwise show every scalar field.
-    let display_fields: Vec<&'static FieldSchema> = if admin_cfg.list_display.is_empty() {
-        model.scalar_fields().collect()
+    // is set, each entry resolves to one of:
+    //
+    // 1. a declared scalar field (the column-name path),
+    // 2. a registered computed field for this table (the
+    //    `register_admin_computed!` path — receives the row and returns
+    //    HTML),
+    //
+    // Names that match neither are silently dropped. Empty
+    // `list_display` falls back to every scalar field (today's
+    // behavior).
+    enum DisplayItem {
+        Field(&'static FieldSchema),
+        Computed(&'static crate::admin::computed_fields::ComputedField),
+    }
+    let display_items: Vec<DisplayItem> = if admin_cfg.list_display.is_empty() {
+        model.scalar_fields().map(DisplayItem::Field).collect()
     } else {
         admin_cfg
             .list_display
             .iter()
-            .filter_map(|name| model.field(name))
+            .filter_map(|name| {
+                model.field(name).map(DisplayItem::Field).or_else(|| {
+                    crate::admin::computed_fields::find(model.table, name)
+                        .map(DisplayItem::Computed)
+                })
+            })
             .collect()
     };
 
-    // Per-column header label. PK gets a `<small>(pk)</small>` suffix; the
-    // template marks the value `| safe` so this raw HTML survives.
-    let columns_ctx: Vec<serde_json::Value> = display_fields
+    // Per-column header label. Scalar columns get a `<small>(pk)</small>`
+    // suffix on the PK; computed fields show their declared label
+    // (falling back to the bare identifier).
+    let columns_ctx: Vec<serde_json::Value> = display_items
         .iter()
-        .map(|f| {
-            let label = if f.primary_key {
-                format!("{} <small>(pk)</small>", render::escape(f.name))
-            } else {
-                render::escape(f.name)
+        .map(|item| {
+            let label = match item {
+                DisplayItem::Field(f) => {
+                    if f.primary_key {
+                        format!("{} <small>(pk)</small>", render::escape(f.name))
+                    } else {
+                        render::escape(f.name)
+                    }
+                }
+                DisplayItem::Computed(m) => {
+                    render::escape(if m.label.is_empty() { m.name } else { m.label })
+                }
             };
             serde_json::json!({ "label": label })
         })
         .collect();
 
-    // Per-row payload. Each cell is pre-rendered HTML (FK link or escaped
-    // scalar) and `pk` carries the row's URL fragment for the action link.
+    // Per-row payload. Computed-field cells are pre-escaped HTML
+    // supplied by the user's closure; scalar cells go through the
+    // standard `render_cell` path (FK link or escaped scalar).
     let rows_ctx: Vec<serde_json::Value> = rows
         .iter()
         .map(|row| {
-            let cells: Vec<String> = display_fields
+            let cells: Vec<String> = display_items
                 .iter()
-                .map(|f| render_cell(row, f, &fk_map))
+                .map(|item| match item {
+                    DisplayItem::Field(f) => render_cell(row, f, &fk_map),
+                    DisplayItem::Computed(m) => (m.render)(row),
+                })
                 .collect();
             let pk = pk_field.map(|pk| render::escape(&render::render_value_for_input(row, pk)));
             serde_json::json!({ "cells": cells, "pk": pk })
@@ -681,6 +709,18 @@ pub(crate) async fn detail_view(
             })
         })
         .collect();
+
+    // v0.32 — append one row per registered admin computed field. The
+    // detail view shows every computed column the user declared for
+    // this table, mirroring the list-view behavior so authors don't
+    // have to hunt for word counts / derived flags / etc. in the
+    // single-row view.
+    for cf in crate::admin::computed_fields::for_table(model.table) {
+        cells_ctx.push(serde_json::json!({
+            "label": if cf.label.is_empty() { cf.name } else { cf.label },
+            "value": (cf.render)(&row),
+        }));
+    }
 
     // F.4b — append one row per #[rustango(generic_fk(...))]
     // declaration. Reads the (content_type_id, object_pk) pair off

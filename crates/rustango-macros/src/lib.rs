@@ -436,9 +436,16 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let app_label = container.app.clone();
 
     // Validate admin field-name lists against declared field names.
+    // Note: `list_display` is intentionally NOT validated here. As of
+    // v0.32 it may also reference inventory-registered computed
+    // fields (via `register_admin_computed!`) whose existence the
+    // macro can't see at compile time — they're submitted from any
+    // crate that depends on rustango. The runtime list-view resolves
+    // unknown names against the inventory + silently drops the
+    // truly-bogus ones, which is the cheaper trade-off versus
+    // forcing a per-Model attr to opt out.
     if let Some(admin) = &container.admin {
         for (label, list) in [
-            ("list_display", &admin.list_display),
             ("search_fields", &admin.search_fields),
             ("readonly_fields", &admin.readonly_fields),
             ("list_filter", &admin.list_filter),
