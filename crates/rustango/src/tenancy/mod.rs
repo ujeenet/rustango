@@ -87,7 +87,8 @@ pub use permissions::{
 pub use database_pools::{DatabaseConn, DatabasePool, DatabasePools};
 pub use error::TenancyError;
 pub use migrate::{
-    migrate_registry, migrate_tenants, TenantMigrationOutcome, TenantMigrationReport,
+    migrate_registry, migrate_registry_pool, migrate_tenants, TenantMigrationOutcome,
+    TenantMigrationReport,
 };
 pub use org::{BackendKind, Org, StorageMode};
 pub use pools::{PrewarmReport, TenantConn, TenantPool, TenantPools, TenantPoolsConfig};

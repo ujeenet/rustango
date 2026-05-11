@@ -33,7 +33,7 @@
 //! foreign key everywhere else.
 
 use crate::core::{inventory, Model as _, ModelEntry, SqlValue};
-use crate::sql::{sqlx::PgPool, Auto, ExecError, Fetcher as _};
+use crate::sql::{sqlx::PgPool, Auto, ExecError, Fetcher as _, FetcherPool as _};
 use crate::Model;
 
 /// One row per registered model. The schema mirrors Django's
@@ -120,6 +120,36 @@ impl ContentType {
             )
             .limit(1)
             .fetch(pool)
+            .await?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Backend-agnostic counterpart of [`Self::by_natural_key`].
+    /// Routes through [`FetcherPool::fetch_pool`] so the same call
+    /// works against `Pool::Postgres` / `Pool::Mysql` / `Pool::Sqlite`.
+    /// Prefer this in framework code so sqlite/mysql apps don't get
+    /// silently locked out of the contenttype catalog.
+    ///
+    /// # Errors
+    /// As [`Self::for_model`].
+    pub async fn by_natural_key_pool(
+        pool: &crate::sql::Pool,
+        app_label: &str,
+        model_name: &str,
+    ) -> Result<Option<Self>, ExecError> {
+        let rows: Vec<Self> = Self::objects()
+            .filter(
+                "app_label",
+                crate::core::Op::Eq,
+                SqlValue::String(app_label.into()),
+            )
+            .filter(
+                "model_name",
+                crate::core::Op::Eq,
+                SqlValue::String(model_name.into()),
+            )
+            .limit(1)
+            .fetch_pool(pool)
             .await?;
         Ok(rows.into_iter().next())
     }
@@ -619,6 +649,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS "rustango_content_types_natural_key"
     ON "rustango_content_types" ("app_label", "model_name");
 "#;
 
+/// MySQL counterpart of [`CREATE_TABLE_SQL`]. `BIGINT AUTO_INCREMENT`
+/// for the auto-PK, backtick quoting for identifiers (needed when
+/// `ANSI_QUOTES=off`, the default), and the UNIQUE constraint inlined
+/// in the CREATE TABLE since MySQL has no `CREATE INDEX IF NOT EXISTS`.
+/// Mirrors the `audit::CREATE_TABLE_SQL_MYSQL` shape.
+const CREATE_TABLE_SQL_MYSQL: &str = r#"
+CREATE TABLE IF NOT EXISTS `rustango_content_types` (
+    `id`          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `app_label`   VARCHAR(100) NOT NULL,
+    `model_name`  VARCHAR(100) NOT NULL,
+    `table`       VARCHAR(100) NOT NULL,
+    UNIQUE KEY `rustango_content_types_natural_key` (`app_label`, `model_name`)
+);
+"#;
+
+/// SQLite counterpart. `INTEGER PRIMARY KEY AUTOINCREMENT` for the
+/// auto-PK (SQLite's auto-PK affinity), TEXT for the VARCHAR columns
+/// (SQLite type affinity, no real length limit). `CREATE INDEX
+/// IF NOT EXISTS` is supported, so the index lives in its own
+/// statement like the Postgres version.
+const CREATE_TABLE_SQL_SQLITE: &str = r#"
+CREATE TABLE IF NOT EXISTS "rustango_content_types" (
+    "id"          INTEGER PRIMARY KEY AUTOINCREMENT,
+    "app_label"   TEXT NOT NULL,
+    "model_name"  TEXT NOT NULL,
+    "table"       TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "rustango_content_types_natural_key"
+    ON "rustango_content_types" ("app_label", "model_name");
+"#;
+
 /// Ensure `rustango_content_types` exists in `pool`'s database /
 /// schema. No-op when already present (`IF NOT EXISTS`). Used by
 /// [`ensure_seeded`] internally + callable directly for any
@@ -687,6 +748,93 @@ pub async fn ensure_seeded(pool: &PgPool) -> Result<usize, ExecError> {
             table: table.to_owned(),
         };
         row.insert(pool).await?;
+        inserted += 1;
+    }
+    Ok(inserted)
+}
+
+// ============================================================ v0.34 bi-dialect
+
+/// Bootstrap the `rustango_content_types` table against any
+/// rustango-supported backend. Dispatches the per-dialect DDL through
+/// the [`crate::sql::Pool`] enum — Postgres / MySQL / SQLite variants
+/// are picked at runtime from `pool.dialect().name()`.
+///
+/// Mirrors the [`crate::audit::ensure_table_pool`] pattern; this is
+/// the abstraction the framework's registry-bootstrap path should
+/// prefer over the PG-only [`ensure_table`].
+///
+/// # Errors
+/// Driver / SQL failures from `CREATE TABLE IF NOT EXISTS`.
+pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), crate::sql::sqlx::Error> {
+    let ddl = match pool.dialect().name() {
+        "postgres" => CREATE_TABLE_SQL,
+        "mysql" => CREATE_TABLE_SQL_MYSQL,
+        "sqlite" => CREATE_TABLE_SQL_SQLITE,
+        // Unknown dialects fall back to the Postgres shape — closer to
+        // ANSI SQL than the MySQL / SQLite forks; future backends
+        // should add an explicit arm.
+        _ => CREATE_TABLE_SQL,
+    };
+    for stmt in ddl.split(';') {
+        let trimmed = stmt.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match pool {
+            #[cfg(feature = "postgres")]
+            crate::sql::Pool::Postgres(pg) => {
+                crate::sql::sqlx::query(trimmed).execute(pg).await?;
+            }
+            #[cfg(feature = "mysql")]
+            crate::sql::Pool::Mysql(my) => {
+                crate::sql::sqlx::query(trimmed).execute(my).await?;
+            }
+            #[cfg(feature = "sqlite")]
+            crate::sql::Pool::Sqlite(sq) => {
+                crate::sql::sqlx::query(trimmed).execute(sq).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Backend-agnostic counterpart of [`ensure_seeded`]. Walks the
+/// inventory of registered models and INSERTs a `ContentType` row for
+/// every missing one — but routes the table-bootstrap +
+/// natural-key probe + insert through the [`crate::sql::Pool`] enum,
+/// so sqlite/mysql registries work without the PG-only [`ensure_seeded`]
+/// blowing up at runtime.
+///
+/// Idempotent: re-running on a populated DB inserts nothing and
+/// returns `Ok(0)`.
+///
+/// # Errors
+/// Driver / query failures from the SELECT-or-INSERT loop or the
+/// table bootstrap.
+pub async fn ensure_seeded_pool(pool: &crate::sql::Pool) -> Result<usize, ExecError> {
+    ensure_table_pool(pool).await.map_err(ExecError::Driver)?;
+    let mut inserted = 0_usize;
+    for entry in inventory::iter::<ModelEntry> {
+        let table = entry.schema.table;
+        if table == ContentType::SCHEMA.table {
+            continue;
+        }
+        let app = entry.resolved_app_label().unwrap_or("project").to_owned();
+        let name = entry.schema.name.to_ascii_lowercase();
+        if ContentType::by_natural_key_pool(pool, &app, &name)
+            .await?
+            .is_some()
+        {
+            continue;
+        }
+        let mut row = ContentType {
+            id: Auto::Unset,
+            app_label: app,
+            model_name: name,
+            table: table.to_owned(),
+        };
+        row.insert_pool(pool).await?;
         inserted += 1;
     }
     Ok(inserted)

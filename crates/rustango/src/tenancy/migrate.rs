@@ -105,62 +105,80 @@ pub async fn migrate_registry(
     pools: &TenantPools,
     dir: &Path,
 ) -> Result<Vec<Migration>, TenancyError> {
+    migrate_registry_pool(&pools.registry_pool(), dir).await
+}
+
+/// Backend-agnostic registry migration runner — counterpart of
+/// [`migrate_registry`] that takes a [`crate::sql::Pool`] enum
+/// directly instead of going through [`TenantPools`]. Routes the
+/// migration runner, audit-table bootstrap, and contenttype seed
+/// through their backend-agnostic `_pool` variants so a sqlite /
+/// mysql registry works end-to-end.
+///
+/// The PG-only password-changed-at ALTER stays gated to Postgres —
+/// it only matters for registries upgraded from pre-v0.28.4, and
+/// fresh non-PG registries are never in that state.
+///
+/// # Errors
+/// As [`crate::migrate::migrate_pool`].
+pub async fn migrate_registry_pool(
+    registry: &crate::sql::Pool,
+    dir: &Path,
+) -> Result<Vec<Migration>, TenancyError> {
     info!(target: "crate::tenancy", "applying registry-scoped migrations");
     let scoped_dir = scoped_subset(dir, MigrationScope::Registry).await?;
     let applied = match scoped_dir {
         ScopedDir::Owned(temp) => {
-            let result = migrate::migrate(pools.registry(), temp.path()).await?;
+            let result = migrate::migrate_pool(registry, temp.path()).await?;
             drop(temp);
             result
         }
-        ScopedDir::Original => migrate::migrate(pools.registry(), dir).await?,
+        ScopedDir::Original => migrate::migrate_pool(registry, dir).await?,
     };
     // v0.28.4 (#77) — runtime ALTER for the password_changed_at
-    // column on the registry-scoped operator table. Existing
-    // rustango_orgs / rustango_operators bootstrap snapshots predate
-    // this column, so we ALTER ADD COLUMN IF NOT EXISTS instead of
-    // shipping a migration the user would have to run.
-    if let Err(e) = rustango::sql::sqlx::query(
-        r#"ALTER TABLE "rustango_operators"
-           ADD COLUMN IF NOT EXISTS "password_changed_at" TIMESTAMPTZ NULL"#,
-    )
-    .execute(pools.registry())
-    .await
-    {
-        tracing::warn!(
-            target: "crate::tenancy",
-            error = %e,
-            "ALTER rustango_operators password_changed_at failed",
-        );
+    // column on Postgres registries. The column landed mid-v0.28; PG
+    // registries from earlier versions need it back-filled without a
+    // migration JSON the user would have to apply manually. Sqlite +
+    // MySQL registries are post-v0.34 and ship the column from the
+    // start, so the ALTER is PG-only.
+    #[cfg(feature = "postgres")]
+    if let Some(pg) = registry.as_postgres() {
+        if let Err(e) = rustango::sql::sqlx::query(
+            r#"ALTER TABLE "rustango_operators"
+               ADD COLUMN IF NOT EXISTS "password_changed_at" TIMESTAMPTZ NULL"#,
+        )
+        .execute(pg)
+        .await
+        {
+            tracing::warn!(
+                target: "crate::tenancy",
+                error = %e,
+                "ALTER rustango_operators password_changed_at failed",
+            );
+        }
     }
     // Registry-scope audit-log table for operator-side actions
     // (impersonation start / end, org config edits via the
-    // operator console, etc.). Per-tenant audit lives in each
-    // tenant's schema and is created by `migrate_tenants` below;
-    // this is the operator-side mirror so cross-tenant operator
-    // history has a stable home. `CREATE TABLE IF NOT EXISTS`
-    // means re-runs are idempotent; pre-fix the table simply
-    // didn't exist on the registry pool, and the impersonate
-    // handler's INSERT silently dropped to a `tracing::warn` —
-    // no audit trail at all for operator actions.
-    if let Err(e) = crate::audit::ensure_table(pools.registry()).await {
+    // operator console, etc.). Bi-dialect via
+    // `audit::ensure_table_pool` (Postgres / MySQL / SQLite all
+    // supported).
+    if let Err(e) = crate::audit::ensure_table_pool(registry).await {
         tracing::warn!(
             target: "crate::tenancy",
             error = %e,
-            "audit::ensure_table failed for registry pool",
+            "audit::ensure_table_pool failed for registry pool",
         );
     }
     // (#89) Auto-seed the `rustango_content_types` registry-side
-    // catalog — the operator console's audit log + future
-    // permissions UI consult it to resolve `entity_table` strings
-    // back to a stable per-model identifier. Pre-fix every fresh
-    // tango required a manual `ensure_seeded(&pool)` call which
-    // nobody remembers; now `migrate` Just Works.
-    if let Err(e) = crate::contenttypes::ensure_seeded(pools.registry()).await {
+    // catalog — the operator console's audit log + permissions UI
+    // consult it to resolve `entity_table` strings back to a stable
+    // per-model identifier. Bi-dialect via
+    // `contenttypes::ensure_seeded_pool` (v0.34 slice 1).
+    if let Err(e) = crate::contenttypes::ensure_seeded_pool(registry).await {
         tracing::warn!(
             target: "crate::tenancy",
             error = %e,
-            "contenttypes::ensure_seeded failed for registry pool",
+            "contenttypes::ensure_seeded_pool failed for registry pool",
         );
     }
     info!(
