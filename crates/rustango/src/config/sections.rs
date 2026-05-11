@@ -132,16 +132,69 @@ impl Settings {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct DatabaseSettings {
-    /// Postgres connection URL. Required at runtime; loader doesn't
-    /// enforce presence so callers can ship a config that overrides
-    /// this from `RUSTANGO__DATABASE__URL` only.
+    /// Connection URL. Required at runtime; loader doesn't enforce
+    /// presence so callers can ship a config that overrides this from
+    /// `RUSTANGO__DATABASE__URL` only. Supported schemes: `postgres://`,
+    /// `mysql://`, `sqlite:` — [`crate::sql::Pool::connect`] dispatches
+    /// per-backend by URL scheme.
     pub url: Option<String>,
+    /// Explicit backend selector — `"postgres"` / `"mysql"` / `"sqlite"`.
+    /// **Optional.** When unset, the backend is inferred from the URL
+    /// scheme at [`crate::sql::Pool::connect`] time; the inferred
+    /// value is reflected back here by
+    /// [`DatabaseSettings::resolved_backend`] so admin/templates can
+    /// branch on dialect without owning the [`crate::sql::Pool`].
+    ///
+    /// Explicit values that don't match the URL scheme are flagged by
+    /// `manage check --deploy` as a misconfiguration; they DON'T
+    /// override the URL — sqlx still binds the backend dictated by
+    /// the URL prefix. This field is a deploy-intent assertion, not
+    /// an override.
+    pub backend: Option<String>,
     /// Maximum number of pooled connections. `None` means use sqlx's
     /// default.
     pub pool_max_size: Option<u32>,
     /// Minimum number of pooled connections kept warm. `None` =
     /// driver default.
     pub pool_min_size: Option<u32>,
+}
+
+impl DatabaseSettings {
+    /// Resolve the backend kind: explicit `self.backend` wins, else
+    /// sniff the scheme from `self.url`. Returns `None` when neither
+    /// is set. Output is normalized: `"postgres"` / `"mysql"` /
+    /// `"sqlite"` (aliases like `"postgresql"`, `"mariadb"` collapse
+    /// to canonical names).
+    ///
+    /// Use this in admin/template code that wants to branch on
+    /// dialect at config-load time — the pool isn't always reachable
+    /// from the rendering path, but Settings is.
+    #[must_use]
+    pub fn resolved_backend(&self) -> Option<&'static str> {
+        if let Some(b) = self.backend.as_deref() {
+            return Some(canonicalize_backend(b));
+        }
+        let url = self.url.as_deref()?;
+        let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
+        match scheme.as_str() {
+            "postgres" | "postgresql" => Some("postgres"),
+            "mysql" | "mariadb" => Some("mysql"),
+            "sqlite" => Some("sqlite"),
+            _ => None,
+        }
+    }
+}
+
+/// Normalize backend aliases to the canonical string. Returns the
+/// input unchanged when the alias isn't recognized — caller decides
+/// how to handle unknown backends.
+fn canonicalize_backend(raw: &str) -> &'static str {
+    match raw.to_ascii_lowercase().as_str() {
+        "postgres" | "postgresql" | "pg" => "postgres",
+        "mysql" | "mariadb" => "mysql",
+        "sqlite" | "sqlite3" => "sqlite",
+        _ => "postgres", // safest fallback — most existing deploys are PG
+    }
 }
 
 /// Auto-admin tweaks read at boot. Mirrors the `admin::Builder`
@@ -410,4 +463,56 @@ pub struct LoggingSettings {
     /// logs land in the file ONLY. Useful for headless workers /
     /// daemonized processes. No-op when `file_dir` is unset.
     pub file_only: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_backend_uses_explicit_value() {
+        let mut s = DatabaseSettings::default();
+        s.backend = Some("mysql".into());
+        s.url = Some("postgres://x".into()); // mismatched, explicit wins
+        assert_eq!(s.resolved_backend(), Some("mysql"));
+    }
+
+    #[test]
+    fn resolved_backend_canonicalizes_aliases() {
+        let s = DatabaseSettings {
+            backend: Some("postgresql".into()),
+            ..Default::default()
+        };
+        assert_eq!(s.resolved_backend(), Some("postgres"));
+        let s = DatabaseSettings {
+            backend: Some("mariadb".into()),
+            ..Default::default()
+        };
+        assert_eq!(s.resolved_backend(), Some("mysql"));
+    }
+
+    #[test]
+    fn resolved_backend_sniffs_from_url_scheme() {
+        let s = DatabaseSettings {
+            url: Some("sqlite::memory:".into()),
+            ..Default::default()
+        };
+        assert_eq!(s.resolved_backend(), Some("sqlite"));
+        let s = DatabaseSettings {
+            url: Some("mysql://root@localhost/x".into()),
+            ..Default::default()
+        };
+        assert_eq!(s.resolved_backend(), Some("mysql"));
+        let s = DatabaseSettings {
+            url: Some("postgresql://x".into()),
+            ..Default::default()
+        };
+        assert_eq!(s.resolved_backend(), Some("postgres"));
+    }
+
+    #[test]
+    fn resolved_backend_none_when_neither_set() {
+        let s = DatabaseSettings::default();
+        assert_eq!(s.resolved_backend(), None);
+    }
 }
