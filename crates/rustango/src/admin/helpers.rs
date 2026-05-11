@@ -297,6 +297,67 @@ pub(crate) fn render_cell(
     render::render_value(row, field)
 }
 
+/// v0.37 — JSON-bridge counterpart of [`fk_map_from_joined_rows`]. Walks a
+/// `Vec<serde_json::Value>` (one row per Value) instead of `Vec<PgRow>`,
+/// using the dialect-agnostic `*_json` reader companions. Same output
+/// shape: `(target_table, source_value_string) → display_html`.
+pub(crate) fn fk_map_from_joined_rows_json(
+    state: &AppState,
+    model: &'static ModelSchema,
+    rows: &[serde_json::Value],
+) -> FkMap {
+    let mut map: FkMap = HashMap::new();
+    for field in model.scalar_fields() {
+        let Some(rel) = field.relation else { continue };
+        let to = match rel {
+            Relation::Fk { to, .. } | Relation::O2O { to, .. } => to,
+        };
+        let Some(target) = lookup_model(state, to) else {
+            continue;
+        };
+        let Some(display_field) = target.display_field() else {
+            continue;
+        };
+        for row in rows {
+            let Some(source) = render::read_value_as_string_json(row, field) else {
+                continue;
+            };
+            let Some(display) =
+                render::read_joined_value_as_html_json(row, field.name, display_field)
+            else {
+                continue;
+            };
+            map.insert((to.to_owned(), source), display);
+        }
+    }
+    map
+}
+
+/// v0.37 — JSON-bridge counterpart of [`render_cell`]. Same FK-link
+/// resolution logic, but reads the row through `serde_json::Value`
+/// so it compiles + runs against any backend.
+pub(crate) fn render_cell_json(
+    row: &serde_json::Value,
+    field: &FieldSchema,
+    fk_map: &FkMap,
+) -> String {
+    if let Some(rel) = field.relation {
+        let to = match rel {
+            Relation::Fk { to, .. } | Relation::O2O { to, .. } => to,
+        };
+        let Some(raw_value) = render::read_value_as_string_json(row, field) else {
+            return "<em>NULL</em>".to_owned();
+        };
+        let raw_esc = render::escape(&raw_value);
+        let to_esc = render::escape(to);
+        return match fk_map.get(&(to.to_owned(), raw_value)) {
+            Some(display) => format!(r#"<a href="/{to_esc}/{raw_esc}">{display}</a>"#),
+            None => raw_esc,
+        };
+    }
+    render::render_value_json(row, field)
+}
+
 /// Render a create or edit form via the `form.html` template. Pre-fill
 /// values come from `prefill` (keyed by Rust field name); pass `None` for
 /// an empty create form. `pk_locked` makes the PK input read-only (edit

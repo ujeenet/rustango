@@ -16,8 +16,8 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use super::errors::AdminError;
 use super::forms;
 use super::helpers::{
-    build_fk_joins, chrome_context, fk_map_from_joined_rows, lookup_model, pager_suffix,
-    render_cell, render_form,
+    build_fk_joins, chrome_context, fk_map_from_joined_rows, fk_map_from_joined_rows_json,
+    lookup_model, pager_suffix, render_cell, render_cell_json, render_form,
 };
 use super::render;
 use super::templates::render_with_chrome;
@@ -204,8 +204,8 @@ pub(crate) async fn table_view(
     let total: i64 = if count_skipped {
         0
     } else {
-        crate::sql::count_rows(
-            state.pg_pool(),
+        crate::sql::count_rows_pool(
+            &state.pool,
             &CountQuery {
                 model,
                 where_clause: where_clause.clone(),
@@ -242,8 +242,9 @@ pub(crate) async fn table_view(
     } else {
         page_size
     };
-    let mut rows = crate::sql::select_rows(
-        state.pg_pool(),
+    let scalar_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    let mut rows = crate::sql::select_rows_as_json_pool(
+        &state.pool,
         &SelectQuery {
             model,
             where_clause,
@@ -253,6 +254,7 @@ pub(crate) async fn table_view(
             limit: Some(fetch_limit),
             offset: Some(offset),
         },
+        &scalar_fields,
     )
     .await?;
     let has_next_skipped = if count_skipped && rows.len() as i64 > page_size {
@@ -262,7 +264,7 @@ pub(crate) async fn table_view(
         false
     };
 
-    let fk_map = fk_map_from_joined_rows(&state, model, &rows);
+    let fk_map = fk_map_from_joined_rows_json(&state, model, &rows);
 
     let last_page = if count_skipped {
         // No total → no last page. Pager renders "Page N" with
@@ -329,24 +331,23 @@ pub(crate) async fn table_view(
 
     // Per-row payload. Computed-field cells are pre-escaped HTML
     // supplied by the user's closure; scalar cells go through the
-    // standard `render_cell` path (FK link or escaped scalar).
+    // standard `render_cell_json` path (FK link or escaped scalar).
+    //
+    // v0.37 — rows are already `serde_json::Value` from the JSON
+    // bridge; cell + PK rendering go through `*_json` companions so
+    // this loop compiles on any backend.
     let rows_ctx: Vec<serde_json::Value> = rows
         .iter()
         .map(|row| {
-            // v0.36 — convert the raw row to JSON once per row so
-            // tri-dialect computed-field closures get a backend-
-            // agnostic input. Cheap (per-cell decode), reused below
-            // for every computed cell on this row.
-            let row_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-            let row_json = crate::sql::row_to_json(row, &row_fields);
             let cells: Vec<String> = display_items
                 .iter()
                 .map(|item| match item {
-                    DisplayItem::Field(f) => render_cell(row, f, &fk_map),
-                    DisplayItem::Computed(m) => (m.render)(&row_json),
+                    DisplayItem::Field(f) => render_cell_json(row, f, &fk_map),
+                    DisplayItem::Computed(m) => (m.render)(row),
                 })
                 .collect();
-            let pk = pk_field.map(|pk| render::escape(&render::render_value_for_input(row, pk)));
+            let pk =
+                pk_field.map(|pk| render::escape(&render::render_value_for_input_json(row, pk)));
             serde_json::json!({ "cells": cells, "pk": pk })
         })
         .collect();
@@ -469,57 +470,64 @@ async fn compute_facets(
         // value floats to the top. Tie-break alphabetically by the
         // displayed value so output stays deterministic across
         // requests.
+        //
+        // v0.37 — SQL is rendered through the dialect's quote_ident
+        // emitter so identifier quoting works on PG/MySQL/SQLite
+        // uniformly. The two GROUP BY shapes (FK-joined vs flat)
+        // dispatch through the Pool enum via `raw_query_pool::<T>`
+        // returning typed `(facet_value, facet_count[, facet_display])`
+        // tuples.
+        let dialect = state.pool.dialect();
         let sql = if let Some((target_table, target_pk, display_col)) = fk_join {
+            let src_t = dialect.quote_ident(model.table);
+            let src_c = dialect.quote_ident(field.column);
+            let tgt_t = dialect.quote_ident(target_table);
+            let tgt_pk = dialect.quote_ident(target_pk);
+            let tgt_disp = dialect.quote_ident(display_col);
             format!(
-                r#"SELECT "{src_table}"."{col}" AS facet_value,
-                          "{target_table}"."{display_col}" AS facet_display,
-                          COUNT(*) AS facet_count
-                   FROM "{src_table}"
-                   LEFT JOIN "{target_table}"
-                     ON "{target_table}"."{target_pk}" = "{src_table}"."{col}"
-                   GROUP BY "{src_table}"."{col}", "{target_table}"."{display_col}"
-                   ORDER BY facet_count DESC, "{target_table}"."{display_col}""#,
-                col = field.column.replace('"', "\"\""),
-                src_table = model.table.replace('"', "\"\""),
-                target_table = target_table.replace('"', "\"\""),
-                target_pk = target_pk.replace('"', "\"\""),
-                display_col = display_col.replace('"', "\"\""),
+                "SELECT {src_t}.{src_c} AS facet_value, \
+                        {tgt_t}.{tgt_disp} AS facet_display, \
+                        COUNT(*) AS facet_count \
+                 FROM {src_t} \
+                 LEFT JOIN {tgt_t} ON {tgt_t}.{tgt_pk} = {src_t}.{src_c} \
+                 GROUP BY {src_t}.{src_c}, {tgt_t}.{tgt_disp} \
+                 ORDER BY facet_count DESC, {tgt_t}.{tgt_disp}"
             )
         } else {
+            let t = dialect.quote_ident(model.table);
+            let c = dialect.quote_ident(field.column);
             format!(
-                r#"SELECT "{col}" AS facet_value, COUNT(*) AS facet_count
-                   FROM "{table}"
-                   GROUP BY "{col}"
-                   ORDER BY facet_count DESC, "{col}""#,
-                col = field.column.replace('"', "\"\""),
-                table = model.table.replace('"', "\"\""),
+                "SELECT {c} AS facet_value, COUNT(*) AS facet_count \
+                 FROM {t} \
+                 GROUP BY {c} \
+                 ORDER BY facet_count DESC, {c}"
             )
         };
-        let rows = sqlx::query(&sql).fetch_all(state.pg_pool()).await?;
-        let mut values = Vec::with_capacity(rows.len());
-        for row in &rows {
+        let facet_rows = fetch_facet_rows(&state.pool, &sql, fk_join.is_some())
+            .await
+            .map_err(|e| AdminError::Internal(e.to_string()))?;
+        let mut values = Vec::with_capacity(facet_rows.len());
+        for (raw_value, display_text, count) in &facet_rows {
             // Stringify the value at the `facet_value` column alias.
             // Same shape `parse_form_value` accepts back when the URL
             // round-trips through the filter machinery.
-            let raw =
-                render::read_value_as_string_at(row, field, "facet_value").unwrap_or_default();
+            //
+            // v0.37 — `raw_value` is the already-stringified column
+            // value (we ask the per-backend fetch to stringify to keep
+            // the executor type-erased); `render::read_value_as_string_at`
+            // was only ever used to convert PG's typed value, the same
+            // type-erasure happens inside `fetch_facet_rows` now.
+            let raw = raw_value.clone();
             // Display: for FK fields with a JOIN, prefer the target's
             // display value; otherwise fall back to the raw key.
             let display = if raw.is_empty() {
                 "—".to_owned()
-            } else if fk_join.is_some() {
-                let display_text: Option<String> =
-                    sqlx::Row::try_get::<Option<String>, _>(row, "facet_display")
-                        .ok()
-                        .flatten();
-                match display_text {
-                    Some(t) if !t.is_empty() => render::escape(&t),
-                    _ => render::escape(&raw),
-                }
+            } else if let Some(d) = display_text.as_deref().filter(|s| !s.is_empty()) {
+                render::escape(d)
             } else {
                 render::escape(&raw)
             };
-            let count: i64 = sqlx::Row::try_get(row, "facet_count").unwrap_or(0);
+            let count: i64 = *count;
             let is_active = active_value.map(|v| v == raw).unwrap_or(false);
             // Build the toggle URL: drop this filter when active, else
             // set it. Other active filters + ?q= are preserved.
@@ -622,6 +630,137 @@ async fn compute_facets(
         }));
     }
     Ok(out)
+}
+
+/// v0.37 — run a `GROUP BY` facet SELECT through the right backend.
+/// Returns `(raw_value, optional_display_text, count)` triples,
+/// stringifying the typed column value uniformly so the caller can
+/// type-erase. `expect_display` is `true` for the FK-joined facet
+/// (which also reads the joined display column).
+async fn fetch_facet_rows(
+    pool: &crate::sql::Pool,
+    sql: &str,
+    expect_display: bool,
+) -> Result<Vec<(String, Option<String>, i64)>, sqlx::Error> {
+    use sqlx::Row as _;
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let rows = sqlx::query(sql).fetch_all(pg).await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for r in rows {
+                // facet_value column may be any scalar type. Try the
+                // most common shapes; fall back to empty string if
+                // every decode fails (matches the legacy unwrap_or_default
+                // behaviour).
+                let raw = stringify_facet_value_pg(&r);
+                let display = if expect_display {
+                    r.try_get::<Option<String>, _>("facet_display")
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                };
+                let count: i64 = r.try_get("facet_count").unwrap_or(0);
+                out.push((raw, display, count));
+            }
+            Ok(out)
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            let rows = sqlx::query(sql).fetch_all(my).await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for r in rows {
+                let raw = stringify_facet_value_my(&r);
+                let display = if expect_display {
+                    r.try_get::<Option<String>, _>("facet_display")
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                };
+                let count: i64 = r.try_get("facet_count").unwrap_or(0);
+                out.push((raw, display, count));
+            }
+            Ok(out)
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => {
+            let rows = sqlx::query(sql).fetch_all(sq).await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for r in rows {
+                let raw = stringify_facet_value_sqlite(&r);
+                let display = if expect_display {
+                    r.try_get::<Option<String>, _>("facet_display")
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                };
+                let count: i64 = r.try_get("facet_count").unwrap_or(0);
+                out.push((raw, display, count));
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// Try decoding the `facet_value` column as text first, then as the
+/// numeric / boolean scalars admin facets commonly hit. Returns an
+/// empty string when every shape fails — matches the v0.13.x
+/// `unwrap_or_default()` legacy behaviour.
+#[cfg(feature = "postgres")]
+fn stringify_facet_value_pg(row: &sqlx::postgres::PgRow) -> String {
+    use sqlx::Row as _;
+    if let Ok(Some(s)) = row.try_get::<Option<String>, _>("facet_value") {
+        return s;
+    }
+    if let Ok(Some(n)) = row.try_get::<Option<i64>, _>("facet_value") {
+        return n.to_string();
+    }
+    if let Ok(Some(n)) = row.try_get::<Option<i32>, _>("facet_value") {
+        return n.to_string();
+    }
+    if let Ok(Some(b)) = row.try_get::<Option<bool>, _>("facet_value") {
+        return b.to_string();
+    }
+    String::new()
+}
+
+#[cfg(feature = "mysql")]
+fn stringify_facet_value_my(row: &sqlx::mysql::MySqlRow) -> String {
+    use sqlx::Row as _;
+    if let Ok(Some(s)) = row.try_get::<Option<String>, _>("facet_value") {
+        return s;
+    }
+    if let Ok(Some(n)) = row.try_get::<Option<i64>, _>("facet_value") {
+        return n.to_string();
+    }
+    if let Ok(Some(n)) = row.try_get::<Option<i32>, _>("facet_value") {
+        return n.to_string();
+    }
+    if let Ok(Some(b)) = row.try_get::<Option<bool>, _>("facet_value") {
+        return b.to_string();
+    }
+    String::new()
+}
+
+#[cfg(feature = "sqlite")]
+fn stringify_facet_value_sqlite(row: &sqlx::sqlite::SqliteRow) -> String {
+    use sqlx::Row as _;
+    if let Ok(Some(s)) = row.try_get::<Option<String>, _>("facet_value") {
+        return s;
+    }
+    if let Ok(Some(n)) = row.try_get::<Option<i64>, _>("facet_value") {
+        return n.to_string();
+    }
+    if let Ok(Some(n)) = row.try_get::<Option<i32>, _>("facet_value") {
+        return n.to_string();
+    }
+    if let Ok(Some(b)) = row.try_get::<Option<bool>, _>("facet_value") {
+        return b.to_string();
+    }
+    String::new()
 }
 
 // v0.31.1 (#5): take `admin_prefix` instead of hardcoding `/__admin`.

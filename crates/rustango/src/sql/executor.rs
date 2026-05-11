@@ -729,7 +729,14 @@ pub async fn select_rows_as_json_pool(
                 q = bind_query(q, v);
             }
             let rows = q.fetch_all(pg).await?;
-            Ok(rows.iter().map(|r| row_to_json(r, fields)).collect())
+            Ok(rows
+                .iter()
+                .map(|r| {
+                    let mut json = row_to_json(r, fields);
+                    augment_joined_columns_pg(&mut json, r, &query.joins);
+                    json
+                })
+                .collect())
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
@@ -739,7 +746,14 @@ pub async fn select_rows_as_json_pool(
                 q = bind_query_my(q, v);
             }
             let rows = q.fetch_all(my).await?;
-            Ok(rows.iter().map(|r| row_to_json_my(r, fields)).collect())
+            Ok(rows
+                .iter()
+                .map(|r| {
+                    let mut json = row_to_json_my(r, fields);
+                    augment_joined_columns_my(&mut json, r, &query.joins);
+                    json
+                })
+                .collect())
         }
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
@@ -749,7 +763,97 @@ pub async fn select_rows_as_json_pool(
                 q = bind_query_sqlite(q, v);
             }
             let rows = q.fetch_all(sq).await?;
-            Ok(rows.iter().map(|r| row_to_json_sqlite(r, fields)).collect())
+            Ok(rows
+                .iter()
+                .map(|r| {
+                    let mut json = row_to_json_sqlite(r, fields);
+                    augment_joined_columns_sqlite(&mut json, r, &query.joins);
+                    json
+                })
+                .collect())
+        }
+    }
+}
+
+/// v0.37 — copy joined-table columns (`<alias>__<col>`) into the
+/// JSON row. The compile_select writer aliases joined columns this
+/// way and the admin's `read_joined_value_as_html_json` reads them
+/// out by the same key. Decoded as nullable strings — the admin only
+/// uses these for FK display HTML rendering.
+#[cfg(feature = "postgres")]
+fn augment_joined_columns_pg(
+    out: &mut serde_json::Value,
+    row: &sqlx::postgres::PgRow,
+    joins: &[crate::core::Join],
+) {
+    use sqlx::Row as _;
+    let Some(map) = out.as_object_mut() else {
+        return;
+    };
+    for join in joins {
+        for col in &join.project {
+            let key = format!("{}__{}", join.alias, col);
+            let v = row
+                .try_get::<Option<String>, _>(key.as_str())
+                .ok()
+                .flatten();
+            map.insert(
+                key,
+                v.map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        }
+    }
+}
+
+#[cfg(feature = "mysql")]
+fn augment_joined_columns_my(
+    out: &mut serde_json::Value,
+    row: &sqlx::mysql::MySqlRow,
+    joins: &[crate::core::Join],
+) {
+    use sqlx::Row as _;
+    let Some(map) = out.as_object_mut() else {
+        return;
+    };
+    for join in joins {
+        for col in &join.project {
+            let key = format!("{}__{}", join.alias, col);
+            let v = row
+                .try_get::<Option<String>, _>(key.as_str())
+                .ok()
+                .flatten();
+            map.insert(
+                key,
+                v.map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        }
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn augment_joined_columns_sqlite(
+    out: &mut serde_json::Value,
+    row: &sqlx::sqlite::SqliteRow,
+    joins: &[crate::core::Join],
+) {
+    use sqlx::Row as _;
+    let Some(map) = out.as_object_mut() else {
+        return;
+    };
+    for join in joins {
+        for col in &join.project {
+            let key = format!("{}__{}", join.alias, col);
+            let v = row
+                .try_get::<Option<String>, _>(key.as_str())
+                .ok()
+                .flatten();
+            map.insert(
+                key,
+                v.map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            );
         }
     }
 }
@@ -772,10 +876,11 @@ pub async fn select_one_row_as_json_pool(
             for v in stmt.params {
                 q = bind_query(q, v);
             }
-            Ok(q.fetch_optional(pg)
-                .await?
-                .as_ref()
-                .map(|r| row_to_json(r, fields)))
+            Ok(q.fetch_optional(pg).await?.as_ref().map(|r| {
+                let mut json = row_to_json(r, fields);
+                augment_joined_columns_pg(&mut json, r, &query.joins);
+                json
+            }))
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
@@ -784,10 +889,11 @@ pub async fn select_one_row_as_json_pool(
             for v in stmt.params {
                 q = bind_query_my(q, v);
             }
-            Ok(q.fetch_optional(my)
-                .await?
-                .as_ref()
-                .map(|r| row_to_json_my(r, fields)))
+            Ok(q.fetch_optional(my).await?.as_ref().map(|r| {
+                let mut json = row_to_json_my(r, fields);
+                augment_joined_columns_my(&mut json, r, &query.joins);
+                json
+            }))
         }
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
@@ -796,10 +902,11 @@ pub async fn select_one_row_as_json_pool(
             for v in stmt.params {
                 q = bind_query_sqlite(q, v);
             }
-            Ok(q.fetch_optional(sq)
-                .await?
-                .as_ref()
-                .map(|r| row_to_json_sqlite(r, fields)))
+            Ok(q.fetch_optional(sq).await?.as_ref().map(|r| {
+                let mut json = row_to_json_sqlite(r, fields);
+                augment_joined_columns_sqlite(&mut json, r, &query.joins);
+                json
+            }))
         }
     }
 }
