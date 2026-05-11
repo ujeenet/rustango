@@ -397,6 +397,163 @@ pub(crate) fn read_value_as_string(row: &PgRow, field: &FieldSchema) -> Option<S
     read_value_as_string_at(row, field, field.column)
 }
 
+// ============================================================ v0.36 — tri-dialect JSON companions
+//
+// The `_json` family below mirrors the PG-typed `render_value` /
+// `read_value_as_string` / `read_value_as_string_at` /
+// `read_joined_value_as_html` / `read_value_as_json` API surface,
+// but takes a `&serde_json::Value` (the row object produced by
+// `crate::sql::row_to_json` / `row_to_json_my` / `row_to_json_sqlite`)
+// instead of a backend-specific `Row` type. The bundled admin's
+// fetch path (v0.36 slice 4) routes every row through
+// `select_rows_as_json_pool` → these renderers, so the rendering
+// layer never sees a `PgRow` and works uniformly on PG / MySQL /
+// SQLite.
+
+/// Tri-dialect counterpart of [`render_value`]. Takes a JSON object
+/// (`{ field.name: value }` per the [`crate::sql::row_to_json`]
+/// shape) and renders the named field as HTML, applying the same
+/// type-specific formatting:
+///
+/// * scalars → JSON numeric → `to_string`
+/// * `Bool`  → ☑ / ☐ checkbox glyph (matches `render_value`)
+/// * `String` / `Uuid` / `Date` / `DateTime` → escaped text
+/// * `Json`  → compact JSON text
+///
+/// `null` (or missing key) renders as `<em>NULL</em>` — same as the
+/// PG path's NULL marker. Decode errors aren't possible at this
+/// layer (JSON is already typed); shape mismatches fall back to a
+/// best-effort `to_string` of the underlying JSON node.
+pub(crate) fn render_value_json(row: &serde_json::Value, field: &FieldSchema) -> String {
+    let v = row.get(field.name);
+    if matches!(v, None | Some(serde_json::Value::Null)) {
+        // Bool keeps its checkbox-glyph shape even for NULL — admin
+        // list rows scan cleaner as a vertical line of ☑/☐ than
+        // text/NULL mixed.
+        return if field.ty == FieldType::Bool {
+            r#"<span class="rcms-bool no" aria-label="false">☐</span>"#.to_owned()
+        } else {
+            "<em>NULL</em>".to_owned()
+        };
+    }
+    let v = v.unwrap();
+    match field.ty {
+        FieldType::Bool => match v.as_bool() {
+            Some(true) => r#"<span class="rcms-bool yes" aria-label="true">☑</span>"#.to_owned(),
+            _ => r#"<span class="rcms-bool no" aria-label="false">☐</span>"#.to_owned(),
+        },
+        FieldType::I16 | FieldType::I32 | FieldType::I64 => v
+            .as_i64()
+            .map(|n| escape(&n.to_string()))
+            .unwrap_or_else(|| escape(&v.to_string())),
+        FieldType::F32 | FieldType::F64 => v
+            .as_f64()
+            .map(|n| escape(&n.to_string()))
+            .unwrap_or_else(|| escape(&v.to_string())),
+        FieldType::String | FieldType::Uuid | FieldType::Date | FieldType::DateTime => {
+            escape(v.as_str().unwrap_or(""))
+        }
+        FieldType::Json => {
+            // Compact serialize to keep list cells one-line; the
+            // detail view template can render expanded.
+            serde_json::to_string(v)
+                .map(|s| escape(&s))
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// Tri-dialect counterpart of [`read_value_as_string`]. JSON-shape
+/// version: read the value at `field.name` and return its string
+/// form, or `None` for `NULL` / missing / unsupported types.
+pub(crate) fn read_value_as_string_json(
+    row: &serde_json::Value,
+    field: &FieldSchema,
+) -> Option<String> {
+    read_value_as_string_at_json(row, field, field.name)
+}
+
+/// Tri-dialect counterpart of [`read_value_as_string_at`]. The
+/// `key` parameter is the JSON-map lookup name (typically
+/// `field.name` for direct cells, or a facet alias like
+/// `"facet_value"` for SELECT-AS aliases). PG-typed counterpart's
+/// behavior is preserved: `Bool` / `F32` / `F64` / `Date` /
+/// `DateTime` / `Json` are NOT supported as PK/FK key shapes and
+/// return `None`.
+pub(crate) fn read_value_as_string_at_json(
+    row: &serde_json::Value,
+    field: &FieldSchema,
+    key: &str,
+) -> Option<String> {
+    let v = row.get(key)?;
+    if v.is_null() {
+        return None;
+    }
+    match field.ty {
+        FieldType::I16 | FieldType::I32 | FieldType::I64 => v.as_i64().map(|n| n.to_string()),
+        FieldType::String | FieldType::Uuid => v.as_str().map(str::to_owned),
+        _ => None,
+    }
+}
+
+/// Tri-dialect counterpart of [`read_joined_value_as_html`]. Reads
+/// from `<alias>__<field.column>` in the JSON row object — the
+/// admin fetch path writes joined columns under that prefixed key
+/// so the JSON shape stays self-describing. Returns
+/// already-HTML-escaped text or `None` for `NULL` (LEFT JOIN miss)
+/// and unsupported types (`FieldType::Json`).
+pub(crate) fn read_joined_value_as_html_json(
+    row: &serde_json::Value,
+    alias: &str,
+    field: &FieldSchema,
+) -> Option<String> {
+    let key = format!("{}__{}", alias, field.column);
+    let v = row.get(&key)?;
+    if v.is_null() {
+        return None;
+    }
+    let text: Option<String> = match field.ty {
+        FieldType::I16 | FieldType::I32 | FieldType::I64 => v.as_i64().map(|n| n.to_string()),
+        FieldType::F32 | FieldType::F64 => v.as_f64().map(|n| n.to_string()),
+        FieldType::Bool => v.as_bool().map(|b| b.to_string()),
+        FieldType::String | FieldType::Uuid | FieldType::Date | FieldType::DateTime => {
+            v.as_str().map(str::to_owned)
+        }
+        FieldType::Json => None,
+    };
+    text.map(|s| escape(&s))
+}
+
+/// Tri-dialect counterpart of [`read_value_as_json`]. Walks the
+/// already-decoded JSON row object and re-extracts the named field
+/// as a `serde_json::Value` shaped consistently with what
+/// `serde_json::to_value(&model.field)` would produce. Mostly an
+/// identity passthrough since the row is already JSON; provides the
+/// same coercion fallbacks as the PG path (e.g. strings parsing as
+/// numbers when the field type is `I64`).
+pub(crate) fn read_value_as_json_from_json(
+    row: &serde_json::Value,
+    field: &FieldSchema,
+) -> serde_json::Value {
+    use serde_json::Value;
+    let v = row.get(field.name).cloned().unwrap_or(Value::Null);
+    if v.is_null() {
+        return Value::Null;
+    }
+    // Coerce the existing JSON value to the field's expected JSON
+    // shape. Most types pass through unchanged; the exceptions
+    // (`String → I64` when the row stores numbers as strings, e.g.
+    // SQLite TEXT-affinity dates) get coerced.
+    match field.ty {
+        FieldType::I16 | FieldType::I32 | FieldType::I64 => {
+            v.as_i64().map(Value::from).unwrap_or(v)
+        }
+        FieldType::F32 | FieldType::F64 => v.as_f64().map(Value::from).unwrap_or(v),
+        FieldType::Bool => v.as_bool().map(Value::from).unwrap_or(v),
+        _ => v,
+    }
+}
+
 /// Variant of [`read_value_as_string`] that reads from an arbitrary
 /// column alias (e.g. `"facet_value"` after a `SELECT col AS facet_value`).
 /// Used by the facet-filter machinery (slice 10.4) which renames the
@@ -498,4 +655,125 @@ pub(crate) fn read_joined_value_as_html(
         FieldType::Json => None,
     };
     text.map(|s| escape(&s))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{FieldSchema, FieldType};
+    use serde_json::json;
+
+    fn field(name: &'static str, column: &'static str, ty: FieldType) -> FieldSchema {
+        FieldSchema {
+            name,
+            column,
+            ty,
+            nullable: true,
+            primary_key: false,
+            auto: false,
+            unique: false,
+            max_length: None,
+            min: None,
+            max: None,
+            default: None,
+            relation: None,
+            generated_as: None,
+        }
+    }
+
+    #[test]
+    fn render_value_json_bool_uses_checkbox_glyph() {
+        let f = field("active", "active", FieldType::Bool);
+        let row = json!({ "active": true });
+        let html = render_value_json(&row, &f);
+        assert!(html.contains("rcms-bool yes"));
+        assert!(html.contains("☑"));
+        let row = json!({ "active": false });
+        let html = render_value_json(&row, &f);
+        assert!(html.contains("rcms-bool no"));
+        assert!(html.contains("☐"));
+    }
+
+    #[test]
+    fn render_value_json_null_renders_em_null_except_for_bool() {
+        let f_str = field("name", "name", FieldType::String);
+        let row = json!({ "name": null });
+        assert_eq!(render_value_json(&row, &f_str), "<em>NULL</em>");
+        // Bool NULL still renders as the empty-checkbox so list cells
+        // stay a clean vertical line of ☑/☐.
+        let f_bool = field("active", "active", FieldType::Bool);
+        let row = json!({ "active": null });
+        let html = render_value_json(&row, &f_bool);
+        assert!(html.contains("☐"));
+    }
+
+    #[test]
+    fn render_value_json_integers_render_unadorned() {
+        let f = field("count", "count", FieldType::I64);
+        let row = json!({ "count": 42 });
+        assert_eq!(render_value_json(&row, &f), "42");
+    }
+
+    #[test]
+    fn render_value_json_strings_are_html_escaped() {
+        let f = field("title", "title", FieldType::String);
+        let row = json!({ "title": "<script>alert('xss')</script>" });
+        let html = render_value_json(&row, &f);
+        assert!(html.contains("&lt;script"));
+        assert!(!html.contains("<script"));
+    }
+
+    #[test]
+    fn read_value_as_string_json_handles_supported_types() {
+        let row = json!({ "id": 42, "name": "alice" });
+        assert_eq!(
+            read_value_as_string_json(&row, &field("id", "id", FieldType::I64)),
+            Some("42".into())
+        );
+        assert_eq!(
+            read_value_as_string_json(&row, &field("name", "name", FieldType::String)),
+            Some("alice".into())
+        );
+        // Bool and Date aren't supported as PK/FK key shapes — return None.
+        let row = json!({ "active": true });
+        assert_eq!(
+            read_value_as_string_json(&row, &field("active", "active", FieldType::Bool)),
+            None
+        );
+    }
+
+    #[test]
+    fn read_value_as_string_at_json_uses_custom_key() {
+        let row = json!({ "facet_value": 7 });
+        let f = field("id", "id", FieldType::I64);
+        assert_eq!(
+            read_value_as_string_at_json(&row, &f, "facet_value"),
+            Some("7".into())
+        );
+    }
+
+    #[test]
+    fn read_joined_value_as_html_json_reads_prefixed_key() {
+        let row = json!({ "author__name": "Ada Lovelace" });
+        let f = field("name", "name", FieldType::String);
+        assert_eq!(
+            read_joined_value_as_html_json(&row, "author", &f),
+            Some("Ada Lovelace".into())
+        );
+    }
+
+    #[test]
+    fn read_joined_value_as_html_json_returns_none_for_left_join_miss() {
+        let row = json!({ "author__name": null });
+        let f = field("name", "name", FieldType::String);
+        assert_eq!(read_joined_value_as_html_json(&row, "author", &f), None);
+    }
+
+    #[test]
+    fn read_value_as_json_from_json_passes_through_numbers() {
+        let row = json!({ "count": 7 });
+        let f = field("count", "count", FieldType::I64);
+        let v = read_value_as_json_from_json(&row, &f);
+        assert_eq!(v, json!(7));
+    }
 }
