@@ -242,10 +242,11 @@ template_views = ["forms", "dep:axum", "dep:tera", "dep:tokio"]
 # admin's CRUD handlers reuse the shared parsers and ship CSRF on
 # every mutation by default.
 admin = [
-    "forms",
-    "csrf",
-    "dep:axum",
-    "dep:tera",
+    "postgres",        # v0.34 — bundled admin is PG-only by language
+    "forms",           # (raw PgRow rendering, PgPool everywhere). The
+    "csrf",            # bi-dialect admin rewrite is v0.35+ scope.
+    "dep:axum",        # Sqlite/MySQL apps that want their own admin
+    "dep:tera",        # routes wire them by hand using DatabaseTenant<DB>.
     "dep:base64",
     "dep:http",
     "dep:http-body-util",
@@ -260,7 +261,11 @@ admin = [
 # console can persist per-tenant brand assets (logo / favicon) on
 # disk and serve them via the tenancy router.
 tenancy = [
-    "admin",
+    # v0.34 — `tenancy` no longer implies `admin`. Pure-sqlite /
+    # pure-MySQL apps can use `tenancy` without pulling Postgres in
+    # via the (PG-only) bundled admin. Apps that want the bundled
+    # admin add `--features admin` explicitly (transitively enables
+    # `postgres`).
     "runtime",
     "storage",
     "uploads",

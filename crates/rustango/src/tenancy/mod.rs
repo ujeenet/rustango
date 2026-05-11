@@ -38,6 +38,13 @@
 //! See `memory/v05-multitenancy-roadmap.md` in the project memory for
 //! the full design and slice plan.
 
+// v0.34 — `tenancy::admin` (the per-tenant admin router builder) is
+// PG-only by design because it threads the framework's PgRow-based
+// rendering helpers + builds short-lived PgPools with `search_path`
+// baked in. Sqlite/MySQL apps that want bundled admin will wait for
+// the v0.35+ bi-dialect admin rewrite; today, write your own routes
+// using `DatabaseTenant<DB>` + the ORM `_pool` helpers.
+#[cfg(feature = "admin")]
 pub mod admin;
 pub mod auth;
 pub mod auth_backends;

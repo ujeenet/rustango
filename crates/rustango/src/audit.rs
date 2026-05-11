@@ -37,7 +37,13 @@
 
 use serde_json::{Map, Value};
 
-use crate::sql::sqlx::{self, postgres::PgRow, PgPool, Row};
+use crate::sql::sqlx::{self, Row};
+
+// PG-typed helpers below import PgRow / PgPool directly. Sqlite/
+// MySQL paths use the bi-dialect `ensure_table_pool` /
+// `emit_one_pool` further down which dispatch per-backend.
+#[cfg(feature = "postgres")]
+use crate::sql::sqlx::{postgres::PgRow, PgPool};
 
 /// Source of the change recorded in the audit log.
 ///
@@ -146,10 +152,12 @@ impl AuditOp {
     }
 }
 
-/// Emit a single entry. Used by per-row write paths.
+/// Emit a single entry against a Postgres executor. Used by per-row
+/// write paths on PG. For bi-dialect emission see [`emit_one_pool`].
 ///
 /// # Errors
 /// Driver / SQL failures from the INSERT.
+#[cfg(feature = "postgres")]
 pub async fn emit_one<'c, E>(executor: E, entry: &PendingEntry) -> Result<(), sqlx::Error>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
@@ -169,12 +177,13 @@ where
     Ok(())
 }
 
-/// Emit a batch of entries in a single statement. Used by bulk write
-/// paths so audit overhead is one extra round-trip even when the
-/// underlying write affected N rows.
+/// Emit a batch of entries in a single Postgres statement. Used by
+/// bulk write paths on PG. Sqlite/MySQL fall back to per-row
+/// `emit_one_pool` until a bi-dialect batch path lands.
 ///
 /// # Errors
 /// As [`emit_one`].
+#[cfg(feature = "postgres")]
 pub async fn emit_many<'c, E>(executor: E, entries: &[PendingEntry]) -> Result<(), sqlx::Error>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
