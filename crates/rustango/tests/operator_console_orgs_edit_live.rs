@@ -117,6 +117,7 @@ async fn seed_org(pool: &sqlx::PgPool, slug: &str, mode: StorageMode, db_url: Op
         slug: slug.to_owned(),
         display_name: format!("display for {slug}"),
         storage_mode: mode.as_str().into(),
+        backend_kind: "postgres".to_owned(),
         database_url: db_url.map(str::to_owned),
         schema_name: None,
         host_pattern: Some(format!("{slug}.example.com")),
