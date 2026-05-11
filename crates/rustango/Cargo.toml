@@ -283,7 +283,12 @@ tenancy = [
 # `info,sqlx=warn` env-filter logger before the user body runs. Apps
 # that don't want this dep can opt out by skipping the macro and
 # using `#[tokio::main]` directly.
-runtime = ["dep:tracing-subscriber", "dep:tracing-appender"]
+#
+# v0.31.1 (#4): `dep:tokio` so the macro can emit
+# `#[::rustango::__private_runtime::tokio::main]` and user crates no
+# longer need to add tokio to their own Cargo.toml just to use the
+# rustango entrypoint shim.
+runtime = ["dep:tracing-subscriber", "dep:tracing-appender", "dep:tokio"]
 
 # Minimal axum runserver — `rustango::server::AppBuilder`. Bi-dialect
 # single-pool bootstrap (SQLite / Postgres / MySQL). Implies axum +
@@ -293,7 +298,7 @@ runserver = ["dep:axum", "dep:tokio"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.31.0", path = "../rustango-macros" }
+rustango-macros = { version = "0.31.1", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono     = { workspace = true }

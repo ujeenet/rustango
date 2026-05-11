@@ -310,17 +310,25 @@ pub(crate) fn render_form(
     pk_locked: bool,
     error_msg: Option<&str>,
 ) -> String {
+    // v0.31.1 (#5): respect `state.config.admin_prefix` instead of
+    // hardcoding `/__admin`. Apps on the v0.29+ friendly default
+    // (`/admin`) were getting form-action URLs that 404'd.
+    let admin_prefix = state.config.admin_prefix.as_str();
     let (action, edit_pk) = if pk_locked {
         let pk_field = model.primary_key().expect("pk_locked requires a PK");
         let pk_value = prefill
             .and_then(|m| m.get(pk_field.name).cloned())
             .unwrap_or_default();
         (
-            format!("/__admin/{}/{}", model.table, render::escape(&pk_value)),
+            format!(
+                "{admin_prefix}/{}/{}",
+                model.table,
+                render::escape(&pk_value)
+            ),
             Some(pk_value),
         )
     } else {
-        (format!("/__admin/{}", model.table), None)
+        (format!("{admin_prefix}/{}", model.table), None)
     };
     let title = if pk_locked {
         format!("Edit {}", model.name)

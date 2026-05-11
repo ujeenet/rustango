@@ -230,10 +230,15 @@ impl SessionSecret {
         // Disk path: read existing key if present.
         if let Ok(bytes) = std::fs::read(disk_path) {
             if bytes.len() >= 32 {
-                tracing::debug!(
+                // v0.31.1 (#7): bumped from `debug!` to `info!` so the
+                // happy-path "your session keys are persistent" message
+                // shows up in default-log boots and operators can tell
+                // at a glance whether the secret is freshly generated
+                // or carried over from a prior run.
+                tracing::info!(
                     target: "crate::tenancy::session",
                     path = %disk_path.display(),
-                    "loaded persistent session secret from disk",
+                    "loaded persisted session secret from disk",
                 );
                 return Self(bytes);
             }
@@ -251,10 +256,17 @@ impl SessionSecret {
         let tmp_path = disk_path.with_extension("tmp");
         match std::fs::write(&tmp_path, &buf).and_then(|_| std::fs::rename(&tmp_path, disk_path)) {
             Ok(()) => {
+                // v0.31.1 (#7): clarify the "(dev fallback)" wording —
+                // the message previously made it look like the secret
+                // was being regenerated on every boot. It only fires
+                // when no env var AND no on-disk key were found, i.e.
+                // the very first boot.
                 tracing::info!(
                     target: "crate::tenancy::session",
                     path = %disk_path.display(),
-                    "persisted new session secret to disk (dev fallback)",
+                    "generated new session secret and persisted to disk \
+                     (set RUSTANGO_SESSION_SECRET to override; this message \
+                     only fires on first boot)",
                 );
             }
             Err(e) => {

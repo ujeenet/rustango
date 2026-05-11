@@ -806,6 +806,10 @@ pub use rustango_macros::main;
 #[doc(hidden)]
 #[cfg(feature = "runtime")]
 pub mod __private_runtime {
+    /// v0.31.1 (#4) — re-exported so `#[rustango::main]` can resolve
+    /// `tokio::main` through the rustango facade. Apps using the
+    /// shim no longer need a direct `tokio` dependency.
+    pub use tokio;
     pub use tracing_subscriber;
 }
 

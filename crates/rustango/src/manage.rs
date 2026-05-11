@@ -491,7 +491,13 @@ impl Cli {
         let verb = args.first().map_or("", String::as_str);
 
         match verb {
-            "" | "runserver" => self.runserver().await,
+            // v0.31.1 (#1): the hyphenated `run-server` form is what
+            // `--help` has advertised since the start, but only the
+            // unhyphenated `runserver` reached `runserver()` — the
+            // hyphenated form fell through to `dispatch()` →
+            // `tenancy::manage::run_with_init`, which **silently
+            // skipped the `.seed()` hook**. Accept both forms.
+            "" | "runserver" | "run-server" => self.runserver().await,
             _ => self.dispatch(args).await,
         }
     }

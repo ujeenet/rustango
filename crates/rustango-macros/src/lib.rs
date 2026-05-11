@@ -201,10 +201,15 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
 
     // Parse optional `flavor = "..."` etc. from the attribute args
     // and pass them straight through to `#[tokio::main(...)]`.
+    //
+    // v0.31.1 (#4): qualify via the rustango re-export so user
+    // crates don't need a direct `tokio` dep — `#[rustango::main]`
+    // through `rustango = { ..., features = ["runtime"] }` is now
+    // sufficient.
     let tokio_attr = if args.is_empty() {
-        quote! { #[::tokio::main] }
+        quote! { #[::rustango::__private_runtime::tokio::main] }
     } else {
-        quote! { #[::tokio::main(#args)] }
+        quote! { #[::rustango::__private_runtime::tokio::main(#args)] }
     };
 
     // Re-block the body so the tracing init runs before user code.

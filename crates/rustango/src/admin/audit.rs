@@ -228,11 +228,15 @@ pub(crate) async fn audit_log_view(
             let occurred_at: chrono::DateTime<chrono::Utc> = r
                 .try_get("occurred_at")
                 .unwrap_or_else(|_| chrono::Utc::now());
+            // v0.31.1 (#5): use the configured admin prefix instead of
+            // hardcoded `/__admin`. Friendly defaults (`/admin`) had
+            // broken audit-log "view this record" links.
+            let admin_prefix = state.config.admin_prefix.as_str();
             serde_json::json!({
                 "id": id,
                 "entity_table": entity_table,
                 "entity_pk": entity_pk,
-                "detail_url": format!("/__admin/{entity_table}/{entity_pk}"),
+                "detail_url": format!("{admin_prefix}/{entity_table}/{entity_pk}"),
                 "operation": operation,
                 "action_name": action_name,
                 "source": source,

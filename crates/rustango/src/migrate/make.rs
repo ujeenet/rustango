@@ -123,10 +123,37 @@ pub fn make_migrations_scoped(
         .iter()
         .filter(|m| m.scope == migration_scope)
         .collect();
-    let prev_snapshot = prior_scoped
+    // v0.31.1 (#2): the chain head's snapshot is the obvious baseline,
+    // but it's incomplete when the project has multiple "head"
+    // migrations in the same scope. Concrete case: `init-tenancy`
+    // writes `0001_rustango_tenant_initial` (tenant scope, no `prev`)
+    // alongside the user's `0001_initial`. Subsequent user-app
+    // migrations chain off `0001_initial` and carry forward only the
+    // user-app tables in their snapshots — the framework tables drop
+    // out of the baseline. Diffing against the inventory then re-emits
+    // `CreateTable` for every framework table and the migration runner
+    // crashes with `relation already exists`.
+    //
+    // Two-step fix:
+    //   1. Merge any side-chain bootstrap snapshots (no `prev`, not in
+    //      the main chain) into the baseline.
+    //   2. Pre-populate the baseline with every `rustango_*` table the
+    //      current registry knows about. The framework reserves the
+    //      `rustango_` table-name prefix for tables it manages itself
+    //      (bootstrap migrations + lazy ensure-table paths like
+    //      `audit_log`, `content_types`, `permissions`). User-app
+    //      makemigrations should never emit CreateTable for those.
+    let mut prev_snapshot = prior_scoped
         .last()
-        .map_or_else(empty_snapshot, |m| m.snapshot.clone())
-        .filtered_to_scope(model_scope);
+        .map_or_else(empty_snapshot, |m| m.snapshot.clone());
+    let in_chain = chain_membership(&prior_scoped);
+    for m in &prior_scoped {
+        if !in_chain.contains(m.name.as_str()) {
+            fold_in_missing_tables(&mut prev_snapshot, &m.snapshot);
+        }
+    }
+    fold_in_framework_tables(&mut prev_snapshot, current);
+    let prev_snapshot = prev_snapshot.filtered_to_scope(model_scope);
     let prev_name = prior_scoped.last().map(|m| m.name.clone());
     // Index numbering walks the WHOLE directory — we don't want
     // tenant-scoped 0002 colliding with registry-scoped 0002 in the
@@ -241,6 +268,90 @@ pub fn make_migrations_from(
     Ok(Some(mig))
 }
 
+/// Names reachable from the lex-last in-scope migration by walking
+/// `prev` links backward. Migrations whose names are NOT in this set
+/// are side-chain bootstrap migrations whose tables would otherwise
+/// drop out of the baseline. See `make_migrations_scoped` for the
+/// `0001_rustango_tenant_initial` collision this guards against (#2).
+fn chain_membership(prior_scoped: &[&Migration]) -> std::collections::HashSet<String> {
+    let mut seen = std::collections::HashSet::new();
+    let Some(last) = prior_scoped.last() else {
+        return seen;
+    };
+    let mut cur: Option<&str> = Some(last.name.as_str());
+    while let Some(name) = cur {
+        if !seen.insert(name.to_owned()) {
+            // Defensive — a cyclic `prev` chain shouldn't happen but
+            // would loop forever if it did.
+            break;
+        }
+        cur = prior_scoped
+            .iter()
+            .find(|m| m.name == name)
+            .and_then(|m| m.prev.as_deref());
+    }
+    seen
+}
+
+/// Pre-populate `prev_snapshot` with every `rustango_*` table the
+/// current inventory knows about. The `rustango_` table-name prefix is
+/// a reserved framework namespace — the framework creates those
+/// tables itself (via bootstrap migrations or lazy ensure-table
+/// paths). User-app makemigrations diffs should treat them as
+/// already-present so they don't get re-emitted as CreateTable ops
+/// that crash on `relation already exists` (#2).
+fn fold_in_framework_tables(into: &mut SchemaSnapshot, current: &SchemaSnapshot) {
+    for t in &current.tables {
+        if t.name.starts_with("rustango_") && !into.tables.iter().any(|x| x.name == t.name) {
+            into.tables.push(t.clone());
+        }
+    }
+    for m2m in &current.m2m_tables {
+        if m2m.through.starts_with("rustango_")
+            && !into.m2m_tables.iter().any(|x| x.through == m2m.through)
+        {
+            into.m2m_tables.push(m2m.clone());
+        }
+    }
+    for idx in &current.indexes {
+        if idx.table.starts_with("rustango_") && !into.indexes.iter().any(|x| x.name == idx.name) {
+            into.indexes.push(idx.clone());
+        }
+    }
+    for c in &current.checks {
+        if c.table.starts_with("rustango_") && !into.checks.iter().any(|x| x.name == c.name) {
+            into.checks.push(c.clone());
+        }
+    }
+}
+
+/// Add every table / m2m / index / check from `from` to `into` that
+/// isn't already named in `into`. Used to fold side-chain bootstrap
+/// snapshots into the chain head's baseline (#2). The "missing-only"
+/// semantics keep in-chain DropTable operations honored.
+fn fold_in_missing_tables(into: &mut SchemaSnapshot, from: &SchemaSnapshot) {
+    for t in &from.tables {
+        if !into.tables.iter().any(|x| x.name == t.name) {
+            into.tables.push(t.clone());
+        }
+    }
+    for m2m in &from.m2m_tables {
+        if !into.m2m_tables.iter().any(|x| x.through == m2m.through) {
+            into.m2m_tables.push(m2m.clone());
+        }
+    }
+    for idx in &from.indexes {
+        if !into.indexes.iter().any(|x| x.name == idx.name) {
+            into.indexes.push(idx.clone());
+        }
+    }
+    for c in &from.checks {
+        if !into.checks.iter().any(|x| x.name == c.name) {
+            into.checks.push(c.clone());
+        }
+    }
+}
+
 fn empty_snapshot() -> SchemaSnapshot {
     SchemaSnapshot {
         tables: vec![],
@@ -305,6 +416,39 @@ fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
                 .all(|c| matches!(c, SchemaChange::CreateTable(_))) =>
         {
             "initial".into()
+        }
+        // v0.31.1: previously this case fell through to the
+        // unhelpful "auto" — generating uninformative filenames like
+        // `0004_auto.json` even when the diff was a clean set of
+        // `CreateTable`s + their indexes. Now: if every op is a
+        // CreateTable, or a CreateIndex targeting one of those new
+        // tables, name the migration after the tables created
+        // (capped at 3, joined with `_and_`).
+        many if many.iter().all(|c| {
+            matches!(
+                c,
+                SchemaChange::CreateTable(_)
+                    | SchemaChange::CreateIndex { .. }
+                    | SchemaChange::CreateM2MTable { .. }
+            )
+        }) =>
+        {
+            let mut tables: Vec<&str> = many
+                .iter()
+                .filter_map(|c| match c {
+                    SchemaChange::CreateTable(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect();
+            tables.sort_unstable();
+            tables.dedup();
+            if tables.is_empty() {
+                "auto".into()
+            } else if tables.len() <= 3 {
+                format!("create_{}", tables.join("_and_"))
+            } else {
+                format!("create_{}_etc", tables[..3].join("_and_"))
+            }
         }
         _ => "auto".into(),
     }
@@ -451,8 +595,14 @@ mod tests {
     fn make_migrations_scoped_emits_with_correct_migration_scope() {
         // First call from empty dir → snapshot has 1 tenant table → file
         // created and tagged with MigrationScope::Tenant.
+        //
+        // v0.31.1 (#2): table name must NOT start with `rustango_` —
+        // that prefix is reserved for framework-managed tables which
+        // are now filtered out of the user-app diff baseline. Use a
+        // user-app-shape name (`posts`) so this test exercises the
+        // "first migration created" path.
         let dir = tempdir();
-        let snap = snap_with(vec![t("rustango_users")]);
+        let snap = snap_with(vec![t("posts")]);
         let mig = make_migrations_scoped(
             &dir,
             &snap,

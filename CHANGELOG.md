@@ -2,6 +2,32 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.31.1] — paper cuts surfaced building rustango-cms
+
+Five small but visible bugs that bit first-time `rustango-cms` setup. None of these change documented public behavior; each was a silent failure or a misleading message.
+
+### Fixed
+
+- **#1 — `run-server` vs `runserver` verb mismatch** ([`crates/rustango/src/manage.rs:493-505`](crates/rustango/src/manage.rs#L493-L505)). `cargo run -- --help` has advertised **`run-server`** (with hyphen) since the verb shipped, but only the unhyphenated `runserver` reached `Cli::runserver()` — the hyphenated form fell through to `dispatch()` and **silently skipped `.seed()`**, costing one debugging session per first-time user with a `Cli::seed(...)` hook. `Cli::run()` now matches both forms.
+
+- **#4 — `#[rustango::main]` no longer requires a direct `tokio` dependency** ([`crates/rustango-macros/src/lib.rs:204-217`](crates/rustango-macros/src/lib.rs#L204-L217), [`crates/rustango/src/lib.rs:806-818`](crates/rustango/src/lib.rs#L806-L818), [`crates/rustango/Cargo.toml`](crates/rustango/Cargo.toml)). The macro emitted `#[::tokio::main]`, forcing every downstream app to add tokio to its own `Cargo.toml` even though it never named tokio in code. The macro now resolves through `::rustango::__private_runtime::tokio::main`, and the `runtime` feature (already implied by `manage`, default-on) pulls tokio under the rustango facade. Apps with `rustango = "0.31.1"` can drop their explicit tokio dep entirely.
+
+- **#5 — Admin URLs respect `routes.admin_url`** ([`crates/rustango/src/admin/helpers.rs`](crates/rustango/src/admin/helpers.rs), [`crates/rustango/src/admin/views.rs`](crates/rustango/src/admin/views.rs), [`crates/rustango/src/admin/audit.rs`](crates/rustango/src/admin/audit.rs)). Several admin URL builders still hard-coded `/__admin/` after the v0.28 / v0.29 prefix-config rollout — list-view facet toggle/clear/show-all links, edit-form POST actions, create/update/delete redirect targets, and audit-log "view this record" detail links. On apps using the v0.29+ friendly `/admin` default, all of those 404'd. Each call site now reads `state.config.admin_prefix` (or the equivalent thread-through).
+
+- **#7 — Session secret log message clarified** ([`crates/rustango/src/tenancy/operator_console/session.rs:230-260`](crates/rustango/src/tenancy/operator_console/session.rs#L230-L260)). The "persisted new session secret to disk (dev fallback)" line used to fire as `info!` only on the first boot, while subsequent boots emitted a `debug!`-level "loaded persistent" line that was silent at default log levels — leaving operators uncertain whether the secret rotated on every restart. Bumped the "loaded" message to `info!` so the happy path is visible, and clarified the "new" message to spell out it only fires when no env var AND no on-disk key exist (point operators at `RUSTANGO_SESSION_SECRET` for production).
+
+- **#2 — `makemigrations` no longer emits `CreateTable` for framework-internal tables** ([`crates/rustango/src/migrate/make.rs`](crates/rustango/src/migrate/make.rs)). On `init-tenancy`-style projects (which write both `0001_initial` and `0001_rustango_tenant_initial` as parallel chain heads), generated migrations re-emitted `CreateTable` for every `rustango_*` table — applying them crashed the runner with `relation already exists`. The diff baseline now:
+  1. Folds in any same-scope side-chain bootstrap snapshots that aren't reachable from the main chain's `prev` walk, AND
+  2. Pre-populates the baseline with every `rustango_*` table the current registry knows about, so the framework-owned namespace is treated as already-present regardless of how the table got created (bootstrap migration OR lazy ensure-table path like `audit_log` / `content_types` / `permissions`).
+
+  The `rustango_` table-name prefix is now formally reserved for framework-managed tables.
+
+- **Generated migrations get descriptive names** for multi-CreateTable change sets. Previously, `makemigrations` fell back to the opaque `0004_auto.json` whenever the diff included both new tables AND their indexes (a common case). The auto-namer now produces `0004_create_cms_locale_and_cms_media.json` (capped at 3 tables, suffixed `_etc` beyond that). Users no longer need to hand-rename `_auto` files.
+
+### Deferred
+
+- **#3 — Inventory force-link fragility** (the `register_page_type!`-style ctors that macOS's `-dead_strip` *can* drop in release builds). Tracked for rustango-cms — the affected macro lives there, and we don't have a reliable repro of the failure case yet (both `std::any::type_name::<T>()` and `ManuallyDrop::new(T::default())` worked in dev profile during the surface this issue surfaced).
+
 ## [0.31.0] — tenant admin no longer catches every URL
 
 The tenancy server's `Builder` used to attach `tenant_admin` as `Router::fallback_service(...)`, which silently overrode any `.fallback()` set inside the user's API router (axum semantics). That made `rustango-cms`-style projects impossible without mounting the public site at an explicit non-root prefix: every unmatched URL went to the admin's `/{table}` catch-all and returned `{"error":"table not found"}` instead of running the user's resolver.

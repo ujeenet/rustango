@@ -502,7 +502,8 @@ async fn compute_facets(
             if !is_active {
                 params.push((field.name.into(), raw.clone()));
             }
-            let toggle_url = build_query_url(model.table, &params);
+            let toggle_url =
+                build_query_url(state.config.admin_prefix.as_str(), model.table, &params);
 
             values.push(serde_json::json!({
                 "raw": raw,
@@ -548,7 +549,11 @@ async fn compute_facets(
                 params.push(((*k).into(), v.clone()));
             }
             params.push(("facet_show_all".into(), field.name.into()));
-            Some(build_query_url(model.table, &params))
+            Some(build_query_url(
+                state.config.admin_prefix.as_str(),
+                model.table,
+                &params,
+            ))
         } else {
             None
         };
@@ -565,7 +570,11 @@ async fn compute_facets(
                 }
                 params.push(((*k).into(), v.clone()));
             }
-            Some(build_query_url(model.table, &params))
+            Some(build_query_url(
+                state.config.admin_prefix.as_str(),
+                model.table,
+                &params,
+            ))
         } else {
             None
         };
@@ -581,15 +590,18 @@ async fn compute_facets(
     Ok(out)
 }
 
-fn build_query_url(table: &str, params: &[(String, String)]) -> String {
+// v0.31.1 (#5): take `admin_prefix` instead of hardcoding `/__admin`.
+// On the v0.29+ friendly default the facet toggle / clear / show-all
+// URLs all 404'd until the caller corrected them by hand.
+fn build_query_url(admin_prefix: &str, table: &str, params: &[(String, String)]) -> String {
     if params.is_empty() {
-        format!("/__admin/{table}")
+        format!("{admin_prefix}/{table}")
     } else {
         let qs: Vec<String> = params
             .iter()
             .map(|(k, v)| format!("{}={}", url_encode(k), url_encode(v)))
             .collect();
-        format!("/__admin/{table}?{}", qs.join("&"))
+        format!("{admin_prefix}/{table}?{}", qs.join("&"))
     }
 }
 
@@ -852,7 +864,11 @@ pub(crate) async fn create_submit(
         &form,
     )
     .await;
-    Ok(Redirect::to(&format!("/__admin/{}/{}", model.table, pk_value)).into_response())
+    Ok(Redirect::to(&format!(
+        "{}/{}/{}",
+        state.config.admin_prefix, model.table, pk_value
+    ))
+    .into_response())
 }
 
 // ============================================================== EDIT
@@ -981,7 +997,11 @@ pub(crate) async fn update_submit(
     // `tenancy::admin`, so operators get a "who changed what" trail
     // automatically.
     super::audit::emit_admin_audit_diff(&state, model, &pk_raw, before_row.as_ref(), &form).await;
-    Ok(Redirect::to(&format!("/__admin/{}/{}", model.table, pk_raw)).into_response())
+    Ok(Redirect::to(&format!(
+        "{}/{}/{}",
+        state.config.admin_prefix, model.table, pk_raw
+    ))
+    .into_response())
 }
 
 // ============================================================== DELETE
@@ -1090,7 +1110,7 @@ pub(crate) async fn delete_submit(
             "admin audit emit failed for delete",
         );
     }
-    Ok(Redirect::to(&format!("/__admin/{}", model.table)).into_response())
+    Ok(Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response())
 }
 
 // ============================================================== ACTIONS (slice 10.6)
@@ -1131,10 +1151,14 @@ pub(crate) async fn action_submit(
     }
     let Some(action) = action_name.filter(|s| !s.is_empty()) else {
         // No action picked — just bounce back to the list.
-        return Ok(Redirect::to(&format!("/__admin/{}", model.table)).into_response());
+        return Ok(
+            Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response(),
+        );
     };
     if selected_raw.is_empty() {
-        return Ok(Redirect::to(&format!("/__admin/{}", model.table)).into_response());
+        return Ok(
+            Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response(),
+        );
     }
 
     let admin_cfg = model
@@ -1157,7 +1181,9 @@ pub(crate) async fn action_submit(
         .filter_map(|raw| forms::parse_pk_string(pk_field, raw).ok())
         .collect();
     if pk_values.is_empty() {
-        return Ok(Redirect::to(&format!("/__admin/{}", model.table)).into_response());
+        return Ok(
+            Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response(),
+        );
     }
 
     // v0.12.4: SELECT every selected row's pre-action state so the
@@ -1319,5 +1345,5 @@ pub(crate) async fn action_submit(
         }
     }
 
-    Ok(Redirect::to(&format!("/__admin/{}", model.table)).into_response())
+    Ok(Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response())
 }
