@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::core::Column as _;
-use crate::sql::{Auto, Fetcher, Updater};
+use crate::sql::{Auto, FetcherPool, UpdaterPool};
 
 use crate::tenancy::error::TenancyError;
 use crate::tenancy::manage::args::{next_value, quote_ident, reject_leading_flag};
@@ -41,9 +41,10 @@ pub(super) async fn create_tenant<W: Write + Send>(
 
     // Reject duplicate slug up front — saves a partial-state mess
     // when CREATE SCHEMA succeeds and the INSERT then fails.
+    let registry = pools.registry_pool();
     let existing: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(parsed.slug.clone()))
-        .fetch(pools.registry())
+        .fetch_pool(&registry)
         .await?;
     if !existing.is_empty() {
         return Err(TenancyError::Validation(format!(
@@ -82,6 +83,10 @@ pub(super) async fn create_tenant<W: Write + Send>(
     // a failed INSERT doesn't leave an orphan schema. Idempotent
     // via IF NOT EXISTS.
     if let StorageMode::Schema = parsed.mode {
+        // Schema mode is PG-only by language — `CREATE SCHEMA` /
+        // `SET search_path` don't exist on sqlite or mysql. The
+        // registry pool MUST be PG here; pools.registry() panics
+        // with a clear error otherwise.
         let schema = schema_name.as_deref().unwrap_or(&parsed.slug);
         let sql = format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(schema));
         rustango::sql::sqlx::query(&sql)
@@ -109,7 +114,7 @@ pub(super) async fn create_tenant<W: Write + Send>(
         primary_color: None,
         theme_mode: None,
     };
-    org.insert(pools.registry()).await?;
+    org.insert_pool(&registry).await?;
     let id = org.id.get().copied().unwrap_or_default();
     writeln!(
         w,
@@ -286,9 +291,10 @@ pub(super) async fn drop_tenant<W: Write + Send>(
         )));
     }
 
+    let registry = pools.registry_pool();
     let existing: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(slug.clone()))
-        .fetch(pools.registry())
+        .fetch_pool(&registry)
         .await?;
     let Some(org) = existing.into_iter().next() else {
         return Err(TenancyError::Validation(format!(
@@ -310,7 +316,7 @@ pub(super) async fn drop_tenant<W: Write + Send>(
         .where_(Org::id.eq(id))
         .update()
         .set("active", false)
-        .execute(pools.registry())
+        .execute_pool(&registry)
         .await?;
     if updated == 0 {
         return Err(TenancyError::Validation(format!(
@@ -408,9 +414,10 @@ pub(super) async fn purge_tenant<W: Write + Send>(
         )));
     }
 
+    let registry = pools.registry_pool();
     let existing: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(slug.clone()))
-        .fetch(pools.registry())
+        .fetch_pool(&registry)
         .await?;
     let Some(org) = existing.into_iter().next() else {
         return Err(TenancyError::Validation(format!(
@@ -424,6 +431,9 @@ pub(super) async fn purge_tenant<W: Write + Send>(
 
     match mode {
         StorageMode::Schema => {
+            // Schema mode is PG-only by language. `pools.registry()`
+            // panics if the registry is non-PG, which is the right
+            // failure for "you can't drop a PG schema on sqlite".
             let schema = org.schema_name.clone().unwrap_or_else(|| slug.clone());
             let sql = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(&schema));
             rustango::sql::sqlx::query(&sql)
@@ -450,18 +460,14 @@ pub(super) async fn purge_tenant<W: Write + Send>(
         }
     }
 
-    // DELETE the Org row. Use a raw query so we don't depend on a
-    // model-level delete API (rustango doesn't ship one yet).
+    // DELETE the Org row via the ORM's bi-dialect `delete_pool`.
     let id = org
         .id
         .get()
         .copied()
         .ok_or_else(|| TenancyError::Validation("purge-tenant: Org row has no PK".into()))?;
-    let result = rustango::sql::sqlx::query("DELETE FROM rustango_orgs WHERE id = $1")
-        .bind(id)
-        .execute(pools.registry())
-        .await?;
-    if result.rows_affected() == 0 {
+    let rows_deleted = org.delete_pool(&registry).await?;
+    if rows_deleted == 0 {
         return Err(TenancyError::Validation(format!(
             "purge-tenant: no Org row deleted for id {id} — race condition?"
         )));
@@ -517,7 +523,7 @@ pub(super) async fn list_tenants<W: Write + Send>(
     pools: &TenantPools,
     w: &mut W,
 ) -> Result<(), TenancyError> {
-    let orgs: Vec<Org> = Org::objects().fetch(pools.registry()).await?;
+    let orgs: Vec<Org> = Org::objects().fetch_pool(&pools.registry_pool()).await?;
     if orgs.is_empty() {
         writeln!(w, "(no tenants)")?;
         return Ok(());

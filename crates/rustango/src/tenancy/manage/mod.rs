@@ -41,6 +41,7 @@
 
 mod args;
 mod audit;
+#[cfg(feature = "postgres")]
 mod migrate_storage;
 mod migrations;
 mod roles;
@@ -176,10 +177,17 @@ pub async fn run_with_writer_and_init<W: Write + Send>(
             migrations::migrate_tenants_cmd(pools, registry_url, dir, writer).await
         }
         "migrate-registry" => migrations::migrate_registry_cmd(pools, dir, writer).await,
+        #[cfg(feature = "postgres")]
         "migrate-tenant-storage" => {
             migrate_storage::migrate_tenant_storage_cmd(pools, registry_url, &args[1..], writer)
                 .await
         }
+        #[cfg(not(feature = "postgres"))]
+        "migrate-tenant-storage" => Err(TenancyError::Validation(
+            "migrate-tenant-storage requires the `postgres` feature (uses pg_dump | psql + \
+             schema-mode is PG-only)"
+                .into(),
+        )),
         "create-operator" => users::create_operator_cmd(pools, &args[1..], writer).await,
         "create-user" => users::create_user_cmd(pools, registry_url, &args[1..], writer).await,
         "create-superuser" => {

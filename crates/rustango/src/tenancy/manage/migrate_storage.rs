@@ -6,6 +6,15 @@
 //! the data sitting at the OLD location and no resolver pointing at
 //! it (split-brain).
 //!
+//! **Postgres-only by language**: this whole verb is gated on the
+//! `postgres` feature because (a) `schema` storage mode requires
+//! `SET search_path`, which is a PG-specific SQL statement; (b) the
+//! data move uses `pg_dump | psql`, which is part of the PG client
+//! tools and has no MySQL/SQLite analog with the same shape. Sqlite
+//! and MySQL apps don't need this verb — they only have
+//! `database` mode.
+#![cfg(feature = "postgres")]
+//!
 //! ## Algorithm
 //!
 //! 1. Look up `Org` by slug. Validate target ≠ current storage_mode.

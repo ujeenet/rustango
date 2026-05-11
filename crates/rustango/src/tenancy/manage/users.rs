@@ -4,7 +4,7 @@
 use std::io::Write;
 
 use crate::core::Column as _;
-use crate::sql::{Auto, Fetcher};
+use crate::sql::{Auto, FetcherPool};
 
 use crate::tenancy::error::TenancyError;
 use crate::tenancy::manage::args::{next_value, quote_ident, reject_leading_flag};
@@ -78,9 +78,10 @@ pub(super) async fn create_operator_cmd<W: Write + Send>(
     };
 
     // Reject duplicate username up front.
+    let registry = pools.registry_pool();
     let existing: Vec<crate::tenancy::Operator> = crate::tenancy::Operator::objects()
         .where_(crate::tenancy::Operator::username.eq(username.clone()))
-        .fetch(pools.registry())
+        .fetch_pool(&registry)
         .await?;
     if !existing.is_empty() {
         return Err(TenancyError::Validation(format!(
@@ -96,7 +97,7 @@ pub(super) async fn create_operator_cmd<W: Write + Send>(
         created_at: chrono::Utc::now(),
         password_changed_at: None,
     };
-    op.insert(pools.registry()).await?;
+    op.insert_pool(&registry).await?;
     let id = op.id.get().copied().unwrap_or_default();
     if generated {
         writeln!(w, "created operator `{username}` (id {id})")?;
@@ -186,9 +187,10 @@ pub(super) async fn create_user_cmd<W: Write + Send>(
     };
 
     // Look up the tenant.
+    let registry = pools.registry_pool();
     let orgs: Vec<crate::tenancy::Org> = crate::tenancy::Org::objects()
         .where_(crate::tenancy::Org::slug.eq(slug.clone()))
-        .fetch(pools.registry())
+        .fetch_pool(&registry)
         .await?;
     let org = orgs.into_iter().next().ok_or_else(|| {
         TenancyError::Validation(format!("create-user: no tenant with slug `{slug}`"))
@@ -534,18 +536,23 @@ pub(super) async fn reset_operator_password_cmd<W: Write + Send>(
         (p, false)
     };
     let hash = crate::tenancy::password::hash(&plain)?;
-    let result = rustango::sql::sqlx::query(
-        "UPDATE rustango_operators SET password_hash = $1, password_changed_at = NOW() WHERE username = $2",
-    )
-    .bind(&hash)
-    .bind(&username)
-    .execute(pools.registry())
-    .await?;
-    if result.rows_affected() == 0 {
-        return Err(TenancyError::Validation(format!(
+    // Route the operator-password rotate through the ORM so the SQL
+    // gets per-dialect placeholders + identifier quoting + `NOW()` is
+    // a value we set on the Rust side (chrono::Utc::now()) instead of
+    // a PG-only SQL function.
+    let registry = pools.registry_pool();
+    let existing: Vec<crate::tenancy::Operator> = crate::tenancy::Operator::objects()
+        .where_(crate::tenancy::Operator::username.eq(username.clone()))
+        .fetch_pool(&registry)
+        .await?;
+    let mut op = existing.into_iter().next().ok_or_else(|| {
+        TenancyError::Validation(format!(
             "reset-operator-password: no operator named `{username}`"
-        )));
-    }
+        ))
+    })?;
+    op.password_hash = hash;
+    op.password_changed_at = Some(chrono::Utc::now());
+    op.save_pool(&registry).await?;
     writeln!(w, "password reset for operator `{username}`")?;
     if generated {
         writeln!(w, "  generated password: {plain}")?;
@@ -736,30 +743,26 @@ pub(super) async fn change_operator_password_cmd<W: Write + Send>(
         (p, false)
     };
 
-    let stored: Option<String> = rustango::sql::sqlx::query_scalar(
-        "SELECT password_hash FROM rustango_operators WHERE username = $1",
-    )
-    .bind(&username)
-    .fetch_optional(pools.registry())
-    .await?;
-    let Some(stored_hash) = stored else {
-        return Err(TenancyError::Validation(format!(
+    // ORM lookup + save path so the change-password verb works on any
+    // backend the registry runs on.
+    let registry = pools.registry_pool();
+    let existing: Vec<crate::tenancy::Operator> = crate::tenancy::Operator::objects()
+        .where_(crate::tenancy::Operator::username.eq(username.clone()))
+        .fetch_pool(&registry)
+        .await?;
+    let mut op = existing.into_iter().next().ok_or_else(|| {
+        TenancyError::Validation(format!(
             "change-operator-password: no operator named `{username}`"
-        )));
-    };
-    if !crate::tenancy::password::verify(&cur_plain, &stored_hash)? {
+        ))
+    })?;
+    if !crate::tenancy::password::verify(&cur_plain, &op.password_hash)? {
         return Err(TenancyError::Validation(
             "change-operator-password: current password did not match".into(),
         ));
     }
-    let new_hash = crate::tenancy::password::hash(&new_plain)?;
-    rustango::sql::sqlx::query(
-        "UPDATE rustango_operators SET password_hash = $1, password_changed_at = NOW() WHERE username = $2",
-    )
-    .bind(&new_hash)
-    .bind(&username)
-    .execute(pools.registry())
-    .await?;
+    op.password_hash = crate::tenancy::password::hash(&new_plain)?;
+    op.password_changed_at = Some(chrono::Utc::now());
+    op.save_pool(&registry).await?;
     writeln!(w, "password changed for operator `{username}`")?;
     if generated {
         writeln!(w, "  generated password: {new_plain}")?;
@@ -778,7 +781,7 @@ async fn scoped_tenant_pool(
 ) -> Result<rustango::sql::sqlx::PgPool, TenancyError> {
     let orgs: Vec<crate::tenancy::Org> = crate::tenancy::Org::objects()
         .where_(crate::tenancy::Org::slug.eq(slug.to_owned()))
-        .fetch(pools.registry())
+        .fetch_pool(&pools.registry_pool())
         .await?;
     let org = orgs
         .into_iter()

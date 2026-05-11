@@ -16,7 +16,7 @@
 use std::io::Write;
 
 use crate::core::Column as _;
-use crate::sql::Fetcher as _;
+use crate::sql::FetcherPool as _;
 use crate::tenancy::error::TenancyError;
 use crate::tenancy::pools::TenantPools;
 use crate::tenancy::Org;
@@ -76,10 +76,11 @@ pub(super) async fn audit_cleanup_cmd<W: Write + Send>(
         _ => {}
     }
 
+    let registry = pools.registry_pool();
     let orgs: Vec<Org> = if let Some(ref slug) = tenant_slug {
         let found: Vec<Org> = Org::objects()
             .where_(Org::slug.eq(slug.as_str()))
-            .fetch(pools.registry())
+            .fetch_pool(&registry)
             .await?;
         if found.is_empty() {
             return Err(TenancyError::Validation(format!(
@@ -90,7 +91,7 @@ pub(super) async fn audit_cleanup_cmd<W: Write + Send>(
     } else {
         Org::objects()
             .where_(Org::active.eq(true))
-            .fetch(pools.registry())
+            .fetch_pool(&registry)
             .await?
     };
 

@@ -1072,6 +1072,31 @@ impl<T: Model + Send> Updater<T> for UpdateBuilder<T> {
     }
 }
 
+/// Backend-agnostic counterpart of [`Updater`]. `UpdateBuilder` gets
+/// an `execute_pool(&Pool)` method via this trait that dispatches the
+/// compiled `UpdateQuery` through [`update_pool`] — works on any
+/// backend rustango supports.
+///
+/// Pulled in via `use rustango::sql::UpdaterPool;`.
+pub trait UpdaterPool<T: Model + Send> {
+    /// Compile and execute the update against `pool`. Returns rows
+    /// affected.
+    ///
+    /// # Errors
+    /// As [`Updater::execute`].
+    fn execute_pool(
+        self,
+        pool: &Pool,
+    ) -> impl std::future::Future<Output = Result<u64, ExecError>> + Send;
+}
+
+impl<T: Model + Send> UpdaterPool<T> for UpdateBuilder<T> {
+    async fn execute_pool(self, pool: &Pool) -> Result<u64, ExecError> {
+        let query = self.compile()?;
+        update_pool(pool, &query).await
+    }
+}
+
 /// Match on `SqlValue` and bind to a sqlx query builder. Used twice below for
 /// `Query` and `QueryAs`, which don't share a bind trait.
 macro_rules! bind_match {

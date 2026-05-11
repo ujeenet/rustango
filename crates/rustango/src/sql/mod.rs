@@ -41,7 +41,7 @@ pub use executor::{
     select_rows_on, select_rows_pool, select_rows_pool_with_related, transaction, transaction_pool,
     update, update_on, update_pool, Counter, CounterPool, Deleter, ExplainFormat, ExplainOptions,
     Fetcher, FetcherPool, FkPkAccess, HasPkValue, InsertReturningPool, LoadRelated, MaybeMyFromRow,
-    MaybeMyLoadRelated, Page, PoolTx, Updater,
+    MaybeMyLoadRelated, Page, PoolTx, Updater, UpdaterPool,
 };
 
 #[cfg(feature = "mysql")]
