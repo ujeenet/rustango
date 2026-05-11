@@ -474,9 +474,15 @@ impl ModelForm {
     /// Validate and execute the INSERT or UPDATE. Returns the PK value
     /// (newly generated for inserts; the supplied value for updates).
     ///
+    /// v0.37 — PG-only by signature (`&PgPool`). A tri-dialect `save_pool`
+    /// companion is queued for the v0.38 forms tri-dialect sweep;
+    /// pure-sqlite / pure-mysql `--features <backend>,forms` builds drop
+    /// this method.
+    ///
     /// # Errors
     /// [`ModelFormError::Validation`] if any field is invalid.
     /// [`ModelFormError::Database`] for driver-level failures.
+    #[cfg(feature = "postgres")]
     pub async fn save(&self, pool: &crate::sql::sqlx::PgPool) -> Result<SqlValue, ModelFormError> {
         let errors = self.validate();
         if !errors.is_empty() {
@@ -1027,10 +1033,16 @@ impl<T: crate::core::Model> ModelFormFor<T> {
     /// row being edited isn't its own conflict (analog to DRF's
     /// `instance` parameter on the validator).
     ///
+    /// v0.37 — PG-only by signature (`&PgPool`). A tri-dialect
+    /// `validate_unique_together_pool` companion is queued for the
+    /// v0.38 forms tri-dialect sweep; pure-sqlite / pure-mysql
+    /// `--features <backend>,forms` builds drop this method.
+    ///
     /// # Errors
     /// Returns the accumulated [`FormErrors`] when any composite
     /// UNIQUE check finds a conflicting row in the DB. Driver / SQL
     /// failures land as a non-field error.
+    #[cfg(feature = "postgres")]
     pub async fn validate_unique_together(
         &self,
         pool: &crate::sql::sqlx::PgPool,
@@ -1158,6 +1170,7 @@ impl<T: crate::core::Model> ModelFormFor<T> {
 
 /// Bind a [`SqlValue`] onto a Postgres `sqlx::Query`. Free helper used
 /// by [`ModelFormFor::validate_unique_together`]'s pre-check SELECT.
+#[cfg(feature = "postgres")]
 fn bind_sql_value_inline<'a>(
     q: crate::sql::sqlx::query::Query<
         'a,

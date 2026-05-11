@@ -552,21 +552,11 @@ impl Builder {
     }
 
     pub fn build(self) -> Router {
-        // v0.36 — admin surface accepts `Pool` but internals still
-        // require Postgres until v0.37 finishes the JSON-bridge fetch
-        // conversion. Reject non-PG pools at boot with a clear error
-        // so users don't trip a runtime panic mid-request.
-        #[cfg(feature = "postgres")]
-        {
-            assert!(
-                matches!(self.pool, Pool::Postgres(_)),
-                "rustango::admin currently requires a Postgres pool. Got backend = {}. \
-                 v0.36 makes the admin's public surface tri-dialect (Builder/AppState/\
-                 actions all accept `Pool`); the fetch internals are still PG-bound \
-                 and the tri-dialect rewrite ships in v0.37+.",
-                self.pool.backend_name(),
-            );
-        }
+        // v0.37 — admin runs on any backend the `Pool` enum carries
+        // (Postgres / MySQL / SQLite). The v0.36 boot-time PG guard
+        // is gone: every fetch site in `views.rs` + `audit.rs` now
+        // goes through the JSON bridge (`select_*_as_json_pool`) +
+        // dialect emitters (`audit::*_pool`, `tenancy::permissions::*_pool`).
         let audit_path = self.config.audit_url.clone();
         let audit_cleanup_path = format!("{audit_path}/cleanup");
         Router::new()
@@ -683,22 +673,6 @@ impl AppState {
             .get(table)
             .and_then(|m| m.get(action))
             .cloned()
-    }
-
-    /// v0.36 — Extract the underlying `PgPool` for the legacy PG-bound
-    /// fetch sites in `views.rs` / `audit.rs`. The admin's *surface*
-    /// (Builder/AppState/actions) is tri-dialect from v0.36 onward;
-    /// the *internals* still require Postgres until v0.37 finishes
-    /// converting fetch sites to `select_*_as_json_pool`. Boot-time
-    /// guard in `Builder::build` rejects non-PG pools with a clear
-    /// error, so calling this never panics in practice.
-    #[cfg(feature = "postgres")]
-    pub(crate) fn pg_pool(&self) -> &sqlx::PgPool {
-        self.pool.as_postgres().expect(
-            "rustango::admin: AppState.pool is not Postgres. v0.36 admin still requires \
-             a Postgres pool internally; the boot-time guard in admin::Builder::build \
-             should have rejected this earlier — please file an issue.",
-        )
     }
 }
 

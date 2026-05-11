@@ -206,6 +206,10 @@ pub(crate) fn build_fk_joins(state: &AppState, model: &'static ModelSchema) -> V
 /// `(target_table, source_value_string) → display_html` map entry. Rows
 /// where the joined display value is `NULL` (LEFT JOIN miss — target row
 /// not present) are skipped, so `render_cell` falls back to the raw value.
+///
+/// v0.37 — PG-typed back-compat; admin internals call
+/// [`fk_map_from_joined_rows_json`] which works on any backend.
+#[cfg(feature = "postgres")]
 pub(crate) fn fk_map_from_joined_rows(
     state: &AppState,
     model: &'static ModelSchema,
@@ -274,6 +278,10 @@ fn url_encode(s: &str) -> String {
 
 /// Render one cell. For FK columns this resolves to a link into the target
 /// table; everything else delegates to [`render::render_value`].
+///
+/// v0.37 — PG-typed back-compat; admin internals call
+/// [`render_cell_json`] which works on any backend.
+#[cfg(feature = "postgres")]
 pub(crate) fn render_cell(
     row: &sqlx::postgres::PgRow,
     field: &FieldSchema,

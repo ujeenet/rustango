@@ -6,6 +6,7 @@
 use std::fmt::Write as _;
 
 use crate::core::{FieldSchema, FieldType};
+#[cfg(feature = "postgres")]
 use crate::sql::sqlx::{self, postgres::PgRow, Postgres, Row};
 
 /// Escape a string for safe inclusion in HTML body or attribute context.
@@ -35,6 +36,7 @@ pub(crate) fn escape(s: &str) -> String {
 /// * `DateTime<Utc>` → RFC 3339
 /// * `NaiveDate`     → ISO 8601
 /// * `serde_json::Value` → compact JSON
+#[cfg(feature = "postgres")]
 pub(crate) fn render_value(row: &PgRow, field: &FieldSchema) -> String {
     match field.ty {
         FieldType::I16 => format_display::<i16>(row, field),
@@ -59,6 +61,7 @@ pub(crate) fn render_value(row: &PgRow, field: &FieldSchema) -> String {
 /// NULL renders as the empty marker so the column stays a clean
 /// vertical line of ✓ / ☐ — eyes can scan tens of rows in one
 /// sweep, which the literal `true` / `false` text never allowed.
+#[cfg(feature = "postgres")]
 fn format_bool_checkbox(row: &PgRow, field: &FieldSchema) -> String {
     match row.try_get::<Option<bool>, _>(field.column) {
         Ok(Some(true)) => r#"<span class="rcms-bool yes" aria-label="true">☑</span>"#.to_owned(),
@@ -69,6 +72,7 @@ fn format_bool_checkbox(row: &PgRow, field: &FieldSchema) -> String {
     }
 }
 
+#[cfg(feature = "postgres")]
 fn format_display<T>(row: &PgRow, field: &FieldSchema) -> String
 where
     T: std::fmt::Display + for<'r> sqlx::Decode<'r, Postgres> + sqlx::Type<Postgres>,
@@ -80,6 +84,7 @@ where
     }
 }
 
+#[cfg(feature = "postgres")]
 fn format_json(row: &PgRow, field: &FieldSchema) -> String {
     // sqlx requires the `json` feature to decode `serde_json::Value`. We
     // don't enable it in v0.1 to keep the dep tree small, so render a
@@ -101,6 +106,7 @@ fn format_json(row: &PgRow, field: &FieldSchema) -> String {
 ///
 /// `NULL` columns become `Value::Null`. Decode errors fall back to
 /// `Value::Null` so an audit emit never fails the data write.
+#[cfg(feature = "postgres")]
 pub(crate) fn read_value_as_json(row: &PgRow, field: &FieldSchema) -> serde_json::Value {
     use serde_json::Value;
     match field.ty {
@@ -267,6 +273,7 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
 
 /// Best-effort string form of a column value for pre-populating form
 /// inputs. Returns an empty string for `NULL`, so the input renders blank.
+#[cfg(feature = "postgres")]
 pub(crate) fn render_value_for_input(row: &PgRow, field: &FieldSchema) -> String {
     fn opt_to_string<T: std::fmt::Display>(v: Option<T>) -> String {
         v.map(|x| x.to_string()).unwrap_or_default()
@@ -393,6 +400,7 @@ pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) ->
 /// Read a column value as a string, for use as a hash-map key or URL
 /// fragment. Returns `None` for `NULL` and for value types we don't
 /// support as PKs/FKs.
+#[cfg(feature = "postgres")]
 pub(crate) fn read_value_as_string(row: &PgRow, field: &FieldSchema) -> Option<String> {
     read_value_as_string_at(row, field, field.column)
 }
@@ -558,6 +566,7 @@ pub(crate) fn read_value_as_json_from_json(
 /// column alias (e.g. `"facet_value"` after a `SELECT col AS facet_value`).
 /// Used by the facet-filter machinery (slice 10.4) which renames the
 /// column to keep its query independent of the source table's schema.
+#[cfg(feature = "postgres")]
 pub(crate) fn read_value_as_string_at(
     row: &PgRow,
     field: &FieldSchema,
@@ -596,6 +605,7 @@ pub(crate) fn read_value_as_string_at(
 /// name in the result set is `<alias>__<field.column>`. Returns the value
 /// as already-HTML-escaped text suitable for templating, or `None` for
 /// `NULL` (LEFT JOIN miss) and unsupported types.
+#[cfg(feature = "postgres")]
 pub(crate) fn read_joined_value_as_html(
     row: &PgRow,
     alias: &str,

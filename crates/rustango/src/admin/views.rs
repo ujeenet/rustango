@@ -16,8 +16,8 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use super::errors::AdminError;
 use super::forms;
 use super::helpers::{
-    build_fk_joins, chrome_context, fk_map_from_joined_rows, fk_map_from_joined_rows_json,
-    lookup_model, pager_suffix, render_cell, render_cell_json, render_form,
+    build_fk_joins, chrome_context, fk_map_from_joined_rows_json, lookup_model, pager_suffix,
+    render_cell_json, render_form,
 };
 use super::render;
 use super::templates::render_with_chrome;
@@ -1046,6 +1046,7 @@ pub(crate) async fn create_submit(
     // RETURNING and we read the PK column off the row; MySQL has no
     // RETURNING so the helper hands back `LAST_INSERT_ID()` directly.
     let pk_value = match crate::sql::insert_returning_pool(&state.pool, &query).await {
+        #[cfg(feature = "postgres")]
         Ok(crate::sql::InsertReturningPool::PgRow(row)) => {
             render::read_value_as_string(&row, pk_field).unwrap_or_default()
         }
