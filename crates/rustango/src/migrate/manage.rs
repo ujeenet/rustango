@@ -2460,6 +2460,69 @@ pub(crate) fn settings_audit_check(
             ));
         }
     }
+
+    // v0.36 slice 7+10 — [admin] section deploy audit. The new
+    // settings-driven admin Builder reads these in
+    // `admin::Builder::from_settings`; flag dev-defaults left in prod.
+    let admin = &settings.admin;
+
+    // CSRF cookie must be Secure in prod (HTTPS only).
+    if matches!(admin.csrf_cookie_secure, Some(false)) {
+        out.warnings.push(
+            "[admin] csrf_cookie_secure = false in prod tier — admin CSRF cookie will be \
+             sent over plain HTTP, which strips its tamper resistance. Set true (or remove \
+             the override) so the framework default Secure flag applies."
+                .into(),
+        );
+    }
+
+    // Hex color sanity — common typo is missing `#` or RGB shorthand.
+    if let Some(hex) = admin.primary_color.as_deref() {
+        let stripped = hex.trim_start_matches('#');
+        let valid_len = matches!(stripped.len(), 3 | 6 | 8);
+        let all_hex = stripped.chars().all(|c| c.is_ascii_hexdigit());
+        if !hex.starts_with('#') || !valid_len || !all_hex {
+            out.warnings.push(format!(
+                "[admin] primary_color = `{hex}` does not parse as a hex color (expected \
+                 `#RRGGBB`, `#RGB`, or `#RRGGBBAA`) — the theme will fall back to the default \
+                 accent. Check for a missing leading `#` or non-hex characters."
+            ));
+        }
+    }
+
+    // theme_mode allowlist — typo-detection.
+    if let Some(mode) = admin.theme_mode.as_deref() {
+        if !matches!(mode, "auto" | "light" | "dark") {
+            out.warnings.push(format!(
+                "[admin] theme_mode = `{mode}` is not one of `auto` / `light` / `dark` — \
+                 the chrome will ignore it and fall back to `auto`."
+            ));
+        }
+    }
+
+    // session_timeout_minutes = 0 in prod means no idle expiry — info-flag
+    // (some deploys want this deliberately for kiosks etc.).
+    if matches!(admin.session_timeout_minutes, Some(0)) {
+        out.info.push(
+            "[admin] session_timeout_minutes = 0 in prod tier — admin sessions never idle-expire. \
+             Confirm this is deliberate (kiosk / single-user setup); otherwise pick a non-zero \
+             value so abandoned sessions can't be hijacked."
+                .into(),
+        );
+    }
+
+    // url_prefix smell tests — trailing slash trips up some
+    // template hrefs; root-mount empty string is legal but worth
+    // info-flagging since it conflicts with most reverse proxies.
+    if let Some(prefix) = admin.url_prefix.as_deref() {
+        if prefix.ends_with('/') && prefix.len() > 1 {
+            out.warnings.push(format!(
+                "[admin] url_prefix = `{prefix}` ends with a trailing slash — Builder will \
+                 strip it, but config files should write the canonical form (no trailing slash) \
+                 so reviewers can grep across deployments."
+            ));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3082,6 +3145,125 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         assert!(
             r.warnings.is_empty(),
             "neither should be warnings, got: {:?}",
+            r.warnings
+        );
+    }
+
+    // -------- v0.36 slice 7+10 — [admin] section audit --------
+
+    /// `csrf_cookie_secure = false` in prod is a footgun — admin
+    /// CSRF cookie sent over plain HTTP loses tamper resistance.
+    #[cfg(feature = "config")]
+    #[test]
+    fn settings_audit_admin_csrf_insecure_warns_in_prod() {
+        let mut s = crate::config::Settings::default();
+        s.admin.csrf_cookie_secure = Some(false);
+        let r = settings_run("prod", &s);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("[admin]") && w.contains("csrf_cookie_secure")),
+            "expected CSRF secure warning, got: {:?}",
+            r.warnings
+        );
+    }
+
+    /// Malformed hex color trips the format check.
+    #[cfg(feature = "config")]
+    #[test]
+    fn settings_audit_admin_bad_primary_color_warns() {
+        let mut s = crate::config::Settings::default();
+        s.admin.primary_color = Some("not-a-color".into());
+        let r = settings_run("prod", &s);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("[admin]") && w.contains("primary_color")),
+            "expected primary_color warning, got: {:?}",
+            r.warnings
+        );
+    }
+
+    /// Valid hex colors (3 / 6 / 8 hex digits, leading #) stay quiet.
+    #[cfg(feature = "config")]
+    #[test]
+    fn settings_audit_admin_valid_hex_color_is_quiet() {
+        for hex in ["#abc", "#2c6fb0", "#2c6fb0ff"] {
+            let mut s = crate::config::Settings::default();
+            s.admin.primary_color = Some(hex.into());
+            let r = settings_run("prod", &s);
+            assert!(
+                !r.warnings
+                    .iter()
+                    .any(|w| w.contains("[admin]") && w.contains("primary_color")),
+                "expected `{hex}` to be quiet, got: {:?}",
+                r.warnings
+            );
+        }
+    }
+
+    /// Bogus theme_mode trips the allowlist.
+    #[cfg(feature = "config")]
+    #[test]
+    fn settings_audit_admin_unknown_theme_mode_warns() {
+        let mut s = crate::config::Settings::default();
+        s.admin.theme_mode = Some("midnight".into());
+        let r = settings_run("prod", &s);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("[admin]") && w.contains("theme_mode")),
+            "expected theme_mode warning, got: {:?}",
+            r.warnings
+        );
+    }
+
+    /// `session_timeout_minutes = 0` is info-level (some deploys
+    /// want never-expire kiosk sessions deliberately).
+    #[cfg(feature = "config")]
+    #[test]
+    fn settings_audit_admin_zero_session_timeout_is_info() {
+        let mut s = crate::config::Settings::default();
+        s.admin.session_timeout_minutes = Some(0);
+        let r = settings_run("prod", &s);
+        assert!(
+            r.info
+                .iter()
+                .any(|i| i.contains("[admin]") && i.contains("session_timeout_minutes")),
+            "expected session_timeout_minutes info, got: {:?}",
+            r.info
+        );
+    }
+
+    /// url_prefix with a trailing slash trips the canonical-form
+    /// nudge (Builder strips it, but the config should be clean).
+    #[cfg(feature = "config")]
+    #[test]
+    fn settings_audit_admin_trailing_slash_url_prefix_warns() {
+        let mut s = crate::config::Settings::default();
+        s.admin.url_prefix = Some("/admin/".into());
+        let r = settings_run("prod", &s);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("[admin]") && w.contains("url_prefix")),
+            "expected url_prefix warning, got: {:?}",
+            r.warnings
+        );
+    }
+
+    /// Empty (root-mount) url_prefix stays quiet — legal, just unusual.
+    #[cfg(feature = "config")]
+    #[test]
+    fn settings_audit_admin_empty_url_prefix_is_quiet() {
+        let mut s = crate::config::Settings::default();
+        s.admin.url_prefix = Some("".into());
+        let r = settings_run("prod", &s);
+        assert!(
+            !r.warnings
+                .iter()
+                .any(|w| w.contains("[admin]") && w.contains("url_prefix")),
+            "empty url_prefix should be quiet, got: {:?}",
             r.warnings
         );
     }

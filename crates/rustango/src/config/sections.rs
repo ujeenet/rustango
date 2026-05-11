@@ -199,6 +199,13 @@ fn canonicalize_backend(raw: &str) -> &'static str {
 
 /// Auto-admin tweaks read at boot. Mirrors the `admin::Builder`
 /// flags so `Settings`-driven projects don't need to hand-wire them.
+///
+/// v0.36 expansion (#87 admin section) — branding + URL prefix +
+/// session knobs that previously required imperative builder calls.
+/// `admin::Builder::from_settings(pool, &Settings)` walks these
+/// fields and applies each non-`None` value through the existing
+/// builder methods; imperative overrides after `from_settings`
+/// still win.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AdminSettings {
@@ -208,6 +215,42 @@ pub struct AdminSettings {
     /// Tables whose mutating routes are blocked. Empty / missing =
     /// every table is read-write.
     pub read_only_tables: Vec<String>,
+
+    // ---- v0.36 — branding + chrome (#87) ----------------------
+    /// Title rendered in the sidebar + `<title>` tag. Falls through
+    /// to `Settings.brand.name` then the framework default
+    /// `"Rustango Admin"` when unset.
+    pub title: Option<String>,
+    /// Tagline rendered under the brand name in the sidebar.
+    /// Falls through to `Settings.brand.tagline`.
+    pub subtitle: Option<String>,
+    /// Logo URL rendered next to the title. Falls through to
+    /// `Settings.brand.logo_url`, then the embedded
+    /// `/__static__/rustango.png`.
+    pub logo_url: Option<String>,
+    /// Hex-encoded accent color (e.g. `"#2c6fb0"`). Falls through to
+    /// `Settings.brand.primary_color`. `manage check --deploy`
+    /// validates the format.
+    pub primary_color: Option<String>,
+    /// `"auto"` (default), `"light"`, `"dark"`. Falls through to
+    /// `Settings.brand.theme_mode`.
+    pub theme_mode: Option<String>,
+    /// Admin URL prefix. When set, overrides `Settings.routes.admin_url`
+    /// and the framework default (`/admin` in friendly preset,
+    /// `/__admin` in legacy). Useful for projects that want
+    /// admin-section-only prefix overrides without flipping the
+    /// whole route preset.
+    pub url_prefix: Option<String>,
+
+    // ---- v0.36 — deploy + session knobs (#87) -----------------
+    /// `true` (default in prod) = CSRF cookie is `Secure` (HTTPS
+    /// only). `false` is dev-only. `manage check --deploy` flags
+    /// `false` in prod as an error.
+    pub csrf_cookie_secure: Option<bool>,
+    /// Admin session idle timeout in minutes. `None` = framework
+    /// default (60 minutes today). 0 = no idle timeout (browser
+    /// session only).
+    pub session_timeout_minutes: Option<u32>,
 }
 
 /// Multi-tenancy operator-side settings. Tenant-side resolver
@@ -514,5 +557,49 @@ mod tests {
     fn resolved_backend_none_when_neither_set() {
         let s = DatabaseSettings::default();
         assert_eq!(s.resolved_backend(), None);
+    }
+
+    // v0.36 slice 7 — AdminSettings extended fields default to None
+    // so projects upgrading from v0.35 keep their existing TOML.
+    #[test]
+    fn admin_settings_extended_fields_default_to_none() {
+        let s = AdminSettings::default();
+        assert!(s.title.is_none());
+        assert!(s.subtitle.is_none());
+        assert!(s.logo_url.is_none());
+        assert!(s.primary_color.is_none());
+        assert!(s.theme_mode.is_none());
+        assert!(s.url_prefix.is_none());
+        assert!(s.csrf_cookie_secure.is_none());
+        assert!(s.session_timeout_minutes.is_none());
+        assert!(s.allowed_tables.is_empty());
+        assert!(s.read_only_tables.is_empty());
+    }
+
+    #[test]
+    fn admin_settings_parses_full_section() {
+        let toml = r##"
+title = "Acme Admin"
+subtitle = "Tenant management"
+logo_url = "/assets/acme.png"
+primary_color = "#2c6fb0"
+theme_mode = "dark"
+url_prefix = "/admin"
+csrf_cookie_secure = true
+session_timeout_minutes = 30
+allowed_tables = ["post", "author"]
+read_only_tables = ["audit_log"]
+"##;
+        let parsed: AdminSettings = toml::from_str(toml).expect("valid TOML");
+        assert_eq!(parsed.title.as_deref(), Some("Acme Admin"));
+        assert_eq!(parsed.subtitle.as_deref(), Some("Tenant management"));
+        assert_eq!(parsed.logo_url.as_deref(), Some("/assets/acme.png"));
+        assert_eq!(parsed.primary_color.as_deref(), Some("#2c6fb0"));
+        assert_eq!(parsed.theme_mode.as_deref(), Some("dark"));
+        assert_eq!(parsed.url_prefix.as_deref(), Some("/admin"));
+        assert_eq!(parsed.csrf_cookie_secure, Some(true));
+        assert_eq!(parsed.session_timeout_minutes, Some(30));
+        assert_eq!(parsed.allowed_tables, vec!["post", "author"]);
+        assert_eq!(parsed.read_only_tables, vec!["audit_log"]);
     }
 }

@@ -218,6 +218,78 @@ impl Builder {
         Self { pool, config }
     }
 
+    /// v0.36 — construct a Builder from a parsed [`crate::config::Settings`].
+    ///
+    /// Mirrors `crate::tenancy::operator_console::OpBrand::from_env`:
+    /// defaults first, then `Settings.admin` field overrides, then
+    /// `Settings.brand` brand-section fallbacks (so a deploy can set
+    /// `brand.name = "Acme"` once and the admin picks it up alongside
+    /// the operator console), then `Settings.routes.admin_url` for the
+    /// mount prefix when `admin.url_prefix` is unset.
+    ///
+    /// Imperative builder methods (`.title(...)`, `.read_only(...)`,
+    /// `.admin_prefix(...)`, etc.) called *after* this still win — the
+    /// settings frame is a starting point, not a lock.
+    pub fn from_settings(pool: impl Into<Pool>, settings: &crate::config::Settings) -> Self {
+        let mut builder = Self::new(pool);
+
+        // 1. Admin section overrides (most specific).
+        let admin = &settings.admin;
+        if let Some(t) = admin.title.as_deref() {
+            builder = builder.title(t);
+        } else if let Some(brand_name) = settings.brand.name.as_deref() {
+            // Brand-section fallback — keeps operator console + admin
+            // chrome in sync without duplicating the value.
+            builder = builder.title(brand_name);
+        }
+        if let Some(s) = admin.subtitle.as_deref() {
+            builder = builder.subtitle(s);
+        } else if let Some(t) = settings.brand.tagline.as_deref() {
+            builder = builder.subtitle(t);
+        }
+        if let Some(url) = admin.logo_url.as_deref() {
+            builder = builder.brand_logo_url(url);
+        } else if let Some(url) = settings.brand.logo_url.as_deref() {
+            builder = builder.brand_logo_url(url);
+        }
+        if let Some(mode) = admin
+            .theme_mode
+            .as_deref()
+            .or(settings.brand.theme_mode.as_deref())
+        {
+            builder = builder.theme_mode(mode);
+        }
+
+        // 2. URL prefix — admin.url_prefix wins, then routes.admin_url,
+        //    else the default `/__admin` set by `Builder::new`.
+        let url_prefix = admin
+            .url_prefix
+            .as_deref()
+            .or(settings.routes.admin_url.as_deref());
+        if let Some(prefix) = url_prefix {
+            builder = builder.admin_prefix(prefix);
+        }
+        if let Some(audit_url) = settings.routes.audit_url.as_deref() {
+            builder = builder.audit_url(audit_url);
+        }
+        if let Some(static_url) = settings.routes.static_url.as_deref() {
+            builder = builder.static_url(static_url);
+        }
+        if let Some(change_password_url) = settings.routes.change_password_url.as_deref() {
+            builder = builder.change_password_url(change_password_url);
+        }
+
+        // 3. Permissions / read-only lists from the section.
+        if !admin.allowed_tables.is_empty() {
+            builder = builder.show_only(admin.allowed_tables.iter().cloned());
+        }
+        if !admin.read_only_tables.is_empty() {
+            builder = builder.read_only(admin.read_only_tables.iter().cloned());
+        }
+
+        builder
+    }
+
     /// URL prefix the admin Router is mounted under (#59,
     /// v0.27.9). Threaded into every template as
     /// `{{ admin_prefix }}` so hrefs / form actions resolve
@@ -740,5 +812,79 @@ mod scope_filter_tests {
         let pool = lazy_pg_pool();
         let b = Builder::new(pool).admin_prefix("");
         assert_eq!(b.config.admin_prefix, "");
+    }
+
+    // v0.36 slice 7 — Settings-driven Builder construction. The
+    // settings frame should populate every supported knob; per-call
+    // imperative overrides after `from_settings` still win.
+    #[tokio::test]
+    async fn from_settings_applies_admin_section_overrides() {
+        use crate::config::{AdminSettings, Settings};
+        let mut settings = Settings::default();
+        settings.admin = AdminSettings {
+            title: Some("Acme Admin".into()),
+            subtitle: Some("Tenants".into()),
+            logo_url: Some("/assets/acme.png".into()),
+            theme_mode: Some("dark".into()),
+            url_prefix: Some("/admin".into()),
+            allowed_tables: vec!["post".into(), "author".into()],
+            read_only_tables: vec!["audit_log".into()],
+            ..Default::default()
+        };
+        let b = Builder::from_settings(lazy_pg_pool(), &settings);
+        assert_eq!(b.config.title.as_deref(), Some("Acme Admin"));
+        assert_eq!(b.config.subtitle.as_deref(), Some("Tenants"));
+        assert_eq!(b.config.brand_logo_url.as_deref(), Some("/assets/acme.png"));
+        assert_eq!(b.config.theme_mode.as_deref(), Some("dark"));
+        assert_eq!(b.config.admin_prefix, "/admin");
+        let allowed: Vec<String> = b
+            .config
+            .allowed_tables
+            .as_ref()
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        assert!(allowed.contains(&"post".to_string()));
+        assert!(allowed.contains(&"author".to_string()));
+        assert!(b.config.read_only_tables.contains("audit_log"));
+    }
+
+    #[tokio::test]
+    async fn from_settings_falls_back_to_brand_section() {
+        // When `settings.admin.title` is unset, the brand-section
+        // name + tagline + logo_url propagate so deploys can set
+        // brand once and the admin picks it up alongside the
+        // operator console.
+        use crate::config::{BrandSettings, Settings};
+        let mut settings = Settings::default();
+        settings.brand = BrandSettings {
+            name: Some("Acme".into()),
+            tagline: Some("Things".into()),
+            logo_url: Some("/brand/logo.png".into()),
+            theme_mode: Some("light".into()),
+            ..Default::default()
+        };
+        let b = Builder::from_settings(lazy_pg_pool(), &settings);
+        assert_eq!(b.config.title.as_deref(), Some("Acme"));
+        assert_eq!(b.config.subtitle.as_deref(), Some("Things"));
+        assert_eq!(b.config.brand_logo_url.as_deref(), Some("/brand/logo.png"));
+        assert_eq!(b.config.theme_mode.as_deref(), Some("light"));
+    }
+
+    #[tokio::test]
+    async fn from_settings_admin_url_prefix_wins_over_routes_section() {
+        // `admin.url_prefix` is the most-specific knob and should
+        // beat the broader `routes.admin_url` when both are set.
+        use crate::config::{AdminSettings, RoutesSettings, Settings};
+        let mut settings = Settings::default();
+        settings.admin = AdminSettings {
+            url_prefix: Some("/custom-admin".into()),
+            ..Default::default()
+        };
+        settings.routes = RoutesSettings {
+            admin_url: Some("/admin".into()),
+            ..Default::default()
+        };
+        let b = Builder::from_settings(lazy_pg_pool(), &settings);
+        assert_eq!(b.config.admin_prefix, "/custom-admin");
     }
 }
