@@ -383,7 +383,10 @@ async fn chain_resolver_subdomain_first_then_header() {
         HeaderValue::from_static("globex"),
     );
     let (parts, _) = req.into_parts();
-    let org = chain.resolve(&parts, &pool).await.unwrap();
+    let org = chain
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap();
     assert_eq!(
         org.unwrap().slug,
         "acme",
@@ -392,14 +395,21 @@ async fn chain_resolver_subdomain_first_then_header() {
 
     // Header fallback when no subdomain matches.
     let parts = parts_with_header("x-org", "globex");
-    let org = chain.resolve(&parts, &pool).await.unwrap();
+    let org = chain
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap();
     assert_eq!(org.unwrap().slug, "globex");
 
     // Path-prefix is NOT in the standard chain — `/acme/x` alone
     // shouldn't resolve.
     let parts = parts_with_uri("http://app.test/acme/x");
     assert!(
-        chain.resolve(&parts, &pool).await.unwrap().is_none(),
+        chain
+            .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+            .await
+            .unwrap()
+            .is_none(),
         "PathPrefixResolver must NOT be in the default chain"
     );
 
@@ -421,7 +431,10 @@ async fn chain_resolver_with_explicit_path_prefix_opt_in() {
 
     // No subdomain match → falls through to path-prefix.
     let parts = parts_with_uri("http://app.test/acme/dashboard");
-    let org = chain.resolve(&parts, &pool).await.unwrap();
+    let org = chain
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap();
     assert_eq!(org.unwrap().slug, "acme");
 
     migrate::drop_all(&pool).await.unwrap();
@@ -438,7 +451,11 @@ async fn chain_resolver_returns_none_when_no_resolver_matches() {
 
     let chain = ChainResolver::standard("app.test");
     let parts = parts_with_uri("http://app.test/");
-    assert!(chain.resolve(&parts, &pool).await.unwrap().is_none());
+    assert!(chain
+        .resolve(&parts, &rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .unwrap()
+        .is_none());
 
     migrate::drop_all(&pool).await.unwrap();
 }

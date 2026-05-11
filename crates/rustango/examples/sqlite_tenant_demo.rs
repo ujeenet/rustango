@@ -122,9 +122,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         resolver,
         session_secret: SessionSecret::from_bytes(b"demo_tenant_secret____32bytes!!!".to_vec()),
         operator_secret: SessionSecret::from_bytes(b"demo_operator_secret___32bytes!!".to_vec()),
-        // The demo's resolver never touches the registry pool. A
-        // lazy pool against an unreachable address is enough.
-        registry: sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/none")?,
+        // v0.34 B.2 — the demo's registry is itself SQLite, proving
+        // a pure-SQLite stack works end-to-end (no Postgres anywhere).
+        registry: rustango::sql::Pool::Sqlite(sqlx::SqlitePool::connect_lazy("sqlite::memory:")?),
     });
 
     let app: Router = Router::new()

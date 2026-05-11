@@ -100,10 +100,13 @@ async fn full_request_path_through_extractor() {
         operator_secret: rustango::tenancy::operator_console::SessionSecret::from_bytes(
             b"test_oper_session_secret____32b!".to_vec(),
         ),
-        // The resolver above never touches the registry pool, but the
-        // type still requires us to pass one. A lazy pool against an
-        // unreachable address never connects — works as a placeholder.
-        registry: sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/none").expect("lazy pg pool"),
+        // The resolver above never touches the registry pool, but
+        // the type still requires us to pass one. Use a SQLite
+        // in-memory pool — proves the Pool enum accepts non-Postgres
+        // variants for the registry (v0.34 B.2).
+        registry: rustango::sql::Pool::Sqlite(
+            sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy sqlite pool"),
+        ),
     });
 
     let app: Router =

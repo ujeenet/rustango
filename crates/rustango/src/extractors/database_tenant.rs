@@ -35,24 +35,26 @@ use crate::tenancy::{
 
 /// Per-server context that the [`DatabaseTenant`] extractor reads out
 /// of request extensions. Generic over the **tenant-data** backend
-/// (`sqlx::Sqlite` or `sqlx::MySql`); the registry pool is still
-/// Postgres in v0.33 (v0.34 generalizes it).
+/// (`sqlx::Sqlite` or `sqlx::MySql`); the registry pool is the
+/// backend-erasing [`rustango::sql::Pool`] enum so apps can run
+/// pure-SQLite (registry + tenant data on SQLite) or hybrid
+/// (Postgres registry + SQLite tenants).
 ///
 /// Populated once at boot by `crate::server::Builder` (or the manual
 /// router-setup path) and `Arc`-cloned into every request.
 pub struct DatabaseTenantContext<DB: Database> {
     /// Tenant-data pool registry parameterized over the backend.
     pub pools: Arc<DatabasePools<DB>>,
-    /// Resolver chain — unchanged from the Postgres path, runs
-    /// against the registry pool.
+    /// Resolver chain — backend-agnostic (v0.34 B.1).
     pub resolver: ChainResolver,
     /// HMAC-SHA256 key used to sign tenant session cookies.
     pub session_secret: SessionSecret,
     /// HMAC-SHA256 key used to sign operator session cookies.
     pub operator_secret: SessionSecret,
-    /// Registry pool — still Postgres in v0.33. The resolver chain
-    /// reads `rustango_orgs` from this pool.
-    pub registry: sqlx::PgPool,
+    /// Registry pool — backend-erasing `Pool` enum. v0.33 Phase A
+    /// pinned this to Postgres; v0.34 B.2 makes it generic so a
+    /// pure-SQLite stack works without any Postgres dependency.
+    pub registry: crate::sql::Pool,
 }
 
 /// Extractor: resolves the request's tenant via the registry, then
@@ -135,13 +137,11 @@ where
             .get::<Arc<DatabaseTenantContext<DB>>>()
             .ok_or(DatabaseTenantRejection::MissingContext)?
             .clone();
-        // v0.34 B.1 — resolver takes the backend-erasing Pool enum.
-        // The context still stores a raw `PgPool` (the registry stays
-        // Postgres in this slice; v0.34 B.4 will generalize it).
-        let registry_pool = crate::sql::Pool::Postgres(ctx.registry.clone());
+        // Resolver + context registry are both backend-erasing
+        // since v0.34 B.2 — no inline wrap needed.
         let org = ctx
             .resolver
-            .resolve(parts, &registry_pool)
+            .resolve(parts, &ctx.registry)
             .await
             .map_err(|e| DatabaseTenantRejection::Internal(e.to_string()))?
             .ok_or(DatabaseTenantRejection::NotFound)?;
