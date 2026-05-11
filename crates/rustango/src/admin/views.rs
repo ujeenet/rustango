@@ -333,11 +333,17 @@ pub(crate) async fn table_view(
     let rows_ctx: Vec<serde_json::Value> = rows
         .iter()
         .map(|row| {
+            // v0.36 — convert the raw row to JSON once per row so
+            // tri-dialect computed-field closures get a backend-
+            // agnostic input. Cheap (per-cell decode), reused below
+            // for every computed cell on this row.
+            let row_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+            let row_json = crate::sql::row_to_json(row, &row_fields);
             let cells: Vec<String> = display_items
                 .iter()
                 .map(|item| match item {
                     DisplayItem::Field(f) => render_cell(row, f, &fk_map),
-                    DisplayItem::Computed(m) => (m.render)(row),
+                    DisplayItem::Computed(m) => (m.render)(&row_json),
                 })
                 .collect();
             let pk = pk_field.map(|pk| render::escape(&render::render_value_for_input(row, pk)));
@@ -715,10 +721,14 @@ pub(crate) async fn detail_view(
     // this table, mirroring the list-view behavior so authors don't
     // have to hunt for word counts / derived flags / etc. in the
     // single-row view.
+    // v0.36 — convert the row to JSON once for the computed-field
+    // pass so closures get a tri-dialect input.
+    let detail_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    let row_json_for_computed = crate::sql::row_to_json(&row, &detail_fields);
     for cf in crate::admin::computed_fields::for_table(model.table) {
         cells_ctx.push(serde_json::json!({
             "label": if cf.label.is_empty() { cf.name } else { cf.label },
-            "value": (cf.render)(&row),
+            "value": (cf.render)(&row_json_for_computed),
         }));
     }
 

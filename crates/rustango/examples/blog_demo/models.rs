@@ -53,9 +53,14 @@ pub struct Post {
 // renders the integer as a small muted span. Shows up in both the
 // list view (declared in `admin.list_display` above) and the detail
 // view (every registered computed field gets an extra row).
+//
+// v0.36: closure receives the row as `serde_json::Value` (tri-
+// dialect — works the same on PG / MySQL / SQLite) instead of
+// `&PgRow`. Use `row.get("col").and_then(|v| v.as_str())` to read
+// string columns; `.as_i64()` / `.as_bool()` / `.as_f64()` for
+// scalars; `.get("col")` directly for nested JSON columns.
 rustango::register_admin_computed!("post", "word_count", "Words", |row| {
-    use sqlx::Row;
-    let body: String = row.try_get("body").unwrap_or_default();
+    let body = row.get("body").and_then(|v| v.as_str()).unwrap_or_default();
     let n = body.split_whitespace().count();
     format!(
         r#"<span style="color: var(--color-text-muted); font-variant-numeric: tabular-nums;">{n}</span>"#

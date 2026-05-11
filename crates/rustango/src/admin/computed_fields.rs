@@ -3,14 +3,23 @@
 //! Models declare a computed field by name in `admin(list_display = "…")`
 //! alongside the regular column names; the renderer dispatches to a
 //! user-supplied closure via the inventory registry. The closure
-//! receives the live `sqlx::postgres::PgRow` so it can pull any column
+//! receives the row as a `serde_json::Value` (a `{ field_name: value }`
+//! map produced by [`crate::sql::select_rows_as_json_pool`] — works
+//! the same on Postgres / MySQL / SQLite) so it can pull any column
 //! it wants and produce pre-escaped display HTML.
+//!
+//! ## v0.36 breaking change
+//!
+//! Pre-v0.36 the closure received `&sqlx::postgres::PgRow`. v0.36
+//! switched to `&serde_json::Value` so admin's row-rendering path is
+//! tri-dialect (the closure no longer cares which backend produced
+//! the row). Migration: replace
+//! `let body: String = row.try_get("body").unwrap_or_default();`
+//! with `let body = row.get("body").and_then(|v| v.as_str()).unwrap_or_default();`.
 //!
 //! ## Example
 //!
 //! ```ignore
-//! use sqlx::Row;
-//!
 //! #[derive(rustango::Model)]
 //! #[rustango(table = "cms_post", admin(list_display = "title, word_count, updated_at"))]
 //! pub struct Post {
@@ -26,7 +35,7 @@
 //!     "word_count",
 //!     "Words",
 //!     |row| {
-//!         let body: String = row.try_get("body").unwrap_or_default();
+//!         let body = row.get("body").and_then(|v| v.as_str()).unwrap_or_default();
 //!         body.split_whitespace().count().to_string()
 //!     }
 //! );
@@ -36,13 +45,15 @@
 //! Names that collide with declared fields lose — the column takes
 //! precedence, the computed field is ignored.
 
-use sqlx::postgres::PgRow;
-
-/// Function signature a computed field implements. Receives the raw
-/// `PgRow` (no struct round-trip — saves the deserialize when the
-/// model has a hundred columns) and returns the pre-escaped HTML to
-/// drop into the cell.
-pub type ComputedFieldRenderFn = fn(&PgRow) -> String;
+/// Function signature a computed field implements. Receives the row
+/// as a `serde_json::Value` (a `{ field_name → value }` map) and
+/// returns the pre-escaped HTML to drop into the cell.
+///
+/// v0.36: switched from `fn(&PgRow) -> String` to
+/// `fn(&serde_json::Value) -> String` for tri-dialect admin. The
+/// JSON map is produced by [`crate::sql::row_to_json`] /
+/// `row_to_json_my` / `row_to_json_sqlite` per the active backend.
+pub type ComputedFieldRenderFn = fn(&serde_json::Value) -> String;
 
 /// One computed-field registration. Inventory-collected; submit one
 /// per `register_admin_computed!` invocation.
