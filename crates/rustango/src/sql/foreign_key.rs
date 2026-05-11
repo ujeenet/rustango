@@ -327,6 +327,13 @@ where
 /// emissions. Use this in new framework code so sqlite/mysql apps
 /// can lazy-load FK targets without going through the PG-typed
 /// [`Self::get`].
+///
+/// v0.35: gated on `postgres` while `FetcherPool` still requires
+/// `FromRow<PgRow>` unconditionally. v0.35 slice 6 introduces a
+/// `MaybePgFromRow` marker trait paralleling the existing
+/// `MaybeMyFromRow` / `MaybeSqliteFromRow` so this bound becomes
+/// universally satisfiable + the gate drops.
+#[cfg(feature = "postgres")]
 impl<T, K> ForeignKey<T, K>
 where
     T: Model

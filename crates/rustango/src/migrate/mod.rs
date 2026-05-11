@@ -21,6 +21,12 @@ pub mod file;
 pub(crate) mod inspectdb;
 pub mod invert;
 pub mod make;
+// v0.35 — the migrate CLI dispatcher (`migrate::manage::run`) is
+// PG-typed end-to-end (takes `&PgPool`, threads it into subcommands
+// that compile dialect-specific SQL via the PG-only runner paths).
+// Gate the whole module on `postgres` for now; sqlite/MySQL apps
+// build their own dispatcher around `migrate_pool` directly.
+#[cfg(feature = "postgres")]
 pub mod manage;
 mod runner;
 pub mod scaffold;
@@ -31,12 +37,20 @@ pub use error::MigrateError;
 pub use file::{discover_migration_dirs, list_dirs, DataOp, Migration, MigrationScope, Operation};
 pub use invert::invert;
 pub use make::{make_migrations, make_migrations_for_app, make_migrations_from};
+#[cfg(feature = "postgres")]
 pub use manage::{append_data_op, make_data_migration};
+// Always-on: tri-dialect entry points (work on PG / MySQL / SQLite via
+// the `Pool` enum), plus the inventory + builder surface.
 pub use runner::{
-    applied_set, applied_set_pool, apply_all, apply_all_pool, downgrade, downgrade_pool, drop_all,
-    drop_all_pool, ensure_ledger, ensure_ledger_pool, migrate, migrate_dry_run,
-    migrate_dry_run_pool, migrate_embedded, migrate_embedded_pool, migrate_pool, migrate_to,
-    migrate_to_pool, registered_models, unapply, unapply_force, unapply_force_pool, unapply_pool,
-    Builder, MigrationPreview, LEDGER_TABLE,
+    applied_set_pool, apply_all_pool, downgrade_pool, drop_all_pool, ensure_ledger_pool,
+    migrate_dry_run_pool, migrate_embedded_pool, migrate_pool, migrate_to_pool, registered_models,
+    unapply_force_pool, unapply_pool, Builder, MigrationPreview, LEDGER_TABLE,
+};
+// PG-typed back-compat: only re-exported when the `postgres` feature
+// is on. Sqlite/MySQL apps use the `_pool` variants above.
+#[cfg(feature = "postgres")]
+pub use runner::{
+    applied_set, apply_all, downgrade, drop_all, ensure_ledger, migrate, migrate_dry_run,
+    migrate_embedded, migrate_to, unapply, unapply_force,
 };
 pub use snapshot::{FieldSnapshot, IndexSnapshot, RelationSnapshot, SchemaSnapshot, TableSnapshot};

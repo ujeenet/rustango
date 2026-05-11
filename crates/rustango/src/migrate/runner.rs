@@ -15,7 +15,11 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::core::{inventory, ModelEntry, ModelSchema};
-use crate::sql::sqlx::{self, PgPool, Row};
+use crate::sql::sqlx::{self, Row};
+// PG-typed shims below import these; sqlite/mysql-only builds get
+// just the `_pool` entry points.
+#[cfg(feature = "postgres")]
+use crate::sql::sqlx::PgPool;
 
 use super::diff::render_changes_split;
 use super::file::{self, Migration, Operation};
@@ -89,8 +93,12 @@ impl Builder {
 
     /// As [`migrate`], with this builder's ledger.
     ///
+    /// PG-typed back-compat. For non-PG migrations, call
+    /// [`migrate_pool`] directly.
+    ///
     /// # Errors
     /// As [`migrate`].
+    #[cfg(feature = "postgres")]
     pub async fn migrate(&self, pool: &PgPool, dir: &Path) -> Result<Vec<Migration>, MigrateError> {
         migrate_with_ledger(pool, dir, self.ledger).await
     }
@@ -99,6 +107,7 @@ impl Builder {
     ///
     /// # Errors
     /// As [`migrate_to`].
+    #[cfg(feature = "postgres")]
     pub async fn migrate_to(
         &self,
         pool: &PgPool,
@@ -112,6 +121,7 @@ impl Builder {
     ///
     /// # Errors
     /// As [`migrate_embedded`].
+    #[cfg(feature = "postgres")]
     pub async fn migrate_embedded(
         &self,
         pool: &PgPool,
@@ -124,6 +134,7 @@ impl Builder {
     ///
     /// # Errors
     /// As [`migrate_dry_run`].
+    #[cfg(feature = "postgres")]
     pub async fn migrate_dry_run(
         &self,
         pool: &PgPool,
@@ -136,6 +147,7 @@ impl Builder {
     ///
     /// # Errors
     /// As [`downgrade`].
+    #[cfg(feature = "postgres")]
     pub async fn downgrade(
         &self,
         pool: &PgPool,
@@ -149,6 +161,7 @@ impl Builder {
     ///
     /// # Errors
     /// As [`unapply`].
+    #[cfg(feature = "postgres")]
     pub async fn unapply(
         &self,
         pool: &PgPool,
@@ -162,6 +175,7 @@ impl Builder {
     ///
     /// # Errors
     /// As [`unapply_force`].
+    #[cfg(feature = "postgres")]
     pub async fn unapply_force(
         &self,
         pool: &PgPool,
@@ -175,6 +189,7 @@ impl Builder {
     ///
     /// # Errors
     /// As [`applied_set`].
+    #[cfg(feature = "postgres")]
     pub async fn applied_set(&self, pool: &PgPool) -> Result<HashSet<String>, MigrateError> {
         applied_set_for(pool, self.ledger).await
     }
@@ -183,6 +198,7 @@ impl Builder {
     ///
     /// # Errors
     /// As [`ensure_ledger`].
+    #[cfg(feature = "postgres")]
     pub async fn ensure_ledger(&self, pool: &PgPool) -> Result<(), MigrateError> {
         ensure_ledger_for(pool, self.ledger).await
     }
@@ -227,10 +243,12 @@ pub fn registered_models() -> Vec<&'static ModelSchema> {
 
 /// Run `CREATE TABLE` for every registered model, then every model's FK
 /// `ALTER TABLE` constraints. Two-phase so create order doesn't matter.
+/// PG-typed back-compat; for non-PG use [`apply_all_pool`].
 ///
 /// # Errors
 /// Returns [`MigrateError`] for any sqlx failure (connection, syntax,
 /// constraint violation).
+#[cfg(feature = "postgres")]
 pub async fn apply_all(pool: &PgPool) -> Result<(), MigrateError> {
     let models = registered_models();
 
@@ -248,9 +266,11 @@ pub async fn apply_all(pool: &PgPool) -> Result<(), MigrateError> {
 
 /// `DROP TABLE IF EXISTS … CASCADE` for every registered model. CASCADE
 /// makes order irrelevant — FKs go away with the parent table.
+/// PG-typed back-compat; for non-PG use [`drop_all_pool`].
 ///
 /// # Errors
 /// Returns [`MigrateError`] for any sqlx failure.
+#[cfg(feature = "postgres")]
 pub async fn drop_all(pool: &PgPool) -> Result<(), MigrateError> {
     for model in registered_models() {
         let sql = ddl::drop_table_sql(model, /* if_exists */ true, /* cascade */ true);
@@ -327,10 +347,12 @@ pub async fn drop_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> 
 /// # Errors
 /// Returns [`MigrateError::Io`]/[`MigrateError::Json`]/[`MigrateError::Validation`]
 /// for file problems, [`MigrateError::Driver`] for SQL failures.
+#[cfg(feature = "postgres")]
 pub async fn migrate(pool: &PgPool, dir: &Path) -> Result<Vec<Migration>, MigrateError> {
     Builder::default().migrate(pool, dir).await
 }
 
+#[cfg(feature = "postgres")]
 async fn migrate_with_ledger(
     pool: &PgPool,
     dir: &Path,
@@ -364,6 +386,7 @@ async fn migrate_with_ledger(
 /// explicitly unlock before dropping it back to the pool. (Dropping
 /// alone wouldn't release, since pooled connections survive between
 /// uses.)
+#[cfg(feature = "postgres")]
 async fn with_migrate_lock<F, R>(pool: &PgPool, body: F) -> Result<R, MigrateError>
 where
     F: std::future::Future<Output = Result<R, MigrateError>>,
@@ -402,10 +425,12 @@ where
 /// # Errors
 /// Returns [`MigrateError::Driver`] for any sqlx failure (including a
 /// missing ledger table — call [`ensure_ledger`] first).
+#[cfg(feature = "postgres")]
 pub async fn applied_set(pool: &PgPool) -> Result<HashSet<String>, MigrateError> {
     applied_set_for(pool, LEDGER_TABLE).await
 }
 
+#[cfg(feature = "postgres")]
 async fn applied_set_for(pool: &PgPool, ledger: &str) -> Result<HashSet<String>, MigrateError> {
     let rows = sqlx::query(&format!("SELECT name FROM {ledger}"))
         .fetch_all(pool)
@@ -429,10 +454,12 @@ async fn applied_set_for(pool: &PgPool, ledger: &str) -> Result<HashSet<String>,
 ///
 /// # Errors
 /// Returns [`MigrateError::Driver`] for any sqlx failure.
+#[cfg(feature = "postgres")]
 pub async fn ensure_ledger(pool: &PgPool) -> Result<(), MigrateError> {
     ensure_ledger_for(pool, LEDGER_TABLE).await
 }
 
+#[cfg(feature = "postgres")]
 async fn ensure_ledger_for(pool: &PgPool, ledger: &str) -> Result<(), MigrateError> {
     use crate::sql::{Dialect as _, Postgres};
     // Stable arbitrary key — must be the same every call. "RUST" in ASCII hex.
@@ -484,6 +511,7 @@ pub struct MigrationPreview {
 /// # Errors
 /// As [`migrate`] minus the SQL execution — file I/O, JSON parse,
 /// chain validation, plus the `applied_set` read.
+#[cfg(feature = "postgres")]
 pub async fn migrate_dry_run(
     pool: &PgPool,
     dir: &Path,
@@ -491,6 +519,7 @@ pub async fn migrate_dry_run(
     Builder::default().migrate_dry_run(pool, dir).await
 }
 
+#[cfg(feature = "postgres")]
 async fn migrate_dry_run_with_ledger(
     pool: &PgPool,
     dir: &Path,
@@ -548,6 +577,7 @@ fn preview_migration(mig: &Migration, ledger: &str) -> Result<MigrationPreview, 
     })
 }
 
+#[cfg(feature = "postgres")]
 async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (atomic)");
     let mut tx = pool.begin().await?;
@@ -601,6 +631,7 @@ async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<()
 /// * [`MigrateError::Validation`] if `target` doesn't match any file
 ///   in `dir` (and isn't `"zero"`).
 /// * Any error [`migrate`] or [`unapply`] would raise.
+#[cfg(feature = "postgres")]
 pub async fn migrate_to(
     pool: &PgPool,
     dir: &Path,
@@ -609,6 +640,7 @@ pub async fn migrate_to(
     Builder::default().migrate_to(pool, dir, target).await
 }
 
+#[cfg(feature = "postgres")]
 async fn migrate_to_with_ledger(
     pool: &PgPool,
     dir: &Path,
@@ -701,6 +733,7 @@ async fn migrate_to_with_ledger(
 /// # Errors
 /// As [`migrate`], plus [`MigrateError::Validation`] when an entry
 /// key doesn't match the migration's own name.
+#[cfg(feature = "postgres")]
 pub async fn migrate_embedded(
     pool: &PgPool,
     embedded: &[(&str, &str)],
@@ -708,6 +741,7 @@ pub async fn migrate_embedded(
     Builder::default().migrate_embedded(pool, embedded).await
 }
 
+#[cfg(feature = "postgres")]
 async fn migrate_embedded_with_ledger(
     pool: &PgPool,
     embedded: &[(&str, &str)],
@@ -754,6 +788,7 @@ async fn migrate_embedded_with_ledger(
 ///
 /// # Errors
 /// As [`unapply`] for each step.
+#[cfg(feature = "postgres")]
 pub async fn downgrade(
     pool: &PgPool,
     dir: &Path,
@@ -762,6 +797,7 @@ pub async fn downgrade(
     Builder::default().downgrade(pool, dir, steps).await
 }
 
+#[cfg(feature = "postgres")]
 async fn downgrade_with_ledger(
     pool: &PgPool,
     dir: &Path,
@@ -797,6 +833,7 @@ async fn downgrade_with_ledger(
     .await
 }
 
+#[cfg(feature = "postgres")]
 async fn apply_one(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
     if mig.atomic {
         apply_atomic(pool, mig, ledger).await
@@ -805,6 +842,7 @@ async fn apply_one(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), M
     }
 }
 
+#[cfg(feature = "postgres")]
 async fn unapply_all_in_order(
     pool: &PgPool,
     dir: &Path,
@@ -856,10 +894,12 @@ async fn unapply_all_in_order(
 /// * [`MigrateError::Validation`] — non-head target, irreversible
 ///   op, missing migration file, missing predecessor.
 /// * [`MigrateError::Driver`] — SQL failure during rollback.
+#[cfg(feature = "postgres")]
 pub async fn unapply(pool: &PgPool, dir: &Path, name: &str) -> Result<Migration, MigrateError> {
     Builder::default().unapply(pool, dir, name).await
 }
 
+#[cfg(feature = "postgres")]
 async fn unapply_with_ledger(
     pool: &PgPool,
     dir: &Path,
@@ -884,6 +924,7 @@ async fn unapply_with_ledger(
 ///
 /// # Errors
 /// As [`unapply`], minus the head-mismatch check.
+#[cfg(feature = "postgres")]
 pub async fn unapply_force(
     pool: &PgPool,
     dir: &Path,
@@ -892,6 +933,7 @@ pub async fn unapply_force(
     Builder::default().unapply_force(pool, dir, name).await
 }
 
+#[cfg(feature = "postgres")]
 async fn unapply_force_with_ledger(
     pool: &PgPool,
     dir: &Path,
@@ -906,6 +948,7 @@ async fn unapply_force_with_ledger(
 /// Silent pass-through if the migration isn't applied at all — that
 /// case will surface as a clearer error from `unapply_locked`
 /// ("migration not found in dir" or similar).
+#[cfg(feature = "postgres")]
 async fn check_is_head(
     pool: &PgPool,
     dir: &Path,
@@ -938,6 +981,7 @@ async fn check_is_head(
 /// lock for the whole operation. Acquiring the lock recursively on
 /// a different pooled connection would block forever (each
 /// `pool.acquire()` is a fresh session).
+#[cfg(feature = "postgres")]
 async fn unapply_locked(
     pool: &PgPool,
     dir: &Path,
@@ -983,6 +1027,7 @@ async fn unapply_locked(
     Ok(target)
 }
 
+#[cfg(feature = "postgres")]
 async fn unapply_atomic(
     pool: &PgPool,
     target: &Migration,
@@ -1019,6 +1064,7 @@ async fn unapply_atomic(
     Ok(())
 }
 
+#[cfg(feature = "postgres")]
 async fn unapply_loose(
     pool: &PgPool,
     target: &Migration,
@@ -1053,6 +1099,7 @@ async fn unapply_loose(
     Ok(())
 }
 
+#[cfg(feature = "postgres")]
 async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (non-atomic)");
     let mut deferred_fks: Vec<String> = Vec::new();
