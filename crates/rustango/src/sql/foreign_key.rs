@@ -37,15 +37,20 @@
 //!   `Relation::Fk { on: … }` schema entry. Override with
 //!   `#[rustango(on = "user_uuid")]` on the FK field.
 
-use crate::core::{Model, Op, SqlValue};
-use crate::query::QuerySet;
-use sqlx::FromRow;
+use crate::core::SqlValue;
 // PG-typed surfaces below import these. Pulled in only when the
 // `postgres` feature is on; sqlite/mysql-only builds get just the
 // tri-dialect `get_pool` entry point further down.
 #[cfg(feature = "postgres")]
+use crate::core::{Model, Op};
+#[cfg(feature = "postgres")]
+use crate::query::QuerySet;
+#[cfg(feature = "postgres")]
 use sqlx::postgres::{PgPool, PgRow};
+#[cfg(feature = "postgres")]
+use sqlx::FromRow;
 
+#[cfg(feature = "postgres")]
 use super::ExecError;
 
 /// Lazy-loaded reference to a parent row. See module docs.

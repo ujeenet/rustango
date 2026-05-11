@@ -37,13 +37,13 @@
 
 use serde_json::{Map, Value};
 
-use crate::sql::sqlx::{self, Row};
+use crate::sql::sqlx;
 
-// PG-typed helpers below import PgRow / PgPool directly. Sqlite/
-// MySQL paths use the bi-dialect `ensure_table_pool` /
+// PG-typed helpers below import PgRow / PgPool / Row directly.
+// Sqlite/ MySQL paths use the bi-dialect `ensure_table_pool` /
 // `emit_one_pool` further down which dispatch per-backend.
 #[cfg(feature = "postgres")]
-use crate::sql::sqlx::{postgres::PgRow, PgPool};
+use crate::sql::sqlx::{postgres::PgRow, PgPool, Row};
 
 /// Source of the change recorded in the audit log.
 ///

@@ -5,16 +5,19 @@ use crate::core::{
     SelectQuery, SqlValue, UpdateQuery,
 };
 use crate::query::{QuerySet, UpdateBuilder};
-use sqlx::query::{Query, QueryAs};
 
 // PG-typed helpers below import these. Sqlite/MySQL-only builds only
 // see the bi/tri-dialect `_pool` entry points from this module.
 #[cfg(feature = "postgres")]
 use sqlx::postgres::{PgArguments, PgPool, PgRow};
+#[cfg(feature = "postgres")]
+use sqlx::query::{Query, QueryAs};
 
 #[cfg(feature = "postgres")]
+use super::Dialect;
+use super::ExecError;
+#[cfg(feature = "postgres")]
 use super::Postgres;
-use super::{Dialect, ExecError};
 
 /// Hidden trait every `#[derive(Model)]` type implements via the
 /// macro — slice 9.0e's bridge between `fetch_with_prefetch` and
