@@ -20,14 +20,43 @@ use super::views;
 /// Future returned by an [`AdminAction`] handler.
 pub type AdminActionFuture<'a> = Pin<Box<dyn Future<Output = Result<(), AdminError>> + Send + 'a>>;
 
-/// Bulk action handler. Receives the model's `&PgPool` (not a tenant
-/// connection — the admin runs with the connection the request lives
-/// on, so search_path is already correct) and the parsed PK list of
-/// the rows the operator selected. Return `Ok(())` on success;
-/// `AdminError::Internal(...)` for failure (renders as 500). Built-in
-/// `delete_selected` uses this signature.
-pub type AdminActionFn =
-    Arc<dyn for<'a> Fn(&'a PgPool, &'a [SqlValue]) -> AdminActionFuture<'a> + Send + Sync>;
+/// Bulk action handler. Receives the model's [`crate::sql::Pool`]
+/// (backend-erasing enum so the handler runs on PG / MySQL / SQLite
+/// alike) and the parsed PK list of the rows the operator selected.
+/// Return `Ok(())` on success; `AdminError::Internal(...)` for
+/// failure (renders as 500). Built-in `delete_selected` uses this
+/// signature.
+///
+/// v0.36 breaking change: closure now takes `&'a Pool` instead of
+/// `&'a PgPool`. User-defined custom action handlers need updating:
+///
+/// ```ignore
+/// // Pre-v0.36:
+/// register_admin_action!("post", "publish", "Publish selected", |pool, pks| {
+///     Box::pin(async move {
+///         sqlx::query("UPDATE post SET published_at = NOW() WHERE id = ANY($1)")
+///             .bind(pks).execute(pool).await?;
+///         Ok(())
+///     })
+/// });
+///
+/// // v0.36+: route through the bi-dialect ORM:
+/// register_admin_action!("post", "publish", "Publish selected", |pool, pks| {
+///     Box::pin(async move {
+///         use rustango::sql::{UpdaterPool as _, Pool};
+///         Post::objects()
+///             .filter("id", rustango::core::Op::In, pks.into())
+///             .update()
+///             .set("published_at", chrono::Utc::now())
+///             .execute_pool(pool)
+///             .await?;
+///         Ok(())
+///     })
+/// });
+/// ```
+pub type AdminActionFn = Arc<
+    dyn for<'a> Fn(&'a crate::sql::Pool, &'a [SqlValue]) -> AdminActionFuture<'a> + Send + Sync,
+>;
 
 /// Per-table action registry: model `table` name → action name →
 /// handler. The action name must also appear in the model's
@@ -431,7 +460,10 @@ impl Builder {
         handler: F,
     ) -> Self
     where
-        F: for<'a> Fn(&'a PgPool, &'a [SqlValue]) -> AdminActionFuture<'a> + Send + Sync + 'static,
+        F: for<'a> Fn(&'a crate::sql::Pool, &'a [SqlValue]) -> AdminActionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
     {
         self.config
             .actions

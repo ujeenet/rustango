@@ -254,7 +254,7 @@ impl TenantAdminBuilder {
     ) -> Self
     where
         F: for<'a> Fn(
-                &'a crate::sql::sqlx::PgPool,
+                &'a crate::sql::Pool,
                 &'a [crate::core::SqlValue],
             ) -> crate::admin::AdminActionFuture<'a>
             + Send

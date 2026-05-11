@@ -1342,7 +1342,10 @@ pub(crate) async fn action_submit(
                 table: model.table.to_owned(),
             });
         }
-        handler(&state.pool, &pk_values).await?;
+        // v0.36 — wrap the PG-typed `state.pool` in the tri-dialect
+        // `Pool` enum at the action-handler boundary. Slice 6 makes
+        // `state.pool` natively a `Pool`, collapsing this wrap.
+        handler(&crate::sql::Pool::Postgres(state.pool.clone()), &pk_values).await?;
     } else {
         return Err(AdminError::Internal(format!(
             "action `{action}` is in `admin.actions` but no handler is registered \
