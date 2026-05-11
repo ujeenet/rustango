@@ -820,8 +820,9 @@ pub(crate) async fn detail_view(
     })?;
     let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
 
-    let row = crate::sql::select_one_row(
-        state.pg_pool(),
+    let detail_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    let row = crate::sql::select_one_row_as_json_pool(
+        &state.pool,
         &SelectQuery {
             model,
             where_clause: WhereExpr::Predicate(Filter {
@@ -835,6 +836,7 @@ pub(crate) async fn detail_view(
             limit: None,
             offset: None,
         },
+        &detail_fields,
     )
     .await?
     .ok_or(AdminError::RowNotFound {
@@ -843,14 +845,14 @@ pub(crate) async fn detail_view(
     })?;
 
     // Read joined FK display values from the same row — no extra queries.
-    let fk_map = fk_map_from_joined_rows(&state, model, std::slice::from_ref(&row));
+    let fk_map = fk_map_from_joined_rows_json(&state, model, std::slice::from_ref(&row));
 
     let mut cells_ctx: Vec<serde_json::Value> = model
         .scalar_fields()
         .map(|f| {
             serde_json::json!({
                 "label": f.name,
-                "value": render_cell(&row, f, &fk_map),
+                "value": render_cell_json(&row, f, &fk_map),
             })
         })
         .collect();
@@ -860,28 +862,34 @@ pub(crate) async fn detail_view(
     // this table, mirroring the list-view behavior so authors don't
     // have to hunt for word counts / derived flags / etc. in the
     // single-row view.
-    // v0.36 — convert the row to JSON once for the computed-field
-    // pass so closures get a tri-dialect input.
-    let detail_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    let row_json_for_computed = crate::sql::row_to_json(&row, &detail_fields);
     for cf in crate::admin::computed_fields::for_table(model.table) {
         cells_ctx.push(serde_json::json!({
             "label": if cf.label.is_empty() { cf.name } else { cf.label },
-            "value": (cf.render)(&row_json_for_computed),
+            "value": (cf.render)(&row),
         }));
     }
 
     // F.4b — append one row per #[rustango(generic_fk(...))]
     // declaration. Reads the (content_type_id, object_pk) pair off
     // the row and renders a clickable target link via
-    // `contenttypes::render_generic_fk_link`. Stale references
+    // `contenttypes::render_generic_fk_link_pool`. Stale references
     // (CT not seeded, target deleted) render as a `(ct=N, pk=M)`
     // fallback rather than failing the whole page.
+    //
+    // v0.37 — `ct_id` / `object_pk` come from the JSON row via
+    // `as_i64()`; the generic-FK render helper has a tri-dialect
+    // `_pool` companion that dispatches per backend.
     for gfk in model.generic_relations {
-        let ct_id = sqlx::Row::try_get::<i64, _>(&row, gfk.ct_column).unwrap_or_default();
-        let object_pk = sqlx::Row::try_get::<i64, _>(&row, gfk.pk_column).unwrap_or_default();
+        let ct_id = row
+            .get(gfk.ct_column)
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_default();
+        let object_pk = row
+            .get(gfk.pk_column)
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_default();
         let g = crate::contenttypes::GenericForeignKey::new(ct_id, object_pk);
-        let html = crate::contenttypes::render_generic_fk_link(state.pg_pool(), g)
+        let html = crate::contenttypes::render_generic_fk_link_pool(&state.pool, g)
             .await
             .unwrap_or_else(|_| format!("<em>(ct={ct_id}, pk={object_pk})</em>"));
         cells_ctx.push(serde_json::json!({
@@ -895,7 +903,7 @@ pub(crate) async fn detail_view(
     // `audit::ensure_table` per tenant), the lookup returns Err and
     // we render an empty section instead of failing the whole page.
     let audit_entries_ctx: Vec<serde_json::Value> =
-        match crate::audit::fetch_for_entity(state.pg_pool(), model.table, &pk_raw).await {
+        match crate::audit::fetch_for_entity_pool(&state.pool, model.table, &pk_raw).await {
             Ok(entries) => entries
                 .into_iter()
                 .map(|e| {
@@ -1034,17 +1042,29 @@ pub(crate) async fn create_submit(
         returning: vec![pk_field.column],
         on_conflict: None,
     };
-    let row = match crate::sql::insert_returning(state.pg_pool(), &query).await {
-        Ok(row) => row,
+    // v0.37 — tri-dialect insert + PK extraction. PG/SQLite emit
+    // RETURNING and we read the PK column off the row; MySQL has no
+    // RETURNING so the helper hands back `LAST_INSERT_ID()` directly.
+    let pk_value = match crate::sql::insert_returning_pool(&state.pool, &query).await {
+        Ok(crate::sql::InsertReturningPool::PgRow(row)) => {
+            render::read_value_as_string(&row, pk_field).unwrap_or_default()
+        }
+        #[cfg(feature = "mysql")]
+        Ok(crate::sql::InsertReturningPool::MySqlAutoId(id)) => id.to_string(),
+        #[cfg(feature = "sqlite")]
+        Ok(crate::sql::InsertReturningPool::SqliteRow(row)) => {
+            // SQLite returns a typed row via RETURNING — convert it
+            // to JSON once and reuse the JSON reader so the path
+            // matches the rest of the admin's tri-dialect rendering.
+            let row_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+            let json = crate::sql::row_to_json_sqlite(&row, &row_fields);
+            render::read_value_as_string_json(&json, pk_field).unwrap_or_default()
+        }
         Err(e) => {
             let html = render_form(&state, model, Some(&form), false, Some(&e.to_string()));
             return Ok(Html(html).into_response());
         }
     };
-
-    // Pull the (possibly-generated) PK back out of the RETURNING row so
-    // the redirect lands on the right detail page even for Auto-PK models.
-    let pk_value = render::read_value_as_string(&row, pk_field).unwrap_or_default();
     super::audit::emit_admin_audit(
         &state,
         model,
@@ -1074,8 +1094,9 @@ pub(crate) async fn edit_form(
     })?;
     let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
 
-    let row = crate::sql::select_one_row(
-        state.pg_pool(),
+    let edit_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    let row = crate::sql::select_one_row_as_json_pool(
+        &state.pool,
         &SelectQuery {
             model,
             where_clause: WhereExpr::Predicate(Filter {
@@ -1089,6 +1110,7 @@ pub(crate) async fn edit_form(
             limit: None,
             offset: None,
         },
+        &edit_fields,
     )
     .await?
     .ok_or(AdminError::RowNotFound {
@@ -1098,7 +1120,10 @@ pub(crate) async fn edit_form(
 
     let mut prefill = HashMap::new();
     for f in model.scalar_fields() {
-        prefill.insert(f.name.to_owned(), render::render_value_for_input(&row, f));
+        prefill.insert(
+            f.name.to_owned(),
+            render::render_value_for_input_json(&row, f),
+        );
     }
     Ok(Html(render_form(&state, model, Some(&prefill), true, None)))
 }
@@ -1148,8 +1173,12 @@ pub(crate) async fn update_submit(
     // diff. Best-effort — if the SELECT fails (race, concurrent
     // delete), we fall back to the snapshot path so the data write
     // still emits something useful.
-    let before_row = crate::sql::select_one_row(
-        state.pg_pool(),
+    //
+    // v0.37 — SELECT runs through the JSON bridge and the audit emit
+    // takes `Option<&serde_json::Value>` directly, no shim needed.
+    let before_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    let before_row = crate::sql::select_one_row_as_json_pool(
+        &state.pool,
         &SelectQuery {
             model,
             where_clause: WhereExpr::Predicate(Filter {
@@ -1163,6 +1192,7 @@ pub(crate) async fn update_submit(
             limit: None,
             offset: None,
         },
+        &before_fields,
     )
     .await
     .ok()
@@ -1177,7 +1207,7 @@ pub(crate) async fn update_submit(
             value: pk_value,
         }),
     };
-    if let Err(e) = crate::sql::update(state.pg_pool(), &query).await {
+    if let Err(e) = crate::sql::update_pool(&state.pool, &query).await {
         let html = render_form(&state, model, Some(&form), true, Some(&e.to_string()));
         return Ok(Html(html).into_response());
     }
@@ -1185,16 +1215,7 @@ pub(crate) async fn update_submit(
     // up the per-request `with_source(User { id })` install from
     // `tenancy::admin`, so operators get a "who changed what" trail
     // automatically.
-    //
-    // v0.37 — convert the PG-typed before-row to JSON once for the
-    // audit emit helper. When views.rs fully migrates to the JSON
-    // bridge (slice 3+4), this `row_to_json` shim drops and the
-    // SELECT above uses `select_one_row_as_json_pool` directly.
-    let before_fields: Vec<&'static crate::core::FieldSchema> = model.scalar_fields().collect();
-    let before_json = before_row
-        .as_ref()
-        .map(|row| crate::sql::row_to_json(row, &before_fields));
-    super::audit::emit_admin_audit_diff(&state, model, &pk_raw, before_json.as_ref(), &form).await;
+    super::audit::emit_admin_audit_diff(&state, model, &pk_raw, before_row.as_ref(), &form).await;
     Ok(Redirect::to(&format!(
         "{}/{}/{}",
         state.config.admin_prefix, model.table, pk_raw
@@ -1225,8 +1246,9 @@ pub(crate) async fn delete_submit(
     // captures what was actually removed (snapshot of pre-delete
     // state). Best-effort — missing row falls back to an empty
     // changes payload, which still records the operation + source.
-    let before_row = crate::sql::select_one_row(
-        state.pg_pool(),
+    let delete_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    let before_row = crate::sql::select_one_row_as_json_pool(
+        &state.pool,
         &SelectQuery {
             model,
             where_clause: WhereExpr::Predicate(Filter {
@@ -1240,6 +1262,7 @@ pub(crate) async fn delete_submit(
             limit: None,
             offset: None,
         },
+        &delete_fields,
     )
     .await
     .ok()
@@ -1252,8 +1275,8 @@ pub(crate) async fn delete_submit(
     };
 
     if let Some(col) = model.soft_delete_column {
-        crate::sql::update(
-            state.pg_pool(),
+        crate::sql::update_pool(
+            &state.pool,
             &UpdateQuery {
                 model,
                 set: vec![Assignment {
@@ -1269,8 +1292,8 @@ pub(crate) async fn delete_submit(
         )
         .await?;
     } else {
-        crate::sql::delete(
-            state.pg_pool(),
+        crate::sql::delete_pool(
+            &state.pool,
             &DeleteQuery {
                 model,
                 where_clause: WhereExpr::Predicate(Filter {
@@ -1288,7 +1311,7 @@ pub(crate) async fn delete_submit(
         .map(|row| {
             model
                 .scalar_fields()
-                .map(|f| (f.name, render::read_value_as_json(row, f)))
+                .map(|f| (f.name, render::read_value_as_json_from_json(row, f)))
                 .collect()
         })
         .unwrap_or_default();
@@ -1299,7 +1322,7 @@ pub(crate) async fn delete_submit(
         source: crate::audit::current_source(),
         changes: crate::audit::snapshot_changes(&pairs),
     };
-    if let Err(e) = crate::audit::emit_one(state.pg_pool(), &entry).await {
+    if let Err(e) = crate::audit::emit_one_pool(&state.pool, &entry).await {
         tracing::warn!(
             target: "rustango::admin::audit",
             error = %e,
@@ -1388,8 +1411,9 @@ pub(crate) async fn action_submit(
     // audit emit can record what the action ran against. For
     // delete_selected this snapshots the gone rows; for user-defined
     // actions it records the row state at the time of action.
-    let before_rows = crate::sql::select_rows(
-        state.pg_pool(),
+    let action_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    let before_rows = crate::sql::select_rows_as_json_pool(
+        &state.pool,
         &SelectQuery {
             model,
             where_clause: WhereExpr::Predicate(Filter {
@@ -1403,6 +1427,7 @@ pub(crate) async fn action_submit(
             limit: None,
             offset: None,
         },
+        &action_fields,
     )
     .await
     .unwrap_or_default();
@@ -1427,8 +1452,8 @@ pub(crate) async fn action_submit(
         }
         if let Some(col) = model.soft_delete_column {
             // Soft model — stamp the deleted_at column instead of hard DELETE.
-            crate::sql::update(
-                state.pg_pool(),
+            crate::sql::update_pool(
+                &state.pool,
                 &UpdateQuery {
                     model,
                     set: vec![Assignment {
@@ -1444,8 +1469,8 @@ pub(crate) async fn action_submit(
             )
             .await?;
         } else {
-            crate::sql::delete(
-                state.pg_pool(),
+            crate::sql::delete_pool(
+                &state.pool,
                 &DeleteQuery {
                     model,
                     where_clause: WhereExpr::Predicate(Filter {
@@ -1467,8 +1492,8 @@ pub(crate) async fn action_submit(
         // Only meaningful for models with soft_delete_column; for others
         // the action is a no-op so users don't need to guard it.
         if let Some(col) = model.soft_delete_column {
-            crate::sql::update(
-                state.pg_pool(),
+            crate::sql::update_pool(
+                &state.pool,
                 &UpdateQuery {
                     model,
                     set: vec![Assignment {
@@ -1513,10 +1538,10 @@ pub(crate) async fn action_submit(
     let entries: Vec<crate::audit::PendingEntry> = before_rows
         .iter()
         .map(|row| {
-            let pk_str = render::read_value_as_string(row, pk_field).unwrap_or_default();
+            let pk_str = render::read_value_as_string_json(row, pk_field).unwrap_or_default();
             let mut pairs: Vec<(&str, serde_json::Value)> = model
                 .scalar_fields()
-                .map(|f| (f.name, render::read_value_as_json(row, f)))
+                .map(|f| (f.name, render::read_value_as_json_from_json(row, f)))
                 .collect();
             if action != "delete_selected" {
                 // Tag the action name into the changes payload so
@@ -1534,7 +1559,7 @@ pub(crate) async fn action_submit(
         })
         .collect();
     if !entries.is_empty() {
-        if let Err(e) = crate::audit::emit_many(state.pg_pool(), &entries).await {
+        if let Err(e) = crate::audit::emit_many_pool(&state.pool, &entries).await {
             tracing::warn!(
                 target: "rustango::admin::audit",
                 error = %e,

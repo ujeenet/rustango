@@ -193,6 +193,20 @@ impl ContentType {
             .await?;
         Ok(rows.into_iter().next())
     }
+
+    /// v0.37 — backend-agnostic counterpart of [`Self::by_id`]. Used
+    /// by the admin's generic-FK link renderer.
+    ///
+    /// # Errors
+    /// As [`Self::for_model`].
+    pub async fn by_id_pool(pool: &crate::sql::Pool, id: i64) -> Result<Option<Self>, ExecError> {
+        let rows: Vec<Self> = Self::objects()
+            .filter("id", crate::core::Op::Eq, SqlValue::I64(id))
+            .limit(1)
+            .fetch_pool(pool)
+            .await?;
+        Ok(rows.into_iter().next())
+    }
 }
 
 // ============================================================ #89 part B — fetch helpers
@@ -448,6 +462,43 @@ pub async fn render_generic_fk_link(
         None => {
             // Stale or unseeded reference — show the raw pair so
             // the admin operator can spot it.
+            return Ok(format!(
+                "<em>(ct={}, pk={})</em>",
+                gfk.content_type_id, gfk.object_pk
+            ));
+        }
+    };
+    let label = format!("{}.{}", ct.app_label, ct.model_name);
+    let table_esc = escape(&ct.table);
+    let label_esc = escape(&label);
+    Ok(format!(
+        r#"<a href="/{table}/{pk}">{label} #{pk}</a>"#,
+        table = table_esc,
+        pk = gfk.object_pk,
+        label = label_esc,
+    ))
+}
+
+/// v0.37 — backend-agnostic counterpart of [`render_generic_fk_link`].
+/// Routes the ContentType lookup through [`ContentType::by_id_pool`]
+/// so admin detail views render generic-FK links on any backend.
+///
+/// # Errors
+/// As [`render_generic_fk_link`].
+pub async fn render_generic_fk_link_pool(
+    pool: &crate::sql::Pool,
+    gfk: GenericForeignKey,
+) -> Result<String, ExecError> {
+    let escape = |s: &str| -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#x27;")
+    };
+    let ct = match ContentType::by_id_pool(pool, gfk.content_type_id).await? {
+        Some(c) => c,
+        None => {
             return Ok(format!(
                 "<em>(ct={}, pk={})</em>",
                 gfk.content_type_id, gfk.object_pk
