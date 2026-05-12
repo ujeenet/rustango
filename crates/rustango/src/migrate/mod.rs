@@ -18,11 +18,11 @@ pub mod ddl;
 pub mod diff;
 mod error;
 pub mod file;
-// inspectdb is the migrate CLI's "emit Model derives from a live PG
-// schema" verb — PG-only by design (reads `information_schema` with
-// PG-typed FromRow / pg_catalog joins). Gated to PG; sqlite/MySQL
-// apps don't get this verb.
-#[cfg(feature = "postgres")]
+// inspectdb is the migrate CLI's "emit Model derives from a live
+// schema" verb. v0.38 — tri-dialect: dispatches per-backend
+// (information_schema on PG / MySQL; PRAGMA + sqlite_master on
+// SQLite). The module is now reachable on any backend the framework
+// supports; the manage CLI runs it via the unified `&Pool` enum.
 pub(crate) mod inspectdb;
 pub mod invert;
 pub mod make;

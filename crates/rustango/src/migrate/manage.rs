@@ -112,24 +112,10 @@ pub async fn run_with_writer<W: Write + Send>(
         "db:dump" => db_dump_cmd(&args[1..], writer),
         "db:restore" => db_restore_cmd(&args[1..], writer),
         "db:info" => db_info_cmd(writer),
-        // v0.38 — `inspectdb` is PG-only because it queries
-        // `information_schema` with PG-specific column types. The
-        // sqlite/mysql equivalent ships in v0.39.
-        #[cfg(feature = "postgres")]
-        "inspectdb" => {
-            let pg = pool.as_postgres().ok_or_else(|| {
-                MigrateError::Validation(
-                    "`inspectdb` is only supported on Postgres (uses information_schema). \
-                     For sqlite use `sqlite3 db.db .schema`."
-                        .into(),
-                )
-            })?;
-            super::inspectdb::inspectdb_cmd(pg, &args[1..], writer).await
-        }
-        #[cfg(not(feature = "postgres"))]
-        "inspectdb" => Err(MigrateError::Validation(
-            "`inspectdb` requires the `postgres` feature".into(),
-        )),
+        // v0.38 — `inspectdb` is tri-dialect: PG + MySQL via
+        // `information_schema`, SQLite via `PRAGMA table_info` +
+        // `sqlite_master`. Dispatch happens inside `inspectdb_cmd`.
+        "inspectdb" => super::inspectdb::inspectdb_cmd(pool, &args[1..], writer).await,
         other => Err(MigrateError::Validation(format!(
             "unknown subcommand: `{other}` (run with --help for usage)"
         ))),
