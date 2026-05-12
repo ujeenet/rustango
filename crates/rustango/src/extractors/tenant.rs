@@ -55,6 +55,14 @@ pub struct TenantContext<DB: Database = DefaultTenantDb> {
 pub struct Tenant<DB: Database = DefaultTenantDb> {
     pub org: Org,
     conn: TenantConn<DB>,
+    /// v0.38 — backend-erasing pool reference for the tenant's storage.
+    /// On PG schema-mode this wraps the registry pool (queries through
+    /// it would hit the `public` schema unless `SET search_path` is
+    /// applied — for that path prefer [`Tenant::conn`]). On non-PG
+    /// (and PG database-mode), this is the tenant's dedicated pool;
+    /// handlers can run `Model::objects().fetch_pool(&t.pool)` for
+    /// tri-dialect ORM queries.
+    pool: crate::sql::Pool,
 }
 
 impl<DB: Database> Tenant<DB> {
@@ -74,6 +82,21 @@ impl<DB: Database> Tenant<DB> {
     #[must_use]
     pub fn into_conn(self) -> TenantConn<DB> {
         self.conn
+    }
+
+    /// Borrow the tenant-scoped [`crate::sql::Pool`] enum. Use this
+    /// when routing through the tri-dialect ORM (`fetch_pool` /
+    /// `insert_pool` / `save_pool`) — every backend works through the
+    /// same code path.
+    ///
+    /// **PG schema-mode note**: the pool wraps the shared registry
+    /// pool; queries against it would hit `public` instead of the
+    /// tenant schema. For schema-mode-on-PG paths use
+    /// [`Tenant::conn`] (which has `SET search_path` applied).
+    /// Database-mode (any backend) is unaffected.
+    #[must_use]
+    pub fn pool(&self) -> &crate::sql::Pool {
+        &self.pool
     }
 
     /// **Test-only** — construct a `Tenant` directly from an `Org`
@@ -96,8 +119,8 @@ impl<DB: Database> Tenant<DB> {
     /// before any query — same ceremony the extractor runs.
     #[cfg(any(test, feature = "test_utils"))]
     #[must_use]
-    pub fn for_test(org: Org, conn: TenantConn<DB>) -> Self {
-        Self { org, conn }
+    pub fn for_test(org: Org, conn: TenantConn<DB>, pool: crate::sql::Pool) -> Self {
+        Self { org, conn, pool }
     }
 }
 
@@ -167,7 +190,17 @@ where
             .acquire(&org)
             .await
             .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        Ok(Tenant { org, conn })
+        // v0.38 — also resolve the backend-erasing Pool enum so
+        // `t.pool()` lets handlers use tri-dialect ORM helpers
+        // (fetch_pool / save_pool / etc.). Schema-mode picks the
+        // shared registry pool (which requires SET search_path);
+        // database-mode resolves to the dedicated tenant pool.
+        let pool = ctx
+            .pools
+            .scoped_pool_dyn(&org)
+            .await
+            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
+        Ok(Tenant { org, conn, pool })
     }
 }
 
@@ -195,12 +228,17 @@ where
             .await
             .map_err(|e| TenantRejection::Internal(e.to_string()))?
             .ok_or(TenantRejection::NotFound)?;
+        let pool = ctx
+            .pools
+            .scoped_pool_dyn(&org)
+            .await
+            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
         let conn = ctx
             .pools
             .database_acquire(&org)
             .await
             .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        Ok(Tenant { org, conn })
+        Ok(Tenant { org, conn, pool })
     }
 }
 
@@ -224,11 +262,16 @@ where
             .await
             .map_err(|e| TenantRejection::Internal(e.to_string()))?
             .ok_or(TenantRejection::NotFound)?;
+        let pool = ctx
+            .pools
+            .scoped_pool_dyn(&org)
+            .await
+            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
         let conn = ctx
             .pools
             .database_acquire(&org)
             .await
             .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        Ok(Tenant { org, conn })
+        Ok(Tenant { org, conn, pool })
     }
 }

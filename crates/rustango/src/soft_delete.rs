@@ -367,6 +367,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "postgres")]
     async fn soft_delete_on_unsupported_model_returns_clear_error() {
         // Use a connect_lazy pool — never actually dialed because the
         // function returns the error before any SQL runs.
@@ -382,6 +383,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "postgres")]
     async fn restore_on_unsupported_model_returns_clear_error() {
         let pg = crate::sql::sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
