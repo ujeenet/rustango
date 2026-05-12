@@ -82,12 +82,15 @@ pub type InitTenancyFn = fn(&Path) -> Result<super::bootstrap::InitTenancyReport
 /// # Errors
 /// Either a [`TenancyError`] from a tenancy verb, or a wrapped
 /// `crate::migrate::MigrateError` from the delegated call.
-pub async fn run(
-    pools: &TenantPools,
+pub async fn run<DB: sqlx::Database>(
+    pools: &TenantPools<DB>,
     registry_url: &str,
     dir: &Path,
     args: impl IntoIterator<Item = String>,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let mut stdout = io::stdout();
     run_with_writer(pools, registry_url, dir, args, &mut stdout).await
 }
@@ -98,13 +101,16 @@ pub async fn run(
 ///
 /// # Errors
 /// As [`run`].
-pub async fn run_with_init(
-    pools: &TenantPools,
+pub async fn run_with_init<DB: sqlx::Database>(
+    pools: &TenantPools<DB>,
     registry_url: &str,
     dir: &Path,
     args: impl IntoIterator<Item = String>,
     init_fn: InitTenancyFn,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let mut stdout = io::stdout();
     run_with_writer_and_init(pools, registry_url, dir, args, &mut stdout, init_fn).await
 }
@@ -114,13 +120,16 @@ pub async fn run_with_init(
 ///
 /// # Errors
 /// As [`run`].
-pub async fn run_with_writer<W: Write + Send>(
-    pools: &TenantPools,
+pub async fn run_with_writer<W: Write + Send, DB: sqlx::Database>(
+    pools: &TenantPools<DB>,
     registry_url: &str,
     dir: &Path,
     args: impl IntoIterator<Item = String>,
     writer: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     run_with_writer_and_init(
         pools,
         registry_url,
@@ -138,14 +147,17 @@ pub async fn run_with_writer<W: Write + Send>(
 ///
 /// # Errors
 /// As [`run`].
-pub async fn run_with_writer_and_init<W: Write + Send>(
-    pools: &TenantPools,
+pub async fn run_with_writer_and_init<W: Write + Send, DB: sqlx::Database>(
+    pools: &TenantPools<DB>,
     registry_url: &str,
     dir: &Path,
     args: impl IntoIterator<Item = String>,
     writer: &mut W,
     init_fn: InitTenancyFn,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let args: Vec<String> = args.into_iter().collect();
     let cmd = args.first().map_or("", String::as_str);
 
@@ -179,7 +191,19 @@ pub async fn run_with_writer_and_init<W: Write + Send>(
         "migrate-registry" => migrations::migrate_registry_cmd(pools, dir, writer).await,
         #[cfg(feature = "postgres")]
         "migrate-tenant-storage" => {
-            migrate_storage::migrate_tenant_storage_cmd(pools, registry_url, &args[1..], writer)
+            // PG-only: uses pg_dump | psql + schema-mode dispatch.
+            // Downcast through `Any` so the generic dispatcher path
+            // can still compile on multi-backend builds.
+            let pg_pools = (pools as &dyn std::any::Any)
+                .downcast_ref::<TenantPools<sqlx::Postgres>>()
+                .ok_or_else(|| {
+                    TenancyError::Validation(
+                        "migrate-tenant-storage is Postgres-only (uses pg_dump | psql + \
+                         schema-mode dispatch). Re-run with a postgres:// DATABASE_URL."
+                            .into(),
+                    )
+                })?;
+            migrate_storage::migrate_tenant_storage_cmd(pg_pools, registry_url, &args[1..], writer)
                 .await
         }
         #[cfg(not(feature = "postgres"))]

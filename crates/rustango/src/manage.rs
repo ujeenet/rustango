@@ -548,19 +548,58 @@ impl Cli {
 
         #[cfg(all(feature = "tenancy", feature = "postgres"))]
         if self.tenancy {
-            // v0.36 — schema-mode tenancy (`TenantPools<sqlx::Postgres>`)
-            // is Postgres-only by language. Catch sqlite / mysql URLs
-            // here with a friendly error instead of letting `PgPool::connect`
-            // emit the sqlx-internal "unsupported scheme" message at a
-            // less helpful layer.
+            // v0.38 — dispatch on the URL scheme so binaries compiled
+            // with multiple backend features (e.g. `["postgres", "sqlite"]`
+            // for testing) can route sqlite / mysql URLs to the right
+            // `TenantPools<DB>`. Schema-mode tenants on non-PG backends
+            // still return a clear validation error at request time
+            // (`TenantPools<DB>::scoped_pool_dyn`); database-mode
+            // tenants work on every backend.
             let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
+            #[cfg(feature = "sqlite")]
+            if scheme == "sqlite" {
+                let pool = if no_db_verb {
+                    crate::sql::sqlx::SqlitePool::connect_lazy(&url)?
+                } else {
+                    crate::sql::sqlx::SqlitePool::connect(&url).await?
+                };
+                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(pool);
+                crate::tenancy::manage::run_with_init(
+                    &pools,
+                    &url,
+                    &self.migrations_dir,
+                    args,
+                    self.init_tenancy_fn,
+                )
+                .await?;
+                return Ok(());
+            }
+            #[cfg(feature = "mysql")]
+            if scheme == "mysql" {
+                let pool = if no_db_verb {
+                    crate::sql::sqlx::MySqlPool::connect_lazy(&url)?
+                } else {
+                    crate::sql::sqlx::MySqlPool::connect(&url).await?
+                };
+                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::MySql>::new(pool);
+                crate::tenancy::manage::run_with_init(
+                    &pools,
+                    &url,
+                    &self.migrations_dir,
+                    args,
+                    self.init_tenancy_fn,
+                )
+                .await?;
+                return Ok(());
+            }
             if !matches!(scheme.as_str(), "postgres" | "postgresql") {
                 return Err(format!(
-                    "manage::Cli::tenancy() requires a Postgres DATABASE_URL (got scheme \
-                     `{scheme}`). Schema-mode multi-tenancy uses `SET search_path` which \
-                     is Postgres-only by language semantics. To run sqlite/mysql apps, \
-                     drop `.tenancy()` from the Cli setup; for multi-tenant sqlite/mysql \
-                     see `crate::tenancy::DatabasePools<DB>` (one database per tenant)."
+                    "manage::Cli::tenancy() got `DATABASE_URL` with unsupported scheme \
+                     `{scheme}`. Supported schemes depend on the compiled-in backend \
+                     features (`postgres`, `sqlite`, `mysql`). Schema-mode multi-tenancy \
+                     (where many tenants share one PG database via `SET search_path`) \
+                     is Postgres-only by language; database-mode multi-tenancy works on \
+                     every backend."
                 )
                 .into());
             }

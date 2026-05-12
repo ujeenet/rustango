@@ -60,14 +60,17 @@ use super::InitTenancyFn;
 /// surfaces here. The wizard does NOT swallow errors silently —
 /// a failed step aborts the wizard so the user can retry from
 /// where they were.
-pub(super) async fn wizard_cmd<R: BufRead, W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn wizard_cmd<R: BufRead, W: Write + Send, DB: sqlx::Database>(
+    pools: &TenantPools<DB>,
     registry_url: &str,
     dir: &Path,
     init_fn: InitTenancyFn,
     reader: &mut R,
     writer: &mut W,
-) -> Result<(), super::TenancyError> {
+) -> Result<(), super::TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     write_intro(writer)?;
 
     // Step 1 — scaffold an app

@@ -610,7 +610,13 @@ impl ViewSetState {
             PoolSource::Tenant => {
                 use axum::extract::FromRequestParts as _;
                 use axum::response::IntoResponse as _;
-                let t = crate::extractors::Tenant::from_request_parts(parts, &())
+                // v0.38 — annotate the generic param so multi-backend
+                // builds (e.g. `--features postgres,sqlite`) infer
+                // `Tenant<DefaultTenantDb>` instead of erroring on
+                // ambiguous type inference.
+                let t = <crate::extractors::Tenant<
+                    crate::tenancy::DefaultTenantDb,
+                > as axum::extract::FromRequestParts<()>>::from_request_parts(parts, &())
                     .await
                     .map_err(|e| e.into_response())?;
                 let pool = t.pool().clone();
