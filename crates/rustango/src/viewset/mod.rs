@@ -96,7 +96,7 @@ use crate::core::{
     OrderClause, SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
 use crate::forms::{collect_values, parse_form_value, parse_pk_string, FormError};
-use crate::sql::sqlx::{PgPool, Row as _};
+use crate::sql::Pool;
 
 // ------------------------------------------------------------------ Permissions config
 
@@ -166,6 +166,13 @@ impl PaginationStyle {
 /// (`T::from_row`) then runs it through the serializer's `from_model`
 /// + `to_value`, so SerializerMethodField / read_only / source /
 /// many overrides all apply to the JSON output.
+///
+/// v0.38 — gated to `cfg(postgres)` because the closure is bound to
+/// `&PgRow` via `T::from_row(row)`. The tri-dialect ViewSet
+/// (`tenant_router` on sqlite/mysql) skips the closure path and
+/// uses the dialect-aware `select_rows_as_json_pool` default
+/// projection.
+#[cfg(feature = "postgres")]
 type RowRender = std::sync::Arc<dyn Fn(&crate::sql::sqlx::postgres::PgRow) -> Value + Send + Sync>;
 
 /// Builder for a set of REST CRUD endpoints over a single [`Model`] table.
@@ -182,9 +189,10 @@ pub struct ViewSet {
     perms: ViewSetPerms,
     read_only: bool,
     pagination: PaginationStyle,
-    /// When set, list / retrieve responses run each row through this
-    /// callback instead of the default field-level projection. Wired
-    /// via [`Self::serializer`].
+    /// When set (PG only), list / retrieve responses run each row
+    /// through this callback instead of the default field-level
+    /// projection. Wired via [`Self::serializer`].
+    #[cfg(feature = "postgres")]
     row_render: Option<RowRender>,
 }
 
@@ -201,6 +209,7 @@ impl ViewSet {
             perms: ViewSetPerms::default(),
             read_only: false,
             pagination: PaginationStyle::PageNumber,
+            #[cfg(feature = "postgres")]
             row_render: None,
         }
     }
@@ -216,7 +225,13 @@ impl ViewSet {
     ///
     /// Internally stores `Arc<dyn Fn(&PgRow) -> Value>` so the
     /// ViewSet itself stays type-erased — non-breaking add-on.
-    #[cfg(feature = "serializer")]
+    ///
+    /// v0.38 — PG-only because the serializer's `Model` requires
+    /// `FromRow<PgRow>`. Sqlite/MySQL ViewSets use the default
+    /// field-level JSON projection (no per-row callback); add a
+    /// tri-dialect serializer-like extension in v0.39 once
+    /// `T::from_row` is lifted to the backend-erasing trait.
+    #[cfg(all(feature = "serializer", feature = "postgres"))]
     #[must_use]
     pub fn serializer<S>(mut self) -> Self
     where
@@ -337,8 +352,16 @@ impl ViewSet {
     ///
     /// The prefix may or may not end with `/` — both `/api/posts` and
     /// `/api/posts/` work identically.
-    pub fn router(self, prefix: &str, pool: PgPool) -> Router {
+    #[cfg(feature = "postgres")]
+    pub fn router(self, prefix: &str, pool: crate::sql::sqlx::PgPool) -> Router {
         Self::router_with_source(self, prefix, PoolSource::Static(pool))
+    }
+
+    /// v0.38 — tri-dialect counterpart of [`Self::router`] that
+    /// accepts the backend-erasing [`crate::sql::Pool`] enum. Sqlite/
+    /// MySQL projects use this; PG projects can still use either.
+    pub fn router_pool(self, prefix: &str, pool: crate::sql::Pool) -> Router {
+        Self::router_with_source(self, prefix, PoolSource::StaticPool(pool))
     }
 
     /// Build a router that resolves the database connection per
@@ -426,7 +449,12 @@ impl ViewSet {
 /// extraction (the v0.30 [`ViewSet::tenant_router`] path).
 #[derive(Clone)]
 enum PoolSource {
-    Static(PgPool),
+    /// PG-typed static pool (back-compat for the `router(prefix, &PgPool)` path).
+    #[cfg(feature = "postgres")]
+    Static(crate::sql::sqlx::PgPool),
+    /// Backend-erasing static pool — accepts any dialect; used by
+    /// `router_pool(prefix, &Pool)`.
+    StaticPool(crate::sql::Pool),
     /// Tenant mode — each handler resolves a connection via the
     /// [`crate::extractors::Tenant`] extractor at request time. We
     /// can't bake a `&PgPool` because schema-mode tenants need
@@ -448,84 +476,102 @@ struct ViewSetState {
 /// returned wrapper exposes `select_rows` / `count_rows` /
 /// `insert_returning` / `update` / `delete` / `has_perm` facade
 /// methods so handler bodies stay free of pool-source branching.
-enum AcquiredConn {
-    Static(PgPool),
+/// v0.38 — `Pool` enum wraps either the static-mode pool or the
+/// tenant-scoped pool yielded by `Tenant<DB>::pool()`. Schema-mode
+/// PG tenants go through the search-path-bound pool that
+/// `TenantPools::scoped_pool_dyn` builds; database-mode tenants
+/// (any backend) clone the cached pool.
+struct AcquiredConn {
+    pool: Pool,
+    /// Kept alive so PG schema-mode connections aren't released
+    /// before the handler is done.
     #[cfg(feature = "tenancy")]
-    Tenant(Box<crate::extractors::Tenant>),
+    #[allow(dead_code)]
+    _tenant: Option<Box<crate::extractors::Tenant>>,
 }
 
 impl AcquiredConn {
-    async fn select_rows(
+    async fn select_rows_as_json(
         &mut self,
         q: &SelectQuery,
-    ) -> Result<Vec<crate::sql::sqlx::postgres::PgRow>, crate::sql::ExecError> {
-        match self {
-            Self::Static(pool) => crate::sql::select_rows_on(&*pool, q).await,
-            #[cfg(feature = "tenancy")]
-            Self::Tenant(t) => crate::sql::select_rows_on(t.conn(), q).await,
-        }
+        fields: &[&'static crate::core::FieldSchema],
+    ) -> Result<Vec<Value>, crate::sql::ExecError> {
+        crate::sql::select_rows_as_json_pool(&self.pool, q, fields).await
     }
 
     async fn count_rows(&mut self, q: &CountQuery) -> Result<i64, crate::sql::ExecError> {
-        match self {
-            Self::Static(pool) => crate::sql::count_rows_on(&*pool, q).await,
-            #[cfg(feature = "tenancy")]
-            Self::Tenant(t) => crate::sql::count_rows_on(t.conn(), q).await,
-        }
+        crate::sql::count_rows_pool(&self.pool, q).await
     }
 
-    async fn select_one_row(
+    async fn select_one_as_json(
         &mut self,
         q: &SelectQuery,
-    ) -> Result<Option<crate::sql::sqlx::postgres::PgRow>, crate::sql::ExecError> {
-        match self {
-            Self::Static(pool) => crate::sql::select_one_row_on(&*pool, q).await,
-            #[cfg(feature = "tenancy")]
-            Self::Tenant(t) => crate::sql::select_one_row_on(t.conn(), q).await,
-        }
+        fields: &[&'static crate::core::FieldSchema],
+    ) -> Result<Option<Value>, crate::sql::ExecError> {
+        let mut rows = crate::sql::select_rows_as_json_pool(&self.pool, q, fields).await?;
+        Ok(rows.pop())
     }
 
-    async fn insert_returning(
+    /// Insert a row and return the primary-key value of the new row
+    /// (per-backend: PG/SQLite use RETURNING, MySQL uses
+    /// LAST_INSERT_ID()).
+    async fn insert_returning_pk(
         &mut self,
         q: &InsertQuery,
-    ) -> Result<crate::sql::sqlx::postgres::PgRow, crate::sql::ExecError> {
-        match self {
-            Self::Static(pool) => crate::sql::insert_returning_on(&*pool, q).await,
-            #[cfg(feature = "tenancy")]
-            Self::Tenant(t) => crate::sql::insert_returning_on(t.conn(), q).await,
-        }
+        pk_field: &crate::core::FieldSchema,
+    ) -> Result<SqlValue, crate::sql::ExecError> {
+        let returning = crate::sql::insert_returning_pool(&self.pool, q).await?;
+        let pk = match returning {
+            #[cfg(feature = "postgres")]
+            crate::sql::InsertReturningPool::PgRow(row) => {
+                use crate::sql::sqlx::Row as _;
+                match pk_field.ty {
+                    FieldType::I64 => SqlValue::I64(row.try_get(pk_field.column).unwrap_or(0)),
+                    FieldType::I32 => SqlValue::I32(row.try_get(pk_field.column).unwrap_or(0)),
+                    FieldType::I16 => SqlValue::I16(row.try_get(pk_field.column).unwrap_or(0)),
+                    FieldType::String => {
+                        SqlValue::String(row.try_get(pk_field.column).unwrap_or_default())
+                    }
+                    _ => SqlValue::Null,
+                }
+            }
+            #[cfg(feature = "mysql")]
+            crate::sql::InsertReturningPool::MySqlAutoId(id) => match pk_field.ty {
+                FieldType::I64 => SqlValue::I64(id),
+                FieldType::I32 => SqlValue::I32(id as i32),
+                FieldType::I16 => SqlValue::I16(id as i16),
+                _ => SqlValue::I64(id),
+            },
+            #[cfg(feature = "sqlite")]
+            crate::sql::InsertReturningPool::SqliteRow(row) => {
+                use crate::sql::sqlx::Row as _;
+                match pk_field.ty {
+                    FieldType::I64 => SqlValue::I64(row.try_get(pk_field.column).unwrap_or(0)),
+                    FieldType::I32 => SqlValue::I32(row.try_get(pk_field.column).unwrap_or(0)),
+                    FieldType::I16 => SqlValue::I16(row.try_get(pk_field.column).unwrap_or(0)),
+                    FieldType::String => {
+                        SqlValue::String(row.try_get(pk_field.column).unwrap_or_default())
+                    }
+                    _ => SqlValue::Null,
+                }
+            }
+        };
+        Ok(pk)
     }
 
     async fn update(&mut self, q: &UpdateQuery) -> Result<u64, crate::sql::ExecError> {
-        match self {
-            Self::Static(pool) => crate::sql::update_on(&*pool, q).await,
-            #[cfg(feature = "tenancy")]
-            Self::Tenant(t) => crate::sql::update_on(t.conn(), q).await,
-        }
+        crate::sql::update_pool(&self.pool, q).await
     }
 
     async fn delete(&mut self, q: &DeleteQuery) -> Result<u64, crate::sql::ExecError> {
-        match self {
-            Self::Static(pool) => crate::sql::delete_on(&*pool, q).await,
-            #[cfg(feature = "tenancy")]
-            Self::Tenant(t) => crate::sql::delete_on(t.conn(), q).await,
-        }
+        crate::sql::delete_pool(&self.pool, q).await
     }
 
     #[cfg(feature = "tenancy")]
-    async fn has_perm(
-        &mut self,
-        uid: i64,
-        codename: &str,
-    ) -> Result<bool, crate::sql::sqlx::Error> {
-        match self {
-            Self::Static(pool) => {
-                crate::tenancy::permissions::has_perm_on(uid, codename, &*pool).await
-            }
-            Self::Tenant(t) => {
-                crate::tenancy::permissions::has_perm_on(uid, codename, t.conn()).await
-            }
-        }
+    async fn has_perm(&mut self, uid: i64, codename: &str) -> bool {
+        crate::tenancy::permissions::has_perm_pool(uid, codename, &self.pool)
+            .await
+            .unwrap_or(false)
     }
 }
 
@@ -549,15 +595,29 @@ impl ViewSetState {
         parts: &mut axum::http::request::Parts,
     ) -> Result<AcquiredConn, Response> {
         match &self.pool_source {
-            PoolSource::Static(pool) => Ok(AcquiredConn::Static(pool.clone())),
+            #[cfg(feature = "postgres")]
+            PoolSource::Static(pool) => Ok(AcquiredConn {
+                pool: Pool::from(pool.clone()),
+                #[cfg(feature = "tenancy")]
+                _tenant: None,
+            }),
+            PoolSource::StaticPool(pool) => Ok(AcquiredConn {
+                pool: pool.clone(),
+                #[cfg(feature = "tenancy")]
+                _tenant: None,
+            }),
             #[cfg(feature = "tenancy")]
             PoolSource::Tenant => {
                 use axum::extract::FromRequestParts as _;
                 use axum::response::IntoResponse as _;
-                crate::extractors::Tenant::from_request_parts(parts, &())
+                let t = crate::extractors::Tenant::from_request_parts(parts, &())
                     .await
-                    .map(|t| AcquiredConn::Tenant(Box::new(t)))
-                    .map_err(|e| e.into_response())
+                    .map_err(|e| e.into_response())?;
+                let pool = t.pool().clone();
+                Ok(AcquiredConn {
+                    pool,
+                    _tenant: Some(Box::new(t)),
+                })
             }
         }
     }
@@ -587,7 +647,7 @@ impl ViewSetState {
                 return true;
             }
             for cn in codenames {
-                if let Ok(true) = conn.has_perm(auth.id, cn).await {
+                if conn.has_perm(auth.id, cn).await {
                     return true;
                 }
             }
@@ -611,10 +671,12 @@ impl ViewSetState {
 // ------------------------------------------------------------------ Serialization
 
 /// Re-export of the shared row-to-JSON helper. Lives in
-/// `crate::sql::row_to_json` since v0.29 (#89) so contenttypes
+/// `crate::sql::row_to_json` since v0.29 (#89) — PG only; the
+/// tri-dialect viewset path uses `select_rows_as_json_pool` directly.
 /// + admin views can use it without reaching across module
 /// boundaries; this is a thin local alias for source-compat
 /// with the v0.28 callsite shape.
+#[cfg(feature = "postgres")]
 pub(crate) use crate::sql::row_to_json;
 
 fn json_response(body: Value) -> Response {
@@ -860,18 +922,21 @@ async fn handle_list(
             // keeps the handler simple — two short queries on the
             // same connection are typically faster than two pool
             // round-trips anyway.
-            let rows = match acq.select_rows(&select_q).await {
+            // v0.38 — fetch as JSON directly via the tri-dialect
+            // `select_rows_as_json_pool`; the optional row_render
+            // closure (PG-only, requires PgRow) is no longer applied
+            // here because the AcquiredConn is dialect-agnostic. PG
+            // projects that want the serializer extension can still
+            // mount the legacy `.serializer()` path under a separate
+            // builder if needed; default JSON projection is now
+            // tri-dialect.
+            let results = match acq.select_rows_as_json(&select_q, &fields).await {
                 Ok(r) => r,
                 Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
             };
             let count = match acq.count_rows(&count_q).await {
                 Ok(c) => c,
                 Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-            };
-
-            let results: Vec<Value> = match &state.vs.row_render {
-                Some(render) => rows.iter().map(|r| (render)(r)).collect(),
-                None => rows.iter().map(|row| row_to_json(row, &fields)).collect(),
             };
             let last_page = ((count - 1).max(0) / page_size) + 1;
             json_response(json!({
@@ -976,45 +1041,31 @@ async fn handle_list_cursor(
         limit: Some(page_size + 1),
         offset: None,
     };
-    let rows = match acq.select_rows(&select_q).await {
+    let rows = match acq.select_rows_as_json(&select_q, &fields).await {
         Ok(r) => r,
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
 
     let has_more = rows.len() as i64 > page_size;
-    let page_rows = if has_more {
+    let page_rows: &[Value] = if has_more {
         &rows[..page_size as usize]
     } else {
         &rows[..]
     };
 
     let next_cursor = if has_more {
-        // Read the cursor field value from the last row in this page
+        // Read the cursor field value from the last JSON row.
         let last = page_rows.last().expect("non-empty page");
-        let val: i64 = match cursor_schema.ty {
-            FieldType::I16 => last
-                .try_get::<i16, _>(cursor_schema.column)
-                .map(i64::from)
-                .unwrap_or(0),
-            FieldType::I32 => last
-                .try_get::<i32, _>(cursor_schema.column)
-                .map(i64::from)
-                .unwrap_or(0),
-            FieldType::I64 => last.try_get::<i64, _>(cursor_schema.column).unwrap_or(0),
-            _ => 0,
-        };
+        let val: i64 = last
+            .get(cursor_schema.name)
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         Some(encode_cursor(val))
     } else {
         None
     };
 
-    let results: Vec<Value> = match &state.vs.row_render {
-        Some(render) => page_rows.iter().map(|r| (render)(r)).collect(),
-        None => page_rows
-            .iter()
-            .map(|row| row_to_json(row, &fields))
-            .collect(),
-    };
+    let results: Vec<Value> = page_rows.to_vec();
     json_response(json!({
         "page_size": page_size,
         "next": next_cursor,
@@ -1081,11 +1132,8 @@ async fn handle_retrieve(
     };
 
     let fields = state.effective_fields();
-    match acq.select_one_row(&select_q).await {
-        Ok(Some(row)) => match &state.vs.row_render {
-            Some(render) => json_response((render)(&row)),
-            None => json_response(row_to_json(&row, &fields)),
-        },
+    match acq.select_one_as_json(&select_q, &fields).await {
+        Ok(Some(row)) => json_response(row),
         Ok(None) => json_error(StatusCode::NOT_FOUND, "not found"),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -1143,17 +1191,9 @@ async fn handle_create(
         on_conflict: None,
     };
 
-    let row = match acq.insert_returning(&query).await {
-        Ok(r) => r,
+    let pk_val = match acq.insert_returning_pk(&query, pk_field).await {
+        Ok(v) => v,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-    };
-
-    // Fetch the full object to return it
-    let pk_val = match pk_field.ty {
-        FieldType::I64 => SqlValue::I64(row.try_get(pk_field.column).unwrap_or(0)),
-        FieldType::I32 => SqlValue::I32(row.try_get(pk_field.column).unwrap_or(0)),
-        FieldType::I16 => SqlValue::I16(row.try_get(pk_field.column).unwrap_or(0)),
-        _ => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "unsupported PK type"),
     };
     let fields = state.effective_fields();
     match fetch_by_pk(&state, &mut acq, pk_field, pk_val, &fields).await {
@@ -1325,14 +1365,11 @@ async fn fetch_by_pk(
         limit: Some(1),
         offset: None,
     };
-    acq.select_one_row(&select_q)
+    let _ = state;
+    acq.select_one_as_json(&select_q, fields)
         .await
         .ok()
         .flatten()
-        .map(|row| match &state.vs.row_render {
-            Some(render) => (render)(&row),
-            None => row_to_json(&row, fields),
-        })
 }
 
 /// Extract form data from both `application/x-www-form-urlencoded` and

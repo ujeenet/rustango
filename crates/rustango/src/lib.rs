@@ -772,13 +772,17 @@ pub mod extractors;
 /// DRF-style ModelViewSet — five REST endpoints for any [`Model`] table
 /// in ~5 lines. See [`viewset::ViewSet`].
 ///
-/// v0.38 — internal `_on` query helpers are bound to
-/// `Database = Postgres` at the executor layer, so the ViewSet itself
-/// stays PG-typed. Sqlite/MySQL projects mount their own REST routes
-/// against `Tenant<DB>` (lifted in slice 10) + the ORM `_pool`
-/// helpers; the auto-generated five-endpoint ViewSet bundle waits for
-/// a generic `_on_db<DB>` lift.
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+/// v0.38 — fully tri-dialect. Internal queries route through
+/// `select_rows_as_json_pool` + `insert_returning_pool` etc., so the
+/// same ViewSet body runs on PG / MySQL / SQLite. The `.serializer()`
+/// row-render extension stays PG-only because it decodes via
+/// `T::from_row(&PgRow)`; non-PG ViewSets use the default field-level
+/// JSON projection.
+///
+/// The `router(prefix, &PgPool)` (static-pool) entry point keeps its
+/// PG-typed pool arg for source-compat; `tenant_router(prefix)`
+/// works on every dialect via the generic Tenant<DB>.pool() path.
+#[cfg(feature = "tenancy")]
 pub mod viewset;
 
 /// Generic class-based views for HTML templates (Django-shape) —
