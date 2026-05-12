@@ -403,6 +403,100 @@ pub async fn has_perm(uid: i64, codename: &str, pool: &PgPool) -> Result<bool, s
     has_perm_on(uid, codename, pool).await
 }
 
+/// v0.38 — tri-dialect counterpart of [`has_perm`]. Trades the single
+/// CTE round-trip for three ORM queries (user-info, explicit grant,
+/// role-via grant) — each an indexed lookup, total cost ≈ 3× the
+/// CTE in latency but portable across PG/MySQL/SQLite without
+/// dialect-specific `TRUE`/`FALSE` literals or array binding.
+///
+/// Resolution order is identical to [`has_perm`]:
+/// 1. Superuser → true
+/// 2. Explicit per-user denial (`granted = false`) → false
+/// 3. Explicit per-user grant (`granted = true`) → true
+/// 4. Any role the user belongs to grants `codename` → true
+/// 5. Default → false
+///
+/// # Errors
+/// Driver / SQL failures.
+pub async fn has_perm_pool(
+    uid: i64,
+    codename: &str,
+    pool: &crate::sql::Pool,
+) -> Result<bool, TenancyError> {
+    use sqlx::Row as _;
+    let dialect = pool.dialect();
+    let users_t = dialect.quote_ident("rustango_users");
+    let user_perms_t = dialect.quote_ident("rustango_user_permissions");
+    let user_roles_t = dialect.quote_ident("rustango_user_roles");
+    let role_perms_t = dialect.quote_ident("rustango_role_permissions");
+    let p1 = dialect.placeholder(1);
+    let p2 = dialect.placeholder(2);
+    let true_lit = dialect.bool_literal(true);
+    let false_lit = dialect.bool_literal(false);
+    // Single round-trip — equivalent CTE shape to the PG `has_perm`,
+    // but with dialect-emitted bool literals (TRUE/FALSE on PG/MySQL,
+    // 1/0 on SQLite) and `?`/`$N` placeholders. Returns one row.
+    let sql = format!(
+        "SELECT \
+            COALESCE((SELECT is_superuser FROM {users_t} \
+                      WHERE id = {p1} AND active = {true_lit}), {false_lit}) AS is_super, \
+            (SELECT granted FROM {user_perms_t} \
+                WHERE user_id = {p1} AND codename = {p2}) AS explicit_grant, \
+            EXISTS(SELECT 1 FROM {user_roles_t} ur \
+                   JOIN {role_perms_t} rp ON rp.role_id = ur.role_id \
+                   WHERE ur.user_id = {p1} AND rp.codename = {p2}) AS via_role"
+    );
+    let (is_super, explicit_grant, via_role) = match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let row = sqlx::query(&sql)
+                .bind(uid)
+                .bind(codename)
+                .fetch_one(pg)
+                .await?;
+            (
+                row.try_get::<bool, _>("is_super").unwrap_or(false),
+                row.try_get::<Option<bool>, _>("explicit_grant")
+                    .unwrap_or(None),
+                row.try_get::<bool, _>("via_role").unwrap_or(false),
+            )
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            let row = sqlx::query(&sql)
+                .bind(uid)
+                .bind(codename)
+                .fetch_one(my)
+                .await?;
+            // MySQL's EXISTS returns 0/1 as i64, BOOLEAN is TINYINT(1).
+            let is_super: i64 = row.try_get("is_super").unwrap_or(0);
+            let explicit: Option<i64> = row.try_get("explicit_grant").unwrap_or(None);
+            let via_role: i64 = row.try_get("via_role").unwrap_or(0);
+            (is_super != 0, explicit.map(|v| v != 0), via_role != 0)
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => {
+            let row = sqlx::query(&sql)
+                .bind(uid)
+                .bind(codename)
+                .fetch_one(sq)
+                .await?;
+            // SQLite bools come back as i64; explicit_grant nullable.
+            let is_super: i64 = row.try_get("is_super").unwrap_or(0);
+            let explicit: Option<i64> = row.try_get("explicit_grant").unwrap_or(None);
+            let via_role: i64 = row.try_get("via_role").unwrap_or(0);
+            (is_super != 0, explicit.map(|v| v != 0), via_role != 0)
+        }
+    };
+    if is_super {
+        return Ok(true);
+    }
+    if let Some(granted) = explicit_grant {
+        return Ok(granted);
+    }
+    Ok(via_role)
+}
+
 /// Like [`has_perm`] but accepts any sqlx executor. The
 /// [`crate::viewset::ViewSet::tenant_router`] path uses this with the
 /// per-request `&mut PgConnection` from

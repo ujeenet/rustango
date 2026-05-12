@@ -36,7 +36,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 
-use crate::sql::sqlx::PgPool;
+use crate::sql::Pool;
 
 use super::auth_backends::{AuthError, AuthUser, BoxedBackend};
 use super::permissions;
@@ -94,14 +94,14 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentUser {
 #[derive(Clone)]
 struct AuthState {
     backends: Arc<Vec<BoxedBackend>>,
-    pool: PgPool,
+    pool: Pool,
     required: bool, // false = optional_auth
 }
 
 #[derive(Clone)]
 struct PermState {
     codename: &'static str,
-    pool: PgPool,
+    pool: Pool,
 }
 
 // ------------------------------------------------------------------ Middleware handlers
@@ -127,14 +127,8 @@ async fn auth_middleware(
     let mut authenticated: Option<AuthUser> = None;
     let mut error_response: Option<Response> = None;
 
-    // v0.38 — bridge to the tri-dialect `AuthBackend::authenticate`
-    // signature. AuthState.pool stays `PgPool` until slice 3c lifts
-    // the whole middleware state to `Pool`; for now wrap the per-
-    // request handle into a `Pool::Postgres` enum so the trait call
-    // typechecks. Cheap clone (PgPool is Arc-backed internally).
-    let pool_enum: crate::sql::Pool = state.pool.clone().into();
     for backend in state.backends.iter() {
-        match backend.authenticate(&dummy_parts, &pool_enum).await {
+        match backend.authenticate(&dummy_parts, &state.pool).await {
             Ok(Some(user)) => {
                 authenticated = Some(user);
                 break;
@@ -176,7 +170,7 @@ async fn perm_middleware(
     let Some(user) = user else {
         return (StatusCode::UNAUTHORIZED, "authentication required").into_response();
     };
-    let ok = permissions::has_perm(user.id, state.codename, &state.pool)
+    let ok = permissions::has_perm_pool(user.id, state.codename, &state.pool)
         .await
         .unwrap_or(false);
     if !ok {
@@ -202,20 +196,20 @@ async fn perm_middleware(
 pub trait RouterAuthExt<S> {
     /// Require a valid identity for all routes in this router. Injects
     /// [`AuthenticatedUser`] into extensions on success; returns 401 on failure.
-    fn require_auth(self, backends: Vec<BoxedBackend>, pool: PgPool) -> Self;
+    fn require_auth(self, backends: Vec<BoxedBackend>, pool: Pool) -> Self;
 
     /// Like [`require_auth`] but does NOT return 401 for anonymous requests.
     /// Useful for routes that serve both authenticated and anonymous users.
-    fn optional_auth(self, backends: Vec<BoxedBackend>, pool: PgPool) -> Self;
+    fn optional_auth(self, backends: Vec<BoxedBackend>, pool: Pool) -> Self;
 
     /// Require `codename` permission on the already-resolved
     /// [`AuthenticatedUser`]. Must be placed inside (closer to handlers
     /// than) a `require_auth` layer.
-    fn require_perm(self, codename: &'static str, pool: PgPool) -> Self;
+    fn require_perm(self, codename: &'static str, pool: Pool) -> Self;
 }
 
 impl<S: Clone + Send + Sync + 'static> RouterAuthExt<S> for Router<S> {
-    fn require_auth(self, backends: Vec<BoxedBackend>, pool: PgPool) -> Self {
+    fn require_auth(self, backends: Vec<BoxedBackend>, pool: Pool) -> Self {
         let state = AuthState {
             backends: Arc::new(backends),
             pool,
@@ -224,7 +218,7 @@ impl<S: Clone + Send + Sync + 'static> RouterAuthExt<S> for Router<S> {
         self.layer(axum::middleware::from_fn_with_state(state, auth_middleware))
     }
 
-    fn optional_auth(self, backends: Vec<BoxedBackend>, pool: PgPool) -> Self {
+    fn optional_auth(self, backends: Vec<BoxedBackend>, pool: Pool) -> Self {
         let state = AuthState {
             backends: Arc::new(backends),
             pool,
@@ -233,7 +227,7 @@ impl<S: Clone + Send + Sync + 'static> RouterAuthExt<S> for Router<S> {
         self.layer(axum::middleware::from_fn_with_state(state, auth_middleware))
     }
 
-    fn require_perm(self, codename: &'static str, pool: PgPool) -> Self {
+    fn require_perm(self, codename: &'static str, pool: Pool) -> Self {
         let state = PermState { codename, pool };
         self.layer(axum::middleware::from_fn_with_state(state, perm_middleware))
     }
