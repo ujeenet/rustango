@@ -127,8 +127,14 @@ async fn auth_middleware(
     let mut authenticated: Option<AuthUser> = None;
     let mut error_response: Option<Response> = None;
 
+    // v0.38 — bridge to the tri-dialect `AuthBackend::authenticate`
+    // signature. AuthState.pool stays `PgPool` until slice 3c lifts
+    // the whole middleware state to `Pool`; for now wrap the per-
+    // request handle into a `Pool::Postgres` enum so the trait call
+    // typechecks. Cheap clone (PgPool is Arc-backed internally).
+    let pool_enum: crate::sql::Pool = state.pool.clone().into();
     for backend in state.backends.iter() {
-        match backend.authenticate(&dummy_parts, &state.pool).await {
+        match backend.authenticate(&dummy_parts, &pool_enum).await {
             Ok(Some(user)) => {
                 authenticated = Some(user);
                 break;

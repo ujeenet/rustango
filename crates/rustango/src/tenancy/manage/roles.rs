@@ -266,12 +266,13 @@ pub(super) async fn create_api_key_cmd<W: Write + Send>(
     }
 
     let pool = tenant_pool_for_slug(pools, &slug).await?;
-    auth_backends::ensure_api_keys_table(&pool)
+    let pool_enum: crate::sql::Pool = pool.clone().into();
+    auth_backends::ensure_api_keys_table_pool(&pool_enum)
         .await
         .map_err(TenancyError::Driver)?;
     let user_id = user_id_by_username(&username, &pool).await?;
     let expires_at = expires_days.map(|d| chrono::Utc::now() + chrono::Duration::days(d));
-    let token = auth_backends::create_api_key(user_id, &label, expires_at, &pool).await?;
+    let token = auth_backends::create_api_key(user_id, &label, expires_at, &pool_enum).await?;
 
     writeln!(w, "API key for `{username}` on tenant `{slug}`:")?;
     writeln!(w, "  {token}")?;

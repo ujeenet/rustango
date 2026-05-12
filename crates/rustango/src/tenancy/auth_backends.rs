@@ -38,7 +38,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::http::request::Parts;
 
-use crate::sql::sqlx::{self, PgPool, Row};
+use crate::sql::sqlx;
+use crate::sql::Pool;
 
 use super::auth::parse_basic_auth;
 use super::password;
@@ -82,11 +83,8 @@ pub enum AuthError {
 /// - `Err(_)` — hard failure (wrong password, expired token, DB error).
 #[async_trait]
 pub trait AuthBackend: Send + Sync {
-    async fn authenticate(
-        &self,
-        parts: &Parts,
-        pool: &PgPool,
-    ) -> Result<Option<AuthUser>, AuthError>;
+    async fn authenticate(&self, parts: &Parts, pool: &Pool)
+        -> Result<Option<AuthUser>, AuthError>;
 }
 
 /// Heap-allocated dyn backend.
@@ -105,10 +103,10 @@ impl AuthBackend for ModelBackend {
     async fn authenticate(
         &self,
         parts: &Parts,
-        pool: &PgPool,
+        pool: &Pool,
     ) -> Result<Option<AuthUser>, AuthError> {
         use crate::core::Column as _;
-        use crate::sql::Fetcher as _;
+        use crate::sql::FetcherPool as _;
 
         let auth_header = parts
             .headers
@@ -122,7 +120,7 @@ impl AuthBackend for ModelBackend {
 
         let users = super::auth::User::objects()
             .where_(super::auth::User::username.eq(username.clone()))
-            .fetch(pool)
+            .fetch_pool(pool)
             .await?;
 
         let Some(user) = users.into_iter().next() else {
@@ -204,17 +202,81 @@ CREATE TABLE IF NOT EXISTS "rustango_api_keys" (
 );
 "#;
 
+/// v0.38 — SQLite counterpart of [`API_KEY_ENSURE_SQL`]. Same column
+/// shape, SQLite affinities. `NOW()` → `CURRENT_TIMESTAMP`.
+const API_KEY_ENSURE_SQL_SQLITE: &str = r#"
+CREATE TABLE IF NOT EXISTS "rustango_api_keys" (
+    "id"         INTEGER PRIMARY KEY AUTOINCREMENT,
+    "user_id"    INTEGER NOT NULL
+                          REFERENCES "rustango_users"("id")
+                          ON DELETE CASCADE,
+    "key_prefix" TEXT    NOT NULL,
+    "key_hash"   TEXT    NOT NULL,
+    "label"      TEXT    NOT NULL DEFAULT '',
+    "expires_at" TEXT,
+    "created_at" TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "rustango_api_keys_prefix_uq" UNIQUE ("key_prefix")
+);
+"#;
+
+/// v0.38 — MySQL counterpart of [`API_KEY_ENSURE_SQL`]. Backticks +
+/// `BIGINT AUTO_INCREMENT PRIMARY KEY` + `DATETIME(6)` for the
+/// timestamp columns + `CURRENT_TIMESTAMP(6)` default.
+const API_KEY_ENSURE_SQL_MYSQL: &str = r#"
+CREATE TABLE IF NOT EXISTS `rustango_api_keys` (
+    `id`         BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `user_id`    BIGINT       NOT NULL,
+    `key_prefix` VARCHAR(8)   NOT NULL,
+    `key_hash`   VARCHAR(255) NOT NULL,
+    `label`      VARCHAR(100) NOT NULL DEFAULT '',
+    `expires_at` DATETIME(6),
+    `created_at` DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    CONSTRAINT `rustango_api_keys_prefix_uq` UNIQUE (`key_prefix`),
+    CONSTRAINT `rustango_api_keys_fk_user`
+        FOREIGN KEY (`user_id`) REFERENCES `rustango_users`(`id`) ON DELETE CASCADE
+);
+"#;
+
 /// Create the `rustango_api_keys` table if it doesn't exist.
+///
+/// PG-typed back-compat for legacy callers; new code should use
+/// [`ensure_api_keys_table_pool`] which picks the right per-dialect
+/// DDL constant via `pool.dialect().name()`.
 ///
 /// # Errors
 /// Driver failures.
-pub async fn ensure_api_keys_table(pool: &PgPool) -> Result<(), sqlx::Error> {
+#[cfg(feature = "postgres")]
+pub async fn ensure_api_keys_table(pool: &crate::sql::sqlx::PgPool) -> Result<(), sqlx::Error> {
     for stmt in API_KEY_ENSURE_SQL
         .split(';')
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
         sqlx::query(stmt).execute(pool).await?;
+    }
+    Ok(())
+}
+
+/// v0.38 — tri-dialect counterpart of [`ensure_api_keys_table`].
+/// Picks the per-dialect DDL constant based on `pool.dialect().name()`
+/// and runs each statement separately (sqlx's simple-prepare rejects
+/// multi-statement strings).
+///
+/// # Errors
+/// Driver / SQL failures from `CREATE TABLE IF NOT EXISTS`.
+pub async fn ensure_api_keys_table_pool(pool: &Pool) -> Result<(), sqlx::Error> {
+    let ddl = match pool.dialect().name() {
+        "sqlite" => API_KEY_ENSURE_SQL_SQLITE,
+        "mysql" => API_KEY_ENSURE_SQL_MYSQL,
+        _ => API_KEY_ENSURE_SQL,
+    };
+    for stmt in ddl.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        crate::sql::raw_execute_pool(pool, stmt, Vec::new())
+            .await
+            .map_err(|e| match e {
+                crate::sql::ExecError::Driver(err) => err,
+                other => sqlx::Error::Protocol(format!("{other}")),
+            })?;
     }
     Ok(())
 }
@@ -230,8 +292,11 @@ impl AuthBackend for ApiKeyBackend {
     async fn authenticate(
         &self,
         parts: &Parts,
-        pool: &PgPool,
+        pool: &Pool,
     ) -> Result<Option<AuthUser>, AuthError> {
+        use crate::core::Column as _;
+        use crate::sql::FetcherPool as _;
+
         let bearer = extract_bearer(parts)?;
         let Some(token) = bearer else {
             return Ok(None);
@@ -247,44 +312,46 @@ impl AuthBackend for ApiKeyBackend {
             return Ok(None);
         }
 
-        let row = sqlx::query(
-            r#"SELECT ak.key_hash, ak.expires_at,
-                      u.id, u.username, u.is_superuser, u.active
-               FROM   "rustango_api_keys" ak
-               JOIN   "rustango_users" u ON u.id = ak.user_id
-               WHERE  ak.key_prefix = $1"#,
-        )
-        .bind(prefix)
-        .fetch_optional(pool)
-        .await?;
-
-        let Some(row) = row else {
+        // v0.38 — replaced the hand-rolled JOIN with two ORM round-
+        // trips because tri-dialect sqlx doesn't expose a portable
+        // raw-row decode path (PgRow/MySqlRow/SqliteRow are distinct
+        // types). One round-trip per ApiKey lookup + one per user
+        // resolve; both indexed (key_prefix UNIQUE + id PK) so the
+        // total latency on the hot path is two index seeks.
+        let keys = ApiKey::objects()
+            .where_(ApiKey::key_prefix.eq(prefix.to_owned()))
+            .fetch_pool(pool)
+            .await?;
+        let Some(key) = keys.into_iter().next() else {
             return Ok(None);
         };
 
-        let expires_at: Option<chrono::DateTime<chrono::Utc>> =
-            row.try_get("expires_at").unwrap_or(None);
-        if let Some(exp) = expires_at {
+        if let Some(exp) = key.expires_at {
             if chrono::Utc::now() > exp {
                 return Err(AuthError::InvalidToken);
             }
         }
 
-        let active: bool = row.try_get("active").unwrap_or(false);
-        if !active {
-            return Err(AuthError::Inactive);
-        }
-
-        let stored_hash: String = row.try_get("key_hash").unwrap_or_default();
-        let ok = password::verify(secret, &stored_hash).map_err(|_| AuthError::InvalidToken)?;
+        let ok = password::verify(secret, &key.key_hash).map_err(|_| AuthError::InvalidToken)?;
         if !ok {
             return Ok(None);
         }
 
+        let users = super::auth::User::objects()
+            .where_(super::auth::User::id.eq(key.user_id))
+            .fetch_pool(pool)
+            .await?;
+        let Some(user) = users.into_iter().next() else {
+            return Ok(None);
+        };
+        if !user.active {
+            return Err(AuthError::Inactive);
+        }
+
         Ok(Some(AuthUser {
-            id: row.try_get("id")?,
-            username: row.try_get("username")?,
-            is_superuser: row.try_get("is_superuser").unwrap_or(false),
+            id: user.id.get().copied().unwrap_or(0),
+            username: user.username,
+            is_superuser: user.is_superuser,
         }))
     }
 }
@@ -298,7 +365,7 @@ pub async fn create_api_key(
     user_id: i64,
     label: &str,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    pool: &PgPool,
+    pool: &Pool,
 ) -> Result<String, crate::tenancy::error::TenancyError> {
     use crate::sql::Auto;
     use rand::Rng;
@@ -321,7 +388,7 @@ pub async fn create_api_key(
         expires_at,
         created_at: Auto::default(),
     };
-    key.save_on(pool).await?;
+    key.save_pool(pool).await?;
 
     Ok(format!("{prefix}.{secret}"))
 }
@@ -404,10 +471,10 @@ impl AuthBackend for JwtBackend {
     async fn authenticate(
         &self,
         parts: &Parts,
-        pool: &PgPool,
+        pool: &Pool,
     ) -> Result<Option<AuthUser>, AuthError> {
         use crate::core::Column as _;
-        use crate::sql::Fetcher as _;
+        use crate::sql::FetcherPool as _;
 
         let bearer = extract_bearer(parts)?;
         let Some(token) = bearer else {
@@ -431,7 +498,7 @@ impl AuthBackend for JwtBackend {
 
         let users = super::auth::User::objects()
             .where_(super::auth::User::id.eq(user_id))
-            .fetch(pool)
+            .fetch_pool(pool)
             .await?;
 
         let Some(user) = users.into_iter().next() else {
