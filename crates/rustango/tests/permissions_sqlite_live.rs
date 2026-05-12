@@ -325,3 +325,79 @@ async fn typed_facade_has_perm_for_model_pool_routes_through_codename() {
         .expect("has typed delete after revoke");
     assert!(!gone, "after typed revoke the perm should be gone");
 }
+
+#[tokio::test]
+async fn typed_facade_set_and_clear_user_perm_for_model_pool() {
+    // Coverage for `set_user_perm_for_model_pool` +
+    // `clear_user_perm_for_model_pool` — the typed counterparts of
+    // `set_user_perm_pool` / `clear_user_perm_pool` slice 25 helpers.
+    let pool = sqlite_pool().await;
+    let uid = make_user(&pool, "ivy_set_clear_typed").await;
+
+    // Explicit grant via the typed facade.
+    rustango::permissions::set_user_perm_for_model_pool::<Post>(uid, "approve", true, &pool)
+        .await
+        .expect("set_user_perm_for_model_pool grant");
+    let ok = rustango::permissions::has_perm_for_model_pool::<Post>(uid, "approve", &pool)
+        .await
+        .expect("has after grant");
+    assert!(ok, "typed grant should win when no role denies");
+
+    // Flip to denial.
+    rustango::permissions::set_user_perm_for_model_pool::<Post>(uid, "approve", false, &pool)
+        .await
+        .expect("set_user_perm_for_model_pool deny");
+    let denied = rustango::permissions::has_perm_for_model_pool::<Post>(uid, "approve", &pool)
+        .await
+        .expect("has after deny");
+    assert!(!denied, "explicit denial should flip the answer");
+
+    // Clear via typed facade.
+    rustango::permissions::clear_user_perm_for_model_pool::<Post>(uid, "approve", &pool)
+        .await
+        .expect("clear_user_perm_for_model_pool");
+    let gone = rustango::permissions::has_perm_for_model_pool::<Post>(uid, "approve", &pool)
+        .await
+        .expect("has after clear");
+    assert!(!gone, "after clear with no role, user has no perm");
+}
+
+#[tokio::test]
+async fn auto_create_permissions_pool_seeds_codenames_on_sqlite() {
+    // Coverage for `auto_create_permissions_pool`, slice 25. Walks the
+    // global inventory and inserts a row into `rustango_permissions`
+    // for every `(table, action)` pair from every `#[derive(Model)]`
+    // that opts into permissions. Idempotent — re-running is a no-op.
+    let pool = sqlite_pool().await;
+    rustango::tenancy::permissions::auto_create_permissions_pool(&pool)
+        .await
+        .expect("auto_create_permissions_pool");
+    // Spot-check: the four CRUD codenames for the local Post model
+    // should have landed.
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!()
+    };
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM rustango_permissions WHERE table_name = ?")
+            .bind("perm_sqlite_blog_post")
+            .fetch_one(sq)
+            .await
+            .expect("count");
+    assert!(
+        count >= 4,
+        "expected ≥4 codenames for Post (add/change/delete/view), got {count}"
+    );
+    // Idempotency: second call inserts nothing new.
+    let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rustango_permissions")
+        .fetch_one(sq)
+        .await
+        .expect("count before");
+    rustango::tenancy::permissions::auto_create_permissions_pool(&pool)
+        .await
+        .expect("idempotent second call");
+    let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rustango_permissions")
+        .fetch_one(sq)
+        .await
+        .expect("count after");
+    assert_eq!(before, after, "second seed should be a no-op");
+}

@@ -89,6 +89,57 @@ async fn dispatch_persists_and_runs_on_sqlite() {
 }
 
 #[tokio::test]
+async fn reclaim_stuck_jobs_pool_resets_old_locks_on_sqlite() {
+    // Coverage for `reclaim_stuck_jobs_pool` — slice 27. Resets
+    // `locked_at = NULL` on any row whose lock is older than the
+    // threshold. Used in production as a periodic sweep.
+    let pool = sqlite_pool().await;
+    // Manually insert a stuck row with locked_at well in the past.
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!()
+    };
+    sqlx::query(
+        "INSERT INTO rustango_jobs (name, payload, max_attempts, run_at, locked_at, locked_by) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind("stuck:demo")
+    .bind("{}")
+    .bind(5_i32)
+    .bind("2026-01-01T00:00:00.000Z")
+    .bind("2026-01-01T00:00:00.000Z")
+    .bind("crashed_worker")
+    .execute(sq)
+    .await
+    .expect("seed stuck row");
+
+    // Sweep with a 1-second threshold — the row's lock is hours old,
+    // so it should be reclaimed.
+    let reclaimed = PgJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(1))
+        .await
+        .expect("reclaim_stuck_jobs_pool");
+    assert_eq!(reclaimed, 1, "should have reclaimed the one stuck row");
+
+    // Verify locked_at is now NULL.
+    let locked_at: Option<String> =
+        sqlx::query_scalar("SELECT locked_at FROM rustango_jobs WHERE name = ?")
+            .bind("stuck:demo")
+            .fetch_one(sq)
+            .await
+            .expect("fetch locked_at");
+    assert!(
+        locked_at.is_none(),
+        "locked_at should be NULL after reclaim"
+    );
+
+    // Second call with the same threshold is a no-op (no rows left to
+    // reclaim).
+    let again = PgJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(1))
+        .await
+        .expect("second sweep");
+    assert_eq!(again, 0, "no stuck rows on second sweep");
+}
+
+#[tokio::test]
 async fn pending_count_decreases_as_workers_run() {
     RAN_PENDING.store(0, Ordering::SeqCst);
     let pool = sqlite_pool().await;

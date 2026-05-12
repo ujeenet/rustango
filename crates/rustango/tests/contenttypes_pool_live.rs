@@ -225,6 +225,159 @@ async fn fetch_row_as_json_pool_returns_none_for_missing_pk() {
 }
 
 #[tokio::test]
+async fn render_generic_fk_link_pool_emits_clickable_html_on_sqlite() {
+    // Coverage for `render_generic_fk_link_pool` — slice 26c. Used by
+    // the admin to render `(content_type_id, pk)` as a link. Returns
+    // graceful fallback HTML when the CT row is unknown.
+    let pool = sqlite_pool().await;
+    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
+    let ct = ContentType::for_model_pool::<Post>(&pool)
+        .await
+        .expect("for_model_pool")
+        .expect("ct row");
+    let ct_id = ct.id.get().copied().expect("ct id");
+    let gfk = rustango::contenttypes::GenericForeignKey::new(ct_id, 7);
+    let html = contenttypes::render_generic_fk_link_pool(&pool, gfk)
+        .await
+        .expect("render_generic_fk_link_pool");
+    assert!(
+        html.contains("ct_pool_live_post"),
+        "rendered link should mention the target table, got: {html}"
+    );
+    assert!(html.contains(">"), "should be HTML, got: {html}");
+    assert!(html.contains("#7"), "should mention the pk, got: {html}");
+
+    // Unknown CT id → graceful fallback HTML, not an error.
+    let fallback = contenttypes::render_generic_fk_link_pool(
+        &pool,
+        rustango::contenttypes::GenericForeignKey::new(99_999, 7),
+    )
+    .await
+    .expect("fallback ok");
+    assert!(
+        fallback.contains("ct=99999"),
+        "unknown CT should render the raw (ct, pk) tuple, got: {fallback}"
+    );
+}
+
+/// Model with an explicit `author_id: i64` soft-FK column for the
+/// prefetch tests. Separate from `Post` above so the schema field
+/// resolves at compile time.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "ct_pool_live_comment")]
+#[rustango(app = "blog_pool_live")]
+#[allow(dead_code)]
+pub struct Comment {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 200)]
+    pub body: String,
+    /// Soft FK — column lives on the row, no `rustango(fk = …)` so
+    /// the framework treats it as a plain i64.
+    pub author_id: i64,
+}
+
+#[tokio::test]
+async fn prefetch_soft_pool_groups_children_by_parent_pk_on_sqlite() {
+    // Coverage for `prefetch_soft_pool` — slice 26c. Takes a list of
+    // parent PKs + a soft-FK column name, runs one SELECT against the
+    // child table filtering `WHERE <fk_col> IN (...)`, returns a
+    // HashMap<parent_pk, Vec<Child>>.
+    use rustango::sql::sqlx::Executor as _;
+    let pool = sqlite_pool().await;
+    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
+    if let Pool::Sqlite(sq) = &pool {
+        sq.execute(
+            "CREATE TABLE IF NOT EXISTS ct_pool_live_comment (\
+                id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                body TEXT NOT NULL, \
+                author_id INTEGER NOT NULL)",
+        )
+        .await
+        .expect("create");
+        for (body, author) in [("a", 1_i64), ("b", 1_i64), ("c", 2_i64)] {
+            sqlx::query("INSERT INTO ct_pool_live_comment (body, author_id) VALUES (?, ?)")
+                .bind(body)
+                .bind(author)
+                .execute(sq)
+                .await
+                .expect("insert");
+        }
+    }
+    let grouped =
+        contenttypes::prefetch_soft_pool::<Comment, _>(&pool, &[1, 2], "author_id", |c| {
+            c.author_id
+        })
+        .await
+        .expect("prefetch_soft_pool");
+    assert_eq!(
+        grouped.get(&1).map_or(0, |v| v.len()),
+        2,
+        "author 1 has 2 comments"
+    );
+    assert_eq!(
+        grouped.get(&2).map_or(0, |v| v.len()),
+        1,
+        "author 2 has 1 comment"
+    );
+
+    // Empty parent_pks list short-circuits to empty map.
+    let empty =
+        contenttypes::prefetch_soft_pool::<Comment, _>(&pool, &[], "author_id", |c| c.author_id)
+            .await
+            .expect("empty pks");
+    assert!(empty.is_empty(), "empty parent list short-circuits");
+}
+
+#[tokio::test]
+async fn prefetch_generic_pool_hydrates_targets_on_sqlite() {
+    // Coverage for `prefetch_generic_pool` — slice 26c. Resolves the
+    // ContentType for `C`, runs one SELECT for every (ct_id, pk) pair
+    // whose ct matches, returns `HashMap<(i64, i64), C>`.
+    use rustango::sql::sqlx::Executor as _;
+    let pool = sqlite_pool().await;
+    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
+    if let Pool::Sqlite(sq) = &pool {
+        sq.execute(
+            "CREATE TABLE IF NOT EXISTS ct_pool_live_post (\
+                id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                title TEXT NOT NULL)",
+        )
+        .await
+        .expect("create");
+        sqlx::query("INSERT INTO ct_pool_live_post (title) VALUES ('hello')")
+            .execute(sq)
+            .await
+            .expect("seed row");
+    }
+    // Look up Post's CT id then ask prefetch_generic_pool to hydrate.
+    let ct = ContentType::for_model_pool::<Post>(&pool)
+        .await
+        .expect("for_model_pool")
+        .expect("ct row");
+    let ct_id = ct.id.get().copied().expect("ct id");
+    let map = contenttypes::prefetch_generic_pool::<Post>(&pool, &[(ct_id, 1)])
+        .await
+        .expect("prefetch_generic_pool");
+    assert!(
+        map.contains_key(&(ct_id, 1)),
+        "expected (ct_id, 1) in map, got keys: {:?}",
+        map.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        map.get(&(ct_id, 1)).map(|p| p.title.as_str()),
+        Some("hello"),
+        "hydrated Post should carry the seeded title"
+    );
+
+    // Empty pairs short-circuit to empty map.
+    let empty = contenttypes::prefetch_generic_pool::<Post>(&pool, &[])
+        .await
+        .expect("empty");
+    assert!(empty.is_empty(), "empty pair list should short-circuit");
+}
+
+#[tokio::test]
 async fn for_each_row_of_ct_pool_visits_seeded_rows() {
     use rustango::sql::sqlx::Executor as _;
     let pool = sqlite_pool().await;
