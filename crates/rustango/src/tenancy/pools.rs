@@ -25,15 +25,23 @@
 //! Schema-mode tenants don't consume cache slots — they always reuse
 //! the registry pool.
 
+#[cfg(feature = "postgres")]
 use std::collections::HashMap;
+#[cfg(feature = "postgres")]
 use std::sync::Arc;
 
+#[cfg(feature = "postgres")]
 use crate::sql::sqlx::postgres::{PgPool, PgPoolOptions};
+#[cfg(feature = "postgres")]
 use crate::sql::sqlx::{self, Database};
+#[cfg(feature = "postgres")]
 use tokio::sync::RwLock;
 
+#[cfg(feature = "postgres")]
 use super::error::TenancyError;
+#[cfg(feature = "postgres")]
 use super::org::{Org, StorageMode};
+#[cfg(feature = "postgres")]
 use super::secrets::{LiteralSecretsResolver, SecretsResolver};
 
 /// Configuration for [`TenantPools`].
@@ -114,6 +122,7 @@ impl Default for TenantPoolsConfig {
 /// Per-tenant errors are written to the tracing log during
 /// pre-warm; consumers needing them should subscribe to the
 /// `crate::tenancy::pools` target.
+#[cfg(feature = "postgres")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PrewarmReport {
     /// Number of active database-mode tenants the registry returned.
@@ -137,6 +146,7 @@ pub struct PrewarmReport {
 /// uses `Arc<sqlx::Pool<DB>>` so a sqlite-only or MySQL-only stack
 /// can use this enum without any Postgres dependency at the field
 /// level.
+#[cfg(feature = "postgres")]
 #[derive(Debug)]
 pub enum TenantPool<DB: Database = sqlx::Postgres> {
     /// Tenant data is in a schema in the (Postgres) registry DB. The
@@ -153,6 +163,7 @@ pub enum TenantPool<DB: Database = sqlx::Postgres> {
 
 // Manual Clone so we don't need `DB: Clone` (sqlx::Pool<DB> is
 // already cheap-Arc-clone).
+#[cfg(feature = "postgres")]
 impl<DB: Database> Clone for TenantPool<DB> {
     fn clone(&self) -> Self {
         match self {
@@ -168,6 +179,7 @@ impl<DB: Database> Clone for TenantPool<DB> {
     }
 }
 
+#[cfg(feature = "postgres")]
 impl<DB: Database> TenantPool<DB> {
     /// `true` when this tenant's data lives in a Postgres schema
     /// inside the registry DB. `false` for database mode (or any
@@ -214,6 +226,7 @@ impl TenantPool<sqlx::Postgres> {
 /// live on `impl TenantPools<sqlx::Postgres>` only — the type
 /// system forbids schema-mode on non-PG. Database-mode methods are
 /// generic and work on any backend.
+#[cfg(feature = "postgres")]
 pub struct TenantPools<DB: Database = sqlx::Postgres> {
     registry: sqlx::Pool<DB>,
     config: TenantPoolsConfig,
@@ -221,6 +234,7 @@ pub struct TenantPools<DB: Database = sqlx::Postgres> {
     cache: RwLock<HashMap<String, Arc<sqlx::Pool<DB>>>>,
 }
 
+#[cfg(feature = "postgres")]
 impl<DB: Database> TenantPools<DB> {
     /// Construct with the default `LiteralSecretsResolver` (i.e.
     /// `Org.database_url` carries the literal URL). Existing
@@ -274,6 +288,7 @@ impl TenantPools<sqlx::Postgres> {
     }
 }
 
+#[cfg(feature = "postgres")]
 impl<DB: Database> TenantPools<DB>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
@@ -294,6 +309,7 @@ where
 
 // ============================================================ generic methods (any backend)
 
+#[cfg(feature = "postgres")]
 impl<DB: Database> TenantPools<DB> {
     /// Database-mode pool for `org`. Errors on schema-mode orgs —
     /// schema-mode dispatch lives on `impl TenantPools<Postgres>`
@@ -441,6 +457,7 @@ impl<DB: Database> TenantPools<DB> {
 
 // Prewarm requires the registry to be convertible to crate::sql::Pool
 // (we read Orgs from it via the bi-dialect `fetch_pool` family).
+#[cfg(feature = "postgres")]
 impl<DB: Database> TenantPools<DB>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
@@ -618,6 +635,7 @@ impl TenantPools<sqlx::Postgres> {
 /// keepalive / lifetime settings from `config`. Generic over the
 /// backend — uses sqlx's generic `PoolOptions<DB>` so PG / MySQL /
 /// SQLite all build through the same code path.
+#[cfg(feature = "postgres")]
 async fn build_database_pool<DB: Database>(
     url: &str,
     config: &TenantPoolsConfig,
@@ -643,11 +661,13 @@ async fn build_database_pool<DB: Database>(
 ///
 /// Implements `Deref` to the inner [`sqlx::pool::PoolConnection`] for
 /// use as a sqlx executor.
+#[cfg(feature = "postgres")]
 pub struct TenantConn<DB: Database = sqlx::Postgres> {
     inner: sqlx::pool::PoolConnection<DB>,
     schema: Option<String>,
 }
 
+#[cfg(feature = "postgres")]
 impl<DB: Database> TenantConn<DB> {
     /// `Some(schema)` for schema-mode connections, `None` for
     /// database-mode. Useful for diagnostics / logging.
@@ -657,6 +677,7 @@ impl<DB: Database> TenantConn<DB> {
     }
 }
 
+#[cfg(feature = "postgres")]
 impl<DB: Database> std::ops::Deref for TenantConn<DB> {
     type Target = sqlx::pool::PoolConnection<DB>;
     fn deref(&self) -> &Self::Target {
@@ -664,6 +685,7 @@ impl<DB: Database> std::ops::Deref for TenantConn<DB> {
     }
 }
 
+#[cfg(feature = "postgres")]
 impl<DB: Database> std::ops::DerefMut for TenantConn<DB> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
@@ -675,6 +697,7 @@ impl<DB: Database> std::ops::DerefMut for TenantConn<DB> {
 /// `SET search_path` to prevent malformed slugs from breaking the
 /// statement (and to defuse the trivial injection vector that would
 /// exist if we string-concatenated raw schema names into SQL).
+#[cfg(feature = "postgres")]
 fn quote_ident(name: &str) -> String {
     let escaped = name.replace('"', "\"\"");
     format!("\"{escaped}\"")

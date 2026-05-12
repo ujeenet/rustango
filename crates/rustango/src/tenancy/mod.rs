@@ -113,7 +113,9 @@ pub use error::TenancyError;
 pub use migrate::{migrate_registry, migrate_tenants};
 pub use migrate::{migrate_registry_pool, TenantMigrationOutcome, TenantMigrationReport};
 pub use org::{BackendKind, Org, StorageMode};
-pub use pools::{PrewarmReport, TenantConn, TenantPool, TenantPools, TenantPoolsConfig};
+pub use pools::TenantPoolsConfig;
+#[cfg(feature = "postgres")]
+pub use pools::{PrewarmReport, TenantConn, TenantPool, TenantPools};
 pub use resolver::{
     ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver, PortResolver, SubdomainResolver,
 };
