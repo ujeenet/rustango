@@ -47,17 +47,26 @@
 //! callers supply it explicitly when their connection-string layout
 //! demands.
 
-use crate::core::Column as _;
-use crate::migrate::{self, Migration, MigrationScope};
-use crate::sql::sqlx::postgres::PgPoolOptions;
-use crate::sql::sqlx::PgPool;
-use crate::sql::Fetcher;
+use crate::migrate::{Migration, MigrationScope};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
+#[cfg(feature = "postgres")]
+use crate::core::Column as _;
+#[cfg(feature = "postgres")]
+use crate::migrate;
+#[cfg(feature = "postgres")]
+use crate::sql::sqlx::postgres::PgPoolOptions;
+#[cfg(feature = "postgres")]
+use crate::sql::sqlx::PgPool;
+#[cfg(feature = "postgres")]
+use crate::sql::Fetcher;
+
 use super::error::TenancyError;
+#[cfg(feature = "postgres")]
 use super::org::{Org, StorageMode};
+#[cfg(feature = "postgres")]
 use super::pools::TenantPools;
 
 /// Outcome of [`migrate_tenants`].
@@ -101,6 +110,7 @@ pub struct TenantMigrationOutcome {
 ///
 /// # Errors
 /// As [`crate::migrate::migrate`].
+#[cfg(feature = "postgres")]
 pub async fn migrate_registry(
     pools: &TenantPools,
     dir: &Path,
@@ -244,6 +254,7 @@ pub async fn migrate_registry_pool(
 /// Walking the Org table or building the scoped subset can short-
 /// circuit; returns `Err` in those cases. Per-tenant errors are
 /// captured in the [`TenantMigrationReport`] without aborting.
+#[cfg(feature = "postgres")]
 pub async fn migrate_tenants(
     pools: &TenantPools,
     dir: &Path,
@@ -317,6 +328,7 @@ pub async fn migrate_tenants(
     Ok(report)
 }
 
+#[cfg(feature = "postgres")]
 async fn run_for_one_tenant(
     pools: &TenantPools,
     org: &Org,
@@ -404,6 +416,7 @@ async fn run_for_one_tenant(
 /// runs (so a freshly-provisioned tenant works on its first
 /// `migrate_tenants` call). `CREATE SCHEMA IF NOT EXISTS` is
 /// idempotent.
+#[cfg(feature = "postgres")]
 async fn build_schema_scoped_pool(
     registry_url: &str,
     schema: &str,

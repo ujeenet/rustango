@@ -74,8 +74,10 @@ pub use auth::{
     authenticate_operator, authenticate_user, validate_tenant_user_schema, Operator,
     TenantUserModel, User, REQUIRED_USER_COLUMNS,
 };
+#[cfg(feature = "postgres")]
+pub use auth_backends::ensure_api_keys_table;
 pub use auth_backends::{
-    create_api_key, ensure_api_keys_table, ApiKeyBackend, AuthBackend, AuthError, AuthUser,
+    create_api_key, ensure_api_keys_table_pool, ApiKeyBackend, AuthBackend, AuthError, AuthUser,
     BoxedBackend, JwtBackend, ModelBackend,
 };
 pub use bootstrap::{
@@ -84,19 +86,26 @@ pub use bootstrap::{
     InitTenancyReport, REGISTRY_BOOTSTRAP_NAME, TENANT_BOOTSTRAP_NAME,
 };
 pub use middleware::{AuthenticatedUser, CurrentUser, RouterAuthExt};
+// v0.38 — the PG-typed permission helpers stay PG-only re-exports;
+// the tri-dialect `_pool` variants are the cross-dialect entry points.
+#[cfg(feature = "postgres")]
 pub use permissions::{
     assign_role, auto_create_permissions, clear_user_perm,
     ensure_tables as ensure_permission_tables, get_or_create_role, grant_role_perm, has_all_perms,
-    has_any_perm, has_perm, model_codenames, remove_role, revoke_role_perm, set_user_perm,
-    user_permissions, user_roles,
+    has_any_perm, has_perm, remove_role, revoke_role_perm, set_user_perm, user_permissions,
+    user_roles,
+};
+pub use permissions::{
+    auto_create_permissions_pool, clear_user_perm_pool, ensure_tables_pool, grant_role_perm_pool,
+    has_perm_pool, model_codenames, revoke_role_perm_pool, set_user_perm_pool,
+    user_permissions_pool, user_roles_qs_pool,
 };
 
 pub use database_pools::{DatabaseConn, DatabasePool, DatabasePools};
 pub use error::TenancyError;
-pub use migrate::{
-    migrate_registry, migrate_registry_pool, migrate_tenants, TenantMigrationOutcome,
-    TenantMigrationReport,
-};
+#[cfg(feature = "postgres")]
+pub use migrate::{migrate_registry, migrate_tenants};
+pub use migrate::{migrate_registry_pool, TenantMigrationOutcome, TenantMigrationReport};
 pub use org::{BackendKind, Org, StorageMode};
 pub use pools::{PrewarmReport, TenantConn, TenantPool, TenantPools, TenantPoolsConfig};
 pub use resolver::{
