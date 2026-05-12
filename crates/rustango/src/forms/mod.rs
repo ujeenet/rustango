@@ -474,16 +474,15 @@ impl ModelForm {
     /// Validate and execute the INSERT or UPDATE. Returns the PK value
     /// (newly generated for inserts; the supplied value for updates).
     ///
-    /// v0.37 — PG-only by signature (`&PgPool`). A tri-dialect `save_pool`
-    /// companion is queued for the v0.38 forms tri-dialect sweep;
-    /// pure-sqlite / pure-mysql `--features <backend>,forms` builds drop
-    /// this method.
+    /// v0.38 — fully tri-dialect via `&crate::sql::Pool`. Routes through
+    /// the backend-erasing `update_pool` / `insert_returning_pool`
+    /// helpers and decodes the returned PK per backend (PgRow on PG,
+    /// `LAST_INSERT_ID()` on MySQL, SqliteRow on SQLite).
     ///
     /// # Errors
     /// [`ModelFormError::Validation`] if any field is invalid.
     /// [`ModelFormError::Database`] for driver-level failures.
-    #[cfg(feature = "postgres")]
-    pub async fn save(&self, pool: &crate::sql::sqlx::PgPool) -> Result<SqlValue, ModelFormError> {
+    pub async fn save(&self, pool: &crate::sql::Pool) -> Result<SqlValue, ModelFormError> {
         let errors = self.validate();
         if !errors.is_empty() {
             return Err(ModelFormError::Validation(errors));
@@ -519,7 +518,7 @@ impl ModelForm {
                     value: pk_val.clone(),
                 }),
             };
-            crate::sql::update(pool, &query).await?;
+            crate::sql::update_pool(pool, &query).await?;
             Ok(pk_val.clone())
         } else {
             // INSERT
@@ -542,16 +541,44 @@ impl ModelForm {
                 returning: vec![pk_field.column],
                 on_conflict: None,
             };
-            let row = crate::sql::insert_returning(pool, &query).await?;
-            use crate::sql::sqlx::Row as _;
-            let pk_val: SqlValue = match pk_field.ty {
-                FieldType::I64 => SqlValue::I64(row.try_get(pk_field.column).unwrap_or(0)),
-                FieldType::I32 => SqlValue::I32(row.try_get(pk_field.column).unwrap_or(0)),
-                FieldType::I16 => SqlValue::I16(row.try_get(pk_field.column).unwrap_or(0)),
-                FieldType::String => {
-                    SqlValue::String(row.try_get(pk_field.column).unwrap_or_default())
+            let returning = crate::sql::insert_returning_pool(pool, &query).await?;
+            // Per-backend PK decode. Both PG and SQLite return the
+            // RETURNING column as a row; MySQL has no RETURNING and
+            // surfaces the auto-generated PK as a single `i64`.
+            let pk_val: SqlValue = match returning {
+                #[cfg(feature = "postgres")]
+                crate::sql::InsertReturningPool::PgRow(row) => {
+                    use crate::sql::sqlx::Row as _;
+                    match pk_field.ty {
+                        FieldType::I64 => SqlValue::I64(row.try_get(pk_field.column).unwrap_or(0)),
+                        FieldType::I32 => SqlValue::I32(row.try_get(pk_field.column).unwrap_or(0)),
+                        FieldType::I16 => SqlValue::I16(row.try_get(pk_field.column).unwrap_or(0)),
+                        FieldType::String => {
+                            SqlValue::String(row.try_get(pk_field.column).unwrap_or_default())
+                        }
+                        _ => SqlValue::Null,
+                    }
                 }
-                _ => SqlValue::Null,
+                #[cfg(feature = "mysql")]
+                crate::sql::InsertReturningPool::MySqlAutoId(id) => match pk_field.ty {
+                    FieldType::I64 => SqlValue::I64(id),
+                    FieldType::I32 => SqlValue::I32(id as i32),
+                    FieldType::I16 => SqlValue::I16(id as i16),
+                    _ => SqlValue::I64(id),
+                },
+                #[cfg(feature = "sqlite")]
+                crate::sql::InsertReturningPool::SqliteRow(row) => {
+                    use crate::sql::sqlx::Row as _;
+                    match pk_field.ty {
+                        FieldType::I64 => SqlValue::I64(row.try_get(pk_field.column).unwrap_or(0)),
+                        FieldType::I32 => SqlValue::I32(row.try_get(pk_field.column).unwrap_or(0)),
+                        FieldType::I16 => SqlValue::I16(row.try_get(pk_field.column).unwrap_or(0)),
+                        FieldType::String => {
+                            SqlValue::String(row.try_get(pk_field.column).unwrap_or_default())
+                        }
+                        _ => SqlValue::Null,
+                    }
+                }
             };
             Ok(pk_val)
         }
@@ -1033,24 +1060,23 @@ impl<T: crate::core::Model> ModelFormFor<T> {
     /// row being edited isn't its own conflict (analog to DRF's
     /// `instance` parameter on the validator).
     ///
-    /// v0.37 — PG-only by signature (`&PgPool`). A tri-dialect
-    /// `validate_unique_together_pool` companion is queued for the
-    /// v0.38 forms tri-dialect sweep; pure-sqlite / pure-mysql
-    /// `--features <backend>,forms` builds drop this method.
+    /// v0.38 — tri-dialect via `&crate::sql::Pool`. Identifier quoting
+    /// routes through `dialect.quote_ident` (double-quotes on PG/SQLite,
+    /// backticks on MySQL) and placeholders through
+    /// `dialect.placeholder(n)` (`$N` on PG, `?` on sqlite/mysql).
     ///
     /// # Errors
     /// Returns the accumulated [`FormErrors`] when any composite
     /// UNIQUE check finds a conflicting row in the DB. Driver / SQL
     /// failures land as a non-field error.
-    #[cfg(feature = "postgres")]
     pub async fn validate_unique_together(
         &self,
-        pool: &crate::sql::sqlx::PgPool,
+        pool: &crate::sql::Pool,
         pk_value: Option<&crate::core::SqlValue>,
     ) -> Result<(), FormErrors> {
-        use crate::sql::sqlx;
         let mut errors = FormErrors::default();
         let pk_field = T::SCHEMA.primary_key();
+        let dialect = pool.dialect();
         for idx in T::SCHEMA.indexes {
             if !idx.unique || idx.columns.len() < 2 {
                 continue;
@@ -1059,13 +1085,13 @@ impl<T: crate::core::Model> ModelFormFor<T> {
             // column in the composite index. If any column is absent
             // (skipped, missing) we can't pre-check — let the DB
             // surface the conflict.
-            let mut bound: Vec<(&'static str, &crate::core::SqlValue)> = Vec::new();
+            let mut bound: Vec<(&'static str, crate::core::SqlValue)> = Vec::new();
             let mut all_present = true;
             for col in idx.columns {
                 match self.columns.iter().position(|c| c == col) {
                     Some(i) => bound.push((
                         idx.columns.iter().find(|c| c == &col).copied().unwrap(),
-                        &self.values[i],
+                        self.values[i].clone(),
                     )),
                     None => {
                         all_present = false;
@@ -1076,39 +1102,81 @@ impl<T: crate::core::Model> ModelFormFor<T> {
             if !all_present {
                 continue;
             }
-            // Build `SELECT 1 FROM "<table>" WHERE c1 = $1 AND c2 = $2 [...] [AND pk <> $N] LIMIT 1`
-            let mut sql = format!(r#"SELECT 1 FROM "{}" WHERE "#, T::SCHEMA.table);
+            // Build `SELECT 1 FROM <table> WHERE c1 = ? AND c2 = ? [...] [AND pk <> ?] LIMIT 1`
+            // with dialect-aware quoting + placeholders.
+            let table_q = dialect.quote_ident(T::SCHEMA.table);
+            let mut sql = format!("SELECT 1 FROM {table_q} WHERE ");
+            let mut binds: Vec<crate::core::SqlValue> = Vec::new();
             let mut sep = "";
-            for (i, (col, _)) in bound.iter().enumerate() {
+            for (i, (col, val)) in bound.iter().enumerate() {
                 sql.push_str(sep);
                 sep = " AND ";
-                sql.push_str(&format!(r#""{col}" = ${}"#, i + 1));
+                let col_q = dialect.quote_ident(col);
+                let ph = dialect.placeholder(i + 1);
+                sql.push_str(&format!("{col_q} = {ph}"));
+                binds.push(val.clone());
             }
             let extra_pk_idx = bound.len() + 1;
-            if let (Some(pk_field), Some(_pk_value)) = (pk_field, pk_value) {
-                sql.push_str(&format!(
-                    r#" AND "{}" <> ${}"#,
-                    pk_field.column, extra_pk_idx
-                ));
+            if let (Some(pk_field), Some(pk_v)) = (pk_field, pk_value) {
+                let pk_col = dialect.quote_ident(pk_field.column);
+                let ph = dialect.placeholder(extra_pk_idx);
+                sql.push_str(&format!(" AND {pk_col} <> {ph}"));
+                binds.push(pk_v.clone());
             }
             sql.push_str(" LIMIT 1");
-            let mut q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> =
-                sqlx::query(&sql);
-            for (_, v) in &bound {
-                q = bind_sql_value_inline(q, v);
-            }
-            if let (Some(_), Some(pk_value)) = (pk_field, pk_value) {
-                q = bind_sql_value_inline(q, pk_value);
-            }
-            match q.fetch_optional(pool).await {
-                Ok(Some(_)) => {
+            // raw_select_one_pool returns Option<row-shape>; we only
+            // care about Some/None — re-emit via raw_execute_pool and
+            // use rows_affected? No, SELECT 1 doesn't affect rows. Use
+            // the count of returned rows via raw_select_count_pool-like
+            // shape: build via select_rows_pool against the raw SQL.
+            // Simpler: dispatch via execute on PG vs raw fetch on
+            // sqlite/mysql. Use `raw_execute_pool` for the count via
+            // `affected_rows()`? No, SELECT returns rowset, not affected.
+            // Easiest: per-backend fetch via the Pool's dispatch.
+            let exists = match pool {
+                #[cfg(feature = "postgres")]
+                crate::sql::Pool::Postgres(pg) => {
+                    use crate::sql::sqlx;
+                    let mut q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> =
+                        sqlx::query(&sql);
+                    for v in &binds {
+                        q = bind_sql_value_inline(q, v);
+                    }
+                    q.fetch_optional(pg).await.map(|r| r.is_some())
+                }
+                #[cfg(feature = "mysql")]
+                crate::sql::Pool::Mysql(my) => {
+                    use crate::sql::sqlx;
+                    let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                        sqlx::query(&sql);
+                    for v in &binds {
+                        q = bind_sql_value_inline_my(q, v);
+                    }
+                    q.fetch_optional(my).await.map(|r| r.is_some())
+                }
+                #[cfg(feature = "sqlite")]
+                crate::sql::Pool::Sqlite(sq) => {
+                    use crate::sql::sqlx;
+                    let mut q: sqlx::query::Query<
+                        '_,
+                        sqlx::Sqlite,
+                        sqlx::sqlite::SqliteArguments<'_>,
+                    > = sqlx::query(&sql);
+                    for v in &binds {
+                        q = bind_sql_value_inline_sqlite(q, v);
+                    }
+                    q.fetch_optional(sq).await.map(|r| r.is_some())
+                }
+            };
+            match exists {
+                Ok(true) => {
                     let label = idx.columns.join(", ");
                     let msg = format!("a row with the same ({label}) already exists");
                     for col in idx.columns {
                         errors.add(col.to_owned(), msg.clone());
                     }
                 }
-                Ok(None) => {}
+                Ok(false) => {}
                 Err(e) => errors.add_non_field(format!("unique-together pre-check failed: {e}")),
             }
         }
@@ -1197,6 +1265,70 @@ fn bind_sql_value_inline<'a>(
         SqlValue::Date(v) => q.bind(*v),
         SqlValue::Uuid(v) => q.bind(*v),
         SqlValue::Json(v) => q.bind(v.clone()),
+        SqlValue::List(_) => panic!("validate_unique_together: List not supported in pre-check"),
+    }
+}
+
+/// MySQL counterpart of [`bind_sql_value_inline`].
+#[cfg(feature = "mysql")]
+fn bind_sql_value_inline_my<'a>(
+    q: crate::sql::sqlx::query::Query<
+        'a,
+        crate::sql::sqlx::MySql,
+        crate::sql::sqlx::mysql::MySqlArguments,
+    >,
+    v: &crate::core::SqlValue,
+) -> crate::sql::sqlx::query::Query<
+    'a,
+    crate::sql::sqlx::MySql,
+    crate::sql::sqlx::mysql::MySqlArguments,
+> {
+    use crate::core::SqlValue;
+    match v {
+        SqlValue::Null => q.bind(None::<i64>),
+        SqlValue::I16(v) => q.bind(*v),
+        SqlValue::I32(v) => q.bind(*v),
+        SqlValue::I64(v) => q.bind(*v),
+        SqlValue::F32(v) => q.bind(*v),
+        SqlValue::F64(v) => q.bind(*v),
+        SqlValue::Bool(v) => q.bind(*v),
+        SqlValue::String(v) => q.bind(v.clone()),
+        SqlValue::DateTime(v) => q.bind(*v),
+        SqlValue::Date(v) => q.bind(*v),
+        SqlValue::Uuid(v) => q.bind(v.to_string()),
+        SqlValue::Json(v) => q.bind(v.to_string()),
+        SqlValue::List(_) => panic!("validate_unique_together: List not supported in pre-check"),
+    }
+}
+
+/// SQLite counterpart of [`bind_sql_value_inline`].
+#[cfg(feature = "sqlite")]
+fn bind_sql_value_inline_sqlite<'a>(
+    q: crate::sql::sqlx::query::Query<
+        'a,
+        crate::sql::sqlx::Sqlite,
+        crate::sql::sqlx::sqlite::SqliteArguments<'a>,
+    >,
+    v: &crate::core::SqlValue,
+) -> crate::sql::sqlx::query::Query<
+    'a,
+    crate::sql::sqlx::Sqlite,
+    crate::sql::sqlx::sqlite::SqliteArguments<'a>,
+> {
+    use crate::core::SqlValue;
+    match v {
+        SqlValue::Null => q.bind(None::<i64>),
+        SqlValue::I16(v) => q.bind(*v),
+        SqlValue::I32(v) => q.bind(*v),
+        SqlValue::I64(v) => q.bind(*v),
+        SqlValue::F32(v) => q.bind(*v),
+        SqlValue::F64(v) => q.bind(*v),
+        SqlValue::Bool(v) => q.bind(*v),
+        SqlValue::String(v) => q.bind(v.clone()),
+        SqlValue::DateTime(v) => q.bind(*v),
+        SqlValue::Date(v) => q.bind(*v),
+        SqlValue::Uuid(v) => q.bind(v.to_string()),
+        SqlValue::Json(v) => q.bind(v.to_string()),
         SqlValue::List(_) => panic!("validate_unique_together: List not supported in pre-check"),
     }
 }
