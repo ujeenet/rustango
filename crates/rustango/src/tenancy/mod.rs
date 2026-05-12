@@ -21,7 +21,7 @@
 //!
 //! [`TenantPools`]: pools::TenantPools
 //!
-//! ## Design choices (locked 2026-04-28)
+//! ## Design choices (locked 2026-04-28; revisited 2026-05-12)
 //!
 //! 1. **Operator auth = registry-only.** Two strictly-separated
 //!    identity domains. Operators never appear in tenant tables;
@@ -34,16 +34,30 @@
 //! 6. **Routing default = subdomain (`acme.app.com`).** Cookie
 //!    isolation by subdomain is the headline win. Apex
 //!    (`app.com`) routes only to `/operator/*`.
+//! 7. **Two storage modes, one universal + one PG optimization**
+//!    (v0.38). Database-mode (one dedicated DB/file per tenant)
+//!    works on every backend — PostgreSQL, MySQL, and SQLite — and
+//!    is the right default for enterprise B2B, compliance-sensitive
+//!    deployments, and anything with fewer than a few hundred
+//!    tenants. Schema-mode (many tenants share one PG database;
+//!    isolated by `SET search_path`) is a Postgres-only
+//!    optimization for high-N-low-revenue SaaS where connection
+//!    counts or per-tenant DB overhead actually matter. On MySQL
+//!    and SQLite, `Org.storage_mode = "schema"` returns a clear
+//!    runtime validation error pointing the user at database-mode;
+//!    isolation semantics are equivalent.
 //!
 //! See `memory/v05-multitenancy-roadmap.md` in the project memory for
 //! the full design and slice plan.
 
-// v0.38 slice 24 — `tenancy::admin` is tri-dialect: handler bodies
-// route through the ORM `_pool` family + the unified
-// `crate::sql::Pool` enum. Schema-mode dispatch remains PG-only by
-// language (`SET search_path`); on non-PG backends a schema-mode
-// tenant returns `TenancyError::Validation` from
-// `TenantPools<DB>::scoped_pool_dyn` before the inner admin is built.
+// v0.38 — `tenancy::admin` is tri-dialect: handler bodies route
+// through the ORM `_pool` family + the unified `crate::sql::Pool`
+// enum. Tenants in database-mode work on PG / MySQL / SQLite. The
+// schema-mode dispatch (where many tenants share one PG database
+// via `SET search_path`) is a Postgres-only optimization; on non-PG
+// backends, a schema-mode org returns `TenancyError::Validation`
+// from `TenantPools<DB>::scoped_pool_dyn` with a message pointing
+// the user at database-mode.
 #[cfg(feature = "admin")]
 pub mod admin;
 pub mod auth;

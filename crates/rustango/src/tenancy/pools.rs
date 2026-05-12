@@ -130,14 +130,42 @@ pub struct PrewarmReport {
     pub skipped_cap: usize,
 }
 
-/// One tenant's pool reference. Generic over the backend
-/// (`DB = sqlx::Postgres` by default — keeps existing call sites
-/// compiling unchanged). Schema-mode is fundamentally Postgres-only:
-/// the variant always carries a `PgPool` and is only constructed by
-/// `impl TenantPools<sqlx::Postgres>::pool_for_org`. Database-mode
-/// uses `Arc<sqlx::Pool<DB>>` so a sqlite-only or MySQL-only stack
-/// can use this enum without any Postgres dependency at the field
-/// level.
+/// One tenant's pool reference.
+///
+/// ## Two storage modes
+///
+/// **Database-mode** (`Database` variant) is the universal model —
+/// each tenant has its own dedicated database (a separate PG database,
+/// MySQL database, or SQLite file). Works on every backend. This is
+/// the right choice for:
+///   - Enterprise B2B (dozens to low hundreds of tenants)
+///   - Compliance-sensitive deployments (physical data separation)
+///   - Geographic sharding (each region has its own DB cluster)
+///   - Anything on sqlite or mysql (database-mode is the only mode
+///     these backends support)
+///
+/// **Schema-mode** (`Schema` variant, PG-only) is a PG-specific
+/// optimization — every tenant shares one PG database and one
+/// connection pool; tenants are isolated by PG schemas, with
+/// `SET search_path` switching namespace per request. Use only when
+/// you have high-N-low-revenue SaaS scale (500+ small tenants on PG)
+/// and connection-count or per-tenant DB overhead actually bites.
+///
+/// `SET search_path` is a Postgres-only command — MySQL and SQLite
+/// have no equivalent connection-scoped namespace switch. On those
+/// backends, schema-mode is unavailable by language semantics; users
+/// set `Org.storage_mode = "database"` and get equivalent isolation
+/// via per-tenant databases/files.
+///
+/// ## Generic shape
+///
+/// Generic over the backend (`DB = sqlx::Postgres` by default — keeps
+/// existing call sites compiling unchanged). The `Schema` variant
+/// always carries a `PgPool` and is only constructed by
+/// `impl TenantPools<sqlx::Postgres>::pool_for_org`. The `Database`
+/// variant uses `Arc<sqlx::Pool<DB>>` so a sqlite-only or MySQL-only
+/// stack can use this enum without any Postgres dependency at the
+/// field level.
 /// Default backend for `TenantPool<DB>` / `TenantPools<DB>` /
 /// `TenantConn<DB>` so existing PG call sites that write `TenantPools`
 /// (no param) keep compiling. On non-PG builds the default is the
@@ -339,10 +367,13 @@ impl<DB: Database> TenantPools<DB> {
         })?;
         match mode {
             StorageMode::Schema => Err(TenancyError::Validation(format!(
-                "org `{}` is schema-mode but TenantPools<{}> is non-Postgres — schema-mode \
-                 tenants require a Postgres registry",
+                "org `{}` has `storage_mode = 'schema'` but TenantPools<{dbname}> is non-Postgres. \
+                 Schema-mode is a Postgres-only optimization (uses `SET search_path` — no \
+                 equivalent on MySQL/SQLite). Switch this org to `storage_mode = 'database'` and \
+                 set `database_url` to its dedicated database / file; isolation semantics are \
+                 equivalent.",
                 org.slug,
-                std::any::type_name::<DB>(),
+                dbname = std::any::type_name::<DB>(),
             ))),
             StorageMode::Database => {
                 let pool = self.pool_for_database_mode(org).await?;
@@ -535,10 +566,13 @@ where
                     }
                 }
                 Err(TenancyError::Validation(format!(
-                    "org `{}` is schema-mode but TenantPools<{}> is non-Postgres — schema-mode \
-                     tenants require a Postgres registry",
+                    "org `{}` has `storage_mode = 'schema'` but TenantPools<{dbname}> is \
+                     non-Postgres. Schema-mode is a Postgres-only optimization (uses \
+                     `SET search_path` — no equivalent on MySQL/SQLite). Switch this org to \
+                     `storage_mode = 'database'` and set `database_url` to its dedicated \
+                     database / file; isolation semantics are equivalent.",
                     org.slug,
-                    std::any::type_name::<DB>(),
+                    dbname = std::any::type_name::<DB>(),
                 )))
             }
             StorageMode::Database => {

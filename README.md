@@ -2,19 +2,55 @@
 
 **A Django-shaped, batteries-included web framework for Rust.**
 
-Bi-dialect ORM (Postgres / MySQL / **SQLite**) with auto-migrations, multi-tenancy, auto-admin (token-driven theme system + dark mode + per-tenant branding via pluggable `Storage` trait — S3/R2/B2/MinIO/Local), sessions + JWT + OAuth2/OIDC + HMAC auth, signals, caching, first-class media (Postgres rows + S3/R2/B2/MinIO + presigned uploads + collections + tags), email pipeline (renderer + jobs + Mailable), background jobs (in-mem + Postgres), webhook delivery, OpenAPI 3.1 auto-derive from serializers + viewsets, JSON:API + RFC 7807 Problem Details, scheduled tasks, RFC 6238 TOTP, signed URLs, Prometheus metrics, OTel-shape tracing, distributed locks + rate limits + feature flags, every standard middleware (CSRF, CSP nonce, gzip/deflate, body limit, real-IP, idempotency, maintenance, trailing slash, static files, method override, server-timing, …) — all shipped, all opt-out via cargo features.
+**Tri-dialect ORM (Postgres / MySQL / SQLite)** with auto-migrations, multi-tenancy, auto-admin (token-driven theme system + dark mode + per-tenant branding via pluggable `Storage` trait — S3/R2/B2/MinIO/Local), sessions + JWT + OAuth2/OIDC + HMAC auth, signals, caching, first-class media (Media rows + S3/R2/B2/MinIO + presigned uploads + collections + tags), email pipeline (renderer + jobs + Mailable), background jobs (in-mem + DB queue with `FOR UPDATE SKIP LOCKED` on PG/MySQL 8+ and transaction-bounded `UPDATE … RETURNING` on SQLite), webhook delivery, OpenAPI 3.1 auto-derive from serializers + viewsets, JSON:API + RFC 7807 Problem Details, scheduled tasks, RFC 6238 TOTP, signed URLs, Prometheus metrics, OTel-shape tracing, distributed locks + rate limits + feature flags, every standard middleware (CSRF, CSP nonce, gzip/deflate, body limit, real-IP, idempotency, maintenance, trailing slash, static files, method override, server-timing, …) — all shipped, all opt-out via cargo features.
+
+Every feature works on every supported backend out of the box. The only PG-specific surface is schema-mode tenancy, a connection-pool optimization for high-N SaaS — see the [storage modes table](#multi-tenancy) below for when it matters.
 
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.31"
+rustango = "0.38"
 
-# SQLite — file-backed or in-memory, full bi-dialect ORM
-rustango = { version = "0.31", features = ["sqlite"] }
+# SQLite — file-backed or in-memory, full tri-dialect framework
+rustango = { version = "0.38", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
+
+# MySQL 8+
+rustango = { version = "0.38", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
 
 # Multiple backends in one binary
-rustango = { version = "0.31", features = ["postgres", "sqlite"] }
+rustango = { version = "0.38", features = ["postgres", "sqlite"] }
 ```
+
+### What's new in v0.38 (May 2026) — every feature, every backend
+
+**rustango is now genuinely tri-dialect end-to-end.** Every previously-PG-only feature
+— multi-tenancy `Builder` + admin, jobs queue (`PgJobQueue` despite the legacy name),
+`manage inspectdb`, first-class media (`MediaManager`), the typed permissions facade —
+now ships sqlite + mysql parity with the postgres path. Concretely:
+
+- **Multi-tenant runserver** works on sqlite and mysql. `Cli::tenancy().run().await`
+  boots the operator console + tenant admin + host-based dispatch on any backend.
+- **Jobs queue** runs on PG / MySQL 8+ / SQLite. PG + MySQL 8+ use `FOR UPDATE SKIP LOCKED`
+  for atomic multi-worker pickup; SQLite uses a transaction-bounded `UPDATE … RETURNING`
+  (SQLite serializes writers, so the pickup is implicitly mutually-exclusive).
+- **`manage inspectdb`** introspects any backend (PG / MySQL via `information_schema`;
+  SQLite via `PRAGMA table_info` + `sqlite_master`). Emits per-dialect `#[derive(Model)]`
+  source.
+- **Media** — the `media` Cargo feature dropped its `postgres` requirement. Every
+  `MediaManager` method (save / get / delete / collections / tags / popular_tags / purge
+  / etc.) dispatches per-dialect; PG-specific SQL idioms (`ANY($1)`, `NOW() - INTERVAL`,
+  `DELETE … USING`, `ON CONFLICT DO UPDATE`, `INSERT … RETURNING`) translated to portable
+  equivalents (`IN (?, …)`, pre-computed timestamps, subquery rewrites, `ON DUPLICATE KEY
+  UPDATE` on MySQL, `LAST_INSERT_ID()` in a transaction on MySQL).
+- **`server::Builder<DB>`** is generic over the registry backend; `Builder::from_pool`
+  is the explicit-backend constructor alongside the PG-default `Builder::from_env`.
+- **Storage modes** — database-mode (one dedicated DB / file per tenant) works on every
+  backend and is the right default. Schema-mode (many tenants share one PG database;
+  isolated by `SET search_path`) is a Postgres-only optimization for high-N SaaS where
+  connection counts matter; on non-PG backends a schema-mode org returns a clear
+  validation error pointing at database-mode.
+
+Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
 ### What's new in v0.31 (May 2026)
 
@@ -121,12 +157,14 @@ DATABASE_URL='sqlite:./var/app.db?mode=rwc' \
   cargo run --features sqlite,runserver
 ```
 
-Same code unchanged with `DATABASE_URL=postgres://…` boots on Postgres.
+Same code unchanged with `DATABASE_URL=postgres://…` boots on Postgres or `DATABASE_URL=mysql://…` on MySQL.
 
-> **Multi-tenant on SQLite?** The `tenancy` module's `TenantPools` /
-> `Builder` is still PG-only — pending refactor in v0.28. For SQLite
-> tenants today, see Cookbook chapter 13 for the per-tenant `Pool`
-> registry shape.
+> **Multi-tenant on SQLite or MySQL?** Yes, fully supported since v0.38.
+> `Cli::tenancy().run()` boots the operator console + tenant admin + host
+> dispatch on any backend. Use database-mode (one DB / file per tenant) —
+> works identically on all three. Schema-mode is a Postgres-only
+> optimization for high-N SaaS scale. See the [multi-tenancy](#multi-tenancy)
+> section for the storage-mode matrix.
 
 ---
 
@@ -858,15 +896,19 @@ let plan = Post::objects()
 let parsed: serde_json::Value = serde_json::from_str(&plan.join("\n"))?;
 ```
 
-### Bi-dialect (Postgres + MySQL) via `&Pool`
+### Tri-dialect (Postgres / MySQL / SQLite) via `&Pool`
 
-The classic API takes `&PgPool` (Postgres-only). The v0.23.0 series
-adds a parallel `&Pool` API that targets either backend; pick MySQL
-8.0+ or Postgres at runtime via the connection URL.
+The classic API takes `&PgPool` (Postgres-only). The v0.23.0 series added
+a parallel `&Pool` API; v0.38 extended it to every framework surface
+(multi-tenancy `Builder`, admin, jobs queue, `manage inspectdb`, media,
+permissions, contenttypes, fixtures — the full set). Pick PG, MySQL 8.0+,
+or SQLite at runtime via the connection URL.
 
 ```toml
-# Cargo.toml — opt in to MySQL alongside the default postgres feature
-rustango = { version = "0.29", features = ["mysql"] }
+# Cargo.toml — opt in to MySQL or SQLite alongside (or instead of)
+# the default postgres feature
+rustango = { version = "0.38", features = ["mysql"] }
+rustango = { version = "0.38", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
 ```
 
 ```rust
@@ -898,7 +940,7 @@ user.delete_pool(&pool).await?;        // DELETE (transactional with audit
                                        // emit when the model is audited)
 
 // QuerySet read path — single-table, select_related joins, prefetch,
-// pagination, and aggregates all bi-dialect.
+// pagination, and aggregates all tri-dialect.
 let posts: Vec<Post> = Post::objects()
     .filter(Post::is_published.eq(true))
     .select_related(&[Post::author])   // joins decoded automatically
@@ -1557,6 +1599,10 @@ match form.save(&pool).await {
 
 ## Multi-tenancy
 
+Works on Postgres, MySQL 8+, and SQLite since v0.38. Use `Builder::from_env`
+for PG-default boot, or `Builder::<DB>::from_pool` for explicit-backend
+construction:
+
 ```rust
 use rustango::server::Builder;
 
@@ -1576,13 +1622,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `DATABASE_URL` | — | Registry Postgres (orgs, operators, users) |
+| `DATABASE_URL` | — | Registry (orgs, operators, users) — `postgres://…`, `mysql://…`, or `sqlite:./…` |
 | `RUSTANGO_APEX_DOMAIN` | `localhost` | Subdomain root → `<slug>.<apex>` |
 | `RUSTANGO_BIND` | `0.0.0.0:8080` | Bind address |
 | `RUSTANGO_SESSION_SECRET` | random (warns) | Base64-encoded 32-byte HMAC key |
 | `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS` | `3600` | "Open admin as superuser →" cookie lifetime (#78) |
 
 Generate a secret: `openssl rand -base64 32`.
+
+### Storage modes — picking the right one
+
+Each `Org` row carries a `storage_mode` column (`"database"` or `"schema"`).
+The framework switches isolation strategy per tenant. Choose based on scale
+and backend:
+
+| Mode | Backends | What it does | When to use | Trade-off |
+|---|---|---|---|---|
+| **`database`** (default) | PG, MySQL, SQLite | Each tenant gets a dedicated database (PG database, MySQL database, or SQLite `.db` file). One cached connection pool per tenant. | Enterprise B2B (≤ a few hundred tenants), compliance-sensitive deployments, geographic sharding, anything on sqlite/mysql. | One pool per tenant: 500 tenants × 5 conns = 2 500 connections. Hits `max_connections` ceilings at scale. |
+| **`schema`** | **Postgres only** | All tenants share one PG database; each lives in its own PG schema. One shared connection pool, with `SET search_path` per request. | High-N-low-revenue SaaS on PG (500+ small tenants). Lets you serve thousands of orgs from one connection pool. Cross-tenant SQL stays possible (`SELECT … FROM acme.posts UNION …`). | Soft isolation (tenants share buffer pool, WAL, autovacuum). MySQL and SQLite have no equivalent (`SET search_path` is PG-specific). |
+
+Default is `"database"`. Switch to `"schema"` only when connection counts on PG
+actually bite — for most projects, database-mode is simpler and sufficient.
+
+If you set `storage_mode = "schema"` on MySQL or SQLite, the framework returns
+a clear runtime validation error pointing you at database-mode (isolation
+semantics are equivalent on those backends; one database / file per tenant).
 
 ### Tenant pool tuning (v0.27.7+)
 

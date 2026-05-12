@@ -29,10 +29,11 @@ quotes from a real, compiling, test-covered file.
 9. [ViewSets / DRF / OpenAPI](#chapter-9--viewsets--drf--openapi)
 10. [Templates + static](#chapter-10--templates--static)
 11. [Async / IO / extensions](#chapter-11--async--io--extensions)
-12. [Bi-dialect + cross-cutting](#chapter-12--bi-dialect--cross-cutting)
+12. [Tri-dialect + cross-cutting](#chapter-12--tri-dialect--cross-cutting)
 13. [SQLite backend (v0.27 / v0.28)](#chapter-13--sqlite-backend-v027--v028)
 14. [v0.30 cycle: do less work](#chapter-14--v030-cycle-do-less-work) — `inspectdb`, `wizard`, ListView bulk + fk_display, admin COUNT skip, settings-driven logging
 15. [v0.31 — tenant admin no longer catches every URL](#chapter-15--v031--tenant-admin-no-longer-catches-every-url)
+16. [v0.38 — every feature, every backend](#chapter-16--v038--every-feature-every-backend)
 
 ---
 
@@ -1741,7 +1742,7 @@ save/delete events), 11.138 (compression middleware), 11.139 (CSP nonce)
 queued for Slice 11b. Several have framework-level live tests under
 rustango/tests already.*
 
-## Chapter 12 — Bi-dialect + cross-cutting
+## Chapter 12 — Tri-dialect + cross-cutting
 
 2 live tests against a docker MySQL 8.0 container, exercising the
 same cookbook model that PG tests use through the dialect-agnostic
@@ -2392,6 +2393,131 @@ end-to-end demo:
   admin's page list, and on the edit form header. URLs are
   pre-computed server-side via a single-pass `build_live_url_map`
   walk in tree order.
+
+---
+
+## Chapter 16 — v0.38 — every feature, every backend
+
+v0.38 is the "tri-dialect everywhere" release. Every framework
+surface that was previously PG-only now runs on PostgreSQL, MySQL
+8+, and SQLite out of the box. Concretely:
+
+### 16.220 — Multi-tenant runserver on any backend
+
+**What**: `Cli::tenancy().run().await` and `server::Builder` boot
+the operator console + tenant admin + host-based dispatch on PG,
+MySQL, or SQLite.
+
+**Recipe**:
+```rust,ignore
+// Same code on every backend — only DATABASE_URL changes.
+#[rustango::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    rustango::manage::Cli::new()
+        .tenancy()
+        .api(my_app::urls::router())
+        .run().await
+}
+```
+
+On PG: `DATABASE_URL=postgres://…`. On MySQL: `DATABASE_URL=mysql://…`.
+On SQLite: `DATABASE_URL=sqlite:./var/registry.db?mode=rwc`.
+
+`server::Builder<DB>` is generic over the registry backend.
+`Builder::from_env()` is the PG-default constructor;
+`Builder::<DB>::from_pool(pool, url, apex)` is the explicit-backend
+constructor for non-PG.
+
+### 16.221 — Storage modes — pick the right one
+
+| Mode | Backends | Use when |
+|---|---|---|
+| `database` (default) | PG, MySQL, SQLite | Enterprise B2B; compliance; geographic sharding; small-to-medium N |
+| `schema` | **Postgres only** | High-N SaaS on PG (500+ tenants); shared connection pool matters |
+
+On MySQL/SQLite, `Org.storage_mode = "schema"` returns a clear
+runtime validation error pointing the user at `database` (semantics
+equivalent on those backends — one DB / file per tenant).
+
+### 16.222 — Jobs queue, per-backend pickup
+
+`PgJobQueue` (name kept for back-compat) now runs on PG / MySQL 8+ /
+SQLite. PG + MySQL 8+ use `FOR UPDATE SKIP LOCKED` for atomic
+multi-worker pickup; SQLite uses a transaction-bounded
+`UPDATE … WHERE id = (SELECT id … LIMIT 1) RETURNING …` (SQLite
+serializes writers globally so the pickup is implicitly mutually-
+exclusive).
+
+```rust,ignore
+let pool = rustango::sql::Pool::connect("sqlite:./var/jobs.db?mode=rwc").await?;
+rustango::jobs::pg::PgJobQueue::ensure_table_pool(&pool).await?;
+let queue = std::sync::Arc::new(
+    rustango::jobs::pg::PgJobQueue::with_workers_pool(pool, 1)
+);
+queue.register::<SendWelcomeEmail>().await;
+queue.start().await;
+queue.dispatch(&SendWelcomeEmail { user_id: 42 }).await?;
+```
+
+`Cargo.toml`: `rustango = { features = ["sqlite", "jobs-postgres"] }`.
+The feature name is preserved for back-compat — the queue itself is
+no longer PG-only.
+
+### 16.223 — `manage inspectdb` on any backend
+
+PG/MySQL use `information_schema`; SQLite uses `PRAGMA table_info`
++ `sqlite_master`. Emits per-dialect type-mapped `#[derive(Model)]`
+source.
+
+```sh
+# Postgres
+cargo run -- inspectdb --schema public
+
+# MySQL — `--schema` is the database name (DATABASE() default)
+cargo run -- inspectdb
+
+# SQLite — `--schema` is ignored
+cargo run -- inspectdb --table users
+```
+
+### 16.224 — Media on any backend
+
+The `media` Cargo feature no longer requires `postgres`. Every
+`MediaManager` method dispatches per-dialect; PG-specific SQL idioms
+(`ANY($1)`, `NOW() - INTERVAL`, `DELETE … USING`, `ON CONFLICT DO
+UPDATE`, `INSERT … RETURNING`) translated to portable equivalents.
+
+```toml
+# Tri-dialect media
+rustango = { version = "0.38", default-features = false, features = ["sqlite", "media", "storage"] }
+```
+
+```rust,ignore
+let pool = rustango::sql::Pool::connect("sqlite:./var/app.db?mode=rwc").await?;
+rustango::media::ensure_all_tables_pool(&pool).await?;
+let manager = MediaManager::new_pool(pool, registry);
+let m = manager.save_bytes(opts).await?;
+let m = manager.get(m.id.get().copied().unwrap()).await?.unwrap();
+```
+
+### 16.225 — Permissions facade, fixtures, auth
+
+The top-level `rustango::permissions::*_for_model_pool<T>` typed
+helpers, `tenancy::auth::authenticate_user_pool`, and `fixtures::
+load_all_pool` / `Fixture::load_into_pool` all run on any backend.
+
+### Tests covering this chapter
+
+* PG live tests — every existing suite still green (1386 lib tests
+  on PG; 22 PG media live; 4 PG jobs live; 3 PG inspectdb live).
+* SQLite live tests added in v0.38:
+  * `media_sqlite_live` — save → get → delete → purge round-trip;
+    collection CRUD; tag lifecycle (ON CONFLICT, IGNORE, subquery
+    DELETE, popular_tags aggregate).
+  * `jobs_sqlite_live` — dispatch persists + drains; pending_count
+    sweep.
+  * `inspectdb_sqlite_live` — `Auto<i64>` PK + max_length + FK +
+    `Option<String>` nullable; `--table` filtering.
 
 ---
 
