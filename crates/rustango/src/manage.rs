@@ -826,15 +826,57 @@ impl Cli {
 
     #[cfg(all(feature = "tenancy", not(feature = "postgres")))]
     async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
-        Err(
-            "Cli::tenancy().runserver() is PG-only today. The multi-tenant \
-             runserver (server::Builder) bakes in schema-mode dispatch + the \
-             operator console which depend on Postgres. Sqlite/MySQL multi-\
-             tenant runtime works via `crate::tenancy::DatabasePools<DB>` + \
-             `extractors::DatabaseTenant<DB>` — mount your own axum router. \
-             The generic Builder<DB> lift is queued for v0.39."
-                .into(),
+        // v0.38 slice 24 — `server::Builder<DB>` is generic. On non-PG
+        // single-backend builds, `DefaultTenantDb` resolves to whichever
+        // sqlx backend the feature flags picked (sqlite first, mysql
+        // otherwise). Database-mode tenants work out of the box;
+        // schema-mode tenants return `TenancyError::Validation` at
+        // request time (schema-mode is PG-only by language).
+        let api = self.api;
+        #[cfg(feature = "admin")]
+        let api = if self.welcome_page {
+            try_mount_welcome(api)
+        } else {
+            api
+        };
+        #[cfg(feature = "csrf")]
+        let api = match self.csrf.clone() {
+            Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
+            None => api,
+        };
+        #[cfg(feature = "config")]
+        let api = match self.settings_for_layers.as_ref() {
+            Some(s) => apply_settings_layers(api, s),
+            None => api,
+        };
+        let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
+        let registry_url =
+            std::env::var("DATABASE_URL")
+                .ok()
+                .ok_or_else(|| -> Box<dyn std::error::Error> {
+                    "DATABASE_URL not set — sqlite/mysql tenancy projects need an explicit \
+             registry URL (e.g. `sqlite:./var/registry.db` or `mysql://…`). Set the \
+             env var or build the server manually via `server::Builder::from_pool`."
+                        .into()
+                })?;
+        let registry =
+            sqlx::Pool::<crate::tenancy::DefaultTenantDb>::connect(&registry_url).await?;
+        let mut builder = crate::server::Builder::<crate::tenancy::DefaultTenantDb>::from_pool(
+            registry,
+            registry_url,
+            apex,
         )
+        .api(api);
+        if self.health_endpoints {
+            builder = builder.with_health();
+        }
+        for (prefix, root) in self.static_dirs {
+            builder = builder.with_static(prefix, root);
+        }
+        if let Some(routes) = self.routes {
+            builder = builder.routes(routes);
+        }
+        builder.serve(&self.bind).await
     }
 }
 

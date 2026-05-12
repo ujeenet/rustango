@@ -83,7 +83,7 @@ struct ConsoleState {
     /// that org so the next request rebuilds against the new URL.
     /// When `None` (the legacy [`router`] entry point), edit routes
     /// aren't mounted and the console stays read-only.
-    pools: Option<Arc<TenantPools>>,
+    pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
     session_secret: Arc<SessionSecret>,
     tera: Arc<Tera>,
     /// Storage backend for per-tenant brand assets (logo, favicon).
@@ -254,7 +254,7 @@ pub fn router(registry: impl Into<crate::sql::Pool>, secret: SessionSecret) -> R
 #[must_use]
 pub fn router_with_pools(
     registry: impl Into<crate::sql::Pool>,
-    pools: Arc<TenantPools>,
+    pools: Arc<dyn crate::tenancy::TenantPoolInvalidator>,
     secret: SessionSecret,
 ) -> Router {
     router_inner(
@@ -290,7 +290,7 @@ pub fn router_with_pools(
 #[must_use]
 pub fn router_with_impersonation(
     registry: impl Into<crate::sql::Pool>,
-    pools: Arc<TenantPools>,
+    pools: Arc<dyn crate::tenancy::TenantPoolInvalidator>,
     secret: SessionSecret,
     brand_storage: BoxedStorage,
     tenant_session_secret: SessionSecret,
@@ -321,7 +321,7 @@ pub fn router_with_impersonation(
 #[must_use]
 pub fn router_with_brand_storage(
     registry: impl Into<crate::sql::Pool>,
-    pools: Option<Arc<TenantPools>>,
+    pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
     secret: SessionSecret,
     brand_storage: BoxedStorage,
 ) -> Router {
@@ -346,7 +346,7 @@ fn default_tenant_handoff_url() -> String {
 
 fn router_inner(
     registry: crate::sql::Pool,
-    pools: Option<Arc<TenantPools>>,
+    pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
     secret: SessionSecret,
     brand_storage: BoxedStorage,
     tenant_session_secret: Option<SessionSecret>,

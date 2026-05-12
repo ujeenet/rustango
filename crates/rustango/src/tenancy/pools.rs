@@ -376,6 +376,40 @@ impl<DB: Database> TenantPools<DB> {
         let mut cache = self.cache.write().await;
         cache.remove(slug);
     }
+}
+
+/// v0.38 — backend-erasing handle for tenant-pool invalidation.
+/// Used by the operator console (and any other surface that needs
+/// to evict a tenant pool after a configuration change) to avoid
+/// being generic over `DB`. Implemented by every `TenantPools<DB>`.
+pub trait TenantPoolInvalidator: Send + Sync {
+    /// Drop the cached pool for the given tenant slug. Idempotent.
+    fn invalidate<'a>(
+        &'a self,
+        slug: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+}
+
+impl<DB: Database> TenantPoolInvalidator for TenantPools<DB> {
+    fn invalidate<'a>(
+        &'a self,
+        slug: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move { TenantPools::<DB>::invalidate(self, slug).await })
+    }
+}
+
+#[allow(dead_code)]
+impl<DB: Database> TenantPools<DB> {
+    /// Type-erase this `TenantPools<DB>` into an
+    /// `Arc<dyn TenantPoolInvalidator>` for surfaces that only need
+    /// the invalidation hook (operator console, admin handlers that
+    /// rotate config). Avoids cascading `<DB>` generics through
+    /// non-query layers.
+    #[must_use]
+    pub fn into_invalidator(self: Arc<Self>) -> Arc<dyn TenantPoolInvalidator> {
+        self
+    }
 
     /// Resolve `org.database_url` through the configured
     /// [`SecretsResolver`] and return the literal connection URL.

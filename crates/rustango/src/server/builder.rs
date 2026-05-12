@@ -1,17 +1,20 @@
 //! `rustango::server::Builder` — the runserver assembly.
 
 use std::future::Future;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use axum::{Extension, Router};
+use sqlx::Database;
 use tower::ServiceExt as _;
 
 use crate::extractors::TenantContext;
+#[cfg(feature = "postgres")]
 use crate::sql::sqlx::PgPool;
 use crate::tenancy::{
     admin::TenantAdminBuilder,
     operator_console::{self, SessionSecret},
-    ChainResolver, HeaderResolver, SubdomainResolver, TenantPools,
+    ChainResolver, DefaultTenantDb, HeaderResolver, SubdomainResolver, TenantPools,
 };
 
 /// Stateless API router that the user supplies. The Builder injects
@@ -20,11 +23,17 @@ use crate::tenancy::{
 pub type ApiRouter = Router<()>;
 
 /// What every tenancy app's `main` builds before serving.
-pub struct Builder {
+///
+/// Generic over the backend (`DB = DefaultTenantDb` so existing PG
+/// `Builder::from_env()` callers compile without a turbofish).
+/// v0.38 — every internal handle (`registry`, `pools`) is per-backend;
+/// sqlite + mysql tenancy apps get the same bundled operator-console +
+/// tenant-admin shape by constructing via [`Builder::from_pool`].
+pub struct Builder<DB: Database = DefaultTenantDb> {
     apex: String,
     registry_url: String,
-    pools: Arc<TenantPools>,
-    registry: PgPool,
+    pools: Arc<TenantPools<DB>>,
+    registry: sqlx::Pool<DB>,
     show_only: Vec<String>,
     admin_title: Option<String>,
     admin_subtitle: Option<String>,
@@ -50,6 +59,7 @@ pub struct Builder {
     /// before the admin fallback so they take precedence over the
     /// admin's catch-all.
     static_dirs: Vec<(String, std::path::PathBuf)>,
+    _phantom: PhantomData<DB>,
 }
 
 struct PendingAction {
@@ -58,10 +68,15 @@ struct PendingAction {
     handler: crate::admin::AdminActionFn,
 }
 
-impl Builder {
+#[cfg(feature = "postgres")]
+impl Builder<sqlx::Postgres> {
     /// Connect to `DATABASE_URL`, build [`TenantPools`], read
     /// `RUSTANGO_APEX_DOMAIN`. Tracing init is left to the caller —
     /// one `tracing_subscriber::fmt().init()` away.
+    ///
+    /// PG-only: defaults to `postgres://...` and uses
+    /// `PgPool::connect`. For sqlite / mysql tenancy apps, use
+    /// [`Builder::from_pool`] with the right `sqlx::Pool<DB>` instead.
     ///
     /// # Errors
     /// Connection to `DATABASE_URL` failures.
@@ -70,10 +85,28 @@ impl Builder {
         let registry_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://rustango:rustango@localhost:5432/rustango_test".into());
         let registry = PgPool::connect(&registry_url).await?;
-        let pools = Arc::new(TenantPools::new(registry.clone()));
-        Ok(Self {
-            apex,
-            registry_url,
+        Ok(Self::from_pool(registry, registry_url, apex))
+    }
+}
+
+impl<DB: Database> Builder<DB> {
+    /// Construct a Builder from an already-built `sqlx::Pool<DB>` and
+    /// the registry URL string. Use this when you've configured the
+    /// pool yourself (custom `PoolOptions`, after-connect hooks, etc.)
+    /// or when you need a non-default backend (sqlite / mysql).
+    ///
+    /// `apex` is the apex domain for host-based dispatch; override
+    /// via env-aware `Builder::from_env()` on PG, or wire your own
+    /// value here.
+    pub fn from_pool(
+        registry: sqlx::Pool<DB>,
+        registry_url: impl Into<String>,
+        apex: impl Into<String>,
+    ) -> Self {
+        let pools = Arc::new(TenantPools::<DB>::new(registry.clone()));
+        Self {
+            apex: apex.into(),
+            registry_url: registry_url.into(),
             pools,
             registry,
             show_only: Vec::new(),
@@ -85,7 +118,8 @@ impl Builder {
             routes: crate::tenancy::RouteConfig::default(),
             health_endpoints: false,
             static_dirs: Vec::new(),
-        })
+            _phantom: PhantomData,
+        }
     }
 
     /// Auto-mount `/health` (liveness) + `/ready` (readiness with
@@ -225,7 +259,7 @@ impl Builder {
     /// Surfaces whatever the hook returns.
     pub async fn seed_with<F, Fut>(self, hook: F) -> Result<Self, Box<dyn std::error::Error>>
     where
-        F: FnOnce(Arc<TenantPools>, PgPool, String) -> Fut,
+        F: FnOnce(Arc<TenantPools<DB>>, sqlx::Pool<DB>, String) -> Fut,
         Fut: Future<Output = Result<(), Box<dyn std::error::Error>>>,
     {
         hook(
@@ -269,7 +303,10 @@ impl Builder {
     pub async fn migrate<P: AsRef<std::path::Path>>(
         self,
         project_root: P,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, Box<dyn std::error::Error>>
+    where
+        crate::sql::Pool: From<sqlx::Pool<DB>>,
+    {
         let root = project_root.as_ref();
         std::fs::create_dir_all(root)?;
 
@@ -281,8 +318,10 @@ impl Builder {
         if dirs.is_empty() && root_has_json_files(root) {
             // v0.8.1 shape: user passed the flat migrations dir.
             (self.init_tenancy_fn)(root)?;
-            let _ = crate::tenancy::migrate_registry(&self.pools, root).await?;
-            let _ = crate::tenancy::migrate_tenants(&self.pools, root, &self.registry_url).await?;
+            let _ = crate::tenancy::migrate_registry(self.pools.as_ref(), root).await?;
+            let _ =
+                crate::tenancy::migrate_tenants_dyn(self.pools.as_ref(), root, &self.registry_url)
+                    .await?;
             return Ok(self);
         }
 
@@ -294,8 +333,10 @@ impl Builder {
         // Re-discover after init_tenancy populated the flat dir.
         let dirs = crate::migrate::discover_migration_dirs(root);
         for dir in &dirs {
-            let _ = crate::tenancy::migrate_registry(&self.pools, dir).await?;
-            let _ = crate::tenancy::migrate_tenants(&self.pools, dir, &self.registry_url).await?;
+            let _ = crate::tenancy::migrate_registry(self.pools.as_ref(), dir).await?;
+            let _ =
+                crate::tenancy::migrate_tenants_dyn(self.pools.as_ref(), dir, &self.registry_url)
+                    .await?;
         }
         Ok(self)
     }
@@ -306,7 +347,10 @@ impl Builder {
     /// # Errors
     /// `bind` failure, or the underlying `axum::serve` call
     /// returning an error.
-    pub async fn serve(self, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn serve(self, addr: &str) -> Result<(), Box<dyn std::error::Error>>
+    where
+        crate::sql::Pool: From<sqlx::Pool<DB>>,
+    {
         let resolver_for_admin = build_resolver(&self.apex);
 
         // v0.27.7 (#60) — pre-warm tenant pools on boot when the
@@ -452,7 +496,7 @@ impl Builder {
         let brand_storage_for_op = crate::tenancy::branding::default_brand_storage();
         let operator_admin = operator_console::router_with_impersonation(
             self.registry,
-            self.pools.clone(),
+            self.pools.clone().into_invalidator(),
             operator_secret,
             brand_storage_for_op,
             session_secret_for_tenant.clone(),

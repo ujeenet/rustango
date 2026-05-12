@@ -457,6 +457,32 @@ where
     Ok(applied)
 }
 
+/// Tri-dialect tenant migration dispatch (v0.38). On PG, downcasts
+/// to `TenantPools<sqlx::Postgres>` and calls [`migrate_tenants`]
+/// (which handles both schema-mode + database-mode tenants); on any
+/// other backend, calls [`migrate_tenants_db`] (database-mode only —
+/// schema-mode is PG-only by language).
+///
+/// Used by [`crate::server::Builder::migrate`] so generic backends
+/// share the same Builder entry-point.
+///
+/// # Errors
+/// As [`migrate_tenants`] / [`migrate_tenants_db`].
+pub async fn migrate_tenants_dyn<DB: Database>(
+    pools: &TenantPools<DB>,
+    dir: &Path,
+    registry_url: &str,
+) -> Result<TenantMigrationReport, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    #[cfg(feature = "postgres")]
+    if let Some(pg) = (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>() {
+        return migrate_tenants(pg, dir, registry_url).await;
+    }
+    migrate_tenants_db(pools, dir, registry_url).await
+}
+
 #[cfg(feature = "postgres")]
 async fn run_for_one_tenant(
     pools: &TenantPools,
