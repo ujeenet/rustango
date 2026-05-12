@@ -32,7 +32,6 @@
 use std::io::Write;
 use std::sync::Arc;
 
-use crate::sql::sqlx::PgPool;
 use axum::body::Body;
 use axum::http::{header, Request, Response};
 use tower::ServiceExt as _;
@@ -98,7 +97,7 @@ pub async fn run<W: Write + Send>(
     config: ServerConfig,
     writer: &mut W,
 ) -> Result<(), TenancyError> {
-    if !no_operators_warn(pools.registry(), writer).await? {
+    if !no_operators_warn(&pools.registry_pool(), writer).await? {
         // No operator accounts — the user can still bring up the
         // server, but they can't log in. Loud warning, then proceed
         // (someone else may be planning to create an operator while
@@ -200,14 +199,14 @@ async fn shutdown_signal() {
 /// would be unreachable in that state. Returns `Ok(true)` when at
 /// least one is present.
 async fn no_operators_warn<W: Write + Send>(
-    registry: &PgPool,
+    registry: &crate::sql::Pool,
     w: &mut W,
 ) -> Result<bool, TenancyError> {
     use crate::core::Column as _;
-    use crate::sql::Fetcher;
+    use crate::sql::FetcherPool;
     let active: Vec<super::auth::Operator> = super::auth::Operator::objects()
         .where_(super::auth::Operator::active.eq(true))
-        .fetch(registry)
+        .fetch_pool(registry)
         .await?;
     if active.is_empty() {
         writeln!(w, "WARNING: no active operators in `rustango_operators` —")?;
