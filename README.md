@@ -9,19 +9,19 @@ Every feature works on every supported backend out of the box. The only PG-speci
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.38"
+rustango = "0.38.0"
 
 # SQLite — file-backed or in-memory, full tri-dialect framework
-rustango = { version = "0.38", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
+rustango = { version = "0.38.0", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
 
 # MySQL 8+
-rustango = { version = "0.38", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
+rustango = { version = "0.38.0", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
 
 # Multiple backends in one binary
-rustango = { version = "0.38", features = ["postgres", "sqlite"] }
+rustango = { version = "0.38.0", features = ["postgres", "sqlite"] }
 ```
 
-### What's new in v0.38 (May 2026) — every feature, every backend
+### What's new in v0.38.0 (May 2026) — every feature, every backend
 
 **rustango is now genuinely tri-dialect end-to-end.** Every previously-PG-only feature
 — multi-tenancy `Builder` + admin, jobs queue (`PgJobQueue` despite the legacy name),
@@ -159,7 +159,7 @@ DATABASE_URL='sqlite:./var/app.db?mode=rwc' \
 
 Same code unchanged with `DATABASE_URL=postgres://…` boots on Postgres or `DATABASE_URL=mysql://…` on MySQL.
 
-> **Multi-tenant on SQLite or MySQL?** Yes, fully supported since v0.38.
+> **Multi-tenant on SQLite or MySQL?** Yes, fully supported since v0.38.0.
 > `Cli::tenancy().run()` boots the operator console + tenant admin + host
 > dispatch on any backend. Use database-mode (one DB / file per tenant) —
 > works identically on all three. Schema-mode is a Postgres-only
@@ -899,7 +899,7 @@ let parsed: serde_json::Value = serde_json::from_str(&plan.join("\n"))?;
 ### Tri-dialect (Postgres / MySQL / SQLite) via `&Pool`
 
 The classic API takes `&PgPool` (Postgres-only). The v0.23.0 series added
-a parallel `&Pool` API; v0.38 extended it to every framework surface
+a parallel `&Pool` API; v0.38.0 extended it to every framework surface
 (multi-tenancy `Builder`, admin, jobs queue, `manage inspectdb`, media,
 permissions, contenttypes, fixtures — the full set). Pick PG, MySQL 8.0+,
 or SQLite at runtime via the connection URL.
@@ -907,8 +907,8 @@ or SQLite at runtime via the connection URL.
 ```toml
 # Cargo.toml — opt in to MySQL or SQLite alongside (or instead of)
 # the default postgres feature
-rustango = { version = "0.38", features = ["mysql"] }
-rustango = { version = "0.38", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
+rustango = { version = "0.38.0", features = ["mysql"] }
+rustango = { version = "0.38.0", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
 ```
 
 ```rust
@@ -1599,7 +1599,7 @@ match form.save(&pool).await {
 
 ## Multi-tenancy
 
-Works on Postgres, MySQL 8+, and SQLite since v0.38. Use `Builder::from_env`
+Works on Postgres, MySQL 8+, and SQLite since v0.38.0. Use `Builder::from_env`
 for PG-default boot, or `Builder::<DB>::from_pool` for explicit-backend
 construction:
 

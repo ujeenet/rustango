@@ -2,6 +2,36 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.38.0] — tri-dialect end-to-end: every feature, every backend
+
+This release makes rustango genuinely tri-dialect (Postgres + MySQL 8+ + SQLite) across every framework feature. Previously Postgres-only surfaces — multi-tenancy builder + admin UI, jobs queue, `manage inspectdb`, media manager, typed permissions — now ship full SQLite + MySQL parity. Concretely:
+
+### Added
+
+- **Full tri-dialect parity** — Every framework feature now works identically across Postgres, MySQL 8+, and SQLite:
+  - Multi-tenancy builder, admin UI, managed identity + group permissions
+  - Background jobs queue with `FOR UPDATE SKIP LOCKED` (PG/MySQL) and transaction-bounded updates (SQLite)
+  - Media manager with storage trait (S3/R2/B2/MinIO/Local)
+  - Typed permissions facade (`subject_can`, `Perm::*` hierarchy)
+  - Schema introspection (`manage inspectdb`)
+
+- **Backend-agnostic APIs** — Core framework surfaces now dispatch to any backend:
+  - `&Pool<AnyDatabase>` replaces `PgPool` in most contexts
+  - Dialect-aware DDL emission (MySQL `BIGINT AUTO_INCREMENT`, `DATETIME(6)`, SQLite `INTEGER PRIMARY KEY AUTOINCREMENT`)
+  - Unified migration runner accepting any backend
+
+### Changed
+
+- **Jobs queue** — `PgJobQueue` name kept for back-compat but now truly backend-agnostic; works on MySQL 8.0+ and SQLite
+- **Admin panel** — Fully themable without Postgres; localStorage + inline CSS for multi-tenant branding via `Storage` trait
+- **Tenancy modes** — All three storage modes (schema, database, row) now available on all three backends
+
+### Fixed
+
+- Multi-tenant `Builder` no longer requires `postgres` feature; can use sqlite or mysql exclusively
+- Admin catch-all routing respects dialect-specific URL construction
+- Media collections work on SQLite file-backed databases
+
 ## [0.34.0] — serious refactor with expanded MySQL support
 
 This release represents a major refactor with comprehensive multi-dialect improvements. The test suite has been significantly expanded with new MySQL live integration tests, ensuring feature parity across SQLite, PostgreSQL, and MySQL backends.
