@@ -58,9 +58,11 @@ pub use crate::tenancy::permissions::{
     revoke_role_perm, set_user_perm, user_permissions, user_roles, user_roles_qs,
 };
 pub use crate::tenancy::permissions::{
-    auto_create_permissions_pool, clear_user_perm_pool, ensure_tables_pool, grant_role_perm_pool,
+    auto_create_permissions_pool, clear_user_perm_pool, create_role_pool, ensure_tables_pool,
+    get_or_create_role_pool, grant_role_perm_pool, has_all_perms_pool, has_any_perm_pool,
     has_perm_pool, model_codenames, revoke_role_perm_pool, set_user_perm_pool,
-    user_permissions_pool, user_roles_qs_pool, Role, RolePermission, UserPermission, UserRole,
+    user_permissions_pool, user_roles_pool, user_roles_qs_pool, Role, RolePermission,
+    UserPermission, UserRole,
 };
 
 // ----- typed entry points (v0.16.0 Option G) -----
@@ -93,6 +95,9 @@ pub fn codename_for<T: Model>(action: &str) -> String {
 /// }
 /// ```
 ///
+/// v0.38 — PG back-compat shim over [`has_perm_for_model_pool`]. New
+/// code should reach for the tri-dialect `_pool` variant directly.
+///
 /// # Errors
 /// As [`has_perm`].
 #[cfg(feature = "postgres")]
@@ -104,9 +109,25 @@ pub async fn has_perm_for_model<T: Model>(
     has_perm(uid, &codename_for::<T>(action), pool).await
 }
 
+/// Tri-dialect counterpart of [`has_perm_for_model`]: same model-typed
+/// API but takes the unified [`crate::sql::Pool`] enum so the call
+/// site works on PG, SQLite, and MySQL through the same surface.
+///
+/// # Errors
+/// As [`has_perm_pool`].
+pub async fn has_perm_for_model_pool<T: Model>(
+    uid: i64,
+    action: &str,
+    pool: &crate::sql::Pool,
+) -> Result<bool, TenancyError> {
+    has_perm_pool(uid, &codename_for::<T>(action), pool).await
+}
+
 /// Grant `<table>.<action>` to `role_id` keyed off the model type.
 /// Idempotent (the underlying [`grant_role_perm`] uses `ON CONFLICT
 /// DO NOTHING`).
+///
+/// v0.38 — PG back-compat shim over [`grant_role_perm_for_model_pool`].
 ///
 /// # Errors
 /// As [`grant_role_perm`].
@@ -119,8 +140,22 @@ pub async fn grant_role_perm_for_model<T: Model>(
     grant_role_perm(role_id, &codename_for::<T>(action), pool).await
 }
 
+/// Tri-dialect counterpart of [`grant_role_perm_for_model`].
+///
+/// # Errors
+/// As [`grant_role_perm_pool`].
+pub async fn grant_role_perm_for_model_pool<T: Model>(
+    role_id: i64,
+    action: &str,
+    pool: &crate::sql::Pool,
+) -> Result<(), TenancyError> {
+    grant_role_perm_pool(role_id, &codename_for::<T>(action), pool).await
+}
+
 /// Revoke `<table>.<action>` from `role_id` keyed off the model
 /// type. Idempotent (no-op when the row didn't exist).
+///
+/// v0.38 — PG back-compat shim over [`revoke_role_perm_for_model_pool`].
 ///
 /// # Errors
 /// As [`revoke_role_perm`].
@@ -133,9 +168,23 @@ pub async fn revoke_role_perm_for_model<T: Model>(
     revoke_role_perm(role_id, &codename_for::<T>(action), pool).await
 }
 
+/// Tri-dialect counterpart of [`revoke_role_perm_for_model`].
+///
+/// # Errors
+/// As [`revoke_role_perm_pool`].
+pub async fn revoke_role_perm_for_model_pool<T: Model>(
+    role_id: i64,
+    action: &str,
+    pool: &crate::sql::Pool,
+) -> Result<(), TenancyError> {
+    revoke_role_perm_pool(role_id, &codename_for::<T>(action), pool).await
+}
+
 /// Set a per-user override for `<table>.<action>` keyed off the
 /// model type. `granted = true` is an explicit grant; `granted =
 /// false` is an explicit denial that overrides any role grant.
+///
+/// v0.38 — PG back-compat shim over [`set_user_perm_for_model_pool`].
 ///
 /// # Errors
 /// As [`set_user_perm`].
@@ -149,9 +198,24 @@ pub async fn set_user_perm_for_model<T: Model>(
     set_user_perm(uid, &codename_for::<T>(action), granted, pool).await
 }
 
+/// Tri-dialect counterpart of [`set_user_perm_for_model`].
+///
+/// # Errors
+/// As [`set_user_perm_pool`].
+pub async fn set_user_perm_for_model_pool<T: Model>(
+    uid: i64,
+    action: &str,
+    granted: bool,
+    pool: &crate::sql::Pool,
+) -> Result<(), TenancyError> {
+    set_user_perm_pool(uid, &codename_for::<T>(action), granted, pool).await
+}
+
 /// Clear a per-user override for `<table>.<action>` keyed off the
 /// model type — the user falls back to their role-derived
 /// permissions for that codename.
+///
+/// v0.38 — PG back-compat shim over [`clear_user_perm_for_model_pool`].
 ///
 /// # Errors
 /// As [`clear_user_perm`].
@@ -162,6 +226,18 @@ pub async fn clear_user_perm_for_model<T: Model>(
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
     clear_user_perm(uid, &codename_for::<T>(action), pool).await
+}
+
+/// Tri-dialect counterpart of [`clear_user_perm_for_model`].
+///
+/// # Errors
+/// As [`clear_user_perm_pool`].
+pub async fn clear_user_perm_for_model_pool<T: Model>(
+    uid: i64,
+    action: &str,
+    pool: &crate::sql::Pool,
+) -> Result<(), TenancyError> {
+    clear_user_perm_pool(uid, &codename_for::<T>(action), pool).await
 }
 
 #[cfg(test)]

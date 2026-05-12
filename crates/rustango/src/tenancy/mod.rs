@@ -78,8 +78,8 @@ pub mod tenant_console;
 #[cfg(feature = "postgres")]
 pub use auth::{authenticate_operator, authenticate_user};
 pub use auth::{
-    authenticate_operator_pool, validate_tenant_user_schema, Operator, TenantUserModel, User,
-    REQUIRED_USER_COLUMNS,
+    authenticate_operator_pool, authenticate_user_pool, validate_tenant_user_schema, Operator,
+    TenantUserModel, User, REQUIRED_USER_COLUMNS,
 };
 #[cfg(feature = "postgres")]
 pub use auth_backends::ensure_api_keys_table;
@@ -103,9 +103,10 @@ pub use permissions::{
     user_roles,
 };
 pub use permissions::{
-    auto_create_permissions_pool, clear_user_perm_pool, ensure_tables_pool, grant_role_perm_pool,
+    auto_create_permissions_pool, clear_user_perm_pool, create_role_pool, ensure_tables_pool,
+    get_or_create_role_pool, grant_role_perm_pool, has_all_perms_pool, has_any_perm_pool,
     has_perm_pool, model_codenames, revoke_role_perm_pool, set_user_perm_pool,
-    user_permissions_pool, user_roles_qs_pool,
+    user_permissions_pool, user_roles_pool, user_roles_qs_pool,
 };
 
 pub use database_pools::{DatabaseConn, DatabasePool, DatabasePools};

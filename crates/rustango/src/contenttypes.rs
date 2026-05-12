@@ -207,6 +207,42 @@ impl ContentType {
             .await?;
         Ok(rows.into_iter().next())
     }
+
+    /// Tri-dialect counterpart of [`Self::for_model`] (v0.38).
+    /// Resolves `T`'s registered ContentType row via the natural
+    /// `(app_label, model_name)` key — same lookup logic, but the
+    /// query goes through [`crate::sql::FetcherPool::fetch_pool`]
+    /// so the call works on PG / SQLite / MySQL.
+    ///
+    /// # Errors
+    /// As [`Self::for_model`].
+    pub async fn for_model_pool<T: crate::core::Model>(
+        pool: &crate::sql::Pool,
+    ) -> Result<Option<Self>, ExecError> {
+        let entry = inventory::iter::<ModelEntry>
+            .into_iter()
+            .find(|e| e.schema.table == T::SCHEMA.table)
+            .ok_or_else(|| ExecError::MissingPrimaryKey {
+                table: T::SCHEMA.table,
+            })?;
+        let app = entry.resolved_app_label().unwrap_or("project");
+        let name = T::SCHEMA.name.to_ascii_lowercase();
+        Self::by_natural_key_pool(pool, app, &name).await
+    }
+
+    /// Tri-dialect counterpart of [`Self::all`] (v0.38) — every
+    /// registered ContentType ordered by `(app_label, model_name)`,
+    /// across any backend the [`crate::sql::Pool`] enum carries.
+    ///
+    /// # Errors
+    /// As [`Self::for_model`].
+    pub async fn all_pool(pool: &crate::sql::Pool) -> Result<Vec<Self>, ExecError> {
+        let rows: Vec<Self> = Self::objects()
+            .order_by(&[("app_label", false), ("model_name", false)])
+            .fetch_pool(pool)
+            .await?;
+        Ok(rows)
+    }
 }
 
 // ============================================================ #89 part B — fetch helpers
@@ -237,6 +273,22 @@ impl ContentType {
 #[cfg(feature = "postgres")]
 pub async fn fetch_row_as_json(
     pool: &PgPool,
+    ct: &ContentType,
+    pk: impl Into<SqlValue>,
+) -> Result<Option<serde_json::Value>, ExecError> {
+    fetch_row_as_json_pool(&crate::sql::Pool::Postgres(pool.clone()), ct, pk).await
+}
+
+/// Tri-dialect counterpart of [`fetch_row_as_json`] (v0.38). Takes
+/// the unified [`crate::sql::Pool`] enum and routes through
+/// [`crate::sql::select_one_row_as_json_pool`] so the same body runs
+/// against PG / SQLite / MySQL. Used by the admin's audit log + the
+/// generic-FK link renderer on every backend.
+///
+/// # Errors
+/// As [`fetch_row_as_json`].
+pub async fn fetch_row_as_json_pool(
+    pool: &crate::sql::Pool,
     ct: &ContentType,
     pk: impl Into<SqlValue>,
 ) -> Result<Option<serde_json::Value>, ExecError> {
@@ -273,13 +325,8 @@ pub async fn fetch_row_as_json(
         limit: Some(1),
         offset: None,
     };
-    let row_opt = crate::sql::select_one_row_on(pool, &select_q).await?;
-    let Some(row) = row_opt else {
-        return Ok(None);
-    };
-
     let fields: Vec<&'static crate::core::FieldSchema> = entry.schema.scalar_fields().collect();
-    Ok(Some(crate::sql::row_to_json(&row, &fields)))
+    crate::sql::select_one_row_as_json_pool(pool, &select_q, &fields).await
 }
 
 /// Stream every row of a given ContentType through `f`. Useful
@@ -298,6 +345,25 @@ pub async fn fetch_row_as_json(
 #[cfg(feature = "postgres")]
 pub async fn for_each_row_of_ct<F>(
     pool: &PgPool,
+    ct: &ContentType,
+    batch_size: u32,
+    f: F,
+) -> Result<usize, ExecError>
+where
+    F: FnMut(serde_json::Value) -> Result<(), ExecError>,
+{
+    for_each_row_of_ct_pool(&crate::sql::Pool::Postgres(pool.clone()), ct, batch_size, f).await
+}
+
+/// Tri-dialect counterpart of [`for_each_row_of_ct`] (v0.38). Iterates
+/// the rows in batches via [`crate::sql::select_rows_as_json_pool`] so
+/// the same body runs across every backend the [`crate::sql::Pool`]
+/// enum carries. `batch_size = 0` clamps to 1.
+///
+/// # Errors
+/// As [`for_each_row_of_ct`].
+pub async fn for_each_row_of_ct_pool<F>(
+    pool: &crate::sql::Pool,
     ct: &ContentType,
     batch_size: u32,
     mut f: F,
@@ -337,16 +403,16 @@ where
             limit: Some(batch),
             offset: Some(offset),
         };
-        let rows = crate::sql::select_rows_on(pool, &select_q).await?;
+        let rows = crate::sql::select_rows_as_json_pool(pool, &select_q, &fields).await?;
         if rows.is_empty() {
             break;
         }
-        for row in &rows {
-            let json = crate::sql::row_to_json(row, &fields);
+        let n = rows.len() as i64;
+        for json in rows {
             f(json)?;
             visited += 1;
         }
-        if (rows.len() as i64) < batch {
+        if n < batch {
             break;
         }
         offset += batch;
@@ -409,11 +475,25 @@ impl GenericForeignKey {
         pool: &PgPool,
         object_pk: i64,
     ) -> Result<Self, ExecError> {
-        let ct = ContentType::for_model::<T>(pool).await?.ok_or_else(|| {
-            ExecError::MissingPrimaryKey {
+        Self::for_target_pool::<T>(&crate::sql::Pool::Postgres(pool.clone()), object_pk).await
+    }
+
+    /// Tri-dialect counterpart of [`Self::for_target`] (v0.38).
+    /// Routes the ContentType lookup through
+    /// [`ContentType::for_model_pool`] so the same call site works on
+    /// PG / SQLite / MySQL.
+    ///
+    /// # Errors
+    /// As [`Self::for_target`].
+    pub async fn for_target_pool<T: crate::core::Model>(
+        pool: &crate::sql::Pool,
+        object_pk: i64,
+    ) -> Result<Self, ExecError> {
+        let ct = ContentType::for_model_pool::<T>(pool)
+            .await?
+            .ok_or_else(|| ExecError::MissingPrimaryKey {
                 table: T::SCHEMA.table,
-            }
-        })?;
+            })?;
         let id = ct
             .id
             .get()

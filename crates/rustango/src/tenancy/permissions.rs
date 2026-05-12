@@ -713,6 +713,86 @@ pub async fn create_role_pool(
     Ok(role.id.get().copied().unwrap_or(0))
 }
 
+/// v0.38 — tri-dialect counterpart of [`get_or_create_role`]. Two
+/// round-trips on a fresh insert (SELECT-by-name, then INSERT on miss)
+/// vs. the single-CTE PG variant; the bound surface is small and
+/// idempotency is preserved by the unique constraint on `name`.
+///
+/// # Errors
+/// As [`get_or_create_role`].
+pub async fn get_or_create_role_pool(
+    name: &str,
+    description: &str,
+    pool: &crate::sql::Pool,
+) -> Result<i64, TenancyError> {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+    let existing: Vec<Role> = Role::objects()
+        .where_(Role::name.eq(name.to_owned()))
+        .limit(1)
+        .fetch_pool(pool)
+        .await?;
+    if let Some(r) = existing.into_iter().next() {
+        return Ok(r.id.get().copied().unwrap_or(0));
+    }
+    create_role_pool(name, description, pool).await
+}
+
+/// v0.38 — tri-dialect counterpart of [`has_any_perm`]. Issues one
+/// `has_perm_pool` per codename and short-circuits on the first hit.
+/// PG keeps the single-CTE [`has_any_perm`] for hot paths; the
+/// loop-per-codename path is fine for sqlite/mysql given the typical
+/// codename-list size (≤ a handful).
+///
+/// # Errors
+/// As [`has_perm_pool`].
+pub async fn has_any_perm_pool(
+    uid: i64,
+    codenames: &[&str],
+    pool: &crate::sql::Pool,
+) -> Result<bool, TenancyError> {
+    for c in codenames {
+        if has_perm_pool(uid, c, pool).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// v0.38 — tri-dialect counterpart of [`has_all_perms`]. Issues one
+/// `has_perm_pool` per codename and short-circuits on the first miss.
+///
+/// # Errors
+/// As [`has_perm_pool`].
+pub async fn has_all_perms_pool(
+    uid: i64,
+    codenames: &[&str],
+    pool: &crate::sql::Pool,
+) -> Result<bool, TenancyError> {
+    for c in codenames {
+        if !has_perm_pool(uid, c, pool).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// v0.38 — tri-dialect counterpart of [`user_roles`]. Reuses
+/// [`user_roles_qs_pool`] and projects to `(id, name)` pairs.
+///
+/// # Errors
+/// As [`user_roles_qs_pool`].
+pub async fn user_roles_pool(
+    uid: i64,
+    pool: &crate::sql::Pool,
+) -> Result<Vec<(i64, String)>, TenancyError> {
+    let roles = user_roles_qs_pool(uid, pool).await?;
+    Ok(roles
+        .into_iter()
+        .map(|r| (r.id.get().copied().unwrap_or(0), r.name))
+        .collect())
+}
+
 /// Get an existing role by name or create one. Returns the id.
 #[cfg(feature = "postgres")]
 pub async fn get_or_create_role(
