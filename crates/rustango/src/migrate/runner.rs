@@ -1367,6 +1367,7 @@ async fn apply_atomic_pool(
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (atomic, _pool)");
+    let dialect = pool.dialect();
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
@@ -1375,9 +1376,12 @@ async fn apply_atomic_pool(
             for op in &mig.forward {
                 match op {
                     Operation::Schema(change) => {
-                        let batch =
-                            render_changes_split(std::slice::from_ref(change), &mig.snapshot)
-                                .map_err(MigrateError::Validation)?;
+                        let batch = super::diff::render_changes_split_with_dialect(
+                            std::slice::from_ref(change),
+                            &mig.snapshot,
+                            dialect,
+                        )
+                        .map_err(MigrateError::Validation)?;
                         for stmt in batch.immediate {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
@@ -1404,9 +1408,12 @@ async fn apply_atomic_pool(
             for op in &mig.forward {
                 match op {
                     Operation::Schema(change) => {
-                        let batch =
-                            render_changes_split(std::slice::from_ref(change), &mig.snapshot)
-                                .map_err(MigrateError::Validation)?;
+                        let batch = super::diff::render_changes_split_with_dialect(
+                            std::slice::from_ref(change),
+                            &mig.snapshot,
+                            dialect,
+                        )
+                        .map_err(MigrateError::Validation)?;
                         for stmt in batch.immediate {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
@@ -1435,9 +1442,12 @@ async fn apply_atomic_pool(
             for op in &mig.forward {
                 match op {
                     Operation::Schema(change) => {
-                        let batch =
-                            render_changes_split(std::slice::from_ref(change), &mig.snapshot)
-                                .map_err(MigrateError::Validation)?;
+                        let batch = super::diff::render_changes_split_with_dialect(
+                            std::slice::from_ref(change),
+                            &mig.snapshot,
+                            dialect,
+                        )
+                        .map_err(MigrateError::Validation)?;
                         for stmt in batch.immediate {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }

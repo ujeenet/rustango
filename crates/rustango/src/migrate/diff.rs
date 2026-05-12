@@ -529,6 +529,39 @@ pub fn render_changes_split(
     changes: &[SchemaChange],
     current: &SchemaSnapshot,
 ) -> Result<RenderedBatch, String> {
+    // v0.38 — PG-default for back-compat. The migration runner's
+    // per-pool apply paths route through `render_changes_split_with_dialect`
+    // with the live `&dyn Dialect` so the emitted DDL matches the
+    // backend executing it (slice 30 fix — bootstrap CREATE TABLE was
+    // emitting `BIGSERIAL` / `TIMESTAMPTZ` on SQLite, which SQLite
+    // accepts as NUMERIC affinity columns but then rejects NULL
+    // inserts because `BIGSERIAL` doesn't carry the SQLite-specific
+    // `INTEGER PRIMARY KEY AUTOINCREMENT` semantics).
+    render_changes_split_with_dialect(changes, current, &crate::sql::Postgres)
+}
+
+/// v0.38 — dialect-aware counterpart of [`render_changes_split`].
+/// The runner's `apply_atomic_pool` / `apply_nonatomic_pool` match
+/// arms pass `pool.dialect()` so a SQLite bootstrap migration emits
+/// `INTEGER PRIMARY KEY AUTOINCREMENT` for `Auto<i64>` PKs (was
+/// `BIGSERIAL`, which SQLite typed as NUMERIC and then rejected
+/// NULL inserts into).
+///
+/// # Errors
+/// As [`render_changes_split`].
+pub fn render_changes_split_with_dialect(
+    changes: &[SchemaChange],
+    current: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Result<RenderedBatch, String> {
+    render_changes_split_inner(changes, current, dialect)
+}
+
+fn render_changes_split_inner(
+    changes: &[SchemaChange],
+    current: &SchemaSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Result<RenderedBatch, String> {
     let mut out = RenderedBatch::default();
     for change in changes {
         match change {
@@ -536,7 +569,8 @@ pub fn render_changes_split(
                 let table = current.table(name).ok_or_else(|| {
                     format!("CreateTable for `{name}` but no snapshot entry for it")
                 })?;
-                out.immediate.push(create_table_sql_from_snapshot(table));
+                out.immediate
+                    .push(create_table_sql_from_snapshot_with_dialect(table, dialect));
                 out.deferred_fks
                     .extend(constraints_sql_from_snapshot(table));
             }
@@ -762,21 +796,41 @@ fn pg_type_for_ty_name(ty: &str) -> String {
 }
 
 fn create_table_sql_from_snapshot(t: &TableSnapshot) -> String {
-    let mut sql = format!(r#"CREATE TABLE "{}" ("#, t.name);
+    // v0.38 — PG-default kept for tests + back-compat. Tri-dialect
+    // callers go through `_with_dialect`.
+    create_table_sql_from_snapshot_with_dialect(t, &crate::sql::Postgres)
+}
+
+fn create_table_sql_from_snapshot_with_dialect(
+    t: &TableSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> String {
+    let mut sql = format!("CREATE TABLE {} (", dialect.quote_ident(&t.name));
     let mut first = true;
     for f in &t.fields {
         if !first {
             sql.push_str(", ");
         }
         first = false;
-        let _ = write!(sql, r#""{}" {}"#, f.column, sql_type(f));
+        let _ = write!(
+            sql,
+            "{} {}",
+            dialect.quote_ident(&f.column),
+            sql_type_with_dialect(f, dialect)
+        );
         if let Some(expr) = &f.default {
             let _ = write!(sql, " DEFAULT {expr}");
         }
         if !f.nullable {
             sql.push_str(" NOT NULL");
         }
-        if f.primary_key {
+        // SQLite emits `INTEGER PRIMARY KEY AUTOINCREMENT` as a single
+        // type token for `Auto<T>` PKs — `PRIMARY KEY` is part of the
+        // type, not a separate clause. Skip the standalone append.
+        let serial_pk_inline = f.auto
+            && matches!(f.ty.as_str(), "i16" | "i32" | "i64")
+            && dialect.serial_type_includes_primary_key();
+        if f.primary_key && !serial_pk_inline {
             sql.push_str(" PRIMARY KEY");
         }
         // Per-column UNIQUE constraint from #[rustango(unique)]. Without
@@ -793,14 +847,14 @@ fn create_table_sql_from_snapshot(t: &TableSnapshot) -> String {
             sql.push_str(" CHECK (");
             let mut wrote = false;
             if let Some(min) = f.min {
-                let _ = write!(sql, r#""{}" >= {}"#, f.column, min);
+                let _ = write!(sql, "{} >= {}", dialect.quote_ident(&f.column), min);
                 wrote = true;
             }
             if let Some(max) = f.max {
                 if wrote {
                     sql.push_str(" AND ");
                 }
-                let _ = write!(sql, r#""{}" <= {}"#, f.column, max);
+                let _ = write!(sql, "{} <= {}", dialect.quote_ident(&f.column), max);
             }
             sql.push(')');
         }
@@ -875,39 +929,51 @@ fn add_column_sql(table: &str, f: &FieldSnapshot) -> String {
 }
 
 fn sql_type(f: &FieldSnapshot) -> String {
-    // v0.13.2: `auto = true` historically meant "PK SERIAL/BIGSERIAL,"
-    // but v0.12+ field mixins (`auto_now_add`, `auto_now`,
-    // `auto_uuid`) reuse the same flag to mark a column as
-    // "skipped on INSERT, DB DEFAULT fires." For non-integer types
-    // we fall through to the regular type mapping so the migration
-    // emits e.g. `TIMESTAMPTZ NOT NULL DEFAULT now()` instead of
-    // an invalid `DATETIME` literal. Integer auto stays SERIAL.
+    // v0.38 — PG-default kept for tests + the back-compat
+    // `render_changes_split` entry point. Tri-dialect emitters go
+    // through `sql_type_with_dialect`.
+    sql_type_with_dialect(f, &crate::sql::Postgres)
+}
+
+/// v0.38 — dialect-aware sql_type. Routes integer-`Auto<T>` PKs
+/// through `dialect.serial_type()` and every other field through
+/// `dialect.column_type()`. SQLite's `Auto<i64>` PK becomes
+/// `INTEGER PRIMARY KEY AUTOINCREMENT`; MySQL's becomes `BIGINT NOT NULL
+/// AUTO_INCREMENT`; PG's stays `BIGSERIAL`.
+fn sql_type_with_dialect(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
+    use crate::core::FieldType;
+    // Map snapshot's lowercase ty string to FieldType.
+    let ty = match f.ty.as_str() {
+        "i16" => Some(FieldType::I16),
+        "i32" => Some(FieldType::I32),
+        "i64" => Some(FieldType::I64),
+        "f32" => Some(FieldType::F32),
+        "f64" => Some(FieldType::F64),
+        "bool" => Some(FieldType::Bool),
+        "string" => Some(FieldType::String),
+        "datetime" => Some(FieldType::DateTime),
+        "date" => Some(FieldType::Date),
+        "uuid" => Some(FieldType::Uuid),
+        "json" => Some(FieldType::Json),
+        _ => None,
+    };
+    // v0.13.2: `auto = true` historically meant "PK SERIAL/BIGSERIAL"
+    // for integer types; field-mixin auto (auto_now_add etc.) on
+    // non-integer types falls through to the regular column_type
+    // mapping. Dialect-specific token is picked by `dialect.serial_type()`.
     if f.auto {
-        match f.ty.as_str() {
-            "i32" => return "SERIAL".into(),
-            "i64" => return "BIGSERIAL".into(),
-            // anything else: fall through to the regular type
-            // resolution below.
-            _ => {}
+        if let Some(t) = ty {
+            if matches!(t, FieldType::I16 | FieldType::I32 | FieldType::I64) {
+                return dialect.serial_type(t).to_owned();
+            }
         }
     }
-    match f.ty.as_str() {
-        "i16" => "SMALLINT".into(),
-        "i32" => "INTEGER".into(),
-        "i64" => "BIGINT".into(),
-        "f32" => "REAL".into(),
-        "f64" => "DOUBLE PRECISION".into(),
-        "bool" => "BOOLEAN".into(),
-        "string" => match f.max_length {
-            Some(n) => format!("VARCHAR({n})"),
-            None => "TEXT".into(),
-        },
-        "datetime" => "TIMESTAMPTZ".into(),
-        "date" => "DATE".into(),
-        "uuid" => "UUID".into(),
-        "json" => "JSONB".into(),
-        other => other.to_uppercase(),
+    if let Some(t) = ty {
+        return dialect.column_type(t, f.max_length);
     }
+    // Unknown type string — fall through to upper-case (preserves
+    // pre-v0.38 behavior for any field type rustango doesn't model).
+    f.ty.to_uppercase()
 }
 
 #[cfg(test)]
