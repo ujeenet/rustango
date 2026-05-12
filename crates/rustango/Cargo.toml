@@ -267,20 +267,19 @@ admin = [
 # console can persist per-tenant brand assets (logo / favicon) on
 # disk and serve them via the tenancy router.
 tenancy = [
-    # v0.37 — `tenancy` now implies `postgres` because schema-mode
-    # multi-tenancy uses `SET search_path` which is Postgres-only by
-    # language semantics. The legacy back-compat `auth_backends`,
-    # `permissions`, `auth_routes`, operator-console etc. submodules
-    # still take bare `&PgPool` for their PG-only fast paths; their
-    # `_pool` companions exist for tri-dialect callers but the file-
-    # level imports stay PG-typed until the v0.38 tenancy-tri-dialect
-    # sweep finishes (deferred v0.34 B.3+B.4+B.5 in the roadmap).
+    # v0.38 — `tenancy` no longer implies `postgres`. Database-per-tenant
+    # mode (`DatabasePools<DB>`, since v0.33) works on Postgres, MySQL,
+    # and SQLite alike. Schema-mode tenancy is still Postgres-only by
+    # language semantics (uses `SET search_path`); the framework's
+    # tenancy/migrate + tenancy/pools code paths keep their
+    # `#[cfg(feature = "postgres")]` gates around schema-mode-specific
+    # logic, and the runtime returns a clear error when a non-PG
+    # registry is asked to serve a schema-mode tenant.
     #
-    # Apps that want sqlite/mysql + admin without the multi-tenancy
-    # layer build with `--no-default-features --features
-    # <backend>,admin` and skip `tenancy` — that combo is supported
-    # as of v0.37.
-    "postgres",
+    # Picking a backend: add `--features sqlite,tenancy,admin`,
+    # `--features mysql,tenancy`, or `--features postgres,tenancy,admin`
+    # depending on the target deployment. Apps that *also* want
+    # schema-mode tenants get `postgres` automatically by including it.
     "runtime",
     "storage",
     "uploads",
