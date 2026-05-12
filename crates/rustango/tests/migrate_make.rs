@@ -286,7 +286,13 @@ fn name_override_beats_heuristic_even_for_initial() {
 }
 
 #[test]
-fn multiple_create_tables_after_initial_falls_back_to_auto() {
+fn multiple_create_tables_after_initial_names_after_tables() {
+    // v0.31.1 — the auto-name heuristic was upgraded so a diff that
+    // is exclusively `CreateTable`s (plus their indexes) produces a
+    // descriptive name like `create_<a>_and_<b>` instead of the
+    // unhelpful `auto`. Pre-v0.31.1 this test asserted "0002_auto";
+    // the assertion was updated alongside the heuristic and the test
+    // renamed to reflect the new contract.
     let dir = fresh_dir("multi_create");
     let initial = snapshot_with(vec![user_table()]);
     make_migrations_from(&dir, &initial, None).unwrap().unwrap();
@@ -302,7 +308,10 @@ fn multiple_create_tables_after_initial_falls_back_to_auto() {
 
     let next = snapshot_with(vec![user_table(), post_table(), extra]);
     let mig = make_migrations_from(&dir, &next, None).unwrap().unwrap();
-    assert_eq!(mig.name, "0002_auto");
+    // Tables are sorted before being joined, so "extra" + "snap_post"
+    // (the `post_table()` helper uses table name `snap_post`) come out
+    // alphabetically.
+    assert_eq!(mig.name, "0002_create_extra_and_snap_post");
     assert_eq!(mig.forward.len(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }

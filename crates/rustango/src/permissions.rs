@@ -13,11 +13,13 @@
 //! reach for permissions by their `T: Model` type instead of
 //! string-typing the codename:
 //!
-//!     // Old (still supported):
-//!     rustango::tenancy::permissions::has_perm(uid, "post.change", &pool).await?;
+//! ```ignore
+//! // Old (still supported):
+//! rustango::tenancy::permissions::has_perm(uid, "post.change", &pool).await?;
 //!
-//!     // New, typed (Option G of v0.16.0):
-//!     rustango::permissions::has_perm_for_model::<Post>(uid, "change", &pool).await?;
+//! // New, typed (Option G of v0.16.0):
+//! rustango::permissions::has_perm_for_model::<Post>(uid, "change", &pool).await?;
+//! ```
 //!
 //! The codename layout is unchanged (`{table}.{action}`) — the
 //! typed helpers just build the string from `T::SCHEMA.table`. No
