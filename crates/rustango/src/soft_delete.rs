@@ -32,8 +32,7 @@
 use crate::core::{
     Assignment, DeleteQuery, Filter, ModelSchema, Op, SqlValue, UpdateQuery, WhereExpr,
 };
-use crate::sql::sqlx::PgPool;
-use crate::sql::{delete as sql_delete, update as sql_update, ExecError};
+use crate::sql::{delete_pool as sql_delete_pool, update_pool as sql_update_pool, ExecError, Pool};
 
 /// Returns `Some(<col> IS NULL)` when `model` is soft-delete-enabled,
 /// `None` otherwise. Use to filter for rows that haven't been trashed.
@@ -105,7 +104,7 @@ pub enum SoftDeleteError {
 /// `#[rustango(soft_delete)]` field.
 /// [`SoftDeleteError::Exec`] for the underlying sqlx error.
 pub async fn soft_delete(
-    pool: &PgPool,
+    pool: &Pool,
     model: &'static ModelSchema,
     pk_column: &'static str,
     pk_value: SqlValue,
@@ -113,7 +112,7 @@ pub async fn soft_delete(
     let col = model
         .soft_delete_column
         .ok_or(SoftDeleteError::NotSoftDeleteEnabled(model.name))?;
-    let n = sql_update(
+    let n = sql_update_pool(
         pool,
         &UpdateQuery {
             model,
@@ -140,7 +139,7 @@ pub async fn soft_delete(
 /// `#[rustango(soft_delete)]` field.
 /// [`SoftDeleteError::Exec`] for the underlying sqlx error.
 pub async fn restore(
-    pool: &PgPool,
+    pool: &Pool,
     model: &'static ModelSchema,
     pk_column: &'static str,
     pk_value: SqlValue,
@@ -148,7 +147,7 @@ pub async fn restore(
     let col = model
         .soft_delete_column
         .ok_or(SoftDeleteError::NotSoftDeleteEnabled(model.name))?;
-    let n = sql_update(
+    let n = sql_update_pool(
         pool,
         &UpdateQuery {
             model,
@@ -176,12 +175,12 @@ pub async fn restore(
 /// # Errors
 /// Underlying sqlx error.
 pub async fn purge(
-    pool: &PgPool,
+    pool: &Pool,
     model: &'static ModelSchema,
     pk_column: &'static str,
     pk_value: SqlValue,
 ) -> Result<u64, ExecError> {
-    sql_delete(
+    sql_delete_pool(
         pool,
         &DeleteQuery {
             model,
@@ -371,10 +370,11 @@ mod tests {
     async fn soft_delete_on_unsupported_model_returns_clear_error() {
         // Use a connect_lazy pool — never actually dialed because the
         // function returns the error before any SQL runs.
-        let pool = sqlx::postgres::PgPoolOptions::new()
+        let pg = crate::sql::sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy("postgres://localhost:1/none")
             .unwrap();
+        let pool: crate::sql::Pool = pg.into();
         let err = soft_delete(&pool, &MODEL_WITHOUT_SD, "id", SqlValue::I64(1))
             .await
             .unwrap_err();
@@ -383,10 +383,11 @@ mod tests {
 
     #[tokio::test]
     async fn restore_on_unsupported_model_returns_clear_error() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
+        let pg = crate::sql::sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy("postgres://localhost:1/none")
             .unwrap();
+        let pool: crate::sql::Pool = pg.into();
         let err = restore(&pool, &MODEL_WITHOUT_SD, "id", SqlValue::I64(1))
             .await
             .unwrap_err();

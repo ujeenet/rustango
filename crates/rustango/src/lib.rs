@@ -315,7 +315,8 @@ pub mod sql;
 /// Soft-delete query helpers — `active_filter` / `trashed_filter` /
 /// `compose_with_active` / `soft_delete` / `restore` / `purge` for any
 /// model carrying `#[rustango(soft_delete)]`. See [`soft_delete`].
-#[cfg(feature = "postgres")]
+///
+/// v0.38 — fully tri-dialect via `&crate::sql::Pool`.
 pub mod soft_delete;
 
 #[cfg(feature = "admin")]
