@@ -40,6 +40,7 @@
 //! `rustango::manage::Cli`.)
 
 use crate::core::Column as _;
+#[cfg(feature = "postgres")]
 use crate::sql::sqlx::{PgConnection, PgPool};
 use crate::sql::Auto;
 use crate::Model;
@@ -129,6 +130,7 @@ pub struct User {
 /// Returns [`TenancyError::Driver`]/[`TenancyError::Exec`] for SQL
 /// failures, or [`TenancyError::Validation`] for malformed stored
 /// hashes (corrupt row).
+#[cfg(feature = "postgres")]
 pub async fn authenticate_operator(
     registry: &PgPool,
     username: &str,
@@ -185,6 +187,7 @@ pub async fn authenticate_operator_pool(
 ///
 /// # Errors
 /// As [`authenticate_operator`].
+#[cfg(feature = "postgres")]
 pub async fn authenticate_user(
     conn: &mut PgConnection,
     username: &str,

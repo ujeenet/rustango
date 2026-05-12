@@ -530,7 +530,12 @@ pub mod fixtures;
 
 /// Bulk-action runner — apply one operation to a set of selected PKs.
 /// See [`bulk_actions::BulkActionRegistry`] + built-in actions.
-#[cfg(feature = "tenancy")]
+///
+/// v0.38 — also gated to `postgres` because [`BulkAction::execute`]
+/// takes `&PgPool` and the built-ins bind `Vec<i64>` arrays (PG-only
+/// IN-list shape). Slice 6 lifts the trait to `&Pool` + uses dialect
+/// emitter for the IN list.
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
 pub mod bulk_actions;
 
 /// TOTP — RFC 6238 time-based one-time passwords for 2FA.
@@ -764,7 +769,13 @@ pub mod extractors;
 
 /// DRF-style ModelViewSet — five REST endpoints for any [`Model`] table
 /// in ~5 lines. See [`viewset::ViewSet`].
-#[cfg(feature = "tenancy")]
+///
+/// v0.38 — also gated to `postgres` because [`ViewSet::tenant_router`]
+/// uses the PG-only `Tenant` extractor; slice 4 lifts that to be
+/// generic and the gate can drop. Sqlite/MySQL projects can still
+/// hand-roll their REST routes against `DatabaseTenant<DB>` + the
+/// ORM `_pool` helpers in the meantime.
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
 pub mod viewset;
 
 /// Generic class-based views for HTML templates (Django-shape) —
@@ -772,7 +783,11 @@ pub mod viewset;
 /// over `#[derive(Model)]` schemas, rendered through Tera. Sibling of
 /// [`viewset`] for the JSON/API side. See [`template_views`] for
 /// usage and the canonical Tera context shape.
-#[cfg(feature = "template_views")]
+///
+/// v0.38 — also gated to `postgres` because the implementation uses
+/// the PG-only `Tenant` extractor; tracks the same lift as `viewset`
+/// (slice 4).
+#[cfg(all(feature = "template_views", feature = "postgres"))]
 pub mod template_views;
 
 /// Django-style runserver — [`server::Builder`] owns every line of

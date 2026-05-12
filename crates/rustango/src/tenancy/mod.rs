@@ -44,15 +44,22 @@
 // baked in. Sqlite/MySQL apps that want bundled admin will wait for
 // the v0.35+ bi-dialect admin rewrite; today, write your own routes
 // using `DatabaseTenant<DB>` + the ORM `_pool` helpers.
-#[cfg(feature = "admin")]
+#[cfg(all(feature = "admin", feature = "postgres"))]
 pub mod admin;
 pub mod auth;
 pub mod auth_backends;
+// v0.38 — `auth_routes` uses the PG-only `Tenant` extractor for
+// `per-tenant JWT routes; sqlite/mysql tenancy projects build their
+// own routes using `DatabaseTenant<DB>` until slice 4 lifts `Tenant`
+// to be generic.
+#[cfg(feature = "postgres")]
 pub mod auth_routes;
 pub mod bootstrap;
 pub mod branding;
 pub mod database_pools;
 mod error;
+// v0.38 — depends on operator_console signed cookies + TenantPools.
+#[cfg(feature = "postgres")]
 pub mod impersonation_handoff;
 pub mod jwt_lifecycle;
 // v0.38 — the manage CLI (create-tenant, role/perm verbs, etc.)
@@ -65,6 +72,11 @@ pub mod manage;
 mod manage_interactive;
 pub mod middleware;
 pub mod migrate;
+// v0.38 — `session` (HMAC-signed session cookies, SessionSecret type)
+// has no PG deps and ships unconditionally; `DatabaseTenantContext`
+// references it. The wider `operator_console` module wires
+// TenantPools + admin builder and stays PG-gated until slice 5.
+#[cfg(feature = "postgres")]
 pub mod operator_console;
 mod org;
 pub mod password;
@@ -73,12 +85,22 @@ mod pools;
 mod resolver;
 pub mod routes;
 mod secrets;
+pub mod session;
+// v0.38 — `tenancy::server` ties together TenantPools + Tenant
+// extractor + admin builder; all PG-typed today. Gated to PG; sqlite/
+// mysql apps assemble their own routes today, full generic lift in
+// slice 5 (server::Builder<DB>).
+#[cfg(feature = "postgres")]
 pub mod server;
+// v0.38 — tenant console mounts the per-tenant admin which is PG-only.
+#[cfg(feature = "postgres")]
 pub mod tenant_console;
 
+#[cfg(feature = "postgres")]
+pub use auth::{authenticate_operator, authenticate_user};
 pub use auth::{
-    authenticate_operator, authenticate_user, validate_tenant_user_schema, Operator,
-    TenantUserModel, User, REQUIRED_USER_COLUMNS,
+    authenticate_operator_pool, validate_tenant_user_schema, Operator, TenantUserModel, User,
+    REQUIRED_USER_COLUMNS,
 };
 #[cfg(feature = "postgres")]
 pub use auth_backends::ensure_api_keys_table;

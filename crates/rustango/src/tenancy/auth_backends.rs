@@ -400,6 +400,12 @@ pub async fn create_api_key(
 /// [`SessionSecret`] as the admin session cookie.
 ///
 /// [`SessionSecret`]: super::operator_console::SessionSecret
+///
+/// v0.38 — `from_session_secret` + the verify/issue impls depend on
+/// `operator_console::session::sign` which is PG-gated until slice 5.
+/// The backend struct + `new()` stay unconditional so projects can
+/// still register it (sqlite/mysql apps would build the secret bytes
+/// themselves until then).
 pub struct JwtBackend {
     secret: Vec<u8>,
     /// Token lifetime in seconds for tokens issued via [`JwtBackend::issue`].
@@ -418,6 +424,7 @@ impl JwtBackend {
 
     /// Build from the operator-console session secret (convenient for
     /// projects that don't want a separate signing key).
+    #[cfg(feature = "postgres")]
     #[must_use]
     pub fn from_session_secret(s: &super::operator_console::SessionSecret) -> Self {
         Self::new(s.key().to_vec())
@@ -431,10 +438,7 @@ impl JwtBackend {
         let payload = serde_json::json!({"sub": user_id, "exp": exp});
         let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&payload).unwrap_or_default());
-        let sig = super::operator_console::session::sign(
-            &super::operator_console::SessionSecret::from_bytes(self.secret.clone()),
-            payload_b64.as_bytes(),
-        );
+        let sig = hmac_sha256(&self.secret, payload_b64.as_bytes());
         let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
         format!("{payload_b64}.{sig_b64}")
     }
@@ -444,10 +448,7 @@ impl JwtBackend {
         use subtle::ConstantTimeEq;
 
         let (payload_b64, sig_b64) = token.split_once('.')?;
-        let expected = super::operator_console::session::sign(
-            &super::operator_console::SessionSecret::from_bytes(self.secret.clone()),
-            payload_b64.as_bytes(),
-        );
+        let expected = hmac_sha256(&self.secret, payload_b64.as_bytes());
         let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(sig_b64)
             .ok()?;
@@ -464,6 +465,20 @@ impl JwtBackend {
         }
         payload.get("sub")?.as_i64()
     }
+}
+
+/// v0.38 — inline HMAC-SHA256(secret, msg) so JwtBackend signs
+/// without depending on the PG-gated `operator_console::session::sign`.
+/// Equivalent to the shared primitive — same `hmac` + `sha2` crates.
+fn hmac_sha256(secret: &[u8], msg: &[u8]) -> [u8; 32] {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key length");
+    mac.update(msg);
+    let bytes = mac.finalize().into_bytes();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes[..32]);
+    out
 }
 
 #[async_trait]

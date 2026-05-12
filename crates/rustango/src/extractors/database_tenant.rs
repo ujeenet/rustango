@@ -30,7 +30,7 @@ use sqlx::Database;
 
 use crate::sql::sqlx;
 use crate::tenancy::{
-    operator_console::SessionSecret, ChainResolver, DatabaseConn, DatabasePools, Org, OrgResolver,
+    session::SessionSecret, ChainResolver, DatabaseConn, DatabasePools, Org, OrgResolver,
 };
 
 /// Per-server context that the [`DatabaseTenant`] extractor reads out

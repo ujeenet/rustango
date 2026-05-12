@@ -139,11 +139,11 @@ pub async fn migrate_registry_pool(
     let scoped_dir = scoped_subset(dir, MigrationScope::Registry).await?;
     let applied = match scoped_dir {
         ScopedDir::Owned(temp) => {
-            let result = migrate::migrate_pool(registry, temp.path()).await?;
+            let result = crate::migrate::migrate_pool(registry, temp.path()).await?;
             drop(temp);
             result
         }
-        ScopedDir::Original => migrate::migrate_pool(registry, dir).await?,
+        ScopedDir::Original => crate::migrate::migrate_pool(registry, dir).await?,
     };
     // v0.28.4 (#77) — runtime ALTER for the password_changed_at
     // column on Postgres registries. The column landed mid-v0.28; PG

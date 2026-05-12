@@ -43,16 +43,22 @@
 #![cfg(feature = "tenancy")]
 
 use crate::core::Model;
+#[cfg(feature = "postgres")]
 use crate::sql::sqlx::PgPool;
 use crate::tenancy::TenancyError;
 
 // ----- re-export the engine for the canonical path -----
 
+#[cfg(feature = "postgres")]
 pub use crate::tenancy::permissions::{
     assign_role, auto_create_permissions, clear_user_perm, create_role, ensure_tables,
-    get_or_create_role, grant_role_perm, has_all_perms, has_any_perm, has_perm, model_codenames,
-    remove_role, revoke_role_perm, set_user_perm, user_permissions, user_roles, user_roles_qs,
-    Role, RolePermission, UserPermission, UserRole,
+    get_or_create_role, grant_role_perm, has_all_perms, has_any_perm, has_perm, remove_role,
+    revoke_role_perm, set_user_perm, user_permissions, user_roles, user_roles_qs,
+};
+pub use crate::tenancy::permissions::{
+    auto_create_permissions_pool, clear_user_perm_pool, ensure_tables_pool, grant_role_perm_pool,
+    has_perm_pool, model_codenames, revoke_role_perm_pool, set_user_perm_pool,
+    user_permissions_pool, user_roles_qs_pool, Role, RolePermission, UserPermission, UserRole,
 };
 
 // ----- typed entry points (v0.16.0 Option G) -----
@@ -87,6 +93,7 @@ pub fn codename_for<T: Model>(action: &str) -> String {
 ///
 /// # Errors
 /// As [`has_perm`].
+#[cfg(feature = "postgres")]
 pub async fn has_perm_for_model<T: Model>(
     uid: i64,
     action: &str,
@@ -101,6 +108,7 @@ pub async fn has_perm_for_model<T: Model>(
 ///
 /// # Errors
 /// As [`grant_role_perm`].
+#[cfg(feature = "postgres")]
 pub async fn grant_role_perm_for_model<T: Model>(
     role_id: i64,
     action: &str,
@@ -114,6 +122,7 @@ pub async fn grant_role_perm_for_model<T: Model>(
 ///
 /// # Errors
 /// As [`revoke_role_perm`].
+#[cfg(feature = "postgres")]
 pub async fn revoke_role_perm_for_model<T: Model>(
     role_id: i64,
     action: &str,
@@ -128,6 +137,7 @@ pub async fn revoke_role_perm_for_model<T: Model>(
 ///
 /// # Errors
 /// As [`set_user_perm`].
+#[cfg(feature = "postgres")]
 pub async fn set_user_perm_for_model<T: Model>(
     uid: i64,
     action: &str,
@@ -143,6 +153,7 @@ pub async fn set_user_perm_for_model<T: Model>(
 ///
 /// # Errors
 /// As [`clear_user_perm`].
+#[cfg(feature = "postgres")]
 pub async fn clear_user_perm_for_model<T: Model>(
     uid: i64,
     action: &str,

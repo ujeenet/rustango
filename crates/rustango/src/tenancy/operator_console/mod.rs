@@ -38,8 +38,6 @@
 //! let app = axum::Router::new().merge(console);
 //! ```
 
-pub(crate) mod session;
-
 use crate::core::Column as _;
 // v0.34 — operator console no longer imports `PgPool` directly.
 // ConsoleState.registry is `crate::sql::Pool` (the backend-erasing
@@ -60,8 +58,11 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tera::{Context, Tera};
 
-pub use session::{SessionPayload, SessionSecret, SessionSecretError};
-use session::{COOKIE_NAME, SESSION_TTL_SECS};
+// v0.38 — `session` (HMAC-signed cookies, SessionSecret) lives one
+// level up at `tenancy::session` so non-PG callers like
+// `DatabaseTenantContext` can reach it.
+pub use super::session::{self, SessionPayload, SessionSecret, SessionSecretError};
+use super::session::{COOKIE_NAME, SESSION_TTL_SECS};
 
 use super::auth;
 use super::branding::{self, BrandAssetKind};

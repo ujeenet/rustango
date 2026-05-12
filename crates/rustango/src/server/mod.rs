@@ -24,10 +24,14 @@
 
 #[cfg(feature = "runserver")]
 mod app;
-#[cfg(feature = "tenancy")]
+// v0.38 — `server::Builder` is the multi-tenant Postgres runserver
+// (`TenantPools`, schema-mode dispatch, operator console). The Pool
+// enum lift lands in slice 5; for now sqlite/mysql apps mount their
+// own routes against `DatabasePools<DB>` + plain `axum::serve`.
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
 mod builder;
 
 #[cfg(feature = "runserver")]
 pub use app::AppBuilder;
-#[cfg(feature = "tenancy")]
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
 pub use builder::{ApiRouter, Builder};
