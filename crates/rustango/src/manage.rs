@@ -37,24 +37,16 @@ use axum::Router;
 use crate::sql::sqlx::PgPool;
 
 /// Boxed seed-hook future. Keeps the public method signature simple
-/// while accepting any `async fn(&PgPool) -> Result<…>` closure.
-///
-/// v0.38 — gated to `postgres` for now. Lifting `SeedFn` to `&Pool` is
-/// queued for v0.39 as a breaking API change (every existing seed
-/// closure would need updating). Sqlite/MySQL apps that need a seed
-/// hook wire it manually via plain `axum::serve` until then.
-#[cfg(feature = "postgres")]
+/// while accepting any `async fn(&Pool) -> Result<…>` closure.
 type SeedFut<'a> =
     Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + 'a>>;
-#[cfg(feature = "postgres")]
-type SeedFn = Box<dyn for<'a> FnOnce(&'a PgPool) -> SeedFut<'a> + Send>;
+type SeedFn = Box<dyn for<'a> FnOnce(&'a crate::sql::Pool) -> SeedFut<'a> + Send>;
 
 /// One-builder dispatcher. Hand it your API router (and optionally a
 /// seed hook), call [`Cli::run`], and you're done.
 #[must_use = "Cli does nothing until .run() is awaited"]
 pub struct Cli {
     api: Router,
-    #[cfg(feature = "postgres")]
     seed: Option<SeedFn>,
     bind: String,
     migrations_dir: PathBuf,
@@ -121,7 +113,6 @@ impl Cli {
     pub fn new() -> Self {
         Self {
             api: Router::new(),
-            #[cfg(feature = "postgres")]
             seed: None,
             bind: std::env::var("RUSTANGO_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
             migrations_dir: PathBuf::from("./migrations"),
@@ -177,16 +168,11 @@ impl Cli {
     /// Run a one-shot async hook on first boot — typical use is
     /// inserting a demo tenant or a seed superuser. The hook receives
     /// the registry pool (or single-tenant pool when [`Cli::tenancy`]
-    /// is off).
-    ///
-    /// v0.38 — gated to `postgres` for now. Lifting the closure
-    /// signature to `&Pool` is queued for v0.39 as a deliberate
-    /// breaking API change.
-    #[cfg(feature = "postgres")]
+    /// is off) as a tri-dialect [`crate::sql::Pool`].
     #[must_use]
     pub fn seed<F, Fut>(mut self, hook: F) -> Self
     where
-        F: for<'a> FnOnce(&'a PgPool) -> Fut + Send + 'static,
+        F: for<'a> FnOnce(&'a crate::sql::Pool) -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + 'static,
     {
         self.seed = Some(Box::new(move |pool| Box::pin(hook(pool))));
@@ -724,14 +710,10 @@ impl Cli {
         if self.tenancy {
             return Err("Cli::tenancy() requires the `tenancy` feature".into());
         }
-        // v0.38 — non-tenancy single-tenant `runserver` on non-PG.
+        // Non-tenancy single-tenant `runserver` on non-PG.
         // Opens a `Pool` enum via Pool::connect (dispatches on URL
         // scheme: sqlite:// → SqlitePool, mysql:// → MySqlPool). Runs
-        // migrations through migrate_pool (tri-dialect). The seed
-        // hook stays PG-gated because `SeedFn` takes `&PgPool` —
-        // sqlite/mysql users either skip seeding or wire their own
-        // axum::serve directly. Handlers can extract the Pool enum
-        // via `axum::Extension<rustango::sql::Pool>`.
+        // migrations through migrate_pool (tri-dialect).
         #[cfg(not(feature = "postgres"))]
         {
             let url = std::env::var("DATABASE_URL").map_err(|_| {
@@ -739,6 +721,9 @@ impl Cli {
             })?;
             let pool = crate::sql::Pool::connect(&url).await?;
             let _ = crate::migrate::migrate_pool(&pool, &self.migrations_dir).await?;
+            if let Some(seed) = self.seed {
+                seed(&pool).await?;
+            }
             let api = self.api;
             #[cfg(feature = "admin")]
             let api = if self.welcome_page {
@@ -776,7 +761,7 @@ impl Cli {
             let pool = PgPool::connect(&url).await?;
             let _ = crate::migrate::migrate(&pool, &self.migrations_dir).await?;
             if let Some(seed) = self.seed {
-                seed(&pool).await?;
+                seed(&crate::sql::Pool::from(pool.clone())).await?;
             }
             let api = self.api;
             #[cfg(feature = "admin")]
@@ -857,7 +842,9 @@ impl Cli {
             // Tenancy Builder's seed_with takes (Arc<TenantPools>, PgPool,
             // String); we forward the registry pool and discard the rest.
             builder = builder
-                .seed_with(move |_pools, registry, _url| async move { seed(&registry).await })
+                .seed_with(move |_pools, registry, _url| async move {
+                    seed(&crate::sql::Pool::from(registry)).await
+                })
                 .await?;
         }
         builder.serve(&self.bind).await
@@ -1130,7 +1117,6 @@ mod tests {
         assert!(cli.tenancy);
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn seed_hook_stored() {
         let cli = Cli::new().seed(|_pool| async { Ok(()) });

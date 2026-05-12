@@ -13,7 +13,6 @@ use sqlx::postgres::{PgArguments, PgPool, PgRow};
 #[cfg(feature = "postgres")]
 use sqlx::query::{Query, QueryAs};
 
-#[cfg(feature = "postgres")]
 use super::Dialect;
 use super::ExecError;
 #[cfg(feature = "postgres")]
@@ -1815,6 +1814,22 @@ impl<'a> PoolTx<'a> {
             PoolTx::Sqlite(tx) => tx.rollback().await,
         }
     }
+
+    /// Return the dialect for this transaction's backend — same
+    /// dispatch as [`super::Pool::dialect`] but sourced from the
+    /// `PoolTx` variant rather than the pool. Used internally by the
+    /// `_tx` executor helpers to compile SQL against the right backend.
+    #[must_use]
+    pub fn dialect(&self) -> &'static dyn Dialect {
+        match self {
+            #[cfg(feature = "postgres")]
+            PoolTx::Postgres(_) => super::postgres::DIALECT,
+            #[cfg(feature = "mysql")]
+            PoolTx::Mysql(_) => super::mysql::DIALECT,
+            #[cfg(feature = "sqlite")]
+            PoolTx::Sqlite(_) => super::sqlite::DIALECT,
+        }
+    }
 }
 
 /// Open a transaction against either backend. Bi-dialect counterpart
@@ -2155,6 +2170,253 @@ async fn execute_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<u6
                 q = bind_query_sqlite(q, v);
             }
             Ok(q.execute(sq).await?.rows_affected())
+        }
+    }
+}
+
+// ====================================================================
+// `&mut PoolTx` dispatch — tri-dialect transaction executor surface
+// ====================================================================
+//
+// Mirrors the `_pool` non-`FromRow` helpers above but executes against
+// an open transaction (a `PoolTx` obtained from `transaction_pool`).
+// Each helper compiles SQL through `tx.dialect()` and dispatches to
+// the correct sqlx driver branch via `match tx { ... }`.
+//
+// `execute_tx` is the internal building-block (private); the rest
+// are the public API consumed by macro-generated `_tx` model methods.
+
+async fn execute_tx(
+    tx: &mut PoolTx<'_>,
+    sql: &str,
+    binds: Vec<SqlValue>,
+) -> Result<u64, ExecError> {
+    match tx {
+        #[cfg(feature = "postgres")]
+        PoolTx::Postgres(t) => {
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
+            for v in binds {
+                q = bind_query(q, v);
+            }
+            Ok(q.execute(&mut **t).await?.rows_affected())
+        }
+        #[cfg(feature = "mysql")]
+        PoolTx::Mysql(t) => {
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(sql);
+            for v in binds {
+                q = bind_query_my(q, v);
+            }
+            Ok(q.execute(&mut **t).await?.rows_affected())
+        }
+        #[cfg(feature = "sqlite")]
+        PoolTx::Sqlite(t) => {
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(sql);
+            for v in binds {
+                q = bind_query_sqlite(q, v);
+            }
+            Ok(q.execute(&mut **t).await?.rows_affected())
+        }
+    }
+}
+
+/// `INSERT` inside an open transaction. Equivalent to [`insert_pool`]
+/// but executes against `tx` so the write participates in the
+/// caller's transaction boundary.
+///
+/// # Errors
+/// As [`insert_pool`].
+pub async fn insert_tx(tx: &mut PoolTx<'_>, query: &InsertQuery) -> Result<(), ExecError> {
+    query.validate()?;
+    let stmt = tx.dialect().compile_insert(query)?;
+    execute_tx(tx, &stmt.sql, stmt.params).await?;
+    Ok(())
+}
+
+/// `INSERT … RETURNING` / `LAST_INSERT_ID()` inside an open
+/// transaction. Returns the same [`InsertReturningPool`] shape as
+/// [`insert_returning_pool`], but all operations run against `tx`.
+///
+/// MySQL contract: the INSERT and `SELECT LAST_INSERT_ID()` both
+/// execute on the transaction's connection, so the auto-id is always
+/// correct even under concurrent inserts on other connections.
+///
+/// # Errors
+/// As [`insert_returning_pool`].
+pub async fn insert_returning_tx(
+    tx: &mut PoolTx<'_>,
+    query: &InsertQuery,
+) -> Result<InsertReturningPool, ExecError> {
+    query.validate()?;
+    if query.returning.is_empty() {
+        return Err(ExecError::EmptyReturning);
+    }
+    match tx {
+        #[cfg(feature = "postgres")]
+        PoolTx::Postgres(t) => {
+            let row = insert_returning_on(&mut **t, query).await?;
+            Ok(InsertReturningPool::PgRow(row))
+        }
+        #[cfg(feature = "mysql")]
+        PoolTx::Mysql(t) => {
+            let plain = InsertQuery {
+                model: query.model,
+                columns: query.columns.clone(),
+                values: query.values.clone(),
+                returning: ::std::vec::Vec::new(),
+                on_conflict: query.on_conflict.clone(),
+            };
+            let stmt = super::mysql::DIALECT.compile_insert(&plain)?;
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_my(q, v);
+            }
+            q.execute(&mut **t).await?;
+            use sqlx::Row as _;
+            let row = sqlx::query("SELECT LAST_INSERT_ID()")
+                .fetch_one(&mut **t)
+                .await?;
+            let id_u64: u64 = row.try_get::<u64, _>(0)?;
+            let id = i64::try_from(id_u64).unwrap_or(i64::MAX);
+            Ok(InsertReturningPool::MySqlAutoId(id))
+        }
+        #[cfg(feature = "sqlite")]
+        PoolTx::Sqlite(t) => {
+            let stmt = super::sqlite::DIALECT.compile_insert(query)?;
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_sqlite(q, v);
+            }
+            let row = q.fetch_one(&mut **t).await?;
+            Ok(InsertReturningPool::SqliteRow(row))
+        }
+    }
+}
+
+/// `UPDATE` inside an open transaction; returns rows affected.
+///
+/// # Errors
+/// As [`update_pool`].
+pub async fn update_tx(tx: &mut PoolTx<'_>, query: &UpdateQuery) -> Result<u64, ExecError> {
+    let stmt = tx.dialect().compile_update(query)?;
+    execute_tx(tx, &stmt.sql, stmt.params).await
+}
+
+/// `DELETE` inside an open transaction; returns rows affected.
+///
+/// # Errors
+/// As [`delete_pool`].
+pub async fn delete_tx(tx: &mut PoolTx<'_>, query: &DeleteQuery) -> Result<u64, ExecError> {
+    let stmt = tx.dialect().compile_delete(query)?;
+    execute_tx(tx, &stmt.sql, stmt.params).await
+}
+
+/// `SELECT` inside an open transaction, with optional `select_related`
+/// join decoding. Mirrors [`select_rows_pool_with_related`] but
+/// executes against `tx`.
+///
+/// # Errors
+/// As [`select_rows_pool_with_related`].
+pub async fn select_rows_tx_with_related<T>(
+    tx: &mut PoolTx<'_>,
+    query: &SelectQuery,
+) -> Result<Vec<T>, ExecError>
+where
+    T: MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    let stmt = tx.dialect().compile_select(query)?;
+    let aliases: Vec<&'static str> = query.joins.iter().map(|j| j.alias).collect();
+    match tx {
+        #[cfg(feature = "postgres")]
+        PoolTx::Postgres(t) => {
+            if aliases.is_empty() {
+                let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
+                    sqlx::query_as::<_, T>(&stmt.sql);
+                for v in stmt.params {
+                    q = bind_query_as(q, v);
+                }
+                return Ok(q.fetch_all(&mut **t).await?);
+            }
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query(q, v);
+            }
+            let raw_rows = q.fetch_all(&mut **t).await?;
+            let mut out = Vec::with_capacity(raw_rows.len());
+            for row in &raw_rows {
+                let mut item = T::from_row(row)?;
+                for alias in &aliases {
+                    let _ = item.__rustango_load_related(row, alias, alias)?;
+                }
+                out.push(item);
+            }
+            Ok(out)
+        }
+        #[cfg(feature = "mysql")]
+        PoolTx::Mysql(t) => {
+            if aliases.is_empty() {
+                let mut q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> =
+                    sqlx::query_as::<_, T>(&stmt.sql);
+                for v in stmt.params {
+                    q = bind_query_as_my(q, v);
+                }
+                return Ok(q.fetch_all(&mut **t).await?);
+            }
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_my(q, v);
+            }
+            let raw_rows = q.fetch_all(&mut **t).await?;
+            let mut out = Vec::with_capacity(raw_rows.len());
+            for row in &raw_rows {
+                let mut item = <T as sqlx::FromRow<sqlx::mysql::MySqlRow>>::from_row(row)?;
+                for alias in &aliases {
+                    let _ = item.__rustango_load_related_my(row, alias, alias)?;
+                }
+                out.push(item);
+            }
+            Ok(out)
+        }
+        #[cfg(feature = "sqlite")]
+        PoolTx::Sqlite(t) => {
+            if aliases.is_empty() {
+                let mut q: sqlx::query::QueryAs<
+                    '_,
+                    sqlx::Sqlite,
+                    T,
+                    sqlx::sqlite::SqliteArguments<'_>,
+                > = sqlx::query_as::<_, T>(&stmt.sql);
+                for v in stmt.params {
+                    q = bind_query_as_sqlite(q, v);
+                }
+                return Ok(q.fetch_all(&mut **t).await?);
+            }
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_sqlite(q, v);
+            }
+            let raw_rows = q.fetch_all(&mut **t).await?;
+            let mut out = Vec::with_capacity(raw_rows.len());
+            for row in &raw_rows {
+                let mut item = <T as sqlx::FromRow<sqlx::sqlite::SqliteRow>>::from_row(row)?;
+                for alias in &aliases {
+                    let _ = item.__rustango_load_related_sqlite(row, alias, alias)?;
+                }
+                out.push(item);
+            }
+            Ok(out)
         }
     }
 }
@@ -2947,6 +3209,56 @@ where
     async fn fetch_pool(self, pool: &Pool) -> Result<Vec<T>, ExecError> {
         let select = self.compile()?;
         select_rows_pool_with_related(pool, &select).await
+    }
+}
+
+/// `QuerySet::fetch` variant that takes `&mut PoolTx` — executes the
+/// SELECT inside an open transaction so the read and subsequent writes
+/// share the same transaction boundary.
+///
+/// Mirrors [`FetcherPool`] but routes through
+/// [`select_rows_tx_with_related`] instead of
+/// [`select_rows_pool_with_related`]. All model types that derive
+/// `Model` automatically satisfy the bounds (`#[derive(Model)]` emits
+/// both PG and cfg-gated MySQL/SQLite `FromRow` impls).
+pub trait FetcherTx<T>
+where
+    T: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    /// Compile the queryset and run `fetch_all` against the open
+    /// transaction. Stitches `select_related` joins automatically.
+    ///
+    /// # Errors
+    /// As [`FetcherPool::fetch_pool`].
+    fn fetch_tx(
+        self,
+        tx: &mut PoolTx<'_>,
+    ) -> impl std::future::Future<Output = Result<Vec<T>, ExecError>> + Send;
+}
+
+impl<T> FetcherTx<T> for QuerySet<T>
+where
+    T: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    async fn fetch_tx(self, tx: &mut PoolTx<'_>) -> Result<Vec<T>, ExecError> {
+        let select = self.compile()?;
+        select_rows_tx_with_related(tx, &select).await
     }
 }
 

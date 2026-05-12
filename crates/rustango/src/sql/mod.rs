@@ -36,13 +36,14 @@ pub use executor::row_to_json_my;
 #[cfg(feature = "sqlite")]
 pub use executor::row_to_json_sqlite;
 pub use executor::{
-    bulk_insert_pool, bulk_update_pool, count_rows_pool, delete_pool, fetch_aggregate_pool,
-    fetch_paginated_pool, fetch_with_prefetch_pool, insert_pool, insert_returning_pool,
-    raw_execute_pool, raw_query_pool, select_one_row_as_json_pool, select_one_row_pool,
-    select_rows_as_json_pool, select_rows_pool, select_rows_pool_with_related, transaction_pool,
-    update_pool, CounterPool, ExplainFormat, ExplainOptions, FetcherPool, FkPkAccess, HasPkValue,
-    InsertReturningPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow,
-    MaybeSqliteFromRow, MaybeSqliteLoadRelated, Page, PoolTx, UpdaterPool,
+    bulk_insert_pool, bulk_update_pool, count_rows_pool, delete_pool, delete_tx,
+    fetch_aggregate_pool, fetch_paginated_pool, fetch_with_prefetch_pool, insert_pool,
+    insert_returning_pool, insert_returning_tx, insert_tx, raw_execute_pool, raw_query_pool,
+    select_one_row_as_json_pool, select_one_row_pool, select_rows_as_json_pool, select_rows_pool,
+    select_rows_pool_with_related, select_rows_tx_with_related, transaction_pool, update_pool,
+    update_tx, CounterPool, ExplainFormat, ExplainOptions, FetcherPool, FetcherTx, FkPkAccess,
+    HasPkValue, InsertReturningPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated,
+    MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated, Page, PoolTx, UpdaterPool,
 };
 // PG-typed back-compat surface: only re-exported when `postgres` is on.
 #[cfg(feature = "postgres")]

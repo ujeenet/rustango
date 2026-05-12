@@ -2184,6 +2184,145 @@ fn inherent_impl_tokens(
         }
     };
 
+    // `_tx` family — `insert_tx`, `save_tx`, `delete_tx`. These mirror
+    // the non-audited `_pool` methods but execute against an open
+    // `PoolTx` so the writes participate in the caller's transaction.
+    // Auditing inside TX is deferred; these always use the plain
+    // executor primitives regardless of whether the model is audited.
+    let tx_insert_method = if fields.has_auto {
+        let pushes = &fields.insert_pushes;
+        let returning_cols = &fields.returning_cols;
+        quote! {
+            /// Insert this row inside an open transaction, populating
+            /// any `Auto<T>` PK from the auto-assigned value. Works
+            /// against any backend that `tx` wraps.
+            ///
+            /// # Errors
+            /// As [`Self::insert_pool`].
+            pub async fn insert_tx(
+                &mut self,
+                tx: &mut ::rustango::sql::PoolTx<'_>,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                let mut _columns: ::std::vec::Vec<&'static str> =
+                    ::std::vec::Vec::new();
+                let mut _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                    ::std::vec::Vec::new();
+                #( #pushes )*
+                let _query = ::rustango::core::InsertQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    columns: _columns,
+                    values: _values,
+                    returning: ::std::vec![ #( #returning_cols ),* ],
+                    on_conflict: ::core::option::Option::None,
+                };
+                let _result = ::rustango::sql::insert_returning_tx(tx, &_query).await?;
+                ::rustango::sql::apply_auto_pk_pool(_result, self)
+            }
+        }
+    } else {
+        let insert_columns = &fields.insert_columns;
+        let insert_values = &fields.insert_values;
+        quote! {
+            /// Insert this row inside an open transaction.
+            ///
+            /// # Errors
+            /// As [`Self::insert_pool`].
+            pub async fn insert_tx(
+                &self,
+                tx: &mut ::rustango::sql::PoolTx<'_>,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                let _query = ::rustango::core::InsertQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    columns: ::std::vec![ #( #insert_columns ),* ],
+                    values: ::std::vec![ #( #insert_values ),* ],
+                    returning: ::std::vec::Vec::new(),
+                    on_conflict: ::core::option::Option::None,
+                };
+                ::rustango::sql::insert_tx(tx, &_query).await
+            }
+        }
+    };
+
+    let tx_save_method = if let Some((pk_ident, pk_col)) = primary_key {
+        let pk_column_lit = pk_col.as_str();
+        let assignments = &fields.update_assignments;
+        let dispatch_unset = if fields.pk_is_auto {
+            quote! {
+                if matches!(self.#pk_ident, ::rustango::sql::Auto::Unset) {
+                    return self.insert_tx(tx).await;
+                }
+            }
+        } else {
+            quote!()
+        };
+        quote! {
+            /// Save this row inside an open transaction. `INSERT` when
+            /// the `Auto<T>` PK is `Unset`, else `UPDATE` keyed on the
+            /// PK. Works against any backend that `tx` wraps.
+            ///
+            /// # Errors
+            /// As [`Self::save_pool`].
+            pub async fn save_tx(
+                &mut self,
+                tx: &mut ::rustango::sql::PoolTx<'_>,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                #dispatch_unset
+                let _query = ::rustango::core::UpdateQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    set: ::std::vec![ #( #assignments ),* ],
+                    where_clause: ::rustango::core::WhereExpr::Predicate(
+                        ::rustango::core::Filter {
+                            column: #pk_column_lit,
+                            op: ::rustango::core::Op::Eq,
+                            value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&self.#pk_ident)
+                            ),
+                        }
+                    ),
+                };
+                let _ = ::rustango::sql::update_tx(tx, &_query).await?;
+                ::core::result::Result::Ok(())
+            }
+        }
+    } else {
+        quote!()
+    };
+
+    let tx_delete_method = {
+        let pk_column_lit = primary_key.map(|(_, col)| col.as_str()).unwrap_or("id");
+        let pk_ident_for_tx = primary_key.map(|(ident, _)| ident);
+        if let Some(pk_ident) = pk_ident_for_tx {
+            quote! {
+                /// Delete the row identified by this instance's PK
+                /// inside an open transaction. Works against any backend
+                /// that `tx` wraps.
+                ///
+                /// # Errors
+                /// As [`Self::delete_pool`].
+                pub async fn delete_tx(
+                    &self,
+                    tx: &mut ::rustango::sql::PoolTx<'_>,
+                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                    let _query = ::rustango::core::DeleteQuery {
+                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                        where_clause: ::rustango::core::WhereExpr::Predicate(
+                            ::rustango::core::Filter {
+                                column: #pk_column_lit,
+                                op: ::rustango::core::Op::Eq,
+                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                    ::core::clone::Clone::clone(&self.#pk_ident)
+                                ),
+                            }
+                        ),
+                    };
+                    ::rustango::sql::delete_tx(tx, &_query).await
+                }
+            }
+        } else {
+            quote!()
+        }
+    };
+
     // Update emission captures both BEFORE and AFTER state — runs an
     // extra SELECT against `_executor` BEFORE the UPDATE, captures
     // each tracked field's prior value, then after the UPDATE diffs
@@ -2674,6 +2813,9 @@ fn inherent_impl_tokens(
             #pool_delete_method
             #pool_insert_method
             #pool_save_method
+            #tx_delete_method
+            #tx_insert_method
+            #tx_save_method
             #soft_delete_methods
         }
     });
