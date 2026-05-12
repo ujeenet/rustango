@@ -137,10 +137,10 @@ impl MediaTag {
     }
 
     /// PG row decoder — kept for in-crate callers that still acquire
-    /// a `PgRow` directly. Tri-dialect callers route through ORM
-    /// `_pool` helpers that decode via per-backend paths.
+    /// a `PgRow` directly. Tri-dialect callers can use the
+    /// `sqlx::FromRow` trait impl below + `raw_query_pool::<MediaTag>`.
     #[cfg(feature = "postgres")]
-    pub(super) fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+    pub(super) fn decode_pg(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
         use sqlx::Row;
         let id: i64 = row.try_get("id")?;
         Ok(Self {
@@ -153,7 +153,7 @@ impl MediaTag {
 
     /// MySQL row decoder.
     #[cfg(feature = "mysql")]
-    pub(super) fn from_row_my(row: &sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
+    pub(super) fn decode_my(row: &sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
         use sqlx::Row;
         let id: i64 = row.try_get("id")?;
         let created_at: DateTime<Utc> = decode_my_datetime(row, "created_at")?;
@@ -167,7 +167,7 @@ impl MediaTag {
 
     /// SQLite row decoder.
     #[cfg(feature = "sqlite")]
-    pub(super) fn from_row_sq(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+    pub(super) fn decode_sq(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
         use sqlx::Row;
         let id: i64 = row.try_get("id")?;
         let created_at: DateTime<Utc> = decode_sqlite_datetime(row, "created_at")?;
@@ -177,6 +177,27 @@ impl MediaTag {
             slug: row.try_get("slug")?,
             created_at,
         })
+    }
+}
+
+// v0.38 — FromRow impls dispatch per backend so `raw_query_pool::<MediaTag>`
+// works on every backend.
+#[cfg(feature = "postgres")]
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for MediaTag {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Self::decode_pg(row)
+    }
+}
+#[cfg(feature = "mysql")]
+impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for MediaTag {
+    fn from_row(row: &'r sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
+        Self::decode_my(row)
+    }
+}
+#[cfg(feature = "sqlite")]
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for MediaTag {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        Self::decode_sq(row)
     }
 }
 

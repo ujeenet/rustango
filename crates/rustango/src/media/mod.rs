@@ -320,7 +320,7 @@ impl Media {
     }
 
     #[cfg(feature = "postgres")]
-    fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+    fn decode_pg(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
         use sqlx::Row;
         let id: i64 = row.try_get("id")?;
         Ok(Self {
@@ -342,7 +342,7 @@ impl Media {
 
     /// MySQL row decoder (v0.38).
     #[cfg(feature = "mysql")]
-    fn from_row_my(row: &sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
+    fn decode_my(row: &sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
         use sqlx::Row;
         let id: i64 = row.try_get("id")?;
         let uploaded_at = crate::media::tag::decode_my_datetime(row, "uploaded_at")?;
@@ -367,7 +367,7 @@ impl Media {
 
     /// SQLite row decoder (v0.38). `metadata` is stored as TEXT-as-JSON.
     #[cfg(feature = "sqlite")]
-    fn from_row_sq(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+    fn decode_sq(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
         use sqlx::Row;
         let id: i64 = row.try_get("id")?;
         let uploaded_at = crate::media::tag::decode_sqlite_datetime(row, "uploaded_at")?;
@@ -389,6 +389,28 @@ impl Media {
             metadata,
             deleted_at,
         })
+    }
+}
+
+// v0.38 — FromRow impls so `raw_query_pool::<Media>` dispatches via
+// the unified `crate::sql::Pool` enum. Each backend's FromRow forwards
+// to the corresponding inherent `decode_*` above.
+#[cfg(feature = "postgres")]
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for Media {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Self::decode_pg(row)
+    }
+}
+#[cfg(feature = "mysql")]
+impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for Media {
+    fn from_row(row: &'r sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
+        Self::decode_my(row)
+    }
+}
+#[cfg(feature = "sqlite")]
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Media {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        Self::decode_sq(row)
     }
 }
 
@@ -490,6 +512,15 @@ pub struct UploadTicket {
 
 /// Glue between the `Media` model and a [`StorageRegistry`]. Cheap
 /// to clone — internal state is `Arc`-shared.
+///
+/// v0.38 — currently PG-only at the runtime layer (`MediaManager`'s
+/// ~16 query sites use PG-specific SQL idioms: `ANY($1)`, `NOW() -
+/// INTERVAL`, `DELETE … USING`, `ON CONFLICT DO UPDATE`). The DDL +
+/// row decoders are tri-dialect (see [`Media::ensure_table_pool`] +
+/// the FromRow impls below); a full lift of the query layer is queued
+/// for v0.39. New code that doesn't depend on `MediaManager`'s
+/// convenience methods can already run on any backend by querying
+/// the `rustango_media` table directly via the ORM `_pool` family.
 #[derive(Clone)]
 pub struct MediaManager {
     pool: PgPool,
@@ -650,7 +681,7 @@ impl MediaManager {
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| Media::from_row(&r)).transpose()?)
+        Ok(row.map(|r| Media::decode_pg(&r)).transpose()?)
     }
 
     /// Like [`Self::get`] but returns soft-deleted rows too. Use
@@ -666,7 +697,7 @@ impl MediaManager {
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| Media::from_row(&r)).transpose()?)
+        Ok(row.map(|r| Media::decode_pg(&r)).transpose()?)
     }
 
     /// CDN-aware URL for `m`. Returns `None` when neither the disk's
@@ -753,7 +784,7 @@ impl MediaManager {
         .await?;
         let mut purged = 0u64;
         for row in rows {
-            let m = Media::from_row(&row)?;
+            let m = Media::decode_pg(&row)?;
             self.purge(&m).await?;
             purged += 1;
         }
@@ -805,7 +836,7 @@ impl MediaManager {
         .bind(description.into())
         .fetch_one(&self.pool)
         .await?;
-        Ok(MediaCollection::from_row(&row)?)
+        Ok(MediaCollection::decode_pg(&row)?)
     }
 
     /// Look up by id (excludes soft-deleted).
@@ -818,7 +849,7 @@ impl MediaManager {
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| MediaCollection::from_row(&r)).transpose()?)
+        Ok(row.map(|r| MediaCollection::decode_pg(&r)).transpose()?)
     }
 
     /// Look up by slug (excludes soft-deleted).
@@ -834,7 +865,7 @@ impl MediaManager {
         .bind(slug)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| MediaCollection::from_row(&r)).transpose()?)
+        Ok(row.map(|r| MediaCollection::decode_pg(&r)).transpose()?)
     }
 
     /// List every non-deleted collection, ordered by `(parent_id, name)`
@@ -849,7 +880,7 @@ impl MediaManager {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
-            .map(|r| MediaCollection::from_row(&r).map_err(MediaError::Db))
+            .map(|r| MediaCollection::decode_pg(&r).map_err(MediaError::Db))
             .collect()
     }
 
@@ -934,7 +965,7 @@ impl MediaManager {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
-            .map(|r| Media::from_row(&r).map_err(MediaError::Db))
+            .map(|r| Media::decode_pg(&r).map_err(MediaError::Db))
             .collect()
     }
 
@@ -980,7 +1011,7 @@ impl MediaManager {
         .bind(slug)
         .fetch_one(&self.pool)
         .await?;
-        Ok(MediaTag::from_row(&row)?)
+        Ok(MediaTag::decode_pg(&row)?)
     }
 
     /// Look up a tag by slug.
@@ -991,7 +1022,7 @@ impl MediaManager {
         .bind(slug)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| MediaTag::from_row(&r)).transpose()?)
+        Ok(row.map(|r| MediaTag::decode_pg(&r)).transpose()?)
     }
 
     /// Apply tags to a media row. Auto-creates missing tags.
@@ -1056,7 +1087,7 @@ impl MediaManager {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
-            .map(|r| MediaTag::from_row(&r).map_err(MediaError::Db))
+            .map(|r| MediaTag::decode_pg(&r).map_err(MediaError::Db))
             .collect()
     }
 
@@ -1084,7 +1115,7 @@ impl MediaManager {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
-            .map(|r| Media::from_row(&r).map_err(MediaError::Db))
+            .map(|r| Media::decode_pg(&r).map_err(MediaError::Db))
             .collect()
     }
 
@@ -1104,7 +1135,7 @@ impl MediaManager {
         rows.into_iter()
             .map(|r| {
                 let count: i64 = r.try_get("use_count").map_err(MediaError::Db)?;
-                let tag = MediaTag::from_row(&r).map_err(MediaError::Db)?;
+                let tag = MediaTag::decode_pg(&r).map_err(MediaError::Db)?;
                 Ok((tag, count))
             })
             .collect()
@@ -1134,7 +1165,7 @@ impl MediaManager {
         .bind(&r.metadata)
         .fetch_one(&self.pool)
         .await?;
-        Ok(Media::from_row(&row)?)
+        Ok(Media::decode_pg(&row)?)
     }
 }
 

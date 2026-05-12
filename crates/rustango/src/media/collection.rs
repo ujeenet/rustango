@@ -129,8 +129,9 @@ impl MediaCollection {
     }
 
     /// PG row decoder — kept for in-crate callers using `PgRow`.
+    /// Tri-dialect callers use the `sqlx::FromRow` impl below.
     #[cfg(feature = "postgres")]
-    pub(super) fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+    pub(super) fn decode_pg(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
         use sqlx::Row;
         let id: i64 = row.try_get("id")?;
         Ok(Self {
@@ -146,7 +147,7 @@ impl MediaCollection {
 
     /// MySQL row decoder.
     #[cfg(feature = "mysql")]
-    pub(super) fn from_row_my(row: &sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
+    pub(super) fn decode_my(row: &sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
         use sqlx::Row;
         let id: i64 = row.try_get("id")?;
         let created_at = super::tag::decode_my_datetime(row, "created_at")?;
@@ -164,7 +165,7 @@ impl MediaCollection {
 
     /// SQLite row decoder.
     #[cfg(feature = "sqlite")]
-    pub(super) fn from_row_sq(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+    pub(super) fn decode_sq(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
         use sqlx::Row;
         let id: i64 = row.try_get("id")?;
         let created_at = super::tag::decode_sqlite_datetime(row, "created_at")?;
@@ -178,5 +179,26 @@ impl MediaCollection {
             created_at,
             deleted_at,
         })
+    }
+}
+
+// v0.38 — FromRow impls so `raw_query_pool::<MediaCollection>` works
+// on every backend.
+#[cfg(feature = "postgres")]
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for MediaCollection {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Self::decode_pg(row)
+    }
+}
+#[cfg(feature = "mysql")]
+impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for MediaCollection {
+    fn from_row(row: &'r sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
+        Self::decode_my(row)
+    }
+}
+#[cfg(feature = "sqlite")]
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for MediaCollection {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        Self::decode_sq(row)
     }
 }
