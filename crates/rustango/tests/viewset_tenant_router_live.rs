@@ -136,8 +136,8 @@ async fn fixture(pool: sqlx::PgPool) -> (String, sqlx::PgPool, axum::Router) {
         resolver,
         session_secret: SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec()),
         operator_secret: SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-y".to_vec()),
-        registry: pool.clone(),
     });
+    let _ = &pool; // silence unused-warning if the test no longer needs the raw pool
 
     // The full v0.30 builder chain — unsupported in the v1
     // tenant_router. If any of these silently no-op, the assertions
