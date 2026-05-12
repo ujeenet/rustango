@@ -41,8 +41,8 @@ pub use executor::{
     raw_execute_pool, raw_query_pool, select_one_row_as_json_pool, select_one_row_pool,
     select_rows_as_json_pool, select_rows_pool, select_rows_pool_with_related, transaction_pool,
     update_pool, CounterPool, ExplainFormat, ExplainOptions, FetcherPool, FkPkAccess, HasPkValue,
-    InsertReturningPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated, MaybeSqliteFromRow,
-    MaybeSqliteLoadRelated, Page, PoolTx, UpdaterPool,
+    InsertReturningPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow,
+    MaybeSqliteFromRow, MaybeSqliteLoadRelated, Page, PoolTx, UpdaterPool,
 };
 // PG-typed back-compat surface: only re-exported when `postgres` is on.
 #[cfg(feature = "postgres")]

@@ -780,6 +780,143 @@ where
     Ok(out)
 }
 
+/// Tri-dialect counterpart of [`prefetch_soft`] (v0.38). Same shape
+/// — one batched SELECT against `target_fk_column`, grouped by
+/// parent PK — but routes through [`crate::sql::FetcherPool::fetch_pool`]
+/// so the bound is `C: Model + MaybePgFromRow + MaybeMyFromRow +
+/// MaybeSqliteFromRow + …` (all auto-implemented by `#[derive(Model)]`).
+///
+/// # Errors
+/// As [`prefetch_soft`].
+pub async fn prefetch_soft_pool<C, F>(
+    pool: &crate::sql::Pool,
+    parent_pks: &[i64],
+    target_fk_column: &'static str,
+    extract: F,
+) -> Result<::std::collections::HashMap<i64, Vec<C>>, ExecError>
+where
+    C: crate::core::Model
+        + crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin
+        + 'static,
+    F: Fn(&C) -> i64,
+{
+    use crate::sql::FetcherPool as _;
+    if parent_pks.is_empty() {
+        return Ok(::std::collections::HashMap::new());
+    }
+    let mut keys: Vec<i64> = parent_pks.to_vec();
+    keys.sort_unstable();
+    keys.dedup();
+    let pk_values: Vec<crate::core::SqlValue> = keys
+        .iter()
+        .copied()
+        .map(crate::core::SqlValue::I64)
+        .collect();
+    let children: Vec<C> = crate::query::QuerySet::<C>::new()
+        .filter(
+            target_fk_column,
+            crate::core::Op::In,
+            crate::core::SqlValue::List(pk_values),
+        )
+        .fetch_pool(pool)
+        .await?;
+    let mut grouped: ::std::collections::HashMap<i64, Vec<C>> = ::std::collections::HashMap::new();
+    for child in children {
+        let key = extract(&child);
+        grouped.entry(key).or_default().push(child);
+    }
+    Ok(grouped)
+}
+
+/// Tri-dialect counterpart of [`prefetch_generic`] (v0.38). Routes the
+/// ContentType lookup through [`ContentType::for_model_pool`] and the
+/// target SELECT through [`crate::sql::FetcherPool::fetch_pool`] so
+/// the same body works on PG / SQLite / MySQL.
+///
+/// # Errors
+/// As [`prefetch_generic`].
+pub async fn prefetch_generic_pool<C>(
+    pool: &crate::sql::Pool,
+    pairs: &[(i64, i64)],
+) -> Result<::std::collections::HashMap<(i64, i64), C>, ExecError>
+where
+    C: crate::core::Model
+        + crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + crate::sql::HasPkValue
+        + Send
+        + Unpin
+        + 'static,
+{
+    use crate::sql::FetcherPool as _;
+    if pairs.is_empty() {
+        return Ok(::std::collections::HashMap::new());
+    }
+    let target_ct = ContentType::for_model_pool::<C>(pool)
+        .await?
+        .ok_or_else(|| ExecError::MissingPrimaryKey {
+            table: C::SCHEMA.table,
+        })?;
+    let target_ct_id = target_ct
+        .id
+        .get()
+        .copied()
+        .ok_or_else(|| ExecError::MissingPrimaryKey {
+            table: ContentType::SCHEMA.table,
+        })?;
+
+    let mut wanted_pks: Vec<i64> = pairs
+        .iter()
+        .filter(|(ct, _)| *ct == target_ct_id)
+        .map(|(_, pk)| *pk)
+        .collect();
+    if wanted_pks.is_empty() {
+        return Ok(::std::collections::HashMap::new());
+    }
+    wanted_pks.sort_unstable();
+    wanted_pks.dedup();
+
+    let pk_values: Vec<crate::core::SqlValue> = wanted_pks
+        .iter()
+        .copied()
+        .map(crate::core::SqlValue::I64)
+        .collect();
+    let pk_field = C::SCHEMA
+        .primary_key()
+        .ok_or_else(|| ExecError::MissingPrimaryKey {
+            table: C::SCHEMA.table,
+        })?;
+    let rows: Vec<C> = crate::query::QuerySet::<C>::new()
+        .filter(
+            pk_field.column,
+            crate::core::Op::In,
+            crate::core::SqlValue::List(pk_values),
+        )
+        .fetch_pool(pool)
+        .await?;
+
+    let mut out: ::std::collections::HashMap<(i64, i64), C> =
+        ::std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let pk_value = <C as crate::sql::HasPkValue>::__rustango_pk_value_impl(&row);
+        if let crate::core::SqlValue::I64(pk) = pk_value {
+            out.insert((target_ct_id, pk), row);
+        }
+    }
+    Ok(out)
+}
+
 /// SQL that creates the `rustango_content_types` table + the
 /// `(app_label, model_name)` UNIQUE index. Idempotent
 /// (`IF NOT EXISTS`). Mounted as a runtime ensure-table so the
