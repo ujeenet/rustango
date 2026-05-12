@@ -141,20 +141,58 @@ pub async fn migrate_registry_pool(
     // migration JSON the user would have to apply manually. Sqlite +
     // MySQL registries are post-v0.34 and ship the column from the
     // start, so the ALTER is PG-only.
+    //
+    // v0.37 (#7) — extended to the v0.26+v0.33 `Org` columns the
+    // scaffolder's bootstrap JSON predates: `backend_kind` (v0.33
+    // multi-backend tenancy), `brand_*` / `logo_path` / `favicon_path`
+    // / `primary_color` / `theme_mode` (v0.26 branding). Until the
+    // scaffolder templates get regenerated, fresh scaffolded projects
+    // need this fixup or `Org` row reads error with `column "..." does
+    // not exist`. Each ALTER is idempotent via `ADD COLUMN IF NOT
+    // EXISTS`; running on an up-to-date schema is a no-op.
     #[cfg(feature = "postgres")]
     if let Some(pg) = registry.as_postgres() {
-        if let Err(e) = rustango::sql::sqlx::query(
-            r#"ALTER TABLE "rustango_operators"
-               ADD COLUMN IF NOT EXISTS "password_changed_at" TIMESTAMPTZ NULL"#,
-        )
-        .execute(pg)
-        .await
-        {
-            tracing::warn!(
-                target: "crate::tenancy",
-                error = %e,
-                "ALTER rustango_operators password_changed_at failed",
-            );
+        // List every (table, column, type) the current framework
+        // expects but a stale bootstrap might be missing. Adding to
+        // this list is the contract for "ship a column that older
+        // deployments need" — pair every new column with an entry
+        // here so users don't have to hand-write ALTERs to upgrade.
+        let fixups: &[(&str, &str, &str)] = &[
+            (
+                "rustango_operators",
+                "password_changed_at",
+                "TIMESTAMPTZ NULL",
+            ),
+            (
+                "rustango_orgs",
+                "backend_kind",
+                "VARCHAR(16) NOT NULL DEFAULT 'postgres'",
+            ),
+            ("rustango_orgs", "brand_name", "VARCHAR(80)"),
+            ("rustango_orgs", "brand_tagline", "VARCHAR(200)"),
+            ("rustango_orgs", "logo_path", "VARCHAR(120)"),
+            ("rustango_orgs", "favicon_path", "VARCHAR(120)"),
+            ("rustango_orgs", "primary_color", "VARCHAR(7)"),
+            ("rustango_orgs", "theme_mode", "VARCHAR(8)"),
+        ];
+        for (table, column, col_type) in fixups {
+            let sql =
+                format!(r#"ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS "{column}" {col_type}"#);
+            if let Err(e) = rustango::sql::sqlx::query(&sql).execute(pg).await {
+                // Missing tables (rustango_operators / rustango_orgs)
+                // mean the registry bootstrap hasn't run yet — that's
+                // a separate error path, not a fixup failure. Warn and
+                // continue; the next on-disk migration will create
+                // the table and a subsequent boot will re-run this
+                // fixup against the populated schema.
+                tracing::warn!(
+                    target: "crate::tenancy",
+                    table = %table,
+                    column = %column,
+                    error = %e,
+                    "registry column fixup failed (non-fatal — re-run after the bootstrap migrate)",
+                );
+            }
         }
     }
     // Registry-scope audit-log table for operator-side actions

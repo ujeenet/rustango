@@ -321,8 +321,18 @@ impl Pool {
         //   - `sqlite:./path.db` — relative path
         //   - `sqlite:///abs/path.db` — absolute path
         //   - `sqlite:?mode=memory&cache=shared` — query-string options
+        //
+        // v0.37 friendly-default: when the URL points at a file path
+        // and doesn't already carry a `mode=` query param, append
+        // `?mode=rwc` so a missing file is created (matching the
+        // Django-shape "just works" tone). Without this, sqlx
+        // returns `unable to open database file (code: 14)` on first
+        // boot, which is a confusing error for new users. In-memory
+        // databases (`sqlite::memory:`) and explicit `mode=` URLs
+        // bypass this — the user's intent always wins.
+        let url_with_default = ensure_sqlite_rwc_default(url);
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .connect(url)
+            .connect(&url_with_default)
             .await
             .map_err(|e| PoolError::Connect(e.to_string()))?;
         Ok(Self::Sqlite(pool))
@@ -335,6 +345,82 @@ impl Pool {
             scheme: "sqlite",
             feature: "sqlite",
         })
+    }
+}
+
+/// v0.37 — append `?mode=rwc` to a sqlite file URL that doesn't
+/// already specify a `mode=`. In-memory URLs (`sqlite::memory:`) and
+/// URLs that already opt into a mode (`mode=ro` / `mode=rwc` / etc.)
+/// pass through unchanged. Public for tests in
+/// `pool_sqlite_rwc_default_tests`.
+#[cfg(feature = "sqlite")]
+fn ensure_sqlite_rwc_default(url: &str) -> String {
+    // In-memory: no file to create, no default needed.
+    if url.contains(":memory:") || url.starts_with("sqlite::memory:") {
+        return url.to_owned();
+    }
+    // Caller already opted into a mode — respect their intent.
+    if url.contains("mode=") {
+        return url.to_owned();
+    }
+    // Append `?mode=rwc` or `&mode=rwc` depending on existing query.
+    if url.contains('?') {
+        format!("{url}&mode=rwc")
+    } else {
+        format!("{url}?mode=rwc")
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod pool_sqlite_rwc_default_tests {
+    use super::ensure_sqlite_rwc_default;
+
+    #[test]
+    fn memory_url_passes_through() {
+        assert_eq!(
+            ensure_sqlite_rwc_default("sqlite::memory:"),
+            "sqlite::memory:"
+        );
+    }
+
+    #[test]
+    fn memory_query_passes_through() {
+        assert_eq!(
+            ensure_sqlite_rwc_default("sqlite:?mode=memory&cache=shared"),
+            "sqlite:?mode=memory&cache=shared"
+        );
+    }
+
+    #[test]
+    fn explicit_mode_passes_through() {
+        assert_eq!(
+            ensure_sqlite_rwc_default("sqlite:./db.db?mode=ro"),
+            "sqlite:./db.db?mode=ro"
+        );
+        assert_eq!(
+            ensure_sqlite_rwc_default("sqlite:///abs/db.db?mode=rwc"),
+            "sqlite:///abs/db.db?mode=rwc"
+        );
+    }
+
+    #[test]
+    fn file_path_without_mode_gets_rwc() {
+        assert_eq!(
+            ensure_sqlite_rwc_default("sqlite:./db.db"),
+            "sqlite:./db.db?mode=rwc"
+        );
+        assert_eq!(
+            ensure_sqlite_rwc_default("sqlite:///abs/db.db"),
+            "sqlite:///abs/db.db?mode=rwc"
+        );
+    }
+
+    #[test]
+    fn existing_query_gets_appended_with_amp() {
+        assert_eq!(
+            ensure_sqlite_rwc_default("sqlite:./db.db?cache=shared"),
+            "sqlite:./db.db?cache=shared&mode=rwc"
+        );
     }
 }
 

@@ -697,9 +697,19 @@ impl Default for Cli {
 /// fallback returns the original router unchanged.
 fn try_mount_welcome(api: Router) -> Router {
     let api_for_probe = api.clone();
+    // v0.37 (#5) — axum's `Router::merge` panics with "Overlapping
+    // method route" when both sides route `GET /`. We use
+    // `catch_unwind` to convert that panic into a friendly tracing
+    // warn. The default Rust panic hook still prints the panic line
+    // to stderr though, which is confusing for users — looks like a
+    // crash. Install a noop hook for the merge probe so the stderr
+    // stays clean; restore the previous hook immediately after.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {})); // suppress
     let merged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         api_for_probe.merge(crate::welcome::welcome_router())
     }));
+    std::panic::set_hook(prev_hook);
     match merged {
         Ok(r) => r,
         Err(_) => {

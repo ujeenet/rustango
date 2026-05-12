@@ -92,6 +92,13 @@
             "auto": true
           },
           {
+            "name": "password_changed_at",
+            "column": "password_changed_at",
+            "ty": "datetime",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
             "name": "password_hash",
             "column": "password_hash",
             "ty": "string",
@@ -122,6 +129,31 @@
             "primary_key": false
           },
           {
+            "name": "backend_kind",
+            "column": "backend_kind",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 16,
+            "default": "'postgres'"
+          },
+          {
+            "name": "brand_name",
+            "column": "brand_name",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 80
+          },
+          {
+            "name": "brand_tagline",
+            "column": "brand_tagline",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 200
+          },
+          {
             "name": "created_at",
             "column": "created_at",
             "ty": "datetime",
@@ -144,6 +176,14 @@
             "max_length": 255
           },
           {
+            "name": "favicon_path",
+            "column": "favicon_path",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 120
+          },
+          {
             "name": "host_pattern",
             "column": "host_pattern",
             "ty": "string",
@@ -160,6 +200,14 @@
             "auto": true
           },
           {
+            "name": "logo_path",
+            "column": "logo_path",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 120
+          },
+          {
             "name": "path_prefix",
             "column": "path_prefix",
             "ty": "string",
@@ -173,6 +221,14 @@
             "ty": "i32",
             "nullable": true,
             "primary_key": false
+          },
+          {
+            "name": "primary_color",
+            "column": "primary_color",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 7
           },
           {
             "name": "schema_name",
@@ -198,6 +254,14 @@
             "nullable": false,
             "primary_key": false,
             "max_length": 16
+          },
+          {
+            "name": "theme_mode",
+            "column": "theme_mode",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 8
           }
         ]
       },
@@ -380,6 +444,13 @@
             "column": "is_superuser",
             "ty": "bool",
             "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "password_changed_at",
+            "column": "password_changed_at",
+            "ty": "datetime",
+            "nullable": true,
             "primary_key": false
           },
           {
