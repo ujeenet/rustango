@@ -531,11 +531,12 @@ pub mod fixtures;
 /// Bulk-action runner — apply one operation to a set of selected PKs.
 /// See [`bulk_actions::BulkActionRegistry`] + built-in actions.
 ///
-/// v0.38 — also gated to `postgres` because [`BulkAction::execute`]
-/// takes `&PgPool` and the built-ins bind `Vec<i64>` arrays (PG-only
-/// IN-list shape). Slice 6 lifts the trait to `&Pool` + uses dialect
-/// emitter for the IN list.
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+/// v0.38 slice 6 — fully tri-dialect. [`BulkAction::run`] takes
+/// `&crate::sql::Pool`; built-ins emit per-dialect DDL via
+/// `dialect.quote_ident()` + `dialect.placeholder(n)` and bind
+/// timestamps as `chrono::DateTime<Utc>` to dodge `NOW()` vs
+/// `CURRENT_TIMESTAMP` differences.
+#[cfg(feature = "tenancy")]
 pub mod bulk_actions;
 
 /// TOTP — RFC 6238 time-based one-time passwords for 2FA.

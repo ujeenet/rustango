@@ -92,7 +92,7 @@ pub enum RustangoError {
     AuthFlow(crate::auth_flows::AuthFlowError),
 
     /// Bulk-action runner error.
-    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[cfg(feature = "tenancy")]
     BulkAction(crate::bulk_actions::BulkActionError),
 
     /// IP filter parse error (invalid CIDR).
@@ -167,7 +167,7 @@ impl fmt::Display for RustangoError {
             Self::SignedUrl(e) => write!(f, "signed_url: {e}"),
             #[cfg(feature = "auth_flows")]
             Self::AuthFlow(e) => write!(f, "auth_flow: {e}"),
-            #[cfg(all(feature = "tenancy", feature = "postgres"))]
+            #[cfg(feature = "tenancy")]
             Self::BulkAction(e) => write!(f, "bulk_action: {e}"),
             #[cfg(feature = "admin")]
             Self::IpFilter(e) => write!(f, "ip_filter: {e}"),
@@ -210,7 +210,7 @@ impl std::error::Error for RustangoError {
             Self::SignedUrl(e) => Some(e),
             #[cfg(feature = "auth_flows")]
             Self::AuthFlow(e) => Some(e),
-            #[cfg(all(feature = "tenancy", feature = "postgres"))]
+            #[cfg(feature = "tenancy")]
             Self::BulkAction(e) => Some(e),
             #[cfg(feature = "admin")]
             Self::IpFilter(e) => Some(e),
@@ -315,7 +315,7 @@ impl From<crate::auth_flows::AuthFlowError> for RustangoError {
     }
 }
 
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 impl From<crate::bulk_actions::BulkActionError> for RustangoError {
     fn from(e: crate::bulk_actions::BulkActionError) -> Self {
         Self::BulkAction(e)
@@ -414,7 +414,7 @@ mod into_response {
 
             // Bad input: 400
             RustangoError::Env(_) => ApiError::bad_request(msg),
-            #[cfg(all(feature = "tenancy", feature = "postgres"))]
+            #[cfg(feature = "tenancy")]
             RustangoError::BulkAction(_) => ApiError::bad_request(msg),
             #[cfg(feature = "admin")]
             RustangoError::IpFilter(_) => ApiError::bad_request(msg),

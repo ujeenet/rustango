@@ -1,32 +1,27 @@
-//! Bulk-action runner — apply one operation to a set of selected PKs.
+//! Pluggable bulk actions for the auto-admin.
 //!
-//! Pairs with admin list views or any UI where the user picks rows and
-//! triggers an action. Built-in actions handle the common cases
-//! (delete, soft-delete, restore, set-field-to-value); custom actions
-//! plug in via the [`BulkAction`] trait.
+//! Bulk-action runner that lifts Django's `actions = [...]` dropdown.
+//! Each `BulkAction` knows its codename, label, and how to run on a
+//! list of selected primary keys. The admin's "Action" dropdown is
+//! populated from a [`BulkActionRegistry`] mounted on the
+//! [`crate::server::Builder`] (or constructed directly for unit
+//! tests).
 //!
-//! ## Quick start
-//!
-//! ```ignore
-//! use rustango::bulk_actions::{BulkActionRegistry, BulkDeleteAction};
-//! use std::sync::Arc;
-//!
-//! let registry = BulkActionRegistry::new()
-//!     .register(Arc::new(BulkDeleteAction));
-//!
-//! // From a handler:
-//! let result = registry
-//!     .run("delete", "posts", &[1, 2, 3], &pool)
-//!     .await?;
-//! println!("affected {} rows", result.affected);
-//! ```
+//! v0.38 — lifted from `&PgPool` to the tri-dialect `&Pool` enum so
+//! built-in actions work on PG / MySQL / SQLite. Identifier quoting
+//! routes through `dialect.quote_ident()` (`"foo"` on PG/SQLite,
+//! `` `foo` `` on MySQL) and IN-lists are expanded inline rather
+//! than bound via PG-only `= ANY($N::bigint[])`. Timestamps use
+//! `chrono::Utc::now()` bound as parameters, dodging the per-dialect
+//! `NOW()` / `CURRENT_TIMESTAMP` difference.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::sql::sqlx::{self, PgPool};
+use crate::core::SqlValue;
+use crate::sql::Pool;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BulkActionError {
@@ -63,7 +58,7 @@ pub trait BulkAction: Send + Sync + 'static {
         &self,
         table: &str,
         pks: &[i64],
-        pool: &PgPool,
+        pool: &Pool,
     ) -> Result<BulkActionResult, BulkActionError>;
 }
 
@@ -122,7 +117,7 @@ impl BulkActionRegistry {
         name: &str,
         table: &str,
         pks: &[i64],
-        pool: &PgPool,
+        pool: &Pool,
     ) -> Result<BulkActionResult, BulkActionError> {
         let action = self
             .get(name)
@@ -137,11 +132,27 @@ pub(crate) fn validate_ident(name: &str) -> Result<(), BulkActionError> {
     if name.is_empty() {
         return Err(BulkActionError::InvalidIdent("empty".into()));
     }
-    let bad = ['"', '\0', '\n', '\r', '\\', ';', ' '];
+    let bad = ['"', '`', '\0', '\n', '\r', '\\', ';', ' '];
     if name.chars().any(|c| bad.contains(&c) || c.is_control()) {
         return Err(BulkActionError::InvalidIdent(name.to_owned()));
     }
     Ok(())
+}
+
+/// Render `({p1}, {p2}, ..., {pN})` for an IN-list of `n` placeholders
+/// using `dialect.placeholder(i)`. PG emits `$1, $2, …`, MySQL/SQLite
+/// emit `?, ?, …`.
+fn placeholders_for(dialect: &dyn crate::sql::Dialect, n: usize) -> String {
+    let mut s = String::with_capacity(n * 4 + 2);
+    s.push('(');
+    for i in 0..n {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        s.push_str(&dialect.placeholder(i + 1));
+    }
+    s.push(')');
+    s
 }
 
 // ------------------------------------------------------------------ Built-in actions
@@ -162,7 +173,7 @@ impl BulkAction for BulkDeleteAction {
         &self,
         table: &str,
         pks: &[i64],
-        pool: &PgPool,
+        pool: &Pool,
     ) -> Result<BulkActionResult, BulkActionError> {
         validate_ident(table)?;
         if pks.is_empty() {
@@ -172,22 +183,26 @@ impl BulkAction for BulkDeleteAction {
                 table: table.to_owned(),
             });
         }
-        let sql = format!(r#"DELETE FROM "{table}" WHERE "id" = ANY($1)"#);
-        let result = sqlx::query(&sql)
-            .bind(pks)
-            .execute(pool)
+        let dialect = pool.dialect();
+        let table_q = dialect.quote_ident(table);
+        let id_col = dialect.quote_ident("id");
+        let placeholders = placeholders_for(dialect, pks.len());
+        let sql = format!("DELETE FROM {table_q} WHERE {id_col} IN {placeholders}");
+        let binds: Vec<SqlValue> = pks.iter().copied().map(SqlValue::from).collect();
+        let affected = crate::sql::raw_execute_pool(pool, &sql, binds)
             .await
             .map_err(|e| BulkActionError::Database(e.to_string()))?;
         Ok(BulkActionResult {
-            affected: result.rows_affected(),
+            affected,
             action: self.name().to_owned(),
             table: table.to_owned(),
         })
     }
 }
 
-/// Soft-delete: set the named column (typically `deleted_at`) to `NOW()`
-/// for every selected row. Only updates rows where the column is currently NULL.
+/// Soft-delete: set the named column (typically `deleted_at`) to the
+/// current UTC time for every selected row. Only updates rows where
+/// the column is currently NULL.
 pub struct BulkSoftDeleteAction {
     /// SQL column name to set (e.g. `"deleted_at"`).
     pub column: &'static str,
@@ -206,7 +221,7 @@ impl BulkAction for BulkSoftDeleteAction {
         &self,
         table: &str,
         pks: &[i64],
-        pool: &PgPool,
+        pool: &Pool,
     ) -> Result<BulkActionResult, BulkActionError> {
         validate_ident(table)?;
         validate_ident(self.column)?;
@@ -217,17 +232,33 @@ impl BulkAction for BulkSoftDeleteAction {
                 table: table.to_owned(),
             });
         }
-        let col = self.column;
+        let dialect = pool.dialect();
+        let table_q = dialect.quote_ident(table);
+        let col_q = dialect.quote_ident(self.column);
+        let id_col = dialect.quote_ident("id");
+        // Placeholder $1 / ? for the timestamp value, then IN-list
+        // for the pk binds starting at index 2.
+        let ts_ph = dialect.placeholder(1);
+        let mut binds: Vec<SqlValue> = Vec::with_capacity(pks.len() + 1);
+        binds.push(SqlValue::DateTime(chrono::Utc::now()));
+        let mut in_list = String::from("(");
+        for (i, pk) in pks.iter().enumerate() {
+            if i > 0 {
+                in_list.push_str(", ");
+            }
+            in_list.push_str(&dialect.placeholder(i + 2));
+            binds.push(SqlValue::from(*pk));
+        }
+        in_list.push(')');
         let sql = format!(
-            r#"UPDATE "{table}" SET "{col}" = NOW() WHERE "id" = ANY($1) AND "{col}" IS NULL"#,
+            "UPDATE {table_q} SET {col_q} = {ts_ph} \
+             WHERE {id_col} IN {in_list} AND {col_q} IS NULL"
         );
-        let result = sqlx::query(&sql)
-            .bind(pks)
-            .execute(pool)
+        let affected = crate::sql::raw_execute_pool(pool, &sql, binds)
             .await
             .map_err(|e| BulkActionError::Database(e.to_string()))?;
         Ok(BulkActionResult {
-            affected: result.rows_affected(),
+            affected,
             action: self.name().to_owned(),
             table: table.to_owned(),
         })
@@ -252,7 +283,7 @@ impl BulkAction for BulkRestoreAction {
         &self,
         table: &str,
         pks: &[i64],
-        pool: &PgPool,
+        pool: &Pool,
     ) -> Result<BulkActionResult, BulkActionError> {
         validate_ident(table)?;
         validate_ident(self.column)?;
@@ -263,15 +294,18 @@ impl BulkAction for BulkRestoreAction {
                 table: table.to_owned(),
             });
         }
-        let col = self.column;
-        let sql = format!(r#"UPDATE "{table}" SET "{col}" = NULL WHERE "id" = ANY($1)"#,);
-        let result = sqlx::query(&sql)
-            .bind(pks)
-            .execute(pool)
+        let dialect = pool.dialect();
+        let table_q = dialect.quote_ident(table);
+        let col_q = dialect.quote_ident(self.column);
+        let id_col = dialect.quote_ident("id");
+        let placeholders = placeholders_for(dialect, pks.len());
+        let sql = format!("UPDATE {table_q} SET {col_q} = NULL WHERE {id_col} IN {placeholders}");
+        let binds: Vec<SqlValue> = pks.iter().copied().map(SqlValue::from).collect();
+        let affected = crate::sql::raw_execute_pool(pool, &sql, binds)
             .await
             .map_err(|e| BulkActionError::Database(e.to_string()))?;
         Ok(BulkActionResult {
-            affected: result.rows_affected(),
+            affected,
             action: self.name().to_owned(),
             table: table.to_owned(),
         })
@@ -299,7 +333,7 @@ mod tests {
             &self,
             table: &str,
             _pks: &[i64],
-            _pool: &PgPool,
+            _pool: &Pool,
         ) -> Result<BulkActionResult, BulkActionError> {
             Ok(BulkActionResult {
                 affected: 0,
@@ -393,12 +427,14 @@ mod tests {
         assert!(validate_ident("a b").is_err());
         assert!(validate_ident("a\nb").is_err());
         assert!(validate_ident("").is_err());
+        assert!(validate_ident("evil`").is_err());
     }
 
     #[tokio::test]
     async fn unknown_action_returns_error() {
         // Use a lazy pool — the action lookup fails before the SQL fires
-        let pool = sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+        let pg = crate::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+        let pool: Pool = pg.into();
         let r = BulkActionRegistry::new();
         let err = r
             .run("nonexistent", "posts", &[1], &pool)
