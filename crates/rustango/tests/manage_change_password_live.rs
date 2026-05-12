@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live tests for the v0.28.2 change-password / change-operator-password
 //! CLI verbs. Exercises the current-password verification path end-to-end:
 //! create user → change with correct current → re-verify hash; create

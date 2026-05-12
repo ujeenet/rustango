@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Integration test for the `migrate-tenant-storage` verb (item #58
 //! in the future-feature backlog). The `--dry-run` flag short-circuits
 //! before any actual pg_dump → psql work, so this test exercises the
@@ -9,7 +10,7 @@
 //! it would need both binaries on PATH plus a second writable
 //! database to be the target.
 
-#![cfg(feature = "tenancy")]
+#![cfg(all(feature = "tenancy", feature = "postgres"))]
 
 use std::sync::Arc;
 

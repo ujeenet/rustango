@@ -1,3 +1,4 @@
+#![cfg(all(feature = "mysql", feature = "postgres"))]
 //! Compile-time check that `#[derive(Model)]` emits an
 //! `impl FromRow<MySqlRow>` when rustango is built with the `mysql`
 //! feature. The check is the type assertion alone — if the proc-macro

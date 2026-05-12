@@ -1,3 +1,4 @@
+#![cfg(feature = "storage-s3")]
 //! `#[ignore]`-d helper that uploads a few visible files to the
 //! configured S3-compatible bucket via `S3Storage`, leaves them
 //! behind, and prints the URLs so you can see them in the MinIO /

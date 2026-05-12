@@ -1,4 +1,4 @@
-#![cfg(feature = "tenancy")]
+#![cfg(all(feature = "tenancy", feature = "postgres"))]
 //! Live tests for scoped tenant migrations.
 //!
 //! Bootstraps a registry with two schema-mode tenants, writes a

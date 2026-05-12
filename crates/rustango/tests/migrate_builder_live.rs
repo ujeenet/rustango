@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live test for `migrate::Builder` (v0.7 slice 2).
 //!
 //! Two rustango apps in the same database can pick distinct ledger

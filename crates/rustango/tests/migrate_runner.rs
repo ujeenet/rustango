@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live tests for `rustango::migrate::migrate` (the file-driven runner)
 //! and the `__rustango_migrations__` ledger table.
 //!

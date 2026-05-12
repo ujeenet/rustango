@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live integration tests for `MediaManager` against Postgres + an
 //! S3-compatible bucket.
 //!

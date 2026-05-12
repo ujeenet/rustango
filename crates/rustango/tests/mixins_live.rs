@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live tests for v0.12 commit 1 — base-model field-level mixin
 //! attributes: `auto_uuid`, `auto_now_add`, `auto_now`, `soft_delete`.
 //!

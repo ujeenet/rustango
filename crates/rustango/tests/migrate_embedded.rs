@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Tests for `migrate::migrate_embedded` and the `embed_migrations!`
 //! proc-macro.
 

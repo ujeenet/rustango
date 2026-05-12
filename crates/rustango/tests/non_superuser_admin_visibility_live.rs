@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live integration test for #67 — the "scaffold an app, see it in
 //! admin as a non-superuser" loop that #61–#66 collectively broke.
 //!

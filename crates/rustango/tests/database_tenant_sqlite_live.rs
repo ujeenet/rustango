@@ -94,10 +94,10 @@ async fn full_request_path_through_extractor() {
     let ctx = Arc::new(DatabaseTenantContext {
         pools,
         resolver,
-        session_secret: rustango::tenancy::operator_console::SessionSecret::from_bytes(
+        session_secret: rustango::tenancy::session::SessionSecret::from_bytes(
             b"test_tenant_session_secret_32by!".to_vec(),
         ),
-        operator_secret: rustango::tenancy::operator_console::SessionSecret::from_bytes(
+        operator_secret: rustango::tenancy::session::SessionSecret::from_bytes(
             b"test_oper_session_secret____32b!".to_vec(),
         ),
         // The resolver above never touches the registry pool, but

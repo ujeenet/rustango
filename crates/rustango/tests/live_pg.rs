@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live end-to-end test against a real Postgres instance.
 //!
 //! Reads `DATABASE_URL`. If unset, every test returns silently — so

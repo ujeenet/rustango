@@ -1,4 +1,4 @@
-#![cfg(feature = "tenancy")]
+#![cfg(all(feature = "tenancy", feature = "postgres"))]
 //! Live tests for the OrgResolver chain. Spins up a registry with
 //! three orgs in mixed config (subdomain, header-only, port-based)
 //! and exercises each resolver + the chain composition.

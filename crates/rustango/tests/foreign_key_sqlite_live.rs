@@ -1,3 +1,4 @@
+#![cfg(all(feature = "sqlite", feature = "postgres"))]
 //! Live regression for v0.35 slice 2 — `ForeignKey::get_pool`
 //! against SQLite. Proves FK lazy-load works on any backend without
 //! Postgres, mirroring the existing PG-typed `ForeignKey::get` test.

@@ -1,4 +1,4 @@
-#![cfg(feature = "tenancy")]
+#![cfg(all(feature = "tenancy", feature = "postgres"))]
 //! Smoke test for `manage wizard` (roadmap #2, v0.30.14).
 //!
 //! The wizard's prompt + dispatch logic is covered by the unit

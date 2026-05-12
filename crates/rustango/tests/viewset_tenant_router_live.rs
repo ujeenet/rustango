@@ -1,4 +1,4 @@
-#![cfg(feature = "tenancy")]
+#![cfg(all(feature = "tenancy", feature = "postgres"))]
 //! Live integration test for `ViewSet::tenant_router(prefix)` (#80, v0.30).
 //!
 //! Boots a single tenant in database storage mode (pointing at the same
@@ -27,7 +27,7 @@ use rustango::core::Model as _;
 use rustango::extractors::TenantContext;
 use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::{
-    operator_console::SessionSecret, ChainResolver, HeaderResolver, Org, StorageMode, TenantPools,
+    session::SessionSecret, ChainResolver, HeaderResolver, Org, StorageMode, TenantPools,
 };
 use rustango::viewset::ViewSet;
 use rustango::{migrate as rmig, Model};

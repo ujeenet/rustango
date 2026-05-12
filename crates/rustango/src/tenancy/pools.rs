@@ -707,6 +707,7 @@ fn quote_ident(name: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "postgres")]
     #[test]
     fn quote_ident_wraps_and_escapes() {
         assert_eq!(quote_ident("acme"), "\"acme\"");
@@ -738,6 +739,7 @@ mod tests {
         assert!(c.database_pool_max_lifetime.is_some());
     }
 
+    #[cfg(feature = "postgres")]
     #[test]
     fn prewarm_report_zeroed_default() {
         let r = PrewarmReport::default();

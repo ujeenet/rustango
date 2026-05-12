@@ -1,3 +1,4 @@
+#![cfg(feature = "serializer")]
 //! Unit tests for #[derive(Serializer)] — no database required.
 
 use rustango::serializer::ModelSerializer;

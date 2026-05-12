@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live regression for `permissions.rs` upserts after migrating
 //! `grant_role_perm` / `assign_role` / `set_user_perm` from raw sqlx
 //! to the ORM's `InsertQuery` + `ConflictClause` IR (ORM roadmap P1).

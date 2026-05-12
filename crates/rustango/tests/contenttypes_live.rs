@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live integration test for the v0.15 sub-slice F.1 ContentType
 //! framework — bootstrap the table, seed it from inventory, look up
 //! by `for_model::<T>` / `by_natural_key` / `by_id` / `all`.

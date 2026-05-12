@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Tests for `rustango::migrate::manage::run` — the Django-style
 //! `manage.py` analog.
 //!
@@ -18,13 +19,12 @@ use rustango::sql::sqlx::{self, PgPool, Row};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
-async fn pool() -> Option<PgPool> {
+async fn pool() -> Option<rustango::sql::Pool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    Some(
-        PgPool::connect(&url)
-            .await
-            .expect("connect to DATABASE_URL"),
-    )
+    let pg = PgPool::connect(&url)
+        .await
+        .expect("connect to DATABASE_URL");
+    Some(pg.into())
 }
 
 fn fresh_dir(label: &str) -> PathBuf {
@@ -71,15 +71,17 @@ fn write_migration(dir: &std::path::Path, mig: &Migration) {
     file::write(&path, mig).unwrap();
 }
 
-async fn drop_table(pool: &PgPool, table: &str) {
+async fn drop_table(pool: &rustango::sql::Pool, table: &str) {
+    let pg = pool.as_postgres().expect("test pool is postgres");
     let sql = format!(r#"DROP TABLE IF EXISTS "{table}" CASCADE"#);
-    sqlx::query(&sql).execute(pool).await.unwrap();
+    sqlx::query(&sql).execute(pg).await.unwrap();
 }
 
-async fn delete_ledger_entry(pool: &PgPool, name: &str) {
+async fn delete_ledger_entry(pool: &rustango::sql::Pool, name: &str) {
+    let pg = pool.as_postgres().expect("test pool is postgres");
     sqlx::query("DELETE FROM __rustango_migrations__ WHERE name = $1")
         .bind(name)
-        .execute(pool)
+        .execute(pg)
         .await
         .unwrap();
 }
@@ -274,7 +276,8 @@ async fn add_data_op_cmd_creates_new_migration() {
     let dir = fresh_dir("cmd_create");
     let mut out = Vec::<u8>::new();
     // add-data-op is pure file I/O — no DB needed. Pass a lazy pool.
-    let pool = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let pg = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let pool: rustango::sql::Pool = pg.into();
     manage::run_with_writer(
         &pool,
         &dir,
@@ -309,7 +312,8 @@ async fn add_data_op_cmd_missing_sql_is_error() {
     let dir = fresh_dir("cmd_no_sql");
     let _ = std::fs::create_dir_all(&dir);
     let mut out = Vec::<u8>::new();
-    let pool = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let pg = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let pool: rustango::sql::Pool = pg.into();
     let err = manage::run_with_writer(
         &pool,
         &dir,
@@ -426,7 +430,7 @@ async fn migrate_subcommand_applies_pending() {
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
     )
     .bind(&table)
-    .fetch_one(&pool)
+    .fetch_one(pool.as_postgres().unwrap())
     .await
     .unwrap()
     .try_get(0)
@@ -488,7 +492,7 @@ async fn migrate_to_target_subcommand_routes_correctly() {
         .await
         .unwrap();
 
-    let applied = migrate::applied_set(&pool).await.unwrap();
+    let applied = migrate::applied_set_pool(&pool).await.unwrap();
     assert!(applied.contains(&names[0]));
     assert!(!applied.contains(&names[1]), "0002 should NOT be applied");
 
@@ -552,7 +556,7 @@ async fn downgrade_subcommand_steps_back_one_by_default() {
         .await
         .unwrap();
 
-    let applied = migrate::applied_set(&pool).await.unwrap();
+    let applied = migrate::applied_set_pool(&pool).await.unwrap();
     assert!(applied.contains(&names[0]));
     assert!(!applied.contains(&names[1]), "head should be rolled back");
 
@@ -650,7 +654,7 @@ async fn migrate_dry_run_subcommand_prints_sql_no_writes() {
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
     )
     .bind(&table)
-    .fetch_one(&pool)
+    .fetch_one(pool.as_postgres().unwrap())
     .await
     .unwrap()
     .try_get(0)
@@ -740,7 +744,8 @@ async fn makemigrations_empty_via_run_writes_scaffold() {
 #[tokio::test]
 async fn version_command_prints_framework_version() {
     let dir = fresh_dir("version");
-    let pool = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let pg = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let pool: rustango::sql::Pool = pg.into();
     let mut out = Vec::<u8>::new();
     manage::run_with_writer(&pool, &dir, args(&["version"]), &mut out)
         .await
@@ -753,7 +758,8 @@ async fn version_command_prints_framework_version() {
 #[tokio::test]
 async fn version_dash_dash_alias_works() {
     let dir = fresh_dir("version_alias");
-    let pool = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let pg = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let pool: rustango::sql::Pool = pg.into();
     let mut out = Vec::<u8>::new();
     manage::run_with_writer(&pool, &dir, args(&["--version"]), &mut out)
         .await
@@ -764,7 +770,8 @@ async fn version_dash_dash_alias_works() {
 #[tokio::test]
 async fn docs_command_prints_url() {
     let dir = fresh_dir("docs");
-    let pool = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let pg = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let pool: rustango::sql::Pool = pg.into();
     let mut out = Vec::<u8>::new();
     manage::run_with_writer(&pool, &dir, args(&["docs"]), &mut out)
         .await
@@ -775,7 +782,8 @@ async fn docs_command_prints_url() {
 #[tokio::test]
 async fn help_lists_new_commands() {
     let dir = fresh_dir("help_new");
-    let pool = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let pg = rustango::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+    let pool: rustango::sql::Pool = pg.into();
     let mut out = Vec::<u8>::new();
     manage::run_with_writer(&pool, &dir, args(&["--help"]), &mut out)
         .await

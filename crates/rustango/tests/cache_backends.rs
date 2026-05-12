@@ -1,3 +1,4 @@
+#![cfg(feature = "cache")]
 //! Unit tests for cache backends — no external services required.
 
 use std::sync::Arc;

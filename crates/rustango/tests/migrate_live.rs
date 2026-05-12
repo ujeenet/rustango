@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live test of `rustango::migrate::apply_all` against a real Postgres.
 //!
 //! Reads `DATABASE_URL`. If unset, every test returns silently — same

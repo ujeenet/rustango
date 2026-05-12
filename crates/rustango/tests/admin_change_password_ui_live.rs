@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live test for the v0.28.2 self-serve change-password page on the
 //! tenant admin (`#77`). Covers anonymous-redirect-to-login plus the
 //! happy-path POST that flips the stored hash.

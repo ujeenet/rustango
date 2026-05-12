@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live test for `WhereExpr` OR / nested filter semantics
 //! (v0.7 slice 4).
 //!

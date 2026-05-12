@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! v0.17.2 — `#[rustango(fk = "self")]` self-referential FK.
 //!
 //! Page tree shape:

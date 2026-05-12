@@ -1,3 +1,4 @@
+#![cfg(feature = "signals")]
 //! Unit tests for the signals dispatcher — no DB required.
 
 use std::sync::atomic::{AtomicUsize, Ordering};

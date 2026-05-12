@@ -1,4 +1,4 @@
-#![cfg(feature = "tenancy")]
+#![cfg(all(feature = "tenancy", feature = "postgres"))]
 //! Live tests for the tenant-aware admin router.
 //!
 //! Two tenants in different storage modes; same admin URL serves

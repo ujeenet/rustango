@@ -1,4 +1,4 @@
-#![cfg(feature = "tenancy")]
+#![cfg(all(feature = "tenancy", feature = "postgres"))]
 //! Live tests for the tenant-side auth + `is_superuser` admin gating
 //! shipped in v0.6 step 7.
 //!

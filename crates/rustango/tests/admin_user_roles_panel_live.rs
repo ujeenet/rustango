@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live test for the v0.28 user-roles+permissions panel rendered on
 //! the `rustango_users` admin detail page (Step 5 / item #76).
 //!

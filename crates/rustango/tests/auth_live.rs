@@ -1,4 +1,4 @@
-#![cfg(feature = "tenancy")]
+#![cfg(all(feature = "tenancy", feature = "postgres"))]
 //! Live tests for the 2-domain auth model.
 //!
 //! Reads `DATABASE_URL`. Skips silently when unset.

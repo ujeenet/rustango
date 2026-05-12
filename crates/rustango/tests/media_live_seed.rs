@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! `#[ignore]`-d helper that creates visible Media rows + S3
 //! objects via `MediaManager`, leaves everything behind for
 //! inspection.

@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Operator-console branding driven by env vars (no DB required).
 //!
 //! The operator console reads `RUSTANGO_OPERATOR_BRAND_NAME` /

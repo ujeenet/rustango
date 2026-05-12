@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! `QuerySet::explain` helper — closes future-backlog item #5
 //! ("ORM query profiling / EXPLAIN").
 //!

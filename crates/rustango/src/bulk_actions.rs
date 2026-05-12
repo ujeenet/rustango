@@ -430,11 +430,13 @@ mod tests {
         assert!(validate_ident("evil`").is_err());
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn unknown_action_returns_error() {
-        // Use a lazy pool — the action lookup fails before the SQL fires
-        let pg = crate::sql::sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
-        let pool: Pool = pg.into();
+        // Lazy SQLite in-memory pool — the action lookup fails before
+        // any SQL fires, so the connection never matters.
+        let sq = crate::sql::sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap();
+        let pool: Pool = sq.into();
         let r = BulkActionRegistry::new();
         let err = r
             .run("nonexistent", "posts", &[1], &pool)

@@ -67,8 +67,9 @@ async fn inspectdb_emits_models_for_fixture_tables() {
     fresh_fixture(&pool).await;
 
     let mut buf: Vec<u8> = Vec::new();
+    let pool_enum: rustango::sql::Pool = pool.clone().into();
     rustango::migrate::manage::run_with_writer(
-        &pool,
+        &pool_enum,
         std::path::Path::new("/tmp/_inspectdb_unused"),
         vec![
             "inspectdb".into(),
@@ -136,8 +137,9 @@ async fn inspectdb_emits_fk_uuid_and_jsonb_correctly() {
     fresh_fixture(&pool).await;
 
     let mut buf: Vec<u8> = Vec::new();
+    let pool_enum: rustango::sql::Pool = pool.clone().into();
     rustango::migrate::manage::run_with_writer(
-        &pool,
+        &pool_enum,
         std::path::Path::new("/tmp/_inspectdb_unused"),
         vec![
             "inspectdb".into(),
@@ -179,8 +181,9 @@ async fn inspectdb_unknown_schema_emits_friendly_comment() {
     let Some(pool) = pool().await else { return };
 
     let mut buf: Vec<u8> = Vec::new();
+    let pool_enum: rustango::sql::Pool = pool.clone().into();
     rustango::migrate::manage::run_with_writer(
-        &pool,
+        &pool_enum,
         std::path::Path::new("/tmp/_inspectdb_unused"),
         vec![
             "inspectdb".into(),

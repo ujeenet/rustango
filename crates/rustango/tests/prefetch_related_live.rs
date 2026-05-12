@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live test for slice 9.0e — `fetch_with_prefetch::<Author, Post>(...)`
 //! returns `Vec<(Author, Vec<Post>)>` from **two** SQL queries flat:
 //! one over the parent, one batched over the children via `WHERE

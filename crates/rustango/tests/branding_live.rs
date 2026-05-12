@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! End-to-end branding flow tests — exercise the operator console
 //! upload + serve routes and confirm the per-tenant CSS variable
 //! override + logo `<img>` end up in the rendered admin sidebar.

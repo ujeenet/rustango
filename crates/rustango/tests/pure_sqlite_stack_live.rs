@@ -25,7 +25,7 @@ use axum::Router;
 use rustango::extractors::{DatabaseTenant, DatabaseTenantContext};
 use rustango::sql::sqlx::{self, Row};
 use rustango::tenancy::{
-    operator_console::SessionSecret, BackendKind, ChainResolver, DatabasePools, Org, OrgResolver,
+    session::SessionSecret, BackendKind, ChainResolver, DatabasePools, Org, OrgResolver,
     TenancyError,
 };
 use tower::ServiceExt;

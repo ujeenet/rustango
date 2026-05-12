@@ -1,4 +1,4 @@
-#![cfg(feature = "tenancy")]
+#![cfg(all(feature = "tenancy", feature = "postgres"))]
 //! Live tests for the operator console's `/orgs/{slug}/edit` flow
 //! (added in v0.25.0). Covers:
 //!

@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live test for `ForeignKey<T>` lazy-load (v0.7 slice 3).
 //!
 //! Models: `Author { id, name }`, `Book { id, title, author: ForeignKey<Author> }`.

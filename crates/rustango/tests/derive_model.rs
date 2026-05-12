@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! End-to-end check that `#[derive(Model)]` emits the expected schema and
 //! that the model is discoverable via the inventory registry.
 

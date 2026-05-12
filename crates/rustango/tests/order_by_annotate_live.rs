@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live tests for slice 9.0b — `QuerySet::order_by(&[(field, desc)])`
 //! emits `ORDER BY` and `annotate_count_children` returns
 //! `Vec<(Parent, i64)>` from a single SELECT-with-GROUP-BY.

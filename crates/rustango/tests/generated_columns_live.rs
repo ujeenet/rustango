@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! `#[rustango(generated_as = "EXPR")]` — closes future-backlog
 //! item #35 ("computed/virtual columns"). The macro skips the column
 //! from every INSERT/UPDATE path and the DDL writer emits

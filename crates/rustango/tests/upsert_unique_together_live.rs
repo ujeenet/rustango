@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Verifies that the `#[derive(Model)]` macro's generated `upsert()`
 //! picks the first `unique_together` group as its `ON CONFLICT` target
 //! when one is declared on the model — instead of always defaulting to

@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live test for the derive's `save()` method (v0.7 slice 1).
 //!
 //! `save()` is generated only for models whose primary key is

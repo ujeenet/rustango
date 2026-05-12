@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live presigned URL test against MinIO. Exercises:
 //! - presigned PUT  (browser-style upload — bound to Content-Type)
 //! - presigned GET  (private download link)

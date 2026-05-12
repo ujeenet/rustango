@@ -676,7 +676,7 @@ impl AppState {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 mod scope_filter_tests {
     use super::*;
     use crate::core::ModelScope;

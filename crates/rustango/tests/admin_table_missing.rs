@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Verify the admin returns a friendly HTML page (HTTP 503) when a
 //! registered model's table doesn't exist in the connected DB —
 //! instead of the raw `relation X does not exist` 500 JSON.

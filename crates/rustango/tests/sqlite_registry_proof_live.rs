@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Proof: the `Org` Model derive already works against a SQLite pool
 //! via the `rustango::sql::Pool` enum dispatch — the foundation for
 //! v0.34's pure-SQLite stack.

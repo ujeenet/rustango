@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Closes the P10 gap from `orm-improvements.md`: until v0.26
 //! `fetch_with_prefetch` collected parent PKs as `Vec<i64>` and
 //! silently dropped non-integer-keyed parents. This test parents over

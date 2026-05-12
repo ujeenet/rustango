@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live test for slice 9.0d — `Post::objects().select_related("author").fetch_on()`
 //! emits ONE SQL query with a LEFT JOIN and decodes both the post and
 //! the author into `Post { author: ForeignKey::Loaded { ... } }`.

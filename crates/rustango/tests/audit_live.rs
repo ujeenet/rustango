@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Live tests for v0.12 commit 2 — audit primitives.
 //!
 //! Verifies the runtime API (`ensure_table`, `emit_one`, `emit_many`,
