@@ -97,10 +97,15 @@ notifications = ["email", "cache"]
 # worker pool, retry with exponential backoff, dead-letter callback.
 jobs = ["dep:async-trait", "dep:tokio"]
 
-# Postgres-backed job queue (`rustango::jobs::pg::PgJobQueue`) using
-# `SELECT … FOR UPDATE SKIP LOCKED` for safe multi-process / multi-replica
-# pickup. Implies `jobs` + `postgres` and the always-on `chrono` workspace dep.
-jobs-postgres = ["jobs", "postgres"]
+# Database-backed job queue (`rustango::jobs::pg::PgJobQueue`).
+# v0.38 — tri-dialect: PostgreSQL + MySQL 8.0+ use `FOR UPDATE SKIP
+# LOCKED` for safe multi-process pickup; SQLite uses a transaction
+# around `UPDATE … RETURNING` (SQLite serializes writers globally so
+# the pickup is implicitly mutually-exclusive). The feature name is
+# `jobs-postgres` for back-compat with v0.37 — the queue itself is
+# no longer PG-only. The struct is still `PgJobQueue` for the same
+# back-compat reason; new code can use `PgJobQueue::new_pool(pool)`.
+jobs-postgres = ["jobs"]
 
 # Pre-built auth flows (`rustango::auth_flows`) — password reset, email
 # verification, magic-link login. Composes signed_url + email helpers.
