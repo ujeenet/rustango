@@ -429,27 +429,35 @@ pub async fn has_perm_pool(
     let user_perms_t = dialect.quote_ident("rustango_user_permissions");
     let user_roles_t = dialect.quote_ident("rustango_user_roles");
     let role_perms_t = dialect.quote_ident("rustango_role_permissions");
-    let p1 = dialect.placeholder(1);
-    let p2 = dialect.placeholder(2);
+    // v0.38 — bind uid 3 times + codename 2 times. PG `placeholder(n)`
+    // generates `$n` which the driver reuses, but MySQL/SQLite use
+    // positional `?` so each occurrence must be a distinct bind.
+    // Emitting 5 distinct placeholders + binding 5 values is portable
+    // across all three.
+    let p_uid_a = dialect.placeholder(1);
+    let p_uid_b = dialect.placeholder(2);
+    let p_cn_a = dialect.placeholder(3);
+    let p_uid_c = dialect.placeholder(4);
+    let p_cn_b = dialect.placeholder(5);
     let true_lit = dialect.bool_literal(true);
     let false_lit = dialect.bool_literal(false);
-    // Single round-trip — equivalent CTE shape to the PG `has_perm`,
-    // but with dialect-emitted bool literals (TRUE/FALSE on PG/MySQL,
-    // 1/0 on SQLite) and `?`/`$N` placeholders. Returns one row.
     let sql = format!(
         "SELECT \
             COALESCE((SELECT is_superuser FROM {users_t} \
-                      WHERE id = {p1} AND active = {true_lit}), {false_lit}) AS is_super, \
+                      WHERE id = {p_uid_a} AND active = {true_lit}), {false_lit}) AS is_super, \
             (SELECT granted FROM {user_perms_t} \
-                WHERE user_id = {p1} AND codename = {p2}) AS explicit_grant, \
+                WHERE user_id = {p_uid_b} AND codename = {p_cn_a}) AS explicit_grant, \
             EXISTS(SELECT 1 FROM {user_roles_t} ur \
                    JOIN {role_perms_t} rp ON rp.role_id = ur.role_id \
-                   WHERE ur.user_id = {p1} AND rp.codename = {p2}) AS via_role"
+                   WHERE ur.user_id = {p_uid_c} AND rp.codename = {p_cn_b}) AS via_role"
     );
     let (is_super, explicit_grant, via_role) = match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
             let row = sqlx::query(&sql)
+                .bind(uid)
+                .bind(uid)
+                .bind(codename)
                 .bind(uid)
                 .bind(codename)
                 .fetch_one(pg)
@@ -465,6 +473,9 @@ pub async fn has_perm_pool(
         crate::sql::Pool::Mysql(my) => {
             let row = sqlx::query(&sql)
                 .bind(uid)
+                .bind(uid)
+                .bind(codename)
+                .bind(uid)
                 .bind(codename)
                 .fetch_one(my)
                 .await?;
@@ -477,6 +488,9 @@ pub async fn has_perm_pool(
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
             let row = sqlx::query(&sql)
+                .bind(uid)
+                .bind(uid)
+                .bind(codename)
                 .bind(uid)
                 .bind(codename)
                 .fetch_one(sq)

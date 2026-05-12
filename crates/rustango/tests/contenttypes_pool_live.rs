@@ -120,3 +120,143 @@ async fn by_natural_key_pool_returns_none_for_unknown_key() {
         .expect("lookup");
     assert!(row.is_none());
 }
+
+// ============================================================ slice 25/26c
+// New `_pool` companions added during the v0.38 audit pass — these need
+// runtime coverage on sqlite (the PG path is exercised via the back-compat
+// shims in `contenttypes_live.rs`).
+
+#[tokio::test]
+async fn for_model_pool_resolves_model_type_on_sqlite() {
+    let pool = sqlite_pool().await;
+    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
+    let row = ContentType::for_model_pool::<Post>(&pool)
+        .await
+        .expect("for_model_pool");
+    let row = row.expect("Post should have a CT row");
+    assert_eq!(row.app_label, "blog_pool_live");
+    assert_eq!(row.model_name, "post");
+    assert_eq!(row.table, "ct_pool_live_post");
+}
+
+#[tokio::test]
+async fn for_model_pool_finds_user_too() {
+    let pool = sqlite_pool().await;
+    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
+    let row = ContentType::for_model_pool::<User>(&pool)
+        .await
+        .expect("for_model_pool")
+        .expect("User should have a CT row");
+    assert_eq!(row.app_label, "auth_pool_live");
+    assert_eq!(row.model_name, "user");
+}
+
+#[tokio::test]
+async fn all_pool_returns_seeded_rows_alphabetically() {
+    let pool = sqlite_pool().await;
+    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
+    let rows = ContentType::all_pool(&pool).await.expect("all_pool");
+    assert!(
+        rows.len() >= 2,
+        "should have at least the Post + User rows; got {}",
+        rows.len()
+    );
+    // Spot-check: rows ordered by (app_label, model_name) — `auth_pool_live`
+    // < `blog_pool_live` alphabetically.
+    let mut auth_idx = None;
+    let mut blog_idx = None;
+    for (i, r) in rows.iter().enumerate() {
+        if r.app_label == "auth_pool_live" {
+            auth_idx = Some(i);
+        }
+        if r.app_label == "blog_pool_live" {
+            blog_idx = Some(i);
+        }
+    }
+    let (a, b) = (auth_idx.expect("auth row"), blog_idx.expect("blog row"));
+    assert!(a < b, "auth_pool_live should sort before blog_pool_live");
+}
+
+#[tokio::test]
+async fn for_target_pool_constructs_generic_fk_on_sqlite() {
+    let pool = sqlite_pool().await;
+    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
+    let gfk = rustango::contenttypes::GenericForeignKey::for_target_pool::<Post>(&pool, 42)
+        .await
+        .expect("for_target_pool");
+    assert_eq!(gfk.object_pk, 42);
+    // ct id should match what for_model_pool returns.
+    let ct = ContentType::for_model_pool::<Post>(&pool)
+        .await
+        .expect("for_model_pool")
+        .expect("ct row");
+    assert_eq!(
+        Some(gfk.content_type_id),
+        ct.id.get().copied(),
+        "GFK content_type_id should equal Post's CT row id"
+    );
+}
+
+#[tokio::test]
+async fn fetch_row_as_json_pool_returns_none_for_missing_pk() {
+    use rustango::sql::sqlx::Executor as _;
+    let pool = sqlite_pool().await;
+    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
+    // Bootstrap the Post table so `fetch_row_as_json_pool` finds the
+    // schema and can issue the SELECT — and returns None for an
+    // absent PK.
+    if let Pool::Sqlite(sq) = &pool {
+        sq.execute(
+            "CREATE TABLE IF NOT EXISTS ct_pool_live_post (\
+                id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                title TEXT NOT NULL)",
+        )
+        .await
+        .expect("create post table");
+    }
+    let ct = ContentType::for_model_pool::<Post>(&pool)
+        .await
+        .expect("for_model_pool")
+        .expect("ct row");
+    let row = contenttypes::fetch_row_as_json_pool(&pool, &ct, 9999_i64)
+        .await
+        .expect("fetch_row_as_json_pool");
+    assert!(row.is_none(), "no row with id=9999 should return None");
+}
+
+#[tokio::test]
+async fn for_each_row_of_ct_pool_visits_seeded_rows() {
+    use rustango::sql::sqlx::Executor as _;
+    let pool = sqlite_pool().await;
+    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
+    // Bootstrap + seed three Posts so the iterator has something to walk.
+    if let Pool::Sqlite(sq) = &pool {
+        sq.execute(
+            "CREATE TABLE IF NOT EXISTS ct_pool_live_post (\
+                id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                title TEXT NOT NULL)",
+        )
+        .await
+        .expect("create post table");
+        for title in ["alpha", "beta", "gamma"] {
+            sqlx::query("INSERT INTO ct_pool_live_post (title) VALUES (?)")
+                .bind(title)
+                .execute(sq)
+                .await
+                .expect("insert");
+        }
+    }
+    let ct = ContentType::for_model_pool::<Post>(&pool)
+        .await
+        .expect("for_model_pool")
+        .expect("ct row");
+    let mut visited = 0usize;
+    let total = contenttypes::for_each_row_of_ct_pool(&pool, &ct, 2, |_row| {
+        visited += 1;
+        Ok(())
+    })
+    .await
+    .expect("for_each_row_of_ct_pool");
+    assert_eq!(total, 3, "should visit all three Post rows");
+    assert_eq!(visited, 3, "closure should fire once per row");
+}
