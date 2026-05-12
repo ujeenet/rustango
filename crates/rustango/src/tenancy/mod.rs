@@ -48,11 +48,6 @@
 pub mod admin;
 pub mod auth;
 pub mod auth_backends;
-// v0.38 — `auth_routes` uses the PG-only `Tenant` extractor for
-// `per-tenant JWT routes; sqlite/mysql tenancy projects build their
-// own routes using `DatabaseTenant<DB>` until slice 4 lifts `Tenant`
-// to be generic.
-#[cfg(feature = "postgres")]
 pub mod auth_routes;
 pub mod bootstrap;
 pub mod branding;

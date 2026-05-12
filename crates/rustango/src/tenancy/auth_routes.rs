@@ -185,13 +185,14 @@ pub struct LoginOutput {
     pub user: UserBrief,
 }
 
-async fn login(mut t: Tenant, Json(body): Json<LoginInput>) -> Result<Json<LoginOutput>, Response> {
+async fn login(t: Tenant, Json(body): Json<LoginInput>) -> Result<Json<LoginOutput>, Response> {
     use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
     use crate::tenancy::auth::User;
 
     let users = User::objects()
         .where_(User::username.eq(body.username.clone()))
-        .fetch_on(t.conn())
+        .fetch_pool(t.pool())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
 
@@ -299,8 +300,9 @@ pub fn verify_for_tenant(bearer: &str, expected_slug: &str) -> Result<i64, &'sta
 /// Validates the token's `tenant` claim against the resolved
 /// request tenant via [`verify_for_tenant`] so a JWT minted on one
 /// subdomain can't be replayed against another.
-async fn me(mut t: Tenant, bearer: Bearer) -> Result<Json<UserBrief>, Response> {
+async fn me(t: Tenant, bearer: Bearer) -> Result<Json<UserBrief>, Response> {
     use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
     use crate::tenancy::auth::User;
 
     let user_id = verify_for_tenant(&bearer.0, &t.org.slug)
@@ -308,7 +310,7 @@ async fn me(mut t: Tenant, bearer: Bearer) -> Result<Json<UserBrief>, Response> 
 
     let users = User::objects()
         .where_(User::id.eq(user_id))
-        .fetch_on(t.conn())
+        .fetch_pool(t.pool())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
 
