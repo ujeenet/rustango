@@ -27,8 +27,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
-use super::operator_console::session::{sign, SessionError};
-pub use super::operator_console::SessionSecret;
+pub use super::session::SessionSecret;
+use super::session::{sign, SessionError};
 
 /// Default tenant cookie name. Distinct from the operator console's
 /// `rustango_op_session` so the two never collide on a host that

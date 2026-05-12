@@ -59,11 +59,6 @@ pub mod manage;
 mod manage_interactive;
 pub mod middleware;
 pub mod migrate;
-// v0.38 — `session` (HMAC-signed session cookies, SessionSecret type)
-// has no PG deps and ships unconditionally; `DatabaseTenantContext`
-// references it. The wider `operator_console` module wires
-// TenantPools + admin builder and stays PG-gated until slice 5.
-#[cfg(feature = "postgres")]
 pub mod operator_console;
 mod org;
 pub mod password;
@@ -79,8 +74,6 @@ pub mod session;
 // slice 5 (server::Builder<DB>).
 #[cfg(feature = "postgres")]
 pub mod server;
-// v0.38 — tenant console mounts the per-tenant admin which is PG-only.
-#[cfg(feature = "postgres")]
 pub mod tenant_console;
 
 #[cfg(feature = "postgres")]
