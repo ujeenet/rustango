@@ -169,11 +169,14 @@ jwt = ["dep:hmac", "dep:sha2", "dep:subtle", "dep:base64"]
 # `multer` transitively via `axum/multipart`.
 uploads = ["admin", "storage", "axum/multipart"]
 
-# First-class media model (`rustango::media`) — a Postgres-backed
-# Media row that references a file in the Storage layer. Handles
-# direct browser upload (via S3 presigning), CDN-aware URLs,
-# soft delete + orphan purge sweep. Implies `storage` + `postgres`.
-media = ["storage", "postgres"]
+# First-class media model (`rustango::media`) — a Media row that
+# references a file in the Storage layer. Handles direct browser
+# upload (via S3 presigning), CDN-aware URLs, soft delete + orphan
+# purge sweep. v0.38 — tri-dialect: every query dispatches per
+# backend (PG / MySQL 8+ / SQLite), so `media` now only requires
+# `storage` + at least one database backend feature
+# (postgres / mysql / sqlite).
+media = ["storage"]
 
 # S3-compatible storage backend (`rustango::storage::s3::S3Storage`).
 # Hand-rolled SigV4 over reqwest — works for AWS S3, Cloudflare R2,
