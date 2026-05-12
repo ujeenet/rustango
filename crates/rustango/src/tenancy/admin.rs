@@ -419,7 +419,7 @@ async fn handle_request(
                     login_form(&org, cfg, brand_storage, routes, parts.uri.query()).into_response()
                 }
                 axum::http::Method::POST => {
-                    login_submit(&org, cfg, pool.pg_pool(), routes, parts.headers, body).await
+                    login_submit(&org, cfg, &pool.as_pool(), routes, parts.headers, body).await
                 }
                 _ => (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response(),
             };
@@ -440,7 +440,7 @@ async fn handle_request(
         }
 
         // Private surface — require a valid session cookie.
-        match validate_session(&parts.headers, cfg, &org, pool.pg_pool()).await {
+        match validate_session(&parts.headers, cfg, &org, &pool.as_pool()).await {
             SessionCheck::Authenticated {
                 is_superuser,
                 user_id,
@@ -453,7 +453,8 @@ async fn handle_request(
                     // and thread them into the inner admin builder so
                     // individual views can check add/change/delete/view perms
                     // per table without extra DB round-trips.
-                    match super::permissions::user_permissions(user_id, pool.pg_pool()).await {
+                    match super::permissions::user_permissions_pool(user_id, &pool.as_pool()).await
+                    {
                         Ok(codenames) => {
                             user_perms = Some(codenames.into_iter().collect());
                         }
@@ -496,7 +497,7 @@ async fn handle_request(
                         .into_response()
                 }
                 axum::http::Method::POST => {
-                    change_password_submit(&org, pool.pg_pool(), routes, user_id, body).await
+                    change_password_submit(&org, &pool.as_pool(), routes, user_id, body).await
                 }
                 _ => (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response(),
             };
@@ -593,8 +594,11 @@ async fn validate_session(
     headers: &HeaderMap,
     cfg: &TenantSessionConfig,
     org: &Org,
-    tenant_pool: &PgPool,
+    tenant_pool: &crate::sql::Pool,
 ) -> SessionCheck {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+
     let Some(cookie_value) = read_cookie(headers, tenant_console::COOKIE_NAME) else {
         return SessionCheck::Anonymous;
     };
@@ -604,9 +608,7 @@ async fn validate_session(
     };
     // v0.27.8 (#78) — impersonation cookies are minted by the
     // operator console; the tenant admin trusts them as
-    // superuser without consulting `rustango_users`. The
-    // operator id is preserved in `impersonated_by` so the
-    // banner + audit-log source pick it up.
+    // superuser without consulting `rustango_users`.
     if let Some(operator_id) = payload.imp {
         return SessionCheck::Authenticated {
             is_superuser: true,
@@ -614,44 +616,15 @@ async fn validate_session(
             impersonated_by: Some(operator_id),
         };
     }
-    // Look up the user in the tenant's storage; this gives us a
-    // fresh `is_superuser` and `active` flag (operator can toggle
-    // either mid-session). The query mirrors `auth::authenticate_user`
-    // but without the password verify. v0.28.4 (#77) — also fetches
-    // `password_changed_at` so a session minted before the latest
-    // password rotation is rejected.
-    match rustango::sql::sqlx::query(
-        "SELECT is_superuser, active, password_changed_at \
-         FROM rustango_users WHERE id = $1",
-    )
-    .bind(payload.uid)
-    .fetch_optional(tenant_pool)
-    .await
+    // v0.38 — route through ORM `User::objects().fetch_pool` so the
+    // same body runs on PG / MySQL / SQLite. Identifier quoting +
+    // placeholders are handled by the dialect emitter.
+    let users: Vec<super::auth::User> = match super::auth::User::objects()
+        .where_(super::auth::User::id.eq(payload.uid))
+        .fetch_pool(tenant_pool)
+        .await
     {
-        Ok(Some(row)) => {
-            let active: bool = row.try_get("active").unwrap_or(false);
-            if !active {
-                return SessionCheck::Anonymous;
-            }
-            // v0.28.4 — invalidate sessions issued before the latest
-            // password rotation. `password_changed_at IS NULL` means
-            // the account predates v0.28.4 and never rotated, so
-            // we don't enforce.
-            let pwd_changed: Option<chrono::DateTime<chrono::Utc>> =
-                row.try_get("password_changed_at").ok().flatten();
-            if let Some(ts) = pwd_changed {
-                if payload.iat < ts.timestamp() {
-                    return SessionCheck::Anonymous;
-                }
-            }
-            let is_superuser: bool = row.try_get("is_superuser").unwrap_or(false);
-            SessionCheck::Authenticated {
-                is_superuser,
-                user_id: payload.uid,
-                impersonated_by: None,
-            }
-        }
-        Ok(None) => SessionCheck::Anonymous,
+        Ok(v) => v,
         Err(e) => {
             warn!(
                 target: "crate::tenancy::admin",
@@ -659,8 +632,27 @@ async fn validate_session(
                 error = %e,
                 "tenant user lookup failed during session validation",
             );
-            SessionCheck::Error("session lookup failed".into())
+            return SessionCheck::Error("session lookup failed".into());
         }
+    };
+    let Some(user) = users.into_iter().next() else {
+        return SessionCheck::Anonymous;
+    };
+    if !user.active {
+        return SessionCheck::Anonymous;
+    }
+    // v0.28.4 — invalidate sessions issued before the latest password
+    // rotation. `password_changed_at IS NULL` means the account
+    // predates v0.28.4 and never rotated; we don't enforce.
+    if let Some(ts) = user.password_changed_at {
+        if payload.iat < ts.timestamp() {
+            return SessionCheck::Anonymous;
+        }
+    }
+    SessionCheck::Authenticated {
+        is_superuser: user.is_superuser,
+        user_id: payload.uid,
+        impersonated_by: None,
     }
 }
 
@@ -763,11 +755,14 @@ struct LoginSubmitForm {
 async fn login_submit(
     org: &Org,
     cfg: &TenantSessionConfig,
-    tenant_pool: &PgPool,
+    tenant_pool: &crate::sql::Pool,
     routes: &super::routes::RouteConfig,
     _headers: HeaderMap,
     body: Body,
 ) -> Response {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+
     let bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(b) => b.to_bytes(),
         Err(_) => return (StatusCode::BAD_REQUEST, "could not read body").into_response(),
@@ -778,19 +773,16 @@ async fn login_submit(
     };
     let next = sanitize_next(form.next.as_deref());
 
-    // Hand-write the auth check against the tenant pool. We can't
-    // call `auth::authenticate_user` because that takes a
-    // `&mut PgConnection`; here we have a `&PgPool` and want to run
-    // a single query.
-    let row = match rustango::sql::sqlx::query(
-        "SELECT id, password_hash, is_superuser, active FROM rustango_users \
-         WHERE username = $1",
-    )
-    .bind(&form.username)
-    .fetch_optional(tenant_pool)
-    .await
+    // v0.38 — auth check via the tri-dialect ORM. The query targets
+    // the tenant's `rustango_users` table on the user-supplied pool;
+    // schema-mode PG handles search_path internally (the admin pool
+    // is built with search_path baked in).
+    let users: Vec<super::auth::User> = match super::auth::User::objects()
+        .where_(super::auth::User::username.eq(form.username.clone()))
+        .fetch_pool(tenant_pool)
+        .await
     {
-        Ok(r) => r,
+        Ok(v) => v,
         Err(e) => {
             warn!(target: "crate::tenancy::admin", error = %e, "login query");
             return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
@@ -804,17 +796,13 @@ async fn login_submit(
         ))
         .into_response()
     };
-    let Some(row) = row else {
+    let Some(user) = users.into_iter().next() else {
         return bad_creds();
     };
-    let active: bool = row.try_get("active").unwrap_or(false);
-    if !active {
+    if !user.active {
         return bad_creds();
     }
-    let hash: String = match row.try_get("password_hash") {
-        Ok(h) => h,
-        Err(_) => return bad_creds(),
-    };
+    let hash = user.password_hash.clone();
     let ok = match super::password::verify(&form.password, &hash) {
         Ok(b) => b,
         Err(_) => false,
@@ -822,10 +810,10 @@ async fn login_submit(
     if !ok {
         return bad_creds();
     }
-    let uid: i64 = match row.try_get("id") {
-        Ok(v) => v,
-        Err(_) => return bad_creds(),
-    };
+    let uid: i64 = user.id.get().copied().unwrap_or(0);
+    if uid == 0 {
+        return bad_creds();
+    }
     let ttl_secs = i64::try_from(routes.tenant_session_ttl.as_secs())
         .unwrap_or(tenant_console::SESSION_TTL_SECS);
     let payload = TenantSessionPayload::new(uid, &org.slug, ttl_secs);
@@ -1069,11 +1057,14 @@ fn change_password_form(
 
 async fn change_password_submit(
     _org: &Org,
-    tenant_pool: &PgPool,
+    tenant_pool: &crate::sql::Pool,
     routes: &super::routes::RouteConfig,
     user_id: i64,
     body: Body,
 ) -> Response {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+
     let bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(b) => b.to_bytes(),
         Err(_) => return (StatusCode::BAD_REQUEST, "could not read body").into_response(),
@@ -1104,12 +1095,14 @@ async fn change_password_submit(
     if user_id <= 0 {
         return redir_err("Session is missing a user id; please log in again.");
     }
-    let stored: Option<String> = match rustango::sql::sqlx::query_scalar(
-        "SELECT password_hash FROM rustango_users WHERE id = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(tenant_pool)
-    .await
+    // v0.38 — fetch the user via the tri-dialect ORM, verify current
+    // password, then save the updated row. save_pool covers PG / MySQL
+    // / SQLite and the dialect emitter handles the placeholder /
+    // identifier quoting differences.
+    let users: Vec<super::auth::User> = match super::auth::User::objects()
+        .where_(super::auth::User::id.eq(user_id))
+        .fetch_pool(tenant_pool)
+        .await
     {
         Ok(v) => v,
         Err(e) => {
@@ -1117,10 +1110,10 @@ async fn change_password_submit(
             return (StatusCode::INTERNAL_SERVER_ERROR, "lookup failed").into_response();
         }
     };
-    let Some(stored_hash) = stored else {
+    let Some(mut user) = users.into_iter().next() else {
         return redir_err("Your account no longer exists; please log in again.");
     };
-    let ok = super::password::verify(&form.current_password, &stored_hash).unwrap_or(false);
+    let ok = super::password::verify(&form.current_password, &user.password_hash).unwrap_or(false);
     if !ok {
         return redir_err("Current password did not match.");
     }
@@ -1130,14 +1123,9 @@ async fn change_password_submit(
             return redir_err(&format!("hash failed: {e}"));
         }
     };
-    if let Err(e) = rustango::sql::sqlx::query(
-        "UPDATE rustango_users SET password_hash = $1, password_changed_at = NOW() WHERE id = $2",
-    )
-    .bind(&new_hash)
-    .bind(user_id)
-    .execute(tenant_pool)
-    .await
-    {
+    user.password_hash = new_hash;
+    user.password_changed_at = Some(chrono::Utc::now());
+    if let Err(e) = user.save_pool(tenant_pool).await {
         warn!(target: "crate::tenancy::admin", error = %e, "change-password update");
         return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
     }
@@ -1233,6 +1221,18 @@ impl AdminPool {
             Self::Database(p) => p,
             Self::Schema(p) => p,
         }
+    }
+
+    /// v0.38 — backend-erasing accessor for the tri-dialect handler
+    /// path. On the AdminPool variants (both PG-shaped), wraps the
+    /// underlying PgPool into `crate::sql::Pool::Postgres`. Used by
+    /// `validate_session` / `login_submit` / `change_password_submit`
+    /// so they route through ORM `_pool` helpers and stay
+    /// dialect-agnostic at the source level — schema-mode tenants
+    /// happen to live behind a PgPool but the same code body works
+    /// against any future tri-dialect AdminPool generalization.
+    fn as_pool(&self) -> crate::sql::Pool {
+        crate::sql::Pool::Postgres(self.pg_pool().clone())
     }
 }
 
