@@ -78,8 +78,8 @@ use serde_json::Value;
 use tera::{Context, Tera};
 
 use crate::core::{Filter, ModelSchema, Op, OrderClause, SelectQuery, SqlValue, WhereExpr};
-use crate::sql::sqlx::PgPool;
-use crate::sql::{count_rows, row_to_json, select_one_row, select_rows};
+use crate::sql::Pool;
+use crate::sql::{count_rows_pool, select_one_row_as_json_pool, select_rows_as_json_pool};
 
 // ============================================================== ListView
 
@@ -93,16 +93,18 @@ pub type BulkActionFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
 
 /// Handler closure for a bulk action mounted on the static-pool
-/// [`ListView::router`] path. Receives the captured `&PgPool` and
+/// [`ListView::router`] path. Receives the captured `&Pool` and
 /// the parsed list of selected primary keys (already type-coerced
 /// from the form's `_selected_action` strings).
 pub type BulkActionFn =
-    Arc<dyn for<'a> Fn(&'a PgPool, &'a [SqlValue]) -> BulkActionFuture<'a> + Send + Sync>;
+    Arc<dyn for<'a> Fn(&'a Pool, &'a [SqlValue]) -> BulkActionFuture<'a> + Send + Sync>;
 
 /// Tenant-mode counterpart — runs against the per-request tenant
 /// connection from [`crate::extractors::Tenant::conn`]. Wired via
 /// [`ListView::tenant_action`].
-#[cfg(feature = "tenancy")]
+/// v0.38 — PG-only by signature (takes `&mut PgConnection`). Sqlite/
+/// MySQL tenants get the tri-dialect `Pool`-based variant below.
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
 pub type TenantBulkActionFn = Arc<
     dyn for<'a> Fn(&'a mut crate::sql::sqlx::PgConnection, &'a [SqlValue]) -> BulkActionFuture<'a>
         + Send
@@ -130,7 +132,7 @@ pub struct BulkAction {
 #[derive(Clone)]
 pub enum BulkActionHandler {
     Pool(BulkActionFn),
-    #[cfg(feature = "tenancy")]
+    #[cfg(all(feature = "tenancy", feature = "postgres"))]
     Tenant(TenantBulkActionFn),
 }
 
@@ -469,8 +471,8 @@ impl ListView {
     /// Tenancy counterpart to [`Self::action`] — handler runs
     /// against the per-request `&mut PgConnection` from the
     /// [`crate::extractors::Tenant`] extractor instead of a captured
-    /// pool. Pair with [`Self::tenant_router`].
-    #[cfg(feature = "tenancy")]
+    /// pool. Pair with [`Self::tenant_router`]. PG-only by signature.
+    #[cfg(all(feature = "tenancy", feature = "postgres"))]
     #[must_use]
     pub fn tenant_action(
         mut self,
@@ -493,7 +495,7 @@ impl ListView {
     /// same pool. For tenancy projects use [`Self::tenant_router`].
     /// When [`Self::bulk_actions`] is on, also mounts `POST <prefix>`.
     #[must_use]
-    pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: PgPool) -> Router<()> {
+    pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
         let bulk = self.bulk_actions_enabled;
         let state = Arc::new(ListViewState {
             vs: self,
@@ -539,7 +541,7 @@ fn same_action_name(a: &str, b: &str) -> bool {
 struct ListViewState {
     vs: ListView,
     tera: Arc<Tera>,
-    pool: PgPool,
+    pool: Pool,
 }
 
 async fn handle_list(
@@ -588,11 +590,12 @@ async fn handle_list(
         search: None,
     };
 
+    let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let (rows_result, count_result) = tokio::join!(
-        select_rows(&state.pool, &select_q),
-        count_rows(&state.pool, &count_q),
+        select_rows_as_json_pool(&state.pool, &select_q, &fields),
+        count_rows_pool(&state.pool, &count_q),
     );
-    let rows = match rows_result {
+    let mut object_list: Vec<Value> = match rows_result {
         Ok(r) => r,
         Err(e) => return template_error(&format!("query rows: {e}")),
     };
@@ -600,9 +603,6 @@ async fn handle_list(
         Ok(c) => c,
         Err(e) => return template_error(&format!("count rows: {e}")),
     };
-
-    let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-    let mut object_list: Vec<Value> = rows.iter().map(|r| row_to_json(r, &fields)).collect();
     if state.vs.fk_display {
         resolve_fk_displays_pool(state.vs.schema, &state.pool, &mut object_list).await;
     }
@@ -694,7 +694,7 @@ async fn handle_list_action(
     {
         match &custom.handler {
             BulkActionHandler::Pool(f) => f(&state.pool, &pks).await,
-            #[cfg(feature = "tenancy")]
+            #[cfg(all(feature = "tenancy", feature = "postgres"))]
             BulkActionHandler::Tenant(_) => Err("this action was registered via tenant_action — \
                  mount the ListView via tenant_router(...) to dispatch it"
                 .into()),
@@ -774,7 +774,7 @@ impl DetailView {
     }
 
     #[must_use]
-    pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: PgPool) -> Router<()> {
+    pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
         let state = Arc::new(DetailViewState {
             vs: self,
             tera,
@@ -802,7 +802,7 @@ impl DetailView {
 struct DetailViewState {
     vs: DetailView,
     tera: Arc<Tera>,
-    pool: PgPool,
+    pool: Pool,
 }
 
 async fn handle_detail(
@@ -828,14 +828,13 @@ async fn handle_detail(
         limit: Some(1),
         offset: None,
     };
-    let row = match select_one_row(&state.pool, &select_q).await {
+    let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
+    let object = match select_one_row_as_json_pool(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
         Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => return template_error(&format!("query row: {e}")),
     };
 
-    let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-    let object = row_to_json(&row, &fields);
     let mut ctx = Context::new();
     ctx.insert("object", &object);
 
@@ -894,7 +893,7 @@ impl DeleteView {
 
     /// Mount as `GET`/`POST <prefix>/{pk}/delete`.
     #[must_use]
-    pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: PgPool) -> Router<()> {
+    pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
         let state = Arc::new(DeleteViewState {
             vs: self,
             tera,
@@ -928,7 +927,7 @@ impl DeleteView {
 struct DeleteViewState {
     vs: DeleteView,
     tera: Arc<Tera>,
-    pool: PgPool,
+    pool: Pool,
 }
 
 async fn handle_delete_confirm(
@@ -955,13 +954,12 @@ async fn handle_delete_confirm(
         limit: Some(1),
         offset: None,
     };
-    let row = match select_one_row(&state.pool, &select_q).await {
+    let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
+    let object = match select_one_row_as_json_pool(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
         Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => return template_error(&format!("query row: {e}")),
     };
-    let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-    let object = row_to_json(&row, &fields);
     let mut ctx = Context::new();
     ctx.insert("object", &object);
     let set_cookie = stamp_csrf(&headers, &mut ctx);
@@ -988,7 +986,7 @@ async fn handle_delete_submit(
             value: coerce_pk(pk_field, &pk),
         }),
     };
-    match crate::sql::delete(&state.pool, &delete_q).await {
+    match crate::sql::delete_pool(&state.pool, &delete_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
             // Note: typically `{pk}` in a delete success_url
@@ -1139,7 +1137,7 @@ impl CreateView {
 
     /// Mount as `GET`/`POST <prefix>/new`.
     #[must_use]
-    pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: PgPool) -> Router<()> {
+    pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
         let state = Arc::new(FormViewState {
             schema: self.schema,
             template: self.template.clone(),
@@ -1250,7 +1248,7 @@ impl UpdateView {
 
     /// Mount as `GET`/`POST <prefix>/{pk}/edit`.
     #[must_use]
-    pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: PgPool) -> Router<()> {
+    pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
         let state = Arc::new(FormViewState {
             schema: self.schema,
             template: self.template.clone(),
@@ -1310,7 +1308,7 @@ struct FormViewState {
     success_url: String,
     fields: Option<Vec<String>>,
     tera: Arc<Tera>,
-    pool: PgPool,
+    pool: Pool,
     /// Optional user-supplied validator (`#[derive(Form)]`-derived
     /// `min_length` / `regex` / custom validator chain). v0.30.2
     /// — closes the v0.29 gap where business validation had to be
@@ -1432,9 +1430,12 @@ fn substitute_pk(template: &str, pk: &str) -> String {
 /// The caller (handle_create_post) computes the `RETURNING` list
 /// via [`success_url_returning_columns`] and feeds the resulting
 /// row in here.
+/// v0.38 — operates on the JSON object form of the RETURNING row.
+/// Callers pass `&InsertReturningPool` and the helper extracts the
+/// value per-backend before driving the placeholder substitution.
 fn interpolate_success_url(
     template: &str,
-    row: &sqlx::postgres::PgRow,
+    row: &crate::sql::InsertReturningPool,
     schema: &'static crate::core::ModelSchema,
 ) -> Result<String, String> {
     let placeholders = parse_success_url_placeholders(template);
@@ -1459,7 +1460,7 @@ fn interpolate_success_url(
                 )
             })?
         };
-        let v = column_value_as_string(row, column).map_err(|e| {
+        let v = column_value_as_string_returning(row, column).map_err(|e| {
             format!(
                 "success_url interpolation failed reading `{}`: {e}",
                 column.column
@@ -1468,6 +1469,61 @@ fn interpolate_success_url(
         out = out.replace(&format!("{{{name}}}"), &v);
     }
     Ok(out)
+}
+
+/// Read `column` from an `InsertReturningPool` and stringify per-backend.
+fn column_value_as_string_returning(
+    row: &crate::sql::InsertReturningPool,
+    column: &'static crate::core::FieldSchema,
+) -> Result<String, String> {
+    match row {
+        #[cfg(feature = "postgres")]
+        crate::sql::InsertReturningPool::PgRow(pg_row) => {
+            column_value_as_string(pg_row, column).map_err(|e| e.to_string())
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::InsertReturningPool::MySqlAutoId(id) => {
+            // MySQL only carries the auto-generated PK; placeholders
+            // for other columns are unresolvable on this path.
+            if column.primary_key {
+                Ok(id.to_string())
+            } else {
+                Err(format!(
+                    "success_url placeholder `{}` cannot be resolved on MySQL (no RETURNING — \
+                     only the auto-generated primary key is available)",
+                    column.column,
+                ))
+            }
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::InsertReturningPool::SqliteRow(sq_row) => {
+            use crate::core::FieldType;
+            use crate::sql::sqlx::Row as _;
+            match column.ty {
+                FieldType::String => sq_row
+                    .try_get::<String, _>(column.column)
+                    .map_err(|e| e.to_string()),
+                FieldType::I64 => sq_row
+                    .try_get::<i64, _>(column.column)
+                    .map(|v| v.to_string())
+                    .map_err(|e| e.to_string()),
+                FieldType::I32 => sq_row
+                    .try_get::<i32, _>(column.column)
+                    .map(|v| v.to_string())
+                    .map_err(|e| e.to_string()),
+                FieldType::I16 => sq_row
+                    .try_get::<i16, _>(column.column)
+                    .map(|v| v.to_string())
+                    .map_err(|e| e.to_string()),
+                FieldType::Uuid => sq_row
+                    .try_get::<String, _>(column.column)
+                    .map_err(|e| e.to_string()),
+                _ => sq_row
+                    .try_get::<String, _>(column.column)
+                    .map_err(|e| e.to_string()),
+            }
+        }
+    }
 }
 
 /// Walk the template and collect every `{name}` placeholder. Plain
@@ -1547,6 +1603,7 @@ fn success_url_returning_columns(
 /// without quoting. Falls through to text decoding for everything
 /// else (string, datetime, date, json — Postgres' text codec
 /// handles the latter three predictably).
+#[cfg(feature = "postgres")]
 fn column_value_as_string(
     row: &sqlx::postgres::PgRow,
     field: &'static crate::core::FieldSchema,
@@ -1687,7 +1744,7 @@ async fn handle_create_post(
         on_conflict: None,
     };
     let target_url = if need_returning {
-        match crate::sql::insert_returning(&state.pool, &insert_q).await {
+        match crate::sql::insert_returning_pool(&state.pool, &insert_q).await {
             Ok(row) => match interpolate_success_url(&state.success_url, &row, state.schema) {
                 Ok(url) => url,
                 Err(e) => return template_error(&e),
@@ -1695,7 +1752,7 @@ async fn handle_create_post(
             Err(e) => return template_error(&format!("insert row: {e}")),
         }
     } else {
-        if let Err(e) = crate::sql::insert(&state.pool, &insert_q).await {
+        if let Err(e) = crate::sql::insert_pool(&state.pool, &insert_q).await {
             return template_error(&format!("insert row: {e}"));
         }
         state.success_url.clone()
@@ -1727,13 +1784,12 @@ async fn handle_update_get(
         limit: Some(1),
         offset: None,
     };
-    let row = match select_one_row(&state.pool, &select_q).await {
+    let scalars: Vec<&'static crate::core::FieldSchema> = state.schema.scalar_fields().collect();
+    let row_json = match select_one_row_as_json_pool(&state.pool, &select_q, &scalars).await {
         Ok(Some(r)) => r,
         Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => return template_error(&format!("query row: {e}")),
     };
-    let scalars: Vec<&'static crate::core::FieldSchema> = state.schema.scalar_fields().collect();
-    let row_json = row_to_json(&row, &scalars);
     // Convert the row's JSON object into a string-keyed string-valued
     // HashMap so `form_fields` can pick up the existing values.
     let row_obj = row_json.as_object().cloned().unwrap_or_default();
@@ -1793,7 +1849,7 @@ async fn handle_update_post(
             value: coerce_pk(pk_field, &pk),
         }),
     };
-    match crate::sql::update(&state.pool, &update_q).await {
+    match crate::sql::update_pool(&state.pool, &update_q).await {
         Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Ok(_) => {
             let target = substitute_pk(&state.success_url, &pk);
@@ -2441,7 +2497,7 @@ fn coerce_pk_typed(
 /// while a 500 isn't.
 async fn resolve_fk_displays_pool(
     schema: &'static ModelSchema,
-    pool: &PgPool,
+    pool: &Pool,
     object_list: &mut [Value],
 ) {
     let lookups = collect_fk_target_lookups(schema, object_list);
@@ -2463,30 +2519,8 @@ async fn resolve_fk_displays_pool(
     }
 }
 
-#[cfg(feature = "tenancy")]
-async fn resolve_fk_displays_conn(
-    schema: &'static ModelSchema,
-    conn: &mut crate::sql::sqlx::PgConnection,
-    object_list: &mut [Value],
-) {
-    let lookups = collect_fk_target_lookups(schema, object_list);
-    for fk in lookups {
-        let map = match fetch_fk_display_map_conn(&fk, conn).await {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::debug!(
-                    target: "rustango::template_views",
-                    field = fk.local_field,
-                    target_table = fk.target_table,
-                    error = %e,
-                    "fk display lookup failed (tenant); templates fall back to raw FK"
-                );
-                continue;
-            }
-        };
-        stamp_display_into_rows(&fk, &map, object_list);
-    }
-}
+// v0.38 — `resolve_fk_displays_conn` removed; tenant handlers now
+// use `Tenant::pool()` + `resolve_fk_displays_pool` directly.
 
 /// One FK column we need to resolve: which local field to read
 /// from each row, which target table+column to look up, and the
@@ -2568,20 +2602,15 @@ fn lookup_target_schema(table: &str) -> Option<&'static ModelSchema> {
 /// `(source_value_string → display_value)` map.
 async fn fetch_fk_display_map_pool(
     fk: &FkLookup,
-    pool: &PgPool,
+    pool: &Pool,
 ) -> Result<HashMap<String, Value>, crate::sql::ExecError> {
     let q = build_fk_display_query(fk);
-    let rows = select_rows(pool, &q).await?;
-    Ok(extract_fk_display_map(fk, &rows))
-}
-
-#[cfg(feature = "tenancy")]
-async fn fetch_fk_display_map_conn(
-    fk: &FkLookup,
-    conn: &mut crate::sql::sqlx::PgConnection,
-) -> Result<HashMap<String, Value>, crate::sql::ExecError> {
-    let q = build_fk_display_query(fk);
-    let rows = crate::sql::select_rows_on(conn, &q).await?;
+    let target = match lookup_target_schema(fk.target_table) {
+        Some(s) => s,
+        None => return Ok(HashMap::new()),
+    };
+    let fields: Vec<&'static crate::core::FieldSchema> = target.scalar_fields().collect();
+    let rows = select_rows_as_json_pool(pool, &q, &fields).await?;
     Ok(extract_fk_display_map(fk, &rows))
 }
 
@@ -2643,71 +2672,40 @@ fn json_value_to_sql_for_fk_pk(v: &Value) -> SqlValue {
     }
 }
 
-fn extract_fk_display_map(
-    fk: &FkLookup,
-    rows: &[crate::sql::sqlx::postgres::PgRow],
-) -> HashMap<String, Value> {
-    use crate::core::FieldType;
-    use crate::sql::sqlx::Row as _;
+/// v0.38 — operates on JSON rows from `select_rows_as_json_pool`
+/// instead of raw PgRow. The dialect-aware row → JSON conversion
+/// already covered every column type in [`crate::sql::row_to_json`] /
+/// `row_to_json_my` / `row_to_json_sqlite`, so the FK display
+/// extraction is just JSON object lookup.
+fn extract_fk_display_map(fk: &FkLookup, rows: &[Value]) -> HashMap<String, Value> {
     let mut map = HashMap::new();
+    // The JSON object is keyed by FieldSchema.name (the Rust field
+    // name); look up display by *name*, not column. The query that
+    // populated `rows` projected `target_pk_column` and
+    // `target_display_column` — we look them up by the equivalent
+    // field-name keys from the model schema.
+    let target = match lookup_target_schema(fk.target_table) {
+        Some(s) => s,
+        None => return map,
+    };
+    let pk_field_name = target
+        .field_by_column(fk.target_pk_column)
+        .map(|f| f.name)
+        .unwrap_or(fk.target_pk_column);
+    let display_field_name = target
+        .field_by_column(fk.target_display_column)
+        .map(|f| f.name)
+        .unwrap_or(fk.target_display_column);
     for row in rows {
-        // Read the PK column as a string key (matches how the
-        // source FK value got stringified for the .iter().any
-        // distinct check).
-        let key: Option<String> = read_pk_as_string(row, fk.target_pk_column);
-        let Some(key) = key else { continue };
-        let display_val: Value = match fk.target_display_field_type {
-            FieldType::String => row
-                .try_get::<Option<String>, _>(fk.target_display_column)
-                .unwrap_or(None)
-                .map(Value::String)
-                .unwrap_or(Value::Null),
-            FieldType::I64 => row
-                .try_get::<Option<i64>, _>(fk.target_display_column)
-                .unwrap_or(None)
-                .map(|n| Value::Number(n.into()))
-                .unwrap_or(Value::Null),
-            FieldType::I32 => row
-                .try_get::<Option<i32>, _>(fk.target_display_column)
-                .unwrap_or(None)
-                .map(|n| Value::Number(n.into()))
-                .unwrap_or(Value::Null),
-            FieldType::Uuid => row
-                .try_get::<Option<uuid::Uuid>, _>(fk.target_display_column)
-                .unwrap_or(None)
-                .map(|u| Value::String(u.to_string()))
-                .unwrap_or(Value::Null),
-            // Everything else: stringify what came back, best-effort.
-            _ => row
-                .try_get::<Option<String>, _>(fk.target_display_column)
-                .unwrap_or(None)
-                .map(Value::String)
-                .unwrap_or(Value::Null),
+        let Some(obj) = row.as_object() else { continue };
+        let Some(key) = obj.get(pk_field_name).and_then(json_value_as_lookup_key) else {
+            continue;
         };
+        let display_val = obj.get(display_field_name).cloned().unwrap_or(Value::Null);
         map.insert(key, display_val);
     }
     let _ = fk.target_display_field_name; // kept for future debug logging
     map
-}
-
-fn read_pk_as_string(row: &crate::sql::sqlx::postgres::PgRow, column: &str) -> Option<String> {
-    use crate::sql::sqlx::Row as _;
-    if let Ok(Some(s)) = row.try_get::<Option<String>, _>(column) {
-        return Some(s);
-    }
-    if let Ok(Some(n)) = row.try_get::<Option<i64>, _>(column) {
-        return Some(n.to_string());
-    }
-    if let Ok(Some(n)) = row.try_get::<Option<i32>, _>(column) {
-        return Some(n.to_string());
-    }
-    if let Ok(Some(n)) = row.try_get::<Option<i16>, _>(column) {
-        return Some(n.to_string());
-    }
-    if let Ok(Some(u)) = row.try_get::<Option<uuid::Uuid>, _>(column) {
-        return Some(u.to_string());
-    }
-    None
 }
 
 /// Stringify a JSON value the same way `read_pk_as_string` does
@@ -2790,7 +2788,7 @@ fn render_bulk_delete_confirm(
 async fn fetch_pks_as_objects_pool(
     schema: &'static ModelSchema,
     pk_field: &'static crate::core::FieldSchema,
-    pool: &PgPool,
+    pool: &Pool,
     pks: &[SqlValue],
 ) -> Result<Vec<Value>, String> {
     use crate::core::{Filter, Op};
@@ -2807,37 +2805,11 @@ async fn fetch_pks_as_objects_pool(
         limit: None,
         offset: None,
     };
-    let rows = select_rows(pool, &q).await.map_err(|e| e.to_string())?;
     let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
-    Ok(rows.iter().map(|r| row_to_json(r, &fields)).collect())
-}
-
-#[cfg(feature = "tenancy")]
-async fn fetch_pks_as_objects_conn(
-    schema: &'static ModelSchema,
-    pk_field: &'static crate::core::FieldSchema,
-    conn: &mut crate::sql::sqlx::PgConnection,
-    pks: &[SqlValue],
-) -> Result<Vec<Value>, String> {
-    use crate::core::{Filter, Op};
-    let q = SelectQuery {
-        model: schema,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::In,
-            value: SqlValue::List(pks.to_vec()),
-        }),
-        search: None,
-        joins: vec![],
-        order_by: vec![],
-        limit: None,
-        offset: None,
-    };
-    let rows = crate::sql::select_rows_on(conn, &q)
+    let rows = select_rows_as_json_pool(pool, &q, &fields)
         .await
         .map_err(|e| e.to_string())?;
-    let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
-    Ok(rows.iter().map(|r| row_to_json(r, &fields)).collect())
+    Ok(rows)
 }
 
 /// Run the built-in `delete_selected` action: `DELETE FROM <table>
@@ -2847,7 +2819,7 @@ async fn fetch_pks_as_objects_conn(
 async fn run_delete_selected_pool(
     schema: &'static ModelSchema,
     pk_field: &'static crate::core::FieldSchema,
-    pool: &PgPool,
+    pool: &Pool,
     pks: &[SqlValue],
 ) -> Result<(), String> {
     use crate::core::{DeleteQuery, Filter, Op};
@@ -2859,33 +2831,14 @@ async fn run_delete_selected_pool(
             value: SqlValue::List(pks.to_vec()),
         }),
     };
-    crate::sql::delete(pool, &q)
+    crate::sql::delete_pool(pool, &q)
         .await
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
-#[cfg(feature = "tenancy")]
-async fn run_delete_selected_conn(
-    schema: &'static ModelSchema,
-    pk_field: &'static crate::core::FieldSchema,
-    conn: &mut crate::sql::sqlx::PgConnection,
-    pks: &[SqlValue],
-) -> Result<(), String> {
-    use crate::core::{DeleteQuery, Filter, Op};
-    let q = DeleteQuery {
-        model: schema,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::In,
-            value: SqlValue::List(pks.to_vec()),
-        }),
-    };
-    crate::sql::delete_on(conn, &q)
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-}
+// v0.38 — `run_delete_selected_conn` removed; tenant handlers now
+// use `run_delete_selected_pool` against `Tenant::pool()`.
 
 /// Resolve the projection set — either every scalar field or the
 /// caller's explicit `fields` allowlist.
@@ -2955,7 +2908,7 @@ mod tenant {
         State(state): State<Arc<TenantListViewState>>,
         headers: axum::http::HeaderMap,
         Query(params): Query<HashMap<String, String>>,
-        mut t: Tenant,
+        t: Tenant,
     ) -> Response {
         let page: i64 = params
             .get("page")
@@ -2996,24 +2949,22 @@ mod tenant {
             search: None,
         };
 
-        let conn = t.conn();
-        // Run sequentially — `Tenant::conn()` hands out a `&mut`
-        // exclusive borrow, so we can't fan out the two queries
-        // in parallel like the pool path does. The latency hit is
-        // bounded by tokio's task switch.
-        let rows = match crate::sql::select_rows_on(&mut *conn, &select_q).await {
-            Ok(r) => r,
-            Err(e) => return template_error(&format!("query rows: {e}")),
-        };
-        let total = match crate::sql::count_rows_on(&mut *conn, &count_q).await {
+        // v0.38 — use the tenant's tri-dialect Pool enum; runs the
+        // same code on PG / MySQL / SQLite. Routes through
+        // select_rows_as_json_pool + count_rows_pool.
+        let pool = t.pool().clone();
+        let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
+        let mut object_list =
+            match crate::sql::select_rows_as_json_pool(&pool, &select_q, &fields).await {
+                Ok(r) => r,
+                Err(e) => return template_error(&format!("query rows: {e}")),
+            };
+        let total = match crate::sql::count_rows_pool(&pool, &count_q).await {
             Ok(c) => c,
             Err(e) => return template_error(&format!("count rows: {e}")),
         };
-
-        let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-        let mut object_list: Vec<Value> = rows.iter().map(|r| row_to_json(r, &fields)).collect();
         if state.vs.fk_display {
-            super::resolve_fk_displays_conn(state.vs.schema, conn, &mut object_list).await;
+            super::resolve_fk_displays_pool(state.vs.schema, &pool, &mut object_list).await;
         }
 
         let total_pages = ((total - 1).max(0) / page_size) + 1;
@@ -3070,19 +3021,24 @@ mod tenant {
         };
 
         // v0.30.7 — confirmation gate for built-in delete_selected.
-        // Tenant variant: fetch confirm-page rows on the per-request
-        // connection. Same shape as the static path.
+        // Tenant variant: fetch confirm-page rows via the
+        // backend-erasing pool. Same JSON shape as the static path.
         if state.vs.confirm_delete
             && action == super::BUILTIN_DELETE_SELECTED
             && !super::is_form_confirmed(&form)
         {
-            let conn = t.conn();
-            let objects =
-                match super::fetch_pks_as_objects_conn(state.vs.schema, pk_field, conn, &pks).await
-                {
-                    Ok(o) => o,
-                    Err(e) => return template_error(&format!("fetch confirm rows: {e}")),
-                };
+            let pool = t.pool().clone();
+            let objects = match super::fetch_pks_as_objects_pool(
+                state.vs.schema,
+                pk_field,
+                &pool,
+                &pks,
+            )
+            .await
+            {
+                Ok(o) => o,
+                Err(e) => return template_error(&format!("fetch confirm rows: {e}")),
+            };
             return super::render_bulk_delete_confirm(
                 &state.tera,
                 super::confirm_delete_template_name(&state.vs),
@@ -3094,7 +3050,7 @@ mod tenant {
         }
 
         let dispatch_path = parts.uri.path().to_owned();
-        let conn = t.conn();
+        let pool = t.pool().clone();
         let result: Result<(), String> = if let Some(custom) = state
             .vs
             .actions
@@ -3102,7 +3058,23 @@ mod tenant {
             .find(|a| super::same_action_name(&a.name, &action))
         {
             match &custom.handler {
-                super::BulkActionHandler::Tenant(f) => f(conn, &pks).await,
+                #[cfg(feature = "postgres")]
+                super::BulkActionHandler::Tenant(f) => {
+                    // The Tenant handler takes &mut PgConnection (PG
+                    // bulk action API); only firable when the tenant
+                    // pool is actually PG.
+                    if let Some(pg) = pool.as_postgres() {
+                        match pg.acquire().await {
+                            Ok(mut conn) => f(&mut *conn, &pks).await,
+                            Err(e) => Err(e.to_string()),
+                        }
+                    } else {
+                        Err("this action was registered via .tenant_action(&mut PgConnection,...) — \
+                             mount on a PG tenant pool; sqlite/mysql tenants don't expose a \
+                             PgConnection"
+                            .into())
+                    }
+                }
                 super::BulkActionHandler::Pool(_) => {
                     Err("this action was registered via .action(...) — \
                      mount the ListView via router(...) (single-pool) to dispatch it"
@@ -3110,7 +3082,7 @@ mod tenant {
                 }
             }
         } else if action == super::BUILTIN_DELETE_SELECTED {
-            super::run_delete_selected_conn(state.vs.schema, pk_field, conn, &pks).await
+            super::run_delete_selected_pool(state.vs.schema, pk_field, &pool, &pks).await
         } else {
             return (
                 StatusCode::BAD_REQUEST,
@@ -3157,14 +3129,14 @@ mod tenant {
             limit: Some(1),
             offset: None,
         };
-        let row = match crate::sql::select_one_row_on(&mut *t.conn(), &select_q).await {
-            Ok(Some(r)) => r,
-            Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-            Err(e) => return template_error(&format!("query row: {e}")),
-        };
-
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-        let object = row_to_json(&row, &fields);
+        let object =
+            match crate::sql::select_one_row_as_json_pool(t.pool(), &select_q, &fields).await {
+                Ok(Some(r)) => r,
+                Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+                Err(e) => return template_error(&format!("query row: {e}")),
+            };
+
         let mut ctx = Context::new();
         ctx.insert("object", &object);
         render(&state.tera, &state.vs.template, &ctx)
@@ -3203,13 +3175,13 @@ mod tenant {
             limit: Some(1),
             offset: None,
         };
-        let row = match crate::sql::select_one_row_on(&mut *t.conn(), &select_q).await {
-            Ok(Some(r)) => r,
-            Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-            Err(e) => return template_error(&format!("query row: {e}")),
-        };
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-        let object = row_to_json(&row, &fields);
+        let object =
+            match crate::sql::select_one_row_as_json_pool(t.pool(), &select_q, &fields).await {
+                Ok(Some(r)) => r,
+                Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+                Err(e) => return template_error(&format!("query row: {e}")),
+            };
         let mut ctx = Context::new();
         ctx.insert("object", &object);
         let set_cookie = super::stamp_csrf(&headers, &mut ctx);
@@ -3237,7 +3209,7 @@ mod tenant {
                 value: coerce_pk(pk_field, &pk),
             }),
         };
-        match crate::sql::delete_on(&mut *t.conn(), &delete_q).await {
+        match crate::sql::delete_pool(t.pool(), &delete_q).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
             Ok(_) => {
                 let target = super::substitute_pk(&state.vs.success_url, &pk);
@@ -3307,7 +3279,7 @@ mod tenant {
             on_conflict: None,
         };
         let target_url = if need_returning {
-            match crate::sql::insert_returning_on(&mut *t.conn(), &insert_q).await {
+            match crate::sql::insert_returning_pool(t.pool(), &insert_q).await {
                 Ok(row) => {
                     match super::interpolate_success_url(&state.success_url, &row, state.schema) {
                         Ok(url) => url,
@@ -3317,7 +3289,7 @@ mod tenant {
                 Err(e) => return template_error(&format!("insert row: {e}")),
             }
         } else {
-            if let Err(e) = crate::sql::insert_on(&mut *t.conn(), &insert_q).await {
+            if let Err(e) = crate::sql::insert_pool(t.pool(), &insert_q).await {
                 return template_error(&format!("insert row: {e}"));
             }
             state.success_url.clone()
@@ -3350,14 +3322,14 @@ mod tenant {
             limit: Some(1),
             offset: None,
         };
-        let row = match crate::sql::select_one_row_on(&mut *t.conn(), &select_q).await {
-            Ok(Some(r)) => r,
-            Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-            Err(e) => return template_error(&format!("query row: {e}")),
-        };
         let scalars: Vec<&'static crate::core::FieldSchema> =
             state.schema.scalar_fields().collect();
-        let row_json = row_to_json(&row, &scalars);
+        let row_json =
+            match crate::sql::select_one_row_as_json_pool(t.pool(), &select_q, &scalars).await {
+                Ok(Some(r)) => r,
+                Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+                Err(e) => return template_error(&format!("query row: {e}")),
+            };
         let row_obj = row_json.as_object().cloned().unwrap_or_default();
         let mut values: HashMap<String, String> = HashMap::with_capacity(row_obj.len());
         for (k, v) in row_obj {
@@ -3419,7 +3391,7 @@ mod tenant {
                 value: coerce_pk(pk_field, &pk),
             }),
         };
-        match crate::sql::update_on(&mut *t.conn(), &update_q).await {
+        match crate::sql::update_pool(t.pool(), &update_q).await {
             Ok(0) => (StatusCode::NOT_FOUND, "not found").into_response(),
             Ok(_) => {
                 let target = super::substitute_pk(&state.success_url, &pk);

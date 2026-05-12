@@ -791,10 +791,15 @@ pub mod viewset;
 /// [`viewset`] for the JSON/API side. See [`template_views`] for
 /// usage and the canonical Tera context shape.
 ///
-/// v0.38 — also gated to `postgres` because the implementation uses
-/// the PG-only `Tenant` extractor; tracks the same lift as `viewset`
-/// (slice 4).
-#[cfg(all(feature = "template_views", feature = "postgres"))]
+/// v0.38 slice 22 — fully tri-dialect. State carries Pool enum;
+/// handlers route through select_rows_as_json_pool /
+/// select_one_row_as_json_pool / insert_returning_pool /
+/// update_pool / delete_pool. PG schema-mode tenants get
+/// `SET search_path` via Tenant<Postgres>; sqlite/mysql tenants use
+/// database-mode via Tenant<DB>.pool(). MySQL note:
+/// success_url interpolation can only resolve `{pk}` placeholders
+/// on the MySQL backend (no RETURNING).
+#[cfg(feature = "template_views")]
 pub mod template_views;
 
 /// Django-style runserver — [`server::Builder`] owns every line of
