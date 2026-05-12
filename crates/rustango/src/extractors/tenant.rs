@@ -7,16 +7,8 @@
 //! **Schema-mode is Postgres-only by language**: the implementation
 //! uses `SET search_path`. `Tenant<sqlx::Postgres>` supports both
 //! schema-mode and database-mode tenants; `Tenant<sqlx::Sqlite>` /
-//! `Tenant<sqlx::MySql>` (v0.38 forward) will support database-mode
-//! only. Today the runtime extractor `impl` is wired for
-//! `Tenant<sqlx::Postgres>` only; the generic type signature is in
-//! place so projects can write `fn handler(t: Tenant<sqlx::Sqlite>)`
-//! today and the runtime path lights up in a follow-up slice.
-//!
-//! Until the non-PG runtime impl lands, sqlite / mysql apps use
-//! [`super::DatabaseTenant<DB>`] which has the database-mode-only
-//! runtime today (shipped v0.33).
-#![cfg(feature = "postgres")]
+//! `Tenant<sqlx::MySql>` support database-mode only — `SET search_path`
+//! doesn't exist on those backends.
 
 use std::sync::Arc;
 

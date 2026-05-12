@@ -1,4 +1,3 @@
-#![cfg(feature = "postgres")]
 //! Live regression for v0.34 slice 3 — `TenantPools<sqlx::Sqlite>`
 //! works end-to-end. Proves the generalized struct can hold a SQLite
 //! registry, build per-tenant SQLite pools, and acquire connections —

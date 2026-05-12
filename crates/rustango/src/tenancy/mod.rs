@@ -62,11 +62,12 @@ mod error;
 #[cfg(feature = "postgres")]
 pub mod impersonation_handoff;
 pub mod jwt_lifecycle;
-// v0.38 — the manage CLI (create-tenant, role/perm verbs, etc.)
-// is wired through legacy `TenantPools` which is PG-typed. Sqlite/
-// MySQL apps get the multi-tenant runtime via `DatabasePools<DB>` but
-// the CLI surface lands in slice 4 (TenantPools<DB> generic). Gated
-// to `postgres` until then.
+// v0.38 — manage CLI (create-tenant / create-operator / create-user
+// / role+perm verbs) is wired through the audit cleanup helpers,
+// tenant migration runner, and operator console — all PG-typed
+// internals. The runtime tri-dialect path goes through
+// DatabasePools<DB> directly; the CLI submodules wait for their
+// _pool lifts (slice 9+).
 #[cfg(feature = "postgres")]
 pub mod manage;
 mod manage_interactive;
@@ -135,9 +136,9 @@ pub use error::TenancyError;
 pub use migrate::{migrate_registry, migrate_tenants};
 pub use migrate::{migrate_registry_pool, TenantMigrationOutcome, TenantMigrationReport};
 pub use org::{BackendKind, Org, StorageMode};
-pub use pools::TenantPoolsConfig;
-#[cfg(feature = "postgres")]
-pub use pools::{PrewarmReport, TenantConn, TenantPool, TenantPools};
+pub use pools::{
+    DefaultTenantDb, PrewarmReport, TenantConn, TenantPool, TenantPools, TenantPoolsConfig,
+};
 pub use resolver::{
     ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver, PortResolver, SubdomainResolver,
 };
