@@ -48,7 +48,9 @@
 
 use crate::core::Model as _;
 use crate::core::{ConflictClause, DeleteQuery, Filter, InsertQuery, Op, SqlValue, WhereExpr};
-use crate::sql::sqlx::{self, PgPool, Row};
+use crate::sql::sqlx;
+#[cfg(feature = "postgres")]
+use crate::sql::sqlx::{PgPool, Row};
 use crate::sql::Auto;
 use crate::Model;
 
@@ -205,6 +207,117 @@ ALTER TABLE "rustango_users"
     ADD COLUMN IF NOT EXISTS "password_changed_at" TIMESTAMPTZ NULL;
 "#;
 
+/// v0.38 — SQLite counterpart of [`ENSURE_SQL`].
+///
+/// Differences from the PG version:
+/// - `BIGSERIAL` → `INTEGER PRIMARY KEY AUTOINCREMENT` (SQLite's
+///   auto-rowid spelling — `INTEGER PRIMARY KEY` aliases to the
+///   internal `ROWID`, AUTOINCREMENT enforces monotonic non-reuse).
+/// - `BIGINT` / `VARCHAR(N)` / `JSONB` / `BOOLEAN` / `TIMESTAMPTZ`
+///   collapse to SQLite's loose affinities (`INTEGER` / `TEXT`).
+/// - `DEFAULT TRUE` → `DEFAULT 1` (SQLite has no bool literal —
+///   1/0 are the canonical encoding the sqlx-sqlite driver reads
+///   back via `<bool as Decode<Sqlite>>`).
+/// - No `ALTER TABLE ADD COLUMN IF NOT EXISTS`. The PG ALTER block
+///   is a legacy backfill for ≤0.27 installs; fresh SQLite tenants
+///   never need it because the columns ship in the CREATE TABLE.
+const ENSURE_SQL_SQLITE: &str = r#"
+CREATE TABLE IF NOT EXISTS "rustango_permissions" (
+    "id"          INTEGER     PRIMARY KEY AUTOINCREMENT,
+    "table_name"  TEXT        NOT NULL,
+    "codename"    TEXT        NOT NULL,
+    "name"        TEXT        NOT NULL DEFAULT '',
+    CONSTRAINT "rustango_permissions_uq" UNIQUE ("table_name", "codename")
+);
+CREATE TABLE IF NOT EXISTS "rustango_roles" (
+    "id"          INTEGER     PRIMARY KEY AUTOINCREMENT,
+    "name"        TEXT        NOT NULL,
+    "description" TEXT        NOT NULL DEFAULT '',
+    "data"        TEXT        NOT NULL DEFAULT '{}',
+    CONSTRAINT "rustango_roles_name_uq" UNIQUE ("name")
+);
+CREATE TABLE IF NOT EXISTS "rustango_role_permissions" (
+    "id"       INTEGER  PRIMARY KEY AUTOINCREMENT,
+    "role_id"  INTEGER  NOT NULL
+                         REFERENCES "rustango_roles"("id")
+                         ON DELETE CASCADE,
+    "codename" TEXT     NOT NULL,
+    CONSTRAINT "rustango_role_permissions_uq" UNIQUE ("role_id", "codename")
+);
+CREATE TABLE IF NOT EXISTS "rustango_user_roles" (
+    "id"      INTEGER PRIMARY KEY AUTOINCREMENT,
+    "user_id" INTEGER NOT NULL
+                       REFERENCES "rustango_users"("id")
+                       ON DELETE CASCADE,
+    "role_id" INTEGER NOT NULL
+                       REFERENCES "rustango_roles"("id")
+                       ON DELETE CASCADE,
+    CONSTRAINT "rustango_user_roles_uq" UNIQUE ("user_id", "role_id")
+);
+CREATE TABLE IF NOT EXISTS "rustango_user_permissions" (
+    "id"       INTEGER  PRIMARY KEY AUTOINCREMENT,
+    "user_id"  INTEGER  NOT NULL
+                         REFERENCES "rustango_users"("id")
+                         ON DELETE CASCADE,
+    "codename" TEXT     NOT NULL,
+    "granted"  INTEGER  NOT NULL DEFAULT 1,
+    "data"     TEXT     NOT NULL DEFAULT '{}',
+    CONSTRAINT "rustango_user_permissions_uq" UNIQUE ("user_id", "codename")
+);
+"#;
+
+/// v0.38 — MySQL counterpart of [`ENSURE_SQL`]. Identifier quoting
+/// is backticks (MySQL rejects double-quoted identifiers in default
+/// `ANSI_QUOTES=off` mode). `BIGSERIAL` → `BIGINT AUTO_INCREMENT
+/// PRIMARY KEY`. `JSONB` → `JSON`. `TIMESTAMPTZ` → `DATETIME(6)`.
+/// `BOOLEAN` is a `TINYINT(1)` alias. Same legacy-ALTER posture as
+/// SQLite: omit the back-compat columns — fresh MySQL tenants ship
+/// the `data` / `password_changed_at` columns from the CREATE.
+const ENSURE_SQL_MYSQL: &str = r#"
+CREATE TABLE IF NOT EXISTS `rustango_permissions` (
+    `id`          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `table_name`  VARCHAR(150) NOT NULL,
+    `codename`    VARCHAR(100) NOT NULL,
+    `name`        VARCHAR(255) NOT NULL DEFAULT '',
+    CONSTRAINT `rustango_permissions_uq` UNIQUE (`table_name`, `codename`)
+);
+CREATE TABLE IF NOT EXISTS `rustango_roles` (
+    `id`          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `name`        VARCHAR(150) NOT NULL,
+    `description` VARCHAR(500) NOT NULL DEFAULT '',
+    `data`        JSON         NOT NULL,
+    CONSTRAINT `rustango_roles_name_uq` UNIQUE (`name`)
+);
+CREATE TABLE IF NOT EXISTS `rustango_role_permissions` (
+    `id`       BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `role_id`  BIGINT       NOT NULL,
+    `codename` VARCHAR(100) NOT NULL,
+    CONSTRAINT `rustango_role_permissions_uq` UNIQUE (`role_id`, `codename`),
+    CONSTRAINT `rustango_role_permissions_fk_role`
+        FOREIGN KEY (`role_id`) REFERENCES `rustango_roles`(`id`) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS `rustango_user_roles` (
+    `id`      BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `user_id` BIGINT NOT NULL,
+    `role_id` BIGINT NOT NULL,
+    CONSTRAINT `rustango_user_roles_uq` UNIQUE (`user_id`, `role_id`),
+    CONSTRAINT `rustango_user_roles_fk_user`
+        FOREIGN KEY (`user_id`) REFERENCES `rustango_users`(`id`) ON DELETE CASCADE,
+    CONSTRAINT `rustango_user_roles_fk_role`
+        FOREIGN KEY (`role_id`) REFERENCES `rustango_roles`(`id`) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS `rustango_user_permissions` (
+    `id`       BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `user_id`  BIGINT       NOT NULL,
+    `codename` VARCHAR(100) NOT NULL,
+    `granted`  BOOLEAN      NOT NULL DEFAULT TRUE,
+    `data`     JSON         NOT NULL,
+    CONSTRAINT `rustango_user_permissions_uq` UNIQUE (`user_id`, `codename`),
+    CONSTRAINT `rustango_user_permissions_fk_user`
+        FOREIGN KEY (`user_id`) REFERENCES `rustango_users`(`id`) ON DELETE CASCADE
+);
+"#;
+
 /// Ensure all four permission tables exist in `pool`'s schema.
 /// Idempotent — safe to call on every boot. The tables are framework-
 /// managed (like `rustango_audit_log`) and live outside the user's
@@ -212,6 +325,19 @@ ALTER TABLE "rustango_users"
 ///
 /// # Errors
 /// Driver failures from `CREATE TABLE IF NOT EXISTS`.
+///
+/// v0.38 — deprecated. The framework's bootstrap migrations
+/// (`0001_rustango_tenant_initial.json` written by `init-tenancy`)
+/// already create every permission table the engine needs, with
+/// per-dialect DDL emitted by the migration runner. New code should
+/// rely on `migrate` / `migrate-tenants` instead of calling this
+/// directly. Kept for downstream tests that scaffold a registry by
+/// hand and expect the tables to exist mid-test.
+#[cfg(feature = "postgres")]
+#[deprecated(
+    since = "0.38.0",
+    note = "use `cargo run -- migrate` (the bootstrap tenant migration creates these tables per-dialect); this runtime DDL helper is PG-only and predates the bootstrap migrations"
+)]
 pub async fn ensure_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
     for stmt in ENSURE_SQL
         .split(';')
@@ -219,6 +345,40 @@ pub async fn ensure_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
         .filter(|s| !s.is_empty())
     {
         sqlx::query(stmt).execute(pool).await?;
+    }
+    Ok(())
+}
+
+/// v0.38 — tri-dialect counterpart of [`ensure_tables`]. Picks the
+/// per-dialect DDL constant ([`ENSURE_SQL`] / [`ENSURE_SQL_SQLITE`] /
+/// [`ENSURE_SQL_MYSQL`]) and runs each statement as its own round-trip
+/// because sqlx's simple-prepare path rejects multi-statement strings.
+///
+/// Long-term, the bootstrap tenant migration should create every
+/// table the engine needs and this runtime helper goes away; today
+/// the bootstrap only emits `CreateTable rustango_users` (the seven
+/// auth/perm tables live in its snapshot but never get DDL'd by the
+/// migration runner). This helper plugs that gap on all three
+/// dialects.
+///
+/// # Errors
+/// Driver / SQL failures from any `CREATE TABLE IF NOT EXISTS`.
+pub async fn ensure_tables_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Error> {
+    let dialect = pool.dialect();
+    let ddl = match dialect.name() {
+        "sqlite" => ENSURE_SQL_SQLITE,
+        "mysql" => ENSURE_SQL_MYSQL,
+        // PG and any future dialect fall through to the original
+        // BIGSERIAL/JSONB/TIMESTAMPTZ DDL.
+        _ => ENSURE_SQL,
+    };
+    for stmt in ddl.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        crate::sql::raw_execute_pool(pool, stmt, Vec::new())
+            .await
+            .map_err(|e| match e {
+                crate::sql::ExecError::Driver(err) => err,
+                other => sqlx::Error::Protocol(format!("{other}")),
+            })?;
     }
     Ok(())
 }
@@ -238,6 +398,7 @@ pub async fn ensure_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
 ///
 /// # Errors
 /// Driver / SQL failures.
+#[cfg(feature = "postgres")]
 pub async fn has_perm(uid: i64, codename: &str, pool: &PgPool) -> Result<bool, sqlx::Error> {
     has_perm_on(uid, codename, pool).await
 }
@@ -251,6 +412,7 @@ pub async fn has_perm(uid: i64, codename: &str, pool: &PgPool) -> Result<bool, s
 ///
 /// # Errors
 /// As [`has_perm`].
+#[cfg(feature = "postgres")]
 pub async fn has_perm_on<'c, E>(uid: i64, codename: &str, executor: E) -> Result<bool, sqlx::Error>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
@@ -301,6 +463,7 @@ where
 ///
 /// Single round-trip — resolves superuser, explicit denials, explicit
 /// grants, and role-based grants in one CTE for the full array.
+#[cfg(feature = "postgres")]
 pub async fn has_any_perm(
     uid: i64,
     codenames: &[&str],
@@ -360,6 +523,7 @@ pub async fn has_any_perm(
 ///
 /// Single round-trip — counts effective grants (after applying denials)
 /// and compares against the full codename list.
+#[cfg(feature = "postgres")]
 pub async fn has_all_perms(
     uid: i64,
     codenames: &[&str],
@@ -420,6 +584,7 @@ pub async fn has_all_perms(
 // ------------------------------------------------------------------ Role management (ORM-backed)
 
 /// Create a role. Errors if name already exists.
+#[cfg(feature = "postgres")]
 pub async fn create_role(
     name: &str,
     description: &str,
@@ -435,7 +600,27 @@ pub async fn create_role(
     Ok(role.id.get().copied().unwrap_or(0))
 }
 
+/// v0.38 — tri-dialect counterpart of [`create_role`].
+///
+/// # Errors
+/// As [`create_role`].
+pub async fn create_role_pool(
+    name: &str,
+    description: &str,
+    pool: &crate::sql::Pool,
+) -> Result<i64, TenancyError> {
+    let mut role = Role {
+        id: Auto::default(),
+        name: name.to_owned(),
+        description: description.to_owned(),
+        data: serde_json::Value::Object(serde_json::Map::new()),
+    };
+    role.save_pool(pool).await?;
+    Ok(role.id.get().copied().unwrap_or(0))
+}
+
 /// Get an existing role by name or create one. Returns the id.
+#[cfg(feature = "postgres")]
 pub async fn get_or_create_role(
     name: &str,
     description: &str,
@@ -469,6 +654,7 @@ pub async fn get_or_create_role(
 /// [`ConflictClause::DoNothing`] — the writer emits `INSERT … ON
 /// CONFLICT DO NOTHING`, which matches the `(role_id, codename)`
 /// unique constraint declared in [`ENSURE_SQL`].
+#[cfg(feature = "postgres")]
 pub async fn grant_role_perm(
     role_id: i64,
     codename: &str,
@@ -485,7 +671,28 @@ pub async fn grant_role_perm(
     Ok(())
 }
 
+/// v0.38 — tri-dialect counterpart of [`grant_role_perm`].
+///
+/// # Errors
+/// As [`grant_role_perm`].
+pub async fn grant_role_perm_pool(
+    role_id: i64,
+    codename: &str,
+    pool: &crate::sql::Pool,
+) -> Result<(), TenancyError> {
+    let query = InsertQuery {
+        model: RolePermission::SCHEMA,
+        columns: vec!["role_id", "codename"],
+        values: vec![SqlValue::from(role_id), SqlValue::from(codename.to_owned())],
+        returning: vec![],
+        on_conflict: Some(ConflictClause::DoNothing),
+    };
+    crate::sql::insert_pool(pool, &query).await?;
+    Ok(())
+}
+
 /// Revoke a codename from a role.
+#[cfg(feature = "postgres")]
 pub async fn revoke_role_perm(
     role_id: i64,
     codename: &str,
@@ -513,9 +720,41 @@ pub async fn revoke_role_perm(
     Ok(())
 }
 
+/// v0.38 — tri-dialect counterpart of [`revoke_role_perm`].
+///
+/// # Errors
+/// As [`revoke_role_perm`].
+pub async fn revoke_role_perm_pool(
+    role_id: i64,
+    codename: &str,
+    pool: &crate::sql::Pool,
+) -> Result<(), TenancyError> {
+    crate::sql::delete_pool(
+        pool,
+        &DeleteQuery {
+            model: RolePermission::SCHEMA,
+            where_clause: WhereExpr::and_predicates(vec![
+                Filter {
+                    column: "role_id",
+                    op: Op::Eq,
+                    value: SqlValue::from(role_id),
+                },
+                Filter {
+                    column: "codename",
+                    op: Op::Eq,
+                    value: SqlValue::from(codename),
+                },
+            ]),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 /// Assign a user to a role. No-op if already assigned.
 ///
 /// Same IR-routed pattern as [`grant_role_perm`].
+#[cfg(feature = "postgres")]
 pub async fn assign_role(user_id: i64, role_id: i64, pool: &PgPool) -> Result<(), TenancyError> {
     let query = InsertQuery {
         model: UserRole::SCHEMA,
@@ -528,9 +767,55 @@ pub async fn assign_role(user_id: i64, role_id: i64, pool: &PgPool) -> Result<()
     Ok(())
 }
 
+/// v0.38 — tri-dialect counterpart of [`assign_role`].
+pub async fn assign_role_pool(
+    user_id: i64,
+    role_id: i64,
+    pool: &crate::sql::Pool,
+) -> Result<(), TenancyError> {
+    let query = InsertQuery {
+        model: UserRole::SCHEMA,
+        columns: vec!["user_id", "role_id"],
+        values: vec![SqlValue::from(user_id), SqlValue::from(role_id)],
+        returning: vec![],
+        on_conflict: Some(ConflictClause::DoNothing),
+    };
+    crate::sql::insert_pool(pool, &query).await?;
+    Ok(())
+}
+
 /// Remove a user from a role.
+#[cfg(feature = "postgres")]
 pub async fn remove_role(user_id: i64, role_id: i64, pool: &PgPool) -> Result<(), TenancyError> {
     crate::sql::delete(
+        pool,
+        &DeleteQuery {
+            model: UserRole::SCHEMA,
+            where_clause: WhereExpr::and_predicates(vec![
+                Filter {
+                    column: "user_id",
+                    op: Op::Eq,
+                    value: SqlValue::from(user_id),
+                },
+                Filter {
+                    column: "role_id",
+                    op: Op::Eq,
+                    value: SqlValue::from(role_id),
+                },
+            ]),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// v0.38 — tri-dialect counterpart of [`remove_role`].
+pub async fn remove_role_pool(
+    user_id: i64,
+    role_id: i64,
+    pool: &crate::sql::Pool,
+) -> Result<(), TenancyError> {
+    crate::sql::delete_pool(
         pool,
         &DeleteQuery {
             model: UserRole::SCHEMA,
@@ -560,6 +845,7 @@ pub async fn remove_role(user_id: i64, role_id: i64, pool: &PgPool) -> Result<()
 /// matching the composite unique constraint in [`ENSURE_SQL`]. `data`
 /// is omitted from `update_columns` so the existing JSONB context
 /// (reason / granted-by / etc.) survives a re-grant.
+#[cfg(feature = "postgres")]
 pub async fn set_user_perm(
     user_id: i64,
     codename: &str,
@@ -585,13 +871,68 @@ pub async fn set_user_perm(
     Ok(())
 }
 
+/// v0.38 — tri-dialect counterpart of [`set_user_perm`].
+pub async fn set_user_perm_pool(
+    user_id: i64,
+    codename: &str,
+    granted: bool,
+    pool: &crate::sql::Pool,
+) -> Result<(), TenancyError> {
+    let query = InsertQuery {
+        model: UserPermission::SCHEMA,
+        columns: vec!["user_id", "codename", "granted", "data"],
+        values: vec![
+            SqlValue::from(user_id),
+            SqlValue::from(codename.to_owned()),
+            SqlValue::from(granted),
+            SqlValue::Json(serde_json::json!({})),
+        ],
+        returning: vec![],
+        on_conflict: Some(ConflictClause::DoUpdate {
+            target: vec!["user_id", "codename"],
+            update_columns: vec!["granted"],
+        }),
+    };
+    crate::sql::insert_pool(pool, &query).await?;
+    Ok(())
+}
+
 /// Remove a per-user override, restoring role-based resolution.
+#[cfg(feature = "postgres")]
 pub async fn clear_user_perm(
     user_id: i64,
     codename: &str,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
     crate::sql::delete(
+        pool,
+        &DeleteQuery {
+            model: UserPermission::SCHEMA,
+            where_clause: WhereExpr::and_predicates(vec![
+                Filter {
+                    column: "user_id",
+                    op: Op::Eq,
+                    value: SqlValue::from(user_id),
+                },
+                Filter {
+                    column: "codename",
+                    op: Op::Eq,
+                    value: SqlValue::from(codename),
+                },
+            ]),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// v0.38 — tri-dialect counterpart of [`clear_user_perm`].
+pub async fn clear_user_perm_pool(
+    user_id: i64,
+    codename: &str,
+    pool: &crate::sql::Pool,
+) -> Result<(), TenancyError> {
+    crate::sql::delete_pool(
         pool,
         &DeleteQuery {
             model: UserPermission::SCHEMA,
@@ -787,6 +1128,7 @@ pub async fn user_permissions_pool(
 }
 
 /// List all roles a user belongs to.
+#[cfg(feature = "postgres")]
 pub async fn user_roles_qs(user_id: i64, pool: &PgPool) -> Result<Vec<Role>, sqlx::Error> {
     let rows = sqlx::query(
         r#"SELECT r.id, r.name, r.description
@@ -813,6 +1155,7 @@ pub async fn user_roles_qs(user_id: i64, pool: &PgPool) -> Result<Vec<Role>, sql
 }
 
 /// List all `(role_id, name)` pairs for a user.
+#[cfg(feature = "postgres")]
 pub async fn user_roles(uid: i64, pool: &PgPool) -> Result<Vec<(i64, String)>, sqlx::Error> {
     let roles = user_roles_qs(uid, pool).await?; // raw SQL join — stays sqlx::Error
     Ok(roles
@@ -827,6 +1170,7 @@ pub async fn user_roles(uid: i64, pool: &PgPool) -> Result<Vec<(i64, String)>, s
 ///
 /// Denial priority matches [`has_perm`]: an explicit `granted = false` row
 /// removes the codename even if a role would otherwise grant it.
+#[cfg(feature = "postgres")]
 pub async fn user_permissions(uid: i64, pool: &PgPool) -> Result<Vec<String>, TenancyError> {
     let rows = sqlx::query(
         r#"
@@ -883,6 +1227,7 @@ pub fn model_codenames(table: &str) -> [String; 4] {
 ///
 /// # Errors
 /// Driver / SQL failures.
+#[cfg(feature = "postgres")]
 pub async fn auto_create_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
     use crate::core::{inventory, ModelEntry};
 
@@ -925,6 +1270,90 @@ pub async fn auto_create_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    Ok(())
+}
+
+/// v0.38 — tri-dialect counterpart of [`auto_create_permissions`].
+///
+/// Unlike [`ensure_tables`], this is *not* redundant with the
+/// bootstrap migration: the migration creates the `rustango_permissions`
+/// table but cannot know which models the binary has compiled in.
+/// This walks the runtime `inventory::<ModelEntry>` and seeds one row
+/// per `(model_table, action)` for every model carrying
+/// `#[rustango(permissions)]`. Idempotent via `ON CONFLICT DO NOTHING`
+/// (supported on PG, SQLite ≥ 3.24, MySQL via the IGNORE-style
+/// `INSERT ... ON CONFLICT(...) DO NOTHING` which sqlx routes through
+/// the `insert_pool` IR emitter).
+///
+/// PG path used a single `UNNEST($1::text[], $2::text[], $3::text[])`
+/// to insert every row in one round-trip. SQLite + MySQL have no
+/// `UNNEST` of parallel arrays, so the `_pool` variant builds one
+/// `InsertQuery` per (table, action) and dispatches via `insert_pool`
+/// — N round-trips for N codenames, where N ≤ `(model_count × 4)`.
+/// Typical projects have <50 models, so this is <200 short
+/// INSERTs at boot, well under a second.
+///
+/// # Errors
+/// Driver / SQL failures from any of the per-row inserts.
+pub async fn auto_create_permissions_pool(pool: &crate::sql::Pool) -> Result<(), TenancyError> {
+    use crate::core::{inventory, ModelEntry};
+
+    let action_names = [
+        ("add", "Can add"),
+        ("change", "Can change"),
+        ("delete", "Can delete"),
+        ("view", "Can view"),
+    ];
+
+    for entry in inventory::iter::<ModelEntry> {
+        if !entry.schema.permissions {
+            continue;
+        }
+        let table = entry.schema.table;
+        let model_name = entry.schema.name;
+        for (action, verb) in &action_names {
+            // Hand-rolled `INSERT … ON CONFLICT (...) DO NOTHING`
+            // via the dialect emitter — `rustango_permissions` isn't
+            // a `#[derive(Model)]` so we can't go through the ORM
+            // IR (`InsertQuery` needs a `&'static ModelSchema`).
+            // Pattern mirrors `audit::audit_select_sql` from v0.37.
+            let dialect = pool.dialect();
+            let perm_t = dialect.quote_ident("rustango_permissions");
+            let table_col = dialect.quote_ident("table_name");
+            let codename_col = dialect.quote_ident("codename");
+            let name_col = dialect.quote_ident("name");
+            let p1 = dialect.placeholder(1);
+            let p2 = dialect.placeholder(2);
+            let p3 = dialect.placeholder(3);
+            // `ON CONFLICT (col1, col2) DO NOTHING` is supported on
+            // PG (always), SQLite (≥ 3.24), MySQL (8.0.19+ — older
+            // MySQL would need `INSERT IGNORE` instead, but the
+            // framework's minimum is MySQL 8). Same posture as
+            // `audit::emit_one_pool` etc.
+            let sql = format!(
+                "INSERT INTO {perm_t} ({table_col}, {codename_col}, {name_col}) \
+                 VALUES ({p1}, {p2}, {p3}) \
+                 ON CONFLICT ({table_col}, {codename_col}) DO NOTHING"
+            );
+            let codename = format!("{table}.{action}");
+            let display = format!("{verb} {model_name}");
+            crate::sql::raw_execute_pool(
+                pool,
+                &sql,
+                vec![
+                    SqlValue::from(table.to_owned()),
+                    SqlValue::from(codename),
+                    SqlValue::from(display),
+                ],
+            )
+            .await
+            .map_err(|e| {
+                TenancyError::Validation(format!(
+                    "auto_create_permissions_pool: INSERT for `{table}.{action}` failed: {e}"
+                ))
+            })?;
+        }
+    }
     Ok(())
 }
 
