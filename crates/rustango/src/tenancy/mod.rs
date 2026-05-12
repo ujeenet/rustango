@@ -53,8 +53,6 @@ pub mod bootstrap;
 pub mod branding;
 pub mod database_pools;
 mod error;
-// v0.38 — depends on operator_console signed cookies + TenantPools.
-#[cfg(feature = "postgres")]
 pub mod impersonation_handoff;
 pub mod jwt_lifecycle;
 pub mod manage;

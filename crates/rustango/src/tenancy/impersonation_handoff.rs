@@ -67,8 +67,8 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
-use super::operator_console::session::{sign, SessionError};
-pub use super::operator_console::SessionSecret;
+pub use super::session::SessionSecret;
+use super::session::{sign, SessionError};
 
 /// Default lifetime — 60 seconds. The handoff is "click button →
 /// browser redirects → tenant admin redeems"; nothing legitimate
