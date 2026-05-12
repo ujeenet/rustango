@@ -1,11 +1,21 @@
-//! `Tenant` extractor — resolves the request's tenant + acquires a
-//! tenant-scoped Postgres connection.
+//! `Tenant<DB>` extractor — resolves the request's tenant + acquires
+//! a tenant-scoped connection on the configured backend.
 //!
-//! **Postgres-only by language**: this extractor wraps
-//! [`crate::tenancy::TenantPools::acquire`] which handles schema-mode
-//! via `SET search_path` — a PG-only SQL statement. Sqlite / MySQL
-//! apps use [`super::DatabaseTenant`] instead (shipped v0.33,
-//! generic over the backend).
+//! Default backend is Postgres (`Tenant` = `Tenant<sqlx::Postgres>`)
+//! so existing call sites (`fn handler(t: Tenant)`) compile unchanged.
+//!
+//! **Schema-mode is Postgres-only by language**: the implementation
+//! uses `SET search_path`. `Tenant<sqlx::Postgres>` supports both
+//! schema-mode and database-mode tenants; `Tenant<sqlx::Sqlite>` /
+//! `Tenant<sqlx::MySql>` (v0.38 forward) will support database-mode
+//! only. Today the runtime extractor `impl` is wired for
+//! `Tenant<sqlx::Postgres>` only; the generic type signature is in
+//! place so projects can write `fn handler(t: Tenant<sqlx::Sqlite>)`
+//! today and the runtime path lights up in a follow-up slice.
+//!
+//! Until the non-PG runtime impl lands, sqlite / mysql apps use
+//! [`super::DatabaseTenant<DB>`] which has the database-mode-only
+//! runtime today (shipped v0.33).
 #![cfg(feature = "postgres")]
 
 use std::sync::Arc;
@@ -14,17 +24,20 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use sqlx::Database;
 
 use crate::sql::sqlx;
 use crate::tenancy::{
-    operator_console::SessionSecret, ChainResolver, Org, OrgResolver, TenantConn, TenantPools,
+    session::SessionSecret, ChainResolver, Org, OrgResolver, TenantConn, TenantPools,
 };
 
 /// Per-server context that the [`Tenant`] extractor reads out of
-/// request extensions. Populated once by [`crate::server::Builder`]
-/// and `Arc`-cloned into every request.
-pub struct TenantContext {
-    pub pools: Arc<TenantPools>,
+/// request extensions. Generic over the tenant-data backend
+/// (`DB = sqlx::Postgres` default keeps existing call sites compiling
+/// unchanged). Populated once by [`crate::server::Builder`] and
+/// `Arc`-cloned into every request.
+pub struct TenantContext<DB: Database = sqlx::Postgres> {
+    pub pools: Arc<TenantPools<DB>>,
     pub resolver: ChainResolver,
     /// The HMAC-SHA256 key used to sign tenant session cookies. Set by
     /// [`crate::server::Builder`] so that [`SessionUser`] can validate
@@ -38,7 +51,9 @@ pub struct TenantContext {
 }
 
 /// Extractor: resolves the request's tenant and acquires a connection
-/// scoped to it. Handlers borrow the connection through
+/// scoped to it. Generic over the backend (`DB = sqlx::Postgres`
+/// default — `fn handler(t: Tenant)` continues to mean
+/// `Tenant<sqlx::Postgres>`). Handlers borrow the connection through
 /// [`Tenant::conn`] for ORM calls.
 ///
 /// ```ignore
@@ -47,16 +62,19 @@ pub struct TenantContext {
 ///     Ok(Json(posts))
 /// }
 /// ```
-pub struct Tenant {
+pub struct Tenant<DB: Database = sqlx::Postgres> {
     pub org: Org,
-    conn: TenantConn,
+    conn: TenantConn<DB>,
 }
 
-impl Tenant {
-    /// Borrow the tenant-scoped connection as `&mut PgConnection` —
-    /// the executor type sqlx and rustango's `fetch_on` / `get_on`
-    /// expect.
-    pub fn conn(&mut self) -> &mut sqlx::PgConnection {
+impl<DB: Database> Tenant<DB> {
+    /// Borrow the tenant-scoped pool connection. Use this for sqlx
+    /// query macros (`sqlx::query!(...).fetch_all(t.pool_conn())`)
+    /// when working in a backend-agnostic context. PG-specific code
+    /// can use [`Tenant::conn`] instead which derefs all the way to
+    /// `&mut PgConnection` so the framework's `_on` helpers
+    /// (`fetch_on`, `select_rows_on`) accept it directly.
+    pub fn pool_conn(&mut self) -> &mut sqlx::pool::PoolConnection<DB> {
         &mut self.conn
     }
 
@@ -64,7 +82,7 @@ impl Tenant {
     /// pool when dropped. Use for handlers that finished their DB
     /// work but still have long-running computation left.
     #[must_use]
-    pub fn into_conn(self) -> TenantConn {
+    pub fn into_conn(self) -> TenantConn<DB> {
         self.conn
     }
 
@@ -88,8 +106,18 @@ impl Tenant {
     /// before any query — same ceremony the extractor runs.
     #[cfg(any(test, feature = "test_utils"))]
     #[must_use]
-    pub fn for_test(org: Org, conn: TenantConn) -> Self {
+    pub fn for_test(org: Org, conn: TenantConn<DB>) -> Self {
         Self { org, conn }
+    }
+}
+
+impl Tenant<sqlx::Postgres> {
+    /// Borrow the tenant-scoped connection as `&mut PgConnection` —
+    /// the executor type sqlx and rustango's `fetch_on` / `get_on`
+    /// expect. PG-only; for generic backends, use
+    /// [`Tenant::pool_conn`] and the sqlx query macros.
+    pub fn conn(&mut self) -> &mut sqlx::PgConnection {
+        &mut self.conn
     }
 }
 
@@ -120,7 +148,11 @@ impl IntoResponse for TenantRejection {
     }
 }
 
-impl<S> FromRequestParts<S> for Tenant
+// v0.38 — the FromRequestParts impl is wired for the PG default only.
+// `Tenant<sqlx::Postgres>` goes through schema-mode-aware `TenantPools<Postgres>::acquire`.
+// Sqlite/MySQL apps use `DatabaseTenant<DB>` until the non-PG runtime
+// path lights up in a follow-up slice.
+impl<S> FromRequestParts<S> for Tenant<sqlx::Postgres>
 where
     S: Send + Sync,
 {
@@ -129,7 +161,7 @@ where
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let ctx = parts
             .extensions
-            .get::<Arc<TenantContext>>()
+            .get::<Arc<TenantContext<sqlx::Postgres>>>()
             .ok_or(TenantRejection::MissingContext)?
             .clone();
         let org = ctx
