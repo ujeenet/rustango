@@ -582,20 +582,71 @@ impl Cli {
         }
         #[cfg(all(feature = "tenancy", not(feature = "postgres")))]
         if self.tenancy {
-            // v0.38 — the legacy `TenantPools` + manage CLI (create-
-            // tenant, create-operator, role/perm verbs, …) is still
-            // wired through `PgPool`; runtime tenancy on sqlite/mysql
-            // works via `DatabasePools<DB>` but the CLI surface awaits
-            // slice 4 (TenantPools<DB> generic). Until then, fail
-            // explicitly instead of silently shipping a half-working
-            // binary.
-            return Err(
-                "Cli::tenancy() manage CLI verbs currently require the `postgres` \
-                        feature. Multi-tenant sqlite/mysql runtime works via \
-                        `crate::tenancy::DatabasePools<DB>`; the CLI surface lands in \
-                        v0.38 slice 4 (TenantPools<DB> generic)."
-                    .into(),
-            );
+            // v0.38 — on non-PG builds, the tenancy manage CLI runs
+            // through `TenantPools<DB>` with sqlite or mysql as the
+            // backend. Schema-mode is rejected (PG-only by language)
+            // but database-mode tenants are fully supported through
+            // the tri-dialect `_pool` family.
+            #[cfg(feature = "sqlite")]
+            let dispatch_pool = if no_db_verb {
+                let p = crate::sql::sqlx::SqlitePool::connect_lazy(&url)?;
+                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(p);
+                let init_fn: crate::tenancy::manage::InitTenancyFn = crate::tenancy::init_tenancy;
+                crate::tenancy::manage::run_with_init(
+                    &pools,
+                    &url,
+                    &self.migrations_dir,
+                    args,
+                    init_fn,
+                )
+                .await?;
+                return Ok(());
+            } else {
+                let p = crate::sql::sqlx::SqlitePool::connect(&url).await?;
+                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(p);
+                let init_fn: crate::tenancy::manage::InitTenancyFn = crate::tenancy::init_tenancy;
+                crate::tenancy::manage::run_with_init(
+                    &pools,
+                    &url,
+                    &self.migrations_dir,
+                    args,
+                    init_fn,
+                )
+                .await?;
+                return Ok(());
+            };
+            #[cfg(all(not(feature = "sqlite"), feature = "mysql"))]
+            {
+                let p = if no_db_verb {
+                    crate::sql::sqlx::MySqlPool::connect_lazy(&url)?
+                } else {
+                    crate::sql::sqlx::MySqlPool::connect(&url).await?
+                };
+                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::MySql>::new(p);
+                let init_fn: crate::tenancy::manage::InitTenancyFn = crate::tenancy::init_tenancy;
+                crate::tenancy::manage::run_with_init(
+                    &pools,
+                    &url,
+                    &self.migrations_dir,
+                    args,
+                    init_fn,
+                )
+                .await?;
+                return Ok(());
+            }
+            #[cfg(not(any(feature = "sqlite", feature = "mysql")))]
+            {
+                let _ = (url, args);
+                return Err(
+                    "Cli::tenancy() requires at least one of `postgres`, `sqlite`, or \
+                     `mysql` features to be enabled."
+                        .into(),
+                );
+            }
+            #[allow(unreachable_code)]
+            {
+                let _: () = dispatch_pool;
+            }
         }
         #[cfg(not(feature = "tenancy"))]
         if self.tenancy {
