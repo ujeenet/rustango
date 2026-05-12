@@ -13,8 +13,10 @@
 
 use std::path::Path;
 
+use sqlx::Database;
+
 use crate::core::Column as _;
-use crate::sql::{Auto, Fetcher};
+use crate::sql::{Auto, FetcherPool};
 use crate::tenancy::auth::{Operator, User};
 use crate::tenancy::error::TenancyError;
 use crate::tenancy::migrate as tenant_migrate;
@@ -64,10 +66,16 @@ impl Default for CreateTenantOpts {
 ///
 /// # Errors
 /// Driver / SQL failures during the lookup.
-pub async fn find_org(pools: &TenantPools, slug: &str) -> Result<Option<Org>, TenancyError> {
+pub async fn find_org<DB: Database>(
+    pools: &TenantPools<DB>,
+    slug: &str,
+) -> Result<Option<Org>, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let mut rows: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(slug.to_owned()))
-        .fetch(pools.registry())
+        .fetch_pool(&pools.registry_pool())
         .await?;
     Ok(rows.pop())
 }
@@ -80,13 +88,16 @@ pub async fn find_org(pools: &TenantPools, slug: &str) -> Result<Option<Org>, Te
 ///   schema/database options.
 /// * Driver / SQL failures during schema creation, the Org INSERT, or
 ///   the tenant migration pass.
-pub async fn create_tenant(
-    pools: &TenantPools,
+pub async fn create_tenant<DB: Database>(
+    pools: &TenantPools<DB>,
     registry_url: &str,
     migrations_dir: &Path,
     slug: &str,
     opts: CreateTenantOpts,
-) -> Result<Org, TenancyError> {
+) -> Result<Org, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     if find_org(pools, slug).await?.is_some() {
         return Err(TenancyError::Validation(format!(
             "tenant slug `{slug}` already exists"
@@ -116,14 +127,30 @@ pub async fn create_tenant(
     };
 
     if let StorageMode::Schema = opts.mode {
-        let schema = schema_name.as_deref().unwrap_or(slug);
-        let sql = format!(
-            "CREATE SCHEMA IF NOT EXISTS {}",
-            super::args::quote_ident(schema)
-        );
-        rustango::sql::sqlx::query(&sql)
-            .execute(pools.registry())
-            .await?;
+        #[cfg(feature = "postgres")]
+        {
+            let pg_pools = (pools as &dyn std::any::Any)
+                .downcast_ref::<TenantPools<sqlx::Postgres>>()
+                .ok_or_else(|| {
+                    TenancyError::Validation(
+                        "schema-mode tenants require a Postgres registry".into(),
+                    )
+                })?;
+            let schema = schema_name.as_deref().unwrap_or(slug);
+            let sql = format!(
+                "CREATE SCHEMA IF NOT EXISTS {}",
+                super::args::quote_ident(schema)
+            );
+            rustango::sql::sqlx::query(&sql)
+                .execute(pg_pools.registry())
+                .await?;
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            return Err(TenancyError::Validation(
+                "schema-mode tenants require the `postgres` feature".into(),
+            ));
+        }
     }
 
     let mut org = Org {
@@ -146,11 +173,26 @@ pub async fn create_tenant(
         primary_color: None,
         theme_mode: None,
     };
-    org.insert(pools.registry()).await?;
+    org.insert_pool(&pools.registry_pool()).await?;
 
     if !opts.no_migrate {
         for dir in resolve_migration_dirs(migrations_dir) {
-            let _ = tenant_migrate::migrate_tenants(pools, &dir, registry_url).await?;
+            // PG path runs schema-mode + database-mode; non-PG runs
+            // database-mode only via migrate_tenants_db.
+            #[cfg(feature = "postgres")]
+            {
+                if let Some(pg_pools) =
+                    (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
+                {
+                    let _ = tenant_migrate::migrate_tenants(pg_pools, &dir, registry_url).await?;
+                } else {
+                    let _ = tenant_migrate::migrate_tenants_db(pools, &dir, registry_url).await?;
+                }
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                let _ = tenant_migrate::migrate_tenants_db(pools, &dir, registry_url).await?;
+            }
         }
     }
 
@@ -171,13 +213,16 @@ pub async fn create_tenant(
 /// # Errors
 /// Driver / SQL failures, or [`create_tenant`]'s validation errors
 /// (mode/url mismatch).
-pub async fn create_tenant_if_missing(
-    pools: &TenantPools,
+pub async fn create_tenant_if_missing<DB: Database>(
+    pools: &TenantPools<DB>,
     registry_url: &str,
     migrations_dir: &Path,
     slug: &str,
     opts: CreateTenantOpts,
-) -> Result<Org, TenancyError> {
+) -> Result<Org, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     if let Some(existing) = find_org(pools, slug).await? {
         return Ok(existing);
     }
@@ -189,14 +234,18 @@ pub async fn create_tenant_if_missing(
 ///
 /// # Errors
 /// Driver / SQL failures or password-hash failures.
-pub async fn create_operator_if_missing(
-    pools: &TenantPools,
+pub async fn create_operator_if_missing<DB: Database>(
+    pools: &TenantPools<DB>,
     username: &str,
     password: &str,
-) -> Result<Operator, TenancyError> {
+) -> Result<Operator, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let registry = pools.registry_pool();
     let mut existing: Vec<Operator> = Operator::objects()
         .where_(Operator::username.eq(username.to_owned()))
-        .fetch(pools.registry())
+        .fetch_pool(&registry)
         .await?;
     if let Some(op) = existing.pop() {
         return Ok(op);
@@ -209,7 +258,7 @@ pub async fn create_operator_if_missing(
         created_at: chrono::Utc::now(),
         password_changed_at: None,
     };
-    op.insert(pools.registry()).await?;
+    op.insert_pool(&registry).await?;
     Ok(op)
 }
 
@@ -220,22 +269,29 @@ pub async fn create_operator_if_missing(
 /// # Errors
 /// * `TenancyError::Validation` if the tenant slug is unknown.
 /// * Driver / SQL failures.
-pub async fn create_user_if_missing(
-    pools: &TenantPools,
+pub async fn create_user_if_missing<DB: Database>(
+    pools: &TenantPools<DB>,
     slug: &str,
     username: &str,
     password: &str,
     superuser: bool,
-) -> Result<User, TenancyError> {
+) -> Result<User, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let org = find_org(pools, slug)
         .await?
         .ok_or_else(|| TenancyError::Validation(format!("no tenant with slug `{slug}`")))?;
-    let mut conn = pools.acquire(&org).await?;
-    let conn_ref: &mut rustango::sql::sqlx::PgConnection = &mut conn;
+
+    // v0.38 — route through the backend-agnostic
+    // `TenantPools::scoped_pool_dyn` (schema-mode-aware on PG, db-mode
+    // elsewhere) + ORM `_pool` family so the same code runs on every
+    // dialect.
+    let scoped = pools.scoped_pool_dyn(&org).await?;
 
     let mut existing: Vec<User> = User::objects()
         .where_(User::username.eq(username.to_owned()))
-        .fetch_on(&mut *conn_ref)
+        .fetch_pool(&scoped)
         .await?;
     if let Some(u) = existing.pop() {
         return Ok(u);
@@ -250,7 +306,7 @@ pub async fn create_user_if_missing(
         data: serde_json::json!({}),
         password_changed_at: None,
     };
-    user.insert_on(&mut *conn_ref).await?;
+    user.save_pool(&scoped).await?;
     Ok(user)
 }
 

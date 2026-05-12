@@ -52,9 +52,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-#[cfg(feature = "postgres")]
 use crate::core::Column as _;
-#[cfg(feature = "postgres")]
 use crate::migrate;
 #[cfg(feature = "postgres")]
 use crate::sql::sqlx::postgres::PgPoolOptions;
@@ -62,11 +60,10 @@ use crate::sql::sqlx::postgres::PgPoolOptions;
 use crate::sql::sqlx::PgPool;
 #[cfg(feature = "postgres")]
 use crate::sql::Fetcher;
+use sqlx::Database;
 
 use super::error::TenancyError;
-#[cfg(feature = "postgres")]
 use super::org::{Org, StorageMode};
-#[cfg(feature = "postgres")]
 use super::pools::TenantPools;
 
 /// Outcome of [`migrate_tenants`].
@@ -110,11 +107,15 @@ pub struct TenantMigrationOutcome {
 ///
 /// # Errors
 /// As [`crate::migrate::migrate`].
-#[cfg(feature = "postgres")]
-pub async fn migrate_registry(
-    pools: &TenantPools,
+/// v0.38 — generic over the registry backend. Routes through the
+/// tri-dialect [`migrate_registry_pool`].
+pub async fn migrate_registry<DB: Database>(
+    pools: &TenantPools<DB>,
     dir: &Path,
-) -> Result<Vec<Migration>, TenancyError> {
+) -> Result<Vec<Migration>, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     migrate_registry_pool(&pools.registry_pool(), dir).await
 }
 
@@ -326,6 +327,134 @@ pub async fn migrate_tenants(
         });
     }
     Ok(report)
+}
+
+/// v0.38 — tri-dialect counterpart of [`migrate_tenants`]. Walks
+/// active orgs from the registry (any backend) and applies
+/// tenant-scoped migrations. Schema-mode tenants are rejected
+/// (schema-mode is PG-only by language); database-mode tenants
+/// migrate against their per-tenant pool via
+/// [`TenantPools::database_acquire`].
+///
+/// `_registry_url` is accepted for API symmetry with
+/// [`migrate_tenants`] but unused on this path — database-mode
+/// migrations don't need to spin up a schema-scoped pool.
+///
+/// # Errors
+/// Walking the Org table can short-circuit; per-tenant errors are
+/// captured in the [`TenantMigrationReport`] without aborting.
+pub async fn migrate_tenants_db<DB: Database>(
+    pools: &TenantPools<DB>,
+    dir: &Path,
+    _registry_url: &str,
+) -> Result<TenantMigrationReport, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    use crate::sql::FetcherPool as _;
+    let scoped = scoped_subset(dir, MigrationScope::Tenant).await?;
+    let scoped_path = match &scoped {
+        ScopedDir::Owned(temp) => temp.path().to_path_buf(),
+        ScopedDir::Original => dir.to_path_buf(),
+    };
+
+    let registry_pool = pools.registry_pool();
+    let orgs: Vec<Org> = Org::objects()
+        .where_(Org::active.eq(true))
+        .fetch_pool(&registry_pool)
+        .await?;
+
+    info!(
+        target: "crate::tenancy",
+        tenants = orgs.len(),
+        dir = %dir.display(),
+        "applying tenant-scoped migrations (db-mode only)"
+    );
+
+    let mut report = TenantMigrationReport::default();
+    for org in &orgs {
+        let outcome = run_for_one_tenant_db(pools, org, &scoped_path).await;
+        match &outcome {
+            Ok(applied) => info!(
+                target: "crate::tenancy",
+                slug = %org.slug,
+                applied = applied.len(),
+                "tenant migrations done"
+            ),
+            Err(e) => warn!(
+                target: "crate::tenancy",
+                slug = %org.slug,
+                error = %e,
+                "tenant migration failed; continuing with remaining tenants"
+            ),
+        }
+        report.tenants.push(match outcome {
+            Ok(applied) => TenantMigrationOutcome {
+                slug: org.slug.clone(),
+                applied,
+                error: None,
+            },
+            Err(error) => TenantMigrationOutcome {
+                slug: org.slug.clone(),
+                applied: Vec::new(),
+                error: Some(error),
+            },
+        });
+    }
+    Ok(report)
+}
+
+async fn run_for_one_tenant_db<DB: Database>(
+    pools: &TenantPools<DB>,
+    org: &Org,
+    dir: &Path,
+) -> Result<Vec<Migration>, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
+        TenancyError::Validation(format!(
+            "org `{}` has unknown storage_mode `{got}`",
+            org.slug
+        ))
+    })?;
+    if !matches!(mode, StorageMode::Database) {
+        return Err(TenancyError::Validation(format!(
+            "org `{}` is schema-mode but migrate_tenants_db only handles \
+             database-mode tenants (schema-mode is PG-only by language)",
+            org.slug,
+        )));
+    }
+    // Get a tenant-scoped Pool enum (no SET search_path needed for
+    // database-mode), apply migrations through `migrate_pool`, then
+    // run the audit/permission/contenttype/api-key DDL backfills
+    // through the same backend-agnostic helpers the registry-side
+    // bootstrap uses.
+    let tenant_pool = pools.database_pool_for_org(org).await?;
+    let inner_pool = match &tenant_pool {
+        super::pools::TenantPool::Database { pool } => crate::sql::Pool::from((**pool).clone()),
+        #[cfg(feature = "postgres")]
+        super::pools::TenantPool::Schema { .. } => {
+            unreachable!("database_pool_for_org rejects schema-mode")
+        }
+    };
+    let applied = migrate::migrate_pool(&inner_pool, dir).await?;
+    if let Err(e) = crate::audit::ensure_table_pool(&inner_pool).await {
+        tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "audit::ensure_table_pool failed for database-mode tenant");
+    }
+    if let Err(e) = super::permissions::ensure_tables_pool(&inner_pool).await {
+        tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "permissions::ensure_tables_pool failed for database-mode tenant");
+    }
+    if let Err(e) = super::permissions::auto_create_permissions_pool(&inner_pool).await {
+        tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "auto_create_permissions_pool failed for database-mode tenant");
+    }
+    if let Err(e) = crate::contenttypes::ensure_seeded_pool(&inner_pool).await {
+        tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded_pool failed for database-mode tenant");
+    }
+    if let Err(e) = super::auth_backends::ensure_api_keys_table_pool(&inner_pool).await {
+        tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "ensure_api_keys_table_pool failed for database-mode tenant");
+    }
+    Ok(applied)
 }
 
 #[cfg(feature = "postgres")]

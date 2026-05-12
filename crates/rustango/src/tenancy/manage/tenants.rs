@@ -5,6 +5,8 @@
 use std::io::Write;
 use std::path::Path;
 
+use sqlx::Database;
+
 use crate::core::Column as _;
 use crate::sql::{Auto, FetcherPool, UpdaterPool};
 
@@ -30,13 +32,16 @@ struct CreateTenantArgs {
     no_migrate: bool,
 }
 
-pub(super) async fn create_tenant<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn create_tenant<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     registry_url: &str,
     dir: &Path,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let parsed = parse_create_tenant_args(args)?;
 
     // Reject duplicate slug up front — saves a partial-state mess
@@ -84,14 +89,32 @@ pub(super) async fn create_tenant<W: Write + Send>(
     // via IF NOT EXISTS.
     if let StorageMode::Schema = parsed.mode {
         // Schema mode is PG-only by language — `CREATE SCHEMA` /
-        // `SET search_path` don't exist on sqlite or mysql. The
-        // registry pool MUST be PG here; pools.registry() panics
-        // with a clear error otherwise.
-        let schema = schema_name.as_deref().unwrap_or(&parsed.slug);
-        let sql = format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(schema));
-        rustango::sql::sqlx::query(&sql)
-            .execute(pools.registry())
-            .await?;
+        // `SET search_path` don't exist on sqlite or mysql.
+        #[cfg(feature = "postgres")]
+        {
+            let pg_pools = (pools as &dyn std::any::Any)
+                .downcast_ref::<TenantPools<sqlx::Postgres>>()
+                .ok_or_else(|| {
+                    TenancyError::Validation(
+                        "schema-mode tenants require a Postgres registry — pass --mode database \
+                         on sqlite/mysql"
+                            .into(),
+                    )
+                })?;
+            let schema = schema_name.as_deref().unwrap_or(&parsed.slug);
+            let sql = format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(schema));
+            rustango::sql::sqlx::query(&sql)
+                .execute(pg_pools.registry())
+                .await?;
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            return Err(TenancyError::Validation(
+                "schema-mode tenants require the `postgres` feature — pass --mode database \
+                 on sqlite/mysql builds"
+                    .into(),
+            ));
+        }
     }
 
     let mut org = Org {
@@ -129,7 +152,21 @@ pub(super) async fn create_tenant<W: Write + Send>(
         return Ok(());
     }
     writeln!(w, "  applying tenant migrations…")?;
-    let report = tenant_migrate::migrate_tenants(pools, dir, registry_url).await?;
+    // v0.38 — on PG go through `migrate_tenants` (schema-mode +
+    // database-mode); on sqlite/mysql use `migrate_tenants_db`
+    // (database-mode only).
+    #[cfg(feature = "postgres")]
+    let report = {
+        if let Some(pg_pools) =
+            (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
+        {
+            tenant_migrate::migrate_tenants(pg_pools, dir, registry_url).await?
+        } else {
+            tenant_migrate::migrate_tenants_db(pools, dir, registry_url).await?
+        }
+    };
+    #[cfg(not(feature = "postgres"))]
+    let report = tenant_migrate::migrate_tenants_db(pools, dir, registry_url).await?;
     let outcome = report.tenants.iter().find(|t| t.slug == parsed.slug);
     match outcome {
         Some(o) => {
@@ -224,11 +261,14 @@ fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, Tenancy
 
 // ---------- drop-tenant ----------
 
-pub(super) async fn drop_tenant<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn drop_tenant<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     reject_leading_flag(
         args,
         "drop-tenant",
@@ -336,11 +376,14 @@ pub(super) async fn drop_tenant<W: Write + Send>(
 
 // ---------- purge-tenant (v0.6 step 6) ----------
 
-pub(super) async fn purge_tenant<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn purge_tenant<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     reject_leading_flag(
         args,
         "purge-tenant",
@@ -431,15 +474,30 @@ pub(super) async fn purge_tenant<W: Write + Send>(
 
     match mode {
         StorageMode::Schema => {
-            // Schema mode is PG-only by language. `pools.registry()`
-            // panics if the registry is non-PG, which is the right
-            // failure for "you can't drop a PG schema on sqlite".
-            let schema = org.schema_name.clone().unwrap_or_else(|| slug.clone());
-            let sql = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(&schema));
-            rustango::sql::sqlx::query(&sql)
-                .execute(pools.registry())
-                .await?;
-            writeln!(w, "purged tenant `{slug}` (dropped schema `{schema}`)")?;
+            // Schema mode is PG-only by language. Downcast to grab
+            // the typed `pools.registry()` PgPool accessor.
+            #[cfg(feature = "postgres")]
+            {
+                let pg_pools = (pools as &dyn std::any::Any)
+                    .downcast_ref::<TenantPools<sqlx::Postgres>>()
+                    .ok_or_else(|| {
+                        TenancyError::Validation(
+                            "purge-tenant: schema-mode tenants require a Postgres registry".into(),
+                        )
+                    })?;
+                let schema = org.schema_name.clone().unwrap_or_else(|| slug.clone());
+                let sql = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(&schema));
+                rustango::sql::sqlx::query(&sql)
+                    .execute(pg_pools.registry())
+                    .await?;
+                writeln!(w, "purged tenant `{slug}` (dropped schema `{schema}`)")?;
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                return Err(TenancyError::Validation(
+                    "purge-tenant: schema-mode tenants require the `postgres` feature".into(),
+                ));
+            }
         }
         StorageMode::Database => {
             if !purge_database {
@@ -455,7 +513,23 @@ pub(super) async fn purge_tenant<W: Write + Send>(
             // are open.
             let url = pools.resolved_database_url(&org).await?;
             pools.invalidate(&slug).await;
-            drop_database_at(&url, w).await?;
+            // v0.38 — DROP DATABASE is PG-only via this helper for
+            // now. On sqlite the operator deletes the .db file out-
+            // of-band; on mysql the syntax matches but the admin-
+            // db rewrite is different so we'd need a parallel helper.
+            #[cfg(feature = "postgres")]
+            {
+                drop_database_at(&url, w).await?;
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                writeln!(
+                    w,
+                    "  purged tenant `{slug}` registry row; manually delete the \
+                     tenant database at `{url}` (DROP DATABASE not wired for \
+                     sqlite/mysql in v0.38)",
+                )?;
+            }
             writeln!(w, "purged tenant `{slug}` (dropped dedicated database)")?;
         }
     }
@@ -480,6 +554,12 @@ pub(super) async fn purge_tenant<W: Write + Send>(
 /// the `postgres` admin database (DROP DATABASE can't run from a
 /// connection to the database being dropped). Issue the DROP, then
 /// close the admin connection.
+///
+/// v0.38 — PG-only. SQLite databases live in a single file (delete
+/// the file); MySQL has `DROP DATABASE` but the per-tenant URL
+/// rewrite gymnastics are different enough that lifting this helper
+/// to be tri-dialect is queued separately.
+#[cfg(feature = "postgres")]
 async fn drop_database_at<W: Write + Send>(
     tenant_url: &str,
     w: &mut W,
@@ -519,10 +599,13 @@ async fn drop_database_at<W: Write + Send>(
 
 // ---------- list-tenants ----------
 
-pub(super) async fn list_tenants<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn list_tenants<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let orgs: Vec<Org> = Org::objects().fetch_pool(&pools.registry_pool()).await?;
     if orgs.is_empty() {
         writeln!(w, "(no tenants)")?;

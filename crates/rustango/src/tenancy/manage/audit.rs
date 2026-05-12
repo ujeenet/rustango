@@ -15,6 +15,8 @@
 
 use std::io::Write;
 
+use sqlx::Database;
+
 use crate::core::Column as _;
 use crate::sql::FetcherPool as _;
 use crate::tenancy::error::TenancyError;
@@ -23,11 +25,14 @@ use crate::tenancy::Org;
 
 use super::args::next_value;
 
-pub(super) async fn audit_cleanup_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn audit_cleanup_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let mut days: Option<i64> = None;
     let mut keep_last: Option<i64> = None;
     let mut tenant_slug: Option<String> = None;
@@ -99,15 +104,16 @@ pub(super) async fn audit_cleanup_cmd<W: Write + Send>(
     let mut total_deleted: u64 = 0;
 
     for org in &orgs {
-        // `scoped_pool` bakes `search_path` into a dedicated pool in
-        // schema mode — without it the audit query would hit the
-        // `public` schema instead of the tenant's.
-        let pool = pools.scoped_pool(org).await?;
+        // v0.38 — route through scoped_pool_dyn which yields a
+        // backend-agnostic `crate::sql::Pool` enum: on PG schema-mode
+        // it builds a dedicated pool with `search_path` baked in;
+        // database-mode (any backend) just wraps the cached pool.
+        let scoped = pools.scoped_pool_dyn(org).await?;
 
         let deleted = if let Some(n) = days {
-            crate::audit::cleanup_older_than(&pool, n).await?
+            crate::audit::cleanup_older_than_pool(&scoped, n).await?
         } else if let Some(n) = keep_last {
-            crate::audit::cleanup_keep_last_n(&pool, n).await?
+            crate::audit::cleanup_keep_last_n_pool(&scoped, n).await?
         } else {
             unreachable!()
         };

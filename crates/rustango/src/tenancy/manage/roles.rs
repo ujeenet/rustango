@@ -1,13 +1,17 @@
 //! `create-role`, `assign-role`, `revoke-role`, `list-roles`,
 //! `grant-perm`, `revoke-perm`, `create-api-key` manage verbs.
+//!
+//! v0.38 — fully tri-dialect via `TenantPools<DB>` generics +
+//! `_pool` ORM helpers + `scoped_pool_dyn` for schema-mode-aware
+//! pool resolution.
 
 use std::io::Write;
 
-use crate::core::Column as _;
-use crate::sql::Fetcher as _;
-use crate::tenancy::{auth_backends, permissions, Org, User};
+use sqlx::Database;
 
-use crate::sql::sqlx::{PgPool, Row};
+use crate::core::Column as _;
+use crate::sql::FetcherPool as _;
+use crate::tenancy::{auth_backends, permissions, Org, User};
 
 use super::super::error::TenancyError;
 use super::super::pools::TenantPools;
@@ -15,11 +19,14 @@ use super::args::{next_value, reject_leading_flag};
 
 // ------------------------------------------------------------------ create-role
 
-pub(super) async fn create_role_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn create_role_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     reject_leading_flag(
         args,
         "create-role",
@@ -41,74 +48,88 @@ pub(super) async fn create_role_cmd<W: Write + Send>(
         }
     }
     let pool = tenant_pool_for_slug(pools, &slug).await?;
-    let id = permissions::create_role(&name, &description, &pool).await?;
+    let id = permissions::create_role_pool(&name, &description, &pool).await?;
     writeln!(w, "created role `{name}` (id={id}) on tenant `{slug}`")?;
     Ok(())
 }
 
 // ------------------------------------------------------------------ list-roles
 
-pub(super) async fn list_roles_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn list_roles_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     reject_leading_flag(args, "list-roles", "slug", "list-roles <slug>")?;
     let mut iter = args.iter();
     let slug = next_value(&mut iter, "<tenant-slug>")?;
     let pool = tenant_pool_for_slug(pools, &slug).await?;
-    let rows = crate::sql::sqlx::query(
-        r#"SELECT r.id, r.name, r.description,
-                  COUNT(rp.codename) AS perm_count
-           FROM "rustango_roles" r
-           LEFT JOIN "rustango_role_permissions" rp ON rp.role_id = r.id
-           GROUP BY r.id
-           ORDER BY r.name"#,
-    )
-    .fetch_all(&pool)
-    .await
-    .map_err(TenancyError::Driver)?;
-
-    if rows.is_empty() {
+    // v0.38 — list via ORM + per-role count via separate fetches.
+    // Trades one JOIN-with-GROUP-BY query for N+1 queries; for the
+    // tiny per-tenant role count (usually < 10) the perf delta is
+    // unnoticeable, and the code stays tri-dialect without per-
+    // dialect SQL.
+    use crate::tenancy::permissions::{Role, RolePermission};
+    let roles: Vec<Role> = Role::objects().fetch_pool(&pool).await?;
+    if roles.is_empty() {
         writeln!(w, "(no roles on tenant `{slug}`)")?;
         return Ok(());
     }
     writeln!(w, "{:<6} {:<30} {:<8} description", "id", "name", "perms")?;
     writeln!(w, "{}", "-".repeat(60))?;
-    for row in &rows {
-        let id: i64 = row.try_get("id").unwrap_or(0);
-        let name: String = row.try_get("name").unwrap_or_default();
-        let desc: String = row.try_get("description").unwrap_or_default();
-        let count: i64 = row.try_get("perm_count").unwrap_or(0);
-        writeln!(w, "{id:<6} {name:<30} {count:<8} {desc}")?;
+    for role in &roles {
+        let id = role.id.get().copied().unwrap_or(0);
+        let perms: Vec<RolePermission> = RolePermission::objects()
+            .where_(RolePermission::role_id.eq(id))
+            .fetch_pool(&pool)
+            .await?;
+        writeln!(
+            w,
+            "{id:<6} {:<30} {:<8} {}",
+            role.name,
+            perms.len(),
+            role.description,
+        )?;
     }
     Ok(())
 }
 
 // ------------------------------------------------------------------ assign-role / revoke-role
 
-pub(super) async fn assign_role_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn assign_role_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     role_membership_cmd(pools, args, w, true).await
 }
 
-pub(super) async fn revoke_role_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn revoke_role_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     role_membership_cmd(pools, args, w, false).await
 }
 
-async fn role_membership_cmd<W: Write + Send>(
-    pools: &TenantPools,
+async fn role_membership_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     args: &[String],
     w: &mut W,
     assign: bool,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let verb = if assign { "assign-role" } else { "revoke-role" };
     let usage = if assign {
         "assign-role <slug> <username> <role-name>"
@@ -126,13 +147,13 @@ async fn role_membership_cmd<W: Write + Send>(
     let role_id = role_id_by_name(&role_name, &pool).await?;
 
     if assign {
-        permissions::assign_role(user_id, role_id, &pool).await?;
+        permissions::assign_role_pool(user_id, role_id, &pool).await?;
         writeln!(
             w,
             "assigned role `{role_name}` to `{username}` on tenant `{slug}`"
         )?;
     } else {
-        permissions::remove_role(user_id, role_id, &pool).await?;
+        permissions::remove_role_pool(user_id, role_id, &pool).await?;
         writeln!(
             w,
             "removed role `{role_name}` from `{username}` on tenant `{slug}`"
@@ -143,11 +164,14 @@ async fn role_membership_cmd<W: Write + Send>(
 
 // ------------------------------------------------------------------ grant-perm / revoke-perm
 
-pub(super) async fn grant_perm_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn grant_perm_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     reject_leading_flag(
         args,
         "grant-perm",
@@ -168,14 +192,14 @@ pub(super) async fn grant_perm_cmd<W: Write + Send>(
     let pool = tenant_pool_for_slug(pools, &slug).await?;
     if to_role {
         let role_id = role_id_by_name(&target, &pool).await?;
-        permissions::grant_role_perm(role_id, &codename, &pool).await?;
+        permissions::grant_role_perm_pool(role_id, &codename, &pool).await?;
         writeln!(
             w,
             "granted `{codename}` to role `{target}` on tenant `{slug}`"
         )?;
     } else {
         let user_id = user_id_by_username(&target, &pool).await?;
-        permissions::set_user_perm(user_id, &codename, true, &pool).await?;
+        permissions::set_user_perm_pool(user_id, &codename, true, &pool).await?;
         writeln!(
             w,
             "granted `{codename}` to user `{target}` on tenant `{slug}`"
@@ -184,11 +208,14 @@ pub(super) async fn grant_perm_cmd<W: Write + Send>(
     Ok(())
 }
 
-pub(super) async fn revoke_perm_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn revoke_perm_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     reject_leading_flag(
         args,
         "revoke-perm",
@@ -209,14 +236,14 @@ pub(super) async fn revoke_perm_cmd<W: Write + Send>(
     let pool = tenant_pool_for_slug(pools, &slug).await?;
     if to_role {
         let role_id = role_id_by_name(&target, &pool).await?;
-        permissions::revoke_role_perm(role_id, &codename, &pool).await?;
+        permissions::revoke_role_perm_pool(role_id, &codename, &pool).await?;
         writeln!(
             w,
             "revoked `{codename}` from role `{target}` on tenant `{slug}`"
         )?;
     } else {
         let user_id = user_id_by_username(&target, &pool).await?;
-        permissions::set_user_perm(user_id, &codename, false, &pool).await?;
+        permissions::set_user_perm_pool(user_id, &codename, false, &pool).await?;
         writeln!(
             w,
             "denied `{codename}` for user `{target}` on tenant `{slug}`"
@@ -227,11 +254,14 @@ pub(super) async fn revoke_perm_cmd<W: Write + Send>(
 
 // ------------------------------------------------------------------ create-api-key
 
-pub(super) async fn create_api_key_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn create_api_key_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     reject_leading_flag(
         args,
         "create-api-key",
@@ -266,13 +296,12 @@ pub(super) async fn create_api_key_cmd<W: Write + Send>(
     }
 
     let pool = tenant_pool_for_slug(pools, &slug).await?;
-    let pool_enum: crate::sql::Pool = pool.clone().into();
-    auth_backends::ensure_api_keys_table_pool(&pool_enum)
+    auth_backends::ensure_api_keys_table_pool(&pool)
         .await
         .map_err(TenancyError::Driver)?;
     let user_id = user_id_by_username(&username, &pool).await?;
     let expires_at = expires_days.map(|d| chrono::Utc::now() + chrono::Duration::days(d));
-    let token = auth_backends::create_api_key(user_id, &label, expires_at, &pool_enum).await?;
+    let token = auth_backends::create_api_key(user_id, &label, expires_at, &pool).await?;
 
     writeln!(w, "API key for `{username}` on tenant `{slug}`:")?;
     writeln!(w, "  {token}")?;
@@ -281,32 +310,15 @@ pub(super) async fn create_api_key_cmd<W: Write + Send>(
 }
 
 // ------------------------------------------------------------------ seed-permissions
-//
-// `manage seed-permissions [--slug <s>]` — invoke
-// `auto_create_permissions` for one or every active tenant. The
-// auto-invoke at migrate time (#61) covers the typical case; this
-// verb is the ad-hoc reseed for situations where the tenant pool
-// existed before the model carried `#[rustango(permissions)]`,
-// when a model was added between full migrate runs, or when an
-// operator wants to verify the catalog is fully populated without
-// touching schema.
 
-/// `manage seed-permissions [--slug <slug>]` — re-run
-/// `auto_create_permissions` against one or every active tenant.
-///
-/// Without `--slug`, walks every active org and seeds each in
-/// turn. With `--slug <s>`, scopes to a single tenant. The
-/// underlying call is idempotent (UNIQUE on `(content_type_id,
-/// codename)` — re-running on a populated catalog is a no-op).
-///
-/// # Errors
-/// [`TenancyError::Validation`] if `--slug` references a missing
-/// tenant; [`TenancyError::Driver`] for SQL failures.
-pub(super) async fn seed_permissions_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn seed_permissions_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let mut slug: Option<String> = None;
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
@@ -317,7 +329,7 @@ pub(super) async fn seed_permissions_cmd<W: Write + Send>(
                     w,
                     "seed-permissions [--slug <s>]\n  \
                      Re-run auto_create_permissions for one (with --slug) or every\n  \
-                     active tenant. Idempotent — UNIQUE on (content_type_id, codename)\n  \
+                     active tenant. Idempotent — UNIQUE on (table_name, codename)\n  \
                      means re-running on a populated catalog is a no-op."
                 )?;
                 return Ok(());
@@ -330,10 +342,11 @@ pub(super) async fn seed_permissions_cmd<W: Write + Send>(
         }
     }
 
+    let registry = pools.registry_pool();
     let targets: Vec<Org> = if let Some(s) = slug.as_deref() {
         let orgs: Vec<Org> = Org::objects()
             .where_(Org::slug.eq(s.to_owned()))
-            .fetch(pools.registry())
+            .fetch_pool(&registry)
             .await?;
         if orgs.is_empty() {
             return Err(TenancyError::Validation(format!("tenant `{s}` not found")));
@@ -342,7 +355,7 @@ pub(super) async fn seed_permissions_cmd<W: Write + Send>(
     } else {
         Org::objects()
             .where_(Org::active.eq(true))
-            .fetch(pools.registry())
+            .fetch_pool(&registry)
             .await?
     };
 
@@ -352,17 +365,11 @@ pub(super) async fn seed_permissions_cmd<W: Write + Send>(
     }
 
     for org in &targets {
-        let pool = pools.scoped_pool(org).await?;
-        // ensure_tables first — the seeder writes to
-        // `rustango_permissions` + `rustango_content_types`, both
-        // of which are bootstrap-migration tables but might be
-        // missing on tenants migrated pre-#61.
-        permissions::ensure_tables(&pool)
+        let pool = pools.scoped_pool_dyn(org).await?;
+        permissions::ensure_tables_pool(&pool)
             .await
             .map_err(TenancyError::Driver)?;
-        permissions::auto_create_permissions(&pool)
-            .await
-            .map_err(TenancyError::Driver)?;
+        permissions::auto_create_permissions_pool(&pool).await?;
         writeln!(w, "seeded `{}`", org.slug)?;
     }
     writeln!(w, "done — {} tenant(s) processed", targets.len())?;
@@ -371,22 +378,28 @@ pub(super) async fn seed_permissions_cmd<W: Write + Send>(
 
 // ------------------------------------------------------------------ helpers
 
-async fn tenant_pool_for_slug(pools: &TenantPools, slug: &str) -> Result<PgPool, TenancyError> {
+async fn tenant_pool_for_slug<DB: Database>(
+    pools: &TenantPools<DB>,
+    slug: &str,
+) -> Result<crate::sql::Pool, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let orgs: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(slug.to_owned()))
-        .fetch(pools.registry())
+        .fetch_pool(&pools.registry_pool())
         .await?;
     let org = orgs
         .into_iter()
         .next()
         .ok_or_else(|| TenancyError::Validation(format!("tenant `{slug}` not found")))?;
-    pools.scoped_pool(&org).await
+    pools.scoped_pool_dyn(&org).await
 }
 
-async fn user_id_by_username(username: &str, pool: &PgPool) -> Result<i64, TenancyError> {
+async fn user_id_by_username(username: &str, pool: &crate::sql::Pool) -> Result<i64, TenancyError> {
     let rows = User::objects()
         .where_(User::username.eq(username.to_owned()))
-        .fetch(pool)
+        .fetch_pool(pool)
         .await?;
     rows.into_iter()
         .next()
@@ -394,11 +407,11 @@ async fn user_id_by_username(username: &str, pool: &PgPool) -> Result<i64, Tenan
         .map(|u| u.id.get().copied().unwrap_or(0))
 }
 
-async fn role_id_by_name(name: &str, pool: &PgPool) -> Result<i64, TenancyError> {
+async fn role_id_by_name(name: &str, pool: &crate::sql::Pool) -> Result<i64, TenancyError> {
     use crate::tenancy::permissions::Role;
     let rows = Role::objects()
         .where_(Role::name.eq(name.to_owned()))
-        .fetch(pool)
+        .fetch_pool(pool)
         .await?;
     rows.into_iter()
         .next()

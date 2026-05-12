@@ -1,7 +1,17 @@
 //! User-account verbs: `create-operator` (registry-side, slice 6) and
 //! `create-user` (per-tenant, slice 6).
+//!
+//! v0.38 — generic over the tenant backend via `TenantPools<DB>`.
+//! The per-tenant verbs (create-user / set-superuser / reset-password)
+//! rely on `scoped_tenant_pool` which on PG dispatches through schema-
+//! mode + database-mode, and on sqlite/mysql resolves to database-mode
+//! only. The `_pool` ORM family (`fetch_pool`, `save_pool`,
+//! `update_pool`) drives every backend-uniform query path so the same
+//! verb body runs on PG / MySQL / SQLite.
 
 use std::io::Write;
+
+use sqlx::Database;
 
 use crate::core::Column as _;
 use crate::sql::{Auto, FetcherPool};
@@ -13,11 +23,14 @@ use crate::tenancy::pools::TenantPools;
 
 // ---------- create-operator (Slice 6) ----------
 
-pub(super) async fn create_operator_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn create_operator_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     reject_leading_flag(
         args,
         "create-operator",
@@ -111,12 +124,15 @@ pub(super) async fn create_operator_cmd<W: Write + Send>(
 
 // ---------- create-user (Slice 6) ----------
 
-pub(super) async fn create_user_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn create_user_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     registry_url: &str,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     reject_leading_flag(
         args,
         "create-user",
@@ -197,89 +213,41 @@ pub(super) async fn create_user_cmd<W: Write + Send>(
     })?;
 
     let hash = crate::tenancy::password::hash(&plain)?;
-    let now = chrono::Utc::now().to_rfc3339();
 
-    // We bypass `User::insert` because that uses `pools.registry()`'s
-    // pool by default and we need a connection scoped to the tenant.
-    // Hand-write an INSERT against the scoped connection.
-    use crate::sql::sqlx::Row;
-    use crate::tenancy::org::StorageMode;
-    let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
-        TenancyError::Validation(format!("org `{slug}` has unknown storage_mode `{got}`"))
-    })?;
+    // v0.38 — open a tenant-scoped Pool enum (handles schema-mode on
+    // PG, database-mode on any backend). Then drive the read/write
+    // through the tri-dialect ORM (FetcherPool::fetch_pool +
+    // Model::save_pool) so the same code runs on PG / MySQL / SQLite.
+    use crate::sql::FetcherPool as _;
+    let scoped = scoped_tenant_pool(pools, registry_url, &slug).await?;
+
     // v0.27.6 — first-user-auto-superuser. When a tenant has zero
-    // existing rows in `rustango_users`, the first user we create
-    // is implicitly promoted to superuser even if `--superuser`
-    // wasn't passed. Pre-fix, an onboarding script that ran
-    // `create-user osu admin --password ...` (forgetting
-    // `--superuser`) produced a tenant with exactly one user who
-    // could log in but saw an empty admin sidebar (no granted
-    // CRUD codenames → `is_visible()` returns false for every
-    // table). Mirrors Django's `createsuperuser` first-user UX.
-    // Caller can still pass `--superuser` for explicit intent;
-    // future flag `--no-auto-superuser` could opt out.
+    // existing rows in `rustango_users`, the first user is implicitly
+    // promoted to superuser even if `--superuser` wasn't passed.
     let mut auto_promoted = false;
     if !is_superuser {
-        let existing_count: Option<i64> = match mode {
-            StorageMode::Schema => {
-                let schema = org.schema_name.clone().unwrap_or_else(|| slug.clone());
-                let pool = build_schema_scoped_pool(registry_url, &schema).await?;
-                let row = rustango::sql::sqlx::query("SELECT COUNT(*) AS n FROM rustango_users")
-                    .fetch_one(&pool)
-                    .await
-                    .ok();
-                pool.close().await;
-                row.and_then(|r| r.try_get::<i64, _>("n").ok())
-            }
-            StorageMode::Database => {
-                let tp = pools.pool_for_org(&org).await?;
-                rustango::sql::sqlx::query("SELECT COUNT(*) AS n FROM rustango_users")
-                    .fetch_one(tp.pool())
-                    .await
-                    .ok()
-                    .and_then(|r| r.try_get::<i64, _>("n").ok())
-            }
-        };
-        if existing_count == Some(0) {
+        let existing: Vec<crate::tenancy::User> = crate::tenancy::User::objects()
+            .fetch_pool(&scoped)
+            .await
+            .unwrap_or_default();
+        if existing.is_empty() {
             is_superuser = true;
             auto_promoted = true;
         }
     }
-    let row_id: i64 = match mode {
-        StorageMode::Schema => {
-            // Fresh search-path-bound pool so the INSERT lands in the
-            // tenant's schema. Mirrors the migration / admin path.
-            let schema = org.schema_name.clone().unwrap_or_else(|| slug.clone());
-            let pool = build_schema_scoped_pool(registry_url, &schema).await?;
-            let row = rustango::sql::sqlx::query(
-                "INSERT INTO rustango_users (username, password_hash, is_superuser, active, created_at) \
-                 VALUES ($1, $2, $3, true, $4::timestamptz) RETURNING id",
-            )
-            .bind(&username)
-            .bind(&hash)
-            .bind(is_superuser)
-            .bind(&now)
-            .fetch_one(&pool)
-            .await?;
-            let id: i64 = row.try_get("id")?;
-            pool.close().await;
-            id
-        }
-        StorageMode::Database => {
-            let tp = pools.pool_for_org(&org).await?;
-            let row = rustango::sql::sqlx::query(
-                "INSERT INTO rustango_users (username, password_hash, is_superuser, active, created_at) \
-                 VALUES ($1, $2, $3, true, $4::timestamptz) RETURNING id",
-            )
-            .bind(&username)
-            .bind(&hash)
-            .bind(is_superuser)
-            .bind(&now)
-            .fetch_one(tp.pool())
-            .await?;
-            row.try_get("id")?
-        }
+
+    let mut user = crate::tenancy::User {
+        id: Auto::default(),
+        username: username.clone(),
+        password_hash: hash,
+        is_superuser,
+        active: true,
+        created_at: chrono::Utc::now(),
+        data: serde_json::Value::Object(serde_json::Map::new()),
+        password_changed_at: None,
     };
+    user.save_pool(&scoped).await?;
+    let row_id: i64 = user.id.get().copied().unwrap_or_default();
     if auto_promoted {
         writeln!(
             w,
@@ -306,12 +274,15 @@ pub(super) async fn create_user_cmd<W: Write + Send>(
 /// Convenience entrypoint that always sets `is_superuser = true` —
 /// equivalent to `create-user <slug> <username> --superuser` but
 /// with a clearer name and prompts when args are missing.
-pub(super) async fn create_superuser_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn create_superuser_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     registry_url: &str,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     // Forward to `create_user_cmd` with `--superuser` injected.
     let mut forwarded: Vec<String> = args.to_vec();
     if !forwarded.iter().any(|s| s == "--superuser") {
@@ -328,12 +299,15 @@ pub(super) async fn create_superuser_cmd<W: Write + Send>(
 /// reason for this verb existing — a freshly-onboarded user lacks
 /// any granted CRUD codenames and the admin sidebar appears empty.
 /// Promoting them to superuser bypasses the per-codename check.
-pub(super) async fn set_superuser_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn set_superuser_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     registry_url: &str,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     reject_leading_flag(
         args,
         "set-superuser",
@@ -366,15 +340,26 @@ pub(super) async fn set_superuser_cmd<W: Write + Send>(
         }
     }
     let pool = scoped_tenant_pool(pools, registry_url, &slug).await?;
-    let result = rustango::sql::sqlx::query(
-        "UPDATE rustango_users SET is_superuser = $1 WHERE username = $2",
+    // v0.38 — UPDATE via tri-dialect raw_execute_pool. Dialect
+    // emitter picks placeholders ($1/$2 on PG, ? on sqlite/mysql).
+    let dialect = pool.dialect();
+    let users_t = dialect.quote_ident("rustango_users");
+    let is_super_col = dialect.quote_ident("is_superuser");
+    let username_col = dialect.quote_ident("username");
+    let p1 = dialect.placeholder(1);
+    let p2 = dialect.placeholder(2);
+    let sql = format!("UPDATE {users_t} SET {is_super_col} = {p1} WHERE {username_col} = {p2}");
+    let affected = rustango::sql::raw_execute_pool(
+        &pool,
+        &sql,
+        vec![
+            rustango::core::SqlValue::from(on),
+            rustango::core::SqlValue::from(username.clone()),
+        ],
     )
-    .bind(on)
-    .bind(&username)
-    .execute(&pool)
-    .await?;
-    pool.close().await;
-    if result.rows_affected() == 0 {
+    .await
+    .map_err(|e| TenancyError::Validation(format!("set-superuser: {e}")))?;
+    if affected == 0 {
         return Err(TenancyError::Validation(format!(
             "set-superuser: no user `{username}` in tenant `{slug}`"
         )));
@@ -393,12 +378,15 @@ pub(super) async fn set_superuser_cmd<W: Write + Send>(
 /// password. Use this from the admin's perspective to recover a
 /// locked-out user; tenant users themselves should change their
 /// password via the (still-pending #77) self-serve UI.
-pub(super) async fn reset_password_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn reset_password_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     registry_url: &str,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     reject_leading_flag(
         args,
         "reset-password",
@@ -453,15 +441,32 @@ pub(super) async fn reset_password_cmd<W: Write + Send>(
     };
     let hash = crate::tenancy::password::hash(&plain)?;
     let pool = scoped_tenant_pool(pools, registry_url, &slug).await?;
-    let result = rustango::sql::sqlx::query(
-        "UPDATE rustango_users SET password_hash = $1, password_changed_at = NOW() WHERE username = $2",
+    // v0.38 — tri-dialect UPDATE. Bind chrono::Utc::now() instead of
+    // SQL `NOW()` so the same code works on PG/MySQL (NOW()) and
+    // SQLite (CURRENT_TIMESTAMP). raw_execute_pool routes per dialect.
+    let dialect = pool.dialect();
+    let users_t = dialect.quote_ident("rustango_users");
+    let hash_col = dialect.quote_ident("password_hash");
+    let ts_col = dialect.quote_ident("password_changed_at");
+    let username_col = dialect.quote_ident("username");
+    let p1 = dialect.placeholder(1);
+    let p2 = dialect.placeholder(2);
+    let p3 = dialect.placeholder(3);
+    let sql = format!(
+        "UPDATE {users_t} SET {hash_col} = {p1}, {ts_col} = {p2} WHERE {username_col} = {p3}"
+    );
+    let affected = rustango::sql::raw_execute_pool(
+        &pool,
+        &sql,
+        vec![
+            rustango::core::SqlValue::from(hash.clone()),
+            rustango::core::SqlValue::DateTime(chrono::Utc::now()),
+            rustango::core::SqlValue::from(username.clone()),
+        ],
     )
-    .bind(&hash)
-    .bind(&username)
-    .execute(&pool)
-    .await?;
-    pool.close().await;
-    if result.rows_affected() == 0 {
+    .await
+    .map_err(|e| TenancyError::Validation(format!("reset-password: {e}")))?;
+    if affected == 0 {
         return Err(TenancyError::Validation(format!(
             "reset-password: no user `{username}` in tenant `{slug}`"
         )));
@@ -480,11 +485,14 @@ pub(super) async fn reset_password_cmd<W: Write + Send>(
 /// operator's password hash on the registry pool. Recovery path
 /// when an operator forgets their password and there's no other
 /// admin who can reset via the (pending #77) UI.
-pub(super) async fn reset_operator_password_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn reset_operator_password_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     reject_leading_flag(
         args,
         "reset-operator-password",
@@ -571,12 +579,15 @@ pub(super) async fn reset_operator_password_cmd<W: Write + Send>(
 ///
 /// Both passwords are read interactively from a TTY when not passed
 /// on the command line; the prompts are echo-suppressed.
-pub(super) async fn change_password_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn change_password_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     registry_url: &str,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let mut iter = args.iter();
     let slug = iter.next().cloned().ok_or_else(|| {
         TenancyError::Validation(
@@ -638,31 +649,25 @@ pub(super) async fn change_password_cmd<W: Write + Send>(
     };
 
     let pool = scoped_tenant_pool(pools, registry_url, &slug).await?;
-    let stored: Option<String> = rustango::sql::sqlx::query_scalar(
-        "SELECT password_hash FROM rustango_users WHERE username = $1",
-    )
-    .bind(&username)
-    .fetch_optional(&pool)
-    .await?;
-    let Some(stored_hash) = stored else {
-        pool.close().await;
+    // v0.38 — read the existing user row via the tri-dialect ORM.
+    use crate::sql::FetcherPool as _;
+    let users: Vec<crate::tenancy::User> = crate::tenancy::User::objects()
+        .where_(crate::tenancy::User::username.eq(username.clone()))
+        .fetch_pool(&pool)
+        .await?;
+    let Some(mut user) = users.into_iter().next() else {
         return Err(TenancyError::Validation(format!(
             "change-password: no user `{username}` in tenant `{slug}`"
         )));
     };
-    if !crate::tenancy::password::verify(&cur_plain, &stored_hash)? {
-        pool.close().await;
+    if !crate::tenancy::password::verify(&cur_plain, &user.password_hash)? {
         return Err(TenancyError::Validation(
             "change-password: current password did not match".into(),
         ));
     }
-    let new_hash = crate::tenancy::password::hash(&new_plain)?;
-    rustango::sql::sqlx::query("UPDATE rustango_users SET password_hash = $1, password_changed_at = NOW() WHERE username = $2")
-        .bind(&new_hash)
-        .bind(&username)
-        .execute(&pool)
-        .await?;
-    pool.close().await;
+    user.password_hash = crate::tenancy::password::hash(&new_plain)?;
+    user.password_changed_at = Some(chrono::Utc::now());
+    user.save_pool(&pool).await?;
     writeln!(
         w,
         "password changed for user `{username}` in tenant `{slug}`"
@@ -680,11 +685,14 @@ pub(super) async fn change_password_cmd<W: Write + Send>(
 /// password by first verifying the current password. Symmetric
 /// counterpart to `reset-operator-password` for the case where the
 /// operator still remembers their current credentials.
-pub(super) async fn change_operator_password_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn change_operator_password_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let mut iter = args.iter();
     let username = iter.next().cloned().ok_or_else(|| {
         TenancyError::Validation(
@@ -774,11 +782,14 @@ pub(super) async fn change_operator_password_cmd<W: Write + Send>(
 /// Open a short-lived `PgPool` scoped to `slug`'s tenant — schema
 /// mode pre-sets `search_path`; database mode reuses the cached
 /// per-tenant pool. Shared by `set-superuser` / `reset-password`.
-async fn scoped_tenant_pool(
-    pools: &TenantPools,
+async fn scoped_tenant_pool<DB: Database>(
+    pools: &TenantPools<DB>,
     registry_url: &str,
     slug: &str,
-) -> Result<rustango::sql::sqlx::PgPool, TenancyError> {
+) -> Result<rustango::sql::Pool, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let orgs: Vec<crate::tenancy::Org> = crate::tenancy::Org::objects()
         .where_(crate::tenancy::Org::slug.eq(slug.to_owned()))
         .fetch_pool(&pools.registry_pool())
@@ -793,16 +804,31 @@ async fn scoped_tenant_pool(
     })?;
     match mode {
         StorageMode::Schema => {
-            let schema = org.schema_name.unwrap_or_else(|| slug.to_owned());
-            build_schema_scoped_pool(registry_url, &schema).await
+            #[cfg(feature = "postgres")]
+            {
+                let schema = org.schema_name.unwrap_or_else(|| slug.to_owned());
+                let pg = build_schema_scoped_pool(registry_url, &schema).await?;
+                Ok(rustango::sql::Pool::Postgres(pg))
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                let _ = registry_url;
+                Err(TenancyError::Validation(format!(
+                    "tenant `{slug}` is schema-mode but `postgres` feature is off"
+                )))
+            }
         }
         StorageMode::Database => {
-            // Database-mode tenants use the cached pool — clone it
-            // so the caller can `.close()` without affecting siblings.
-            // Actually the cached pool is shared, so don't close;
-            // clone the inner Arc<PgPool> handle instead.
-            let tp = pools.pool_for_org(&org).await?;
-            Ok(tp.pool().clone())
+            let tp = pools.database_pool_for_org(&org).await?;
+            match tp {
+                crate::tenancy::TenantPool::Database { pool } => {
+                    Ok(rustango::sql::Pool::from((*pool).clone()))
+                }
+                #[cfg(feature = "postgres")]
+                crate::tenancy::TenantPool::Schema { .. } => {
+                    unreachable!("database_pool_for_org rejects schema-mode")
+                }
+            }
         }
     }
 }
@@ -810,6 +836,8 @@ async fn scoped_tenant_pool(
 /// Mirror of the migration helper — build a short-lived pool whose
 /// connections have `search_path` pre-set. Local copy so manage
 /// doesn't need a public reference into [`crate::migrate`].
+/// PG-only by language.
+#[cfg(feature = "postgres")]
 async fn build_schema_scoped_pool(
     registry_url: &str,
     schema: &str,

@@ -4,19 +4,39 @@
 use std::io::Write;
 use std::path::Path;
 
+use sqlx::Database;
+
 use crate::tenancy::error::TenancyError;
 use crate::tenancy::migrate as tenant_migrate;
 use crate::tenancy::pools::TenantPools;
 
 // ---------- migrate-tenants ----------
 
-pub(super) async fn migrate_tenants_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn migrate_tenants_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     registry_url: &str,
     dir: &Path,
     w: &mut W,
-) -> Result<(), TenancyError> {
-    let report = tenant_migrate::migrate_tenants(pools, dir, registry_url).await?;
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    // v0.38 — on PG the legacy `migrate_tenants` handles both schema-
+    // mode and database-mode tenants; on non-PG we route through the
+    // generic `migrate_tenants_db` which is database-mode-only by
+    // design (schema-mode is PG-only by language).
+    #[cfg(feature = "postgres")]
+    let report = {
+        if let Some(pg_pools) =
+            (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
+        {
+            tenant_migrate::migrate_tenants(pg_pools, dir, registry_url).await?
+        } else {
+            tenant_migrate::migrate_tenants_db(pools, dir, registry_url).await?
+        }
+    };
+    #[cfg(not(feature = "postgres"))]
+    let report = tenant_migrate::migrate_tenants_db(pools, dir, registry_url).await?;
     write_tenant_report(w, &report)
 }
 
@@ -48,11 +68,14 @@ fn write_tenant_report<W: Write>(
 
 // ---------- migrate-registry ----------
 
-pub(super) async fn migrate_registry_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn migrate_registry_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     dir: &Path,
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let applied = tenant_migrate::migrate_registry(pools, dir).await?;
     if applied.is_empty() {
         writeln!(w, "registry: nothing to migrate (already up to date)")?;
@@ -67,13 +90,16 @@ pub(super) async fn migrate_registry_cmd<W: Write + Send>(
 
 // ---------- migrate (scope-aware) ----------
 
-pub(super) async fn migrate_all_cmd<W: Write + Send>(
-    pools: &TenantPools,
+pub(super) async fn migrate_all_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
     registry_url: &str,
     dir: &Path,
     args: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     // Pass any flags / args (e.g. `--dry-run`, `--help`, target name)
     // through to the registry-side runner. The single-tenant manage
     // runner doesn't know about scopes, so for now we let the
@@ -170,8 +196,22 @@ pub(super) async fn migrate_all_cmd<W: Write + Send>(
         }
     }
 
-    // Tenant phase.
-    let report = tenant_migrate::migrate_tenants(pools, dir, registry_url).await?;
+    // Tenant phase. Branch by backend: PG goes through the legacy
+    // `migrate_tenants` (handles schema-mode + database-mode);
+    // sqlite/mysql route through `migrate_tenants_db` (database-mode
+    // only — schema-mode is PG-only by language).
+    #[cfg(feature = "postgres")]
+    let report = {
+        if let Some(pg_pools) =
+            (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
+        {
+            tenant_migrate::migrate_tenants(pg_pools, dir, registry_url).await?
+        } else {
+            tenant_migrate::migrate_tenants_db(pools, dir, registry_url).await?
+        }
+    };
+    #[cfg(not(feature = "postgres"))]
+    let report = tenant_migrate::migrate_tenants_db(pools, dir, registry_url).await?;
     write_tenant_report(w, &report)?;
     Ok(())
 }
@@ -214,12 +254,15 @@ pub(super) fn init_tenancy_cmd_with<W: Write>(
 /// Each `name` is validated against the migration directory before
 /// the row lands so operators can't backfill a typo. The ledger
 /// schema is created if missing (same shape as `ensure_ledger`).
-async fn fake_apply_to_registry<W: Write>(
-    pools: &TenantPools,
+async fn fake_apply_to_registry<W: Write, DB: Database>(
+    pools: &TenantPools<DB>,
     dir: &Path,
     names: &[String],
     w: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     // Discover what's on disk to validate the names.
     let migrations = rustango::migrate::file::list_dir(dir).map_err(TenancyError::Migrate)?;
     let on_disk: std::collections::HashSet<&str> =

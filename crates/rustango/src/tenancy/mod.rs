@@ -62,13 +62,6 @@ mod error;
 #[cfg(feature = "postgres")]
 pub mod impersonation_handoff;
 pub mod jwt_lifecycle;
-// v0.38 — manage CLI (create-tenant / create-operator / create-user
-// / role+perm verbs) is wired through the audit cleanup helpers,
-// tenant migration runner, and operator console — all PG-typed
-// internals. The runtime tri-dialect path goes through
-// DatabasePools<DB> directly; the CLI submodules wait for their
-// _pool lifts (slice 9+).
-#[cfg(feature = "postgres")]
 pub mod manage;
 mod manage_interactive;
 pub mod middleware;
@@ -133,8 +126,11 @@ pub use permissions::{
 pub use database_pools::{DatabaseConn, DatabasePool, DatabasePools};
 pub use error::TenancyError;
 #[cfg(feature = "postgres")]
-pub use migrate::{migrate_registry, migrate_tenants};
-pub use migrate::{migrate_registry_pool, TenantMigrationOutcome, TenantMigrationReport};
+pub use migrate::migrate_tenants;
+pub use migrate::{
+    migrate_registry, migrate_registry_pool, migrate_tenants_db, TenantMigrationOutcome,
+    TenantMigrationReport,
+};
 pub use org::{BackendKind, Org, StorageMode};
 pub use pools::{
     DefaultTenantDb, PrewarmReport, TenantConn, TenantPool, TenantPools, TenantPoolsConfig,

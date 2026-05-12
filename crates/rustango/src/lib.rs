@@ -771,11 +771,12 @@ pub mod extractors;
 /// DRF-style ModelViewSet — five REST endpoints for any [`Model`] table
 /// in ~5 lines. See [`viewset::ViewSet`].
 ///
-/// v0.38 — `tenant_router` uses the now-generic `Tenant<DB>` extractor.
-/// Internal `_on` query helpers stay PG-typed (executor bound to
-/// `Database = Postgres`), so the ViewSet still routes PG-backed
-/// queries — but `Tenant<Sqlite>` / `Tenant<MySql>` can sit alongside
-/// in the same project for hand-rolled non-PG REST routes.
+/// v0.38 — internal `_on` query helpers are bound to
+/// `Database = Postgres` at the executor layer, so the ViewSet itself
+/// stays PG-typed. Sqlite/MySQL projects mount their own REST routes
+/// against `Tenant<DB>` (lifted in slice 10) + the ORM `_pool`
+/// helpers; the auto-generated five-endpoint ViewSet bundle waits for
+/// a generic `_on_db<DB>` lift.
 #[cfg(all(feature = "tenancy", feature = "postgres"))]
 pub mod viewset;
 

@@ -451,12 +451,59 @@ impl<DB: Database> TenantPools<DB> {
     }
 }
 
-// Prewarm requires the registry to be convertible to crate::sql::Pool
-// (we read Orgs from it via the bi-dialect `fetch_pool` family).
 impl<DB: Database> TenantPools<DB>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    /// v0.38 — backend-agnostic counterpart of
+    /// [`Self::scoped_pool`] (PG-only). For schema-mode tenants on
+    /// Postgres this returns `Pool::Postgres(scoped_pool)` where the
+    /// pool has `search_path` baked into its connect options. For
+    /// database-mode tenants (any backend) it wraps the cached
+    /// tenant pool as a `crate::sql::Pool` enum. The schema-mode
+    /// branch can only fire when `DB = sqlx::Postgres`; on other
+    /// backends a schema-mode org returns the same
+    /// [`TenancyError::Validation`] [`Self::database_pool_for_org`]
+    /// would emit.
+    ///
+    /// # Errors
+    /// As [`Self::database_pool_for_org`].
+    pub async fn scoped_pool_dyn(&self, org: &Org) -> Result<crate::sql::Pool, TenancyError> {
+        let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
+            TenancyError::Validation(format!(
+                "org `{}` has unknown storage_mode `{got}` (expected `schema` or `database`)",
+                org.slug
+            ))
+        })?;
+        match mode {
+            StorageMode::Schema => {
+                #[cfg(feature = "postgres")]
+                {
+                    // Only PG TenantPools<Postgres> can build a
+                    // schema-mode scoped pool; on other backends
+                    // schema-mode is forbidden by `database_pool_for_org`.
+                    // Erase to `Pool::Postgres` if our DB happens to be PG.
+                    if let Some(pg_pools) =
+                        (self as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
+                    {
+                        let scoped = pg_pools.scoped_pool(org).await?;
+                        return Ok(crate::sql::Pool::Postgres(scoped));
+                    }
+                }
+                Err(TenancyError::Validation(format!(
+                    "org `{}` is schema-mode but TenantPools<{}> is non-Postgres — schema-mode \
+                     tenants require a Postgres registry",
+                    org.slug,
+                    std::any::type_name::<DB>(),
+                )))
+            }
+            StorageMode::Database => {
+                let pool = self.pool_for_database_mode(org).await?;
+                Ok(crate::sql::Pool::from((*pool).clone()))
+            }
+        }
+    }
+
     /// Pre-warm pools for every active database-mode tenant. Useful
     /// at boot so the *first* request per tenant doesn't pay TCP +
     /// TLS + auth + sqlx-ramp-up on the hot path. Bounded by
