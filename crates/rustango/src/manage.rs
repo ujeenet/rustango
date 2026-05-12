@@ -634,23 +634,49 @@ impl Cli {
         if self.tenancy {
             return Err("Cli::tenancy() requires the `tenancy` feature".into());
         }
-        // v0.38 — non-tenancy single-tenant `runserver` is still PG-bound
-        // because `SeedFn` takes `&PgPool` (breaking change to lift) and
-        // user handlers commonly extract `Extension<PgPool>`. Sqlite +
-        // mysql users on the non-tenant lane wire their own
-        // `axum::serve` (Sites A/B pattern in the demo). Lifting this
-        // path is queued for v0.39 as a deliberate API rev with a
-        // migration guide. For now, fail at runtime with a clear
-        // pointer when run on non-PG.
+        // v0.38 — non-tenancy single-tenant `runserver` on non-PG.
+        // Opens a `Pool` enum via Pool::connect (dispatches on URL
+        // scheme: sqlite:// → SqlitePool, mysql:// → MySqlPool). Runs
+        // migrations through migrate_pool (tri-dialect). The seed
+        // hook stays PG-gated because `SeedFn` takes `&PgPool` —
+        // sqlite/mysql users either skip seeding or wire their own
+        // axum::serve directly. Handlers can extract the Pool enum
+        // via `axum::Extension<rustango::sql::Pool>`.
         #[cfg(not(feature = "postgres"))]
         {
-            return Err(
-                "Cli::new().runserver() is PG-only today (non-tenant lane). \
-                 For sqlite/mysql apps wire your own `axum::serve` — see \
-                 the Sites A/B pattern in the rustango demo. Lifting this \
-                 path to `&Pool` is queued for v0.39."
-                    .into(),
-            );
+            let url = std::env::var("DATABASE_URL").map_err(|_| {
+                "missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`."
+            })?;
+            let pool = crate::sql::Pool::connect(&url).await?;
+            let _ = crate::migrate::migrate_pool(&pool, &self.migrations_dir).await?;
+            let api = self.api;
+            #[cfg(feature = "admin")]
+            let api = if self.welcome_page {
+                try_mount_welcome(api)
+            } else {
+                api
+            };
+            #[cfg(feature = "admin")]
+            let api = mount_static_dirs(api, &self.static_dirs);
+            #[cfg(feature = "csrf")]
+            let api = match self.csrf {
+                Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
+                None => api,
+            };
+            #[cfg(feature = "config")]
+            let api = match self.settings_for_layers.as_ref() {
+                Some(s) => apply_settings_layers(api, s),
+                None => api,
+            };
+            let app = api.layer(axum::Extension(pool));
+            let listener = tokio::net::TcpListener::bind(&self.bind).await?;
+            eprintln!("server listening on http://{}", listener.local_addr()?);
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await?;
+            return Ok(());
         }
         #[cfg(feature = "postgres")]
         {
@@ -663,6 +689,7 @@ impl Cli {
                 seed(&pool).await?;
             }
             let api = self.api;
+            #[cfg(feature = "admin")]
             let api = if self.welcome_page {
                 try_mount_welcome(api)
             } else {
@@ -710,6 +737,7 @@ impl Cli {
     #[cfg(all(feature = "tenancy", feature = "postgres"))]
     async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
         let api = self.api;
+        #[cfg(feature = "admin")]
         let api = if self.welcome_page {
             try_mount_welcome(api)
         } else {
@@ -780,6 +808,7 @@ impl Default for Cli {
 /// surfaces as a `tracing::warn!` instead of a process abort.
 /// `Router` implements `UnwindSafe` so the catch is sound; the
 /// fallback returns the original router unchanged.
+#[cfg(feature = "admin")]
 fn try_mount_welcome(api: Router) -> Router {
     let api_for_probe = api.clone();
     // v0.37 (#5) — axum's `Router::merge` panics with "Overlapping
