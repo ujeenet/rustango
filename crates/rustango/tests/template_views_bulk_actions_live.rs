@@ -91,6 +91,11 @@ fn build_app(pool: sqlx::PgPool) -> axum::Router {
         let pool = pool.clone();
         let pks = pks.to_vec();
         Box::pin(async move {
+            // v0.38 — bulk-action handlers receive the unified
+            // `crate::sql::Pool` enum. Tests pinned to PG unwrap
+            // explicitly; real handlers route through `_pool`
+            // helpers and stay dialect-agnostic.
+            let rustango::sql::Pool::Postgres(pg) = &pool;
             // Translate SqlValue::I64 back to bind values; the
             // framework guarantees they're typed correctly per the
             // schema's PK type.
@@ -103,7 +108,7 @@ fn build_app(pool: sqlx::PgPool) -> axum::Router {
                 .collect();
             sqlx::query("UPDATE tv_bulk_widget SET published = TRUE WHERE id = ANY($1)")
                 .bind(&ids)
-                .execute(&pool)
+                .execute(pg)
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string())
@@ -115,7 +120,7 @@ fn build_app(pool: sqlx::PgPool) -> axum::Router {
         .bulk_actions(true)
         .action("publish_selected", "Publish selected", publish_handler);
 
-    lv.router("/widgets", tera(), pool)
+    lv.router("/widgets", tera(), rustango::sql::Pool::Postgres(pool))
 }
 
 fn post_form(uri: &str, body: &str) -> Request<Body> {
@@ -250,7 +255,11 @@ async fn confirmation_renders_first_then_deletes_on_confirmed() {
     let lv = ListView::for_model(Widget::SCHEMA)
         .bulk_actions(true)
         .with_delete_confirmation(true);
-    let app = lv.router("/widgets", tera, pool.clone());
+    let app = lv.router(
+        "/widgets",
+        tera,
+        rustango::sql::Pool::Postgres(pool.clone()),
+    );
 
     // First POST — no `confirmed` field. Should render confirm
     // page (200), NOT redirect.
@@ -319,6 +328,7 @@ async fn confirmation_does_not_gate_custom_actions() {
         let pool = pool.clone();
         let pks = pks.to_vec();
         Box::pin(async move {
+            let rustango::sql::Pool::Postgres(pg) = &pool;
             let ids: Vec<i64> = pks
                 .iter()
                 .filter_map(|v| match v {
@@ -328,7 +338,7 @@ async fn confirmation_does_not_gate_custom_actions() {
                 .collect();
             sqlx::query("UPDATE tv_bulk_widget SET published = TRUE WHERE id = ANY($1)")
                 .bind(&ids)
-                .execute(&pool)
+                .execute(pg)
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string())
@@ -339,7 +349,11 @@ async fn confirmation_does_not_gate_custom_actions() {
         .bulk_actions(true)
         .with_delete_confirmation(true) // ON, but only gates delete_selected
         .action("publish_selected", "Publish", publish);
-    let app = lv.router("/widgets", tera(), pool.clone());
+    let app = lv.router(
+        "/widgets",
+        tera(),
+        rustango::sql::Pool::Postgres(pool.clone()),
+    );
 
     // POST with publish_selected — runs immediately, no confirm.
     let body = format!("action=publish_selected&_selected_action={}", ids[0]);
@@ -408,7 +422,7 @@ async fn list_get_stamps_csrf_token_into_context() {
     )
     .unwrap();
     let lv = ListView::for_model(Widget::SCHEMA).bulk_actions(true);
-    let app = lv.router("/widgets", Arc::new(t), pool);
+    let app = lv.router("/widgets", Arc::new(t), rustango::sql::Pool::Postgres(pool));
 
     // First GET: no cookie sent → handler mints + sets a fresh
     // token + Set-Cookie. Body and cookie value must agree.

@@ -54,10 +54,10 @@
 //! responsibility — compose via host-based dispatch (see
 //! `multitenant_demo`).
 
+use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::sql::sqlx::postgres::{PgPool, PgPoolOptions};
-use crate::sql::sqlx::Row;
+use crate::sql::sqlx::Database;
 use axum::body::Body;
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -69,16 +69,25 @@ use tower::ServiceExt;
 use tracing::warn;
 
 use super::branding;
-use super::error::TenancyError;
-use super::org::{Org, StorageMode};
-use super::pools::TenantPools;
+use super::org::Org;
+use super::pools::{DefaultTenantDb, TenantPools};
 use super::resolver::OrgResolver;
 use super::tenant_console::{self, TenantSessionPayload};
 use crate::storage::BoxedStorage;
 
 /// Builder for the tenant-aware admin router.
-pub struct TenantAdminBuilder {
-    pools: Arc<TenantPools>,
+///
+/// Generic over the backend (`DB = DefaultTenantDb` so existing PG
+/// call sites continue to compile without a turbofish). v0.38 made
+/// the inner query layer tri-dialect — `TenantAdminBuilder<sqlx::Sqlite>`
+/// and `TenantAdminBuilder<sqlx::MySql>` build admin routers whose
+/// auth handlers + inner admin both run on the tenant's backend.
+/// Schema-mode tenants remain PG-only by language; non-PG instances
+/// silently never enter the schema-mode arm because
+/// `TenantPools<DB>::scoped_pool_dyn` rejects schema-mode for non-PG
+/// backends at runtime.
+pub struct TenantAdminBuilder<DB: Database = DefaultTenantDb> {
+    pools: Arc<TenantPools<DB>>,
     registry_url: String,
     resolver: Arc<dyn OrgResolver>,
     show_only: Option<Vec<String>>,
@@ -92,6 +101,7 @@ pub struct TenantAdminBuilder {
     /// `RouteConfig::default()` (legacy `__`-prefixed paths) so
     /// upgrade is a no-op until apps set `routes(...)`.
     routes: Arc<super::routes::RouteConfig>,
+    _phantom: PhantomData<DB>,
 }
 
 /// One row in the action registry threaded through the tenant admin
@@ -109,7 +119,7 @@ struct TenantSessionConfig {
     tera: Tera,
 }
 
-impl TenantAdminBuilder {
+impl<DB: Database> TenantAdminBuilder<DB> {
     /// Build a tenant-aware admin handler.
     ///
     /// `registry_url` is the connection string used to spin up
@@ -118,7 +128,7 @@ impl TenantAdminBuilder {
     /// any valid URL if you only have database-mode tenants.
     #[must_use]
     pub fn new(
-        pools: Arc<TenantPools>,
+        pools: Arc<TenantPools<DB>>,
         registry_url: impl Into<String>,
         resolver: impl OrgResolver,
     ) -> Self {
@@ -134,6 +144,7 @@ impl TenantAdminBuilder {
             subtitle: None,
             brand_storage: None,
             routes: Arc::new(super::routes::RouteConfig::default()),
+            _phantom: PhantomData,
         }
     }
 
@@ -268,7 +279,12 @@ impl TenantAdminBuilder {
         });
         self
     }
+}
 
+impl<DB: Database> TenantAdminBuilder<DB>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     /// Build the tenant-aware `axum::Router`. Catches every request
     /// via a fallback handler — mount it under whatever prefix you
     /// want via `Router::nest`.
@@ -306,7 +322,7 @@ impl TenantAdminBuilder {
             let brand_storage = brand_storage.clone();
             let routes = routes.clone();
             async move {
-                handle_request(
+                handle_request::<DB>(
                     req,
                     &pools,
                     &registry_url,
@@ -326,9 +342,9 @@ impl TenantAdminBuilder {
     }
 }
 
-async fn handle_request(
+async fn handle_request<DB: Database>(
     req: Request<Body>,
-    pools: &TenantPools,
+    pools: &TenantPools<DB>,
     registry_url: &str,
     resolver: &dyn OrgResolver,
     show_only: &Option<Vec<String>>,
@@ -339,7 +355,15 @@ async fn handle_request(
     subtitle: Option<&str>,
     brand_storage: &BoxedStorage,
     routes: &super::routes::RouteConfig,
-) -> Response {
+) -> Response
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    // v0.38 — `registry_url` is unused now that schema-mode pool
+    // construction lives on `TenantPools<Postgres>::scoped_pool_dyn`.
+    // Kept in the signature so the published `TenantAdminBuilder::new`
+    // contract is unchanged.
+    let _ = registry_url;
     // Public brand asset surface — `<brand_url>/{slug}/{filename}`.
     // Served before the resolver runs so the assets are reachable
     // even when the requesting host doesn't match a known tenant
@@ -362,7 +386,14 @@ async fn handle_request(
         }
     };
 
-    let pool = match build_admin_pool_for_tenant(&org, pools, registry_url).await {
+    // v0.38 — `scoped_pool_dyn` returns the unified `Pool` enum:
+    // for schema-mode PG tenants it builds a short-lived PgPool with
+    // `search_path` baked in (Schema → `Pool::Postgres`); for
+    // database-mode tenants it hands back a cheap Arc clone of the
+    // cached `sqlx::Pool<DB>` wrapped in the right `Pool::…`
+    // variant. Schema-mode on non-PG backends returns
+    // `TenancyError::Validation` (it's PG-only by language).
+    let pool = match pools.scoped_pool_dyn(&org).await {
         Ok(p) => p,
         Err(e) => {
             warn!(
@@ -419,7 +450,7 @@ async fn handle_request(
                     login_form(&org, cfg, brand_storage, routes, parts.uri.query()).into_response()
                 }
                 axum::http::Method::POST => {
-                    login_submit(&org, cfg, &pool.as_pool(), routes, parts.headers, body).await
+                    login_submit(&org, cfg, &pool, routes, parts.headers, body).await
                 }
                 _ => (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response(),
             };
@@ -440,7 +471,7 @@ async fn handle_request(
         }
 
         // Private surface — require a valid session cookie.
-        match validate_session(&parts.headers, cfg, &org, &pool.as_pool()).await {
+        match validate_session(&parts.headers, cfg, &org, &pool).await {
             SessionCheck::Authenticated {
                 is_superuser,
                 user_id,
@@ -453,8 +484,7 @@ async fn handle_request(
                     // and thread them into the inner admin builder so
                     // individual views can check add/change/delete/view perms
                     // per table without extra DB round-trips.
-                    match super::permissions::user_permissions_pool(user_id, &pool.as_pool()).await
-                    {
+                    match super::permissions::user_permissions_pool(user_id, &pool).await {
                         Ok(codenames) => {
                             user_perms = Some(codenames.into_iter().collect());
                         }
@@ -497,7 +527,7 @@ async fn handle_request(
                         .into_response()
                 }
                 axum::http::Method::POST => {
-                    change_password_submit(&org, &pool.as_pool(), routes, user_id, body).await
+                    change_password_submit(&org, &pool, routes, user_id, body).await
                 }
                 _ => (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response(),
             };
@@ -505,7 +535,7 @@ async fn handle_request(
     }
 
     let admin_router = build_inner_admin_router(
-        pool.pg_pool().clone(),
+        pool.clone(),
         show_only,
         read_only,
         user_perms,
@@ -1205,104 +1235,8 @@ fn sanitize_next_with_routes(next: Option<&str>, routes: &super::routes::RouteCo
     }
 }
 
-/// Wrapper around the tenant's PgPool that owns the schema-mode
-/// short-lived pool's lifetime; for database-mode it just holds an
-/// `Arc<PgPool>`.
-enum AdminPool {
-    /// Cached database-mode pool — cheap clone of an Arc.
-    Database(Arc<PgPool>),
-    /// Short-lived schema-mode pool — closed when dropped.
-    Schema(PgPool),
-}
-
-impl AdminPool {
-    fn pg_pool(&self) -> &PgPool {
-        match self {
-            Self::Database(p) => p,
-            Self::Schema(p) => p,
-        }
-    }
-
-    /// v0.38 — backend-erasing accessor for the tri-dialect handler
-    /// path. On the AdminPool variants (both PG-shaped), wraps the
-    /// underlying PgPool into `crate::sql::Pool::Postgres`. Used by
-    /// `validate_session` / `login_submit` / `change_password_submit`
-    /// so they route through ORM `_pool` helpers and stay
-    /// dialect-agnostic at the source level — schema-mode tenants
-    /// happen to live behind a PgPool but the same code body works
-    /// against any future tri-dialect AdminPool generalization.
-    fn as_pool(&self) -> crate::sql::Pool {
-        crate::sql::Pool::Postgres(self.pg_pool().clone())
-    }
-}
-
-impl Drop for AdminPool {
-    fn drop(&mut self) {
-        // For schema-mode we'd ideally `pool.close().await` — but
-        // Drop can't be async. sqlx's PgPool background reaper will
-        // eventually close idle connections; not ideal but
-        // acceptable for slice 4. v0.6 may move to a per-request
-        // connection (no pool) to avoid this entirely.
-    }
-}
-
-async fn build_admin_pool_for_tenant(
-    org: &Org,
-    pools: &TenantPools,
-    registry_url: &str,
-) -> Result<AdminPool, TenancyError> {
-    let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
-        TenancyError::Validation(format!(
-            "org `{}` has unknown storage_mode `{got}`",
-            org.slug
-        ))
-    })?;
-    match mode {
-        StorageMode::Database => {
-            let tp = pools.pool_for_org(org).await?;
-            match tp {
-                super::pools::TenantPool::Database { pool } => Ok(AdminPool::Database(pool)),
-                #[cfg(feature = "postgres")]
-                super::pools::TenantPool::Schema { .. } => {
-                    unreachable!("StorageMode::Database parsed but pool_for_org returned Schema")
-                }
-            }
-        }
-        StorageMode::Schema => {
-            let schema = org.schema_name.clone().unwrap_or_else(|| org.slug.clone());
-            let pool = build_short_lived_schema_pool(registry_url, &schema).await?;
-            Ok(AdminPool::Schema(pool))
-        }
-    }
-}
-
-/// Build a short-lived `PgPool` whose every connection has its
-/// `search_path` set to `<schema>, public`. Used for one admin
-/// request, then dropped. Mirrors the migration helper in
-/// [`crate::migrate`] but with a smaller pool size — admin
-/// requests typically issue 1-3 queries.
-async fn build_short_lived_schema_pool(
-    registry_url: &str,
-    schema: &str,
-) -> Result<PgPool, TenancyError> {
-    let schema_owned: Arc<str> = Arc::from(schema);
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .after_connect(move |conn, _meta| {
-            let schema = Arc::clone(&schema_owned);
-            Box::pin(async move {
-                let stmt = format!("SET search_path TO {}, public", quote_ident(&schema));
-                rustango::sql::sqlx::query(&stmt).execute(conn).await?;
-                Ok(())
-            })
-        })
-        .connect(registry_url)
-        .await?;
-    Ok(pool)
-}
-
 fn build_inner_admin_router(
-    pool: PgPool,
+    pool: crate::sql::Pool,
     show_only: &Option<Vec<String>>,
     read_only: &[String],
     user_perms: Option<std::collections::HashSet<String>>,
@@ -1418,9 +1352,4 @@ async fn serve_brand_asset(slug: &str, filename: &str, brand_storage: &BoxedStor
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
     }
-}
-
-fn quote_ident(name: &str) -> String {
-    let escaped = name.replace('"', "\"\"");
-    format!("\"{escaped}\"")
 }
