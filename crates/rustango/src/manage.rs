@@ -69,7 +69,7 @@ pub struct Cli {
     /// [`Cli::tenancy`] is on. Defaults to
     /// [`crate::tenancy::init_tenancy`]; replaced by [`Cli::user_model`]
     /// to swap in a custom [`crate::tenancy::TenantUserModel`].
-    #[cfg(feature = "tenancy")]
+    #[cfg(all(feature = "tenancy", feature = "postgres"))]
     init_tenancy_fn: crate::tenancy::manage::InitTenancyFn,
     /// Cloned [`Settings`] handle stored by [`Cli::with_settings`].
     /// Consumed at `runserver` time to apply layers (security_headers,
@@ -128,7 +128,7 @@ impl Cli {
             tenancy: false,
             #[cfg(feature = "tenancy")]
             routes: None,
-            #[cfg(feature = "tenancy")]
+            #[cfg(all(feature = "tenancy", feature = "postgres"))]
             init_tenancy_fn: crate::tenancy::init_tenancy,
             #[cfg(feature = "config")]
             settings_for_layers: None,
@@ -475,7 +475,7 @@ impl Cli {
     ///     .user_model::<myapp::AppUser>()
     ///     .run().await
     /// ```
-    #[cfg(feature = "tenancy")]
+    #[cfg(all(feature = "tenancy", feature = "postgres"))]
     #[must_use]
     pub fn user_model<U: crate::tenancy::TenantUserModel>(mut self) -> Self {
         self.init_tenancy_fn = crate::tenancy::init_tenancy_with::<U>;
@@ -701,7 +701,13 @@ impl Cli {
         } // end of #[cfg(feature = "postgres")] block for non-tenancy runserver
     }
 
-    #[cfg(feature = "tenancy")]
+    // v0.38 — `server::Builder` is the multi-tenant PG runserver
+    // (TenantPools + schema-mode dispatch + operator console). Gated
+    // to PG today; sqlite/mysql apps with `tenancy` get a friendly
+    // runtime error pointing at `DatabasePools<DB>` + plain
+    // `axum::serve`. The non-PG runserver_tenancy fallback below
+    // mirrors that for symmetry.
+    #[cfg(all(feature = "tenancy", feature = "postgres"))]
     async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
         let api = self.api;
         let api = if self.welcome_page {
@@ -737,6 +743,19 @@ impl Cli {
                 .await?;
         }
         builder.serve(&self.bind).await
+    }
+
+    #[cfg(all(feature = "tenancy", not(feature = "postgres")))]
+    async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
+        Err(
+            "Cli::tenancy().runserver() is PG-only today. The multi-tenant \
+             runserver (server::Builder) bakes in schema-mode dispatch + the \
+             operator console which depend on Postgres. Sqlite/MySQL multi-\
+             tenant runtime works via `crate::tenancy::DatabasePools<DB>` + \
+             `extractors::DatabaseTenant<DB>` — mount your own axum router. \
+             The generic Builder<DB> lift is queued for v0.39."
+                .into(),
+        )
     }
 }
 
