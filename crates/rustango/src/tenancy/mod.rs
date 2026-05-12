@@ -55,6 +55,12 @@ pub mod database_pools;
 mod error;
 pub mod impersonation_handoff;
 pub mod jwt_lifecycle;
+// v0.38 — the manage CLI (create-tenant, role/perm verbs, etc.)
+// is wired through legacy `TenantPools` which is PG-typed. Sqlite/
+// MySQL apps get the multi-tenant runtime via `DatabasePools<DB>` but
+// the CLI surface lands in slice 4 (TenantPools<DB> generic). Gated
+// to `postgres` until then.
+#[cfg(feature = "postgres")]
 pub mod manage;
 mod manage_interactive;
 pub mod middleware;

@@ -546,7 +546,7 @@ impl Cli {
             return Err("missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`.".into());
         }
 
-        #[cfg(feature = "tenancy")]
+        #[cfg(all(feature = "tenancy", feature = "postgres"))]
         if self.tenancy {
             // v0.36 — schema-mode tenancy (`TenantPools<sqlx::Postgres>`)
             // is Postgres-only by language. Catch sqlite / mysql URLs
@@ -579,6 +579,23 @@ impl Cli {
             )
             .await?;
             return Ok(());
+        }
+        #[cfg(all(feature = "tenancy", not(feature = "postgres")))]
+        if self.tenancy {
+            // v0.38 — the legacy `TenantPools` + manage CLI (create-
+            // tenant, create-operator, role/perm verbs, …) is still
+            // wired through `PgPool`; runtime tenancy on sqlite/mysql
+            // works via `DatabasePools<DB>` but the CLI surface awaits
+            // slice 4 (TenantPools<DB> generic). Until then, fail
+            // explicitly instead of silently shipping a half-working
+            // binary.
+            return Err(
+                "Cli::tenancy() manage CLI verbs currently require the `postgres` \
+                        feature. Multi-tenant sqlite/mysql runtime works via \
+                        `crate::tenancy::DatabasePools<DB>`; the CLI surface lands in \
+                        v0.38 slice 4 (TenantPools<DB> generic)."
+                    .into(),
+            );
         }
         #[cfg(not(feature = "tenancy"))]
         if self.tenancy {
