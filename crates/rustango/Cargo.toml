@@ -385,21 +385,23 @@ tempfile       = "3"
 # here.
 
 # Multi-tenant blog demo (operator console + tenant admin + viewsets).
-# Auto-discovered by Cargo because it lives under `examples/blog_demo/`
-# with a `main.rs`, but its imports (rustango::tenancy, ::extractors,
-# #[viewset(...)]) require the `tenancy` feature — without this gate,
-# bare `cargo test` would compile it under default features and fail.
+# Uses the PG-only `Tenant` extractor / `viewset` / `server::ApiRouter`
+# stack — requires postgres feature alongside tenancy. Auto-discovered
+# by Cargo because it lives under `examples/blog_demo/` with a
+# `main.rs`; gated so sqlite/mysql builds skip it cleanly.
 [[example]]
 name              = "blog_demo"
 path              = "examples/blog_demo/main.rs"
-required-features = ["tenancy"]
+required-features = ["tenancy", "postgres"]
 
 # SQLite ORM demo — single-file example, gated on the `sqlite` feature
 # so default `cargo build --examples` doesn't try to compile it.
+# Also requires postgres because it derives Model unconditionally
+# (macro emits PG paths).
 [[example]]
 name              = "sqlite_orm_demo"
 path              = "examples/sqlite_orm_demo.rs"
-required-features = ["sqlite"]
+required-features = ["sqlite", "postgres"]
 
 # AppBuilder + SQLite — minimal runnable bootstrap shape.
 [[example]]
@@ -411,7 +413,8 @@ required-features = ["sqlite", "runserver"]
 # extractor for per-tenant-file SQLite databases. Pairs with the
 # `database_pools_sqlite_*_live.rs` tests; this is the manual-running
 # shape downstream apps consume until the Cli builder lands.
+# Also requires postgres for the operator_console types it imports.
 [[example]]
 name              = "sqlite_tenant_demo"
 path              = "examples/sqlite_tenant_demo.rs"
-required-features = ["sqlite", "tenancy", "runtime"]
+required-features = ["sqlite", "tenancy", "runtime", "postgres"]
