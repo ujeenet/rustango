@@ -12,3 +12,28 @@ services:
       interval: 2s
       timeout: 2s
       retries: 20
+
+  # MySQL 8.0+ test target. Mirrors the `postgres` service for symmetry.
+  # Live MySQL tests skip when MYSQL_TEST_URL is unset, so the suite
+  # stays green offline; CI / local devs run `docker compose up -d mysql`
+  # and `export MYSQL_TEST_URL=mysql://rustango:rustango@127.0.0.1:3406/rustango_test`
+  # to actually exercise the MySQL code paths.
+  #
+  # Port 3406 (not 3306) so it doesn't collide with a local MySQL.
+  # 8.0 is required for `FOR UPDATE SKIP LOCKED` (used by the jobs queue)
+  # and `JSON` column type. 8.0.19+ for `INSERT … ON CONFLICT DO NOTHING`
+  # (the framework uses `INSERT IGNORE` on MySQL which works on every 8.0).
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rustango
+      MYSQL_DATABASE: rustango_test
+      MYSQL_USER: rustango
+      MYSQL_PASSWORD: rustango
+    ports:
+      - "3406:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "rustango", "-prustango"]
+      interval: 2s
+      timeout: 2s
+      retries: 30

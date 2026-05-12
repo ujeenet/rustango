@@ -2,6 +2,37 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.34.0] — serious refactor with expanded MySQL support
+
+This release represents a major refactor with comprehensive multi-dialect improvements. The test suite has been significantly expanded with new MySQL live integration tests, ensuring feature parity across SQLite, PostgreSQL, and MySQL backends.
+
+### Added
+
+- **MySQL live integration tests** — New comprehensive test suite for MySQL 8.0+ covering permissions, tenancy management, and database pooling. Tests mirror SQLite equivalents to ensure identical behavior across backends:
+  - `tests/permissions_mysql_live.rs` — Full permissions model (roles, grants, user overrides)
+  - `tests/tenancy_manage_mysql_live.rs` — Tenancy CLI operations and schema validation
+  - MySQL Docker service in `docker-compose.yml` for local testing
+
+- **Improved Docker Compose setup** — MySQL 8.0 service added for local development and CI testing (port 3406, no collision with local MySQL instances)
+
+- **Multi-dialect dialect-aware DDL** — Ensured correct MySQL-specific DDL emission:
+  - `BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY` for `Auto<i64>` PKs
+  - `DATETIME(6)` for timestamps with microsecond precision
+  - `JSON` column type support
+  - Backtick identifier quoting
+
+### Testing infrastructure improvements
+
+- **Dialect-specific test skip logic** — Tests gracefully skip when dialect-specific environment variables are unset (e.g., `MYSQL_TEST_URL`), keeping CI green offline
+- **Consistent test setup** — All three backends (SQLite, PostgreSQL, MySQL) now have identical live test coverage for core features
+
+### Known issues fixed during refactor
+
+- Framework-internal table namespace is now formally reserved with `rustango_*` prefix
+- Admin URL building respects `routes.admin_url` configuration consistently
+- Session secret rotation properly visible in logs
+- Fallback routing no longer silently clobbered by admin catch-all
+
 ## [0.31.2] — `#[rustango::main]` actually no longer needs direct tokio
 
 0.31.1 attempted to resolve `#[rustango::main]` through the rustango facade, but the underlying expansion delegated to `tokio`'s own `#[tokio::main]` proc-macro — and tokio's macro emits `::tokio::*` paths that resolve against the user crate's deps, so the user still had to add tokio to their own `Cargo.toml`.
