@@ -42,7 +42,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::core::inventory;
-use crate::sql::sqlx::PgPool;
+use crate::sql::Pool;
 
 use super::error::MigrateError;
 use super::file::{self, DataOp, Migration, Operation};
@@ -61,7 +61,7 @@ use super::snapshot::SchemaSnapshot;
 /// [`MigrateError::Validation`] for unknown subcommands or bad argv,
 /// or [`MigrateError::Io`] if writing to stdout fails (broken pipe).
 pub async fn run(
-    pool: &PgPool,
+    pool: &Pool,
     dir: &Path,
     args: impl IntoIterator<Item = String>,
 ) -> Result<(), MigrateError> {
@@ -77,7 +77,7 @@ pub async fn run(
 /// As [`run`] — including [`MigrateError::Io`] from any failed
 /// `writer.write` (the writer's surface).
 pub async fn run_with_writer<W: Write + Send>(
-    pool: &PgPool,
+    pool: &Pool,
     dir: &Path,
     args: impl IntoIterator<Item = String>,
     writer: &mut W,
@@ -112,7 +112,24 @@ pub async fn run_with_writer<W: Write + Send>(
         "db:dump" => db_dump_cmd(&args[1..], writer),
         "db:restore" => db_restore_cmd(&args[1..], writer),
         "db:info" => db_info_cmd(writer),
-        "inspectdb" => super::inspectdb::inspectdb_cmd(pool, &args[1..], writer).await,
+        // v0.38 — `inspectdb` is PG-only because it queries
+        // `information_schema` with PG-specific column types. The
+        // sqlite/mysql equivalent ships in v0.39.
+        #[cfg(feature = "postgres")]
+        "inspectdb" => {
+            let pg = pool.as_postgres().ok_or_else(|| {
+                MigrateError::Validation(
+                    "`inspectdb` is only supported on Postgres (uses information_schema). \
+                     For sqlite use `sqlite3 db.db .schema`."
+                        .into(),
+                )
+            })?;
+            super::inspectdb::inspectdb_cmd(pg, &args[1..], writer).await
+        }
+        #[cfg(not(feature = "postgres"))]
+        "inspectdb" => Err(MigrateError::Validation(
+            "`inspectdb` requires the `postgres` feature".into(),
+        )),
         other => Err(MigrateError::Validation(format!(
             "unknown subcommand: `{other}` (run with --help for usage)"
         ))),
@@ -539,7 +556,7 @@ fn write_scoped_migration<W: Write>(
 }
 
 async fn migrate<W: Write>(
-    pool: &PgPool,
+    pool: &Pool,
     dir: &Path,
     args: &[String],
     w: &mut W,
@@ -593,7 +610,7 @@ async fn migrate<W: Write>(
                 "`migrate <target> --dry-run` is not supported in v0.4 — use plain `--dry-run` to preview pending forward migrations".into(),
             ));
         }
-        let preview = runner::migrate_dry_run(pool, dir).await?;
+        let preview = runner::migrate_dry_run_pool(pool, dir).await?;
         if preview.is_empty() {
             writeln!(w, "nothing to migrate (already up to date)")?;
         } else {
@@ -619,7 +636,7 @@ async fn migrate<W: Write>(
     }
 
     if let Some(target) = positional {
-        let touched = runner::migrate_to(pool, dir, target).await?;
+        let touched = runner::migrate_to_pool(pool, dir, target).await?;
         if touched.is_empty() {
             writeln!(w, "already at {target}")?;
         } else {
@@ -630,7 +647,7 @@ async fn migrate<W: Write>(
         return Ok(());
     }
 
-    let applied = runner::migrate(pool, dir).await?;
+    let applied = runner::migrate_pool(pool, dir).await?;
     if applied.is_empty() {
         writeln!(w, "nothing to migrate (already up to date)")?;
     } else {
@@ -656,14 +673,10 @@ async fn migrate<W: Write>(
 /// caller passing a stale `applied_set`). Refuses if there are zero
 /// pending migrations (nothing to do) or only one (`forget-pending`
 /// is the right verb for the single-file case).
-async fn migrate_squash<W: Write>(
-    pool: &PgPool,
-    dir: &Path,
-    w: &mut W,
-) -> Result<(), MigrateError> {
-    runner::ensure_ledger(pool).await?;
+async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<(), MigrateError> {
+    runner::ensure_ledger_pool(pool).await?;
     let all = file::list_dir(dir)?;
-    let applied = runner::applied_set(pool).await?;
+    let applied = runner::applied_set_pool(pool).await?;
 
     let pending: Vec<&Migration> = all.iter().filter(|m| !applied.contains(&m.name)).collect();
     if pending.is_empty() {
@@ -716,7 +729,7 @@ async fn migrate_squash<W: Write>(
 }
 
 async fn downgrade<W: Write>(
-    pool: &PgPool,
+    pool: &Pool,
     dir: &Path,
     args: &[String],
     w: &mut W,
@@ -730,7 +743,7 @@ async fn downgrade<W: Write>(
     } else {
         1
     };
-    let touched = runner::downgrade(pool, dir, steps).await?;
+    let touched = runner::downgrade_pool(pool, dir, steps).await?;
     if touched.is_empty() {
         writeln!(w, "nothing to downgrade")?;
     } else {
@@ -741,14 +754,10 @@ async fn downgrade<W: Write>(
     Ok(())
 }
 
-async fn showmigrations<W: Write>(
-    pool: &PgPool,
-    dir: &Path,
-    w: &mut W,
-) -> Result<(), MigrateError> {
-    runner::ensure_ledger(pool).await?;
+async fn showmigrations<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<(), MigrateError> {
+    runner::ensure_ledger_pool(pool).await?;
     let all = file::list_dir(dir)?;
-    let applied = runner::applied_set(pool).await?;
+    let applied = runner::applied_set_pool(pool).await?;
 
     if all.is_empty() {
         writeln!(w, "(no migrations in {})", dir.display())?;
@@ -783,7 +792,7 @@ async fn showmigrations<W: Write>(
 /// On success: deletes the file, prints a one-line confirmation,
 /// and suggests `makemigrations` as the follow-up.
 async fn forget_pending_cmd<W: Write>(
-    pool: &PgPool,
+    pool: &Pool,
     dir: &Path,
     args: &[String],
     w: &mut W,
@@ -825,9 +834,9 @@ async fn forget_pending_cmd<W: Write>(
         Some(s) => s,
     };
 
-    runner::ensure_ledger(pool).await?;
+    runner::ensure_ledger_pool(pool).await?;
     let all = file::list_dir(dir)?;
-    let applied = runner::applied_set(pool).await?;
+    let applied = runner::applied_set_pool(pool).await?;
 
     // Resolve <name> against the file list — accept exact match OR
     // unique substring (matches the "0003" use case).
@@ -1186,7 +1195,7 @@ fn usage() -> String {
 // ============================================================ about / check / docs / version
 
 /// `manage about` — env summary for support tickets / debugging.
-async fn about_cmd<W: Write>(pool: &PgPool, w: &mut W) -> Result<(), MigrateError> {
+async fn about_cmd<W: Write>(pool: &Pool, w: &mut W) -> Result<(), MigrateError> {
     let registered_models = crate::core::inventory::iter::<crate::core::ModelEntry>
         .into_iter()
         .count();
@@ -1225,9 +1234,11 @@ async fn about_cmd<W: Write>(pool: &PgPool, w: &mut W) -> Result<(), MigrateErro
     });
     writeln!(w, "  DATABASE_URL:   {db_url}")?;
 
-    // DB connectivity
+    // DB connectivity — tri-dialect: SELECT 1 is universal across PG/MySQL/SQLite.
     write!(w, "  db_connect:     ")?;
-    let ok = sqlx::query("SELECT 1").execute(pool).await.is_ok();
+    let ok = crate::sql::raw_execute_pool(pool, "SELECT 1", Vec::new())
+        .await
+        .is_ok();
     writeln!(w, "{}", if ok { "ok" } else { "FAILED" })?;
 
     Ok(())
@@ -1235,7 +1246,7 @@ async fn about_cmd<W: Write>(pool: &PgPool, w: &mut W) -> Result<(), MigrateErro
 
 /// `manage check [--deploy]` — run system audits.
 async fn check_cmd<W: Write>(
-    pool: &PgPool,
+    pool: &Pool,
     dir: &Path,
     args: &[String],
     w: &mut W,
@@ -1261,8 +1272,11 @@ async fn check_cmd<W: Write>(
         info.push(format!("{model_count} models registered via inventory"));
     }
 
-    // DB connectivity
-    if sqlx::query("SELECT 1").execute(pool).await.is_err() {
+    // DB connectivity — tri-dialect via raw_execute_pool.
+    if crate::sql::raw_execute_pool(pool, "SELECT 1", Vec::new())
+        .await
+        .is_err()
+    {
         errors.push("cannot connect to database — verify DATABASE_URL is reachable".into());
     } else {
         info.push("database reachable".into());

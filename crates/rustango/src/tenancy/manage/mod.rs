@@ -248,7 +248,11 @@ pub async fn run_with_writer_and_init<W: Write + Send>(
         // Everything else (makemigrations, showmigrations, downgrade,
         // …) is registry-scoped and delegates to the standard
         // single-tenant runner.
-        _ => rustango::migrate::manage::run_with_writer(pools.registry(), dir, args, writer)
+        // v0.38 — `manage::run_with_writer` now accepts `&crate::sql::Pool`
+        // (instead of `&PgPool`), so we route through the tri-dialect
+        // `registry_pool()` accessor that returns the backend-agnostic
+        // enum form.
+        _ => rustango::migrate::manage::run_with_writer(&pools.registry_pool(), dir, args, writer)
             .await
             .map_err(TenancyError::Migrate),
     }

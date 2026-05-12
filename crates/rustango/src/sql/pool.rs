@@ -202,6 +202,57 @@ impl Pool {
         Self::connect(&url).await
     }
 
+    /// v0.38 — backend-agnostic counterpart of
+    /// `sqlx::PgPool::connect_lazy`. Builds a pool that defers the
+    /// first connection until the first query, dispatching to
+    /// sqlx's per-backend `connect_lazy` based on the URL scheme.
+    /// Used by `manage::Cli` for "no-db verbs" (`help` / `startapp`
+    /// / `makemigrations` etc.) so we don't open a TCP socket just
+    /// to print help text.
+    ///
+    /// # Errors
+    /// As [`Self::connect`].
+    pub fn connect_lazy(url: &str) -> Result<Self, PoolError> {
+        let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
+        match scheme.as_str() {
+            #[cfg(feature = "postgres")]
+            "postgres" | "postgresql" => {
+                let pool = sqlx::PgPool::connect_lazy(url)
+                    .map_err(|e| PoolError::Connect(e.to_string()))?;
+                Ok(Self::Postgres(pool))
+            }
+            #[cfg(not(feature = "postgres"))]
+            "postgres" | "postgresql" => Err(PoolError::FeatureNotEnabled {
+                scheme: "postgres",
+                feature: "postgres",
+            }),
+            #[cfg(feature = "mysql")]
+            "mysql" => {
+                let pool = sqlx::MySqlPool::connect_lazy(url)
+                    .map_err(|e| PoolError::Connect(e.to_string()))?;
+                Ok(Self::Mysql(pool))
+            }
+            #[cfg(not(feature = "mysql"))]
+            "mysql" => Err(PoolError::FeatureNotEnabled {
+                scheme: "mysql",
+                feature: "mysql",
+            }),
+            #[cfg(feature = "sqlite")]
+            "sqlite" => {
+                let url_with_default = ensure_sqlite_rwc_default(url);
+                let pool = sqlx::SqlitePool::connect_lazy(&url_with_default)
+                    .map_err(|e| PoolError::Connect(e.to_string()))?;
+                Ok(Self::Sqlite(pool))
+            }
+            #[cfg(not(feature = "sqlite"))]
+            "sqlite" => Err(PoolError::FeatureNotEnabled {
+                scheme: "sqlite",
+                feature: "sqlite",
+            }),
+            _ => Err(PoolError::UnsupportedScheme(url.to_owned())),
+        }
+    }
+
     /// Borrow the dialect for this pool. Stable [`Dialect`] reference
     /// usable by callers who need to inspect identifier quoting,
     /// placeholder syntax, etc., without caring which backend the

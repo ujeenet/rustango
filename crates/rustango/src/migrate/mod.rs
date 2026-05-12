@@ -27,11 +27,11 @@ pub(crate) mod inspectdb;
 pub mod invert;
 pub mod make;
 // v0.35 — the migrate CLI dispatcher (`migrate::manage::run`) is
-// PG-typed end-to-end (takes `&PgPool`, threads it into subcommands
-// that compile dialect-specific SQL via the PG-only runner paths).
-// Gate the whole module on `postgres` for now; sqlite/MySQL apps
-// build their own dispatcher around `migrate_pool` directly.
-#[cfg(feature = "postgres")]
+// v0.38 — `manage::run` now accepts `&crate::sql::Pool` (was &PgPool).
+// Each verb routes through the right `_pool` companion in
+// `crate::migrate::runner`. The one exception is `inspectdb` which
+// queries PG-specific `information_schema` and stays
+// `#[cfg(feature = "postgres")]`-gated inside `manage::run_with_writer`.
 pub mod manage;
 mod runner;
 pub mod scaffold;

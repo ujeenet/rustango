@@ -145,9 +145,14 @@ pub(super) async fn migrate_all_cmd<W: Write + Send>(
         // Forward the original args to the registry runner.
         let mut forwarded = vec!["migrate".to_owned()];
         forwarded.extend(args.iter().cloned());
-        return rustango::migrate::manage::run_with_writer(pools.registry(), dir, forwarded, w)
-            .await
-            .map_err(TenancyError::Migrate);
+        return rustango::migrate::manage::run_with_writer(
+            &pools.registry_pool(),
+            dir,
+            forwarded,
+            w,
+        )
+        .await
+        .map_err(TenancyError::Migrate);
     }
 
     // Registry phase.
@@ -232,23 +237,35 @@ async fn fake_apply_to_registry<W: Write>(
     }
 
     // Ensure the ledger table exists, then INSERT each row idempotently.
-    let pool = pools.registry();
-    rustango::migrate::ensure_ledger(pool)
+    // v0.38 — route through the tri-dialect `_pool` helpers + the
+    // dialect's `placeholder(n)` emitter so the same code works on
+    // PG (`$1`) and sqlite/mysql (`?`).
+    let registry = pools.registry_pool();
+    rustango::migrate::ensure_ledger_pool(&registry)
         .await
         .map_err(TenancyError::Migrate)?;
+    let placeholder = registry.dialect().placeholder(1);
+    let table = registry
+        .dialect()
+        .quote_ident(rustango::migrate::LEDGER_TABLE);
+    let name_col = registry.dialect().quote_ident("name");
     let sql = format!(
-        "INSERT INTO {} (name) VALUES ($1) ON CONFLICT (name) DO NOTHING",
-        rustango::migrate::LEDGER_TABLE
+        "INSERT INTO {table} ({name_col}) VALUES ({placeholder}) \
+         ON CONFLICT ({name_col}) DO NOTHING"
     );
     for name in names {
-        let result = rustango::sql::sqlx::query(&sql)
-            .bind(name)
-            .execute(pool)
-            .await
-            .map_err(|e| {
-                TenancyError::Migrate(rustango::migrate::MigrateError::Driver(e.into()))
-            })?;
-        if result.rows_affected() == 0 {
+        let affected = rustango::sql::raw_execute_pool(
+            &registry,
+            &sql,
+            vec![rustango::core::SqlValue::String(name.clone())],
+        )
+        .await
+        .map_err(|e| {
+            TenancyError::Migrate(rustango::migrate::MigrateError::Validation(format!(
+                "--fake: insert into ledger failed for `{name}`: {e}"
+            )))
+        })?;
+        if affected == 0 {
             writeln!(w, "  · {name} already in ledger — left untouched")?;
         } else {
             writeln!(w, "  + faked {name} (no SQL run; ledger row inserted)")?;

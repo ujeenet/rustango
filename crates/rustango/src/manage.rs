@@ -31,12 +31,22 @@ use std::pin::Pin;
 
 use axum::Router;
 
+// v0.38 — `PgPool` only used in the non-tenancy `runserver` path
+// (which stays PG-only by signature until v0.39); gated accordingly.
+#[cfg(feature = "postgres")]
 use crate::sql::sqlx::PgPool;
 
 /// Boxed seed-hook future. Keeps the public method signature simple
 /// while accepting any `async fn(&PgPool) -> Result<…>` closure.
+///
+/// v0.38 — gated to `postgres` for now. Lifting `SeedFn` to `&Pool` is
+/// queued for v0.39 as a breaking API change (every existing seed
+/// closure would need updating). Sqlite/MySQL apps that need a seed
+/// hook wire it manually via plain `axum::serve` until then.
+#[cfg(feature = "postgres")]
 type SeedFut<'a> =
     Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + 'a>>;
+#[cfg(feature = "postgres")]
 type SeedFn = Box<dyn for<'a> FnOnce(&'a PgPool) -> SeedFut<'a> + Send>;
 
 /// One-builder dispatcher. Hand it your API router (and optionally a
@@ -44,6 +54,7 @@ type SeedFn = Box<dyn for<'a> FnOnce(&'a PgPool) -> SeedFut<'a> + Send>;
 #[must_use = "Cli does nothing until .run() is awaited"]
 pub struct Cli {
     api: Router,
+    #[cfg(feature = "postgres")]
     seed: Option<SeedFn>,
     bind: String,
     migrations_dir: PathBuf,
@@ -110,6 +121,7 @@ impl Cli {
     pub fn new() -> Self {
         Self {
             api: Router::new(),
+            #[cfg(feature = "postgres")]
             seed: None,
             bind: std::env::var("RUSTANGO_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
             migrations_dir: PathBuf::from("./migrations"),
@@ -166,6 +178,11 @@ impl Cli {
     /// inserting a demo tenant or a seed superuser. The hook receives
     /// the registry pool (or single-tenant pool when [`Cli::tenancy`]
     /// is off).
+    ///
+    /// v0.38 — gated to `postgres` for now. Lifting the closure
+    /// signature to `&Pool` is queued for v0.39 as a deliberate
+    /// breaking API change.
+    #[cfg(feature = "postgres")]
     #[must_use]
     pub fn seed<F, Fut>(mut self, hook: F) -> Self
     where
@@ -568,11 +585,22 @@ impl Cli {
             return Err("Cli::tenancy() requires the `tenancy` feature".into());
         }
 
+        // v0.38 — `migrate::manage::run` accepts `&Pool` now, so the
+        // non-tenancy dispatch path opens through `Pool::connect()`
+        // which routes by URL scheme to PG / MySQL / SQLite. This is
+        // what makes `cargo run -- migrate` work against a sqlite
+        // DATABASE_URL without going through the `runserver_tenancy`
+        // path.
         let pool = if no_db_verb {
-            PgPool::connect_lazy(&url)?
+            crate::sql::Pool::connect_lazy(&url)
+                .map_err(|e| format!("connect_lazy({url}): {e}").into())
+                as Result<_, Box<dyn std::error::Error>>
         } else {
-            PgPool::connect(&url).await?
-        };
+            crate::sql::Pool::connect(&url)
+                .await
+                .map_err(|e| format!("connect({url}): {e}").into())
+                as Result<_, Box<dyn std::error::Error>>
+        }?;
         crate::migrate::manage::run(&pool, &self.migrations_dir, args).await?;
         Ok(())
     }
@@ -589,50 +617,71 @@ impl Cli {
         if self.tenancy {
             return Err("Cli::tenancy() requires the `tenancy` feature".into());
         }
-        let url = std::env::var("DATABASE_URL").map_err(|_| {
+        // v0.38 — non-tenancy single-tenant `runserver` is still PG-bound
+        // because `SeedFn` takes `&PgPool` (breaking change to lift) and
+        // user handlers commonly extract `Extension<PgPool>`. Sqlite +
+        // mysql users on the non-tenant lane wire their own
+        // `axum::serve` (Sites A/B pattern in the demo). Lifting this
+        // path is queued for v0.39 as a deliberate API rev with a
+        // migration guide. For now, fail at runtime with a clear
+        // pointer when run on non-PG.
+        #[cfg(not(feature = "postgres"))]
+        {
+            return Err(
+                "Cli::new().runserver() is PG-only today (non-tenant lane). \
+                 For sqlite/mysql apps wire your own `axum::serve` — see \
+                 the Sites A/B pattern in the rustango demo. Lifting this \
+                 path to `&Pool` is queued for v0.39."
+                    .into(),
+            );
+        }
+        #[cfg(feature = "postgres")]
+        {
+            let url = std::env::var("DATABASE_URL").map_err(|_| {
             "missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`."
         })?;
-        let pool = PgPool::connect(&url).await?;
-        let _ = crate::migrate::migrate(&pool, &self.migrations_dir).await?;
-        if let Some(seed) = self.seed {
-            seed(&pool).await?;
-        }
-        let api = self.api;
-        let api = if self.welcome_page {
-            try_mount_welcome(api)
-        } else {
-            api
-        };
-        let api = if self.health_endpoints {
-            api.merge(crate::health::health_router(pool.clone()))
-        } else {
-            api
-        };
-        #[cfg(feature = "admin")]
-        let api = mount_static_dirs(api, &self.static_dirs);
-        #[cfg(feature = "csrf")]
-        let api = match self.csrf {
-            Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
-            None => api,
-        };
-        #[cfg(feature = "config")]
-        let api = match self.settings_for_layers.as_ref() {
-            Some(s) => apply_settings_layers(api, s),
-            None => api,
-        };
-        let app = api.layer(axum::Extension(pool));
-        let listener = tokio::net::TcpListener::bind(&self.bind).await?;
-        eprintln!("server listening on http://{}", listener.local_addr()?);
-        // v0.30.16 — `into_make_service_with_connect_info` is what
-        // populates `ConnectInfo<SocketAddr>` in request extensions.
-        // Without it, `access_log` (and any other middleware that
-        // reads the peer address) sees "-".
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await?;
-        Ok(())
+            let pool = PgPool::connect(&url).await?;
+            let _ = crate::migrate::migrate(&pool, &self.migrations_dir).await?;
+            if let Some(seed) = self.seed {
+                seed(&pool).await?;
+            }
+            let api = self.api;
+            let api = if self.welcome_page {
+                try_mount_welcome(api)
+            } else {
+                api
+            };
+            let api = if self.health_endpoints {
+                api.merge(crate::health::health_router(pool.clone()))
+            } else {
+                api
+            };
+            #[cfg(feature = "admin")]
+            let api = mount_static_dirs(api, &self.static_dirs);
+            #[cfg(feature = "csrf")]
+            let api = match self.csrf {
+                Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
+                None => api,
+            };
+            #[cfg(feature = "config")]
+            let api = match self.settings_for_layers.as_ref() {
+                Some(s) => apply_settings_layers(api, s),
+                None => api,
+            };
+            let app = api.layer(axum::Extension(pool));
+            let listener = tokio::net::TcpListener::bind(&self.bind).await?;
+            eprintln!("server listening on http://{}", listener.local_addr()?);
+            // v0.30.16 — `into_make_service_with_connect_info` is what
+            // populates `ConnectInfo<SocketAddr>` in request extensions.
+            // Without it, `access_log` (and any other middleware that
+            // reads the peer address) sees "-".
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await?;
+            Ok(())
+        } // end of #[cfg(feature = "postgres")] block for non-tenancy runserver
     }
 
     #[cfg(feature = "tenancy")]
@@ -866,6 +915,7 @@ mod tests {
         assert_eq!(cli.bind, "0.0.0.0:8080");
         assert_eq!(cli.migrations_dir, std::path::PathBuf::from("./migrations"));
         assert!(!cli.tenancy);
+        #[cfg(feature = "postgres")]
         assert!(cli.seed.is_none());
     }
 
@@ -883,6 +933,7 @@ mod tests {
         assert!(cli.tenancy);
     }
 
+    #[cfg(feature = "postgres")]
     #[test]
     fn seed_hook_stored() {
         let cli = Cli::new().seed(|_pool| async { Ok(()) });
