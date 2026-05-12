@@ -271,6 +271,16 @@ impl<DB: Database> TenantPools<DB> {
     pub fn pool_config(&self) -> &TenantPoolsConfig {
         &self.config
     }
+
+    /// v0.38 — backend-typed accessor for the registry `sqlx::Pool<DB>`.
+    /// Cheap clone (sqlx pools are Arc-shaped). Used by
+    /// `tenancy::manage::server::run_server_cmd` to rebuild a fresh
+    /// `Arc<TenantPools<DB>>` for the server closures without losing
+    /// the original `pools`' database-mode cache.
+    #[must_use]
+    pub fn registry_inner(&self) -> &sqlx::Pool<DB> {
+        &self.registry
+    }
 }
 
 #[cfg(feature = "postgres")]

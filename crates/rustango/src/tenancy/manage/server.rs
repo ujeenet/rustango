@@ -2,23 +2,20 @@
 //! using the project's existing models. Thin wrapper around
 //! [`crate::tenancy::server::run`].
 //!
-//! v0.38 — PG-only because `tenancy::server::Builder` glues together
-//! TenantPools<Postgres>, schema-mode dispatch, operator console
-//! (PG-typed cookies), and the per-tenant admin builder. Sqlite/MySQL
-//! tenancy projects mount their own axum routes against
-//! `DatabaseTenant<DB>` + the ORM `_pool` helpers until the
-//! Builder<DB> generic lift lands (queued for v0.39).
+//! v0.38 — fully tri-dialect. `tenancy::server::run<DB>` boots the
+//! operator console + tenant admin on whichever backend
+//! `TenantPools<DB>` was built with. Schema-mode tenants remain
+//! PG-only by language (`SET search_path`); database-mode tenants
+//! work on any backend.
 
 use std::io::Write;
 
 use sqlx::Database;
 
 use crate::tenancy::error::TenancyError;
-#[cfg(feature = "postgres")]
 use crate::tenancy::manage::args::next_value;
 use crate::tenancy::pools::TenantPools;
 
-#[cfg(feature = "postgres")]
 pub(super) async fn run_server_cmd<W: Write + Send, DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
@@ -53,49 +50,14 @@ where
             }
         }
     }
-    // Pools is borrowed; the server takes an `Arc<TenantPools>` so it
-    // can clone into per-request closures. Build a fresh Arc carrying
-    // a clone of the registry pool — the existing pools' database-mode
-    // cache stays distinct, but for `run-server` the freshly-built
-    // registry uses the same connection-pool handle so the existing
-    // cache isn't lost.
-    // The PG-only `tenancy::server::Builder` consumes the concrete
-    // `TenantPools<sqlx::Postgres>`. Downcast through Any — this
-    // function is cfg(postgres)-gated so the cast either succeeds
-    // (DB = Postgres at the type level) or we're being called from
-    // dead code under a feature combination that shouldn't compile.
-    let pg_pools = (pools as &dyn std::any::Any)
-        .downcast_ref::<TenantPools<sqlx::Postgres>>()
-        .ok_or_else(|| {
-            TenancyError::Validation(
-                "run-server requires TenantPools<sqlx::Postgres> — schema-mode dispatch \
-                 + operator console are PG-only by language. Mount your own axum routes \
-                 against DatabaseTenant<DB> for sqlite/mysql tenancy projects."
-                    .into(),
-            )
-        })?;
-    let arc_pools = std::sync::Arc::new(crate::tenancy::TenantPools::new(
-        pg_pools.registry().clone(),
-    ));
-    crate::tenancy::server::run(arc_pools, registry_url.to_owned(), cfg, w).await
-}
-
-#[cfg(not(feature = "postgres"))]
-pub(super) async fn run_server_cmd<W: Write + Send, DB: Database>(
-    _pools: &TenantPools<DB>,
-    _registry_url: &str,
-    _args: &[String],
-    _w: &mut W,
-) -> Result<(), TenancyError>
-where
-    crate::sql::Pool: From<sqlx::Pool<DB>>,
-{
-    Err(TenancyError::Validation(
-        "run-server is PG-only today — the bundled multi-tenant server (TenantPools + \
-         schema-mode dispatch + operator console) is wired through Postgres types. For \
-         sqlite/mysql tenancy projects, mount your own axum routes against \
-         DatabaseTenant<DB> + the ORM _pool helpers. The Builder<DB> generic lift is \
-         queued for v0.39."
-            .into(),
-    ))
+    // v0.38 — `tenancy::server::run<DB>` is generic; the downcast to
+    // `TenantPools<sqlx::Postgres>` that used to live here is gone.
+    // Build a fresh Arc wrapping a re-borrow of `pools`' registry pool:
+    // the caller hands us `&TenantPools<DB>` (no Arc) and the server's
+    // closures need an `Arc<TenantPools<DB>>` they can clone per
+    // request. Re-using the registry pool is cheap (sqlx::Pool is
+    // Arc-shaped under the hood); the database-mode tenant cache on
+    // `pools` is independent and remains usable elsewhere.
+    let arc_pools = std::sync::Arc::new(TenantPools::<DB>::new(pools.registry_inner().clone()));
+    crate::tenancy::server::run::<DB, _>(arc_pools, registry_url.to_owned(), cfg, w).await
 }

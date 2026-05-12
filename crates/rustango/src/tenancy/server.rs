@@ -40,6 +40,7 @@ use super::error::TenancyError;
 use super::operator_console::{self, SessionSecret};
 use super::pools::TenantPools;
 use super::resolver::ChainResolver;
+use crate::sql::sqlx::Database;
 use crate::tenancy::admin::TenantAdminBuilder;
 
 /// Defaults for `manage run-server`. All fields are env-overridable;
@@ -91,12 +92,15 @@ impl ServerConfig {
 ///
 /// Returns [`TenancyError::Driver`] for connection / bind failures,
 /// or [`TenancyError::Validation`] for malformed config.
-pub async fn run<W: Write + Send>(
-    pools: Arc<TenantPools>,
+pub async fn run<DB: Database, W: Write + Send>(
+    pools: Arc<TenantPools<DB>>,
     registry_url: String,
     config: ServerConfig,
     writer: &mut W,
-) -> Result<(), TenancyError> {
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     if !no_operators_warn(&pools.registry_pool(), writer).await? {
         // No operator accounts — the user can still bring up the
         // server, but they can't log in. Loud warning, then proceed
@@ -118,12 +122,14 @@ pub async fn run<W: Write + Send>(
         SessionSecret::from_env_or_disk(std::path::Path::new("./var/.rustango_session.key"));
 
     // --- Operator console at the apex ---
-    let operator_console =
-        operator_console::router(pools.registry().clone(), session_secret.clone());
+    // v0.38 — `registry_pool()` (unified Pool enum) instead of the
+    // PG-only `registry()` accessor so the operator console runs on
+    // whichever backend `TenantPools<DB>` was built with.
+    let operator_console = operator_console::router(pools.registry_pool(), session_secret.clone());
 
     // --- Tenant admin at subdomains (with per-tenant auth) ---
     let resolver = ChainResolver::standard(config.apex_domain.clone());
-    let tenant_admin = TenantAdminBuilder::new(pools.clone(), registry_url, resolver)
+    let tenant_admin = TenantAdminBuilder::<DB>::new(pools.clone(), registry_url, resolver)
         .with_session(session_secret)
         .build();
 

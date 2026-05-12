@@ -38,13 +38,13 @@
 //! See `memory/v05-multitenancy-roadmap.md` in the project memory for
 //! the full design and slice plan.
 
-// v0.34 — `tenancy::admin` (the per-tenant admin router builder) is
-// PG-only by design because it threads the framework's PgRow-based
-// rendering helpers + builds short-lived PgPools with `search_path`
-// baked in. Sqlite/MySQL apps that want bundled admin will wait for
-// the v0.35+ bi-dialect admin rewrite; today, write your own routes
-// using `DatabaseTenant<DB>` + the ORM `_pool` helpers.
-#[cfg(all(feature = "admin", feature = "postgres"))]
+// v0.38 slice 24 — `tenancy::admin` is tri-dialect: handler bodies
+// route through the ORM `_pool` family + the unified
+// `crate::sql::Pool` enum. Schema-mode dispatch remains PG-only by
+// language (`SET search_path`); on non-PG backends a schema-mode
+// tenant returns `TenancyError::Validation` from
+// `TenantPools<DB>::scoped_pool_dyn` before the inner admin is built.
+#[cfg(feature = "admin")]
 pub mod admin;
 pub mod auth;
 pub mod auth_backends;
@@ -68,11 +68,10 @@ mod resolver;
 pub mod routes;
 mod secrets;
 pub mod session;
-// v0.38 — `tenancy::server` ties together TenantPools + Tenant
-// extractor + admin builder; all PG-typed today. Gated to PG; sqlite/
-// mysql apps assemble their own routes today, full generic lift in
-// slice 5 (server::Builder<DB>).
-#[cfg(feature = "postgres")]
+// v0.38 slice 24 — `tenancy::server::run<DB>` is tri-dialect; the
+// operator console runs on whichever backend `TenantPools<DB>` was
+// built with, schema-mode dispatch only fires on PG (by language),
+// and the inner admin uses the unified `crate::sql::Pool` enum.
 pub mod server;
 pub mod tenant_console;
 
