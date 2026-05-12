@@ -352,7 +352,6 @@ impl Builder {
             resolver: build_resolver(&self.apex),
             session_secret: session_secret_for_tenant.clone(),
             operator_secret: operator_secret.clone(),
-            registry: self.registry.clone(),
         });
         let mut tenant_admin_builder = TenantAdminBuilder::new(
             self.pools.clone(),

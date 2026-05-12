@@ -20,7 +20,8 @@ use sqlx::Database;
 
 use crate::sql::sqlx;
 use crate::tenancy::{
-    session::SessionSecret, ChainResolver, Org, OrgResolver, TenantConn, TenantPools,
+    session::SessionSecret, ChainResolver, DefaultTenantDb, Org, OrgResolver, TenantConn,
+    TenantPools,
 };
 
 /// Per-server context that the [`Tenant`] extractor reads out of
@@ -28,7 +29,7 @@ use crate::tenancy::{
 /// (`DB = sqlx::Postgres` default keeps existing call sites compiling
 /// unchanged). Populated once by [`crate::server::Builder`] and
 /// `Arc`-cloned into every request.
-pub struct TenantContext<DB: Database = sqlx::Postgres> {
+pub struct TenantContext<DB: Database = DefaultTenantDb> {
     pub pools: Arc<TenantPools<DB>>,
     pub resolver: ChainResolver,
     /// The HMAC-SHA256 key used to sign tenant session cookies. Set by
@@ -37,9 +38,6 @@ pub struct TenantContext<DB: Database = sqlx::Postgres> {
     pub session_secret: SessionSecret,
     /// The HMAC-SHA256 key used to sign operator session cookies.
     pub operator_secret: SessionSecret,
-    /// Registry-level pool, used by [`SessionOperator`] to look up the
-    /// operator row after validating the cookie.
-    pub registry: sqlx::PgPool,
 }
 
 /// Extractor: resolves the request's tenant and acquires a connection
@@ -54,7 +52,7 @@ pub struct TenantContext<DB: Database = sqlx::Postgres> {
 ///     Ok(Json(posts))
 /// }
 /// ```
-pub struct Tenant<DB: Database = sqlx::Postgres> {
+pub struct Tenant<DB: Database = DefaultTenantDb> {
     pub org: Org,
     conn: TenantConn<DB>,
 }
@@ -103,6 +101,7 @@ impl<DB: Database> Tenant<DB> {
     }
 }
 
+#[cfg(feature = "postgres")]
 impl Tenant<sqlx::Postgres> {
     /// Borrow the tenant-scoped connection as `&mut PgConnection` —
     /// the executor type sqlx and rustango's `fetch_on` / `get_on`
@@ -140,10 +139,11 @@ impl IntoResponse for TenantRejection {
     }
 }
 
-// v0.38 — the FromRequestParts impl is wired for the PG default only.
-// `Tenant<sqlx::Postgres>` goes through schema-mode-aware `TenantPools<Postgres>::acquire`.
-// Sqlite/MySQL apps use `DatabaseTenant<DB>` until the non-PG runtime
-// path lights up in a follow-up slice.
+// v0.38 — `Tenant<sqlx::Postgres>` goes through the schema-mode-aware
+// `TenantPools<Postgres>::acquire` so PG schema-mode tenants get
+// `SET search_path` applied before the connection is handed to the
+// handler. Database-mode PG tenants go through the same path.
+#[cfg(feature = "postgres")]
 impl<S> FromRequestParts<S> for Tenant<sqlx::Postgres>
 where
     S: Send + Sync,
@@ -165,6 +165,68 @@ where
         let conn = ctx
             .pools
             .acquire(&org)
+            .await
+            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
+        Ok(Tenant { org, conn })
+    }
+}
+
+// v0.38 — `Tenant<sqlx::Sqlite>` routes through the generic
+// `TenantPools::database_acquire` (database-mode only — schema-mode
+// is PG-only by language). The user assembles routing the same way
+// as the PG case; `TenantContext<sqlx::Sqlite>` carries
+// `TenantPools<sqlx::Sqlite>`. Same shape, no `SET search_path`.
+#[cfg(feature = "sqlite")]
+impl<S> FromRequestParts<S> for Tenant<sqlx::Sqlite>
+where
+    S: Send + Sync,
+{
+    type Rejection = TenantRejection;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let ctx = parts
+            .extensions
+            .get::<Arc<TenantContext<sqlx::Sqlite>>>()
+            .ok_or(TenantRejection::MissingContext)?
+            .clone();
+        let org = ctx
+            .resolver
+            .resolve(parts, &ctx.pools.registry_pool())
+            .await
+            .map_err(|e| TenantRejection::Internal(e.to_string()))?
+            .ok_or(TenantRejection::NotFound)?;
+        let conn = ctx
+            .pools
+            .database_acquire(&org)
+            .await
+            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
+        Ok(Tenant { org, conn })
+    }
+}
+
+// v0.38 — same for `Tenant<sqlx::MySql>`. Database-mode only.
+#[cfg(feature = "mysql")]
+impl<S> FromRequestParts<S> for Tenant<sqlx::MySql>
+where
+    S: Send + Sync,
+{
+    type Rejection = TenantRejection;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let ctx = parts
+            .extensions
+            .get::<Arc<TenantContext<sqlx::MySql>>>()
+            .ok_or(TenantRejection::MissingContext)?
+            .clone();
+        let org = ctx
+            .resolver
+            .resolve(parts, &ctx.pools.registry_pool())
+            .await
+            .map_err(|e| TenantRejection::Internal(e.to_string()))?
+            .ok_or(TenantRejection::NotFound)?;
+        let conn = ctx
+            .pools
+            .database_acquire(&org)
             .await
             .map_err(|e| TenantRejection::Internal(e.to_string()))?;
         Ok(Tenant { org, conn })

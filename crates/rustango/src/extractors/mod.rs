@@ -24,13 +24,15 @@
 //! ```
 
 mod database_tenant;
+// v0.38 — `session_user` still PG-gated because it queries `Operator`
+// from the registry, which only lives on PG today. The eventual lift
+// is to route through `fetch_pool` (already done for SessionOperator)
+// and make tenant_console/operator_console types backend-agnostic.
 #[cfg(feature = "postgres")]
 mod session_user;
-#[cfg(feature = "postgres")]
 mod tenant;
 
 pub use database_tenant::{DatabaseTenant, DatabaseTenantContext, DatabaseTenantRejection};
 #[cfg(feature = "postgres")]
 pub use session_user::{SessionOperator, SessionUser};
-#[cfg(feature = "postgres")]
 pub use tenant::{Tenant, TenantContext, TenantRejection};

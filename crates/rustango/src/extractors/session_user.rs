@@ -131,10 +131,10 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionOperator {
         };
 
         use crate::core::Column as _;
-        use crate::sql::Fetcher as _;
+        use crate::sql::FetcherPool as _;
         let ops = Operator::objects()
             .where_(Operator::id.eq(payload.oid))
-            .fetch(&ctx.registry)
+            .fetch_pool(&ctx.pools.registry_pool())
             .await
             .unwrap_or_default();
 
