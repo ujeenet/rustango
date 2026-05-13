@@ -456,6 +456,9 @@ pub struct BulkUpdateQuery {
 pub enum AggregateExpr {
     /// `COUNT(*)` or `COUNT(column)` when `column` is `Some`.
     Count(Option<&'static str>),
+    /// `COUNT(DISTINCT column)` — counts distinct values in a column.
+    /// v0.45. Works on PG / MySQL 8+ / SQLite 3.35+.
+    CountDistinct(&'static str),
     /// `SUM(column)`.
     Sum(&'static str),
     /// `AVG(column)`.

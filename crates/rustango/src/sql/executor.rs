@@ -3213,6 +3213,251 @@ where
     }
 }
 
+// v0.45 — single-row sugar on top of FetcherPool. Each method
+// applies the appropriate `order_by` + `limit(1)` then forwards to
+// `fetch_pool`. All four are inherent methods on `QuerySet<T>` (not
+// trait methods) because adding default methods to `FetcherPool`
+// would require RTN syntax against `Self::Future` and bound shuffling
+// we don't need — `QuerySet<T>` is the only Self that matters.
+impl<T> crate::query::QuerySet<T>
+where
+    T: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    /// Fetch the first row by the current ordering, or `None` when
+    /// the result is empty.
+    ///
+    /// If no `order_by` is set, "first" means "first by primary key
+    /// ASC" — the natural insertion order on Auto<T> PKs and stable
+    /// across drivers. Django's `QuerySet.first()` behaves the same
+    /// way (it falls back to PK ordering for determinism).
+    ///
+    /// # Errors
+    /// As [`FetcherPool::fetch_pool`].
+    pub async fn first_pool(self, pool: &Pool) -> Result<Option<T>, ExecError> {
+        let qs = ensure_pk_ordering(self, /*reverse=*/ false);
+        let rows = qs.limit(1).fetch_pool(pool).await?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Fetch the last row by the current ordering, or `None` when
+    /// the result is empty.
+    ///
+    /// Implemented as "flip every ordering direction, take the first"
+    /// — avoids `OFFSET COUNT(*) - 1` and works on every dialect.
+    /// If no `order_by` is set, sorts by PK DESC.
+    ///
+    /// # Errors
+    /// As [`FetcherPool::fetch_pool`].
+    pub async fn last_pool(self, pool: &Pool) -> Result<Option<T>, ExecError> {
+        let qs = ensure_pk_ordering(self, /*reverse=*/ true);
+        let rows = qs.limit(1).fetch_pool(pool).await?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Fetch the smallest row by `field` (ASC ordering), or `None`
+    /// when the result is empty. Django's `QuerySet.earliest("field")`.
+    ///
+    /// Any previously-set `order_by` is **replaced** — `earliest`
+    /// declares the sort itself.
+    ///
+    /// # Errors
+    /// As [`FetcherPool::fetch_pool`].
+    pub async fn earliest_pool(mut self, field: &str, pool: &Pool) -> Result<Option<T>, ExecError> {
+        self = self.replace_order_by(&[(field, false)]);
+        let rows = self.limit(1).fetch_pool(pool).await?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Fetch the largest row by `field` (DESC ordering), or `None`
+    /// when the result is empty. Django's `QuerySet.latest("field")`.
+    ///
+    /// Any previously-set `order_by` is **replaced** — `latest`
+    /// declares the sort itself.
+    ///
+    /// # Errors
+    /// As [`FetcherPool::fetch_pool`].
+    pub async fn latest_pool(mut self, field: &str, pool: &Pool) -> Result<Option<T>, ExecError> {
+        self = self.replace_order_by(&[(field, true)]);
+        let rows = self.limit(1).fetch_pool(pool).await?;
+        Ok(rows.into_iter().next())
+    }
+}
+
+/// v0.45 — Django-style `get_or_create`. Runs the queryset; if it
+/// matches exactly one row return `(row, false)`; if it matches none
+/// invoke `create_fn` to materialize a new instance + insert it and
+/// return `(created, true)`. Matching multiple rows is a
+/// programming error and returns
+/// [`ExecError::MultipleRowsReturned`].
+///
+/// Like Django's helper, this is **not atomic** without an enclosing
+/// transaction — between the SELECT and the INSERT another writer
+/// could insert a colliding row. For race-free behaviour pair it
+/// with `Pool::begin()` or with a UNIQUE constraint that surfaces
+/// the conflict via the existing `upsert()` machinery.
+///
+/// The closure receives an **owned** `Pool` (cheap to clone — it's
+/// an `Arc` internally). That sidesteps Rust's async-closure
+/// lifetime inference: borrowed `&Pool` inside a future returned
+/// from a closure trips the compiler's `'1 must outlive '2` rule.
+///
+/// # Example
+///
+/// ```ignore
+/// let (post, created) = rustango::sql::get_or_create_pool(
+///     Post::objects().filter("slug", Op::Eq, "hello"),
+///     |pool| async move {
+///         let mut p = Post {
+///             id: Auto::Unset,
+///             slug: "hello".into(),
+///             title: "Hello".into(),
+///         };
+///         p.insert_pool(&pool).await?;
+///         Ok(p)
+///     },
+///     &pool,
+/// ).await?;
+/// ```
+///
+/// # Errors
+/// - [`ExecError::MultipleRowsReturned`] when the filter matches >1 row.
+/// - Whatever the `create_fn` closure returns when matching no rows.
+/// - Whatever [`FetcherPool::fetch_pool`] returns.
+pub async fn get_or_create_pool<T, F, Fut>(
+    qs: crate::query::QuerySet<T>,
+    create_fn: F,
+    pool: &Pool,
+) -> Result<(T, bool), ExecError>
+where
+    T: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+    F: FnOnce(Pool) -> Fut,
+    Fut: std::future::Future<Output = Result<T, ExecError>>,
+{
+    let mut rows = qs.fetch_pool(pool).await?;
+    match rows.len() {
+        0 => Ok((create_fn(pool.clone()).await?, true)),
+        1 => Ok((rows.remove(0), false)),
+        n => Err(ExecError::MultipleRowsReturned {
+            op: "get_or_create",
+            table: T::SCHEMA.table,
+            count: n,
+        }),
+    }
+}
+
+/// v0.45 — Django-style `update_or_create`. Runs the queryset; if
+/// it matches exactly one row, invoke `update_fn` to mutate it +
+/// save the changes and return `(updated, false)`; if it matches
+/// none, invoke `create_fn` and return `(created, true)`. Matching
+/// multiple rows returns [`ExecError::MultipleRowsReturned`].
+///
+/// Same atomicity caveat as [`get_or_create_pool`] — wrap in a
+/// transaction or rely on a UNIQUE constraint for race-free
+/// semantics.
+///
+/// Both closures receive an **owned** `Pool` for the same
+/// async-lifetime reason as [`get_or_create_pool`].
+///
+/// # Example
+///
+/// ```ignore
+/// let (post, created) = rustango::sql::update_or_create_pool(
+///     Post::objects().filter("slug", Op::Eq, "hello"),
+///     |pool, mut existing| async move {
+///         existing.title = "New title".into();
+///         existing.save_pool(&pool).await?;
+///         Ok(existing)
+///     },
+///     |pool| async move {
+///         let mut p = Post { /* defaults */ };
+///         p.insert_pool(&pool).await?;
+///         Ok(p)
+///     },
+///     &pool,
+/// ).await?;
+/// ```
+///
+/// # Errors
+/// As [`get_or_create_pool`].
+pub async fn update_or_create_pool<T, UF, UFut, CF, CFut>(
+    qs: crate::query::QuerySet<T>,
+    update_fn: UF,
+    create_fn: CF,
+    pool: &Pool,
+) -> Result<(T, bool), ExecError>
+where
+    T: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+    UF: FnOnce(Pool, T) -> UFut,
+    UFut: std::future::Future<Output = Result<T, ExecError>>,
+    CF: FnOnce(Pool) -> CFut,
+    CFut: std::future::Future<Output = Result<T, ExecError>>,
+{
+    let mut rows = qs.fetch_pool(pool).await?;
+    match rows.len() {
+        0 => Ok((create_fn(pool.clone()).await?, true)),
+        1 => {
+            let existing = rows.remove(0);
+            let updated = update_fn(pool.clone(), existing).await?;
+            Ok((updated, false))
+        }
+        n => Err(ExecError::MultipleRowsReturned {
+            op: "update_or_create",
+            table: T::SCHEMA.table,
+            count: n,
+        }),
+    }
+}
+
+/// v0.45 helper — ensure the queryset has *some* deterministic
+/// ordering before slicing to one row. Used by `first_pool` and
+/// `last_pool`. If the caller already provided an `order_by`, we
+/// either keep it (forward) or flip every direction (reverse). If
+/// they didn't, we fall back to the model's primary key.
+fn ensure_pk_ordering<T: Model>(
+    qs: crate::query::QuerySet<T>,
+    reverse: bool,
+) -> crate::query::QuerySet<T> {
+    if qs.order_by_clauses().is_empty() {
+        let pk = T::SCHEMA.primary_key().map(|f| f.column);
+        if let Some(pk_col) = pk {
+            return qs.replace_order_by(&[(pk_col, reverse)]);
+        }
+        // No PK on this model — leave the order_by empty. The caller
+        // is going to get a row deterministic-by-row-order, which is
+        // dialect-defined but stable enough for the no-pk-no-order
+        // edge case.
+        qs
+    } else if reverse {
+        qs.flip_order_by()
+    } else {
+        qs
+    }
+}
+
 /// `QuerySet::fetch` variant that takes `&mut PoolTx` — executes the
 /// SELECT inside an open transaction so the read and subsequent writes
 /// share the same transaction boundary.

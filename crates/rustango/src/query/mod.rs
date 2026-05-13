@@ -112,6 +112,34 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// v0.45 — discard any previously-set `order_by` and apply
+    /// `items` as the new ordering. Used by `earliest_pool` and
+    /// `latest_pool` which declare their own sort.
+    #[must_use]
+    pub fn replace_order_by(mut self, items: &[(&str, bool)]) -> Self {
+        self.order_by.clear();
+        self.order_by(items)
+    }
+
+    /// v0.45 — flip every ordering direction in place. Used by
+    /// `last_pool` to invert the queryset's natural sort and take
+    /// the first row from the reversed sequence — avoids OFFSET +
+    /// COUNT(*) and works on every dialect.
+    #[must_use]
+    pub fn flip_order_by(mut self) -> Self {
+        for entry in &mut self.order_by {
+            entry.1 = !entry.1;
+        }
+        self
+    }
+
+    /// v0.45 — read-only view of the current `order_by` for callers
+    /// that need to inspect it (e.g. inserting a PK fallback).
+    #[must_use]
+    pub fn order_by_clauses(&self) -> &[(String, bool)] {
+        &self.order_by
+    }
+
     /// Eagerly load a `ForeignKey<Parent>` field via a `LEFT JOIN` —
     /// Django's `select_related`. Pass the field name on `T` (not the
     /// FK column or the parent table); subsequent `fetch_on` returns

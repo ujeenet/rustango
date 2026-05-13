@@ -145,4 +145,16 @@ pub enum ExecError {
     /// surfaces only if a model deriving `Model` somehow lacks a PK.
     #[error("model `{table}` has no `#[rustango(primary_key)]` field — required for FK lookup")]
     MissingPrimaryKey { table: &'static str },
+
+    /// `get_or_create` / `update_or_create` (v0.45) was called with a
+    /// filter that matches more than one row. Django's
+    /// `MultipleObjectsReturned`. Tighten the filter or use
+    /// [`crate::query::QuerySet::first_pool`] when ambiguity is
+    /// acceptable.
+    #[error("`{op}` filter matched {count} rows on `{table}`; expected at most 1")]
+    MultipleRowsReturned {
+        op: &'static str,
+        table: &'static str,
+        count: usize,
+    },
 }

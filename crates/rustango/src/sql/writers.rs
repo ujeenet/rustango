@@ -207,6 +207,11 @@ pub(super) fn write_aggregate(b: &mut Sql<'_>, query: &AggregateQuery) -> Result
                 b.write_ident(col);
                 b.sql.push(')');
             }
+            AggregateExpr::CountDistinct(col) => {
+                b.sql.push_str("COUNT(DISTINCT ");
+                b.write_ident(col);
+                b.sql.push(')');
+            }
             AggregateExpr::Sum(col) => {
                 // Both PG and MySQL widen SUM(int) into a type the
                 // SqlValue aggregate decoder doesn't try (PG NUMERIC,
