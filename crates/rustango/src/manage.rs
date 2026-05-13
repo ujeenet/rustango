@@ -544,10 +544,13 @@ impl Cli {
             let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
             #[cfg(feature = "sqlite")]
             if scheme == "sqlite" {
+                let opts = crate::sql::sqlite_connect_options(&url)?;
                 let pool = if no_db_verb {
-                    crate::sql::sqlx::SqlitePool::connect_lazy(&url)?
+                    crate::sql::sqlx::sqlite::SqlitePoolOptions::new().connect_lazy_with(opts)
                 } else {
-                    crate::sql::sqlx::SqlitePool::connect(&url).await?
+                    crate::sql::sqlx::sqlite::SqlitePoolOptions::new()
+                        .connect_with(opts)
+                        .await?
                 };
                 let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(pool);
                 crate::tenancy::manage::run_with_init(
@@ -614,10 +617,13 @@ impl Cli {
             // the tri-dialect `_pool` family.
             #[cfg(feature = "sqlite")]
             {
+                let opts = crate::sql::sqlite_connect_options(&url)?;
                 let p = if no_db_verb {
-                    crate::sql::sqlx::SqlitePool::connect_lazy(&url)?
+                    crate::sql::sqlx::sqlite::SqlitePoolOptions::new().connect_lazy_with(opts)
                 } else {
-                    crate::sql::sqlx::SqlitePool::connect(&url).await?
+                    crate::sql::sqlx::sqlite::SqlitePoolOptions::new()
+                        .connect_with(opts)
+                        .await?
                 };
                 let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(p);
                 let init_fn: crate::tenancy::manage::InitTenancyFn = crate::tenancy::init_tenancy;

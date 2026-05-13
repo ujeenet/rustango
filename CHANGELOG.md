@@ -2,6 +2,35 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.39.0] — dialect-agnostic transactions + tri-dialect migrations
+
+Closes the last PG-specific gaps in the executor surface and the file-based migration renderer. Multi-row TX blocks, `SeedFn` hooks, and `SchemaChange` DDL all work on any backend; sqlite/mysql `runserver_tenancy` now honors the `Cli::seed` hook on boot.
+
+### Added
+
+- **Dialect-agnostic transactions** — `PoolTx::dialect()` returns the variant's dialect; `insert_tx` / `insert_returning_tx` / `update_tx` / `delete_tx` mirror the `_pool` family against an open `&mut PoolTx`. MySQL `LAST_INSERT_ID()` runs on the same TX connection.
+- **`QuerySet::fetch_tx`** — `select_rows_tx_with_related` + new `FetcherTx` trait; macro emits `save_tx` / `insert_tx` / `delete_tx` on every `Model`.
+- **Tri-dialect `SchemaChange` DDL** — three new `Dialect` capabilities:
+  - `translate_default_expr(&str, ty: &str)` — `now()` → `CURRENT_TIMESTAMP` (sqlite) / `CURRENT_TIMESTAMP(6)` (mysql); strips Postgres `::type` cast suffixes; parenthesizes JSON defaults for MySQL.
+  - `inline_fks_in_create_table()` — sqlite returns true; CREATE TABLE renderer emits inline + table-level FK clauses and skips the post-hoc `ALTER TABLE ADD CONSTRAINT` path.
+  - `supports_create_index_if_not_exists()` — mysql returns false; `CREATE INDEX` is emitted without the guard token (ledger serializes application).
+- **`Dialect::insert_on_conflict_skip(&[&col])`** — PG/SQLite → `ON CONFLICT (…) DO NOTHING`; MySQL → `ON DUPLICATE KEY UPDATE <pivot> = <pivot>`.
+
+### Changed
+
+- `SeedFn` lifted from `&PgPool` to `&Pool` (postgres `cfg` gate dropped); sqlite/mysql runserver paths now invoke seeds.
+- `server::Builder` cfg loosened from `feature = "postgres"` to `feature = "tenancy"`; the generic-over-DB builder is reached from the non-PG `runserver_tenancy` arm.
+- Renderers routed through the new dialect capabilities: `migrate/diff.rs::create_table_sql_from_snapshot_with_dialect`, `constraints_sql_from_snapshot`, `add_column_sql`, the `CreateIndex` arm, `migrate/ddl.rs::write_column_def`, and `tenancy/permissions.rs::auto_create_permissions_pool` + `tenancy/manage/migrations.rs` (both now use `insert_on_conflict_skip`).
+
+### Fixed
+
+- `manage.rs::runserver_tenancy` (non-PG arm) now invokes `Cli::seed` on boot. Previously this was unconditionally skipped, so `rustango_cms::ensure_seeded` never ran on sqlite/mysql and the admin chrome rendered untokenized (white-on-white) because the `cms_theme` table stayed empty.
+- Identifier quoting in `constraints_sql_from_snapshot` no longer hardcodes ANSI double-quotes (broke MySQL backticks).
+
+### Tests
+
+- `tests/tx_methods_sqlite_live.rs` — end-to-end round-trip on a real SQLite pool (1201 lib + 3 new tests pass).
+
 ## [0.38.0] — tri-dialect end-to-end: every feature, every backend
 
 This release makes rustango genuinely tri-dialect (Postgres + MySQL 8+ + SQLite) across every framework feature. Previously Postgres-only surfaces — multi-tenancy builder + admin UI, jobs queue, `manage inspectdb`, media manager, typed permissions — now ship full SQLite + MySQL parity. Concretely:

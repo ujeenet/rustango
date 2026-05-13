@@ -81,3 +81,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # v0.40 tri-dialect litmus — proves a non-PG build of rustango with
+  # tenancy still compiles. Catches regressions where PG-only types,
+  # bind syntax, or feature wiring leak into the bi/tri-dialect paths.
+  # Runs `cargo check`, `cargo clippy`, and the SQLite pragma
+  # regression test (foreign_keys ON, WAL on file-backed, busy_timeout
+  # set, FK violation rejected — see tests/sqlite_pragmas_live.rs).
+  sqlite_litmus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p rustango --no-default-features --features sqlite,tenancy
+      - run: cargo clippy -p rustango --no-default-features --features sqlite,tenancy --lib --no-deps
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test sqlite_pragmas_live

@@ -172,9 +172,10 @@ impl Pool {
             }),
             #[cfg(feature = "sqlite")]
             "sqlite" => {
+                let opts = sqlite_connect_options(url)?;
                 let pool = sqlx::sqlite::SqlitePoolOptions::new()
                     .acquire_timeout(timeout)
-                    .connect(url)
+                    .connect_with(opts)
                     .await
                     .map_err(|e| PoolError::Connect(e.to_string()))?;
                 Ok(Self::Sqlite(pool))
@@ -239,9 +240,8 @@ impl Pool {
             }),
             #[cfg(feature = "sqlite")]
             "sqlite" => {
-                let url_with_default = ensure_sqlite_rwc_default(url);
-                let pool = sqlx::SqlitePool::connect_lazy(&url_with_default)
-                    .map_err(|e| PoolError::Connect(e.to_string()))?;
+                let opts = sqlite_connect_options(url)?;
+                let pool = sqlx::sqlite::SqlitePoolOptions::new().connect_lazy_with(opts);
                 Ok(Self::Sqlite(pool))
             }
             #[cfg(not(feature = "sqlite"))]
@@ -373,17 +373,14 @@ impl Pool {
         //   - `sqlite:///abs/path.db` — absolute path
         //   - `sqlite:?mode=memory&cache=shared` — query-string options
         //
-        // v0.37 friendly-default: when the URL points at a file path
-        // and doesn't already carry a `mode=` query param, append
-        // `?mode=rwc` so a missing file is created (matching the
-        // Django-shape "just works" tone). Without this, sqlx
-        // returns `unable to open database file (code: 14)` on first
-        // boot, which is a confusing error for new users. In-memory
-        // databases (`sqlite::memory:`) and explicit `mode=` URLs
-        // bypass this — the user's intent always wins.
-        let url_with_default = ensure_sqlite_rwc_default(url);
+        // v0.37 friendly-default: missing files are created on connect
+        // via `ensure_sqlite_rwc_default` (applied inside
+        // `sqlite_connect_options`). v0.40: `sqlite_connect_options`
+        // also turns on `foreign_keys`, sets `busy_timeout = 5s`, and
+        // enables WAL journal mode for file-backed databases.
+        let opts = sqlite_connect_options(url)?;
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .connect(&url_with_default)
+            .connect_with(opts)
             .await
             .map_err(|e| PoolError::Connect(e.to_string()))?;
         Ok(Self::Sqlite(pool))
@@ -397,6 +394,40 @@ impl Pool {
             feature: "sqlite",
         })
     }
+}
+
+/// v0.40 — build a `SqliteConnectOptions` with the pragmas every
+/// rustango SQLite pool needs:
+///
+/// - `foreign_keys = ON` — SQLite ships with FK enforcement OFF, so
+///   without this an ORM that emits `ForeignKey` columns silently
+///   accepts orphaned references.
+/// - `busy_timeout = 5s` — contended writes wait instead of
+///   immediately returning `database is locked`.
+/// - `journal_mode = WAL` for file-backed databases — concurrent
+///   readers don't block writers. Skipped for `:memory:` and
+///   `mode=memory` URLs (WAL is file-only; setting it on memory
+///   databases silently falls back to MEMORY mode).
+///
+/// Applies `ensure_sqlite_rwc_default` to the URL first, so missing
+/// files are created on connect.
+///
+/// # Errors
+/// [`PoolError::Connect`] if the URL can't be parsed as a SQLite URL.
+#[cfg(feature = "sqlite")]
+pub(crate) fn sqlite_connect_options(
+    url: &str,
+) -> Result<sqlx::sqlite::SqliteConnectOptions, PoolError> {
+    use std::str::FromStr;
+    let url_with_default = ensure_sqlite_rwc_default(url);
+    let mut opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url_with_default)
+        .map_err(|e| PoolError::Connect(e.to_string()))?
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(5));
+    if !url_with_default.contains(":memory:") && !url_with_default.contains("mode=memory") {
+        opts = opts.journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+    }
+    Ok(opts)
 }
 
 /// v0.37 — append `?mode=rwc` to a sqlite file URL that doesn't

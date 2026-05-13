@@ -68,9 +68,9 @@ Post::objects().where_(Post::view_count.lte(100)).fetch(&pool).await?;
 Post::objects().where_(Post::status.ne("archived")).fetch(&pool).await?;
 Post::objects().where_(Post::id.in_(&[1, 2, 3])).fetch(&pool).await?;
 Post::objects().where_(Post::status.not_in(&["draft", "deleted"])).fetch(&pool).await?;
-Post::objects().where_(Post::title.like("%draft%")).fetch(&pool).await?;
-Post::objects().where_(Post::title.icontains("draft")).fetch(&pool).await?;
-Post::objects().where_(Post::title.starts_with("Hello")).fetch(&pool).await?;
+Post::objects().where_(Post::title.like("%draft%")).fetch(&pool).await?;          // case-sensitive contains
+Post::objects().where_(Post::title.ilike("%draft%")).fetch(&pool).await?;         // case-insensitive contains
+Post::objects().where_(Post::title.ilike("Hello%")).fetch(&pool).await?;          // case-insensitive starts-with
 Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 Post::objects().where_(Post::published_at.between(start, end)).fetch(&pool).await?;
 ```

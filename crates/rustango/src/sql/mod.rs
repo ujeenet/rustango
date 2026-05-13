@@ -64,6 +64,8 @@ pub use foreign_key::ForeignKey;
 pub use m2m::M2MManager;
 #[cfg(feature = "mysql")]
 pub use mysql::MySql;
+#[cfg(all(feature = "sqlite", feature = "manage"))]
+pub(crate) use pool::sqlite_connect_options;
 pub use pool::{Pool, PoolError};
 pub use postgres::Postgres;
 #[cfg(feature = "sqlite")]

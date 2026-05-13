@@ -9,14 +9,17 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.27"                                       # Postgres (default)
-//! rustango = { version = "0.27", features = ["sqlite"] }  # SQLite
+//! rustango = "0.39"                                       # Postgres (default)
+//! rustango = { version = "0.39", features = ["sqlite"] }  # SQLite
+//! rustango = { version = "0.39", features = ["mysql"] }   # MySQL 8.0+
 //! ```
 //!
 //! Defaults pull `postgres`, `admin`, and `runserver` (the bi-dialect
 //! single-pool [`server::AppBuilder`]). Add `"tenancy"` for the
-//! multi-tenant resolver / pools / per-tenant auth (PG-only until
-//! v0.28 makes [`tenancy::TenantPools`] `Pool`-generic). Add
+//! multi-tenant resolver / pools / per-tenant auth. Tenancy is
+//! tri-dialect since v0.33: [`tenancy::TenantPools`] is generic over
+//! the backend, database-mode tenants work on every backend, and
+//! schema-mode stays Postgres-only by language semantics. Add
 //! `"mysql"` or `"sqlite"` for additional backends — the same
 //! `#[derive(Model)]` types and `_pool` ORM API work against any of
 //! them. Drop `default-features` for the bare ORM (no axum, no Tera).

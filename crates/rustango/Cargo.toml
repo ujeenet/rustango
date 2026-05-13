@@ -39,22 +39,20 @@ manage = ["dep:axum", "dep:tokio", "runtime"]
 # axum server with TenantContext. v0.30.26+.
 test_utils = []
 
-# MySQL 8.4+ backend. Lands fully in rustango v0.23.0-batch2 (when the
-# `MySqlDialect` impl + DDL writer dispatch ship); the `mysql` feature
-# in v0.23.0-batch1 wires the sqlx side so apps can already opt-in.
-# Trying to actually `Pool::connect("mysql://...")` in batch1 returns a
-# clear "not yet implemented in this version" error — apps building
-# against `mysql` ahead of batch2 get a soft-error, not a panic.
+# MySQL 8.0+ backend. Fully tri-dialect since v0.38: every framework
+# surface (ORM, migrations, admin, tenancy database-mode, jobs queue,
+# audit, media, contenttypes, permissions, inspectdb, ViewSet,
+# Serializer) works against MySQL through the same `&Pool` API as
+# Postgres. Schema-mode tenancy remains Postgres-only by language
+# semantics (`SET search_path` has no MySQL equivalent).
 mysql = ["sqlx/mysql"]
 
-# SQLite 3.35+ backend. v0.27 Phase 1 ships the `Sqlite` dialect impl
-# + writer support — every SQL writer in `crate::sql::writers` produces
-# valid SQLite SQL through the dialect seam. Pool::Sqlite variant +
-# bi-dialect macro `__rustango_from_sqlite_row` decoder land in
-# subsequent phases (mirroring the v0.23 MySQL rollout); apps building
-# against the `sqlite` feature today get the dialect for SQL emission +
-# DDL but must execute statements through their own `sqlx::SqlitePool`
-# until Phase 2 ships.
+# SQLite 3.35+ backend. Fully tri-dialect since v0.38: every framework
+# surface works against a file-backed or in-memory SQLite DB through
+# the same `&Pool` API as Postgres. v0.40 turns on `foreign_keys`,
+# `journal_mode = WAL` (file-backed), and `busy_timeout = 5000` on
+# every connection via `sql::pool::sqlite_connect_options` — apps
+# don't have to remember the SQLite-default-off FK pragma.
 sqlite = ["sqlx/sqlite"]
 
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`

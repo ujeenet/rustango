@@ -9,16 +9,16 @@ Every feature works on every supported backend out of the box. The only PG-speci
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.38.0"
+rustango = "0.39"
 
 # SQLite — file-backed or in-memory, full tri-dialect framework
-rustango = { version = "0.38.0", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
+rustango = { version = "0.39", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
 
 # MySQL 8+
-rustango = { version = "0.38.0", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
+rustango = { version = "0.39", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
 
 # Multiple backends in one binary
-rustango = { version = "0.38.0", features = ["postgres", "sqlite"] }
+rustango = { version = "0.39", features = ["postgres", "sqlite"] }
 ```
 
 ### What's new in v0.38.0 (May 2026) — every feature, every backend
@@ -907,8 +907,8 @@ or SQLite at runtime via the connection URL.
 ```toml
 # Cargo.toml — opt in to MySQL or SQLite alongside (or instead of)
 # the default postgres feature
-rustango = { version = "0.38.0", features = ["mysql"] }
-rustango = { version = "0.38.0", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
+rustango = { version = "0.39", features = ["mysql"] }
+rustango = { version = "0.39", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
 ```
 
 ```rust
@@ -2489,16 +2489,16 @@ The default features cover everything most apps need. Trim them when shipping a 
 
 ```toml
 # Default — everything except tenancy + cache-redis
-rustango = "0.31"
+rustango = "0.39"
 
 # Multi-tenant
-rustango = { version = "0.29", features = ["tenancy"] }
+rustango = { version = "0.39", features = ["tenancy"] }
 
 # With Redis cache
-rustango = { version = "0.29", features = ["cache-redis"] }
+rustango = { version = "0.39", features = ["cache-redis"] }
 
 # Bare ORM only (no admin, no forms, no email, no storage)
-rustango = { version = "0.29", default-features = false, features = ["postgres"] }
+rustango = { version = "0.39", default-features = false, features = ["postgres"] }
 ```
 
 | Feature | What it adds | On by default? |
