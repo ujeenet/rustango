@@ -613,8 +613,12 @@ impl Cli {
             // but database-mode tenants are fully supported through
             // the tri-dialect `_pool` family.
             #[cfg(feature = "sqlite")]
-            let dispatch_pool = if no_db_verb {
-                let p = crate::sql::sqlx::SqlitePool::connect_lazy(&url)?;
+            {
+                let p = if no_db_verb {
+                    crate::sql::sqlx::SqlitePool::connect_lazy(&url)?
+                } else {
+                    crate::sql::sqlx::SqlitePool::connect(&url).await?
+                };
                 let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(p);
                 let init_fn: crate::tenancy::manage::InitTenancyFn = crate::tenancy::init_tenancy;
                 crate::tenancy::manage::run_with_init(
@@ -626,20 +630,7 @@ impl Cli {
                 )
                 .await?;
                 return Ok(());
-            } else {
-                let p = crate::sql::sqlx::SqlitePool::connect(&url).await?;
-                let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(p);
-                let init_fn: crate::tenancy::manage::InitTenancyFn = crate::tenancy::init_tenancy;
-                crate::tenancy::manage::run_with_init(
-                    &pools,
-                    &url,
-                    &self.migrations_dir,
-                    args,
-                    init_fn,
-                )
-                .await?;
-                return Ok(());
-            };
+            }
             #[cfg(all(not(feature = "sqlite"), feature = "mysql"))]
             {
                 let p = if no_db_verb {
@@ -667,10 +658,6 @@ impl Cli {
                      `mysql` features to be enabled."
                         .into(),
                 );
-            }
-            #[allow(unreachable_code)]
-            {
-                let _: () = dispatch_pool;
             }
         }
         #[cfg(not(feature = "tenancy"))]
@@ -901,6 +888,15 @@ impl Cli {
         }
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
+        }
+        if let Some(seed) = self.seed {
+            // Mirror the PG arm above (line 828) so sqlite/mysql tenancy
+            // projects get their `Cli::seed` hook fired on boot too.
+            builder = builder
+                .seed_with(move |_pools, registry, _url| async move {
+                    seed(&crate::sql::Pool::from(registry)).await
+                })
+                .await?;
         }
         builder.serve(&self.bind).await
     }

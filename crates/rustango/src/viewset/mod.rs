@@ -608,7 +608,6 @@ impl ViewSetState {
             }),
             #[cfg(feature = "tenancy")]
             PoolSource::Tenant => {
-                use axum::extract::FromRequestParts as _;
                 use axum::response::IntoResponse as _;
                 // v0.38 — annotate the generic param so multi-backend
                 // builds (e.g. `--features postgres,sqlite`) infer

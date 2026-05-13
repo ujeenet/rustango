@@ -229,6 +229,7 @@ fn validate_ledger_name(name: &str) {
 /// `relation already exists` or PK violation on the ledger INSERT.
 ///
 /// "RUSTMIGT" in ASCII hex.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 const MIGRATE_LOCK_KEY: i64 = 0x5255_5354_4d49_4754;
 
 /// Collect every registered model's schema into a `Vec`. Order is the

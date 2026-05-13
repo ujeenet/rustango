@@ -71,12 +71,61 @@ impl Dialect for Sqlite {
         true
     }
 
+    /// SQLite has no `ALTER TABLE … ADD CONSTRAINT` for foreign keys
+    /// (or any other constraint kind). The migration renderer must
+    /// fold every FK into the originating CREATE TABLE instead.
+    fn inline_fks_in_create_table(&self) -> bool {
+        true
+    }
+
     fn supports_returning(&self) -> bool {
         // SQLite ≥ 3.35 (released 2021-03). Lower versions reject the
         // clause; rustango doesn't try to detect the runtime version
         // — operators on ancient SQLite get a parse error and need to
         // upgrade.
         true
+    }
+
+    /// Translate Postgres-native `DEFAULT` expressions to SQLite
+    /// spelling.
+    ///
+    /// - `now()` / `CURRENT_TIMESTAMP` → `CURRENT_TIMESTAMP` (SQLite has
+    ///   no `now()` function in DDL).
+    /// - `'<lit>'::<type>` → `'<lit>'` (SQLite has no `::` cast syntax;
+    ///   the bare literal is the right encoding for JSON-as-TEXT,
+    ///   boolean-as-INTEGER, etc.).
+    /// - Everything else passes through. `_ty` is ignored — SQLite has
+    ///   no per-type DEFAULT syntax quirks.
+    fn translate_default_expr(&self, expr: &str, _ty: &str) -> String {
+        let trimmed = expr.trim();
+        match trimmed {
+            "now()" | "NOW()" | "current_timestamp" | "CURRENT_TIMESTAMP" => {
+                return "CURRENT_TIMESTAMP".to_owned();
+            }
+            _ => {}
+        }
+        // Strip Postgres `::<type>` cast suffix. Common cases:
+        //   "'[]'::jsonb"   → "'[]'"
+        //   "'{}'::jsonb"   → "'{}'"
+        //   "0::int"        → "0"
+        // The `::` token can't legally appear inside a single-quoted
+        // SQL literal except as part of an escape, so a simple
+        // rfind('::') is safe for the well-formed defaults the macro
+        // layer emits.
+        if let Some(idx) = trimmed.rfind("::") {
+            // Guard: only strip if everything after `::` is an identifier
+            // (no spaces, parens, etc.) so we don't mangle expressions
+            // that legitimately contain `::` outside cast position.
+            let suffix = &trimmed[idx + 2..];
+            if !suffix.is_empty()
+                && suffix
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                return trimmed[..idx].to_owned();
+            }
+        }
+        expr.to_owned()
     }
 
     /// SQLite has no native `BOOLEAN`. `INTEGER` 1 / 0 is the

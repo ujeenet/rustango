@@ -49,6 +49,7 @@
 
 use crate::migrate::{Migration, MigrationScope};
 use std::path::Path;
+#[cfg(feature = "postgres")]
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -196,6 +197,69 @@ pub async fn migrate_registry_pool(
                 // continue; the next on-disk migration will create
                 // the table and a subsequent boot will re-run this
                 // fixup against the populated schema.
+                tracing::warn!(
+                    target: "crate::tenancy",
+                    table = %table,
+                    column = %column,
+                    error = %e,
+                    "registry column fixup failed (non-fatal — re-run after the bootstrap migrate)",
+                );
+            }
+        }
+    }
+    // Same fixup for SQLite registries. SQLite's `ALTER TABLE ADD
+    // COLUMN` has no `IF NOT EXISTS` clause, so we probe `PRAGMA
+    // table_info(<table>)` first and only ALTER when the column is
+    // absent. v0.34 introduced sqlite tenancy AFTER the v0.26 brand
+    // columns shipped, but `Org::SCHEMA` evolved further (v0.33
+    // `backend_kind`) and the scaffolder's bootstrap JSON can be
+    // older than the running rustango — same shape as the PG path.
+    #[cfg(feature = "sqlite")]
+    if let Some(sq) = registry.as_sqlite() {
+        // SQLite is dynamically typed and stores VARCHAR / TIMESTAMP
+        // as TEXT via type affinity. Spell columns with their idiomatic
+        // sqlite types so a follow-up `PRAGMA table_info` reads cleanly.
+        let fixups: &[(&str, &str, &str)] = &[
+            (
+                "rustango_orgs",
+                "backend_kind",
+                "TEXT NOT NULL DEFAULT 'postgres'",
+            ),
+            ("rustango_orgs", "brand_name", "TEXT"),
+            ("rustango_orgs", "brand_tagline", "TEXT"),
+            ("rustango_orgs", "logo_path", "TEXT"),
+            ("rustango_orgs", "favicon_path", "TEXT"),
+            ("rustango_orgs", "primary_color", "TEXT"),
+            ("rustango_orgs", "theme_mode", "TEXT"),
+        ];
+        for (table, column, col_type) in fixups {
+            let pragma = format!(r#"PRAGMA table_info("{table}")"#);
+            let rows = match rustango::sql::sqlx::query(&pragma).fetch_all(sq).await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    // Table missing → bootstrap hasn't run yet. Same
+                    // logic as the PG arm: warn + continue, the next
+                    // boot picks it up after migrate writes the table.
+                    tracing::warn!(
+                        target: "crate::tenancy",
+                        table = %table,
+                        error = %e,
+                        "sqlite PRAGMA table_info failed (non-fatal — re-run after the bootstrap migrate)",
+                    );
+                    continue;
+                }
+            };
+            let has_col = rows.iter().any(|r| {
+                use rustango::sql::sqlx::Row as _;
+                r.try_get::<String, _>("name")
+                    .map(|n| n == *column)
+                    .unwrap_or(false)
+            });
+            if has_col {
+                continue;
+            }
+            let sql = format!(r#"ALTER TABLE "{table}" ADD COLUMN "{column}" {col_type}"#);
+            if let Err(e) = rustango::sql::sqlx::query(&sql).execute(sq).await {
                 tracing::warn!(
                     target: "crate::tenancy",
                     table = %table,
@@ -673,7 +737,7 @@ fn tempdir_under_target() -> Result<TempDir, TenancyError> {
     })?;
     Ok(TempDir(p))
 }
-
+#[cfg(feature = "postgres")]
 fn quote_ident_for_schema(name: &str) -> String {
     let escaped = name.replace('"', "\"\"");
     format!("\"{escaped}\"")

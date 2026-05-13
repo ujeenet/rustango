@@ -111,6 +111,73 @@ impl Dialect for MySql {
         }
     }
 
+    /// Translate Postgres-native `DEFAULT` expressions to MySQL
+    /// spelling.
+    ///
+    /// - `now()` / `CURRENT_TIMESTAMP` → `CURRENT_TIMESTAMP(6)`. MySQL
+    ///   requires the fractional-second precision of the `DEFAULT` to
+    ///   match the column type; our `DateTime` columns render as
+    ///   `DATETIME(6)` (see [`Self::column_type`]) so the default has
+    ///   to carry `(6)` too, otherwise MySQL fails with
+    ///   `1067 (42000): Invalid default value`.
+    /// - `'<lit>'::<type>` → `'<lit>'` (strip Postgres cast).
+    /// - JSON columns (`ty == "json"`): wrap the result in parens —
+    ///   `DEFAULT '{}'` is rejected by MySQL on JSON/TEXT/BLOB
+    ///   (`1101 (42000)`), but the MySQL-8.0.13+ expression-default
+    ///   form `DEFAULT (<expr>)` is accepted.
+    /// - Everything else passes through.
+    fn translate_default_expr(&self, expr: &str, ty: &str) -> String {
+        let mut out = expr.trim().to_owned();
+        match out.as_str() {
+            "now()" | "NOW()" | "current_timestamp" | "CURRENT_TIMESTAMP" => {
+                out = "CURRENT_TIMESTAMP(6)".to_owned();
+            }
+            _ => {
+                if let Some(idx) = out.rfind("::") {
+                    let suffix = &out[idx + 2..];
+                    if !suffix.is_empty()
+                        && suffix
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    {
+                        out.truncate(idx);
+                    }
+                }
+            }
+        }
+        if ty.eq_ignore_ascii_case("json") {
+            // Skip wrapping if the caller already produced a
+            // parenthesized expression (defensive — current renderers
+            // never do this).
+            if !(out.starts_with('(') && out.ends_with(')')) {
+                out = format!("({out})");
+            }
+        }
+        out
+    }
+
+    /// MySQL does not accept `CREATE INDEX IF NOT EXISTS` (as of
+    /// 8.x — parse error). The ledger already serializes migration
+    /// application so the idempotency guard is unnecessary in
+    /// practice.
+    fn supports_create_index_if_not_exists(&self) -> bool {
+        false
+    }
+
+    /// MySQL has no `ON CONFLICT`. The semantic equivalent is
+    /// `ON DUPLICATE KEY UPDATE <col> = <col>` — a no-op write
+    /// against an existing row that satisfies MySQL's requirement
+    /// that the clause name at least one column assignment. Picks
+    /// the first conflict column so the SQL parses against any
+    /// unique-index shape the caller passes in.
+    fn insert_on_conflict_skip(&self, conflict_cols: &[&str]) -> String {
+        if conflict_cols.is_empty() {
+            return String::new();
+        }
+        let pivot = conflict_cols[0];
+        format!("ON DUPLICATE KEY UPDATE {pivot} = {pivot}")
+    }
+
     /// `MySQL` has no native `BOOLEAN` (the `BOOL` keyword is just an
     /// alias for `TINYINT(1)`). Emit `1`/`0` so `DEFAULT` clauses and
     /// inline comparisons match the storage shape.

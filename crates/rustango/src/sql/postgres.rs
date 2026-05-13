@@ -10,12 +10,15 @@
 
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
-    FieldType, InsertQuery, ModelSchema, Op, OrderClause, SearchClause, SelectQuery, UpdateQuery,
-    WhereExpr,
+    FieldType, InsertQuery, Op, SelectQuery, UpdateQuery,
 };
+#[cfg(feature = "postgres")]
+use crate::core::{ModelSchema, OrderClause, SearchClause, WhereExpr};
 
+#[cfg(feature = "postgres")]
+use super::writers;
 use super::writers::{
-    self, write_aggregate, write_bulk_insert, write_bulk_update_pg, write_count, write_delete,
+    write_aggregate, write_bulk_insert, write_bulk_update_pg, write_count, write_delete,
     write_insert, write_select, write_update, Sql,
 };
 use super::{CompiledStatement, Dialect, SqlError};
@@ -28,6 +31,7 @@ pub struct Postgres;
 
 /// `'static` reference to the singleton [`Postgres`] dialect, useful
 /// where callers want a `&'static dyn Dialect` (e.g. [`crate::sql::Pool::dialect`]).
+#[cfg(feature = "postgres")]
 pub static DIALECT: &Postgres = &Postgres;
 
 impl Dialect for Postgres {
@@ -231,6 +235,7 @@ fn write_pg_ident(sql: &mut String, name: &str) {
 ///
 /// # Errors
 /// As [`super::writers::compile_where_order_tail`].
+#[cfg(feature = "postgres")]
 pub(crate) fn compile_where_order_tail(
     where_clause: &WhereExpr,
     search: Option<&SearchClause>,

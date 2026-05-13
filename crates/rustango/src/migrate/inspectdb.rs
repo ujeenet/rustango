@@ -188,6 +188,10 @@ pub(super) struct ColumnRow {
 // Per-dialect introspection
 // ====================================================================
 
+#[cfg_attr(
+    not(any(feature = "postgres", feature = "mysql")),
+    allow(unused_variables)
+)]
 async fn list_tables(
     pool: &Pool,
     schema: &str,
@@ -203,6 +207,10 @@ async fn list_tables(
     }
 }
 
+#[cfg_attr(
+    not(any(feature = "postgres", feature = "mysql")),
+    allow(unused_variables)
+)]
 async fn list_columns(
     pool: &Pool,
     schema: &str,
@@ -218,6 +226,10 @@ async fn list_columns(
     }
 }
 
+#[cfg_attr(
+    not(any(feature = "postgres", feature = "mysql")),
+    allow(unused_variables)
+)]
 async fn list_pk_columns(
     pool: &Pool,
     schema: &str,
@@ -233,6 +245,10 @@ async fn list_pk_columns(
     }
 }
 
+#[cfg_attr(
+    not(any(feature = "postgres", feature = "mysql")),
+    allow(unused_variables)
+)]
 async fn list_fks(
     pool: &Pool,
     schema: &str,
@@ -874,6 +890,7 @@ pub(super) fn table_to_struct_name(table: &str) -> String {
 }
 
 /// Emit one `#[derive(Model)]` block for a table.
+#[cfg(test)]
 fn write_model<W: Write>(
     w: &mut W,
     table: &str,

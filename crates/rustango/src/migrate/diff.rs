@@ -571,8 +571,10 @@ fn render_changes_split_inner(
                 })?;
                 out.immediate
                     .push(create_table_sql_from_snapshot_with_dialect(table, dialect));
-                out.deferred_fks
-                    .extend(constraints_sql_from_snapshot(table));
+                if !dialect.inline_fks_in_create_table() {
+                    out.deferred_fks
+                        .extend(constraints_sql_from_snapshot(table, dialect));
+                }
             }
             SchemaChange::DropColumn { table, column } => {
                 out.immediate
@@ -603,7 +605,7 @@ fn render_changes_split_inner(
                          right fix for any table that has production data.",
                     ));
                 }
-                out.immediate.push(add_column_sql(table, f));
+                out.immediate.push(add_column_sql(table, f, dialect));
             }
             SchemaChange::DropTable(name) => {
                 out.immediate
@@ -697,13 +699,20 @@ fn render_changes_split_inner(
                 unique,
             } => {
                 let unique_kw = if *unique { "UNIQUE " } else { "" };
+                let if_not_exists = if dialect.supports_create_index_if_not_exists() {
+                    "IF NOT EXISTS "
+                } else {
+                    ""
+                };
                 let cols = columns
                     .iter()
-                    .map(|c| format!(r#""{c}""#))
+                    .map(|c| dialect.quote_ident(c))
                     .collect::<Vec<_>>()
                     .join(", ");
                 out.immediate.push(format!(
-                    r#"CREATE {unique_kw}INDEX IF NOT EXISTS "{name}" ON "{table}" ({cols})"#,
+                    "CREATE {unique_kw}INDEX {if_not_exists}{} ON {} ({cols})",
+                    dialect.quote_ident(name),
+                    dialect.quote_ident(table),
                 ));
             }
             SchemaChange::DropIndex { name } => {
@@ -795,12 +804,6 @@ fn pg_type_for_ty_name(ty: &str) -> String {
     }
 }
 
-fn create_table_sql_from_snapshot(t: &TableSnapshot) -> String {
-    // v0.38 — PG-default kept for tests + back-compat. Tri-dialect
-    // callers go through `_with_dialect`.
-    create_table_sql_from_snapshot_with_dialect(t, &crate::sql::Postgres)
-}
-
 fn create_table_sql_from_snapshot_with_dialect(
     t: &TableSnapshot,
     dialect: &dyn crate::sql::Dialect,
@@ -819,7 +822,11 @@ fn create_table_sql_from_snapshot_with_dialect(
             sql_type_with_dialect(f, dialect)
         );
         if let Some(expr) = &f.default {
-            let _ = write!(sql, " DEFAULT {expr}");
+            let _ = write!(
+                sql,
+                " DEFAULT {}",
+                dialect.translate_default_expr(expr, &f.ty)
+            );
         }
         if !f.nullable {
             sql.push_str(" NOT NULL");
@@ -858,54 +865,86 @@ fn create_table_sql_from_snapshot_with_dialect(
             }
             sql.push(')');
         }
+        // Inline FK clause for dialects that can't ALTER TABLE ADD CONSTRAINT
+        // (SQLite). Postgres/MySQL keep the post-hoc ALTER path so cyclic
+        // FK graphs resolve across the whole migration batch.
+        if dialect.inline_fks_in_create_table() {
+            if let Some(rel) = &f.fk {
+                let _ = write!(
+                    sql,
+                    " REFERENCES {} ({})",
+                    dialect.quote_ident(&rel.to),
+                    dialect.quote_ident(&rel.on),
+                );
+            }
+        }
+    }
+    if dialect.inline_fks_in_create_table() {
+        for cf in &t.composite_fks {
+            sql.push_str(", FOREIGN KEY (");
+            let from_cols: Vec<String> = cf.from.iter().map(|c| dialect.quote_ident(c)).collect();
+            sql.push_str(&from_cols.join(", "));
+            sql.push_str(") REFERENCES ");
+            sql.push_str(&dialect.quote_ident(&cf.to));
+            sql.push_str(" (");
+            let on_cols: Vec<String> = cf.on.iter().map(|c| dialect.quote_ident(c)).collect();
+            sql.push_str(&on_cols.join(", "));
+            sql.push(')');
+        }
     }
     sql.push(')');
     sql
 }
 
-fn constraints_sql_from_snapshot(t: &TableSnapshot) -> Vec<String> {
+fn constraints_sql_from_snapshot(
+    t: &TableSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+) -> Vec<String> {
+    let table_q = dialect.quote_ident(&t.name);
     let mut out: Vec<String> = t
         .fields
         .iter()
         .filter_map(|f| {
             f.fk.as_ref().map(|rel| {
+                let constraint = format!("{}_{}_fkey", t.name, f.column);
                 format!(
-                    r#"ALTER TABLE "{}" ADD CONSTRAINT "{}_{}_fkey" FOREIGN KEY ("{}") REFERENCES "{}" ("{}")"#,
-                    t.name, t.name, f.column, f.column, rel.to, rel.on,
+                    "ALTER TABLE {table_q} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+                    dialect.quote_ident(&constraint),
+                    dialect.quote_ident(&f.column),
+                    dialect.quote_ident(&rel.to),
+                    dialect.quote_ident(&rel.on),
                 )
             })
         })
         .collect();
     for cf in &t.composite_fks {
-        let from_cols = cf
-            .from
-            .iter()
-            .map(|c| format!(r#""{c}""#))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let on_cols = cf
-            .on
-            .iter()
-            .map(|c| format!(r#""{c}""#))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let from_cols: Vec<String> = cf.from.iter().map(|c| dialect.quote_ident(c)).collect();
+        let on_cols: Vec<String> = cf.on.iter().map(|c| dialect.quote_ident(c)).collect();
         out.push(format!(
-            r#"ALTER TABLE "{}" ADD CONSTRAINT "{}" FOREIGN KEY ({}) REFERENCES "{}" ({})"#,
-            t.name, cf.name, from_cols, cf.to, on_cols,
+            "ALTER TABLE {table_q} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+            dialect.quote_ident(&cf.name),
+            from_cols.join(", "),
+            dialect.quote_ident(&cf.to),
+            on_cols.join(", "),
         ));
     }
     out
 }
 
-fn add_column_sql(table: &str, f: &FieldSnapshot) -> String {
+fn add_column_sql(table: &str, f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
+    let col_q = dialect.quote_ident(&f.column);
     let mut sql = format!(
-        r#"ALTER TABLE "{}" ADD COLUMN "{}" {}"#,
-        table,
-        f.column,
-        sql_type(f)
+        "ALTER TABLE {} ADD COLUMN {} {}",
+        dialect.quote_ident(table),
+        col_q,
+        sql_type_with_dialect(f, dialect)
     );
     if let Some(expr) = &f.default {
-        let _ = write!(sql, " DEFAULT {expr}");
+        let _ = write!(
+            sql,
+            " DEFAULT {}",
+            dialect.translate_default_expr(expr, &f.ty)
+        );
     }
     if !f.nullable {
         sql.push_str(" NOT NULL");
@@ -914,23 +953,23 @@ fn add_column_sql(table: &str, f: &FieldSnapshot) -> String {
         sql.push_str(" CHECK (");
         let mut wrote = false;
         if let Some(min) = f.min {
-            let _ = write!(sql, r#""{}" >= {}"#, f.column, min);
+            let _ = write!(sql, "{col_q} >= {min}");
             wrote = true;
         }
         if let Some(max) = f.max {
             if wrote {
                 sql.push_str(" AND ");
             }
-            let _ = write!(sql, r#""{}" <= {}"#, f.column, max);
+            let _ = write!(sql, "{col_q} <= {max}");
         }
         sql.push(')');
     }
     sql
 }
 
+#[cfg(test)]
 fn sql_type(f: &FieldSnapshot) -> String {
-    // v0.38 — PG-default kept for tests + the back-compat
-    // `render_changes_split` entry point. Tri-dialect emitters go
+    // v0.38 — PG-default kept for tests. Tri-dialect emitters go
     // through `sql_type_with_dialect`.
     sql_type_with_dialect(f, &crate::sql::Postgres)
 }

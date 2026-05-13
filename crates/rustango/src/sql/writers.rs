@@ -904,6 +904,7 @@ fn write_returning(b: &mut Sql<'_>, returning: &[&'static str]) -> Result<(), Sq
 // (annotate_count_children calls this directly).
 // ====================================================================
 
+#[allow(unused)]
 #[allow(clippy::too_many_arguments)] // 8 args mirrors the existing public shim signature; refactoring the call-sites is a v0.24 cleanup.
 pub(crate) fn compile_where_order_tail(
     d: &dyn Dialect,

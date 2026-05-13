@@ -17,7 +17,9 @@ use crate::core::Column as _;
 use crate::sql::{Auto, FetcherPool};
 
 use crate::tenancy::error::TenancyError;
-use crate::tenancy::manage::args::{next_value, quote_ident, reject_leading_flag};
+#[cfg(feature = "postgres")]
+use crate::tenancy::manage::args::quote_ident;
+use crate::tenancy::manage::args::{next_value, reject_leading_flag};
 use crate::tenancy::manage_interactive;
 use crate::tenancy::pools::TenantPools;
 
@@ -208,7 +210,7 @@ where
         .where_(crate::tenancy::Org::slug.eq(slug.clone()))
         .fetch_pool(&registry)
         .await?;
-    let org = orgs.into_iter().next().ok_or_else(|| {
+    orgs.into_iter().next().ok_or_else(|| {
         TenancyError::Validation(format!("create-user: no tenant with slug `{slug}`"))
     })?;
 

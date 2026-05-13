@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use crate::core::{inventory, FieldSchema, Join, ModelEntry, ModelSchema, Relation};
+#[allow(unused_imports)]
 use crate::sql::sqlx;
 
 use super::render;

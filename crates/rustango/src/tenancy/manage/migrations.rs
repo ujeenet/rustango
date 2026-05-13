@@ -287,15 +287,12 @@ where
     rustango::migrate::ensure_ledger_pool(&registry)
         .await
         .map_err(TenancyError::Migrate)?;
-    let placeholder = registry.dialect().placeholder(1);
-    let table = registry
-        .dialect()
-        .quote_ident(rustango::migrate::LEDGER_TABLE);
-    let name_col = registry.dialect().quote_ident("name");
-    let sql = format!(
-        "INSERT INTO {table} ({name_col}) VALUES ({placeholder}) \
-         ON CONFLICT ({name_col}) DO NOTHING"
-    );
+    let dialect = registry.dialect();
+    let placeholder = dialect.placeholder(1);
+    let table = dialect.quote_ident(rustango::migrate::LEDGER_TABLE);
+    let name_col = dialect.quote_ident("name");
+    let conflict_tail = dialect.insert_on_conflict_skip(&[&name_col]);
+    let sql = format!("INSERT INTO {table} ({name_col}) VALUES ({placeholder}) {conflict_tail}");
     for name in names {
         let affected = rustango::sql::raw_execute_pool(
             &registry,

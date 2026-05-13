@@ -66,6 +66,7 @@ use super::session::{COOKIE_NAME, SESSION_TTL_SECS};
 
 use super::auth;
 use super::branding::{self, BrandAssetKind};
+#[allow(unused_imports)] // referenced only by rustdoc links
 use super::pools::TenantPools;
 
 const RUSTANGO_PNG: &[u8] = include_bytes!("../static/rustango.png");

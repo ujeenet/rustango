@@ -397,7 +397,7 @@ impl FieldSnapshot {
     }
 }
 
-fn field_type_name(ty: FieldType) -> &'static str {
+pub(crate) fn field_type_name(ty: FieldType) -> &'static str {
     // Reuse the `FieldType::as_str` mapping but with stable JSON names.
     match ty {
         FieldType::I16 => "i16",

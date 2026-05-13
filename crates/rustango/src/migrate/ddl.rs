@@ -209,7 +209,12 @@ fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) 
         return;
     }
     if let Some(expr) = field.default {
-        let _ = write!(s, " DEFAULT {expr}");
+        let ty_name = crate::migrate::snapshot::field_type_name(field.ty);
+        let _ = write!(
+            s,
+            " DEFAULT {}",
+            dialect.translate_default_expr(expr, ty_name)
+        );
     }
     if !field.nullable {
         s.push_str(" NOT NULL");

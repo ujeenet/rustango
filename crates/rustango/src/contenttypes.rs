@@ -925,6 +925,7 @@ where
 /// a separate migration JSON. Tenant schemas already get this
 /// table via the bootstrap migration's CreateTable op for every
 /// registered model.
+#[cfg(feature = "postgres")]
 const CREATE_TABLE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS "rustango_content_types" (
     "id"          BIGSERIAL PRIMARY KEY,

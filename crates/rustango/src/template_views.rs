@@ -2525,6 +2525,7 @@ async fn resolve_fk_displays_pool(
 /// One FK column we need to resolve: which local field to read
 /// from each row, which target table+column to look up, and the
 /// distinct non-null source values that appeared in the page.
+#[allow(unused)]
 struct FkLookup {
     /// Local Rust field name on the source model — also the JSON
     /// key in each row (rows are serialized via `row_to_json`
@@ -2534,7 +2535,6 @@ struct FkLookup {
     target_pk_column: &'static str,
     target_display_column: &'static str,
     target_display_field_name: &'static str,
-    target_display_field_type: crate::core::FieldType,
     /// Distinct stringified source values from the page (NULL
     /// values are filtered out so the SQL doesn't bind a NULL
     /// into the `ANY($1)` array).
@@ -2579,7 +2579,6 @@ fn collect_fk_target_lookups(schema: &'static ModelSchema, object_list: &[Value]
             target_pk_column: on,
             target_display_column: display_field.column,
             target_display_field_name: display_field.name,
-            target_display_field_type: display_field.ty,
             distinct_values: distinct,
         });
     }
@@ -2997,7 +2996,7 @@ mod tenant {
     /// action against it, and 303s back to the same prefix.
     pub(super) async fn handle_list_action_tenant(
         State(state): State<Arc<TenantListViewState>>,
-        mut t: Tenant,
+        t: Tenant,
         req: axum::extract::Request,
     ) -> Response {
         let (parts, body) = req.into_parts();
@@ -3108,7 +3107,7 @@ mod tenant {
     pub(super) async fn handle_detail_tenant(
         State(state): State<Arc<TenantDetailViewState>>,
         Path(pk): Path<String>,
-        mut t: Tenant,
+        t: Tenant,
     ) -> Response {
         let Some(pk_field) = state.vs.schema.primary_key() else {
             return template_error(&format!(
@@ -3154,7 +3153,7 @@ mod tenant {
         State(state): State<Arc<TenantDeleteViewState>>,
         Path(pk): Path<String>,
         headers: axum::http::HeaderMap,
-        mut t: Tenant,
+        t: Tenant,
     ) -> Response {
         let Some(pk_field) = state.vs.schema.primary_key() else {
             return template_error(&format!(
@@ -3193,7 +3192,7 @@ mod tenant {
     pub(super) async fn handle_delete_submit_tenant(
         State(state): State<Arc<TenantDeleteViewState>>,
         Path(pk): Path<String>,
-        mut t: Tenant,
+        t: Tenant,
     ) -> Response {
         let Some(pk_field) = state.vs.schema.primary_key() else {
             return template_error(&format!(
@@ -3254,7 +3253,7 @@ mod tenant {
     pub(super) async fn handle_create_post_tenant(
         State(state): State<Arc<TenantFormViewState>>,
         headers: axum::http::HeaderMap,
-        mut t: Tenant,
+        t: Tenant,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
         let (columns, values, mut errors) =
@@ -3301,7 +3300,7 @@ mod tenant {
         State(state): State<Arc<TenantFormViewState>>,
         Path(pk): Path<String>,
         headers: axum::http::HeaderMap,
-        mut t: Tenant,
+        t: Tenant,
     ) -> Response {
         let Some(pk_field) = state.schema.primary_key() else {
             return template_error(&format!(
@@ -3360,7 +3359,7 @@ mod tenant {
         State(state): State<Arc<TenantFormViewState>>,
         Path(pk): Path<String>,
         headers: axum::http::HeaderMap,
-        mut t: Tenant,
+        t: Tenant,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
         let Some(pk_field) = state.schema.primary_key() else {
@@ -4860,7 +4859,6 @@ mod tests {
             target_pk_column: "id",
             target_display_column: "name",
             target_display_field_name: "name",
-            target_display_field_type: crate::core::FieldType::String,
             distinct_values: vec![],
         };
         let mut rows = vec![

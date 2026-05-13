@@ -11,7 +11,9 @@ use crate::core::Column as _;
 use crate::sql::{Auto, FetcherPool, UpdaterPool};
 
 use crate::tenancy::error::TenancyError;
-use crate::tenancy::manage::args::{next_value, quote_ident, reject_leading_flag};
+#[cfg(feature = "postgres")]
+use crate::tenancy::manage::args::quote_ident;
+use crate::tenancy::manage::args::{next_value, reject_leading_flag};
 use crate::tenancy::manage_interactive;
 use crate::tenancy::migrate as tenant_migrate;
 use crate::tenancy::org::{BackendKind, Org, StorageMode};

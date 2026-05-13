@@ -389,7 +389,9 @@ impl<DB: Database> TenantPools<DB> {
     /// As [`Self::database_pool_for_org`].
     pub async fn database_acquire(&self, org: &Org) -> Result<TenantConn<DB>, TenancyError> {
         let pool = self.database_pool_for_org(org).await?;
-        let TenantPool::Database { pool } = pool else {
+        #[cfg_attr(not(feature = "postgres"), allow(irrefutable_let_patterns))]
+        let TenantPool::Database { pool } = pool
+        else {
             unreachable!("database_pool_for_org rejects schema-mode")
         };
         let conn = pool.acquire().await?;

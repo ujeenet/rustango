@@ -107,6 +107,33 @@ pub trait Dialect {
         false
     }
 
+    /// `true` when the migration renderer should emit FK clauses inline
+    /// inside `CREATE TABLE` (column-level `REFERENCES …` plus table-
+    /// level `FOREIGN KEY (…) REFERENCES …` for composites) instead of
+    /// as post-hoc `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` ops.
+    ///
+    /// Default `false` (Postgres/MySQL: defer FKs so circular table
+    /// references resolve cleanly across the whole batch). SQLite
+    /// overrides to `true` — it has no `ALTER TABLE … ADD CONSTRAINT`
+    /// support, so FKs must live inside the originating CREATE.
+    fn inline_fks_in_create_table(&self) -> bool {
+        false
+    }
+
+    /// Translate a `DEFAULT` expression authored in Postgres dialect
+    /// (the rustango canonical form) to the target backend's spelling.
+    /// `ty` is the field's `FieldType` token (e.g. `"json"`, `"datetime"`,
+    /// `"string"`) so dialects can choose syntax per column type — MySQL
+    /// in particular needs `DEFAULT ('{}')` (expression default) for
+    /// `JSON` columns since `DEFAULT '{}'` is rejected.
+    ///
+    /// Default: pass-through (Postgres-native). SQLite overrides
+    /// `now()` → `CURRENT_TIMESTAMP` and strips `::type` casts.
+    /// MySQL overrides similarly plus wraps JSON defaults in parens.
+    fn translate_default_expr(&self, expr: &str, _ty: &str) -> String {
+        expr.to_owned()
+    }
+
     /// Render a boolean literal for `DEFAULT` clauses and inline
     /// comparisons. Default: ANSI `TRUE` / `FALSE`. SQLite + MySQL
     /// override to `1` / `0` (no native boolean type).
@@ -124,6 +151,34 @@ pub trait Dialect {
     /// `CREATE INDEX` with a warning.
     fn supports_concurrent_index(&self) -> bool {
         false
+    }
+
+    /// `true` if `CREATE INDEX IF NOT EXISTS` is accepted. Postgres
+    /// and SQLite support the guard; MySQL does not (as of 8.x). The
+    /// migration renderer omits the `IF NOT EXISTS` token when this
+    /// returns `false`; the ledger already prevents re-runs so the
+    /// guard is belt-and-suspenders.
+    fn supports_create_index_if_not_exists(&self) -> bool {
+        true
+    }
+
+    /// Render the "insert-or-skip" tail clause appended to `INSERT INTO
+    /// … VALUES (…)` so the caller's row inserts cleanly on first run
+    /// and is silently skipped on re-run.
+    ///
+    /// `conflict_cols` are the **already-quoted** column identifiers
+    /// that define the unique constraint the caller is targeting
+    /// (typically a `UNIQUE INDEX` or composite PK).
+    ///
+    /// Defaults to Postgres/SQLite `ON CONFLICT (…) DO NOTHING`. MySQL
+    /// overrides to `ON DUPLICATE KEY UPDATE <col0> = <col0>` (no-op
+    /// write — satisfies MySQL's syntax requirement for at least one
+    /// SET expression while leaving the existing row untouched).
+    fn insert_on_conflict_skip(&self, conflict_cols: &[&str]) -> String {
+        if conflict_cols.is_empty() {
+            return String::new();
+        }
+        format!("ON CONFLICT ({}) DO NOTHING", conflict_cols.join(", "))
     }
 
     /// `true` if `INSERT ... RETURNING <cols>` is honored. Postgres

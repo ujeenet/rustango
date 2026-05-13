@@ -1513,15 +1513,15 @@ pub async fn auto_create_permissions_pool(pool: &crate::sql::Pool) -> Result<(),
             let p1 = dialect.placeholder(1);
             let p2 = dialect.placeholder(2);
             let p3 = dialect.placeholder(3);
-            // `ON CONFLICT (col1, col2) DO NOTHING` is supported on
-            // PG (always), SQLite (≥ 3.24), MySQL (8.0.19+ — older
-            // MySQL would need `INSERT IGNORE` instead, but the
-            // framework's minimum is MySQL 8). Same posture as
-            // `audit::emit_one_pool` etc.
+            // PG / SQLite emit `ON CONFLICT (col1, col2) DO NOTHING`;
+            // MySQL emits `ON DUPLICATE KEY UPDATE <pivot> = <pivot>`.
+            // The dialect picks the right tail; the unique index on
+            // (`table_name`, `codename`) is what both forms target.
+            let conflict_tail = dialect.insert_on_conflict_skip(&[&table_col, &codename_col]);
             let sql = format!(
                 "INSERT INTO {perm_t} ({table_col}, {codename_col}, {name_col}) \
                  VALUES ({p1}, {p2}, {p3}) \
-                 ON CONFLICT ({table_col}, {codename_col}) DO NOTHING"
+                 {conflict_tail}"
             );
             let codename = format!("{table}.{action}");
             let display = format!("{verb} {model_name}");

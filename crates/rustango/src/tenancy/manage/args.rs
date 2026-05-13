@@ -17,6 +17,7 @@ pub(super) fn next_value<'a, I: Iterator<Item = &'a String>>(
 
 /// Quote a SQL identifier (table / schema / database name). Doubles
 /// any embedded `"` so the quoted form survives unmodified.
+#[cfg(feature = "postgres")]
 pub(super) fn quote_ident(name: &str) -> String {
     let escaped = name.replace('"', "\"\"");
     format!("\"{escaped}\"")

@@ -1400,6 +1400,7 @@ pub enum ExplainFormat {
     Xml,
 }
 
+#[cfg(feature = "postgres")]
 impl ExplainOptions {
     /// Render the parenthesized option list (e.g. `(ANALYZE,
     /// BUFFERS, FORMAT JSON)`). Empty when every option is at its

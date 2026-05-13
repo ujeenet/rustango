@@ -42,6 +42,7 @@
 use crate::core::Column as _;
 #[cfg(feature = "postgres")]
 use crate::sql::sqlx::{PgConnection, PgPool};
+#[allow(unused_imports)]
 use crate::sql::Auto;
 use crate::Model;
 use base64::Engine;
