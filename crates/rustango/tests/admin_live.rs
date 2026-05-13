@@ -448,8 +448,11 @@ async fn create_form_for_auto_pk_omits_id_input() {
 #[tokio::test]
 async fn create_submit_for_auto_pk_assigns_pk_and_redirects() {
     // S7 round-trip: POST to an Auto-PK model without an `id` field —
-    // server-assigned PK from `insert_returning`, redirect lands on
-    // the new row's detail URL.
+    // server-assigned PK from `insert_returning`. v0.46+ uses
+    // Django's three-button submit row: the default `Save` redirects
+    // to the list view, `Save and continue editing` stays on the
+    // detail page. We send `_continue=1` to assert PK extraction
+    // from the detail URL still works.
     let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
@@ -462,7 +465,7 @@ async fn create_submit_for_auto_pk_assigns_pk_and_redirects() {
         .oneshot(form_request(
             Method::POST,
             "/admin_widget",
-            "label=auto-pk-test",
+            "label=auto-pk-test&_continue=1",
         ))
         .await
         .unwrap();
@@ -473,10 +476,15 @@ async fn create_submit_for_auto_pk_assigns_pk_and_redirects() {
         .unwrap()
         .to_str()
         .unwrap();
-    let prefix = "/admin_widget/";
+    // Default admin_prefix has been `/__admin` since v0.29 — generated
+    // links carry it. The router's *routes* are mounted at the bare
+    // path (no prefix), which is why the POST uri above doesn't have
+    // it; production mounts the admin router under /__admin and the
+    // prefix is stripped on the way in.
+    let prefix = "/__admin/admin_widget/";
     assert!(
         location.starts_with(prefix),
-        "expected /admin_widget/<id>, got `{location}`"
+        "expected /__admin/admin_widget/<id>, got `{location}`"
     );
     let pk: i64 = location[prefix.len()..]
         .parse()
@@ -503,11 +511,14 @@ async fn create_submit_inserts_row_and_redirects() {
     migrate::apply_all(&pool).await.unwrap();
 
     let app = rustango::admin::router(pool.clone());
+    // v0.46+ — `_continue=1` keeps the historical "redirect to the
+    // freshly-created row" behaviour. The default `Save` button now
+    // sends users to the list view (Django shape).
     let response = app
         .oneshot(form_request(
             Method::POST,
             "/admin_user",
-            "id=42&name=zelda&age=27&is_active=true",
+            "id=42&name=zelda&age=27&is_active=true&_continue=1",
         ))
         .await
         .unwrap();
@@ -518,7 +529,7 @@ async fn create_submit_inserts_row_and_redirects() {
         .unwrap()
         .to_str()
         .unwrap();
-    assert_eq!(location, "/admin_user/42");
+    assert_eq!(location, "/__admin/admin_user/42");
 
     // Verify the row landed via direct sqlx.
     let row = sqlx::query("SELECT name, age, is_active FROM admin_user WHERE id = 42")
@@ -644,18 +655,21 @@ async fn edit_submit_updates_row_and_redirects() {
     seed(&pool).await;
 
     let app = rustango::admin::router(pool.clone());
+    // v0.46+ — assert the historical "stay on the row" behaviour via
+    // an explicit `_continue=1`. The bare `_save` button now sends
+    // users back to the list view (Django shape).
     let response = app
         .oneshot(form_request(
             Method::POST,
             "/admin_user/1",
-            "id=1&name=ALICE&age=31&is_active=true",
+            "id=1&name=ALICE&age=31&is_active=true&_continue=1",
         ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         response.headers().get(header::LOCATION).unwrap(),
-        "/admin_user/1",
+        "/__admin/admin_user/1",
     );
 
     let row = sqlx::query("SELECT name, age FROM admin_user WHERE id = 1")
@@ -684,7 +698,7 @@ async fn delete_submit_removes_row_and_redirects() {
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         response.headers().get(header::LOCATION).unwrap(),
-        "/admin_user",
+        "/__admin/admin_user",
     );
 
     let count: i64 = sqlx::query("SELECT COUNT(*) FROM admin_user")
