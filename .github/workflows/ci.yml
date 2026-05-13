@@ -13,6 +13,15 @@ env:
   # pre-push hook treats warnings as warnings; CI now does the
   # same. Real type errors / broken tests still fail the build.
   DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
+  # sccache wrapper for `rustc`, backed by GitHub Actions Cache. Caches
+  # the per-crate compile output keyed by content hash, so reruns after
+  # a `Cargo.lock` bump don't need to rebuild every dep from scratch.
+  # Composes with `Swatinem/rust-cache@v2` — the latter caches `target/`
+  # + the registry index between runs on the same lockfile, sccache
+  # cuts cold-build time after a lockfile change. Free, 10 GB GHA-cache
+  # limit, no infra to maintain.
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
 
 jobs:
   fmt:
@@ -22,6 +31,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
         with:
           components: rustfmt
+      # sccache-action installs the binary so the workflow-level
+      # `RUSTC_WRAPPER: sccache` resolves even though `cargo fmt`
+      # itself never invokes rustc.
+      - uses: mozilla-actions/sccache-action@v0.0.6
       - run: cargo fmt --all -- --check
 
   clippy:
@@ -31,6 +44,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
         with:
           components: clippy
+      - uses: mozilla-actions/sccache-action@v0.0.6
       - uses: Swatinem/rust-cache@v2
       # v0.30.22 — aligned with the local pre-push hook
       # (see .githooks/pre-push). Pre-v0.30.22 CI ran the
@@ -66,6 +80,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
+      - uses: mozilla-actions/sccache-action@v0.0.6
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
 
@@ -74,6 +89,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
+      - uses: mozilla-actions/sccache-action@v0.0.6
       - uses: Swatinem/rust-cache@v2
       # v0.30.22 — dropped `RUSTDOCFLAGS=-D warnings` because the
       # vast majority of warnings are stylistic (bare URLs in
@@ -84,6 +100,13 @@ jobs:
 
   deny:
     runs-on: ubuntu-latest
+    # cargo-deny-action ships a prebuilt binary and never invokes rustc,
+    # so it doesn't need sccache. Scope the wrapper var out of this job
+    # so the global default doesn't trip a "sccache not found" lookup
+    # if cargo-deny ever evolves to call cargo internally.
+    env:
+      RUSTC_WRAPPER: ""
+      SCCACHE_GHA_ENABLED: ""
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -101,6 +124,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
         with:
           components: clippy
+      - uses: mozilla-actions/sccache-action@v0.0.6
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p rustango --no-default-features --features sqlite,tenancy
       - run: cargo clippy -p rustango --no-default-features --features sqlite,tenancy --lib --no-deps
@@ -123,6 +147,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
+      - uses: mozilla-actions/sccache-action@v0.0.6
       - uses: Swatinem/rust-cache@v2
       - run: |
           cargo test -p rustango \
@@ -183,6 +208,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
+      - uses: mozilla-actions/sccache-action@v0.0.6
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p rustango --features mysql,jobs-postgres --test jobs_mysql_live
       - run: cargo test -p rustango --features mysql --test mysql_live
