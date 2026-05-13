@@ -30,12 +30,24 @@ async fn pools_or_skip() -> Option<(TenantPools<sqlx::MySql>, String)> {
     let pool = sqlx::MySqlPool::connect(&url)
         .await
         .expect("connect to MYSQL_TEST_URL");
-    // Reset the registry side of the schema between runs. Drop in FK-
-    // correct order so child rows / tables don't block the parent drop.
+    // Reset the registry side of the schema between runs.
+    //
+    // FK checks are disabled around the drops so prior CI steps that
+    // left framework tables with FKs into ones we drop here (e.g.
+    // `rustango_users` referenced by audit / permission tables in some
+    // shape) don't make the drop fail silently. The per-table `let _ =`
+    // swallows missing-table errors by design (first run starts empty),
+    // so the SET statements must `expect` — otherwise the bypass
+    // silently no-ops and the failure surfaces only later as a 42S01.
+    //
     // The migration ledger table is `__rustango_migrations__` (double
     // underscores per `migrate::runner::LEDGER_TABLE`); if a stale entry
     // survives, `migrate-registry` thinks bootstrap is already applied
     // and skips creating the tables we just dropped.
+    sqlx::query("SET FOREIGN_KEY_CHECKS = 0")
+        .execute(&pool)
+        .await
+        .expect("disable FK checks");
     for tbl in [
         "rustango_audit_log",
         "rustango_role_permissions",
@@ -53,6 +65,10 @@ async fn pools_or_skip() -> Option<(TenantPools<sqlx::MySql>, String)> {
             .execute(&pool)
             .await;
     }
+    sqlx::query("SET FOREIGN_KEY_CHECKS = 1")
+        .execute(&pool)
+        .await
+        .expect("re-enable FK checks");
     Some((TenantPools::<sqlx::MySql>::new(pool), url))
 }
 

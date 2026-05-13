@@ -68,6 +68,10 @@ async fn pool_or_skip() -> Option<Pool> {
 
 async fn fresh_schema(pool: &Pool) {
     use rustango::sql::raw_execute_pool;
+    // FK checks off during cleanup so prior CI steps that left framework
+    // tables with cross-references can't make a drop silently no-op and
+    // trip `Table … already exists` on the subsequent `apply_all_pool`.
+    let _ = raw_execute_pool(pool, "SET FOREIGN_KEY_CHECKS = 0", vec![]).await;
     // Drop every registered framework + test model in one pass — this
     // covers `rustango_content_types` and any other inventory-registered
     // table that the hand-rolled drop list used to miss.
@@ -83,6 +87,7 @@ async fn fresh_schema(pool: &Pool) {
         let sql = format!("DROP TABLE IF EXISTS `{tbl}`");
         let _ = raw_execute_pool(pool, &sql, vec![]).await;
     }
+    let _ = raw_execute_pool(pool, "SET FOREIGN_KEY_CHECKS = 1", vec![]).await;
     rustango::migrate::apply_all_pool(pool)
         .await
         .expect("apply_all_pool");

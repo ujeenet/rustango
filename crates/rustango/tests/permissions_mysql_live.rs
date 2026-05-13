@@ -50,7 +50,19 @@ async fn mysql_pool_or_skip() -> Option<Pool> {
         .await
         .expect("connect to MYSQL_TEST_URL");
     // Each test gets a clean slate — drop the per-test tables.
-    // Drop in FK-correct order (children before parents).
+    //
+    // FK checks are disabled around the drops so prior CI steps (e.g.
+    // `tenancy_manage_mysql_live`, `mysql_live`) that left framework
+    // tables with FKs *into* `rustango_users` don't make the drop fail
+    // silently and trip `Table 'rustango_users' already exists` on the
+    // subsequent CREATE. The per-table `let _ =` swallows individual
+    // drop errors by design (table may not exist on first run), so the
+    // FK_CHECKS toggle itself must `expect` — otherwise the bypass
+    // silently no-ops and the failure surfaces only later as a 42S01.
+    sqlx::query("SET FOREIGN_KEY_CHECKS = 0")
+        .execute(&p)
+        .await
+        .expect("disable FK checks");
     for tbl in [
         "rustango_user_permissions",
         "rustango_user_roles",
@@ -63,6 +75,10 @@ async fn mysql_pool_or_skip() -> Option<Pool> {
             .execute(&p)
             .await;
     }
+    sqlx::query("SET FOREIGN_KEY_CHECKS = 1")
+        .execute(&p)
+        .await
+        .expect("re-enable FK checks");
     // Bootstrap rustango_users — the `_pool` family doesn't auto-create
     // it; the production tenant bootstrap migration does.
     sqlx::query(
