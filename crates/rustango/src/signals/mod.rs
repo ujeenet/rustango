@@ -88,13 +88,13 @@ fn next_id() -> ReceiverId {
 
 fn insert_receiver<R: Any + Send + Sync>(key: (TypeId, SignalKind), receiver: R) -> ReceiverId {
     let id = next_id();
-    let mut reg = registry().write().expect("signals registry poisoned");
+    let mut reg = registry().write().unwrap_or_else(|e| e.into_inner());
     reg.entry(key).or_default().push((id, Box::new(receiver)));
     id
 }
 
 fn remove_receiver(key: (TypeId, SignalKind), id: ReceiverId) -> bool {
-    let mut reg = registry().write().expect("signals registry poisoned");
+    let mut reg = registry().write().unwrap_or_else(|e| e.into_inner());
     let Some(bag) = reg.get_mut(&key) else {
         return false;
     };
@@ -107,7 +107,7 @@ fn remove_receiver(key: (TypeId, SignalKind), id: ReceiverId) -> bool {
 /// can release the registry lock immediately, avoiding holding it
 /// across await points.
 fn snapshot<R: Any + Send + Sync + Clone>(key: (TypeId, SignalKind)) -> Vec<R> {
-    let reg = registry().read().expect("signals registry poisoned");
+    let reg = registry().read().unwrap_or_else(|e| e.into_inner());
     let Some(bag) = reg.get(&key) else {
         return Vec::new();
     };
@@ -257,14 +257,14 @@ pub async fn send_post_delete<T: Model + Clone + 'static>(instance: &T) {
 pub fn clear_all() {
     registry()
         .write()
-        .expect("signals registry poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .clear();
 }
 
 /// Number of currently registered receivers across all signals for `T`.
 /// Useful in tests to assert connection state.
 pub fn receiver_count<T: Model + 'static>() -> usize {
-    let reg = registry().read().expect("signals registry poisoned");
+    let reg = registry().read().unwrap_or_else(|e| e.into_inner());
     let id = TypeId::of::<T>();
     [
         SignalKind::PreSave,

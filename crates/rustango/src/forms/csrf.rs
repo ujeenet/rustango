@@ -85,8 +85,21 @@ pub struct CsrfConfig {
     /// Header name the middleware accepts on unsafe methods. Default
     /// `"X-CSRF-Token"`.
     pub header_name: String,
-    /// `Secure` cookie attribute. Default `false` so dev over HTTP
-    /// works; flip to `true` in production.
+    /// `Secure` cookie attribute.
+    ///
+    /// Defaults to `true` since v0.43 — the safe production default.
+    /// Browsers will not send a `Secure` cookie over plain HTTP, so
+    /// local development against `http://localhost:8080` needs an
+    /// explicit opt-out:
+    ///
+    /// ```ignore
+    /// rustango::forms::csrf::with_config(
+    ///     CsrfConfig::default().allow_insecure_for_dev(),
+    /// )
+    /// ```
+    ///
+    /// `manage check --deploy` continues to warn when this is `false`
+    /// on a prod tier.
     pub secure: bool,
 }
 
@@ -95,8 +108,20 @@ impl Default for CsrfConfig {
         Self {
             cookie_name: CSRF_COOKIE.to_owned(),
             header_name: CSRF_HEADER.to_owned(),
-            secure: false,
+            secure: true,
         }
+    }
+}
+
+impl CsrfConfig {
+    /// Opt out of the `Secure` cookie attribute for local HTTP
+    /// development. v0.43 — replaces the pre-v0.43 default of
+    /// `secure: false`, which made dev easy but silently shipped to
+    /// production unless the operator remembered to flip it.
+    #[must_use]
+    pub fn allow_insecure_for_dev(mut self) -> Self {
+        self.secure = false;
+        self
     }
 }
 

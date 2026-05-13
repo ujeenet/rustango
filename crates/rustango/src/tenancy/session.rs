@@ -256,6 +256,11 @@ impl SessionSecret {
         let tmp_path = disk_path.with_extension("tmp");
         match std::fs::write(&tmp_path, &buf).and_then(|_| std::fs::rename(&tmp_path, disk_path)) {
             Ok(()) => {
+                // v0.43 — restrict to 0600 on Unix so other users on
+                // the host can't read the session-signing key. Windows
+                // ACL hardening is a separate piece of work (DPAPI /
+                // restricted DACL); the warn below documents the gap.
+                restrict_session_secret_perms(disk_path);
                 // v0.31.1 (#7): clarify the "(dev fallback)" wording —
                 // the message previously made it look like the secret
                 // was being regenerated on every boot. It only fires
@@ -335,6 +340,30 @@ impl SessionSecret {
     pub(crate) fn key(&self) -> &[u8] {
         &self.0
     }
+}
+
+/// v0.43 — chmod the persisted session-secret file to 0600 on Unix.
+/// On Windows we currently rely on user-profile ACLs inherited by
+/// `./var/`; tightening the DACL is a separate effort.
+#[cfg(unix)]
+fn restrict_session_secret_perms(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        tracing::warn!(
+            target: "crate::tenancy::session",
+            path = %path.display(),
+            error = %e,
+            "could not chmod session secret to 0600 — file may be world-readable",
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_session_secret_perms(_path: &std::path::Path) {
+    // No portable equivalent. On Windows the file inherits the
+    // parent directory's ACL; for hard isolation set
+    // `RUSTANGO_SESSION_SECRET` from a vault instead of relying on
+    // the on-disk fallback.
 }
 
 /// Serialize and sign a payload into a cookie value.

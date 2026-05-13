@@ -85,7 +85,7 @@ impl Timings {
     /// is from the previous `measure` (or the request start) to now.
     pub fn measure(&self, stage: impl Into<String>) {
         let now = Instant::now();
-        let mut g = self.inner.lock().expect("Timings poisoned");
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let elapsed = now.duration_since(g.last_mark).as_secs_f64() * 1000.0;
         g.entries.push((stage.into(), elapsed));
         g.last_mark = now;
@@ -95,7 +95,7 @@ impl Timings {
     /// timed yourself). The stage doesn't move the "previous mark"
     /// cursor — useful for sub-stage breakdowns that overlap.
     pub fn add(&self, stage: impl Into<String>, ms: f64) {
-        let mut g = self.inner.lock().expect("Timings poisoned");
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.entries.push((stage.into(), ms));
     }
 
@@ -108,7 +108,7 @@ impl Timings {
     }
 
     fn render(&self) -> String {
-        let g = self.inner.lock().expect("Timings poisoned");
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let total_ms = g.request_started.elapsed().as_secs_f64() * 1000.0;
         let mut parts = Vec::with_capacity(g.entries.len() + 1);
         parts.push(format!("total;dur={total_ms:.1}"));

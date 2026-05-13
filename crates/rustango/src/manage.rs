@@ -1342,7 +1342,18 @@ mod tests {
         let cli_with = Cli::new().with_csrf();
         let csrf = cli_with.csrf.expect("with_csrf should set csrf");
         assert_eq!(csrf.cookie_name, crate::forms::csrf::CSRF_COOKIE);
-        assert!(!csrf.secure, "default Secure=false for dev over HTTP");
+        // v0.43 — default flipped to Secure=true so production isn't
+        // foot-gunned by forgetting to enable it. Dev over HTTP opts
+        // out via `.allow_insecure_for_dev()`.
+        assert!(csrf.secure, "default Secure=true since v0.43");
+    }
+
+    #[cfg(feature = "csrf")]
+    #[test]
+    fn allow_insecure_for_dev_clears_secure_flag() {
+        use crate::forms::csrf::CsrfConfig;
+        let cfg = CsrfConfig::default().allow_insecure_for_dev();
+        assert!(!cfg.secure, "dev opt-out should clear Secure");
     }
 
     /// `with_csrf_config` overrides the default — verify the explicit

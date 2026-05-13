@@ -128,13 +128,13 @@ impl MetricsRegistry {
     pub fn counter(&self, name: &str, labels: &[(&str, &str)]) -> Counter {
         let key = MetricKey::new(name, labels);
         let inner = {
-            let read = self.inner.read().expect("metrics poisoned");
+            let read = self.inner.read().unwrap_or_else(|e| e.into_inner());
             read.counters.get(&key).cloned()
         };
         if let Some(i) = inner {
             return Counter { inner: i };
         }
-        let mut write = self.inner.write().expect("metrics poisoned");
+        let mut write = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let i = write
             .counters
             .entry(key)
@@ -159,13 +159,13 @@ impl MetricsRegistry {
     ) -> Histogram {
         let key = MetricKey::new(name, labels);
         let inner = {
-            let read = self.inner.read().expect("metrics poisoned");
+            let read = self.inner.read().unwrap_or_else(|e| e.into_inner());
             read.histograms.get(&key).cloned()
         };
         if let Some(i) = inner {
             return Histogram { inner: i };
         }
-        let mut write = self.inner.write().expect("metrics poisoned");
+        let mut write = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let i = write
             .histograms
             .entry(key)
@@ -177,7 +177,7 @@ impl MetricsRegistry {
     /// Render every metric in the Prometheus text exposition format.
     #[must_use]
     pub fn render(&self) -> String {
-        let r = self.inner.read().expect("metrics poisoned");
+        let r = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let mut out = String::new();
 
         // Counters first, then histograms. Both groups: write a single

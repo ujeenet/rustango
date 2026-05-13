@@ -136,7 +136,7 @@ impl InMemorySecrets {
         for (k, v) in pairs {
             self.inner
                 .get_mut()
-                .expect("secrets poisoned")
+                .unwrap_or_else(|e| e.into_inner())
                 .insert((*k).to_owned(), (*v).to_owned());
         }
         self
@@ -146,13 +146,16 @@ impl InMemorySecrets {
     pub fn set(&self, key: &str, value: &str) {
         self.inner
             .lock()
-            .expect("secrets poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .insert(key.to_owned(), value.to_owned());
     }
 
     /// Remove a secret.
     pub fn remove(&self, key: &str) {
-        self.inner.lock().expect("secrets poisoned").remove(key);
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(key);
     }
 }
 
@@ -168,7 +171,7 @@ impl Secrets for InMemorySecrets {
         Ok(self
             .inner
             .lock()
-            .expect("secrets poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .get(key)
             .cloned())
     }

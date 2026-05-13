@@ -140,15 +140,48 @@ impl OrgResolver for PathPrefixResolver {
 /// Useful for API-only deployments where every request carries an
 /// explicit tenant identifier (`X-Org: acme`). The default header
 /// is `X-Org`; configure via [`HeaderResolver::new`].
+///
+/// # Security
+///
+/// The header value comes straight from the client. Without an
+/// [`Self::allow_only`] allowlist, an attacker who reaches the
+/// resolver chain can request *any* tenant by name; defense-in-depth
+/// against IDOR therefore depends on every downstream handler
+/// checking `Tenant`-scoped authorization. For API-key or
+/// JWT-authenticated deployments where the credential is itself
+/// tenant-scoped this is fine; for ambient-cookie deployments,
+/// always pair this resolver with `allow_only`.
 pub struct HeaderResolver {
     pub header_name: HeaderName,
+    allowed_slugs: Option<std::collections::HashSet<String>>,
 }
 
 impl HeaderResolver {
     /// Construct with a custom header name (case-insensitive).
     #[must_use]
     pub fn new(header_name: HeaderName) -> Self {
-        Self { header_name }
+        Self {
+            header_name,
+            allowed_slugs: None,
+        }
+    }
+
+    /// Restrict accepted header values to a fixed allowlist of slugs.
+    /// Requests whose header value is not in the set resolve to
+    /// `None` (the chain falls through to the next resolver, then to
+    /// the operator-console fallback if nothing matches). v0.43.
+    ///
+    /// ```ignore
+    /// HeaderResolver::default().allow_only(["acme", "globex"])
+    /// ```
+    #[must_use]
+    pub fn allow_only<I, S>(mut self, slugs: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_slugs = Some(slugs.into_iter().map(Into::into).collect());
+        self
     }
 }
 
@@ -157,6 +190,7 @@ impl Default for HeaderResolver {
     fn default() -> Self {
         Self {
             header_name: HeaderName::from_static("x-org"),
+            allowed_slugs: None,
         }
     }
 }
@@ -173,6 +207,12 @@ impl OrgResolver for HeaderResolver {
         };
         if slug.is_empty() {
             return Ok(None);
+        }
+        // v0.43 — allowlist short-circuit, before the DB lookup.
+        if let Some(allowed) = &self.allowed_slugs {
+            if !allowed.contains(slug) {
+                return Ok(None);
+            }
         }
         find_active_org_by(registry, Org::slug.eq(slug.to_owned())).await
     }
@@ -304,5 +344,46 @@ fn driver_from_exec(e: rustango::sql::ExecError) -> rustango::sql::sqlx::Error {
         // not a user error. Wrap as a synthetic driver error so
         // callers don't need to match every ExecError variant.
         other => rustango::sql::sqlx::Error::Protocol(format!("resolver query: {other}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // v0.43 — lock in the HeaderResolver allowlist behaviour at the
+    // builder level. The full resolve() path requires a live Pool +
+    // Org row; that's exercised in the tenant_extractor_*_live tests.
+    // These unit tests guarantee the builder semantics so a refactor
+    // can't silently drop the allowlist set.
+
+    #[test]
+    fn default_has_no_allowlist() {
+        let r = HeaderResolver::default();
+        assert!(
+            r.allowed_slugs.is_none(),
+            "default resolver should not have an allowlist"
+        );
+    }
+
+    #[test]
+    fn allow_only_stores_slugs() {
+        let r = HeaderResolver::default().allow_only(["acme", "globex"]);
+        let set = r.allowed_slugs.expect("allow_only sets the slug set");
+        assert_eq!(set.len(), 2);
+        assert!(set.contains("acme"));
+        assert!(set.contains("globex"));
+        assert!(!set.contains("attacker-tenant"));
+    }
+
+    #[test]
+    fn allow_only_accepts_owned_strings() {
+        // `Into<String>` bound — verify Vec<String> also works.
+        let slugs: Vec<String> = vec!["a".into(), "b".into()];
+        let r = HeaderResolver::default().allow_only(slugs);
+        assert_eq!(
+            r.allowed_slugs.expect("allow_only sets the slug set").len(),
+            2
+        );
     }
 }

@@ -44,7 +44,7 @@ impl OAuth2Registry {
         let name = provider.name.clone();
         self.inner
             .write()
-            .expect("registry poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .insert((tenant.into(), name), Arc::new(provider));
     }
 
@@ -52,7 +52,7 @@ impl OAuth2Registry {
     pub fn deregister(&self, tenant: &str, name: &str) -> bool {
         self.inner
             .write()
-            .expect("registry poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .remove(&(tenant.to_owned(), name.to_owned()))
             .is_some()
     }
@@ -63,7 +63,7 @@ impl OAuth2Registry {
     pub fn get(&self, tenant: &str, name: &str) -> Option<Arc<OAuth2Provider>> {
         self.inner
             .read()
-            .expect("registry poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .get(&(tenant.to_owned(), name.to_owned()))
             .cloned()
     }
@@ -73,7 +73,7 @@ impl OAuth2Registry {
     pub fn list(&self) -> Vec<(String, String)> {
         self.inner
             .read()
-            .expect("registry poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .keys()
             .cloned()
             .collect()
@@ -84,7 +84,7 @@ impl OAuth2Registry {
     pub fn list_for_tenant(&self, tenant: &str) -> Vec<String> {
         self.inner
             .read()
-            .expect("registry poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter(|((t, _), _)| t == tenant)
             .map(|((_, n), _)| n.clone())
@@ -93,7 +93,10 @@ impl OAuth2Registry {
 
     /// Drop everything. Useful for tests or hot-reload.
     pub fn clear(&self) {
-        self.inner.write().expect("registry poisoned").clear();
+        self.inner
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 }
 

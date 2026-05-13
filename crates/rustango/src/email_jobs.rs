@@ -87,7 +87,7 @@ impl Job for EmailJob {
     async fn run(&self) -> Result<(), JobError> {
         let mailer = mailer_registry()
             .read()
-            .expect("EmailJob registry poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .get(Self::NAME)
             .cloned()
             .ok_or_else(|| {
@@ -107,7 +107,7 @@ impl Job for EmailJob {
 pub async fn register_email_job<Q: JobQueue>(queue: &Q, cfg: EmailJobConfig) {
     mailer_registry()
         .write()
-        .expect("EmailJob registry poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .insert(EmailJob::NAME, cfg.mailer);
     queue.register::<EmailJob>().await;
 }

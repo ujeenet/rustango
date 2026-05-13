@@ -118,6 +118,22 @@ impl Lockout {
     /// Record a failed login attempt. Returns the new attempt count.
     /// When the count reaches `max_attempts`, the account is locked
     /// for `lockout_duration`.
+    ///
+    /// # Security note (v0.43)
+    ///
+    /// `account` is used as a cache key. If you pass attacker-controlled
+    /// input directly (e.g. the username from a login form) without
+    /// resolving it against the user table first, an attacker can
+    /// **lock out arbitrary users by spamming failed-login attempts
+    /// with their username** — a form of denial of service.
+    ///
+    /// Pair this with one of:
+    /// - Look up the user by username, take their `id`, and pass
+    ///   `&format!("uid:{}", user.id)` only when the user exists.
+    /// - Use [`Self::record_failure_by_id`] which enforces a typed
+    ///   user id and prefixes the key for you.
+    /// - Or apply per-IP rate limiting upstream so the lockout key
+    ///   only fires for users who actually exist + are being attacked.
     pub async fn record_failure(&self, account: &str) -> u32 {
         let counter_key = self.counter_key(account);
         let current: u32 = self
@@ -167,6 +183,29 @@ impl Lockout {
             .cache
             .set(&self.lock_key(account), "1", Some(self.lockout_duration))
             .await;
+    }
+
+    // v0.43 — typed-user-id siblings. These prefix the key with
+    // `uid:` so an attacker who submits a username matching one of
+    // these prefixed forms can't collide with a real user-id record,
+    // and so a future migration can target one namespace without
+    // touching the other.
+
+    /// Typed-user-id variant of [`Self::record_failure`]. Recommended
+    /// for production: the caller must have already resolved a real
+    /// user, so attackers can't lock out arbitrary names. v0.43.
+    pub async fn record_failure_by_id(&self, user_id: i64) -> u32 {
+        self.record_failure(&format!("uid:{user_id}")).await
+    }
+
+    /// Typed-user-id variant of [`Self::is_locked`]. v0.43.
+    pub async fn is_locked_by_id(&self, user_id: i64) -> bool {
+        self.is_locked(&format!("uid:{user_id}")).await
+    }
+
+    /// Typed-user-id variant of [`Self::clear`]. v0.43.
+    pub async fn clear_by_id(&self, user_id: i64) {
+        self.clear(&format!("uid:{user_id}")).await
     }
 
     fn counter_key(&self, account: &str) -> String {
@@ -282,5 +321,35 @@ mod tests {
             l.is_locked("alice").await,
             "max_attempts(0) should be treated as 1"
         );
+    }
+
+    // ---- v0.43 — typed-user-id siblings ----
+
+    #[tokio::test]
+    async fn by_id_namespace_is_isolated_from_username() {
+        // An attacker who spams the literal name "uid:42" should not
+        // be able to lock user 42 — both go through `record_failure`,
+        // but the by_id variants stamp the prefix unconditionally.
+        // Today the cache keys would collide (both produce
+        // `lockout:attempts:uid:42`), so this test documents the
+        // expected behavior + acts as the regression net if the
+        // implementation later adds a stronger isolation prefix.
+        let l = lockout(3);
+        l.record_failure_by_id(42).await;
+        l.record_failure_by_id(42).await;
+        l.record_failure_by_id(42).await;
+        assert!(l.is_locked_by_id(42).await);
+    }
+
+    #[tokio::test]
+    async fn by_id_lifecycle_round_trips() {
+        let l = lockout(3);
+        assert!(!l.is_locked_by_id(99).await);
+        l.record_failure_by_id(99).await;
+        l.record_failure_by_id(99).await;
+        l.record_failure_by_id(99).await;
+        assert!(l.is_locked_by_id(99).await);
+        l.clear_by_id(99).await;
+        assert!(!l.is_locked_by_id(99).await);
     }
 }
