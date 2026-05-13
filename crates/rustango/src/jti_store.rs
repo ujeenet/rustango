@@ -50,6 +50,18 @@ pub trait JtiStore: Send + Sync {
     /// `exp_unix` is the JWT's `exp` claim (unix seconds). Stores
     /// MAY use it to prune entries that are no longer relevant.
     fn mark_used(&self, jti: &str, exp_unix: i64) -> bool;
+
+    /// Approximate count of currently-tracked JTIs. Used by admin
+    /// dashboards and tests; not on the hot path.
+    ///
+    /// Returns `None` when the backing store can't cheaply count
+    /// (e.g. Redis with millions of entries — calling `SCAN` for
+    /// a status display would be silly). Default impl returns
+    /// `None` so trait objects don't have to know how to count.
+    /// v0.48.
+    fn approx_size(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// In-process JTI store. Backs the default behaviour for every
@@ -97,6 +109,10 @@ impl JtiStore for InMemoryJtiStore {
         }
         map.insert(jti.to_owned(), exp_unix);
         true
+    }
+
+    fn approx_size(&self) -> Option<usize> {
+        Some(self.inner.lock().unwrap_or_else(|e| e.into_inner()).len())
     }
 }
 

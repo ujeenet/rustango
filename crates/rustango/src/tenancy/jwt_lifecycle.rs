@@ -38,11 +38,12 @@
 //! jwt.revoke(&refresh_token);  // blacklist the refresh JTI
 //! ```
 
-use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::Arc;
 
 use base64::Engine;
 use subtle::ConstantTimeEq;
+
+use crate::jti_store::{InMemoryJtiStore, JtiStore};
 
 /// One issued access+refresh pair.
 #[derive(Debug, Clone)]
@@ -109,12 +110,15 @@ pub const DEFAULT_ACCESS_TTL_SECS: i64 = 900;
 /// Default refresh token TTL — 7 days.
 pub const DEFAULT_REFRESH_TTL_SECS: i64 = 7 * 24 * 3600;
 
-/// JWT manager with access + refresh tokens and an in-memory blacklist.
+/// JWT manager with access + refresh tokens and a pluggable JTI
+/// revocation store. v0.48 — the store is `Arc<dyn JtiStore>` so
+/// multi-instance deployments can share state via a Redis- or DB-
+/// backed impl. Default ctor wires up [`InMemoryJtiStore`].
 pub struct JwtLifecycle {
     secret: Vec<u8>,
     pub access_ttl_secs: i64,
     pub refresh_ttl_secs: i64,
-    blacklist: RwLock<HashMap<String, i64>>, // jti -> expiry timestamp (auto-pruned)
+    jti_store: Arc<dyn JtiStore>,
 }
 
 impl JwtLifecycle {
@@ -125,8 +129,19 @@ impl JwtLifecycle {
             secret,
             access_ttl_secs: DEFAULT_ACCESS_TTL_SECS,
             refresh_ttl_secs: DEFAULT_REFRESH_TTL_SECS,
-            blacklist: RwLock::new(HashMap::new()),
+            jti_store: Arc::new(InMemoryJtiStore::new()),
         }
+    }
+
+    /// Swap the JTI store. v0.48 — pass any `Arc<dyn JtiStore>` for
+    /// multi-instance revocation correctness. Without this, two
+    /// rustango processes have independent blacklists and a token
+    /// revoked on instance A can still be replayed on instance B
+    /// within the token's TTL window.
+    #[must_use]
+    pub fn with_jti_store(mut self, store: Arc<dyn JtiStore>) -> Self {
+        self.jti_store = store;
+        self
     }
 
     /// Override the access token TTL (in seconds).
@@ -268,11 +283,12 @@ impl JwtLifecycle {
         true
     }
 
-    /// Number of currently blacklisted JTIs (for tests / monitoring).
+    /// Approximate number of currently blacklisted JTIs (for tests
+    /// / monitoring). Stores that don't cheaply expose a count
+    /// (e.g. a Redis-backed [`JtiStore`]) return 0. v0.48.
     #[must_use]
     pub fn blacklist_size(&self) -> usize {
-        self.prune_blacklist();
-        self.blacklist.read().expect("blacklist poisoned").len()
+        self.jti_store.approx_size().unwrap_or(0)
     }
 
     // ------------------------------------------------------------------ internals
@@ -365,24 +381,23 @@ impl JwtLifecycle {
     }
 
     fn blacklist_jti(&self, jti: &str, expires_at: i64) {
-        self.blacklist
-            .write()
-            .expect("blacklist poisoned")
-            .insert(jti.to_owned(), expires_at);
-        self.prune_blacklist();
+        // v0.48 — delegate to the pluggable JtiStore. We ignore the
+        // returned `bool` (newly-inserted vs already-present) because
+        // re-revoking an already-revoked token is idempotent here:
+        // either way the JTI is in the store on return. Pruning is
+        // the store's responsibility (`InMemoryJtiStore` does it
+        // opportunistically inside `mark_used`).
+        let _ = self.jti_store.mark_used(jti, expires_at);
     }
 
     fn is_blacklisted(&self, jti: &str) -> bool {
-        let now = chrono::Utc::now().timestamp();
-        let bl = self.blacklist.read().expect("blacklist poisoned");
-        bl.get(jti).map_or(false, |&exp| exp > now)
-    }
-
-    /// Remove blacklist entries past their expiry — keeps the map bounded.
-    fn prune_blacklist(&self) {
-        let now = chrono::Utc::now().timestamp();
-        let mut bl = self.blacklist.write().expect("blacklist poisoned");
-        bl.retain(|_, &mut exp| exp > now);
+        // v0.48 — `JtiStore::is_used` doesn't filter by the entry's
+        // expiry the way the pre-v0.48 in-line map did. That's a
+        // tighter behaviour (a revoked-but-not-yet-pruned JTI stays
+        // unusable for slightly longer), and harmless: the token
+        // verify path rejects expired tokens before this check is
+        // ever consulted.
+        self.jti_store.is_used(jti)
     }
 }
 
@@ -661,5 +676,57 @@ mod tests {
         let _new = j.refresh(&pair.refresh).unwrap();
         // Original refresh token can no longer be used
         assert!(j.refresh(&pair.refresh).is_none());
+    }
+
+    // v0.48 — `with_jti_store` lets two JwtLifecycle handles share
+    // revocation state. This is the multi-instance hook: in a
+    // horizontally-scaled deployment process A revokes a token,
+    // process B sees the revocation. The default in-memory store
+    // can't span processes, but this test uses an `Arc<dyn JtiStore>`
+    // shared between two in-process handles to prove the wire is
+    // wired. A Redis-backed JtiStore in production gives the same
+    // semantics across actual replicas.
+
+    #[test]
+    fn shared_jti_store_makes_revoke_visible_across_handles() {
+        use crate::jti_store::{InMemoryJtiStore, JtiStore};
+        let secret = b"shared-test-secret-32-bytes-long".to_vec();
+        let shared: std::sync::Arc<dyn JtiStore> = std::sync::Arc::new(InMemoryJtiStore::new());
+
+        let j_a = JwtLifecycle::new(secret.clone()).with_jti_store(std::sync::Arc::clone(&shared));
+        let j_b = JwtLifecycle::new(secret).with_jti_store(std::sync::Arc::clone(&shared));
+
+        let pair = j_a.issue_pair(7);
+        // Both instances accept the token before revocation.
+        assert!(j_a.verify_access(&pair.access).is_some());
+        assert!(j_b.verify_access(&pair.access).is_some());
+
+        // Revoke on A.
+        assert!(j_a.revoke(&pair.access));
+
+        // B must now reject the token even though revocation
+        // happened on A. The shared store is the single source of
+        // truth.
+        assert!(
+            j_a.verify_access(&pair.access).is_none(),
+            "instance A must reject its own revoked token"
+        );
+        assert!(
+            j_b.verify_access(&pair.access).is_none(),
+            "instance B must see the revocation from A via the shared store"
+        );
+    }
+
+    #[test]
+    fn blacklist_size_uses_jti_store_approx_size() {
+        // Confirms blacklist_size delegates to JtiStore::approx_size
+        // rather than peeking at a private map.
+        let j = jwt();
+        assert_eq!(j.blacklist_size(), 0);
+        let pair = j.issue_pair(1);
+        j.revoke(&pair.access);
+        assert_eq!(j.blacklist_size(), 1);
+        j.revoke(&pair.refresh);
+        assert_eq!(j.blacklist_size(), 2);
     }
 }
