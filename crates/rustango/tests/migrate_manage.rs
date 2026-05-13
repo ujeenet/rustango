@@ -19,6 +19,19 @@ use rustango::sql::sqlx::{self, PgPool, Row};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets shared tables (via
+/// DROP/CREATE or `drop_all`); under cargo's default parallel harness
+/// two tests would race on PG's `pg_type_typname_nsp_index` /
+/// `pg_class_relname_nsp_index` system-catalog uniques when both try
+/// to CREATE/DROP at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
 async fn pool() -> Option<rustango::sql::Pool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let pg = PgPool::connect(&url)
@@ -330,6 +343,7 @@ async fn add_data_op_cmd_missing_sql_is_error() {
 
 #[tokio::test]
 async fn run_no_args_prints_help_returns_ok() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -339,6 +353,7 @@ async fn run_no_args_prints_help_returns_ok() {
 
 #[tokio::test]
 async fn run_help_subcommand_returns_ok() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -350,6 +365,7 @@ async fn run_help_subcommand_returns_ok() {
 
 #[tokio::test]
 async fn run_unknown_subcommand_is_validation_error() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -363,6 +379,7 @@ async fn run_unknown_subcommand_is_validation_error() {
 
 #[tokio::test]
 async fn makemigrations_unknown_flag_is_validation_error() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -375,6 +392,7 @@ async fn makemigrations_unknown_flag_is_validation_error() {
 
 #[tokio::test]
 async fn makemigrations_empty_without_name_is_error() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -387,6 +405,7 @@ async fn makemigrations_empty_without_name_is_error() {
 
 #[tokio::test]
 async fn downgrade_with_garbage_step_count_is_error() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -401,6 +420,7 @@ async fn downgrade_with_garbage_step_count_is_error() {
 
 #[tokio::test]
 async fn migrate_subcommand_applies_pending() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -444,6 +464,7 @@ async fn migrate_subcommand_applies_pending() {
 
 #[tokio::test]
 async fn migrate_to_target_subcommand_routes_correctly() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -507,6 +528,7 @@ async fn migrate_to_target_subcommand_routes_correctly() {
 
 #[tokio::test]
 async fn downgrade_subcommand_steps_back_one_by_default() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -571,6 +593,7 @@ async fn downgrade_subcommand_steps_back_one_by_default() {
 
 #[tokio::test]
 async fn showmigrations_subcommand_runs_on_empty_dir() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -588,6 +611,7 @@ async fn showmigrations_subcommand_runs_on_empty_dir() {
 
 #[tokio::test]
 async fn run_with_writer_captures_help_text() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -606,6 +630,7 @@ async fn run_with_writer_captures_help_text() {
 
 #[tokio::test]
 async fn migrate_dry_run_subcommand_prints_sql_no_writes() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -666,6 +691,7 @@ async fn migrate_dry_run_subcommand_prints_sql_no_writes() {
 
 #[tokio::test]
 async fn migrate_dry_run_subcommand_with_target_is_rejected() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -681,6 +707,7 @@ async fn migrate_dry_run_subcommand_with_target_is_rejected() {
 
 #[tokio::test]
 async fn run_with_writer_captures_migrate_output() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -719,6 +746,7 @@ async fn run_with_writer_captures_migrate_output() {
 
 #[tokio::test]
 async fn makemigrations_empty_via_run_writes_scaffold() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };

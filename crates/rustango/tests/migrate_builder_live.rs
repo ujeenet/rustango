@@ -18,6 +18,19 @@ use rustango::sql::sqlx::{self, PgPool, Row};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets shared tables (via
+/// DROP/CREATE or `drop_all`); under cargo's default parallel harness
+/// two tests would race on PG's `pg_type_typname_nsp_index` /
+/// `pg_class_relname_nsp_index` system-catalog uniques when both try
+/// to CREATE/DROP at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
 async fn pool() -> Option<PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     Some(
@@ -88,6 +101,7 @@ async fn drop_table(pool: &PgPool, table: &str) {
 
 #[tokio::test]
 async fn two_builders_keep_distinct_ledgers() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -167,6 +181,7 @@ async fn two_builders_keep_distinct_ledgers() {
 
 #[tokio::test]
 async fn default_builder_matches_free_function_results() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };

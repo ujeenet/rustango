@@ -11,6 +11,19 @@
 
 use rustango::sql::sqlx;
 
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets shared tables (via
+/// DROP/CREATE or `drop_all`); under cargo's default parallel harness
+/// two tests would race on PG's `pg_type_typname_nsp_index` /
+/// `pg_class_relname_nsp_index` system-catalog uniques when both try
+/// to CREATE/DROP at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     Some(sqlx::PgPool::connect(&url).await.unwrap())
@@ -63,6 +76,7 @@ async fn fresh_fixture(pool: &sqlx::PgPool) {
 /// the verb wiring is validated too.
 #[tokio::test]
 async fn inspectdb_emits_models_for_fixture_tables() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     fresh_fixture(&pool).await;
 
@@ -133,6 +147,7 @@ async fn inspectdb_emits_models_for_fixture_tables() {
 /// FK column + maps uuid + jsonb correctly.
 #[tokio::test]
 async fn inspectdb_emits_fk_uuid_and_jsonb_correctly() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     fresh_fixture(&pool).await;
 
@@ -178,6 +193,7 @@ async fn inspectdb_emits_fk_uuid_and_jsonb_correctly() {
 /// returns the "no tables found" comment without crashing.
 #[tokio::test]
 async fn inspectdb_unknown_schema_emits_friendly_comment() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
 
     let mut buf: Vec<u8> = Vec::new();
