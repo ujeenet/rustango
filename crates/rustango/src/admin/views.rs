@@ -763,6 +763,36 @@ fn stringify_facet_value_sqlite(row: &sqlx::sqlite::SqliteRow) -> String {
     String::new()
 }
 
+// v0.46 — Django save-and-X redirect target.
+//
+// The admin's change/add form ships three submit buttons. Their
+// `name="..."` attribute tells the handler where to send the user
+// after a successful save:
+//
+//   <button name="_save"        … >Save</button>
+//   <button name="_continue"    … >Save and continue editing</button>
+//   <button name="_addanother"  … >Save and add another</button>
+//
+// Matching Django's `BaseModelAdmin.response_post_save_*` conventions
+// down to the literal field names so muscle memory carries over.
+pub(crate) fn post_save_redirect(
+    admin_prefix: &str,
+    table: &str,
+    pk_value: &str,
+    form: &HashMap<String, String>,
+) -> String {
+    if form.contains_key("_continue") {
+        // Stay on the detail page for further edits.
+        format!("{admin_prefix}/{table}/{pk_value}")
+    } else if form.contains_key("_addanother") {
+        // Land on the empty create form.
+        format!("{admin_prefix}/{table}/add")
+    } else {
+        // Default `_save` → list view.
+        format!("{admin_prefix}/{table}")
+    }
+}
+
 // v0.31.1 (#5): take `admin_prefix` instead of hardcoding `/__admin`.
 // On the v0.29+ friendly default the facet toggle / clear / show-all
 // URLs all 404'd until the caller corrected them by hand.
@@ -1074,11 +1104,8 @@ pub(crate) async fn create_submit(
         &form,
     )
     .await;
-    Ok(Redirect::to(&format!(
-        "{}/{}/{}",
-        state.config.admin_prefix, model.table, pk_value
-    ))
-    .into_response())
+    let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_value, &form);
+    Ok(Redirect::to(&target).into_response())
 }
 
 // ============================================================== EDIT
@@ -1217,11 +1244,8 @@ pub(crate) async fn update_submit(
     // `tenancy::admin`, so operators get a "who changed what" trail
     // automatically.
     super::audit::emit_admin_audit_diff(&state, model, &pk_raw, before_row.as_ref(), &form).await;
-    Ok(Redirect::to(&format!(
-        "{}/{}/{}",
-        state.config.admin_prefix, model.table, pk_raw
-    ))
-    .into_response())
+    let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_raw, &form);
+    Ok(Redirect::to(&target).into_response())
 }
 
 // ============================================================== DELETE
@@ -1573,4 +1597,66 @@ pub(crate) async fn action_submit(
     }
 
     Ok(Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // v0.46.9 — post-save redirect routing matches Django's
+    // `BaseModelAdmin.response_post_save_*` table:
+    //   _continue   → detail (stay for further edits)
+    //   _addanother → add form (empty)
+    //   anything else (including _save) → list view
+
+    fn form_with(field: &str) -> HashMap<String, String> {
+        let mut m = HashMap::new();
+        m.insert(field.to_owned(), "1".to_owned());
+        m
+    }
+
+    #[test]
+    fn default_save_redirects_to_list_view() {
+        let url = post_save_redirect("/__admin", "post", "42", &form_with("_save"));
+        assert_eq!(url, "/__admin/post");
+    }
+
+    #[test]
+    fn save_with_no_button_name_redirects_to_list_view() {
+        // Some browsers / clients submit forms without picking up the
+        // button name (e.g. JS-driven form.submit()). Default = list.
+        let url = post_save_redirect("/__admin", "post", "42", &HashMap::new());
+        assert_eq!(url, "/__admin/post");
+    }
+
+    #[test]
+    fn continue_redirects_to_detail() {
+        let url = post_save_redirect("/__admin", "post", "42", &form_with("_continue"));
+        assert_eq!(url, "/__admin/post/42");
+    }
+
+    #[test]
+    fn addanother_redirects_to_create_form() {
+        let url = post_save_redirect("/__admin", "post", "42", &form_with("_addanother"));
+        assert_eq!(url, "/__admin/post/add");
+    }
+
+    #[test]
+    fn continue_takes_precedence_over_addanother() {
+        // Both fields present (synthetic JS, double-click race, etc.)
+        // → prefer the safer choice: stay on the just-saved record.
+        let mut form = form_with("_continue");
+        form.insert("_addanother".to_owned(), "1".to_owned());
+        let url = post_save_redirect("/__admin", "post", "42", &form);
+        assert_eq!(url, "/__admin/post/42");
+    }
+
+    #[test]
+    fn admin_prefix_is_honored() {
+        // Apps that mount the admin at `/manage` instead of the
+        // default `/__admin` (#74 in the backlog) get the right
+        // base path everywhere.
+        let url = post_save_redirect("/manage", "post", "42", &form_with("_continue"));
+        assert_eq!(url, "/manage/post/42");
+    }
 }

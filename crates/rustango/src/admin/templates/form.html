@@ -27,6 +27,10 @@
     </table>
   </fieldset>
 {% endfor %}
-  <p><button type="submit">Save</button></p>
+  <p class="form-submit-row">
+    <button type="submit" name="_save">Save</button>
+    <button type="submit" name="_continue">Save and continue editing</button>
+    <button type="submit" name="_addanother">Save and add another</button>
+  </p>
 </form>
 {% endblock body %}
