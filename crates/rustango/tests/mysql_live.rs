@@ -74,9 +74,15 @@ async fn fresh_schema(pool: &Pool) {
     rustango::migrate::drop_all_pool(pool)
         .await
         .expect("drop_all_pool");
-    // `rustango_audit_log` is a runtime side-table (not a registered
-    // model), so drop it explicitly.
-    let _ = raw_execute_pool(pool, "DROP TABLE IF EXISTS `rustango_audit_log`", vec![]).await;
+    // Runtime side-tables (not registered models, so `drop_all_pool`
+    // doesn't touch them): the audit log + the migration ledger. The
+    // ledger drop matters across test files — without it, a prior
+    // binary's bootstrap entries leak into `applied_set_pool` and trip
+    // `migrate_pool_ledger_round_trips`'s "empty ledger" assertion.
+    for tbl in ["rustango_audit_log", "__rustango_migrations__"] {
+        let sql = format!("DROP TABLE IF EXISTS `{tbl}`");
+        let _ = raw_execute_pool(pool, &sql, vec![]).await;
+    }
     rustango::migrate::apply_all_pool(pool)
         .await
         .expect("apply_all_pool");

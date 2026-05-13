@@ -13,6 +13,17 @@
 
 use rustango::sql::sqlx;
 use rustango::tenancy::TenantPools;
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Both tests in this file `DROP TABLE` the shared
+/// registry tables and then re-run the bootstrap migration; without
+/// serialization the parallel harness races and trips MySQL error 1050
+/// or partial-drop FK errors.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
 
 async fn pools_or_skip() -> Option<(TenantPools<sqlx::MySql>, String)> {
     let url = std::env::var("MYSQL_TEST_URL").ok()?;
@@ -21,6 +32,10 @@ async fn pools_or_skip() -> Option<(TenantPools<sqlx::MySql>, String)> {
         .expect("connect to MYSQL_TEST_URL");
     // Reset the registry side of the schema between runs. Drop in FK-
     // correct order so child rows / tables don't block the parent drop.
+    // The migration ledger table is `__rustango_migrations__` (double
+    // underscores per `migrate::runner::LEDGER_TABLE`); if a stale entry
+    // survives, `migrate-registry` thinks bootstrap is already applied
+    // and skips creating the tables we just dropped.
     for tbl in [
         "rustango_audit_log",
         "rustango_role_permissions",
@@ -32,7 +47,7 @@ async fn pools_or_skip() -> Option<(TenantPools<sqlx::MySql>, String)> {
         "rustango_users",
         "rustango_operators",
         "rustango_orgs",
-        "rustango_migrations",
+        "__rustango_migrations__",
     ] {
         let _ = sqlx::query(&format!("DROP TABLE IF EXISTS `{tbl}`"))
             .execute(&pool)
@@ -43,6 +58,7 @@ async fn pools_or_skip() -> Option<(TenantPools<sqlx::MySql>, String)> {
 
 #[tokio::test]
 async fn tenancy_manage_run_dispatches_init_then_create_then_list_on_mysql() {
+    let _g = live_lock().lock().await;
     let Some((pools, url)) = pools_or_skip().await else {
         eprintln!("MYSQL_TEST_URL unset — skipping");
         return;
@@ -83,8 +99,11 @@ async fn tenancy_manage_run_dispatches_init_then_create_then_list_on_mysql() {
     // Verify rustango_orgs exists. Pull its DDL via information_schema
     // and verify it carries MySQL-flavored types, not PG-only ones.
     let inner = pools.registry_inner();
+    // CAST to CHAR so sqlx decodes into String — `information_schema`'s
+    // COLUMN_TYPE has a binary collation on MySQL 8, which sqlx surfaces
+    // as `SQL type BLOB` and rejects against a Rust `String` target.
     let create_sql: String = sqlx::query_scalar::<_, String>(
-        "SELECT COLUMN_TYPE FROM information_schema.columns \
+        "SELECT CAST(COLUMN_TYPE AS CHAR) FROM information_schema.columns \
          WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'rustango_orgs' AND COLUMN_NAME = 'id'",
     )
     .fetch_one(inner)
@@ -141,6 +160,7 @@ async fn tenancy_manage_run_dispatches_init_then_create_then_list_on_mysql() {
 
 #[tokio::test]
 async fn tenancy_manage_run_rejects_schema_mode_on_mysql_with_friendly_error() {
+    let _g = live_lock().lock().await;
     let Some((pools, url)) = pools_or_skip().await else {
         eprintln!("MYSQL_TEST_URL unset — skipping");
         return;
