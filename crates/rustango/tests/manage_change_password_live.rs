@@ -12,6 +12,19 @@ use rustango::sql::sqlx;
 use rustango::tenancy::manage::run_with_writer;
 use rustango::tenancy::{TenantPools, TenantPoolsConfig};
 
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets the shared PG
+/// schema; under cargo's default parallel harness two tests would race
+/// on PG's `pg_type_typname_nsp_index` / `pg_class_relname_nsp_index`
+/// system-catalog uniques when both try to CREATE/DROP the same table
+/// at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     sqlx::PgPool::connect(&url).await.ok()
@@ -28,6 +41,7 @@ fn args(parts: &[&str]) -> Vec<String> {
 
 #[tokio::test]
 async fn change_operator_password_round_trip() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         eprintln!("skipping: DATABASE_URL not set");
         return;
@@ -116,6 +130,7 @@ async fn change_operator_password_round_trip() {
 
 #[tokio::test]
 async fn create_operator_with_generate_emits_random_password() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         eprintln!("skipping: DATABASE_URL not set");
         return;
@@ -167,6 +182,7 @@ async fn create_operator_with_generate_emits_random_password() {
 
 #[tokio::test]
 async fn generate_and_password_are_mutually_exclusive() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         eprintln!("skipping: DATABASE_URL not set");
         return;

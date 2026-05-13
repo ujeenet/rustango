@@ -25,6 +25,19 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}_{pid}_{n}")
 }
 
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets the shared PG
+/// schema; under cargo's default parallel harness two tests would race
+/// on PG's `pg_type_typname_nsp_index` / `pg_class_relname_nsp_index`
+/// system-catalog uniques when both try to CREATE/DROP the same table
+/// at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     Some(sqlx::PgPool::connect(&url).await.unwrap())
@@ -109,6 +122,7 @@ async fn registry_migrate_applies_only_registry_scoped() {
     // Two migrations: one registry-scoped (creates a registry-side
     // table) and one tenant-scoped (creates a tenant-side table).
     // `migrate_registry` runs only the registry one.
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -179,6 +193,7 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
     // table in each tenant's schema. Each tenant's ledger lives in
     // its own schema. Registry's `public.__rustango_migrations__`
     // does NOT pick up the tenant migrations.
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -290,6 +305,7 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
 
 #[tokio::test]
 async fn tenant_migrate_skips_inactive_orgs() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };

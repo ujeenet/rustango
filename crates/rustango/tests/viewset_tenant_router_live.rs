@@ -41,6 +41,19 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}_{pid}_{n}")
 }
 
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets the shared PG
+/// schema; under cargo's default parallel harness two tests would race
+/// on PG's `pg_type_typname_nsp_index` / `pg_class_relname_nsp_index`
+/// system-catalog uniques when both try to CREATE/DROP the same table
+/// at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     Some(sqlx::PgPool::connect(&url).await.unwrap())
@@ -173,6 +186,7 @@ fn req_json(method: Method, uri: &str, slug: &str, body: serde_json::Value) -> R
 
 #[tokio::test]
 async fn list_returns_paginated_payload_against_tenant_conn() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     let (slug, pool, app) = fixture(pool).await;
 
@@ -204,6 +218,7 @@ async fn list_returns_paginated_payload_against_tenant_conn() {
 
 #[tokio::test]
 async fn search_param_narrows_via_tenant_router() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     let (slug, pool, app) = fixture(pool).await;
 
@@ -229,6 +244,7 @@ async fn search_param_narrows_via_tenant_router() {
 
 #[tokio::test]
 async fn filter_param_exact_match_via_tenant_router() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     let (slug, pool, app) = fixture(pool).await;
 
@@ -252,6 +268,7 @@ async fn filter_param_exact_match_via_tenant_router() {
 
 #[tokio::test]
 async fn retrieve_by_pk_via_tenant_router() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     let (slug, pool, app) = fixture(pool).await;
 
@@ -273,6 +290,7 @@ async fn retrieve_by_pk_via_tenant_router() {
 
 #[tokio::test]
 async fn create_then_retrieve_via_tenant_router() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     let (slug, pool, app) = fixture(pool).await;
 
@@ -302,6 +320,7 @@ async fn create_then_retrieve_via_tenant_router() {
 
 #[tokio::test]
 async fn update_then_destroy_via_tenant_router() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     let (slug, pool, app) = fixture(pool).await;
 
@@ -355,6 +374,7 @@ async fn update_then_destroy_via_tenant_router() {
 /// cleanly rather than leaking a 500 from the inner SQL layer.
 #[tokio::test]
 async fn missing_tenant_header_yields_404() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     let (_slug, _pool, app) = fixture(pool).await;
 

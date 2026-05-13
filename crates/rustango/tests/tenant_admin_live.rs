@@ -27,6 +27,19 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}_{pid}_{n}")
 }
 
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets the shared PG
+/// schema; under cargo's default parallel harness two tests would race
+/// on PG's `pg_type_typname_nsp_index` / `pg_class_relname_nsp_index`
+/// system-catalog uniques when both try to CREATE/DROP the same table
+/// at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     Some(sqlx::PgPool::connect(&url).await.unwrap())
@@ -64,6 +77,7 @@ async fn database_mode_admin_serves_tenant_data() {
     // (degenerate but sufficient — proves the dispatch flow).
     // Insert a Widget through the registry pool, then GET / via the
     // admin: the row must show up.
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -130,6 +144,7 @@ async fn database_mode_admin_serves_tenant_data() {
 
 #[tokio::test]
 async fn no_tenant_match_returns_404() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -150,6 +165,7 @@ async fn no_tenant_match_returns_404() {
 
 #[tokio::test]
 async fn unknown_slug_in_header_returns_404() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -177,6 +193,7 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
     // table in its own schema. The admin URL with X-Org=acme returns
     // acme's data; X-Org=globex returns globex's. Browser-style
     // isolation by tenant.
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -317,6 +334,7 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
 
 #[tokio::test]
 async fn subdomain_chain_resolves_via_host_header() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
