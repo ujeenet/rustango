@@ -110,6 +110,11 @@ pub fn derive_form(input: TokenStream) -> TokenStream {
 /// - `#[serializer(write_only)]` — `Default::default()` in `from_model`; excluded from JSON output; included in `writable_fields()`
 /// - `#[serializer(source = "field_name")]` — reads from `model.field_name` instead of `model.<field_ident>`
 /// - `#[serializer(skip)]` — `Default::default()` in `from_model`; included in JSON output; excluded from `writable_fields()` (user sets manually)
+/// - `#[serializer(method = "fn_name")]` — DRF `SerializerMethodField`: calls `Self::fn_name(&model)` for the field value; excluded from `writable_fields()`
+/// - `#[serializer(nested)]` / `nested(strict)` — auto-resolves nested serializer from a loaded `ForeignKey`; excluded from `writable_fields()`
+/// - `#[serializer(many = ChildSerializer)]` — collection of nested serializers; populated via macro-emitted `set_<field>(&[Child::Model])`; excluded from `writable_fields()`
+/// - `#[serializer(slug = "name")]` — DRF `SlugRelatedField`: clones `model.<source>.value()?.name`; excluded from `writable_fields()` (v0.44)
+/// - `#[serializer(validate = "fn_name")]` — per-field validator surfaced by `Self::validate(&self)`
 ///
 /// The macro also emits a custom `impl serde::Serialize` — do **not** also `#[derive(Serialize)]`.
 #[proc_macro_derive(Serializer, attributes(serializer))]
@@ -5594,6 +5599,16 @@ struct SerializerFieldAttrs {
     /// possible (the M2M / one-to-many accessor is async); callers
     /// fetch the children + call the setter post-from_model.
     many: Option<syn::Type>,
+    /// `#[serializer(slug = "name")]` — DRF `SlugRelatedField` analog.
+    /// Source field on the model must be a `ForeignKey<T>`; the
+    /// macro emits `from_model` glue that walks
+    /// `model.<source>.value()?.<slug>` and clones it. Field type on
+    /// the serializer is typically `String` (whatever type the slug
+    /// column has). When the FK is unloaded the field falls back to
+    /// `Default::default()`, same graceful-degrade contract as
+    /// `nested`. Source defaults to the field name; override with
+    /// `source = "..."`. v0.44.
+    slug: Option<String>,
 }
 
 fn parse_serializer_container_attrs(input: &DeriveInput) -> syn::Result<SerializerContainerAttrs> {
@@ -5674,9 +5689,15 @@ fn parse_serializer_field_attrs(field: &syn::Field) -> syn::Result<SerializerFie
                 }
                 return Ok(());
             }
+            if meta.path.is_ident("slug") {
+                let s: LitStr = meta.value()?.parse()?;
+                out.slug = Some(s.value());
+                return Ok(());
+            }
             Err(meta.error(
                 "unknown serializer field attribute (supported: \
-                 `read_only`, `write_only`, `source`, `skip`, `method`, `validate`, `nested`)",
+                 `read_only`, `write_only`, `source`, `skip`, `method`, \
+                 `validate`, `nested`, `many`, `slug`)",
             ))
         })?;
     }
@@ -5692,6 +5713,13 @@ fn parse_serializer_field_attrs(field: &syn::Field) -> syn::Result<SerializerFie
             field,
             "`method` and `source` are mutually exclusive — `method` computes \
              the value from a method, `source` reads it from a different model field",
+        ));
+    }
+    if out.slug.is_some() && (out.method.is_some() || out.nested || out.many.is_some()) {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`slug` is mutually exclusive with `method`, `nested`, and `many` \
+             — pick one strategy for populating the field",
         ));
     }
     Ok(out)
@@ -5752,6 +5780,30 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             // `fn <method>(model: &T) -> <field type>`.
             let method_ident = syn::Ident::new(method, ident.span());
             quote! { #ident: Self::#method_ident(model) }
+        } else if let Some(slug_field) = &fi.attrs.slug {
+            // v0.44 — SlugRelatedField. Source defaults to the field
+            // name on this struct; override via `source = "..."`. The
+            // source field on the model is expected to be a
+            // `ForeignKey<T>`; the slug field on the parent is named
+            // by the attribute value. When the FK is unloaded the
+            // field falls back to `Default::default()` — same
+            // graceful-degrade contract as `nested`.
+            let src_name = fi
+                .attrs
+                .source
+                .as_deref()
+                .unwrap_or(&fi.ident.to_string())
+                .to_owned();
+            let src_ident = syn::Ident::new(&src_name, ident.span());
+            let slug_ident = syn::Ident::new(slug_field, ident.span());
+            quote! {
+                #ident: match model.#src_ident.value() {
+                    ::core::option::Option::Some(__loaded) =>
+                        ::core::clone::Clone::clone(&__loaded.#slug_ident),
+                    ::core::option::Option::None =>
+                        ::core::default::Default::default(),
+                }
+            }
         } else if fi.attrs.nested {
             // Nested serializer. Source defaults to the field name on
             // this struct; override via `source = "..."`. The source
@@ -5887,10 +5939,29 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         quote! { __state.serialize_field(#name_lit, &self.#ident)?; }
     });
 
-    // writable_fields: normal + write_only (not read_only, not skip)
+    // writable_fields: normal + write_only.
+    // Exclude:
+    //   - `read_only` — server-computed.
+    //   - `skip` — caller sets manually post-from_model.
+    //   - `method` — computed from a Self::fn(&model) call; accepting
+    //     it on write is meaningless.
+    //   - `nested` / `many` — populated from related-model data, not
+    //     from a field on the wire body.
+    // v0.44 fix: pre-v0.44 the macro included `method` / `nested` /
+    // `many` in `writable_fields()`, which made the ViewSet write
+    // path accept those fields from the JSON body and try to bind
+    // them to the SQL UPDATE — a silent no-op at best, a type
+    // mismatch at worst.
     let writable_lits: Vec<_> = fields_info
         .iter()
-        .filter(|fi| !fi.attrs.read_only && !fi.attrs.skip)
+        .filter(|fi| {
+            !fi.attrs.read_only
+                && !fi.attrs.skip
+                && fi.attrs.method.is_none()
+                && !fi.attrs.nested
+                && fi.attrs.many.is_none()
+                && fi.attrs.slug.is_none()
+        })
         .map(|fi| fi.ident.to_string())
         .collect();
 

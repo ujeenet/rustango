@@ -42,23 +42,66 @@
 //! | `write_only` | `Default::default()` | excluded | yes |
 //! | `source = "x"` | mapped from `model.x` | included | yes |
 //! | `skip` | `Default::default()` | included | no |
+//! | `method = "fn"` | calls `Self::fn(&model)` | included | no |
+//! | `nested` | reads `model.<field>.value()` then `Child::from_model(parent)` | included | no |
+//! | `nested(strict)` | same, but panics on unloaded FK | included | no |
+//! | `many = TagSerializer` | initializes to `Vec::new()`; populate via `set_<field>(&[Tag])` helper | included | no |
+//! | `slug = "name"` | clones `model.<source>.value()?.name` (DRF SlugRelatedField) | included | no |
+//! | `validate = "fn"` | per-field validator called by `Self::validate(&self)` | n/a | n/a |
 //!
-//! ## Nested serializers
+//! ## Nested serializers — auto-resolved via `#[serializer(nested)]`
 //!
-//! For v0.20.x, nested objects require `#[serializer(skip)]` — set the field
-//! manually after calling `from_model`:
+//! When the field type is another serializer and the model's FK is
+//! already loaded (via `select_related`), the macro emits a `from_model`
+//! initializer that walks the FK automatically:
 //!
 //! ```ignore
-//! let mut s = PostSerializer::from_model(&post);
-//! s.author = AuthorSerializer::from_model(post.author.value().expect("loaded"));
+//! #[derive(Serializer, serde::Deserialize, Default)]
+//! #[serializer(model = Post)]
+//! struct PostWithAuthor {
+//!     pub id: i64,
+//!     pub title: String,
+//!     #[serializer(nested)]
+//!     pub author: AuthorSerializer,
+//! }
 //! ```
 //!
-//! Full automatic nested support (`#[serializer(nested)]` with FK loading) is
-//! planned for a future slice.
+//! If the FK was *not* loaded (no `select_related`), the field falls
+//! back to `Default::default()` rather than panicking — production
+//! degrades gracefully. Use `#[serializer(nested(strict))]` to opt
+//! back into the v0.18.1 panic-on-unloaded behaviour for tests.
+//!
+//! For lists of children (one-to-many / M2M), use
+//! `#[serializer(many = ChildSerializer)]`. The macro emits a
+//! `set_<field>(&[Child])` setter; the caller fetches the children
+//! and calls it after `from_model` (auto-load isn't possible because
+//! the M2M accessor is async).
+//!
+//! ## Computed fields — `#[serializer(method = "fn")]`
+//!
+//! DRF `SerializerMethodField` analog. The macro emits a `from_model`
+//! initializer that calls `Self::fn(&model)`:
+//!
+//! ```ignore
+//! impl PostSerializer {
+//!     fn excerpt(model: &Post) -> String {
+//!         model.body.chars().take(80).collect::<String>() + "…"
+//!     }
+//! }
+//!
+//! #[derive(Serializer, serde::Deserialize, Default)]
+//! #[serializer(model = Post)]
+//! struct PostSerializer {
+//!     pub title: String,
+//!     #[serializer(method = "excerpt")]
+//!     pub excerpt: String,
+//! }
+//! ```
 //!
 //! ## Validation
 //!
-//! Add cross-field validation as an inherent method on the serializer struct:
+//! Cross-field validation: implement `validate(&self)` as an inherent
+//! method on the serializer struct:
 //!
 //! ```ignore
 //! impl PostSerializer {
@@ -71,6 +114,11 @@
 //!     }
 //! }
 //! ```
+//!
+//! Per-field validators: declare `#[serializer(validate = "fn_name")]`
+//! on the field and write `fn fn_name(value: &T) -> Result<(), String>`
+//! as an associated method. The macro-generated `validate(&self)`
+//! aggregates per-field results into a `FormErrors`.
 
 use serde_json::Value;
 

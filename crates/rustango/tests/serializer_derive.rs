@@ -305,3 +305,262 @@ mod openapi_auto_derive {
         assert_eq!(direct, via_helper);
     }
 }
+
+// ============================================================================
+// v0.44 — standalone unit-test coverage for advanced serializer attributes.
+//
+// The cookbook chapters exercise these end-to-end against the blog_demo
+// schema; this module proves the macro expansion in isolation so a
+// regression in `parse_serializer_field_attrs` / `expand_serializer`
+// trips a fast, no-DB unit test instead of waiting for a cookbook
+// build that needs sqlx + a live DB.
+// ============================================================================
+
+mod advanced_attrs {
+    use rustango::serializer::ModelSerializer;
+    use rustango::sql::{Auto, ForeignKey};
+    use rustango::Serializer;
+
+    #[derive(rustango::Model, Debug, Clone)]
+    #[rustango(table = "v044_author")]
+    pub struct V044Author {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 80)]
+        pub name: String,
+    }
+
+    #[derive(rustango::Model, Debug, Clone)]
+    #[rustango(table = "v044_comment")]
+    pub struct V044Comment {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 500)]
+        pub body: String,
+        pub author: ForeignKey<V044Author>,
+    }
+
+    // ---- method = "fn_name" ----
+
+    #[derive(Serializer, serde::Deserialize, Default)]
+    #[serializer(model = super::Post)]
+    struct PostWithMethod {
+        pub title: String,
+        #[serializer(method = "loud_title")]
+        pub loud: String,
+    }
+
+    impl PostWithMethod {
+        fn loud_title(p: &super::Post) -> String {
+            p.title.to_uppercase()
+        }
+    }
+
+    #[test]
+    fn method_field_invokes_associated_fn_in_from_model() {
+        let p = super::post(1, "hello", "body", 0);
+        let s = PostWithMethod::from_model(&p);
+        assert_eq!(s.title, "hello");
+        assert_eq!(s.loud, "HELLO");
+    }
+
+    #[test]
+    fn method_field_excluded_from_writable() {
+        // method fields are computed — never accepted on write.
+        let wf = PostWithMethod::writable_fields();
+        assert!(wf.contains(&"title"));
+        assert!(!wf.contains(&"loud"), "method field should not be writable");
+    }
+
+    // ---- nested ----
+
+    #[derive(Serializer, serde::Deserialize, Default, Debug)]
+    #[serializer(model = V044Author)]
+    struct AuthorBrief {
+        #[serializer(read_only)]
+        pub id: Auto<i64>,
+        pub name: String,
+    }
+
+    #[derive(Serializer, serde::Deserialize, Default, Debug)]
+    #[serializer(model = V044Comment)]
+    struct CommentSerializer {
+        pub body: String,
+        #[serializer(nested)]
+        pub author: AuthorBrief,
+    }
+
+    fn author(id: i64, name: &str) -> V044Author {
+        V044Author {
+            id: Auto::Set(id),
+            name: name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn nested_pulls_parent_when_fk_is_loaded() {
+        let parent = author(7, "ada");
+        let comment = V044Comment {
+            id: Auto::Set(1),
+            body: "hi".into(),
+            author: ForeignKey::loaded(7, parent),
+        };
+        let s = CommentSerializer::from_model(&comment);
+        assert_eq!(s.body, "hi");
+        assert_eq!(s.author.name, "ada");
+    }
+
+    #[test]
+    fn nested_falls_back_to_default_when_fk_unloaded() {
+        // Non-strict mode: production-degrades-gracefully. The author
+        // field is unloaded (no select_related); the macro must NOT
+        // panic.
+        let comment = V044Comment {
+            id: Auto::Set(1),
+            body: "hi".into(),
+            author: ForeignKey::unloaded(7),
+        };
+        let s = CommentSerializer::from_model(&comment);
+        assert_eq!(s.body, "hi");
+        assert_eq!(s.author.name, ""); // Default::default() name
+    }
+
+    // ---- many = ChildSerializer ----
+
+    #[derive(Serializer, serde::Deserialize, Default, Debug)]
+    #[serializer(model = V044Comment)]
+    struct CommentBrief {
+        pub body: String,
+    }
+
+    #[derive(Serializer, serde::Deserialize, Default, Debug)]
+    #[serializer(model = V044Author)]
+    struct AuthorWithComments {
+        pub name: String,
+        #[serializer(many = CommentBrief)]
+        pub recent_comments: Vec<CommentBrief>,
+    }
+
+    #[test]
+    fn many_field_initializes_to_empty_vec_in_from_model() {
+        // The setter is the only way to populate `many` fields —
+        // auto-load isn't possible (M2M / reverse-FK is async).
+        let a = author(1, "ada");
+        let s = AuthorWithComments::from_model(&a);
+        assert_eq!(s.name, "ada");
+        assert!(s.recent_comments.is_empty());
+    }
+
+    #[test]
+    fn many_setter_populates_via_child_from_model() {
+        let a = author(1, "ada");
+        let mut s = AuthorWithComments::from_model(&a);
+        let comments = [
+            V044Comment {
+                id: Auto::Set(1),
+                body: "first".into(),
+                author: ForeignKey::unloaded(1),
+            },
+            V044Comment {
+                id: Auto::Set(2),
+                body: "second".into(),
+                author: ForeignKey::unloaded(1),
+            },
+        ];
+        s.set_recent_comments(&comments);
+        assert_eq!(s.recent_comments.len(), 2);
+        assert_eq!(s.recent_comments[0].body, "first");
+        assert_eq!(s.recent_comments[1].body, "second");
+    }
+
+    // ---- slug = "field_name" (v0.44) ----
+
+    #[derive(Serializer, serde::Deserialize, Default, Debug)]
+    #[serializer(model = V044Comment)]
+    struct CommentWithAuthorSlug {
+        pub body: String,
+        // DRF SlugRelatedField: serialize the FK as a string slug
+        // (here the author's `name` field) instead of an i64 PK.
+        #[serializer(slug = "name", source = "author")]
+        pub author_name: String,
+    }
+
+    #[test]
+    fn slug_field_pulls_named_field_from_loaded_parent() {
+        let parent = author(7, "ada");
+        let c = V044Comment {
+            id: Auto::Set(1),
+            body: "hi".into(),
+            author: ForeignKey::loaded(7, parent),
+        };
+        let s = CommentWithAuthorSlug::from_model(&c);
+        assert_eq!(s.body, "hi");
+        assert_eq!(s.author_name, "ada");
+    }
+
+    #[test]
+    fn slug_field_falls_back_to_default_when_fk_unloaded() {
+        let c = V044Comment {
+            id: Auto::Set(1),
+            body: "hi".into(),
+            author: ForeignKey::unloaded(7),
+        };
+        let s = CommentWithAuthorSlug::from_model(&c);
+        assert_eq!(s.author_name, "");
+    }
+
+    #[test]
+    fn slug_field_excluded_from_writable() {
+        let wf = CommentWithAuthorSlug::writable_fields();
+        assert!(wf.contains(&"body"));
+        assert!(
+            !wf.contains(&"author_name"),
+            "slug fields are display-only — must not be writable"
+        );
+    }
+
+    // ---- validate = "fn_name" ----
+
+    #[derive(Serializer, serde::Deserialize, Default)]
+    #[serializer(model = super::Post)]
+    struct ValidatedPost {
+        #[serializer(validate = "title_at_least_3")]
+        pub title: String,
+        pub body: String,
+    }
+
+    impl ValidatedPost {
+        fn title_at_least_3(t: &String) -> Result<(), String> {
+            if t.chars().count() < 3 {
+                Err("title must be at least 3 chars".to_owned())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn per_field_validator_passes_on_valid_input() {
+        let s = ValidatedPost {
+            title: "Hello".into(),
+            body: "body".into(),
+        };
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn per_field_validator_collects_field_keyed_error() {
+        let s = ValidatedPost {
+            title: "hi".into(), // 2 chars — too short
+            body: "body".into(),
+        };
+        let err = s.validate().expect_err("should fail");
+        let title_errs = err.get("title");
+        assert!(
+            !title_errs.is_empty(),
+            "FormErrors should carry the title key, got fields: {:?}",
+            err.fields()
+        );
+        assert!(title_errs[0].contains("3 chars"));
+    }
+}
