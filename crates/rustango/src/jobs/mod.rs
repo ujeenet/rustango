@@ -54,6 +54,14 @@
 #[cfg(feature = "jobs-postgres")]
 pub mod pg;
 
+/// v0.41 — forward-looking alias for [`pg::PgJobQueue`]. The struct
+/// itself is tri-dialect since v0.38; the `Pg` prefix is purely
+/// historical (it was the original PG-only impl name). New code should
+/// reach for `DatabaseJobQueue`; existing `PgJobQueue` call-sites
+/// keep working unchanged.
+#[cfg(feature = "jobs-postgres")]
+pub type DatabaseJobQueue = pg::PgJobQueue;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;

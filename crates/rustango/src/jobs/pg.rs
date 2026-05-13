@@ -531,12 +531,17 @@ async fn pick_one(pool: &Pool, worker_id: &str) -> Result<Option<PickedJob>, sql
             //    a row id; 2) UPDATE that id; 3) SELECT the full row.
             // MySQL doesn't support UPDATE … RETURNING.
             let mut tx = my.begin().await?;
+            // MySQL clause order: LIMIT must come *before*
+            // `FOR UPDATE SKIP LOCKED` (PG/SQLite accept either order;
+            // MySQL is strict and rejects the reverse with a 1064
+            // syntax error — that bug silently shipped in v0.38 and
+            // is why MySQL workers never picked up dispatched jobs).
             let id_row: Option<(i64,)> = sqlx::query_as(
                 "SELECT id FROM `rustango_jobs`
                   WHERE locked_at IS NULL AND run_at <= ?
                   ORDER BY run_at, id
-                  FOR UPDATE SKIP LOCKED
-                  LIMIT 1",
+                  LIMIT 1
+                  FOR UPDATE SKIP LOCKED",
             )
             .bind(now)
             .fetch_optional(&mut *tx)

@@ -409,25 +409,31 @@ async fn list_tables_my(
     use sqlx::Row as _;
     // On MySQL, `--schema` is the database name. Default ("public")
     // doesn't make sense — use DATABASE() when no override.
+    // MySQL 8.0+ flags `information_schema` string columns as
+    // VARBINARY (with `BINARY` collation), which sqlx can't decode as
+    // `String` directly — it errors with a `VARCHAR vs VARBINARY`
+    // type mismatch. `CAST(... AS CHAR)` forces a real VARCHAR shape
+    // that sqlx decodes cleanly. Without this, inspectdb on MySQL
+    // silently produced `pub struct Unnamed {}` for every table.
     let use_default = schema == "public" || schema.is_empty();
     let sql = match (only, use_default) {
         (Some(_), true) => {
-            r#"SELECT TABLE_NAME FROM information_schema.tables
+            r#"SELECT CAST(TABLE_NAME AS CHAR) AS TABLE_NAME FROM information_schema.tables
                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE' AND TABLE_NAME = ?
                ORDER BY TABLE_NAME"#
         }
         (Some(_), false) => {
-            r#"SELECT TABLE_NAME FROM information_schema.tables
+            r#"SELECT CAST(TABLE_NAME AS CHAR) AS TABLE_NAME FROM information_schema.tables
                WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' AND TABLE_NAME = ?
                ORDER BY TABLE_NAME"#
         }
         (None, true) => {
-            r#"SELECT TABLE_NAME FROM information_schema.tables
+            r#"SELECT CAST(TABLE_NAME AS CHAR) AS TABLE_NAME FROM information_schema.tables
                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'
                ORDER BY TABLE_NAME"#
         }
         (None, false) => {
-            r#"SELECT TABLE_NAME FROM information_schema.tables
+            r#"SELECT CAST(TABLE_NAME AS CHAR) AS TABLE_NAME FROM information_schema.tables
                WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'
                ORDER BY TABLE_NAME"#
         }
@@ -453,16 +459,25 @@ async fn list_columns_my(
     table: &str,
 ) -> Result<Vec<ColumnRow>, MigrateError> {
     use sqlx::Row as _;
+    // See `list_tables_my` for why every string column is `CAST AS CHAR`.
     let use_default = schema == "public" || schema.is_empty();
     let sql = if use_default {
-        r#"SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, CHARACTER_MAXIMUM_LENGTH,
-                  COLUMN_DEFAULT, EXTRA
+        r#"SELECT CAST(COLUMN_NAME AS CHAR)    AS COLUMN_NAME,
+                  CAST(DATA_TYPE AS CHAR)      AS DATA_TYPE,
+                  CAST(IS_NULLABLE AS CHAR)    AS IS_NULLABLE,
+                  CHARACTER_MAXIMUM_LENGTH,
+                  CAST(COLUMN_DEFAULT AS CHAR) AS COLUMN_DEFAULT,
+                  CAST(EXTRA AS CHAR)          AS EXTRA
            FROM information_schema.columns
            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
            ORDER BY ORDINAL_POSITION"#
     } else {
-        r#"SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, CHARACTER_MAXIMUM_LENGTH,
-                  COLUMN_DEFAULT, EXTRA
+        r#"SELECT CAST(COLUMN_NAME AS CHAR)    AS COLUMN_NAME,
+                  CAST(DATA_TYPE AS CHAR)      AS DATA_TYPE,
+                  CAST(IS_NULLABLE AS CHAR)    AS IS_NULLABLE,
+                  CHARACTER_MAXIMUM_LENGTH,
+                  CAST(COLUMN_DEFAULT AS CHAR) AS COLUMN_DEFAULT,
+                  CAST(EXTRA AS CHAR)          AS EXTRA
            FROM information_schema.columns
            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
            ORDER BY ORDINAL_POSITION"#
@@ -507,9 +522,10 @@ async fn list_pk_columns_my(
     table: &str,
 ) -> Result<Vec<String>, MigrateError> {
     use sqlx::Row as _;
+    // See `list_tables_my` for why every string column is `CAST AS CHAR`.
     let use_default = schema == "public" || schema.is_empty();
     let sql = if use_default {
-        r#"SELECT kcu.COLUMN_NAME
+        r#"SELECT CAST(kcu.COLUMN_NAME AS CHAR) AS COLUMN_NAME
            FROM information_schema.TABLE_CONSTRAINTS tc
            JOIN information_schema.KEY_COLUMN_USAGE kcu
              ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
@@ -519,7 +535,7 @@ async fn list_pk_columns_my(
              AND tc.TABLE_SCHEMA = DATABASE() AND tc.TABLE_NAME = ?
            ORDER BY kcu.ORDINAL_POSITION"#
     } else {
-        r#"SELECT kcu.COLUMN_NAME
+        r#"SELECT CAST(kcu.COLUMN_NAME AS CHAR) AS COLUMN_NAME
            FROM information_schema.TABLE_CONSTRAINTS tc
            JOIN information_schema.KEY_COLUMN_USAGE kcu
              ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
@@ -548,14 +564,17 @@ async fn list_fks_my(
     table: &str,
 ) -> Result<Vec<(String, String)>, MigrateError> {
     use sqlx::Row as _;
+    // See `list_tables_my` for why every string column is `CAST AS CHAR`.
     let use_default = schema == "public" || schema.is_empty();
     let sql = if use_default {
-        r#"SELECT COLUMN_NAME, REFERENCED_TABLE_NAME
+        r#"SELECT CAST(COLUMN_NAME AS CHAR)            AS COLUMN_NAME,
+                  CAST(REFERENCED_TABLE_NAME AS CHAR)  AS REFERENCED_TABLE_NAME
            FROM information_schema.KEY_COLUMN_USAGE
            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL
            ORDER BY ORDINAL_POSITION"#
     } else {
-        r#"SELECT COLUMN_NAME, REFERENCED_TABLE_NAME
+        r#"SELECT CAST(COLUMN_NAME AS CHAR)            AS COLUMN_NAME,
+                  CAST(REFERENCED_TABLE_NAME AS CHAR)  AS REFERENCED_TABLE_NAME
            FROM information_schema.KEY_COLUMN_USAGE
            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL
            ORDER BY ORDINAL_POSITION"#

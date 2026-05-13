@@ -99,3 +99,39 @@ jobs:
       - run: cargo check -p rustango --no-default-features --features sqlite,tenancy
       - run: cargo clippy -p rustango --no-default-features --features sqlite,tenancy --lib --no-deps
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test sqlite_pragmas_live
+
+  # v0.41 MySQL parity — the marketing claim is tri-dialect end-to-end
+  # since v0.38, but every MySQL `_live.rs` test was skipped silently
+  # in CI because `MYSQL_TEST_URL` was never set. This job runs the
+  # MySQL live suite against a real MySQL 8.0 service. Catches the
+  # class of bug we just hit: MySQL-clause-order syntax errors in
+  # query strings that PG/SQLite accept (e.g. `LIMIT` vs `FOR UPDATE
+  # SKIP LOCKED` order in v0.38's jobs pickup).
+  mysql_live:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: rustango
+          MYSQL_DATABASE: rustango_test
+          MYSQL_USER: rustango
+          MYSQL_PASSWORD: rustango
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u rustango -prustango"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      MYSQL_TEST_URL: mysql://rustango:rustango@127.0.0.1:3306/rustango_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p rustango --features mysql,jobs-postgres --test jobs_mysql_live
+      - run: cargo test -p rustango --features mysql --test mysql_live
+      - run: cargo test -p rustango --features mysql,tenancy --test tenancy_manage_mysql_live
+      - run: cargo test -p rustango --features mysql,tenancy --test permissions_mysql_live
+      - run: cargo test -p rustango --features mysql,tenancy --test database_pools_mysql_live
