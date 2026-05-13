@@ -402,6 +402,7 @@ pub struct ModelForm {
     data: HashMap<String, String>,
     pk_value: Option<SqlValue>,
     include_fields: Option<Vec<String>>,
+    exclude_fields: Vec<String>,
 }
 
 impl ModelForm {
@@ -412,6 +413,7 @@ impl ModelForm {
             data,
             pk_value: None,
             include_fields: None,
+            exclude_fields: Vec::new(),
         }
     }
 
@@ -426,6 +428,7 @@ impl ModelForm {
             data,
             pk_value: Some(pk),
             include_fields: None,
+            exclude_fields: Vec::new(),
         }
     }
 
@@ -436,14 +439,43 @@ impl ModelForm {
         self
     }
 
+    /// Drop the named fields from the form. v0.49 — Django's
+    /// `Meta.exclude` analog. Applied AFTER `fields(...)` if both
+    /// are set, so `.fields(&["a", "b", "c"]).exclude(&["b"])`
+    /// produces `["a", "c"]`. Excluding a field also drops it from
+    /// validation / INSERT / UPDATE; PK / auto fields are excluded
+    /// unconditionally regardless of this list.
+    pub fn exclude(mut self, fields: &[&str]) -> Self {
+        for f in fields {
+            self.exclude_fields.push((*f).to_owned());
+        }
+        self
+    }
+
     fn should_include(&self, field: &FieldSchema) -> bool {
         if field.primary_key || field.auto {
+            return false;
+        }
+        if self.exclude_fields.iter().any(|n| n == field.name) {
             return false;
         }
         match &self.include_fields {
             Some(list) => list.iter().any(|n| n == field.name),
             None => true,
         }
+    }
+
+    /// v0.49 — test-only accessor returning the field NAMES the form
+    /// currently includes (after applying `fields(...)` /
+    /// `exclude(...)` and skipping PK / auto). Useful for asserting
+    /// the builder semantics without driving a full validate/save.
+    #[cfg(test)]
+    pub(crate) fn included_field_names(&self) -> Vec<&'static str> {
+        self.schema
+            .scalar_fields()
+            .filter(|f| self.should_include(f))
+            .map(|f| f.name)
+            .collect()
     }
 
     /// Validate form data against the schema. Returns all errors.
@@ -1443,5 +1475,58 @@ mod model_form_tests {
             }
             _ => panic!("wrong where shape"),
         }
+    }
+
+    // ---- v0.49 — ModelForm field-include / field-exclude semantics ----
+
+    /// `<Post as crate::core::Model>::SCHEMA` shorthand for the
+    /// builder tests below.
+    fn post_schema() -> &'static crate::core::ModelSchema {
+        <Post as crate::core::Model>::SCHEMA
+    }
+
+    #[test]
+    fn modelform_default_includes_all_non_pk_non_auto_fields() {
+        let form = ModelForm::new(post_schema(), HashMap::new());
+        // Post: id is auto-PK (excluded), title + body remain.
+        let included = form.included_field_names();
+        assert_eq!(included, vec!["title", "body"]);
+    }
+
+    #[test]
+    fn modelform_fields_restricts_to_named_set() {
+        let form = ModelForm::new(post_schema(), HashMap::new()).fields(&["title"]);
+        assert_eq!(form.included_field_names(), vec!["title"]);
+    }
+
+    #[test]
+    fn modelform_exclude_drops_named_fields() {
+        let form = ModelForm::new(post_schema(), HashMap::new()).exclude(&["body"]);
+        assert_eq!(form.included_field_names(), vec!["title"]);
+    }
+
+    #[test]
+    fn modelform_exclude_and_fields_compose() {
+        // `.fields()` whitelists, then `.exclude()` removes —
+        // Django's `Meta.fields` + `Meta.exclude` interaction.
+        let form = ModelForm::new(post_schema(), HashMap::new())
+            .fields(&["title", "body"])
+            .exclude(&["body"]);
+        assert_eq!(form.included_field_names(), vec!["title"]);
+    }
+
+    #[test]
+    fn modelform_exclude_cannot_re_enable_pk_or_auto() {
+        // Auto / PK fields are always excluded regardless of the
+        // exclude list (excluding `id` doesn't change anything).
+        let form = ModelForm::new(post_schema(), HashMap::new()).exclude(&["id"]);
+        // title + body still present (id was already excluded).
+        assert_eq!(form.included_field_names(), vec!["title", "body"]);
+    }
+
+    #[test]
+    fn modelform_exclude_unknown_field_is_a_no_op() {
+        let form = ModelForm::new(post_schema(), HashMap::new()).exclude(&["nope"]);
+        assert_eq!(form.included_field_names(), vec!["title", "body"]);
     }
 }
