@@ -59,8 +59,7 @@
 //! the dev-localhost scenario this addresses, single-instance is
 //! the universal case.
 
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -200,24 +199,38 @@ pub fn decode(
     Ok(payload)
 }
 
-/// In-process single-use jti tracker. Bounded memory because every
-/// entry's `exp` is within `HANDOFF_TTL_SECS` of insertion — old
-/// entries get pruned on every `mark_used` call.
+/// In-process single-use jti tracker. v0.47 — delegates to the
+/// pluggable [`crate::jti_store::JtiStore`] trait. `JtiBlacklist`
+/// itself stays as the consumer-facing type (back-compat with v0.46
+/// imports) but the storage is now swappable: pass an
+/// `Arc<dyn JtiStore>` to [`Self::with_store`] to share state across
+/// processes (Redis / DB).
 pub struct JtiBlacklist {
-    inner: Mutex<HashMap<String, i64>>,
+    store: Arc<dyn crate::jti_store::JtiStore>,
 }
 
 impl JtiBlacklist {
+    /// Build a blacklist backed by an in-memory store. Suitable for
+    /// single-instance dev / tests; multi-instance deployments
+    /// should call [`Self::with_store`] with a shared store.
     fn new() -> Self {
         Self {
-            inner: Mutex::new(HashMap::new()),
+            store: Arc::new(crate::jti_store::InMemoryJtiStore::new()),
         }
+    }
+
+    /// Swap the underlying store. v0.47 — pass any
+    /// `Arc<dyn JtiStore>` for multi-instance correctness.
+    #[must_use]
+    pub fn with_store(store: Arc<dyn crate::jti_store::JtiStore>) -> Self {
+        Self { store }
     }
 
     /// Process-wide singleton. The crate has no DI surface for this,
     /// and the practical use case is single-instance dev where a
-    /// local map is correct. Multi-instance deployments document the
-    /// limitation in the module-level docstring.
+    /// local map is correct. Multi-instance deployments construct
+    /// their own `JtiBlacklist::with_store(...)` and pass it into
+    /// the redeem path explicitly.
     pub fn shared() -> &'static Self {
         static INSTANCE: OnceLock<JtiBlacklist> = OnceLock::new();
         INSTANCE.get_or_init(Self::new)
@@ -225,28 +238,19 @@ impl JtiBlacklist {
 
     /// Returns `true` if the jti was previously marked used.
     pub fn is_used(&self, jti: &str) -> bool {
-        let map = self.inner.lock().expect("jti blacklist not poisoned");
-        map.contains_key(jti)
+        self.store.is_used(jti)
     }
 
     /// Atomically check + record. Returns `Err(AlreadyUsed)` if the
-    /// jti is in the map; otherwise inserts `(jti, exp)` and returns
-    /// `Ok(())`. Prunes expired entries opportunistically on every
-    /// call so memory stays bounded without a background sweeper.
+    /// jti is in the store; otherwise inserts `(jti, exp)` and
+    /// returns `Ok(())`. Pruning of expired entries is the store's
+    /// responsibility — the in-memory impl does it on every call.
     pub fn mark_used(&self, jti: &str, exp: i64) -> Result<(), HandoffError> {
-        let mut map = self.inner.lock().expect("jti blacklist not poisoned");
-        let now = chrono::Utc::now().timestamp();
-        map.retain(|_, &mut e| e > now);
-        if map.contains_key(jti) {
-            return Err(HandoffError::AlreadyUsed);
+        if self.store.mark_used(jti, exp) {
+            Ok(())
+        } else {
+            Err(HandoffError::AlreadyUsed)
         }
-        map.insert(jti.to_owned(), exp);
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.inner.lock().unwrap().len()
     }
 }
 
@@ -351,20 +355,36 @@ mod tests {
     }
 
     #[test]
-    fn jti_blacklist_prunes_expired_entries_on_insert() {
-        let bl = JtiBlacklist::new();
-        let now = chrono::Utc::now().timestamp();
-        // Insert one already-expired entry by hand to sidestep the
-        // public API's pruning behavior on the FIRST call.
-        bl.inner.lock().unwrap().insert("stale".into(), now - 60);
-        assert_eq!(bl.len(), 1);
-        // A subsequent mark_used prunes the stale entry while
-        // adding the new one.
-        bl.mark_used("fresh", now + 60).unwrap();
-        assert!(!bl.is_used("stale"));
-        assert!(bl.is_used("fresh"));
-        assert_eq!(bl.len(), 1);
+    fn jti_blacklist_with_store_delegates_to_swapped_backend() {
+        // v0.47 — proves the multi-instance hook: an Arc<dyn JtiStore>
+        // passed via `with_store` is the source of truth, not the
+        // default in-memory map. Two JtiBlacklist handles built from
+        // the same store share state — that's exactly what a Redis-
+        // backed store would give a multi-process deployment.
+        use crate::jti_store::{InMemoryJtiStore, JtiStore};
+        use std::sync::Arc;
+        let shared: Arc<dyn JtiStore> = Arc::new(InMemoryJtiStore::new());
+        let bl_a = JtiBlacklist::with_store(Arc::clone(&shared));
+        let bl_b = JtiBlacklist::with_store(Arc::clone(&shared));
+        let jti = "shared-token";
+        let exp = chrono::Utc::now().timestamp() + 60;
+        bl_a.mark_used(jti, exp).unwrap();
+        assert!(
+            bl_b.is_used(jti),
+            "second handle on the shared store must see the mark"
+        );
+        assert_eq!(
+            bl_b.mark_used(jti, exp).unwrap_err(),
+            HandoffError::AlreadyUsed,
+            "single-use guard must hold across handles on the shared store"
+        );
     }
+
+    // v0.47 — JTI pruning behaviour moved to the `JtiStore` trait
+    // and is covered by `jti_store::tests::expired_entries_are_pruned_on_next_mark`.
+    // The duplicate JtiBlacklist-level test reached into `bl.inner`
+    // directly which is no longer a field (storage is now an
+    // `Arc<dyn JtiStore>`).
 
     /// `HANDOFF_TTL_SECS` is short by design — long enough for the
     /// browser to redirect, short enough that browser-history leak

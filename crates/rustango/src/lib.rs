@@ -432,6 +432,13 @@ pub mod hmac_auth;
 #[cfg(feature = "jwt")]
 pub mod jwt;
 
+/// Pluggable JTI revocation / single-use store. v0.47 extracts the
+/// in-memory `Mutex<HashMap>` that was hard-coded into
+/// [`tenancy::jwt_lifecycle::JwtLifecycle`] and the impersonation
+/// handoff into a [`jti_store::JtiStore`] trait so multi-instance
+/// deployments can plug in Redis / DB-backed stores.
+pub mod jti_store;
+
 /// Multipart file upload helper — wraps axum's multipart extractor +
 /// the [`storage::Storage`] trait. See [`uploads::save_uploads`] +
 /// [`uploads::UploadConfig`].

@@ -137,7 +137,24 @@ router.rate_limit(RateLimitLayer::global(10, Duration::from_secs(1)));
 
 When exhausted: `429 Too Many Requests` with `Retry-After` header. Every successful response includes `X-RateLimit-Limit` + `X-RateLimit-Remaining`.
 
-**Process-local** — for distributed enforcement across replicas, pair with a Redis-backed counter (separate effort; not yet shipped).
+`RateLimitLayer` is **process-local** — fine for single-instance deployments. For distributed enforcement across replicas use `rate_limit_cache::CacheRateLimitLayer`, which delegates to any `cache::Cache` impl (pair with `cache::RedisCache` for a shared counter incremented atomically by Redis `INCRBY`):
+
+```rust
+use rustango::cache::RedisCache;
+use rustango::rate_limit::KeyBy;
+use rustango::rate_limit_cache::{CacheRateLimitLayer, CacheRateLimitRouterExt};
+
+let cache: rustango::cache::BoxedCache =
+    std::sync::Arc::new(RedisCache::connect("redis://localhost").await?);
+
+let app = axum::Router::new()
+    .route("/api/login", axum::routing::post(login))
+    .cache_rate_limit(
+        CacheRateLimitLayer::new(cache, 5, Duration::from_secs(60))
+            .key_by(KeyBy::Ip)
+            .key_prefix("login"),
+    );
+```
 
 ---
 
