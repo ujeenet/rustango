@@ -190,6 +190,7 @@ mod tests {
     struct PingEvent(i32);
 
     #[derive(Clone, Debug)]
+    #[allow(dead_code)] // payload is intentional — test exercises type-keyed routing, not the value.
     struct PongEvent(String);
 
     #[tokio::test]
