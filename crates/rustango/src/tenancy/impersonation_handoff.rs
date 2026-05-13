@@ -63,7 +63,6 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use base64::Engine;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
@@ -134,11 +133,13 @@ impl HandoffPayload {
     #[must_use]
     pub fn new(op_id: i64, slug: impl Into<String>, ttl_secs: i64) -> Self {
         let now = chrono::Utc::now().timestamp();
-        // 16 random bytes is >2^64 entropy — collision risk is
-        // negligible across the bounded TTL window. Same RNG path
-        // as `operator_console::session::SessionSecret::random`.
+        // 16 random bytes is >2^64 entropy. v0.42 — sources from the
+        // OS CSPRNG: a predictable JTI here lets an operator who
+        // intercepted one handoff URL pre-mint the JTI for another,
+        // bypassing the single-use blacklist.
+        use rand::{rngs::OsRng, RngCore};
         let mut bytes = [0u8; 16];
-        rand::thread_rng().fill(&mut bytes[..]);
+        OsRng.fill_bytes(&mut bytes[..]);
         let jti = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         Self {
             op: op_id,

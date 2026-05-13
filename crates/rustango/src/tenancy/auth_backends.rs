@@ -368,12 +368,18 @@ pub async fn create_api_key(
     pool: &Pool,
 ) -> Result<String, crate::tenancy::error::TenancyError> {
     use crate::sql::Auto;
-    use rand::Rng;
+    use rand::rngs::OsRng;
+    use rand::RngCore;
 
-    let mut rng = rand::thread_rng();
-    let prefix_bytes: [u8; 4] = rng.gen();
+    // v0.42 — API key prefix + secret source from the OS CSPRNG. The
+    // 16-byte secret is the actual bearer credential; a predictable
+    // RNG here would compromise every key issued by the affected
+    // process.
+    let mut prefix_bytes = [0u8; 4];
+    OsRng.fill_bytes(&mut prefix_bytes);
     let prefix = to_hex(&prefix_bytes);
-    let secret_bytes: [u8; 16] = rng.gen();
+    let mut secret_bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut secret_bytes);
     let secret = to_hex(&secret_bytes);
 
     let hash = password::hash(&secret)

@@ -32,11 +32,20 @@ pub struct TotpSecret(pub Vec<u8>);
 
 impl TotpSecret {
     /// Generate a 20-byte random secret (RFC 4226 minimum).
+    ///
+    /// Uses [`rand::rngs::OsRng`] — the OS CSPRNG — rather than
+    /// `thread_rng`. `thread_rng` is seeded from `OsRng` but is a
+    /// userspace ChaCha PRNG that doesn't satisfy "cryptographic key
+    /// material" guarantees on every platform; for 2FA shared secrets
+    /// the OS CSPRNG is the right default. Matches the rest of the
+    /// framework's crypto sites (sessions, CSP nonce, CSRF token,
+    /// signed URLs).
     #[must_use]
     pub fn generate() -> Self {
+        use rand::rngs::OsRng;
         use rand::RngCore;
         let mut bytes = vec![0u8; 20];
-        rand::thread_rng().fill_bytes(&mut bytes);
+        OsRng.fill_bytes(&mut bytes);
         Self(bytes)
     }
 
@@ -312,5 +321,45 @@ mod tests {
         assert!(url.contains("issuer=MyApp"));
         assert!(url.contains("digits=6"));
         assert!(url.contains("period=30"));
+    }
+
+    // ---- v0.42 regressions: lock in OsRng quality ----
+
+    #[test]
+    fn generate_produces_full_20_byte_secrets() {
+        // Defends against future regressions where someone shortens
+        // the secret below RFC 4226's 160-bit minimum.
+        for _ in 0..16 {
+            let s = TotpSecret::generate();
+            assert_eq!(s.0.len(), 20, "TOTP secret must be exactly 20 bytes");
+        }
+    }
+
+    #[test]
+    fn generate_produces_unique_secrets() {
+        // 64 secrets * 20 bytes = 160 bits of entropy each. Collisions
+        // at this rate would mean ~1 in 2^80 per pair — astronomically
+        // impossible with a working CSPRNG. A regression to a constant
+        // / counter / weakly-seeded PRNG would surface immediately.
+        use std::collections::HashSet;
+        let mut seen: HashSet<Vec<u8>> = HashSet::new();
+        for _ in 0..64 {
+            let s = TotpSecret::generate();
+            assert!(seen.insert(s.0), "duplicate TOTP secret — RNG regressed");
+        }
+    }
+
+    #[test]
+    fn generate_does_not_produce_trivial_secrets() {
+        // No all-zero, no all-0xff, no fixed-byte secrets — those are
+        // the failure modes a broken RNG would exhibit.
+        let s = TotpSecret::generate();
+        assert!(s.0.iter().any(|&b| b != 0), "all-zero secret");
+        assert!(s.0.iter().any(|&b| b != 0xff), "all-ones secret");
+        let first = s.0[0];
+        assert!(
+            s.0.iter().any(|&b| b != first),
+            "fixed-byte secret (every byte = {first:#x}) — RNG returns constant"
+        );
     }
 }

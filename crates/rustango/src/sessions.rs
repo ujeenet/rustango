@@ -225,12 +225,14 @@ impl SessionStore {
 
 /// Generate a 32-character base64url session ID. 192 bits of entropy
 /// — comfortably more than the standards-recommended 128 for session
-/// tokens.
+/// tokens. Sources from [`rand::rngs::OsRng`] (the OS CSPRNG) rather
+/// than `thread_rng`; session IDs are auth-boundary material and want
+/// the strongest available source. v0.42.
 fn generate_id() -> String {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use rand::{rngs::OsRng, RngCore};
     let mut buf = [0u8; ID_BYTES];
-    use rand::RngCore;
-    rand::thread_rng().fill_bytes(&mut buf);
+    OsRng.fill_bytes(&mut buf);
     URL_SAFE_NO_PAD.encode(buf)
 }
 

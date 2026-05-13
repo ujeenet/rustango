@@ -461,10 +461,13 @@ pub fn default_user_mapper(
 }
 
 /// Random URL-safe token of `byte_len` bytes (output is ~`byte_len * 4 / 3`
-/// chars).
+/// chars). Used for OAuth2 `state` (CSRF) and PKCE verifiers — both
+/// must be unpredictable to attackers, so we source from the OS CSPRNG.
+/// v0.42.
 fn random_token(byte_len: usize) -> String {
+    use rand::{rngs::OsRng, RngCore};
     let mut buf = vec![0u8; byte_len];
-    rand::thread_rng().fill(&mut buf[..]);
+    OsRng.fill_bytes(&mut buf[..]);
     URL_SAFE_NO_PAD.encode(&buf)
 }
 
