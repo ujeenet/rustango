@@ -158,7 +158,9 @@ hmac-auth = ["admin", "dep:hmac", "dep:sha2", "dep:subtle", "dep:base64"]
 # Standalone HS256 JWT (`rustango::jwt`) — sign / verify / decode for
 # magic links, microservice tokens, third-party SSO. Standalone
 # alternative to `tenancy::jwt_lifecycle` (which adds refresh +
-# blacklist + sliding rotation but is gated on tenancy).
+# blacklist + sliding rotation but is gated on tenancy; since v0.48
+# its blacklist is also pluggable via `Arc<dyn rustango::jti_store::JtiStore>`
+# for multi-instance deployments).
 jwt = ["dep:hmac", "dep:sha2", "dep:subtle", "dep:base64"]
 
 # Multipart file upload helper (`rustango::uploads`) — wraps

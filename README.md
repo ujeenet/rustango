@@ -96,11 +96,13 @@ do by hand.
   `file_dir` / `file_rotation`). `access_log` middleware
   emits TIMEIT-shape per-request lines (`method=... path=...
   status=... duration_ms=... ip=...`).
-- **Security audit fixes** ([v0.30.12](CHANGELOG.md)) — every
-  CSPRNG site now uses `OsRng` directly; admin
+- **Security audit fixes** ([v0.30.12](CHANGELOG.md)) — admin
   `AdminError::Internal` redacts DB error text + stamps a
   correlation id; CORS misconfig (`allow_any + credentials`)
-  emits a runtime warning.
+  emits a runtime warning. Completed in v0.42: every auth-boundary
+  CSPRNG site (TOTP secrets, session IDs, JWT JTI, impersonation
+  handoff JTI, OAuth2 state + PKCE, API key prefix + secret) now
+  sources from `rand::rngs::OsRng` rather than `thread_rng`.
 - **New `Cli::with_*` cluster** — `with_static(prefix, dir)`
   ([v0.29.9](CHANGELOG.md)), `with_csrf()`/`with_csrf_config(c)`
   ([v0.29.10](CHANGELOG.md)), `with_welcome()`
@@ -159,12 +161,28 @@ DATABASE_URL='sqlite:./var/app.db?mode=rwc' \
 
 Same code unchanged with `DATABASE_URL=postgres://…` boots on Postgres or `DATABASE_URL=mysql://…` on MySQL.
 
+> **SQLite defaults you didn't have to ask for (since v0.40).** Every
+> `Pool::connect("sqlite:…")` turns on `PRAGMA foreign_keys = ON`
+> (off by default in SQLite — without this, an ORM that emits
+> `ForeignKey<T>` columns silently accepts orphaned rows),
+> `journal_mode = WAL` for file-backed databases (concurrent readers
+> don't block writers), and `busy_timeout = 5s` (contended writes
+> wait instead of immediately returning `database is locked`). Apps
+> upgrading from pre-v0.40 may surface previously-tolerated FK
+> violations — that's the bug, not the fix.
+
 > **Multi-tenant on SQLite or MySQL?** Yes, fully supported since v0.38.0.
 > `Cli::tenancy().run()` boots the operator console + tenant admin + host
 > dispatch on any backend. Use database-mode (one DB / file per tenant) —
 > works identically on all three. Schema-mode is a Postgres-only
 > optimization for high-N SaaS scale. See the [multi-tenancy](#multi-tenancy)
 > section for the storage-mode matrix.
+>
+> **MySQL note (since v0.41):** the bundled jobs queue's MySQL pickup
+> path and `manage inspectdb` against MySQL 8 both had silent shipped
+> bugs in v0.38–v0.40 (`LIMIT 1` placed after `FOR UPDATE SKIP LOCKED`,
+> and `information_schema` strings decoded as VARBINARY). Both are fixed
+> in v0.41; recommend upgrading if you're on MySQL with either feature.
 
 ---
 
@@ -479,6 +497,10 @@ rustango::manage::Cli::new()
     .with_health()                              // /health + /ready endpoints
     .with_static("/static", "./assets")         // CSS, JS, images
     .with_csrf()                                // form-driven app? mount CSRF
+    //   ^- since v0.43 the cookie's `Secure` attribute is on by default,
+    //      so local dev over plain http://localhost stops receiving the
+    //      cookie. Pair `.with_csrf_config(CsrfConfig::default().allow_insecure_for_dev())`
+    //      while developing.
     .with_welcome()                             // friendly "/" on first run
     .run().await
 ```
@@ -803,15 +825,40 @@ let page = Post::objects().page(2, 50).fetch(&pool).await?;
 let count = Post::objects().where_(Post::author_id.eq(42)).count(&pool).await?;
 let avg = Post::objects().avg(Post::view_count, &pool).await?;
 
+// COUNT(DISTINCT col) — since v0.45, via the AggregateExpr IR.
+
 // IN / NOT IN
 let some = Post::objects()
     .where_(Post::id.in_(&[1, 2, 3]))
     .fetch(&pool).await?;
 
-// Pattern lookups
+// Pattern lookups — case-insensitive substring / prefix via .ilike()
 let drafts = Post::objects()
-    .where_(Post::title.icontains("draft"))       // ILIKE %draft%
+    .where_(Post::title.ilike("%draft%"))         // ILIKE %draft%
     .fetch(&pool).await?;
+let hellos = Post::objects()
+    .where_(Post::title.ilike("Hello%"))          // ILIKE Hello%
+    .fetch(&pool).await?;
+
+// Single-row sugar — Django shape, since v0.45
+let first    = Post::objects().first_pool(&pool).await?;          // PK ASC fallback
+let last     = Post::objects().last_pool(&pool).await?;           // flips every order direction
+let newest   = Post::objects().latest_pool("published_at", &pool).await?;
+let oldest   = Post::objects().earliest_pool("published_at", &pool).await?;
+
+// get_or_create / update_or_create — since v0.45. Closures take an
+// owned Pool (cheap Arc clone) to sidestep async-closure lifetime
+// inference. Not atomic without a transaction; pair with `Pool::begin()`
+// or a UNIQUE constraint for race-free behaviour.
+let (post, created) = rustango::sql::get_or_create_pool(
+    Post::objects().where_(Post::slug.eq("hello".to_owned())),
+    |pool| async move {
+        let mut p = Post { id: Auto::Unset, slug: "hello".into(), title: "Hello".into(), .. };
+        p.insert_pool(&pool).await?;
+        Ok(p)
+    },
+    &pool,
+).await?;
 
 // Pre-load FKs (no N+1)
 let with_authors = Post::objects()
@@ -1482,6 +1529,19 @@ jwt.revoke(&refresh_token);
 
 Reserved-claim defense: `sub`, `exp`, `jti`, `typ` cannot appear in `custom` (returns `JwtIssueError::ReservedClaim`).
 
+**Multi-instance revocation (since v0.48).** The default JTI blacklist is process-local — a token revoked on instance A still verifies on instance B until it expires. For horizontally-scaled deployments, plug a shared store in via the `JtiStore` trait:
+
+```rust
+use rustango::jti_store::{JtiStore, InMemoryJtiStore};
+use std::sync::Arc;
+
+// Wire your own Redis/DB-backed impl, or use InMemoryJtiStore for tests:
+let shared: Arc<dyn JtiStore> = Arc::new(InMemoryJtiStore::new());
+let jwt = JwtLifecycle::new(secret).with_jti_store(shared);
+```
+
+The same `JtiStore` powers `tenancy::impersonation_handoff::JtiBlacklist::with_store(...)` for single-use operator-as-tenant handoff tokens.
+
 For tenancy projects there's a one-liner that mounts the four-route
 JWT auth surface (`/api/auth/login` / `/refresh` / `/logout` / `/me`):
 
@@ -1593,6 +1653,13 @@ match form.save(&pool).await {
     Err(ModelFormError::Validation(errors)) => render_with_errors(errors),
     Err(ModelFormError::Database(e)) => server_error(e),
 }
+
+// v0.49 — Django's `Meta.fields` + `Meta.exclude` analogs compose
+// on the same builder:
+let form = ModelForm::new(Post::SCHEMA, form_data)
+    .fields(&["title", "body", "draft"])     // whitelist
+    .exclude(&["draft"]);                    // then drop one
+//   → driver columns: ["title", "body"]
 ```
 
 ---

@@ -774,8 +774,9 @@ pub mod openapi;
 #[cfg(feature = "tenancy")]
 pub mod tenancy;
 
-/// Per-request extractors for handlers — tenancy-aware DI. Today
-/// ships [`extractors::Tenant`]; future slices add `Operator` + `User`.
+/// Per-request extractors for handlers — tenancy-aware DI. Ships
+/// [`extractors::Tenant`], [`extractors::SessionUser`], and
+/// [`extractors::SessionOperator`].
 #[cfg(feature = "tenancy")]
 pub mod extractors;
 
