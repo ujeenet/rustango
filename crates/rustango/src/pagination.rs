@@ -1,4 +1,4 @@
-//! Pagination helpers — two shapes for different surfaces.
+//! Pagination helpers — three shapes for different surfaces.
 //!
 //! ## API-layer shape: `Link` headers + cursor parameters
 //!
@@ -16,11 +16,10 @@
 //! //    </api/posts?page=3>; rel=\"next\", </api/posts?page=5>; rel=\"last\""
 //! ```
 //!
-//! ## Django-shape: [`Paginator`] + [`Page`]
+//! ## Page-number shape: [`Paginator`] + [`Page`]
 //!
 //! For server-side rendered list views (Tera / template_views), pure-
-//! metadata Paginator + Page types that mirror Django's
-//! `django.core.paginator.Paginator` API. The Page holds no rows — the
+//! metadata `Paginator` + `Page` types. The `Page` holds no rows — the
 //! caller computes `page.offset()` and `page.limit()` and feeds them
 //! into a `QuerySet` `.offset(...).limit(...).fetch_pool(...)` call.
 //!
@@ -40,8 +39,43 @@
 //! for mark in paginator.get_elided_page_range(page.number, 3, 2) { … }
 //! ```
 //!
-//! Mirrors Django's algorithm bit-for-bit including the
-//! `(on_each_side + on_ends) * 2` short-circuit for small page counts.
+//! `get_elided_page_range` short-circuits when total pages
+//! `<= (on_each_side + on_ends) * 2`, emitting every page without
+//! ellipsis markers.
+//!
+//! ## Cursor shape: [`CursorPaginator`] + [`Cursor`] + [`CursorPage`]
+//!
+//! For large tables where `COUNT(*) + OFFSET N` is prohibitively
+//! expensive, cursor (keyset / seek) pagination walks the table by a
+//! stable ordering key — no count, no offset, O(log N) per page.
+//!
+//! The caller owns the SQL — the paginator hands back an opaque token
+//! and a direction; the caller writes `WHERE (pos) > cursor.position`
+//! (or `<` for backward) plus a matching `ORDER BY`.
+//!
+//! ```ignore
+//! use rustango::pagination::{Cursor, CursorPaginator};
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Serialize, Deserialize, Clone)]
+//! struct PostPos { id: i64 }
+//!
+//! let paginator = CursorPaginator::new(20);
+//! // Over-fetch N + 1 so we can detect whether a next page exists.
+//! let limit = paginator.fetch_limit() as i64;
+//!
+//! let cursor: Option<Cursor<PostPos>> = req.query("cursor")
+//!     .map(|s| Cursor::decode(&s)).transpose()?;
+//! let mut q = Post::objects().order_by(&[("id", false)]).limit(limit);
+//! if let Some(c) = &cursor {
+//!     q = q.filter("id__gt", c.position.id);
+//! }
+//! let rows = q.fetch_pool(&pool).await?;
+//!
+//! let page = paginator.build_page(rows, |row| PostPos { id: row.id });
+//! // page.items — up to N rows
+//! // page.next  — Some(Cursor) if more pages, None at end
+//! ```
 
 use std::collections::BTreeMap;
 
@@ -564,11 +598,9 @@ mod tests {
 }
 
 // ============================================================================
-// Django-shape Paginator + Page (issue #12)
+// Page-number Paginator + Page (issue #12)
 //
-// Pure-metadata types for server-side rendered list views. Mirrors
-// `django.core.paginator.Paginator` / `Page` so apps porting from
-// Django keep their muscle memory.
+// Pure-metadata types for server-side rendered list views.
 //
 // Distinct from the `LinkHeaderBuilder` / `PageLinks` API-layer shape
 // above. Pick the right tool: API endpoints emit RFC 5988 `Link`
@@ -586,8 +618,9 @@ pub enum PageMark {
 }
 
 /// Errors from [`Paginator::page`] / [`Page::next_page_number`] /
-/// [`Page::previous_page_number`]. Mirrors Django's
-/// `EmptyPage` / `PageNotAnInteger` / `InvalidPage` exception family.
+/// [`Page::previous_page_number`]. Three variants:
+/// `PageNotAnInteger` (page < 1), `EmptyPage` (count == 0 with empty
+/// first page disallowed), and `OutOfRange` (page > num_pages).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PaginatorError {
     #[error("page number must be a positive integer (got 0)")]
@@ -598,7 +631,7 @@ pub enum PaginatorError {
     OutOfRange { requested: usize, last: usize },
 }
 
-/// Django-shape paginator. Pure metadata — holds no rows.
+/// Page-number paginator. Pure metadata — holds no rows.
 ///
 /// Build with [`Paginator::new`] from a `count` + `per_page`. Optional
 /// builder methods narrow the behaviour:
@@ -606,7 +639,7 @@ pub enum PaginatorError {
 ///   items, roll them into the second-to-last page so the trailing
 ///   `<nav>` doesn't show a near-empty page.
 /// - [`Paginator::allow_empty_first_page`] — when `count == 0`, return
-///   page 1 as a valid empty page (default `true`, matches Django).
+///   page 1 as a valid empty page (default `true`).
 ///
 /// Call [`Paginator::page`] for explicit error handling, or
 /// [`Paginator::get_page`] for the "clamp to valid range" shape.
@@ -617,16 +650,16 @@ pub struct Paginator {
     /// Maximum items per page. Always >= 1 (constructor clamps).
     pub per_page: usize,
     /// Items on the last page get rolled into the previous page when
-    /// the count is `<= orphans`. Default 0 (Django default).
+    /// the count is `<= orphans`. Default 0.
     pub orphans: usize,
     /// When `count == 0`, treat page 1 as a valid empty page. Default
-    /// `true` (Django default).
+    /// `true`.
     pub allow_empty_first_page: bool,
 }
 
 impl Paginator {
-    /// Build a paginator. `per_page` is clamped to at least 1 (Django
-    /// raises `ZeroDivisionError`; rustango opts for the clamp).
+    /// Build a paginator. `per_page` is clamped to at least 1 (rather
+    /// than panicking on a divide-by-zero downstream).
     #[must_use]
     pub fn new(count: usize, per_page: usize) -> Self {
         Self {
@@ -670,7 +703,7 @@ impl Paginator {
     }
 
     /// Validate a page number against the paginator. Returns the
-    /// number unchanged on success. Mirrors Django's `validate_number`.
+    /// number unchanged on success.
     ///
     /// # Errors
     /// - [`PaginatorError::PageNotAnInteger`] when `number < 1`.
@@ -689,7 +722,7 @@ impl Paginator {
         }
         if number > last {
             // Special case: count == 0, allow_empty_first_page == true
-            // (so last == 1) — Django still rejects page > 1.
+            // (so last == 1) — page > 1 is still out of range.
             return Err(PaginatorError::OutOfRange {
                 requested: number,
                 last,
@@ -712,7 +745,7 @@ impl Paginator {
 
     /// Build a [`Page`] for `number`, clamping out-of-range values to
     /// page 1 (negative / zero) or the last page (too large). Never
-    /// returns an error. Mirrors Django's `get_page`.
+    /// returns an error.
     #[must_use]
     pub fn get_page(&self, number: i64) -> Page<'_> {
         let last = self.num_pages().max(1);
@@ -728,17 +761,16 @@ impl Paginator {
     }
 
     /// Yield a "1, 2, …, 12, 13, 14, …, 49, 50"-style elided page
-    /// range for rendering a `<nav>` pager. Mirrors Django's
-    /// `get_elided_page_range` bit-for-bit:
+    /// range for rendering a `<nav>` pager:
     /// - Short-circuits when `num_pages <= (on_each_side + on_ends) * 2`
     ///   and emits every page directly with no ellipsis.
     /// - Otherwise emits the left edge, a window around `number`, and
     ///   the right edge, with [`PageMark::Ellipsis`] markers in the
     ///   gaps.
     ///
-    /// Django defaults: `on_each_side=3, on_ends=2`. An invalid
-    /// `number` is clamped to page 1 (Django raises; we don't, to
-    /// match `get_page`'s forgiving shape).
+    /// Recommended defaults: `on_each_side=3, on_ends=2`. An invalid
+    /// `number` is clamped to page 1 to match `get_page`'s forgiving
+    /// shape.
     #[must_use]
     pub fn get_elided_page_range(
         &self,
@@ -762,7 +794,7 @@ impl Paginator {
         let mut out = Vec::new();
 
         // ---- Left half (everything up to and including `number`) ----
-        // Django: if number > (1 + on_each_side + on_ends) + 1, emit
+        // If number > (1 + on_each_side + on_ends) + 1, emit
         // [1..on_ends] + ELL + [number - on_each_side .. number].
         // Else emit [1 .. number].
         let left_gap_trigger = 1usize
@@ -784,7 +816,7 @@ impl Paginator {
         }
 
         // ---- Right half (everything after `number`) ----
-        // Django: if number < (num_pages - on_each_side - on_ends) - 1,
+        // If number < (num_pages - on_each_side - on_ends) - 1,
         // emit [number+1 .. number+on_each_side] + ELL + [last-on_ends+1 .. last].
         // Else emit [number+1 .. last].
         let right_gap_trigger = last
@@ -920,6 +952,276 @@ impl<'a> Page<'a> {
     }
 }
 
+// ============================================================================
+// Cursor pagination — keyset/seek-style for large tables
+// ============================================================================
+
+/// Direction of cursor traversal.
+///
+/// `Forward` walks the table in the natural order (`pos > cursor.position`);
+/// `Backward` walks it in reverse (`pos < cursor.position`). Bidirectional
+/// callers typically encode the direction into the cursor itself so a
+/// "previous page" link round-trips cleanly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum CursorDirection {
+    #[serde(rename = "f")]
+    #[default]
+    Forward,
+    #[serde(rename = "b")]
+    Backward,
+}
+
+/// Errors from [`Cursor::decode`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CursorError {
+    /// Cursor string contained a non-hex byte or odd length.
+    #[error("invalid cursor encoding: {0}")]
+    Decode(String),
+    /// Cursor payload didn't deserialize into the expected position
+    /// shape (usually a schema change between cursor mint + use).
+    #[error("invalid cursor payload: {0}")]
+    Json(String),
+}
+
+/// An opaque, URL-safe cursor token carrying a position payload `T`
+/// plus a traversal direction.
+///
+/// `T` is any `serde::Serialize + serde::de::DeserializeOwned` value
+/// — usually a small struct holding the column(s) used in the
+/// `ORDER BY` (e.g. `{ id: i64 }` or `{ created_at: DateTime, id: i64 }`
+/// for stable tie-breaking).
+///
+/// The wire format is hex-encoded JSON. Clients should treat the
+/// string as opaque; the server is free to change the position shape
+/// across releases (an old cursor that fails to decode just falls
+/// through to "start from the beginning").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cursor<T> {
+    /// The "last seen" position. For `Forward` direction, the next
+    /// page starts strictly after this; for `Backward`, strictly before.
+    pub position: T,
+    /// Direction this cursor was minted for.
+    pub direction: CursorDirection,
+}
+
+impl<T> Cursor<T> {
+    /// Build a forward cursor at `position`.
+    pub fn forward(position: T) -> Self {
+        Self {
+            position,
+            direction: CursorDirection::Forward,
+        }
+    }
+
+    /// Build a backward cursor at `position`.
+    pub fn backward(position: T) -> Self {
+        Self {
+            position,
+            direction: CursorDirection::Backward,
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CursorWire<T> {
+    p: T,
+    #[serde(default)]
+    d: CursorDirection,
+}
+
+impl<T> Cursor<T>
+where
+    T: serde::Serialize,
+{
+    /// Encode this cursor as an opaque URL-safe string.
+    ///
+    /// # Panics
+    /// Panics only if `T` produces invalid JSON via `serde_json` — for
+    /// well-formed `Serialize` impls this never fires.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        let wire = CursorWire {
+            p: &self.position,
+            d: self.direction,
+        };
+        let json = serde_json::to_vec(&wire).expect("cursor position must serialize cleanly");
+        hex_encode(&json)
+    }
+}
+
+impl<T> Cursor<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    /// Parse a cursor string previously produced by [`Cursor::encode`].
+    ///
+    /// # Errors
+    /// - [`CursorError::Decode`] when `s` isn't valid lowercase hex.
+    /// - [`CursorError::Json`] when the decoded bytes don't match the
+    ///   expected position shape.
+    pub fn decode(s: &str) -> Result<Self, CursorError> {
+        let bytes = hex_decode(s).map_err(CursorError::Decode)?;
+        let wire: CursorWire<T> =
+            serde_json::from_slice(&bytes).map_err(|e| CursorError::Json(e.to_string()))?;
+        Ok(Self {
+            position: wire.p,
+            direction: wire.d,
+        })
+    }
+}
+
+/// Cursor (keyset) paginator. Pure metadata — holds no rows and owns
+/// no SQL. Knows only the page size and the "over-fetch by one"
+/// trick used to detect whether a next page exists.
+#[derive(Debug, Clone, Copy)]
+pub struct CursorPaginator {
+    /// Visible page size. Always >= 1.
+    pub page_size: usize,
+}
+
+impl CursorPaginator {
+    /// Build a paginator. `page_size` is clamped to at least 1.
+    #[must_use]
+    pub fn new(page_size: usize) -> Self {
+        Self {
+            page_size: page_size.max(1),
+        }
+    }
+
+    /// SQL `LIMIT` value the caller should use. Equals `page_size + 1`
+    /// — one extra row, peeled off in [`Self::build_page`] to detect
+    /// the presence of a next page without an expensive count.
+    #[must_use]
+    pub fn fetch_limit(&self) -> usize {
+        self.page_size + 1
+    }
+
+    /// Convert an over-fetched batch into a [`CursorPage`]. If `rows`
+    /// has more than `page_size` items, the extra trailing row is
+    /// dropped and `page.next` is `Some(Cursor::forward(...))`; the
+    /// position payload is built from the *last visible* row via
+    /// `extract_position`.
+    ///
+    /// The previous cursor is not auto-derived (keyset pagination
+    /// doesn't have a natural "previous"); call [`Self::build_page_with`]
+    /// to supply it explicitly.
+    #[must_use]
+    pub fn build_page<T, P, F>(self, rows: Vec<T>, extract_position: F) -> CursorPage<T, P>
+    where
+        F: Fn(&T) -> P,
+    {
+        self.build_page_with(rows, extract_position, None)
+    }
+
+    /// Like [`Self::build_page`] but lets the caller provide a
+    /// `previous` cursor (typically minted from the first row of the
+    /// current page, wrapped as `Cursor::backward`).
+    #[must_use]
+    pub fn build_page_with<T, P, F>(
+        self,
+        mut rows: Vec<T>,
+        extract_position: F,
+        previous: Option<Cursor<P>>,
+    ) -> CursorPage<T, P>
+    where
+        F: Fn(&T) -> P,
+    {
+        let has_next = rows.len() > self.page_size;
+        if has_next {
+            rows.truncate(self.page_size);
+        }
+        let next = if has_next {
+            rows.last().map(|r| Cursor::forward(extract_position(r)))
+        } else {
+            None
+        };
+        CursorPage {
+            items: rows,
+            next,
+            previous,
+            page_size: self.page_size,
+        }
+    }
+}
+
+/// One page of cursor-paginated results.
+///
+/// - `items`: visible rows (at most `page_size`).
+/// - `next`: forward cursor for the next request, or `None` at tail.
+/// - `previous`: backward cursor passed in by the caller, or `None`.
+/// - `page_size`: the requested page size (echoed for templating).
+#[derive(Debug, Clone)]
+pub struct CursorPage<T, P> {
+    pub items: Vec<T>,
+    pub next: Option<Cursor<P>>,
+    pub previous: Option<Cursor<P>>,
+    pub page_size: usize,
+}
+
+impl<T, P> CursorPage<T, P> {
+    /// `true` if a next page exists.
+    #[must_use]
+    pub fn has_next(&self) -> bool {
+        self.next.is_some()
+    }
+
+    /// `true` if a previous cursor was supplied.
+    #[must_use]
+    pub fn has_previous(&self) -> bool {
+        self.previous.is_some()
+    }
+}
+
+impl<T, P: serde::Serialize> CursorPage<T, P> {
+    /// Encoded form of [`Self::next`], for embedding in JSON / Link headers.
+    #[must_use]
+    pub fn next_token(&self) -> Option<String> {
+        self.next.as_ref().map(Cursor::encode)
+    }
+
+    /// Encoded form of [`Self::previous`], for embedding in JSON / Link headers.
+    #[must_use]
+    pub fn previous_token(&self) -> Option<String> {
+        self.previous.as_ref().map(Cursor::encode)
+    }
+}
+
+// ---- minimal lowercase-hex codec (kept private; pagination has no
+// optional-feature gate, and base64/urlencoding are opt-in deps here) ----
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
+    if s.len() % 2 != 0 {
+        return Err(format!("odd length: {}", s.len()));
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for chunk in bytes.chunks_exact(2) {
+        let hi = hex_nibble(chunk[0])?;
+        let lo = hex_nibble(chunk[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+fn hex_nibble(b: u8) -> Result<u8, String> {
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(b - b'a' + 10),
+        b'A'..=b'F' => Ok(b - b'A' + 10),
+        other => Err(format!("non-hex byte: 0x{other:02x}")),
+    }
+}
+
 #[cfg(test)]
 mod paginator_tests {
     use super::*;
@@ -961,7 +1263,7 @@ mod paginator_tests {
 
     #[test]
     fn per_page_zero_clamps_to_one() {
-        // No ZeroDivisionError — rustango clamps where Django raises.
+        // per_page=0 is clamped to 1 instead of panicking on a divide-by-zero downstream.
         let p = Paginator::new(5, 0);
         assert_eq!(p.per_page, 1);
         assert_eq!(p.num_pages(), 5);
@@ -996,7 +1298,7 @@ mod paginator_tests {
 
     #[test]
     fn page_one_on_default_empty_paginator_is_valid_empty() {
-        // Django: with count=0 and allow_empty_first_page=true,
+        // With count=0 and allow_empty_first_page=true,
         // page(1) returns an empty page. page(2) errors.
         let p = Paginator::new(0, 20);
         let page = p.page(1).expect("page 1 valid on empty paginator");
@@ -1099,7 +1401,7 @@ mod paginator_tests {
         assert!(page2.slice(&items).is_empty());
     }
 
-    // ---------- Paginator::get_elided_page_range — Django parity ----------
+    // ---------- Paginator::get_elided_page_range ----------
 
     #[test]
     fn elided_short_circuit_when_below_threshold() {
@@ -1115,9 +1417,8 @@ mod paginator_tests {
     }
 
     #[test]
-    fn elided_django_canonical_example() {
-        // Django docstring example: 1000 pages, current=500,
-        // on_each_side=3, on_ends=2 →
+    fn elided_canonical_example() {
+        // 1000 pages, current=500, on_each_side=3, on_ends=2 →
         // 1, 2, …, 497, 498, 499, 500, 501, 502, 503, …, 999, 1000.
         let p = Paginator::new(20_000, 20); // 1000 pages
         let marks = p.get_elided_page_range(500, 3, 2);
@@ -1195,5 +1496,185 @@ mod paginator_tests {
     fn elided_empty_paginator_returns_empty_vec() {
         let p = Paginator::new(0, 20).allow_empty_first_page(false);
         assert!(p.get_elided_page_range(1, 3, 2).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct Pos {
+        id: i64,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct CompositePos {
+        created_at: String,
+        id: i64,
+    }
+
+    // ---------- hex codec ----------
+
+    #[test]
+    fn hex_round_trip_random_bytes() {
+        let bytes: Vec<u8> = (0u8..=255).collect();
+        let encoded = hex_encode(&bytes);
+        assert_eq!(encoded.len(), 512);
+        assert_eq!(hex_decode(&encoded).unwrap(), bytes);
+    }
+
+    #[test]
+    fn hex_decode_accepts_mixed_case() {
+        assert_eq!(hex_decode("AbCdEf").unwrap(), vec![0xab, 0xcd, 0xef]);
+    }
+
+    #[test]
+    fn hex_decode_rejects_odd_length() {
+        assert!(hex_decode("abc").is_err());
+    }
+
+    #[test]
+    fn hex_decode_rejects_non_hex_byte() {
+        assert!(hex_decode("zz").is_err());
+    }
+
+    // ---------- Cursor encode/decode ----------
+
+    #[test]
+    fn cursor_encode_decode_round_trip() {
+        let c = Cursor::forward(Pos { id: 42 });
+        let s = c.encode();
+        let back: Cursor<Pos> = Cursor::decode(&s).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn cursor_url_safe() {
+        let c = Cursor::forward(Pos { id: 9_999_999 });
+        let s = c.encode();
+        assert!(
+            s.chars().all(|ch| ch.is_ascii_hexdigit()),
+            "cursor should be lowercase hex: {s}"
+        );
+    }
+
+    #[test]
+    fn cursor_preserves_direction() {
+        let fwd = Cursor::forward(Pos { id: 1 });
+        let bwd = Cursor::backward(Pos { id: 1 });
+        assert_ne!(fwd.encode(), bwd.encode());
+        assert_eq!(
+            Cursor::<Pos>::decode(&fwd.encode()).unwrap().direction,
+            CursorDirection::Forward
+        );
+        assert_eq!(
+            Cursor::<Pos>::decode(&bwd.encode()).unwrap().direction,
+            CursorDirection::Backward
+        );
+    }
+
+    #[test]
+    fn cursor_composite_position_round_trip() {
+        let c = Cursor::forward(CompositePos {
+            created_at: "2026-05-13T10:30:00Z".into(),
+            id: 7,
+        });
+        let s = c.encode();
+        let back: Cursor<CompositePos> = Cursor::decode(&s).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn cursor_decode_garbage_returns_decode_error() {
+        let err = Cursor::<Pos>::decode("not-hex!").unwrap_err();
+        assert!(matches!(err, CursorError::Decode(_)));
+    }
+
+    #[test]
+    fn cursor_decode_wrong_shape_returns_json_error() {
+        // Encode a string position, decode as struct — incompatible JSON.
+        let other = Cursor::forward("not-a-struct".to_string());
+        let s = other.encode();
+        let err = Cursor::<Pos>::decode(&s).unwrap_err();
+        assert!(matches!(err, CursorError::Json(_)));
+    }
+
+    // ---------- CursorPaginator::build_page ----------
+
+    #[test]
+    fn build_page_under_page_size_no_next() {
+        let paginator = CursorPaginator::new(20);
+        let rows: Vec<i64> = (1..=10).collect();
+        let page = paginator.build_page(rows, |r| Pos { id: *r });
+        assert_eq!(page.items.len(), 10);
+        assert!(!page.has_next());
+        assert!(page.next.is_none());
+    }
+
+    #[test]
+    fn build_page_exactly_page_size_no_next() {
+        let paginator = CursorPaginator::new(20);
+        let rows: Vec<i64> = (1..=20).collect();
+        let page = paginator.build_page(rows, |r| Pos { id: *r });
+        assert_eq!(page.items.len(), 20);
+        // No over-fetch row → we don't know if more rows exist → next is None.
+        assert!(page.next.is_none());
+    }
+
+    #[test]
+    fn build_page_over_fetched_drops_extra_and_sets_next() {
+        let paginator = CursorPaginator::new(20);
+        // Over-fetched 21 rows.
+        let rows: Vec<i64> = (1..=21).collect();
+        let page = paginator.build_page(rows, |r| Pos { id: *r });
+        assert_eq!(page.items.len(), 20);
+        let next = page.next.expect("next cursor must be present");
+        assert_eq!(
+            next.position.id, 20,
+            "next cursor anchored on last visible row"
+        );
+        assert_eq!(next.direction, CursorDirection::Forward);
+    }
+
+    #[test]
+    fn build_page_with_previous_propagates() {
+        let paginator = CursorPaginator::new(20);
+        let rows: Vec<i64> = (51..=70).collect();
+        let prev = Some(Cursor::backward(Pos { id: 50 }));
+        let page = paginator.build_page_with(rows, |r| Pos { id: *r }, prev.clone());
+        assert!(page.has_previous());
+        assert_eq!(page.previous, prev);
+    }
+
+    #[test]
+    fn paginator_page_size_clamps_to_one() {
+        let p = CursorPaginator::new(0);
+        assert_eq!(p.page_size, 1);
+        assert_eq!(p.fetch_limit(), 2);
+    }
+
+    #[test]
+    fn fetch_limit_is_page_size_plus_one() {
+        assert_eq!(CursorPaginator::new(50).fetch_limit(), 51);
+    }
+
+    #[test]
+    fn cursor_page_tokens_are_decodable() {
+        let paginator = CursorPaginator::new(2);
+        let page = paginator.build_page_with(
+            vec![10_i64, 20, 30],
+            |r| Pos { id: *r },
+            Some(Cursor::backward(Pos { id: 5 })),
+        );
+        let next_token = page.next_token().unwrap();
+        let prev_token = page.previous_token().unwrap();
+        let next: Cursor<Pos> = Cursor::decode(&next_token).unwrap();
+        let prev: Cursor<Pos> = Cursor::decode(&prev_token).unwrap();
+        assert_eq!(next.position.id, 20);
+        assert_eq!(next.direction, CursorDirection::Forward);
+        assert_eq!(prev.position.id, 5);
+        assert_eq!(prev.direction, CursorDirection::Backward);
     }
 }
