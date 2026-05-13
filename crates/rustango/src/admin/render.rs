@@ -37,6 +37,7 @@ pub(crate) fn escape(s: &str) -> String {
 /// * `NaiveDate`     → ISO 8601
 /// * `serde_json::Value` → compact JSON
 #[cfg(feature = "postgres")]
+#[allow(dead_code)] // back-compat dispatcher; live callers go through `render_value_json`.
 pub(crate) fn render_value(row: &PgRow, field: &FieldSchema) -> String {
     match field.ty {
         FieldType::I16 => format_display::<i16>(row, field),
@@ -62,6 +63,7 @@ pub(crate) fn render_value(row: &PgRow, field: &FieldSchema) -> String {
 /// vertical line of ✓ / ☐ — eyes can scan tens of rows in one
 /// sweep, which the literal `true` / `false` text never allowed.
 #[cfg(feature = "postgres")]
+#[allow(dead_code)] // helper for the dead `render_value` dispatcher.
 fn format_bool_checkbox(row: &PgRow, field: &FieldSchema) -> String {
     match row.try_get::<Option<bool>, _>(field.column) {
         Ok(Some(true)) => r#"<span class="rcms-bool yes" aria-label="true">☑</span>"#.to_owned(),
@@ -73,6 +75,7 @@ fn format_bool_checkbox(row: &PgRow, field: &FieldSchema) -> String {
 }
 
 #[cfg(feature = "postgres")]
+#[allow(dead_code)] // helper for the dead `render_value` dispatcher.
 fn format_display<T>(row: &PgRow, field: &FieldSchema) -> String
 where
     T: std::fmt::Display + for<'r> sqlx::Decode<'r, Postgres> + sqlx::Type<Postgres>,
@@ -85,6 +88,7 @@ where
 }
 
 #[cfg(feature = "postgres")]
+#[allow(dead_code)] // helper for the dead `render_value` dispatcher.
 fn format_json(row: &PgRow, field: &FieldSchema) -> String {
     // sqlx requires the `json` feature to decode `serde_json::Value`. We
     // don't enable it in v0.1 to keep the dep tree small, so render a
@@ -107,6 +111,7 @@ fn format_json(row: &PgRow, field: &FieldSchema) -> String {
 /// `NULL` columns become `Value::Null`. Decode errors fall back to
 /// `Value::Null` so an audit emit never fails the data write.
 #[cfg(feature = "postgres")]
+#[allow(dead_code)] // back-compat; live callers go through `read_value_as_json_from_json`.
 pub(crate) fn read_value_as_json(row: &PgRow, field: &FieldSchema) -> serde_json::Value {
     use serde_json::Value;
     match field.ty {
@@ -274,6 +279,7 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
 /// Best-effort string form of a column value for pre-populating form
 /// inputs. Returns an empty string for `NULL`, so the input renders blank.
 #[cfg(feature = "postgres")]
+#[allow(dead_code)] // back-compat; live callers go through `render_value_for_input_json`.
 pub(crate) fn render_value_for_input(row: &PgRow, field: &FieldSchema) -> String {
     fn opt_to_string<T: std::fmt::Display>(v: Option<T>) -> String {
         v.map(|x| x.to_string()).unwrap_or_default()
@@ -606,6 +612,7 @@ pub(crate) fn read_value_as_string_at(
 /// as already-HTML-escaped text suitable for templating, or `None` for
 /// `NULL` (LEFT JOIN miss) and unsupported types.
 #[cfg(feature = "postgres")]
+#[allow(dead_code)] // back-compat; live callers go through `read_joined_value_as_html_json`.
 pub(crate) fn read_joined_value_as_html(
     row: &PgRow,
     alias: &str,

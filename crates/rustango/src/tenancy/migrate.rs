@@ -548,6 +548,7 @@ where
 }
 
 #[cfg(feature = "postgres")]
+#[allow(deprecated)] // calls `permissions::ensure_tables` as a best-effort back-compat fallback for tenants on schemas/DBs that pre-date the bootstrap migration.
 async fn run_for_one_tenant(
     pools: &TenantPools,
     org: &Org,
