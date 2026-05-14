@@ -414,6 +414,17 @@ fn write_aggregate_expr(
                     wrapper: "Filtered(Coalesced)",
                 });
             }
+            // `Filtered { Window }` — combining FILTER with a window
+            // function isn't dispatched today (PG allows it for
+            // aggregate-window funcs, not ranking ones; writer hasn't
+            // been taught the per-fn rule). Reject upfront with a
+            // consistent message before either the PG-FILTER or the
+            // MySQL-CASE-WHEN path renames it to a per-dialect string.
+            if matches!(inner.as_ref(), AggregateExpr::Window(_)) {
+                return Err(SqlError::NestedAggregateWrapper {
+                    wrapper: "Filtered(Window)",
+                });
+            }
             // MySQL: no FILTER keyword — rewrite via CASE WHEN. The
             // helper applies the dialect's cast helper post-emit for
             // Sum/Avg/StdDev/etc.

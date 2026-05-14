@@ -21,19 +21,18 @@
 //!     )
 //!     .compile()?;
 //!
-//! // Lag with COALESCE fallback for the first row of each partition.
-//! // Composes naturally because LAG returns NULL for the boundary row
-//! // and `aggregates::sum(...).default(...)` shape applies.
-//! use rustango::core::aggregates::AggregateBuilder;
+//! // Lag with a fallback value when there's no prior row. LAG itself
+//! // returns NULL on the partition boundary; passing a `Some(default)`
+//! // tells the SQL function to substitute it. Builder ends with
+//! // `.into()` to lower into the `AggregateExpr` slot `annotate` takes.
 //! Event::objects()
 //!     .aggregate()
 //!     .annotate(
 //!         "prev_count",
-//!         AggregateBuilder::from(
-//!             lag("count", 1, Some(SqlValue::I64(0)))
-//!                 .partition_by("user_id")
-//!                 .order_by(&[("day", false)]),
-//!         ),
+//!         lag("count", 1, Some(SqlValue::I64(0)))
+//!             .partition_by("user_id")
+//!             .order_by(&[("day", false)])
+//!             .into(),
 //!     )
 //!     .compile()?;
 //! ```

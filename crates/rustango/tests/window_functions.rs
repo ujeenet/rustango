@@ -446,3 +446,46 @@ fn last_value_with_unbounded_following_frame_emits_full_form() {
         stmt.sql
     );
 }
+
+/// Round-2 regression: rejecting `Filtered { Window }` must surface
+/// the same error wrapper across all three dialects. Pre-fix the PG
+/// and SQLite paths returned the unhelpful internal name
+/// `"Window at format_bare_aggregate site"` while MySQL returned the
+/// clean `"Filtered(Window)"`. The upfront `matches!(inner, Window)`
+/// guard in `write_aggregate_expr` now produces the consistent
+/// `"Filtered(Window)"` everywhere.
+#[test]
+fn filtered_window_rejection_msg_consistent_across_dialects() {
+    use rustango::core::{Filter, Op, WindowExpr, WindowFn};
+    use rustango::sql::{MySql, SqlError, Sqlite};
+    let f = AggregateExpr::Filtered {
+        inner: Box::new(AggregateExpr::Window(Box::new(WindowExpr {
+            kind: WindowFn::RowNumber,
+            args: vec![],
+            partition_by: vec![],
+            order_by: vec![],
+            frame: None,
+        }))),
+        filter: WhereExpr::Predicate(Filter {
+            column: "score",
+            op: Op::Eq,
+            value: SqlValue::I64(1),
+        }),
+    };
+    let q = agg(f);
+    for (label, err) in [
+        ("pg", Postgres.compile_aggregate(&q).unwrap_err()),
+        ("mysql", MySql.compile_aggregate(&q).unwrap_err()),
+        ("sqlite", Sqlite.compile_aggregate(&q).unwrap_err()),
+    ] {
+        assert!(
+            matches!(
+                err,
+                SqlError::NestedAggregateWrapper {
+                    wrapper: "Filtered(Window)"
+                }
+            ),
+            "{label}: expected wrapper=Filtered(Window), got {err:?}",
+        );
+    }
+}
