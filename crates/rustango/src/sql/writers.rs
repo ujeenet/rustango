@@ -16,8 +16,8 @@ use std::fmt::Write as _;
 
 use crate::core::{
     AggregateExpr, AggregateQuery, BulkInsertQuery, BulkUpdateQuery, CountQuery, DeleteQuery,
-    Filter, InsertQuery, ModelSchema, Op, OrderClause, SearchClause, SelectQuery, SqlValue,
-    UpdateQuery, WhereExpr,
+    Filter, InsertQuery, ModelSchema, Op, SearchClause, SelectQuery, SqlValue, UpdateQuery,
+    WhereExpr,
 };
 
 use super::{CompiledStatement, Dialect, SqlError};
@@ -222,7 +222,7 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
         query.limit,
         query.offset,
         qualify.then_some(query.model.table),
-    );
+    )?;
 
     Ok(())
 }
@@ -290,7 +290,7 @@ pub(super) fn write_aggregate(b: &mut Sql<'_>, query: &AggregateQuery) -> Result
         write_where_expr(b, having, None, Some(query.model))?;
     }
 
-    write_order_limit_offset(b, &query.order_by, query.limit, query.offset, None);
+    write_order_limit_offset(b, &query.order_by, query.limit, query.offset, None)?;
 
     Ok(())
 }
@@ -1960,24 +1960,56 @@ fn op_label(op: Op) -> &'static str {
 
 fn write_order_limit_offset(
     b: &mut Sql<'_>,
-    order_by: &[OrderClause],
+    order_by: &[crate::core::OrderItem],
     limit: Option<i64>,
     offset: Option<i64>,
     qualify_with: Option<&str>,
-) {
+) -> Result<(), SqlError> {
+    use crate::core::{NullsOrder, OrderItem};
     if !order_by.is_empty() {
         b.sql.push_str(" ORDER BY ");
-        for (i, clause) in order_by.iter().enumerate() {
-            if i > 0 {
+        let supports_nulls = b.d.supports_nulls_order();
+        let mut first = true;
+        for item in order_by {
+            // Resolve the (target, desc, nulls) triple uniformly.
+            // Column targets get quoted ident; Expr targets get
+            // written through the standard expr writer.
+            let (desc, nulls) = match item {
+                OrderItem::Column { desc, nulls, .. } => (*desc, *nulls),
+                OrderItem::Expr { desc, nulls, .. } => (*desc, *nulls),
+            };
+            // Emulate NULLS FIRST/LAST on MySQL via a leading
+            // `<target> IS NULL <asc|desc>` term, then fall through
+            // to the actual sort.
+            if !supports_nulls && !matches!(nulls, NullsOrder::Default) {
+                if !first {
+                    b.sql.push_str(", ");
+                }
+                first = false;
+                write_order_target(b, item, qualify_with)?;
+                b.sql.push_str(" IS NULL");
+                // NULLS FIRST → group NULLs to the top → IS NULL DESC.
+                // NULLS LAST  → group NULLs to the bottom → IS NULL ASC.
+                match nulls {
+                    NullsOrder::First => b.sql.push_str(" DESC"),
+                    NullsOrder::Last => b.sql.push_str(" ASC"),
+                    NullsOrder::Default => unreachable!(),
+                }
+            }
+            if !first {
                 b.sql.push_str(", ");
             }
-            if let Some(table) = qualify_with {
-                b.write_ident(table);
-                b.sql.push('.');
-            }
-            b.write_ident(clause.column);
-            if clause.desc {
+            first = false;
+            write_order_target(b, item, qualify_with)?;
+            if desc {
                 b.sql.push_str(" DESC");
+            }
+            if supports_nulls {
+                match nulls {
+                    NullsOrder::First => b.sql.push_str(" NULLS FIRST"),
+                    NullsOrder::Last => b.sql.push_str(" NULLS LAST"),
+                    NullsOrder::Default => {}
+                }
             }
         }
     }
@@ -1987,6 +2019,32 @@ fn write_order_limit_offset(
     if let Some(n) = offset {
         let _ = write!(b.sql, " OFFSET {n}");
     }
+    Ok(())
+}
+
+/// Emit just the column or expression part of an `OrderItem` — the
+/// `<target>` half of `<target> [DESC] [NULLS …]`. Used twice when
+/// a MySQL `NULLS …` emulation needs the target both for the
+/// `IS NULL` pre-sort term and the main sort term.
+fn write_order_target(
+    b: &mut Sql<'_>,
+    item: &crate::core::OrderItem,
+    qualify_with: Option<&str>,
+) -> Result<(), SqlError> {
+    use crate::core::OrderItem;
+    match item {
+        OrderItem::Column { column, .. } => {
+            if let Some(table) = qualify_with {
+                b.write_ident(table);
+                b.sql.push('.');
+            }
+            b.write_ident(column);
+        }
+        OrderItem::Expr { expr, .. } => {
+            write_expr(b, expr, None)?;
+        }
+    }
+    Ok(())
 }
 
 // ====================================================================
@@ -2031,7 +2089,7 @@ pub(crate) fn compile_where_order_tail(
     d: &dyn Dialect,
     where_clause: &WhereExpr,
     search: Option<&SearchClause>,
-    order_by: &[OrderClause],
+    order_by: &[crate::core::OrderItem],
     limit: Option<i64>,
     offset: Option<i64>,
     qualify_with: Option<&str>,
@@ -2039,6 +2097,6 @@ pub(crate) fn compile_where_order_tail(
 ) -> Result<CompiledStatement, SqlError> {
     let mut b = Sql::new(d);
     write_where_with_search(&mut b, where_clause, search, qualify_with, model)?;
-    write_order_limit_offset(&mut b, order_by, limit, offset, qualify_with);
+    write_order_limit_offset(&mut b, order_by, limit, offset, qualify_with)?;
     Ok(b.finish())
 }

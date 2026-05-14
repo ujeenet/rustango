@@ -3441,7 +3441,7 @@ fn ensure_pk_ordering<T: Model>(
     qs: crate::query::QuerySet<T>,
     reverse: bool,
 ) -> crate::query::QuerySet<T> {
-    if qs.order_by_clauses().is_empty() {
+    if !qs.has_order_by() {
         let pk = T::SCHEMA.primary_key().map(|f| f.column);
         if let Some(pk_col) = pk {
             return qs.replace_order_by(&[(pk_col, reverse)]);

@@ -13,7 +13,7 @@ use crate::core::{
     FieldType, InsertQuery, Op, SelectQuery, UpdateQuery,
 };
 #[cfg(feature = "postgres")]
-use crate::core::{ModelSchema, OrderClause, SearchClause, WhereExpr};
+use crate::core::{ModelSchema, SearchClause, WhereExpr};
 
 #[cfg(feature = "postgres")]
 use super::writers;
@@ -239,7 +239,7 @@ fn write_pg_ident(sql: &mut String, name: &str) {
 pub(crate) fn compile_where_order_tail(
     where_clause: &WhereExpr,
     search: Option<&SearchClause>,
-    order_by: &[OrderClause],
+    order_by: &[crate::core::OrderItem],
     limit: Option<i64>,
     offset: Option<i64>,
     qualify_with: Option<&str>,

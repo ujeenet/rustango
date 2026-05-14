@@ -378,9 +378,9 @@ pub struct SelectQuery {
     pub search: Option<SearchClause>,
     pub joins: Vec<Join>,
     /// `ORDER BY` clauses, in the order they should appear in SQL.
-    /// Slice 9.0b. Emitted after WHERE / JOIN / GROUP BY but before
-    /// LIMIT / OFFSET. Empty = no `ORDER BY` (existing behaviour).
-    pub order_by: Vec<OrderClause>,
+    /// Slice 9.0b + issue #76. Emitted after WHERE / JOIN / GROUP BY
+    /// but before LIMIT / OFFSET. Empty = no `ORDER BY`.
+    pub order_by: Vec<OrderItem>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -416,7 +416,13 @@ impl PartialEq for Join {
     }
 }
 
-/// Single column in an `ORDER BY` clause. Slice 9.0b.
+/// Single column in an `ORDER BY` clause. Slice 9.0b — the simple
+/// "field name + ASC/DESC" form that pre-dates [`OrderItem`].
+///
+/// New code should prefer [`OrderItem`] (issue #76) which adds Expr
+/// items and `NULLS FIRST/LAST` control. `OrderClause` remains as a
+/// convenience-constructor and converts via `Into<OrderItem>` for
+/// every `SelectQuery` / `AggregateQuery` / window-OVER ORDER BY slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderClause {
     /// SQL column name on the main table — already resolved by
@@ -425,6 +431,129 @@ pub struct OrderClause {
     pub column: &'static str,
     /// `true` for `DESC`, `false` for the default `ASC`.
     pub desc: bool,
+}
+
+/// Where NULLs sort relative to non-NULL values. Issue #76.
+///
+/// Default semantics differ per dialect: PG and SQLite sort NULLs
+/// LAST on `ASC` and FIRST on `DESC` (the SQL-standard); MySQL
+/// treats NULLs as smaller than every value so they land FIRST on
+/// `ASC` and LAST on `DESC`. Pinning the order explicitly via
+/// `First` or `Last` produces consistent behavior across all three
+/// dialects (the writer emits `IFNULL(…)` workarounds on MySQL,
+/// which has no native `NULLS FIRST`/`NULLS LAST` keywords).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NullsOrder {
+    /// Backend's native default — emits no `NULLS …` clause.
+    #[default]
+    Default,
+    /// `NULLS FIRST` on PG/SQLite; emulated via `IFNULL(col, '') = ''
+    /// DESC, …` style trick on MySQL.
+    First,
+    /// `NULLS LAST` on PG/SQLite; emulated on MySQL similarly.
+    Last,
+}
+
+/// One item in a generalized `ORDER BY` list (issue #76). Carries
+/// either a plain column reference (with optional NULL-ordering) or
+/// an arbitrary [`Expr`] — `lower(col)`, `case(…)`, `F(a) + F(b)`,
+/// any builder result that lowers to `Expr`.
+///
+/// Old-shape `OrderClause` values convert into the `Column` variant
+/// via `Into<OrderItem>` so existing constructors keep working.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OrderItem {
+    /// `<col> [DESC] [NULLS FIRST|LAST]`. Equivalent of the legacy
+    /// `OrderClause` with the addition of `NullsOrder`.
+    Column {
+        column: &'static str,
+        desc: bool,
+        nulls: NullsOrder,
+    },
+    /// `<expr> [DESC] [NULLS FIRST|LAST]`. The `expr` is emitted via
+    /// the standard `Expr` writer, so function calls / `CASE` /
+    /// arithmetic / etc. all compose.
+    Expr {
+        expr: Expr,
+        desc: bool,
+        nulls: NullsOrder,
+    },
+}
+
+impl From<OrderClause> for OrderItem {
+    fn from(c: OrderClause) -> Self {
+        Self::Column {
+            column: c.column,
+            desc: c.desc,
+            nulls: NullsOrder::Default,
+        }
+    }
+}
+
+impl OrderItem {
+    /// Convenience for the most-common case — `<col> [DESC]`, default
+    /// NULL ordering.
+    #[must_use]
+    pub fn column(column: &'static str, desc: bool) -> Self {
+        Self::Column {
+            column,
+            desc,
+            nulls: NullsOrder::Default,
+        }
+    }
+
+    /// Convenience for `<col> [DESC] [NULLS FIRST|LAST]`.
+    #[must_use]
+    pub fn column_with_nulls(column: &'static str, desc: bool, nulls: NullsOrder) -> Self {
+        Self::Column {
+            column,
+            desc,
+            nulls,
+        }
+    }
+
+    /// Convenience for `<expr> [DESC]` with default NULL ordering.
+    #[must_use]
+    pub fn expr(expr: Expr, desc: bool) -> Self {
+        Self::Expr {
+            expr,
+            desc,
+            nulls: NullsOrder::Default,
+        }
+    }
+
+    /// Convenience for `<expr> [DESC] [NULLS FIRST|LAST]`.
+    #[must_use]
+    pub fn expr_with_nulls(expr: Expr, desc: bool, nulls: NullsOrder) -> Self {
+        Self::Expr { expr, desc, nulls }
+    }
+
+    /// Bare column name when this item is a `Column` variant; `None`
+    /// for `Expr` variants. Used by callers that pre-dated the enum
+    /// (admin / template_views / older tests).
+    #[must_use]
+    pub fn column_name(&self) -> Option<&'static str> {
+        match self {
+            Self::Column { column, .. } => Some(column),
+            Self::Expr { .. } => None,
+        }
+    }
+
+    /// `true` if this item sorts descending.
+    #[must_use]
+    pub fn is_desc(&self) -> bool {
+        match self {
+            Self::Column { desc, .. } | Self::Expr { desc, .. } => *desc,
+        }
+    }
+
+    /// The `NullsOrder` setting for this item.
+    #[must_use]
+    pub fn nulls_order(&self) -> NullsOrder {
+        match self {
+            Self::Column { nulls, .. } | Self::Expr { nulls, .. } => *nulls,
+        }
+    }
 }
 
 /// Which SQL `JOIN` keyword the writer should emit. Issue #80.
@@ -771,7 +900,7 @@ pub struct AggregateQuery {
     pub aggregates: Vec<(&'static str, AggregateExpr)>,
     /// Optional HAVING clause (applied after GROUP BY).
     pub having: Option<WhereExpr>,
-    pub order_by: Vec<OrderClause>,
+    pub order_by: Vec<OrderItem>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }

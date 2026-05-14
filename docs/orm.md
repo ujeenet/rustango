@@ -76,6 +76,49 @@ Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 Post::objects().where_(Post::published_at.between(start, end)).fetch(&pool).await?;
 ```
 
+### ORDER BY — column, expression, NULLS FIRST/LAST
+
+Three dimensions beyond the basic `.order_by(&[("col", desc)])`:
+
+```rust
+use rustango::core::funcs::lower;
+use rustango::core::{F, NullsOrder};
+
+// 1. Plain field + ASC/DESC (back-compat — implicit NULLS handling
+//    differs between dialects; see the dialect note below).
+Post::objects()
+    .order_by(&[("published_at", true), ("id", false)])
+    .fetch(&pool).await?;
+
+// 2. Explicit NULLS FIRST/LAST control — portable across PG, MySQL,
+//    and SQLite. MySQL has no native `NULLS …` keyword; the writer
+//    emulates with an `<col> IS NULL` pre-sort term so the on-wire
+//    ordering matches PG/SQLite.
+Post::objects()
+    .order_by_with_nulls(&[("score", true, NullsOrder::Last)])
+    .fetch(&pool).await?;
+
+// 3. Arbitrary Expr in the ORDER BY position — case-insensitive
+//    title sort via `LOWER(title)`, computed sort keys via
+//    `case() / when() / value()`, arithmetic via `F("a") + F("b")`.
+Post::objects()
+    .order_by_expr(lower(F("title")), false)
+    .order_by_expr_with_nulls(F("score") + 1_i64, true, NullsOrder::Last)
+    .fetch(&pool).await?;
+```
+
+**Per-dialect NULLS handling (no explicit `NullsOrder` set):**
+
+| Dialect | ASC default | DESC default |
+|---|---|---|
+| PostgreSQL | NULLS LAST | NULLS FIRST |
+| SQLite | NULLS LAST | NULLS FIRST |
+| MySQL | NULLs first (smallest-value semantics) | NULLs last |
+
+Use `.order_by_with_nulls(...)` / `.order_by_expr_with_nulls(...)` to pin the placement; otherwise the database's native default applies. On MySQL the writer emits `<col> IS NULL <asc|desc>` ahead of the actual sort to emulate; the emitted SQL has two ORDER BY terms per pinned column but the semantic matches PG/SQLite.
+
+**Chain composition.** `.order_by(...)`, `.order_by_with_nulls(...)`, and `.order_by_expr(...)` accumulate into one unified list in **registration order**. `.replace_order_by(&[...])` clears every prior order-by call. `.flip_order_by()` inverts every direction AND swaps `NullsOrder::First` ↔ `NullsOrder::Last` so the "NULLs at the same end" semantic survives an inversion.
+
 ### Pagination
 
 ```rust

@@ -10,8 +10,7 @@ use std::marker::PhantomData;
 
 use crate::core::{
     AggregateExpr, AggregateQuery, Assignment, DeleteQuery, Filter, Model, ModelSchema, Op,
-    OrderClause, QueryError, SelectQuery, SqlValue, TypedAssignment, TypedExpr, UpdateQuery,
-    WhereExpr,
+    QueryError, SelectQuery, SqlValue, TypedAssignment, TypedExpr, UpdateQuery, WhereExpr,
 };
 
 /// A lazy builder for a `SELECT` over `T`.
@@ -39,10 +38,34 @@ pub struct QuerySet<T: Model> {
     /// time so explicit user-driven joins sit alongside the automatic
     /// FK ones in the SELECT list.
     ad_hoc_joins: Vec<crate::core::Join>,
-    /// `(field_name, desc)` pairs registered via [`Self::order_by`].
-    /// Slice 9.0b. Resolved against the schema at `compile()` time.
-    order_by: Vec<(String, bool)>,
+    /// Unified pending `ORDER BY` list (slice 9.0b + issue #76).
+    /// Carries `Field { name, desc, nulls }` entries from
+    /// `.order_by(...)` / `.order_by_with_nulls(...)` plus `Expr { … }`
+    /// entries from `.order_by_expr(...)`. Lowered at `compile()`
+    /// time in registration order so chain order is preserved
+    /// across mixed builder calls.
+    order_by: Vec<PendingOrderItem>,
     _model: PhantomData<fn() -> T>,
+}
+
+/// Issue #76: order-by entry in the QuerySet's unified pending list.
+/// `Field` carries a string field name resolved against the schema
+/// at `compile()` time (sugar shared between `.order_by(...)` and
+/// `.order_by_with_nulls(...)`). `Expr` wraps an already-built
+/// expression for `.order_by_expr(...)`. The list preserves
+/// registration order so mixed builder chains compose predictably.
+#[derive(Debug, Clone)]
+enum PendingOrderItem {
+    Field {
+        name: String,
+        desc: bool,
+        nulls: crate::core::NullsOrder,
+    },
+    Expr {
+        expr: crate::core::Expr,
+        desc: bool,
+        nulls: crate::core::NullsOrder,
+    },
 }
 
 /// Filter accumulator entry — keeps insertion order across string-keyed and
@@ -127,14 +150,85 @@ impl<T: Model> QuerySet<T> {
     #[must_use]
     pub fn order_by(mut self, items: &[(&str, bool)]) -> Self {
         for (field, desc) in items {
-            self.order_by.push(((*field).to_owned(), *desc));
+            self.order_by.push(PendingOrderItem::Field {
+                name: (*field).to_owned(),
+                desc: *desc,
+                nulls: crate::core::NullsOrder::Default,
+            });
         }
+        self
+    }
+
+    /// Append `ORDER BY` columns with explicit `NULLS FIRST|LAST`
+    /// control. Issue #76. PG + SQLite emit the `NULLS …` keyword
+    /// natively; MySQL emulates via `<col> IS NULL` pre-sort
+    /// because it has no `NULLS …` syntax.
+    ///
+    /// ```ignore
+    /// use rustango::core::NullsOrder;
+    /// Post::objects()
+    ///     .order_by_with_nulls(&[("published_at", true, NullsOrder::Last)])
+    ///     .fetch(&pool).await?;
+    /// ```
+    ///
+    /// Composes with `.order_by(...)` — legacy `(name, desc)` entries
+    /// Composes with `.order_by(...)` — entries from both methods
+    /// appear in the SQL `ORDER BY` clause in **registration order**
+    /// across the chain.
+    #[must_use]
+    pub fn order_by_with_nulls(
+        mut self,
+        items: &[(&'static str, bool, crate::core::NullsOrder)],
+    ) -> Self {
+        for (field, desc, nulls) in items {
+            self.order_by.push(PendingOrderItem::Field {
+                name: (*field).to_owned(),
+                desc: *desc,
+                nulls: *nulls,
+            });
+        }
+        self
+    }
+
+    /// Append an `ORDER BY` item whose target is an arbitrary
+    /// [`Expr`] — `lower(F("title"))`, `case(...)`, `F("a") + F("b")`,
+    /// any builder result that lowers to `Expr`. Issue #76.
+    ///
+    /// `desc = true` → `DESC`; defaults to the dialect's native
+    /// NULL ordering (use [`Self::order_by_expr_with_nulls`] to pin).
+    ///
+    /// [`Expr`]: crate::core::Expr
+    #[must_use]
+    pub fn order_by_expr(mut self, expr: impl Into<crate::core::Expr>, desc: bool) -> Self {
+        self.order_by.push(PendingOrderItem::Expr {
+            expr: expr.into(),
+            desc,
+            nulls: crate::core::NullsOrder::Default,
+        });
+        self
+    }
+
+    /// Same as [`Self::order_by_expr`] but with an explicit
+    /// `NullsOrder`. Issue #76.
+    #[must_use]
+    pub fn order_by_expr_with_nulls(
+        mut self,
+        expr: impl Into<crate::core::Expr>,
+        desc: bool,
+        nulls: crate::core::NullsOrder,
+    ) -> Self {
+        self.order_by.push(PendingOrderItem::Expr {
+            expr: expr.into(),
+            desc,
+            nulls,
+        });
         self
     }
 
     /// v0.45 — discard any previously-set `order_by` and apply
     /// `items` as the new ordering. Used by `earliest_pool` and
-    /// `latest_pool` which declare their own sort.
+    /// `latest_pool` which declare their own sort. Clears every
+    /// pending item (legacy + `_with_nulls` + `_expr`).
     #[must_use]
     pub fn replace_order_by(mut self, items: &[(&str, bool)]) -> Self {
         self.order_by.clear();
@@ -144,20 +238,36 @@ impl<T: Model> QuerySet<T> {
     /// v0.45 — flip every ordering direction in place. Used by
     /// `last_pool` to invert the queryset's natural sort and take
     /// the first row from the reversed sequence — avoids OFFSET +
-    /// COUNT(*) and works on every dialect.
+    /// COUNT(*) and works on every dialect. Issue #76: also swaps
+    /// `NullsOrder::First` ↔ `NullsOrder::Last` so the "NULLs at the
+    /// same logical end as before" semantic survives an inversion.
     #[must_use]
     pub fn flip_order_by(mut self) -> Self {
         for entry in &mut self.order_by {
-            entry.1 = !entry.1;
+            match entry {
+                PendingOrderItem::Field { desc, nulls, .. }
+                | PendingOrderItem::Expr { desc, nulls, .. } => {
+                    *desc = !*desc;
+                    *nulls = match *nulls {
+                        crate::core::NullsOrder::First => crate::core::NullsOrder::Last,
+                        crate::core::NullsOrder::Last => crate::core::NullsOrder::First,
+                        crate::core::NullsOrder::Default => crate::core::NullsOrder::Default,
+                    };
+                }
+            }
         }
         self
     }
 
-    /// v0.45 — read-only view of the current `order_by` for callers
-    /// that need to inspect it (e.g. inserting a PK fallback).
+    /// v0.45 — count of registered `ORDER BY` items. Used by
+    /// `ensure_pk_ordering` (executor) to detect "no ordering set"
+    /// without inspecting the variant types. Issue #76 dropped the
+    /// `order_by_clauses() -> &[(String, bool)]` getter because the
+    /// unified pending list now carries `Expr` items that can't
+    /// flatten to that shape.
     #[must_use]
-    pub fn order_by_clauses(&self) -> &[(String, bool)] {
-        &self.order_by
+    pub fn has_order_by(&self) -> bool {
+        !self.order_by.is_empty()
     }
 
     /// Eagerly load a `ForeignKey<Parent>` field via a `LEFT JOIN` —
@@ -316,7 +426,11 @@ impl<T: Model> QuerySet<T> {
         // for legacy callers, and keeps user-driven joins next to the
         // user-driven WHERE.
         joins.extend(self.ad_hoc_joins);
-        let order_by = lower_order_by(model, &self.order_by)?;
+        // Lower the unified pending list to OrderItems. Insertion
+        // order is preserved across legacy `.order_by(...)` and
+        // issue-#76 `.order_by_with_nulls(...)` / `.order_by_expr(...)`
+        // calls so a mixed chain emits in the order it was written.
+        let order_by = lower_order_items(model, self.order_by)?;
         Ok(SelectQuery {
             model,
             where_clause,
@@ -460,24 +574,33 @@ impl<T: Model> UpdateBuilder<T> {
     }
 }
 
-/// Convert `(field_name, desc)` pairs into `OrderClause`s by
-/// resolving each field name on the schema. Slice 9.0b.
-fn lower_order_by(
+/// Issue #76: lower the unified pending order-by list to a
+/// `Vec<OrderItem>` at `compile()` time. `Field` variants resolve
+/// the field name against the model schema; `Expr` variants pass
+/// through verbatim (the writer surfaces DB-side errors for typos
+/// inside expressions, matching the existing `set_expr` posture).
+fn lower_order_items(
     model: &'static ModelSchema,
-    items: &[(String, bool)],
-) -> Result<Vec<crate::core::OrderClause>, QueryError> {
+    items: Vec<PendingOrderItem>,
+) -> Result<Vec<crate::core::OrderItem>, QueryError> {
     let mut out = Vec::with_capacity(items.len());
-    for (field_name, desc) in items {
-        let field = model
-            .field(field_name)
-            .ok_or_else(|| QueryError::UnknownField {
-                model: model.name,
-                field: field_name.clone(),
-            })?;
-        out.push(crate::core::OrderClause {
-            column: field.column,
-            desc: *desc,
-        });
+    for item in items {
+        match item {
+            PendingOrderItem::Field { name, desc, nulls } => {
+                let field = model.field(&name).ok_or_else(|| QueryError::UnknownField {
+                    model: model.name,
+                    field: name.clone(),
+                })?;
+                out.push(crate::core::OrderItem::column_with_nulls(
+                    field.column,
+                    desc,
+                    nulls,
+                ));
+            }
+            PendingOrderItem::Expr { expr, desc, nulls } => {
+                out.push(crate::core::OrderItem::expr_with_nulls(expr, desc, nulls));
+            }
+        }
     }
     Ok(out)
 }
@@ -811,7 +934,7 @@ impl<T: Model> AggregateBuilder<T> {
         let order_by = self
             .order_by
             .into_iter()
-            .map(|(col, desc)| OrderClause { column: col, desc })
+            .map(|(col, desc)| crate::core::OrderItem::column(col, desc))
             .collect();
         Ok(AggregateQuery {
             model,

@@ -399,7 +399,8 @@ where
             order_by: vec![OrderClause {
                 column: pk_field.column,
                 desc: false,
-            }],
+            }
+            .into()],
             limit: Some(batch),
             offset: Some(offset),
         };
