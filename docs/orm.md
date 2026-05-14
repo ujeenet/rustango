@@ -19,6 +19,7 @@ Patterns for the rustango ORM beyond the basics. Most examples assume you alread
 - [Lazy FK loading](#lazy-fk-loading)
 - [QuerySet vs string-keyed filters](#queryset-vs-string-keyed-filters)
 - [Tenant-scoped queries](#tenant-scoped-queries)
+- [Signals](#signals)
 - [Performance tips](#performance-tips)
 
 ---
@@ -578,6 +579,58 @@ async fn handler(mut t: Tenant) -> Result<...> {
 ```
 
 `fetch_on` works with any `sqlx::Executor`; `fetch` is sugar for `fetch_on(&pool)`.
+
+---
+
+## Signals
+
+Two registries, two purposes.
+
+### Model lifecycle
+
+`pre_save` / `post_save` / `pre_delete` / `post_delete` — per-`Model` hooks that fire from the macro-generated write paths.
+
+```rust
+use rustango::signals::{connect_post_save, PostSaveContext};
+
+connect_post_save::<Post, _, _>(|post, ctx| async move {
+    if ctx.created {
+        tracing::info!("new post #{}", post.id.get().copied().unwrap_or(0));
+    }
+});
+```
+
+`T: Clone + 'static` is required (the dispatcher hands each receiver an `Arc<T>` clone). Receivers run sequentially in registration order. Disconnect via the `ReceiverId` returned by `connect_*`. The four signal kinds + their context shapes are documented inline in `rustango::signals`.
+
+### Request lifecycle — issue #53
+
+`request_started` / `request_finished` / `got_request_exception` — fire around every HTTP request that passes through `RequestSignalsLayer`. Useful for tracing, audit, request-time metrics, and Django-style `got_request_exception` error reporting.
+
+```rust
+use axum::Router;
+use rustango::signals::request::{
+    connect_request_started, connect_request_finished, RequestSignalsLayer,
+};
+
+connect_request_started(|ctx| Box::pin(async move {
+    tracing::info!(method = %ctx.method, path = %ctx.path, "started");
+}));
+connect_request_finished(|ctx| Box::pin(async move {
+    metrics::histogram!("http_request_ms").record(ctx.elapsed_ms);
+}));
+
+let app: Router = Router::new()
+    .route("/", get(home))
+    .layer(RequestSignalsLayer::new());  // outermost — sees request first / response last
+```
+
+| Signal | Context fields |
+|---|---|
+| `request_started` | `method`, `path`, `query` |
+| `request_finished` | `method`, `path`, `status`, `elapsed_ms` |
+| `got_request_exception` | `method`, `path`, `error` |
+
+Receivers run sequentially in registration order; wrap a body in `tokio::spawn` for parallel fanout or panic isolation. The request and model registries are independent — connecting / disconnecting / clearing one doesn't touch the other.
 
 ---
 

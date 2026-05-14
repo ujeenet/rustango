@@ -2453,6 +2453,8 @@ handle.shutdown().await;
 
 ## Signals
 
+### Model lifecycle — `pre_save` / `post_save` / `pre_delete` / `post_delete`
+
 ```rust
 use rustango::signals::{connect_post_save, send_post_save, PostSaveContext};
 
@@ -2469,6 +2471,30 @@ send_post_save(&post, PostSaveContext { created: true }).await;
 ```
 
 Available: `connect_pre_save`, `connect_post_save`, `connect_pre_delete`, `connect_post_delete`. Disconnect via the returned `ReceiverId`.
+
+### Request lifecycle — `request_started` / `request_finished` / `got_request_exception`
+
+Issue #53. Drop the `RequestSignalsLayer` tower layer on your router; receivers fire around every request.
+
+```rust
+use axum::Router;
+use rustango::signals::request::{
+    connect_request_started, connect_request_finished, RequestSignalsLayer,
+};
+
+connect_request_started(|ctx| Box::pin(async move {
+    tracing::info!(method = %ctx.method, path = %ctx.path, "started");
+}));
+connect_request_finished(|ctx| Box::pin(async move {
+    tracing::info!(status = ctx.status, ms = ctx.elapsed_ms, "finished");
+}));
+
+let app: Router = Router::new()
+    // ... your routes ...
+    .layer(RequestSignalsLayer::new());   // outermost — sees request first, response last
+```
+
+`RequestStartedContext` carries `method` / `path` / `query`; `RequestFinishedContext` adds `status` + `elapsed_ms`; `RequestExceptionContext` carries the inner-service error string. Disconnect via the returned `ReceiverId`. Receivers run sequentially in registration order — wrap in `tokio::spawn` for parallel fanout.
 
 ---
 
