@@ -54,6 +54,12 @@ impl Dialect for MySql {
         false
     }
 
+    /// MySQL spells the random function as `RAND()`, not `RANDOM()`.
+    /// Issue #77.
+    fn random_fn(&self) -> &'static str {
+        "RAND"
+    }
+
     /// `MySQL` quotes identifiers with backticks, not double quotes.
     /// Embedded backticks are doubled (the `MySQL` parser's escape rule)
     /// so the output is always a valid quoted identifier even for

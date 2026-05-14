@@ -1977,6 +1977,10 @@ fn write_order_limit_offset(
             let (desc, nulls) = match item {
                 OrderItem::Column { desc, nulls, .. } => (*desc, *nulls),
                 OrderItem::Expr { desc, nulls, .. } => (*desc, *nulls),
+                // Random ordering: no direction (unordered by
+                // definition), no NULLS clause (the random key is
+                // per-row + non-NULL). Skip the desc/nulls dance.
+                OrderItem::Random => (false, NullsOrder::Default),
             };
             // Emulate NULLS FIRST/LAST on MySQL via a leading
             // `<target> IS NULL <asc|desc>` term, then fall through
@@ -2042,6 +2046,14 @@ fn write_order_target(
         }
         OrderItem::Expr { expr, .. } => {
             write_expr(b, expr, None)?;
+        }
+        // Issue #77 — tri-dialect random ordering. PG + SQLite use
+        // `RANDOM()`; MySQL uses `RAND()`. Both are 0-arg, return
+        // a per-row pseudorandom value; the surrounding `ORDER BY`
+        // sorts by that value.
+        OrderItem::Random => {
+            b.sql.push_str(b.d.random_fn());
+            b.sql.push_str("()");
         }
     }
     Ok(())

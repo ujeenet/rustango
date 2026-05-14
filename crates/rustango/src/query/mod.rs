@@ -66,6 +66,9 @@ enum PendingOrderItem {
         desc: bool,
         nulls: crate::core::NullsOrder,
     },
+    /// `ORDER BY RANDOM()` / `RAND()` — issue #77. No fields; the
+    /// writer picks the dialect-specific token at emit time.
+    Random,
 }
 
 /// Filter accumulator entry — keeps insertion order across string-keyed and
@@ -225,6 +228,35 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// `ORDER BY RANDOM()` (PG / SQLite) or `ORDER BY RAND()` (MySQL)
+    /// — Django's `.order_by('?')`. Useful for "random N rows" UI
+    /// patterns like banner rotation, sample selection, A/B-test
+    /// bucket assignment. Issue #77.
+    ///
+    /// ```ignore
+    /// // Three random posts.
+    /// Post::objects()
+    ///     .order_random()
+    ///     .limit(3)
+    ///     .fetch(&pool).await?;
+    /// ```
+    ///
+    /// **Performance caveat**: random ordering forces a full table
+    /// scan + in-memory sort by a per-row random key. The query
+    /// planner can't use an index. For tables much larger than memory,
+    /// prefer the `WHERE pk >= <random_offset> LIMIT N` pattern
+    /// (which can range-scan an index) and accept that adjacency in
+    /// the result rows mirrors PK adjacency.
+    ///
+    /// Composes with other `.order_by*` calls — the random key sorts
+    /// rows whose preceding sort columns tied. Most callers want a
+    /// `.replace_order_by`-style reset first.
+    #[must_use]
+    pub fn order_random(mut self) -> Self {
+        self.order_by.push(PendingOrderItem::Random);
+        self
+    }
+
     /// v0.45 — discard any previously-set `order_by` and apply
     /// `items` as the new ordering. Used by `earliest_pool` and
     /// `latest_pool` which declare their own sort. Clears every
@@ -254,6 +286,9 @@ impl<T: Model> QuerySet<T> {
                         crate::core::NullsOrder::Default => crate::core::NullsOrder::Default,
                     };
                 }
+                // Random has no direction or NULLS clause — nothing
+                // to flip. Issue #77.
+                PendingOrderItem::Random => {}
             }
         }
         self
@@ -599,6 +634,9 @@ fn lower_order_items(
             }
             PendingOrderItem::Expr { expr, desc, nulls } => {
                 out.push(crate::core::OrderItem::expr_with_nulls(expr, desc, nulls));
+            }
+            PendingOrderItem::Random => {
+                out.push(crate::core::OrderItem::random());
             }
         }
     }

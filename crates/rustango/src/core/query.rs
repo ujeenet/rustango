@@ -478,6 +478,16 @@ pub enum OrderItem {
         desc: bool,
         nulls: NullsOrder,
     },
+    /// `ORDER BY RANDOM()` (PG / SQLite) or `ORDER BY RAND()` (MySQL).
+    /// Issue #77 — Django's `.order_by('?')` shape. No direction, no
+    /// NULLS clause: random ordering is by definition unordered, and
+    /// the random value is computed per-row so there are no NULLs.
+    ///
+    /// **Performance**: forces a full table scan + in-memory sort
+    /// by a per-row random key. The optimizer can't use an index.
+    /// For large tables, prefer a `WHERE pk >= rand_offset LIMIT N`
+    /// pattern instead.
+    Random,
 }
 
 impl From<OrderClause> for OrderItem {
@@ -528,30 +538,42 @@ impl OrderItem {
         Self::Expr { expr, desc, nulls }
     }
 
+    /// Construct a `Random` item — `ORDER BY RANDOM()` / `RAND()`.
+    /// Issue #77.
+    #[must_use]
+    pub fn random() -> Self {
+        Self::Random
+    }
+
     /// Bare column name when this item is a `Column` variant; `None`
-    /// for `Expr` variants. Used by callers that pre-dated the enum
-    /// (admin / template_views / older tests).
+    /// for `Expr` / `Random` variants. Used by callers that pre-dated
+    /// the enum (admin / template_views / older tests).
     #[must_use]
     pub fn column_name(&self) -> Option<&'static str> {
         match self {
             Self::Column { column, .. } => Some(column),
-            Self::Expr { .. } => None,
+            Self::Expr { .. } | Self::Random => None,
         }
     }
 
-    /// `true` if this item sorts descending.
+    /// `true` if this item sorts descending. `Random` ordering has no
+    /// direction (it's unordered by definition) — returns `false`.
     #[must_use]
     pub fn is_desc(&self) -> bool {
         match self {
             Self::Column { desc, .. } | Self::Expr { desc, .. } => *desc,
+            Self::Random => false,
         }
     }
 
-    /// The `NullsOrder` setting for this item.
+    /// The `NullsOrder` setting for this item. `Random` returns
+    /// `Default` — the random key is per-row and non-NULL, so the
+    /// clause has no effect.
     #[must_use]
     pub fn nulls_order(&self) -> NullsOrder {
         match self {
             Self::Column { nulls, .. } | Self::Expr { nulls, .. } => *nulls,
+            Self::Random => NullsOrder::Default,
         }
     }
 }

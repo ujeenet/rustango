@@ -117,7 +117,43 @@ Post::objects()
 
 Use `.order_by_with_nulls(...)` / `.order_by_expr_with_nulls(...)` to pin the placement; otherwise the database's native default applies. On MySQL the writer emits `<col> IS NULL <asc|desc>` ahead of the actual sort to emulate; the emitted SQL has two ORDER BY terms per pinned column but the semantic matches PG/SQLite.
 
-**Chain composition.** `.order_by(...)`, `.order_by_with_nulls(...)`, and `.order_by_expr(...)` accumulate into one unified list in **registration order**. `.replace_order_by(&[...])` clears every prior order-by call. `.flip_order_by()` inverts every direction AND swaps `NullsOrder::First` ↔ `NullsOrder::Last` so the "NULLs at the same end" semantic survives an inversion.
+**Chain composition.** `.order_by(...)`, `.order_by_with_nulls(...)`, and `.order_by_expr(...)` accumulate into one unified list in **registration order**. `.replace_order_by(&[...])` clears every prior order-by call. `.flip_order_by()` inverts every direction AND swaps `NullsOrder::First` ↔ `NullsOrder::Last` so the "NULLs at the same end" semantic survives an inversion (for explicit `First` / `Last`; the dialect-default behavior under `Default` still tracks direction).
+
+### Random row order — `.order_random()`
+
+Issue #77 — Django's `.order_by('?')`. Emits `ORDER BY RANDOM()` on PG and SQLite, `ORDER BY RAND()` on MySQL. Useful for banner rotation, sample selection, A/B-test bucket assignment without round-tripping a query result through the app to shuffle.
+
+```rust
+// Three random posts.
+Post::objects()
+    .order_random()
+    .limit(3)
+    .fetch(&pool).await?;
+
+// Random tie-breaker after a primary sort: posts ordered by score
+// descending, with ties shuffled.
+Post::objects()
+    .order_by(&[("score", true)])
+    .order_random()
+    .fetch(&pool).await?;
+```
+
+The IR variant carries no direction or NULLS clause: random ordering is unordered by definition, and the random key is computed per row (non-NULL).
+
+**Performance caveat.** `ORDER BY RANDOM()` forces a **full table scan + in-memory sort by a per-row random key**. The query planner can't use an index. For tables much larger than memory, prefer the index-friendly pattern:
+
+```rust
+// Coin-flip offset; range-scans the PK index.
+let max_id: i64 = Post::objects().max::<i64>(Post::id, &pool).await?;
+let offset = rand::random::<u32>() as i64 % max_id.max(1);
+Post::objects()
+    .where_(Post::id.gte(offset))
+    .order_by(&[("id", false)])
+    .limit(1)
+    .fetch(&pool).await?;
+```
+
+The trade-off: adjacency in the result rows mirrors PK adjacency, so it's not "uniformly random" in the strict sense — but it's free of the full-table-scan cost.
 
 ### Pagination
 
