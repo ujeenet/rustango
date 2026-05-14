@@ -772,7 +772,7 @@ act.save(&pool).await?;
 13 live recipes against the Author / Post fixture from Chapter 2.
 Run with `DATABASE_URL=... cargo test --test cookbook_chapter03_orm -- --test-threads=1`.
 
-* §3.31 `Post::objects().filter("published", Op::Eq, true).fetch(&pool)` →
+* §3.31 `Post::objects().filter_op("published", Op::Eq, true).fetch(&pool)` →
   `filter_eq_fetch_returns_matching_rows`
 * §3.34 `Op::Gt` / `Op::Lt` / `Op::ILike` / `Op::In` / `Op::Between` /
   `Op::IsNull` — six tests covering the full Op surface.
@@ -1871,7 +1871,7 @@ API:         [`crates/rustango/src/sql/sqlite.rs`](../../src/sql/sqlite.rs)
 Recipe:
 ```rust,ignore
 Post::objects()
-    .filter("title", Op::ILike, "%hello%")
+    .filter_op("title", Op::ILike, "%hello%")
     .fetch_pool(&pool).await?;  // emits: WHERE LOWER(title) LIKE LOWER(?)
 ```
 

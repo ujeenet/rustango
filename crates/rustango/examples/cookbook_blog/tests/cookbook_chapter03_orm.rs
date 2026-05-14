@@ -87,7 +87,7 @@ async fn filter_eq_fetch_returns_matching_rows() {
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
     let published: Vec<Post> = Post::objects()
-        .filter("published", Op::Eq, true)
+        .filter_op("published", Op::Eq, true)
         .fetch(&pool).await.unwrap();
     assert_eq!(published.len(), 3, "3 of 5 posts are published");
     for p in &published { assert!(p.published, "filter must keep only published"); }
@@ -101,7 +101,7 @@ async fn filter_with_gt_lt_op() {
     let popular: Vec<Post> = Post::objects()
         // Bind as i64 — the column is BIGINT, and `90` would otherwise
         // infer as i32 and trip rustango's TypeMismatch guard.
-        .filter("view_count", Op::Gt, 90i64)
+        .filter_op("view_count", Op::Gt, 90i64)
         .fetch(&pool).await.unwrap();
     assert_eq!(popular.len(), 2, "view_count>90: rust-orm(100) + django-shape(250)");
     let titles: Vec<&str> = popular.iter().map(|p| p.title.as_str()).collect();
@@ -115,7 +115,7 @@ async fn filter_with_ilike_case_insensitive() {
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
     let drafts: Vec<Post> = Post::objects()
-        .filter("title", Op::ILike, "%draft%")
+        .filter_op("title", Op::ILike, "%draft%")
         .fetch(&pool).await.unwrap();
     assert_eq!(drafts.len(), 2);
 }
@@ -127,7 +127,7 @@ async fn filter_with_in_list() {
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
     let picks: Vec<Post> = Post::objects()
-        .filter("slug", Op::In, SqlValue::List(vec![
+        .filter_op("slug", Op::In, SqlValue::List(vec![
             SqlValue::String("rust-orm".into()),
             SqlValue::String("axum-101".into()),
         ]))
@@ -142,7 +142,7 @@ async fn filter_with_between_range() {
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
     let mid: Vec<Post> = Post::objects()
-        .filter("view_count", Op::Between, SqlValue::List(vec![
+        .filter_op("view_count", Op::Between, SqlValue::List(vec![
             SqlValue::I64(50), SqlValue::I64(150),
         ]))
         .fetch(&pool).await.unwrap();
@@ -156,7 +156,7 @@ async fn filter_with_is_null_unpublished() {
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
     let drafts: Vec<Post> = Post::objects()
-        .filter("published_at", Op::IsNull, SqlValue::Bool(true))
+        .filter_op("published_at", Op::IsNull, SqlValue::Bool(true))
         .fetch(&pool).await.unwrap();
     assert_eq!(drafts.len(), 2, "draft-1 + draft-2 have NULL published_at");
 }
@@ -167,7 +167,7 @@ async fn order_by_view_count_desc() {
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
     let by_views: Vec<Post> = Post::objects()
-        .filter("published", Op::Eq, true)
+        .filter_op("published", Op::Eq, true)
         // QuerySet::order_by uses (column, desc): true = DESC, false = ASC.
         .order_by(&[("view_count", true)])
         .fetch(&pool).await.unwrap();
@@ -201,7 +201,7 @@ async fn aggregate_count_and_sum() {
     let _ = fresh_blog(&pool).await;
 
     let q = Post::objects()
-        .filter("published", Op::Eq, true)
+        .filter_op("published", Op::Eq, true)
         .aggregate()
         .annotate("total", AggregateExpr::Count(None))
         .annotate("views", AggregateExpr::Sum("view_count"))
@@ -242,7 +242,7 @@ async fn save_inserts_then_updates_in_place() {
     p.save(&pool).await.unwrap();
 
     let back: Vec<Post> = Post::objects()
-        .filter("id", Op::Eq, id)
+        .filter_op("id", Op::Eq, id)
         .fetch(&pool).await.unwrap();
     assert_eq!(back[0].body, "v2");
     assert!(back[0].published);
