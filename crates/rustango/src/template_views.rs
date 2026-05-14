@@ -1838,7 +1838,10 @@ async fn handle_update_post(
     let assignments: Vec<crate::core::Assignment> = columns
         .into_iter()
         .zip(values)
-        .map(|(column, value)| crate::core::Assignment { column, value })
+        .map(|(column, value)| crate::core::Assignment {
+            column,
+            value: value.into(),
+        })
         .collect();
     let update_q = crate::core::UpdateQuery {
         model: state.schema,
@@ -3379,7 +3382,10 @@ mod tenant {
         let assignments: Vec<crate::core::Assignment> = columns
             .into_iter()
             .zip(values)
-            .map(|(column, value)| crate::core::Assignment { column, value })
+            .map(|(column, value)| crate::core::Assignment {
+                column,
+                value: value.into(),
+            })
             .collect();
         let update_q = crate::core::UpdateQuery {
             model: state.schema,

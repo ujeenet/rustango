@@ -66,6 +66,19 @@ struct RawAssignment {
     value: SqlValue,
 }
 
+/// Staged `field = <expression>` assignment for the [`F()`]-shaped
+/// SET path. `field` is the Rust-side name resolved against the
+/// schema at `compile()` time; `value` is an [`crate::core::Expr`]
+/// tree that may contain column refs + arithmetic. Resolves to
+/// [`crate::core::Assignment`] in `resolve_assignment_expr`.
+///
+/// [`F()`]: crate::core::F
+#[derive(Debug, Clone)]
+struct RawExprAssignment {
+    field: String,
+    value: crate::core::Expr,
+}
+
 impl<T: Model> Default for QuerySet<T> {
     fn default() -> Self {
         Self::new()
@@ -310,6 +323,9 @@ pub struct UpdateBuilder<T: Model> {
 
 enum PendingAssignment {
     Raw(RawAssignment),
+    /// `field = <Expr>` — staging for the `F()` SET path. Resolved at
+    /// `compile()` time so the field name validates against the schema.
+    RawExpr(RawExprAssignment),
     Resolved(Assignment),
 }
 
@@ -332,6 +348,33 @@ impl<T: Model> UpdateBuilder<T> {
         self
     }
 
+    /// Append a `SET field = <expression>` — the [`Expr`]-shaped form
+    /// that powers `F()` column references and arithmetic:
+    ///
+    /// ```ignore
+    /// // Atomic counter increment, no read-modify-write race:
+    /// Post::objects()
+    ///     .where_(Post::id.eq(7))
+    ///     .update()
+    ///     .set_expr("views", F("views") + 1)
+    ///     .execute_pool(&pool).await?;
+    /// ```
+    ///
+    /// Accepts a bare [`F`](crate::core::F), a literal (anything that
+    /// `Into<SqlValue>`), or a full arithmetic tree.
+    #[must_use]
+    pub fn set_expr(
+        mut self,
+        field: impl Into<String>,
+        expr: impl Into<crate::core::Expr>,
+    ) -> Self {
+        self.set.push(PendingAssignment::RawExpr(RawExprAssignment {
+            field: field.into(),
+            value: expr.into(),
+        }));
+        self
+    }
+
     /// Validate against `T::SCHEMA` and lower to an `UpdateQuery`.
     ///
     /// # Errors
@@ -346,6 +389,7 @@ impl<T: Model> UpdateBuilder<T> {
             .into_iter()
             .map(|p| match p {
                 PendingAssignment::Raw(raw) => resolve_assignment(model, raw),
+                PendingAssignment::RawExpr(raw) => resolve_assignment_expr(model, raw),
                 PendingAssignment::Resolved(assignment) => Ok(assignment),
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -518,8 +562,60 @@ fn resolve_assignment(
 
     Ok(Assignment {
         column: field.column,
+        value: raw.value.into(),
+    })
+}
+
+/// Resolve a [`RawExprAssignment`] (the `F()` SET path) against the
+/// schema. Field name + every column reference inside the expression
+/// tree are validated; the literal type-check that
+/// [`resolve_assignment`] does for [`SqlValue`] doesn't apply because
+/// the RHS may be a column ref or arithmetic, both of which only have
+/// a resolved type at the row level.
+fn resolve_assignment_expr(
+    model: &'static ModelSchema,
+    raw: RawExprAssignment,
+) -> Result<Assignment, QueryError> {
+    let field = model
+        .field(&raw.field)
+        .ok_or_else(|| QueryError::UnknownField {
+            model: model.name,
+            field: raw.field.clone(),
+        })?;
+    validate_expr_columns_in_model(model, &raw.value)?;
+    Ok(Assignment {
+        column: field.column,
         value: raw.value,
     })
+}
+
+/// Walk an [`crate::core::Expr`] and confirm every `Column`
+/// reference resolves on `model`. Mirrors the same check that
+/// `core::query::WhereExpr::validate` does for `ColumnCompare` —
+/// duplicated here so the `UpdateBuilder` path catches typos at
+/// `compile()` time rather than at the database.
+fn validate_expr_columns_in_model(
+    model: &'static ModelSchema,
+    expr: &crate::core::Expr,
+) -> Result<(), QueryError> {
+    use crate::core::Expr;
+    match expr {
+        Expr::Literal(_) => Ok(()),
+        Expr::Column(name) => {
+            if model.field_by_column(name).is_none() {
+                Err(QueryError::UnknownField {
+                    model: model.name,
+                    field: (*name).to_owned(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+        Expr::BinOp { left, right, .. } => {
+            validate_expr_columns_in_model(model, left)?;
+            validate_expr_columns_in_model(model, right)
+        }
+    }
 }
 
 // ------------------------------------------------------------------ AggregateBuilder

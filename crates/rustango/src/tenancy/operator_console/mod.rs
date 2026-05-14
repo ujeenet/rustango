@@ -1100,7 +1100,7 @@ async fn org_edit_submit(
         .iter()
         .map(|(col, val)| crate::core::Assignment {
             column: *col,
-            value: val.clone(),
+            value: val.clone().into(),
         })
         .collect();
     let update_q = crate::core::UpdateQuery {
@@ -1296,7 +1296,8 @@ async fn org_edit_branding(
             value: v
                 .as_ref()
                 .map(|s| crate::core::SqlValue::String(s.clone()))
-                .unwrap_or(crate::core::SqlValue::Null),
+                .unwrap_or(crate::core::SqlValue::Null)
+                .into(),
         })
         .collect();
     let update_q = crate::core::UpdateQuery {

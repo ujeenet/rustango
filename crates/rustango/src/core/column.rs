@@ -168,13 +168,66 @@ pub trait Column: Copy + 'static {
 
     /// `SET column = value` for an UPDATE.
     fn set<V: Into<Self::Value>>(self, value: V) -> TypedAssignment<Self::Model> {
+        // value: V → Self::Value → SqlValue → Expr (each `.into()` step is
+        // a registered `From` impl).
+        let sql: SqlValue = value.into().into();
         TypedAssignment {
             inner: Assignment {
                 column: Self::COLUMN,
-                value: value.into().into(),
+                value: sql.into(),
             },
             _model: PhantomData,
         }
+    }
+
+    /// `SET column = <expression>` for an UPDATE — full [`Expr`] form,
+    /// for `F()` column references and arithmetic. The literal-value
+    /// shape stays on [`Column::set`].
+    fn set_expr(self, expr: impl Into<crate::core::Expr>) -> TypedAssignment<Self::Model> {
+        TypedAssignment {
+            inner: Assignment {
+                column: Self::COLUMN,
+                value: expr.into(),
+            },
+            _model: PhantomData,
+        }
+    }
+
+    // ----- Column-vs-expression predicates (Django `F()` rhs) -----
+
+    /// `column = <expr>` — Django's `filter(col=F("other"))` shape.
+    /// Accepts a bare [`F`](crate::core::F), a full [`Expr`](crate::core::Expr)
+    /// (e.g. `F("a") + 1`), or anything else that lifts via
+    /// `Into<Expr>`. Returns a [`TypedExpr`] so it composes with
+    /// `.and()`/`.or()` exactly like the literal-rhs variants.
+    fn eq_expr(self, rhs: impl Into<crate::core::Expr>) -> TypedExpr<Self::Model> {
+        TypedExpr::column_cmp(Self::COLUMN, Op::Eq, rhs.into())
+    }
+
+    /// `column <> <expr>`.
+    fn ne_expr(self, rhs: impl Into<crate::core::Expr>) -> TypedExpr<Self::Model> {
+        TypedExpr::column_cmp(Self::COLUMN, Op::Ne, rhs.into())
+    }
+
+    /// `column < <expr>` — the canonical column-vs-column compare
+    /// (e.g. `start_date.lt_expr(F("end_date"))`).
+    fn lt_expr(self, rhs: impl Into<crate::core::Expr>) -> TypedExpr<Self::Model> {
+        TypedExpr::column_cmp(Self::COLUMN, Op::Lt, rhs.into())
+    }
+
+    /// `column <= <expr>`.
+    fn lte_expr(self, rhs: impl Into<crate::core::Expr>) -> TypedExpr<Self::Model> {
+        TypedExpr::column_cmp(Self::COLUMN, Op::Lte, rhs.into())
+    }
+
+    /// `column > <expr>`.
+    fn gt_expr(self, rhs: impl Into<crate::core::Expr>) -> TypedExpr<Self::Model> {
+        TypedExpr::column_cmp(Self::COLUMN, Op::Gt, rhs.into())
+    }
+
+    /// `column >= <expr>`.
+    fn gte_expr(self, rhs: impl Into<crate::core::Expr>) -> TypedExpr<Self::Model> {
+        TypedExpr::column_cmp(Self::COLUMN, Op::Gte, rhs.into())
     }
 }
 
@@ -255,6 +308,17 @@ pub struct TypedExpr<M: Model> {
 }
 
 impl<M: Model> TypedExpr<M> {
+    /// Build a [`WhereExpr::ColumnCompare`] leaf — the `F()`-style
+    /// "column <op> expr" predicate. Used by [`Column::eq_expr`] &
+    /// friends; not normally constructed directly by user code.
+    #[must_use]
+    pub(crate) fn column_cmp(column: &'static str, op: Op, rhs: crate::core::Expr) -> Self {
+        Self {
+            inner: WhereExpr::ColumnCompare(super::query::ColumnFilter { column, op, rhs }),
+            _model: PhantomData,
+        }
+    }
+
     /// Unwrap to the dialect-neutral expression form.
     #[must_use]
     pub fn into_expr(self) -> WhereExpr {

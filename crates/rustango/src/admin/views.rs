@@ -1193,7 +1193,10 @@ pub(crate) async fn update_submit(
     };
     let assignments: Vec<Assignment> = collected
         .into_iter()
-        .map(|(column, value)| Assignment { column, value })
+        .map(|(column, value)| Assignment {
+            column,
+            value: value.into(),
+        })
         .collect();
 
     // v0.12.3: SELECT the row's pre-update state so the audit emit
@@ -1306,7 +1309,7 @@ pub(crate) async fn delete_submit(
                 model,
                 set: vec![Assignment {
                     column: col,
-                    value: SqlValue::from(chrono::Utc::now()),
+                    value: SqlValue::from(chrono::Utc::now()).into(),
                 }],
                 where_clause: WhereExpr::Predicate(Filter {
                     column: pk_field.column,
@@ -1483,7 +1486,7 @@ pub(crate) async fn action_submit(
                     model,
                     set: vec![Assignment {
                         column: col,
-                        value: SqlValue::from(chrono::Utc::now()),
+                        value: SqlValue::from(chrono::Utc::now()).into(),
                     }],
                     where_clause: WhereExpr::Predicate(Filter {
                         column: pk_field.column,
@@ -1523,7 +1526,7 @@ pub(crate) async fn action_submit(
                     model,
                     set: vec![Assignment {
                         column: col,
-                        value: SqlValue::Null,
+                        value: SqlValue::Null.into(),
                     }],
                     where_clause: WhereExpr::Predicate(Filter {
                         column: pk_field.column,

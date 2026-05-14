@@ -1258,8 +1258,10 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             out.update_assignments.push(quote! {
                 ::rustango::core::Assignment {
                     column: #column,
-                    value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
-                        ::chrono::Utc::now()
+                    value: ::core::convert::Into::<::rustango::core::Expr>::into(
+                        ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                            ::chrono::Utc::now()
+                        )
                     ),
                 }
             });
@@ -1268,8 +1270,10 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             out.update_assignments.push(quote! {
                 ::rustango::core::Assignment {
                     column: #column,
-                    value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
-                        ::core::clone::Clone::clone(&self.#ident)
+                    value: ::core::convert::Into::<::rustango::core::Expr>::into(
+                        ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&self.#ident)
+                        )
                     ),
                 }
             });
@@ -2687,8 +2691,10 @@ fn inherent_impl_tokens(
                         set: ::std::vec![
                             ::rustango::core::Assignment {
                                 column: #col_lit,
-                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
-                                    ::chrono::Utc::now()
+                                value: ::core::convert::Into::<::rustango::core::Expr>::into(
+                                    ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                        ::chrono::Utc::now()
+                                    )
                                 ),
                             },
                         ],
@@ -2727,7 +2733,9 @@ fn inherent_impl_tokens(
                         set: ::std::vec![
                             ::rustango::core::Assignment {
                                 column: #col_lit,
-                                value: ::rustango::core::SqlValue::Null,
+                                value: ::core::convert::Into::<::rustango::core::Expr>::into(
+                                    ::rustango::core::SqlValue::Null
+                                ),
                             },
                         ],
                         where_clause: ::rustango::core::WhereExpr::Predicate(

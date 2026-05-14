@@ -163,9 +163,15 @@ fn update_builder_accumulates_set_assignments() {
 
     assert_eq!(query.set.len(), 2);
     assert_eq!(query.set[0].column, "is_active");
-    assert_eq!(query.set[0].value, SqlValue::Bool(false));
+    assert_eq!(
+        query.set[0].value,
+        rustango::core::Expr::Literal(SqlValue::Bool(false))
+    );
     assert_eq!(query.set[1].column, "name");
-    assert_eq!(query.set[1].value, SqlValue::String("ALICE".into()));
+    assert_eq!(
+        query.set[1].value,
+        rustango::core::Expr::Literal(SqlValue::String("ALICE".into()))
+    );
 
     let filters = query.where_clause.as_flat_and().unwrap();
     assert_eq!(filters.len(), 1);

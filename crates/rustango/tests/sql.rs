@@ -363,7 +363,7 @@ fn update_single_set_no_where_runs_table_wide() {
         model: User::SCHEMA,
         set: vec![Assignment {
             column: "is_active",
-            value: SqlValue::Bool(false),
+            value: SqlValue::Bool(false).into(),
         }],
         where_clause: WhereExpr::And(vec![]),
     };
@@ -379,11 +379,11 @@ fn update_multi_set_with_where_orders_set_then_filter_placeholders() {
         set: vec![
             Assignment {
                 column: "name",
-                value: SqlValue::String("ALICE".into()),
+                value: SqlValue::String("ALICE".into()).into(),
             },
             Assignment {
                 column: "is_active",
-                value: SqlValue::Bool(false),
+                value: SqlValue::Bool(false).into(),
             },
         ],
         where_clause: WhereExpr::Predicate(eq_filter("id", SqlValue::I64(7))),
@@ -409,7 +409,7 @@ fn update_with_multiple_filters_chains_with_and() {
         model: User::SCHEMA,
         set: vec![Assignment {
             column: "is_active",
-            value: SqlValue::Bool(true),
+            value: SqlValue::Bool(true).into(),
         }],
         where_clause: WhereExpr::and_predicates(vec![
             eq_filter("name", SqlValue::String("alice".into())),
@@ -445,7 +445,7 @@ fn update_propagates_filter_errors() {
         model: User::SCHEMA,
         set: vec![Assignment {
             column: "is_active",
-            value: SqlValue::Bool(false),
+            value: SqlValue::Bool(false).into(),
         }],
         where_clause: WhereExpr::Predicate(Filter {
             column: "id",
