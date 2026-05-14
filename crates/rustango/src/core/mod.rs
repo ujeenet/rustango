@@ -3,6 +3,7 @@
 //! This crate is dependency-light on purpose: no async, no DB drivers, no proc-macros.
 //! Anything that needs to be referenced by both the macro output and the runtime lives here.
 
+pub mod aggregates;
 pub mod case;
 mod column;
 mod error;

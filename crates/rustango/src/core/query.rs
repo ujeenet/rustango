@@ -665,6 +665,20 @@ pub struct BulkUpdateQuery {
 }
 
 /// One aggregate expression in an [`AggregateQuery`].
+///
+/// The flat variants (`Count`, `Sum`, etc.) emit the standard
+/// `AGG(col)` shape; the two recursive wrappers ([`Filtered`] and
+/// [`Coalesced`], issue #6) compose on top to add a `FILTER (WHERE …)`
+/// predicate or a `COALESCE(…, default)` empty-result fallback.
+///
+/// Build via the higher-level helpers in [`crate::core::aggregates`]
+/// (`count`/`sum`/`avg`/`max`/`min`/`count_distinct`/`stddev`/
+/// `stddev_pop`/`variance`/`variance_pop`) rather than constructing
+/// these variants directly — the builder enforces the right wrap
+/// order (`Coalesced` outside `Filtered`).
+///
+/// [`Filtered`]: AggregateExpr::Filtered
+/// [`Coalesced`]: AggregateExpr::Coalesced
 #[derive(Debug, Clone)]
 pub enum AggregateExpr {
     /// `COUNT(*)` or `COUNT(column)` when `column` is `Some`.
@@ -680,6 +694,36 @@ pub enum AggregateExpr {
     Max(&'static str),
     /// `MIN(column)`.
     Min(&'static str),
+    /// `STDDEV_SAMP(column)` — sample standard deviation. Issue #6.
+    /// Native on PG + MySQL 8+; the writer raises
+    /// [`crate::sql::SqlError::AggregateNotSupported`] on SQLite,
+    /// which has no built-in stddev (matches Django behavior).
+    StdDev(&'static str),
+    /// `STDDEV_POP(column)` — population standard deviation. Issue #6.
+    /// Same dialect-support story as [`StdDev`](AggregateExpr::StdDev).
+    StdDevPop(&'static str),
+    /// `VAR_SAMP(column)` — sample variance. Issue #6.
+    /// Same dialect-support story as [`StdDev`](AggregateExpr::StdDev).
+    Variance(&'static str),
+    /// `VAR_POP(column)` — population variance. Issue #6.
+    /// Same dialect-support story as [`StdDev`](AggregateExpr::StdDev).
+    VariancePop(&'static str),
+    /// `<inner> FILTER (WHERE <filter>)` on PG / SQLite (3.30+);
+    /// `<inner-with-CASE-WHEN-arg>` on MySQL. Issue #6. Wraps any
+    /// base aggregate (Count/Sum/Avg/Max/Min/CountDistinct/StdDev/
+    /// Variance/etc.) — nested `Filtered` is rejected at emit time
+    /// to keep emission unambiguous.
+    Filtered {
+        inner: Box<AggregateExpr>,
+        filter: WhereExpr,
+    },
+    /// `COALESCE(<inner>, <default>)` — empty-result fallback. Issue #6.
+    /// Always outermost when combined with `Filtered` (builder enforces
+    /// the order); nested `Coalesced` is rejected at emit time.
+    Coalesced {
+        inner: Box<AggregateExpr>,
+        default: SqlValue,
+    },
 }
 
 /// A `SELECT … GROUP BY … HAVING …` query. Returned rows are untyped

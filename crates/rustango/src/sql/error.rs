@@ -169,6 +169,27 @@ pub enum SqlError {
     #[error("JOIN `on` predicate must not be empty")]
     EmptyJoinOnCondition,
 
+    /// An aggregate function isn't supported by the active dialect
+    /// (issue #6). Today raised only for `StdDev` / `StdDevPop` /
+    /// `Variance` / `VariancePop` on SQLite, which has no built-in
+    /// statistical aggregates. Caller can either switch dialects,
+    /// drop the offending annotation, or compute the variance
+    /// formula in app code.
+    #[error("aggregate `{aggregate}` is not supported by the `{dialect}` dialect")]
+    AggregateNotSupported {
+        aggregate: &'static str,
+        dialect: &'static str,
+    },
+
+    /// An ill-formed `AggregateExpr` tree was passed in (issue #6) —
+    /// e.g. `Coalesced { Coalesced { … } }` or `Filtered { Filtered {
+    /// … } }`. The public [`crate::core::aggregates`] builder never
+    /// produces these, so this is a "hand-rolled IR" programmer
+    /// error. `wrapper` names the offending shape for the error
+    /// message.
+    #[error("nested aggregate wrapper `{wrapper}` is not supported")]
+    NestedAggregateWrapper { wrapper: &'static str },
+
     /// A [`crate::core::JoinKind`] was used on a dialect that doesn't
     /// support it (issue #80). Today: `Right` on SQLite, `Full` on
     /// SQLite + MySQL. Caller can either switch dialects, restructure

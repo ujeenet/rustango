@@ -462,6 +462,70 @@ let counts = Author::objects()
 // each Author gets a `post_count` extra field accessible via the annotated row
 ```
 
+### Conditional aggregates — `filter=` + `default=` + StdDev/Variance
+
+Issue #6 adds Django-shape `count("id").filter(...)` / `sum("price").default(0)` / `stddev("pages")` builders on the same `AggregateExpr` machinery. The non-PG fallback for `filter=` reuses the `Expr::Case` infrastructure from the conditional-expression slice.
+
+```rust
+use rustango::core::aggregates::{avg, count, count_all, stddev, sum};
+use rustango::core::Column as _;
+
+let rows = Post::objects()
+    .aggregate()
+    // COUNT(*) FILTER (WHERE is_active AND status = 'published')
+    .annotate(
+        "active_published",
+        count_all()
+            .filter(Post::is_active.eq(true).and(Post::status.eq("published")))
+            .into(),
+    )
+    // COALESCE(SUM(price) FILTER (WHERE status = 'published'), 0)
+    //   — returns 0 instead of NULL when the queryset is empty.
+    .annotate(
+        "revenue_or_zero",
+        sum("price")
+            .filter(Post::status.eq("published"))
+            .default(0_i64)
+            .into(),
+    )
+    .annotate("avg_pages", avg("pages").into())
+    .annotate("page_stddev", stddev("pages").into())
+    .compile()?;
+let result = rustango::sql::fetch_aggregate(&rows, &pool).await?;
+```
+
+**Builders** in `rustango::core::aggregates`:
+
+| Builder | SQL |
+|---|---|
+| `count(col)` | `COUNT(col)` |
+| `count_all()` | `COUNT(*)` |
+| `count_distinct(col)` | `COUNT(DISTINCT col)` |
+| `sum(col)` / `avg(col)` / `max(col)` / `min(col)` | the usual |
+| `stddev(col)` / `stddev_pop(col)` | `STDDEV_SAMP` / `STDDEV_POP` |
+| `variance(col)` / `variance_pop(col)` | `VAR_SAMP` / `VAR_POP` |
+
+Each returns an `AggregateBuilder` with two chainable modifiers:
+
+- `.filter(predicate)` — wrap in `FILTER (WHERE predicate)`. The predicate is any `WhereExpr` (typed `.eq()` / `.and()` / raw `WhereExpr::Or(...)`), so it composes the same way as a normal WHERE.
+- `.default(value)` — wrap in `COALESCE(..., value)` so an empty queryset returns the default instead of `NULL`.
+
+Calling both chains as `Coalesced` outside `Filtered`: `COALESCE(SUM(col) FILTER (WHERE p), 0)`. Chain order doesn't matter — `.filter(p).default(0)` and `.default(0).filter(p)` produce the same IR.
+
+**Tri-dialect emission:**
+
+| Feature | PG | MySQL | SQLite |
+|---|---|---|---|
+| `Count` / `Sum` / `Avg` / `Max` / `Min` / `CountDistinct` | ✓ | ✓ | ✓ |
+| `StdDev` / `StdDevPop` / `Variance` / `VariancePop` | ✓ | ✓ (8.0+) | ✗ `SqlError::AggregateNotSupported` |
+| `.filter(...)` — native `FILTER (WHERE …)` | ✓ | ✗ rewritten | ✓ (3.30+) |
+| `.filter(...)` — `CASE WHEN` fallback | — | ✓ `<agg>(CASE WHEN … THEN <arg> END)` | — |
+| `.default(...)` — `COALESCE` | ✓ | ✓ | ✓ |
+
+The writer applies the dialect's int/float cast (`::bigint`, `CAST(... AS SIGNED)`, etc.) around the whole `FILTER` expression — `SUM(col)::bigint FILTER (...)` is a PG parse error, so the emitted form is `(SUM(col) FILTER (...))::bigint`. Same shape for `STDDEV_SAMP` / `VAR_SAMP` (they return NUMERIC on PG for bigint input).
+
+**SQLite + StdDev/Variance:** SQLite has no built-in statistical aggregates, so the writer rejects with `SqlError::AggregateNotSupported { aggregate, dialect: "sqlite" }`. Compute the variance formula in app code if portable stats are needed (same posture Django takes).
+
 ---
 
 ## Joins + select_related

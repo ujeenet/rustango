@@ -266,43 +266,7 @@ pub(super) fn write_aggregate(b: &mut Sql<'_>, query: &AggregateQuery) -> Result
         if !query.group_by.is_empty() || i > 0 {
             b.sql.push_str(", ");
         }
-        match expr {
-            AggregateExpr::Count(None) => b.sql.push_str("COUNT(*)"),
-            AggregateExpr::Count(Some(col)) => {
-                b.sql.push_str("COUNT(");
-                b.write_ident(col);
-                b.sql.push(')');
-            }
-            AggregateExpr::CountDistinct(col) => {
-                b.sql.push_str("COUNT(DISTINCT ");
-                b.write_ident(col);
-                b.sql.push(')');
-            }
-            AggregateExpr::Sum(col) => {
-                // Both PG and MySQL widen SUM(int) into a type the
-                // SqlValue aggregate decoder doesn't try (PG NUMERIC,
-                // MySQL DECIMAL). Ask the dialect to cast back to a
-                // known scalar so the i64 decode arm picks it up.
-                let inner = format!("SUM({})", b.d.quote_ident(col));
-                let wrapped = b.d.cast_aggregate_to_int(&inner);
-                b.sql.push_str(&wrapped);
-            }
-            AggregateExpr::Avg(col) => {
-                let inner = format!("AVG({})", b.d.quote_ident(col));
-                let wrapped = b.d.cast_aggregate_to_float(&inner);
-                b.sql.push_str(&wrapped);
-            }
-            AggregateExpr::Max(col) => {
-                b.sql.push_str("MAX(");
-                b.write_ident(col);
-                b.sql.push(')');
-            }
-            AggregateExpr::Min(col) => {
-                b.sql.push_str("MIN(");
-                b.write_ident(col);
-                b.sql.push(')');
-            }
-        }
+        write_aggregate_expr(b, expr, query.model)?;
         b.sql.push_str(" AS ");
         b.write_ident(alias);
     }
@@ -329,6 +293,244 @@ pub(super) fn write_aggregate(b: &mut Sql<'_>, query: &AggregateQuery) -> Result
     write_order_limit_offset(b, &query.order_by, query.limit, query.offset, None);
 
     Ok(())
+}
+
+/// What kind of decoder-side cast a base aggregate needs.
+/// PG widens `SUM(bigint)` to NUMERIC and `AVG/STDDEV/VAR_*(bigint)`
+/// to NUMERIC too; MySQL widens to DECIMAL/DOUBLE. The SqlValue
+/// decoder only tries `i64`/`f64`, so the writer post-wraps the
+/// aggregate call to a target type per dialect.
+#[derive(Debug, Clone, Copy)]
+enum AggCast {
+    Int,
+    Float,
+}
+
+/// Return the cast a flat aggregate variant needs, or `None` for
+/// aggregates whose native return type the decoder already handles
+/// (Count, CountDistinct, Max, Min — return i64 on every dialect).
+fn aggregate_cast_kind(expr: &AggregateExpr) -> Option<AggCast> {
+    match expr {
+        AggregateExpr::Sum(_) => Some(AggCast::Int),
+        AggregateExpr::Avg(_)
+        | AggregateExpr::StdDev(_)
+        | AggregateExpr::StdDevPop(_)
+        | AggregateExpr::Variance(_)
+        | AggregateExpr::VariancePop(_) => Some(AggCast::Float),
+        _ => None,
+    }
+}
+
+/// Apply the dialect's cast helper to an already-emitted aggregate
+/// call (or filtered aggregate call). For PG the form is
+/// `<expr>::bigint` / `<expr>::double precision`; MySQL wraps with
+/// `CAST(... AS SIGNED/DOUBLE)`; SQLite with `CAST(... AS INTEGER/REAL)`.
+fn apply_agg_cast(d: &dyn Dialect, kind: AggCast, inner: &str) -> String {
+    match kind {
+        AggCast::Int => d.cast_aggregate_to_int(inner),
+        AggCast::Float => d.cast_aggregate_to_float(inner),
+    }
+}
+
+/// Format the bare aggregate-call SQL (no decoder-side cast) for one
+/// of the flat variants. Doesn't write to `b.sql` — the caller
+/// composes it (optionally inside a FILTER clause, then post-wraps
+/// with `apply_agg_cast` for cast-needing kinds).
+fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, SqlError> {
+    Ok(match expr {
+        AggregateExpr::Count(None) => "COUNT(*)".into(),
+        AggregateExpr::Count(Some(col)) => format!("COUNT({})", b.d.quote_ident(col)),
+        AggregateExpr::CountDistinct(col) => {
+            format!("COUNT(DISTINCT {})", b.d.quote_ident(col))
+        }
+        AggregateExpr::Sum(col) => format!("SUM({})", b.d.quote_ident(col)),
+        AggregateExpr::Avg(col) => format!("AVG({})", b.d.quote_ident(col)),
+        AggregateExpr::Max(col) => format!("MAX({})", b.d.quote_ident(col)),
+        AggregateExpr::Min(col) => format!("MIN({})", b.d.quote_ident(col)),
+        AggregateExpr::StdDev(col)
+        | AggregateExpr::StdDevPop(col)
+        | AggregateExpr::Variance(col)
+        | AggregateExpr::VariancePop(col) => {
+            if b.d.name() == "sqlite" {
+                return Err(SqlError::AggregateNotSupported {
+                    aggregate: stddev_variance_name(expr),
+                    dialect: b.d.name(),
+                });
+            }
+            format!("{}({})", stddev_variance_name(expr), b.d.quote_ident(col))
+        }
+        AggregateExpr::Filtered { .. } | AggregateExpr::Coalesced { .. } => {
+            // `format_bare_aggregate` is only called with a flat
+            // variant — the wrappers are unwrapped first.
+            return Err(SqlError::NestedAggregateWrapper {
+                wrapper: "wrapper at format_bare_aggregate site",
+            });
+        }
+    })
+}
+
+/// Emit one aggregate expression. Recursive for `Filtered` and
+/// `Coalesced` wrappers (issue #6). Dialect dispatch happens here:
+/// PG + SQLite (3.30+) emit native `FILTER (WHERE …)`; MySQL rewrites
+/// to `<agg>(CASE WHEN … THEN <arg> END)`. `Coalesced` always emits
+/// `COALESCE(<inner>, <default>)` regardless of dialect.
+fn write_aggregate_expr(
+    b: &mut Sql<'_>,
+    expr: &AggregateExpr,
+    model: &'static ModelSchema,
+) -> Result<(), SqlError> {
+    match expr {
+        AggregateExpr::Coalesced { inner, default } => {
+            if matches!(inner.as_ref(), AggregateExpr::Coalesced { .. }) {
+                return Err(SqlError::NestedAggregateWrapper {
+                    wrapper: "Coalesced",
+                });
+            }
+            b.sql.push_str("COALESCE(");
+            write_aggregate_expr(b, inner, model)?;
+            b.sql.push_str(", ");
+            let cast = aggregate_column(inner).and_then(|c| null_cast_for(b.d, model, c));
+            b.push_param_typed(default.clone(), cast);
+            b.sql.push(')');
+            Ok(())
+        }
+        AggregateExpr::Filtered { inner, filter } => {
+            if matches!(inner.as_ref(), AggregateExpr::Filtered { .. }) {
+                return Err(SqlError::NestedAggregateWrapper {
+                    wrapper: "Filtered",
+                });
+            }
+            if matches!(inner.as_ref(), AggregateExpr::Coalesced { .. }) {
+                return Err(SqlError::NestedAggregateWrapper {
+                    wrapper: "Filtered(Coalesced)",
+                });
+            }
+            // MySQL: no FILTER keyword — rewrite via CASE WHEN. The
+            // helper applies the dialect's cast helper post-emit for
+            // Sum/Avg/StdDev/etc.
+            if b.d.name() == "mysql" {
+                return write_aggregate_as_case_when(b, inner, filter);
+            }
+            // PG + SQLite (3.30+): native FILTER. Emit
+            // `<bare> FILTER (WHERE <pred>)` into a slice, then
+            // post-wrap with the dialect's cast helper (the cast can't
+            // sit between `<bare>` and `FILTER` on PG — `SUM(x)::bigint
+            // FILTER (...)` is a parse error — so we apply the cast
+            // around `(<bare> FILTER (...))`).
+            let bare = format_bare_aggregate(b, inner)?;
+            let prior = b.sql.len();
+            b.sql.push_str(&bare);
+            b.sql.push_str(" FILTER (WHERE ");
+            write_where_expr(b, filter, None, Some(model))?;
+            b.sql.push(')');
+            if let Some(kind) = aggregate_cast_kind(inner) {
+                let emitted = b.sql[prior..].to_string();
+                b.sql.truncate(prior);
+                let wrapped = apply_agg_cast(b.d, kind, &format!("({emitted})"));
+                b.sql.push_str(&wrapped);
+            }
+            Ok(())
+        }
+        _ => write_aggregate_kind(b, expr),
+    }
+}
+
+/// Emit one of the flat aggregate variants (no `Filtered` /
+/// `Coalesced` wrappers). Pairs `format_bare_aggregate` with a
+/// dialect-aware cast wrap for the kinds whose native return type
+/// the decoder can't otherwise unwrap.
+fn write_aggregate_kind(b: &mut Sql<'_>, expr: &AggregateExpr) -> Result<(), SqlError> {
+    let bare = format_bare_aggregate(b, expr)?;
+    let out = match aggregate_cast_kind(expr) {
+        Some(kind) => apply_agg_cast(b.d, kind, &bare),
+        None => bare,
+    };
+    b.sql.push_str(&out);
+    Ok(())
+}
+
+/// MySQL fallback for `<inner> FILTER (WHERE predicate)`: rewrite to
+/// `<agg>(CASE WHEN predicate THEN <argument> END)`. The `<argument>`
+/// depends on the aggregate kind: `COUNT(*)` becomes
+/// `COUNT(CASE WHEN p THEN 1 END)`, everything else becomes
+/// `<AGG>(CASE WHEN p THEN <col> END)`.
+fn write_aggregate_as_case_when(
+    b: &mut Sql<'_>,
+    inner: &AggregateExpr,
+    filter: &WhereExpr,
+) -> Result<(), SqlError> {
+    // Pick the aggregate keyword (and CASE-THEN argument) for the
+    // emission. COUNT(*) gets `THEN 1`; everything else gets `THEN
+    // <col>`. CountDistinct prefixes the CASE with `DISTINCT`.
+    let (agg_kw, case_then, distinct_prefix) = match inner {
+        AggregateExpr::Count(None) => ("COUNT", None, ""),
+        AggregateExpr::Count(Some(col)) => ("COUNT", Some(*col), ""),
+        AggregateExpr::CountDistinct(col) => ("COUNT", Some(*col), "DISTINCT "),
+        AggregateExpr::Sum(col) => ("SUM", Some(*col), ""),
+        AggregateExpr::Avg(col) => ("AVG", Some(*col), ""),
+        AggregateExpr::Max(col) => ("MAX", Some(*col), ""),
+        AggregateExpr::Min(col) => ("MIN", Some(*col), ""),
+        AggregateExpr::StdDev(col)
+        | AggregateExpr::StdDevPop(col)
+        | AggregateExpr::Variance(col)
+        | AggregateExpr::VariancePop(col) => (stddev_variance_name(inner), Some(*col), ""),
+        AggregateExpr::Filtered { .. } | AggregateExpr::Coalesced { .. } => {
+            return Err(SqlError::NestedAggregateWrapper {
+                wrapper: "wrapper inside Filtered fallback",
+            });
+        }
+    };
+    let prior = b.sql.len();
+    b.sql.push_str(agg_kw);
+    b.sql.push('(');
+    b.sql.push_str(distinct_prefix);
+    b.sql.push_str("CASE WHEN ");
+    write_where_expr(b, filter, None, None)?;
+    b.sql.push_str(" THEN ");
+    match case_then {
+        Some(col) => b.write_ident(col),
+        None => b.sql.push('1'),
+    }
+    b.sql.push_str(" END)");
+    // Apply the dialect's cast wrap for Sum/Avg/StdDev/Variance —
+    // same shape the flat path uses.
+    if let Some(kind) = aggregate_cast_kind(inner) {
+        let emitted = b.sql[prior..].to_string();
+        b.sql.truncate(prior);
+        let wrapped = apply_agg_cast(b.d, kind, &emitted);
+        b.sql.push_str(&wrapped);
+    }
+    Ok(())
+}
+
+/// Look up the column referenced by a flat aggregate variant (or by
+/// the inner of a wrapper). Returns `None` for `Count(None)` (no column).
+fn aggregate_column(expr: &AggregateExpr) -> Option<&'static str> {
+    match expr {
+        AggregateExpr::Count(c) => *c,
+        AggregateExpr::CountDistinct(c)
+        | AggregateExpr::Sum(c)
+        | AggregateExpr::Avg(c)
+        | AggregateExpr::Max(c)
+        | AggregateExpr::Min(c)
+        | AggregateExpr::StdDev(c)
+        | AggregateExpr::StdDevPop(c)
+        | AggregateExpr::Variance(c)
+        | AggregateExpr::VariancePop(c) => Some(c),
+        AggregateExpr::Filtered { inner, .. } | AggregateExpr::Coalesced { inner, .. } => {
+            aggregate_column(inner)
+        }
+    }
+}
+
+fn stddev_variance_name(expr: &AggregateExpr) -> &'static str {
+    match expr {
+        AggregateExpr::StdDev(_) => "STDDEV_SAMP",
+        AggregateExpr::StdDevPop(_) => "STDDEV_POP",
+        AggregateExpr::Variance(_) => "VAR_SAMP",
+        AggregateExpr::VariancePop(_) => "VAR_POP",
+        _ => "(unknown)", // not reachable from public paths
+    }
 }
 
 // ====================================================================
