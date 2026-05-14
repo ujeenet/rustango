@@ -285,6 +285,7 @@ Order::objects()
 |---|---|---|---|
 | `now()` | `NOW()` | `NOW()` | `CURRENT_TIMESTAMP` |
 | `extract_year(x)` | `CAST(EXTRACT(YEAR FROM x) AS INTEGER)` | `YEAR(x)` | `CAST(strftime('%Y', x) AS INTEGER)` |
+| `extract_week(x)` ⚠ | `EXTRACT(WEEK FROM x)` — ISO 8601, range 1–53 | `WEEK(x)` — Sunday-start, range **0**–53 | `strftime('%W', x)` — Monday-start, range 00–53 |
 | `extract_weekday(x)` | `CAST(EXTRACT(DOW FROM x) AS INTEGER)` | `(DAYOFWEEK(x) - 1)` | `CAST(strftime('%w', x) AS INTEGER)` |
 | `extract_quarter(x)` | `EXTRACT(QUARTER FROM x)` | `QUARTER(x)` | **unsupported** — error |
 | `trunc_date(x)` | `DATE(x)` | `DATE(x)` | `DATE(x)` |
@@ -296,6 +297,7 @@ Order::objects()
 
 - **`trunc_year/month` return type diverges**: timestamp on PG, text on MySQL/SQLite. Cast on the app side when reading if you need a typed `chrono::NaiveDate` — or store the bucket as a plain integer (`extract_year` + `extract_month`) and reconstruct in code.
 - **`extract_weekday` is normalized to 0 = Sunday** across all three dialects. MySQL's native `DAYOFWEEK()` returns 1=Sunday, so the writer subtracts 1.
+- **⚠ `extract_week` is NOT portable.** PG returns ISO 8601 week numbers (Monday-start, range 1–53); MySQL's default `WEEK(x)` is Sunday-start with range **0**–53; SQLite's `strftime('%W')` is Monday-start with range 00–53. For 2024-01-01 (a Monday), the three backends return `1`, `0`, and `01` respectively. Single-backend code can use it freely; cross-dialect code should compute the week boundary as a typed `chrono::DateTime` in Rust and filter on the timestamp column instead.
 - **`extract_quarter` on SQLite errors** with `OpNotSupportedInDialect` — SQLite has no native quarter token. Either gate the feature behind `cfg(not(sqlite))` or compute via `((extract_month - 1) / 3) + 1` in app code.
 - **Time-zone handling**: PG `EXTRACT` operates in the column's timezone; MySQL `YEAR()` operates in the session timezone (`SET time_zone = ...`); SQLite has no real TZ support — treat everything as UTC. Use `TIMESTAMPTZ` on PG, `DATETIME` on MySQL with the session TZ set, ISO-8601 strings on SQLite.
 
