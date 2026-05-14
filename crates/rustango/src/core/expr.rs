@@ -155,6 +155,17 @@ pub enum Expr {
         alias: &'static str,
         column: &'static str,
     },
+    /// Window function — `<fn>(args) OVER (PARTITION BY … ORDER BY …
+    /// [frame])`. Issue #7. Boxed because [`WindowExpr`] carries a
+    /// `Vec<Expr>` for arguments, which makes the enum size
+    /// unbounded otherwise.
+    ///
+    /// Build via [`crate::core::window`] (`row_number`, `rank`,
+    /// `dense_rank`, `lag`, `lead`, `first_value`, `last_value`,
+    /// `ntile`) rather than this variant directly.
+    ///
+    /// [`WindowExpr`]: crate::core::WindowExpr
+    Window(Box<super::window::WindowExpr>),
 }
 
 /// One arm of a [`Expr::Case`] expression — `WHEN <condition> THEN <then>`.

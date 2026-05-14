@@ -16,6 +16,7 @@ mod schema;
 pub mod subquery;
 mod validate;
 mod value;
+pub mod window;
 
 pub use case::{case, value, CaseBuilder};
 pub use column::{Column, TypedAssignment, TypedExpr, TypedFilter};
@@ -34,6 +35,7 @@ pub use schema::{
 };
 pub use validate::validate_value;
 pub use value::SqlValue;
+pub use window::{FrameBoundary, FrameKind, WindowExpr, WindowFn, WindowFrame};
 
 /// Re-exported so `#[derive(Model)]` output can name `inventory` without
 /// requiring downstream crates to add their own dependency on it.

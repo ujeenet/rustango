@@ -526,6 +526,118 @@ The writer applies the dialect's int/float cast (`::bigint`, `CAST(... AS SIGNED
 
 **SQLite + StdDev/Variance:** SQLite has no built-in statistical aggregates, so the writer rejects with `SqlError::AggregateNotSupported { aggregate, dialect: "sqlite" }`. Compute the variance formula in app code if portable stats are needed (same posture Django takes).
 
+### Window functions — `row_number / rank / dense_rank / lag / lead / first_value / last_value / ntile`
+
+Issue #7 closes the Django `Window(expression, partition_by=, order_by=, frame=)` gap with 8 function variants + ROWS/RANGE frame clauses. Tri-dialect uniform — every backend rustango supports (PG ≥ 9.0, MySQL ≥ 8.0, SQLite ≥ 3.25) ships native `OVER (…)` syntax.
+
+```rust
+use rustango::core::aggregates::max;
+use rustango::core::window::{lag, rank, row_number};
+
+// "Rank users by score within each tenant" — the canonical
+// integration target.
+let q = User::objects()
+    .aggregate()
+    .group_by("id")
+    .group_by("tenant_id")
+    .group_by("name")
+    .group_by("score")
+    .annotate("_a", max("id").into())  // satisfies GROUP BY on the projection
+    .annotate(
+        "tenant_rank",
+        rank().partition_by("tenant_id").order_by(&[("score", true)]).into(),
+    )
+    .order_by(&[("tenant_id", false), ("score", true)])
+    .compile()?;
+let rows = rustango::sql::fetch_aggregate(&q, &pool).await?;
+
+// Day-over-day delta via LAG with a default for the first row.
+let q = Event::objects()
+    .aggregate()
+    .group_by("id")
+    .group_by("day")
+    .group_by("count")
+    .annotate("_a", max("id").into())
+    .annotate(
+        "prev_count",
+        lag("count", 1, Some(SqlValue::I64(0)))
+            .partition_by("user_id")
+            .order_by(&[("day", false)])
+            .into(),
+    )
+    .compile()?;
+
+// Stable row index per group for "show me row N" pagination.
+let q = Post::objects()
+    .aggregate()
+    .group_by("id")
+    .group_by("status")
+    .group_by("created_at")
+    .annotate("_a", max("id").into())
+    .annotate(
+        "rn",
+        row_number()
+            .partition_by("status")
+            .order_by(&[("created_at", true)])
+            .into(),
+    )
+    .compile()?;
+```
+
+**Builders** in `rustango::core::window`:
+
+| Builder | SQL | Args |
+|---|---|---|
+| `row_number()` | `ROW_NUMBER()` | — |
+| `rank()` | `RANK()` | — |
+| `dense_rank()` | `DENSE_RANK()` | — |
+| `ntile(buckets)` | `NTILE(buckets)` | bucket count |
+| `lag(col, offset, default)` | `LAG(col, offset, default?)` | column + offset + optional default |
+| `lead(col, offset, default)` | `LEAD(col, offset, default?)` | column + offset + optional default |
+| `first_value(col)` | `FIRST_VALUE(col)` | column |
+| `last_value(col)` | `LAST_VALUE(col)` | column |
+
+Each returns a `WindowBuilder` with three chainable modifiers:
+
+- `.partition_by("col")` — append a `PARTITION BY` column. Call multiple times for multi-column partitioning.
+- `.order_by(&[("col", desc)])` — append `ORDER BY` columns (`desc = true` → DESC).
+- `.frame(WindowFrame { kind, start, end })` — set the optional `ROWS`/`RANGE` frame clause. `FrameBoundary::UnboundedPreceding` / `Preceding(n)` / `CurrentRow` / `Following(n)` / `UnboundedFollowing`.
+
+The builder lowers via `Into<Expr>` so window functions slot into `set_expr` (UPDATE) and `eq_expr` (WHERE rhs); via `Into<AggregateExpr>` so they compose with `annotate()`.
+
+**Annotate caveat (until issue #75 ships):**
+
+`annotate()` lives on the aggregate-builder which requires `GROUP BY` to project per-row scalar columns alongside aggregates. To project window-function results next to row columns today, list every row column you want to return in `.group_by(...)` calls and `annotate("_a", max("id").into())` as a no-op placeholder to keep the row identity stable. Issue #75 (GROUP BY auto-inference) lands a cleaner shape.
+
+**Frame clauses:**
+
+```rust
+use rustango::core::{FrameBoundary, FrameKind, WindowFrame};
+
+// Running total over the last 7 rows:
+let frame = WindowFrame {
+    kind: FrameKind::Rows,
+    start: FrameBoundary::Preceding(6),
+    end: Some(FrameBoundary::CurrentRow),
+};
+
+// Centered 11-row window:
+let frame = WindowFrame {
+    kind: FrameKind::Rows,
+    start: FrameBoundary::Preceding(5),
+    end: Some(FrameBoundary::Following(5)),
+};
+```
+
+**Tri-dialect emission:**
+
+`<fn>(args) OVER (PARTITION BY … ORDER BY … [frame])` is SQL-standard — identical across PG, MySQL 8+, and SQLite 3.25+. The one quirk: `LAG` / `LEAD` / `NTILE` require integer offsets/buckets on PG (binding as a bigint `$N` parameter causes `function lag(bigint, bigint, bigint) does not exist`). The writer inlines integer literals directly in the SQL for those slots; default-value args bind through normally.
+
+**Caveats:**
+
+- **`FILTER` + `Window` not yet supported**: combining `.filter(...)` with a window function raises `SqlError::NestedAggregateWrapper { wrapper: "Filtered(Window)" }` — the underlying syntax varies by function kind (PG allows `agg_fn() FILTER (WHERE …) OVER (…)` for aggregate-window funcs but not for ranking ones), and the writer hasn't been taught the dispatch. Filed for a follow-up if demand surfaces.
+- **`PercentRank` / `CumeDist` / `NthValue`** aren't in v1 — Django's complete set is bigger. v1 ships the 8 most-used variants; the missing three can be added incrementally with the same builder shape.
+
 ---
 
 ## Joins + select_related

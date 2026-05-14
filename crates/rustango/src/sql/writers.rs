@@ -366,6 +366,15 @@ fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, Sq
                 wrapper: "wrapper at format_bare_aggregate site",
             });
         }
+        AggregateExpr::Window(_) => {
+            // Window-in-aggregate is emitted by the dedicated
+            // `write_aggregate_expr` arm, not the bare-aggregate
+            // helper. Reaching this point means the writer treated
+            // a Window like a flat aggregate — a programmer error.
+            return Err(SqlError::NestedAggregateWrapper {
+                wrapper: "Window at format_bare_aggregate site",
+            });
+        }
     })
 }
 
@@ -431,6 +440,7 @@ fn write_aggregate_expr(
             }
             Ok(())
         }
+        AggregateExpr::Window(w) => write_window_expr(b, w),
         _ => write_aggregate_kind(b, expr),
     }
 }
@@ -479,6 +489,16 @@ fn write_aggregate_as_case_when(
                 wrapper: "wrapper inside Filtered fallback",
             });
         }
+        AggregateExpr::Window(_) => {
+            // `<window_fn>(...) OVER (...) FILTER (WHERE ...)` is
+            // valid SQL on some backends (PG since 9.4 for aggregate
+            // window functions; not for ranking ones), but mixing
+            // `Filtered` + `Window` requires careful per-function
+            // dispatch we haven't designed yet. Reject for v1.
+            return Err(SqlError::NestedAggregateWrapper {
+                wrapper: "Filtered(Window)",
+            });
+        }
     };
     let prior = b.sql.len();
     b.sql.push_str(agg_kw);
@@ -520,6 +540,10 @@ fn aggregate_column(expr: &AggregateExpr) -> Option<&'static str> {
         AggregateExpr::Filtered { inner, .. } | AggregateExpr::Coalesced { inner, .. } => {
             aggregate_column(inner)
         }
+        AggregateExpr::Window(w) => w.args.iter().find_map(|a| match a {
+            crate::core::Expr::Column(c) => Some(*c),
+            _ => None,
+        }),
     }
 }
 
@@ -801,6 +825,121 @@ fn write_expr(
             let qualified = format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(column),);
             b.sql.push_str(&qualified);
             Ok(())
+        }
+        Expr::Window(w) => write_window_expr(b, w),
+    }
+}
+
+/// Emit a window expression — `<fn>(args) OVER (PARTITION BY … ORDER
+/// BY … [frame])`. Tri-dialect uniform: PG ≥ 9.0, MySQL ≥ 8.0, and
+/// SQLite ≥ 3.25 all accept this SQL-standard form verbatim.
+fn write_window_expr(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(), SqlError> {
+    use crate::core::{Expr, WindowFn};
+    let fn_name = match w.kind {
+        WindowFn::RowNumber => "ROW_NUMBER",
+        WindowFn::Rank => "RANK",
+        WindowFn::DenseRank => "DENSE_RANK",
+        WindowFn::Ntile => "NTILE",
+        WindowFn::Lag => "LAG",
+        WindowFn::Lead => "LEAD",
+        WindowFn::FirstValue => "FIRST_VALUE",
+        WindowFn::LastValue => "LAST_VALUE",
+    };
+    b.sql.push_str(fn_name);
+    b.sql.push('(');
+    // PG's LAG/LEAD/NTILE require `offset`/`buckets` as `integer`, not
+    // `bigint`. Binding `i64` as a parameter (which PG types as
+    // `bigint`) makes function lookup fail with
+    // `function lag(bigint, bigint, bigint) does not exist`. The
+    // offset/bucket count is a compile-time constant in user code
+    // anyway — emit it inline as a SQL integer literal. The
+    // value-arg (Lag's first, Lead's first) and the default-arg
+    // (Lag's third, Lead's third) bind normally via params.
+    let integer_arg_index: Option<usize> = match w.kind {
+        WindowFn::Lag | WindowFn::Lead => Some(1),
+        WindowFn::Ntile => Some(0),
+        _ => None,
+    };
+    for (i, arg) in w.args.iter().enumerate() {
+        if i > 0 {
+            b.sql.push_str(", ");
+        }
+        if integer_arg_index == Some(i) {
+            if let Expr::Literal(SqlValue::I64(n)) = arg {
+                use std::fmt::Write as _;
+                let _ = write!(b.sql, "{n}");
+                continue;
+            }
+        }
+        write_expr(b, arg, None)?;
+    }
+    b.sql.push_str(") OVER (");
+    let mut first_clause = true;
+    if !w.partition_by.is_empty() {
+        b.sql.push_str("PARTITION BY ");
+        for (i, col) in w.partition_by.iter().enumerate() {
+            if i > 0 {
+                b.sql.push_str(", ");
+            }
+            b.write_ident(col);
+        }
+        first_clause = false;
+    }
+    if !w.order_by.is_empty() {
+        if !first_clause {
+            b.sql.push(' ');
+        }
+        b.sql.push_str("ORDER BY ");
+        for (i, o) in w.order_by.iter().enumerate() {
+            if i > 0 {
+                b.sql.push_str(", ");
+            }
+            b.write_ident(o.column);
+            if o.desc {
+                b.sql.push_str(" DESC");
+            }
+        }
+        first_clause = false;
+    }
+    if let Some(frame) = &w.frame {
+        if !first_clause {
+            b.sql.push(' ');
+        }
+        write_window_frame(b, frame);
+    }
+    b.sql.push(')');
+    Ok(())
+}
+
+fn write_window_frame(b: &mut Sql<'_>, frame: &crate::core::WindowFrame) {
+    use crate::core::{FrameBoundary, FrameKind};
+    b.sql.push_str(match frame.kind {
+        FrameKind::Rows => "ROWS",
+        FrameKind::Range => "RANGE",
+    });
+    b.sql.push(' ');
+    if frame.end.is_some() {
+        b.sql.push_str("BETWEEN ");
+    }
+    write_frame_boundary(b, frame.start);
+    if let Some(end) = frame.end {
+        b.sql.push_str(" AND ");
+        write_frame_boundary(b, end);
+    }
+
+    fn write_frame_boundary(b: &mut Sql<'_>, bound: FrameBoundary) {
+        match bound {
+            FrameBoundary::UnboundedPreceding => b.sql.push_str("UNBOUNDED PRECEDING"),
+            FrameBoundary::Preceding(n) => {
+                use std::fmt::Write as _;
+                let _ = write!(b.sql, "{n} PRECEDING");
+            }
+            FrameBoundary::CurrentRow => b.sql.push_str("CURRENT ROW"),
+            FrameBoundary::Following(n) => {
+                use std::fmt::Write as _;
+                let _ = write!(b.sql, "{n} FOLLOWING");
+            }
+            FrameBoundary::UnboundedFollowing => b.sql.push_str("UNBOUNDED FOLLOWING"),
         }
     }
 }

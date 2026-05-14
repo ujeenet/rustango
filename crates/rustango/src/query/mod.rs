@@ -706,6 +706,30 @@ fn validate_expr_columns_in_model(
         // there). `AliasedColumn` (issue #80) carries its own table
         // alias and is validated by the JOIN writer at emit time.
         Expr::Subquery(_) | Expr::OuterRef(_) | Expr::AliasedColumn { .. } => Ok(()),
+        // Window (issue #7) — partition_by + order_by + arg columns
+        // reference the model. Walk them.
+        Expr::Window(w) => {
+            for col in &w.partition_by {
+                if model.field_by_column(col).is_none() {
+                    return Err(QueryError::UnknownField {
+                        model: model.name,
+                        field: (*col).to_owned(),
+                    });
+                }
+            }
+            for o in &w.order_by {
+                if model.field_by_column(o.column).is_none() {
+                    return Err(QueryError::UnknownField {
+                        model: model.name,
+                        field: o.column.to_owned(),
+                    });
+                }
+            }
+            for arg in &w.args {
+                validate_expr_columns_in_model(model, arg)?;
+            }
+            Ok(())
+        }
     }
 }
 

@@ -320,6 +320,30 @@ fn validate_expr_columns(model: &'static ModelSchema, expr: &Expr) -> Result<(),
         // `AliasedColumn` (issue #80) carries its own table alias so
         // it doesn't resolve against the passed-in model.
         Expr::Subquery(_) | Expr::OuterRef(_) | Expr::AliasedColumn { .. } => Ok(()),
+        // Window (issue #7) — args / partition_by / order_by all
+        // reference the outer model's columns. Validate them.
+        Expr::Window(w) => {
+            for col in &w.partition_by {
+                if model.field_by_column(col).is_none() {
+                    return Err(QueryError::UnknownField {
+                        model: model.name,
+                        field: (*col).to_owned(),
+                    });
+                }
+            }
+            for o in &w.order_by {
+                if model.field_by_column(o.column).is_none() {
+                    return Err(QueryError::UnknownField {
+                        model: model.name,
+                        field: o.column.to_owned(),
+                    });
+                }
+            }
+            for arg in &w.args {
+                validate_expr_columns(model, arg)?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -724,6 +748,13 @@ pub enum AggregateExpr {
         inner: Box<AggregateExpr>,
         default: SqlValue,
     },
+    /// Window function — `<fn>(args) OVER (PARTITION BY … ORDER BY …)`.
+    /// Issue #7. Conceptually distinct from an aggregate (operates
+    /// over a frame, not a group), but reuses the `annotate()` slot
+    /// because the projection shape is the same. Use the builders in
+    /// [`crate::core::window`] rather than constructing this variant
+    /// directly.
+    Window(Box<super::window::WindowExpr>),
 }
 
 /// A `SELECT … GROUP BY … HAVING …` query. Returned rows are untyped
