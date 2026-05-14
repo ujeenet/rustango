@@ -549,14 +549,17 @@ let rows = rustango::sql::fetch_aggregate(&by_author, &pool).await?;
 
 Issue #75 closes the Django ergonomic gap: GROUP BY is **inferred** from the queryset's shape — you never call a `.group_by(...)` builder unless you're overriding the inference.
 
-| Shape | Builder | Resulting `GROUP BY` |
+| Entry shape | Builder | Resulting `GROUP BY` |
 |---|---|---|
-| **2 — values + aggregate** | `.values(&["author_id"]).annotate("n", count_all().into())` | `GROUP BY "author_id"` |
-| **3 — bare aggregate** | `.annotate("n", count_all().into())` | `GROUP BY` every non-aggregate scalar column on the model |
-| **Window-only** | `.aggregate().annotate("rn", row_number()…)` | (no `GROUP BY` — window funcs are per-row) |
-| **Explicit override** | `.aggregate().group_by("month").annotate(...)` | `GROUP BY "month"` — explicit wins |
+| **Django annotate** | `.annotate("n", count_all().into())` | every non-aggregate scalar column on the model (Shape 3) |
+| **Django values + aggregate** | `.values(&["author_id"]).annotate("n", count_all().into())` | `GROUP BY "author_id"` (Shape 2) |
+| **rustango scalar aggregate** | `.aggregate().annotate("n", count_all().into())` | none — single-row scalar result |
+| **Window-only** | `.aggregate().annotate("rn", row_number()…)` | none — window funcs are per-row |
+| **Explicit override** | `.aggregate().group_by("month").annotate(...)` | the explicit list wins |
 
-The classifier `AggregateExpr::is_aggregating()` distinguishes the row-collapsing variants (`Count` / `Sum` / `Avg` / `Max` / `Min` / `CountDistinct` / `StdDev*` / `Variance*` — plus recursive `Filtered` / `Coalesced` wrappers) from `Window`, which is per-row. Only the aggregating variants trigger Shape 3 inference.
+**The two entry points are intentionally distinct.** `QuerySet::annotate(...)` (Django-shape, sugar over `aggregate().annotate(...)` + auto-inference) treats the annotation as a per-row computed column and infers GROUP BY. `QuerySet::aggregate().annotate(...)` (rustango-native, explicit) treats the annotation as a terminal scalar aggregation and emits no `GROUP BY` — mirroring Django's distinction between `.aggregate(...)` (returns one dict) and `.annotate(...)` (returns a queryset with an extra column per row).
+
+The classifier `AggregateExpr::is_aggregating()` distinguishes the row-collapsing variants (`Count` / `Sum` / `Avg` / `Max` / `Min` / `CountDistinct` / `StdDev*` / `Variance*` — plus recursive `Filtered` / `Coalesced` wrappers) from `Window`, which is per-row. Only aggregating variants on the Django-shape entry trigger Shape 3 inference.
 
 ```rust
 use rustango::core::aggregates::{count_all, sum};

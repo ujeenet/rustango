@@ -574,6 +574,13 @@ impl<T: Model> QuerySet<T> {
     /// Start an [`AggregateBuilder`] carrying this queryset's filters as the
     /// WHERE clause. Chain `.group_by`, `.annotate`, `.having`, `.order_by`,
     /// `.limit`, `.offset` then call `.compile()` to get an [`AggregateQuery`].
+    ///
+    /// This is the rustango-native (non-Django-shape) entry point — the
+    /// builder it returns does **not** trigger Shape 3 GROUP BY auto-inference
+    /// at compile time. `.aggregate().annotate(agg)` without an explicit
+    /// `.group_by(...)` stays a scalar single-row aggregate, mirroring
+    /// Django's terminal `aggregate()` distinct from per-row `.annotate(...)`.
+    /// Use [`Self::annotate`] / [`Self::values`] for the auto-inferring path.
     #[must_use]
     pub fn aggregate(self) -> AggregateBuilder<T> {
         AggregateBuilder {
@@ -586,6 +593,7 @@ impl<T: Model> QuerySet<T> {
             offset: None,
             deferred_error: None,
             values: None,
+            django_shape: false,
         }
     }
 
@@ -619,6 +627,7 @@ impl<T: Model> QuerySet<T> {
             offset: None,
             deferred_error: None,
             values: Some(columns.to_vec()),
+            django_shape: true,
         }
     }
 
@@ -638,7 +647,9 @@ impl<T: Model> QuerySet<T> {
     /// ```
     #[must_use]
     pub fn annotate(self, alias: &'static str, expr: AggregateExpr) -> AggregateBuilder<T> {
-        self.aggregate().annotate(alias, expr)
+        let mut b = self.aggregate();
+        b.django_shape = true;
+        b.annotate(alias, expr)
     }
 }
 
@@ -1199,10 +1210,21 @@ pub struct AggregateBuilder<T: Model> {
     /// Issue #75 — projection columns set via [`Self::values`] (or
     /// [`QuerySet::values`]). When `Some(cols)` and the user hasn't
     /// called `.group_by(...)` explicitly, `compile()` derives
-    /// `GROUP BY cols`. When `None` and an aggregating annotation is
-    /// present, `compile()` falls back to Django Shape 3 — `GROUP BY`
-    /// every non-aggregate scalar column on the model.
+    /// `GROUP BY cols`.
     values: Option<Vec<&'static str>>,
+    /// Issue #75 — `true` when the builder was constructed via the
+    /// Django-shape entries [`QuerySet::annotate`] / [`QuerySet::values`]
+    /// (or after [`Self::values`] is called mid-chain). Only then does
+    /// `compile()` apply **Shape 3** auto-inference — `GROUP BY` every
+    /// non-aggregate scalar column when no group_by / values are set
+    /// and an aggregating annotation is present.
+    ///
+    /// `false` when constructed via the rustango-native
+    /// [`QuerySet::aggregate`] entry. That path preserves the historical
+    /// "no group_by → no `GROUP BY` clause → scalar single-row aggregate"
+    /// semantic, which mirrors Django's distinction between
+    /// `.aggregate()` (terminal scalar) and `.annotate()` (per-row).
+    django_shape: bool,
 }
 
 impl<T: Model> AggregateBuilder<T> {
@@ -1224,6 +1246,12 @@ impl<T: Model> AggregateBuilder<T> {
     #[must_use]
     pub fn values(mut self, columns: &[&'static str]) -> Self {
         self.values = Some(columns.to_vec());
+        // Calling `.values(...)` mid-chain opts the builder into the
+        // Django-shape inference path (issue #75) — without this flip,
+        // a `.aggregate().values(cols).annotate(agg)` chain would still
+        // emit a scalar query because `.aggregate()` started with
+        // `django_shape = false`.
+        self.django_shape = true;
         self
     }
 
@@ -1432,14 +1460,19 @@ impl<T: Model> AggregateBuilder<T> {
                 }
             }
             cols.clone()
-        } else if has_aggregating {
+        } else if has_aggregating && self.django_shape {
             // Shape 3 — group by every scalar column on the model.
             // Mirrors Django's "implicit GROUP BY all selected
-            // non-aggregate columns".
+            // non-aggregate columns". Gated on `django_shape` so the
+            // rustango-native `.aggregate().annotate(agg)` path stays
+            // a scalar single-row aggregate (the historical semantic
+            // every pre-#75 test relied on).
             model.scalar_fields().map(|f| f.column).collect()
         } else {
-            // No aggregating annotation, no values — pure window
-            // annotation path (issue #7) or empty builder. No GROUP BY.
+            // No GROUP BY — either:
+            //   * `.aggregate().annotate(agg)` (scalar aggregate)
+            //   * pure window-only annotation (issue #7)
+            //   * empty builder
             Vec::new()
         };
 

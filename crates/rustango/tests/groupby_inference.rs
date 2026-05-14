@@ -95,6 +95,27 @@ fn bare_annotate_groups_by_every_scalar_column() {
     assert!(stmt.sql.contains("GROUP BY"), "got: {}", stmt.sql);
 }
 
+// ---------- Scalar aggregate via .aggregate().annotate(): NO GROUP BY ----------
+
+#[test]
+fn aggregate_then_annotate_stays_scalar() {
+    // Regression pin: the rustango-native `.aggregate().annotate(agg)` path
+    // must remain a scalar single-row aggregate. Adding Shape 3 inference
+    // to this path broke every pre-existing aggregate-filter live test
+    // (PR #82) and the entire aggregations cookbook chapter.
+    let q = Post::objects()
+        .aggregate()
+        .annotate("n", count_all().into())
+        .compile()
+        .unwrap();
+    let stmt = Postgres.compile_aggregate(&q).unwrap();
+    assert!(
+        !stmt.sql.contains("GROUP BY"),
+        ".aggregate().annotate(agg) must NOT emit GROUP BY (scalar aggregate): {}",
+        stmt.sql
+    );
+}
+
 // ---------- Window-only: no GROUP BY ----------
 
 #[test]
@@ -277,19 +298,28 @@ fn sqlite_shape3_includes_all_cols() {
 // ---------- QuerySet::annotate shortcut ----------
 
 #[test]
-fn queryset_annotate_promotes_to_aggregate_builder() {
-    // Calling `.annotate()` directly on QuerySet (without `.aggregate()`)
-    // should produce the same SQL as the explicit two-step form.
-    let q1 = Post::objects()
+fn queryset_annotate_is_django_shape_aggregate_is_scalar() {
+    // The two entry points are intentionally distinct (Django's
+    // `aggregate()` vs `annotate()` distinction):
+    //   * QuerySet::annotate(...)         → Django Shape 3 — GROUP BY all cols
+    //   * QuerySet::aggregate().annotate  → scalar single-row aggregate (no GROUP BY)
+    let django_shape = Post::objects()
         .annotate("n", count_all().into())
         .compile()
         .unwrap();
-    let q2 = Post::objects()
+    let scalar = Post::objects()
         .aggregate()
         .annotate("n", count_all().into())
         .compile()
         .unwrap();
-    let s1 = Postgres.compile_aggregate(&q1).unwrap().sql;
-    let s2 = Postgres.compile_aggregate(&q2).unwrap().sql;
-    assert_eq!(s1, s2, "shortcut SQL must match explicit aggregate path");
+    let s1 = Postgres.compile_aggregate(&django_shape).unwrap().sql;
+    let s2 = Postgres.compile_aggregate(&scalar).unwrap().sql;
+    assert!(
+        s1.contains("GROUP BY"),
+        "QuerySet::annotate should auto-infer Shape 3 GROUP BY: {s1}"
+    );
+    assert!(
+        !s2.contains("GROUP BY"),
+        "QuerySet::aggregate().annotate stays scalar (no GROUP BY): {s2}"
+    );
 }
