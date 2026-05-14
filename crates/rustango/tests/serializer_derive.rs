@@ -98,6 +98,7 @@ fn read_only_field_excluded_from_writable_fields() {
 
 #[derive(Serializer, Default)]
 #[serializer(model = Post)]
+#[allow(dead_code)] // `body` is intentionally write-only — checked by absence in the serializer output.
 struct PostWithWriteOnly {
     pub title: String,
     #[serializer(write_only)]
@@ -277,6 +278,7 @@ mod openapi_auto_derive {
 
     #[derive(Serializer, Default)]
     #[serializer(model = Post)]
+    #[allow(dead_code)] // `secret` is intentionally write-only — checked by absence in the serializer output.
     struct WithWriteOnly {
         pub title: String,
         #[serializer(write_only)]

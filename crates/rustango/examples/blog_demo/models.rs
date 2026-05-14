@@ -77,6 +77,7 @@ rustango::register_admin_computed!("post", "word_count", "Words", |row| {
     ordering      = "-published_at",
     page_size     = 20,
 )]
+#[allow(dead_code)] // Example viewset; built solely to prove the derive macro shape.
 pub struct PostViewSet;
 
 /// Read-only viewset for authors.
@@ -88,4 +89,5 @@ pub struct PostViewSet;
     ordering      = "name",
     read_only,
 )]
+#[allow(dead_code)] // Example viewset; built solely to prove the derive macro shape.
 pub struct AuthorViewSet;

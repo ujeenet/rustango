@@ -1,3 +1,4 @@
+#![allow(irrefutable_let_patterns)] // Pool enum is single-variant in sqlite-only builds; pattern is refutable on multi-backend builds.
 //! Advanced ORM coverage on SQLite — closes the gap between the
 //! basic `save_pool` / `fetch_pool` round-trips in `sqlite_live.rs`
 //! and the full PG live suite (`save_live.rs`, `select_related_live.rs`,

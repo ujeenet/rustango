@@ -6,7 +6,7 @@
 //! `<col> IS NULL` pre-sort term.
 
 use rustango::core::funcs::lower;
-use rustango::core::{Column as _, Model as _, NullsOrder, F};
+use rustango::core::{NullsOrder, F};
 use rustango::sql::{Dialect, MySql, Postgres, Sqlite};
 use rustango::Model;
 

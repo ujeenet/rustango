@@ -76,10 +76,7 @@ async fn select_rows_as_json_pool_decodes_sqlite_rows() {
             where_clause: WhereExpr::And(Vec::new()),
             search: None,
             joins: Vec::new(),
-            order_by: vec![rustango::core::OrderClause {
-                column: "id",
-                desc: false,
-            }],
+            order_by: vec![rustango::core::OrderItem::column("id", false)],
             limit: None,
             offset: None,
         },

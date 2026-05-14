@@ -21,6 +21,11 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use rustango::sql::sqlx;
 use rustango::sql::Auto;
+// `ensure_tables` is deprecated in favor of `manage migrate` (which
+// the bootstrap tenant migration covers). The test predates that
+// helper and uses the legacy DDL path for setup — keep until the
+// fixture is migrated.
+#[allow(deprecated)]
 use rustango::tenancy::permissions::{
     assign_role, auto_create_permissions, ensure_tables, get_or_create_role, grant_role_perm,
     user_permissions,
@@ -61,6 +66,7 @@ async fn fresh(pool: &sqlx::PgPool) {
             .await
             .unwrap();
     }
+    #[allow(deprecated)]
     ensure_tables(pool).await.unwrap();
 }
 

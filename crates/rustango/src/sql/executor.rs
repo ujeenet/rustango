@@ -3510,6 +3510,9 @@ where
 
 #[cfg(test)]
 mod pool_dispatch_tests {
+    // All inner tests are `#[cfg(feature = "mysql")]` gated; without
+    // that feature the imports show as unused.
+    #[allow(unused_imports)]
     use super::*;
 
     /// Smoke test: a `Pool::Mysql` from a `connect_lazy` handle picks

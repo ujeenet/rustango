@@ -11,7 +11,7 @@
 
 #![cfg(feature = "tenancy")]
 
-use rustango::core::{Column as _, Model as _};
+use rustango::core::Column as _;
 use rustango::sql::sqlx;
 use rustango::sql::{Auto, Fetcher};
 use rustango::tenancy::permissions::{
@@ -61,6 +61,10 @@ async fn fresh(pool: &sqlx::PgPool) {
             .await
             .unwrap();
     }
+    // Deprecated helper still used by this fixture; migration to
+    // `manage migrate` will happen alongside the broader admin/perms
+    // test cleanup.
+    #[allow(deprecated)]
     rustango::tenancy::ensure_permission_tables(pool)
         .await
         .unwrap();

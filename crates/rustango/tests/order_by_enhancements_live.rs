@@ -9,7 +9,7 @@
 use std::sync::OnceLock;
 
 use rustango::core::funcs::lower;
-use rustango::core::{Column as _, NullsOrder, F};
+use rustango::core::{NullsOrder, F};
 use rustango::sql::{sqlx, Auto, Fetcher};
 use rustango::Model;
 use tokio::sync::Mutex;

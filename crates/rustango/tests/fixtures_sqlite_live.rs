@@ -1,3 +1,5 @@
+#![allow(irrefutable_let_patterns, unreachable_patterns)]
+// Pool enum is single-variant in sqlite-only builds; patterns become refutable / reachable on multi-backend builds.
 //! Live regression for v0.35 slice 3 — `Fixture::load_into_pool` +
 //! `load_all_pool` against SQLite. Proves fixture loading works on
 //! any backend without Postgres.

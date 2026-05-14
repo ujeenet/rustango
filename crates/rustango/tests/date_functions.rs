@@ -220,6 +220,7 @@ fn sqlite_extract_quarter_returns_op_not_supported() {
 // ---------- TruncDate — same SQL across all dialects ----------
 
 #[test]
+#[allow(non_snake_case)] // SQL keyword "DATE" preserved in test name for readability.
 fn trunc_date_emits_DATE_call_on_all_dialects() {
     let q = update_set(trunc_date(F("created_at")));
     for dialect in ["pg", "my", "sq"] {
@@ -333,6 +334,7 @@ fn sqlite_trunc_day_collapses_to_date_function() {
 // ---------- Composition with F() arithmetic ----------
 
 #[test]
+#[allow(non_snake_case)] // `F` preserved in test name to mirror the builder it tests (`F("created_at")`).
 fn extract_year_of_F_column_composes_with_other_funcs() {
     use rustango::core::funcs::{abs, greatest};
     // greatest(extract_year(F("created_at")), 2020)

@@ -16,7 +16,7 @@
 
 #![cfg(all(feature = "sqlite", feature = "tenancy"))]
 
-use rustango::sql::{sqlx, Pool};
+use rustango::sql::sqlx;
 use rustango::tenancy::TenantPools;
 
 /// Build a sqlite tenant-pools handle backed by a tempfile DB.

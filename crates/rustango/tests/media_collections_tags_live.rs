@@ -4,12 +4,11 @@
 //! silently when DATABASE_URL or RUSTANGO_S3_TEST_* are unset.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use rustango::media::router::media_router;
-use rustango::media::{ensure_all_tables, MediaManager, SaveOpts, UploadIntent};
+use rustango::media::{ensure_all_tables, MediaManager, SaveOpts};
 use rustango::storage::s3::{S3Config, S3Storage};
 use rustango::storage::{BoxedStorage, StorageRegistry};
 use sqlx::PgPool;

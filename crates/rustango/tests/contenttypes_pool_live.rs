@@ -1,3 +1,4 @@
+#![allow(irrefutable_let_patterns)] // Pool enum is single-variant in sqlite-only builds; pattern is refutable on multi-backend builds.
 //! Live regression for the v0.34 bi-dialect `contenttypes::*_pool`
 //! family. Exercises the new `&Pool`-taking helpers against an
 //! in-memory SQLite registry — proves a sqlite-only stack can

@@ -1,4 +1,5 @@
 #![cfg(all(feature = "sqlite", feature = "jobs-postgres"))]
+#![allow(irrefutable_let_patterns)] // Pool enum is single-variant in sqlite-only builds; pattern is refutable on multi-backend builds.
 //! Live integration test for the tri-dialect job queue on SQLite.
 //!
 //! v0.38 slice 27 — the bundled queue (struct name kept as `PgJobQueue`
