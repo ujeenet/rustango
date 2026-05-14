@@ -166,6 +166,17 @@ pub enum Expr {
     ///
     /// [`WindowExpr`]: crate::core::WindowExpr
     Window(Box<super::window::WindowExpr>),
+    /// Aggregate function lifted into the Expr tree — issue #74.
+    /// Lets aggregate expressions appear in `HAVING` predicates
+    /// (which PG strictly requires the expression in, not the SELECT
+    /// alias) via [`super::query::WhereExpr::ExprCompare`]. Also
+    /// composable inside `Case` / `Coalesce` / set_expr slots when
+    /// the surrounding query is aggregating.
+    ///
+    /// Boxed because `AggregateExpr` itself carries `Box<...>`
+    /// wrappers (`Filtered { inner, ... }`, `Coalesced { inner, ... }`)
+    /// which would make the enum size unbounded otherwise.
+    Aggregate(Box<super::query::AggregateExpr>),
 }
 
 /// One arm of a [`Expr::Case`] expression — `WHEN <condition> THEN <then>`.

@@ -736,6 +736,43 @@ let frame = WindowFrame {
 - **`FILTER` + `Window` not yet supported**: combining `.filter(...)` with a window function raises `SqlError::NestedAggregateWrapper { wrapper: "Filtered(Window)" }` — the underlying syntax varies by function kind (PG allows `agg_fn() FILTER (WHERE …) OVER (…)` for aggregate-window funcs but not for ranking ones), and the writer hasn't been taught the dispatch. Filed for a follow-up if demand surfaces.
 - **`PercentRank` / `CumeDist` / `NthValue`** aren't in v1 — Django's complete set is bigger. v1 ships the 8 most-used variants; the missing three can be added incrementally with the same builder shape.
 
+### HAVING auto-routing — `.filter()` after `.annotate()`
+
+Issue #74. Django's pattern: a `.filter(name=value)` call lands in either `WHERE` or `HAVING` depending on whether `name` matches an aggregate annotation alias. rustango exposes the same routing via `AggregateBuilder::filter(field, op, value)`:
+
+```rust
+use rustango::core::aggregates::count_all;
+use rustango::core::Op;
+
+// "Authors with > 10 published posts" — the canonical pattern.
+// status='published' is on the model       → routes to WHERE.
+// post_count > 10 references the annotation → routes to HAVING.
+let q = Post::objects()
+    .aggregate()
+    .group_by("author_id")
+    .annotate("post_count", count_all().into())
+    .filter("status",     Op::Eq, "published")
+    .filter("post_count", Op::Gt, 10_i64)
+    .compile()?;
+let rows = rustango::sql::fetch_aggregate(&q, &pool).await?;
+```
+
+Emits, on PG:
+
+```sql
+SELECT "author_id", COUNT(*) AS "post_count"
+FROM "post"
+WHERE "status" = $1
+GROUP BY "author_id"
+HAVING COUNT(*) > $2
+```
+
+**The aggregate expression is lifted into HAVING, not the SELECT alias.** PG strictly disallows aliases in HAVING (only the expression resolves); MySQL + SQLite are more lenient. The writer emits the lifted form uniformly across all three so the same query works everywhere.
+
+**Chain ordering matters in v1.** Call `.annotate(alias, ...)` BEFORE the corresponding `.filter(alias, ...)`. If the order is reversed, `filter()` looks up an empty annotation registry and routes to `WHERE` — and the `resolve_pending` validator surfaces `UnknownField` at `compile()` because the alias isn't a real model column. Django defers this resolution to query-construction time; a v0.50 follow-up may match that posture.
+
+**Validator gap (matches existing aggregate posture)**: alias-routed HAVING predicates skip the model-schema column walk. Typo'd aliases surface at the database, not at `compile()`. Same gap as `Sum("typo_col")` — pre-existing and orthogonal.
+
 ---
 
 ## Joins + select_related

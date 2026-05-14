@@ -254,6 +254,17 @@ pub(super) fn write_count(b: &mut Sql<'_>, query: &CountQuery) -> Result<(), Sql
 // ====================================================================
 
 pub(super) fn write_aggregate(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), SqlError> {
+    // Push the model onto the scope stack so any `Expr::Aggregate`
+    // (issue #74) emitted inside the HAVING predicate has a model
+    // to resolve its COALESCE-default cast against. Mirrors the
+    // pattern in `write_select`.
+    b.scope_stack.push(query.model);
+    let r = write_aggregate_inner(b, query);
+    b.scope_stack.pop();
+    r
+}
+
+fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), SqlError> {
     b.sql.push_str("SELECT ");
 
     for (i, col) in query.group_by.iter().enumerate() {
@@ -838,6 +849,23 @@ fn write_expr(
             Ok(())
         }
         Expr::Window(w) => write_window_expr(b, w),
+        Expr::Aggregate(agg) => {
+            // Issue #74 — lift the aggregate expression into the
+            // current writer scope (e.g., a HAVING predicate's lhs).
+            // The Aggregate writer handles dialect casting + filter
+            // wrapping internally; we just need an enclosing model
+            // context for the COALESCE cast lookup. Reach for the
+            // current scope frame; if none, fall back to a dummy.
+            // Scope-stack is set in `write_select` for SELECT/HAVING
+            // emission, so by the time HAVING is being walked the
+            // top frame is the right model.
+            let model = b
+                .scope_stack
+                .last()
+                .copied()
+                .expect("Expr::Aggregate emitted outside any scope frame");
+            write_aggregate_expr(b, agg, model)
+        }
     }
 }
 

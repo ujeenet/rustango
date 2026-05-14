@@ -891,6 +891,11 @@ fn validate_expr_columns_in_model(
             }
             Ok(())
         }
+        // Aggregate (issue #74) — flat variants hold raw column
+        // names that this validator doesn't traverse; pre-existing
+        // gap. Window-shaped aggregates are validated via the
+        // dedicated walker in `validate_aggregate_expr_columns`.
+        Expr::Aggregate(_) => Ok(()),
     }
 }
 
@@ -929,6 +934,72 @@ impl<T: Model> AggregateBuilder<T> {
         match self.having {
             None => self.having = Some(expr),
             Some(ref mut existing) => existing.push_and(expr),
+        }
+        self
+    }
+
+    /// String-keyed filter with WHERE/HAVING auto-routing — issue #74.
+    /// Django's `.filter()` semantic on an aggregating queryset: if
+    /// `field` matches an annotation alias added via [`Self::annotate`],
+    /// the predicate lands in `HAVING` (alongside any explicit
+    /// [`Self::having`] calls). Otherwise it forwards to the WHERE
+    /// path on the underlying `QuerySet`.
+    ///
+    /// ```ignore
+    /// // Authors with > 10 published posts:
+    /// Author::objects()
+    ///     .aggregate()
+    ///     .group_by("id")
+    ///     .annotate("post_count", count_all().filter(Post::status.eq("published")).into())
+    ///     .filter("post_count", Op::Gt, 10_i64)   // → HAVING (annotation alias)
+    ///     .filter("active", Op::Eq, true)         // → WHERE  (model column)
+    ///     .compile()?;
+    /// ```
+    ///
+    /// **Chain ordering matters**: `.annotate(alias, ...)` must come
+    /// BEFORE the corresponding `.filter(alias, ...)` so the
+    /// alias-registry lookup sees it. (Django defers this resolution
+    /// to query construction; rustango v1 resolves at call time —
+    /// reordering may land in a future slice.)
+    ///
+    /// **Validator gap**: alias-routed HAVING predicates skip the
+    /// model-schema column walk (the alias isn't a real column).
+    /// Typo'd aliases surface at the DB, not at `compile()`.
+    /// WHERE-routed predicates still go through `resolve_pending`'s
+    /// schema validation.
+    #[must_use]
+    pub fn filter(
+        mut self,
+        field: &'static str,
+        op: crate::core::Op,
+        value: impl Into<crate::core::SqlValue>,
+    ) -> Self {
+        // Look up the AggregateExpr behind the alias if one exists.
+        // PG strictly disallows SELECT-list aliases in HAVING (only
+        // MySQL + SQLite allow it), so we LIFT the aggregate
+        // expression into the predicate rather than passing the
+        // alias by name — `HAVING COUNT(*) > $1` emits uniformly on
+        // every backend.
+        let agg = self
+            .aggregates
+            .iter()
+            .find(|(alias, _)| *alias == field)
+            .map(|(_, expr)| expr.clone());
+        if let Some(agg) = agg {
+            let pred = WhereExpr::ExprCompare {
+                lhs: crate::core::Expr::Aggregate(Box::new(agg)),
+                op,
+                rhs: crate::core::Expr::Literal(value.into()),
+            };
+            match self.having {
+                None => self.having = Some(pred),
+                Some(ref mut existing) => existing.push_and(pred),
+            }
+        } else {
+            // Forward to the underlying QuerySet's WHERE path. Same
+            // schema-validation rules apply at `resolve_pending` time
+            // — typo'd model columns get caught at `compile()`.
+            self.qs = self.qs.filter(field, op, value);
         }
         self
     }

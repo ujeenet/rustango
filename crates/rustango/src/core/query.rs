@@ -344,6 +344,12 @@ fn validate_expr_columns(model: &'static ModelSchema, expr: &Expr) -> Result<(),
             }
             Ok(())
         }
+        // Aggregate (issue #74) — bare-column args (Sum("col"), etc.)
+        // hold raw `&'static str` names that this validator doesn't
+        // visit today; that's a pre-existing gap. Window-shaped
+        // aggregates are validated via the dedicated walker called
+        // from AggregateBuilder::compile().
+        Expr::Aggregate(_) => Ok(()),
     }
 }
 
@@ -854,7 +860,7 @@ pub struct BulkUpdateQuery {
 ///
 /// [`Filtered`]: AggregateExpr::Filtered
 /// [`Coalesced`]: AggregateExpr::Coalesced
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AggregateExpr {
     /// `COUNT(*)` or `COUNT(column)` when `column` is `Some`.
     Count(Option<&'static str>),
