@@ -223,30 +223,59 @@ Issue #3 adds the `Now` / `Extract*` / `Trunc*` family on the same `Expr` machin
 
 ```rust
 use rustango::core::funcs::{
-    now, trunc_date, trunc_month, trunc_year, trunc_day,
-    extract_year, extract_month, extract_day, extract_hour,
-    extract_minute, extract_second, extract_week, extract_weekday,
-    extract_quarter,
+    now, trunc_date, trunc_month,
+    extract_year, extract_month, extract_weekday,
 };
+use rustango::core::F;
 
-// Stamp server-side current time.
+// 1. Stamp server-side current time on write.
 Post::objects()
     .eq("id", id)
     .update()
     .set_expr("published_at", now())
     .execute(&pool).await?;
 
-// Extract year / month into integer columns so you can index them
-// for cheap "signups per month" aggregations.
+// 2. Extract year / month / weekday into denormalized indexable
+// columns so cohort + day-of-week queries are cheap.
 Signup::objects()
     .update()
     .set_expr("bucket_year", extract_year(F("created_at")))
+    .set_expr("bucket_month", extract_month(F("created_at")))
+    .set_expr("weekday", extract_weekday(F("created_at")))
     .execute(&pool).await?;
 
-// "Find rows from this calendar year."
-Order::objects()
-    .where_(Order::created_at.gte_expr(trunc_year(now())))
+// 3. Filter on the stored bucket — typed integer comparison, uses
+// the index, portable across all three dialects.
+let friday_signups = Signup::objects()
+    .where_(Signup::weekday.eq(5_i64))            // 5 = Friday (0=Sun)
     .fetch(&pool).await?;
+
+// 4. For range filters where you'd be tempted to write
+// `created_at >= trunc_year(now())` directly: don't. The function
+// builders for `Trunc*` return text on MySQL/SQLite (see caveats
+// below), so a column-vs-trunc comparison in WHERE only behaves
+// well on PG. Compute the boundary in Rust instead and pass it as a
+// typed literal — works the same on every backend and uses the
+// index on `created_at`:
+let year_start = chrono::Utc::now()
+    .date_naive()
+    .with_month0(0).unwrap()
+    .with_day0(0).unwrap()
+    .and_hms_opt(0, 0, 0).unwrap()
+    .and_utc();
+let this_year = Order::objects()
+    .where_(Order::created_at.gte(year_start))
+    .fetch(&pool).await?;
+
+// 5. `Trunc*` shines on the *write* side, where the type mismatch
+// is the user's problem to handle once at column declaration:
+Order::objects()
+    .update()
+    .set_expr("month_bucket", trunc_month(F("created_at")))
+    .execute(&pool).await?;
+// On PG `month_bucket` should be `TIMESTAMPTZ`; on MySQL/SQLite
+// declare it as `VARCHAR(10)` / `TEXT` and parse client-side if
+// needed.
 ```
 
 **Per-dialect emission:**

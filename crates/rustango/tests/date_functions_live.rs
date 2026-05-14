@@ -9,7 +9,9 @@
 
 use std::sync::OnceLock;
 
-use rustango::core::funcs::{extract_month, extract_year, now, trunc_date, trunc_month};
+use rustango::core::funcs::{
+    extract_month, extract_weekday, extract_year, now, trunc_date, trunc_month,
+};
 use rustango::core::F;
 use rustango::sql::{sqlx, Auto, Dialect, Fetcher, Updater};
 use rustango::Model;
@@ -31,6 +33,11 @@ pub struct Signup {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub bucket_year: i64,
     pub bucket_month: i64,
+    /// Stored day-of-week (0 = Sunday, 6 = Saturday). Populated via
+    /// `extract_weekday(F("created_at"))` in the cookbook
+    /// "store-then-filter" recipe and exercised in
+    /// `cookbook_store_then_filter_by_weekday_pattern`.
+    pub weekday: i64,
 }
 
 async fn pool() -> Option<sqlx::PgPool> {
@@ -49,7 +56,8 @@ async fn fresh(pool: &sqlx::PgPool) {
             "username" VARCHAR(50) NOT NULL,
             "created_at" TIMESTAMPTZ NOT NULL,
             "bucket_year" BIGINT NOT NULL DEFAULT 0,
-            "bucket_month" BIGINT NOT NULL DEFAULT 0
+            "bucket_month" BIGINT NOT NULL DEFAULT 0,
+            "weekday" BIGINT NOT NULL DEFAULT 0
         )"#,
     )
     .execute(pool)
@@ -267,6 +275,127 @@ async fn trunc_date_and_trunc_month_smoke_check() {
     // Use the DSL builders too as smoke checks.
     let _e = trunc_date(F("created_at"));
     let _e = trunc_month(F("created_at"));
+
+    sqlx::query(r#"DROP TABLE IF EXISTS "dt_signup" CASCADE"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+/// Pins the cookbook recipe's "store the weekday once, filter on
+/// the indexed column" pattern end-to-end. This is the cross-dialect
+/// shape — the alternative (function call on the WHERE LHS) doesn't
+/// work in the v1 IR, and the cookbook now teaches *this* pattern
+/// instead. Test guards against future regressions in either the
+/// extract_weekday emitter or the SET path it composes with.
+#[tokio::test]
+async fn cookbook_store_then_filter_by_weekday_pattern() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    fresh(&pool).await;
+
+    // 7 rows, one per day of the week starting from a Sunday.
+    // 2024-01-07 is a Sunday → weekday 0. 2024-01-13 is Saturday → 6.
+    for (name, ts) in [
+        ("sun", "2024-01-07 12:00:00+00"),
+        ("mon", "2024-01-08 12:00:00+00"),
+        ("tue", "2024-01-09 12:00:00+00"),
+        ("wed", "2024-01-10 12:00:00+00"),
+        ("thu", "2024-01-11 12:00:00+00"),
+        ("fri", "2024-01-12 12:00:00+00"),
+        ("sat", "2024-01-13 12:00:00+00"),
+    ] {
+        sqlx::query(&format!(
+            r#"INSERT INTO "dt_signup" ("username", "created_at") VALUES ('{name}', '{ts}')"#
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // Step 1 of the cookbook recipe — store the weekday once.
+    Signup::objects()
+        .update()
+        .set_expr("weekday", extract_weekday(F("created_at")))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Step 2 — filter on the indexed integer column. This is the
+    // pattern the cookbook teaches as cross-dialect-safe (we test PG
+    // here; emission tests cover the SQL strings on MySQL/SQLite).
+    use rustango::core::Column as _;
+    let fridays: Vec<Signup> = Signup::objects()
+        .where_(Signup::weekday.eq(5_i64))
+        .fetch(&pool)
+        .await
+        .unwrap();
+    assert_eq!(fridays.len(), 1, "expected exactly 1 Friday");
+    assert_eq!(fridays[0].username, "fri");
+
+    // Verify the normalization invariant — 0 = Sunday, 6 = Saturday
+    // — holds for every seeded row. This guards against the
+    // EXTRACT(DOW) emitter regressing to MySQL's 1-indexed shape.
+    let by_day: Vec<Signup> = Signup::objects()
+        .order_by(&[("weekday", false)])
+        .fetch(&pool)
+        .await
+        .unwrap();
+    assert_eq!(by_day[0].weekday, 0, "Sunday must be 0");
+    assert_eq!(by_day[0].username, "sun");
+    assert_eq!(by_day[6].weekday, 6, "Saturday must be 6");
+    assert_eq!(by_day[6].username, "sat");
+
+    sqlx::query(r#"DROP TABLE IF EXISTS "dt_signup" CASCADE"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+/// Pins the cookbook's "Rust-computed range boundary + typed literal"
+/// pattern — what users should write instead of
+/// `WHERE col >= trunc_year(now())` for portable year-to-date filters.
+/// The example below mirrors the cookbook code one-to-one.
+#[tokio::test]
+async fn cookbook_rust_computed_year_boundary_pattern() {
+    use chrono::{Datelike, TimeZone, Timelike};
+
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    fresh(&pool).await;
+
+    // One row from "two years ago", one from "this year".
+    let this_year = chrono::Utc::now().year();
+    let two_years_ago = this_year - 2;
+    sqlx::query(&format!(
+        r#"INSERT INTO "dt_signup" ("username", "created_at") VALUES ('old', '{two_years_ago}-06-15 12:00:00+00'), ('new', '{this_year}-06-15 12:00:00+00')"#
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Compute the year-start boundary in Rust — the cookbook
+    // recommends this over `trunc_year(now())` so MySQL/SQLite get
+    // typed-timestamp comparison instead of timestamp-vs-text.
+    let year_start = chrono::Utc
+        .with_ymd_and_hms(this_year, 1, 1, 0, 0, 0)
+        .unwrap();
+    assert_eq!(year_start.month(), 1);
+    assert_eq!(year_start.day(), 1);
+    assert_eq!(year_start.hour(), 0);
+
+    use rustango::core::Column as _;
+    let recent: Vec<Signup> = Signup::objects()
+        .where_(Signup::created_at.gte(year_start))
+        .fetch(&pool)
+        .await
+        .unwrap();
+    assert_eq!(recent.len(), 1, "only 'new' should match this-year filter");
+    assert_eq!(recent[0].username, "new");
 
     sqlx::query(r#"DROP TABLE IF EXISTS "dt_signup" CASCADE"#)
         .execute(&pool)
