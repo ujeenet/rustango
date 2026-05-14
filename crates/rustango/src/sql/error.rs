@@ -139,6 +139,14 @@ pub enum SqlError {
     /// construction, so the writer surfaces this here.
     #[error("CASE expression must have at least one WHEN branch")]
     EmptyCaseBranches,
+
+    /// A `CASE WHEN <cond> …` branch had an empty predicate (e.g.
+    /// `WhereExpr::And(vec![])`). The standard "no WHERE filter"
+    /// marker is legal at the top of an UPDATE/DELETE, but inside a
+    /// `WHEN` it would produce `WHEN  THEN …` with a hole — a parse
+    /// error on every backend. Reject it loudly here.
+    #[error("CASE WHEN branch condition must not be empty")]
+    EmptyCaseWhenCondition,
 }
 
 /// Raised while compiling, writing, or executing a query end-to-end.

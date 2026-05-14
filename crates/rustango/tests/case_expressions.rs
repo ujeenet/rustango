@@ -231,6 +231,25 @@ fn empty_branches_is_rejected_at_emit_time() {
     );
 }
 
+#[test]
+fn empty_when_condition_is_rejected_at_emit_time() {
+    // `WhereExpr::And(vec![])` is the legitimate "no WHERE filter"
+    // marker at the top of an UPDATE — but inside a WHEN it would
+    // produce `WHEN  THEN …` with a literal hole. Reject before
+    // hitting the database.
+    let q = update_set(
+        case()
+            .when(WhereExpr::And(vec![]), value("hit"))
+            .default(value("fallback"))
+            .into(),
+    );
+    let err = Postgres.compile_update(&q).unwrap_err();
+    assert!(
+        matches!(err, SqlError::EmptyCaseWhenCondition),
+        "expected EmptyCaseWhenCondition, got {err:?}",
+    );
+}
+
 // ---------- F() column-ref inside THEN ----------
 
 #[test]
@@ -248,8 +267,9 @@ fn then_branch_can_be_column_ref() {
         "got: {}",
         stmt.sql
     );
-    // Two params: the "draft" literal in WHERE-side check, plus the
-    // WHERE id=1 literal — but no params for the columns themselves.
+    // Two params: the "draft" literal in the WHEN predicate, plus
+    // the WHERE id=1 literal — but no params for the bare column
+    // refs in the THEN/ELSE branches.
     assert_eq!(stmt.params.len(), 2);
 }
 

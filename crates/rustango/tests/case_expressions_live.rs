@@ -10,8 +10,8 @@ use std::sync::OnceLock;
 
 use rustango::core::case::{case, value};
 use rustango::core::funcs::lower;
-use rustango::core::{Column as _, Model as _, F};
-use rustango::sql::{sqlx, Auto, Dialect, Fetcher, Updater};
+use rustango::core::{Column as _, F};
+use rustango::sql::{sqlx, Auto, Fetcher, Updater};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -34,6 +34,10 @@ pub struct Post {
     #[rustango(max_length = 50)]
     pub label: String,
     pub priority: i64,
+    // Nullable target so `case_without_else_returns_null_for_unmatched_rows`
+    // can write a no-default CASE and observe NULL on unmatched rows.
+    #[rustango(max_length = 50)]
+    pub maybe_label: Option<String>,
 }
 
 async fn pool() -> Option<sqlx::PgPool> {
@@ -53,7 +57,8 @@ async fn fresh(pool: &sqlx::PgPool) {
             "title" VARCHAR(200) NOT NULL,
             "views" BIGINT NOT NULL DEFAULT 0,
             "label" VARCHAR(50) NOT NULL DEFAULT '',
-            "priority" BIGINT NOT NULL DEFAULT 99
+            "priority" BIGINT NOT NULL DEFAULT 99,
+            "maybe_label" VARCHAR(50)
         )"#,
     )
     .execute(pool)
@@ -247,10 +252,11 @@ async fn case_with_and_or_predicate_executes() {
         .unwrap();
 }
 
-/// No-default behaviour: CASE with no ELSE returns NULL for unmatched
-/// rows. This is the standard SQL semantic — confirms our writer emits
-/// the correct shape (no trailing ELSE keyword) and the database
-/// returns NULL for the unmatched rows.
+/// No-default behaviour: a CASE without `.default(...)` returns NULL
+/// for any row that matches none of the `WHEN` branches. Writes the
+/// CASE to the nullable `maybe_label` column, then reads back and
+/// asserts the unmatched rows came back as `None` (not the empty
+/// string, not a fallback).
 #[tokio::test]
 async fn case_without_else_returns_null_for_unmatched_rows() {
     let _g = live_lock().lock().await;
@@ -258,44 +264,30 @@ async fn case_without_else_returns_null_for_unmatched_rows() {
         return;
     };
     fresh(&pool).await;
-    // Add a nullable test column.
-    sqlx::query(r#"ALTER TABLE "case_post" ADD COLUMN "draft_label" VARCHAR(50)"#)
+
+    // SET maybe_label = CASE WHEN status = 'draft' THEN 'Draft' END
+    // — three of the four rows are non-draft and should land as NULL.
+    Post::objects()
+        .update()
+        .set_expr(
+            "maybe_label",
+            case().when(Post::status.eq("draft"), value("Draft")),
+        )
         .execute(&pool)
         .await
         .unwrap();
 
-    // Use a raw SQL run through the queryset SO we exercise the writer
-    // — set_expr targets a column from the Post model, but draft_label
-    // isn't on the model. Use sqlx directly to confirm the SQL the
-    // writer would emit for this case is correct.
-    //
-    // Actually simpler: run UPDATE with set_expr against `label`
-    // (which IS on the model) and use a non-matching status so we
-    // assert NULL appearing in `label`. But `label` is NOT NULL — so
-    // we'll have to use a different column.
-    //
-    // Use raw sqlx for the no-default case; just confirm the IR
-    // compiles to the right SQL via the writer's emission tests
-    // already covered, and assert here that the runtime semantic is
-    // what we expect.
-    use rustango::sql::SqlError;
-    let q = rustango::core::UpdateQuery {
-        model: Post::SCHEMA,
-        set: vec![rustango::core::Assignment {
-            column: "label",
-            value: case()
-                .when(Post::status.eq("__never_matches__"), value("hit"))
-                .build(),
-        }],
-        where_clause: rustango::core::WhereExpr::And(vec![]),
-    };
-    let stmt: Result<_, SqlError> = rustango::sql::Postgres.compile_update(&q);
-    let stmt = stmt.unwrap();
-    assert!(
-        !stmt.sql.contains("ELSE"),
-        "no-default CASE should not emit ELSE in SQL: {}",
-        stmt.sql
-    );
+    let rows: Vec<Post> = Post::objects()
+        .order_by(&[("id", false)])
+        .fetch(&pool)
+        .await
+        .unwrap();
+    // Row 1 (draft) hits the WHEN branch; rows 2-4 fall through and
+    // get NULL because there is no ELSE.
+    assert_eq!(rows[0].maybe_label.as_deref(), Some("Draft"));
+    assert_eq!(rows[1].maybe_label, None);
+    assert_eq!(rows[2].maybe_label, None);
+    assert_eq!(rows[3].maybe_label, None);
 
     sqlx::query(r#"DROP TABLE IF EXISTS "case_post" CASCADE"#)
         .execute(&pool)

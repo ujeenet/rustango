@@ -367,9 +367,9 @@ Post::objects()
 
 **Caveats:**
 
-- **Empty branches**: `case().build()` with no `.when(...)` calls is rejected at emit time with `SqlError::EmptyCaseBranches`. SQL requires at least one `WHEN` clause.
+- **Empty branches**: `case().build()` with no `.when(...)` calls is rejected at emit time with `SqlError::EmptyCaseBranches`. SQL requires at least one `WHEN` clause. An empty `WHEN` condition (e.g. `WhereExpr::And(vec![])`) is rejected with `SqlError::EmptyCaseWhenCondition` for the same reason.
 - **Type unification across branches**: every dialect picks a common type from the `THEN` and `ELSE` values. Mixing types (`THEN 1_i64` + `ELSE "string"`) can throw a runtime cast error or coerce surprisingly. Stick to one type per `CASE`.
-- **Performance**: a heavily branched `CASE` evaluates each `WHEN` until one matches — no short-circuit on subsequent rows. For more than ~5 branches, consider a lookup table or denormalized column.
+- **Performance**: each row evaluates `WHEN` predicates in order until one matches (first-match-wins, per row). Cost grows with the number of branches and the cost of the predicates. For many fixed-string mappings, a join against a small lookup table can be cheaper and more readable.
 
 ### When to reach for a raw SQL escape hatch instead
 

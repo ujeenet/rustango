@@ -507,12 +507,19 @@ fn write_case(
     }
     b.sql.push_str("CASE");
     for branch in branches {
+        // Empty `And(vec![])` is the legal "no WHERE filter" marker
+        // at the top of an UPDATE/DELETE, but inside a WHEN it would
+        // produce `WHEN  THEN …` with a hole. Reject it before the
+        // database does.
+        if branch.condition.is_empty() {
+            return Err(SqlError::EmptyCaseWhenCondition);
+        }
         b.sql.push_str(" WHEN ");
         // `write_where_expr` handles And/Or/Not nesting + parameter
         // binding. We pass no qualify-with / no model — `Case`
         // conditions are emitted in the context of the surrounding
         // statement which already knows the table name.
-        super::writers::write_where_expr(b, &branch.condition, None, None)?;
+        write_where_expr(b, &branch.condition, None, None)?;
         b.sql.push_str(" THEN ");
         write_expr(b, &branch.then, None)?;
     }

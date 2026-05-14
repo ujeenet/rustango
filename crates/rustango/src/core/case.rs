@@ -7,16 +7,23 @@
 //! ```ignore
 //! use rustango::core::{case::case, F, funcs::lower};
 //!
-//! // Custom ordering: published posts first, drafts after.
+//! // Custom ordering — derive a rank column with CASE, then sort by
+//! // it. Today this is the `update().set_expr(...) + order_by(rank)`
+//! // pattern; once issue #75 (annotate-with-Expr) lands, the rank can
+//! // be computed inline as a SELECT-side annotation instead of
+//! // materialized into the column.
 //! Post::objects()
-//!     .annotate(
-//!         "order_key",
+//!     .update()
+//!     .set_expr(
+//!         "priority",
 //!         case()
 //!             .when(Post::status.eq("published"), 0_i64)
 //!             .when(Post::status.eq("draft"), 1_i64)
 //!             .default(2_i64),
 //!     )
-//!     .order_by(&[("order_key", false)])
+//!     .execute(&pool).await?;
+//! let ranked = Post::objects()
+//!     .order_by(&[("priority", false), ("id", false)])
 //!     .fetch(&pool).await?;
 //!
 //! // Computed default on update — fall back to lowercased title when
@@ -30,17 +37,6 @@
 //!             .default(F("slug")),
 //!     )
 //!     .execute(&pool).await?;
-//!
-//! // Conditional aggregate via Case + COUNT (until issue #6 ships
-//! // `Aggregate(filter=Q(...))` directly).
-//! Post::objects()
-//!     .annotate(
-//!         "published_count",
-//!         case()
-//!             .when(Post::status.eq("published"), 1_i64)
-//!             .default(0_i64),
-//!     )
-//!     // …then sum(`published_count`) over a group_by.
 //! ```
 //!
 //! ## Conditions accept any [`WhereExpr`]
