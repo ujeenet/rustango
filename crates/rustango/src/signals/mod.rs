@@ -29,6 +29,14 @@
 //! | `pre_delete` | `Fn(Arc<T>) -> Future` | Before DELETE |
 //! | `post_delete` | `Fn(Arc<T>) -> Future` | After DELETE |
 //!
+//! ## HTTP request lifecycle
+//!
+//! Request-level signals (`request_started` / `request_finished` /
+//! `got_request_exception`) live in [`request`] — separate registry,
+//! separate connect/disconnect/send functions, plus a
+//! [`request::RequestSignalsLayer`] tower layer that fires them
+//! around every axum request. Issue #53.
+//!
 //! ## Semantics
 //!
 //! - Receivers run **sequentially** in registration order, awaited one at a time.
@@ -46,6 +54,8 @@ use std::pin::Pin;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::core::Model;
+
+pub mod request;
 
 /// Future returned by signal receivers. `'static` because the receiver
 /// is stored as `Box<dyn ...>` and may run after the caller has returned.
