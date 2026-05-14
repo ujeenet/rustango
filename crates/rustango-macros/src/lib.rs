@@ -1774,7 +1774,9 @@ fn inherent_impl_tokens(
                 quote!()
             } else {
                 let pairs = audit_pair_tokens.iter();
+                let pairs2 = audit_pair_tokens.iter();
                 let pk_str = audit_pk_to_string.clone();
+                let pk_str2 = audit_pk_to_string.clone();
                 quote! {
                     /// Save (UPDATE) this row against either backend
                     /// with audit emission inside the same transaction.
@@ -1820,6 +1822,96 @@ fn inherent_impl_tokens(
                         ).await?;
                         ::core::result::Result::Ok(())
                     }
+
+                    /// `save_pool` narrowed to a Rust-field allowlist — issue #66
+                    /// (Django `Model.save(update_fields=[...])`).
+                    /// Audit emission shrinks to the same column set so
+                    /// the audit log reflects exactly what was written.
+                    ///
+                    /// # Errors
+                    /// As [`Self::save_pool`], plus
+                    /// [`::rustango::core::QueryError::UnknownField`] wrapped
+                    /// in `ExecError::Query` for unknown field names.
+                    pub async fn save_pool_fields(
+                        &mut self,
+                        fields: &[&str],
+                        pool: &::rustango::sql::Pool,
+                    ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                        if fields.is_empty() {
+                            ::tracing::warn!(
+                                target: "rustango::save_pool_fields",
+                                model = <Self as ::rustango::core::Model>::SCHEMA.name,
+                                "save_pool_fields called with empty field list — no-op"
+                            );
+                            return ::core::result::Result::Ok(());
+                        }
+                        let _schema = <Self as ::rustango::core::Model>::SCHEMA;
+                        let mut _wanted_cols: ::std::collections::HashSet<&'static str> =
+                            ::std::collections::HashSet::with_capacity(fields.len());
+                        for f in fields {
+                            match _schema.field(f) {
+                                ::core::option::Option::Some(fs) => {
+                                    _wanted_cols.insert(fs.column);
+                                }
+                                ::core::option::Option::None => {
+                                    return ::core::result::Result::Err(
+                                        ::rustango::sql::ExecError::Query(
+                                            ::rustango::core::QueryError::UnknownField {
+                                                model: _schema.name,
+                                                field: (*f).to_owned(),
+                                            }
+                                        )
+                                    );
+                                }
+                            }
+                        }
+                        let _full: ::std::vec::Vec<::rustango::core::Assignment> =
+                            ::std::vec![ #( #assignments ),* ];
+                        let _filtered: ::std::vec::Vec<::rustango::core::Assignment> = _full
+                            .into_iter()
+                            .filter(|a| _wanted_cols.contains(a.column))
+                            .collect();
+                        if _filtered.is_empty() {
+                            ::tracing::warn!(
+                                target: "rustango::save_pool_fields",
+                                model = _schema.name,
+                                "save_pool_fields: every named field maps to a non-assignable column — no-op"
+                            );
+                            return ::core::result::Result::Ok(());
+                        }
+                        let _query = ::rustango::core::UpdateQuery {
+                            model: _schema,
+                            set: _filtered,
+                            where_clause: ::rustango::core::WhereExpr::Predicate(
+                                ::rustango::core::Filter {
+                                    column: #pk_column_lit,
+                                    op: ::rustango::core::Op::Eq,
+                                    value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                        ::core::clone::Clone::clone(&self.#pk_ident)
+                                    ),
+                                }
+                            ),
+                        };
+                        // Narrow the audit snapshot to the same column set.
+                        let _all_pairs: ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
+                            ::std::vec![ #( #pairs2 ),* ];
+                        let _narrowed: ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
+                            _all_pairs
+                                .into_iter()
+                                .filter(|(col, _)| _wanted_cols.contains(col))
+                                .collect();
+                        let _audit_entry = ::rustango::audit::PendingEntry {
+                            entity_table: _schema.table,
+                            entity_pk: #pk_str2,
+                            operation: ::rustango::audit::AuditOp::Update,
+                            source: ::rustango::audit::current_source(),
+                            changes: ::rustango::audit::snapshot_changes(&_narrowed),
+                        };
+                        let _ = ::rustango::audit::save_one_with_audit_pool(
+                            pool, &_query, &_audit_entry,
+                        ).await?;
+                        ::core::result::Result::Ok(())
+                    }
                 }
             }
         } else {
@@ -1847,6 +1939,105 @@ fn inherent_impl_tokens(
                     let _query = ::rustango::core::UpdateQuery {
                         model: <Self as ::rustango::core::Model>::SCHEMA,
                         set: ::std::vec![ #( #assignments ),* ],
+                        where_clause: ::rustango::core::WhereExpr::Predicate(
+                            ::rustango::core::Filter {
+                                column: #pk_column_lit,
+                                op: ::rustango::core::Op::Eq,
+                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                    ::core::clone::Clone::clone(&self.#pk_ident)
+                                ),
+                            }
+                        ),
+                    };
+                    let _ = ::rustango::sql::update_pool(pool, &_query).await?;
+                    ::core::result::Result::Ok(())
+                }
+
+                /// Save (UPDATE) only the listed Rust-side fields,
+                /// leaving every other column untouched. Issue #66 —
+                /// Django's `Model.save(update_fields=[...])` shape.
+                ///
+                /// `fields` are Rust-side struct field names; the macro
+                /// resolves each to its SQL column. Unknown field
+                /// names return [`::rustango::core::QueryError::UnknownField`]
+                /// wrapped in `ExecError::Query`. An empty list is a
+                /// no-op (returns `Ok(())` and logs a `tracing::warn!`),
+                /// matching Django's "nothing to do" semantic.
+                ///
+                /// Use this when:
+                /// * you only mutated a couple of fields on a wide row
+                ///   (avoid re-writing every column on every save), or
+                /// * two writers diverged after their initial read and
+                ///   you want to preserve the other writer's changes to
+                ///   columns you didn't touch.
+                ///
+                /// Auto-PK models with an unset PK return
+                /// [`::rustango::core::QueryError::UnknownField`] with
+                /// field name `<pk>` — `save_pool_fields` is an
+                /// UPDATE-only path. Call [`Self::insert_pool`]
+                /// (or [`Self::save_pool`] which dispatches based on
+                /// PK state) for the INSERT case.
+                ///
+                /// # Errors
+                /// As [`Self::save_pool`], plus `UnknownField` for
+                /// unknown / empty / Auto-Unset cases.
+                pub async fn save_pool_fields(
+                    &mut self,
+                    fields: &[&str],
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    if fields.is_empty() {
+                        ::tracing::warn!(
+                            target: "rustango::save_pool_fields",
+                            model = <Self as ::rustango::core::Model>::SCHEMA.name,
+                            "save_pool_fields called with empty field list — no-op"
+                        );
+                        return ::core::result::Result::Ok(());
+                    }
+                    let _schema = <Self as ::rustango::core::Model>::SCHEMA;
+                    // Validate field names against the schema.
+                    let mut _wanted_cols: ::std::collections::HashSet<&'static str> =
+                        ::std::collections::HashSet::with_capacity(fields.len());
+                    for f in fields {
+                        match _schema.field(f) {
+                            ::core::option::Option::Some(fs) => {
+                                _wanted_cols.insert(fs.column);
+                            }
+                            ::core::option::Option::None => {
+                                return ::core::result::Result::Err(
+                                    ::rustango::sql::ExecError::Query(
+                                        ::rustango::core::QueryError::UnknownField {
+                                            model: _schema.name,
+                                            field: (*f).to_owned(),
+                                        }
+                                    )
+                                );
+                            }
+                        }
+                    }
+                    // Build the full assignment vec, then keep only the
+                    // assignments whose column is in `_wanted_cols`.
+                    let _full: ::std::vec::Vec<::rustango::core::Assignment> =
+                        ::std::vec![ #( #assignments ),* ];
+                    let _filtered: ::std::vec::Vec<::rustango::core::Assignment> = _full
+                        .into_iter()
+                        .filter(|a| _wanted_cols.contains(a.column))
+                        .collect();
+                    if _filtered.is_empty() {
+                        // All field names valid, but they all map to
+                        // non-assignable slots (PK column, computed/
+                        // virtual fields, relations without an
+                        // assignment). Same no-op semantic as Django.
+                        ::tracing::warn!(
+                            target: "rustango::save_pool_fields",
+                            model = _schema.name,
+                            "save_pool_fields: every named field maps to a non-assignable column — no-op"
+                        );
+                        return ::core::result::Result::Ok(());
+                    }
+                    let _query = ::rustango::core::UpdateQuery {
+                        model: _schema,
+                        set: _filtered,
                         where_clause: ::rustango::core::WhereExpr::Predicate(
                             ::rustango::core::Filter {
                                 column: #pk_column_lit,
