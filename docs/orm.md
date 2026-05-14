@@ -603,7 +603,26 @@ Each returns a `WindowBuilder` with three chainable modifiers:
 - `.order_by(&[("col", desc)])` — append `ORDER BY` columns (`desc = true` → DESC).
 - `.frame(WindowFrame { kind, start, end })` — set the optional `ROWS`/`RANGE` frame clause. `FrameBoundary::UnboundedPreceding` / `Preceding(n)` / `CurrentRow` / `Following(n)` / `UnboundedFollowing`.
 
-The builder lowers via `Into<Expr>` so window functions slot into `set_expr` (UPDATE) and `eq_expr` (WHERE rhs); via `Into<AggregateExpr>` so they compose with `annotate()`.
+The builder lowers via `Into<AggregateExpr>` so window functions compose with `annotate()`. `Into<Expr>` is also implemented (the IR-level slot for window expressions), but **every backend rustango supports restricts window functions to the `SELECT` list and `ORDER BY` clause of a query** — they cannot appear in `WHERE` / `HAVING` / `GROUP BY` / `UPDATE SET` / `JOIN ON` / `RETURNING`. The writer doesn't gate emission on this, so `set_expr("col", row_number())` compiles to SQL the database rejects at execute. Build window expressions through `annotate()`; reach for a subquery if you need to feed a window result into a WHERE filter or an UPDATE.
+
+**`LAST_VALUE` default-frame trap:**
+
+A bare `last_value(col).order_by(&[("x", false)])` emits `LAST_VALUE("col") OVER (ORDER BY "x")` and looks like it should return the partition's last `col`. It doesn't — SQL's *default* window frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, so `LAST_VALUE` returns the **current row's** value, not the partition's last row. To get the intuitive "last row of the partition" behavior, pass an explicit unbounded frame:
+
+```rust
+use rustango::core::{FrameBoundary, FrameKind, WindowFrame};
+
+last_value("score")
+    .partition_by("tenant_id")
+    .order_by(&[("created_at", true)])
+    .frame(WindowFrame {
+        kind: FrameKind::Rows,
+        start: FrameBoundary::UnboundedPreceding,
+        end: Some(FrameBoundary::UnboundedFollowing),
+    })
+```
+
+`first_value` doesn't have this trap — the default frame's start matches the partition start, so the intuitive answer falls out.
 
 **Annotate caveat (until issue #75 ships):**
 

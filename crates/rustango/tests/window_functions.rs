@@ -250,10 +250,26 @@ fn sqlite_uses_double_quotes_for_window_columns() {
     );
 }
 
-// ---------- Window-as-Expr (UPDATE set_expr) ----------
+// ---------- Window-as-Expr IR-shape (diagnostic) ----------
 
+/// **Diagnostic-only test — DO NOT take as a sanctioned use case.**
+///
+/// `Expr::Window` is an IR-level construct: the builder implements
+/// `Into<Expr>` so the variant slots into recursive composition
+/// (e.g. inside `Case` / `Coalesced` / `Subquery`). PG, MySQL 8+, and
+/// SQLite 3.25+ all restrict window functions to the SELECT list +
+/// ORDER BY clause of a query — they're rejected by every backend
+/// rustango supports inside `UPDATE SET`, `WHERE`, `HAVING`,
+/// `JOIN ON`, etc.
+///
+/// This test pins the emission shape for documentation/debugging
+/// purposes — it does NOT mean the resulting SQL executes. Users
+/// must route window expressions through `annotate()` (the only
+/// sanctioned channel today); see the cookbook for the supported
+/// shape and the subquery workaround for UPDATE-from-window
+/// patterns.
 #[test]
-fn window_as_expr_inside_update_set_emits_full_form() {
+fn window_as_expr_emits_when_force_constructed_but_db_will_reject() {
     use rustango::core::{Assignment, Filter, Op, UpdateQuery};
     let expr: Expr = row_number().order_by(&[("score", true)]).into();
     let q = UpdateQuery {
@@ -272,7 +288,10 @@ fn window_as_expr_inside_update_set_emits_full_form() {
     assert!(
         stmt.sql
             .contains(r#"SET "score" = ROW_NUMBER() OVER (ORDER BY "score" DESC)"#),
-        "got: {}",
+        "IR emits — but PG will error at execute with \
+         `window functions are not allowed in UPDATE`. \
+         Pinning the SQL string for diagnostic visibility, not as \
+         a sanctioned use case. Got: {}",
         stmt.sql
     );
 }
@@ -290,6 +309,140 @@ fn multi_partition_and_multi_order_emit_in_chain_order() {
         stmt.sql
             .contains(r#"PARTITION BY "tenant_id", "region" ORDER BY "score" DESC, "id""#),
         "got: {}",
+        stmt.sql
+    );
+}
+
+// ---------- Paranoid-review regressions ----------
+
+/// Validator regression: a typo'd `partition_by` column inside an
+/// `annotate("...", window_fn())` call must surface at `compile()`,
+/// not at execute. Pre-fix this slipped through because the
+/// `Expr::Window` validator only walks the `Expr` path while
+/// `annotate()` lowers to `AggregateExpr::Window`.
+#[test]
+fn partition_by_typo_inside_annotate_is_caught_at_compile_time() {
+    use rustango::core::QueryError;
+    let err = User::objects()
+        .aggregate()
+        .annotate("w", row_number().partition_by("nope_col").into())
+        .compile()
+        .unwrap_err();
+    assert!(
+        matches!(err, QueryError::UnknownField { ref field, .. } if field == "nope_col"),
+        "expected UnknownField for partition_by typo, got: {err:?}",
+    );
+}
+
+#[test]
+fn order_by_typo_inside_annotate_is_caught_at_compile_time() {
+    use rustango::core::QueryError;
+    let err = User::objects()
+        .aggregate()
+        .annotate(
+            "w",
+            row_number()
+                .partition_by("tenant_id")
+                .order_by(&[("nope_order", true)])
+                .into(),
+        )
+        .compile()
+        .unwrap_err();
+    assert!(
+        matches!(err, QueryError::UnknownField { ref field, .. } if field == "nope_order"),
+        "expected UnknownField for order_by typo, got: {err:?}",
+    );
+}
+
+#[test]
+fn lag_column_arg_typo_inside_annotate_is_caught_at_compile_time() {
+    use rustango::core::QueryError;
+    let err = User::objects()
+        .aggregate()
+        .annotate(
+            "w",
+            lag("nope_arg_col", 1, None)
+                .order_by(&[("id", false)])
+                .into(),
+        )
+        .compile()
+        .unwrap_err();
+    assert!(
+        matches!(err, QueryError::UnknownField { ref field, .. } if field == "nope_arg_col"),
+        "expected UnknownField for LAG column arg typo, got: {err:?}",
+    );
+}
+
+/// Same path runs through `Coalesced` and `Filtered` wrappers — the
+/// inner Window's column refs must still validate. (Filtered + Window
+/// is rejected at emit time, but the column-validation walk runs
+/// at compile() before emit, so column typos inside the wrapped
+/// Window should still surface here.)
+#[test]
+fn coalesced_window_partition_typo_still_caught() {
+    use rustango::core::QueryError;
+    // Build the AggregateExpr directly — there's no `aggregates::*`
+    // builder for "Coalesced { Window }" today (Coalesced is a
+    // wrapper on the flat builder; this combo lands later).
+    let inner: AggregateExpr = row_number().partition_by("nope_col_inside_coalesce").into();
+    let wrapped = AggregateExpr::Coalesced {
+        inner: Box::new(inner),
+        default: SqlValue::I64(0),
+    };
+    let err = User::objects()
+        .aggregate()
+        .annotate("w", wrapped)
+        .compile()
+        .unwrap_err();
+    assert!(
+        matches!(err, QueryError::UnknownField { ref field, .. } if field == "nope_col_inside_coalesce"),
+        "Coalesced wrapper must not hide inner column typos: {err:?}",
+    );
+}
+
+/// Pinned-behavior test for the `LAST_VALUE` default-frame trap —
+/// the cookbook now documents this. A bare `last_value` returns the
+/// current-row value, not the partition's last row. The SQL emitted
+/// here is the same as before the cookbook callout (no behavior
+/// change); this test is documentation-in-code so the next reader
+/// sees the bare emission alongside the explicit-frame fix.
+#[test]
+fn last_value_bare_emits_implicit_default_frame_form() {
+    let w = last_value("score").order_by(&[("id", false)]);
+    let stmt = Postgres.compile_aggregate(&agg(w.into())).unwrap();
+    assert!(
+        stmt.sql
+            .contains(r#"LAST_VALUE("score") OVER (ORDER BY "id")"#),
+        "got: {}",
+        stmt.sql
+    );
+    assert!(
+        !stmt.sql.contains("ROWS")
+            && !stmt.sql.contains("RANGE")
+            && !stmt.sql.contains("UNBOUNDED"),
+        "bare last_value emits no explicit frame — DEFAULT frame applies, \
+         which returns the CURRENT row's value (cookbook footgun): {}",
+        stmt.sql
+    );
+}
+
+/// And the explicit-frame fix — pin the cookbook-recommended shape
+/// so the recommended pattern stays callable.
+#[test]
+fn last_value_with_unbounded_following_frame_emits_full_form() {
+    let w = last_value("score")
+        .partition_by("tenant_id")
+        .order_by(&[("id", false)])
+        .frame(WindowFrame {
+            kind: FrameKind::Rows,
+            start: FrameBoundary::UnboundedPreceding,
+            end: Some(FrameBoundary::UnboundedFollowing),
+        });
+    let stmt = Postgres.compile_aggregate(&agg(w.into())).unwrap();
+    assert!(
+        stmt.sql
+            .contains("ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING"),
+        "explicit unbounded-following frame for last_value: {}",
         stmt.sql
     );
 }

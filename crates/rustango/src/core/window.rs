@@ -8,9 +8,11 @@
 //!
 //! ```ignore
 //! use rustango::core::window::{rank, row_number, lag};
-//! use rustango::core::Column as _;
+//! use rustango::core::SqlValue;
 //!
-//! // Rank users by score within each tenant.
+//! // "Rank users by score within each tenant" — the canonical
+//! // window-function use case. Lives in the SELECT list via
+//! // `annotate()`.
 //! User::objects()
 //!     .aggregate()
 //!     .annotate(
@@ -19,15 +21,42 @@
 //!     )
 //!     .compile()?;
 //!
-//! // Day-over-day change via Lag.
+//! // Lag with COALESCE fallback for the first row of each partition.
+//! // Composes naturally because LAG returns NULL for the boundary row
+//! // and `aggregates::sum(...).default(...)` shape applies.
+//! use rustango::core::aggregates::AggregateBuilder;
 //! Event::objects()
-//!     .update()
-//!     .set_expr(
+//!     .aggregate()
+//!     .annotate(
 //!         "prev_count",
-//!         lag("count", 1, None).order_by(&[("day", false)]),
+//!         AggregateBuilder::from(
+//!             lag("count", 1, Some(SqlValue::I64(0)))
+//!                 .partition_by("user_id")
+//!                 .order_by(&[("day", false)]),
+//!         ),
 //!     )
-//!     .execute(&pool).await?;
+//!     .compile()?;
 //! ```
+//!
+//! ## Where window functions can appear
+//!
+//! Every backend rustango supports (PG, MySQL 8+, SQLite 3.25+)
+//! restricts window functions to the **SELECT list** and the
+//! **ORDER BY clause** of a query. They are **not allowed in**:
+//!
+//! - `WHERE` predicates,
+//! - `HAVING` predicates,
+//! - `GROUP BY` clauses,
+//! - `UPDATE SET` assignments,
+//! - `JOIN ON` predicates,
+//! - the projection of a `RETURNING` clause.
+//!
+//! The IR + writer don't gate emission on this — `set_expr(...,
+//! row_number())` compiles cleanly but fails at execute. Build window
+//! expressions through [`crate::query::AggregateBuilder::annotate`]
+//! (the only legitimate channel today). To use a window result inside
+//! an `UPDATE` or filter, wrap the windowed select in a subquery and
+//! join/filter against that.
 //!
 //! ## Builder shape
 //!
@@ -41,9 +70,11 @@
 //! - `.frame(WindowFrame { … })` — set the optional `ROWS`/`RANGE`
 //!   frame clause.
 //!
-//! The builder lowers via `Into<Expr>` so window functions slot into
-//! `set_expr` (UPDATE) and `eq_expr` (WHERE-rhs); via
-//! `Into<AggregateExpr>` so they compose with `annotate()`.
+//! The builder lowers via `Into<AggregateExpr>` so window functions
+//! compose with `annotate()`. `Into<Expr>` is also implemented to
+//! keep the IR composable (window-in-Case/Coalesce/Subquery), but
+//! emitting one in a slot the DB rejects (see list above) is a
+//! programmer error.
 //!
 //! ## Tri-dialect emission
 //!

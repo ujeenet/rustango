@@ -800,6 +800,14 @@ impl<T: Model> AggregateBuilder<T> {
     pub fn compile(self) -> Result<AggregateQuery, QueryError> {
         let model = T::SCHEMA;
         let where_clause = resolve_pending(model, self.qs.pending)?;
+        // Walk each AggregateExpr for column-name typos. Today this
+        // catches partition_by / order_by / args inside an
+        // `AggregateExpr::Window` (issue #7) — the older `Sum("col")` /
+        // `Count(Some("col"))` shapes don't validate yet; that's a
+        // pre-existing gap orthogonal to this slice.
+        for (_alias, expr) in &self.aggregates {
+            validate_aggregate_expr_columns(model, expr)?;
+        }
         let order_by = self
             .order_by
             .into_iter()
@@ -815,5 +823,55 @@ impl<T: Model> AggregateBuilder<T> {
             limit: self.limit,
             offset: self.offset,
         })
+    }
+}
+
+/// Walk an [`AggregateExpr`] for column references that should
+/// resolve against `model`. Today only `AggregateExpr::Window`
+/// (issue #7) carries non-trivial column refs the schema can check —
+/// partition_by + order_by columns + any `Expr::Column` arg. The
+/// flat aggregate variants (`Sum("col")`, etc.) hold raw `&'static str`
+/// column names that the existing validator chain doesn't visit; that
+/// gap is orthogonal to this walk and worth a follow-up.
+///
+/// [`AggregateExpr`]: crate::core::AggregateExpr
+fn validate_aggregate_expr_columns(
+    model: &'static ModelSchema,
+    expr: &crate::core::AggregateExpr,
+) -> Result<(), QueryError> {
+    use crate::core::AggregateExpr;
+    match expr {
+        AggregateExpr::Filtered { inner, filter } => {
+            filter.validate(model)?;
+            validate_aggregate_expr_columns(model, inner)
+        }
+        AggregateExpr::Coalesced { inner, .. } => validate_aggregate_expr_columns(model, inner),
+        AggregateExpr::Window(w) => {
+            for col in &w.partition_by {
+                if model.field_by_column(col).is_none() {
+                    return Err(QueryError::UnknownField {
+                        model: model.name,
+                        field: (*col).to_owned(),
+                    });
+                }
+            }
+            for o in &w.order_by {
+                if model.field_by_column(o.column).is_none() {
+                    return Err(QueryError::UnknownField {
+                        model: model.name,
+                        field: o.column.to_owned(),
+                    });
+                }
+            }
+            for arg in &w.args {
+                validate_expr_columns_in_model(model, arg)?;
+            }
+            Ok(())
+        }
+        // Flat aggregate variants (Count/Sum/Avg/Max/Min/CountDistinct/
+        // StdDev*/Variance*) — the column they reference is a bare
+        // `&'static str` not currently part of the validation chain.
+        // Schema typos surface at execution. Pre-existing gap.
+        _ => Ok(()),
     }
 }
