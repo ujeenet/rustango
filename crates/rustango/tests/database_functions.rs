@@ -373,6 +373,108 @@ fn function_in_where_column_compare() {
 
 // ---------- Schema validation: column refs inside function args ----------
 
+// ---------- Arity enforcement on unary functions (post-review fix A) ----------
+//
+// The public builder API (`lower(arg)`, `upper(arg)`, …) is type-
+// locked to one argument, but the underlying `Expr::Function` variant
+// is permissive — anyone constructing the IR by hand (proc-macro
+// codegen, future feature combos) could pass 0 or 2+ args. The writer
+// catches that with `FunctionArityMismatch` rather than emitting
+// malformed SQL.
+
+#[test]
+fn unary_function_with_zero_args_errors() {
+    for (name, kind) in [
+        ("LOWER", rustango::core::ScalarFn::Lower),
+        ("UPPER", rustango::core::ScalarFn::Upper),
+        ("LENGTH", rustango::core::ScalarFn::Length),
+        ("TRIM", rustango::core::ScalarFn::Trim),
+        ("LTRIM", rustango::core::ScalarFn::LTrim),
+        ("RTRIM", rustango::core::ScalarFn::RTrim),
+        ("ABS", rustango::core::ScalarFn::Abs),
+        ("CEIL", rustango::core::ScalarFn::Ceil),
+        ("FLOOR", rustango::core::ScalarFn::Floor),
+    ] {
+        let q = update_set_expr(Expr::Function { kind, args: vec![] });
+        let err = Postgres.compile_update(&q).unwrap_err();
+        assert!(
+            matches!(err, SqlError::FunctionArityMismatch { func, expected: "1", got: 0 } if func == name),
+            "expected arity-1 error for {name}, got {err:?}",
+        );
+    }
+}
+
+#[test]
+fn unary_function_with_two_args_errors() {
+    let q = update_set_expr(Expr::Function {
+        kind: rustango::core::ScalarFn::Lower,
+        args: vec![F("name").into(), F("name").into()],
+    });
+    let err = Postgres.compile_update(&q).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            SqlError::FunctionArityMismatch {
+                func: "LOWER",
+                expected: "1",
+                got: 2
+            }
+        ),
+        "expected arity error, got {err:?}",
+    );
+}
+
+// ---------- SQLite Greatest/Least with 1 arg (post-review fix B) ----------
+//
+// SQLite's `MAX`/`MIN` are overloaded: 2+ args is the scalar form
+// (semantically equivalent to PG `GREATEST`/`LEAST`); a single arg
+// switches to the aggregate form, which is wrong in `UPDATE SET` and
+// in non-aggregating `WHERE` predicates. The writer rejects the 1-arg
+// SQLite case rather than emit `MAX(x)` and surprise the user with an
+// aggregate-misuse error at execution time.
+
+#[test]
+fn sqlite_greatest_with_one_arg_returns_op_not_supported() {
+    let q = update_set_expr(greatest([F("score").into()]));
+    let err = Sqlite.compile_update(&q).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            SqlError::OpNotSupportedInDialect {
+                dialect: "sqlite",
+                ..
+            }
+        ),
+        "expected OpNotSupportedInDialect on SQLite, got {err:?}",
+    );
+}
+
+#[test]
+fn sqlite_least_with_one_arg_returns_op_not_supported() {
+    let q = update_set_expr(least([F("score").into()]));
+    let err = Sqlite.compile_update(&q).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            SqlError::OpNotSupportedInDialect {
+                dialect: "sqlite",
+                ..
+            }
+        ),
+        "expected OpNotSupportedInDialect on SQLite, got {err:?}",
+    );
+}
+
+#[test]
+fn pg_mysql_greatest_with_one_arg_still_emits() {
+    // PG/MySQL treat `GREATEST(x)` as a legal no-op returning x. Only
+    // SQLite has the aggregate collision — keep the cross-dialect
+    // behaviour asymmetric only where the underlying engine forces it.
+    let q = update_set_expr(greatest([F("score").into()]));
+    assert!(Postgres.compile_update(&q).is_ok());
+    assert!(MySql.compile_update(&q).is_ok());
+}
+
 #[test]
 fn unknown_column_inside_function_is_caught_at_compile() {
     let err = Row::objects()

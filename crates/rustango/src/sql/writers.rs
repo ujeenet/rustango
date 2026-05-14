@@ -500,13 +500,13 @@ fn write_function(
 ) -> Result<(), SqlError> {
     use crate::core::ScalarFn as F;
     match kind {
-        // -------- text: simple FN(arg) --------
-        F::Lower => write_call(b, "LOWER", args),
-        F::Upper => write_call(b, "UPPER", args),
-        F::Length => write_call(b, "LENGTH", args),
-        F::Trim => write_call(b, "TRIM", args),
-        F::LTrim => write_call(b, "LTRIM", args),
-        F::RTrim => write_call(b, "RTRIM", args),
+        // -------- text: simple FN(arg) — unary, arity-checked --------
+        F::Lower => write_call_unary(b, "LOWER", args),
+        F::Upper => write_call_unary(b, "UPPER", args),
+        F::Length => write_call_unary(b, "LENGTH", args),
+        F::Trim => write_call_unary(b, "TRIM", args),
+        F::LTrim => write_call_unary(b, "LTRIM", args),
+        F::RTrim => write_call_unary(b, "RTRIM", args),
 
         // -------- text: 3-ary FN(s, from, to) --------
         F::Replace => {
@@ -578,14 +578,14 @@ fn write_function(
             }
         }
 
-        // -------- math: simple unary --------
-        F::Abs => write_call(b, "ABS", args),
-        F::Floor => write_call(b, "FLOOR", args),
+        // -------- math: simple unary, arity-checked --------
+        F::Abs => write_call_unary(b, "ABS", args),
+        F::Floor => write_call_unary(b, "FLOOR", args),
         F::Ceil => {
             // MySQL accepts both `CEIL` and `CEILING`; PG / SQLite use
             // `CEIL` (SQLite 3.35+). Emit `CEIL` everywhere for the
             // narrowest portable token.
-            write_call(b, "CEIL", args)
+            write_call_unary(b, "CEIL", args)
         }
         F::Round => {
             // 1- or 2-ary. The shape is identical across PG / MySQL /
@@ -621,8 +621,16 @@ fn write_function(
                 });
             }
             // SQLite has no GREATEST keyword. Its scalar `MAX(a, b, …)`
-            // (distinct from the aggregate `MAX(col)` — disambiguated
-            // by argument count) is the portable equivalent.
+            // form requires 2+ args; with 1 arg SQLite parses `MAX(x)` as
+            // the AGGREGATE form, which is a misuse-of-aggregate error
+            // inside `UPDATE SET` and the wrong semantic in `WHERE`.
+            // Surface a clear error rather than emit silently-wrong SQL.
+            if b.d.name() == "sqlite" && args.len() == 1 {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: "GREATEST with 1 argument (SQLite collides with the aggregate MAX)",
+                    dialect: "sqlite",
+                });
+            }
             let name = if b.d.name() == "sqlite" {
                 "MAX"
             } else {
@@ -636,6 +644,13 @@ fn write_function(
                     func: "LEAST",
                     expected: ">= 1",
                     got: 0,
+                });
+            }
+            // See `Greatest` above for the SQLite 1-arg rationale.
+            if b.d.name() == "sqlite" && args.len() == 1 {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: "LEAST with 1 argument (SQLite collides with the aggregate MIN)",
+                    dialect: "sqlite",
                 });
             }
             let name = if b.d.name() == "sqlite" {
@@ -673,6 +688,28 @@ fn write_call(b: &mut Sql<'_>, name: &str, args: &[crate::core::Expr]) -> Result
     }
     b.sql.push(')');
     Ok(())
+}
+
+/// `write_call` with an arity-1 assertion. Used for unary functions
+/// (LOWER, UPPER, LENGTH, TRIM, LTRIM, RTRIM, ABS, CEIL, FLOOR) so a
+/// hand-rolled `Expr::Function { args: vec![] }` or `vec![a, b]` fails
+/// at emit-time with a clear error rather than reaching the database
+/// with malformed SQL like `LOWER()` or `LENGTH(a, b)`. The public
+/// builder API is type-locked to a single arg, so this only fires for
+/// callers that construct the IR directly.
+fn write_call_unary(
+    b: &mut Sql<'_>,
+    name: &'static str,
+    args: &[crate::core::Expr],
+) -> Result<(), SqlError> {
+    if args.len() != 1 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: name,
+            expected: "1",
+            got: args.len(),
+        });
+    }
+    write_call(b, name, args)
 }
 
 // ====================================================================
