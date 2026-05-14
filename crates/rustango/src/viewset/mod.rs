@@ -676,14 +676,6 @@ impl ViewSetState {
 // ------------------------------------------------------------------ Serialization
 
 /// Re-export of the shared row-to-JSON helper. Lives in
-/// `crate::sql::row_to_json` since v0.29 (#89) — PG only; the
-/// tri-dialect viewset path uses `select_rows_as_json_pool` directly.
-/// + admin views can use it without reaching across module
-/// boundaries; this is a thin local alias for source-compat
-/// with the v0.28 callsite shape.
-#[cfg(feature = "postgres")]
-pub(crate) use crate::sql::row_to_json;
-
 fn json_response(body: Value) -> Response {
     Response::builder()
         .status(StatusCode::OK)

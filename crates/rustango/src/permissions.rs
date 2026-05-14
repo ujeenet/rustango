@@ -52,6 +52,7 @@ use crate::tenancy::TenancyError;
 // ----- re-export the engine for the canonical path -----
 
 #[cfg(feature = "postgres")]
+#[allow(deprecated)] // `ensure_tables` is intentionally re-exported for back-compat.
 pub use crate::tenancy::permissions::{
     assign_role, auto_create_permissions, clear_user_perm, create_role, ensure_tables,
     get_or_create_role, grant_role_perm, has_all_perms, has_any_perm, has_perm, remove_role,

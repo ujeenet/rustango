@@ -17,6 +17,19 @@ use rustango::sql::sqlx::{self, PgPool, Row};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets shared tables (via
+/// DROP/CREATE or `drop_all`); under cargo's default parallel harness
+/// two tests would race on PG's `pg_type_typname_nsp_index` /
+/// `pg_class_relname_nsp_index` system-catalog uniques when both try
+/// to CREATE/DROP at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
 async fn pool() -> Option<PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     Some(
@@ -87,6 +100,7 @@ fn write_migration(dir: &std::path::Path, mig: &Migration) {
 
 #[tokio::test]
 async fn migrate_creates_ledger_table_idempotently() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -116,6 +130,7 @@ async fn migrate_creates_ledger_table_idempotently() {
 
 #[tokio::test]
 async fn migrate_with_empty_dir_returns_empty_list() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -129,6 +144,7 @@ async fn migrate_with_empty_dir_returns_empty_list() {
 
 #[tokio::test]
 async fn applies_one_schema_migration_and_records_in_ledger() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -185,6 +201,7 @@ async fn applies_one_schema_migration_and_records_in_ledger() {
 
 #[tokio::test]
 async fn rerun_skips_already_applied_migrations() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -225,6 +242,7 @@ async fn rerun_skips_already_applied_migrations() {
 
 #[tokio::test]
 async fn atomic_failure_rolls_back_offender_keeps_priors() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -317,6 +335,7 @@ async fn atomic_failure_rolls_back_offender_keeps_priors() {
 
 #[tokio::test]
 async fn mixed_schema_and_data_ops_apply_in_order() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -365,6 +384,7 @@ async fn mixed_schema_and_data_ops_apply_in_order() {
 
 #[tokio::test]
 async fn non_atomic_migration_runs_outside_a_tx() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -409,6 +429,7 @@ async fn non_atomic_migration_runs_outside_a_tx() {
 
 #[tokio::test]
 async fn unapply_round_trips_a_schema_only_migration() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -476,6 +497,7 @@ async fn unapply_round_trips_a_schema_only_migration() {
 
 #[tokio::test]
 async fn unapply_data_op_uses_reverse_sql() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -561,6 +583,7 @@ async fn unapply_data_op_uses_reverse_sql() {
 
 #[tokio::test]
 async fn unapply_irreversible_migration_fails_fast_no_db_writes() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -632,6 +655,7 @@ async fn unapply_irreversible_migration_fails_fast_no_db_writes() {
 
 #[tokio::test]
 async fn unapply_unknown_migration_returns_validation_error() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -647,6 +671,7 @@ async fn unapply_unknown_migration_returns_validation_error() {
 
 #[tokio::test]
 async fn unapply_then_reapply_round_trip() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -705,6 +730,7 @@ async fn migration_with_two_create_tables_one_having_fk_to_other_applies() {
     // referenced sibling table hadn't been created yet. Fixed by
     // deferring all FK ALTERs to the end of the migration's forward
     // execution.
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -841,6 +867,7 @@ async fn cleanup(pool: &PgPool, names: &[String], tables: &[String], dir: &std::
 
 #[tokio::test]
 async fn migrate_to_unknown_target_is_validation_error() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -855,6 +882,7 @@ async fn migrate_to_unknown_target_is_validation_error() {
 
 #[tokio::test]
 async fn migrate_to_target_already_head_is_noop() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -872,6 +900,7 @@ async fn migrate_to_target_already_head_is_noop() {
 
 #[tokio::test]
 async fn migrate_to_forward_applies_pending_subset() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -913,6 +942,7 @@ async fn migrate_to_forward_applies_pending_subset() {
 
 #[tokio::test]
 async fn migrate_to_backward_unapplies_in_reverse() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -939,6 +969,7 @@ async fn migrate_to_backward_unapplies_in_reverse() {
 
 #[tokio::test]
 async fn migrate_to_zero_unapplies_everything() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -964,6 +995,7 @@ async fn migrate_to_zero_unapplies_everything() {
 
 #[tokio::test]
 async fn downgrade_one_step_unapplies_head() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -986,6 +1018,7 @@ async fn downgrade_one_step_unapplies_head() {
 
 #[tokio::test]
 async fn downgrade_more_steps_than_applied_unapplies_all() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -1006,6 +1039,7 @@ async fn downgrade_more_steps_than_applied_unapplies_all() {
 
 #[tokio::test]
 async fn downgrade_zero_steps_is_noop() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -1020,6 +1054,7 @@ async fn downgrade_zero_steps_is_noop() {
 
 #[tokio::test]
 async fn applied_set_returns_recorded_names() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -1042,6 +1077,7 @@ async fn applied_set_returns_recorded_names() {
 
 #[tokio::test]
 async fn alter_column_type_applies_and_unapplies_round_trip() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -1138,6 +1174,7 @@ async fn alter_column_type_applies_and_unapplies_round_trip() {
 
 #[tokio::test]
 async fn rename_column_applies_and_unapplies() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -1231,6 +1268,7 @@ async fn rename_column_applies_and_unapplies() {
 
 #[tokio::test]
 async fn dry_run_returns_pending_sql_without_executing() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -1300,6 +1338,7 @@ async fn dry_run_returns_pending_sql_without_executing() {
 
 #[tokio::test]
 async fn dry_run_skips_already_applied_migrations() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -1319,6 +1358,7 @@ async fn dry_run_skips_already_applied_migrations() {
 
 #[tokio::test]
 async fn dry_run_returns_empty_when_up_to_date() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -1339,6 +1379,7 @@ async fn dry_run_returns_empty_when_up_to_date() {
 async fn unapply_refuses_non_head_target() {
     // Apply 0001 → 0002 → 0003. Try to `unapply` 0001 directly.
     // It is not the head, so the call must error before any DB write.
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -1365,6 +1406,7 @@ async fn unapply_refuses_non_head_target() {
 
 #[tokio::test]
 async fn unapply_force_bypasses_head_check() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -1400,6 +1442,7 @@ async fn concurrent_migrate_calls_serialize_via_advisory_lock() {
     // ledger INSERT or a `relation already exists` from the CREATE.
     // With the lock, peers serialize: across N concurrent calls every
     // migration is applied exactly once and every call returns Ok.
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };

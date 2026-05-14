@@ -70,7 +70,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(feature = "postgres")]
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 use crate::sql::Auto;
 use crate::storage::{StorageError, StorageRegistry};
@@ -936,7 +936,6 @@ impl MediaManager {
                     .bind(&description)
                     .execute(&mut *tx)
                     .await?;
-                use sqlx::Row as _;
                 let row = sqlx::query(&format!(
                     "SELECT {select_cols} FROM `rustango_media_collections` \
                      WHERE id = LAST_INSERT_ID()"
@@ -1192,7 +1191,6 @@ impl MediaManager {
                 .bind(slug)
                 .execute(&mut *tx)
                 .await?;
-                use sqlx::Row as _;
                 let row = sqlx::query(
                     "SELECT id, name, slug, created_at FROM `rustango_media_tags` WHERE slug = ?",
                 )
@@ -1483,7 +1481,6 @@ impl MediaManager {
                     .bind(sqlx::types::Json(&r.metadata))
                     .execute(&mut *tx)
                     .await?;
-                use sqlx::Row as _;
                 let row = sqlx::query(&format!(
                     "SELECT {select_cols} FROM `rustango_media` WHERE id = LAST_INSERT_ID()"
                 ))

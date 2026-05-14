@@ -18,6 +18,19 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}_{pid}_{n}")
 }
 
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets the shared PG
+/// schema; under cargo's default parallel harness two tests would race
+/// on PG's `pg_type_typname_nsp_index` / `pg_class_relname_nsp_index`
+/// system-catalog uniques when both try to CREATE/DROP the same table
+/// at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     Some(sqlx::PgPool::connect(&url).await.unwrap())
@@ -55,6 +68,7 @@ async fn run(
 
 #[tokio::test]
 async fn create_tenant_inserts_row_creates_schema_and_runs_migrations() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -119,6 +133,7 @@ async fn create_tenant_inserts_row_creates_schema_and_runs_migrations() {
 
 #[tokio::test]
 async fn create_tenant_database_mode_requires_database_url() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -149,6 +164,7 @@ async fn create_tenant_database_mode_requires_database_url() {
 
 #[tokio::test]
 async fn create_tenant_rejects_duplicate_slug() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -187,6 +203,7 @@ async fn create_tenant_rejects_duplicate_slug() {
 
 #[tokio::test]
 async fn drop_tenant_soft_deletes_with_confirm() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -252,6 +269,7 @@ async fn drop_tenant_soft_deletes_with_confirm() {
 
 #[tokio::test]
 async fn list_tenants_prints_all_orgs() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -308,6 +326,7 @@ async fn list_tenants_prints_all_orgs() {
 async fn unrecognized_subcommand_delegates_to_migrate_manage() {
     // `showmigrations` is a rustango_migrate verb, NOT tenancy. The
     // dispatcher must delegate gracefully.
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -329,6 +348,7 @@ async fn unrecognized_subcommand_delegates_to_migrate_manage() {
 
 #[tokio::test]
 async fn migrate_tenants_runs_against_active_only() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -400,6 +420,7 @@ async fn migrate_tenants_runs_against_active_only() {
 /// deleted (inactive) orgs purge cleanly too.
 #[tokio::test]
 async fn purge_tenant_schema_mode_drops_schema_and_org_row() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -469,6 +490,7 @@ async fn purge_tenant_schema_mode_drops_schema_and_org_row() {
 /// `purge-tenant` rejects `--confirm` mismatch loudly.
 #[tokio::test]
 async fn purge_tenant_rejects_confirm_mismatch() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -520,6 +542,7 @@ async fn purge_tenant_rejects_confirm_mismatch() {
 /// `--purge-database`. The Org row + dedicated DB stay intact.
 #[tokio::test]
 async fn purge_tenant_database_mode_requires_purge_database_flag() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -576,6 +599,7 @@ async fn purge_tenant_database_mode_requires_purge_database_flag() {
 /// touching anything.
 #[tokio::test]
 async fn purge_tenant_unknown_slug_errors() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -604,6 +628,7 @@ async fn purge_tenant_unknown_slug_errors() {
 /// delete is the right next step after `drop-tenant`.
 #[tokio::test]
 async fn purge_tenant_works_on_soft_deleted_org() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -674,6 +699,7 @@ async fn purge_tenant_works_on_soft_deleted_org() {
 /// new schema automatically, and `create-user` writes into it.
 #[tokio::test]
 async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };

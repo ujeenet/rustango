@@ -211,6 +211,7 @@ pub(crate) fn build_fk_joins(state: &AppState, model: &'static ModelSchema) -> V
 /// v0.37 — PG-typed back-compat; admin internals call
 /// [`fk_map_from_joined_rows_json`] which works on any backend.
 #[cfg(feature = "postgres")]
+#[allow(dead_code)] // back-compat surface; live callers go through the `_json` variant.
 pub(crate) fn fk_map_from_joined_rows(
     state: &AppState,
     model: &'static ModelSchema,
@@ -283,6 +284,7 @@ fn url_encode(s: &str) -> String {
 /// v0.37 — PG-typed back-compat; admin internals call
 /// [`render_cell_json`] which works on any backend.
 #[cfg(feature = "postgres")]
+#[allow(dead_code)] // back-compat surface; live callers go through the `_json` variant.
 pub(crate) fn render_cell(
     row: &sqlx::postgres::PgRow,
     field: &FieldSchema,

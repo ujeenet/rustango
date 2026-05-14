@@ -24,6 +24,19 @@ pub struct Invoice {
     pub total: f64,
 }
 
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets the shared PG
+/// schema; under cargo's default parallel harness two tests would race
+/// on PG's `pg_type_typname_nsp_index` / `pg_class_relname_nsp_index`
+/// system-catalog uniques when both try to CREATE/DROP the same table
+/// at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     sqlx::PgPool::connect(&url).await.ok()
@@ -36,6 +49,7 @@ async fn fresh(pool: &sqlx::PgPool) {
 
 #[tokio::test]
 async fn generated_column_is_computed_on_insert() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         eprintln!("skipping: DATABASE_URL not set");
         return;
@@ -102,6 +116,7 @@ async fn generated_column_is_computed_on_insert() {
 
 #[tokio::test]
 async fn generated_column_is_recomputed_on_update() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         eprintln!("skipping: DATABASE_URL not set");
         return;
