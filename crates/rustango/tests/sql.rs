@@ -92,8 +92,8 @@ fn multiple_filters_join_with_and_and_increment_placeholders() {
         .compile_select(
             &User::objects()
                 .eq("name", "alice")
-                .filter("is_active", Op::Eq, true)
-                .filter("id", Op::Gt, 10_i64)
+                .filter_op("is_active", Op::Eq, true)
+                .filter_op("id", Op::Gt, 10_i64)
                 .compile()
                 .unwrap(),
         )
@@ -117,8 +117,8 @@ fn is_null_does_not_consume_placeholder() {
     let stmt = pg()
         .compile_select(
             &User::objects()
-                .filter("name", Op::IsNull, true)
-                .filter("id", Op::Eq, 1_i64)
+                .filter_op("name", Op::IsNull, true)
+                .filter_op("id", Op::Eq, 1_i64)
                 .compile()
                 .unwrap(),
         )
@@ -135,7 +135,7 @@ fn is_not_null_emitted_for_false() {
     let stmt = pg()
         .compile_select(
             &User::objects()
-                .filter("name", Op::IsNull, false)
+                .filter_op("name", Op::IsNull, false)
                 .compile()
                 .unwrap(),
         )
@@ -151,7 +151,7 @@ fn in_list_expands_to_one_placeholder_per_element() {
     let stmt = pg()
         .compile_select(
             &User::objects()
-                .filter(
+                .filter_op(
                     "id",
                     Op::In,
                     SqlValue::List(vec![SqlValue::I64(1), SqlValue::I64(2), SqlValue::I64(3)]),
@@ -175,7 +175,7 @@ fn empty_in_list_is_rejected() {
     let err = pg()
         .compile_select(
             &User::objects()
-                .filter("id", Op::In, SqlValue::List(vec![]))
+                .filter_op("id", Op::In, SqlValue::List(vec![]))
                 .compile()
                 .unwrap(),
         )
@@ -188,7 +188,7 @@ fn in_with_non_list_is_rejected() {
     let err = pg()
         .compile_select(
             &User::objects()
-                .filter("id", Op::In, 1_i64)
+                .filter_op("id", Op::In, 1_i64)
                 .compile()
                 .unwrap(),
         )
@@ -201,7 +201,7 @@ fn is_null_with_non_bool_is_rejected() {
     let err = pg()
         .compile_select(
             &User::objects()
-                .filter("name", Op::IsNull, "alice")
+                .filter_op("name", Op::IsNull, "alice")
                 .compile()
                 .unwrap(),
         )

@@ -104,7 +104,7 @@ async fn save_updates_when_pk_set_without_changing_pk() {
     assert_eq!(original_id, after_id);
 
     let fetched: Vec<Thing> = Thing::objects()
-        .filter("id", Op::Eq, after_id)
+        .filter_op("id", Op::Eq, after_id)
         .fetch(&pool)
         .await
         .unwrap();

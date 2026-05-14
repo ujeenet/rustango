@@ -65,4 +65,35 @@ pub enum QueryError {
          `AggregateBuilder::having`."
     )]
     HavingOpNotSupported { alias: String, op: super::Op },
+
+    /// Django-shape `.filter("field__lookup", value)` got a lookup
+    /// suffix the parser doesn't recognize. Issue #71. The supported
+    /// set (exact / iexact / contains / icontains / startswith /
+    /// istartswith / endswith / iendswith / gt / gte / lt / lte / ne
+    /// / in / isnull / between / range) is documented on
+    /// [`crate::query::QuerySet::filter`]. Chained lookups
+    /// (`author__name__icontains`) aren't supported in v1.
+    #[error(
+        "unknown lookup suffix `__{suffix}` on field `{field}` — \
+         supported: exact, iexact, contains, icontains, startswith, \
+         istartswith, endswith, iendswith, gt, gte, lt, lte, ne, in, \
+         isnull, between, range"
+    )]
+    UnknownLookup { field: String, suffix: String },
+
+    /// Django-shape `.filter("field__lookup", value)` got a value
+    /// whose shape doesn't fit the chosen lookup. Issue #71.
+    /// Examples: `__in` with a non-list, `__isnull` with a
+    /// non-bool, `__between` with a list that isn't exactly 2
+    /// elements.
+    #[error(
+        "lookup `__{suffix}` on field `{field}` requires {expected}; \
+         got a value of shape {actual}"
+    )]
+    InvalidLookupValue {
+        field: String,
+        suffix: String,
+        expected: &'static str,
+        actual: &'static str,
+    },
 }

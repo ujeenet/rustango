@@ -115,12 +115,12 @@ impl ContentType {
         model_name: &str,
     ) -> Result<Option<Self>, ExecError> {
         let rows: Vec<Self> = Self::objects()
-            .filter(
+            .filter_op(
                 "app_label",
                 crate::core::Op::Eq,
                 SqlValue::String(app_label.into()),
             )
-            .filter(
+            .filter_op(
                 "model_name",
                 crate::core::Op::Eq,
                 SqlValue::String(model_name.into()),
@@ -138,7 +138,7 @@ impl ContentType {
     /// As [`Self::for_model`].
     pub async fn by_id(pool: &PgPool, id: i64) -> Result<Option<Self>, ExecError> {
         let rows: Vec<Self> = Self::objects()
-            .filter("id", crate::core::Op::Eq, SqlValue::I64(id))
+            .filter_op("id", crate::core::Op::Eq, SqlValue::I64(id))
             .limit(1)
             .fetch(pool)
             .await?;
@@ -178,12 +178,12 @@ impl ContentType {
         model_name: &str,
     ) -> Result<Option<Self>, ExecError> {
         let rows: Vec<Self> = Self::objects()
-            .filter(
+            .filter_op(
                 "app_label",
                 crate::core::Op::Eq,
                 SqlValue::String(app_label.into()),
             )
-            .filter(
+            .filter_op(
                 "model_name",
                 crate::core::Op::Eq,
                 SqlValue::String(model_name.into()),
@@ -201,7 +201,7 @@ impl ContentType {
     /// As [`Self::for_model`].
     pub async fn by_id_pool(pool: &crate::sql::Pool, id: i64) -> Result<Option<Self>, ExecError> {
         let rows: Vec<Self> = Self::objects()
-            .filter("id", crate::core::Op::Eq, SqlValue::I64(id))
+            .filter_op("id", crate::core::Op::Eq, SqlValue::I64(id))
             .limit(1)
             .fetch_pool(pool)
             .await?;
@@ -662,7 +662,7 @@ where
         .map(crate::core::SqlValue::I64)
         .collect();
     let children: Vec<C> = crate::query::QuerySet::<C>::new()
-        .filter(
+        .filter_op(
             target_fk_column,
             crate::core::Op::In,
             crate::core::SqlValue::List(pk_values),
@@ -760,7 +760,7 @@ where
             table: C::SCHEMA.table,
         })?;
     let rows: Vec<C> = crate::query::QuerySet::<C>::new()
-        .filter(
+        .filter_op(
             pk_field.column,
             crate::core::Op::In,
             crate::core::SqlValue::List(pk_values),
@@ -821,7 +821,7 @@ where
         .map(crate::core::SqlValue::I64)
         .collect();
     let children: Vec<C> = crate::query::QuerySet::<C>::new()
-        .filter(
+        .filter_op(
             target_fk_column,
             crate::core::Op::In,
             crate::core::SqlValue::List(pk_values),
@@ -899,7 +899,7 @@ where
             table: C::SCHEMA.table,
         })?;
     let rows: Vec<C> = crate::query::QuerySet::<C>::new()
-        .filter(
+        .filter_op(
             pk_field.column,
             crate::core::Op::In,
             crate::core::SqlValue::List(pk_values),

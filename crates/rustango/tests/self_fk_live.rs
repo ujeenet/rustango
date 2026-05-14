@@ -122,7 +122,7 @@ async fn live_self_fk_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     grand.save(&pool).await?;
 
     let mut root_children: Vec<Page> = Page::objects()
-        .filter("parent_id", Op::Eq, root_id)
+        .filter_op("parent_id", Op::Eq, root_id)
         .fetch(&pool)
         .await?;
     root_children.sort_by(|a, b| a.title.cmp(&b.title));
@@ -131,7 +131,7 @@ async fn live_self_fk_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(root_children[1].title, "child_b");
 
     let grandkids: Vec<Page> = Page::objects()
-        .filter("parent_id", Op::Eq, child_b_id)
+        .filter_op("parent_id", Op::Eq, child_b_id)
         .fetch(&pool)
         .await?;
     assert_eq!(grandkids.len(), 1);

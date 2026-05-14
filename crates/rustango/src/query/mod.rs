@@ -83,6 +83,11 @@ enum PendingFilter {
     /// typed-column API). Already validated; contributes a whole
     /// sub-tree to the WHERE clause.
     Expr(WhereExpr),
+    /// Deferred error surfaced at `compile()` time. Used by
+    /// [`QuerySet::filter`] (issue #71) when the lookup-suffix
+    /// parser fails — keeps the builder API non-Result while
+    /// surfacing the cause at the natural error-checking point.
+    Error(QueryError),
 }
 
 #[derive(Debug, Clone)]
@@ -386,12 +391,21 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Append a `WHERE field <op> value` predicate.
+    /// Append a `WHERE field <op> value` predicate using the
+    /// **explicit-op** shape. This is the lower-level form used by
+    /// callers that already know which `Op` they want; for the
+    /// Django muscle-memory `filter("field__lookup", value)` shape
+    /// see [`Self::filter`] (issue #71).
     ///
-    /// `field` is the Rust-side field name; the column is looked up from the
-    /// schema at compile time.
+    /// `field` is the Rust-side field name; the column is looked up
+    /// from the schema at compile time.
     #[must_use]
-    pub fn filter(mut self, field: impl Into<String>, op: Op, value: impl Into<SqlValue>) -> Self {
+    pub fn filter_op(
+        mut self,
+        field: impl Into<String>,
+        op: Op,
+        value: impl Into<SqlValue>,
+    ) -> Self {
         self.pending.push(PendingFilter::Raw(RawFilter {
             field: field.into(),
             op,
@@ -400,10 +414,68 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
-    /// Sugar for `filter(field, Op::Eq, value)`.
+    /// Django-shape `filter()` — parses a `"field"` or
+    /// `"field__lookup"` key and dispatches to the matching `Op`.
+    /// Issue #71.
+    ///
+    /// | Suffix | SQL | Value treatment |
+    /// |---|---|---|
+    /// | (none) / `__exact` | `<col> = ?` | as-is |
+    /// | `__iexact` | `<col> ILIKE ?` | as-is (no wildcards) |
+    /// | `__contains` | `<col> LIKE ?` | wrap `%value%` |
+    /// | `__icontains` | `<col> ILIKE ?` | wrap `%value%` |
+    /// | `__startswith` | `<col> LIKE ?` | wrap `value%` |
+    /// | `__istartswith` | `<col> ILIKE ?` | wrap `value%` |
+    /// | `__endswith` | `<col> LIKE ?` | wrap `%value` |
+    /// | `__iendswith` | `<col> ILIKE ?` | wrap `%value` |
+    /// | `__gt` / `__gte` / `__lt` / `__lte` | direct map | as-is |
+    /// | `__ne` | `<col> <> ?` | as-is |
+    /// | `__in` | `<col> IN (...)` | value must be `SqlValue::List` |
+    /// | `__isnull` | `<col> IS NULL` / `IS NOT NULL` | value must be `bool` |
+    /// | `__between` / `__range` | `<col> BETWEEN ? AND ?` | value must be 2-element `SqlValue::List` |
+    ///
+    /// ```ignore
+    /// Post::objects()
+    ///     .filter("title__icontains", "rust")
+    ///     .filter("views__gt", 100_i64)
+    ///     .filter("author_id__in", rustango::core::SqlValue::List(vec![
+    ///         1_i64.into(), 2_i64.into(), 3_i64.into(),
+    ///     ]))
+    ///     .fetch(&pool).await?;
+    /// ```
+    ///
+    /// Unknown suffixes surface as [`QueryError::UnknownLookup`] at
+    /// `compile()`. Value-shape mismatches (e.g. `__in` with a
+    /// non-list value) surface as
+    /// [`QueryError::InvalidLookupValue`].
+    ///
+    /// **Chained lookups** (`author__name__icontains`) are out of
+    /// scope — that's join-traversal territory (`select_related` /
+    /// `prefetch_related`). v1 supports single-table fields only.
+    #[must_use]
+    pub fn filter(self, key: &str, value: impl Into<SqlValue>) -> Self {
+        let raw = value.into();
+        match parse_lookup(key, raw) {
+            Ok((field, op, parsed_value)) => self.filter_op(field, op, parsed_value),
+            Err(e) => self.with_pending_error(e),
+        }
+    }
+
+    /// Stash a builder-time error to surface at `compile()` time.
+    /// Used by [`Self::filter`] when the lookup-suffix parser fails.
+    fn with_pending_error(mut self, e: QueryError) -> Self {
+        // Add a `PendingFilter::Error` so `compile()`'s
+        // `resolve_pending` walk surfaces it. Mirrors the deferred-
+        // error pattern in `AggregateBuilder` for `HavingOpNotSupported`.
+        self.pending.push(PendingFilter::Error(e));
+        self
+    }
+
+    /// Sugar for `filter_op(field, Op::Eq, value)`. Kept for
+    /// backward compatibility with the per-op shorthand surface.
     #[must_use]
     pub fn eq(self, field: impl Into<String>, value: impl Into<SqlValue>) -> Self {
-        self.filter(field, Op::Eq, value)
+        self.filter_op(field, Op::Eq, value)
     }
 
     /// Append a typed predicate or boolean expression built via the
@@ -714,6 +786,154 @@ fn lower_select_related(
     Ok(out)
 }
 
+/// Parse a Django-shape `"field"` or `"field__suffix"` key + raw
+/// value into the matching `(field, Op, transformed_value)` triple.
+/// Issue #71.
+///
+/// The suffix table is documented on [`QuerySet::filter`]. Failures:
+///
+/// - Unknown `__suffix` → [`QueryError::UnknownLookup`].
+/// - Value-shape mismatch for `__in` / `__isnull` / `__between` /
+///   `__range` → [`QueryError::InvalidLookupValue`].
+///
+/// Chained lookups (`a__b__icontains`) are NOT decomposed in v1 — the
+/// FIRST `__` splits field from suffix, anything after stays as part
+/// of the suffix and errors as `UnknownLookup`.
+fn parse_lookup(key: &str, value: SqlValue) -> Result<(String, Op, SqlValue), QueryError> {
+    // Bare field (no `__`) → exact match.
+    let Some(split_at) = key.find("__") else {
+        return Ok((key.to_owned(), Op::Eq, value));
+    };
+    let field = key[..split_at].to_owned();
+    let suffix = &key[split_at + 2..];
+
+    match suffix {
+        "exact" => Ok((field, Op::Eq, value)),
+        "ne" => Ok((field, Op::Ne, value)),
+        "gt" => Ok((field, Op::Gt, value)),
+        "gte" => Ok((field, Op::Gte, value)),
+        "lt" => Ok((field, Op::Lt, value)),
+        "lte" => Ok((field, Op::Lte, value)),
+        "iexact" => Ok((field, Op::ILike, value)),
+        "contains" => {
+            let v = wrap_like(&value, "%", "%", &field, suffix)?;
+            Ok((field, Op::Like, v))
+        }
+        "icontains" => {
+            let v = wrap_like(&value, "%", "%", &field, suffix)?;
+            Ok((field, Op::ILike, v))
+        }
+        "startswith" => {
+            let v = wrap_like(&value, "", "%", &field, suffix)?;
+            Ok((field, Op::Like, v))
+        }
+        "istartswith" => {
+            let v = wrap_like(&value, "", "%", &field, suffix)?;
+            Ok((field, Op::ILike, v))
+        }
+        "endswith" => {
+            let v = wrap_like(&value, "%", "", &field, suffix)?;
+            Ok((field, Op::Like, v))
+        }
+        "iendswith" => {
+            let v = wrap_like(&value, "%", "", &field, suffix)?;
+            Ok((field, Op::ILike, v))
+        }
+        "in" => {
+            if !matches!(value, SqlValue::List(_)) {
+                return Err(QueryError::InvalidLookupValue {
+                    field,
+                    suffix: suffix.to_owned(),
+                    expected: "SqlValue::List(...)",
+                    actual: sql_value_shape_name(&value),
+                });
+            }
+            Ok((field, Op::In, value))
+        }
+        "isnull" => {
+            if !matches!(value, SqlValue::Bool(_)) {
+                return Err(QueryError::InvalidLookupValue {
+                    field,
+                    suffix: suffix.to_owned(),
+                    expected: "SqlValue::Bool(true|false)",
+                    actual: sql_value_shape_name(&value),
+                });
+            }
+            Ok((field, Op::IsNull, value))
+        }
+        "between" | "range" => {
+            match &value {
+                SqlValue::List(items) if items.len() == 2 => {}
+                SqlValue::List(_) => {
+                    return Err(QueryError::InvalidLookupValue {
+                        field,
+                        suffix: suffix.to_owned(),
+                        expected: "SqlValue::List with exactly 2 elements [lo, hi]",
+                        actual: "SqlValue::List with wrong arity",
+                    });
+                }
+                other => {
+                    return Err(QueryError::InvalidLookupValue {
+                        field,
+                        suffix: suffix.to_owned(),
+                        expected: "SqlValue::List([lo, hi])",
+                        actual: sql_value_shape_name(other),
+                    });
+                }
+            }
+            Ok((field, Op::Between, value))
+        }
+        unknown => Err(QueryError::UnknownLookup {
+            field,
+            suffix: unknown.to_owned(),
+        }),
+    }
+}
+
+/// Wrap a `SqlValue::String` with leading/trailing wildcard tokens
+/// for `__contains` / `__startswith` / `__endswith` and their `i*`
+/// case-insensitive variants. Issue #71.
+///
+/// Non-string values are rejected with [`QueryError::InvalidLookupValue`]
+/// — LIKE patterns require text input.
+fn wrap_like(
+    value: &SqlValue,
+    prefix: &str,
+    suffix_char: &str,
+    field: &str,
+    suffix: &str,
+) -> Result<SqlValue, QueryError> {
+    let s = match value {
+        SqlValue::String(s) => s,
+        other => {
+            return Err(QueryError::InvalidLookupValue {
+                field: field.to_owned(),
+                suffix: suffix.to_owned(),
+                expected: "SqlValue::String(...)",
+                actual: sql_value_shape_name(other),
+            });
+        }
+    };
+    Ok(SqlValue::String(format!("{prefix}{s}{suffix_char}")))
+}
+
+/// Human-readable shape name for an `SqlValue` — used in
+/// [`QueryError::InvalidLookupValue`] messages.
+fn sql_value_shape_name(v: &SqlValue) -> &'static str {
+    match v {
+        SqlValue::Null => "SqlValue::Null",
+        SqlValue::I16(_) => "SqlValue::I16",
+        SqlValue::I32(_) => "SqlValue::I32",
+        SqlValue::I64(_) => "SqlValue::I64",
+        SqlValue::F32(_) => "SqlValue::F32",
+        SqlValue::F64(_) => "SqlValue::F64",
+        SqlValue::Bool(_) => "SqlValue::Bool",
+        SqlValue::String(_) => "SqlValue::String",
+        SqlValue::List(_) => "SqlValue::List",
+        _ => "SqlValue::<other>",
+    }
+}
+
 fn resolve_pending(
     model: &'static ModelSchema,
     pending: Vec<PendingFilter>,
@@ -729,6 +949,11 @@ fn resolve_pending(
             }
             PendingFilter::Expr(expr) => {
                 nodes.push(expr);
+            }
+            PendingFilter::Error(e) => {
+                // Issue #71 — bubble the deferred lookup-parse error
+                // up at the natural `compile()` checkpoint.
+                return Err(e);
             }
         }
     }
@@ -1033,7 +1258,7 @@ impl<T: Model> AggregateBuilder<T> {
             // Forward to the underlying QuerySet's WHERE path. Same
             // schema-validation rules apply at `resolve_pending` time
             // — typo'd model columns get caught at `compile()`.
-            self.qs = self.qs.filter(field, op, value);
+            self.qs = self.qs.filter_op(field, op, value);
         }
         self
     }

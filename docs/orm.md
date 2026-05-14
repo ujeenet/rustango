@@ -1149,20 +1149,52 @@ Use `select_related("author")` on the queryset to pre-load a batch.
 
 ## QuerySet vs string-keyed filters
 
-Three syntaxes — pick by context:
+Four syntaxes — pick by context:
 
 ```rust
 // 1. HTTP query string (set via ViewSet filter_fields)
 //    GET /api/posts?author_id=42&status__ne=archived
 
-// 2. String-keyed (validated at compile of the queryset; runtime field lookup)
-Post::objects().filter("author_id", Op::Eq, SqlValue::I64(42));
+// 2. Django-shape string lookup (the same `field__lookup` grammar your
+//    URL parser uses, but inside Rust). Suffix decides the operator
+//    and value-shape; bare key is exact-eq. Field name is validated
+//    at `.compile()`.
+Post::objects()
+    .filter("status", "published")                 // exact-eq
+    .filter("title__icontains", "rust")            // ILIKE %rust%
+    .filter("views__gt", 100_i64);
 
-// 3. Typed columns (compile-time field check; preferred in app code)
+// 3. Explicit operator (legacy 3-arg shape — when you want to pass
+//    an Op directly without parsing a suffix)
+Post::objects().filter_op("author_id", Op::Eq, SqlValue::I64(42));
+
+// 4. Typed columns (compile-time field check; preferred in app code)
 Post::objects().where_(Post::author_id.eq(42));
 ```
 
-**Convention:** typed in app code, string-keyed in admin / generic CRUD code, HTTP query for the public API surface.
+**Convention:** typed in app code, Django-shape in admin / generic CRUD code, `filter_op` only when you've already computed an `Op` (e.g. from a request parser), HTTP query for the public API surface.
+
+### Django-shape lookups — supported suffixes
+
+| Suffix | SQL operator | Value shape | Notes |
+|---|---|---|---|
+| *(none)* / `__exact` | `=` | scalar | bare key is exact-eq |
+| `__ne` | `<>` | scalar | |
+| `__gt` / `__gte` / `__lt` / `__lte` | `>` `>=` `<` `<=` | scalar | |
+| `__contains` | `LIKE` | string | wraps value as `%v%` |
+| `__icontains` | `ILIKE` | string | wraps value as `%v%`; MySQL emulated via `LOWER()` |
+| `__startswith` | `LIKE` | string | wraps as `v%` |
+| `__istartswith` | `ILIKE` | string | wraps as `v%` |
+| `__endswith` | `LIKE` | string | wraps as `%v` |
+| `__iendswith` | `ILIKE` | string | wraps as `%v` |
+| `__iexact` | `ILIKE` | string | no wildcard wrapping — exact case-insensitive match |
+| `__in` | `IN (…)` | `SqlValue::List` | rejects non-list values |
+| `__isnull` | `IS NULL` / `IS NOT NULL` | `bool` | `true` → IS NULL, `false` → IS NOT NULL |
+| `__between` / `__range` | `BETWEEN … AND …` | 2-elt `SqlValue::List` | inclusive on both ends |
+
+**Errors surface at `.compile()`, not at `.filter()` call time** — value-shape mismatches (e.g. `__in` with a scalar, `__isnull` with a non-bool, `__between` with the wrong arity) and unknown suffixes (`status__nope`) return `QueryError::UnknownLookup` / `QueryError::InvalidLookupValue` from `.compile()` so the fluent chain stays type-clean. Chained traversals (`author__name__icontains`) are **not** supported in v0.39 — the splitter takes the suffix after the first `__`, so the whole tail `name__icontains` is treated as an unknown suffix.
+
+Each filter call AND-joins to any preceding ones; mix Django-shape, `filter_op`, and `where_` freely on the same queryset.
 
 ---
 

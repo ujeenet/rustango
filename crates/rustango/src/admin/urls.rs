@@ -45,7 +45,7 @@ pub type AdminActionFuture<'a> = Pin<Box<dyn Future<Output = Result<(), AdminErr
 ///     Box::pin(async move {
 ///         use rustango::sql::{UpdaterPool as _, Pool};
 ///         Post::objects()
-///             .filter("id", rustango::core::Op::In, pks.into())
+///             .filter_op("id", rustango::core::Op::In, pks.into())
 ///             .update()
 ///             .set("published_at", chrono::Utc::now())
 ///             .execute_pool(pool)

@@ -942,7 +942,7 @@ fn reverse_helper_tokens(child_ident: &syn::Ident, fk_relations: &[FkRelation]) 
                 {
                     let _pk: ::rustango::core::SqlValue = self.__rustango_pk_value();
                     ::rustango::query::QuerySet::<#child_ident>::new()
-                        .filter(#fk_col, ::rustango::core::Op::Eq, _pk)
+                        .filter_op(#fk_col, ::rustango::core::Op::Eq, _pk)
                         .fetch_on(_executor)
                         .await
                 }
