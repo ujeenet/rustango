@@ -484,7 +484,232 @@ fn write_expr(
             b.sql.push(')');
             Ok(())
         }
+        Expr::Function { kind, args } => write_function(b, *kind, args),
     }
+}
+
+/// Emit a scalar function call. Most variants are straight `FN(args…)`
+/// across all three dialects; the divergent ones (`Concat` on SQLite,
+/// `Greatest`/`Least` on SQLite, `Substr` PG `FROM…FOR…` form) get
+/// special-cased.
+#[allow(clippy::too_many_lines)] // Per-fn arms are inherently linear.
+fn write_function(
+    b: &mut Sql<'_>,
+    kind: crate::core::ScalarFn,
+    args: &[crate::core::Expr],
+) -> Result<(), SqlError> {
+    use crate::core::ScalarFn as F;
+    match kind {
+        // -------- text: simple FN(arg) — unary, arity-checked --------
+        F::Lower => write_call_unary(b, "LOWER", args),
+        F::Upper => write_call_unary(b, "UPPER", args),
+        F::Length => write_call_unary(b, "LENGTH", args),
+        F::Trim => write_call_unary(b, "TRIM", args),
+        F::LTrim => write_call_unary(b, "LTRIM", args),
+        F::RTrim => write_call_unary(b, "RTRIM", args),
+
+        // -------- text: 3-ary FN(s, from, to) --------
+        F::Replace => {
+            if args.len() != 3 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "REPLACE",
+                    expected: "3",
+                    got: args.len(),
+                });
+            }
+            write_call(b, "REPLACE", args)
+        }
+
+        // -------- CONCAT: PG/MySQL native, SQLite `||` --------
+        F::Concat => {
+            if args.is_empty() {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "CONCAT",
+                    expected: ">= 1",
+                    got: 0,
+                });
+            }
+            if b.d.name() == "sqlite" {
+                // `||` chain. Parenthesize so precedence is unambiguous
+                // when wrapped in another expression.
+                b.sql.push('(');
+                let mut first = true;
+                for a in args {
+                    if !first {
+                        b.sql.push_str(" || ");
+                    }
+                    first = false;
+                    write_expr(b, a, None)?;
+                }
+                b.sql.push(')');
+                Ok(())
+            } else {
+                write_call(b, "CONCAT", args)
+            }
+        }
+
+        // -------- SUBSTR: PG uses `FROM…FOR…`, MySQL/SQLite use commas --------
+        F::Substr => {
+            if args.len() != 3 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "SUBSTRING",
+                    expected: "3",
+                    got: args.len(),
+                });
+            }
+            if b.d.name() == "postgres" {
+                b.sql.push_str("SUBSTRING(");
+                write_expr(b, &args[0], None)?;
+                b.sql.push_str(" FROM ");
+                write_expr(b, &args[1], None)?;
+                b.sql.push_str(" FOR ");
+                write_expr(b, &args[2], None)?;
+                b.sql.push(')');
+                Ok(())
+            } else {
+                // MySQL spells it SUBSTRING; SQLite spells it substr.
+                // Both accept the comma form.
+                let name = if b.d.name() == "mysql" {
+                    "SUBSTRING"
+                } else {
+                    "SUBSTR"
+                };
+                write_call(b, name, args)
+            }
+        }
+
+        // -------- math: simple unary, arity-checked --------
+        F::Abs => write_call_unary(b, "ABS", args),
+        F::Floor => write_call_unary(b, "FLOOR", args),
+        F::Ceil => {
+            // MySQL accepts both `CEIL` and `CEILING`; PG / SQLite use
+            // `CEIL` (SQLite 3.35+). Emit `CEIL` everywhere for the
+            // narrowest portable token.
+            write_call_unary(b, "CEIL", args)
+        }
+        F::Round => {
+            // 1- or 2-ary. The shape is identical across PG / MySQL /
+            // SQLite at the SQL surface; precision-arg type semantics
+            // diverge (PG `numeric` only), documented at the builder.
+            if args.is_empty() || args.len() > 2 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "ROUND",
+                    expected: "1 or 2",
+                    got: args.len(),
+                });
+            }
+            write_call(b, "ROUND", args)
+        }
+
+        // -------- comparison / NULL --------
+        F::Coalesce => {
+            if args.is_empty() {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "COALESCE",
+                    expected: ">= 1",
+                    got: 0,
+                });
+            }
+            write_call(b, "COALESCE", args)
+        }
+        F::Greatest => {
+            if args.is_empty() {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "GREATEST",
+                    expected: ">= 1",
+                    got: 0,
+                });
+            }
+            // SQLite has no GREATEST keyword. Its scalar `MAX(a, b, …)`
+            // form requires 2+ args; with 1 arg SQLite parses `MAX(x)` as
+            // the AGGREGATE form, which is a misuse-of-aggregate error
+            // inside `UPDATE SET` and the wrong semantic in `WHERE`.
+            // Surface a clear error rather than emit silently-wrong SQL.
+            if b.d.name() == "sqlite" && args.len() == 1 {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: "GREATEST with 1 argument (SQLite collides with the aggregate MAX)",
+                    dialect: "sqlite",
+                });
+            }
+            let name = if b.d.name() == "sqlite" {
+                "MAX"
+            } else {
+                "GREATEST"
+            };
+            write_call(b, name, args)
+        }
+        F::Least => {
+            if args.is_empty() {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "LEAST",
+                    expected: ">= 1",
+                    got: 0,
+                });
+            }
+            // See `Greatest` above for the SQLite 1-arg rationale.
+            if b.d.name() == "sqlite" && args.len() == 1 {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: "LEAST with 1 argument (SQLite collides with the aggregate MIN)",
+                    dialect: "sqlite",
+                });
+            }
+            let name = if b.d.name() == "sqlite" {
+                "MIN"
+            } else {
+                "LEAST"
+            };
+            write_call(b, name, args)
+        }
+        F::NullIf => {
+            if args.len() != 2 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "NULLIF",
+                    expected: "2",
+                    got: args.len(),
+                });
+            }
+            write_call(b, "NULLIF", args)
+        }
+    }
+}
+
+/// Standard `NAME(arg, arg, …)` emit. Used by every function variant
+/// whose dialect emission is identical across PG / MySQL / SQLite.
+fn write_call(b: &mut Sql<'_>, name: &str, args: &[crate::core::Expr]) -> Result<(), SqlError> {
+    b.sql.push_str(name);
+    b.sql.push('(');
+    let mut first = true;
+    for a in args {
+        if !first {
+            b.sql.push_str(", ");
+        }
+        first = false;
+        write_expr(b, a, None)?;
+    }
+    b.sql.push(')');
+    Ok(())
+}
+
+/// `write_call` with an arity-1 assertion. Used for unary functions
+/// (LOWER, UPPER, LENGTH, TRIM, LTRIM, RTRIM, ABS, CEIL, FLOOR) so a
+/// hand-rolled `Expr::Function { args: vec![] }` or `vec![a, b]` fails
+/// at emit-time with a clear error rather than reaching the database
+/// with malformed SQL like `LOWER()` or `LENGTH(a, b)`. The public
+/// builder API is type-locked to a single arg, so this only fires for
+/// callers that construct the IR directly.
+fn write_call_unary(
+    b: &mut Sql<'_>,
+    name: &'static str,
+    args: &[crate::core::Expr],
+) -> Result<(), SqlError> {
+    if args.len() != 1 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: name,
+            expected: "1",
+            got: args.len(),
+        });
+    }
+    write_call(b, name, args)
 }
 
 // ====================================================================

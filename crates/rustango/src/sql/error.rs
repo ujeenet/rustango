@@ -118,6 +118,20 @@ pub enum SqlError {
         op: &'static str,
         dialect: &'static str,
     },
+
+    /// A scalar function (issue #2) was built with the wrong number of
+    /// arguments — e.g. `Substr` with 2 args, `NullIf` with 3, or
+    /// `Concat` with 0. The builder-side API constrains arity for
+    /// fixed-arity calls (compile error), but the IR is permissive
+    /// enough that hand-rolled `Expr::Function { args: vec![...] }`
+    /// could trip this — the emitter catches it before reaching the
+    /// database with a confusing parse error.
+    #[error("function `{func}` expects {expected} arg(s), got {got}")]
+    FunctionArityMismatch {
+        func: &'static str,
+        expected: &'static str,
+        got: usize,
+    },
 }
 
 /// Raised while compiling, writing, or executing a query end-to-end.

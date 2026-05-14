@@ -615,6 +615,12 @@ fn validate_expr_columns_in_model(
             validate_expr_columns_in_model(model, left)?;
             validate_expr_columns_in_model(model, right)
         }
+        Expr::Function { args, .. } => {
+            for a in args {
+                validate_expr_columns_in_model(model, a)?;
+            }
+            Ok(())
+        }
     }
 }
 

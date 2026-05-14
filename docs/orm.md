@@ -5,6 +5,7 @@ Patterns for the rustango ORM beyond the basics. Most examples assume you alread
 ## Table of contents
 
 - [Querying](#querying)
+- [F() expressions + database functions](#f-expressions--database-functions)
 - [Aggregations](#aggregations)
 - [Joins + select_related](#joins--select_related)
 - [Bulk operations](#bulk-operations)
@@ -90,6 +91,135 @@ let next = Post::objects()
 ```
 
 For HTTP-side cursor pagination, use `ViewSet::cursor_pagination("id")` instead.
+
+---
+
+## F() expressions + database functions
+
+The ORM Expression DSL — `F()` for column references and the `funcs::*` builders for scalar SQL functions — unlocks three patterns that pure value-based `.set()` / `.where_()` can't express:
+
+### 1. Atomic updates (no read-modify-write race)
+
+The classic counter bug — fetch row → mutate field → save — loses updates under concurrency. `F() + 1` collapses the round-trip into a single `UPDATE` statement so the database takes the row lock:
+
+```rust
+use rustango::core::F;
+
+Post::objects()
+    .eq("id", post_id)
+    .update()
+    .set_expr("view_count", F("view_count") + 1_i64)
+    .execute(&pool).await?;
+```
+
+Tri-dialect: emits `views = ("views" + $1)` on PG, ``views = (`views` + ?)`` on MySQL, identical on SQLite. The arithmetic is parenthesized so nested operations stay unambiguous: `F("a") + F("b") * 2`.
+
+Supported operators: `+ - * / %` plus `& | ^ << >>` (bitwise; XOR on SQLite emits a clear `OpNotSupportedInDialect` since SQLite has no XOR symbol).
+
+### 2. Column-vs-column WHERE filters
+
+`Reservation start_date < end_date` (sanity-check row invariant), `Inventory available > reserved` (find rows with capacity):
+
+```rust
+use rustango::core::Column as _;
+
+// `start_date < end_date` for every selected row.
+let valid = Reservation::objects()
+    .where_(Reservation::start_date.lt_expr(F("end_date")))
+    .fetch(&pool).await?;
+
+// Combine with literal predicates.
+let oversold = Inventory::objects()
+    .where_(Inventory::available.lt_expr(F("reserved")))
+    .where_(Inventory::active.eq(true))
+    .fetch(&pool).await?;
+```
+
+The `*_expr` family — `eq_expr`, `ne_expr`, `lt_expr`, `lte_expr`, `gt_expr`, `gte_expr` — mirrors the literal `eq`, `ne`, … methods but takes any `impl Into<Expr>` on the right side: bare column refs (`F("col")`), arithmetic (`F("price") * 2`), or function results (next section).
+
+### 3. Scalar functions — text, math, NULL handling
+
+`rustango::core::funcs` ships builders for the most-used SQL function set. The 17 v1 functions:
+
+| Group | Builders |
+|---|---|
+| **Text** | `lower`, `upper`, `length`, `trim`, `ltrim`, `rtrim`, `concat`, `substr`, `replace` |
+| **Math** | `abs`, `ceil`, `floor`, `round` (1-arg) / `round_to` (2-arg precision) |
+| **NULL** | `coalesce`, `greatest`, `least`, `nullif` |
+
+```rust
+use rustango::core::funcs::{lower, upper, concat, coalesce, trim, abs, round};
+use rustango::core::F;
+
+// Normalize on write.
+User::objects()
+    .eq("id", id)
+    .update()
+    .set_expr("email", lower(trim(F("email"))))
+    .execute(&pool).await?;
+
+// Build a derived column from two FKs + a literal.
+User::objects()
+    .update()
+    .set_expr(
+        "display_name",
+        concat([F("first").into(), " ".into(), F("last").into()]),
+    )
+    .execute(&pool).await?;
+
+// First non-NULL fallback.
+User::objects()
+    .update()
+    .set_expr(
+        "label",
+        coalesce([F("nickname").into(), F("username").into(), "anonymous".into()]),
+    )
+    .execute(&pool).await?;
+
+// Function on the WHERE rhs.
+User::objects()
+    .where_(User::email_norm.eq_expr(lower(F("email_norm"))))
+    .fetch(&pool).await?;
+
+// Functions compose freely — `abs(round(F("score") * 100))` is one Expr.
+Player::objects()
+    .update()
+    .set_expr("score_int", abs(round(F("score") * 100_f64)))
+    .execute(&pool).await?;
+```
+
+### Tri-dialect behavior
+
+Most functions emit identical SQL across PG / MySQL / SQLite. The divergent shapes are handled per-dialect transparently:
+
+| Builder | PG | MySQL | SQLite |
+|---|---|---|---|
+| `concat([a, b])` | `CONCAT(a, b)` | `CONCAT(a, b)` | `(a \|\| b)` |
+| `substr(s, 1, 3)` | `SUBSTRING(s FROM 1 FOR 3)` | `SUBSTRING(s, 1, 3)` | `SUBSTR(s, 1, 3)` |
+| `greatest([a, b])` | `GREATEST(a, b)` | `GREATEST(a, b)` | `MAX(a, b)` scalar |
+| `least([a, b])` | `LEAST(a, b)` | `LEAST(a, b)` | `MIN(a, b)` scalar |
+
+### Variadic builders take `IntoIterator<Item = Expr>`
+
+Rust arrays are homogeneous, so a heterogeneous mix of `F` + `&str` can't infer a common type. Call `.into()` once per element when passing an array literal:
+
+```rust
+concat([F("first").into(), " ".into(), F("last").into()])
+//          ^^^^^^ each element lifted to Expr
+```
+
+Or build a `Vec<Expr>` and pass it directly — same shape, same result.
+
+### Caveats
+
+- **`length` byte-vs-char**: PG returns chars on `TEXT`/`VARCHAR`, MySQL returns **bytes** (use the framework's future `CharLength` builder or wrap in `CHAR_LENGTH` manually if you need cross-dialect char counts).
+- **`round(x, n)` on PG**: PG's 2-arg form requires `numeric`, not `double`. Either pass an integer column or cast the float first; MySQL and SQLite accept either type.
+- **`greatest([single_arg])` / `least([single_arg])` on SQLite**: not supported — SQLite's `MAX(x)` with one arg is the *aggregate*, not the scalar, form. The writer returns `OpNotSupportedInDialect`. PG and MySQL accept the single-arg form as a no-op returning `x`. Wrap with at least one literal to stay portable.
+- **`substr` with negative start**: PG treats negative as "start from char position N" (effectively clamps to 0); MySQL and SQLite treat negative as "count from end". Avoid negative starts in portable code.
+
+### When to reach for a raw SQL escape hatch instead
+
+The function set covers the common case. For features outside v1 — `Cast`, date arithmetic (`Now`, `ExtractYear`, `TruncDate`), full-text search, JSON path operators, hash functions, trig, `Case/When`, `Subquery`/`Exists` — see the [Custom SQL escape hatch](#custom-sql-escape-hatch) section below or wait on issues #3–#7 in the ORM Expression DSL epic, which extend the same `Expr` tree.
 
 ---
 

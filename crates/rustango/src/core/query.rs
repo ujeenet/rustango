@@ -240,6 +240,12 @@ fn validate_expr_columns(model: &'static ModelSchema, expr: &Expr) -> Result<(),
             validate_expr_columns(model, left)?;
             validate_expr_columns(model, right)
         }
+        Expr::Function { args, .. } => {
+            for a in args {
+                validate_expr_columns(model, a)?;
+            }
+            Ok(())
+        }
     }
 }
 
