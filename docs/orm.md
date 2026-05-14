@@ -487,6 +487,69 @@ For reverse FKs (parent.children), use the macro-generated `_set` method:
 let author_posts = author.post_set(&pool).await?;
 ```
 
+### Ad-hoc joins — `.join(Join { … })`
+
+When the join you need isn't FK-driven (custom predicate, non-equi join, INNER instead of LEFT, self-join, joining on a non-PK column), reach for `QuerySet::join`. The `Join` struct accepts any [`WhereExpr`] as its `on` predicate, so `and()` / `or()` / `Not` / function calls / column-vs-column / literal filters all compose freely.
+
+```rust
+use rustango::core::joins::aliased;
+use rustango::core::{Join, JoinKind, Op, WhereExpr};
+
+// "Posts that have at least one APPROVED comment" — INNER JOIN with
+// an extra predicate inside the ON. Posts with no approved comment
+// drop out; LEFT JOIN would keep them.
+Post::objects()
+    .join(Join {
+        target: Comment::SCHEMA,
+        alias: "c",
+        kind: JoinKind::Inner,
+        on: WhereExpr::And(vec![
+            // Column-on-column condition — both sides aliased.
+            WhereExpr::ExprCompare {
+                lhs: aliased("c", "post_id"),
+                op: Op::Eq,
+                rhs: aliased("post", "id"),
+            },
+            // Bare Filter — unqualified columns inside `on` resolve
+            // to the joined alias ("c"), so this becomes
+            // `"c"."is_approved" = $N`.
+            Comment::is_approved.eq(true).into(),
+        ]),
+        project: vec![],
+    })
+    .fetch(&pool).await?;
+```
+
+**Column qualification rules inside `on`:**
+
+- **Bare `Filter` / `ColumnFilter` columns** resolve to the joined alias (`<alias>` you passed). That's the natural reading because most of an ON predicate is about the joined table.
+- **`aliased(alias, col)`** emits `"<alias>"."<col>"` explicitly — use this for cross-references back to the outer table (`aliased("<outer_table>", "<col>")`) or to a previously joined alias.
+- **`WhereExpr::ExprCompare { lhs, op, rhs }`** is the right shape for column-vs-column comparisons across tables, since both sides take any `Expr`.
+
+**JoinKind tri-dialect support:**
+
+| Kind | PG | MySQL | SQLite |
+|---|---|---|---|
+| `Inner` | ✓ | ✓ | ✓ |
+| `Left` (default) | ✓ | ✓ | ✓ |
+| `Right` | ✓ | ✓ | ✗ `SqlError::JoinKindNotSupported` |
+| `Full` | ✓ | ✗ | ✗ |
+
+`Right` is easy to work around — swap operands and use `Left`. `Full` on MySQL is usually emulated with `(LEFT JOIN) UNION (RIGHT JOIN)` if you really need it.
+
+**When to reach for ad-hoc joins:**
+
+| Need | Tool |
+|---|---|
+| Pull related rows along with the main row | `select_related` (Django shape) |
+| Filter main rows by a related-table predicate | `exists(...)` / `not_exists(...)` |
+| Need both joined columns AND a custom predicate | `.join(...)` |
+| Anti-join (rows in A with NO match in B) | `not_exists(...)` |
+
+`select_related` stays the right tool when the join is "follow this FK and project all its columns." Ad-hoc joins are the escape hatch when you need: non-FK join key, INNER instead of LEFT, an extra predicate inside the ON, a self-join, or no projection at all (just predicate-driven filtering).
+
+[`WhereExpr`]: https://docs.rs/rustango/latest/rustango/core/enum.WhereExpr.html
+
 ---
 
 ## Bulk operations

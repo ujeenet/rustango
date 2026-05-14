@@ -9,6 +9,7 @@ mod error;
 mod expr;
 mod field_type;
 pub mod funcs;
+pub mod joins;
 mod query;
 mod schema;
 pub mod subquery;
@@ -22,7 +23,7 @@ pub use expr::{BinOp, CaseBranch, Expr, ScalarFn, F};
 pub use field_type::FieldType;
 pub use query::{
     AggregateExpr, AggregateQuery, Assignment, BulkInsertQuery, BulkUpdateQuery, ColumnFilter,
-    ConflictClause, CountQuery, DeleteQuery, Filter, InsertQuery, Join, Op, OrderClause,
+    ConflictClause, CountQuery, DeleteQuery, Filter, InsertQuery, Join, JoinKind, Op, OrderClause,
     SearchClause, SelectQuery, UpdateQuery, WhereExpr,
 };
 pub use schema::{

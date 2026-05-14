@@ -190,13 +190,25 @@ pub(crate) fn build_fk_joins(state: &AppState, model: &'static ModelSchema) -> V
         let Some(display_field) = target.display_field() else {
             continue;
         };
+        let alias = field.name;
         joins.push(Join {
             target,
-            on_local: field.column,
-            on_remote: on,
-            // `field.name` is a valid SQL identifier and unique within the
-            // model (it's a Rust struct field), so it makes a clean alias.
-            alias: field.name,
+            // `field.name` is a valid SQL identifier and unique within
+            // the model (it's a Rust struct field), so it makes a
+            // clean alias.
+            alias,
+            kind: crate::core::JoinKind::Left,
+            // `<main>.<fk_col> = <alias>.<target_pk>` expressed as a
+            // WhereExpr now that Join's `on_local`/`on_remote` shape
+            // was generalized in issue #80.
+            on: crate::core::WhereExpr::ExprCompare {
+                lhs: crate::core::Expr::AliasedColumn {
+                    alias: model.table,
+                    column: field.column,
+                },
+                op: crate::core::Op::Eq,
+                rhs: crate::core::Expr::AliasedColumn { alias, column: on },
+            },
             project: vec![display_field.column],
         });
     }

@@ -134,6 +134,16 @@ pub enum WhereExpr {
         negated: bool,
         subquery: Box<SelectQuery>,
     },
+    /// `<lhs-expr> <op> <rhs-expr>` — both sides arbitrary [`Expr`]s
+    /// (issue #80). Used inside JOIN `ON` predicates where one or
+    /// both sides typically need to be qualified with a table alias
+    /// (via [`Expr::AliasedColumn`]) — outside JOIN context the
+    /// narrower [`ColumnFilter`] variant remains the right tool.
+    ///
+    /// Only the binary-comparison ops (`Eq`, `Ne`, `Lt`, `Lte`,
+    /// `Gt`, `Gte`) make sense here; the writer rejects other ops
+    /// the same way it does for `ColumnFilter`.
+    ExprCompare { lhs: Expr, op: Op, rhs: Expr },
 }
 
 impl WhereExpr {
@@ -198,7 +208,8 @@ impl WhereExpr {
             | Self::Not(_)
             | Self::Exists(_)
             | Self::NotExists(_)
-            | Self::InSubquery { .. } => None,
+            | Self::InSubquery { .. }
+            | Self::ExprCompare { .. } => None,
         }
     }
 
@@ -253,6 +264,14 @@ impl WhereExpr {
                 }
                 Ok(())
             }
+            // ExprCompare is used inside JOIN ON predicates where both
+            // sides typically carry their own table alias via
+            // `Expr::AliasedColumn`. Validating against a single
+            // `model` would either be wrong (mismatching alias) or
+            // duplicate work (the alias-side schema isn't reachable
+            // here). Surface column typos at runtime; the JOIN writer
+            // emits clean SQL on the happy path.
+            Self::ExprCompare { .. } => Ok(()),
         }
     }
 }
@@ -298,7 +317,9 @@ fn validate_expr_columns(model: &'static ModelSchema, expr: &Expr) -> Result<(),
         // model — and from the perspective of the inner-walk it's
         // a free name; the outer query's compile() validates it
         // against the outer schema when it embeds this subquery.
-        Expr::Subquery(_) | Expr::OuterRef(_) => Ok(()),
+        // `AliasedColumn` (issue #80) carries its own table alias so
+        // it doesn't resolve against the passed-in model.
+        Expr::Subquery(_) | Expr::OuterRef(_) | Expr::AliasedColumn { .. } => Ok(()),
     }
 }
 
@@ -364,9 +385,9 @@ impl PartialEq for SelectQuery {
 impl PartialEq for Join {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self.target, other.target)
-            && self.on_local == other.on_local
-            && self.on_remote == other.on_remote
             && self.alias == other.alias
+            && self.kind == other.kind
+            && self.on == other.on
             && self.project == other.project
     }
 }
@@ -382,22 +403,47 @@ pub struct OrderClause {
     pub desc: bool,
 }
 
-/// A `LEFT JOIN` against a target model.
+/// Which SQL `JOIN` keyword the writer should emit. Issue #80.
 ///
-/// The writer emits `LEFT JOIN "<target.table>" AS "<alias>" ON
-/// "<main>"."<on_local>" = "<alias>"."<on_remote>"`, and includes each
-/// `project` column in the SELECT list aliased as
-/// `"<alias>"."<col>" AS "<alias>__<col>"`. Callers read joined values
-/// from the resulting `PgRow` by the suffixed name.
+/// `Left` is the default — it matches the original FK-driven
+/// `select_related` semantics where every outer row is preserved
+/// regardless of whether a related row exists on the target side.
+/// `Inner` is the common ad-hoc-join shape (drop outer rows with no
+/// match). `Right` and `Full` are accepted by the IR but only emit
+/// successfully on dialects that support them — the writer raises
+/// [`crate::sql::SqlError::JoinKindNotSupported`] on attempts to
+/// emit `Right` on SQLite or `Full` on MySQL / SQLite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JoinKind {
+    Inner,
+    #[default]
+    Left,
+    Right,
+    Full,
+}
+
+/// A JOIN against a target model. Issue #80 generalized this from
+/// the original FK-only `LEFT JOIN main.fk = alias.target_pk` shape
+/// to carry an arbitrary `WhereExpr` predicate + an explicit
+/// [`JoinKind`].
+///
+/// The writer emits `<kind> JOIN "<target.table>" AS "<alias>" ON
+/// <on>` and includes each `project` column in the SELECT list
+/// aliased as `"<alias>"."<col>" AS "<alias>__<col>"`. Callers read
+/// joined values from the resulting row by the suffixed name.
 ///
 /// When a `SelectQuery` has any joins, the writer also qualifies the
 /// main table's columns as `"<table>"."<col>"` to avoid ambiguity.
+/// Cross-table column references inside `on` use
+/// [`Expr::AliasedColumn`] for explicit `<alias>.<col>` qualification.
+///
+/// [`Expr::AliasedColumn`]: crate::core::Expr::AliasedColumn
 #[derive(Debug, Clone)]
 pub struct Join {
     pub target: &'static ModelSchema,
-    pub on_local: &'static str,
-    pub on_remote: &'static str,
     pub alias: &'static str,
+    pub kind: JoinKind,
+    pub on: WhereExpr,
     pub project: Vec<&'static str>,
 }
 

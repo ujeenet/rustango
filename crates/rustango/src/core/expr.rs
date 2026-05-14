@@ -143,6 +143,18 @@ pub enum Expr {
     /// variant directly — the helper reads closer to Django's
     /// `OuterRef('col')`.
     OuterRef(&'static str),
+    /// Column reference qualified with an explicit table alias —
+    /// `"<alias>"."<column>"`. Used inside JOIN `ON` predicates (issue
+    /// #80) where both sides may reference columns on tables other
+    /// than the implicit "current" one, and a bare `Column(name)`
+    /// would qualify against the wrong scope.
+    ///
+    /// Build via [`crate::core::joins::aliased`] rather than this
+    /// variant directly.
+    AliasedColumn {
+        alias: &'static str,
+        column: &'static str,
+    },
 }
 
 /// One arm of a [`Expr::Case`] expression — `WHEN <condition> THEN <then>`.

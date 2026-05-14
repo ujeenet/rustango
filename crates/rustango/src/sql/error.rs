@@ -159,6 +159,18 @@ pub enum SqlError {
          Subquery wrappers that know the enclosing query's table"
     )]
     OuterRefOutsideSubquery { column: &'static str },
+
+    /// A [`crate::core::JoinKind`] was used on a dialect that doesn't
+    /// support it (issue #80). Today: `Right` on SQLite, `Full` on
+    /// SQLite + MySQL. Caller can either switch dialects, restructure
+    /// the query (e.g. swap operands and use `Left` instead of `Right`,
+    /// or emulate `Full` via two `Left`/`Right` joins UNION'd), or
+    /// gate the feature behind a `cfg`-flag.
+    #[error("`{kind} JOIN` is not supported by the `{dialect}` dialect")]
+    JoinKindNotSupported {
+        kind: &'static str,
+        dialect: &'static str,
+    },
 }
 
 /// Raised while compiling, writing, or executing a query end-to-end.

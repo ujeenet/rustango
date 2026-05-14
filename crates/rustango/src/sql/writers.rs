@@ -150,18 +150,41 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
     b.write_ident(query.model.table);
 
     for join in &query.joins {
-        b.sql.push_str(" LEFT JOIN ");
+        use crate::core::JoinKind;
+        // Reject dialect-incompatible kinds before emitting anything —
+        // gives users a clear error rather than a parse failure at the
+        // driver. PG supports all four; MySQL has no FULL OUTER JOIN;
+        // SQLite has neither RIGHT nor FULL.
+        let kind_kw = match (join.kind, b.d.name()) {
+            (JoinKind::Inner, _) => "INNER JOIN",
+            (JoinKind::Left, _) => "LEFT JOIN",
+            (JoinKind::Right, "sqlite") => {
+                return Err(SqlError::JoinKindNotSupported {
+                    kind: "RIGHT",
+                    dialect: b.d.name(),
+                });
+            }
+            (JoinKind::Right, _) => "RIGHT JOIN",
+            (JoinKind::Full, "postgres") => "FULL OUTER JOIN",
+            (JoinKind::Full, _) => {
+                return Err(SqlError::JoinKindNotSupported {
+                    kind: "FULL",
+                    dialect: b.d.name(),
+                });
+            }
+        };
+        b.sql.push(' ');
+        b.sql.push_str(kind_kw);
+        b.sql.push(' ');
         b.write_ident(join.target.table);
         b.sql.push_str(" AS ");
         b.write_ident(join.alias);
         b.sql.push_str(" ON ");
-        b.write_ident(query.model.table);
-        b.sql.push('.');
-        b.write_ident(join.on_local);
-        b.sql.push_str(" = ");
-        b.write_ident(join.alias);
-        b.sql.push('.');
-        b.write_ident(join.on_remote);
+        // The ON predicate's unqualified `Filter` / `ColumnFilter`
+        // columns resolve to the joined alias; cross-references back
+        // to the outer (or to another joined alias) use
+        // `Expr::AliasedColumn`.
+        write_where_expr(b, &join.on, Some(join.alias), Some(join.target))?;
     }
 
     write_where_with_search(
@@ -532,6 +555,15 @@ fn write_expr(
             }
             let outer = b.scope_stack[len - 2];
             let qualified = format!("{}.{}", b.d.quote_ident(outer.table), b.d.quote_ident(col),);
+            b.sql.push_str(&qualified);
+            Ok(())
+        }
+        Expr::AliasedColumn { alias, column } => {
+            // Explicit `<alias>.<col>` — used in JOIN ON predicates and
+            // anywhere a column reference needs a table prefix that
+            // isn't the current scope. No stack lookup, no validation
+            // beyond what the user passed in.
+            let qualified = format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(column),);
             b.sql.push_str(&qualified);
             Ok(())
         }
@@ -1217,7 +1249,39 @@ pub(super) fn write_where_expr(
             b.sql.push(')');
             Ok(())
         }
+        WhereExpr::ExprCompare { lhs, op, rhs } => write_expr_compare(b, lhs, *op, rhs),
     }
+}
+
+/// Emit `<lhs-expr> <op> <rhs-expr>` for [`WhereExpr::ExprCompare`].
+/// Only the binary-comparison ops make sense here — anything else is
+/// a programmer error and surfaces as
+/// [`SqlError::OpNotSupportedInDialect`] so the test suite catches it
+/// before reaching the database.
+fn write_expr_compare(
+    b: &mut Sql<'_>,
+    lhs: &crate::core::Expr,
+    op: crate::core::Op,
+    rhs: &crate::core::Expr,
+) -> Result<(), SqlError> {
+    let op_str = match op {
+        crate::core::Op::Eq => " = ",
+        crate::core::Op::Ne => " <> ",
+        crate::core::Op::Lt => " < ",
+        crate::core::Op::Lte => " <= ",
+        crate::core::Op::Gt => " > ",
+        crate::core::Op::Gte => " >= ",
+        _ => {
+            return Err(SqlError::OpNotSupportedInDialect {
+                op: "non-binary comparison in ExprCompare",
+                dialect: b.d.name(),
+            });
+        }
+    };
+    write_expr(b, lhs, None)?;
+    b.sql.push_str(op_str);
+    write_expr(b, rhs, None)?;
+    Ok(())
 }
 
 /// Render `<col> <op> <rhs-expr>` for a [`crate::core::ColumnFilter`].
@@ -1282,9 +1346,11 @@ fn write_child(
         WhereExpr::ColumnCompare(cf) => write_column_compare(b, cf, qualify_with, model),
         // Subquery-shaped leaves emit their own parens (EXISTS(…) /
         // col IN (…)) so we don't need to add a second layer here.
-        WhereExpr::Exists(_) | WhereExpr::NotExists(_) | WhereExpr::InSubquery { .. } => {
-            write_where_expr(b, expr, qualify_with, model)
-        }
+        // ExprCompare is also a flat `lhs op rhs` leaf — no nesting.
+        WhereExpr::Exists(_)
+        | WhereExpr::NotExists(_)
+        | WhereExpr::InSubquery { .. }
+        | WhereExpr::ExprCompare { .. } => write_where_expr(b, expr, qualify_with, model),
         WhereExpr::And(_) | WhereExpr::Or(_) | WhereExpr::Not(_) => {
             b.sql.push('(');
             write_where_expr(b, expr, qualify_with, model)?;

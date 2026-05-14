@@ -33,6 +33,12 @@ pub struct QuerySet<T: Model> {
     /// `compile()` time, so the SELECT pulls the parent rows along
     /// with the children in a single SQL round trip.
     select_related: Vec<String>,
+    /// Ad-hoc joins registered via [`Self::join`] (issue #80). Stored
+    /// pre-built rather than as Rust field names because the predicate
+    /// is arbitrary; appended after `select_related` joins at compile
+    /// time so explicit user-driven joins sit alongside the automatic
+    /// FK ones in the SELECT list.
+    ad_hoc_joins: Vec<crate::core::Join>,
     /// `(field_name, desc)` pairs registered via [`Self::order_by`].
     /// Slice 9.0b. Resolved against the schema at `compile()` time.
     order_by: Vec<(String, bool)>,
@@ -93,6 +99,7 @@ impl<T: Model> QuerySet<T> {
             limit: None,
             offset: None,
             select_related: Vec::new(),
+            ad_hoc_joins: Vec::new(),
             order_by: Vec::new(),
             _model: PhantomData,
         }
@@ -173,6 +180,50 @@ impl<T: Model> QuerySet<T> {
     #[must_use]
     pub fn select_related(mut self, field: impl Into<String>) -> Self {
         self.select_related.push(field.into());
+        self
+    }
+
+    /// Ad-hoc JOIN — issue #80. Append a fully specified
+    /// [`crate::core::Join`] to the queryset. Unlike [`select_related`]
+    /// (which auto-builds joins from FK metadata), this gives the
+    /// caller full control over the JOIN kind, alias, predicate, and
+    /// projected columns. The predicate is an arbitrary [`WhereExpr`];
+    /// columns inside it qualify against the joined alias by default
+    /// and against arbitrary aliases via [`crate::core::Expr::AliasedColumn`].
+    ///
+    /// Multiple `.join(...)` calls compose; each appends another JOIN
+    /// after the FK-driven `select_related` ones. Aliases must be
+    /// unique within the queryset.
+    ///
+    /// ```ignore
+    /// use rustango::core::joins::aliased;
+    /// use rustango::core::{Join, JoinKind, Op, WhereExpr};
+    ///
+    /// Post::objects()
+    ///     .join(Join {
+    ///         target: Comment::SCHEMA,
+    ///         alias: "c",
+    ///         kind: JoinKind::Inner,
+    ///         on: WhereExpr::And(vec![
+    ///             WhereExpr::ExprCompare {
+    ///                 lhs: aliased("c", "post_id"),
+    ///                 op: Op::Eq,
+    ///                 rhs: aliased("post", "id"),
+    ///             },
+    ///             // Filter columns inside `on` qualify to the joined
+    ///             // alias (`c`) by default — no need to `aliased()` here.
+    ///             Comment::is_approved.eq(true).into(),
+    ///         ]),
+    ///         project: vec![],
+    ///     })
+    ///     .fetch(&pool).await?;
+    /// ```
+    ///
+    /// [`select_related`]: Self::select_related
+    /// [`WhereExpr`]: crate::core::WhereExpr
+    #[must_use]
+    pub fn join(mut self, join: crate::core::Join) -> Self {
+        self.ad_hoc_joins.push(join);
         self
     }
 
@@ -259,7 +310,12 @@ impl<T: Model> QuerySet<T> {
     pub fn compile(self) -> Result<SelectQuery, QueryError> {
         let model: &'static ModelSchema = T::SCHEMA;
         let where_clause = resolve_pending(model, self.pending)?;
-        let joins = lower_select_related(model, &self.select_related)?;
+        let mut joins = lower_select_related(model, &self.select_related)?;
+        // Ad-hoc joins (issue #80) come AFTER FK-driven select_related
+        // joins in the SELECT — preserves the existing column ordering
+        // for legacy callers, and keeps user-driven joins next to the
+        // user-driven WHERE.
+        joins.extend(self.ad_hoc_joins);
         let order_by = lower_order_by(model, &self.order_by)?;
         Ok(SelectQuery {
             model,
@@ -436,7 +492,7 @@ fn lower_select_related(
     model: &'static ModelSchema,
     names: &[String],
 ) -> Result<Vec<crate::core::Join>, QueryError> {
-    use crate::core::{inventory, Join, ModelEntry, Relation};
+    use crate::core::{inventory, Expr, Join, JoinKind, ModelEntry, Op, Relation, WhereExpr};
     let mut out: Vec<Join> = Vec::with_capacity(names.len());
     for name in names {
         let field = model
@@ -470,14 +526,26 @@ fn lower_select_related(
         // Project every column on the target so the decoder has the
         // full row to rebuild a `Target` instance.
         let project: Vec<&'static str> = target.scalar_fields().map(|f| f.column).collect();
+        // The Rust field name is unique within the model, so it makes
+        // a clean alias prefix that doesn't collide with other JOINs
+        // the writer or admin might add later.
+        let alias = field.name;
         out.push(Join {
             target,
-            on_local: field.column,
-            on_remote: on,
-            // The Rust field name is unique within the model, so it
-            // makes a clean alias prefix that doesn't collide with
-            // other JOINs the writer or admin might add later.
-            alias: field.name,
+            alias,
+            kind: JoinKind::Left,
+            // `<main_table>.<fk_col> = <alias>.<target_pk>` — both
+            // sides aliased so the writer doesn't need to remember
+            // which side is "outer". Same SQL the legacy emitter
+            // produced; just expressed as a WhereExpr now.
+            on: WhereExpr::ExprCompare {
+                lhs: Expr::AliasedColumn {
+                    alias: model.table,
+                    column: field.column,
+                },
+                op: Op::Eq,
+                rhs: Expr::AliasedColumn { alias, column: on },
+            },
             project,
         });
     }
@@ -635,8 +703,9 @@ fn validate_expr_columns_in_model(
         // they were compiled via QuerySet::compile(); OuterRef
         // names an outer column resolved when this Expr is embedded
         // in the outer queryset (the caller already validated it
-        // there).
-        Expr::Subquery(_) | Expr::OuterRef(_) => Ok(()),
+        // there). `AliasedColumn` (issue #80) carries its own table
+        // alias and is validated by the JOIN writer at emit time.
+        Expr::Subquery(_) | Expr::OuterRef(_) | Expr::AliasedColumn { .. } => Ok(()),
     }
 }
 
