@@ -13,7 +13,7 @@ mod schema;
 mod validate;
 mod value;
 
-pub use column::{Column, TypedAssignment, TypedExpr, TypedFilter};
+pub use column::{Column, TypedAssignment, TypedExpr, TypedFieldList, TypedFilter};
 pub use error::QueryError;
 pub use expr::{BinOp, Expr, ScalarFn, F};
 pub use field_type::FieldType;

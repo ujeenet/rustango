@@ -1912,6 +1912,37 @@ fn inherent_impl_tokens(
                         ).await?;
                         ::core::result::Result::Ok(())
                     }
+
+                    /// Typed-column counterpart of [`Self::save_partial`] —
+                    /// issue #67. `fields` is a tuple of [`Column`]
+                    /// constants whose `Model` matches `Self`; typos and
+                    /// model mismatches surface at *compile time*
+                    /// (`Author::name` inside a `Post::save_partial_typed`
+                    /// call is a type error, no runtime check).
+                    ///
+                    /// ```ignore
+                    /// post.save_partial_typed((Post::title, Post::slug), &pool).await?;
+                    /// ```
+                    ///
+                    /// Lowers to [`Self::save_partial`] under the hood;
+                    /// audit narrowing + every other semantic is identical.
+                    ///
+                    /// [`Column`]: ::rustango::core::Column
+                    ///
+                    /// # Errors
+                    /// As [`Self::save_partial`].
+                    pub async fn save_partial_typed<
+                        L: ::rustango::core::TypedFieldList<Self>,
+                    >(
+                        &mut self,
+                        fields: L,
+                        pool: &::rustango::sql::Pool,
+                    ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                        let _names = fields.rust_field_names();
+                        let _refs: ::std::vec::Vec<&str> =
+                            _names.iter().copied().collect();
+                        self.save_partial(&_refs, pool).await
+                    }
                 }
             }
         } else {
@@ -2050,6 +2081,38 @@ fn inherent_impl_tokens(
                     };
                     let _ = ::rustango::sql::update_pool(pool, &_query).await?;
                     ::core::result::Result::Ok(())
+                }
+
+                /// Typed-column counterpart of [`Self::save_partial`] —
+                /// issue #67. `fields` is a tuple of [`Column`]
+                /// constants whose `Model` matches `Self`; typos and
+                /// model mismatches surface at *compile time*
+                /// (`Author::name` inside a `Post::save_partial_typed`
+                /// call is a type error, no runtime check).
+                ///
+                /// ```ignore
+                /// post.save_partial_typed((Post::title, Post::slug), &pool).await?;
+                /// ```
+                ///
+                /// Lowers to [`Self::save_partial`] under the hood — the
+                /// tuple is reduced to a `&[&str]` slice of Rust-side
+                /// field names and forwarded.
+                ///
+                /// [`Column`]: ::rustango::core::Column
+                ///
+                /// # Errors
+                /// As [`Self::save_partial`].
+                pub async fn save_partial_typed<
+                    L: ::rustango::core::TypedFieldList<Self>,
+                >(
+                    &mut self,
+                    fields: L,
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    let _names = fields.rust_field_names();
+                    let _refs: ::std::vec::Vec<&str> =
+                        _names.iter().copied().collect();
+                    self.save_partial(&_refs, pool).await
                 }
             }
         }
