@@ -585,7 +585,60 @@ impl<T: Model> QuerySet<T> {
             limit: None,
             offset: None,
             deferred_error: None,
+            values: None,
         }
+    }
+
+    /// Django-shape `.values(&[...]).annotate(...)` projection — issue #75.
+    ///
+    /// Switches the queryset into aggregate mode and records the projection
+    /// columns. When followed by `.annotate("alias", aggregate)`, the writer
+    /// emits `SELECT cols, AGGR(...) FROM t GROUP BY cols` — GROUP BY is
+    /// inferred from the values list.
+    ///
+    /// ```ignore
+    /// // "Posts per author" — Django's canonical example.
+    /// Post::objects()
+    ///     .values(&["author_id"])
+    ///     .annotate("n", count_all().into())
+    ///     .compile()?;
+    /// // → SELECT "author_id", COUNT(*) AS "n" FROM "post" GROUP BY "author_id"
+    /// ```
+    ///
+    /// Calling `.values()` without a subsequent aggregating `.annotate(...)`
+    /// is a pure projection (no GROUP BY emitted).
+    #[must_use]
+    pub fn values(self, columns: &[&'static str]) -> AggregateBuilder<T> {
+        AggregateBuilder {
+            qs: self,
+            group_by: Vec::new(),
+            aggregates: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            deferred_error: None,
+            values: Some(columns.to_vec()),
+        }
+    }
+
+    /// Django-shape `.annotate(...)` without explicit `.aggregate()` — issue #75.
+    ///
+    /// Promotes to an [`AggregateBuilder`]. If the annotation aggregates rows
+    /// (`Count`, `Sum`, `Avg`, …) and `.values()` wasn't called, `compile()`
+    /// auto-populates GROUP BY with every non-aggregate scalar column on the
+    /// model (Django Shape 3 — "per-row count of children").
+    ///
+    /// ```ignore
+    /// // "Each author + their post count" — every column of `Author`
+    /// // ends up in the SELECT list AND in GROUP BY.
+    /// Author::objects()
+    ///     .annotate("post_count", count_all().into())
+    ///     .compile()?;
+    /// ```
+    #[must_use]
+    pub fn annotate(self, alias: &'static str, expr: AggregateExpr) -> AggregateBuilder<T> {
+        self.aggregate().annotate(alias, expr)
     }
 }
 
@@ -1143,13 +1196,34 @@ pub struct AggregateBuilder<T: Model> {
     /// on first error; subsequent builder calls are no-ops so the
     /// original cause isn't masked. Surfaced from `compile()`.
     deferred_error: Option<crate::core::QueryError>,
+    /// Issue #75 — projection columns set via [`Self::values`] (or
+    /// [`QuerySet::values`]). When `Some(cols)` and the user hasn't
+    /// called `.group_by(...)` explicitly, `compile()` derives
+    /// `GROUP BY cols`. When `None` and an aggregating annotation is
+    /// present, `compile()` falls back to Django Shape 3 — `GROUP BY`
+    /// every non-aggregate scalar column on the model.
+    values: Option<Vec<&'static str>>,
 }
 
 impl<T: Model> AggregateBuilder<T> {
     /// Add a `GROUP BY` column. Call multiple times to group by multiple columns.
+    ///
+    /// Explicit `.group_by(...)` calls always win — when paired with
+    /// [`Self::values`] / [`QuerySet::values`], the explicit list is what
+    /// reaches the writer; the values list still drives the projection
+    /// SELECT list (issue #75).
     #[must_use]
     pub fn group_by(mut self, column: &'static str) -> Self {
         self.group_by.push(column);
+        self
+    }
+
+    /// Set the projection column list — same semantic as
+    /// [`QuerySet::values`] but available mid-chain when you started
+    /// from `.aggregate()` rather than `.values(...)`. Issue #75.
+    #[must_use]
+    pub fn values(mut self, columns: &[&'static str]) -> Self {
+        self.values = Some(columns.to_vec());
         self
     }
 
@@ -1287,7 +1361,22 @@ impl<T: Model> AggregateBuilder<T> {
     /// Compile to an [`AggregateQuery`] IR.
     ///
     /// # Errors
-    /// Returns [`QueryError`] if any filter or having clause names an unknown field.
+    /// Returns [`QueryError`] if any filter or having clause names an
+    /// unknown field, or if `.values()` was called without a
+    /// subsequent aggregating `.annotate(...)`.
+    ///
+    /// # GROUP BY inference (issue #75)
+    ///
+    /// When the user hasn't called `.group_by(...)` explicitly, the
+    /// builder fills it in:
+    ///
+    /// * `.values(cols).annotate(agg)` → `GROUP BY cols` (Django Shape 2).
+    /// * `.annotate(agg)` (no values) → `GROUP BY` every non-aggregate
+    ///   scalar column on the model (Django Shape 3).
+    /// * `.annotate(window)` only → no GROUP BY (window functions are
+    ///   per-row).
+    ///
+    /// Explicit `.group_by(...)` always wins.
     pub fn compile(self) -> Result<AggregateQuery, QueryError> {
         // Surface any builder-time deferred error first (e.g. an
         // `Op::In` against an annotation alias) so the user sees the
@@ -1310,10 +1399,54 @@ impl<T: Model> AggregateBuilder<T> {
             .into_iter()
             .map(|(col, desc)| crate::core::OrderItem::column(col, desc))
             .collect();
+
+        // Issue #75 — GROUP BY auto-inference.
+        let has_aggregating = self.aggregates.iter().any(|(_, e)| e.is_aggregating());
+        let group_by = if !self.group_by.is_empty() {
+            // Explicit `.group_by(...)` always wins. Validate columns
+            // belong to the model (caught early — typos otherwise
+            // surface at the DB).
+            for col in &self.group_by {
+                if model.field_by_column(col).is_none() {
+                    return Err(QueryError::UnknownField {
+                        model: model.name,
+                        field: (*col).to_owned(),
+                    });
+                }
+            }
+            self.group_by
+        } else if let Some(cols) = self.values.as_ref() {
+            // `.values(cols)` set. Without an aggregating annotation
+            // we'd produce a degenerate `SELECT cols GROUP BY cols`
+            // (distinct-projection) — refuse and point the user at
+            // the right path for pure projection.
+            if !has_aggregating {
+                return Err(QueryError::ValuesRequiresAggregate { cols: cols.clone() });
+            }
+            for col in cols {
+                if model.field_by_column(col).is_none() {
+                    return Err(QueryError::UnknownField {
+                        model: model.name,
+                        field: (*col).to_owned(),
+                    });
+                }
+            }
+            cols.clone()
+        } else if has_aggregating {
+            // Shape 3 — group by every scalar column on the model.
+            // Mirrors Django's "implicit GROUP BY all selected
+            // non-aggregate columns".
+            model.scalar_fields().map(|f| f.column).collect()
+        } else {
+            // No aggregating annotation, no values — pure window
+            // annotation path (issue #7) or empty builder. No GROUP BY.
+            Vec::new()
+        };
+
         Ok(AggregateQuery {
             model,
             where_clause,
-            group_by: self.group_by,
+            group_by,
             aggregates: self.aggregates,
             having: self.having,
             order_by,

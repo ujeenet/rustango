@@ -533,13 +533,52 @@ let total_views = Post::objects().sum::<i64>(Post::view_count, &pool).await?;
 let avg_views = Post::objects().avg(Post::view_count, &pool).await?;
 let max_views = Post::objects().max::<i64>(Post::view_count, &pool).await?;
 
-// Annotate (per-row aggregation)
-use rustango::core::AggregateExpr;
-let counts = Author::objects()
-    .annotate("post_count", AggregateExpr::CountChildren("posts", "author_id"))
-    .fetch(&pool).await?;
-// each Author gets a `post_count` extra field accessible via the annotated row
+// Annotate + GROUP BY (issue #75 — Django-shape auto-inference)
+use rustango::core::aggregates::{count_all, sum};
+
+// "Posts per author" — `.values()` lists the GROUP BY columns.
+let by_author = Sale::objects()
+    .values(&["author_id"])
+    .annotate("n", count_all().into())
+    .compile()?;
+let rows = rustango::sql::fetch_aggregate(&by_author, &pool).await?;
+// rows: Vec<HashMap<String, SqlValue>> — { author_id: 1, n: 3 }, …
 ```
+
+### GROUP BY auto-inference — `.values().annotate()` / bare `.annotate()`
+
+Issue #75 closes the Django ergonomic gap: GROUP BY is **inferred** from the queryset's shape — you never call a `.group_by(...)` builder unless you're overriding the inference.
+
+| Shape | Builder | Resulting `GROUP BY` |
+|---|---|---|
+| **2 — values + aggregate** | `.values(&["author_id"]).annotate("n", count_all().into())` | `GROUP BY "author_id"` |
+| **3 — bare aggregate** | `.annotate("n", count_all().into())` | `GROUP BY` every non-aggregate scalar column on the model |
+| **Window-only** | `.aggregate().annotate("rn", row_number()…)` | (no `GROUP BY` — window funcs are per-row) |
+| **Explicit override** | `.aggregate().group_by("month").annotate(...)` | `GROUP BY "month"` — explicit wins |
+
+The classifier `AggregateExpr::is_aggregating()` distinguishes the row-collapsing variants (`Count` / `Sum` / `Avg` / `Max` / `Min` / `CountDistinct` / `StdDev*` / `Variance*` — plus recursive `Filtered` / `Coalesced` wrappers) from `Window`, which is per-row. Only the aggregating variants trigger Shape 3 inference.
+
+```rust
+use rustango::core::aggregates::{count_all, sum};
+
+// Shape 2 — "monthly revenue per author".
+Sale::objects()
+    .where_(Sale::status.eq("paid"))
+    .values(&["author_id", "month"])
+    .annotate("total", sum("amount").into())
+    .compile()?;
+// → SELECT "author_id", "month", SUM("amount")::bigint AS "total"
+//   FROM "sale" WHERE "status" = $1
+//   GROUP BY "author_id", "month"
+
+// Shape 3 — "each author + their post count". Every Author column
+// lands in both the SELECT list and the GROUP BY.
+Author::objects()
+    .annotate("post_count", count_all().filter(Author::id.eq(Post::author_id)).into())
+    .compile()?;
+```
+
+**Pure projection caveat.** `.values(cols)` *alone* (no aggregate annotation) is **not** supported in v0.40 — `compile()` returns `QueryError::ValuesRequiresAggregate`. Pure projection-as-dicts needs a separate writer path (it's a SELECT without GROUP BY, decoded into `Vec<HashMap>`) and is queued for a follow-up. For now, use the typed `QuerySet::fetch(...)` to read whole rows.
 
 ### Conditional aggregates — `filter=` + `default=` + StdDev/Variance
 

@@ -96,4 +96,21 @@ pub enum QueryError {
         expected: &'static str,
         actual: &'static str,
     },
+
+    /// `.values(cols)` was called without a subsequent aggregating
+    /// `.annotate(name, ...)`. Issue #75 v1 supports `.values()` only
+    /// as a GROUP BY hint paired with an aggregate annotation; pure
+    /// projection (returning `Vec<HashMap<String, SqlValue>>` with
+    /// only the requested columns) needs a separate writer path and
+    /// is queued for a follow-up. Until then, use the typed
+    /// `QuerySet::fetch(...)` path to read whole rows, or build an
+    /// `AggregateQuery` directly if you need a custom SELECT shape.
+    #[error(
+        "AggregateBuilder::values({cols:?}) requires at least one \
+         aggregating annotation (Count / Sum / Avg / Max / Min / \
+         StdDev / Variance). Pure projection without GROUP BY is not \
+         supported yet; chain `.annotate(\"alias\", aggregate)` or \
+         use `QuerySet::fetch` instead."
+    )]
+    ValuesRequiresAggregate { cols: Vec<&'static str> },
 }
