@@ -174,6 +174,50 @@ pub enum ScalarFn {
     Least,
     /// `NULLIF(a, b)` — `NULL` when `a == b`, else `a`. Universal.
     NullIf,
+
+    // --- Date / time (issue #3) ---
+    /// `NOW()` (PG/MySQL) / `CURRENT_TIMESTAMP` (SQLite). 0-arg. Returns
+    /// the database server's wall-clock timestamp.
+    Now,
+    /// `EXTRACT(YEAR FROM x)` family. SQLite wraps in
+    /// `CAST(strftime('%Y', x) AS INTEGER)`. PG casts to `integer` so
+    /// the return type is consistent across dialects.
+    ExtractYear,
+    /// Month component (1–12).
+    ExtractMonth,
+    /// Day-of-month (1–31).
+    ExtractDay,
+    /// Hour (0–23).
+    ExtractHour,
+    /// Minute (0–59).
+    ExtractMinute,
+    /// Second (0–59).
+    ExtractSecond,
+    /// Week-of-year (1–53).
+    ExtractWeek,
+    /// Day-of-week. **Normalized to PG's convention: 0 = Sunday, 6 =
+    /// Saturday** across all three dialects. MySQL's `DAYOFWEEK()`
+    /// returns 1=Sunday..7=Saturday natively; the writer subtracts 1
+    /// to align. SQLite's `strftime('%w')` already matches 0=Sunday.
+    ExtractWeekDay,
+    /// Quarter (1–4). Not supported on SQLite (no native `strftime`
+    /// token); emitter errors with `OpNotSupportedInDialect`.
+    ExtractQuarter,
+    /// `DATE(x)` — strip the time component, returning a `DATE`. Same
+    /// shape on all three backends.
+    TruncDate,
+    /// Truncate timestamp to the start of the year. PG: `DATE_TRUNC('year', x)`
+    /// (returns timestamp). MySQL: `DATE_FORMAT(x, '%Y-01-01')` (returns
+    /// string). SQLite: `strftime('%Y-01-01', x)` (returns string).
+    /// **Result-type caveat**: MySQL and SQLite return text — cast on
+    /// the app side if a typed date/datetime is needed.
+    TruncYear,
+    /// Truncate timestamp to the start of the month. See `TruncYear`
+    /// re: return-type divergence on MySQL/SQLite.
+    TruncMonth,
+    /// Truncate timestamp to the start of the day. PG: `DATE_TRUNC('day', x)`
+    /// (returns timestamp). MySQL / SQLite: `DATE(x)` / `date(x)` (date).
+    TruncDay,
 }
 
 impl Expr {

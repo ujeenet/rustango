@@ -217,9 +217,59 @@ Or build a `Vec<Expr>` and pass it directly — same shape, same result.
 - **`greatest([single_arg])` / `least([single_arg])` on SQLite**: not supported — SQLite's `MAX(x)` with one arg is the *aggregate*, not the scalar, form. The writer returns `OpNotSupportedInDialect`. PG and MySQL accept the single-arg form as a no-op returning `x`. Wrap with at least one literal to stay portable.
 - **`substr` with negative start**: PG treats negative as "start from char position N" (effectively clamps to 0); MySQL and SQLite treat negative as "count from end". Avoid negative starts in portable code.
 
+### Date / time functions
+
+Issue #3 adds the `Now` / `Extract*` / `Trunc*` family on the same `Expr` machinery. Use them for cohort queries, time-bucket aggregates, and "now()-default-at-write-time" patterns without dragging rows back to the app.
+
+```rust
+use rustango::core::funcs::{
+    now, trunc_date, trunc_month, trunc_year, trunc_day,
+    extract_year, extract_month, extract_day, extract_hour,
+    extract_minute, extract_second, extract_week, extract_weekday,
+    extract_quarter,
+};
+
+// Stamp server-side current time.
+Post::objects()
+    .eq("id", id)
+    .update()
+    .set_expr("published_at", now())
+    .execute(&pool).await?;
+
+// Extract year / month into integer columns so you can index them
+// for cheap "signups per month" aggregations.
+Signup::objects()
+    .update()
+    .set_expr("bucket_year", extract_year(F("created_at")))
+    .execute(&pool).await?;
+
+// "Find rows from this calendar year."
+Order::objects()
+    .where_(Order::created_at.gte_expr(trunc_year(now())))
+    .fetch(&pool).await?;
+```
+
+**Per-dialect emission:**
+
+| Builder | PG | MySQL | SQLite |
+|---|---|---|---|
+| `now()` | `NOW()` | `NOW()` | `CURRENT_TIMESTAMP` |
+| `extract_year(x)` | `CAST(EXTRACT(YEAR FROM x) AS INTEGER)` | `YEAR(x)` | `CAST(strftime('%Y', x) AS INTEGER)` |
+| `extract_weekday(x)` | `CAST(EXTRACT(DOW FROM x) AS INTEGER)` | `(DAYOFWEEK(x) - 1)` | `CAST(strftime('%w', x) AS INTEGER)` |
+| `extract_quarter(x)` | `EXTRACT(QUARTER FROM x)` | `QUARTER(x)` | **unsupported** — error |
+| `trunc_date(x)` | `DATE(x)` | `DATE(x)` | `DATE(x)` |
+| `trunc_month(x)` | `DATE_TRUNC('month', x)` → timestamp | `DATE_FORMAT(x, '%Y-%m-01')` → **string** | `strftime('%Y-%m-01', x)` → **string** |
+
+**Caveats specific to date/time:**
+
+- **`trunc_year/month` return type diverges**: timestamp on PG, text on MySQL/SQLite. Cast on the app side when reading if you need a typed `chrono::NaiveDate` — or store the bucket as a plain integer (`extract_year` + `extract_month`) and reconstruct in code.
+- **`extract_weekday` is normalized to 0 = Sunday** across all three dialects. MySQL's native `DAYOFWEEK()` returns 1=Sunday, so the writer subtracts 1.
+- **`extract_quarter` on SQLite errors** with `OpNotSupportedInDialect` — SQLite has no native quarter token. Either gate the feature behind `cfg(not(sqlite))` or compute via `((extract_month - 1) / 3) + 1` in app code.
+- **Time-zone handling**: PG `EXTRACT` operates in the column's timezone; MySQL `YEAR()` operates in the session timezone (`SET time_zone = ...`); SQLite has no real TZ support — treat everything as UTC. Use `TIMESTAMPTZ` on PG, `DATETIME` on MySQL with the session TZ set, ISO-8601 strings on SQLite.
+
 ### When to reach for a raw SQL escape hatch instead
 
-The function set covers the common case. For features outside v1 — `Cast`, date arithmetic (`Now`, `ExtractYear`, `TruncDate`), full-text search, JSON path operators, hash functions, trig, `Case/When`, `Subquery`/`Exists` — see the [Custom SQL escape hatch](#custom-sql-escape-hatch) section below or wait on issues #3–#7 in the ORM Expression DSL epic, which extend the same `Expr` tree.
+The function set covers the common case. For features outside v1–v2 — `Cast`, full-text search, JSON path operators, hash functions, trig, `Case/When`, `Subquery`/`Exists`, window functions — see the [Custom SQL escape hatch](#custom-sql-escape-hatch) section below or wait on issues #4–#7 in the ORM Expression DSL epic, which extend the same `Expr` tree.
 
 ---
 

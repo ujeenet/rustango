@@ -211,6 +211,103 @@ where
     variadic(ScalarFn::Least, args)
 }
 
+// ---------- Date / time functions (issue #3) ----------
+
+/// `NOW()` — server-side wall-clock timestamp. SQLite emits
+/// `CURRENT_TIMESTAMP` (no parens). 0-arg.
+#[must_use]
+pub fn now() -> Expr {
+    Expr::Function {
+        kind: ScalarFn::Now,
+        args: Vec::new(),
+    }
+}
+
+/// `EXTRACT(YEAR FROM x)` — calendar year as integer.
+#[must_use]
+pub fn extract_year(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::ExtractYear, arg)
+}
+
+/// `EXTRACT(MONTH FROM x)` — month component (1–12) as integer.
+#[must_use]
+pub fn extract_month(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::ExtractMonth, arg)
+}
+
+/// `EXTRACT(DAY FROM x)` — day-of-month (1–31) as integer.
+#[must_use]
+pub fn extract_day(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::ExtractDay, arg)
+}
+
+/// `EXTRACT(HOUR FROM x)` — hour (0–23) as integer.
+#[must_use]
+pub fn extract_hour(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::ExtractHour, arg)
+}
+
+/// `EXTRACT(MINUTE FROM x)` — minute (0–59) as integer.
+#[must_use]
+pub fn extract_minute(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::ExtractMinute, arg)
+}
+
+/// `EXTRACT(SECOND FROM x)` — second (0–59) as integer.
+#[must_use]
+pub fn extract_second(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::ExtractSecond, arg)
+}
+
+/// `EXTRACT(WEEK FROM x)` — week-of-year (1–53) as integer.
+#[must_use]
+pub fn extract_week(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::ExtractWeek, arg)
+}
+
+/// `EXTRACT(DOW FROM x)` — day-of-week. **Normalized to 0 = Sunday,
+/// 6 = Saturday** across all three dialects. See [`ScalarFn::ExtractWeekDay`].
+#[must_use]
+pub fn extract_weekday(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::ExtractWeekDay, arg)
+}
+
+/// `EXTRACT(QUARTER FROM x)` — quarter (1–4) as integer.
+/// **Not supported on SQLite** (no native `strftime` token); emits
+/// `OpNotSupportedInDialect`.
+#[must_use]
+pub fn extract_quarter(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::ExtractQuarter, arg)
+}
+
+/// `DATE(x)` — strip the time component from a timestamp. Same shape
+/// on all three backends; returns `DATE`.
+#[must_use]
+pub fn trunc_date(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::TruncDate, arg)
+}
+
+/// `DATE_TRUNC('year', x)` (PG) / `DATE_FORMAT(x, '%Y-01-01')` (MySQL)
+/// / `strftime('%Y-01-01', x)` (SQLite). **Returns timestamp on PG,
+/// text on MySQL/SQLite** — cast app-side if a typed value is needed.
+#[must_use]
+pub fn trunc_year(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::TruncYear, arg)
+}
+
+/// `DATE_TRUNC('month', x)` etc. See [`trunc_year`] re: return type.
+#[must_use]
+pub fn trunc_month(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::TruncMonth, arg)
+}
+
+/// `DATE_TRUNC('day', x)` (PG, timestamp) / `DATE(x)` (MySQL, date) /
+/// `date(x)` (SQLite, text).
+#[must_use]
+pub fn trunc_day(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::TruncDay, arg)
+}
+
 // ---------- Internal helpers ----------
 
 fn unary(kind: ScalarFn, arg: impl Into<Expr>) -> Expr {

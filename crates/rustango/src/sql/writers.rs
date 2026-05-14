@@ -670,7 +670,224 @@ fn write_function(
             }
             write_call(b, "NULLIF", args)
         }
+
+        // -------- date/time (issue #3) --------
+        F::Now => {
+            if !args.is_empty() {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "NOW",
+                    expected: "0",
+                    got: args.len(),
+                });
+            }
+            // SQLite uses `CURRENT_TIMESTAMP` (a keyword, no parens);
+            // PG and MySQL accept `NOW()` and treat `CURRENT_TIMESTAMP`
+            // as an equivalent alias.
+            b.sql.push_str(if b.d.name() == "sqlite" {
+                "CURRENT_TIMESTAMP"
+            } else {
+                "NOW()"
+            });
+            Ok(())
+        }
+        F::ExtractYear
+        | F::ExtractMonth
+        | F::ExtractDay
+        | F::ExtractHour
+        | F::ExtractMinute
+        | F::ExtractSecond
+        | F::ExtractWeek => write_extract_int(b, kind, args),
+        F::ExtractWeekDay => write_extract_weekday(b, args),
+        F::ExtractQuarter => {
+            if args.len() != 1 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "EXTRACT(QUARTER)",
+                    expected: "1",
+                    got: args.len(),
+                });
+            }
+            if b.d.name() == "sqlite" {
+                // SQLite has no quarter token in strftime and no
+                // QUARTER() function. Surface a clear error rather
+                // than synthesize a multi-clause CASE expression.
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: "EXTRACT(QUARTER) (SQLite has no native quarter token)",
+                    dialect: "sqlite",
+                });
+            }
+            write_extract_int(b, kind, args)
+        }
+        F::TruncDate => {
+            if args.len() != 1 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "DATE",
+                    expected: "1",
+                    got: args.len(),
+                });
+            }
+            // All three dialects spell this the same: DATE(x) / date(x).
+            b.sql.push_str("DATE(");
+            write_expr(b, &args[0], None)?;
+            b.sql.push(')');
+            Ok(())
+        }
+        F::TruncYear | F::TruncMonth | F::TruncDay => write_trunc(b, kind, args),
     }
+}
+
+/// Emit an `EXTRACT(<field> FROM x)` family call. PG uses the SQL
+/// standard syntax + cast to integer; MySQL has direct per-field
+/// functions; SQLite routes through `strftime` + cast.
+fn write_extract_int(
+    b: &mut Sql<'_>,
+    kind: crate::core::ScalarFn,
+    args: &[crate::core::Expr],
+) -> Result<(), SqlError> {
+    use crate::core::ScalarFn as F;
+    if args.len() != 1 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: "EXTRACT",
+            expected: "1",
+            got: args.len(),
+        });
+    }
+    let field = match kind {
+        F::ExtractYear => "YEAR",
+        F::ExtractMonth => "MONTH",
+        F::ExtractDay => "DAY",
+        F::ExtractHour => "HOUR",
+        F::ExtractMinute => "MINUTE",
+        F::ExtractSecond => "SECOND",
+        F::ExtractWeek => "WEEK",
+        F::ExtractQuarter => "QUARTER",
+        _ => unreachable!("write_extract_int called with non-extract kind: {kind:?}"),
+    };
+    let dialect = b.d.name();
+    if dialect == "postgres" {
+        // EXTRACT returns NUMERIC; cast to INTEGER for return-type
+        // parity with MySQL's per-field functions.
+        b.sql.push_str("CAST(EXTRACT(");
+        b.sql.push_str(field);
+        b.sql.push_str(" FROM ");
+        write_expr(b, &args[0], None)?;
+        b.sql.push_str(") AS INTEGER)");
+    } else if dialect == "mysql" {
+        b.sql.push_str(field);
+        b.sql.push('(');
+        write_expr(b, &args[0], None)?;
+        b.sql.push(')');
+    } else {
+        let token = match field {
+            "YEAR" => "%Y",
+            "MONTH" => "%m",
+            "DAY" => "%d",
+            "HOUR" => "%H",
+            "MINUTE" => "%M",
+            "SECOND" => "%S",
+            "WEEK" => "%W",
+            _ => unreachable!("sqlite extract: {field}"),
+        };
+        b.sql.push_str("CAST(strftime('");
+        b.sql.push_str(token);
+        b.sql.push_str("', ");
+        write_expr(b, &args[0], None)?;
+        b.sql.push_str(") AS INTEGER)");
+    }
+    Ok(())
+}
+
+/// Day-of-week with cross-dialect normalization. Picks PG's convention
+/// (0 = Sunday, 6 = Saturday) and adjusts MySQL's `DAYOFWEEK()`
+/// (1 = Sunday) by subtracting 1. SQLite's `strftime('%w')` already
+/// returns 0 = Sunday.
+fn write_extract_weekday(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
+    if args.len() != 1 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: "EXTRACT(WEEKDAY)",
+            expected: "1",
+            got: args.len(),
+        });
+    }
+    let dialect = b.d.name();
+    if dialect == "postgres" {
+        b.sql.push_str("CAST(EXTRACT(DOW FROM ");
+        write_expr(b, &args[0], None)?;
+        b.sql.push_str(") AS INTEGER)");
+    } else if dialect == "mysql" {
+        b.sql.push_str("(DAYOFWEEK(");
+        write_expr(b, &args[0], None)?;
+        b.sql.push_str(") - 1)");
+    } else {
+        b.sql.push_str("CAST(strftime('%w', ");
+        write_expr(b, &args[0], None)?;
+        b.sql.push_str(") AS INTEGER)");
+    }
+    Ok(())
+}
+
+/// `DATE_TRUNC` family — diverges most across dialects. PG has the
+/// canonical `DATE_TRUNC('unit', x)` returning a timestamp. MySQL has
+/// no direct trunc-to-unit; emit `DATE_FORMAT(x, '%Y-...-...')`
+/// returning text. SQLite emits `strftime(...)` also returning text.
+/// The result-type caveat is documented at the builder.
+fn write_trunc(
+    b: &mut Sql<'_>,
+    kind: crate::core::ScalarFn,
+    args: &[crate::core::Expr],
+) -> Result<(), SqlError> {
+    use crate::core::ScalarFn as F;
+    if args.len() != 1 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: "DATE_TRUNC",
+            expected: "1",
+            got: args.len(),
+        });
+    }
+    let dialect = b.d.name();
+    let pg_unit = match kind {
+        F::TruncYear => "year",
+        F::TruncMonth => "month",
+        F::TruncDay => "day",
+        _ => unreachable!("write_trunc: non-trunc kind: {kind:?}"),
+    };
+    let format_str = match kind {
+        F::TruncYear => "%Y-01-01",
+        F::TruncMonth => "%Y-%m-01",
+        F::TruncDay => "%Y-%m-%d",
+        _ => unreachable!(),
+    };
+    if dialect == "postgres" {
+        b.sql.push_str("DATE_TRUNC('");
+        b.sql.push_str(pg_unit);
+        b.sql.push_str("', ");
+        write_expr(b, &args[0], None)?;
+        b.sql.push(')');
+    } else if dialect == "mysql" {
+        if matches!(kind, F::TruncDay) {
+            b.sql.push_str("DATE(");
+            write_expr(b, &args[0], None)?;
+            b.sql.push(')');
+        } else {
+            b.sql.push_str("DATE_FORMAT(");
+            write_expr(b, &args[0], None)?;
+            b.sql.push_str(", '");
+            b.sql.push_str(format_str);
+            b.sql.push_str("')");
+        }
+    } else {
+        if matches!(kind, F::TruncDay) {
+            b.sql.push_str("date(");
+            write_expr(b, &args[0], None)?;
+            b.sql.push(')');
+        } else {
+            b.sql.push_str("strftime('");
+            b.sql.push_str(format_str);
+            b.sql.push_str("', ");
+            write_expr(b, &args[0], None)?;
+            b.sql.push(')');
+        }
+    }
+    Ok(())
 }
 
 /// Standard `NAME(arg, arg, …)` emit. Used by every function variant
