@@ -147,6 +147,18 @@ pub enum SqlError {
     /// error on every backend. Reject it loudly here.
     #[error("CASE WHEN branch condition must not be empty")]
     EmptyCaseWhenCondition,
+
+    /// `Expr::OuterRef("col")` was emitted outside any subquery
+    /// scope (issue #5). `OuterRef` only makes sense inside a
+    /// correlated subquery — the writer needs at least two scope
+    /// frames on the stack (outer + subquery) to resolve the column
+    /// against the enclosing query. Programming error.
+    #[error(
+        "`OuterRef(\"{column}\")` used outside of a subquery — \
+         it can only appear inside Exists / NotExists / InSubquery / \
+         Subquery wrappers that know the enclosing query's table"
+    )]
+    OuterRefOutsideSubquery { column: &'static str },
 }
 
 /// Raised while compiling, writing, or executing a query end-to-end.

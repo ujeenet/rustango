@@ -631,6 +631,12 @@ fn validate_expr_columns_in_model(
             }
             Ok(())
         }
+        // Subqueries validate against their own model at the time
+        // they were compiled via QuerySet::compile(); OuterRef
+        // names an outer column resolved when this Expr is embedded
+        // in the outer queryset (the caller already validated it
+        // there).
+        Expr::Subquery(_) | Expr::OuterRef(_) => Ok(()),
     }
 }
 

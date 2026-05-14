@@ -119,6 +119,21 @@ pub enum WhereExpr {
     Or(Vec<WhereExpr>),
     /// Logical negation. Emits `NOT (child)`.
     Not(Box<WhereExpr>),
+    /// `EXISTS (<subquery>)` — issue #5. True when the inner
+    /// `SelectQuery` returns at least one row. Boxed because
+    /// `SelectQuery` already carries its own `WhereExpr`, which would
+    /// make the enum size unbounded otherwise.
+    Exists(Box<SelectQuery>),
+    /// `NOT EXISTS (<subquery>)` — issue #5. Django's `~Exists` shorthand.
+    NotExists(Box<SelectQuery>),
+    /// `<col> IN (<subquery>)` / `<col> NOT IN (<subquery>)` — issue
+    /// #5. Sibling to `Op::In` / `Op::NotIn` over a literal list, but
+    /// the RHS is a correlated or non-correlated SELECT.
+    InSubquery {
+        column: &'static str,
+        negated: bool,
+        subquery: Box<SelectQuery>,
+    },
 }
 
 impl WhereExpr {
@@ -176,8 +191,14 @@ impl WhereExpr {
             // `Filter` (the rhs is an `Expr`, not a `SqlValue`), so the
             // flat-AND view can't surface it as a `&Filter` reference.
             // Callers using `as_flat_and` only handle literal `Filter`
-            // predicates anyway.
-            Self::ColumnCompare(_) | Self::Or(_) | Self::Not(_) => None,
+            // predicates anyway. Subquery-shaped predicates (#5) also
+            // fall outside the legacy flat-AND view.
+            Self::ColumnCompare(_)
+            | Self::Or(_)
+            | Self::Not(_)
+            | Self::Exists(_)
+            | Self::NotExists(_)
+            | Self::InSubquery { .. } => None,
         }
     }
 
@@ -217,6 +238,21 @@ impl WhereExpr {
                 Ok(())
             }
             Self::Not(child) => child.validate(model),
+            // Subquery predicates (#5) validate their inner SELECT
+            // against the inner SELECT's own model — that walk runs
+            // when the inner queryset was compiled. From the outer
+            // model's perspective there is nothing to check beyond
+            // the column on the LHS of `InSubquery`.
+            Self::Exists(_) | Self::NotExists(_) => Ok(()),
+            Self::InSubquery { column, .. } => {
+                if model.field_by_column(column).is_none() {
+                    return Err(QueryError::UnknownField {
+                        model: model.name,
+                        field: (*column).to_owned(),
+                    });
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -256,6 +292,13 @@ fn validate_expr_columns(model: &'static ModelSchema, expr: &Expr) -> Result<(),
             }
             Ok(())
         }
+        // Inner subquery validates against its own model when the
+        // user compiles it; nothing to check from the outer model
+        // beyond that. `OuterRef` names a column on the outer
+        // model — and from the perspective of the inner-walk it's
+        // a free name; the outer query's compile() validates it
+        // against the outer schema when it embeds this subquery.
+        Expr::Subquery(_) | Expr::OuterRef(_) => Ok(()),
     }
 }
 
@@ -295,6 +338,37 @@ pub struct SelectQuery {
     pub order_by: Vec<OrderClause>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+/// PartialEq for `SelectQuery` — needed so [`crate::core::Expr`] (which
+/// embeds `Box<SelectQuery>` for issue #5 subqueries) can keep its
+/// `#[derive(PartialEq)]`. `ModelSchema` doesn't implement `PartialEq`
+/// (its fields are heterogeneous + behind static refs), so the `model`
+/// pointer is compared by identity — two queries against the same
+/// schema register equal, which matches every legitimate use case
+/// since model schemas are singletons.
+impl PartialEq for SelectQuery {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.model, other.model)
+            && self.where_clause == other.where_clause
+            && self.search == other.search
+            && self.joins == other.joins
+            && self.order_by == other.order_by
+            && self.limit == other.limit
+            && self.offset == other.offset
+    }
+}
+
+/// Same ptr-eq treatment for `Join` — it also holds `&'static
+/// ModelSchema` (the join target).
+impl PartialEq for Join {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.target, other.target)
+            && self.on_local == other.on_local
+            && self.on_remote == other.on_remote
+            && self.alias == other.alias
+            && self.project == other.project
+    }
 }
 
 /// Single column in an `ORDER BY` clause. Slice 9.0b.

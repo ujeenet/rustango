@@ -120,6 +120,29 @@ pub enum Expr {
         branches: Vec<CaseBranch>,
         default: Option<Box<Expr>>,
     },
+    /// Scalar subquery — `(SELECT col FROM … LIMIT 1)` (issue #5).
+    /// Used in `set_expr` / `eq_expr` / WHERE-rhs slots where a single
+    /// value is expected. The inner [`SelectQuery`] is built by
+    /// calling `QuerySet::compile()` upfront — that way schema
+    /// validation errors surface at construction rather than at
+    /// outer-queryset compile time, and the same compiled subquery
+    /// can be reused across statements.
+    ///
+    /// Caller is responsible for shaping the inner queryset to a
+    /// single row + single column when the slot expects a scalar.
+    ///
+    /// [`SelectQuery`]: crate::core::SelectQuery
+    Subquery(Box<super::query::SelectQuery>),
+    /// Reference to an outer query's column from inside a correlated
+    /// subquery (issue #5). Emitted as `"<outer_table>"."<col>"`; the
+    /// outer table is threaded through the writer at emit time so
+    /// nested `EXISTS` / `IN (SELECT …)` / scalar subqueries can
+    /// reference the outer row.
+    ///
+    /// Build via [`crate::core::subquery::outer_ref`] rather than this
+    /// variant directly — the helper reads closer to Django's
+    /// `OuterRef('col')`.
+    OuterRef(&'static str),
 }
 
 /// One arm of a [`Expr::Case`] expression — `WHEN <condition> THEN <then>`.

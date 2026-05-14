@@ -31,6 +31,14 @@ pub(super) struct Sql<'d> {
     pub d: &'d dyn Dialect,
     pub sql: String,
     pub params: Vec<SqlValue>,
+    /// Stack of active emission scopes (innermost last). Pushed by
+    /// `write_select` / `write_update` / `write_delete` / `write_count`
+    /// on entry, popped on exit. Issue #5 reads from this to resolve
+    /// `Expr::OuterRef` inside a nested subquery — the OuterRef's
+    /// referent is the second-from-top frame (the immediate enclosing
+    /// query), and bare `Column` refs implicitly resolve against the
+    /// top frame.
+    pub scope_stack: Vec<&'static ModelSchema>,
 }
 
 impl<'d> Sql<'d> {
@@ -39,6 +47,7 @@ impl<'d> Sql<'d> {
             d,
             sql: String::new(),
             params: Vec::new(),
+            scope_stack: Vec::new(),
         }
     }
 
@@ -47,6 +56,7 @@ impl<'d> Sql<'d> {
             d,
             sql: String::new(),
             params: Vec::with_capacity(cap),
+            scope_stack: Vec::new(),
         }
     }
 
@@ -103,6 +113,13 @@ pub(super) fn null_cast_for(
 // ====================================================================
 
 pub(super) fn write_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
+    b.scope_stack.push(query.model);
+    let result = write_select_inner(b, query);
+    b.scope_stack.pop();
+    result
+}
+
+fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
     let qualify = !query.joins.is_empty();
 
     b.sql.push_str("SELECT ");
@@ -171,16 +188,21 @@ pub(super) fn write_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), S
 // ====================================================================
 
 pub(super) fn write_count(b: &mut Sql<'_>, query: &CountQuery) -> Result<(), SqlError> {
-    b.sql.push_str("SELECT COUNT(*) FROM ");
-    b.write_ident(query.model.table);
-    write_where_with_search(
-        b,
-        &query.where_clause,
-        query.search.as_ref(),
-        None,
-        Some(query.model),
-    )?;
-    Ok(())
+    b.scope_stack.push(query.model);
+    let r = (|| {
+        b.sql.push_str("SELECT COUNT(*) FROM ");
+        b.write_ident(query.model.table);
+        write_where_with_search(
+            b,
+            &query.where_clause,
+            query.search.as_ref(),
+            None,
+            Some(query.model),
+        )?;
+        Ok(())
+    })();
+    b.scope_stack.pop();
+    r
 }
 
 // ====================================================================
@@ -404,25 +426,29 @@ pub(super) fn write_update(b: &mut Sql<'_>, query: &UpdateQuery) -> Result<(), S
     if query.set.is_empty() {
         return Err(SqlError::EmptyUpdateSet);
     }
+    b.scope_stack.push(query.model);
+    let r = (|| {
+        b.sql.push_str("UPDATE ");
+        b.write_ident(query.model.table);
+        b.sql.push_str(" SET ");
 
-    b.sql.push_str("UPDATE ");
-    b.write_ident(query.model.table);
-    b.sql.push_str(" SET ");
-
-    let mut first = true;
-    for assignment in &query.set {
-        if !first {
-            b.sql.push_str(", ");
+        let mut first = true;
+        for assignment in &query.set {
+            if !first {
+                b.sql.push_str(", ");
+            }
+            first = false;
+            b.write_ident(assignment.column);
+            b.sql.push_str(" = ");
+            let cast = null_cast_for(b.d, query.model, assignment.column);
+            write_expr(b, &assignment.value, cast)?;
         }
-        first = false;
-        b.write_ident(assignment.column);
-        b.sql.push_str(" = ");
-        let cast = null_cast_for(b.d, query.model, assignment.column);
-        write_expr(b, &assignment.value, cast)?;
-    }
 
-    write_where(b, &query.where_clause, Some(query.model))?;
-    Ok(())
+        write_where(b, &query.where_clause, Some(query.model))?;
+        Ok(())
+    })();
+    b.scope_stack.pop();
+    r
 }
 
 /// Render a [`crate::core::Expr`] — the recursive RHS form that
@@ -486,6 +512,29 @@ fn write_expr(
         }
         Expr::Function { kind, args } => write_function(b, *kind, args),
         Expr::Case { branches, default } => write_case(b, branches, default.as_deref()),
+        Expr::Subquery(inner) => {
+            // `(SELECT … FROM …)` — write_select pushes/pops its own
+            // scope frame so any nested OuterRef inside `inner` looks
+            // up the right enclosing model.
+            b.sql.push('(');
+            write_select(b, inner)?;
+            b.sql.push(')');
+            Ok(())
+        }
+        Expr::OuterRef(col) => {
+            // Resolve against the immediate enclosing scope. The top
+            // frame is the *current* query (the subquery emitting
+            // this OuterRef); the next-most-recent frame is the outer
+            // the user is referring to.
+            let len = b.scope_stack.len();
+            if len < 2 {
+                return Err(SqlError::OuterRefOutsideSubquery { column: col });
+            }
+            let outer = b.scope_stack[len - 2];
+            let qualified = format!("{}.{}", b.d.quote_ident(outer.table), b.d.quote_ident(col),);
+            b.sql.push_str(&qualified);
+            Ok(())
+        }
     }
 }
 
@@ -977,10 +1026,15 @@ fn write_call_unary(
 // ====================================================================
 
 pub(super) fn write_delete(b: &mut Sql<'_>, query: &DeleteQuery) -> Result<(), SqlError> {
-    b.sql.push_str("DELETE FROM ");
-    b.write_ident(query.model.table);
-    write_where(b, &query.where_clause, Some(query.model))?;
-    Ok(())
+    b.scope_stack.push(query.model);
+    let r = (|| {
+        b.sql.push_str("DELETE FROM ");
+        b.write_ident(query.model.table);
+        write_where(b, &query.where_clause, Some(query.model))?;
+        Ok(())
+    })();
+    b.scope_stack.pop();
+    r
 }
 
 // ====================================================================
@@ -1139,6 +1193,30 @@ pub(super) fn write_where_expr(
             b.sql.push(')');
             Ok(())
         }
+        WhereExpr::Exists(subq) => {
+            b.sql.push_str("EXISTS (");
+            write_select(b, subq)?;
+            b.sql.push(')');
+            Ok(())
+        }
+        WhereExpr::NotExists(subq) => {
+            b.sql.push_str("NOT EXISTS (");
+            write_select(b, subq)?;
+            b.sql.push(')');
+            Ok(())
+        }
+        WhereExpr::InSubquery {
+            column,
+            negated,
+            subquery,
+        } => {
+            let qualified = render_qualified_col(b.d, qualify_with, column);
+            b.sql.push_str(&qualified);
+            b.sql.push_str(if *negated { " NOT IN (" } else { " IN (" });
+            write_select(b, subquery)?;
+            b.sql.push(')');
+            Ok(())
+        }
     }
 }
 
@@ -1202,6 +1280,11 @@ fn write_child(
     match expr {
         WhereExpr::Predicate(filter) => write_filter(b, filter, qualify_with, model),
         WhereExpr::ColumnCompare(cf) => write_column_compare(b, cf, qualify_with, model),
+        // Subquery-shaped leaves emit their own parens (EXISTS(…) /
+        // col IN (…)) so we don't need to add a second layer here.
+        WhereExpr::Exists(_) | WhereExpr::NotExists(_) | WhereExpr::InSubquery { .. } => {
+            write_where_expr(b, expr, qualify_with, model)
+        }
         WhereExpr::And(_) | WhereExpr::Or(_) | WhereExpr::Not(_) => {
             b.sql.push('(');
             write_where_expr(b, expr, qualify_with, model)?;

@@ -11,6 +11,7 @@ mod field_type;
 pub mod funcs;
 mod query;
 mod schema;
+pub mod subquery;
 mod validate;
 mod value;
 

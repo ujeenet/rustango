@@ -371,9 +371,71 @@ Post::objects()
 - **Type unification across branches**: every dialect picks a common type from the `THEN` and `ELSE` values. Mixing types (`THEN 1_i64` + `ELSE "string"`) can throw a runtime cast error or coerce surprisingly. Stick to one type per `CASE`.
 - **Performance**: each row evaluates `WHEN` predicates in order until one matches (first-match-wins, per row). Cost grows with the number of branches and the cost of the predicates. For many fixed-string mappings, a join against a small lookup table can be cheaper and more readable.
 
+### Subqueries — `exists() / not_exists() / in_subquery() / subquery() / outer_ref()`
+
+Issue #5 adds Django-shape subquery primitives on the same `Expr` machinery. Four builders cover the bulk of "embed one query inside another":
+
+| Builder | Shape | Use it for |
+|---|---|---|
+| `exists(qs)` | `EXISTS (SELECT … FROM …)` | "Authors who have at least one book" |
+| `not_exists(qs)` | `NOT EXISTS (SELECT …)` | "Authors with no books" (anti-join) |
+| `in_subquery(col, qs)` | `<col> IN (SELECT …)` | "Posts in any public category" |
+| `not_in_subquery(col, qs)` | `<col> NOT IN (SELECT …)` | Inverse of the above |
+| `subquery(qs)` | `(SELECT …)` as a scalar | Computed default in `set_expr` |
+| `outer_ref(col)` | `"<outer_table>"."<col>"` | Reference outer row from inside any of the above |
+
+```rust
+use rustango::core::subquery::{exists, not_exists, in_subquery, outer_ref};
+use rustango::core::{Column as _, WhereExpr};
+
+// "Authors with no books" — the canonical anti-join. Build the inner
+// queryset first so its compile() catches typos; embed via not_exists.
+let no_books = Book::objects()
+    .where_(Book::author_id.eq_expr(outer_ref("id")))
+    .compile()?;
+let orphans = Author::objects()
+    .where_raw(not_exists(no_books))
+    .fetch(&pool).await?;
+
+// "Authors who have a published book of more than 100 pages" — the
+// inner predicate combines a correlation (outer_ref) with literal
+// filters in the same WHERE.
+let inner = Book::objects()
+    .where_(Book::author_id.eq_expr(outer_ref("id")))
+    .where_(Book::status.eq("published"))
+    .where_(Book::pages.gt(100_i64))
+    .compile()?;
+let long_writers = Author::objects()
+    .where_raw(exists(inner))
+    .fetch(&pool).await?;
+
+// Compose EXISTS with an OR.
+let inner = Book::objects()
+    .where_(Book::author_id.eq_expr(outer_ref("id")))
+    .compile()?;
+let featured = Author::objects()
+    .where_raw(WhereExpr::Or(vec![
+        Author::name.eq("Carol").into(),
+        exists(inner),
+    ]))
+    .fetch(&pool).await?;
+```
+
+**Nested correlation works.** OuterRef inside a doubly-nested subquery resolves to the *immediate* enclosing scope — the writer maintains a scope stack as it descends, so `EXISTS (Book WHERE id = outer.id AND EXISTS (Comment WHERE book_id = outer.id))` resolves the inner `outer.id` to `Book.id`, not to the outermost `Author.id`. Use `outer_ref(...)` twice if you really do need to reach two scopes up.
+
+**Errors:**
+
+- **`OuterRefOutsideSubquery`** — emitting `outer_ref("col")` at the top level (not inside any subquery wrapper) is a programming error. The writer raises this loudly with the column name so the call site is easy to find.
+
+**Caveats:**
+
+- **`IN (SELECT …)` projection narrowing**: PG strictly requires the inner SELECT to project exactly one column for the `<col> IN (…)` form. rustango doesn't ship `.values("col")`-style projection narrowing yet (issue #62), so the inner queryset always projects every model column — which makes `in_subquery` only work today against tables whose model has a single column. For the multi-column case, reach for `exists(inner.where_(<outer col>.eq_expr(outer_ref(...))))` — it has the same semantics and doesn't depend on the projection shape.
+- **Scalar `subquery(...)` requires a one-column-one-row inner**: the SQL emitted is `SET col = (SELECT …)` — if the inner produces more than one row, the database errors at runtime. Constrain via `.limit(1)` and either narrow projection (once it lands) or design the inner around a uniqueness invariant.
+- **Subquery compile-time validation lives on the inner queryset**: column typos surface at the inner `queryset.compile()?` call, not at the outer query's `compile()`. Build the inner first and propagate `?`.
+
 ### When to reach for a raw SQL escape hatch instead
 
-The function set covers the common case. For features outside v1–v2 — `Cast`, full-text search, JSON path operators, hash functions, trig, `Subquery`/`Exists`, window functions — see the [Custom SQL escape hatch](#custom-sql-escape-hatch) section below or wait on issues #5–#7 in the ORM Expression DSL epic, which extend the same `Expr` tree.
+The function set covers the common case. For features outside v1–v5 — `Cast`, full-text search, JSON path operators, hash functions, trig, window functions — see the [Custom SQL escape hatch](#custom-sql-escape-hatch) section below or wait on issues #6–#7 in the ORM Expression DSL epic, which extend the same `Expr` tree.
 
 ---
 
