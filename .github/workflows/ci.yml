@@ -13,6 +13,11 @@ env:
   # pre-push hook treats warnings as warnings; CI now does the
   # same. Real type errors / broken tests still fail the build.
   DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
+  # CI builds the workspace once per job — incremental codegen
+  # only bloats target/ (~10–15% on this tree). Disabling it
+  # buys back disk space on the heavy `postgres_test` job that
+  # builds ~100+ integration test binaries with `--all-features`.
+  CARGO_INCREMENTAL: 0
 
 jobs:
   fmt:
@@ -65,6 +70,19 @@ jobs:
           --health-retries 20
     steps:
       - uses: actions/checkout@v4
+      # `cargo test --workspace --all-features` compiles ~100+
+      # integration-test binaries with debug info — combined with
+      # the preinstalled toolchains on `ubuntu-latest`, the 14 GB
+      # runner disk fills before the linker finishes. Reclaim
+      # ~20 GB by removing toolchains this workspace doesn't use
+      # (Android SDK, .NET SDK, GHC, the CodeQL bundle).
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          df -h
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
