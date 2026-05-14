@@ -1832,16 +1832,16 @@ fn inherent_impl_tokens(
                     /// As [`Self::save_pool`], plus
                     /// [`::rustango::core::QueryError::UnknownField`] wrapped
                     /// in `ExecError::Query` for unknown field names.
-                    pub async fn save_pool_fields(
+                    pub async fn save_partial(
                         &mut self,
                         fields: &[&str],
                         pool: &::rustango::sql::Pool,
                     ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
                         if fields.is_empty() {
                             ::tracing::warn!(
-                                target: "rustango::save_pool_fields",
+                                target: "rustango::save_partial",
                                 model = <Self as ::rustango::core::Model>::SCHEMA.name,
-                                "save_pool_fields called with empty field list — no-op"
+                                "save_partial called with empty field list — no-op"
                             );
                             return ::core::result::Result::Ok(());
                         }
@@ -1873,9 +1873,9 @@ fn inherent_impl_tokens(
                             .collect();
                         if _filtered.is_empty() {
                             ::tracing::warn!(
-                                target: "rustango::save_pool_fields",
+                                target: "rustango::save_partial",
                                 model = _schema.name,
-                                "save_pool_fields: every named field maps to a non-assignable column — no-op"
+                                "save_partial: every named field maps to a non-assignable column — no-op"
                             );
                             return ::core::result::Result::Ok(());
                         }
@@ -1973,7 +1973,7 @@ fn inherent_impl_tokens(
                 ///
                 /// Auto-PK models with an unset PK return
                 /// [`::rustango::core::QueryError::UnknownField`] with
-                /// field name `<pk>` — `save_pool_fields` is an
+                /// field name `<pk>` — `save_partial` is an
                 /// UPDATE-only path. Call [`Self::insert_pool`]
                 /// (or [`Self::save_pool`] which dispatches based on
                 /// PK state) for the INSERT case.
@@ -1981,16 +1981,16 @@ fn inherent_impl_tokens(
                 /// # Errors
                 /// As [`Self::save_pool`], plus `UnknownField` for
                 /// unknown / empty / Auto-Unset cases.
-                pub async fn save_pool_fields(
+                pub async fn save_partial(
                     &mut self,
                     fields: &[&str],
                     pool: &::rustango::sql::Pool,
                 ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
                     if fields.is_empty() {
                         ::tracing::warn!(
-                            target: "rustango::save_pool_fields",
+                            target: "rustango::save_partial",
                             model = <Self as ::rustango::core::Model>::SCHEMA.name,
-                            "save_pool_fields called with empty field list — no-op"
+                            "save_partial called with empty field list — no-op"
                         );
                         return ::core::result::Result::Ok(());
                     }
@@ -2029,9 +2029,9 @@ fn inherent_impl_tokens(
                         // virtual fields, relations without an
                         // assignment). Same no-op semantic as Django.
                         ::tracing::warn!(
-                            target: "rustango::save_pool_fields",
+                            target: "rustango::save_partial",
                             model = _schema.name,
-                            "save_pool_fields: every named field maps to a non-assignable column — no-op"
+                            "save_partial: every named field maps to a non-assignable column — no-op"
                         );
                         return ::core::result::Result::Ok(());
                     }

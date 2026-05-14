@@ -1,6 +1,6 @@
 #![cfg(feature = "postgres")]
 #![allow(irrefutable_let_patterns)] // Pool enum is single-variant under postgres-only builds.
-//! Live PG end-to-end test for `Model::save_pool_fields` (issue #66).
+//! Live PG end-to-end test for `Model::save_partial` (issue #66).
 //! Confirms the UPDATE narrows correctly against a real Postgres
 //! backend and that an `Auto<T>`-PK model behaves the same.
 //!
@@ -65,10 +65,10 @@ async fn cleanup(pool: &Pool) {
     }
 }
 
-/// Insert a row, then `save_pool_fields(["title"])` and confirm the
+/// Insert a row, then `save_partial(["title"])` and confirm the
 /// other columns survived even though we mutated them in memory.
 #[tokio::test]
-async fn save_pool_fields_narrows_update_on_pg() {
+async fn save_partial_narrows_update_on_pg() {
     let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
@@ -84,13 +84,13 @@ async fn save_pool_fields_narrows_update_on_pg() {
     row.insert_pool(&pool).await.unwrap();
     let pk = *row.id.get().unwrap();
 
-    // Mutate every column in memory; ask save_pool_fields to write
+    // Mutate every column in memory; ask save_partial to write
     // ONLY `title`. The DB row should reflect the title change but
     // keep status='draft' / views=0.
     row.title = "rewritten".into();
     row.status = "would-be-overwritten".into();
     row.views = 999;
-    row.save_pool_fields(&["title"], &pool).await.unwrap();
+    row.save_partial(&["title"], &pool).await.unwrap();
 
     if let Pool::Postgres(pg) = &pool {
         let (title, status, views): (String, String, i64) =
@@ -108,7 +108,7 @@ async fn save_pool_fields_narrows_update_on_pg() {
 }
 
 /// Two-writer divergence: A and B both read the original, mutate
-/// different fields, and both call `save_pool_fields` on their
+/// different fields, and both call `save_partial` on their
 /// single field. Result should carry BOTH changes — no lost-update.
 #[tokio::test]
 async fn two_writers_preserve_each_others_changes_on_pg() {
@@ -136,12 +136,12 @@ async fn two_writers_preserve_each_others_changes_on_pg() {
 
     // A flips title.
     a.title = "from-A".into();
-    a.save_pool_fields(&["title"], &pool).await.unwrap();
+    a.save_partial(&["title"], &pool).await.unwrap();
 
     // B flips status. B's `title` is stale ("orig"), but it's not in
     // the update_fields list, so A's title write survives.
     b.status = "from-B".into();
-    b.save_pool_fields(&["status"], &pool).await.unwrap();
+    b.save_partial(&["status"], &pool).await.unwrap();
 
     if let Pool::Postgres(pg) = &pool {
         let (title, status, views): (String, String, i64) =

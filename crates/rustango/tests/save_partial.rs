@@ -1,6 +1,6 @@
-//! Unit tests for `Model::save_pool_fields` (issue #66) — error paths
+//! Unit tests for `Model::save_partial` (issue #66) — error paths
 //! that don't require a live database. The happy-path "SET clause is
-//! actually narrowed" assertion lives in `save_pool_fields_live.rs`
+//! actually narrowed" assertion lives in `save_partial_live.rs`
 //! against a real PG.
 
 #![cfg(feature = "sqlite")]
@@ -53,7 +53,7 @@ async fn unknown_field_in_list_errors() {
         status: "published".into(),
         views: 100,
     };
-    let r = row.save_pool_fields(&["title", "nope_field"], &pool).await;
+    let r = row.save_partial(&["title", "nope_field"], &pool).await;
     match r {
         Err(rustango::sql::ExecError::Query(QueryError::UnknownField { model, field })) => {
             assert_eq!(model, "Post");
@@ -73,7 +73,7 @@ async fn empty_field_list_is_a_noop() {
         status: "would-overwrite".into(),
         views: 999,
     };
-    row.save_pool_fields(&[], &pool)
+    row.save_partial(&[], &pool)
         .await
         .expect("empty list = no-op");
     // Confirm the original row in the DB is untouched.
@@ -102,7 +102,7 @@ async fn only_listed_columns_get_written() {
         status: "rewritten-status".into(),
         views: 999,
     };
-    row.save_pool_fields(&["title"], &pool).await.unwrap();
+    row.save_partial(&["title"], &pool).await.unwrap();
     if let Pool::Sqlite(sq) = &pool {
         let (title, status, views): (String, String, i64) =
             sqlx::query_as("SELECT title, status, views FROM spf_post WHERE id = 1")
@@ -131,9 +131,7 @@ async fn multiple_listed_columns_get_written() {
         status: "published".into(),
         views: 50,
     };
-    row.save_pool_fields(&["title", "views"], &pool)
-        .await
-        .unwrap();
+    row.save_partial(&["title", "views"], &pool).await.unwrap();
     if let Pool::Sqlite(sq) = &pool {
         let (title, status, views): (String, String, i64) =
             sqlx::query_as("SELECT title, status, views FROM spf_post WHERE id = 1")
@@ -148,7 +146,7 @@ async fn multiple_listed_columns_get_written() {
 
 /// Concurrency-safety scenario from the issue rationale: two writers
 /// each read the original row, mutate different fields, and call
-/// `save_pool_fields` on just their field. The result should reflect
+/// `save_partial` on just their field. The result should reflect
 /// BOTH writers' changes — no lost-update.
 #[tokio::test]
 async fn concurrent_writers_dont_overwrite_each_other() {
@@ -160,7 +158,7 @@ async fn concurrent_writers_dont_overwrite_each_other() {
         status: "stale-A".into(),
         views: -1,
     };
-    a.save_pool_fields(&["title"], &pool).await.unwrap();
+    a.save_partial(&["title"], &pool).await.unwrap();
 
     // Writer B: started from the original read (status="draft", views=0),
     // changes status only.
@@ -170,7 +168,7 @@ async fn concurrent_writers_dont_overwrite_each_other() {
         status: "from-B".into(),
         views: -1,
     };
-    b.save_pool_fields(&["status"], &pool).await.unwrap();
+    b.save_partial(&["status"], &pool).await.unwrap();
 
     if let Pool::Sqlite(sq) = &pool {
         let (title, status, views): (String, String, i64) =

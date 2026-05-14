@@ -273,37 +273,37 @@ let author_posts = author.post_set(&pool).await?;
 
 ---
 
-## Narrow save — `save_pool_fields(&[...], &pool)`
+## Narrow save — `save_partial(&[...], &pool)`
 
-Django's `instance.save(update_fields=[...])` analog (issue #66). `save_pool` rewrites every non-PK column; `save_pool_fields` rewrites only the listed ones.
+Django's `instance.save(update_fields=[...])` analog (issue #66). `save_pool` rewrites every non-PK column; `save_partial` rewrites only the listed ones.
 
 ```rust
 let mut post = Post::objects().fetch(&pool).await?.pop().unwrap();
 post.title = "new title".into();
-post.save_pool_fields(&["title"], &pool).await?;  // SET "title" = $1
+post.save_partial(&["title"], &pool).await?;  // SET "title" = $1
                                                   // — leaves body, status, views untouched
 ```
 
 Two motivations:
 
-* **Performance.** Wide rows with `TEXT` / `JSON` / `bytea` columns pay to re-bind and re-write every field on every `save()` even when only one mutated. `save_pool_fields` keeps the `SET` clause to exactly what changed.
+* **Performance.** Wide rows with `TEXT` / `JSON` / `bytea` columns pay to re-bind and re-write every field on every `save()` even when only one mutated. `save_partial` keeps the `SET` clause to exactly what changed.
 * **Concurrency safety.** When two writers diverge after a shared read, the loser silently overwrites the winner's edits on fields it didn't touch. Naming only the field you actually changed preserves the other writer's work everywhere else.
 
 ```rust
 // Writer A — flips title.
 a.title = "from-A".into();
-a.save_pool_fields(&["title"], &pool).await?;
+a.save_partial(&["title"], &pool).await?;
 
 // Writer B — started from the same read, flips status.
 // B's local `title` is stale, but it's not in the list, so A's
 // write survives.
 b.status = "from-B".into();
-b.save_pool_fields(&["status"], &pool).await?;
+b.save_partial(&["status"], &pool).await?;
 ```
 
 **Field names are Rust-side struct fields**, not SQL columns — `["author_id"]` (not `["author"]` for an FK-typed field). Unknown field names return `ExecError::Query(QueryError::UnknownField)`. An empty list is a no-op (returns `Ok(())` and logs a `tracing::warn!`), matching Django's "nothing to do" semantic. Audited models (`#[rustango(audit(...))]`) narrow the audit-log snapshot to the same column set — the log reflects exactly what was written.
 
-**Auto-PK note.** `save_pool_fields` is UPDATE-only; calling it on an `Auto::Unset` PK is a user error (use `insert_pool` / `save_pool` for that case). Unlike `save_pool` which auto-dispatches `Unset → insert_pool`, this method assumes you've already inserted.
+**Auto-PK note.** `save_partial` is UPDATE-only; calling it on an `Auto::Unset` PK is a user error (use `insert_pool` / `save_pool` for that case). Unlike `save_pool` which auto-dispatches `Unset → insert_pool`, this method assumes you've already inserted.
 
 ---
 
