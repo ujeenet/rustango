@@ -1,11 +1,45 @@
 //! End-to-end check of the `QuerySet` → `SelectQuery` → Postgres SQL pipeline.
 
 use rustango::core::{
-    Assignment, BulkInsertQuery, ConflictClause, CountQuery, DeleteQuery, Filter, InsertQuery,
-    Join, Model as _, Op, SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
+    Assignment, BulkInsertQuery, ConflictClause, CountQuery, DeleteQuery, Expr, Filter,
+    InsertQuery, Join, JoinKind, Model as _, Op, SearchClause, SelectQuery, SqlValue, UpdateQuery,
+    WhereExpr,
 };
 use rustango::sql::{Dialect, Postgres, SqlError};
 use rustango::Model;
+
+/// Issue #80 migration helper — the 4 legacy FK-LEFT-JOIN sites in
+/// this file used `Join { on_local, on_remote, … }`. The generalized
+/// `Join` now carries `kind: JoinKind` + `on: WhereExpr`. This builds
+/// the same SQL the old shape emitted: `<main_table>.<on_local> =
+/// <alias>.<on_remote>` via a `WhereExpr::ExprCompare` over two
+/// `AliasedColumn`s.
+fn fk_left_join(
+    target: &'static rustango::core::ModelSchema,
+    main_table: &'static str,
+    on_local: &'static str,
+    on_remote: &'static str,
+    alias: &'static str,
+    project: Vec<&'static str>,
+) -> Join {
+    Join {
+        target,
+        alias,
+        kind: JoinKind::Left,
+        on: WhereExpr::ExprCompare {
+            lhs: Expr::AliasedColumn {
+                alias: main_table,
+                column: on_local,
+            },
+            op: Op::Eq,
+            rhs: Expr::AliasedColumn {
+                alias,
+                column: on_remote,
+            },
+        },
+        project,
+    }
+}
 
 #[derive(Model)]
 #[allow(dead_code)]
@@ -782,13 +816,14 @@ fn empty_post_select() -> SelectQuery {
 #[test]
 fn join_qualifies_main_columns_and_aliases_joined_ones() {
     let q = SelectQuery {
-        joins: vec![Join {
-            target: User::SCHEMA,
-            on_local: "author_id",
-            on_remote: "id",
-            alias: "author_id",
-            project: vec!["name"],
-        }],
+        joins: vec![fk_left_join(
+            User::SCHEMA,
+            "post",
+            "author_id",
+            "id",
+            "author_id",
+            vec!["name"],
+        )],
         ..empty_post_select()
     };
     let stmt = pg().compile_select(&q).unwrap();
@@ -807,13 +842,14 @@ fn join_with_filter_qualifies_filter_column() {
             op: Op::Eq,
             value: SqlValue::String("hi".into()),
         }),
-        joins: vec![Join {
-            target: User::SCHEMA,
-            on_local: "author_id",
-            on_remote: "id",
-            alias: "author_id",
-            project: vec!["name"],
-        }],
+        joins: vec![fk_left_join(
+            User::SCHEMA,
+            "post",
+            "author_id",
+            "id",
+            "author_id",
+            vec!["name"],
+        )],
         ..empty_post_select()
     };
     let stmt = pg().compile_select(&q).unwrap();
@@ -832,13 +868,14 @@ fn join_with_search_qualifies_search_columns() {
             columns: vec!["title"],
             query: "hi".into(),
         }),
-        joins: vec![Join {
-            target: User::SCHEMA,
-            on_local: "author_id",
-            on_remote: "id",
-            alias: "author_id",
-            project: vec!["name"],
-        }],
+        joins: vec![fk_left_join(
+            User::SCHEMA,
+            "post",
+            "author_id",
+            "id",
+            "author_id",
+            vec!["name"],
+        )],
         ..empty_post_select()
     };
     let stmt = pg().compile_select(&q).unwrap();
@@ -862,13 +899,14 @@ fn no_joins_keeps_unqualified_select_shape() {
 #[test]
 fn join_with_limit_and_offset_orders_clauses() {
     let q = SelectQuery {
-        joins: vec![Join {
-            target: User::SCHEMA,
-            on_local: "author_id",
-            on_remote: "id",
-            alias: "author_id",
-            project: vec!["name"],
-        }],
+        joins: vec![fk_left_join(
+            User::SCHEMA,
+            "post",
+            "author_id",
+            "id",
+            "author_id",
+            vec!["name"],
+        )],
         limit: Some(10),
         offset: Some(20),
         ..empty_post_select()
