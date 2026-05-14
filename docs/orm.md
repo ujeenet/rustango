@@ -305,6 +305,22 @@ b.save_partial(&["status"], &pool).await?;
 
 **Auto-PK note.** `save_partial` is UPDATE-only; calling it on an `Auto::Unset` PK is a user error (use `insert_pool` / `save_pool` for that case). Unlike `save_pool` which auto-dispatches `Unset → insert_pool`, this method assumes you've already inserted.
 
+### Typed-column variant — `save_partial_typed((Cols, ...), &pool)`
+
+Issue #67. The string-keyed shape works for dynamic field lists (admin / API payloads); when the field list is static, `save_partial_typed` catches typos and renames at **compile time**:
+
+```rust
+post.save_partial_typed((Post::title, Post::slug), &pool).await?;
+//                       ──────────  ──────────
+//                       title_col   slug_col   ← distinct ZSTs
+```
+
+Each `Post::<field>` is its own zero-sized type — a homogeneous slice (`&[Post::title, Post::slug]`) doesn't type-check in Rust, so the API takes a **tuple** instead. Single-field calls use the trailing-comma idiom: `(Post::title,)`. Tuples are supported from arity 1 up to 12 — past that, drop to `save_partial(&[&str], _)`.
+
+Cross-model tuples are a **compile error** — `(Post::title, Author::name)` fails the `TypedFieldList<Post>` trait bound because `Author::name`'s `Column::Model = Author`. This is the headline value over the string-keyed shape: rename refactors on a column name surface at the typed call site, not at runtime.
+
+Internally lowers to `save_partial` — same audit narrowing, same `Auto::Unset` constraint, same empty-list no-op semantic.
+
 ---
 
 ## Bulk operations
