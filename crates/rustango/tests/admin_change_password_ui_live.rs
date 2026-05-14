@@ -12,7 +12,6 @@ use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
-use rustango::core::Model as _;
 use rustango::migrate as rmig;
 use rustango::sql::sqlx;
 use rustango::sql::Auto;
@@ -20,8 +19,10 @@ use rustango::tenancy::tenant_console::{
     encode as encode_session, TenantSessionPayload, COOKIE_NAME,
 };
 use rustango::tenancy::{
-    admin::TenantAdminBuilder, ChainResolver, Org, StorageMode, SubdomainResolver, TenantPools,
+    admin::TenantAdminBuilder, routes::RouteConfig, ChainResolver, Org, StorageMode,
+    SubdomainResolver, TenantPools,
 };
+use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 static UNIQ: AtomicU64 = AtomicU64::new(0);
@@ -29,6 +30,16 @@ fn unique(prefix: &str) -> String {
     let n = UNIQ.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id();
     format!("{prefix}_{pid}_{n}")
+}
+
+/// Suite-wide lock. Every test in this file `drop_all + apply_all` on
+/// the same database, which races under `cargo test`'s default parallel
+/// harness ("relation rustango_users already exists" / pg_class
+/// duplicate-key). Acquire this lock before touching the schema.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
 }
 
 async fn pool() -> Option<sqlx::PgPool> {
@@ -50,6 +61,7 @@ async fn change_password_anonymous_redirects_to_login() {
         eprintln!("skipping: DATABASE_URL not set");
         return;
     };
+    let _g = live_lock().lock().await;
     let url = std::env::var("DATABASE_URL").unwrap();
     rmig::drop_all(&pool).await.unwrap();
     rmig::apply_all(&pool).await.unwrap();
@@ -84,6 +96,7 @@ async fn change_password_anonymous_redirects_to_login() {
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let resolver = ChainResolver::new().push(SubdomainResolver::new("app.test"));
     let app = TenantAdminBuilder::new(pools, url.clone(), resolver)
+        .routes(RouteConfig::legacy())
         .with_session(test_secret())
         .build();
 
@@ -116,6 +129,7 @@ async fn change_password_authenticated_get_renders_form() {
     let Some(pool) = pool().await else {
         return;
     };
+    let _g = live_lock().lock().await;
     let url = std::env::var("DATABASE_URL").unwrap();
     rmig::drop_all(&pool).await.unwrap();
     rmig::apply_all(&pool).await.unwrap();
@@ -158,6 +172,7 @@ async fn change_password_authenticated_get_renders_form() {
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let resolver = ChainResolver::new().push(SubdomainResolver::new("app.test"));
     let app = TenantAdminBuilder::new(pools, url.clone(), resolver)
+        .routes(RouteConfig::legacy())
         .with_session(secret.clone())
         .build();
 
@@ -199,6 +214,7 @@ async fn change_password_post_updates_stored_hash_when_current_matches() {
     let Some(pool) = pool().await else {
         return;
     };
+    let _g = live_lock().lock().await;
     let url = std::env::var("DATABASE_URL").unwrap();
     rmig::drop_all(&pool).await.unwrap();
     rmig::apply_all(&pool).await.unwrap();
@@ -240,6 +256,7 @@ async fn change_password_post_updates_stored_hash_when_current_matches() {
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let resolver = ChainResolver::new().push(SubdomainResolver::new("app.test"));
     let app = TenantAdminBuilder::new(pools, url.clone(), resolver)
+        .routes(RouteConfig::legacy())
         .with_session(secret.clone())
         .build();
 
@@ -288,6 +305,7 @@ async fn change_password_post_rejects_wrong_current() {
     let Some(pool) = pool().await else {
         return;
     };
+    let _g = live_lock().lock().await;
     let url = std::env::var("DATABASE_URL").unwrap();
     rmig::drop_all(&pool).await.unwrap();
     rmig::apply_all(&pool).await.unwrap();
@@ -329,6 +347,7 @@ async fn change_password_post_rejects_wrong_current() {
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let resolver = ChainResolver::new().push(SubdomainResolver::new("app.test"));
     let app = TenantAdminBuilder::new(pools, url.clone(), resolver)
+        .routes(RouteConfig::legacy())
         .with_session(secret.clone())
         .build();
 
@@ -389,6 +408,7 @@ async fn session_minted_before_password_rotation_is_rejected() {
         eprintln!("skipping: DATABASE_URL not set");
         return;
     };
+    let _g = live_lock().lock().await;
     let url = std::env::var("DATABASE_URL").unwrap();
     rmig::drop_all(&pool).await.unwrap();
     rmig::apply_all(&pool).await.unwrap();
@@ -430,6 +450,7 @@ async fn session_minted_before_password_rotation_is_rejected() {
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let resolver = ChainResolver::new().push(SubdomainResolver::new("app.test"));
     let app = TenantAdminBuilder::new(pools, url.clone(), resolver)
+        .routes(RouteConfig::legacy())
         .with_session(secret.clone())
         .build();
 

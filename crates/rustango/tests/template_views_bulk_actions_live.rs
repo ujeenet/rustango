@@ -37,6 +37,19 @@ pub struct Widget {
     pub published: bool,
 }
 
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets shared tables (via
+/// DROP/CREATE or `drop_all`); under cargo's default parallel harness
+/// two tests would race on PG's `pg_type_typname_nsp_index` /
+/// `pg_class_relname_nsp_index` system-catalog uniques when both try
+/// to CREATE/DROP at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     Some(sqlx::PgPool::connect(&url).await.unwrap())
@@ -145,6 +158,7 @@ async fn body_string(resp: axum::response::Response) -> String {
 
 #[tokio::test]
 async fn delete_selected_built_in_runs_against_picked_rows() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     fresh_table(&pool).await;
     let ids = seed_three(&pool).await;
@@ -178,6 +192,7 @@ async fn delete_selected_built_in_runs_against_picked_rows() {
 
 #[tokio::test]
 async fn user_action_runs_against_pool_and_updates_rows() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     fresh_table(&pool).await;
     let ids = seed_three(&pool).await;
@@ -203,6 +218,7 @@ async fn user_action_runs_against_pool_and_updates_rows() {
 
 #[tokio::test]
 async fn empty_selection_yields_400() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     fresh_table(&pool).await;
     let _ = seed_three(&pool).await;
@@ -221,6 +237,7 @@ async fn empty_selection_yields_400() {
 
 #[tokio::test]
 async fn unknown_action_name_yields_400() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     fresh_table(&pool).await;
     let ids = seed_three(&pool).await;
@@ -239,6 +256,7 @@ async fn unknown_action_name_yields_400() {
 /// `confirmed=true` actually deletes.
 #[tokio::test]
 async fn confirmation_renders_first_then_deletes_on_confirmed() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     fresh_table(&pool).await;
     let ids = seed_three(&pool).await;
@@ -326,6 +344,7 @@ async fn confirmation_renders_first_then_deletes_on_confirmed() {
 /// actions still run on the first POST without confirmation.
 #[tokio::test]
 async fn confirmation_does_not_gate_custom_actions() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     fresh_table(&pool).await;
     let ids = seed_three(&pool).await;
@@ -381,6 +400,7 @@ async fn confirmation_does_not_gate_custom_actions() {
 
 #[tokio::test]
 async fn list_get_stamps_bulk_actions_into_template_context() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     fresh_table(&pool).await;
     let _ = seed_three(&pool).await;
@@ -417,6 +437,7 @@ async fn list_get_stamps_bulk_actions_into_template_context() {
 ///    rendered body matches the cookie value (no mint, reused)
 #[tokio::test]
 async fn list_get_stamps_csrf_token_into_context() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else { return };
     fresh_table(&pool).await;
     let _ = seed_three(&pool).await;

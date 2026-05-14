@@ -287,10 +287,22 @@ mod tests {
         let secret = key();
         let payload = HandoffPayload::new(7, "acme", 60);
         let token = mint(&secret, &payload);
-        // Flip the last byte of the signature (last char before EOF).
+        // Flip a byte in the middle of the signature segment (i.e. after
+        // the `.` separator), not at `bytes.len() - 1`. The 43-char
+        // no-pad URL-safe base64 encoding of a 32-byte HMAC only allows
+        // specific trailing characters (the 4 unused bits at the tail
+        // must encode as zero), so flipping the very last byte can land
+        // on an invalid trailing char and trigger a base64 decode error
+        // → `Malformed` instead of the `BadSignature` we want to assert.
+        // A mid-signature byte is always-valid base64 and forces the
+        // `ct_eq` mismatch path.
         let mut bytes = token.into_bytes();
-        let last = bytes.len() - 1;
-        bytes[last] = if bytes[last] == b'A' { b'B' } else { b'A' };
+        let dot = bytes
+            .iter()
+            .rposition(|&b| b == b'.')
+            .expect("token has `payload.sig` shape");
+        let mid_sig = dot + 1 + (bytes.len() - dot - 1) / 2;
+        bytes[mid_sig] = if bytes[mid_sig] == b'A' { b'B' } else { b'A' };
         let tampered = String::from_utf8(bytes).unwrap();
         assert_eq!(
             decode(&secret, "acme", &tampered).unwrap_err(),

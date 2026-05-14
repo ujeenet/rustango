@@ -42,6 +42,19 @@ fn now() -> chrono::DateTime<chrono::Utc> {
     chrono::Utc::now()
 }
 
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets the shared PG
+/// schema; under cargo's default parallel harness two tests would race
+/// on PG's `pg_type_typname_nsp_index` / `pg_class_relname_nsp_index`
+/// system-catalog uniques when both try to CREATE/DROP the same table
+/// at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     Some(sqlx::PgPool::connect(&url).await.unwrap())
@@ -137,6 +150,7 @@ async fn seed_org(pool: &sqlx::PgPool, slug: &str, mode: StorageMode, db_url: Op
 
 #[tokio::test]
 async fn get_edit_form_renders_with_prefill_and_no_creds() {
+    let _g = live_lock().lock().await;
     let Some((app, cookie, pool, _)) = boot().await else {
         return;
     };
@@ -205,6 +219,7 @@ async fn get_edit_form_renders_with_prefill_and_no_creds() {
 
 #[tokio::test]
 async fn post_edit_updates_only_editable_fields() {
+    let _g = live_lock().lock().await;
     let Some((app, cookie, pool, _)) = boot().await else {
         return;
     };
@@ -251,6 +266,7 @@ async fn post_edit_updates_only_editable_fields() {
 
 #[tokio::test]
 async fn post_edit_with_blank_database_url_keeps_existing() {
+    let _g = live_lock().lock().await;
     let Some((app, cookie, pool, _)) = boot().await else {
         return;
     };
@@ -293,6 +309,7 @@ async fn post_edit_with_blank_database_url_keeps_existing() {
 
 #[tokio::test]
 async fn post_edit_active_toggle_off() {
+    let _g = live_lock().lock().await;
     let Some((app, cookie, pool, _)) = boot().await else {
         return;
     };

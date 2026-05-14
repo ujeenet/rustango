@@ -19,6 +19,19 @@ use rustango::sql::sqlx::PgPool;
 use rustango::sql::Auto;
 use rustango::tenancy::{manage::run_with_writer, Org, StorageMode, TenantPools};
 
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets the shared PG
+/// schema; under cargo's default parallel harness two tests would race
+/// on PG's `pg_type_typname_nsp_index` / `pg_class_relname_nsp_index`
+/// system-catalog uniques when both try to CREATE/DROP the same table
+/// at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
 async fn pool() -> Option<PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     PgPool::connect(&url).await.ok()
@@ -39,6 +52,7 @@ fn args(values: &[&str]) -> Vec<String> {
 
 #[tokio::test]
 async fn migrate_tenant_storage_dry_run_prints_plan() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         eprintln!("skipping: DATABASE_URL not set");
         return;
@@ -110,6 +124,7 @@ async fn migrate_tenant_storage_dry_run_prints_plan() {
 
 #[tokio::test]
 async fn migrate_tenant_storage_rejects_same_mode_no_op() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         eprintln!("skipping: DATABASE_URL not set");
         return;
@@ -167,6 +182,7 @@ async fn migrate_tenant_storage_rejects_same_mode_no_op() {
 
 #[tokio::test]
 async fn migrate_tenant_storage_rejects_database_target_without_url() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         eprintln!("skipping: DATABASE_URL not set");
         return;
@@ -224,6 +240,7 @@ async fn migrate_tenant_storage_rejects_database_target_without_url() {
 
 #[tokio::test]
 async fn migrate_tenant_storage_rejects_unknown_slug() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         eprintln!("skipping: DATABASE_URL not set");
         return;

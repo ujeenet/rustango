@@ -38,10 +38,16 @@ jobs:
       # surfaced ~70 clippy::pedantic errors on the macros crate
       # (doc_markdown, too_many_lines, items_after_statements)
       # that the pre-push hook treats as warnings only. Real
-      # errors still surface in the `test` job via rustc.
+      # errors still surface in the `postgres_test` job via rustc.
       - run: cargo clippy -p rustango --features tenancy --lib --no-deps
 
-  test:
+  # Primary PG test job — runs the full workspace with `--all-features`
+  # against a real PostgreSQL service. Covers every PG-typed live test
+  # (`*_live.rs`, `admin_live.rs`, `audit_live.rs`, `branding_live.rs`,
+  # `jobs_pg_live.rs`, etc.) plus every unit test. Renamed from `test`
+  # so each dialect has an explicitly-named job: `postgres_test`,
+  # `mysql_live`, `sqlite_live`.
+  postgres_test:
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -99,6 +105,54 @@ jobs:
       - run: cargo check -p rustango --no-default-features --features sqlite,tenancy
       - run: cargo clippy -p rustango --no-default-features --features sqlite,tenancy --lib --no-deps
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test sqlite_pragmas_live
+
+  # Per-dialect SQLite live suite — runs every `_sqlite_live.rs` file
+  # explicitly under `--no-default-features --features sqlite,...`. This
+  # is the SQLite parallel to `mysql_live` + `postgres_test`, and it
+  # exercises rustango's tri-dialect surface from the SQLite side
+  # without inheriting the PG/MySQL feature flags that
+  # `postgres_test --all-features` does. SQLite is embedded so no
+  # service container is needed; tests create per-test files / `:memory:`
+  # databases.
+  #
+  # Listing `--test` files explicitly prevents the test harness from
+  # compiling PG-typed test binaries that don't compile under
+  # `--no-default-features`.
+  sqlite_live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo test -p rustango \
+            --no-default-features \
+            --features sqlite,tenancy,admin,jobs-postgres,media,passwords,serializer \
+            --test admin_sqlite_live \
+            --test audit_pool_sqlite_live \
+            --test count_distinct_sqlite_live \
+            --test database_pools_sqlite_file_live \
+            --test database_pools_sqlite_live \
+            --test database_tenant_sqlite_live \
+            --test first_last_sqlite_live \
+            --test fixtures_sqlite_live \
+            --test foreign_key_sqlite_live \
+            --test get_or_create_sqlite_live \
+            --test inspectdb_sqlite_live \
+            --test jobs_sqlite_live \
+            --test m2m_sqlite_live \
+            --test media_sqlite_live \
+            --test migrate_registry_pool_sqlite_live \
+            --test orm_advanced_sqlite_live \
+            --test permissions_sqlite_live \
+            --test row_to_json_pool_sqlite_live \
+            --test sqlite_pragmas_live \
+            --test tenancy_manage_sqlite_live \
+            --test tenant_auth_sqlite_live \
+            --test tenant_extractor_sqlite_live \
+            --test tenant_pools_sqlite_live \
+            --test tx_methods_sqlite_live \
+            --test viewset_sqlite_live
 
   # v0.41 MySQL parity — the marketing claim is tri-dialect end-to-end
   # since v0.38, but every MySQL `_live.rs` test was skipped silently

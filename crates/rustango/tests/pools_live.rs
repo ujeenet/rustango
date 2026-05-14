@@ -10,6 +10,19 @@ use rustango::migrate;
 use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::{Org, StorageMode, TenantPool, TenantPools};
 
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets the shared PG
+/// schema; under cargo's default parallel harness two tests would race
+/// on PG's `pg_type_typname_nsp_index` / `pg_class_relname_nsp_index`
+/// system-catalog uniques when both try to CREATE/DROP the same table
+/// at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     Some(
@@ -74,6 +87,7 @@ async fn current_schema(conn: &mut sqlx::PgConnection) -> String {
 
 #[tokio::test]
 async fn schema_mode_pool_for_org_returns_schema_variant() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -104,6 +118,7 @@ async fn schema_mode_pool_for_org_returns_schema_variant() {
 
 #[tokio::test]
 async fn schema_mode_acquire_sets_search_path_to_tenant_schema() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -137,6 +152,7 @@ async fn schema_mode_acquire_sets_search_path_to_tenant_schema() {
 #[tokio::test]
 async fn schema_mode_pool_uses_slug_when_schema_name_is_none() {
     // `schema_name = None` means "use the slug as the schema name".
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -157,6 +173,7 @@ async fn schema_mode_pool_uses_slug_when_schema_name_is_none() {
 
 #[tokio::test]
 async fn database_mode_without_database_url_errors() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -178,6 +195,7 @@ async fn database_mode_pool_caches_per_slug() {
     // up a second Postgres for the test, so we point the database_url
     // at the registry itself — that's a degenerate but valid
     // configuration for proving the cache shape.
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -212,6 +230,7 @@ async fn database_mode_resolves_secret_reference_via_resolver() {
     // We still point at the registry DB (only Postgres available
     // in the test harness); the test demonstrates the indirection
     // works.
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };

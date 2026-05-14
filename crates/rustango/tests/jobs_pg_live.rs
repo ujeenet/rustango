@@ -12,6 +12,18 @@ use rustango::jobs::pg::PgJobQueue;
 use rustango::jobs::{Job, JobError, JobQueue};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file `DELETE FROM rustango_jobs`
+/// + dispatches against the shared `DATABASE_URL` pool, and the
+/// `RAN_INC` static counter is read by assertions; under cargo's
+/// default parallel harness two tests would clobber each other's rows
+/// and counter resets.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
 
 async fn pool() -> Option<PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
@@ -45,6 +57,7 @@ impl Job for PgInc {
 
 #[tokio::test]
 async fn dispatch_persists_and_runs() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         eprintln!("DATABASE_URL unset — skipping");
         return;
@@ -99,6 +112,7 @@ impl Job for PgRetry {
 
 #[tokio::test]
 async fn retryable_failure_reschedules_with_backoff() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         eprintln!("DATABASE_URL unset — skipping");
         return;
@@ -134,6 +148,7 @@ async fn retryable_failure_reschedules_with_backoff() {
 
 #[tokio::test]
 async fn reclaim_stuck_jobs_resets_lock() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         eprintln!("DATABASE_URL unset — skipping");
         return;
@@ -163,6 +178,7 @@ async fn reclaim_stuck_jobs_resets_lock() {
 
 #[tokio::test]
 async fn pending_count_reflects_unlocked_rows() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         eprintln!("DATABASE_URL unset — skipping");
         return;

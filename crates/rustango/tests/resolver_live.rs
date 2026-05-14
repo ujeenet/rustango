@@ -14,6 +14,19 @@ use rustango::tenancy::{
     SubdomainResolver,
 };
 
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets the shared PG
+/// schema; under cargo's default parallel harness two tests would race
+/// on PG's `pg_type_typname_nsp_index` / `pg_class_relname_nsp_index`
+/// system-catalog uniques when both try to CREATE/DROP the same table
+/// at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     Some(
@@ -149,6 +162,7 @@ fn parts_with_header(header: &'static str, value: &str) -> Parts {
 
 #[tokio::test]
 async fn subdomain_resolver_matches_host_pattern() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -170,6 +184,7 @@ async fn subdomain_resolver_matches_host_pattern() {
 
 #[tokio::test]
 async fn subdomain_resolver_apex_returns_none() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -192,6 +207,7 @@ async fn subdomain_resolver_apex_returns_none() {
 
 #[tokio::test]
 async fn subdomain_resolver_unknown_subdomain_returns_none() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -214,6 +230,7 @@ async fn subdomain_resolver_unknown_subdomain_returns_none() {
 async fn subdomain_resolver_strips_port_from_host_header() {
     // `Host: acme.app.test:8080` should still match host_pattern
     // `acme.app.test`. Common in dev where you bind a non-standard port.
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -234,6 +251,7 @@ async fn subdomain_resolver_strips_port_from_host_header() {
 
 #[tokio::test]
 async fn subdomain_resolver_skips_inactive_orgs() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -255,6 +273,7 @@ async fn subdomain_resolver_skips_inactive_orgs() {
 
 #[tokio::test]
 async fn path_prefix_resolver_matches_first_segment() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -289,6 +308,7 @@ async fn path_prefix_resolver_matches_first_segment() {
 
 #[tokio::test]
 async fn header_resolver_matches_x_org() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -333,6 +353,7 @@ async fn header_resolver_matches_x_org() {
 
 #[tokio::test]
 async fn port_resolver_matches_org_port() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -360,6 +381,7 @@ async fn port_resolver_matches_org_port() {
 
 #[tokio::test]
 async fn chain_resolver_subdomain_first_then_header() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -418,6 +440,7 @@ async fn chain_resolver_subdomain_first_then_header() {
 
 #[tokio::test]
 async fn chain_resolver_with_explicit_path_prefix_opt_in() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -442,6 +465,7 @@ async fn chain_resolver_with_explicit_path_prefix_opt_in() {
 
 #[tokio::test]
 async fn chain_resolver_returns_none_when_no_resolver_matches() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };

@@ -24,6 +24,17 @@
 
 use rustango::sql::{Auto, CounterPool, FetcherPool, Pool, PoolTx};
 use rustango::Model;
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets the shared schema
+/// via `fresh_schema`; without serialization two tests racing on
+/// `apply_all_pool` (which is not `IF NOT EXISTS` for framework models
+/// like `rustango_content_types`) trip MySQL error 1050.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
 
 #[derive(Model, Debug)]
 #[rustango(table = "live_users")]
@@ -57,10 +68,26 @@ async fn pool_or_skip() -> Option<Pool> {
 
 async fn fresh_schema(pool: &Pool) {
     use rustango::sql::raw_execute_pool;
-    for tbl in ["live_users", "live_audited", "rustango_audit_log"] {
+    // FK checks off during cleanup so prior CI steps that left framework
+    // tables with cross-references can't make a drop silently no-op and
+    // trip `Table … already exists` on the subsequent `apply_all_pool`.
+    let _ = raw_execute_pool(pool, "SET FOREIGN_KEY_CHECKS = 0", vec![]).await;
+    // Drop every registered framework + test model in one pass — this
+    // covers `rustango_content_types` and any other inventory-registered
+    // table that the hand-rolled drop list used to miss.
+    rustango::migrate::drop_all_pool(pool)
+        .await
+        .expect("drop_all_pool");
+    // Runtime side-tables (not registered models, so `drop_all_pool`
+    // doesn't touch them): the audit log + the migration ledger. The
+    // ledger drop matters across test files — without it, a prior
+    // binary's bootstrap entries leak into `applied_set_pool` and trip
+    // `migrate_pool_ledger_round_trips`'s "empty ledger" assertion.
+    for tbl in ["rustango_audit_log", "__rustango_migrations__"] {
         let sql = format!("DROP TABLE IF EXISTS `{tbl}`");
         let _ = raw_execute_pool(pool, &sql, vec![]).await;
     }
+    let _ = raw_execute_pool(pool, "SET FOREIGN_KEY_CHECKS = 1", vec![]).await;
     rustango::migrate::apply_all_pool(pool)
         .await
         .expect("apply_all_pool");
@@ -75,6 +102,7 @@ async fn auto_pk_insert_pool_round_trips() {
         eprintln!("MYSQL_TEST_URL unset — skipping");
         return;
     };
+    let _g = live_lock().lock().await;
     fresh_schema(&pool).await;
 
     let mut u = LiveUser {
@@ -100,6 +128,7 @@ async fn fetch_pool_round_trips_decoded_row() {
         eprintln!("MYSQL_TEST_URL unset — skipping");
         return;
     };
+    let _g = live_lock().lock().await;
     fresh_schema(&pool).await;
 
     let mut u = LiveUser {
@@ -125,6 +154,7 @@ async fn save_pool_updates_existing_row() {
         eprintln!("MYSQL_TEST_URL unset — skipping");
         return;
     };
+    let _g = live_lock().lock().await;
     fresh_schema(&pool).await;
 
     let mut u = LiveUser {
@@ -146,6 +176,7 @@ async fn delete_pool_removes_row() {
         eprintln!("MYSQL_TEST_URL unset — skipping");
         return;
     };
+    let _g = live_lock().lock().await;
     fresh_schema(&pool).await;
 
     let mut u = LiveUser {
@@ -166,6 +197,7 @@ async fn audited_save_pool_emits_diff_audit_row() {
         eprintln!("MYSQL_TEST_URL unset — skipping");
         return;
     };
+    let _g = live_lock().lock().await;
     fresh_schema(&pool).await;
 
     // Insert (creates entry) — note: insert_pool on audited path
@@ -211,6 +243,7 @@ async fn transaction_pool_commit_persists() {
         eprintln!("MYSQL_TEST_URL unset — skipping");
         return;
     };
+    let _g = live_lock().lock().await;
     fresh_schema(&pool).await;
 
     let tx = rustango::sql::transaction_pool(&pool)
@@ -241,6 +274,7 @@ async fn migrate_pool_ledger_round_trips() {
         eprintln!("MYSQL_TEST_URL unset — skipping");
         return;
     };
+    let _g = live_lock().lock().await;
     fresh_schema(&pool).await;
 
     // ensure_ledger_pool is idempotent + creates the

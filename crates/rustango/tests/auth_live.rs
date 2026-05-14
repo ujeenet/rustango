@@ -11,6 +11,18 @@ use rustango::sql::{sqlx, Fetcher};
 use rustango::tenancy::{
     authenticate_operator, authenticate_user, manage, password, Org, TenantPools,
 };
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file `rmig::drop_all` + `apply_all`
+/// against the shared `DATABASE_URL` pool; under cargo's default parallel
+/// harness two tests race on PG's `pg_type_typname_nsp_index` /
+/// `pg_class_relname_nsp_index` system-catalog uniques when both try to
+/// CREATE/DROP the same table at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
 
 async fn lookup_org(pool: &sqlx::PgPool, slug: &str) -> Org {
     let mut rows: Vec<Org> = Org::objects()
@@ -59,6 +71,7 @@ async fn drop_schema(pool: &sqlx::PgPool, name: &str) {
 
 #[tokio::test]
 async fn create_operator_and_authenticate_round_trip() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -100,6 +113,7 @@ async fn create_operator_and_authenticate_round_trip() {
 
 #[tokio::test]
 async fn create_operator_rejects_duplicate_username() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -131,6 +145,7 @@ async fn create_operator_rejects_duplicate_username() {
 
 #[tokio::test]
 async fn create_user_in_schema_mode_tenant_authenticates_against_that_schema() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -149,13 +164,20 @@ async fn create_user_in_schema_mode_tenant_authenticates_against_that_schema() {
         .await
         .unwrap();
     sqlx::query(&format!(
+        // Mirrors the current canonical `rustango_users` schema —
+        // `data JSONB` and `password_changed_at` were added after this
+        // test's original write, so the framework's `create-user` /
+        // session-validation code paths now INSERT/UPDATE columns the
+        // hand-rolled CREATE TABLE used to omit.
         r#"CREATE TABLE "{slug}"."rustango_users" (
             "id" BIGSERIAL NOT NULL PRIMARY KEY,
-            "username" VARCHAR(64) NOT NULL,
-            "password_hash" VARCHAR(255) NOT NULL,
+            "username" VARCHAR(150) NOT NULL,
+            "password_hash" VARCHAR(255) NOT NULL DEFAULT '',
             "is_superuser" BOOLEAN NOT NULL,
             "active" BOOLEAN NOT NULL,
-            "created_at" TIMESTAMPTZ NOT NULL
+            "data" JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            "created_at" TIMESTAMPTZ NOT NULL,
+            "password_changed_at" TIMESTAMPTZ
         )"#
     ))
     .execute(&pool)
@@ -220,6 +242,7 @@ async fn hard_wall_operator_credential_does_not_authenticate_against_tenant() {
     // Create an operator in the registry. Try to authenticate them
     // as a tenant user — must fail because the username doesn't
     // exist in the tenant's rustango_users.
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -234,13 +257,20 @@ async fn hard_wall_operator_credential_does_not_authenticate_against_tenant() {
         .await
         .unwrap();
     sqlx::query(&format!(
+        // Mirrors the current canonical `rustango_users` schema —
+        // `data JSONB` and `password_changed_at` were added after this
+        // test's original write, so the framework's `create-user` /
+        // session-validation code paths now INSERT/UPDATE columns the
+        // hand-rolled CREATE TABLE used to omit.
         r#"CREATE TABLE "{slug}"."rustango_users" (
             "id" BIGSERIAL NOT NULL PRIMARY KEY,
-            "username" VARCHAR(64) NOT NULL,
-            "password_hash" VARCHAR(255) NOT NULL,
+            "username" VARCHAR(150) NOT NULL,
+            "password_hash" VARCHAR(255) NOT NULL DEFAULT '',
             "is_superuser" BOOLEAN NOT NULL,
             "active" BOOLEAN NOT NULL,
-            "created_at" TIMESTAMPTZ NOT NULL
+            "data" JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            "created_at" TIMESTAMPTZ NOT NULL,
+            "password_changed_at" TIMESTAMPTZ
         )"#
     ))
     .execute(&pool)
@@ -291,6 +321,7 @@ async fn hard_wall_operator_credential_does_not_authenticate_against_tenant() {
 
 #[tokio::test]
 async fn hard_wall_tenant_user_credential_does_not_authenticate_as_operator() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -305,13 +336,20 @@ async fn hard_wall_tenant_user_credential_does_not_authenticate_as_operator() {
         .await
         .unwrap();
     sqlx::query(&format!(
+        // Mirrors the current canonical `rustango_users` schema —
+        // `data JSONB` and `password_changed_at` were added after this
+        // test's original write, so the framework's `create-user` /
+        // session-validation code paths now INSERT/UPDATE columns the
+        // hand-rolled CREATE TABLE used to omit.
         r#"CREATE TABLE "{slug}"."rustango_users" (
             "id" BIGSERIAL NOT NULL PRIMARY KEY,
-            "username" VARCHAR(64) NOT NULL,
-            "password_hash" VARCHAR(255) NOT NULL,
+            "username" VARCHAR(150) NOT NULL,
+            "password_hash" VARCHAR(255) NOT NULL DEFAULT '',
             "is_superuser" BOOLEAN NOT NULL,
             "active" BOOLEAN NOT NULL,
-            "created_at" TIMESTAMPTZ NOT NULL
+            "data" JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            "created_at" TIMESTAMPTZ NOT NULL,
+            "password_changed_at" TIMESTAMPTZ
         )"#
     ))
     .execute(&pool)

@@ -11,6 +11,19 @@ use rustango::sql::sqlx::{self, PgPool, Row};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
+use tokio::sync::Mutex;
+
+/// Suite-wide lock. Every test in this file resets shared tables (via
+/// DROP/CREATE or `drop_all`); under cargo's default parallel harness
+/// two tests would race on PG's `pg_type_typname_nsp_index` /
+/// `pg_class_relname_nsp_index` system-catalog uniques when both try
+/// to CREATE/DROP at once.
+fn live_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
 async fn pool() -> Option<PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     Some(
@@ -79,6 +92,7 @@ fn make_migration_json(table: &str, name: &str) -> String {
 
 #[tokio::test]
 async fn migrate_embedded_applies_pending_then_is_noop_on_rerun() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -114,6 +128,7 @@ async fn migrate_embedded_applies_pending_then_is_noop_on_rerun() {
 
 #[tokio::test]
 async fn migrate_embedded_rejects_key_name_mismatch() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -132,6 +147,7 @@ async fn migrate_embedded_rejects_key_name_mismatch() {
 
 #[tokio::test]
 async fn migrate_embedded_propagates_parse_errors() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -144,6 +160,7 @@ async fn migrate_embedded_propagates_parse_errors() {
 
 #[tokio::test]
 async fn migrate_embedded_validates_inconsistent_data_op() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -167,6 +184,7 @@ async fn migrate_embedded_validates_inconsistent_data_op() {
 async fn migrate_embedded_sorts_entries_lexicographically() {
     // Even when the slice is in the "wrong" order, migrate_embedded
     // applies them in lex order.
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -202,6 +220,7 @@ async fn migrate_embedded_rejects_broken_prev_chain() {
     // Same chain validation as `file::list_dir`: an embedded entry
     // declaring `prev` against a sibling that isn't in the slice
     // fails fast with a clear error, before any DB work.
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
@@ -233,6 +252,7 @@ async fn migrate_embedded_rejects_broken_prev_chain() {
 
 #[tokio::test]
 async fn migrate_embedded_empty_slice_is_safe_noop() {
+    let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
