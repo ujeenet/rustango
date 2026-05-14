@@ -485,7 +485,43 @@ fn write_expr(
             Ok(())
         }
         Expr::Function { kind, args } => write_function(b, *kind, args),
+        Expr::Case { branches, default } => write_case(b, branches, default.as_deref()),
     }
+}
+
+/// Emit `CASE WHEN c1 THEN t1 [WHEN c2 THEN t2 …] [ELSE d] END`.
+/// Standard SQL-92, identical across PG / MySQL / SQLite — no
+/// dialect dispatch needed.
+///
+/// Rejects empty `branches` at emit time: a `CASE` with no `WHEN`
+/// clauses is a parse error on every backend, so surfacing it as
+/// `SqlError::EmptyCaseBranches` at compile gives a clearer message
+/// than letting the database complain.
+fn write_case(
+    b: &mut Sql<'_>,
+    branches: &[crate::core::CaseBranch],
+    default: Option<&crate::core::Expr>,
+) -> Result<(), SqlError> {
+    if branches.is_empty() {
+        return Err(SqlError::EmptyCaseBranches);
+    }
+    b.sql.push_str("CASE");
+    for branch in branches {
+        b.sql.push_str(" WHEN ");
+        // `write_where_expr` handles And/Or/Not nesting + parameter
+        // binding. We pass no qualify-with / no model — `Case`
+        // conditions are emitted in the context of the surrounding
+        // statement which already knows the table name.
+        super::writers::write_where_expr(b, &branch.condition, None, None)?;
+        b.sql.push_str(" THEN ");
+        write_expr(b, &branch.then, None)?;
+    }
+    if let Some(d) = default {
+        b.sql.push_str(" ELSE ");
+        write_expr(b, d, None)?;
+    }
+    b.sql.push_str(" END");
+    Ok(())
 }
 
 /// Emit a scalar function call. Most variants are straight `FN(args…)`

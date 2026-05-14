@@ -132,6 +132,13 @@ pub enum SqlError {
         expected: &'static str,
         got: usize,
     },
+
+    /// A `CASE WHEN … END` expression was built with no branches.
+    /// SQL requires at least one `WHEN` clause; the public builder
+    /// API ([`crate::core::case()`]) doesn't prevent zero-branch
+    /// construction, so the writer surfaces this here.
+    #[error("CASE expression must have at least one WHEN branch")]
+    EmptyCaseBranches,
 }
 
 /// Raised while compiling, writing, or executing a query end-to-end.

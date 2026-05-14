@@ -246,6 +246,16 @@ fn validate_expr_columns(model: &'static ModelSchema, expr: &Expr) -> Result<(),
             }
             Ok(())
         }
+        Expr::Case { branches, default } => {
+            for b in branches {
+                b.condition.validate(model)?;
+                validate_expr_columns(model, &b.then)?;
+            }
+            if let Some(d) = default {
+                validate_expr_columns(model, d)?;
+            }
+            Ok(())
+        }
     }
 }
 

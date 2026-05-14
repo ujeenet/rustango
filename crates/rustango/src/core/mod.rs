@@ -3,6 +3,7 @@
 //! This crate is dependency-light on purpose: no async, no DB drivers, no proc-macros.
 //! Anything that needs to be referenced by both the macro output and the runtime lives here.
 
+pub mod case;
 mod column;
 mod error;
 mod expr;
@@ -13,9 +14,10 @@ mod schema;
 mod validate;
 mod value;
 
+pub use case::{case, value, CaseBuilder};
 pub use column::{Column, TypedAssignment, TypedExpr, TypedFilter};
 pub use error::QueryError;
-pub use expr::{BinOp, Expr, ScalarFn, F};
+pub use expr::{BinOp, CaseBranch, Expr, ScalarFn, F};
 pub use field_type::FieldType;
 pub use query::{
     AggregateExpr, AggregateQuery, Assignment, BulkInsertQuery, BulkUpdateQuery, ColumnFilter,

@@ -301,9 +301,79 @@ Order::objects()
 - **`extract_quarter` on SQLite errors** with `OpNotSupportedInDialect` — SQLite has no native quarter token. Either gate the feature behind `cfg(not(sqlite))` or compute via `((extract_month - 1) / 3) + 1` in app code.
 - **Time-zone handling**: PG `EXTRACT` operates in the column's timezone; MySQL `YEAR()` operates in the session timezone (`SET time_zone = ...`); SQLite has no real TZ support — treat everything as UTC. Use `TIMESTAMPTZ` on PG, `DATETIME` on MySQL with the session TZ set, ISO-8601 strings on SQLite.
 
+### Conditional expressions — `case() / when() / value()`
+
+Issue #4 adds Django-shape `CASE WHEN … THEN … ELSE … END` on the same `Expr` machinery. Use it for custom orderings, derived columns in `annotate`, computed defaults in `update`, and (combined with `Sum`) conditional aggregates.
+
+```rust
+use rustango::core::case::{case, value};
+use rustango::core::{Column as _, F};
+use rustango::core::funcs::lower;
+
+// Custom ordering — published posts first, drafts last.
+Post::objects()
+    .update()
+    .set_expr(
+        "priority",
+        case()
+            .when(Post::status.eq("published"), 0_i64)
+            .when(Post::status.eq("review"), 1_i64)
+            .when(Post::status.eq("draft"), 2_i64)
+            .default(99_i64),
+    )
+    .execute(&pool).await?;
+
+let ordered = Post::objects()
+    .order_by(&[("priority", false), ("id", false)])
+    .fetch(&pool).await?;
+
+// Computed default on update — drafts get a lowercased title for
+// the label, everything else uses the title verbatim.
+Post::objects()
+    .update()
+    .set_expr(
+        "label",
+        case()
+            .when(Post::status.eq("draft"), lower(F("title")))
+            .default(F("title")),
+    )
+    .execute(&pool).await?;
+
+// AND / OR composition in the WHEN predicate.
+let viral = Post::status.eq("published").and(Post::views.gt(1_000_i64));
+Post::objects()
+    .update()
+    .set_expr(
+        "label",
+        case()
+            .when(viral, value("viral"))
+            .when(Post::status.eq("published"), value("live"))
+            .default(value("pending")),
+    )
+    .execute(&pool).await?;
+```
+
+**Builder shape:**
+
+- `case()` — start a builder.
+- `.when(condition, then)` — append a branch. `condition` is anything `Into<WhereExpr>` (typically `Column::eq()`, `.and()`, `.or()`); `then` is anything `Into<Expr>` (literal, `F()`, function call, nested `case()`).
+- `.default(expr)` — set the optional `ELSE` branch. Omitting it produces a `CASE` that returns `NULL` for unmatched rows (SQL standard).
+- `.build()` or `.into()` — finalize into an `Expr` for `set_expr` / `eq_expr` / `annotate`.
+- `value(literal)` — Django-style sugar for `Expr::Literal(...)`. Optional — bare literals coerce via `Into<Expr>`, but `value("…")` reads explicitly as "this is a string literal, not a column ref".
+
+**Tri-dialect emission:**
+
+`CASE WHEN … THEN … [ELSE …] END` is SQL-92 standard — emitted identically across PG, MySQL, and SQLite. No dialect dispatch in the writer.
+
+**Caveats:**
+
+- **Empty branches**: `case().build()` with no `.when(...)` calls is rejected at emit time with `SqlError::EmptyCaseBranches`. SQL requires at least one `WHEN` clause.
+- **Type unification across branches**: every dialect picks a common type from the `THEN` and `ELSE` values. Mixing types (`THEN 1_i64` + `ELSE "string"`) can throw a runtime cast error or coerce surprisingly. Stick to one type per `CASE`.
+- **Performance**: a heavily branched `CASE` evaluates each `WHEN` until one matches — no short-circuit on subsequent rows. For more than ~5 branches, consider a lookup table or denormalized column.
+
 ### When to reach for a raw SQL escape hatch instead
 
-The function set covers the common case. For features outside v1–v2 — `Cast`, full-text search, JSON path operators, hash functions, trig, `Case/When`, `Subquery`/`Exists`, window functions — see the [Custom SQL escape hatch](#custom-sql-escape-hatch) section below or wait on issues #4–#7 in the ORM Expression DSL epic, which extend the same `Expr` tree.
+The function set covers the common case. For features outside v1–v2 — `Cast`, full-text search, JSON path operators, hash functions, trig, `Subquery`/`Exists`, window functions — see the [Custom SQL escape hatch](#custom-sql-escape-hatch) section below or wait on issues #5–#7 in the ORM Expression DSL epic, which extend the same `Expr` tree.
 
 ---
 

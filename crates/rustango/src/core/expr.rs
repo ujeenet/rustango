@@ -107,6 +107,32 @@ pub enum Expr {
     /// argument count. Issue #2 (Database functions DSL); see
     /// [`crate::core::funcs`] for the public builder API.
     Function { kind: ScalarFn, args: Vec<Expr> },
+    /// `CASE WHEN c1 THEN t1 [WHEN c2 THEN t2 …] [ELSE d] END` —
+    /// conditional expression (issue #4). Standard SQL; identical
+    /// emission across PG / MySQL / SQLite. `branches` carries the
+    /// `WHEN` clauses in source order; `default` is the optional
+    /// `ELSE` branch (omitted in SQL when `None`).
+    ///
+    /// Build via [`crate::core::case::case()`] rather than
+    /// constructing this variant by hand — the builder chain reads
+    /// closer to the SQL and handles the boxing.
+    Case {
+        branches: Vec<CaseBranch>,
+        default: Option<Box<Expr>>,
+    },
+}
+
+/// One arm of a [`Expr::Case`] expression — `WHEN <condition> THEN <then>`.
+///
+/// `condition` is a full [`crate::core::WhereExpr`] tree, so the same
+/// `Column::eq()` / `.and()` / `.or()` machinery that powers `WHERE`
+/// clauses works inside `CASE` predicates. `then` is any [`Expr`]:
+/// a literal, a column reference, a function call, another nested
+/// `Case`, etc.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseBranch {
+    pub condition: super::query::WhereExpr,
+    pub then: Expr,
 }
 
 /// Scalar database functions surfaced by [`crate::core::funcs`].
