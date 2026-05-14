@@ -257,25 +257,26 @@ let friday_signups = Signup::objects()
 // well on PG. Compute the boundary in Rust instead and pass it as a
 // typed literal — works the same on every backend and uses the
 // index on `created_at`:
-let year_start = chrono::Utc::now()
-    .date_naive()
-    .with_month0(0).unwrap()
-    .with_day0(0).unwrap()
-    .and_hms_opt(0, 0, 0).unwrap()
-    .and_utc();
-let this_year = Order::objects()
+use chrono::{Datelike, TimeZone};
+let this_year = chrono::Utc::now().year();
+let year_start = chrono::Utc.with_ymd_and_hms(this_year, 1, 1, 0, 0, 0).unwrap();
+
+let recent = Order::objects()
     .where_(Order::created_at.gte(year_start))
     .fetch(&pool).await?;
 
-// 5. `Trunc*` shines on the *write* side, where the type mismatch
-// is the user's problem to handle once at column declaration:
+// 5. `Trunc*` shines on the *write* side. `trunc_date` is the
+// one trunc-family builder with identical SQL on every dialect
+// (`DATE(x)`) — handy for grouping by day without the type-divergence
+// caveat the year/month variants carry.
 Order::objects()
     .update()
-    .set_expr("month_bucket", trunc_month(F("created_at")))
+    .set_expr("day_bucket", trunc_date(F("created_at")))     // DATE column on every backend
+    .set_expr("month_bucket", trunc_month(F("created_at")))  // see caveat
     .execute(&pool).await?;
-// On PG `month_bucket` should be `TIMESTAMPTZ`; on MySQL/SQLite
-// declare it as `VARCHAR(10)` / `TEXT` and parse client-side if
-// needed.
+// `month_bucket` should be `TIMESTAMPTZ` on PG and `VARCHAR(10)` /
+// `TEXT` on MySQL/SQLite — parse client-side when reading if you
+// need a typed `chrono::NaiveDate`.
 ```
 
 **Per-dialect emission:**
@@ -287,7 +288,9 @@ Order::objects()
 | `extract_weekday(x)` | `CAST(EXTRACT(DOW FROM x) AS INTEGER)` | `(DAYOFWEEK(x) - 1)` | `CAST(strftime('%w', x) AS INTEGER)` |
 | `extract_quarter(x)` | `EXTRACT(QUARTER FROM x)` | `QUARTER(x)` | **unsupported** — error |
 | `trunc_date(x)` | `DATE(x)` | `DATE(x)` | `DATE(x)` |
+| `trunc_year(x)` | `DATE_TRUNC('year', x)` → timestamp | `DATE_FORMAT(x, '%Y-01-01')` → **string** | `strftime('%Y-01-01', x)` → **string** |
 | `trunc_month(x)` | `DATE_TRUNC('month', x)` → timestamp | `DATE_FORMAT(x, '%Y-%m-01')` → **string** | `strftime('%Y-%m-01', x)` → **string** |
+| `trunc_day(x)` | `DATE_TRUNC('day', x)` → timestamp | `DATE(x)` → date | `date(x)` → text |
 
 **Caveats specific to date/time:**
 
