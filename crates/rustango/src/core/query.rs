@@ -4,6 +4,7 @@
 //! The SQL crate then walks that IR and writes a parameterized statement
 //! per dialect. Anything in this module is therefore visible to both.
 
+use super::expr::Expr;
 use super::{validate::validate_value, ModelSchema, QueryError, SqlValue};
 
 /// Comparison operator on a single column.
@@ -65,6 +66,27 @@ pub struct Filter {
     pub value: SqlValue,
 }
 
+/// `WHERE` predicate that compares two columns from the same row —
+/// the rustango analog of Django's `F()` on the right side of a filter.
+///
+/// Emits `<left_col> <op> <right>` where `right` is an arbitrary
+/// [`Expr`] (typically `Expr::Column` for a plain column-vs-column
+/// compare, or a `BinOp` tree for column-vs-arithmetic). The lhs is
+/// the model column being filtered on; the rhs lives in the `Expr`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnFilter {
+    /// Left-hand column (the field being filtered on, schema-resolved).
+    pub column: &'static str,
+    /// Comparison operator. Subset of [`Op`] — only the binary
+    /// comparison variants make sense here (`Eq`, `Ne`, `Lt`, `Lte`,
+    /// `Gt`, `Gte`). Other ops (`In`, `Between`, `IsNull`, JSON ops, etc.)
+    /// are rejected at compile/emit time.
+    pub op: Op,
+    /// Right-hand side. Most commonly `Expr::Column(other)` for the
+    /// column-vs-column case; can be any expression tree.
+    pub rhs: Expr,
+}
+
 /// Boolean expression in a `WHERE` clause — leaf [`Filter`]s composed
 /// with `AND` / `OR` to arbitrary depth.
 ///
@@ -87,6 +109,8 @@ pub struct Filter {
 pub enum WhereExpr {
     /// Leaf — a single column predicate.
     Predicate(Filter),
+    /// Leaf — a column-vs-expression predicate (F() comparisons).
+    ColumnCompare(ColumnFilter),
     /// All children must match. Empty list = vacuously true (no
     /// `WHERE` emitted by the writer).
     And(Vec<WhereExpr>),
@@ -148,7 +172,12 @@ impl WhereExpr {
                 }
                 Some(out)
             }
-            Self::Or(_) | Self::Not(_) => None,
+            // ColumnCompare is a leaf predicate but it doesn't carry a
+            // `Filter` (the rhs is an `Expr`, not a `SqlValue`), so the
+            // flat-AND view can't surface it as a `&Filter` reference.
+            // Callers using `as_flat_and` only handle literal `Filter`
+            // predicates anyway.
+            Self::ColumnCompare(_) | Self::Or(_) | Self::Not(_) => None,
         }
     }
 
@@ -169,6 +198,18 @@ impl WhereExpr {
                 }
                 Ok(())
             }
+            Self::ColumnCompare(cf) => {
+                if model.field_by_column(cf.column).is_none() {
+                    return Err(QueryError::UnknownField {
+                        model: model.name,
+                        field: cf.column.to_owned(),
+                    });
+                }
+                // Validate every column reference inside the rhs Expr
+                // tree against the model schema.
+                validate_expr_columns(model, &cf.rhs)?;
+                Ok(())
+            }
             Self::And(items) | Self::Or(items) => {
                 for child in items {
                     child.validate(model)?;
@@ -176,6 +217,28 @@ impl WhereExpr {
                 Ok(())
             }
             Self::Not(child) => child.validate(model),
+        }
+    }
+}
+
+/// Recursively walk an [`Expr`] and confirm every `Column` reference
+/// resolves on `model`. Literals + arithmetic ops are passed through.
+fn validate_expr_columns(model: &'static ModelSchema, expr: &Expr) -> Result<(), QueryError> {
+    match expr {
+        Expr::Literal(_) => Ok(()),
+        Expr::Column(name) => {
+            if model.field_by_column(name).is_none() {
+                Err(QueryError::UnknownField {
+                    model: model.name,
+                    field: (*name).to_owned(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+        Expr::BinOp { left, right, .. } => {
+            validate_expr_columns(model, left)?;
+            validate_expr_columns(model, right)
         }
     }
 }
@@ -369,10 +432,19 @@ impl BulkInsertQuery {
 }
 
 /// One `column = value` pair in an `UPDATE ... SET ...` clause.
+///
+/// `value` is an [`Expr`] — it can be a literal (most common, `Expr::Literal`),
+/// a column reference (`Expr::Column` / `F("col")` — column-to-column copy),
+/// or an arithmetic tree (`F("col") + 1` — Django's atomic counter pattern).
+///
+/// Existing call sites that pass an [`SqlValue`] lift transparently
+/// via `impl From<SqlValue> for Expr` — the field's `Into`-bound public
+/// builders (`Column::set`, `UpdateBuilder::set`) keep their original
+/// signatures.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
     pub column: &'static str,
-    pub value: SqlValue,
+    pub value: Expr,
 }
 
 /// Compiled `UPDATE`.
@@ -404,7 +476,12 @@ impl UpdateQuery {
                     model: self.model.name,
                     field: assignment.column.to_owned(),
                 })?;
-            validate_value(self.model.name, field, &assignment.value)?;
+            // Only literal rhs values are checkable against the field's
+            // declared bounds; column refs and arithmetic trees don't
+            // resolve to a single concrete value at compile time.
+            if let Some(literal) = assignment.value.as_literal() {
+                validate_value(self.model.name, field, literal)?;
+            }
         }
         Ok(())
     }

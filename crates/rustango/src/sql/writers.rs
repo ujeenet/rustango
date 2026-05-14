@@ -418,11 +418,73 @@ pub(super) fn write_update(b: &mut Sql<'_>, query: &UpdateQuery) -> Result<(), S
         b.write_ident(assignment.column);
         b.sql.push_str(" = ");
         let cast = null_cast_for(b.d, query.model, assignment.column);
-        b.push_param_typed(assignment.value.clone(), cast);
+        write_expr(b, &assignment.value, cast)?;
     }
 
     write_where(b, &query.where_clause, Some(query.model))?;
     Ok(())
+}
+
+/// Render a [`crate::core::Expr`] — the recursive RHS form that
+/// powers `F()` column references and arithmetic. Literal `Expr`s
+/// route through [`Sql::push_param_typed`] so cast hinting (PG
+/// `::TEXT` on NULL) still fires. `Column` writes a quoted ident;
+/// `BinOp` emits `(<left> <op> <right>)` with both sides recursed.
+fn write_expr(
+    b: &mut Sql<'_>,
+    expr: &crate::core::Expr,
+    cast: Option<&'static str>,
+) -> Result<(), SqlError> {
+    use crate::core::{BinOp as BO, Expr};
+    match expr {
+        Expr::Literal(v) => {
+            b.push_param_typed(v.clone(), cast);
+            Ok(())
+        }
+        Expr::Column(name) => {
+            b.write_ident(name);
+            Ok(())
+        }
+        Expr::BinOp { left, op, right } => {
+            // SQLite doesn't have a bitwise XOR operator; surface a
+            // clear error rather than emitting silently-wrong SQL.
+            if matches!(op, BO::BitXor) && b.d.name() == "sqlite" {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: "BitXor",
+                    dialect: b.d.name(),
+                });
+            }
+            b.sql.push('(');
+            // Nested casts only apply at the literal leaf — clear here
+            // so an outer NULL cast doesn't bleed into the operand.
+            write_expr(b, left, None)?;
+            b.sql.push(' ');
+            b.sql.push_str(match op {
+                BO::Add => "+",
+                BO::Sub => "-",
+                BO::Mul => "*",
+                BO::Div => "/",
+                BO::Mod => "%",
+                BO::BitAnd => "&",
+                BO::BitOr => "|",
+                // PG spells XOR `#`; MySQL uses `^`. SQLite already
+                // bounced above.
+                BO::BitXor => {
+                    if b.d.name() == "postgres" {
+                        "#"
+                    } else {
+                        "^"
+                    }
+                }
+                BO::BitShl => "<<",
+                BO::BitShr => ">>",
+            });
+            b.sql.push(' ');
+            write_expr(b, right, None)?;
+            b.sql.push(')');
+            Ok(())
+        }
+    }
 }
 
 // ====================================================================
@@ -578,6 +640,7 @@ pub(super) fn write_where_expr(
 ) -> Result<(), SqlError> {
     match expr {
         WhereExpr::Predicate(filter) => write_filter(b, filter, qualify_with, model),
+        WhereExpr::ColumnCompare(cf) => write_column_compare(b, cf, qualify_with, model),
         WhereExpr::And(items) => write_joined(b, items, " AND ", qualify_with, model),
         WhereExpr::Or(items) => {
             if items.is_empty() {
@@ -592,6 +655,39 @@ pub(super) fn write_where_expr(
             Ok(())
         }
     }
+}
+
+/// Render `<col> <op> <rhs-expr>` for a [`crate::core::ColumnFilter`].
+/// Only the binary-comparison `Op` variants are valid here — anything
+/// else (`In`, `Between`, `IsNull`, JSON ops, etc.) is a builder error
+/// and surfaces as [`SqlError::OpNotSupportedInDialect`] so the test
+/// suite catches it.
+fn write_column_compare(
+    b: &mut Sql<'_>,
+    cf: &crate::core::ColumnFilter,
+    qualify_with: Option<&str>,
+    _model: Option<&'static ModelSchema>,
+) -> Result<(), SqlError> {
+    let qualified = render_qualified_col(b.d, qualify_with, cf.column);
+    b.sql.push_str(&qualified);
+    let op_str = match cf.op {
+        crate::core::Op::Eq => " = ",
+        crate::core::Op::Ne => " <> ",
+        crate::core::Op::Lt => " < ",
+        crate::core::Op::Lte => " <= ",
+        crate::core::Op::Gt => " > ",
+        crate::core::Op::Gte => " >= ",
+        // Other ops don't fit a `col <op> col` shape; reject loudly.
+        _ => {
+            return Err(SqlError::OpNotSupportedInDialect {
+                op: "non-binary comparison in ColumnCompare",
+                dialect: b.d.name(),
+            });
+        }
+    };
+    b.sql.push_str(op_str);
+    write_expr(b, &cf.rhs, None)?;
+    Ok(())
 }
 
 fn write_joined(
@@ -620,6 +716,7 @@ fn write_child(
 ) -> Result<(), SqlError> {
     match expr {
         WhereExpr::Predicate(filter) => write_filter(b, filter, qualify_with, model),
+        WhereExpr::ColumnCompare(cf) => write_column_compare(b, cf, qualify_with, model),
         WhereExpr::And(_) | WhereExpr::Or(_) | WhereExpr::Not(_) => {
             b.sql.push('(');
             write_where_expr(b, expr, qualify_with, model)?;

@@ -1264,7 +1264,7 @@ async fn update_inner(
         match parse_form_value(field, raw) {
             Ok(v) => assignments.push(Assignment {
                 column: field.column,
-                value: v,
+                value: v.into(),
             }),
             Err(FormError::Missing { .. }) if partial => continue,
             Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),

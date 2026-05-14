@@ -237,7 +237,7 @@ fn update_validate_checks_set_values_only() {
         model: User::SCHEMA,
         set: vec![Assignment {
             column: "name",
-            value: SqlValue::String("a".repeat(20)),
+            value: SqlValue::String("a".repeat(20)).into(),
         }],
         where_clause: WhereExpr::Predicate(Filter {
             column: "name",
@@ -256,11 +256,11 @@ fn update_validate_allows_in_bounds_set() {
         set: vec![
             Assignment {
                 column: "name",
-                value: SqlValue::String("ok".into()),
+                value: SqlValue::String("ok".into()).into(),
             },
             Assignment {
                 column: "age",
-                value: SqlValue::I32(25),
+                value: SqlValue::I32(25).into(),
             },
         ],
         where_clause: WhereExpr::And(vec![]),
@@ -274,7 +274,7 @@ fn update_validate_rejects_out_of_range_set() {
         model: User::SCHEMA,
         set: vec![Assignment {
             column: "age",
-            value: SqlValue::I32(-5),
+            value: SqlValue::I32(-5).into(),
         }],
         where_clause: WhereExpr::And(vec![]),
     };

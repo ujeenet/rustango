@@ -5,6 +5,7 @@
 
 mod column;
 mod error;
+mod expr;
 mod field_type;
 mod query;
 mod schema;
@@ -13,11 +14,12 @@ mod value;
 
 pub use column::{Column, TypedAssignment, TypedExpr, TypedFilter};
 pub use error::QueryError;
+pub use expr::{BinOp, Expr, F};
 pub use field_type::FieldType;
 pub use query::{
-    AggregateExpr, AggregateQuery, Assignment, BulkInsertQuery, BulkUpdateQuery, ConflictClause,
-    CountQuery, DeleteQuery, Filter, InsertQuery, Join, Op, OrderClause, SearchClause, SelectQuery,
-    UpdateQuery, WhereExpr,
+    AggregateExpr, AggregateQuery, Assignment, BulkInsertQuery, BulkUpdateQuery, ColumnFilter,
+    ConflictClause, CountQuery, DeleteQuery, Filter, InsertQuery, Join, Op, OrderClause,
+    SearchClause, SelectQuery, UpdateQuery, WhereExpr,
 };
 pub use schema::{
     infer_app_label_from_module_path, AdminConfig, CheckConstraint, CompositeFkRelation,

@@ -118,7 +118,7 @@ pub async fn soft_delete(
             model,
             set: vec![Assignment {
                 column: col,
-                value: SqlValue::from(chrono::Utc::now()),
+                value: SqlValue::from(chrono::Utc::now()).into(),
             }],
             where_clause: WhereExpr::Predicate(Filter {
                 column: pk_column,
@@ -153,7 +153,7 @@ pub async fn restore(
             model,
             set: vec![Assignment {
                 column: col,
-                value: SqlValue::Null,
+                value: SqlValue::Null.into(),
             }],
             where_clause: WhereExpr::Predicate(Filter {
                 column: pk_column,

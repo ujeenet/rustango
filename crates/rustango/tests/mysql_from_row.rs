@@ -397,7 +397,7 @@ fn audit_save_one_with_audit_pool_is_callable() {
             model: <AuditedRecord as Model>::SCHEMA,
             set: vec![rustango::core::Assignment {
                 column: "name",
-                value: SqlValue::String("changed".into()),
+                value: SqlValue::String("changed".into()).into(),
             }],
             where_clause: WhereExpr::Predicate(Filter {
                 column: "id",

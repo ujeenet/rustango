@@ -106,6 +106,18 @@ pub enum SqlError {
         shape: &'static str,
         dialect: &'static str,
     },
+
+    /// A [`crate::core::BinOp`] variant has no dialect-portable
+    /// translation on this backend. Today raised only for
+    /// `BinOp::BitXor` on SQLite (SQLite has `&`, `|`, `<<`, `>>` but
+    /// no bitwise-XOR operator). Caller can either route to a different
+    /// op (e.g. `(a | b) - (a & b)`) or restrict the feature to
+    /// PG / MySQL.
+    #[error("operator `{op}` is not supported by the `{dialect}` dialect")]
+    OpNotSupportedInDialect {
+        op: &'static str,
+        dialect: &'static str,
+    },
 }
 
 /// Raised while compiling, writing, or executing a query end-to-end.

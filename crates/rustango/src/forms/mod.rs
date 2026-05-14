@@ -536,7 +536,7 @@ impl ModelForm {
                     let raw = self.data.get(f.name).map(String::as_str);
                     parse_form_value(f, raw).ok().map(|v| Assignment {
                         column: f.column,
-                        value: v,
+                        value: v.into(),
                     })
                 })
                 .collect();
@@ -1254,7 +1254,10 @@ impl<T: crate::core::Model> ModelFormFor<T> {
             .columns
             .into_iter()
             .zip(self.values)
-            .map(|(column, value)| crate::core::Assignment { column, value })
+            .map(|(column, value)| crate::core::Assignment {
+                column,
+                value: value.into(),
+            })
             .collect();
         Some(crate::core::UpdateQuery {
             model: T::SCHEMA,
