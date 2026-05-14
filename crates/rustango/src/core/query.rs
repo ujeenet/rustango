@@ -914,6 +914,35 @@ pub enum AggregateExpr {
     Window(Box<super::window::WindowExpr>),
 }
 
+impl AggregateExpr {
+    /// Whether this annotation actually aggregates rows (and therefore
+    /// triggers GROUP BY auto-inference, issue #75).
+    ///
+    /// - `Count` / `Sum` / `Avg` / `Max` / `Min` / `CountDistinct` /
+    ///   `StdDev*` / `Variance*` → **aggregating** (collapses rows).
+    /// - `Window` → **not aggregating** (per-row computation over a frame).
+    /// - `Filtered { inner }` / `Coalesced { inner }` → recurse on `inner`.
+    #[must_use]
+    pub fn is_aggregating(&self) -> bool {
+        match self {
+            AggregateExpr::Count(_)
+            | AggregateExpr::CountDistinct(_)
+            | AggregateExpr::Sum(_)
+            | AggregateExpr::Avg(_)
+            | AggregateExpr::Max(_)
+            | AggregateExpr::Min(_)
+            | AggregateExpr::StdDev(_)
+            | AggregateExpr::StdDevPop(_)
+            | AggregateExpr::Variance(_)
+            | AggregateExpr::VariancePop(_) => true,
+            AggregateExpr::Window(_) => false,
+            AggregateExpr::Filtered { inner, .. } | AggregateExpr::Coalesced { inner, .. } => {
+                inner.is_aggregating()
+            }
+        }
+    }
+}
+
 /// A `SELECT … GROUP BY … HAVING …` query. Returned rows are untyped
 /// (`HashMap<String, SqlValue>`) because the projection is dynamic.
 ///
