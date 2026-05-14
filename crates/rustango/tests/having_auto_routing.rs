@@ -203,6 +203,124 @@ fn sqlite_emits_having_with_double_quotes() {
     );
 }
 
+// ---------- Op validation: alias + non-binary op rejected at compile() ----------
+
+/// `Op::In` against an annotation alias is rejected at `compile()`
+/// with a clear `HavingOpNotSupported` error. v1 limitation —
+/// ExprCompare only emits binary comparison ops; richer dispatch is
+/// queued for v0.50. Pre-fix this surfaced as a cryptic
+/// `OpNotSupportedInDialect { op: "non-binary comparison in ExprCompare" }`
+/// at SQL-emit time.
+#[test]
+fn op_in_against_alias_rejected_at_compile() {
+    use rustango::core::SqlValue;
+    let r = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("post_count", count_all().into())
+        .filter(
+            "post_count",
+            Op::In,
+            SqlValue::List(vec![SqlValue::I64(5), SqlValue::I64(10)]),
+        )
+        .compile();
+    match r {
+        Err(rustango::core::QueryError::HavingOpNotSupported { alias, op }) => {
+            assert_eq!(alias, "post_count");
+            assert_eq!(op, Op::In);
+        }
+        other => panic!("expected HavingOpNotSupported, got {other:?}"),
+    }
+}
+
+#[test]
+fn op_between_against_alias_rejected_at_compile() {
+    use rustango::core::SqlValue;
+    let r = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("post_count", count_all().into())
+        .filter(
+            "post_count",
+            Op::Between,
+            SqlValue::List(vec![SqlValue::I64(5), SqlValue::I64(10)]),
+        )
+        .compile();
+    assert!(matches!(
+        r,
+        Err(rustango::core::QueryError::HavingOpNotSupported {
+            alias,
+            op: Op::Between
+        }) if alias == "post_count"
+    ));
+}
+
+#[test]
+fn op_isnull_against_alias_rejected_at_compile() {
+    use rustango::core::SqlValue;
+    let r = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("post_count", count_all().into())
+        .filter("post_count", Op::IsNull, SqlValue::Bool(true))
+        .compile();
+    assert!(matches!(
+        r,
+        Err(rustango::core::QueryError::HavingOpNotSupported { op: Op::IsNull, .. })
+    ));
+}
+
+#[test]
+fn op_like_against_alias_rejected_at_compile() {
+    let r = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("post_count", count_all().into())
+        .filter("post_count", Op::Like, "%foo%")
+        .compile();
+    assert!(matches!(
+        r,
+        Err(rustango::core::QueryError::HavingOpNotSupported { op: Op::Like, .. })
+    ));
+}
+
+/// Same op + non-alias field still routes to WHERE — the WHERE path
+/// supports the full Op set as before (LIKE on a model string column
+/// is the canonical use). Op-validation is HAVING-specific.
+#[test]
+fn op_like_against_model_column_still_works_via_where() {
+    let q = Post::objects()
+        .aggregate()
+        .annotate("c", count_all().into())
+        .filter("status", Op::Like, "publish%")
+        .compile()
+        .unwrap();
+    let stmt = Postgres.compile_aggregate(&q).unwrap();
+    assert!(
+        stmt.sql.contains(r#"WHERE "status" LIKE $1"#),
+        "WHERE LIKE on model column still works: {}",
+        stmt.sql
+    );
+}
+
+/// Once an error is recorded, subsequent builder calls are no-ops so
+/// the original cause isn't masked by downstream complaints.
+#[test]
+fn deferred_error_swallows_subsequent_builder_calls() {
+    let r = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("post_count", count_all().into())
+        .filter("post_count", Op::Like, "junk") // sets deferred error
+        .filter("status", Op::Eq, "published") // should NOT overwrite
+        .filter("post_count", Op::Gt, 10_i64) // should NOT overwrite
+        .compile();
+    match r {
+        Err(rustango::core::QueryError::HavingOpNotSupported { op: Op::Like, .. }) => {}
+        other => panic!("expected the FIRST error to survive, got {other:?}"),
+    }
+}
+
 // ---------- HAVING composes with explicit .having() call ----------
 
 #[test]

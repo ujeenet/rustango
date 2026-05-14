@@ -45,4 +45,24 @@ pub enum QueryError {
         field: String,
         reason: String,
     },
+
+    /// `AggregateBuilder::filter(alias, op, value)` was called with
+    /// an `op` outside the binary-comparison set (`Eq`/`Ne`/`Lt`/
+    /// `Lte`/`Gt`/`Gte`) — but the alias resolves to an aggregate
+    /// annotation, so the predicate would be routed to `HAVING`
+    /// via [`crate::core::WhereExpr::ExprCompare`], which today
+    /// only supports binary comparisons. Issue #74 v1.
+    ///
+    /// Use [`crate::query::AggregateBuilder::having`] with a
+    /// pre-built `WhereExpr` (e.g. an `Or`-tree of equalities for
+    /// the `Op::In` shape) until richer ExprCompare-with-Aggregate
+    /// dispatch lands as a v0.50 follow-up.
+    #[error(
+        "HAVING auto-routing for annotation alias `{alias}` supports only \
+         binary-comparison ops (Eq / Ne / Lt / Lte / Gt / Gte); got {op:?}. \
+         For `IN` / `BETWEEN` / `IS NULL` / `LIKE` / etc. against an \
+         aggregate, build a `WhereExpr` directly and pass it through \
+         `AggregateBuilder::having`."
+    )]
+    HavingOpNotSupported { alias: String, op: super::Op },
 }

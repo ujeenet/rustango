@@ -512,6 +512,7 @@ impl<T: Model> QuerySet<T> {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            deferred_error: None,
         }
     }
 }
@@ -910,6 +911,13 @@ pub struct AggregateBuilder<T: Model> {
     order_by: Vec<(&'static str, bool)>,
     limit: Option<i64>,
     offset: Option<i64>,
+    /// Issue #74 — deferred error surfacing for builder-time
+    /// validation failures (e.g. `.filter(alias, Op::In, …)` against
+    /// an annotation alias, which the auto-routing rejects because
+    /// ExprCompare doesn't support `IN`/`BETWEEN`/etc. yet). Stored
+    /// on first error; subsequent builder calls are no-ops so the
+    /// original cause isn't masked. Surfaced from `compile()`.
+    deferred_error: Option<crate::core::QueryError>,
 }
 
 impl<T: Model> AggregateBuilder<T> {
@@ -974,6 +982,12 @@ impl<T: Model> AggregateBuilder<T> {
         op: crate::core::Op,
         value: impl Into<crate::core::SqlValue>,
     ) -> Self {
+        // Once we've recorded a deferred error, swallow subsequent
+        // builder calls so the original cause isn't masked by a
+        // downstream complaint.
+        if self.deferred_error.is_some() {
+            return self;
+        }
         // Look up the AggregateExpr behind the alias if one exists.
         // PG strictly disallows SELECT-list aliases in HAVING (only
         // MySQL + SQLite allow it), so we LIFT the aggregate
@@ -986,6 +1000,26 @@ impl<T: Model> AggregateBuilder<T> {
             .find(|(alias, _)| *alias == field)
             .map(|(_, expr)| expr.clone());
         if let Some(agg) = agg {
+            // v1 limitation: `ExprCompare` only emits binary
+            // comparison ops. `Op::In`/`Between`/`IsNull`/`Like`/etc.
+            // would emit garbage SQL via the existing writer, so
+            // catch the misuse at builder time with a message that
+            // points at the workaround (typed `.having(WhereExpr)`).
+            if !matches!(
+                op,
+                crate::core::Op::Eq
+                    | crate::core::Op::Ne
+                    | crate::core::Op::Lt
+                    | crate::core::Op::Lte
+                    | crate::core::Op::Gt
+                    | crate::core::Op::Gte
+            ) {
+                self.deferred_error = Some(crate::core::QueryError::HavingOpNotSupported {
+                    alias: field.to_owned(),
+                    op,
+                });
+                return self;
+            }
             let pred = WhereExpr::ExprCompare {
                 lhs: crate::core::Expr::Aggregate(Box::new(agg)),
                 op,
@@ -1030,6 +1064,12 @@ impl<T: Model> AggregateBuilder<T> {
     /// # Errors
     /// Returns [`QueryError`] if any filter or having clause names an unknown field.
     pub fn compile(self) -> Result<AggregateQuery, QueryError> {
+        // Surface any builder-time deferred error first (e.g. an
+        // `Op::In` against an annotation alias) so the user sees the
+        // real cause rather than a downstream compile failure.
+        if let Some(e) = self.deferred_error {
+            return Err(e);
+        }
         let model = T::SCHEMA;
         let where_clause = resolve_pending(model, self.qs.pending)?;
         // Walk each AggregateExpr for column-name typos. Today this

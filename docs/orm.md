@@ -773,6 +773,29 @@ HAVING COUNT(*) > $2
 
 **Validator gap (matches existing aggregate posture)**: alias-routed HAVING predicates skip the model-schema column walk. Typo'd aliases surface at the database, not at `compile()`. Same gap as `Sum("typo_col")` — pre-existing and orthogonal.
 
+**Supported ops on alias-routed `.filter()`**: only the binary-comparison set — `Op::Eq` / `Ne` / `Lt` / `Lte` / `Gt` / `Gte`. Anything else (`Op::In`, `Op::Between`, `Op::IsNull`, `Op::Like`, `Op::ILike`, the JSON family) rejects at `compile()` with `QueryError::HavingOpNotSupported { alias, op }`. The writer's `ExprCompare` shape only emits binary comparisons; richer dispatch is a v0.50 follow-up. For aggregate-against-list / pattern / null checks, drop into the typed `.having(WhereExpr)` form with a pre-built predicate:
+
+```rust
+use rustango::core::{Filter, Op, SqlValue, WhereExpr};
+
+// HAVING COUNT(*) IN (5, 10, 20) — bypass auto-routing, hand-build
+// the OR-tree and pass to .having() directly.
+let inner_or = WhereExpr::Or(vec![
+    /* one ExprCompare per value, or a CASE-WHEN ladder */
+]);
+agg_builder.having_raw(inner_or);   // (where it exists in your code)
+```
+
+**Param-vector bloat with non-trivial aggregates**: when the alias targets a `Filtered { Count, filter: pred }` or `Coalesced { Sum, default: 0 }` annotation, the writer lifts the **whole aggregate expression** into HAVING — including its inner predicates and defaults. Their bound literals get fresh parameter slots in HAVING separate from the SELECT-list emission. Concretely:
+
+```text
+SELECT … COUNT(*) FILTER (WHERE "status" = $1) AS "published_count" …
+HAVING COUNT(*) FILTER (WHERE "status" = $2) > $3
+              -- "published" bound twice (once at $1, once at $2)
+```
+
+SQL semantic is unchanged (the same row counts come back), but `stmt.params.len()` grows per `.filter()` call that targets a non-trivial alias. For `COUNT(*)` aliases (no inner literals) the bloat is zero. Document if your test suite pins param counts.
+
 ---
 
 ## Joins + select_related
