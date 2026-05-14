@@ -160,6 +160,15 @@ pub enum SqlError {
     )]
     OuterRefOutsideSubquery { column: &'static str },
 
+    /// A JOIN was constructed with an empty `on` predicate
+    /// (`WhereExpr::And(vec![])` — the legitimate "no WHERE filter"
+    /// marker at the top of an UPDATE/DELETE/SELECT). Inside a JOIN's
+    /// ON it would emit `ON ` with a literal hole, which every
+    /// backend rejects at parse. Mirror of `EmptyCaseWhenCondition`
+    /// for the JOIN-ON context.
+    #[error("JOIN `on` predicate must not be empty")]
+    EmptyJoinOnCondition,
+
     /// A [`crate::core::JoinKind`] was used on a dialect that doesn't
     /// support it (issue #80). Today: `Right` on SQLite, `Full` on
     /// SQLite + MySQL. Caller can either switch dialects, restructure

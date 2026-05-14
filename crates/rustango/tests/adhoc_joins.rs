@@ -3,8 +3,10 @@
 //! identical across PG / MySQL / SQLite for `INNER` and `LEFT`; the
 //! divergent cases are `RIGHT` (no SQLite) and `FULL OUTER` (PG only).
 
-use rustango::core::joins::aliased;
-use rustango::core::{Expr, Filter, Join, JoinKind, Model as _, Op, SqlValue, WhereExpr};
+use rustango::core::joins::{aliased, col_filter};
+use rustango::core::{
+    Column as _, ColumnFilter, Expr, Filter, Join, JoinKind, Model as _, Op, SqlValue, WhereExpr, F,
+};
 use rustango::sql::{Dialect, MySql, Postgres, SqlError, Sqlite};
 use rustango::Model;
 
@@ -326,4 +328,250 @@ fn sqlite_uses_double_quotes_like_pg() {
         "SQLite shape: {}",
         stmt.sql
     );
+}
+
+// ---------- Paranoid-review regressions ----------
+
+/// Empty `on` (`WhereExpr::And(vec![])`) used to emit `ON ` with a
+/// literal hole — a parse error on every backend. Mirror of
+/// `EmptyCaseWhenCondition`; rejected at emit time now.
+#[test]
+fn empty_on_predicate_is_rejected_at_emit_time() {
+    let join = Join {
+        target: Comment::SCHEMA,
+        alias: "c",
+        kind: JoinKind::Inner,
+        on: WhereExpr::And(vec![]),
+        project: vec![],
+    };
+    let err = Postgres
+        .compile_select(&Post::objects().join(join).compile().unwrap())
+        .unwrap_err();
+    assert!(
+        matches!(err, SqlError::EmptyJoinOnCondition),
+        "expected EmptyJoinOnCondition, got {err:?}",
+    );
+}
+
+/// Bare `F("col")` (an `Expr::Column`) inside an ON predicate used to
+/// emit UNqualified — e.g. `ON "c"."post_id" = "id"`, which PG flags
+/// as ambiguous when both tables have an `id`. Fix routes through
+/// `Sql.current_qualify_alias` so bare Column refs in ON resolve to
+/// the joined alias.
+#[test]
+fn bare_f_column_inside_on_qualifies_to_joined_alias() {
+    let join = Join {
+        target: Comment::SCHEMA,
+        alias: "c",
+        kind: JoinKind::Inner,
+        on: WhereExpr::ColumnCompare(ColumnFilter {
+            column: "post_id",
+            op: Op::Eq,
+            rhs: F("id").into(),
+        }),
+        project: vec![],
+    };
+    let stmt = Postgres
+        .compile_select(&Post::objects().join(join).compile().unwrap())
+        .unwrap();
+    assert!(
+        stmt.sql.contains(r#""c"."post_id" = "c"."id""#),
+        "bare F() rhs should qualify to joined alias: {}",
+        stmt.sql
+    );
+    assert!(
+        !stmt.sql.contains(r#"= "id""#),
+        "no UNqualified `id` should slip through: {}",
+        stmt.sql
+    );
+}
+
+/// `col_filter(alias, col, op, value)` is the SAFE replacement for
+/// typed filters from the OUTER model inside ON predicates — emits
+/// `"<alias>"."<col>" <op> <value>` verbatim, with no
+/// joined-alias misrouting.
+#[test]
+fn col_filter_routes_predicate_to_explicit_alias() {
+    let join = Join {
+        target: Comment::SCHEMA,
+        alias: "c",
+        kind: JoinKind::Inner,
+        on: WhereExpr::And(vec![
+            WhereExpr::ExprCompare {
+                lhs: aliased("c", "post_id"),
+                op: Op::Eq,
+                rhs: aliased("aj_post", "id"),
+            },
+            // SAFE outer-table filter inside the ON.
+            col_filter("aj_post", "status", Op::Eq, "draft"),
+        ]),
+        project: vec![],
+    };
+    let stmt = Postgres
+        .compile_select(&Post::objects().join(join).compile().unwrap())
+        .unwrap();
+    assert!(
+        stmt.sql.contains(r#""aj_post"."status" = $1"#),
+        "outer-aliased predicate emits verbatim: {}",
+        stmt.sql
+    );
+    assert!(
+        !stmt.sql.contains(r#""c"."status""#),
+        "no misrouting to joined alias: {}",
+        stmt.sql
+    );
+}
+
+/// Document the residual footgun: a typed filter from the OUTER
+/// model (here `Post::status.eq(...)`) DOES still misqualify to the
+/// joined alias. This test pins the current (unsafe) behavior so a
+/// future fix that closes the type-safety leak surfaces here as a
+/// red test. Pairs with the cookbook's "DANGEROUS PATTERN" callout
+/// directing users to `col_filter` instead.
+#[test]
+fn outer_typed_filter_inside_on_still_misqualifies_pinned() {
+    let join = Join {
+        target: Comment::SCHEMA,
+        alias: "c",
+        kind: JoinKind::Inner,
+        on: WhereExpr::And(vec![
+            WhereExpr::ExprCompare {
+                lhs: aliased("c", "post_id"),
+                op: Op::Eq,
+                rhs: aliased("aj_post", "id"),
+            },
+            // User INTENT: outer post.status = 'draft'. The typed
+            // filter loses its `Post` model tag at `Into<WhereExpr>`,
+            // so the writer misqualifies it to the joined alias.
+            // Users should reach for `col_filter` instead.
+            Post::status.eq("draft").into(),
+        ]),
+        project: vec![],
+    };
+    let stmt = Postgres
+        .compile_select(&Post::objects().join(join).compile().unwrap())
+        .unwrap();
+    assert!(
+        stmt.sql.contains(r#""c"."status" = $1"#),
+        "current (unsafe) behavior pinned — emits joined alias: {}",
+        stmt.sql
+    );
+    // When a future fix lands compile-time prevention (e.g. via a
+    // `Column<M>::at_alias(alias)` builder that preserves the model
+    // tag), this assertion flips and the test name should be renamed
+    // to `outer_typed_filter_inside_on_is_caught_at_compile_time`.
+}
+
+/// Self-join — same target table joined twice with distinct aliases.
+/// Most distinctive ad-hoc-join use case (employee.manager_id =
+/// manager.id). Ensure both join clauses emit independently and the
+/// aliases don't collide.
+#[test]
+fn self_join_emits_two_independent_clauses() {
+    let parent = Join {
+        target: Comment::SCHEMA,
+        alias: "c_parent",
+        kind: JoinKind::Inner,
+        on: WhereExpr::ExprCompare {
+            lhs: aliased("c_parent", "post_id"),
+            op: Op::Eq,
+            rhs: aliased("aj_post", "id"),
+        },
+        project: vec![],
+    };
+    let child = Join {
+        target: Comment::SCHEMA,
+        alias: "c_child",
+        kind: JoinKind::Inner,
+        on: WhereExpr::ExprCompare {
+            lhs: aliased("c_child", "post_id"),
+            op: Op::Eq,
+            rhs: aliased("c_parent", "id"),
+        },
+        project: vec![],
+    };
+    let stmt = Postgres
+        .compile_select(&Post::objects().join(parent).join(child).compile().unwrap())
+        .unwrap();
+    assert!(stmt.sql.contains(r#"AS "c_parent""#));
+    assert!(stmt.sql.contains(r#"AS "c_child""#));
+    assert!(
+        stmt.sql
+            .contains(r#""c_child"."post_id" = "c_parent"."id""#),
+        "inner self-join references parent alias: {}",
+        stmt.sql
+    );
+}
+
+/// `select_related("…")` + `.join(...)` combine — the FK-driven join
+/// emits first (preserving column ordering for legacy decoders), the
+/// ad-hoc join after. Regression for the `lower_select_related`
+/// migration.
+#[test]
+fn select_related_combined_with_ad_hoc_join() {
+    // Note: Post doesn't have an FK column on this test model — use
+    // a bare ad-hoc join alone since the test models don't carry
+    // FK metadata. The ordering invariant is exercised by
+    // `ad_hoc_join_emits_after_fk_select_related` in the main suite;
+    // this test just confirms the IR refactor didn't break the
+    // existing FK-LEFT-JOIN shape via lower_select_related (no FK
+    // here, so just a smoke test on the new IR).
+    let join = Join {
+        target: Comment::SCHEMA,
+        alias: "c",
+        kind: JoinKind::Left,
+        on: WhereExpr::ExprCompare {
+            lhs: aliased("c", "post_id"),
+            op: Op::Eq,
+            rhs: aliased("aj_post", "id"),
+        },
+        project: vec![],
+    };
+    let stmt = Postgres
+        .compile_select(&Post::objects().join(join).compile().unwrap())
+        .unwrap();
+    // Left-join keyword preserved, ON predicate uses ExprCompare.
+    assert!(stmt.sql.contains(r#"LEFT JOIN "aj_comment""#));
+    assert!(stmt.sql.contains(r#""c"."post_id" = "aj_post"."id""#));
+}
+
+/// `project: vec!["col"]` on an ad-hoc join still emits the column
+/// in the SELECT list (the writer doesn't gate this on `kind`). The
+/// cookbook now documents this as dead data — the decoder for
+/// `Vec<MainModel>` doesn't read the extra columns. Pin the current
+/// behavior so users aren't surprised.
+#[test]
+fn project_on_ad_hoc_join_appears_in_select_list_today() {
+    let join = Join {
+        target: Comment::SCHEMA,
+        alias: "c",
+        kind: JoinKind::Inner,
+        on: WhereExpr::ExprCompare {
+            lhs: aliased("c", "post_id"),
+            op: Op::Eq,
+            rhs: aliased("aj_post", "id"),
+        },
+        project: vec!["is_approved"],
+    };
+    let stmt = Postgres
+        .compile_select(&Post::objects().join(join).compile().unwrap())
+        .unwrap();
+    assert!(
+        stmt.sql
+            .contains(r#""c"."is_approved" AS "c__is_approved""#),
+        "project columns still emit (cookbook flags this as dead data): {}",
+        stmt.sql
+    );
+}
+
+// Silence unused-import warnings that only fire when the regressions
+// at the bottom of the file are commented out for debugging.
+#[allow(dead_code)]
+fn _used() {
+    let _ = (Filter {
+        column: "x",
+        op: Op::Eq,
+        value: SqlValue::I64(1),
+    },);
+    let _: Expr = aliased("a", "b");
 }

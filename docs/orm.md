@@ -522,9 +522,22 @@ Post::objects()
 
 **Column qualification rules inside `on`:**
 
-- **Bare `Filter` / `ColumnFilter` columns** resolve to the joined alias (`<alias>` you passed). That's the natural reading because most of an ON predicate is about the joined table.
+- **Bare `Filter` / `ColumnFilter` columns + `F()` column refs** resolve to the joined alias (`<alias>` you passed). That's the natural reading because most of an ON predicate is about the joined table.
 - **`aliased(alias, col)`** emits `"<alias>"."<col>"` explicitly — use this for cross-references back to the outer table (`aliased("<outer_table>", "<col>")`) or to a previously joined alias.
 - **`WhereExpr::ExprCompare { lhs, op, rhs }`** is the right shape for column-vs-column comparisons across tables, since both sides take any `Expr`.
+
+> ⚠️ **DANGEROUS PATTERN — typed filters from the OUTER model inside `on`.**
+> `Post::status.eq("draft").into()` produces a `WhereExpr::Predicate(Filter { column: "status", ... })` and **drops the `Post` model tag** at the `Into<WhereExpr>` boundary. The auto-qualification rule above then misroutes that filter to the **joined alias**, not to `Post`. You get `"<joined_alias>"."status" = $N` — wrong table — and the compiler can't catch it. **Use [`joins::col_filter`] for predicates against any column whose table isn't the join's default alias:**
+>
+> ```rust
+> use rustango::core::joins::{aliased, col_filter};
+> use rustango::core::Op;
+>
+> // SAFE: explicit alias on the LHS.
+> col_filter("post", "status", Op::Eq, "draft")
+> ```
+>
+> Reserve bare typed filters (`Comment::is_approved.eq(true).into()`) for columns on the JOINED model only — never for outer-model columns.
 
 **JoinKind tri-dialect support:**
 
@@ -537,16 +550,27 @@ Post::objects()
 
 `Right` is easy to work around — swap operands and use `Left`. `Full` on MySQL is usually emulated with `(LEFT JOIN) UNION (RIGHT JOIN)` if you really need it.
 
+**Other emit-time errors:**
+
+- **Empty `on` predicate** (`WhereExpr::And(vec![])` or no `ExprCompare`s) is rejected with `SqlError::EmptyJoinOnCondition`. SQL requires at least one boolean predicate inside `ON`; the auto-`true` shorthand from top-level WHERE doesn't apply here.
+
+**`project` is currently dead data on ad-hoc joins.**
+
+The `Join.project` field tells the writer to emit `<alias>"."<col>" AS "<alias>__<col>"` columns in the SELECT list. Today only `select_related` actually decodes those (via the FK-target's full-row decoder); ad-hoc joins emit the columns but the `Vec<MainModel>` decoder ignores them, so populating `project` on an ad-hoc join just adds bytes to the wire. Leave it as `vec![]` until projection-narrowing + tuple-decoding land.
+
 **When to reach for ad-hoc joins:**
 
 | Need | Tool |
 |---|---|
 | Pull related rows along with the main row | `select_related` (Django shape) |
 | Filter main rows by a related-table predicate | `exists(...)` / `not_exists(...)` |
-| Need both joined columns AND a custom predicate | `.join(...)` |
+| Filter via INNER instead of LEFT, or with extra ON predicates | `.join(...)` |
+| Self-join (e.g. `employee.manager_id = manager.id`) | `.join(...)` |
 | Anti-join (rows in A with NO match in B) | `not_exists(...)` |
 
-`select_related` stays the right tool when the join is "follow this FK and project all its columns." Ad-hoc joins are the escape hatch when you need: non-FK join key, INNER instead of LEFT, an extra predicate inside the ON, a self-join, or no projection at all (just predicate-driven filtering).
+`select_related` stays the right tool when the join is "follow this FK and project all its columns." Ad-hoc joins are the escape hatch when you need: non-FK join key, INNER instead of LEFT, an extra predicate inside the ON, or a self-join.
+
+[`joins::col_filter`]: https://docs.rs/rustango/latest/rustango/core/joins/fn.col_filter.html
 
 [`WhereExpr`]: https://docs.rs/rustango/latest/rustango/core/enum.WhereExpr.html
 

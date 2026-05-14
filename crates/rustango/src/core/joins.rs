@@ -65,6 +65,8 @@
 //! [`SqlError::JoinKindNotSupported`]: crate::sql::SqlError::JoinKindNotSupported
 
 use super::expr::Expr;
+use super::query::{Op, WhereExpr};
+use super::SqlValue;
 
 /// Shorthand for [`Expr::AliasedColumn`]. The alias can be a join's
 /// explicit alias (the second arg to `.join(...)`) or the outer
@@ -72,6 +74,62 @@ use super::expr::Expr;
 #[must_use]
 pub fn aliased(alias: &'static str, column: &'static str) -> Expr {
     Expr::AliasedColumn { alias, column }
+}
+
+/// Safe predicate-builder for JOIN `on` clauses: emits
+/// `"<alias>"."<col>" <op> <value>`. Use this whenever filtering
+/// inside an `on` predicate against a column whose table isn't the
+/// join's default alias.
+///
+/// # Why prefer this over a bare typed filter
+///
+/// Inside an `on` predicate, the writer auto-qualifies bare
+/// `Filter` columns to the joined alias. If you write
+/// `Post::status.eq("draft").into()` — where `Post` is the *outer*
+/// model, not the joined one — the writer emits
+/// `"<joined_alias>"."status"`, **not** `"<post_table>"."status"`.
+/// The `TypedFilter<Post>` loses its model tag at the
+/// `Into<WhereExpr>` boundary, so the compiler can't catch this.
+///
+/// `col_filter` forces an explicit alias on the LHS by routing
+/// through [`Expr::AliasedColumn`] + [`WhereExpr::ExprCompare`], so
+/// the emitted SQL matches the call site verbatim:
+///
+/// ```ignore
+/// use rustango::core::joins::col_filter;
+/// use rustango::core::Op;
+///
+/// // ON c.post_id = post.id AND post.status = 'draft'
+/// let on = WhereExpr::And(vec![
+///     WhereExpr::ExprCompare {
+///         lhs: aliased("c", "post_id"),
+///         op: Op::Eq,
+///         rhs: aliased("post", "id"),
+///     },
+///     // Safe: explicitly qualifies to the outer table.
+///     col_filter("post", "status", Op::Eq, "draft"),
+/// ]);
+/// ```
+///
+/// Only binary-comparison ops (`Eq`, `Ne`, `Lt`, `Lte`, `Gt`, `Gte`)
+/// are meaningful here — other ops surface as
+/// [`SqlError::OpNotSupportedInDialect`] at emit time. For `IN` /
+/// `BETWEEN` / `IS NULL` against an aliased column, drop into a
+/// hand-rolled `WhereExpr` until a richer helper ships.
+///
+/// [`SqlError::OpNotSupportedInDialect`]: crate::sql::SqlError::OpNotSupportedInDialect
+#[must_use]
+pub fn col_filter(
+    alias: &'static str,
+    column: &'static str,
+    op: Op,
+    value: impl Into<SqlValue>,
+) -> WhereExpr {
+    WhereExpr::ExprCompare {
+        lhs: Expr::AliasedColumn { alias, column },
+        op,
+        rhs: Expr::Literal(value.into()),
+    }
 }
 
 #[cfg(test)]
@@ -88,5 +146,23 @@ mod tests {
                 column: "post_id",
             },
         );
+    }
+
+    #[test]
+    fn col_filter_wraps_into_expr_compare_with_aliased_lhs() {
+        let w = col_filter("post", "status", Op::Eq, "draft");
+        match w {
+            WhereExpr::ExprCompare {
+                lhs: Expr::AliasedColumn { alias, column },
+                op,
+                rhs: Expr::Literal(SqlValue::String(s)),
+            } => {
+                assert_eq!(alias, "post");
+                assert_eq!(column, "status");
+                assert_eq!(op, Op::Eq);
+                assert_eq!(s, "draft");
+            }
+            _ => panic!("expected ExprCompare with aliased LHS + literal RHS, got {w:?}"),
+        }
     }
 }

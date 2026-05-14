@@ -39,6 +39,14 @@ pub(super) struct Sql<'d> {
     /// query), and bare `Column` refs implicitly resolve against the
     /// top frame.
     pub scope_stack: Vec<&'static ModelSchema>,
+    /// Issue #80. When `Some`, bare `Expr::Column(name)` refs emitted
+    /// in the current scope are qualified as `"<alias>"."<name>"`
+    /// instead of just `"<name>"`. Set + restored around JOIN `ON`
+    /// emission so bare column references inside ON predicates
+    /// (e.g., `Expr::Column` from `F()`) resolve to the joined alias.
+    /// Unset everywhere else for backward compatibility with top-level
+    /// WHERE / UPDATE-SET emission shapes.
+    pub current_qualify_alias: Option<&'static str>,
 }
 
 impl<'d> Sql<'d> {
@@ -48,6 +56,7 @@ impl<'d> Sql<'d> {
             sql: String::new(),
             params: Vec::new(),
             scope_stack: Vec::new(),
+            current_qualify_alias: None,
         }
     }
 
@@ -57,6 +66,7 @@ impl<'d> Sql<'d> {
             sql: String::new(),
             params: Vec::with_capacity(cap),
             scope_stack: Vec::new(),
+            current_qualify_alias: None,
         }
     }
 
@@ -173,6 +183,13 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
                 });
             }
         };
+        // Empty `on` (e.g. `WhereExpr::And(vec![])`) is the legitimate
+        // "no WHERE filter" marker at the top of a SELECT/UPDATE, but
+        // inside an ON it would emit `ON ` with a literal hole — a
+        // parse error on every backend. Mirror of `EmptyCaseWhenCondition`.
+        if join.on.is_empty() {
+            return Err(SqlError::EmptyJoinOnCondition);
+        }
         b.sql.push(' ');
         b.sql.push_str(kind_kw);
         b.sql.push(' ');
@@ -181,10 +198,14 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
         b.write_ident(join.alias);
         b.sql.push_str(" ON ");
         // The ON predicate's unqualified `Filter` / `ColumnFilter`
-        // columns resolve to the joined alias; cross-references back
-        // to the outer (or to another joined alias) use
-        // `Expr::AliasedColumn`.
-        write_where_expr(b, &join.on, Some(join.alias), Some(join.target))?;
+        // columns and bare `Expr::Column` refs (via `F()`) resolve
+        // to the joined alias for the duration of this write. Cross-
+        // references back to the outer (or to another joined alias)
+        // use `Expr::AliasedColumn` to escape the default.
+        let prior_qualify = b.current_qualify_alias.replace(join.alias);
+        let on_result = write_where_expr(b, &join.on, Some(join.alias), Some(join.target));
+        b.current_qualify_alias = prior_qualify;
+        on_result?;
     }
 
     write_where_with_search(
@@ -491,7 +512,19 @@ fn write_expr(
             Ok(())
         }
         Expr::Column(name) => {
-            b.write_ident(name);
+            // When a JOIN-ON emission context has set
+            // `current_qualify_alias`, bare `Column` refs from `F()` /
+            // arithmetic / `eq_expr` rhs slots qualify to that alias —
+            // emits `"<alias>"."<col>"` instead of bare `"<col>"`.
+            // Outside that context (top-level WHERE, UPDATE-SET, etc.)
+            // the original unqualified emission is preserved for
+            // backward compatibility.
+            if let Some(alias) = b.current_qualify_alias {
+                let qualified = format!("{}.{}", b.d.quote_ident(alias), b.d.quote_ident(name),);
+                b.sql.push_str(&qualified);
+            } else {
+                b.write_ident(name);
+            }
             Ok(())
         }
         Expr::BinOp { left, op, right } => {
