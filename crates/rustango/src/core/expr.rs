@@ -80,12 +80,13 @@ pub enum BinOp {
     BitShr,
 }
 
-/// RHS expression — literal, column reference, or arithmetic tree.
+/// RHS expression — literal, column reference, arithmetic tree, or
+/// scalar function call.
 ///
 /// `Expr` is what the writer renders to the right side of `=` in an
 /// UPDATE assignment and to the right side of a column predicate in
 /// a WHERE clause. The variants are recursive so arbitrarily nested
-/// arithmetic is expressible.
+/// arithmetic and function calls are expressible.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     /// Bound value. Emitter pushes a parameter.
@@ -101,6 +102,78 @@ pub enum Expr {
         op: BinOp,
         right: Box<Expr>,
     },
+    /// Scalar function call — `FN(arg, arg, …)`. Variadic-arity is
+    /// folded into `args` so the writer doesn't switch per-fn on
+    /// argument count. Issue #2 (Database functions DSL); see
+    /// [`crate::core::funcs`] for the public builder API.
+    Function { kind: ScalarFn, args: Vec<Expr> },
+}
+
+/// Scalar database functions surfaced by [`crate::core::funcs`].
+///
+/// v1 ships the text + math + comparison subset (~17 functions). The
+/// emitter handles per-dialect divergence — `Concat` falls back to
+/// `||` on SQLite, `Greatest`/`Least` are emitted as MAX/MIN scalars
+/// on SQLite to match PG/MySQL semantics. Hash functions, trig, and
+/// `Cast` ship in a follow-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalarFn {
+    // --- Text (8) ---
+    /// `LOWER(s)` — lowercase a string.
+    Lower,
+    /// `UPPER(s)` — uppercase a string.
+    Upper,
+    /// `LENGTH(s)` — string length. Char count on PG (`length`),
+    /// byte count on MySQL (`LENGTH` — use `CHAR_LENGTH` for chars).
+    /// SQLite: `length()` returns char count for `TEXT`. v2 may
+    /// split this into `Length` (char) + `OctetLength` (byte).
+    Length,
+    /// `CONCAT(a, b, …)` — string concatenation. SQLite emits
+    /// `a || b || …` (the only portable form on pre-3.44 SQLite).
+    /// NULL handling: PG / SQLite return NULL on any NULL operand;
+    /// MySQL's `CONCAT` does the same — this matches.
+    Concat,
+    /// `SUBSTRING(s FROM start FOR length)` (PG) /
+    /// `SUBSTRING(s, start, length)` (MySQL) /
+    /// `substr(s, start, length)` (SQLite). All 1-indexed.
+    Substr,
+    /// `TRIM(s)` — strip leading + trailing whitespace.
+    Trim,
+    /// `LTRIM(s)` — strip leading whitespace.
+    LTrim,
+    /// `RTRIM(s)` — strip trailing whitespace.
+    RTrim,
+    /// `REPLACE(s, from, to)` — replace every occurrence.
+    Replace,
+
+    // --- Math (4) ---
+    /// `ABS(x)` — absolute value.
+    Abs,
+    /// `CEIL(x)` / `CEILING(x)` — ceiling.
+    Ceil,
+    /// `FLOOR(x)` — floor.
+    Floor,
+    /// `ROUND(x)` or `ROUND(x, n)` — bankers' rounding on PG, round-
+    /// half-away-from-zero on MySQL / SQLite. Document the caveat
+    /// for app code; for query work the precision matters less than
+    /// the cross-dialect call shape.
+    Round,
+
+    // --- Comparison / NULL handling (4) ---
+    /// `COALESCE(a, b, c, …)` — first non-NULL argument. Variadic.
+    /// Returns NULL only if every argument is NULL.
+    Coalesce,
+    /// `GREATEST(a, b, …)` — largest non-NULL value. PG and MySQL
+    /// have native operators; SQLite uses scalar `MAX(a, b, …)`.
+    /// NULL semantics: PG / SQLite return NULL if any operand is
+    /// NULL; MySQL ignores NULL. Caller wraps args in `COALESCE`
+    /// for consistent cross-dialect behaviour when nulls are
+    /// possible.
+    Greatest,
+    /// `LEAST(a, b, …)` — mirror of `Greatest`.
+    Least,
+    /// `NULLIF(a, b)` — `NULL` when `a == b`, else `a`. Universal.
+    NullIf,
 }
 
 impl Expr {

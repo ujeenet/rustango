@@ -484,7 +484,195 @@ fn write_expr(
             b.sql.push(')');
             Ok(())
         }
+        Expr::Function { kind, args } => write_function(b, *kind, args),
     }
+}
+
+/// Emit a scalar function call. Most variants are straight `FN(args…)`
+/// across all three dialects; the divergent ones (`Concat` on SQLite,
+/// `Greatest`/`Least` on SQLite, `Substr` PG `FROM…FOR…` form) get
+/// special-cased.
+#[allow(clippy::too_many_lines)] // Per-fn arms are inherently linear.
+fn write_function(
+    b: &mut Sql<'_>,
+    kind: crate::core::ScalarFn,
+    args: &[crate::core::Expr],
+) -> Result<(), SqlError> {
+    use crate::core::ScalarFn as F;
+    match kind {
+        // -------- text: simple FN(arg) --------
+        F::Lower => write_call(b, "LOWER", args),
+        F::Upper => write_call(b, "UPPER", args),
+        F::Length => write_call(b, "LENGTH", args),
+        F::Trim => write_call(b, "TRIM", args),
+        F::LTrim => write_call(b, "LTRIM", args),
+        F::RTrim => write_call(b, "RTRIM", args),
+
+        // -------- text: 3-ary FN(s, from, to) --------
+        F::Replace => {
+            if args.len() != 3 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "REPLACE",
+                    expected: "3",
+                    got: args.len(),
+                });
+            }
+            write_call(b, "REPLACE", args)
+        }
+
+        // -------- CONCAT: PG/MySQL native, SQLite `||` --------
+        F::Concat => {
+            if args.is_empty() {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "CONCAT",
+                    expected: ">= 1",
+                    got: 0,
+                });
+            }
+            if b.d.name() == "sqlite" {
+                // `||` chain. Parenthesize so precedence is unambiguous
+                // when wrapped in another expression.
+                b.sql.push('(');
+                let mut first = true;
+                for a in args {
+                    if !first {
+                        b.sql.push_str(" || ");
+                    }
+                    first = false;
+                    write_expr(b, a, None)?;
+                }
+                b.sql.push(')');
+                Ok(())
+            } else {
+                write_call(b, "CONCAT", args)
+            }
+        }
+
+        // -------- SUBSTR: PG uses `FROM…FOR…`, MySQL/SQLite use commas --------
+        F::Substr => {
+            if args.len() != 3 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "SUBSTRING",
+                    expected: "3",
+                    got: args.len(),
+                });
+            }
+            if b.d.name() == "postgres" {
+                b.sql.push_str("SUBSTRING(");
+                write_expr(b, &args[0], None)?;
+                b.sql.push_str(" FROM ");
+                write_expr(b, &args[1], None)?;
+                b.sql.push_str(" FOR ");
+                write_expr(b, &args[2], None)?;
+                b.sql.push(')');
+                Ok(())
+            } else {
+                // MySQL spells it SUBSTRING; SQLite spells it substr.
+                // Both accept the comma form.
+                let name = if b.d.name() == "mysql" {
+                    "SUBSTRING"
+                } else {
+                    "SUBSTR"
+                };
+                write_call(b, name, args)
+            }
+        }
+
+        // -------- math: simple unary --------
+        F::Abs => write_call(b, "ABS", args),
+        F::Floor => write_call(b, "FLOOR", args),
+        F::Ceil => {
+            // MySQL accepts both `CEIL` and `CEILING`; PG / SQLite use
+            // `CEIL` (SQLite 3.35+). Emit `CEIL` everywhere for the
+            // narrowest portable token.
+            write_call(b, "CEIL", args)
+        }
+        F::Round => {
+            // 1- or 2-ary. The shape is identical across PG / MySQL /
+            // SQLite at the SQL surface; precision-arg type semantics
+            // diverge (PG `numeric` only), documented at the builder.
+            if args.is_empty() || args.len() > 2 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "ROUND",
+                    expected: "1 or 2",
+                    got: args.len(),
+                });
+            }
+            write_call(b, "ROUND", args)
+        }
+
+        // -------- comparison / NULL --------
+        F::Coalesce => {
+            if args.is_empty() {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "COALESCE",
+                    expected: ">= 1",
+                    got: 0,
+                });
+            }
+            write_call(b, "COALESCE", args)
+        }
+        F::Greatest => {
+            if args.is_empty() {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "GREATEST",
+                    expected: ">= 1",
+                    got: 0,
+                });
+            }
+            // SQLite has no GREATEST keyword. Its scalar `MAX(a, b, …)`
+            // (distinct from the aggregate `MAX(col)` — disambiguated
+            // by argument count) is the portable equivalent.
+            let name = if b.d.name() == "sqlite" {
+                "MAX"
+            } else {
+                "GREATEST"
+            };
+            write_call(b, name, args)
+        }
+        F::Least => {
+            if args.is_empty() {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "LEAST",
+                    expected: ">= 1",
+                    got: 0,
+                });
+            }
+            let name = if b.d.name() == "sqlite" {
+                "MIN"
+            } else {
+                "LEAST"
+            };
+            write_call(b, name, args)
+        }
+        F::NullIf => {
+            if args.len() != 2 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "NULLIF",
+                    expected: "2",
+                    got: args.len(),
+                });
+            }
+            write_call(b, "NULLIF", args)
+        }
+    }
+}
+
+/// Standard `NAME(arg, arg, …)` emit. Used by every function variant
+/// whose dialect emission is identical across PG / MySQL / SQLite.
+fn write_call(b: &mut Sql<'_>, name: &str, args: &[crate::core::Expr]) -> Result<(), SqlError> {
+    b.sql.push_str(name);
+    b.sql.push('(');
+    let mut first = true;
+    for a in args {
+        if !first {
+            b.sql.push_str(", ");
+        }
+        first = false;
+        write_expr(b, a, None)?;
+    }
+    b.sql.push(')');
+    Ok(())
 }
 
 // ====================================================================

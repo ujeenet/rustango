@@ -7,6 +7,7 @@ mod column;
 mod error;
 mod expr;
 mod field_type;
+pub mod funcs;
 mod query;
 mod schema;
 mod validate;
@@ -14,7 +15,7 @@ mod value;
 
 pub use column::{Column, TypedAssignment, TypedExpr, TypedFilter};
 pub use error::QueryError;
-pub use expr::{BinOp, Expr, F};
+pub use expr::{BinOp, Expr, ScalarFn, F};
 pub use field_type::FieldType;
 pub use query::{
     AggregateExpr, AggregateQuery, Assignment, BulkInsertQuery, BulkUpdateQuery, ColumnFilter,
