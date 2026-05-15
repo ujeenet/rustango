@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use rustango::migrate::{
-    self, append_data_op, file, make_data_migration, manage, DataOp, MigrateError, Migration,
-    Operation, SchemaChange, SchemaSnapshot, TableSnapshot,
+    self, append_data_op, file, make_data_migration, manage, MigrateError, Migration, Operation,
+    SchemaChange, SchemaSnapshot, TableSnapshot,
 };
 use rustango::sql::sqlx::{self, PgPool, Row};
 

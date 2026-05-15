@@ -10,8 +10,12 @@
 //! existing row instead of inserting a duplicate.
 
 #![cfg(feature = "tenancy")]
+// The legacy `ensure_tables(&PgPool)` is intentionally exercised
+// below — these tests cover the upsert behaviour, not the migration
+// path that superseded it.
+#![allow(deprecated)]
 
-use rustango::core::{Column as _, Model as _};
+use rustango::core::Column as _;
 use rustango::sql::sqlx;
 use rustango::sql::{Auto, Fetcher};
 use rustango::tenancy::permissions::{

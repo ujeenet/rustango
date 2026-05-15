@@ -24,7 +24,7 @@
 #![cfg(all(feature = "tenancy", feature = "sqlite"))]
 
 use rustango::core::Column as _;
-use rustango::sql::{sqlx, Auto, Fetcher as _, FetcherPool as _, Pool};
+use rustango::sql::{sqlx, Auto, FetcherPool as _, Pool};
 use rustango::tenancy::Org;
 
 const BOOTSTRAP_SQL: &str = r#"
