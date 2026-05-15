@@ -422,6 +422,80 @@ pub struct SelectQuery {
     /// syntax (transaction-scope locks are implicit), so the writer
     /// no-ops on that backend.
     pub lock_mode: Option<LockMode>,
+    /// Set-algebra branches that combine with this query — Django's
+    /// `.union(other_qs, all=)` / `.intersection(other_qs)` /
+    /// `.difference(other_qs)`. Issue #25. Empty (default) emits a
+    /// plain `SELECT …`. Non-empty wraps every branch in parens and
+    /// joins them with the matching keyword:
+    ///
+    /// ```text
+    /// (SELECT … this query …)
+    /// UNION [ALL] | INTERSECT | EXCEPT
+    /// (SELECT … branch_1 …)
+    /// …
+    /// ORDER BY …      ← outer order_by applies to the whole compound
+    /// LIMIT N         ← outer limit/offset apply to the combined result
+    /// ```
+    ///
+    /// Each branch keeps its own WHERE / ORDER BY / LIMIT inside the
+    /// parens. The compound's outer `order_by` / `limit` / `offset` /
+    /// `lock_mode` apply to the merged result.
+    pub compound: Vec<CompoundBranch>,
+}
+
+/// One branch of a set-algebra compound query. Issue #25.
+#[derive(Debug, Clone)]
+pub struct CompoundBranch {
+    /// `UNION` / `UNION ALL` / `INTERSECT` / `EXCEPT`.
+    pub op: SetOp,
+    /// The branch itself — a complete `SelectQuery` whose projection
+    /// must match the outer query's column shape (same model).
+    pub query: Box<SelectQuery>,
+}
+
+/// SQL set-algebra operator — Django's
+/// `QuerySet.union(all=)` / `.intersection()` / `.difference()`.
+/// Issue #25.
+///
+/// Tri-dialect availability:
+/// - **Postgres**: all four ops.
+/// - **SQLite**: all four ops.
+/// - **MySQL 8.0+**: `UNION` / `UNION ALL` only. `INTERSECT` / `EXCEPT`
+///   landed in MySQL 8.0.31; older versions return a syntax error
+///   from the driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetOp {
+    /// `UNION` — combine + deduplicate.
+    Union,
+    /// `UNION ALL` — combine, keep duplicates. Cheaper than `UNION`
+    /// because no DISTINCT pass.
+    UnionAll,
+    /// `INTERSECT` — rows present in every branch.
+    Intersection,
+    /// `EXCEPT` — rows in the first branch but not the others
+    /// (Django's `.difference()`).
+    Difference,
+}
+
+impl SetOp {
+    /// SQL keyword for this operator.
+    #[must_use]
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Union => "UNION",
+            Self::UnionAll => "UNION ALL",
+            Self::Intersection => "INTERSECT",
+            Self::Difference => "EXCEPT",
+        }
+    }
+}
+
+/// Manual PartialEq for `CompoundBranch` — nests `SelectQuery` (which
+/// has its own ptr-eq impl on `ModelSchema`).
+impl PartialEq for CompoundBranch {
+    fn eq(&self, other: &Self) -> bool {
+        self.op == other.op && self.query == other.query
+    }
 }
 
 /// `SELECT … FOR UPDATE` row-lock options — Django's
@@ -475,6 +549,7 @@ impl PartialEq for SelectQuery {
             && self.limit == other.limit
             && self.offset == other.offset
             && self.lock_mode == other.lock_mode
+            && self.compound == other.compound
     }
 }
 

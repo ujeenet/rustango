@@ -134,9 +134,87 @@ pub(super) fn null_cast_for(
 
 pub(super) fn write_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
     b.scope_stack.push(query.model);
-    let result = write_select_inner(b, query);
+    let result = if query.compound.is_empty() {
+        write_select_inner(b, query)
+    } else {
+        write_compound_select(b, query)
+    };
     b.scope_stack.pop();
     result
+}
+
+/// Emit a set-algebra compound SELECT (issue #25). Layout:
+///
+/// ```text
+/// (SELECT … this query …)
+/// UNION [ALL] | INTERSECT | EXCEPT
+/// (SELECT … branch_1 …)
+/// …
+/// ORDER BY …    -- outer order_by, applied AFTER the union/intersect/except
+/// LIMIT N
+/// OFFSET M
+/// FOR UPDATE …  -- outer lock_mode
+/// ```
+///
+/// Each branch is rendered in parens so a per-branch `ORDER BY`/`LIMIT`
+/// stays inside the parens (required by PG/SQLite SQL grammar; MySQL
+/// is more forgiving but the parens harm nothing). The OUTER
+/// SelectQuery's `order_by`/`limit`/`offset`/`lock_mode` get emitted
+/// AFTER the last branch closes, so they apply to the whole merged
+/// result.
+///
+/// The OUTER SelectQuery's own `where_clause` / `joins` / `search`
+/// apply to ITS branch (the first one in the compound, since the
+/// outer is itself a complete `SelectQuery`).
+fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
+    // First branch: the outer query itself, wrapped in parens. Build
+    // a copy with the compound stripped + the outer order_by / limit
+    // / offset / lock_mode stripped (those apply to the WHOLE
+    // compound, not the head branch).
+    let head = SelectQuery {
+        model: query.model,
+        where_clause: query.where_clause.clone(),
+        search: query.search.clone(),
+        joins: query.joins.clone(),
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        lock_mode: None,
+        compound: Vec::new(),
+    };
+    b.sql.push('(');
+    write_select_inner(b, &head)?;
+    b.sql.push(')');
+
+    for branch in &query.compound {
+        b.sql.push(' ');
+        b.sql.push_str(branch.op.keyword());
+        b.sql.push_str(" (");
+        // Push a scope frame for the branch so any subqueries inside
+        // resolve `OuterRef` correctly. write_select handles the
+        // push/pop on the outermost call but recursive branches
+        // need their own frame.
+        b.scope_stack.push(branch.query.model);
+        let r = if branch.query.compound.is_empty() {
+            write_select_inner(b, &branch.query)
+        } else {
+            write_compound_select(b, &branch.query)
+        };
+        b.scope_stack.pop();
+        r?;
+        b.sql.push(')');
+    }
+
+    // Outer ORDER BY / LIMIT / OFFSET apply to the merged result.
+    // No qualify (the compound's "table" is the merged resultset, not
+    // a join target).
+    write_order_limit_offset(b, &query.order_by, query.limit, query.offset, None)?;
+
+    if let Some(lock) = &query.lock_mode {
+        write_lock_clause(b, lock);
+    }
+
+    Ok(())
 }
 
 fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {

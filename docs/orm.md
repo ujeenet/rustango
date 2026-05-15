@@ -250,6 +250,54 @@ Calling `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` without a prio
 
 **Must run inside a transaction.** `FOR UPDATE` outside a tx is a no-op on Postgres (the implicit single-statement tx releases the lock immediately) and an error on MySQL. Pair with [`crate::sql::transaction`] / `pool.begin()`.
 
+### Set algebra — `.union()` / `.intersection()` / `.difference()`
+
+Django's [`QuerySet.union(all=)`](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#union) / `.intersection()` / `.difference()` — issue #25. Combine multiple querysets over the same model with SQL set operators.
+
+```rust
+// Posts that are EITHER drafts OR currently in review.
+let inbox: Vec<Post> = Post::objects()
+    .where_(Post::status.eq("draft"))
+    .union(Post::objects().where_(Post::status.eq("review")))
+    .order_by(&[("created_at", true)])
+    .limit(50)
+    .fetch(&pool).await?;
+```
+
+**Builder methods**:
+
+| Method | SQL | Semantic |
+|---|---|---|
+| `.union(other)` | `UNION` | Combine + deduplicate |
+| `.union_all(other)` | `UNION ALL` | Combine, keep duplicates (cheaper, no DISTINCT pass) |
+| `.intersection(other)` | `INTERSECT` | Rows in BOTH querysets |
+| `.difference(other)` | `EXCEPT` | Rows in first queryset but NOT others |
+
+Every method takes `QuerySet<T>` — both branches must target the same model `T`, so the column shape matches by construction (verified at compile time by Rust's generics). Calls accumulate; mixing operators in one chain is allowed (`a.union(b).intersection(c)` evaluates left-to-right per SQL standard).
+
+**Outer modifiers apply to the merged result**:
+
+```rust
+// Outer .order_by() / .limit() / .offset() / .select_for_update()
+// set AFTER the union apply to the combined resultset, NOT per-branch.
+let page: Vec<Post> = qs_a
+    .union(qs_b)
+    .union(qs_c)
+    .order_by(&[("id", false)])    // sorts the merged rows
+    .limit(20)                     // caps the merged count
+    .offset(40)                    // skips into the merged result
+    .fetch(&pool).await?;
+
+// Per-branch ORDER BY / LIMIT stay INSIDE the branch's parens:
+let mixed = qs_a
+    .union(qs_b.order_by(&[("id", true)]).limit(5))   // branch picks its top 5
+    .fetch(&pool).await?;
+```
+
+**Tri-dialect**: Postgres + SQLite support all four operators on every version rustango supports. MySQL 8.0+ supports `UNION`/`UNION ALL`; `INTERSECT`/`EXCEPT` landed in MySQL 8.0.31. Older MySQL versions surface the driver's syntax error at fetch time — there's no client-side gate.
+
+**Error path on the typed builder**: `.union(other_qs)` (and `.intersection()` / `.difference()`) compiles the branch eagerly and panics if the branch fails to compile (typo'd column, etc.). For fallible composition where the caller wants a `Result`, compile the branch first and pass it via `.with_compound(SetOp::Union, branch)` — one generic entry point covers every operator. The panic shape matches Django's: a bad branch is a programmer error, not a runtime data condition.
+
 ---
 
 ## F() expressions + database functions

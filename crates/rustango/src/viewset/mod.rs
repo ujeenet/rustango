@@ -909,6 +909,7 @@ async fn handle_list(
                 limit: Some(page_size),
                 offset: Some(offset),
                 lock_mode: None,
+                compound: vec![],
             };
             let count_q = CountQuery {
                 model: state.vs.schema,
@@ -1038,6 +1039,7 @@ async fn handle_list_cursor(
         limit: Some(page_size + 1),
         offset: None,
         lock_mode: None,
+        compound: vec![],
     };
     let rows = match acq.select_rows_as_json(&select_q, &fields).await {
         Ok(r) => r,
@@ -1128,6 +1130,7 @@ async fn handle_retrieve(
         limit: Some(1),
         offset: None,
         lock_mode: None,
+        compound: vec![],
     };
 
     let fields = state.effective_fields();
@@ -1364,6 +1367,7 @@ async fn fetch_by_pk(
         limit: Some(1),
         offset: None,
         lock_mode: None,
+        compound: vec![],
     };
     let _ = state;
     acq.select_one_as_json(&select_q, fields)
