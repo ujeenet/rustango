@@ -3399,9 +3399,36 @@ where
     /// the extended protocol with no offset reseek. The chunker is the
     /// simple choice that works on every backend.
     ///
+    /// **Concurrent-write hazard.** Each chunk is its own query, so
+    /// rows inserted ahead of the current offset between fetches can
+    /// be skipped, and rows deleted can shift a row down into the
+    /// next chunk and be returned twice. If the table is being
+    /// written concurrently while iterating, wrap the whole drain in
+    /// a snapshot-isolation transaction (PG / SQLite:
+    /// `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`; pair with
+    /// `pool.begin()`). For read-only / append-only tables — the
+    /// usual export use case — this isn't a concern.
+    ///
+    /// **`select_for_update()` does NOT propagate.** Row locks
+    /// acquired by a `.select_for_update()` call on the queryset are
+    /// released between chunks because each chunk runs in its own
+    /// implicit transaction. To hold the locks for the full drain,
+    /// wrap iteration in `pool.begin()` and call `.fetch_on(&mut *tx)`
+    /// against the lock-scoped tx instead of using the chunker.
+    ///
     /// # Errors
     /// Returns [`QueryError`] if the queryset fails to compile.
+    ///
+    /// # Panics
+    /// If `chunk_size <= 0`. Zero or negative chunk sizes silently
+    /// yield no rows, which is almost always a programmer error
+    /// (e.g. `iterator(unchecked_user_input as i64)`); the assert
+    /// surfaces it loudly.
     pub fn iterator(self, chunk_size: i64) -> Result<ChunkedIter<T>, crate::core::QueryError> {
+        assert!(
+            chunk_size > 0,
+            "QuerySet::iterator: chunk_size must be > 0; got {chunk_size}"
+        );
         let query = self.compile()?;
         Ok(ChunkedIter {
             query,
@@ -3782,12 +3809,57 @@ where
     /// # Errors
     /// As [`select_rows_pool_with_related`].
     pub async fn next_chunk(&mut self, pool: &Pool) -> Result<Option<Vec<T>>, ExecError> {
-        // Drain any rows left in the per-row buffer first.
-        let buffered: Vec<T> = self.buffer.drain(..).collect();
-        if !buffered.is_empty() {
+        // Drain any rows left in the per-row buffer first — they were
+        // pre-fetched by an earlier `next_row` call and need to come
+        // out before any new DB fetch.
+        if !self.buffer.is_empty() {
+            let buffered: Vec<T> = self.buffer.drain(..).collect();
             self.seen += buffered.len() as i64;
             return Ok(Some(buffered));
         }
+        match self.fetch_next_chunk(pool).await? {
+            Some(rows) => {
+                self.seen += rows.len() as i64;
+                Ok(Some(rows))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Yield one row at a time, buffering an internal chunk between
+    /// calls. Returns `Ok(None)` when iteration is done.
+    ///
+    /// O(1) per row — uses `VecDeque::pop_front` against the internal
+    /// buffer, refilling from the next chunk only when empty.
+    ///
+    /// # Errors
+    /// As [`Self::next_chunk`].
+    pub async fn next_row(&mut self, pool: &Pool) -> Result<Option<T>, ExecError> {
+        if let Some(row) = self.buffer.pop_front() {
+            self.seen += 1;
+            return Ok(Some(row));
+        }
+        match self.fetch_next_chunk(pool).await? {
+            Some(rows) => {
+                self.buffer.extend(rows);
+                let row = self.buffer.pop_front();
+                if row.is_some() {
+                    self.seen += 1;
+                }
+                Ok(row)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Shared fetch path for [`Self::next_chunk`] / [`Self::next_row`].
+    /// Clones the compiled query, rotates `LIMIT`/`OFFSET` for this
+    /// chunk, runs the fetch, advances `offset`, and flips the
+    /// `exhausted` flag when the chunk comes back short or empty.
+    /// Does NOT touch `self.seen` — that's the caller's
+    /// responsibility because the row-by-row path counts as rows pop
+    /// out of the buffer, not as the chunk arrives.
+    async fn fetch_next_chunk(&mut self, pool: &Pool) -> Result<Option<Vec<T>>, ExecError> {
         if self.exhausted {
             return Ok(None);
         }
@@ -3806,48 +3878,7 @@ where
             self.exhausted = true;
         }
         self.offset += n;
-        self.seen += n;
         Ok(Some(rows))
-    }
-
-    /// Yield one row at a time, buffering an internal chunk between
-    /// calls. Returns `Ok(None)` when iteration is done.
-    ///
-    /// O(1) per row — uses `VecDeque::pop_front` against the internal
-    /// buffer, refilling from the next chunk only when empty.
-    ///
-    /// # Errors
-    /// As [`Self::next_chunk`].
-    pub async fn next_row(&mut self, pool: &Pool) -> Result<Option<T>, ExecError> {
-        if let Some(row) = self.buffer.pop_front() {
-            self.seen += 1;
-            return Ok(Some(row));
-        }
-        if self.exhausted {
-            return Ok(None);
-        }
-        // Fetch a fresh chunk directly (bypass next_chunk to avoid
-        // its buffer-drain branch, which would only confuse the
-        // accounting here).
-        let mut q = self.query.clone();
-        q.limit = Some(self.chunk_size);
-        q.offset = Some(self.offset);
-        let rows = select_rows_pool_with_related::<T>(pool, &q).await?;
-        let n = rows.len() as i64;
-        if rows.is_empty() {
-            self.exhausted = true;
-            return Ok(None);
-        }
-        if n < self.chunk_size {
-            self.exhausted = true;
-        }
-        self.offset += n;
-        self.buffer.extend(rows);
-        let row = self.buffer.pop_front();
-        if row.is_some() {
-            self.seen += 1;
-        }
-        Ok(row)
     }
 
     /// Cumulative count of rows yielded so far across both

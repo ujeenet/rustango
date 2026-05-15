@@ -170,6 +170,7 @@ async fn mixed_next_row_and_next_chunk_preserve_order() {
         values.push(iter.next_row(&pool).await.unwrap().unwrap().value);
     }
     assert_eq!(values, (0..50).collect::<Vec<i64>>());
+    assert_eq!(iter.rows_seen(), 50, "mid-iteration row count");
 
     // Now switch to next_chunk — it should first drain the 50
     // buffered rows as one chunk, then continue with fresh DB

@@ -327,6 +327,22 @@ while let Some(post) = iter.next_row(&pool).await? {
 
 Both `.rows_seen()` (cumulative count) and `.is_exhausted()` (post-drain flag) are available for progress reporting and termination checks.
 
+**Concurrent-write hazard.** Each chunk is a separate query, so rows inserted/deleted between chunks can be skipped or duplicated (the classic OFFSET-pagination "windowing" problem). For read-only / append-only tables — the typical export use case — this isn't a concern. For tables being written concurrently, wrap iteration in a snapshot-isolation transaction so every chunk sees the same view:
+
+```rust
+// Pseudo — apply ISO level then run the iteration inside the tx.
+let mut tx = pool.begin().await?;
+sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+    .execute(&mut *tx).await?;
+// ... iterate using next_chunk_on(&mut *tx) etc., or compile to a
+// SelectQuery and run it directly through select_rows_on per chunk.
+tx.commit().await?;
+```
+
+**`select_for_update()` doesn't propagate across chunks.** Row locks held by `.select_for_update()` are released at the end of each chunk's implicit transaction. To hold the locks across the whole drain, open one `pool.begin()` transaction and run the locking query inside it via `.fetch_on(&mut *tx)` — at that point you're outside the chunker API entirely.
+
+**`chunk_size` must be > 0.** Zero or negative values panic. Pick a value that fits your row-size budget (Django's default is `2000`; reasonable for narrow rows, lower for wide TEXT/JSONB columns).
+
 ---
 
 ## F() expressions + database functions
