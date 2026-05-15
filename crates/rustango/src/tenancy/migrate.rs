@@ -286,12 +286,12 @@ pub async fn migrate_registry_pool(
     // catalog — the operator console's audit log + permissions UI
     // consult it to resolve `entity_table` strings back to a stable
     // per-model identifier. Bi-dialect via
-    // `contenttypes::ensure_seeded_pool` (v0.34 slice 1).
-    if let Err(e) = crate::contenttypes::ensure_seeded_pool(registry).await {
+    // `contenttypes::ensure_seeded` (v0.34 slice 1).
+    if let Err(e) = crate::contenttypes::ensure_seeded(registry).await {
         tracing::warn!(
             target: "crate::tenancy",
             error = %e,
-            "contenttypes::ensure_seeded_pool failed for registry pool",
+            "contenttypes::ensure_seeded failed for registry pool",
         );
     }
     info!(
@@ -512,8 +512,8 @@ where
     if let Err(e) = super::permissions::auto_create_permissions_pool(&inner_pool).await {
         tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "auto_create_permissions_pool failed for database-mode tenant");
     }
-    if let Err(e) = crate::contenttypes::ensure_seeded_pool(&inner_pool).await {
-        tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded_pool failed for database-mode tenant");
+    if let Err(e) = crate::contenttypes::ensure_seeded(&inner_pool).await {
+        tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for database-mode tenant");
     }
     if let Err(e) = super::auth_backends::ensure_api_keys_table_pool(&inner_pool).await {
         tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "ensure_api_keys_table_pool failed for database-mode tenant");
@@ -592,7 +592,7 @@ async fn run_for_one_tenant(
             // (audit log, generic FKs, permissions UI) consults.
             // Idempotent; pre-existing rows are unchanged thanks
             // to the UNIQUE(app_label, model_name) constraint.
-            if let Err(e) = crate::contenttypes::ensure_seeded(&pool).await {
+            if let Err(e) = crate::contenttypes::ensure_seeded(&pool.clone().into()).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for schema-mode tenant");
             }
             if let Err(e) = super::auth_backends::ensure_api_keys_table(&pool).await {
@@ -615,7 +615,9 @@ async fn run_for_one_tenant(
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "auto_create_permissions failed for database-mode tenant");
             }
             // (#89) See schema-mode comment above.
-            if let Err(e) = crate::contenttypes::ensure_seeded(tenant_pool.pool()).await {
+            if let Err(e) =
+                crate::contenttypes::ensure_seeded(&tenant_pool.pool().clone().into()).await
+            {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for database-mode tenant");
             }
             if let Err(e) = super::auth_backends::ensure_api_keys_table(tenant_pool.pool()).await {

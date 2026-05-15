@@ -902,7 +902,7 @@ pub(crate) async fn detail_view(
     // F.4b — append one row per #[rustango(generic_fk(...))]
     // declaration. Reads the (content_type_id, object_pk) pair off
     // the row and renders a clickable target link via
-    // `contenttypes::render_generic_fk_link_pool`. Stale references
+    // `contenttypes::render_generic_fk_link`. Stale references
     // (CT not seeded, target deleted) render as a `(ct=N, pk=M)`
     // fallback rather than failing the whole page.
     //
@@ -919,7 +919,7 @@ pub(crate) async fn detail_view(
             .and_then(serde_json::Value::as_i64)
             .unwrap_or_default();
         let g = crate::contenttypes::GenericForeignKey::new(ct_id, object_pk);
-        let html = crate::contenttypes::render_generic_fk_link_pool(&state.pool, g)
+        let html = crate::contenttypes::render_generic_fk_link(&state.pool, g)
             .await
             .unwrap_or_else(|_| format!("<em>(ct={ct_id}, pk={object_pk})</em>"));
         cells_ctx.push(serde_json::json!({

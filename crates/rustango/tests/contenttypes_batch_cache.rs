@@ -36,7 +36,7 @@ async fn sqlite_pool() -> Pool {
             .await
             .expect("sqlite memory pool"),
     );
-    contenttypes::ensure_seeded_pool(&pool)
+    contenttypes::ensure_seeded(&pool)
         .await
         .expect("ensure_seeded_pool");
     pool
@@ -104,7 +104,7 @@ async fn get_for_models_empty_input_is_empty_output() {
 async fn get_by_natural_key_matches_uncached() {
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
-    let uncached = ContentType::by_natural_key_pool(&pool, "ct_bc_blog", "post")
+    let uncached = ContentType::by_natural_key(&pool, "ct_bc_blog", "post")
         .await
         .expect("uncached lookup")
         .expect("Post is seeded");
@@ -163,7 +163,7 @@ async fn clear_cache_forces_db_round_trip_again() {
             .await
             .expect("drop");
     }
-    contenttypes::ensure_table_pool(&pool)
+    contenttypes::ensure_table(&pool)
         .await
         .expect("recreate empty");
 
@@ -208,7 +208,7 @@ async fn negative_results_are_not_cached() {
 }
 
 /// `get_for_model::<T>` returns the same row as the uncached
-/// `for_model_pool::<T>` and uses the natural-key cache.
+/// `for_model::<T>` and uses the natural-key cache.
 #[tokio::test]
 async fn get_for_model_resolves_type() {
     contenttypes::clear_cache();
@@ -217,7 +217,7 @@ async fn get_for_model_resolves_type() {
         .await
         .expect("cached for_model")
         .expect("Post is seeded");
-    let uncached = ContentType::for_model_pool::<Post>(&pool)
+    let uncached = ContentType::for_model::<Post>(&pool)
         .await
         .expect("uncached for_model")
         .expect("Post is seeded");
