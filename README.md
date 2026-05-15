@@ -1069,17 +1069,31 @@ let inserted = rustango::contenttypes::ensure_seeded(&pool).await?;
 ```rust
 use rustango::contenttypes::ContentType;
 
-// By Rust type
-let ct = ContentType::for_model::<Post>(&pool).await?;       // Option<ContentType>
+// By Rust type (uncached)
+let ct = ContentType::for_model_pool::<Post>(&pool).await?;  // Option<ContentType>
 
-// By natural key (parsed permission codenames, admin URLs, etc.)
-let ct = ContentType::by_natural_key(&pool, "blog", "post").await?;
+// By Rust type (cached — issue #35)
+let ct = ContentType::get_for_model::<Post>(&pool).await?;
 
-// By id (FK joins from audit log / permissions / generic FK rows)
-let ct = ContentType::by_id(&pool, 7).await?;
+// By natural key — uncached and cached forms
+let ct = ContentType::by_natural_key_pool(&pool, "blog", "post").await?;
+let ct = ContentType::get_by_natural_key(&pool, "blog", "post").await?;
+
+// By id
+let ct = ContentType::by_id_pool(&pool, 7).await?;
+
+// Batch lookup (issue #35) — one DB round trip for N models
+use std::collections::HashMap;
+let cts: HashMap<(String, String), ContentType> = ContentType::get_for_models(
+    &pool,
+    [("blog".to_string(), "post".to_string()), ("auth".to_string(), "user".to_string())],
+).await?;
+
+// Clear the process-wide cache (e.g. after a migration adds models)
+rustango::contenttypes::clear_cache();
 
 // Full listing for admin sidebars / API
-let all_cts = ContentType::all(&pool).await?;                 // ordered (app, model)
+let all_cts = ContentType::all_pool(&pool).await?;            // ordered (app, model)
 ```
 
 #### Composite-key foreign keys (F.2)

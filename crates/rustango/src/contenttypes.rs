@@ -230,6 +230,62 @@ impl ContentType {
         Self::by_natural_key_pool(pool, app, &name).await
     }
 
+    /// Batch counterpart of [`Self::by_natural_key_pool`] — issue #35.
+    /// Resolves a list of `(app_label, model_name)` pairs to their
+    /// `ContentType` rows in a **single** DB round trip, returning a
+    /// `HashMap` keyed by the natural pair (cloned strings). Pairs
+    /// that don't have a row in the table are simply omitted from
+    /// the map (no error — same shape Django's `get_for_models`
+    /// gives back when a model isn't migrated yet).
+    ///
+    /// Implemented as `all_pool` + a Rust-side filter — the
+    /// `rustango_content_types` table is O(dozens) of rows in
+    /// realistic apps, so one un-filtered fetch is cheaper than N
+    /// round trips OR a complex composite-key `WHERE`. If your
+    /// catalog ever grows past ~1K rows this can be tightened to a
+    /// per-pair OR-chain without touching the public API.
+    ///
+    /// ```ignore
+    /// use rustango::contenttypes::ContentType;
+    ///
+    /// // String literals work directly — no `.to_string()` needed.
+    /// let cts = ContentType::get_for_models(
+    ///     &pool,
+    ///     [("blog", "post"), ("blog", "author"), ("auth", "user")],
+    /// ).await?;
+    /// let post_ct = cts.get(&("blog".to_string(), "post".to_string()));
+    /// ```
+    ///
+    /// # Errors
+    /// As [`Self::all_pool`].
+    pub async fn get_for_models<A, B, I>(
+        pool: &crate::sql::Pool,
+        pairs: I,
+    ) -> Result<std::collections::HashMap<(String, String), Self>, ExecError>
+    where
+        I: IntoIterator<Item = (A, B)>,
+        A: Into<String>,
+        B: Into<String>,
+    {
+        let wanted: std::collections::HashSet<(String, String)> = pairs
+            .into_iter()
+            .map(|(a, b)| (a.into(), b.into()))
+            .collect();
+        if wanted.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let all = Self::all_pool(pool).await?;
+        let mut out =
+            std::collections::HashMap::<(String, String), Self>::with_capacity(wanted.len());
+        for ct in all {
+            let key = (ct.app_label.clone(), ct.model_name.clone());
+            if wanted.contains(&key) {
+                out.insert(key, ct);
+            }
+        }
+        Ok(out)
+    }
+
     /// Tri-dialect counterpart of [`Self::all`] (v0.38) — every
     /// registered ContentType ordered by `(app_label, model_name)`,
     /// across any backend the [`crate::sql::Pool`] enum carries.
@@ -242,6 +298,97 @@ impl ContentType {
             .fetch_pool(pool)
             .await?;
         Ok(rows)
+    }
+}
+
+// ============================================================ #35 — in-process cache
+
+/// Process-wide cache of `(app_label, model_name) → ContentType`.
+/// Read-mostly: populated lazily by [`ContentType::get_for_model`]
+/// / [`ContentType::get_by_natural_key`], invalidated wholesale
+/// by [`clear_cache`]. The cache is keyed by the natural key, not by
+/// Rust `TypeId`, so cached entries survive across tenants /
+/// rebinds / hot-reloads — the bottleneck is the DB lookup, not the
+/// model registry walk.
+///
+/// The cache stays small in practice: realistic apps have O(dozens)
+/// of ContentTypes. We don't bother with an LRU — once populated,
+/// every lookup is a `HashMap` hit, and `clear_cache()` covers the
+/// "I just migrated, force a refetch" case.
+fn cache() -> &'static std::sync::RwLock<std::collections::HashMap<(String, String), ContentType>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::RwLock<std::collections::HashMap<(String, String), ContentType>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Empty the per-process [`ContentType`] cache. Call after migrations
+/// add new model rows OR after `ensure_seeded` runs on a brand-new
+/// DB so the next lookup re-reads from the DB instead of returning
+/// `None` (the negative result isn't cached, but a stale positive
+/// entry could mask a re-seeded row's new id).
+///
+/// Issue #35 — matches Django's `ContentType.objects.clear_cache()`.
+pub fn clear_cache() {
+    let mut w = cache().write().unwrap_or_else(|e| e.into_inner());
+    w.clear();
+}
+
+impl ContentType {
+    /// Cached counterpart of [`Self::by_natural_key_pool`] — issue #35.
+    /// First call for a given `(app_label, model_name)` hits the DB;
+    /// subsequent calls return the cached row. `Ok(None)` results
+    /// are **not** cached (so a follow-up `ensure_seeded` doesn't
+    /// leave you with a stale negative).
+    ///
+    /// # Errors
+    /// As [`Self::by_natural_key_pool`].
+    pub async fn get_by_natural_key(
+        pool: &crate::sql::Pool,
+        app_label: &str,
+        model_name: &str,
+    ) -> Result<Option<Self>, ExecError> {
+        let key = (app_label.to_owned(), model_name.to_owned());
+        // Fast path — cache hit.
+        if let Some(hit) = cache()
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()
+        {
+            return Ok(Some(hit));
+        }
+        // Miss → DB lookup, populate on success.
+        match Self::by_natural_key_pool(pool, app_label, model_name).await? {
+            Some(ct) => {
+                cache()
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(key, ct.clone());
+                Ok(Some(ct))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Cached counterpart of [`Self::for_model_pool`] — issue #35.
+    /// Resolves `T` to its natural key via the model registry, then
+    /// delegates to [`Self::get_by_natural_key`].
+    ///
+    /// # Errors
+    /// As [`Self::for_model_pool`].
+    pub async fn get_for_model<T: crate::core::Model>(
+        pool: &crate::sql::Pool,
+    ) -> Result<Option<Self>, ExecError> {
+        let entry = inventory::iter::<ModelEntry>
+            .into_iter()
+            .find(|e| e.schema.table == T::SCHEMA.table)
+            .ok_or_else(|| ExecError::MissingPrimaryKey {
+                table: T::SCHEMA.table,
+            })?;
+        let app = entry.resolved_app_label().unwrap_or("project");
+        let name = T::SCHEMA.name.to_ascii_lowercase();
+        Self::get_by_natural_key(pool, app, &name).await
     }
 }
 
