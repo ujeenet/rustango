@@ -94,6 +94,7 @@ async fn filtered_count_matches_predicate() {
 
     let q = Post::objects()
         .aggregate()
+        .values(&[])
         .annotate(
             "active_published",
             count_all()
@@ -121,6 +122,7 @@ async fn filtered_sum_with_default_falls_back_when_empty() {
 
     let q = Post::objects()
         .aggregate()
+        .values(&[])
         .annotate(
             "revenue",
             sum("price")
@@ -135,6 +137,7 @@ async fn filtered_sum_with_default_falls_back_when_empty() {
 
     let q = Post::objects()
         .aggregate()
+        .values(&[])
         .annotate(
             "revenue",
             sum("price")
@@ -166,6 +169,7 @@ async fn filtered_count_column_arg_executes() {
 
     let q = Post::objects()
         .aggregate()
+        .values(&[])
         .annotate("n", count("price").filter(Post::pages.gt(75_i64)).into())
         .compile()
         .unwrap();
@@ -189,6 +193,7 @@ async fn stddev_returns_a_finite_positive_number() {
 
     let q = Post::objects()
         .aggregate()
+        .values(&[])
         .annotate("sd", stddev("pages").into())
         .compile()
         .unwrap();
