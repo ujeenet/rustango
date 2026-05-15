@@ -248,6 +248,7 @@ impl ContentType {
     /// ```ignore
     /// use rustango::contenttypes::ContentType;
     ///
+    /// // String literals work directly — no `.to_string()` needed.
     /// let cts = ContentType::for_models_pool(
     ///     &pool,
     ///     [("blog", "post"), ("blog", "author"), ("auth", "user")],
@@ -257,16 +258,19 @@ impl ContentType {
     ///
     /// # Errors
     /// As [`Self::all_pool`].
-    pub async fn for_models_pool<I>(
+    pub async fn for_models_pool<A, B, I>(
         pool: &crate::sql::Pool,
         pairs: I,
     ) -> Result<std::collections::HashMap<(String, String), Self>, ExecError>
     where
-        I: IntoIterator,
-        I::Item: Into<(String, String)>,
+        I: IntoIterator<Item = (A, B)>,
+        A: Into<String>,
+        B: Into<String>,
     {
-        let wanted: std::collections::HashSet<(String, String)> =
-            pairs.into_iter().map(Into::into).collect();
+        let wanted: std::collections::HashSet<(String, String)> = pairs
+            .into_iter()
+            .map(|(a, b)| (a.into(), b.into()))
+            .collect();
         if wanted.is_empty() {
             return Ok(std::collections::HashMap::new());
         }

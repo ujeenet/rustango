@@ -43,11 +43,23 @@ async fn sqlite_pool() -> Pool {
 }
 
 /// Batch lookup returns one entry per requested pair that exists.
+/// Both `&str` literals and `String` values are accepted.
 #[tokio::test]
 async fn for_models_pool_returns_matching_rows() {
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
-    let cts = ContentType::for_models_pool(
+
+    // &str literals — the primary ergonomic form.
+    let cts =
+        ContentType::for_models_pool(&pool, [("ct_bc_blog", "post"), ("ct_bc_blog", "author")])
+            .await
+            .expect("for_models_pool with &str pairs");
+    assert_eq!(cts.len(), 2, "both &str pairs should resolve");
+    assert!(cts.contains_key(&("ct_bc_blog".into(), "post".into())));
+    assert!(cts.contains_key(&("ct_bc_blog".into(), "author".into())));
+
+    // String values also accepted.
+    let cts2 = ContentType::for_models_pool(
         &pool,
         [
             ("ct_bc_blog".to_string(), "post".to_string()),
@@ -55,10 +67,8 @@ async fn for_models_pool_returns_matching_rows() {
         ],
     )
     .await
-    .expect("for_models_pool");
-    assert_eq!(cts.len(), 2, "both pairs should resolve");
-    assert!(cts.contains_key(&("ct_bc_blog".into(), "post".into())));
-    assert!(cts.contains_key(&("ct_bc_blog".into(), "author".into())));
+    .expect("for_models_pool with String pairs");
+    assert_eq!(cts2.len(), 2, "both String pairs should resolve");
 }
 
 /// Unknown pairs are silently omitted from the result map — same
@@ -68,15 +78,10 @@ async fn for_models_pool_returns_matching_rows() {
 async fn for_models_pool_omits_unknown_pairs() {
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
-    let cts = ContentType::for_models_pool(
-        &pool,
-        [
-            ("ct_bc_blog".to_string(), "post".to_string()),
-            ("nonexistent".to_string(), "nope".to_string()),
-        ],
-    )
-    .await
-    .expect("for_models_pool");
+    let cts =
+        ContentType::for_models_pool(&pool, [("ct_bc_blog", "post"), ("nonexistent", "nope")])
+            .await
+            .expect("for_models_pool");
     assert_eq!(cts.len(), 1, "only the registered pair should appear");
     assert!(cts.contains_key(&("ct_bc_blog".into(), "post".into())));
     assert!(!cts.contains_key(&("nonexistent".into(), "nope".into())));
