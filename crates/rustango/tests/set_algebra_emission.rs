@@ -258,3 +258,108 @@ fn each_branch_contributes_its_own_params() {
     // PG placeholders $1, $2, $3 in textual order.
     assert!(stmt.sql.contains("$1") && stmt.sql.contains("$2") && stmt.sql.contains("$3"));
 }
+
+// ---------- MySQL: INTERSECT / EXCEPT emission (8.0.31+) ----------
+
+#[cfg(feature = "mysql")]
+#[test]
+fn intersect_emits_with_backticks_on_mysql() {
+    // MySQL 8.0.31+ supports INTERSECT. Pre-31 surfaces a syntax
+    // error from the driver — the writer emits the same SQL either
+    // way (no client-side gate).
+    let q = Post::objects()
+        .where_(Post::status.eq("published"))
+        .intersection(Post::objects().where_(Post::author_id.eq(1_i64)))
+        .compile()
+        .unwrap();
+    let stmt = MySql.compile_select(&q).unwrap();
+    assert!(
+        stmt.sql.contains(") INTERSECT ("),
+        "MySQL INTERSECT keyword: {}",
+        stmt.sql
+    );
+    assert!(
+        stmt.sql.contains("`status`") && stmt.sql.contains("`author_id`"),
+        "MySQL backtick identifiers in both branches: {}",
+        stmt.sql
+    );
+}
+
+#[cfg(feature = "mysql")]
+#[test]
+fn except_emits_with_backticks_on_mysql() {
+    let q = Post::objects()
+        .difference(Post::objects().where_(Post::status.eq("deleted")))
+        .compile()
+        .unwrap();
+    let stmt = MySql.compile_select(&q).unwrap();
+    assert!(
+        stmt.sql.contains(") EXCEPT ("),
+        "MySQL EXCEPT keyword: {}",
+        stmt.sql
+    );
+    assert!(
+        stmt.sql.contains("`status`"),
+        "MySQL backticks: {}",
+        stmt.sql
+    );
+}
+
+// ---------- Nested compound — one branch is itself a compound ----------
+
+/// `qs_outer.union(qs_inner_compound)` where the inner is itself a
+/// compound `qs_a.union(qs_b)`. The recursive `write_compound_select`
+/// renders the inner compound inside its own parens, with the outer
+/// `UNION` joining them. Verifies the writer doesn't flatten or
+/// mis-nest.
+#[test]
+fn nested_compound_inside_outer_union_emits_double_parens() {
+    let inner = Post::objects()
+        .where_(Post::status.eq("a"))
+        .union(Post::objects().where_(Post::status.eq("b")));
+    let outer = Post::objects()
+        .where_(Post::status.eq("c"))
+        .union(inner)
+        .compile()
+        .unwrap();
+    let stmt = Postgres.compile_select(&outer).unwrap();
+    // Outer compound: (...) UNION (...).
+    // Inner compound substituted for the second branch:
+    //   (... WHERE c ...) UNION ((... WHERE a ...) UNION (... WHERE b ...))
+    // So we expect "(( ... ) UNION ( ... ))" — a double-open paren
+    // somewhere in the SQL marking the inner-compound boundary.
+    assert!(
+        stmt.sql.contains("(("),
+        "nested compound has `((` boundary: {}",
+        stmt.sql
+    );
+    // Three WHERE clauses total (one per branch).
+    let where_count = stmt.sql.matches("WHERE").count();
+    assert_eq!(where_count, 3, "three branches: {}", stmt.sql);
+    // Two UNION joins: outer and inner.
+    let union_count = stmt.sql.matches(" UNION ").count();
+    assert_eq!(union_count, 2, "two UNIONs: {}", stmt.sql);
+}
+
+// ---------- with_compound — fallible entry point ----------
+
+#[test]
+fn with_compound_takes_precompiled_branch() {
+    use rustango::core::SetOp;
+    // Pre-compile the branch so the caller could `?` on errors.
+    let branch = Post::objects()
+        .where_(Post::status.eq("draft"))
+        .compile()
+        .unwrap();
+    let q = Post::objects()
+        .where_(Post::status.eq("published"))
+        .with_compound(SetOp::Difference, branch)
+        .compile()
+        .unwrap();
+    let stmt = Postgres.compile_select(&q).unwrap();
+    assert!(
+        stmt.sql.contains(") EXCEPT ("),
+        "with_compound(Difference, …): {}",
+        stmt.sql
+    );
+}

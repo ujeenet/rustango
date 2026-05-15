@@ -296,7 +296,7 @@ let mixed = qs_a
 
 **Tri-dialect**: Postgres + SQLite support all four operators on every version rustango supports. MySQL 8.0+ supports `UNION`/`UNION ALL`; `INTERSECT`/`EXCEPT` landed in MySQL 8.0.31. Older MySQL versions surface the driver's syntax error at fetch time — there's no client-side gate.
 
-**Error path on the typed builder**: `.union(other_qs)` compiles the branch eagerly and panics if the branch fails to compile (typo'd column, etc.). For fallible composition where the caller wants a `Result`, compile the branch first and pass it via `.union_compiled(branch)`. The panic shape matches Django's: a bad branch is a programmer error, not a runtime data condition.
+**Error path on the typed builder**: `.union(other_qs)` (and `.intersection()` / `.difference()`) compiles the branch eagerly and panics if the branch fails to compile (typo'd column, etc.). For fallible composition where the caller wants a `Result`, compile the branch first and pass it via `.with_compound(SetOp::Union, branch)` — one generic entry point covers every operator. The panic shape matches Django's: a bad branch is a programmer error, not a runtime data condition.
 
 ---
 

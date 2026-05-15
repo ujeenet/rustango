@@ -238,13 +238,13 @@ impl<T: Model> QuerySet<T> {
     ///
     /// Tri-dialect availability: every supported backend.
     ///
-    /// # Errors
-    /// Forwards `other.compile()` errors (schema validation on the
-    /// branch's WHERE / ORDER BY) into the union builder. If the
-    /// branch fails to compile, this method panics — same posture as
-    /// `.where_()` on the typed path. If you want to surface the
-    /// branch error, compile it first and use
-    /// [`Self::union_compiled`].
+    /// # Panics
+    /// If `other.compile()` fails (typo'd column on the branch's
+    /// WHERE / ORDER BY, schema validation, etc.). Same posture as
+    /// `.where_()` on the typed path — a malformed branch is a
+    /// programmer error, not a runtime data condition. For fallible
+    /// composition that surfaces the branch error as a `Result`,
+    /// pre-compile and pass via [`Self::with_compound`].
     #[must_use]
     pub fn union(self, other: QuerySet<T>) -> Self {
         self.add_compound(crate::core::SetOp::Union, other)
@@ -253,6 +253,9 @@ impl<T: Model> QuerySet<T> {
     /// `UNION ALL` — combine without deduplicating. Cheaper than
     /// `union` because the DB skips the DISTINCT pass; useful when
     /// you know the branches don't overlap.
+    ///
+    /// # Panics
+    /// As [`Self::union`].
     #[must_use]
     pub fn union_all(self, other: QuerySet<T>) -> Self {
         self.add_compound(crate::core::SetOp::UnionAll, other)
@@ -261,6 +264,9 @@ impl<T: Model> QuerySet<T> {
     /// Issue #25 — Django's `QuerySet.intersection(other_qs)`. Rows
     /// present in BOTH this queryset and `other`. Tri-dialect:
     /// Postgres, SQLite, MySQL 8.0.31+.
+    ///
+    /// # Panics
+    /// As [`Self::union`].
     #[must_use]
     pub fn intersection(self, other: QuerySet<T>) -> Self {
         self.add_compound(crate::core::SetOp::Intersection, other)
@@ -269,33 +275,48 @@ impl<T: Model> QuerySet<T> {
     /// Issue #25 — Django's `QuerySet.difference(other_qs)`. Emits
     /// `EXCEPT`: rows in this queryset but NOT in `other`.
     /// Tri-dialect: Postgres, SQLite, MySQL 8.0.31+.
+    ///
+    /// # Panics
+    /// As [`Self::union`].
     #[must_use]
     pub fn difference(self, other: QuerySet<T>) -> Self {
         self.add_compound(crate::core::SetOp::Difference, other)
     }
 
-    /// Lower-level set-algebra entry point: takes a pre-compiled
+    /// Fallible set-algebra entry point: takes a pre-compiled
     /// `SelectQuery` as the branch instead of a fresh `QuerySet`.
     /// Useful when the branch construction may fail (its `.compile()`
     /// returns `Result`) and the caller wants to surface the error
-    /// before chaining. Issue #25.
+    /// before chaining. Generic over the operator — covers `union` /
+    /// `union_all` / `intersection` / `difference` with one entry
+    /// point. Issue #25.
+    ///
+    /// ```ignore
+    /// // Caller wants to handle the branch's compile error explicitly:
+    /// let branch = Post::objects()
+    ///     .filter("typo_field__lt", 100_i64)  // may fail
+    ///     .compile()?;                         // → Result
+    /// let qs = Post::objects()
+    ///     .where_(Post::active.eq(true))
+    ///     .with_compound(SetOp::Union, branch);
+    /// ```
     #[must_use]
-    pub fn union_compiled(self, branch: crate::core::SelectQuery) -> Self {
-        self.add_compound_compiled(crate::core::SetOp::Union, branch)
+    pub fn with_compound(self, op: crate::core::SetOp, branch: crate::core::SelectQuery) -> Self {
+        self.add_compound_compiled(op, branch)
     }
 
-    /// Shared lowering for [`Self::union`] / [`Self::intersection`]
-    /// / [`Self::difference`] — compiles the branch eagerly and
-    /// appends a `CompoundBranch` to `self.compound`. Panics on
-    /// branch compile error; for fallible composition use
-    /// [`Self::union_compiled`].
+    /// Shared lowering for [`Self::union`] / [`Self::union_all`] /
+    /// [`Self::intersection`] / [`Self::difference`] — compiles the
+    /// branch eagerly and appends a `CompoundBranch` to
+    /// `self.compound`. Panics on branch compile error; for fallible
+    /// composition use [`Self::with_compound`].
     fn add_compound(self, op: crate::core::SetOp, other: QuerySet<T>) -> Self {
         match other.compile() {
             Ok(branch) => self.add_compound_compiled(op, branch),
             Err(e) => panic!(
                 "rustango: set-algebra branch failed to compile: {e}. \
-                 Pre-compile the branch and pass via .union_compiled() / \
-                 friends to surface this error as a Result."
+                 Pre-compile the branch and pass via .with_compound(op, \
+                 branch) to surface this error as a Result."
             ),
         }
     }
