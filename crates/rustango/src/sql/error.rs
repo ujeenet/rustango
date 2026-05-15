@@ -284,7 +284,7 @@ pub enum ExecError {
     /// `get_or_create` / `update_or_create` (v0.45) was called with a
     /// filter that matches more than one row. Django's
     /// `MultipleObjectsReturned`. Tighten the filter or use
-    /// [`crate::query::QuerySet::first_pool`] when ambiguity is
+    /// [`crate::query::QuerySet::first`] when ambiguity is
     /// acceptable.
     #[error("`{op}` filter matched {count} rows on `{table}`; expected at most 1")]
     MultipleRowsReturned {

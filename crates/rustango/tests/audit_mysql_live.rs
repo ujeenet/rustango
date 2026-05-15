@@ -10,7 +10,7 @@
 //!   PG's `NOW() - INTERVAL`)
 //! - `cleanup_keep_last_n_pool` per-entity retention via window
 //!   functions (MySQL 8.0+ supports `ROW_NUMBER() OVER`)
-//! - `list_pool` / `count_pool` / `facet_counts_pool` activity-feed
+//! - `list` / `count` / `facet_counts` activity-feed
 //!   helpers
 //!
 //! Reads `MYSQL_TEST_URL`. Tests skip silently when unset so
@@ -178,10 +178,10 @@ async fn list_pool_filters_and_paginates_on_mysql() {
         entity_table: Some("post".into()),
         ..Default::default()
     };
-    let rows = audit::list_pool(&pool, &filter, 50, 0).await.unwrap();
+    let rows = audit::list(&pool, &filter, 50, 0).await.unwrap();
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|r| r.entity_table == "post"));
-    let total = audit::count_pool(&pool, &filter).await.unwrap();
+    let total = audit::count(&pool, &filter).await.unwrap();
     assert_eq!(total, 2);
 }
 
@@ -201,9 +201,7 @@ async fn facet_counts_returns_groupby_on_mysql() {
             .await
             .unwrap();
     }
-    let facets = audit::facet_counts_pool(&pool, "entity_table")
-        .await
-        .unwrap();
+    let facets = audit::facet_counts(&pool, "entity_table").await.unwrap();
     assert_eq!(facets[0], ("post".to_string(), 3));
     assert_eq!(facets[1], ("author".to_string(), 1));
 }
@@ -214,6 +212,6 @@ async fn facet_counts_rejects_non_allowlisted_column_on_mysql() {
     let Some(pool) = mysql_pool().await else {
         return;
     };
-    let r = audit::facet_counts_pool(&pool, "no_such_column").await;
+    let r = audit::facet_counts(&pool, "no_such_column").await;
     assert!(r.is_err(), "non-allowlisted column should be rejected");
 }

@@ -263,8 +263,8 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// v0.45 — discard any previously-set `order_by` and apply
-    /// `items` as the new ordering. Used by `earliest_pool` and
-    /// `latest_pool` which declare their own sort. Clears every
+    /// `items` as the new ordering. Used by `earliest` and
+    /// `latest` which declare their own sort. Clears every
     /// pending item (legacy + `_with_nulls` + `_expr`).
     #[must_use]
     pub fn replace_order_by(mut self, items: &[(&str, bool)]) -> Self {
@@ -273,7 +273,7 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// v0.45 — flip every ordering direction in place. Used by
-    /// `last_pool` to invert the queryset's natural sort and take
+    /// `last` to invert the queryset's natural sort and take
     /// the first row from the reversed sequence — avoids OFFSET +
     /// COUNT(*) and works on every dialect. Issue #76: also swaps
     /// `NullsOrder::First` ↔ `NullsOrder::Last` so the "NULLs at the

@@ -86,10 +86,8 @@ pub(crate) async fn audit_log_view(
     // tri-dialect helpers in `crate::audit`. The SQL is rendered
     // through `dialect.placeholder()` / `dialect.quote_ident()` so
     // this view works against any backend the framework supports.
-    let total = crate::audit::count_pool(&state.pool, &filter)
-        .await
-        .unwrap_or(0);
-    let entries = crate::audit::list_pool(&state.pool, &filter, AUDIT_PAGE_SIZE, offset)
+    let total = crate::audit::count(&state.pool, &filter).await.unwrap_or(0);
+    let entries = crate::audit::list(&state.pool, &filter, AUDIT_PAGE_SIZE, offset)
         .await
         .unwrap_or_default();
 
@@ -105,7 +103,7 @@ pub(crate) async fn audit_log_view(
             .iter()
             .find(|(k, _)| *k == col)
             .map(|(_, v)| v.as_str());
-        let facet_pairs = crate::audit::facet_counts_pool(&state.pool, col)
+        let facet_pairs = crate::audit::facet_counts(&state.pool, col)
             .await
             .unwrap_or_default();
         let mut values: Vec<Value> = facet_pairs
@@ -321,7 +319,7 @@ pub(crate) async fn audit_cleanup_submit(
 ///
 /// v0.37 — `before_row` is now `Option<&serde_json::Value>` (the JSON
 /// bridge from slice 2 of v0.36) instead of `Option<&PgRow>`, so the
-/// caller can fetch via `select_one_row_as_json_pool` on any backend.
+/// caller can fetch via `select_one_row_as_json` on any backend.
 pub(crate) async fn emit_admin_audit_diff(
     state: &AppState,
     model: &'static crate::core::ModelSchema,

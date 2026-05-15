@@ -1,15 +1,15 @@
-//! v0.45 — live SQLite coverage for `QuerySet::first_pool`,
-//! `last_pool`, `earliest_pool`, `latest_pool`.
+//! v0.45 — live SQLite coverage for `QuerySet::first`,
+//! `last`, `earliest`, `latest`.
 //!
 //! Builder sugar over `order_by + limit(1) + fetch_pool`. No DB-side
 //! ranking logic; this suite proves the ordering semantics match
 //! Django:
 //!
-//! - `first_pool` returns the first row by current ordering (PK ASC
+//! - `first` returns the first row by current ordering (PK ASC
 //!   when no `order_by` is set).
-//! - `last_pool` flips every ordering direction, then takes the
+//! - `last` flips every ordering direction, then takes the
 //!   first row of the reversed sequence (PK DESC when no order set).
-//! - `earliest_pool(field)` / `latest_pool(field)` replace any
+//! - `earliest(field)` / `latest(field)` replace any
 //!   prior ordering with `field ASC` / `field DESC`.
 
 #![cfg(feature = "sqlite")]
@@ -62,9 +62,9 @@ async fn pool_with_rows() -> Pool {
 async fn first_pool_without_order_by_returns_lowest_pk() {
     let pool = pool_with_rows().await;
     let first = V045Post::objects()
-        .first_pool(&pool)
+        .first(&pool)
         .await
-        .expect("first_pool")
+        .expect("first")
         .expect("at least one row");
     // Insertion order made "Gamma" the first row; PK ASC also picks it.
     assert_eq!(first.title, "Gamma");
@@ -75,9 +75,9 @@ async fn first_pool_without_order_by_returns_lowest_pk() {
 async fn last_pool_without_order_by_returns_highest_pk() {
     let pool = pool_with_rows().await;
     let last = V045Post::objects()
-        .last_pool(&pool)
+        .last(&pool)
         .await
-        .expect("last_pool")
+        .expect("last")
         .expect("at least one row");
     // Last-inserted was "Beta" with PK=4.
     assert_eq!(last.title, "Beta");
@@ -87,13 +87,13 @@ async fn last_pool_without_order_by_returns_highest_pk() {
 #[tokio::test]
 async fn last_pool_flips_existing_ordering() {
     let pool = pool_with_rows().await;
-    // Order by title ASC → first is "Alpha". `last_pool` flips that
+    // Order by title ASC → first is "Alpha". `last` flips that
     // to DESC and takes the first → "Gamma".
     let last = V045Post::objects()
         .order_by(&[("title", false)])
-        .last_pool(&pool)
+        .last(&pool)
         .await
-        .expect("last_pool")
+        .expect("last")
         .expect("row");
     assert_eq!(last.title, "Gamma");
 }
@@ -102,9 +102,9 @@ async fn last_pool_flips_existing_ordering() {
 async fn earliest_pool_sorts_ascending_by_field() {
     let pool = pool_with_rows().await;
     let earliest = V045Post::objects()
-        .earliest_pool("view_count", &pool)
+        .earliest("view_count", &pool)
         .await
-        .expect("earliest_pool")
+        .expect("earliest")
         .expect("row");
     assert_eq!(earliest.view_count, 10);
     assert_eq!(earliest.title, "Alpha");
@@ -114,9 +114,9 @@ async fn earliest_pool_sorts_ascending_by_field() {
 async fn latest_pool_sorts_descending_by_field() {
     let pool = pool_with_rows().await;
     let latest = V045Post::objects()
-        .latest_pool("view_count", &pool)
+        .latest("view_count", &pool)
         .await
-        .expect("latest_pool")
+        .expect("latest")
         .expect("row");
     assert_eq!(latest.view_count, 40);
     assert_eq!(latest.title, "Delta");
@@ -125,13 +125,13 @@ async fn latest_pool_sorts_descending_by_field() {
 #[tokio::test]
 async fn earliest_pool_replaces_prior_ordering() {
     let pool = pool_with_rows().await;
-    // Caller mis-ordered to view_count DESC; `earliest_pool` should
+    // Caller mis-ordered to view_count DESC; `earliest` should
     // discard that and sort by title ASC instead.
     let earliest = V045Post::objects()
         .order_by(&[("view_count", true)])
-        .earliest_pool("title", &pool)
+        .earliest("title", &pool)
         .await
-        .expect("earliest_pool")
+        .expect("earliest")
         .expect("row");
     assert_eq!(earliest.title, "Alpha");
 }
@@ -148,8 +148,8 @@ async fn first_pool_on_empty_table_returns_none() {
     .await
     .unwrap();
     let first = V045Post::objects()
-        .first_pool(&pool)
+        .first(&pool)
         .await
-        .expect("first_pool on empty");
+        .expect("first on empty");
     assert!(first.is_none());
 }

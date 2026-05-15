@@ -4,7 +4,7 @@
 //! alongside the regular column names; the renderer dispatches to a
 //! user-supplied closure via the inventory registry. The closure
 //! receives the row as a `serde_json::Value` (a `{ field_name: value }`
-//! map produced by [`crate::sql::select_rows_as_json_pool`] — works
+//! map produced by [`crate::sql::select_rows_as_json`] — works
 //! the same on Postgres / MySQL / SQLite) so it can pull any column
 //! it wants and produce pre-escaped display HTML.
 //!

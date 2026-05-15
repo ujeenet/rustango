@@ -420,7 +420,7 @@ pub(crate) fn read_value_as_string(row: &PgRow, field: &FieldSchema) -> Option<S
 // `crate::sql::row_to_json` / `row_to_json_my` / `row_to_json_sqlite`)
 // instead of a backend-specific `Row` type. The bundled admin's
 // fetch path (v0.36 slice 4) routes every row through
-// `select_rows_as_json_pool` → these renderers, so the rendering
+// `select_rows_as_json` → these renderers, so the rendering
 // layer never sees a `PgRow` and works uniformly on PG / MySQL /
 // SQLite.
 

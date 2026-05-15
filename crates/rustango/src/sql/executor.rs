@@ -758,7 +758,7 @@ pub fn row_to_json_sqlite(
 /// # Errors
 /// SQL compilation / driver failures only — per-cell decode errors
 /// are swallowed into `Value::Null`.
-pub async fn select_rows_as_json_pool(
+pub async fn select_rows_as_json(
     pool: &Pool,
     query: &SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
@@ -901,12 +901,12 @@ fn augment_joined_columns_sqlite(
     }
 }
 
-/// Single-row companion of [`select_rows_as_json_pool`]. Returns
+/// Single-row companion of [`select_rows_as_json`]. Returns
 /// `Ok(None)` when no rows match.
 ///
 /// # Errors
-/// As [`select_rows_as_json_pool`].
-pub async fn select_one_row_as_json_pool(
+/// As [`select_rows_as_json`].
+pub async fn select_one_row_as_json(
     pool: &Pool,
     query: &SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
@@ -2091,7 +2091,7 @@ pub async fn insert_returning_pool(
             // the same shape as Postgres, so the flow mirrors PG: bind
             // params, fetch the row, hand it to the macro-emitted
             // `__rustango_assign_from_sqlite_row` body via
-            // `apply_auto_pk_pool`.
+            // `apply_auto_pk`.
             let stmt = pool.dialect().compile_insert(query)?;
             let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
                 sqlx::query(&stmt.sql);
@@ -3306,7 +3306,7 @@ where
     ///
     /// # Errors
     /// As [`FetcherPool::fetch_pool`].
-    pub async fn first_pool(self, pool: &Pool) -> Result<Option<T>, ExecError> {
+    pub async fn first(self, pool: &Pool) -> Result<Option<T>, ExecError> {
         let qs = ensure_pk_ordering(self, /*reverse=*/ false);
         let rows = qs.limit(1).fetch_pool(pool).await?;
         Ok(rows.into_iter().next())
@@ -3321,7 +3321,7 @@ where
     ///
     /// # Errors
     /// As [`FetcherPool::fetch_pool`].
-    pub async fn last_pool(self, pool: &Pool) -> Result<Option<T>, ExecError> {
+    pub async fn last(self, pool: &Pool) -> Result<Option<T>, ExecError> {
         let qs = ensure_pk_ordering(self, /*reverse=*/ true);
         let rows = qs.limit(1).fetch_pool(pool).await?;
         Ok(rows.into_iter().next())
@@ -3335,7 +3335,7 @@ where
     ///
     /// # Errors
     /// As [`FetcherPool::fetch_pool`].
-    pub async fn earliest_pool(mut self, field: &str, pool: &Pool) -> Result<Option<T>, ExecError> {
+    pub async fn earliest(mut self, field: &str, pool: &Pool) -> Result<Option<T>, ExecError> {
         self = self.replace_order_by(&[(field, false)]);
         let rows = self.limit(1).fetch_pool(pool).await?;
         Ok(rows.into_iter().next())
@@ -3349,7 +3349,7 @@ where
     ///
     /// # Errors
     /// As [`FetcherPool::fetch_pool`].
-    pub async fn latest_pool(mut self, field: &str, pool: &Pool) -> Result<Option<T>, ExecError> {
+    pub async fn latest(mut self, field: &str, pool: &Pool) -> Result<Option<T>, ExecError> {
         self = self.replace_order_by(&[(field, true)]);
         let rows = self.limit(1).fetch_pool(pool).await?;
         Ok(rows.into_iter().next())
@@ -3459,7 +3459,7 @@ where
 /// # Example
 ///
 /// ```ignore
-/// let (post, created) = rustango::sql::get_or_create_pool(
+/// let (post, created) = rustango::sql::get_or_create(
 ///     Post::objects().filter("slug", "hello"),
 ///     |pool| async move {
 ///         let mut p = Post {
@@ -3478,7 +3478,7 @@ where
 /// - [`ExecError::MultipleRowsReturned`] when the filter matches >1 row.
 /// - Whatever the `create_fn` closure returns when matching no rows.
 /// - Whatever [`FetcherPool::fetch_pool`] returns.
-pub async fn get_or_create_pool<T, F, Fut>(
+pub async fn get_or_create<T, F, Fut>(
     qs: crate::query::QuerySet<T>,
     create_fn: F,
     pool: &Pool,
@@ -3514,17 +3514,17 @@ where
 /// none, invoke `create_fn` and return `(created, true)`. Matching
 /// multiple rows returns [`ExecError::MultipleRowsReturned`].
 ///
-/// Same atomicity caveat as [`get_or_create_pool`] — wrap in a
+/// Same atomicity caveat as [`get_or_create`] — wrap in a
 /// transaction or rely on a UNIQUE constraint for race-free
 /// semantics.
 ///
 /// Both closures receive an **owned** `Pool` for the same
-/// async-lifetime reason as [`get_or_create_pool`].
+/// async-lifetime reason as [`get_or_create`].
 ///
 /// # Example
 ///
 /// ```ignore
-/// let (post, created) = rustango::sql::update_or_create_pool(
+/// let (post, created) = rustango::sql::update_or_create(
 ///     Post::objects().filter("slug", "hello"),
 ///     |pool, mut existing| async move {
 ///         existing.title = "New title".into();
@@ -3541,8 +3541,8 @@ where
 /// ```
 ///
 /// # Errors
-/// As [`get_or_create_pool`].
-pub async fn update_or_create_pool<T, UF, UFut, CF, CFut>(
+/// As [`get_or_create`].
+pub async fn update_or_create<T, UF, UFut, CF, CFut>(
     qs: crate::query::QuerySet<T>,
     update_fn: UF,
     create_fn: CF,
@@ -3580,8 +3580,8 @@ where
 }
 
 /// v0.45 helper — ensure the queryset has *some* deterministic
-/// ordering before slicing to one row. Used by `first_pool` and
-/// `last_pool`. If the caller already provided an `order_by`, we
+/// ordering before slicing to one row. Used by `first` and
+/// `last`. If the caller already provided an `order_by`, we
 /// either keep it (forward) or flip every direction (reverse). If
 /// they didn't, we fall back to the model's primary key.
 fn ensure_pk_ordering<T: Model>(

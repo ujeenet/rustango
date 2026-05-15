@@ -790,7 +790,7 @@ pub mod extractors;
 /// in ~5 lines. See [`viewset::ViewSet`].
 ///
 /// v0.38 — fully tri-dialect. Internal queries route through
-/// `select_rows_as_json_pool` + `insert_returning_pool` etc., so the
+/// `select_rows_as_json` + `insert_returning_pool` etc., so the
 /// same ViewSet body runs on PG / MySQL / SQLite. The `.serializer()`
 /// row-render extension stays PG-only because it decodes via
 /// `T::from_row(&PgRow)`; non-PG ViewSets use the default field-level
@@ -809,8 +809,8 @@ pub mod viewset;
 /// usage and the canonical Tera context shape.
 ///
 /// v0.38 slice 22 — fully tri-dialect. State carries Pool enum;
-/// handlers route through select_rows_as_json_pool /
-/// select_one_row_as_json_pool / insert_returning_pool /
+/// handlers route through select_rows_as_json /
+/// select_one_row_as_json / insert_returning_pool /
 /// update_pool / delete_pool. PG schema-mode tenants get
 /// `SET search_path` via Tenant<Postgres>; sqlite/mysql tenants use
 /// database-mode via Tenant<DB>.pool(). MySQL note:

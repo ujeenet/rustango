@@ -702,7 +702,7 @@ pub async fn emit_one_pool(
 
 /// v0.37 — filter shape for the admin's audit-log activity feed.
 /// Each field is optional; `None` means "don't constrain that column".
-/// The `list_pool` / `count_pool` helpers turn this into a WHERE clause
+/// The `list` / `count` helpers turn this into a WHERE clause
 /// rendered via [`Dialect::placeholder`] + [`Dialect::quote_ident`].
 #[derive(Debug, Clone, Default)]
 pub struct AuditFilter {
@@ -750,7 +750,7 @@ impl AuditFilter {
 /// # Errors
 /// Driver / SQL failures from the SELECT, or JSON decode failures on
 /// SQLite if the `changes` TEXT column isn't valid JSON.
-pub async fn list_pool(
+pub async fn list(
     pool: &crate::sql::Pool,
     filter: &AuditFilter,
     page_size: i64,
@@ -829,11 +829,11 @@ pub async fn list_pool(
 }
 
 /// v0.37 — tri-dialect total count for the admin audit-log pager,
-/// honoring the same `AuditFilter` as [`list_pool`].
+/// honoring the same `AuditFilter` as [`list`].
 ///
 /// # Errors
 /// Driver / SQL failures from the SELECT COUNT(*).
-pub async fn count_pool(pool: &crate::sql::Pool, filter: &AuditFilter) -> Result<i64, sqlx::Error> {
+pub async fn count(pool: &crate::sql::Pool, filter: &AuditFilter) -> Result<i64, sqlx::Error> {
     let pairs = filter.active_pairs();
     let sql = audit_count_sql(pool.dialect(), &pairs);
     let binds: Vec<&str> = pairs.iter().map(|(_, v)| *v).collect();
@@ -875,7 +875,7 @@ pub async fn count_pool(pool: &crate::sql::Pool, filter: &AuditFilter) -> Result
 /// Driver / SQL failures from the SELECT, or
 /// `Error::ColumnNotFound` when `column` isn't in the allowlist (the
 /// caller has a bug).
-pub async fn facet_counts_pool(
+pub async fn facet_counts(
     pool: &crate::sql::Pool,
     column: &str,
 ) -> Result<Vec<(String, i64)>, sqlx::Error> {
@@ -1213,7 +1213,7 @@ pub async fn cleanup_keep_last_n_pool(
 /// Any [`crate::sql::ExecError`] from compile / bind / execute, plus
 /// `sqlx::Error` from the audit emit (wrapped as
 /// `ExecError::Driver`).
-pub async fn delete_one_with_audit_pool(
+pub async fn delete_one_with_audit(
     pool: &crate::sql::Pool,
     query: &crate::core::DeleteQuery,
     entry: &PendingEntry,
@@ -1280,7 +1280,7 @@ pub async fn delete_one_with_audit_pool(
 /// # Errors
 /// Any [`crate::sql::ExecError`] from compile / bind / execute, plus
 /// `sqlx::Error` from the audit emit.
-pub async fn save_one_with_audit_pool(
+pub async fn save_one_with_audit(
     pool: &crate::sql::Pool,
     query: &crate::core::UpdateQuery,
     entry: &PendingEntry,
@@ -1349,7 +1349,7 @@ pub async fn save_one_with_audit_pool(
 /// # Errors
 /// Any [`crate::sql::ExecError`] from compile / bind / execute, plus
 /// `sqlx::Error` from the audit emit.
-pub async fn insert_one_with_audit_pool(
+pub async fn insert_one_with_audit(
     pool: &crate::sql::Pool,
     query: &crate::core::InsertQuery,
     entry: &PendingEntry,
@@ -1560,7 +1560,7 @@ fn bind_value_sqlite<'q>(
 /// Any [`crate::sql::ExecError`] from the UPDATE/SELECT, plus
 /// `sqlx::Error` from the audit emit (mapped through `From`).
 #[allow(clippy::too_many_arguments)]
-pub async fn save_one_with_diff_pool<F1, F2, F3>(
+pub async fn save_one_with_diff<F1, F2, F3>(
     pool: &crate::sql::Pool,
     update_query: &crate::core::UpdateQuery,
     pk_column: &'static str,

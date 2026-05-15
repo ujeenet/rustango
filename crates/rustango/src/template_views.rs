@@ -79,7 +79,7 @@ use tera::{Context, Tera};
 
 use crate::core::{Filter, ModelSchema, Op, SelectQuery, SqlValue, WhereExpr};
 use crate::sql::Pool;
-use crate::sql::{count_rows_pool, select_one_row_as_json_pool, select_rows_as_json_pool};
+use crate::sql::{count_rows_pool, select_one_row_as_json, select_rows_as_json};
 
 // ============================================================== ListView
 
@@ -592,7 +592,7 @@ async fn handle_list(
 
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let (rows_result, count_result) = tokio::join!(
-        select_rows_as_json_pool(&state.pool, &select_q, &fields),
+        select_rows_as_json(&state.pool, &select_q, &fields),
         count_rows_pool(&state.pool, &count_q),
     );
     let mut object_list: Vec<Value> = match rows_result {
@@ -829,7 +829,7 @@ async fn handle_detail(
         offset: None,
     };
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-    let object = match select_one_row_as_json_pool(&state.pool, &select_q, &fields).await {
+    let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
         Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => return template_error(&format!("query row: {e}")),
@@ -955,7 +955,7 @@ async fn handle_delete_confirm(
         offset: None,
     };
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-    let object = match select_one_row_as_json_pool(&state.pool, &select_q, &fields).await {
+    let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
         Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => return template_error(&format!("query row: {e}")),
@@ -1785,7 +1785,7 @@ async fn handle_update_get(
         offset: None,
     };
     let scalars: Vec<&'static crate::core::FieldSchema> = state.schema.scalar_fields().collect();
-    let row_json = match select_one_row_as_json_pool(&state.pool, &select_q, &scalars).await {
+    let row_json = match select_one_row_as_json(&state.pool, &select_q, &scalars).await {
         Ok(Some(r)) => r,
         Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => return template_error(&format!("query row: {e}")),
@@ -2603,7 +2603,7 @@ async fn fetch_fk_display_map_pool(
         None => return Ok(HashMap::new()),
     };
     let fields: Vec<&'static crate::core::FieldSchema> = target.scalar_fields().collect();
-    let rows = select_rows_as_json_pool(pool, &q, &fields).await?;
+    let rows = select_rows_as_json(pool, &q, &fields).await?;
     Ok(extract_fk_display_map(fk, &rows))
 }
 
@@ -2665,7 +2665,7 @@ fn json_value_to_sql_for_fk_pk(v: &Value) -> SqlValue {
     }
 }
 
-/// v0.38 — operates on JSON rows from `select_rows_as_json_pool`
+/// v0.38 — operates on JSON rows from `select_rows_as_json`
 /// instead of raw PgRow. The dialect-aware row → JSON conversion
 /// already covered every column type in [`crate::sql::row_to_json`] /
 /// `row_to_json_my` / `row_to_json_sqlite`, so the FK display
@@ -2799,7 +2799,7 @@ async fn fetch_pks_as_objects_pool(
         offset: None,
     };
     let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
-    let rows = select_rows_as_json_pool(pool, &q, &fields)
+    let rows = select_rows_as_json(pool, &q, &fields)
         .await
         .map_err(|e| e.to_string())?;
     Ok(rows)
@@ -2944,14 +2944,14 @@ mod tenant {
 
         // v0.38 — use the tenant's tri-dialect Pool enum; runs the
         // same code on PG / MySQL / SQLite. Routes through
-        // select_rows_as_json_pool + count_rows_pool.
+        // select_rows_as_json + count_rows_pool.
         let pool = t.pool().clone();
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-        let mut object_list =
-            match crate::sql::select_rows_as_json_pool(&pool, &select_q, &fields).await {
-                Ok(r) => r,
-                Err(e) => return template_error(&format!("query rows: {e}")),
-            };
+        let mut object_list = match crate::sql::select_rows_as_json(&pool, &select_q, &fields).await
+        {
+            Ok(r) => r,
+            Err(e) => return template_error(&format!("query rows: {e}")),
+        };
         let total = match crate::sql::count_rows_pool(&pool, &count_q).await {
             Ok(c) => c,
             Err(e) => return template_error(&format!("count rows: {e}")),
@@ -3123,12 +3123,11 @@ mod tenant {
             offset: None,
         };
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-        let object =
-            match crate::sql::select_one_row_as_json_pool(t.pool(), &select_q, &fields).await {
-                Ok(Some(r)) => r,
-                Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-                Err(e) => return template_error(&format!("query row: {e}")),
-            };
+        let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
+            Ok(Some(r)) => r,
+            Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+            Err(e) => return template_error(&format!("query row: {e}")),
+        };
 
         let mut ctx = Context::new();
         ctx.insert("object", &object);
@@ -3169,12 +3168,11 @@ mod tenant {
             offset: None,
         };
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
-        let object =
-            match crate::sql::select_one_row_as_json_pool(t.pool(), &select_q, &fields).await {
-                Ok(Some(r)) => r,
-                Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-                Err(e) => return template_error(&format!("query row: {e}")),
-            };
+        let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
+            Ok(Some(r)) => r,
+            Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+            Err(e) => return template_error(&format!("query row: {e}")),
+        };
         let mut ctx = Context::new();
         ctx.insert("object", &object);
         let set_cookie = super::stamp_csrf(&headers, &mut ctx);
@@ -3317,12 +3315,12 @@ mod tenant {
         };
         let scalars: Vec<&'static crate::core::FieldSchema> =
             state.schema.scalar_fields().collect();
-        let row_json =
-            match crate::sql::select_one_row_as_json_pool(t.pool(), &select_q, &scalars).await {
-                Ok(Some(r)) => r,
-                Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-                Err(e) => return template_error(&format!("query row: {e}")),
-            };
+        let row_json = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &scalars).await
+        {
+            Ok(Some(r)) => r,
+            Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+            Err(e) => return template_error(&format!("query row: {e}")),
+        };
         let row_obj = row_json.as_object().cloned().unwrap_or_default();
         let mut values: HashMap<String, String> = HashMap::with_capacity(row_obj.len());
         for (k, v) in row_obj {

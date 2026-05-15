@@ -170,7 +170,7 @@ impl PaginationStyle {
 /// v0.38 — gated to `cfg(postgres)` because the closure is bound to
 /// `&PgRow` via `T::from_row(row)`. The tri-dialect ViewSet
 /// (`tenant_router` on sqlite/mysql) skips the closure path and
-/// uses the dialect-aware `select_rows_as_json_pool` default
+/// uses the dialect-aware `select_rows_as_json` default
 /// projection.
 #[cfg(feature = "postgres")]
 type RowRender = std::sync::Arc<dyn Fn(&crate::sql::sqlx::postgres::PgRow) -> Value + Send + Sync>;
@@ -496,7 +496,7 @@ impl AcquiredConn {
         q: &SelectQuery,
         fields: &[&'static crate::core::FieldSchema],
     ) -> Result<Vec<Value>, crate::sql::ExecError> {
-        crate::sql::select_rows_as_json_pool(&self.pool, q, fields).await
+        crate::sql::select_rows_as_json(&self.pool, q, fields).await
     }
 
     async fn count_rows(&mut self, q: &CountQuery) -> Result<i64, crate::sql::ExecError> {
@@ -508,7 +508,7 @@ impl AcquiredConn {
         q: &SelectQuery,
         fields: &[&'static crate::core::FieldSchema],
     ) -> Result<Option<Value>, crate::sql::ExecError> {
-        let mut rows = crate::sql::select_rows_as_json_pool(&self.pool, q, fields).await?;
+        let mut rows = crate::sql::select_rows_as_json(&self.pool, q, fields).await?;
         Ok(rows.pop())
     }
 
@@ -922,7 +922,7 @@ async fn handle_list(
             // same connection are typically faster than two pool
             // round-trips anyway.
             // v0.38 — fetch as JSON directly via the tri-dialect
-            // `select_rows_as_json_pool`; the optional row_render
+            // `select_rows_as_json`; the optional row_render
             // closure (PG-only, requires PgRow) is no longer applied
             // here because the AcquiredConn is dialect-agnostic. PG
             // projects that want the serializer extension can still

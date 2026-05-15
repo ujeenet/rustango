@@ -1,11 +1,11 @@
-//! Live regression for v0.36 slice 2 — `select_rows_as_json_pool` +
-//! `select_one_row_as_json_pool` against SQLite. Proves the
+//! Live regression for v0.36 slice 2 — `select_rows_as_json` +
+//! `select_one_row_as_json` against SQLite. Proves the
 //! tri-dialect JSON fetch path admin (slice 4) will consume.
 
 #![cfg(feature = "sqlite")]
 
 use rustango::core::{Filter, Model as _, Op, SelectQuery, SqlValue, WhereExpr};
-use rustango::sql::{select_one_row_as_json_pool, select_rows_as_json_pool, sqlx, Auto, Pool};
+use rustango::sql::{select_one_row_as_json, select_rows_as_json, sqlx, Auto, Pool};
 use rustango::Model;
 
 #[derive(Model, Debug, Clone)]
@@ -69,7 +69,7 @@ async fn select_rows_as_json_pool_decodes_sqlite_rows() {
     b.insert_pool(&pool).await.expect("insert beta");
 
     let fields = fields();
-    let rows = select_rows_as_json_pool(
+    let rows = select_rows_as_json(
         &pool,
         &SelectQuery {
             model: Widget::SCHEMA,
@@ -83,7 +83,7 @@ async fn select_rows_as_json_pool_decodes_sqlite_rows() {
         &fields,
     )
     .await
-    .expect("select_rows_as_json_pool");
+    .expect("select_rows_as_json");
 
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["name"], "alpha");
@@ -100,7 +100,7 @@ async fn select_one_row_as_json_pool_returns_none_for_miss() {
     let pool = sqlite_pool_with_widgets().await;
 
     let fields = fields();
-    let got = select_one_row_as_json_pool(
+    let got = select_one_row_as_json(
         &pool,
         &SelectQuery {
             model: Widget::SCHEMA,
@@ -118,7 +118,7 @@ async fn select_one_row_as_json_pool_returns_none_for_miss() {
         &fields,
     )
     .await
-    .expect("select_one_row_as_json_pool");
+    .expect("select_one_row_as_json");
     assert!(got.is_none());
 }
 
@@ -137,7 +137,7 @@ async fn select_one_row_as_json_pool_returns_decoded_row_for_hit() {
     let pk = w.id.get().copied().expect("gamma pk");
 
     let fields = fields();
-    let got = select_one_row_as_json_pool(
+    let got = select_one_row_as_json(
         &pool,
         &SelectQuery {
             model: Widget::SCHEMA,
@@ -155,7 +155,7 @@ async fn select_one_row_as_json_pool_returns_decoded_row_for_hit() {
         &fields,
     )
     .await
-    .expect("select_one_row_as_json_pool")
+    .expect("select_one_row_as_json")
     .expect("row present");
     assert_eq!(got["name"], "gamma");
     assert_eq!(got["count"], 42);
