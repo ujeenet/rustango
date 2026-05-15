@@ -362,6 +362,48 @@ A future `iterator_on(&mut *tx, chunk_size)` companion (issue follow-up) would c
 
 **`chunk_size` must be > 0.** Zero or negative values panic. Pick a value that fits your row-size budget (Django's default is `2000`; reasonable for narrow rows, lower for wide TEXT/JSONB columns).
 
+### Regex lookups — `.regex()` / `.iregex()` and negated variants
+
+Django's [`__regex` / `__iregex`](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#regex) — issue #26. Match a column against a regular-expression pattern, with case-sensitive and case-insensitive flavors plus negated forms.
+
+```rust
+use rustango::core::Column as _;
+
+// Names starting with "al" (case-sensitive).
+User::objects()
+    .where_(User::name.regex("^al.*"))
+    .fetch(&pool).await?;
+
+// Names starting with "al" — case-insensitive.
+User::objects()
+    .where_(User::name.iregex("^al.*"))
+    .fetch(&pool).await?;
+
+// Negated: exclude names starting with "admin" (case-sensitive).
+User::objects()
+    .where_(User::name.not_regex("^admin"))
+    .fetch(&pool).await?;
+
+// Django-shape lookup-suffix form.
+User::objects()
+    .filter("name__iregex", "^bob")
+    .fetch(&pool).await?;
+```
+
+**Tri-dialect emission**:
+
+| Dialect | Case-sensitive | Case-insensitive | Notes |
+|---|---|---|---|
+| PostgreSQL | `<col> ~ ?` / `<col> !~ ?` | `<col> ~* ?` / `<col> !~* ?` | Native POSIX operators |
+| MySQL | `` `col` REGEXP ? `` / `` `col` NOT REGEXP ? `` | `LOWER(`col`) REGEXP LOWER(?)` (negated wraps `NOT`) | LOWER() fallback for `i*` |
+| SQLite | `"col" REGEXP ?` / `"col" NOT REGEXP ?` | `LOWER("col") REGEXP LOWER(?)` (negated wraps `NOT`) | Needs the `regexp` user-function loaded on the connection |
+
+**SQLite requires a registered `regexp` user-function** — it's not built in. sqlx's `sqlite` driver picks up one if the connection has it; for projects targeting SQLite, register a `regexp(pattern, value)` scalar function on the connection (e.g. via `sqlx::sqlite::SqliteConnectOptions::extension(...)` or a `connect_with` hook). Without it, the query emits valid `REGEXP` SQL that SQLite rejects at execution time with `no such function: regexp`.
+
+**Pattern dialect differs across backends.** Postgres uses POSIX extended regex; MySQL uses ICU-based regex with its own flavor; SQLite delegates to whatever the user-function implements (typically Rust's `regex` crate). Patterns that lean on dialect-specific syntax (e.g. PG's `\m` / `\M` word boundaries) don't round-trip — stick to the portable subset (`^`, `$`, `.`, `*`, `+`, `?`, `[...]`, `()`, `|`) if the same model is queried from multiple backends.
+
+**Non-string values are rejected at `.compile()`** — passing `SqlValue::I64(42)` to `__regex` surfaces `QueryError::InvalidLookupValue { suffix: "regex", expected: "string", … }` rather than silently casting.
+
 ---
 
 ## F() expressions + database functions
@@ -1483,6 +1525,7 @@ Post::objects().where_(Post::author_id.eq(42));
 | `__in` | `IN (…)` | `SqlValue::List` | rejects non-list values |
 | `__isnull` | `IS NULL` / `IS NOT NULL` | `bool` | `true` → IS NULL, `false` → IS NOT NULL |
 | `__between` / `__range` | `BETWEEN … AND …` | 2-elt `SqlValue::List` | inclusive on both ends |
+| `__regex` / `__iregex` | PG `~` / `~*`, MySQL/SQLite `REGEXP` | string | case-insensitive emulated on MySQL/SQLite via `LOWER()` wrap; SQLite needs a `regexp` user-function |
 
 **Errors surface at `.compile()`, not at `.filter()` call time** — value-shape mismatches (e.g. `__in` with a scalar, `__isnull` with a non-bool, `__between` with the wrong arity) and unknown suffixes (`status__nope`) return `QueryError::UnknownLookup` / `QueryError::InvalidLookupValue` from `.compile()` so the fluent chain stays type-clean. Chained traversals (`author__name__icontains`) are **not** supported in v0.39 — the splitter takes the suffix after the first `__`, so the whole tail `name__icontains` is treated as an unknown suffix.
 

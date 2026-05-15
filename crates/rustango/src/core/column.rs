@@ -76,6 +76,37 @@ pub trait Column: Copy + 'static {
         TypedFilter::scalar(Self::COLUMN, Op::NotILike, value.into().into())
     }
 
+    /// `column REGEXP pattern` — POSIX regex match. Django `__regex`
+    /// (issue #26). Pattern is bound as a `String` parameter. Emits
+    /// PG `~`, MySQL `REGEXP`, SQLite `REGEXP` (requires the regex
+    /// extension at runtime; sqlx-sqlite loads it automatically).
+    fn regex(self, pattern: impl Into<String>) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(Self::COLUMN, Op::Regex, SqlValue::String(pattern.into()))
+    }
+
+    /// `NOT column REGEXP pattern`. Django `~Q(field__regex=...)`.
+    fn not_regex(self, pattern: impl Into<String>) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(Self::COLUMN, Op::NotRegex, SqlValue::String(pattern.into()))
+    }
+
+    /// Case-insensitive POSIX regex match. Django `__iregex` (issue
+    /// #26). Emits PG `~*`; MySQL + SQLite fall back to
+    /// `LOWER(col) REGEXP LOWER(pattern)` for collation-independent
+    /// case folding.
+    fn iregex(self, pattern: impl Into<String>) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(Self::COLUMN, Op::IRegex, SqlValue::String(pattern.into()))
+    }
+
+    /// Case-insensitive POSIX regex non-match. Django
+    /// `~Q(field__iregex=...)`.
+    fn not_iregex(self, pattern: impl Into<String>) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(
+            Self::COLUMN,
+            Op::NotIRegex,
+            SqlValue::String(pattern.into()),
+        )
+    }
+
     /// `column IS NULL`.
     fn is_null(self) -> TypedFilter<Self::Model> {
         TypedFilter::scalar(Self::COLUMN, Op::IsNull, SqlValue::Bool(true))

@@ -1135,6 +1135,22 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<(String, Op, SqlValue), Qu
             }
             Ok((field, Op::Between, value))
         }
+        "regex" | "iregex" => {
+            if !matches!(value, SqlValue::String(_)) {
+                return Err(QueryError::InvalidLookupValue {
+                    field,
+                    suffix: suffix.to_owned(),
+                    expected: "SqlValue::String(<regex pattern>)",
+                    actual: sql_value_shape_name(&value),
+                });
+            }
+            let op = if suffix == "regex" {
+                Op::Regex
+            } else {
+                Op::IRegex
+            };
+            Ok((field, op, value))
+        }
         unknown => Err(QueryError::UnknownLookup {
             field,
             suffix: unknown.to_owned(),

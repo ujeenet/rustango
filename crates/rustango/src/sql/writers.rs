@@ -2217,6 +2217,24 @@ fn write_filter(
                 matches!(filter.op, Op::NotILike),
             );
         }
+        Op::Regex | Op::NotRegex | Op::IRegex | Op::NotIRegex => {
+            // Pattern shape is checked upstream — the typed builder
+            // `Column::regex(...)` only accepts `impl Into<String>`,
+            // and the Django-shape parser rejects non-strings with
+            // `QueryError::InvalidLookupValue`. Mirroring LIKE we
+            // pass the param through and let the DB surface any
+            // residual type mismatch.
+            require_op(b.d, filter.op)?;
+            b.params.push(filter.value.clone());
+            let p = b.d.placeholder(b.params.len());
+            b.d.write_regex(
+                &mut b.sql,
+                &qualified_col,
+                &p,
+                matches!(filter.op, Op::Regex | Op::NotRegex),
+                matches!(filter.op, Op::NotRegex | Op::NotIRegex),
+            );
+        }
         Op::In | Op::NotIn => {
             let SqlValue::List(elements) = &filter.value else {
                 return Err(SqlError::InRequiresList);
@@ -2393,6 +2411,10 @@ fn op_label(op: Op) -> &'static str {
         Op::JsonHasKey => "? (json)",
         Op::JsonHasAnyKey => "?| (json)",
         Op::JsonHasAllKeys => "?& (json)",
+        Op::Regex => "~ (regex)",
+        Op::NotRegex => "!~ (regex)",
+        Op::IRegex => "~* (iregex)",
+        Op::NotIRegex => "!~* (iregex)",
     }
 }
 
