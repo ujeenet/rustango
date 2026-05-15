@@ -398,11 +398,22 @@ User::objects()
 | MySQL | `` `col` REGEXP ? `` / `` `col` NOT REGEXP ? `` | `LOWER(`col`) REGEXP LOWER(?)` (negated wraps `NOT`) | LOWER() fallback for `i*` |
 | SQLite | `"col" REGEXP ?` / `"col" NOT REGEXP ?` | `LOWER("col") REGEXP LOWER(?)` (negated wraps `NOT`) | Needs the `regexp` user-function loaded on the connection |
 
-**SQLite requires a registered `regexp` user-function** — it's not built in. sqlx's `sqlite` driver picks up one if the connection has it; for projects targeting SQLite, register a `regexp(pattern, value)` scalar function on the connection (e.g. via `sqlx::sqlite::SqliteConnectOptions::extension(...)` or a `connect_with` hook). Without it, the query emits valid `REGEXP` SQL that SQLite rejects at execution time with `no such function: regexp`.
+**SQLite requires a registered `regexp` user-function** — it's not built in. sqlx-sqlite 0.8 does **not** register one by default. Two paths to enable it:
+
+1. **Easy** — enable sqlx-sqlite's `regexp` cargo feature, then opt the connection in:
+   ```rust
+   use sqlx::sqlite::SqliteConnectOptions;
+   let opts = SqliteConnectOptions::new()
+       .filename("app.db")
+       .with_regexp();  // gated on sqlx-sqlite/regexp
+   ```
+2. **Manual** — register a Rust closure via `SqliteConnection::lock_handle()` + raw FFI (`sqlite3_create_function_v2`).
+
+Without one, the query emits valid `REGEXP` SQL that SQLite rejects at execution with `no such function: regexp` (parser-clean — `tests/regex_sqlite_live.rs` pins this).
 
 **Pattern dialect differs across backends.** Postgres uses POSIX extended regex; MySQL uses ICU-based regex with its own flavor; SQLite delegates to whatever the user-function implements (typically Rust's `regex` crate). Patterns that lean on dialect-specific syntax (e.g. PG's `\m` / `\M` word boundaries) don't round-trip — stick to the portable subset (`^`, `$`, `.`, `*`, `+`, `?`, `[...]`, `()`, `|`) if the same model is queried from multiple backends.
 
-**Non-string values are rejected at `.compile()`** — passing `SqlValue::I64(42)` to `__regex` surfaces `QueryError::InvalidLookupValue { suffix: "regex", expected: "string", … }` rather than silently casting.
+**Non-string values are rejected at `.compile()`** — passing `SqlValue::I64(42)` to `__regex` surfaces `QueryError::InvalidLookupValue { suffix: "regex", expected: "SqlValue::String(<regex pattern>)", … }` rather than silently casting.
 
 ---
 

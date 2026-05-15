@@ -209,13 +209,18 @@ impl Dialect for Sqlite {
         }
     }
 
-    /// SQLite's `REGEXP` operator delegates to a user-defined `regexp`
-    /// function — sqlx-sqlite registers one for `:memory:` and file
-    /// URIs by default (case-sensitive). For case-insensitive
-    /// matching, we mirror the ILIKE strategy: lowercase both sides
-    /// so the comparison is collation-independent. This works for
-    /// ASCII case-folding; non-ASCII patterns may not behave as
-    /// expected without the ICU extension. Issue #26.
+    /// SQLite's `REGEXP` operator delegates to a user-defined
+    /// `regexp(pattern, value)` function. sqlx-sqlite does **not**
+    /// register one by default — callers either enable sqlx-sqlite's
+    /// `regexp` cargo feature (which adds a `.with_regexp()` builder
+    /// on `SqliteConnectOptions`) or register their own via
+    /// `SqliteConnection::lock_handle()` + raw FFI. Without one
+    /// registered, the query fails at execution with `no such
+    /// function: REGEXP` (parser-clean, runtime-only). For case-
+    /// insensitive matching we mirror the ILIKE strategy: lowercase
+    /// both sides so the comparison is collation-independent. ASCII-
+    /// only folding; non-ASCII patterns may not behave as expected
+    /// without the ICU extension. Issue #26.
     fn write_regex(
         &self,
         sql: &mut String,

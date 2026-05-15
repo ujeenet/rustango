@@ -78,13 +78,17 @@ pub trait Column: Copy + 'static {
 
     /// `column REGEXP pattern` — POSIX regex match. Django `__regex`
     /// (issue #26). Pattern is bound as a `String` parameter. Emits
-    /// PG `~`, MySQL `REGEXP`, SQLite `REGEXP` (requires the regex
-    /// extension at runtime; sqlx-sqlite loads it automatically).
+    /// PG `~`, MySQL `REGEXP`, SQLite `REGEXP`. SQLite's `REGEXP`
+    /// delegates to a `regexp(pattern, value)` user-function the
+    /// caller must register — sqlx-sqlite does not register it
+    /// automatically (the `regexp` cargo feature on sqlx-sqlite
+    /// adds a `.with_regexp()` builder that does).
     fn regex(self, pattern: impl Into<String>) -> TypedFilter<Self::Model> {
         TypedFilter::scalar(Self::COLUMN, Op::Regex, SqlValue::String(pattern.into()))
     }
 
     /// `NOT column REGEXP pattern`. Django `~Q(field__regex=...)`.
+    /// Same SQLite caveat as [`Column::regex`].
     fn not_regex(self, pattern: impl Into<String>) -> TypedFilter<Self::Model> {
         TypedFilter::scalar(Self::COLUMN, Op::NotRegex, SqlValue::String(pattern.into()))
     }
