@@ -465,9 +465,9 @@ impl GenericForeignKey {
     }
 
     /// Tri-dialect counterpart of [`Self::for_target`] (v0.38).
-    /// Routes the ContentType lookup through
-    /// [`ContentType::for_model`] so the same call site works on
-    /// PG / SQLite / MySQL.
+    /// Routes the ContentType lookup through the cached
+    /// [`ContentType::get_for_model`] so subsequent calls for the
+    /// same model type hit the process-wide cache instead of the DB.
     ///
     /// # Errors
     /// As [`Self::for_target`].
@@ -475,11 +475,11 @@ impl GenericForeignKey {
         pool: &crate::sql::Pool,
         object_pk: i64,
     ) -> Result<Self, ExecError> {
-        let ct = ContentType::for_model::<T>(pool).await?.ok_or_else(|| {
-            ExecError::MissingPrimaryKey {
+        let ct = ContentType::get_for_model::<T>(pool)
+            .await?
+            .ok_or_else(|| ExecError::MissingPrimaryKey {
                 table: T::SCHEMA.table,
-            }
-        })?;
+            })?;
         let id = ct
             .id
             .get()
@@ -488,6 +488,56 @@ impl GenericForeignKey {
                 table: ContentType::SCHEMA.table,
             })?;
         Ok(Self::new(id, object_pk))
+    }
+
+    /// Resolve the `ContentType` row for this GFK. Wraps
+    /// [`ContentType::by_id`] — returns `Ok(None)` when the
+    /// ContentType catalog hasn't been seeded or the id is stale.
+    ///
+    /// Issue #36 — the public entry point for callers that need the
+    /// CT metadata (table name, app label, model name) before loading
+    /// the related object.
+    ///
+    /// # Errors
+    /// Driver failures from the underlying `SELECT`.
+    pub async fn content_type(
+        &self,
+        pool: &crate::sql::Pool,
+    ) -> Result<Option<ContentType>, ExecError> {
+        ContentType::by_id(pool, self.content_type_id).await
+    }
+
+    /// Load the related object as a JSON map keyed by Rust field
+    /// names — issue #36. Equivalent to the Python `gfk.content_object`
+    /// descriptor, but since the target type is unknown at compile
+    /// time we return a `serde_json::Value` (`Object` shape) instead
+    /// of a typed `T: Model`.
+    ///
+    /// Returns `Ok(None)` gracefully when:
+    /// - The ContentType row is stale / not yet seeded.
+    /// - No row exists at `self.object_pk` in the target table.
+    /// - The target model is no longer registered in the binary's
+    ///   inventory (e.g. the app was removed from the project).
+    ///
+    /// ```ignore
+    /// // Assuming TaggedItem { content_type_id, object_pk, tag }:
+    /// let item: TaggedItem = ...;
+    /// let gfk = GenericForeignKey::new(item.content_type_id, item.object_pk);
+    /// if let Some(obj) = gfk.get_object(&pool).await? {
+    ///     println!("{}", obj["title"]);   // works for any model with a title
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    /// Driver failures from ContentType or target-row SELECT.
+    pub async fn get_object(
+        &self,
+        pool: &crate::sql::Pool,
+    ) -> Result<Option<serde_json::Value>, ExecError> {
+        let Some(ct) = ContentType::by_id(pool, self.content_type_id).await? else {
+            return Ok(None);
+        };
+        fetch_row_as_json(pool, &ct, self.object_pk).await
     }
 }
 
