@@ -2174,6 +2174,33 @@ let cache: BoxedCache = Arc::new(
 );
 ```
 
+### Per-view caching — `CachePageLayer` (`cache-page` feature, issue #55)
+
+Django's `@cache_page` / `@cache_control` / `@vary_on_*` analogs as a tower layer + header builders. GET-only, status-200-only, respects `Cache-Control: no-store`.
+
+```rust
+use std::time::Duration;
+use axum::{routing::get, Router};
+use rustango::cache_page::{CachePageLayer, CacheControl, never_cache, vary_on};
+
+let cache = Arc::new(rustango::cache::InMemoryCache::new());
+
+let app: Router = Router::new()
+    .route("/home", get(|| async { "hello" }))
+    .layer(
+        CachePageLayer::new(cache)
+            .timeout(Duration::from_secs(60))
+            .vary_on(["cookie", "accept-language"]),
+    );
+
+// Header builders — attach manually to per-handler responses:
+let cc = CacheControl::new().max_age(60).public().must_revalidate().build();
+let nc = never_cache();                       // no-store, no-cache, must-revalidate, max-age=0
+let vary = vary_on(["cookie", "user-agent"]);  // → "cookie, user-agent"
+```
+
+Cached responses carry `X-Cache-Status: HIT` (or `MISS` on the freshly-cached pass) so observability stacks can split hit/miss without a separate counter. Body is buffered, capped at 1 MiB — for streaming handlers, attach `never_cache()` headers and they pass through untouched.
+
 ---
 
 ## Email + storage + scheduling
