@@ -1101,7 +1101,6 @@ fn write_case(
     Ok(())
 }
 
-
 /// Emit a scalar function call. Most variants are straight `FN(args…)`
 /// across all three dialects; the divergent ones (`Concat` on SQLite,
 /// `Greatest`/`Least` on SQLite, `Substr` PG `FROM…FOR…` form) get
