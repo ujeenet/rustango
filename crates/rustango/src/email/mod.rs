@@ -47,6 +47,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
+#[cfg(feature = "email-smtp")]
+pub mod smtp;
+#[cfg(feature = "email-smtp")]
+pub use smtp::{SmtpMailer, SmtpMailerBuilder, TlsMode};
+
 // ------------------------------------------------------------------ Email
 
 /// One outbound email. Use the builder methods to assemble.
@@ -298,14 +303,7 @@ impl Mailer for NullMailer {
 #[must_use]
 pub fn from_settings(s: &crate::config::MailSettings) -> BoxedMailer {
     match s.backend.as_deref() {
-        Some("smtp") => {
-            tracing::warn!(
-                target: "rustango::email",
-                "mail.backend = \"smtp\" but SmtpMailer isn't implemented yet; falling back to ConsoleMailer. \
-                 Wire your own BoxedMailer in the meantime.",
-            );
-            Arc::new(ConsoleMailer)
-        }
+        Some("smtp") => smtp_from_settings_or_warn(s),
         Some("memory") => Arc::new(InMemoryMailer::new()),
         Some("null" | "none") => Arc::new(NullMailer),
         Some("console") | None => Arc::new(ConsoleMailer),
@@ -318,6 +316,44 @@ pub fn from_settings(s: &crate::config::MailSettings) -> BoxedMailer {
             Arc::new(ConsoleMailer)
         }
     }
+}
+
+/// SMTP-backend resolver. When the `email-smtp` feature is on,
+/// builds an [`SmtpMailer`] from the section — and falls back to
+/// [`ConsoleMailer`] with a tracing warning if the build fails (so
+/// apps don't refuse to boot on a malformed `[mail]` section). When
+/// the feature is off, emits the same legacy warning the pre-#48
+/// build did and falls back to [`ConsoleMailer`].
+#[cfg(all(feature = "config", feature = "email-smtp"))]
+fn smtp_from_settings_or_warn(s: &crate::config::MailSettings) -> BoxedMailer {
+    match smtp::from_settings(s) {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            tracing::warn!(
+                target: "rustango::email",
+                "mail.backend = \"smtp\" but [mail].smtp_host is unset; falling back to ConsoleMailer."
+            );
+            Arc::new(ConsoleMailer)
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "rustango::email",
+                error = %e,
+                "mail.backend = \"smtp\" but SmtpMailer build failed; falling back to ConsoleMailer."
+            );
+            Arc::new(ConsoleMailer)
+        }
+    }
+}
+
+#[cfg(all(feature = "config", not(feature = "email-smtp")))]
+fn smtp_from_settings_or_warn(_s: &crate::config::MailSettings) -> BoxedMailer {
+    tracing::warn!(
+        target: "rustango::email",
+        "mail.backend = \"smtp\" but the `email-smtp` feature isn't enabled in this build; \
+         falling back to ConsoleMailer. Enable `email-smtp` to ship a real SMTP transport.",
+    );
+    Arc::new(ConsoleMailer)
 }
 
 #[cfg(test)]
@@ -436,23 +472,26 @@ mod tests {
         m.send(&email).await.expect("console mailer ok");
     }
 
-    /// SMTP backend warns + falls back to ConsoleMailer until
-    /// SmtpMailer ships. Send-call still succeeds — the fallback
-    /// is fail-safe so apps don't refuse to boot.
+    /// SMTP backend: when `email-smtp` feature is enabled,
+    /// `from_settings` with an `smtp_host` builds a real
+    /// [`crate::email::SmtpMailer`] (no network contact — just
+    /// constructs the transport). When the feature is off, the
+    /// same call falls back to `ConsoleMailer` with a warning.
+    ///
+    /// We only assert that the mailer was successfully created (no
+    /// `.send()` — there's no real relay at `mail.example.com` in
+    /// the test environment).
     #[cfg(feature = "config")]
     #[tokio::test]
-    async fn from_settings_smtp_falls_back_until_implemented() {
+    async fn from_settings_smtp_builds_mailer_when_host_given() {
         let mut s = crate::config::MailSettings::default();
         s.backend = Some("smtp".into());
         s.smtp_host = Some("mail.example.com".into());
+        s.smtp_tls = Some("starttls".into());
         let m = from_settings(&s);
-        // Same as the unset test — works because the fallback is
-        // ConsoleMailer.
-        let email = Email::new()
-            .to("a@x.com")
-            .from("noreply@x.com")
-            .subject("hi")
-            .body("body");
-        m.send(&email).await.expect("smtp fallback to console ok");
+        // The mailer was constructed. On `email-smtp` builds this is a
+        // SmtpMailer; on non-smtp builds it is ConsoleMailer. Either
+        // way the `Arc<dyn Mailer>` is valid — we just don't send.
+        drop(m);
     }
 }

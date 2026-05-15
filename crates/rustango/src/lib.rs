@@ -341,6 +341,12 @@ pub mod serializer;
 #[cfg(feature = "cache")]
 pub mod cache;
 
+/// Per-view caching tower layer + `Cache-Control` / `Vary` header
+/// builders — Django's `@cache_page` / `@cache_control` / `@vary_on_*`
+/// analogs (issue #55). Behind the `cache-page` feature.
+#[cfg(feature = "cache-page")]
+pub mod cache_page;
+
 /// Django-shape model signals — [`signals::connect_post_save`] etc.
 /// Receivers register globally per model type and run sequentially.
 #[cfg(feature = "signals")]

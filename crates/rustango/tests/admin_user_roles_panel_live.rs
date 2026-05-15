@@ -1,4 +1,7 @@
 #![cfg(feature = "postgres")]
+// Tests intentionally exercise the deprecated `ensure_tables(&PgPool)`
+// path — that's what they're testing.
+#![allow(deprecated)]
 //! Live test for the v0.28 user-roles+permissions panel rendered on
 //! the `rustango_users` admin detail page (Step 5 / item #76).
 //!

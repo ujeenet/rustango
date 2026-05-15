@@ -1069,17 +1069,31 @@ let inserted = rustango::contenttypes::ensure_seeded(&pool).await?;
 ```rust
 use rustango::contenttypes::ContentType;
 
-// By Rust type
-let ct = ContentType::for_model::<Post>(&pool).await?;       // Option<ContentType>
+// By Rust type (uncached)
+let ct = ContentType::for_model_pool::<Post>(&pool).await?;  // Option<ContentType>
 
-// By natural key (parsed permission codenames, admin URLs, etc.)
-let ct = ContentType::by_natural_key(&pool, "blog", "post").await?;
+// By Rust type (cached — issue #35)
+let ct = ContentType::get_for_model::<Post>(&pool).await?;
 
-// By id (FK joins from audit log / permissions / generic FK rows)
-let ct = ContentType::by_id(&pool, 7).await?;
+// By natural key — uncached and cached forms
+let ct = ContentType::by_natural_key_pool(&pool, "blog", "post").await?;
+let ct = ContentType::get_by_natural_key(&pool, "blog", "post").await?;
+
+// By id
+let ct = ContentType::by_id_pool(&pool, 7).await?;
+
+// Batch lookup (issue #35) — one DB round trip for N models
+use std::collections::HashMap;
+let cts: HashMap<(String, String), ContentType> = ContentType::get_for_models(
+    &pool,
+    [("blog".to_string(), "post".to_string()), ("auth".to_string(), "user".to_string())],
+).await?;
+
+// Clear the process-wide cache (e.g. after a migration adds models)
+rustango::contenttypes::clear_cache();
 
 // Full listing for admin sidebars / API
-let all_cts = ContentType::all(&pool).await?;                 // ordered (app, model)
+let all_cts = ContentType::all_pool(&pool).await?;            // ordered (app, model)
 ```
 
 #### Composite-key foreign keys (F.2)
@@ -2160,6 +2174,33 @@ let cache: BoxedCache = Arc::new(
 );
 ```
 
+### Per-view caching — `CachePageLayer` (`cache-page` feature, issue #55)
+
+Django's `@cache_page` / `@cache_control` / `@vary_on_*` analogs as a tower layer + header builders. GET-only, status-200-only, respects `Cache-Control: no-store`.
+
+```rust
+use std::time::Duration;
+use axum::{routing::get, Router};
+use rustango::cache_page::{CachePageLayer, CacheControl, never_cache, vary_on};
+
+let cache = Arc::new(rustango::cache::InMemoryCache::new());
+
+let app: Router = Router::new()
+    .route("/home", get(|| async { "hello" }))
+    .layer(
+        CachePageLayer::new(cache)
+            .timeout(Duration::from_secs(60))
+            .vary_on(["cookie", "accept-language"]),
+    );
+
+// Header builders — attach manually to per-handler responses:
+let cc = CacheControl::new().max_age(60).public().must_revalidate().build();
+let nc = never_cache();                       // no-store, no-cache, must-revalidate, max-age=0
+let vary = vary_on(["cookie", "user-agent"]);  // → "cookie, user-agent"
+```
+
+Cached responses carry `X-Cache-Status: HIT` (or `MISS` on the freshly-cached pass) so observability stacks can split hit/miss without a separate counter. Body is buffered, capped at 1 MiB — for streaming handlers, attach `never_cache()` headers and they pass through untouched.
+
 ---
 
 ## Email + storage + scheduling
@@ -2180,6 +2221,36 @@ let email = Email::new()
     .html_body("<h1>Welcome</h1>");
 mailer.send(&email).await?;
 ```
+
+#### Production SMTP — `SmtpMailer` (issue #48)
+
+Opt in with the `email-smtp` feature — pulls `lettre` (rustls, no openssl). Connects to any RFC-2821 relay (Postmark, SendGrid, AWS SES via SMTP, Postfix, etc.).
+
+```rust
+use rustango::email::smtp::{SmtpMailer, TlsMode};
+
+let mailer = SmtpMailer::builder("mail.example.com")
+    .credentials("postmaster@example.com", env::var("SMTP_PASS")?)
+    .tls(TlsMode::StartTls)            // also: TlsMode::Implicit (465), TlsMode::None (25)
+    .default_from("noreply@example.com")
+    .build()?;
+mailer.send(&email).await?;
+```
+
+Or drop the credentials in `[mail]` settings and let `from_settings` build it:
+
+```toml
+[mail]
+backend = "smtp"
+smtp_host = "mail.example.com"
+smtp_port = 587            # optional — defaults to 587/465/25 by tls
+smtp_tls = "starttls"       # "starttls" (default) | "implicit" | "none"
+smtp_username = "postmaster@example.com"
+# smtp_password = "..."     # set via RUSTANGO_MAIL__SMTP_PASSWORD env var
+from_address = "noreply@example.com"
+```
+
+Build failures (malformed host, unparseable `from_address`, etc.) fall back to `ConsoleMailer` with a `tracing::warn!` so apps don't refuse to boot on a typo'd section. TLS is rustls-backed (`webpki-roots`); custom CAs need `SmtpMailer::with_transport(...)`.
 
 ### File storage
 
@@ -2453,6 +2524,8 @@ handle.shutdown().await;
 
 ## Signals
 
+### Model lifecycle — `pre_save` / `post_save` / `pre_delete` / `post_delete`
+
 ```rust
 use rustango::signals::{connect_post_save, send_post_save, PostSaveContext};
 
@@ -2469,6 +2542,30 @@ send_post_save(&post, PostSaveContext { created: true }).await;
 ```
 
 Available: `connect_pre_save`, `connect_post_save`, `connect_pre_delete`, `connect_post_delete`. Disconnect via the returned `ReceiverId`.
+
+### Request lifecycle — `request_started` / `request_finished` / `got_request_exception`
+
+Issue #53. Drop the `RequestSignalsLayer` tower layer on your router; receivers fire around every request.
+
+```rust
+use axum::Router;
+use rustango::signals::request::{
+    connect_request_started, connect_request_finished, RequestSignalsLayer,
+};
+
+connect_request_started(|ctx| Box::pin(async move {
+    tracing::info!(method = %ctx.method, path = %ctx.path, "started");
+}));
+connect_request_finished(|ctx| Box::pin(async move {
+    tracing::info!(status = ctx.status, ms = ctx.elapsed_ms, "finished");
+}));
+
+let app: Router = Router::new()
+    // ... your routes ...
+    .layer(RequestSignalsLayer::new());   // outermost — sees request first, response last
+```
+
+`RequestStartedContext` carries `method` / `path` / `query`; `RequestFinishedContext` adds `status` + `elapsed_ms`; `RequestExceptionContext` carries the inner-service error string. Disconnect via the returned `ReceiverId`. Receivers run sequentially in registration order — wrap in `tokio::spawn` for parallel fanout.
 
 ---
 

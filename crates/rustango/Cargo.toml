@@ -77,6 +77,12 @@ serializer = ["forms"]
 # backend is behind the separate `cache-redis` feature.
 cache = ["dep:async-trait", "dep:tokio"]
 
+# Per-view caching tower layer (`rustango::cache_page`) — Django's
+# @cache_page / @cache_control / @vary_on_headers analogs. Implies
+# `cache` (cache backend) + `admin` (axum types) + base64 for body
+# round-trip serialization. Issue #55.
+cache-page = ["cache", "admin", "dep:base64"]
+
 # Signals layer (`rustango::signals`) — Django-shape pre_save / post_save
 # / pre_delete / post_delete async dispatch. Receivers register globally
 # per model type; senders fire signals after write paths.
@@ -86,6 +92,12 @@ signals = ["dep:tokio"]
 # InMemoryMailer + NullMailer. SMTP and external transports plug in via
 # the trait.
 email = ["dep:async-trait"]
+
+# Production SMTP backend (`rustango::email::SmtpMailer`, issue #48).
+# Implies `email`. Pulls `lettre` with rustls TLS (no openssl).
+# Default builds don't include this — opt in when you ship to prod and
+# need a real relay (Postmark, SendGrid, AWS SES via SMTP, etc.).
+email-smtp = ["email", "dep:lettre", "dep:tokio"]
 
 # Multi-channel notifications layer (`rustango::notifications`) — Laravel-shape
 # fan-out across mail / database / log / broadcast. Implies email + cache.
@@ -370,6 +382,15 @@ urlencoding = { workspace = true, optional = true }
 
 # `compression` feature dep — optional.
 flate2 = { workspace = true, optional = true }
+
+# `email-smtp` feature dep — optional. rustls TLS only (no openssl).
+# `tokio1` enables the async transport; `builder` re-exports the
+# Message builder we use for MIME assembly.
+lettre = { version = "0.11", default-features = false, features = [
+    "tokio1-rustls-tls",
+    "smtp-transport",
+    "builder",
+], optional = true }
 
 # `runtime` feature dep — used by `#[rustango::main]` to install a
 # default tracing subscriber (env-filter) before the user body runs.

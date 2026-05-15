@@ -51,11 +51,11 @@ async fn sqlite_pool() -> Pool {
 #[tokio::test]
 async fn ensure_table_pool_creates_sqlite_table() {
     let pool = sqlite_pool().await;
-    contenttypes::ensure_table_pool(&pool)
+    contenttypes::ensure_table(&pool)
         .await
         .expect("ensure_table_pool");
     // Idempotent — second call is a no-op.
-    contenttypes::ensure_table_pool(&pool)
+    contenttypes::ensure_table(&pool)
         .await
         .expect("ensure_table_pool idempotent");
 
@@ -74,7 +74,7 @@ async fn ensure_table_pool_creates_sqlite_table() {
 #[tokio::test]
 async fn ensure_seeded_pool_inserts_rows_on_sqlite() {
     let pool = sqlite_pool().await;
-    let inserted = contenttypes::ensure_seeded_pool(&pool)
+    let inserted = contenttypes::ensure_seeded(&pool)
         .await
         .expect("ensure_seeded_pool");
     // Inventory is process-global: every Model from every test in
@@ -89,11 +89,11 @@ async fn ensure_seeded_pool_inserts_rows_on_sqlite() {
 #[tokio::test]
 async fn ensure_seeded_pool_is_idempotent_on_sqlite() {
     let pool = sqlite_pool().await;
-    let first = contenttypes::ensure_seeded_pool(&pool)
+    let first = contenttypes::ensure_seeded(&pool)
         .await
         .expect("first seed");
     assert!(first >= 1);
-    let second = contenttypes::ensure_seeded_pool(&pool)
+    let second = contenttypes::ensure_seeded(&pool)
         .await
         .expect("second seed");
     assert_eq!(second, 0, "re-seed should insert nothing");
@@ -102,8 +102,8 @@ async fn ensure_seeded_pool_is_idempotent_on_sqlite() {
 #[tokio::test]
 async fn by_natural_key_pool_finds_seeded_row_on_sqlite() {
     let pool = sqlite_pool().await;
-    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
-    let row = ContentType::by_natural_key_pool(&pool, "blog_pool_live", "post")
+    contenttypes::ensure_seeded(&pool).await.expect("seed");
+    let row = ContentType::by_natural_key(&pool, "blog_pool_live", "post")
         .await
         .expect("lookup");
     let row = row.expect("seeded row should exist");
@@ -115,8 +115,8 @@ async fn by_natural_key_pool_finds_seeded_row_on_sqlite() {
 #[tokio::test]
 async fn by_natural_key_pool_returns_none_for_unknown_key() {
     let pool = sqlite_pool().await;
-    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
-    let row = ContentType::by_natural_key_pool(&pool, "nope", "missing")
+    contenttypes::ensure_seeded(&pool).await.expect("seed");
+    let row = ContentType::by_natural_key(&pool, "nope", "missing")
         .await
         .expect("lookup");
     assert!(row.is_none());
@@ -130,8 +130,8 @@ async fn by_natural_key_pool_returns_none_for_unknown_key() {
 #[tokio::test]
 async fn for_model_pool_resolves_model_type_on_sqlite() {
     let pool = sqlite_pool().await;
-    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
-    let row = ContentType::for_model_pool::<Post>(&pool)
+    contenttypes::ensure_seeded(&pool).await.expect("seed");
+    let row = ContentType::for_model::<Post>(&pool)
         .await
         .expect("for_model_pool");
     let row = row.expect("Post should have a CT row");
@@ -143,8 +143,8 @@ async fn for_model_pool_resolves_model_type_on_sqlite() {
 #[tokio::test]
 async fn for_model_pool_finds_user_too() {
     let pool = sqlite_pool().await;
-    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
-    let row = ContentType::for_model_pool::<User>(&pool)
+    contenttypes::ensure_seeded(&pool).await.expect("seed");
+    let row = ContentType::for_model::<User>(&pool)
         .await
         .expect("for_model_pool")
         .expect("User should have a CT row");
@@ -155,8 +155,8 @@ async fn for_model_pool_finds_user_too() {
 #[tokio::test]
 async fn all_pool_returns_seeded_rows_alphabetically() {
     let pool = sqlite_pool().await;
-    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
-    let rows = ContentType::all_pool(&pool).await.expect("all_pool");
+    contenttypes::ensure_seeded(&pool).await.expect("seed");
+    let rows = ContentType::all(&pool).await.expect("all_pool");
     assert!(
         rows.len() >= 2,
         "should have at least the Post + User rows; got {}",
@@ -181,13 +181,13 @@ async fn all_pool_returns_seeded_rows_alphabetically() {
 #[tokio::test]
 async fn for_target_pool_constructs_generic_fk_on_sqlite() {
     let pool = sqlite_pool().await;
-    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
-    let gfk = rustango::contenttypes::GenericForeignKey::for_target_pool::<Post>(&pool, 42)
+    contenttypes::ensure_seeded(&pool).await.expect("seed");
+    let gfk = rustango::contenttypes::GenericForeignKey::for_target::<Post>(&pool, 42)
         .await
         .expect("for_target_pool");
     assert_eq!(gfk.object_pk, 42);
     // ct id should match what for_model_pool returns.
-    let ct = ContentType::for_model_pool::<Post>(&pool)
+    let ct = ContentType::for_model::<Post>(&pool)
         .await
         .expect("for_model_pool")
         .expect("ct row");
@@ -202,7 +202,7 @@ async fn for_target_pool_constructs_generic_fk_on_sqlite() {
 async fn fetch_row_as_json_pool_returns_none_for_missing_pk() {
     use rustango::sql::sqlx::Executor as _;
     let pool = sqlite_pool().await;
-    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
+    contenttypes::ensure_seeded(&pool).await.expect("seed");
     // Bootstrap the Post table so `fetch_row_as_json_pool` finds the
     // schema and can issue the SELECT — and returns None for an
     // absent PK.
@@ -215,11 +215,11 @@ async fn fetch_row_as_json_pool_returns_none_for_missing_pk() {
         .await
         .expect("create post table");
     }
-    let ct = ContentType::for_model_pool::<Post>(&pool)
+    let ct = ContentType::for_model::<Post>(&pool)
         .await
         .expect("for_model_pool")
         .expect("ct row");
-    let row = contenttypes::fetch_row_as_json_pool(&pool, &ct, 9999_i64)
+    let row = contenttypes::fetch_row_as_json(&pool, &ct, 9999_i64)
         .await
         .expect("fetch_row_as_json_pool");
     assert!(row.is_none(), "no row with id=9999 should return None");
@@ -231,14 +231,14 @@ async fn render_generic_fk_link_pool_emits_clickable_html_on_sqlite() {
     // the admin to render `(content_type_id, pk)` as a link. Returns
     // graceful fallback HTML when the CT row is unknown.
     let pool = sqlite_pool().await;
-    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
-    let ct = ContentType::for_model_pool::<Post>(&pool)
+    contenttypes::ensure_seeded(&pool).await.expect("seed");
+    let ct = ContentType::for_model::<Post>(&pool)
         .await
         .expect("for_model_pool")
         .expect("ct row");
     let ct_id = ct.id.get().copied().expect("ct id");
     let gfk = rustango::contenttypes::GenericForeignKey::new(ct_id, 7);
-    let html = contenttypes::render_generic_fk_link_pool(&pool, gfk)
+    let html = contenttypes::render_generic_fk_link(&pool, gfk)
         .await
         .expect("render_generic_fk_link_pool");
     assert!(
@@ -249,7 +249,7 @@ async fn render_generic_fk_link_pool_emits_clickable_html_on_sqlite() {
     assert!(html.contains("#7"), "should mention the pk, got: {html}");
 
     // Unknown CT id → graceful fallback HTML, not an error.
-    let fallback = contenttypes::render_generic_fk_link_pool(
+    let fallback = contenttypes::render_generic_fk_link(
         &pool,
         rustango::contenttypes::GenericForeignKey::new(99_999, 7),
     )
@@ -286,7 +286,7 @@ async fn prefetch_soft_pool_groups_children_by_parent_pk_on_sqlite() {
     // HashMap<parent_pk, Vec<Child>>.
     use rustango::sql::sqlx::Executor as _;
     let pool = sqlite_pool().await;
-    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
+    contenttypes::ensure_seeded(&pool).await.expect("seed");
     if let Pool::Sqlite(sq) = &pool {
         sq.execute(
             "CREATE TABLE IF NOT EXISTS ct_pool_live_comment (\
@@ -306,11 +306,9 @@ async fn prefetch_soft_pool_groups_children_by_parent_pk_on_sqlite() {
         }
     }
     let grouped =
-        contenttypes::prefetch_soft_pool::<Comment, _>(&pool, &[1, 2], "author_id", |c| {
-            c.author_id
-        })
-        .await
-        .expect("prefetch_soft_pool");
+        contenttypes::prefetch_soft::<Comment, _>(&pool, &[1, 2], "author_id", |c| c.author_id)
+            .await
+            .expect("prefetch_soft_pool");
     assert_eq!(
         grouped.get(&1).map_or(0, |v| v.len()),
         2,
@@ -323,10 +321,9 @@ async fn prefetch_soft_pool_groups_children_by_parent_pk_on_sqlite() {
     );
 
     // Empty parent_pks list short-circuits to empty map.
-    let empty =
-        contenttypes::prefetch_soft_pool::<Comment, _>(&pool, &[], "author_id", |c| c.author_id)
-            .await
-            .expect("empty pks");
+    let empty = contenttypes::prefetch_soft::<Comment, _>(&pool, &[], "author_id", |c| c.author_id)
+        .await
+        .expect("empty pks");
     assert!(empty.is_empty(), "empty parent list short-circuits");
 }
 
@@ -337,7 +334,7 @@ async fn prefetch_generic_pool_hydrates_targets_on_sqlite() {
     // whose ct matches, returns `HashMap<(i64, i64), C>`.
     use rustango::sql::sqlx::Executor as _;
     let pool = sqlite_pool().await;
-    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
+    contenttypes::ensure_seeded(&pool).await.expect("seed");
     if let Pool::Sqlite(sq) = &pool {
         sq.execute(
             "CREATE TABLE IF NOT EXISTS ct_pool_live_post (\
@@ -352,12 +349,12 @@ async fn prefetch_generic_pool_hydrates_targets_on_sqlite() {
             .expect("seed row");
     }
     // Look up Post's CT id then ask prefetch_generic_pool to hydrate.
-    let ct = ContentType::for_model_pool::<Post>(&pool)
+    let ct = ContentType::for_model::<Post>(&pool)
         .await
         .expect("for_model_pool")
         .expect("ct row");
     let ct_id = ct.id.get().copied().expect("ct id");
-    let map = contenttypes::prefetch_generic_pool::<Post>(&pool, &[(ct_id, 1)])
+    let map = contenttypes::prefetch_generic::<Post>(&pool, &[(ct_id, 1)])
         .await
         .expect("prefetch_generic_pool");
     assert!(
@@ -372,7 +369,7 @@ async fn prefetch_generic_pool_hydrates_targets_on_sqlite() {
     );
 
     // Empty pairs short-circuit to empty map.
-    let empty = contenttypes::prefetch_generic_pool::<Post>(&pool, &[])
+    let empty = contenttypes::prefetch_generic::<Post>(&pool, &[])
         .await
         .expect("empty");
     assert!(empty.is_empty(), "empty pair list should short-circuit");
@@ -382,7 +379,7 @@ async fn prefetch_generic_pool_hydrates_targets_on_sqlite() {
 async fn for_each_row_of_ct_pool_visits_seeded_rows() {
     use rustango::sql::sqlx::Executor as _;
     let pool = sqlite_pool().await;
-    contenttypes::ensure_seeded_pool(&pool).await.expect("seed");
+    contenttypes::ensure_seeded(&pool).await.expect("seed");
     // Bootstrap + seed three Posts so the iterator has something to walk.
     if let Pool::Sqlite(sq) = &pool {
         sq.execute(
@@ -400,12 +397,12 @@ async fn for_each_row_of_ct_pool_visits_seeded_rows() {
                 .expect("insert");
         }
     }
-    let ct = ContentType::for_model_pool::<Post>(&pool)
+    let ct = ContentType::for_model::<Post>(&pool)
         .await
         .expect("for_model_pool")
         .expect("ct row");
     let mut visited = 0usize;
-    let total = contenttypes::for_each_row_of_ct_pool(&pool, &ct, 2, |_row| {
+    let total = contenttypes::for_each_row_of_ct(&pool, &ct, 2, |_row| {
         visited += 1;
         Ok(())
     })

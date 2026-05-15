@@ -912,6 +912,30 @@ pub enum AggregateExpr {
     /// [`crate::core::window`] rather than constructing this variant
     /// directly.
     Window(Box<super::window::WindowExpr>),
+    /// PG: `array_agg(column)` — collects column values into a Postgres
+    /// array. With `distinct = true` emits `array_agg(DISTINCT column)`.
+    /// Issue #33. **Postgres-only**: MySQL/SQLite emit
+    /// `SqlError::AggregateNotSupportedInDialect`. The returned column
+    /// is a `text[]` / `int[]` depending on the input type; decode it as
+    /// `Vec<T>` via `serde_json::Value` if the SqlValue decoder doesn't
+    /// recognise the array type natively.
+    ArrayAgg {
+        column: &'static str,
+        distinct: bool,
+    },
+    /// PG: `string_agg(column, delimiter)` — concatenates column values
+    /// with `delimiter`. With `distinct = true` emits
+    /// `string_agg(DISTINCT column, delimiter)`. `delimiter` is bound as
+    /// a parameter so SQL injection through the delimiter is impossible.
+    /// Issue #33. **Postgres-only**.
+    StringAgg {
+        column: &'static str,
+        delimiter: String,
+        distinct: bool,
+    },
+    /// PG: `jsonb_agg(column)` — collects column values into a JSONB
+    /// array. Issue #33. **Postgres-only**.
+    JsonbAgg { column: &'static str },
 }
 
 impl AggregateExpr {
@@ -919,7 +943,8 @@ impl AggregateExpr {
     /// triggers GROUP BY auto-inference, issue #75).
     ///
     /// - `Count` / `Sum` / `Avg` / `Max` / `Min` / `CountDistinct` /
-    ///   `StdDev*` / `Variance*` → **aggregating** (collapses rows).
+    ///   `StdDev*` / `Variance*` / `ArrayAgg` / `StringAgg` / `JsonbAgg`
+    ///   → **aggregating** (collapses rows).
     /// - `Window` → **not aggregating** (per-row computation over a frame).
     /// - `Filtered { inner }` / `Coalesced { inner }` → recurse on `inner`.
     #[must_use]
@@ -934,12 +959,62 @@ impl AggregateExpr {
             | AggregateExpr::StdDev(_)
             | AggregateExpr::StdDevPop(_)
             | AggregateExpr::Variance(_)
-            | AggregateExpr::VariancePop(_) => true,
+            | AggregateExpr::VariancePop(_)
+            | AggregateExpr::ArrayAgg { .. }
+            | AggregateExpr::StringAgg { .. }
+            | AggregateExpr::JsonbAgg { .. } => true,
             AggregateExpr::Window(_) => false,
             AggregateExpr::Filtered { inner, .. } | AggregateExpr::Coalesced { inner, .. } => {
                 inner.is_aggregating()
             }
         }
+    }
+
+    /// Ergonomic constructor for [`AggregateExpr::ArrayAgg`] without
+    /// `DISTINCT`. Issue #33.
+    #[must_use]
+    pub const fn array_agg(column: &'static str) -> Self {
+        Self::ArrayAgg {
+            column,
+            distinct: false,
+        }
+    }
+
+    /// Ergonomic constructor for `array_agg(DISTINCT column)`. Issue #33.
+    #[must_use]
+    pub const fn array_agg_distinct(column: &'static str) -> Self {
+        Self::ArrayAgg {
+            column,
+            distinct: true,
+        }
+    }
+
+    /// Ergonomic constructor for [`AggregateExpr::StringAgg`] without
+    /// `DISTINCT`. Issue #33.
+    #[must_use]
+    pub fn string_agg(column: &'static str, delimiter: impl Into<String>) -> Self {
+        Self::StringAgg {
+            column,
+            delimiter: delimiter.into(),
+            distinct: false,
+        }
+    }
+
+    /// Ergonomic constructor for `string_agg(DISTINCT column, delimiter)`.
+    /// Issue #33.
+    #[must_use]
+    pub fn string_agg_distinct(column: &'static str, delimiter: impl Into<String>) -> Self {
+        Self::StringAgg {
+            column,
+            delimiter: delimiter.into(),
+            distinct: true,
+        }
+    }
+
+    /// Ergonomic constructor for [`AggregateExpr::JsonbAgg`]. Issue #33.
+    #[must_use]
+    pub const fn jsonb_agg(column: &'static str) -> Self {
+        Self::JsonbAgg { column }
     }
 }
 

@@ -19,7 +19,7 @@ mod value;
 pub mod window;
 
 pub use case::{case, value, CaseBuilder};
-pub use column::{Column, TypedAssignment, TypedExpr, TypedFilter};
+pub use column::{Column, TypedAssignment, TypedExpr, TypedFieldList, TypedFilter};
 pub use error::QueryError;
 pub use expr::{BinOp, CaseBranch, Expr, ScalarFn, F};
 pub use field_type::FieldType;

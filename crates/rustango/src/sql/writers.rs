@@ -386,6 +386,20 @@ fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, Sq
                 wrapper: "Window at format_bare_aggregate site",
             });
         }
+        AggregateExpr::ArrayAgg { .. }
+        | AggregateExpr::StringAgg { .. }
+        | AggregateExpr::JsonbAgg { .. } => {
+            // PG-specific aggregates are emitted by the dedicated
+            // arms in `write_aggregate_expr` (which bind the
+            // string_agg delimiter as a parameter). Wrapping them in
+            // `Filtered` or `Coalesced` would route here — not yet
+            // designed (semantics of `array_agg(x) FILTER (...)` is
+            // valid PG but the cast-aware fallback path doesn't
+            // model array return types). Reject upfront.
+            return Err(SqlError::NestedAggregateWrapper {
+                wrapper: "PG-aggregate at format_bare_aggregate site",
+            });
+        }
     })
 }
 
@@ -463,6 +477,54 @@ fn write_aggregate_expr(
             Ok(())
         }
         AggregateExpr::Window(w) => write_window_expr(b, w),
+        AggregateExpr::ArrayAgg { column, distinct } => {
+            if b.d.name() != "postgres" {
+                return Err(SqlError::AggregateNotSupportedInDialect {
+                    aggregate: "array_agg",
+                    dialect: b.d.name(),
+                });
+            }
+            b.sql.push_str("array_agg(");
+            if *distinct {
+                b.sql.push_str("DISTINCT ");
+            }
+            b.write_ident(column);
+            b.sql.push(')');
+            Ok(())
+        }
+        AggregateExpr::StringAgg {
+            column,
+            delimiter,
+            distinct,
+        } => {
+            if b.d.name() != "postgres" {
+                return Err(SqlError::AggregateNotSupportedInDialect {
+                    aggregate: "string_agg",
+                    dialect: b.d.name(),
+                });
+            }
+            b.sql.push_str("string_agg(");
+            if *distinct {
+                b.sql.push_str("DISTINCT ");
+            }
+            b.write_ident(column);
+            b.sql.push_str(", ");
+            b.push_param(crate::core::SqlValue::String(delimiter.clone()));
+            b.sql.push(')');
+            Ok(())
+        }
+        AggregateExpr::JsonbAgg { column } => {
+            if b.d.name() != "postgres" {
+                return Err(SqlError::AggregateNotSupportedInDialect {
+                    aggregate: "jsonb_agg",
+                    dialect: b.d.name(),
+                });
+            }
+            b.sql.push_str("jsonb_agg(");
+            b.write_ident(column);
+            b.sql.push(')');
+            Ok(())
+        }
         _ => write_aggregate_kind(b, expr),
     }
 }
@@ -521,6 +583,17 @@ fn write_aggregate_as_case_when(
                 wrapper: "Filtered(Window)",
             });
         }
+        AggregateExpr::ArrayAgg { .. }
+        | AggregateExpr::StringAgg { .. }
+        | AggregateExpr::JsonbAgg { .. } => {
+            // PG-specific aggregates inside Filtered{} aren't supported
+            // — MySQL has no equivalent native syntax (GROUP_CONCAT
+            // semantics differ), and the CASE-WHEN fallback would lose
+            // the PG-only nature. Reject upfront.
+            return Err(SqlError::NestedAggregateWrapper {
+                wrapper: "Filtered(PG-aggregate)",
+            });
+        }
     };
     let prior = b.sql.len();
     b.sql.push_str(agg_kw);
@@ -559,6 +632,9 @@ fn aggregate_column(expr: &AggregateExpr) -> Option<&'static str> {
         | AggregateExpr::StdDevPop(c)
         | AggregateExpr::Variance(c)
         | AggregateExpr::VariancePop(c) => Some(c),
+        AggregateExpr::ArrayAgg { column, .. }
+        | AggregateExpr::StringAgg { column, .. }
+        | AggregateExpr::JsonbAgg { column } => Some(column),
         AggregateExpr::Filtered { inner, .. } | AggregateExpr::Coalesced { inner, .. } => {
             aggregate_column(inner)
         }
@@ -1024,6 +1100,7 @@ fn write_case(
     b.sql.push_str(" END");
     Ok(())
 }
+
 
 /// Emit a scalar function call. Most variants are straight `FN(args…)`
 /// across all three dialects; the divergent ones (`Concat` on SQLite,

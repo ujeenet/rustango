@@ -19,6 +19,7 @@ Patterns for the rustango ORM beyond the basics. Most examples assume you alread
 - [Lazy FK loading](#lazy-fk-loading)
 - [QuerySet vs string-keyed filters](#queryset-vs-string-keyed-filters)
 - [Tenant-scoped queries](#tenant-scoped-queries)
+- [Signals](#signals)
 - [Performance tips](#performance-tips)
 
 ---
@@ -949,6 +950,56 @@ The `Join.project` field tells the writer to emit `<alias>"."<col>" AS "<alias>_
 
 ---
 
+## Narrow save — `save_partial(&[...], &pool)`
+
+Django's `instance.save(update_fields=[...])` analog (issue #66). `save_pool` rewrites every non-PK column; `save_partial` rewrites only the listed ones.
+
+```rust
+let mut post = Post::objects().fetch(&pool).await?.pop().unwrap();
+post.title = "new title".into();
+post.save_partial(&["title"], &pool).await?;  // SET "title" = $1
+                                                  // — leaves body, status, views untouched
+```
+
+Two motivations:
+
+* **Performance.** Wide rows with `TEXT` / `JSON` / `bytea` columns pay to re-bind and re-write every field on every `save()` even when only one mutated. `save_partial` keeps the `SET` clause to exactly what changed.
+* **Concurrency safety.** When two writers diverge after a shared read, the loser silently overwrites the winner's edits on fields it didn't touch. Naming only the field you actually changed preserves the other writer's work everywhere else.
+
+```rust
+// Writer A — flips title.
+a.title = "from-A".into();
+a.save_partial(&["title"], &pool).await?;
+
+// Writer B — started from the same read, flips status.
+// B's local `title` is stale, but it's not in the list, so A's
+// write survives.
+b.status = "from-B".into();
+b.save_partial(&["status"], &pool).await?;
+```
+
+**Field names are Rust-side struct fields**, not SQL columns — `["author_id"]` (not `["author"]` for an FK-typed field). Unknown field names return `ExecError::Query(QueryError::UnknownField)`. An empty list is a no-op (returns `Ok(())` and logs a `tracing::warn!`), matching Django's "nothing to do" semantic. Audited models (`#[rustango(audit(...))]`) narrow the audit-log snapshot to the same column set — the log reflects exactly what was written.
+
+**Auto-PK note.** `save_partial` is UPDATE-only; calling it on an `Auto::Unset` PK is a user error (use `insert_pool` / `save_pool` for that case). Unlike `save_pool` which auto-dispatches `Unset → insert_pool`, this method assumes you've already inserted.
+
+### Typed-column variant — `save_partial_typed((Cols, ...), &pool)`
+
+Issue #67. The string-keyed shape works for dynamic field lists (admin / API payloads); when the field list is static, `save_partial_typed` catches typos and renames at **compile time**:
+
+```rust
+post.save_partial_typed((Post::title, Post::slug), &pool).await?;
+//                       ──────────  ──────────
+//                       title_col   slug_col   ← distinct ZSTs
+```
+
+Each `Post::<field>` is its own zero-sized type — a homogeneous slice (`&[Post::title, Post::slug]`) doesn't type-check in Rust, so the API takes a **tuple** instead. Single-field calls use the trailing-comma idiom: `(Post::title,)`. Tuples are supported from arity 1 up to 12 — past that, drop to `save_partial(&[&str], _)`.
+
+Cross-model tuples are a **compile error** — `(Post::title, Author::name)` fails the `TypedFieldList<Post>` trait bound because `Author::name`'s `Column::Model = Author`. This is the headline value over the string-keyed shape: rename refactors on a column name surface at the typed call site, not at runtime.
+
+Internally lowers to `save_partial` — same audit narrowing, same `Auto::Unset` constraint, same empty-list no-op semantic.
+
+---
+
 ## Bulk operations
 
 ```rust
@@ -1252,6 +1303,58 @@ async fn handler(mut t: Tenant) -> Result<...> {
 ```
 
 `fetch_on` works with any `sqlx::Executor`; `fetch` is sugar for `fetch_on(&pool)`.
+
+---
+
+## Signals
+
+Two registries, two purposes.
+
+### Model lifecycle
+
+`pre_save` / `post_save` / `pre_delete` / `post_delete` — per-`Model` hooks that fire from the macro-generated write paths.
+
+```rust
+use rustango::signals::{connect_post_save, PostSaveContext};
+
+connect_post_save::<Post, _, _>(|post, ctx| async move {
+    if ctx.created {
+        tracing::info!("new post #{}", post.id.get().copied().unwrap_or(0));
+    }
+});
+```
+
+`T: Clone + 'static` is required (the dispatcher hands each receiver an `Arc<T>` clone). Receivers run sequentially in registration order. Disconnect via the `ReceiverId` returned by `connect_*`. The four signal kinds + their context shapes are documented inline in `rustango::signals`.
+
+### Request lifecycle — issue #53
+
+`request_started` / `request_finished` / `got_request_exception` — fire around every HTTP request that passes through `RequestSignalsLayer`. Useful for tracing, audit, request-time metrics, and Django-style `got_request_exception` error reporting.
+
+```rust
+use axum::Router;
+use rustango::signals::request::{
+    connect_request_started, connect_request_finished, RequestSignalsLayer,
+};
+
+connect_request_started(|ctx| Box::pin(async move {
+    tracing::info!(method = %ctx.method, path = %ctx.path, "started");
+}));
+connect_request_finished(|ctx| Box::pin(async move {
+    metrics::histogram!("http_request_ms").record(ctx.elapsed_ms);
+}));
+
+let app: Router = Router::new()
+    .route("/", get(home))
+    .layer(RequestSignalsLayer::new());  // outermost — sees request first / response last
+```
+
+| Signal | Context fields |
+|---|---|
+| `request_started` | `method`, `path`, `query` |
+| `request_finished` | `method`, `path`, `status`, `elapsed_ms` |
+| `got_request_exception` | `method`, `path`, `error` |
+
+Receivers run sequentially in registration order; wrap a body in `tokio::spawn` for parallel fanout or panic isolation. The request and model registries are independent — connecting / disconnecting / clearing one doesn't touch the other.
 
 ---
 

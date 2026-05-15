@@ -119,6 +119,18 @@ pub enum SqlError {
         dialect: &'static str,
     },
 
+    /// A Postgres-specific aggregate (`array_agg`, `string_agg`,
+    /// `jsonb_agg`, etc.) was requested on a non-PG backend. Issue #33.
+    /// MySQL has `GROUP_CONCAT` and `JSON_ARRAYAGG` that overlap
+    /// semantically but the syntax differs enough that we don't
+    /// auto-translate — caller should branch on `pool.dialect().name()`
+    /// or restrict the feature to PG-only deployments.
+    #[error("aggregate `{aggregate}` is not supported by the `{dialect}` dialect")]
+    AggregateNotSupportedInDialect {
+        aggregate: &'static str,
+        dialect: &'static str,
+    },
+
     /// A scalar function (issue #2) was built with the wrong number of
     /// arguments — e.g. `Substr` with 2 args, `NullIf` with 3, or
     /// `Concat` with 0. The builder-side API constrains arity for

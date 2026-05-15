@@ -295,6 +295,23 @@ pub struct MailSettings {
     pub backend: Option<String>,
     /// SMTP host. Required when `backend = "smtp"`.
     pub smtp_host: Option<String>,
+    /// SMTP port. Defaults vary by TLS mode — 25 for `none`, 587 for
+    /// `starttls`, 465 for `implicit`. Issue #48.
+    pub smtp_port: Option<u16>,
+    /// SMTP AUTH username. Set alongside `smtp_password` to enable
+    /// PLAIN/LOGIN auth — both must be present, otherwise the
+    /// transport connects anonymously. Issue #48.
+    pub smtp_username: Option<String>,
+    /// SMTP AUTH password. Prefer reading from an env var rather than
+    /// committing to TOML — the config loader's env-overlay (see
+    /// [`crate::config`]) makes `RUSTANGO_MAIL__SMTP_PASSWORD` Just
+    /// Work. Issue #48.
+    pub smtp_password: Option<String>,
+    /// TLS mode: `"none"`, `"starttls"` (default — RFC 3207 upgrade
+    /// on port 587), `"implicit"` (SMTPS — TLS from byte one on
+    /// port 465). Unknown values fall back to `"starttls"` with a
+    /// warning. Issue #48.
+    pub smtp_tls: Option<String>,
     /// `From:` address for sent mail.
     pub from_address: Option<String>,
 }

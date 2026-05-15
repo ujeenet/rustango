@@ -187,7 +187,7 @@ async fn ensure_seeded_inserts_a_row_per_model() {
         eprintln!("DATABASE_URL unset — skipping");
         return;
     };
-    let inserted = contenttypes::ensure_seeded(&pool)
+    let inserted = contenttypes::ensure_seeded(&pool.clone().into())
         .await
         .expect("ensure_seeded");
     assert!(
@@ -195,7 +195,7 @@ async fn ensure_seeded_inserts_a_row_per_model() {
         "expected at least the two test models seeded, got {inserted}"
     );
     // Re-running should be a no-op.
-    let inserted_again = contenttypes::ensure_seeded(&pool)
+    let inserted_again = contenttypes::ensure_seeded(&pool.clone().into())
         .await
         .expect("ensure_seeded idempotent");
     assert_eq!(
@@ -211,8 +211,10 @@ async fn for_model_resolves_to_correct_row() {
         eprintln!("DATABASE_URL unset — skipping");
         return;
     };
-    contenttypes::ensure_seeded(&pool).await.expect("seed");
-    let ct = ContentType::for_model::<Post>(&pool)
+    contenttypes::ensure_seeded(&pool.clone().into())
+        .await
+        .expect("seed");
+    let ct = ContentType::for_model::<Post>(&pool.clone().into())
         .await
         .expect("for_model")
         .expect("Post ContentType row exists");
@@ -229,8 +231,10 @@ async fn by_natural_key_round_trips() {
         eprintln!("DATABASE_URL unset — skipping");
         return;
     };
-    contenttypes::ensure_seeded(&pool).await.expect("seed");
-    let ct = ContentType::by_natural_key(&pool, "auth", "user")
+    contenttypes::ensure_seeded(&pool.clone().into())
+        .await
+        .expect("seed");
+    let ct = ContentType::by_natural_key(&pool.clone().into(), "auth", "user")
         .await
         .expect("by_natural_key")
         .expect("auth.user exists");
@@ -238,7 +242,7 @@ async fn by_natural_key_round_trips() {
     let pk = ct.id.get().copied().expect("auto pk populated");
 
     // by_id should return the same row.
-    let by_id = ContentType::by_id(&pool, pk)
+    let by_id = ContentType::by_id(&pool.clone().into(), pk)
         .await
         .expect("by_id")
         .expect("pk exists");
@@ -253,8 +257,10 @@ async fn all_returns_seeded_rows_ordered() {
         eprintln!("DATABASE_URL unset — skipping");
         return;
     };
-    contenttypes::ensure_seeded(&pool).await.expect("seed");
-    let rows = ContentType::all(&pool).await.expect("all");
+    contenttypes::ensure_seeded(&pool.clone().into())
+        .await
+        .expect("seed");
+    let rows = ContentType::all(&pool.clone().into()).await.expect("all");
     assert!(rows.len() >= 2, "at least two seeded models");
     // Confirm sort order: app_label asc, model_name asc.
     let mut last: Option<(String, String)> = None;
@@ -312,15 +318,17 @@ async fn ensure_seeded_skips_content_type_table_itself() {
         eprintln!("DATABASE_URL unset — skipping");
         return;
     };
-    contenttypes::ensure_seeded(&pool).await.expect("seed");
-    let row = ContentType::by_natural_key(&pool, "project", "contenttype")
+    contenttypes::ensure_seeded(&pool.clone().into())
+        .await
+        .expect("seed");
+    let row = ContentType::by_natural_key(&pool.clone().into(), "project", "contenttype")
         .await
         .expect("query");
     assert!(
         row.is_none(),
         "ContentType should not have a self-referential row"
     );
-    let alt = ContentType::by_natural_key(&pool, "contenttypes", "contenttype")
+    let alt = ContentType::by_natural_key(&pool.clone().into(), "contenttypes", "contenttype")
         .await
         .expect("query");
     assert!(alt.is_none(), "ContentType should not seed itself");
@@ -346,11 +354,13 @@ async fn for_target_resolves_via_content_type() {
         eprintln!("DATABASE_URL unset — skipping");
         return;
     };
-    contenttypes::ensure_seeded(&pool).await.expect("seed");
-    let g = GenericForeignKey::for_target::<Post>(&pool, 99)
+    contenttypes::ensure_seeded(&pool.clone().into())
+        .await
+        .expect("seed");
+    let g = GenericForeignKey::for_target::<Post>(&pool.clone().into(), 99)
         .await
         .expect("for_target");
-    let post_ct = ContentType::for_model::<Post>(&pool)
+    let post_ct = ContentType::for_model::<Post>(&pool.clone().into())
         .await
         .expect("for_model")
         .expect("Post CT exists");
@@ -394,10 +404,14 @@ async fn prefetch_soft_groups_children_by_fk_value() {
     }
 
     let parent_pks = vec![p1_id, p2_id];
-    let by_post =
-        contenttypes::prefetch_soft::<Comment, _>(&pool, &parent_pks, "post_id", |c| c.post_id)
-            .await
-            .expect("prefetch_soft");
+    let by_post = contenttypes::prefetch_soft::<Comment, _>(
+        &pool.clone().into(),
+        &parent_pks,
+        "post_id",
+        |c| c.post_id,
+    )
+    .await
+    .expect("prefetch_soft");
 
     let p1_kids = by_post.get(&p1_id).expect("p1 has kids");
     assert_eq!(p1_kids.len(), 2);
@@ -413,7 +427,10 @@ async fn prefetch_soft_short_circuits_on_empty_parent_list() {
         eprintln!("DATABASE_URL unset — skipping");
         return;
     };
-    let by_post = contenttypes::prefetch_soft::<Comment, _>(&pool, &[], "post_id", |c| c.post_id)
+    let by_post =
+        contenttypes::prefetch_soft::<Comment, _>(&pool.clone().into(), &[], "post_id", |c| {
+            c.post_id
+        })
         .await
         .expect("prefetch_soft");
     assert!(by_post.is_empty());
@@ -427,7 +444,9 @@ async fn prefetch_generic_hydrates_typed_targets() {
         eprintln!("DATABASE_URL unset — skipping");
         return;
     };
-    contenttypes::ensure_seeded(&pool).await.expect("seed");
+    contenttypes::ensure_seeded(&pool.clone().into())
+        .await
+        .expect("seed");
 
     // Seed 2 posts + 1 user. Build a list of generic FKs pointing at
     // both kinds. prefetch_generic::<Post>(...) should hydrate only
@@ -452,13 +471,13 @@ async fn prefetch_generic_hydrates_typed_targets() {
     let p2_pk = p2.id.get().copied().unwrap();
     let u_pk = u.id.get().copied().unwrap();
 
-    let g_p1 = GenericForeignKey::for_target::<Post>(&pool, p1_pk)
+    let g_p1 = GenericForeignKey::for_target::<Post>(&pool.clone().into(), p1_pk)
         .await
         .expect("g_p1");
-    let g_p2 = GenericForeignKey::for_target::<Post>(&pool, p2_pk)
+    let g_p2 = GenericForeignKey::for_target::<Post>(&pool.clone().into(), p2_pk)
         .await
         .expect("g_p2");
-    let g_u = GenericForeignKey::for_target::<User>(&pool, u_pk)
+    let g_u = GenericForeignKey::for_target::<User>(&pool.clone().into(), u_pk)
         .await
         .expect("g_u");
     let pairs = vec![
@@ -467,7 +486,7 @@ async fn prefetch_generic_hydrates_typed_targets() {
         (g_u.content_type_id, g_u.object_pk),
     ];
 
-    let posts = contenttypes::prefetch_generic::<Post>(&pool, &pairs)
+    let posts = contenttypes::prefetch_generic::<Post>(&pool.clone().into(), &pairs)
         .await
         .expect("prefetch_generic Post");
     assert_eq!(
@@ -500,8 +519,10 @@ async fn prefetch_generic_short_circuits_on_empty_pairs() {
         eprintln!("DATABASE_URL unset — skipping");
         return;
     };
-    contenttypes::ensure_seeded(&pool).await.expect("seed");
-    let out = contenttypes::prefetch_generic::<Post>(&pool, &[])
+    contenttypes::ensure_seeded(&pool.clone().into())
+        .await
+        .expect("seed");
+    let out = contenttypes::prefetch_generic::<Post>(&pool.clone().into(), &[])
         .await
         .expect("prefetch_generic empty");
     assert!(out.is_empty());
@@ -532,7 +553,9 @@ async fn render_generic_fk_link_resolves_via_content_type() {
         eprintln!("DATABASE_URL unset — skipping");
         return;
     };
-    contenttypes::ensure_seeded(&pool).await.expect("seed");
+    contenttypes::ensure_seeded(&pool.clone().into())
+        .await
+        .expect("seed");
     let mut p = Post {
         id: Auto::Unset,
         title: "rendered".into(),
@@ -540,10 +563,10 @@ async fn render_generic_fk_link_resolves_via_content_type() {
     p.insert(&pool).await.expect("insert post");
     let pk = p.id.get().copied().unwrap();
 
-    let gfk = GenericForeignKey::for_target::<Post>(&pool, pk)
+    let gfk = GenericForeignKey::for_target::<Post>(&pool.clone().into(), pk)
         .await
         .expect("for_target");
-    let html = render_generic_fk_link(&pool, gfk)
+    let html = render_generic_fk_link(&pool.clone().into(), gfk)
         .await
         .expect("render_generic_fk_link");
 
@@ -562,9 +585,11 @@ async fn render_generic_fk_link_falls_back_on_unknown_ct_id() {
         eprintln!("DATABASE_URL unset — skipping");
         return;
     };
-    contenttypes::ensure_seeded(&pool).await.expect("seed");
+    contenttypes::ensure_seeded(&pool.clone().into())
+        .await
+        .expect("seed");
     let gfk = GenericForeignKey::new(/* unknown */ 99_999_999, 42);
-    let html = render_generic_fk_link(&pool, gfk)
+    let html = render_generic_fk_link(&pool.clone().into(), gfk)
         .await
         .expect("render_generic_fk_link");
     // Fallback shape — raw pair, no anchor link, italics for visibility.

@@ -152,20 +152,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n== 4. filter operators (Eq / Gt / In / Like / ILike / Between) ==");
 
     let alice_posts: Vec<Post> = Post::objects()
-        .filter("author_id", Op::Eq, alice_id)
+        .filter_op("author_id", Op::Eq, alice_id)
         .order_by(&[("title", false)])
         .fetch_pool(&pool)
         .await?;
     println!("Alice has {} post(s)", alice_posts.len());
 
     let popular: Vec<Post> = Post::objects()
-        .filter("views", Op::Gt, 0_i64)
+        .filter_op("views", Op::Gt, 0_i64)
         .fetch_pool(&pool)
         .await?;
     println!("posts with views > 0: {}", popular.len());
 
     let by_known_authors: Vec<Post> = Post::objects()
-        .filter(
+        .filter_op(
             "author_id",
             Op::In,
             SqlValue::List(vec![SqlValue::I64(alice_id), SqlValue::I64(bob_id)]),
@@ -175,20 +175,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("posts by Alice or Bob: {}", by_known_authors.len());
 
     let titles_with_pks: Vec<Post> = Post::objects()
-        .filter("title", Op::Like, "%PKs%")
+        .filter_op("title", Op::Like, "%PKs%")
         .fetch_pool(&pool)
         .await?;
     println!("LIKE '%PKs%': {}", titles_with_pks.len());
 
     // ILIKE — translated to LOWER(col) LIKE LOWER(?) on SQLite.
     let titles_ilike: Vec<Post> = Post::objects()
-        .filter("title", Op::ILike, "%hello%")
+        .filter_op("title", Op::ILike, "%hello%")
         .fetch_pool(&pool)
         .await?;
     println!("ILIKE '%hello%': {}", titles_ilike.len());
 
     let mid_views: Vec<Post> = Post::objects()
-        .filter(
+        .filter_op(
             "views",
             Op::Between,
             SqlValue::List(vec![SqlValue::I64(1), SqlValue::I64(50)]),
@@ -225,7 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     first.views = 999;
     first.save_pool(&pool).await?;
     let refetched: Post = QuerySet::<Post>::new()
-        .filter("id", Op::Eq, *first.id.get().unwrap())
+        .filter_op("id", Op::Eq, *first.id.get().unwrap())
         .fetch_pool(&pool)
         .await?
         .pop()
@@ -255,7 +255,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tx.commit().await?;
     }
     let alice_after: Author = QuerySet::<Author>::new()
-        .filter("id", Op::Eq, alice_id)
+        .filter_op("id", Op::Eq, alice_id)
         .fetch_pool(&pool)
         .await?
         .pop()
@@ -313,7 +313,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n== 12. delete_pool removes a row ==");
     let doomed = Post::objects()
-        .filter("title", Op::Eq, "Draft")
+        .filter_op("title", Op::Eq, "Draft")
         .fetch_pool(&pool)
         .await?
         .pop()
