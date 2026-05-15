@@ -1,12 +1,33 @@
 //! Tests for `ContentType::get_for_models` batch lookup and the
 //! `get_for_model` / `get_by_natural_key` cache layer
 //! (issue #35). Runs against in-memory SQLite — no infra needed.
+//!
+//! ## Why the suite-wide serializing mutex
+//!
+//! The ContentType cache (`contenttypes::clear_cache` / the static
+//! HashMap behind `get_*` methods) is **process-global**. Under
+//! cargo's default parallel test harness, two tests racing on
+//! `clear_cache()` between another test's "populate" and "assert HIT"
+//! calls would evict the entry and force a DB hit — which then fails
+//! on a dropped table in the table-drop tests below. The lock makes
+//! every test in this file run sequentially against the shared cache.
 
 #![cfg(feature = "sqlite")]
+
+use std::sync::OnceLock;
 
 use rustango::contenttypes::{self, ContentType};
 use rustango::sql::{sqlx, Auto, Pool};
 use rustango::Model;
+use tokio::sync::Mutex;
+
+/// Suite-wide lock — gates every test against the process-global
+/// ContentType cache so the cache state stays coherent across the
+/// "clear → populate → assert" pattern each test follows.
+fn cache_lock() -> &'static Mutex<()> {
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
 
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "ct_bc_post")]
@@ -46,6 +67,7 @@ async fn sqlite_pool() -> Pool {
 /// Both `&str` literals and `String` values are accepted.
 #[tokio::test]
 async fn get_for_models_returns_matching_rows() {
+    let _g = cache_lock().lock().await;
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
 
@@ -76,6 +98,7 @@ async fn get_for_models_returns_matching_rows() {
 /// migrated yet.
 #[tokio::test]
 async fn get_for_models_omits_unknown_pairs() {
+    let _g = cache_lock().lock().await;
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
     let cts = ContentType::get_for_models(&pool, [("ct_bc_blog", "post"), ("nonexistent", "nope")])
@@ -90,6 +113,7 @@ async fn get_for_models_omits_unknown_pairs() {
 /// the lookup entirely when they have nothing to ask about).
 #[tokio::test]
 async fn get_for_models_empty_input_is_empty_output() {
+    let _g = cache_lock().lock().await;
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
     let cts = ContentType::get_for_models(&pool, std::iter::empty::<(String, String)>())
@@ -102,6 +126,7 @@ async fn get_for_models_empty_input_is_empty_output() {
 /// path — the cache doesn't change semantics, only speed.
 #[tokio::test]
 async fn get_by_natural_key_matches_uncached() {
+    let _g = cache_lock().lock().await;
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
     let uncached = ContentType::by_natural_key(&pool, "ct_bc_blog", "post")
@@ -123,6 +148,7 @@ async fn get_by_natural_key_matches_uncached() {
 /// still succeed.
 #[tokio::test]
 async fn get_by_natural_key_serves_from_cache_on_repeat() {
+    let _g = cache_lock().lock().await;
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
     let _ = ContentType::get_by_natural_key(&pool, "ct_bc_blog", "post")
@@ -150,6 +176,7 @@ async fn get_by_natural_key_serves_from_cache_on_repeat() {
 /// (which after the table drop above means a fresh seed must re-occur).
 #[tokio::test]
 async fn clear_cache_forces_db_round_trip_again() {
+    let _g = cache_lock().lock().await;
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
     let _ = ContentType::get_by_natural_key(&pool, "ct_bc_blog", "post")
@@ -179,6 +206,7 @@ async fn clear_cache_forces_db_round_trip_again() {
 /// blocked by a stale negative entry.
 #[tokio::test]
 async fn negative_results_are_not_cached() {
+    let _g = cache_lock().lock().await;
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
     // First lookup against an unknown pair → None.
@@ -211,6 +239,7 @@ async fn negative_results_are_not_cached() {
 /// `for_model::<T>` and uses the natural-key cache.
 #[tokio::test]
 async fn get_for_model_resolves_type() {
+    let _g = cache_lock().lock().await;
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
     let cached = ContentType::get_for_model::<Post>(&pool)
