@@ -34,10 +34,6 @@
 
 use crate::core::{inventory, Model as _, ModelEntry, SqlValue};
 use crate::sql::{Auto, ExecError, FetcherPool as _};
-// PG-typed helpers below pull in `PgPool` + `Fetcher`. Sqlite/MySQL-
-// only builds get just the tri-dialect `*_pool` entry points.
-#[cfg(feature = "postgres")]
-use crate::sql::{sqlx::PgPool, Fetcher as _};
 use crate::Model;
 
 /// One row per registered model. The schema mirrors Django's
@@ -73,51 +69,6 @@ pub struct ContentType {
     /// reconstruct it from the registry every time.
     #[rustango(max_length = 100)]
     pub table: String,
-}
-
-// Deprecated PG-only shims — delegate to the tri-dialect methods below.
-// Use `ContentType::by_natural_key(&pool, ...)` / `ContentType::by_id(&pool, ...)`
-// etc. where `pool: &Pool` (converts from `PgPool` via `.into()`).
-#[cfg(feature = "postgres")]
-impl ContentType {
-    #[deprecated(
-        since = "0.40.0",
-        note = "use `ContentType::by_natural_key(&pool, ...) where pool: &Pool` \
-                (PgPool converts via `.into()`)"
-    )]
-    pub async fn for_model_pg<T: crate::core::Model>(
-        pool: &PgPool,
-    ) -> Result<Option<Self>, ExecError> {
-        Self::for_model::<T>(&pool.clone().into()).await
-    }
-
-    #[deprecated(
-        since = "0.40.0",
-        note = "use `ContentType::by_natural_key(&pool, ...) where pool: &Pool`"
-    )]
-    pub async fn by_natural_key_pg(
-        pool: &PgPool,
-        app_label: &str,
-        model_name: &str,
-    ) -> Result<Option<Self>, ExecError> {
-        Self::by_natural_key(&pool.clone().into(), app_label, model_name).await
-    }
-
-    #[deprecated(
-        since = "0.40.0",
-        note = "use `ContentType::by_id(&pool, id) where pool: &Pool`"
-    )]
-    pub async fn by_id_pg(pool: &PgPool, id: i64) -> Result<Option<Self>, ExecError> {
-        Self::by_id(&pool.clone().into(), id).await
-    }
-
-    #[deprecated(
-        since = "0.40.0",
-        note = "use `ContentType::all(&pool) where pool: &Pool`"
-    )]
-    pub async fn all_pg(pool: &PgPool) -> Result<Vec<Self>, ExecError> {
-        Self::all(&pool.clone().into()).await
-    }
 }
 
 // ============================================================ tri-dialect lookups
@@ -355,38 +306,6 @@ impl ContentType {
 
 // ============================================================ #89 part B — fetch helpers
 
-/// Look up a single row by ContentType + primary key, returning
-/// it as a JSON object keyed by Rust field names. Sidesteps
-/// Rust's compile-time-typed row decode (which would require
-/// each consumer to know `T: Model` at the call site) by
-/// driving the decode entirely from the runtime
-/// `inventory::ModelEntry` for the ContentType's table.
-///
-/// Used by the admin's audit log (resolves `entity_table` +
-/// `entity_pk` to the displayable target row), the generic-FK
-/// link renderer, and any future "operator clicks a row from a
-/// heterogeneous list" UI.
-///
-/// Returns `Ok(None)` when:
-///   - No model is registered at `ct.table` (e.g. CT row points
-///     at a table the binary no longer compiles in)
-///   - No row exists at the given PK in that table
-///
-/// `pk` accepts any `Into<SqlValue>` so callers can pass
-/// `i64` / `String` / `uuid::Uuid` / etc. — matches the
-/// underlying schema's PK type.
-///
-/// # Errors
-/// Driver / query failures from the SELECT.
-#[cfg(feature = "postgres")]
-pub async fn fetch_row_as_json_pg(
-    pool: &PgPool,
-    ct: &ContentType,
-    pk: impl Into<SqlValue>,
-) -> Result<Option<serde_json::Value>, ExecError> {
-    fetch_row_as_json(&crate::sql::Pool::Postgres(pool.clone()), ct, pk).await
-}
-
 /// Tri-dialect counterpart of [`fetch_row_as_json`] (v0.38). Takes
 /// the unified [`crate::sql::Pool`] enum and routes through
 /// [`crate::sql::select_one_row_as_json_pool`] so the same body runs
@@ -435,32 +354,6 @@ pub async fn fetch_row_as_json(
     };
     let fields: Vec<&'static crate::core::FieldSchema> = entry.schema.scalar_fields().collect();
     crate::sql::select_one_row_as_json_pool(pool, &select_q, &fields).await
-}
-
-/// Stream every row of a given ContentType through `f`. Useful
-/// for cross-table maintenance (e.g. expire audit rows whose
-/// `entity_pk` no longer points at a live row in the target
-/// table). Loads in batches of `batch_size` rows so memory
-/// stays bounded for large tables.
-///
-/// `batch_size = 0` clamps to 1; very large values are accepted
-/// but Postgres will allocate intermediate buffers proportional
-/// to the page so default to 500-1000 for most use cases.
-///
-/// # Errors
-/// Driver / query failures + any `Err` returned by `f` short-
-/// circuits the iteration.
-#[cfg(feature = "postgres")]
-pub async fn for_each_row_of_ct_pg<F>(
-    pool: &PgPool,
-    ct: &ContentType,
-    batch_size: u32,
-    f: F,
-) -> Result<usize, ExecError>
-where
-    F: FnMut(serde_json::Value) -> Result<(), ExecError>,
-{
-    for_each_row_of_ct(&crate::sql::Pool::Postgres(pool.clone()), ct, batch_size, f).await
 }
 
 /// Tri-dialect counterpart of [`for_each_row_of_ct`] (v0.38). Iterates
@@ -571,21 +464,6 @@ impl GenericForeignKey {
         }
     }
 
-    /// Construct a GFK pointing at a row of `T`. Looks up `T`'s
-    /// ContentType via the cached registry (`for_model::<T>`) — one
-    /// DB round-trip the first time, free thereafter once
-    /// memoization lands.
-    ///
-    /// # Errors
-    /// As [`ContentType::for_model`].
-    #[cfg(feature = "postgres")]
-    pub async fn for_target_pg<T: crate::core::Model>(
-        pool: &PgPool,
-        object_pk: i64,
-    ) -> Result<Self, ExecError> {
-        Self::for_target::<T>(&crate::sql::Pool::Postgres(pool.clone()), object_pk).await
-    }
-
     /// Tri-dialect counterpart of [`Self::for_target`] (v0.38).
     /// Routes the ContentType lookup through
     /// [`ContentType::for_model`] so the same call site works on
@@ -611,60 +489,6 @@ impl GenericForeignKey {
             })?;
         Ok(Self::new(id, object_pk))
     }
-}
-
-/// Render a `GenericForeignKey` value as a clickable HTML link
-/// pointing at the target row's admin detail page. Used by the
-/// admin list/detail views (sub-slice F.4) when a model declares
-/// `#[rustango(generic_fk(...))]`.
-///
-/// Resolves the ContentType via [`ContentType::by_id`] to find the
-/// target table name + a human label, builds a relative URL of the
-/// form `/<target_table>/<object_pk>` (matches the auto-admin's
-/// per-table route shape), and returns escaped HTML. Returns the
-/// raw "(ct=…, pk=…)" text fallback if the ContentType lookup fails
-/// (e.g. CT not yet seeded, table dropped, etc.) so the admin
-/// degrades gracefully instead of crashing.
-///
-/// Output is HTML-safe: both `app_label.model_name` and the link
-/// path are HTML-entity-escaped via the same routine the existing
-/// per-FK renderer uses.
-///
-/// # Errors
-/// Driver / SQL failures from the ContentType lookup. Caller can
-/// `unwrap_or_else(|_| ...)` to a fallback rendering.
-#[cfg(feature = "postgres")]
-pub async fn render_generic_fk_link_pg(
-    pool: &PgPool,
-    gfk: GenericForeignKey,
-) -> Result<String, ExecError> {
-    let escape = |s: &str| -> String {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
-            .replace('\'', "&#x27;")
-    };
-    let ct = match ContentType::by_id(&pool.clone().into(), gfk.content_type_id).await? {
-        Some(c) => c,
-        None => {
-            // Stale or unseeded reference — show the raw pair so
-            // the admin operator can spot it.
-            return Ok(format!(
-                "<em>(ct={}, pk={})</em>",
-                gfk.content_type_id, gfk.object_pk
-            ));
-        }
-    };
-    let label = format!("{}.{}", ct.app_label, ct.model_name);
-    let table_esc = escape(&ct.table);
-    let label_esc = escape(&label);
-    Ok(format!(
-        r#"<a href="/{table}/{pk}">{label} #{pk}</a>"#,
-        table = table_esc,
-        pk = gfk.object_pk,
-        label = label_esc,
-    ))
 }
 
 /// v0.37 — backend-agnostic counterpart of [`render_generic_fk_link`].
@@ -702,189 +526,6 @@ pub async fn render_generic_fk_link(
         pk = gfk.object_pk,
         label = label_esc,
     ))
-}
-
-/// Soft-FK prefetch — fetch every row of `C` whose soft-FK column
-/// matches one of `parent_pks`, then group the results by the
-/// soft-FK value via the caller-supplied extractor closure. Returns
-/// a `HashMap<i64, Vec<C>>` keyed on the soft-FK value, mirroring
-/// the shape of [`crate::sql::fetch_with_prefetch`] but for
-/// columns that aren't declared as a real `Relation::Fk` (no DDL FK
-/// constraint, no macro-generated reverse helper).
-///
-/// "Soft FK" = an integer column that conceptually points at
-/// another model's PK without a declared FK relation. Use cases:
-/// optional cross-app references, migration-period references where
-/// the constraint can't be enforced yet, audit-log `entity_pk` columns,
-/// `denormalized_user_id` snapshots, etc.
-///
-/// Two SQL round trips total max (one for the prefetch + the parent
-/// fetch the caller already did). Empty `parent_pks` short-circuits
-/// to an empty map without a round trip.
-///
-/// ```ignore
-/// // After fetching parents:
-/// let parent_pks: Vec<i64> = posts.iter().map(|p| p.id.get().copied().unwrap()).collect();
-/// let by_post: HashMap<i64, Vec<Comment>> = prefetch_soft::<Comment, _>(
-///     &pool,
-///     &parent_pks,
-///     "post_id",        // the soft-FK column on the Comment table
-///     |c| c.post_id,    // extractor: how to read the value off &Comment
-/// ).await?;
-/// for post in &posts {
-///     let comments = by_post.get(&post.id.get().copied().unwrap())
-///         .map(Vec::as_slice).unwrap_or(&[]);
-///     // ...
-/// }
-/// ```
-///
-/// # Errors
-/// Driver / SQL failures from the SELECT.
-#[cfg(feature = "postgres")]
-pub async fn prefetch_soft_pg<C, F>(
-    pool: &PgPool,
-    parent_pks: &[i64],
-    target_fk_column: &'static str,
-    extract: F,
-) -> Result<::std::collections::HashMap<i64, Vec<C>>, ExecError>
-where
-    C: crate::core::Model
-        + for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>
-        + Send
-        + Unpin
-        + 'static,
-    F: Fn(&C) -> i64,
-{
-    if parent_pks.is_empty() {
-        return Ok(::std::collections::HashMap::new());
-    }
-    // Dedupe to keep the IN list compact — duplicate parent PKs
-    // would otherwise pad the SQL string and bind list pointlessly.
-    let mut keys: Vec<i64> = parent_pks.to_vec();
-    keys.sort_unstable();
-    keys.dedup();
-    let pk_values: Vec<crate::core::SqlValue> = keys
-        .iter()
-        .copied()
-        .map(crate::core::SqlValue::I64)
-        .collect();
-    let children: Vec<C> = crate::query::QuerySet::<C>::new()
-        .filter(
-            target_fk_column,
-            crate::core::Op::In,
-            crate::core::SqlValue::List(pk_values),
-        )
-        .fetch(pool)
-        .await?;
-    let mut grouped: ::std::collections::HashMap<i64, Vec<C>> = ::std::collections::HashMap::new();
-    for child in children {
-        let key = extract(&child);
-        grouped.entry(key).or_default().push(child);
-    }
-    Ok(grouped)
-}
-
-/// Generic-FK prefetch — given a list of `(content_type_id, object_pk)`
-/// pairs (typically pulled off a parent set's `GenericForeignKey`
-/// fields), batches one SQL per distinct ContentType to fetch the
-/// targets, returns a `HashMap<(i64, i64), C>` keyed on the
-/// (ct_id, pk) pair.
-///
-/// **Single-target-type variant** — caller supplies the concrete
-/// `C: Model` they want hydrated. Filters out any pair whose
-/// `content_type_id` doesn't match `C`'s ContentType (the framework
-/// can't decode a `Photo` row into a `Comment`). For mixed-target
-/// hydration (one query → many target types) you'd need the
-/// boxed-trait dynamic decoder registry — that's a follow-up
-/// (`prefetch_generic_dyn`) once the registry trait is in.
-///
-/// Two SQL round trips total (one ContentType lookup + one target
-/// fetch). Empty input short-circuits to an empty map.
-///
-/// ```ignore
-/// let pairs: Vec<(i64, i64)> = audit_rows.iter()
-///     .map(|a| (a.target.content_type_id, a.target.object_pk))
-///     .collect();
-/// let posts: HashMap<(i64, i64), Post> =
-///     prefetch_generic::<Post>(&pool, &pairs).await?;
-/// ```
-///
-/// # Errors
-/// As [`ContentType::for_model`] + driver / SQL failures from the
-/// target SELECT.
-#[cfg(feature = "postgres")]
-pub async fn prefetch_generic_pg<C>(
-    pool: &PgPool,
-    pairs: &[(i64, i64)],
-) -> Result<::std::collections::HashMap<(i64, i64), C>, ExecError>
-where
-    C: crate::core::Model
-        + for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>
-        + crate::sql::HasPkValue
-        + Send
-        + Unpin
-        + 'static,
-{
-    if pairs.is_empty() {
-        return Ok(::std::collections::HashMap::new());
-    }
-    // Resolve C's ContentType once — every (ct_id, pk) pair whose
-    // ct_id doesn't match drops out of the result map (caller's
-    // expectation: typed-target prefetch).
-    let target_ct = ContentType::for_model::<C>(&pool.clone().into())
-        .await?
-        .ok_or_else(|| ExecError::MissingPrimaryKey {
-            table: C::SCHEMA.table,
-        })?;
-    let target_ct_id = target_ct
-        .id
-        .get()
-        .copied()
-        .ok_or_else(|| ExecError::MissingPrimaryKey {
-            table: ContentType::SCHEMA.table,
-        })?;
-
-    let mut wanted_pks: Vec<i64> = pairs
-        .iter()
-        .filter(|(ct, _)| *ct == target_ct_id)
-        .map(|(_, pk)| *pk)
-        .collect();
-    if wanted_pks.is_empty() {
-        return Ok(::std::collections::HashMap::new());
-    }
-    wanted_pks.sort_unstable();
-    wanted_pks.dedup();
-
-    let pk_values: Vec<crate::core::SqlValue> = wanted_pks
-        .iter()
-        .copied()
-        .map(crate::core::SqlValue::I64)
-        .collect();
-    let pk_field = C::SCHEMA
-        .primary_key()
-        .ok_or_else(|| ExecError::MissingPrimaryKey {
-            table: C::SCHEMA.table,
-        })?;
-    let rows: Vec<C> = crate::query::QuerySet::<C>::new()
-        .filter(
-            pk_field.column,
-            crate::core::Op::In,
-            crate::core::SqlValue::List(pk_values),
-        )
-        .fetch(pool)
-        .await?;
-
-    let mut out: ::std::collections::HashMap<(i64, i64), C> =
-        ::std::collections::HashMap::with_capacity(rows.len());
-    for row in rows {
-        // Pull the row's PK back out via the macro-generated
-        // __rustango_pk_value path through HasPkValue.
-        let pk_value = <C as crate::sql::HasPkValue>::__rustango_pk_value_impl(&row);
-        if let crate::core::SqlValue::I64(pk) = pk_value {
-            out.insert((target_ct_id, pk), row);
-        }
-    }
-    Ok(out)
 }
 
 /// Tri-dialect counterpart of [`prefetch_soft`] (v0.38). Same shape
@@ -1024,59 +665,13 @@ where
     Ok(out)
 }
 
-/// SQL that creates the `rustango_content_types` table + the
-/// `(app_label, model_name)` UNIQUE index. Idempotent
-/// (`IF NOT EXISTS`). Mounted as a runtime ensure-table so the
-/// registry pool (whose bootstrap migration only creates
-/// `rustango_orgs` + `rustango_operators`) gets the table without
-/// a separate migration JSON. Tenant schemas already get this
-/// table via the bootstrap migration's CreateTable op for every
-/// registered model.
-#[cfg(feature = "postgres")]
-const CREATE_TABLE_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_content_types" (
-    "id"          BIGSERIAL PRIMARY KEY,
-    "app_label"   VARCHAR(100) NOT NULL,
-    "model_name"  VARCHAR(100) NOT NULL,
-    "table"       VARCHAR(100) NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS "rustango_content_types_natural_key"
-    ON "rustango_content_types" ("app_label", "model_name");
-"#;
-
-// v0.34 — note: the legacy `CREATE_TABLE_SQL` Postgres constant above
-// is kept for `ensure_table(&PgPool)` back-compat. The bi-dialect
-// `ensure_table_pool` below no longer carries hand-rolled per-backend
-// DDL constants — it routes through
+// v0.34 — `ensure_table` (below) routes through
 // [`crate::migrate::ddl::create_table_if_not_exists_sql_with_dialect`]
 // which already knows how to emit the table for any backend rustango
 // supports. The UNIQUE INDEX on `(app_label, model_name)` is still
 // hand-emitted because `crate::migrate::diff::render_changes` (the
 // index renderer in the migration system) is currently Postgres-only;
 // when index emission goes bi-dialect that block collapses too.
-
-/// Ensure `rustango_content_types` exists in `pool`'s database /
-/// schema. No-op when already present (`IF NOT EXISTS`). Used by
-/// [`ensure_seeded`] internally + callable directly for any
-/// registry-pool wiring that needs the table without a row walk.
-///
-/// Splits the statement on `;` because Postgres' simple-prepare
-/// path rejects multiple statements in one prepared call —
-/// each `CREATE TABLE` / `CREATE INDEX` runs as its own round-trip.
-///
-/// # Errors
-/// Driver / SQL failures.
-#[cfg(feature = "postgres")]
-pub async fn ensure_table_pg(pool: &PgPool) -> Result<(), crate::sql::sqlx::Error> {
-    for stmt in CREATE_TABLE_SQL.split(';') {
-        let trimmed = stmt.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        crate::sql::sqlx::query(trimmed).execute(pool).await?;
-    }
-    Ok(())
-}
 
 /// Walk the inventory of registered models and INSERT a ContentType
 /// row for every one missing. Idempotent.
@@ -1091,46 +686,6 @@ pub async fn ensure_table_pg(pool: &PgPool) -> Result<(), crate::sql::sqlx::Erro
 ///
 /// # Errors
 /// Driver / query failures from the SELECT-or-INSERT loop.
-#[cfg(feature = "postgres")]
-#[allow(deprecated)]
-pub async fn ensure_seeded_pg(pool: &PgPool) -> Result<usize, ExecError> {
-    ensure_seeded(&pool.clone().into()).await
-}
-
-#[cfg(feature = "postgres")]
-async fn _ensure_seeded_pg_internal(pool: &PgPool) -> Result<usize, ExecError> {
-    ensure_table(&pool.clone().into())
-        .await
-        .map_err(ExecError::Driver)?;
-    let mut inserted = 0_usize;
-    for entry in inventory::iter::<ModelEntry> {
-        let table = entry.schema.table;
-        // Don't seed a row for the ContentType table itself — would
-        // be circular and meaningless.
-        if table == ContentType::SCHEMA.table {
-            continue;
-        }
-        let app = entry.resolved_app_label().unwrap_or("project").to_owned();
-        let name = entry.schema.name.to_ascii_lowercase();
-        // Probe natural key first; skip if already seeded.
-        if ContentType::by_natural_key(&pool.clone().into(), &app, &name)
-            .await?
-            .is_some()
-        {
-            continue;
-        }
-        let mut row = ContentType {
-            id: Auto::Unset,
-            app_label: app,
-            model_name: name,
-            table: table.to_owned(),
-        };
-        row.insert(pool).await?;
-        inserted += 1;
-    }
-    Ok(inserted)
-}
-
 // ============================================================ v0.34 bi-dialect
 
 /// Bootstrap the `rustango_content_types` table against any
