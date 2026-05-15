@@ -472,23 +472,26 @@ mod tests {
         m.send(&email).await.expect("console mailer ok");
     }
 
-    /// SMTP backend warns + falls back to ConsoleMailer until
-    /// SmtpMailer ships. Send-call still succeeds — the fallback
-    /// is fail-safe so apps don't refuse to boot.
+    /// SMTP backend: when `email-smtp` feature is enabled,
+    /// `from_settings` with an `smtp_host` builds a real
+    /// [`crate::email::SmtpMailer`] (no network contact — just
+    /// constructs the transport). When the feature is off, the
+    /// same call falls back to `ConsoleMailer` with a warning.
+    ///
+    /// We only assert that the mailer was successfully created (no
+    /// `.send()` — there's no real relay at `mail.example.com` in
+    /// the test environment).
     #[cfg(feature = "config")]
     #[tokio::test]
-    async fn from_settings_smtp_falls_back_until_implemented() {
+    async fn from_settings_smtp_builds_mailer_when_host_given() {
         let mut s = crate::config::MailSettings::default();
         s.backend = Some("smtp".into());
         s.smtp_host = Some("mail.example.com".into());
+        s.smtp_tls = Some("starttls".into());
         let m = from_settings(&s);
-        // Same as the unset test — works because the fallback is
-        // ConsoleMailer.
-        let email = Email::new()
-            .to("a@x.com")
-            .from("noreply@x.com")
-            .subject("hi")
-            .body("body");
-        m.send(&email).await.expect("smtp fallback to console ok");
+        // The mailer was constructed. On `email-smtp` builds this is a
+        // SmtpMailer; on non-smtp builds it is ConsoleMailer. Either
+        // way the `Arc<dyn Mailer>` is valid — we just don't send.
+        drop(m);
     }
 }
