@@ -327,19 +327,38 @@ while let Some(post) = iter.next_row(&pool).await? {
 
 Both `.rows_seen()` (cumulative count) and `.is_exhausted()` (post-drain flag) are available for progress reporting and termination checks.
 
-**Concurrent-write hazard.** Each chunk is a separate query, so rows inserted/deleted between chunks can be skipped or duplicated (the classic OFFSET-pagination "windowing" problem). For read-only / append-only tables — the typical export use case — this isn't a concern. For tables being written concurrently, wrap iteration in a snapshot-isolation transaction so every chunk sees the same view:
+**Concurrent-write hazard.** Each chunk is a separate query, so rows inserted/deleted between chunks can be skipped or duplicated (the classic OFFSET-pagination "windowing" problem). For read-only / append-only tables — the typical export use case — this isn't a concern. For tables being written concurrently you need a snapshot-isolation transaction so every chunk sees the same view. **`ChunkedIter` takes `&Pool`, not a `&mut Transaction`, so the chunker API can't be used inside the tx directly** — hand-roll the chunked SELECT against the tx instead:
 
 ```rust
-// Pseudo — apply ISO level then run the iteration inside the tx.
+use rustango::sql::select_rows_on;
+
 let mut tx = pool.begin().await?;
 sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
     .execute(&mut *tx).await?;
-// ... iterate using next_chunk_on(&mut *tx) etc., or compile to a
-// SelectQuery and run it directly through select_rows_on per chunk.
+
+// Compile once, then hand-loop LIMIT/OFFSET chunks against the tx.
+let base = Post::objects().order_by(&[("id", false)]).compile()?;
+let chunk_size = 2_000_i64;
+let mut offset = 0_i64;
+loop {
+    let mut q = base.clone();
+    q.limit = Some(chunk_size);
+    q.offset = Some(offset);
+    let rows: Vec<Post> = select_rows_on(&mut *tx, &q).await?;
+    if rows.is_empty() { break; }
+    for post in &rows { /* … */ }
+    if (rows.len() as i64) < chunk_size { break; }
+    offset += rows.len() as i64;
+}
 tx.commit().await?;
 ```
 
-**`select_for_update()` doesn't propagate across chunks.** Row locks held by `.select_for_update()` are released at the end of each chunk's implicit transaction. To hold the locks across the whole drain, open one `pool.begin()` transaction and run the locking query inside it via `.fetch_on(&mut *tx)` — at that point you're outside the chunker API entirely.
+**`select_for_update()` doesn't propagate across chunks.** Row locks held by `.select_for_update()` are released at the end of each chunk's implicit transaction. There's no chunker-shaped fix: the `.iterator()` builder takes `&Pool`, the locking variants need a `&mut Transaction`, and the two don't compose. For a locked drain you have two paths, each with a trade-off:
+
+- **Whole-result `.fetch_on(&mut *tx)`** — single round trip, full `Vec<T>` in memory. Fine when the result fits.
+- **Hand-rolled LIMIT/OFFSET inside the tx** — same shape as the snapshot-isolation snippet above; chunks stay streamed but you're outside the `ChunkedIter` API.
+
+A future `iterator_on(&mut *tx, chunk_size)` companion (issue follow-up) would close this gap. Not in scope for issue #23.
 
 **`chunk_size` must be > 0.** Zero or negative values panic. Pick a value that fits your row-size budget (Django's default is `2000`; reasonable for narrow rows, lower for wide TEXT/JSONB columns).
 

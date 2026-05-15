@@ -3402,19 +3402,29 @@ where
     /// **Concurrent-write hazard.** Each chunk is its own query, so
     /// rows inserted ahead of the current offset between fetches can
     /// be skipped, and rows deleted can shift a row down into the
-    /// next chunk and be returned twice. If the table is being
-    /// written concurrently while iterating, wrap the whole drain in
-    /// a snapshot-isolation transaction (PG / SQLite:
-    /// `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`; pair with
-    /// `pool.begin()`). For read-only / append-only tables — the
-    /// usual export use case — this isn't a concern.
+    /// next chunk and be returned twice. **The chunker API is
+    /// `&Pool`-only — it can't run inside a `&mut Transaction`** —
+    /// so for write-concurrent tables you have to hand-roll the
+    /// LIMIT/OFFSET loop against [`select_rows_on`] inside your
+    /// `pool.begin()` + `SET TRANSACTION ISOLATION LEVEL REPEATABLE
+    /// READ` block. See the cookbook for the boilerplate. For
+    /// read-only / append-only tables (the typical export use case)
+    /// this isn't a concern.
     ///
     /// **`select_for_update()` does NOT propagate.** Row locks
     /// acquired by a `.select_for_update()` call on the queryset are
     /// released between chunks because each chunk runs in its own
-    /// implicit transaction. To hold the locks for the full drain,
-    /// wrap iteration in `pool.begin()` and call `.fetch_on(&mut *tx)`
-    /// against the lock-scoped tx instead of using the chunker.
+    /// implicit transaction, and the chunker API doesn't take a
+    /// transaction. Two compromises for a locked drain:
+    ///
+    /// * `.fetch_on(&mut *tx)` — single round trip, returns full
+    ///   `Vec<T>`; fine when the result fits in memory.
+    /// * Hand-roll LIMIT/OFFSET inside the tx via [`select_rows_on`]
+    ///   — same shape as the snapshot-isolation pattern; streams
+    ///   chunks but outside the [`ChunkedIter`] API.
+    ///
+    /// A future `iterator_on(&mut *tx, chunk_size)` companion would
+    /// close this gap; not in scope for issue #23.
     ///
     /// # Errors
     /// Returns [`QueryError`] if the queryset fails to compile.
