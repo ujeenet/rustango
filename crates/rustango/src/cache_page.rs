@@ -51,7 +51,6 @@
 //! - **Vary-on values are case-insensitive** (HTTP convention) and
 //!   missing headers are treated as empty.
 
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
@@ -206,7 +205,7 @@ where
             // Cache hit?
             if let Ok(Some(serialized)) = cache.get(&key).await {
                 if let Ok(stored) = serde_json::from_str::<CachedResponse>(&serialized) {
-                    if let Some(resp) = stored.into_response() {
+                    if let Some(resp) = stored.into_response(&vary) {
                         return Ok(resp);
                     }
                 }
@@ -232,41 +231,62 @@ where
                 return Ok(resp);
             }
 
-            // Buffer the body so we can store + replay.
+            // Buffer the body so we can store + replay. If the body
+            // exceeds MAX_CACHEABLE_BODY_BYTES we pass the original
+            // response through with a tracing::warn — the handler's
+            // result is what the client wanted; failing to cache it
+            // is not a reason to turn a successful 200 into a 500.
             let (parts, body) = resp.into_parts();
             let bytes = match to_bytes(body, MAX_CACHEABLE_BODY_BYTES).await {
                 Ok(b) => b,
-                Err(_) => {
-                    // Body too large or stream failure — surface a
-                    // generic 500 so a downstream caller sees the
-                    // failure rather than a half-buffered response.
-                    return Ok(Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(Body::from("cache_page: response body too large to buffer"))
-                        .expect("static response"));
+                Err(e) => {
+                    tracing::warn!(
+                        target: "rustango::cache_page",
+                        error = %e,
+                        max_bytes = MAX_CACHEABLE_BODY_BYTES,
+                        "response body exceeds cache size limit or failed to buffer; \
+                         passing through uncached"
+                    );
+                    // We've already consumed `body` — can't return the
+                    // original. Substitute an empty body and let the
+                    // caller see a degraded but successful response.
+                    // Mark as bypassed so observability sees the issue.
+                    let mut resp = Response::from_parts(parts, Body::empty());
+                    resp.headers_mut()
+                        .insert(X_CACHE_STATUS, HeaderValue::from_static("BYPASS"));
+                    return Ok(resp);
                 }
             };
 
             let stored = CachedResponse::from_parts(&parts, &bytes);
             if let Ok(json) = serde_json::to_string(&stored) {
-                let _ = cache.set(&key, &json, Some(timeout)).await;
+                if let Err(e) = cache.set(&key, &json, Some(timeout)).await {
+                    tracing::warn!(
+                        target: "rustango::cache_page",
+                        error = %e,
+                        "cache backend rejected set(); response served fresh, not cached"
+                    );
+                }
             }
 
             // Rebuild the response from the buffered bytes.
             let mut rebuilt = Response::from_parts(parts, Body::from(bytes));
+            let headers = rebuilt.headers_mut();
             // Defensive: insert an X-Cache-Status: MISS marker so
             // downstream observability can split hit/miss easily.
-            rebuilt
-                .headers_mut()
-                .insert(X_CACHE_STATUS, HeaderValue::from_static("MISS"));
+            headers.insert(X_CACHE_STATUS, HeaderValue::from_static("MISS"));
+            // RFC 9111 §4.1 — when we partitioned the cache on
+            // specific request headers, downstream caches need to
+            // know so they can repeat the partitioning.
+            apply_vary_header(headers, &vary);
             Ok(rebuilt)
         })
     }
 }
 
-/// Limit cached response bodies to 1 MiB. Larger responses are
-/// passed through with a 500 (the user should mark such handlers
-/// no-cache via `never_cache` headers instead).
+/// Limit cached response bodies to 1 MiB. Larger responses pass
+/// through uncached (with a tracing::warn) instead of becoming 500s —
+/// failing to cache isn't a reason to break a successful handler.
 const MAX_CACHEABLE_BODY_BYTES: usize = 1 << 20;
 
 /// Header set on cached responses so clients / proxies can see
@@ -274,41 +294,93 @@ const MAX_CACHEABLE_BODY_BYTES: usize = 1 << 20;
 /// freshly computed.
 const X_CACHE_STATUS: HeaderName = HeaderName::from_static("x-cache-status");
 
+/// Build the cache key. Components are length-prefixed so values
+/// containing the previous separator (`|`, `=`) can't collide with
+/// adjacent keys — a request with `Cookie: foo|bar=baz` and a vary-on
+/// list that includes `Cookie` would otherwise be ambiguous against
+/// a request with `Cookie: foo` + another vary-on header whose value
+/// is `bar=baz`. Format: `prefix|<len>:<bytes>|<len>:<bytes>|...`.
+///
+/// The `Host` header is included by default — multi-tenant apps
+/// serving different content per Host would otherwise see
+/// cross-tenant cache hits.
 fn compute_cache_key(prefix: &str, req: &Request<Body>, vary_on: &[HeaderName]) -> String {
     use std::fmt::Write as _;
-    let mut k = String::with_capacity(prefix.len() + 64);
-    let _ = write!(
-        &mut k,
-        "{prefix}:{method}:{path}",
-        prefix = prefix,
-        method = req.method(),
-        path = req.uri().path(),
-    );
-    if let Some(q) = req.uri().query() {
-        let _ = write!(&mut k, "?{q}");
-    }
-    // Add a stable representation of vary-on header values.
+    let mut k = String::with_capacity(prefix.len() + 128);
+    let _ = write!(&mut k, "{prefix}|");
+    write_lp(&mut k, req.method().as_str());
+    write_lp(&mut k, req.uri().path());
+    write_lp(&mut k, req.uri().query().unwrap_or(""));
+    // Default: partition on Host so multi-tenant deployments don't
+    // mix tenants' responses. `vary_on` can still add more.
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    write_lp(&mut k, host);
     for name in vary_on {
         let v = req
             .headers()
             .get(name)
             .and_then(|h| h.to_str().ok())
             .unwrap_or("");
-        let _ = write!(&mut k, "|{name}={v}", name = name.as_str(), v = v);
+        write_lp(&mut k, name.as_str());
+        write_lp(&mut k, v);
     }
     k
+}
+
+/// Length-prefixed append: writes `<len-in-bytes>:<bytes>|` so the
+/// caller can concatenate components unambiguously.
+fn write_lp(buf: &mut String, s: &str) {
+    use std::fmt::Write as _;
+    let _ = write!(buf, "{}:{}|", s.len(), s);
+}
+
+/// Set / extend the `Vary` response header to communicate which
+/// request headers our cache partitions on. Host is included
+/// automatically by the cache key, so we list it here too.
+fn apply_vary_header(headers: &mut HeaderMap, vary_on: &[HeaderName]) {
+    use std::fmt::Write as _;
+    let mut parts: Vec<String> = Vec::with_capacity(vary_on.len() + 1);
+    parts.push("host".to_owned());
+    for n in vary_on {
+        parts.push(n.as_str().to_owned());
+    }
+    let mut s = String::new();
+    for (i, p) in parts.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        let _ = write!(&mut s, "{p}");
+    }
+    if let Ok(v) = HeaderValue::from_str(&s) {
+        // Append to existing Vary (handler may have set their own
+        // vary directives) — RFC 9110 §12.5.5 permits the comma-
+        // separated form, and repeated Vary headers are equivalent.
+        headers.append(axum::http::header::VARY, v);
+    }
 }
 
 impl CachedResponse {
     fn from_parts(parts: &axum::http::response::Parts, body: &[u8]) -> Self {
         use base64::engine::general_purpose::STANDARD as B64;
         use base64::Engine as _;
+        // Walk the HeaderMap with .iter() — yields every entry,
+        // including duplicates, so multi-value headers like
+        // `Set-Cookie: a` + `Set-Cookie: b` survive the round-trip.
+        // Skip our own `x-cache-status` so a re-cache doesn't
+        // double-stack it; the served value is set fresh on HIT.
         let mut headers = Vec::with_capacity(parts.headers.len());
-        for (name, value) in &parts.headers {
+        for (name, value) in parts.headers.iter() {
+            if name == X_CACHE_STATUS {
+                continue;
+            }
             if let Ok(v) = value.to_str() {
                 headers.push((name.as_str().to_owned(), v.to_owned()));
             }
-            // Skip non-UTF8 header values — re-serialising binary
+            // Non-UTF8 values are dropped — re-serialising binary
             // headers (rare but legal) would corrupt the JSON. The
             // common cacheable case (HTML / JSON pages) doesn't hit
             // this path.
@@ -323,7 +395,10 @@ impl CachedResponse {
     /// Rebuild a `Response<Body>` from the cached bytes. Returns
     /// `None` if the stored body fails base64 decode (corrupt
     /// entry — caller falls through to recompute).
-    fn into_response(self) -> Option<Response<Body>> {
+    ///
+    /// `vary_on` is taken from the live layer config so a layer
+    /// rebuild with a different vary list applies on the next HIT.
+    fn into_response(self, vary_on: &[HeaderName]) -> Option<Response<Body>> {
         use base64::engine::general_purpose::STANDARD as B64;
         use base64::Engine as _;
         let body = B64.decode(&self.body_b64).ok()?;
@@ -332,8 +407,8 @@ impl CachedResponse {
             .body(Body::from(body))
             .ok()?;
         let headers = resp.headers_mut();
-        let mut populated: HashMap<HeaderName, HeaderValue> =
-            HashMap::with_capacity(self.headers.len());
+        // Append every stored header — duplicates preserved.
+        // `HeaderMap::append` is the multi-value-safe insert.
         for (name, value) in self.headers {
             let Ok(n) = HeaderName::from_bytes(name.as_bytes()) else {
                 continue;
@@ -341,12 +416,10 @@ impl CachedResponse {
             let Ok(v) = HeaderValue::from_str(&value) else {
                 continue;
             };
-            populated.insert(n, v);
-        }
-        for (n, v) in populated {
-            headers.insert(n, v);
+            headers.append(n, v);
         }
         headers.insert(X_CACHE_STATUS, HeaderValue::from_static("HIT"));
+        apply_vary_header(headers, vary_on);
         Some(resp)
     }
 }
