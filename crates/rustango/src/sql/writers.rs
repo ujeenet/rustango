@@ -1751,6 +1751,7 @@ pub(super) fn write_where_expr(
             }
             write_joined(b, items, " OR ", qualify_with, model)
         }
+        WhereExpr::Xor(items) => write_xor(b, items, qualify_with, model),
         WhereExpr::Not(child) => {
             b.sql.push_str("NOT (");
             write_where_expr(b, child, qualify_with, model)?;
@@ -1977,10 +1978,82 @@ fn write_child(
         | WhereExpr::NotExists(_)
         | WhereExpr::InSubquery { .. }
         | WhereExpr::ExprCompare { .. } => write_where_expr(b, expr, qualify_with, model),
-        WhereExpr::And(_) | WhereExpr::Or(_) | WhereExpr::Not(_) => {
+        WhereExpr::And(_) | WhereExpr::Or(_) | WhereExpr::Xor(_) | WhereExpr::Not(_) => {
             b.sql.push('(');
             write_where_expr(b, expr, qualify_with, model)?;
             b.sql.push(')');
+            Ok(())
+        }
+    }
+}
+
+/// Emit a [`WhereExpr::Xor`] node (issue #27). Django 4.1+ added
+/// `Q(a) ^ Q(b)` with the semantic "odd number of operands evaluate
+/// to true". Native logical XOR exists on MySQL but not on PG or
+/// SQLite, so the writer uses portable SQL-92 rewrites for every
+/// backend:
+///
+/// * 0 children → [`SqlError::EmptyXorBranch`] (mirrors the empty-OR
+///   rejection — a vacuously-false predicate is almost always a bug).
+/// * 1 child   → the child itself (XOR over a single operand is the
+///   operand, no rewrite needed).
+/// * 2 children → `((a) AND NOT (b)) OR (NOT (a) AND (b))` —
+///   canonical binary form per the issue acceptance criteria.
+///   **Caveat**: each operand is emitted twice and therefore evaluated
+///   twice on the database side. Deterministic predicates (column =
+///   literal, range checks) are unaffected, but volatile expressions
+///   (`RANDOM()`, `NOW()`, correlated subqueries with side effects) may
+///   return different values across the two evaluations. If you need
+///   single-evaluation semantics for binary XOR, hand-build the
+///   3-element form `Xor([a, b, FALSE])` so the writer falls into the
+///   parity-tally branch below.
+/// * 3+ children → `((CASE WHEN q1 THEN 1 ELSE 0 END) + … +
+///   (CASE WHEN qN THEN 1 ELSE 0 END)) % 2 = 1` — Django's "odd
+///   number of trues" generalization. Portable across PG / MySQL /
+///   SQLite; uses standard `CASE WHEN` and the SQL `%` modulus. Each
+///   child is evaluated exactly once.
+fn write_xor(
+    b: &mut Sql<'_>,
+    items: &[WhereExpr],
+    qualify_with: Option<&str>,
+    model: Option<&'static ModelSchema>,
+) -> Result<(), SqlError> {
+    match items.len() {
+        0 => Err(SqlError::EmptyXorBranch),
+        1 => write_where_expr(b, &items[0], qualify_with, model),
+        2 => {
+            // (a AND NOT (b)) OR (NOT (a) AND b)
+            b.sql.push('(');
+            write_child(b, &items[0], qualify_with, model)?;
+            b.sql.push_str(" AND NOT (");
+            write_where_expr(b, &items[1], qualify_with, model)?;
+            b.sql.push_str(")) OR (NOT (");
+            write_where_expr(b, &items[0], qualify_with, model)?;
+            b.sql.push_str(") AND ");
+            write_child(b, &items[1], qualify_with, model)?;
+            b.sql.push(')');
+            Ok(())
+        }
+        _ => {
+            // (sum of CASE WHEN q THEN 1 ELSE 0 END) % 2 = 1.
+            // `write_child` (not `write_where_expr`) so a composite
+            // child — And / Or / nested Xor / Not — gets parenthesized
+            // before the `THEN 1`. SQL operator precedence (NOT > AND
+            // > OR) would parse it correctly without the wrap, but the
+            // explicit parens are belt-and-suspenders against future
+            // additions to the precedence ladder.
+            b.sql.push('(');
+            let mut first = true;
+            for child in items {
+                if !first {
+                    b.sql.push_str(" + ");
+                }
+                first = false;
+                b.sql.push_str("(CASE WHEN ");
+                write_child(b, child, qualify_with, model)?;
+                b.sql.push_str(" THEN 1 ELSE 0 END)");
+            }
+            b.sql.push_str(") % 2 = 1");
             Ok(())
         }
     }

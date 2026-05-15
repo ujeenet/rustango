@@ -58,6 +58,17 @@ let qs = Post::objects().where_expr(WhereExpr::Or(vec![
     Post::status.eq("draft").into(),
     Post::status.eq("review").into(),
 ]));
+
+// XOR — Django 4.1+ `Q(a) ^ Q(b)`. Matches rows where an odd number
+// of operands evaluate to true (binary case = "exactly one is true").
+// Issue #27.
+let either_but_not_both = Post::objects()
+    .where_(Post::status.eq("draft").xor(Post::author_id.eq(42)))
+    .fetch(&pool).await?;
+// Tri-dialect emission: native logical XOR exists on MySQL but not PG
+// or SQLite, so the writer emits a portable rewrite uniformly —
+// `(a AND NOT b) OR (NOT a AND b)` for the binary form, or a
+// CASE-WHEN-1/0 tally `% 2 = 1` for N-ary chains.
 ```
 
 ### Lookup operators

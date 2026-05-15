@@ -271,6 +271,14 @@ impl<M: Model> TypedFilter<M> {
         TypedExpr::from(self).or(rhs)
     }
 
+    /// Compose with another predicate or expression via SQL `XOR` —
+    /// Django 4.1+ `Q(a) ^ Q(b)` (issue #27). Returns a [`TypedExpr`]
+    /// so further `.and()` / `.or()` / `.xor()` calls can chain.
+    #[must_use]
+    pub fn xor<E: Into<TypedExpr<M>>>(self, rhs: E) -> TypedExpr<M> {
+        TypedExpr::from(self).xor(rhs)
+    }
+
     /// Negate this predicate — emits `NOT (col op val)`.
     #[must_use]
     pub fn not(self) -> TypedExpr<M> {
@@ -388,6 +396,36 @@ impl<M: Model> TypedExpr<M> {
                 WhereExpr::Or(b)
             }
             (a, b) => WhereExpr::Or(vec![a, b]),
+        };
+        Self {
+            inner,
+            _model: PhantomData,
+        }
+    }
+
+    /// Compose with `XOR` — Django 4.1+ `Q(a) ^ Q(b)` (issue #27).
+    /// Matches rows for which an odd number of operands evaluate to
+    /// `true`. Adjacent `Xor` nodes flatten the same way `.and()` /
+    /// `.or()` do, so chains like `a.xor(b).xor(c)` stay shallow and
+    /// emit Django's N-ary semantic (odd parity) rather than the
+    /// nested `(a^b)^c` form.
+    #[must_use]
+    pub fn xor<E: Into<Self>>(self, rhs: E) -> Self {
+        let rhs = rhs.into();
+        let inner = match (self.inner, rhs.inner) {
+            (WhereExpr::Xor(mut a), WhereExpr::Xor(b)) => {
+                a.extend(b);
+                WhereExpr::Xor(a)
+            }
+            (WhereExpr::Xor(mut a), b) => {
+                a.push(b);
+                WhereExpr::Xor(a)
+            }
+            (a, WhereExpr::Xor(mut b)) => {
+                b.insert(0, a);
+                WhereExpr::Xor(b)
+            }
+            (a, b) => WhereExpr::Xor(vec![a, b]),
         };
         Self {
             inner,
