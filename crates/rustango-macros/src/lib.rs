@@ -1617,7 +1617,7 @@ fn inherent_impl_tokens(
         // Audited models with explicit (non-Auto) PKs go through
         // the non-Auto insert path below — the audit emit is one
         // round-trip after the INSERT inside the same tx via
-        // audit::save_one_with_audit_pool? No, INSERT semantics
+        // audit::save_one_with_audit? No, INSERT semantics
         // differ. For non-Auto PK + audited, route through a
         // dedicated insert + audit emit on the same tx, but defer
         // the macro emission to the audit-bundle-aware block below
@@ -1655,7 +1655,7 @@ fn inherent_impl_tokens(
                 let _result = ::rustango::sql::insert_returning_pool(
                     pool, &_query,
                 ).await?;
-                ::rustango::sql::apply_auto_pk_pool(_result, self)
+                ::rustango::sql::apply_auto_pk(_result, self)
             }
         }
     } else {
@@ -1687,7 +1687,7 @@ fn inherent_impl_tokens(
     // pool_save_method moved to after audit_pair_tokens /
     // audit_pk_to_string (they live ~70 lines below) — needed for
     // the audited branch which builds an UpdateQuery + PendingEntry
-    // and dispatches via audit::save_one_with_audit_pool.
+    // and dispatches via audit::save_one_with_audit.
 
     // pool_delete_method moved to after audit_pair_tokens / audit_pk_to_string
     // are computed (they live ~80 lines below).
@@ -1757,7 +1757,7 @@ fn inherent_impl_tokens(
     // - non-audited, Auto-PK: same, but Auto::Unset routes to
     //   self.insert_pool which already handles RETURNING / LAST_INSERT_ID
     // - audited, plain PK: build UpdateQuery + PendingEntry, dispatch
-    //   through audit::save_one_with_audit_pool (per-backend tx wraps
+    //   through audit::save_one_with_audit (per-backend tx wraps
     //   UPDATE + audit emit atomically). Snapshot-style audit (post-
     //   write field values) — diff-style audit (with pre-UPDATE
     //   SELECT for `before` values) needs per-tracked-column codegen
@@ -1817,7 +1817,7 @@ fn inherent_impl_tokens(
                                 #( #pairs ),*
                             ]),
                         };
-                        let _ = ::rustango::audit::save_one_with_audit_pool(
+                        let _ = ::rustango::audit::save_one_with_audit(
                             pool, &_query, &_audit_entry,
                         ).await?;
                         ::core::result::Result::Ok(())
@@ -1907,7 +1907,7 @@ fn inherent_impl_tokens(
                             source: ::rustango::audit::current_source(),
                             changes: ::rustango::audit::snapshot_changes(&_narrowed),
                         };
-                        let _ = ::rustango::audit::save_one_with_audit_pool(
+                        let _ = ::rustango::audit::save_one_with_audit(
                             pool, &_query, &_audit_entry,
                         ).await?;
                         ::core::result::Result::Ok(())
@@ -2123,7 +2123,7 @@ fn inherent_impl_tokens(
     // Audited `insert_pool` (overrides the placeholder set higher up
     // in the function). v0.23.0-batch22 — both Auto-PK and non-Auto-PK
     // audited models get insert_pool routing through
-    // audit::insert_one_with_audit_pool (per-backend tx wraps INSERT
+    // audit::insert_one_with_audit (per-backend tx wraps INSERT
     // + auto-PK readback + audit emit). Snapshot-style audit (the
     // PendingEntry's `changes` carries post-write field values).
     let pool_insert_method = if audited_fields.is_some() {
@@ -2199,10 +2199,10 @@ fn inherent_impl_tokens(
                             #( #pairs ),*
                         ]),
                     };
-                    let _result = ::rustango::audit::insert_one_with_audit_pool(
+                    let _result = ::rustango::audit::insert_one_with_audit(
                         pool, &_query, &_audit_entry,
                     ).await?;
-                    ::rustango::sql::apply_auto_pk_pool(_result, self)
+                    ::rustango::sql::apply_auto_pk(_result, self)
                 }
             }
         } else {
@@ -2338,7 +2338,7 @@ fn inherent_impl_tokens(
                     };
                     let _after_pairs: ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
                         ::std::vec![ #( #after_pairs_pg ),* ];
-                    ::rustango::audit::save_one_with_diff_pool(
+                    ::rustango::audit::save_one_with_diff(
                         pool,
                         &_query,
                         #pk_column_lit,
@@ -2367,7 +2367,7 @@ fn inherent_impl_tokens(
     // `delete_pool(&Pool)` — emitted for every model with a PK. Two
     // body shapes:
     // - non-audited: simple dispatch through `sql::delete_pool`
-    // - audited: routes through `audit::delete_one_with_audit_pool`,
+    // - audited: routes through `audit::delete_one_with_audit`,
     //   which opens a per-backend transaction wrapping DELETE +
     //   audit emit so the data write and audit row commit atomically.
     let pool_delete_method = {
@@ -2409,7 +2409,7 @@ fn inherent_impl_tokens(
                                 #( #pairs ),*
                             ]),
                         };
-                        ::rustango::audit::delete_one_with_audit_pool(
+                        ::rustango::audit::delete_one_with_audit(
                             pool, &_query, &_audit_entry,
                         ).await
                     }
@@ -2479,7 +2479,7 @@ fn inherent_impl_tokens(
                     on_conflict: ::core::option::Option::None,
                 };
                 let _result = ::rustango::sql::insert_returning_tx(tx, &_query).await?;
-                ::rustango::sql::apply_auto_pk_pool(_result, self)
+                ::rustango::sql::apply_auto_pk(_result, self)
             }
         }
     } else {
@@ -3392,11 +3392,11 @@ fn inherent_impl_tokens(
 
     let fk_pk_access_impl = fk_pk_access_impl_tokens(struct_name, &fields.fk_relations);
 
-    // Slice 17.1 — `AssignAutoPkPool` impl lets `apply_auto_pk_pool`
+    // Slice 17.1 — `AssignAutoPkPool` impl lets `apply_auto_pk`
     // dispatch to the right per-backend body without the macro emitting
     // any `#[cfg(feature = …)]` arm into consumer code. Always emitted
     // so audited models with non-Auto PKs (which still go through
-    // `insert_one_with_audit_pool` → `apply_auto_pk_pool`) link.
+    // `insert_one_with_audit` → `apply_auto_pk`) link.
     let assign_auto_pk_pool_impl = {
         let auto_assigns = &fields.auto_assigns;
         // SQLite ≥ 3.35 supports the same RETURNING shape as Postgres,

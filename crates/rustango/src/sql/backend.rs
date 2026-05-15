@@ -29,14 +29,14 @@
 //! Now the macro emits one cfg-free call:
 //!
 //! ```ignore
-//! ::rustango::sql::apply_auto_pk_pool(
+//! ::rustango::sql::apply_auto_pk(
 //!     _result, self,
 //!     |slf, row| { slf.id = ::rustango::sql::try_get_returning(row, "id")?; Ok(()) },
 //!     |slf, id| { slf.id = ::rustango::sql::Auto::Set(id); Ok(()) },
 //! )?;
 //! ```
 //!
-//! The cfg lives inside [`apply_auto_pk_pool`] and on the type aliases
+//! The cfg lives inside [`apply_auto_pk`] and on the type aliases
 //! [`PgReturningRow`] / [`MyReturningRow`], all in this module. Closure
 //! bodies stay typecheckable in either feature config because the
 //! aliases resolve to uninhabited types when the feature is off and
@@ -236,7 +236,7 @@ impl MysqlAutoIdSet for chrono::DateTime<chrono::Utc> {
 }
 
 /// Hidden trait every macro-emitted `#[derive(Model)]` with at least
-/// one `Auto<T>` field implements. Lets [`apply_auto_pk_pool`] route
+/// one `Auto<T>` field implements. Lets [`apply_auto_pk`] route
 /// an `InsertReturningPool` result to the right per-backend assignment
 /// without the macro emitting any `#[cfg]` arms.
 ///
@@ -285,7 +285,7 @@ pub trait AssignAutoPkPool {
 ///
 /// # Errors
 /// Whatever the dispatched trait method returns.
-pub fn apply_auto_pk_pool<M: AssignAutoPkPool + ?Sized>(
+pub fn apply_auto_pk<M: AssignAutoPkPool + ?Sized>(
     result: super::InsertReturningPool,
     model: &mut M,
 ) -> Result<(), ExecError> {

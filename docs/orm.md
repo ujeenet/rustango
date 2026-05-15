@@ -183,6 +183,33 @@ let next = Post::objects()
 
 For HTTP-side cursor pagination, use `ViewSet::cursor_pagination("id")` instead.
 
+### Fetch a `HashMap` by column — `.in_bulk()`
+
+Django's `Model.objects.in_bulk(ids, field_name=)` — fetch a set of rows by a column value list and return them keyed by that column. Useful for "look up these N rows in one round trip" patterns. Issue #24.
+
+```rust
+use std::collections::HashMap;
+use rustango::sql::Auto;
+
+// Default Django shape: keyed by the Auto<i64> PK.
+let books: HashMap<i64, Book> = Book::objects()
+    .in_bulk(Book::id, [1_i64, 2, 3], |b| match b.id {
+        Auto::Set(v) => v,
+        Auto::Unset  => unreachable!("fetched row has Auto::Set PK"),
+    }, &pool)
+    .await?;
+assert_eq!(books[&1].title, "The Rust Programming Language");
+
+// `field_name=` equivalent — key by any unique column.
+let by_isbn: HashMap<String, Book> = Book::objects()
+    .in_bulk(Book::isbn, ["isbn-1".to_string()], |b| b.isbn.clone(), &pool)
+    .await?;
+```
+
+Composes with prior `.where_()` filters — the `IN`-list AND-joins with the existing WHERE. Empty `ids` short-circuits with an empty map (no SQL is issued). The closure handles `Auto<T>` / `ForeignKey<T, K>` unwrap explicitly, giving callers control over how the key materializes.
+
+Tenant-scoped sibling: `in_bulk_on(column, ids, extract, &executor)` takes any sqlx executor — pair with `tenant.conn()` for schema-mode tenants.
+
 ---
 
 ## F() expressions + database functions

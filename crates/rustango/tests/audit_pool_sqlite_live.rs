@@ -204,10 +204,10 @@ async fn list_pool_filters_by_entity_table() {
         entity_table: Some("post".into()),
         ..Default::default()
     };
-    let rows = audit::list_pool(&pool, &filter, 50, 0).await.unwrap();
+    let rows = audit::list(&pool, &filter, 50, 0).await.unwrap();
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|r| r.entity_table == "post"));
-    let total = audit::count_pool(&pool, &filter).await.unwrap();
+    let total = audit::count(&pool, &filter).await.unwrap();
     assert_eq!(total, 2);
 }
 
@@ -240,7 +240,7 @@ async fn list_pool_combines_multiple_filters() {
         operation: Some("update".into()),
         source: None,
     };
-    let rows = audit::list_pool(&pool, &filter, 50, 0).await.unwrap();
+    let rows = audit::list(&pool, &filter, 50, 0).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].entity_pk, "1");
     assert_eq!(rows[0].operation, "update");
@@ -259,9 +259,9 @@ async fn list_pool_paginates() {
         .unwrap();
     }
     let filter = audit::AuditFilter::default();
-    let page1 = audit::list_pool(&pool, &filter, 2, 0).await.unwrap();
-    let page2 = audit::list_pool(&pool, &filter, 2, 2).await.unwrap();
-    let page3 = audit::list_pool(&pool, &filter, 2, 4).await.unwrap();
+    let page1 = audit::list(&pool, &filter, 2, 0).await.unwrap();
+    let page2 = audit::list(&pool, &filter, 2, 2).await.unwrap();
+    let page3 = audit::list(&pool, &filter, 2, 4).await.unwrap();
     assert_eq!(page1.len(), 2);
     assert_eq!(page2.len(), 2);
     assert_eq!(page3.len(), 1);
@@ -285,13 +285,11 @@ async fn facet_counts_returns_groupby() {
             .unwrap();
     }
     // entity_table facet: post=3, author=1, sorted count-desc.
-    let facets = audit::facet_counts_pool(&pool, "entity_table")
-        .await
-        .unwrap();
+    let facets = audit::facet_counts(&pool, "entity_table").await.unwrap();
     assert_eq!(facets[0], ("post".to_string(), 3));
     assert_eq!(facets[1], ("author".to_string(), 1));
 
-    let ops = audit::facet_counts_pool(&pool, "operation").await.unwrap();
+    let ops = audit::facet_counts(&pool, "operation").await.unwrap();
     assert!(ops.iter().find(|(v, c)| v == "update" && *c == 2).is_some());
     assert!(ops.iter().find(|(v, c)| v == "create" && *c == 2).is_some());
 }
@@ -300,6 +298,6 @@ async fn facet_counts_returns_groupby() {
 async fn facet_counts_rejects_non_allowlisted_column() {
     let pool = pool().await;
     ensure_table_pool(&pool).await.unwrap();
-    let r = audit::facet_counts_pool(&pool, "no_such_column").await;
+    let r = audit::facet_counts(&pool, "no_such_column").await;
     assert!(r.is_err(), "non-allowlisted column should be rejected");
 }

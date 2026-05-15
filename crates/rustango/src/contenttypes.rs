@@ -308,7 +308,7 @@ impl ContentType {
 
 /// Tri-dialect counterpart of [`fetch_row_as_json`] (v0.38). Takes
 /// the unified [`crate::sql::Pool`] enum and routes through
-/// [`crate::sql::select_one_row_as_json_pool`] so the same body runs
+/// [`crate::sql::select_one_row_as_json`] so the same body runs
 /// against PG / SQLite / MySQL. Used by the admin's audit log + the
 /// generic-FK link renderer on every backend.
 ///
@@ -353,11 +353,11 @@ pub async fn fetch_row_as_json(
         offset: None,
     };
     let fields: Vec<&'static crate::core::FieldSchema> = entry.schema.scalar_fields().collect();
-    crate::sql::select_one_row_as_json_pool(pool, &select_q, &fields).await
+    crate::sql::select_one_row_as_json(pool, &select_q, &fields).await
 }
 
 /// Tri-dialect counterpart of [`for_each_row_of_ct`] (v0.38). Iterates
-/// the rows in batches via [`crate::sql::select_rows_as_json_pool`] so
+/// the rows in batches via [`crate::sql::select_rows_as_json`] so
 /// the same body runs across every backend the [`crate::sql::Pool`]
 /// enum carries. `batch_size = 0` clamps to 1.
 ///
@@ -405,7 +405,7 @@ where
             limit: Some(batch),
             offset: Some(offset),
         };
-        let rows = crate::sql::select_rows_as_json_pool(pool, &select_q, &fields).await?;
+        let rows = crate::sql::select_rows_as_json(pool, &select_q, &fields).await?;
         if rows.is_empty() {
             break;
         }

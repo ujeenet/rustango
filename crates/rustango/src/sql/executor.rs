@@ -235,6 +235,50 @@ where
     pub async fn fetch_paginated(self, pool: &PgPool) -> Result<Page<T>, ExecError> {
         self.fetch_paginated_on(pool).await
     }
+
+    /// Tenant-scoped companion to [`QuerySet::in_bulk`] — same
+    /// semantic but takes any sqlx executor (`&PgPool`,
+    /// `&mut PgConnection`, or a `Transaction`) so schema-mode tenant
+    /// queries route through the per-checkout `SET search_path`
+    /// connection. Issue #24.
+    ///
+    /// # Errors
+    /// As [`Self::fetch_on`].
+    pub async fn in_bulk_on<'c, E, C, K, I, F>(
+        self,
+        column: C,
+        ids: I,
+        extract: F,
+        executor: E,
+    ) -> Result<std::collections::HashMap<K, T>, ExecError>
+    where
+        E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+        T: LoadRelated,
+        C: crate::core::Column<Model = T>,
+        K: Eq + std::hash::Hash + Into<crate::core::SqlValue>,
+        I: IntoIterator<Item = K>,
+        F: Fn(&T) -> K,
+    {
+        let _ = column;
+        let id_values: Vec<crate::core::SqlValue> = ids.into_iter().map(|v| v.into()).collect();
+        if id_values.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let rows = self
+            .filter_op(
+                C::COLUMN,
+                crate::core::Op::In,
+                crate::core::SqlValue::List(id_values),
+            )
+            .fetch_on(executor)
+            .await?;
+        let mut out = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            let key = extract(&row);
+            out.insert(key, row);
+        }
+        Ok(out)
+    }
 }
 
 /// Result of [`QuerySet::fetch_paginated_on`] — a slice of rows
@@ -714,7 +758,7 @@ pub fn row_to_json_sqlite(
 /// # Errors
 /// SQL compilation / driver failures only — per-cell decode errors
 /// are swallowed into `Value::Null`.
-pub async fn select_rows_as_json_pool(
+pub async fn select_rows_as_json(
     pool: &Pool,
     query: &SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
@@ -857,12 +901,12 @@ fn augment_joined_columns_sqlite(
     }
 }
 
-/// Single-row companion of [`select_rows_as_json_pool`]. Returns
+/// Single-row companion of [`select_rows_as_json`]. Returns
 /// `Ok(None)` when no rows match.
 ///
 /// # Errors
-/// As [`select_rows_as_json_pool`].
-pub async fn select_one_row_as_json_pool(
+/// As [`select_rows_as_json`].
+pub async fn select_one_row_as_json(
     pool: &Pool,
     query: &SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
@@ -2047,7 +2091,7 @@ pub async fn insert_returning_pool(
             // the same shape as Postgres, so the flow mirrors PG: bind
             // params, fetch the row, hand it to the macro-emitted
             // `__rustango_assign_from_sqlite_row` body via
-            // `apply_auto_pk_pool`.
+            // `apply_auto_pk`.
             let stmt = pool.dialect().compile_insert(query)?;
             let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
                 sqlx::query(&stmt.sql);
@@ -3262,7 +3306,7 @@ where
     ///
     /// # Errors
     /// As [`FetcherPool::fetch_pool`].
-    pub async fn first_pool(self, pool: &Pool) -> Result<Option<T>, ExecError> {
+    pub async fn first(self, pool: &Pool) -> Result<Option<T>, ExecError> {
         let qs = ensure_pk_ordering(self, /*reverse=*/ false);
         let rows = qs.limit(1).fetch_pool(pool).await?;
         Ok(rows.into_iter().next())
@@ -3277,7 +3321,7 @@ where
     ///
     /// # Errors
     /// As [`FetcherPool::fetch_pool`].
-    pub async fn last_pool(self, pool: &Pool) -> Result<Option<T>, ExecError> {
+    pub async fn last(self, pool: &Pool) -> Result<Option<T>, ExecError> {
         let qs = ensure_pk_ordering(self, /*reverse=*/ true);
         let rows = qs.limit(1).fetch_pool(pool).await?;
         Ok(rows.into_iter().next())
@@ -3291,7 +3335,7 @@ where
     ///
     /// # Errors
     /// As [`FetcherPool::fetch_pool`].
-    pub async fn earliest_pool(mut self, field: &str, pool: &Pool) -> Result<Option<T>, ExecError> {
+    pub async fn earliest(mut self, field: &str, pool: &Pool) -> Result<Option<T>, ExecError> {
         self = self.replace_order_by(&[(field, false)]);
         let rows = self.limit(1).fetch_pool(pool).await?;
         Ok(rows.into_iter().next())
@@ -3305,10 +3349,92 @@ where
     ///
     /// # Errors
     /// As [`FetcherPool::fetch_pool`].
-    pub async fn latest_pool(mut self, field: &str, pool: &Pool) -> Result<Option<T>, ExecError> {
+    pub async fn latest(mut self, field: &str, pool: &Pool) -> Result<Option<T>, ExecError> {
         self = self.replace_order_by(&[(field, true)]);
         let rows = self.limit(1).fetch_pool(pool).await?;
         Ok(rows.into_iter().next())
+    }
+
+    /// Issue #24 — Django's `Model.objects.in_bulk(ids, field_name=)`:
+    /// fetch a set of rows by a column value list and return them
+    /// keyed by that column in a `HashMap`.
+    ///
+    /// `column` is a typed [`crate::core::Column`] reference (e.g.
+    /// `User::id` or `Book::isbn`) so the filter column is checked
+    /// against the model at compile time. `ids` is an iterable of
+    /// values — the SQL becomes `… WHERE <column> IN ($1, $2, …)`.
+    /// `extract` reads the key off each fetched row so the map can be
+    /// built without re-decoding the column from the raw `sqlx::Row`
+    /// (a closure also gives callers full control over `Auto<T>` /
+    /// `ForeignKey<T, K>` unwrap shape).
+    ///
+    /// Empty `ids` short-circuits with an empty `HashMap` — no SQL is
+    /// issued, sidestepping `Op::In` with an empty list (which the
+    /// writer rejects with [`crate::sql::SqlError::EmptyInList`]).
+    ///
+    /// ```ignore
+    /// use std::collections::HashMap;
+    /// use rustango::sql::Auto;
+    ///
+    /// // Default — keyed by the Auto<i64> PK. The closure handles
+    /// // Auto::Set unwrap (every fetched row has an `Auto::Set`
+    /// // value; `Auto::Unset` would be a programming error).
+    /// let books: HashMap<i64, Book> = Book::objects()
+    ///     .in_bulk(Book::id, [1_i64, 2, 3], |b| match b.id {
+    ///         Auto::Set(v) => v,
+    ///         Auto::Unset  => unreachable!("fetched row has PK"),
+    ///     }, &pool)
+    ///     .await?;
+    ///
+    /// // `field_name=` equivalent — key by any unique column.
+    /// let books_by_isbn: HashMap<String, Book> = Book::objects()
+    ///     .in_bulk(Book::isbn, ["isbn-1", "isbn-2"], |b| b.isbn.clone(), &pool)
+    ///     .await?;
+    /// ```
+    ///
+    /// When the result contains multiple rows sharing the same key
+    /// (only possible if `column` is not unique), the *later* row
+    /// wins — matches `HashMap::insert` semantics. Pair with a
+    /// unique column to avoid surprises.
+    ///
+    /// # Errors
+    /// As [`FetcherPool::fetch_pool`].
+    pub async fn in_bulk<C, K, I, F>(
+        self,
+        column: C,
+        ids: I,
+        extract: F,
+        pool: &Pool,
+    ) -> Result<std::collections::HashMap<K, T>, ExecError>
+    where
+        C: crate::core::Column<Model = T>,
+        K: Eq + std::hash::Hash + Into<crate::core::SqlValue>,
+        I: IntoIterator<Item = K>,
+        F: Fn(&T) -> K,
+    {
+        // `column` is consumed only to thread the `Column<Model = T>`
+        // bound — its `COLUMN` const drives the WHERE filter below.
+        // Discarding the value keeps the ZST instance from triggering
+        // an unused-variable warning.
+        let _ = column;
+        let id_values: Vec<crate::core::SqlValue> = ids.into_iter().map(|v| v.into()).collect();
+        if id_values.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let rows = self
+            .filter_op(
+                C::COLUMN,
+                crate::core::Op::In,
+                crate::core::SqlValue::List(id_values),
+            )
+            .fetch_pool(pool)
+            .await?;
+        let mut out = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            let key = extract(&row);
+            out.insert(key, row);
+        }
+        Ok(out)
     }
 }
 
@@ -3333,7 +3459,7 @@ where
 /// # Example
 ///
 /// ```ignore
-/// let (post, created) = rustango::sql::get_or_create_pool(
+/// let (post, created) = rustango::sql::get_or_create(
 ///     Post::objects().filter("slug", "hello"),
 ///     |pool| async move {
 ///         let mut p = Post {
@@ -3352,7 +3478,7 @@ where
 /// - [`ExecError::MultipleRowsReturned`] when the filter matches >1 row.
 /// - Whatever the `create_fn` closure returns when matching no rows.
 /// - Whatever [`FetcherPool::fetch_pool`] returns.
-pub async fn get_or_create_pool<T, F, Fut>(
+pub async fn get_or_create<T, F, Fut>(
     qs: crate::query::QuerySet<T>,
     create_fn: F,
     pool: &Pool,
@@ -3388,17 +3514,17 @@ where
 /// none, invoke `create_fn` and return `(created, true)`. Matching
 /// multiple rows returns [`ExecError::MultipleRowsReturned`].
 ///
-/// Same atomicity caveat as [`get_or_create_pool`] — wrap in a
+/// Same atomicity caveat as [`get_or_create`] — wrap in a
 /// transaction or rely on a UNIQUE constraint for race-free
 /// semantics.
 ///
 /// Both closures receive an **owned** `Pool` for the same
-/// async-lifetime reason as [`get_or_create_pool`].
+/// async-lifetime reason as [`get_or_create`].
 ///
 /// # Example
 ///
 /// ```ignore
-/// let (post, created) = rustango::sql::update_or_create_pool(
+/// let (post, created) = rustango::sql::update_or_create(
 ///     Post::objects().filter("slug", "hello"),
 ///     |pool, mut existing| async move {
 ///         existing.title = "New title".into();
@@ -3415,8 +3541,8 @@ where
 /// ```
 ///
 /// # Errors
-/// As [`get_or_create_pool`].
-pub async fn update_or_create_pool<T, UF, UFut, CF, CFut>(
+/// As [`get_or_create`].
+pub async fn update_or_create<T, UF, UFut, CF, CFut>(
     qs: crate::query::QuerySet<T>,
     update_fn: UF,
     create_fn: CF,
@@ -3454,8 +3580,8 @@ where
 }
 
 /// v0.45 helper — ensure the queryset has *some* deterministic
-/// ordering before slicing to one row. Used by `first_pool` and
-/// `last_pool`. If the caller already provided an `order_by`, we
+/// ordering before slicing to one row. Used by `first` and
+/// `last`. If the caller already provided an `order_by`, we
 /// either keep it (forward) or flip every direction (reverse). If
 /// they didn't, we fall back to the model's primary key.
 fn ensure_pk_ordering<T: Model>(

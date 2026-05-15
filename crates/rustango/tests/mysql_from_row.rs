@@ -258,7 +258,7 @@ pub struct AuditedRecord {
 #[test]
 fn audited_model_gets_delete_pool() {
     // batch 20 — audited models now get delete_pool too. The macro
-    // routes through audit::delete_one_with_audit_pool which opens
+    // routes through audit::delete_one_with_audit which opens
     // a per-backend tx wrapping DELETE + audit emit. Compile-time
     // probe; live exec needs a database.
     fn _probe(rec: &AuditedRecord, pool: &rustango::sql::Pool) {
@@ -269,7 +269,7 @@ fn audited_model_gets_delete_pool() {
 #[test]
 fn audited_model_with_plain_pk_gets_save_pool() {
     // batch 21 — audited non-Auto-PK models get save_pool routing
-    // through audit::save_one_with_audit_pool (per-backend tx wraps
+    // through audit::save_one_with_audit (per-backend tx wraps
     // UPDATE + audit emit atomically; snapshot-style audit).
     fn _probe(rec: &mut AuditedRecord, pool: &rustango::sql::Pool) {
         let _fut = rec.save_pool(pool);
@@ -288,7 +288,7 @@ pub struct AuditedAutoRecord {
 #[test]
 fn audited_auto_pk_model_gets_insert_pool() {
     // batch 22 — audited Auto-PK models get insert_pool routing
-    // through audit::insert_one_with_audit_pool (per-backend tx
+    // through audit::insert_one_with_audit (per-backend tx
     // wraps INSERT + auto-PK readback + audit emit).
     fn _probe(rec: &mut AuditedAutoRecord, pool: &rustango::sql::Pool) {
         drop(rec.insert_pool(pool));
@@ -385,7 +385,7 @@ fn audit_insert_one_with_audit_pool_is_callable() {
             source: rustango::audit::AuditSource::System,
             changes: serde_json::json!({}),
         };
-        let _fut = rustango::audit::insert_one_with_audit_pool(pool, &q, &entry);
+        let _fut = rustango::audit::insert_one_with_audit(pool, &q, &entry);
     }
 }
 
@@ -412,7 +412,7 @@ fn audit_save_one_with_audit_pool_is_callable() {
             source: rustango::audit::AuditSource::System,
             changes: serde_json::json!({}),
         };
-        let _fut = rustango::audit::save_one_with_audit_pool(pool, &q, &entry);
+        let _fut = rustango::audit::save_one_with_audit(pool, &q, &entry);
     }
 }
 
@@ -435,7 +435,7 @@ fn audit_delete_one_with_audit_pool_is_callable() {
             source: rustango::audit::AuditSource::System,
             changes: serde_json::json!({}),
         };
-        let _fut = rustango::audit::delete_one_with_audit_pool(pool, &q, &entry);
+        let _fut = rustango::audit::delete_one_with_audit(pool, &q, &entry);
     }
 }
 

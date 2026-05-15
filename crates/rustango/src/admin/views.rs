@@ -242,7 +242,7 @@ pub(crate) async fn table_view(
         page_size
     };
     let scalar_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    let mut rows = crate::sql::select_rows_as_json_pool(
+    let mut rows = crate::sql::select_rows_as_json(
         &state.pool,
         &SelectQuery {
             model,
@@ -850,7 +850,7 @@ pub(crate) async fn detail_view(
     let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
 
     let detail_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    let row = crate::sql::select_one_row_as_json_pool(
+    let row = crate::sql::select_one_row_as_json(
         &state.pool,
         &SelectQuery {
             model,
@@ -1122,7 +1122,7 @@ pub(crate) async fn edit_form(
     let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
 
     let edit_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    let row = crate::sql::select_one_row_as_json_pool(
+    let row = crate::sql::select_one_row_as_json(
         &state.pool,
         &SelectQuery {
             model,
@@ -1207,7 +1207,7 @@ pub(crate) async fn update_submit(
     // v0.37 — SELECT runs through the JSON bridge and the audit emit
     // takes `Option<&serde_json::Value>` directly, no shim needed.
     let before_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    let before_row = crate::sql::select_one_row_as_json_pool(
+    let before_row = crate::sql::select_one_row_as_json(
         &state.pool,
         &SelectQuery {
             model,
@@ -1274,7 +1274,7 @@ pub(crate) async fn delete_submit(
     // state). Best-effort — missing row falls back to an empty
     // changes payload, which still records the operation + source.
     let delete_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    let before_row = crate::sql::select_one_row_as_json_pool(
+    let before_row = crate::sql::select_one_row_as_json(
         &state.pool,
         &SelectQuery {
             model,
@@ -1439,7 +1439,7 @@ pub(crate) async fn action_submit(
     // delete_selected this snapshots the gone rows; for user-defined
     // actions it records the row state at the time of action.
     let action_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    let before_rows = crate::sql::select_rows_as_json_pool(
+    let before_rows = crate::sql::select_rows_as_json(
         &state.pool,
         &SelectQuery {
             model,

@@ -1,5 +1,5 @@
-//! v0.45 — live SQLite coverage for `get_or_create_pool` and
-//! `update_or_create_pool` (Django-style atomic-ish helpers).
+//! v0.45 — live SQLite coverage for `get_or_create` and
+//! `update_or_create` (Django-style atomic-ish helpers).
 //!
 //! Atomicity caveat: the helpers run SELECT then INSERT/UPDATE in
 //! two statements; another writer could race between the two. For
@@ -10,7 +10,7 @@
 #![cfg(feature = "sqlite")]
 
 use rustango::core::Column as _;
-use rustango::sql::{get_or_create_pool, update_or_create_pool, Auto, ExecError, Pool};
+use rustango::sql::{get_or_create, update_or_create, Auto, ExecError, Pool};
 use rustango::Model;
 
 #[derive(Model, Debug, Clone)]
@@ -40,7 +40,7 @@ async fn pool_with_table() -> Pool {
 #[tokio::test]
 async fn get_or_create_inserts_when_filter_matches_zero() {
     let pool = pool_with_table().await;
-    let (w, created) = get_or_create_pool(
+    let (w, created) = get_or_create(
         Widget::objects().where_(Widget::slug.eq("alpha".to_owned())),
         |pool| async move {
             let mut w = Widget {
@@ -74,7 +74,7 @@ async fn get_or_create_returns_existing_when_filter_matches_one() {
     let existing_id = existing.id;
 
     // Second call should find it instead of inserting.
-    let (w, created) = get_or_create_pool(
+    let (w, created) = get_or_create(
         Widget::objects().where_(Widget::slug.eq("beta".to_owned())),
         |_pool| async move {
             panic!("create_fn must not run when the filter matches");
@@ -102,7 +102,7 @@ async fn get_or_create_errors_when_filter_matches_multiple() {
         };
         w.insert_pool(&pool).await.unwrap();
     }
-    let err = get_or_create_pool(
+    let err = get_or_create(
         Widget::objects().where_(Widget::title.eq("shared title".to_owned())),
         |_pool| async move {
             panic!("create_fn must not run on multi-match");
@@ -131,7 +131,7 @@ async fn update_or_create_updates_existing() {
     };
     existing.insert_pool(&pool).await.unwrap();
 
-    let (w, created) = update_or_create_pool(
+    let (w, created) = update_or_create(
         Widget::objects().where_(Widget::slug.eq("delta".to_owned())),
         |pool, mut existing| async move {
             existing.title = "New".into();
@@ -152,7 +152,7 @@ async fn update_or_create_updates_existing() {
 #[tokio::test]
 async fn update_or_create_creates_when_filter_misses() {
     let pool = pool_with_table().await;
-    let (w, created) = update_or_create_pool(
+    let (w, created) = update_or_create(
         Widget::objects().where_(Widget::slug.eq("epsilon".to_owned())),
         |_pool, _existing| async move {
             panic!("update_fn must not run when there's no match");
