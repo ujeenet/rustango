@@ -3355,6 +3355,65 @@ where
         Ok(rows.into_iter().next())
     }
 
+    /// Issue #23 — Django's `QuerySet.iterator(chunk_size=2000)`.
+    /// Return a chunked iterator over results, fetching `chunk_size`
+    /// rows at a time via `LIMIT N OFFSET M`. Never buffers the full
+    /// result set — apps processing million-row exports can stream
+    /// rows without OOM.
+    ///
+    /// Compiles the queryset eagerly so any schema validation error
+    /// surfaces here rather than mid-stream. The compiled `SelectQuery`
+    /// is then re-issued per chunk with rotating `OFFSET`.
+    ///
+    /// ```ignore
+    /// // Two iteration styles, both work:
+    /// let mut iter = Post::objects()
+    ///     .where_(Post::published.eq(true))
+    ///     .order_by(&[("id", false)])
+    ///     .iterator(2_000)?;
+    ///
+    /// // 1. Whole-chunk loop:
+    /// while let Some(chunk) = iter.next_chunk(&pool).await? {
+    ///     for post in chunk { /* … */ }
+    /// }
+    ///
+    /// // 2. Row-by-row loop (buffer one chunk internally):
+    /// while let Some(post) = iter.next_row(&pool).await? {
+    ///     /* … */
+    /// }
+    /// ```
+    ///
+    /// **Order-by recommended.** `OFFSET` without a stable sort returns
+    /// unpredictable rows across chunks — set `.order_by(&[("pk", …)])`
+    /// before `.iterator()` so each chunk picks up where the previous
+    /// left off. The method doesn't enforce it (some queries
+    /// legitimately want no ordering, e.g. a one-shot drain).
+    ///
+    /// **Trade-off vs server-side cursors.** This is a simple
+    /// LIMIT/OFFSET chunker — each chunk re-runs the query with a
+    /// larger offset. On a btree-indexed column with `OFFSET N`,
+    /// Postgres scans the first N rows before returning the (N+1)th,
+    /// so deep pagination is O(n²) total work. For truly streaming
+    /// reads on PG, callers can drop into `transaction()` + the raw
+    /// `sqlx::query(...).fetch(...)` Stream API directly — that uses
+    /// the extended protocol with no offset reseek. The chunker is the
+    /// simple choice that works on every backend.
+    ///
+    /// # Errors
+    /// Returns [`QueryError`] if the queryset fails to compile.
+    pub fn iterator(self, chunk_size: i64) -> Result<ChunkedIter<T>, crate::core::QueryError> {
+        let query = self.compile()?;
+        Ok(ChunkedIter {
+            query,
+            chunk_size,
+            offset: 0,
+            exhausted: false,
+            buffer: std::collections::VecDeque::new(),
+            seen: 0,
+            _model: std::marker::PhantomData,
+        })
+    }
+
     /// Issue #24 — Django's `Model.objects.in_bulk(ids, field_name=)`:
     /// fetch a set of rows by a column value list and return them
     /// keyed by that column in a `HashMap`.
@@ -3652,6 +3711,159 @@ where
     async fn fetch_tx(self, tx: &mut PoolTx<'_>) -> Result<Vec<T>, ExecError> {
         let select = self.compile()?;
         select_rows_tx_with_related(tx, &select).await
+    }
+}
+
+/// Chunked async iterator over a compiled query — Django's
+/// `QuerySet.iterator(chunk_size=...)`. Issue #23.
+///
+/// Constructed via [`crate::query::QuerySet::iterator`]. Internally
+/// re-runs the underlying `SELECT` with rotating `OFFSET` per chunk
+/// so the full result set never lives in memory at once. Two
+/// consumption styles:
+///
+/// - [`Self::next_chunk`] yields `Option<Vec<T>>` — a whole batch at
+///   a time. `None` means iteration is done.
+/// - [`Self::next_row`] yields `Option<T>` one at a time, buffering
+///   the current chunk internally between calls.
+///
+/// Mix freely on the same iterator — both methods share the same
+/// buffer + offset state.
+///
+/// Iteration is **exhausted-aware**: once the underlying query
+/// returns a chunk smaller than `chunk_size` (or no rows), the
+/// iterator marks itself exhausted and every subsequent call to
+/// `next_chunk` / `next_row` returns `Ok(None)` without re-querying.
+pub struct ChunkedIter<T> {
+    /// Compiled `SelectQuery` re-issued per chunk with rotating
+    /// `OFFSET`. Cloned every chunk so the per-chunk `limit` /
+    /// `offset` mutation doesn't mutate the original.
+    query: crate::core::SelectQuery,
+    /// Per-chunk row cap. Picked at construction; doesn't change.
+    chunk_size: i64,
+    /// Next `OFFSET` to issue on the next chunk fetch. Bumped by the
+    /// number of rows actually returned (not by `chunk_size`) so a
+    /// short final chunk doesn't skip ahead.
+    offset: i64,
+    /// `true` once a fetched chunk came back smaller than
+    /// `chunk_size`. Further `next_chunk` / `next_row` calls skip the
+    /// DB and return `Ok(None)`.
+    exhausted: bool,
+    /// One-chunk buffer for the row-by-row [`Self::next_row`] path.
+    /// `VecDeque` so `pop_front` is O(1); a `Vec` would be O(n) per
+    /// row. Empty when no rows are buffered or the iterator has been
+    /// drained chunk-by-chunk via [`Self::next_chunk`].
+    buffer: std::collections::VecDeque<T>,
+    /// Cumulative row count yielded so far (across both `next_chunk`
+    /// and `next_row` paths). Used for [`Self::rows_seen`].
+    seen: i64,
+    _model: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> ChunkedIter<T>
+where
+    T: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    /// Fetch the next chunk. Returns `Ok(None)` when iteration is done.
+    ///
+    /// If `next_row` was previously called and left rows in the
+    /// internal buffer, those rows are drained as the head of the
+    /// returned chunk before any new DB query — mixing `next_row` and
+    /// `next_chunk` on the same iterator preserves row order.
+    ///
+    /// # Errors
+    /// As [`select_rows_pool_with_related`].
+    pub async fn next_chunk(&mut self, pool: &Pool) -> Result<Option<Vec<T>>, ExecError> {
+        // Drain any rows left in the per-row buffer first.
+        let buffered: Vec<T> = self.buffer.drain(..).collect();
+        if !buffered.is_empty() {
+            self.seen += buffered.len() as i64;
+            return Ok(Some(buffered));
+        }
+        if self.exhausted {
+            return Ok(None);
+        }
+        // Clone so the per-chunk LIMIT/OFFSET tweaks don't mutate the
+        // original (the iterator may be re-used across many chunks).
+        let mut q = self.query.clone();
+        q.limit = Some(self.chunk_size);
+        q.offset = Some(self.offset);
+        let rows = select_rows_pool_with_related::<T>(pool, &q).await?;
+        let n = rows.len() as i64;
+        if rows.is_empty() {
+            self.exhausted = true;
+            return Ok(None);
+        }
+        if n < self.chunk_size {
+            self.exhausted = true;
+        }
+        self.offset += n;
+        self.seen += n;
+        Ok(Some(rows))
+    }
+
+    /// Yield one row at a time, buffering an internal chunk between
+    /// calls. Returns `Ok(None)` when iteration is done.
+    ///
+    /// O(1) per row — uses `VecDeque::pop_front` against the internal
+    /// buffer, refilling from the next chunk only when empty.
+    ///
+    /// # Errors
+    /// As [`Self::next_chunk`].
+    pub async fn next_row(&mut self, pool: &Pool) -> Result<Option<T>, ExecError> {
+        if let Some(row) = self.buffer.pop_front() {
+            self.seen += 1;
+            return Ok(Some(row));
+        }
+        if self.exhausted {
+            return Ok(None);
+        }
+        // Fetch a fresh chunk directly (bypass next_chunk to avoid
+        // its buffer-drain branch, which would only confuse the
+        // accounting here).
+        let mut q = self.query.clone();
+        q.limit = Some(self.chunk_size);
+        q.offset = Some(self.offset);
+        let rows = select_rows_pool_with_related::<T>(pool, &q).await?;
+        let n = rows.len() as i64;
+        if rows.is_empty() {
+            self.exhausted = true;
+            return Ok(None);
+        }
+        if n < self.chunk_size {
+            self.exhausted = true;
+        }
+        self.offset += n;
+        self.buffer.extend(rows);
+        let row = self.buffer.pop_front();
+        if row.is_some() {
+            self.seen += 1;
+        }
+        Ok(row)
+    }
+
+    /// Cumulative count of rows yielded so far across both
+    /// `next_chunk` and `next_row` calls. Useful for progress
+    /// reporting on long drains.
+    #[must_use]
+    pub fn rows_seen(&self) -> i64 {
+        self.seen
+    }
+
+    /// `true` once iteration has been exhausted — every subsequent
+    /// `next_chunk` / `next_row` call will return `Ok(None)` without
+    /// hitting the database.
+    #[must_use]
+    pub fn is_exhausted(&self) -> bool {
+        self.exhausted && self.buffer.is_empty()
     }
 }
 
