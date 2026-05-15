@@ -298,6 +298,70 @@ let mixed = qs_a
 
 **Error path on the typed builder**: `.union(other_qs)` (and `.intersection()` / `.difference()`) compiles the branch eagerly and panics if the branch fails to compile (typo'd column, etc.). For fallible composition where the caller wants a `Result`, compile the branch first and pass it via `.with_compound(SetOp::Union, branch)` — one generic entry point covers every operator. The panic shape matches Django's: a bad branch is a programmer error, not a runtime data condition.
 
+### Stream large result sets — `.iterator(chunk_size)`
+
+Django's [`QuerySet.iterator(chunk_size=2000)`](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#iterator) — issue #23. Returns a chunked iterator that fetches `chunk_size` rows at a time via `LIMIT N OFFSET M`, never buffering the whole result set in memory. Right tool for million-row exports, ETL pipelines, batch processors.
+
+```rust
+// 1. Whole-chunk loop — process N rows at a time.
+let mut iter = Post::objects()
+    .where_(Post::published.eq(true))
+    .order_by(&[("id", false)])
+    .iterator(2_000)?;
+while let Some(chunk) = iter.next_chunk(&pool).await? {
+    for post in chunk { /* … */ }
+}
+
+// 2. Row-by-row loop — buffer one chunk internally, yield one row.
+let mut iter = Post::objects().order_by(&[("id", false)]).iterator(2_000)?;
+while let Some(post) = iter.next_row(&pool).await? {
+    /* … */
+}
+```
+
+**Set an `order_by`.** `OFFSET` against a query with no stable sort returns unpredictable rows across chunks — typically `.order_by(&[("pk", false)])` so each chunk picks up cleanly. The method doesn't enforce ordering (some queries legitimately want no sort, e.g. a one-shot drain), but unsorted iteration is a footgun.
+
+**Trade-off vs server-side cursors.** This is a simple LIMIT/OFFSET chunker. On a btree-indexed sort column, Postgres scans the first N rows before returning the (N+1)th — so deep pagination is `O(n²)` total work. For a 10M-row drain this matters; for 100k rows it usually doesn't. The chunker wins on portability (works on all backends with no transaction overhead) and simplicity (no cursor lifecycle management). For truly streaming reads on PG, drop into `transaction()` + raw `sqlx::query(...).fetch(pool)` Stream API directly — the extended protocol streams from the server without offset reseek.
+
+**Mixing `next_chunk` and `next_row` on the same iterator is safe.** The internal `VecDeque` buffer drains in row order before any new DB fetch, so `next_chunk` after a partial `next_row` drain yields the remaining buffered rows first, then continues with fresh chunks.
+
+Both `.rows_seen()` (cumulative count) and `.is_exhausted()` (post-drain flag) are available for progress reporting and termination checks.
+
+**Concurrent-write hazard.** Each chunk is a separate query, so rows inserted/deleted between chunks can be skipped or duplicated (the classic OFFSET-pagination "windowing" problem). For read-only / append-only tables — the typical export use case — this isn't a concern. For tables being written concurrently you need a snapshot-isolation transaction so every chunk sees the same view. **`ChunkedIter` takes `&Pool`, not a `&mut Transaction`, so the chunker API can't be used inside the tx directly** — hand-roll the chunked SELECT against the tx instead:
+
+```rust
+use rustango::sql::select_rows_on;
+
+let mut tx = pool.begin().await?;
+sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+    .execute(&mut *tx).await?;
+
+// Compile once, then hand-loop LIMIT/OFFSET chunks against the tx.
+let base = Post::objects().order_by(&[("id", false)]).compile()?;
+let chunk_size = 2_000_i64;
+let mut offset = 0_i64;
+loop {
+    let mut q = base.clone();
+    q.limit = Some(chunk_size);
+    q.offset = Some(offset);
+    let rows: Vec<Post> = select_rows_on(&mut *tx, &q).await?;
+    if rows.is_empty() { break; }
+    for post in &rows { /* … */ }
+    if (rows.len() as i64) < chunk_size { break; }
+    offset += rows.len() as i64;
+}
+tx.commit().await?;
+```
+
+**`select_for_update()` doesn't propagate across chunks.** Row locks held by `.select_for_update()` are released at the end of each chunk's implicit transaction. There's no chunker-shaped fix: the `.iterator()` builder takes `&Pool`, the locking variants need a `&mut Transaction`, and the two don't compose. For a locked drain you have two paths, each with a trade-off:
+
+- **Whole-result `.fetch_on(&mut *tx)`** — single round trip, full `Vec<T>` in memory. Fine when the result fits.
+- **Hand-rolled LIMIT/OFFSET inside the tx** — same shape as the snapshot-isolation snippet above; chunks stay streamed but you're outside the `ChunkedIter` API.
+
+A future `iterator_on(&mut *tx, chunk_size)` companion (issue follow-up) would close this gap. Not in scope for issue #23.
+
+**`chunk_size` must be > 0.** Zero or negative values panic. Pick a value that fits your row-size budget (Django's default is `2000`; reasonable for narrow rows, lower for wide TEXT/JSONB columns).
+
 ---
 
 ## F() expressions + database functions
