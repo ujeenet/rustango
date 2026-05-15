@@ -1695,6 +1695,9 @@ where
         for (i, col) in row.columns().iter().enumerate() {
             let name = col.name().to_owned();
             // Try to decode as each possible SqlValue type, falling back to Null.
+            // Order matters: try cheaper / more-specific decoders first.
+            // PG-specific composite types (jsonb, arrays) handled after
+            // scalars so int8/text aren't accidentally decoded as JSON.
             let val: SqlValue = if let Ok(v) = row.try_get::<i64, _>(i) {
                 SqlValue::I64(v)
             } else if let Ok(v) = row.try_get::<i32, _>(i) {
@@ -1705,6 +1708,24 @@ where
                 SqlValue::Bool(v)
             } else if let Ok(v) = row.try_get::<String, _>(i) {
                 SqlValue::String(v)
+            } else if let Ok(v) = row.try_get::<serde_json::Value, _>(i) {
+                // jsonb / json — issue #33's jsonb_agg returns this.
+                SqlValue::Json(v)
+            } else if let Ok(v) = row.try_get::<Vec<String>, _>(i) {
+                // text[] / varchar[] — issue #33's array_agg on a text col
+                // returns this. Wrap as a JSON array so the aggregate
+                // result map stays a Vec<HashMap<String, SqlValue>> shape
+                // — SqlValue has no Vec<T> variant.
+                SqlValue::Json(serde_json::Value::Array(
+                    v.into_iter().map(serde_json::Value::String).collect(),
+                ))
+            } else if let Ok(v) = row.try_get::<Vec<i64>, _>(i) {
+                // bigint[] — array_agg on an integer column.
+                SqlValue::Json(serde_json::Value::Array(
+                    v.into_iter()
+                        .map(|n| serde_json::Value::Number(n.into()))
+                        .collect(),
+                ))
             } else {
                 SqlValue::Null
             };
