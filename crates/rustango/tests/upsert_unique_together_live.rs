@@ -13,7 +13,7 @@
 
 #![cfg(feature = "tenancy")]
 
-use rustango::core::{Column as _, Model as _};
+use rustango::core::Column as _;
 use rustango::sql::sqlx;
 use rustango::sql::{Auto, Fetcher};
 

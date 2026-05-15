@@ -1,4 +1,8 @@
 #![cfg(feature = "postgres")]
+// Tests intentionally exercise the deprecated `ensure_tables(&PgPool)`
+// path — covers the legacy-bootstrap behaviour, not the migration
+// that replaces it.
+#![allow(deprecated)]
 //! Live integration test for #67 — the "scaffold an app, see it in
 //! admin as a non-superuser" loop that #61–#66 collectively broke.
 //!

@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use rustango::core::Model as _;
 use rustango::sql::sqlx::PgPool;
 use rustango::sql::Auto;
 use rustango::tenancy::{manage::run_with_writer, Org, StorageMode, TenantPools};

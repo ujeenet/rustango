@@ -11,7 +11,6 @@
 
 #![cfg(feature = "tenancy")]
 
-use rustango::core::{Column as _, Model as _};
 use rustango::sql::{fetch_with_prefetch, sqlx, Auto, ForeignKey};
 
 #[derive(rustango::Model, Debug, Clone)]
@@ -79,7 +78,7 @@ async fn fetch_with_prefetch_groups_children_under_string_pk_parents() {
 
     // Seed: two parents, three children (2 + 1).
     for slug in ["acme", "globex"] {
-        let mut t = StrTenant {
+        let t = StrTenant {
             slug: slug.into(),
             display_name: slug.to_uppercase(),
         };
