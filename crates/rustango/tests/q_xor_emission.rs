@@ -237,6 +237,42 @@ fn chained_xor_flattens_to_nary_parity_tally() {
     assert!(stmt.sql.contains(") % 2 = 1"));
 }
 
+/// N-ary parity tally must parenthesize composite children. Without
+/// the `write_child` wrap, a child like `And(a, b)` would emit raw
+/// `a AND b` inside `CASE WHEN a AND b THEN 1 ELSE 0 END`. SQL
+/// operator precedence (`NOT` > `AND` > `OR`) makes that parse
+/// correctly today, but the wrap is belt-and-suspenders against
+/// future precedence-ladder changes.
+#[test]
+fn nary_parity_tally_parenthesizes_composite_children() {
+    // Xor of [And(a, b), c, d] — first child is a composite.
+    let and_child = WhereExpr::And(vec![
+        User::name.eq("alice").into(),
+        User::active.eq(true).into(),
+    ]);
+    let where_clause = WhereExpr::Xor(vec![
+        and_child,
+        User::age.gt(30_i32).into(),
+        User::age.lt(50_i32).into(),
+    ]);
+    let stmt = Postgres.compile_select(&select(where_clause)).unwrap();
+    // Composite first child appears wrapped: `CASE WHEN (a AND b) THEN`
+    assert!(
+        stmt.sql
+            .contains(r#"CASE WHEN ("name" = $1 AND "active" = $2) THEN"#),
+        "composite child wrapped in parens inside CASE WHEN: {}",
+        stmt.sql
+    );
+    // Predicate leaf children are NOT wrapped (write_child writes
+    // them bare): `CASE WHEN "age" > $3 THEN`
+    assert!(
+        stmt.sql.contains(r#"CASE WHEN "age" > $3 THEN"#),
+        "predicate leaf children emit bare: {}",
+        stmt.sql
+    );
+    assert!(stmt.sql.contains(") % 2 = 1"));
+}
+
 /// `WhereExpr::validate()` walks into `Xor` children — proves the
 /// `And | Or | Xor` validation arm catches typo'd columns inside an
 /// Xor node. Important for any caller that does invoke validate()

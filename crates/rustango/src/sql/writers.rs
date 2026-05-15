@@ -1999,10 +1999,19 @@ fn write_child(
 ///   operand, no rewrite needed).
 /// * 2 children → `((a) AND NOT (b)) OR (NOT (a) AND (b))` —
 ///   canonical binary form per the issue acceptance criteria.
+///   **Caveat**: each operand is emitted twice and therefore evaluated
+///   twice on the database side. Deterministic predicates (column =
+///   literal, range checks) are unaffected, but volatile expressions
+///   (`RANDOM()`, `NOW()`, correlated subqueries with side effects) may
+///   return different values across the two evaluations. If you need
+///   single-evaluation semantics for binary XOR, hand-build the
+///   3-element form `Xor([a, b, FALSE])` so the writer falls into the
+///   parity-tally branch below.
 /// * 3+ children → `((CASE WHEN q1 THEN 1 ELSE 0 END) + … +
 ///   (CASE WHEN qN THEN 1 ELSE 0 END)) % 2 = 1` — Django's "odd
 ///   number of trues" generalization. Portable across PG / MySQL /
-///   SQLite; uses standard `CASE WHEN` and the SQL `%` modulus.
+///   SQLite; uses standard `CASE WHEN` and the SQL `%` modulus. Each
+///   child is evaluated exactly once.
 fn write_xor(
     b: &mut Sql<'_>,
     items: &[WhereExpr],
@@ -2026,7 +2035,13 @@ fn write_xor(
             Ok(())
         }
         _ => {
-            // (sum of CASE WHEN q THEN 1 ELSE 0 END) % 2 = 1
+            // (sum of CASE WHEN q THEN 1 ELSE 0 END) % 2 = 1.
+            // `write_child` (not `write_where_expr`) so a composite
+            // child — And / Or / nested Xor / Not — gets parenthesized
+            // before the `THEN 1`. SQL operator precedence (NOT > AND
+            // > OR) would parse it correctly without the wrap, but the
+            // explicit parens are belt-and-suspenders against future
+            // additions to the precedence ladder.
             b.sql.push('(');
             let mut first = true;
             for child in items {
@@ -2035,7 +2050,7 @@ fn write_xor(
                 }
                 first = false;
                 b.sql.push_str("(CASE WHEN ");
-                write_where_expr(b, child, qualify_with, model)?;
+                write_child(b, child, qualify_with, model)?;
                 b.sql.push_str(" THEN 1 ELSE 0 END)");
             }
             b.sql.push_str(") % 2 = 1");

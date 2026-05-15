@@ -131,6 +131,18 @@ pub enum WhereExpr {
     /// uses it uniformly. Empty children = vacuously false (rejected
     /// by the writer, same as `Or(vec![])`). Single child is
     /// equivalent to the child itself.
+    ///
+    /// **Double-eval caveat (binary form only)**: the 2-child rewrite
+    /// emits each operand twice, so the database evaluates each
+    /// predicate twice. Deterministic predicates are unaffected, but
+    /// volatile expressions (`RANDOM()`, `NOW()`, correlated subqueries
+    /// with side effects) may return different values across the two
+    /// evaluations. If single-evaluation semantics matter, force the
+    /// parity-tally branch by adding a `FALSE` third child:
+    /// `Xor([a, b, WhereExpr::And(vec![WhereExpr::Predicate(..)])])`
+    /// or build via `a.xor(b).xor(c)` chains where the typed builder
+    /// flattens to ≥3 children. The N-ary form evaluates each child
+    /// exactly once.
     Xor(Vec<WhereExpr>),
     /// `EXISTS (<subquery>)` — issue #5. True when the inner
     /// `SelectQuery` returns at least one row. Boxed because
