@@ -30,6 +30,7 @@ fn select(where_clause: WhereExpr) -> SelectQuery {
         order_by: vec![],
         limit: None,
         offset: None,
+        lock_mode: None,
     }
 }
 

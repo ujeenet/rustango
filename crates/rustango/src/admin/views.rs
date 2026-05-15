@@ -252,6 +252,7 @@ pub(crate) async fn table_view(
             order_by,
             limit: Some(fetch_limit),
             offset: Some(offset),
+            lock_mode: None,
         },
         &scalar_fields,
     )
@@ -864,6 +865,7 @@ pub(crate) async fn detail_view(
             order_by: vec![],
             limit: None,
             offset: None,
+            lock_mode: None,
         },
         &detail_fields,
     )
@@ -1136,6 +1138,7 @@ pub(crate) async fn edit_form(
             order_by: vec![],
             limit: None,
             offset: None,
+            lock_mode: None,
         },
         &edit_fields,
     )
@@ -1221,6 +1224,7 @@ pub(crate) async fn update_submit(
             order_by: vec![],
             limit: None,
             offset: None,
+            lock_mode: None,
         },
         &before_fields,
     )
@@ -1288,6 +1292,7 @@ pub(crate) async fn delete_submit(
             order_by: vec![],
             limit: None,
             offset: None,
+            lock_mode: None,
         },
         &delete_fields,
     )
@@ -1453,6 +1458,7 @@ pub(crate) async fn action_submit(
             order_by: vec![],
             limit: None,
             offset: None,
+            lock_mode: None,
         },
         &action_fields,
     )

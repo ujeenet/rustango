@@ -520,6 +520,7 @@ mod tests {
             limit: None,
             offset: None,
             search: None,
+            lock_mode: None,
         };
         let stmt = Sqlite.compile_select(&q).unwrap();
         // SQLite emits ANSI-quoted identifiers and `?` placeholders.

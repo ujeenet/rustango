@@ -79,6 +79,7 @@ async fn select_rows_as_json_pool_decodes_sqlite_rows() {
             order_by: vec![rustango::core::OrderItem::column("id", false)],
             limit: None,
             offset: None,
+            lock_mode: None,
         },
         &fields,
     )
@@ -114,6 +115,7 @@ async fn select_one_row_as_json_pool_returns_none_for_miss() {
             order_by: Vec::new(),
             limit: Some(1),
             offset: None,
+            lock_mode: None,
         },
         &fields,
     )
@@ -151,6 +153,7 @@ async fn select_one_row_as_json_pool_returns_decoded_row_for_hit() {
             order_by: Vec::new(),
             limit: Some(1),
             offset: None,
+            lock_mode: None,
         },
         &fields,
     )

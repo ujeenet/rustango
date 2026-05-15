@@ -45,6 +45,10 @@ pub struct QuerySet<T: Model> {
     /// time in registration order so chain order is preserved
     /// across mixed builder calls.
     order_by: Vec<PendingOrderItem>,
+    /// Row-lock mode for `SELECT … FOR UPDATE` — Django's
+    /// `select_for_update(skip_locked=, nowait=, of=, no_key=)`.
+    /// Issue #21. `None` (default) emits no lock clause.
+    lock_mode: Option<crate::core::LockMode>,
     _model: PhantomData<fn() -> T>,
 }
 
@@ -132,8 +136,83 @@ impl<T: Model> QuerySet<T> {
             select_related: Vec::new(),
             ad_hoc_joins: Vec::new(),
             order_by: Vec::new(),
+            lock_mode: None,
             _model: PhantomData,
         }
+    }
+
+    /// Issue #21 — Django's `QuerySet.select_for_update(skip_locked=,
+    /// nowait=, of=, no_key=)`. Emits `SELECT … FOR UPDATE` (PG /
+    /// MySQL 8+) or no-ops (SQLite has no row-lock syntax;
+    /// transactions hold an implicit write lock for the whole DB).
+    ///
+    /// Must run inside a transaction — `FOR UPDATE` outside a tx is
+    /// a no-op on PG and an error on MySQL. Acquire one via
+    /// [`crate::sql::transaction`] / [`crate::sql::transaction_pg`]
+    /// and call `.fetch_on(&mut *tx)` or `.fetch(&mut *tx)`.
+    ///
+    /// Default options ([`crate::core::LockMode::default`]) emit
+    /// plain `FOR UPDATE`. Use the chained variants below to set
+    /// individual flags.
+    #[must_use]
+    pub fn select_for_update(mut self) -> Self {
+        self.lock_mode = Some(crate::core::LockMode::default());
+        self
+    }
+
+    /// PG / MySQL 8+: append `SKIP LOCKED` to the lock clause —
+    /// "claim next available row" pattern. Rows currently locked by
+    /// another transaction are silently filtered out instead of
+    /// blocking. No effect on SQLite. Implies
+    /// [`Self::select_for_update`] if not already set.
+    #[must_use]
+    pub fn skip_locked(mut self) -> Self {
+        let mut lock = self.lock_mode.take().unwrap_or_default();
+        lock.skip_locked = true;
+        self.lock_mode = Some(lock);
+        self
+    }
+
+    /// PG / MySQL 8+: append `NOWAIT` — return a driver error
+    /// immediately if any matching row is currently locked. Mutually
+    /// exclusive with `skip_locked` at the database; the writer
+    /// emits `SKIP LOCKED` (the more permissive option) when both
+    /// are set. Implies [`Self::select_for_update`] if not already set.
+    #[must_use]
+    pub fn nowait(mut self) -> Self {
+        let mut lock = self.lock_mode.take().unwrap_or_default();
+        lock.nowait = true;
+        self.lock_mode = Some(lock);
+        self
+    }
+
+    /// PG 9.3+: `FOR NO KEY UPDATE` instead of `FOR UPDATE` — weaker
+    /// lock that doesn't block other writers that aren't touching
+    /// the row's PK / unique columns. Useful for high-concurrency
+    /// update paths where the surrounding `UPDATE` doesn't change
+    /// indexed columns. MySQL has no equivalent; the writer falls
+    /// back to `FOR UPDATE` (the stricter lock).
+    #[must_use]
+    pub fn no_key(mut self) -> Self {
+        let mut lock = self.lock_mode.take().unwrap_or_default();
+        lock.no_key = true;
+        self.lock_mode = Some(lock);
+        self
+    }
+
+    /// PG 9.3+ / MySQL 8.0.1+: `FOR UPDATE OF table1, table2, …` —
+    /// restrict the row lock to the named tables / aliases when the
+    /// query JOINs. Without `OF` the lock applies to every row of
+    /// every joined table the result references. SQLite no-op.
+    ///
+    /// Each call appends. Pass either base table names or join
+    /// aliases.
+    #[must_use]
+    pub fn of(mut self, tables: &[&'static str]) -> Self {
+        let mut lock = self.lock_mode.take().unwrap_or_default();
+        lock.of.extend_from_slice(tables);
+        self.lock_mode = Some(lock);
+        self
     }
 
     /// Append `ORDER BY` columns. Slice 9.0b.
@@ -546,6 +625,7 @@ impl<T: Model> QuerySet<T> {
             order_by,
             limit: self.limit,
             offset: self.offset,
+            lock_mode: self.lock_mode,
         })
     }
 

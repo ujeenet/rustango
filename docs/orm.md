@@ -210,6 +210,46 @@ Composes with prior `.where_()` filters — the `IN`-list AND-joins with the exi
 
 Tenant-scoped sibling: `in_bulk_on(column, ids, extract, &executor)` takes any sqlx executor — pair with `tenant.conn()` for schema-mode tenants.
 
+### Row-level locks — `.select_for_update()`
+
+Django's `select_for_update(skip_locked=, nowait=, of=, no_key=)` — issue #21. Appends `SELECT … FOR UPDATE` (or its variants) to the query so the matching rows are locked for the duration of the surrounding transaction.
+
+```rust
+// Canonical "claim next available row" pattern. Worker A grabs the
+// lowest-priority pending job; concurrent worker B with SKIP LOCKED
+// skips A's row and grabs the next instead — no blocking.
+let mut tx = pool.begin().await?;
+let claim: Vec<Job> = Job::objects()
+    .where_(Job::status.eq("pending"))
+    .order_by(&[("priority", false)])
+    .limit(1)
+    .select_for_update()
+    .skip_locked()
+    .fetch_on(&mut *tx).await?;
+// ... mark claim[0] as in-progress, do work ...
+tx.commit().await?;
+```
+
+**Builder methods** — chain to opt in:
+
+- `.select_for_update()` — plain `FOR UPDATE`.
+- `.skip_locked()` — append `SKIP LOCKED`; rows held by another tx are silently filtered out instead of blocking.
+- `.nowait()` — append `NOWAIT`; surface a driver error immediately if any matching row is locked. Mutually exclusive with `skip_locked` (writer picks the more permissive `SKIP LOCKED` if both are set).
+- `.no_key()` — emit `FOR NO KEY UPDATE` instead (PG 9.3+). Weaker lock that doesn't block writers touching only non-key columns.
+- `.of(&["table_or_alias", …])` — restrict the lock to specific tables when the query JOINs.
+
+Calling `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` without a prior `.select_for_update()` implicitly enables the lock, matching Django's ergonomics.
+
+**Tri-dialect behaviour:**
+
+| Dialect | Behaviour |
+|---|---|
+| Postgres | Full support — every flag emits its native syntax. |
+| MySQL 8.0.1+ | Supports everything except `NO KEY` — that flag falls back to plain `FOR UPDATE` (the stricter lock). |
+| SQLite | No row-level lock syntax. The writer emits no clause at all; transactions hold an implicit write lock for the whole database. Use a different strategy for SQLite (typically a busy-wait loop on the transaction itself). |
+
+**Must run inside a transaction.** `FOR UPDATE` outside a tx is a no-op on Postgres (the implicit single-statement tx releases the lock immediately) and an error on MySQL. Pair with [`crate::sql::transaction`] / `pool.begin()`.
+
 ---
 
 ## F() expressions + database functions

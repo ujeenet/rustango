@@ -234,7 +234,57 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
         qualify.then_some(query.model.table),
     )?;
 
+    if let Some(lock) = &query.lock_mode {
+        write_lock_clause(b, lock);
+    }
+
     Ok(())
+}
+
+/// Emit `FOR UPDATE [NO KEY] [OF t1, t2] [SKIP LOCKED | NOWAIT]` —
+/// Django's `select_for_update(...)`. Issue #21.
+///
+/// Tri-dialect dispatch:
+/// - **PG**: full support — `FOR [NO KEY] UPDATE [OF …] [SKIP LOCKED | NOWAIT]`.
+/// - **MySQL 8.0.1+**: supports `FOR UPDATE [OF] [NOWAIT | SKIP LOCKED]`.
+///   `NO KEY` has no equivalent — the writer falls back to plain
+///   `FOR UPDATE` (the stricter lock).
+/// - **SQLite**: no row-lock syntax. Transactions hold an implicit
+///   write lock for the whole database, so the lock clause is a no-op
+///   here. Callers wanting "claim next row" semantics on SQLite need
+///   a different strategy (typically a busy-wait loop on the
+///   transaction).
+///
+/// `SKIP LOCKED` wins over `NOWAIT` when both are set — `SKIP LOCKED`
+/// is the more permissive option, and both can't appear in the same
+/// statement at the database level.
+fn write_lock_clause(b: &mut Sql<'_>, lock: &crate::core::LockMode) {
+    if b.d.name() == "sqlite" {
+        // No row-lock syntax — transaction-scope locks are implicit.
+        return;
+    }
+    b.sql.push_str(" FOR ");
+    if lock.no_key && b.d.name() == "postgres" {
+        b.sql.push_str("NO KEY UPDATE");
+    } else {
+        b.sql.push_str("UPDATE");
+    }
+    if !lock.of.is_empty() {
+        b.sql.push_str(" OF ");
+        let mut first = true;
+        for t in &lock.of {
+            if !first {
+                b.sql.push_str(", ");
+            }
+            first = false;
+            b.sql.push_str(&b.d.quote_ident(t));
+        }
+    }
+    if lock.skip_locked {
+        b.sql.push_str(" SKIP LOCKED");
+    } else if lock.nowait {
+        b.sql.push_str(" NOWAIT");
+    }
 }
 
 // ====================================================================

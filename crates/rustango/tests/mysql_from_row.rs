@@ -224,6 +224,7 @@ fn select_rows_pool_with_related_is_callable() {
             order_by: vec![],
             limit: None,
             offset: None,
+            lock_mode: None,
         };
         let _fut: _ = rustango::sql::select_rows_pool_with_related::<User>(pool, &q);
     }
