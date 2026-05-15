@@ -594,6 +594,7 @@ fn empty_select() -> SelectQuery {
         limit: None,
         offset: None,
         lock_mode: None,
+        compound: vec![],
     }
 }
 
@@ -812,6 +813,7 @@ fn empty_post_select() -> SelectQuery {
         limit: None,
         offset: None,
         lock_mode: None,
+        compound: vec![],
     }
 }
 

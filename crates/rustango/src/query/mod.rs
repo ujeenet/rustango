@@ -49,6 +49,11 @@ pub struct QuerySet<T: Model> {
     /// `select_for_update(skip_locked=, nowait=, of=, no_key=)`.
     /// Issue #21. `None` (default) emits no lock clause.
     lock_mode: Option<crate::core::LockMode>,
+    /// Set-algebra branches — Django's `.union(other_qs, all=)` /
+    /// `.intersection(other_qs)` / `.difference(other_qs)`. Issue #25.
+    /// Each entry is a pre-compiled [`crate::core::CompoundBranch`].
+    /// Empty (default) emits a plain SELECT.
+    compound: Vec<crate::core::CompoundBranch>,
     _model: PhantomData<fn() -> T>,
 }
 
@@ -137,6 +142,7 @@ impl<T: Model> QuerySet<T> {
             ad_hoc_joins: Vec::new(),
             order_by: Vec::new(),
             lock_mode: None,
+            compound: Vec::new(),
             _model: PhantomData,
         }
     }
@@ -212,6 +218,97 @@ impl<T: Model> QuerySet<T> {
         let mut lock = self.lock_mode.take().unwrap_or_default();
         lock.of.extend_from_slice(tables);
         self.lock_mode = Some(lock);
+        self
+    }
+
+    /// Issue #25 — Django's `QuerySet.union(other_qs)`. Combines this
+    /// queryset with `other` via SQL `UNION` (deduplicates). Both
+    /// querysets must target the same model `T`; the column shape is
+    /// guaranteed identical at compile time by the generic bound.
+    ///
+    /// Multiple `.union()` / `.union_all()` calls accumulate — every
+    /// call appends a new branch. Mixing `union` with `intersection`
+    /// or `difference` on the same chain is allowed but unusual; SQL
+    /// evaluates them left-to-right.
+    ///
+    /// Outer `.order_by()` / `.limit()` / `.offset()` set after
+    /// `.union()` apply to the COMBINED result (the merged
+    /// resultset). Each branch keeps its own per-branch ORDER BY /
+    /// LIMIT inside parens.
+    ///
+    /// Tri-dialect availability: every supported backend.
+    ///
+    /// # Errors
+    /// Forwards `other.compile()` errors (schema validation on the
+    /// branch's WHERE / ORDER BY) into the union builder. If the
+    /// branch fails to compile, this method panics — same posture as
+    /// `.where_()` on the typed path. If you want to surface the
+    /// branch error, compile it first and use
+    /// [`Self::union_compiled`].
+    #[must_use]
+    pub fn union(self, other: QuerySet<T>) -> Self {
+        self.add_compound(crate::core::SetOp::Union, other)
+    }
+
+    /// `UNION ALL` — combine without deduplicating. Cheaper than
+    /// `union` because the DB skips the DISTINCT pass; useful when
+    /// you know the branches don't overlap.
+    #[must_use]
+    pub fn union_all(self, other: QuerySet<T>) -> Self {
+        self.add_compound(crate::core::SetOp::UnionAll, other)
+    }
+
+    /// Issue #25 — Django's `QuerySet.intersection(other_qs)`. Rows
+    /// present in BOTH this queryset and `other`. Tri-dialect:
+    /// Postgres, SQLite, MySQL 8.0.31+.
+    #[must_use]
+    pub fn intersection(self, other: QuerySet<T>) -> Self {
+        self.add_compound(crate::core::SetOp::Intersection, other)
+    }
+
+    /// Issue #25 — Django's `QuerySet.difference(other_qs)`. Emits
+    /// `EXCEPT`: rows in this queryset but NOT in `other`.
+    /// Tri-dialect: Postgres, SQLite, MySQL 8.0.31+.
+    #[must_use]
+    pub fn difference(self, other: QuerySet<T>) -> Self {
+        self.add_compound(crate::core::SetOp::Difference, other)
+    }
+
+    /// Lower-level set-algebra entry point: takes a pre-compiled
+    /// `SelectQuery` as the branch instead of a fresh `QuerySet`.
+    /// Useful when the branch construction may fail (its `.compile()`
+    /// returns `Result`) and the caller wants to surface the error
+    /// before chaining. Issue #25.
+    #[must_use]
+    pub fn union_compiled(self, branch: crate::core::SelectQuery) -> Self {
+        self.add_compound_compiled(crate::core::SetOp::Union, branch)
+    }
+
+    /// Shared lowering for [`Self::union`] / [`Self::intersection`]
+    /// / [`Self::difference`] — compiles the branch eagerly and
+    /// appends a `CompoundBranch` to `self.compound`. Panics on
+    /// branch compile error; for fallible composition use
+    /// [`Self::union_compiled`].
+    fn add_compound(self, op: crate::core::SetOp, other: QuerySet<T>) -> Self {
+        match other.compile() {
+            Ok(branch) => self.add_compound_compiled(op, branch),
+            Err(e) => panic!(
+                "rustango: set-algebra branch failed to compile: {e}. \
+                 Pre-compile the branch and pass via .union_compiled() / \
+                 friends to surface this error as a Result."
+            ),
+        }
+    }
+
+    fn add_compound_compiled(
+        mut self,
+        op: crate::core::SetOp,
+        branch: crate::core::SelectQuery,
+    ) -> Self {
+        self.compound.push(crate::core::CompoundBranch {
+            op,
+            query: Box::new(branch),
+        });
         self
     }
 
@@ -626,6 +723,7 @@ impl<T: Model> QuerySet<T> {
             limit: self.limit,
             offset: self.offset,
             lock_mode: self.lock_mode,
+            compound: self.compound,
         })
     }
 

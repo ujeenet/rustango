@@ -352,6 +352,7 @@ pub async fn fetch_row_as_json(
         limit: Some(1),
         offset: None,
         lock_mode: None,
+        compound: vec![],
     };
     let fields: Vec<&'static crate::core::FieldSchema> = entry.schema.scalar_fields().collect();
     crate::sql::select_one_row_as_json(pool, &select_q, &fields).await
@@ -406,6 +407,7 @@ where
             limit: Some(batch),
             offset: Some(offset),
             lock_mode: None,
+            compound: vec![],
         };
         let rows = crate::sql::select_rows_as_json(pool, &select_q, &fields).await?;
         if rows.is_empty() {

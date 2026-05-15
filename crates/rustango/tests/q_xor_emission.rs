@@ -31,6 +31,7 @@ fn select(where_clause: WhereExpr) -> SelectQuery {
         limit: None,
         offset: None,
         lock_mode: None,
+        compound: vec![],
     }
 }
 
