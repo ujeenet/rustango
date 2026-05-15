@@ -172,6 +172,27 @@ pub enum SqlError {
     )]
     OuterRefOutsideSubquery { column: &'static str },
 
+    /// `Expr::Aggregate(...)` was emitted in a SQL slot that doesn't
+    /// allow aggregate function calls (issue #88). Every dialect
+    /// (PG, MySQL, SQLite) rejects aggregates in `WHERE` /
+    /// `UPDATE SET` / `JOIN ON` / `GROUP BY` / `RETURNING` /
+    /// non-aggregate `SELECT` projections; only `HAVING`, the SELECT
+    /// list of an aggregating query, and that query's `ORDER BY`
+    /// are valid homes for an aggregate call. The writer enforces
+    /// this upfront with a clear error rather than passing the SQL
+    /// through to the database, which would surface a less
+    /// helpful "aggregate functions are not allowed in WHERE" or
+    /// equivalent. Programming error — restructure the query to
+    /// reference an aggregate annotation alias via the auto-routing
+    /// `QuerySet::filter(...)` (which goes to HAVING) or move the
+    /// aggregate to the SELECT list.
+    #[error(
+        "`Expr::Aggregate(...)` used outside of an aggregate-accepting \
+         SQL slot — aggregates may only appear in SELECT projection, \
+         HAVING predicate, or ORDER BY of an aggregating query"
+    )]
+    AggregateOutsideAggregateContext,
+
     /// A JOIN was constructed with an empty `on` predicate
     /// (`WhereExpr::And(vec![])` — the legitimate "no WHERE filter"
     /// marker at the top of an UPDATE/DELETE/SELECT). Inside a JOIN's
