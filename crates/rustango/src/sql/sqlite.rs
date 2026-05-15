@@ -209,6 +209,42 @@ impl Dialect for Sqlite {
         }
     }
 
+    /// SQLite's `REGEXP` operator delegates to a user-defined
+    /// `regexp(pattern, value)` function. sqlx-sqlite does **not**
+    /// register one by default — callers either enable sqlx-sqlite's
+    /// `regexp` cargo feature (which adds a `.with_regexp()` builder
+    /// on `SqliteConnectOptions`) or register their own via
+    /// `SqliteConnection::lock_handle()` + raw FFI. Without one
+    /// registered, the query fails at execution with `no such
+    /// function: REGEXP` (parser-clean, runtime-only). For case-
+    /// insensitive matching we mirror the ILIKE strategy: lowercase
+    /// both sides so the comparison is collation-independent. ASCII-
+    /// only folding; non-ASCII patterns may not behave as expected
+    /// without the ICU extension. Issue #26.
+    fn write_regex(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        placeholder: &str,
+        case_sensitive: bool,
+        negated: bool,
+    ) {
+        let kw = if negated { " NOT REGEXP " } else { " REGEXP " };
+        if case_sensitive {
+            sql.push_str(qualified_col);
+            sql.push_str(kw);
+            sql.push_str(placeholder);
+        } else {
+            sql.push_str("LOWER(");
+            sql.push_str(qualified_col);
+            sql.push(')');
+            sql.push_str(kw);
+            sql.push_str("LOWER(");
+            sql.push_str(placeholder);
+            sql.push(')');
+        }
+    }
+
     /// SQLite's `IS` / `IS NOT` are null-safe equality / inequality
     /// (both `NULL IS NULL` and `1 IS 1` evaluate to true). Same
     /// semantics as Postgres' `IS [NOT] DISTINCT FROM` — we just

@@ -55,6 +55,29 @@ pub enum Op {
     /// JSONB `?&` — all of the text keys exist. Bind a `SqlValue::List`
     /// of `SqlValue::String`.
     JsonHasAllKeys,
+    /// POSIX regex match — Django's `__regex` lookup. Case-sensitive.
+    /// Bind a `SqlValue::String` containing the regex pattern.
+    /// Tri-dialect: PG `~`, MySQL `REGEXP`, SQLite `REGEXP`. SQLite's
+    /// `REGEXP` delegates to a `regexp(pattern, value)` user-function
+    /// the connection must register — sqlx-sqlite does not register
+    /// it automatically. Issue #26.
+    Regex,
+    /// POSIX regex non-match — Django's `~Q(name__regex=...)` shape
+    /// rolled into a single op. PG `!~`, MySQL `NOT REGEXP`,
+    /// SQLite `NOT REGEXP` (same user-function caveat as [`Op::Regex`]).
+    /// Issue #26.
+    NotRegex,
+    /// Case-insensitive POSIX regex match — Django's `__iregex`.
+    /// PG `~*` (native ASCII-folded match). MySQL and SQLite have
+    /// no native case-insensitive regex operator, so the writer
+    /// unconditionally wraps both sides in `LOWER(...)` for
+    /// collation-independent ASCII case folding. Issue #26.
+    IRegex,
+    /// Case-insensitive POSIX regex non-match — Django's
+    /// `~Q(name__iregex=...)`. PG `!~*`. MySQL and SQLite use
+    /// `LOWER(<col>) NOT REGEXP LOWER(<pattern>)` for the same
+    /// reason as [`Op::IRegex`]. Issue #26.
+    NotIRegex,
 }
 
 /// One predicate in a `WHERE` clause: `column <op> value`. Always

@@ -222,6 +222,39 @@ impl Dialect for MySql {
         sql.push(')');
     }
 
+    /// MySQL has `REGEXP` for case-sensitive matching but no native
+    /// case-insensitive operator — column collation drives it.
+    /// To guarantee case-insensitivity independent of collation
+    /// (mirror of the ILIKE approach), lowercase both sides for the
+    /// `IRegex` / `NotIRegex` variants. Issue #26.
+    fn write_regex(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        placeholder: &str,
+        case_sensitive: bool,
+        negated: bool,
+    ) {
+        let kw = if negated { " NOT REGEXP " } else { " REGEXP " };
+        if case_sensitive {
+            sql.push_str(qualified_col);
+            sql.push_str(kw);
+            sql.push_str(placeholder);
+        } else {
+            // LOWER(<col>) REGEXP LOWER(<p>) — the pattern is bound
+            // as a single param, so wrapping in LOWER(...) at SQL
+            // level forces the comparison to be case-insensitive
+            // regardless of the column's collation.
+            sql.push_str("LOWER(");
+            sql.push_str(qualified_col);
+            sql.push(')');
+            sql.push_str(kw);
+            sql.push_str("LOWER(");
+            sql.push_str(placeholder);
+            sql.push(')');
+        }
+    }
+
     fn write_null_safe_eq(
         &self,
         sql: &mut String,

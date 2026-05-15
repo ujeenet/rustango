@@ -295,6 +295,39 @@ pub trait Dialect {
         sql.push_str(placeholder);
     }
 
+    /// POSIX regex match — Django `__regex` / `__iregex`. Issue #26.
+    ///
+    /// Default emits the Postgres shape:
+    /// - `case_sensitive=true`,  `negated=false`: `<col> ~ <p>`
+    /// - `case_sensitive=true`,  `negated=true`:  `<col> !~ <p>`
+    /// - `case_sensitive=false`, `negated=false`: `<col> ~* <p>`
+    /// - `case_sensitive=false`, `negated=true`:  `<col> !~* <p>`
+    ///
+    /// MySQL and SQLite override to use the `REGEXP` / `NOT REGEXP`
+    /// keyword. Neither has a native case-insensitive regex operator,
+    /// so both wrap `<col>` and `<placeholder>` in `LOWER(...)` for
+    /// the case-insensitive variants. The pattern is bound as a
+    /// single string parameter — `placeholder` is the slot it goes
+    /// into; the dialect doesn't rewrite the bound value.
+    fn write_regex(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        placeholder: &str,
+        case_sensitive: bool,
+        negated: bool,
+    ) {
+        sql.push_str(qualified_col);
+        let op = match (case_sensitive, negated) {
+            (true, false) => " ~ ",
+            (true, true) => " !~ ",
+            (false, false) => " ~* ",
+            (false, true) => " !~* ",
+        };
+        sql.push_str(op);
+        sql.push_str(placeholder);
+    }
+
     /// Null-safe equality. Postgres: `<col> IS [NOT] DISTINCT FROM <p>`.
     /// `distinct = true` means "not equal under null-safe semantics".
     fn write_null_safe_eq(
