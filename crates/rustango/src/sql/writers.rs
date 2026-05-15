@@ -47,6 +47,14 @@ pub(super) struct Sql<'d> {
     /// Unset everywhere else for backward compatibility with top-level
     /// WHERE / UPDATE-SET emission shapes.
     pub current_qualify_alias: Option<&'static str>,
+    /// Issue #88 — whether `Expr::Aggregate` is allowed in the current
+    /// emission context. Set to `true` only while writing the SELECT
+    /// projection / HAVING predicate / ORDER BY of an aggregating
+    /// query (where SQL natively accepts an aggregate call); `false`
+    /// everywhere else (WHERE / UPDATE-SET / JOIN-ON / GROUP-BY /
+    /// RETURNING / non-aggregate-SELECT). Mirrors the runtime gate
+    /// `SqlError::OuterRefOutsideSubquery` uses for `Expr::OuterRef`.
+    pub aggregate_allowed: bool,
 }
 
 impl<'d> Sql<'d> {
@@ -57,6 +65,7 @@ impl<'d> Sql<'d> {
             params: Vec::new(),
             scope_stack: Vec::new(),
             current_qualify_alias: None,
+            aggregate_allowed: false,
         }
     }
 
@@ -67,6 +76,7 @@ impl<'d> Sql<'d> {
             params: Vec::with_capacity(cap),
             scope_stack: Vec::new(),
             current_qualify_alias: None,
+            aggregate_allowed: false,
         }
     }
 
@@ -298,10 +308,24 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
 
     if let Some(having) = &query.having {
         b.sql.push_str(" HAVING ");
-        write_where_expr(b, having, None, Some(query.model))?;
+        // Issue #88 — `Expr::Aggregate` lhs of a HAVING predicate is its
+        // natural home. Toggle the gate on for the predicate, restore
+        // after so nested subqueries don't inherit permission.
+        let prev = b.aggregate_allowed;
+        b.aggregate_allowed = true;
+        let r = write_where_expr(b, having, None, Some(query.model));
+        b.aggregate_allowed = prev;
+        r?;
     }
 
-    write_order_limit_offset(b, &query.order_by, query.limit, query.offset, None)?;
+    // Issue #88 — aggregating queries are allowed to ORDER BY an
+    // aggregate expression (`ORDER BY COUNT(*) DESC`). Plain SELECT's
+    // ORDER BY keeps the default `false` and rejects `Expr::Aggregate`.
+    let prev = b.aggregate_allowed;
+    b.aggregate_allowed = true;
+    let r = write_order_limit_offset(b, &query.order_by, query.limit, query.offset, None);
+    b.aggregate_allowed = prev;
+    r?;
 
     Ok(())
 }
@@ -896,8 +920,18 @@ fn write_expr(
             // `(SELECT … FROM …)` — write_select pushes/pops its own
             // scope frame so any nested OuterRef inside `inner` looks
             // up the right enclosing model.
+            //
+            // Issue #88 — subqueries today carry a plain `SelectQuery`
+            // (not an aggregating one), so any `Expr::Aggregate` inside
+            // the inner SELECT's projection / WHERE / ORDER BY would
+            // be in a non-aggregate context. Force the gate off across
+            // the boundary so the outer's permission doesn't leak in.
             b.sql.push('(');
-            write_select(b, inner)?;
+            let prev = b.aggregate_allowed;
+            b.aggregate_allowed = false;
+            let r = write_select(b, inner);
+            b.aggregate_allowed = prev;
+            r?;
             b.sql.push(')');
             Ok(())
         }
@@ -926,6 +960,15 @@ fn write_expr(
         }
         Expr::Window(w) => write_window_expr(b, w),
         Expr::Aggregate(agg) => {
+            // Issue #88 — refuse to emit an aggregate call into a SQL
+            // slot that doesn't accept one. Every backend rejects
+            // aggregates in WHERE / UPDATE-SET / JOIN-ON / GROUP-BY /
+            // RETURNING / non-aggregate SELECT lists; only HAVING,
+            // an aggregating SELECT's projection, and that query's
+            // ORDER BY toggle the gate on (see `write_aggregate_inner`).
+            if !b.aggregate_allowed {
+                return Err(SqlError::AggregateOutsideAggregateContext);
+            }
             // Issue #74 — lift the aggregate expression into the
             // current writer scope (e.g., a HAVING predicate's lhs).
             // The Aggregate writer handles dialect casting + filter
