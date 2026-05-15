@@ -236,6 +236,52 @@ pub(super) fn write_aggregate(b: &mut Sql<'_>, query: &AggregateQuery) -> Result
                 b.write_ident(col);
                 b.sql.push(')');
             }
+            AggregateExpr::ArrayAgg { column, distinct } => {
+                if b.d.name() != "postgres" {
+                    return Err(SqlError::AggregateNotSupportedInDialect {
+                        aggregate: "array_agg",
+                        dialect: b.d.name(),
+                    });
+                }
+                b.sql.push_str("array_agg(");
+                if *distinct {
+                    b.sql.push_str("DISTINCT ");
+                }
+                b.write_ident(column);
+                b.sql.push(')');
+            }
+            AggregateExpr::StringAgg {
+                column,
+                delimiter,
+                distinct,
+            } => {
+                if b.d.name() != "postgres" {
+                    return Err(SqlError::AggregateNotSupportedInDialect {
+                        aggregate: "string_agg",
+                        dialect: b.d.name(),
+                    });
+                }
+                b.sql.push_str("string_agg(");
+                if *distinct {
+                    b.sql.push_str("DISTINCT ");
+                }
+                b.write_ident(column);
+                b.sql.push_str(", ");
+                // Delimiter binds as a parameter — no string interpolation.
+                b.push_param(crate::core::SqlValue::String(delimiter.clone()));
+                b.sql.push(')');
+            }
+            AggregateExpr::JsonbAgg { column } => {
+                if b.d.name() != "postgres" {
+                    return Err(SqlError::AggregateNotSupportedInDialect {
+                        aggregate: "jsonb_agg",
+                        dialect: b.d.name(),
+                    });
+                }
+                b.sql.push_str("jsonb_agg(");
+                b.write_ident(column);
+                b.sql.push(')');
+            }
         }
         b.sql.push_str(" AS ");
         b.write_ident(alias);
