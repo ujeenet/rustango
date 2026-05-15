@@ -5,7 +5,7 @@
 //!
 //! The migration dir is intentionally empty — this test isn't about
 //! the runner's row processing, it's about verifying the auxiliary
-//! bootstrap (audit::ensure_table_pool, contenttypes::ensure_seeded_pool)
+//! bootstrap (audit::ensure_table_pool, contenttypes::ensure_seeded)
 //! that runs unconditionally after the migration loop. Combined with
 //! the existing contenttypes_pool_live + audit live tests this gives
 //! coverage of the whole `migrate_registry_pool` happy path.
@@ -24,7 +24,7 @@ async fn migrate_registry_pool_bootstraps_audit_and_contenttypes_on_sqlite() {
     );
 
     // Empty migration dir — exercises the bootstrap-only path
-    // (audit::ensure_table_pool + contenttypes::ensure_seeded_pool).
+    // (audit::ensure_table_pool + contenttypes::ensure_seeded).
     let tmp = tempfile::tempdir().expect("temp dir");
     let applied = migrate_registry_pool(&pool, tmp.path())
         .await

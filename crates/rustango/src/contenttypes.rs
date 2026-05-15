@@ -75,87 +75,48 @@ pub struct ContentType {
     pub table: String,
 }
 
-// v0.35 — PG-typed back-compat block. Sqlite/MySQL apps use the
-// tri-dialect `*_pool` variants further down.
+// Deprecated PG-only shims — delegate to the tri-dialect methods below.
+// Use `ContentType::by_natural_key(&pool, ...)` / `ContentType::by_id(&pool, ...)`
+// etc. where `pool: &Pool` (converts from `PgPool` via `.into()`).
 #[cfg(feature = "postgres")]
 impl ContentType {
-    /// Look up a `ContentType` row for a registered model type.
-    ///
-    /// Cheap-ish (DB round trip) — for hot paths consider
-    /// [`for_model_cached`] which memoizes per-process. Returns
-    /// `Ok(None)` when [`ensure_seeded`] hasn't been called yet for
-    /// this model (the row doesn't exist in the DB).
-    ///
-    /// # Errors
-    /// Driver / query failures from the underlying SELECT.
-    pub async fn for_model<T: crate::core::Model>(
+    #[deprecated(
+        since = "0.40.0",
+        note = "use `ContentType::by_natural_key(&pool, ...) where pool: &Pool` \
+                (PgPool converts via `.into()`)"
+    )]
+    pub async fn for_model_pg<T: crate::core::Model>(
         pool: &PgPool,
     ) -> Result<Option<Self>, ExecError> {
-        let entry = inventory::iter::<ModelEntry>
-            .into_iter()
-            .find(|e| e.schema.table == T::SCHEMA.table)
-            .ok_or_else(|| ExecError::MissingPrimaryKey {
-                table: T::SCHEMA.table,
-            })?;
-        let app = entry.resolved_app_label().unwrap_or("project");
-        let name = T::SCHEMA.name.to_ascii_lowercase();
-        Self::by_natural_key(pool, app, &name).await
+        Self::for_model::<T>(&pool.clone().into()).await
     }
 
-    /// Lookup by `(app_label, model_name)` — the natural key. Used
-    /// when the caller has the strings (e.g. parsing
-    /// `"app.action_model"` permission codenames) but not the Rust
-    /// type.
-    ///
-    /// # Errors
-    /// As [`Self::for_model`].
-    pub async fn by_natural_key(
+    #[deprecated(
+        since = "0.40.0",
+        note = "use `ContentType::by_natural_key(&pool, ...) where pool: &Pool`"
+    )]
+    pub async fn by_natural_key_pg(
         pool: &PgPool,
         app_label: &str,
         model_name: &str,
     ) -> Result<Option<Self>, ExecError> {
-        let rows: Vec<Self> = Self::objects()
-            .filter(
-                "app_label",
-                crate::core::Op::Eq,
-                SqlValue::String(app_label.into()),
-            )
-            .filter(
-                "model_name",
-                crate::core::Op::Eq,
-                SqlValue::String(model_name.into()),
-            )
-            .limit(1)
-            .fetch(pool)
-            .await?;
-        Ok(rows.into_iter().next())
+        Self::by_natural_key(&pool.clone().into(), app_label, model_name).await
     }
 
-    /// Lookup by primary key. Used by FK joins (audit log target,
-    /// permission scope, etc.).
-    ///
-    /// # Errors
-    /// As [`Self::for_model`].
-    pub async fn by_id(pool: &PgPool, id: i64) -> Result<Option<Self>, ExecError> {
-        let rows: Vec<Self> = Self::objects()
-            .filter("id", crate::core::Op::Eq, SqlValue::I64(id))
-            .limit(1)
-            .fetch(pool)
-            .await?;
-        Ok(rows.into_iter().next())
+    #[deprecated(
+        since = "0.40.0",
+        note = "use `ContentType::by_id(&pool, id) where pool: &Pool`"
+    )]
+    pub async fn by_id_pg(pool: &PgPool, id: i64) -> Result<Option<Self>, ExecError> {
+        Self::by_id(&pool.clone().into(), id).await
     }
 
-    /// All registered ContentTypes, ordered by `(app_label, model_name)`
-    /// for stable display in admin sidebars / API listings.
-    ///
-    /// # Errors
-    /// As [`Self::for_model`].
-    pub async fn all(pool: &PgPool) -> Result<Vec<Self>, ExecError> {
-        let rows: Vec<Self> = Self::objects()
-            .order_by(&[("app_label", false), ("model_name", false)])
-            .fetch(pool)
-            .await?;
-        Ok(rows)
+    #[deprecated(
+        since = "0.40.0",
+        note = "use `ContentType::all(&pool) where pool: &Pool`"
+    )]
+    pub async fn all_pg(pool: &PgPool) -> Result<Vec<Self>, ExecError> {
+        Self::all(&pool.clone().into()).await
     }
 }
 
@@ -172,7 +133,7 @@ impl ContentType {
     ///
     /// # Errors
     /// As [`Self::for_model`].
-    pub async fn by_natural_key_pool(
+    pub async fn by_natural_key(
         pool: &crate::sql::Pool,
         app_label: &str,
         model_name: &str,
@@ -199,7 +160,7 @@ impl ContentType {
     ///
     /// # Errors
     /// As [`Self::for_model`].
-    pub async fn by_id_pool(pool: &crate::sql::Pool, id: i64) -> Result<Option<Self>, ExecError> {
+    pub async fn by_id(pool: &crate::sql::Pool, id: i64) -> Result<Option<Self>, ExecError> {
         let rows: Vec<Self> = Self::objects()
             .filter("id", crate::core::Op::Eq, SqlValue::I64(id))
             .limit(1)
@@ -216,7 +177,7 @@ impl ContentType {
     ///
     /// # Errors
     /// As [`Self::for_model`].
-    pub async fn for_model_pool<T: crate::core::Model>(
+    pub async fn for_model<T: crate::core::Model>(
         pool: &crate::sql::Pool,
     ) -> Result<Option<Self>, ExecError> {
         let entry = inventory::iter::<ModelEntry>
@@ -227,7 +188,7 @@ impl ContentType {
             })?;
         let app = entry.resolved_app_label().unwrap_or("project");
         let name = T::SCHEMA.name.to_ascii_lowercase();
-        Self::by_natural_key_pool(pool, app, &name).await
+        Self::by_natural_key(pool, app, &name).await
     }
 
     /// Batch counterpart of [`Self::by_natural_key_pool`] — issue #35.
@@ -274,7 +235,7 @@ impl ContentType {
         if wanted.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let all = Self::all_pool(pool).await?;
+        let all = Self::all(pool).await?;
         let mut out =
             std::collections::HashMap::<(String, String), Self>::with_capacity(wanted.len());
         for ct in all {
@@ -292,7 +253,7 @@ impl ContentType {
     ///
     /// # Errors
     /// As [`Self::for_model`].
-    pub async fn all_pool(pool: &crate::sql::Pool) -> Result<Vec<Self>, ExecError> {
+    pub async fn all(pool: &crate::sql::Pool) -> Result<Vec<Self>, ExecError> {
         let rows: Vec<Self> = Self::objects()
             .order_by(&[("app_label", false), ("model_name", false)])
             .fetch_pool(pool)
@@ -359,7 +320,7 @@ impl ContentType {
             return Ok(Some(hit));
         }
         // Miss → DB lookup, populate on success.
-        match Self::by_natural_key_pool(pool, app_label, model_name).await? {
+        match Self::by_natural_key(pool, app_label, model_name).await? {
             Some(ct) => {
                 cache()
                     .write()
@@ -371,12 +332,12 @@ impl ContentType {
         }
     }
 
-    /// Cached counterpart of [`Self::for_model_pool`] — issue #35.
+    /// Cached counterpart of [`Self::for_model`] — issue #35.
     /// Resolves `T` to its natural key via the model registry, then
     /// delegates to [`Self::get_by_natural_key`].
     ///
     /// # Errors
-    /// As [`Self::for_model_pool`].
+    /// As [`Self::for_model`].
     pub async fn get_for_model<T: crate::core::Model>(
         pool: &crate::sql::Pool,
     ) -> Result<Option<Self>, ExecError> {
@@ -418,12 +379,12 @@ impl ContentType {
 /// # Errors
 /// Driver / query failures from the SELECT.
 #[cfg(feature = "postgres")]
-pub async fn fetch_row_as_json(
+pub async fn fetch_row_as_json_pg(
     pool: &PgPool,
     ct: &ContentType,
     pk: impl Into<SqlValue>,
 ) -> Result<Option<serde_json::Value>, ExecError> {
-    fetch_row_as_json_pool(&crate::sql::Pool::Postgres(pool.clone()), ct, pk).await
+    fetch_row_as_json(&crate::sql::Pool::Postgres(pool.clone()), ct, pk).await
 }
 
 /// Tri-dialect counterpart of [`fetch_row_as_json`] (v0.38). Takes
@@ -434,7 +395,7 @@ pub async fn fetch_row_as_json(
 ///
 /// # Errors
 /// As [`fetch_row_as_json`].
-pub async fn fetch_row_as_json_pool(
+pub async fn fetch_row_as_json(
     pool: &crate::sql::Pool,
     ct: &ContentType,
     pk: impl Into<SqlValue>,
@@ -490,7 +451,7 @@ pub async fn fetch_row_as_json_pool(
 /// Driver / query failures + any `Err` returned by `f` short-
 /// circuits the iteration.
 #[cfg(feature = "postgres")]
-pub async fn for_each_row_of_ct<F>(
+pub async fn for_each_row_of_ct_pg<F>(
     pool: &PgPool,
     ct: &ContentType,
     batch_size: u32,
@@ -499,7 +460,7 @@ pub async fn for_each_row_of_ct<F>(
 where
     F: FnMut(serde_json::Value) -> Result<(), ExecError>,
 {
-    for_each_row_of_ct_pool(&crate::sql::Pool::Postgres(pool.clone()), ct, batch_size, f).await
+    for_each_row_of_ct(&crate::sql::Pool::Postgres(pool.clone()), ct, batch_size, f).await
 }
 
 /// Tri-dialect counterpart of [`for_each_row_of_ct`] (v0.38). Iterates
@@ -509,7 +470,7 @@ where
 ///
 /// # Errors
 /// As [`for_each_row_of_ct`].
-pub async fn for_each_row_of_ct_pool<F>(
+pub async fn for_each_row_of_ct<F>(
     pool: &crate::sql::Pool,
     ct: &ContentType,
     batch_size: u32,
@@ -618,29 +579,29 @@ impl GenericForeignKey {
     /// # Errors
     /// As [`ContentType::for_model`].
     #[cfg(feature = "postgres")]
-    pub async fn for_target<T: crate::core::Model>(
+    pub async fn for_target_pg<T: crate::core::Model>(
         pool: &PgPool,
         object_pk: i64,
     ) -> Result<Self, ExecError> {
-        Self::for_target_pool::<T>(&crate::sql::Pool::Postgres(pool.clone()), object_pk).await
+        Self::for_target::<T>(&crate::sql::Pool::Postgres(pool.clone()), object_pk).await
     }
 
     /// Tri-dialect counterpart of [`Self::for_target`] (v0.38).
     /// Routes the ContentType lookup through
-    /// [`ContentType::for_model_pool`] so the same call site works on
+    /// [`ContentType::for_model`] so the same call site works on
     /// PG / SQLite / MySQL.
     ///
     /// # Errors
     /// As [`Self::for_target`].
-    pub async fn for_target_pool<T: crate::core::Model>(
+    pub async fn for_target<T: crate::core::Model>(
         pool: &crate::sql::Pool,
         object_pk: i64,
     ) -> Result<Self, ExecError> {
-        let ct = ContentType::for_model_pool::<T>(pool)
-            .await?
-            .ok_or_else(|| ExecError::MissingPrimaryKey {
+        let ct = ContentType::for_model::<T>(pool).await?.ok_or_else(|| {
+            ExecError::MissingPrimaryKey {
                 table: T::SCHEMA.table,
-            })?;
+            }
+        })?;
         let id = ct
             .id
             .get()
@@ -673,7 +634,7 @@ impl GenericForeignKey {
 /// Driver / SQL failures from the ContentType lookup. Caller can
 /// `unwrap_or_else(|_| ...)` to a fallback rendering.
 #[cfg(feature = "postgres")]
-pub async fn render_generic_fk_link(
+pub async fn render_generic_fk_link_pg(
     pool: &PgPool,
     gfk: GenericForeignKey,
 ) -> Result<String, ExecError> {
@@ -684,7 +645,7 @@ pub async fn render_generic_fk_link(
             .replace('"', "&quot;")
             .replace('\'', "&#x27;")
     };
-    let ct = match ContentType::by_id(pool, gfk.content_type_id).await? {
+    let ct = match ContentType::by_id(&pool.clone().into(), gfk.content_type_id).await? {
         Some(c) => c,
         None => {
             // Stale or unseeded reference — show the raw pair so
@@ -712,7 +673,7 @@ pub async fn render_generic_fk_link(
 ///
 /// # Errors
 /// As [`render_generic_fk_link`].
-pub async fn render_generic_fk_link_pool(
+pub async fn render_generic_fk_link(
     pool: &crate::sql::Pool,
     gfk: GenericForeignKey,
 ) -> Result<String, ExecError> {
@@ -723,7 +684,7 @@ pub async fn render_generic_fk_link_pool(
             .replace('"', "&quot;")
             .replace('\'', "&#x27;")
     };
-    let ct = match ContentType::by_id_pool(pool, gfk.content_type_id).await? {
+    let ct = match ContentType::by_id(&pool.clone().into(), gfk.content_type_id).await? {
         Some(c) => c,
         None => {
             return Ok(format!(
@@ -780,7 +741,7 @@ pub async fn render_generic_fk_link_pool(
 /// # Errors
 /// Driver / SQL failures from the SELECT.
 #[cfg(feature = "postgres")]
-pub async fn prefetch_soft<C, F>(
+pub async fn prefetch_soft_pg<C, F>(
     pool: &PgPool,
     parent_pks: &[i64],
     target_fk_column: &'static str,
@@ -852,7 +813,7 @@ where
 /// As [`ContentType::for_model`] + driver / SQL failures from the
 /// target SELECT.
 #[cfg(feature = "postgres")]
-pub async fn prefetch_generic<C>(
+pub async fn prefetch_generic_pg<C>(
     pool: &PgPool,
     pairs: &[(i64, i64)],
 ) -> Result<::std::collections::HashMap<(i64, i64), C>, ExecError>
@@ -870,12 +831,11 @@ where
     // Resolve C's ContentType once — every (ct_id, pk) pair whose
     // ct_id doesn't match drops out of the result map (caller's
     // expectation: typed-target prefetch).
-    let target_ct =
-        ContentType::for_model::<C>(pool)
-            .await?
-            .ok_or_else(|| ExecError::MissingPrimaryKey {
-                table: C::SCHEMA.table,
-            })?;
+    let target_ct = ContentType::for_model::<C>(&pool.clone().into())
+        .await?
+        .ok_or_else(|| ExecError::MissingPrimaryKey {
+            table: C::SCHEMA.table,
+        })?;
     let target_ct_id = target_ct
         .id
         .get()
@@ -935,7 +895,7 @@ where
 ///
 /// # Errors
 /// As [`prefetch_soft`].
-pub async fn prefetch_soft_pool<C, F>(
+pub async fn prefetch_soft<C, F>(
     pool: &crate::sql::Pool,
     parent_pks: &[i64],
     target_fk_column: &'static str,
@@ -983,13 +943,13 @@ where
 }
 
 /// Tri-dialect counterpart of [`prefetch_generic`] (v0.38). Routes the
-/// ContentType lookup through [`ContentType::for_model_pool`] and the
+/// ContentType lookup through [`ContentType::for_model`] and the
 /// target SELECT through [`crate::sql::FetcherPool::fetch_pool`] so
 /// the same body works on PG / SQLite / MySQL.
 ///
 /// # Errors
 /// As [`prefetch_generic`].
-pub async fn prefetch_generic_pool<C>(
+pub async fn prefetch_generic<C>(
     pool: &crate::sql::Pool,
     pairs: &[(i64, i64)],
 ) -> Result<::std::collections::HashMap<(i64, i64), C>, ExecError>
@@ -1010,7 +970,7 @@ where
     if pairs.is_empty() {
         return Ok(::std::collections::HashMap::new());
     }
-    let target_ct = ContentType::for_model_pool::<C>(pool)
+    let target_ct = ContentType::for_model::<C>(&pool.clone().into())
         .await?
         .ok_or_else(|| ExecError::MissingPrimaryKey {
             table: C::SCHEMA.table,
@@ -1107,7 +1067,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "rustango_content_types_natural_key"
 /// # Errors
 /// Driver / SQL failures.
 #[cfg(feature = "postgres")]
-pub async fn ensure_table(pool: &PgPool) -> Result<(), crate::sql::sqlx::Error> {
+pub async fn ensure_table_pg(pool: &PgPool) -> Result<(), crate::sql::sqlx::Error> {
     for stmt in CREATE_TABLE_SQL.split(';') {
         let trimmed = stmt.trim();
         if trimmed.is_empty() {
@@ -1132,15 +1092,16 @@ pub async fn ensure_table(pool: &PgPool) -> Result<(), crate::sql::sqlx::Error> 
 /// # Errors
 /// Driver / query failures from the SELECT-or-INSERT loop.
 #[cfg(feature = "postgres")]
-pub async fn ensure_seeded(pool: &PgPool) -> Result<usize, ExecError> {
-    // Idempotent table-create — ensures the registry-side CT
-    // catalog has its physical home before we walk inventory.
-    // Tenant schemas already get this from the bootstrap-migration
-    // CreateTable op; the registry bootstrap doesn't include
-    // `rustango_content_types`, so the seed call would otherwise
-    // 42P01 on every fresh registry. Mirrors the
-    // `audit::ensure_table(registry)` pattern.
-    ensure_table(pool).await.map_err(ExecError::Driver)?;
+#[allow(deprecated)]
+pub async fn ensure_seeded_pg(pool: &PgPool) -> Result<usize, ExecError> {
+    ensure_seeded(&pool.clone().into()).await
+}
+
+#[cfg(feature = "postgres")]
+async fn _ensure_seeded_pg_internal(pool: &PgPool) -> Result<usize, ExecError> {
+    ensure_table(&pool.clone().into())
+        .await
+        .map_err(ExecError::Driver)?;
     let mut inserted = 0_usize;
     for entry in inventory::iter::<ModelEntry> {
         let table = entry.schema.table;
@@ -1152,7 +1113,7 @@ pub async fn ensure_seeded(pool: &PgPool) -> Result<usize, ExecError> {
         let app = entry.resolved_app_label().unwrap_or("project").to_owned();
         let name = entry.schema.name.to_ascii_lowercase();
         // Probe natural key first; skip if already seeded.
-        if ContentType::by_natural_key(pool, &app, &name)
+        if ContentType::by_natural_key(&pool.clone().into(), &app, &name)
             .await?
             .is_some()
         {
@@ -1183,7 +1144,7 @@ pub async fn ensure_seeded(pool: &PgPool) -> Result<usize, ExecError> {
 ///
 /// # Errors
 /// Driver / SQL failures from `CREATE TABLE IF NOT EXISTS`.
-pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), crate::sql::sqlx::Error> {
+pub async fn ensure_table(pool: &crate::sql::Pool) -> Result<(), crate::sql::sqlx::Error> {
     use crate::core::Model as _;
     let dialect = pool.dialect();
     // v0.34 — route the table DDL through the same emitter the
@@ -1270,8 +1231,8 @@ fn is_mysql_dup_index_error(_e: &crate::sql::sqlx::Error) -> bool {
 /// # Errors
 /// Driver / query failures from the SELECT-or-INSERT loop or the
 /// table bootstrap.
-pub async fn ensure_seeded_pool(pool: &crate::sql::Pool) -> Result<usize, ExecError> {
-    ensure_table_pool(pool).await.map_err(ExecError::Driver)?;
+pub async fn ensure_seeded(pool: &crate::sql::Pool) -> Result<usize, ExecError> {
+    ensure_table(pool).await.map_err(ExecError::Driver)?;
     let mut inserted = 0_usize;
     for entry in inventory::iter::<ModelEntry> {
         let table = entry.schema.table;
@@ -1280,7 +1241,7 @@ pub async fn ensure_seeded_pool(pool: &crate::sql::Pool) -> Result<usize, ExecEr
         }
         let app = entry.resolved_app_label().unwrap_or("project").to_owned();
         let name = entry.schema.name.to_ascii_lowercase();
-        if ContentType::by_natural_key_pool(pool, &app, &name)
+        if ContentType::by_natural_key(&pool.clone().into(), &app, &name)
             .await?
             .is_some()
         {
