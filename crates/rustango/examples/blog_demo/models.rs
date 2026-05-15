@@ -77,6 +77,10 @@ rustango::register_admin_computed!("post", "word_count", "Words", |row| {
     ordering      = "-published_at",
     page_size     = 20,
 )]
+// `PostViewSet` / `AuthorViewSet` are mounted by `urls.rs` at runtime —
+// the `#[derive(ViewSet)]` macro registers them via inventory. Compiler
+// can't see the indirect use through inventory walking, hence the allow.
+#[allow(dead_code)]
 pub struct PostViewSet;
 
 /// Read-only viewset for authors.
@@ -88,4 +92,5 @@ pub struct PostViewSet;
     ordering      = "name",
     read_only,
 )]
+#[allow(dead_code)]
 pub struct AuthorViewSet;

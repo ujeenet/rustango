@@ -22,12 +22,12 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use rustango::core::Column as _;
+use rustango::migrate as rmig;
 use rustango::sql::{sqlx, Auto, Fetcher};
 use rustango::tenancy::{
     operator_console::{router_with_pools, SessionSecret},
     Org, StorageMode, TenantPools,
 };
-use rustango::{migrate as rmig, Model};
 use tower::ServiceExt;
 
 static UNIQ: AtomicU64 = AtomicU64::new(0);
