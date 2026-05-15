@@ -119,6 +119,19 @@ pub enum WhereExpr {
     Or(Vec<WhereExpr>),
     /// Logical negation. Emits `NOT (child)`.
     Not(Box<WhereExpr>),
+    /// Logical XOR — Django `Q(a) ^ Q(b)` (added in Django 4.1). Issue
+    /// #27. Matches rows for which an odd number of children evaluate
+    /// to `true`. Binary form is the common case and emits the
+    /// canonical SQL-92 rewrite `(a AND NOT b) OR (NOT a AND b)`; the
+    /// N-ary form (3+) folds to a CASE-WHEN-1/0 sum compared `% 2 = 1`
+    /// to mirror Django's "odd number of trues" semantic.
+    ///
+    /// Native logical XOR exists on MySQL but not on PG or SQLite —
+    /// the rewrite is portable across every backend, so the writer
+    /// uses it uniformly. Empty children = vacuously false (rejected
+    /// by the writer, same as `Or(vec![])`). Single child is
+    /// equivalent to the child itself.
+    Xor(Vec<WhereExpr>),
     /// `EXISTS (<subquery>)` — issue #5. True when the inner
     /// `SelectQuery` returns at least one row. Boxed because
     /// `SelectQuery` already carries its own `WhereExpr`, which would
@@ -205,6 +218,7 @@ impl WhereExpr {
             // fall outside the legacy flat-AND view.
             Self::ColumnCompare(_)
             | Self::Or(_)
+            | Self::Xor(_)
             | Self::Not(_)
             | Self::Exists(_)
             | Self::NotExists(_)
@@ -242,7 +256,7 @@ impl WhereExpr {
                 validate_expr_columns(model, &cf.rhs)?;
                 Ok(())
             }
-            Self::And(items) | Self::Or(items) => {
+            Self::And(items) | Self::Or(items) | Self::Xor(items) => {
                 for child in items {
                     child.validate(model)?;
                 }

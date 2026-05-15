@@ -75,6 +75,13 @@ pub enum SqlError {
     #[error("`WhereExpr::Or` with an empty branch list matches no rows; was that intentional?")]
     EmptyOrBranch,
 
+    /// `WhereExpr::Xor(vec![])` — issue #27. XOR over zero operands
+    /// is vacuously false (an empty "odd-number-of-trues" tally is
+    /// `0 % 2 = 1` → false), almost always a programming error.
+    /// Sibling to [`Self::EmptyOrBranch`].
+    #[error("`WhereExpr::Xor` with an empty branch list matches no rows; was that intentional?")]
+    EmptyXorBranch,
+
     /// `Dialect::compile_*` was called on a dialect whose query
     /// compiler hasn't shipped yet.
     #[error(
