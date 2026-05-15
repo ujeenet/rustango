@@ -2181,6 +2181,36 @@ let email = Email::new()
 mailer.send(&email).await?;
 ```
 
+#### Production SMTP — `SmtpMailer` (issue #48)
+
+Opt in with the `email-smtp` feature — pulls `lettre` (rustls, no openssl). Connects to any RFC-2821 relay (Postmark, SendGrid, AWS SES via SMTP, Postfix, etc.).
+
+```rust
+use rustango::email::smtp::{SmtpMailer, TlsMode};
+
+let mailer = SmtpMailer::builder("mail.example.com")
+    .credentials("postmaster@example.com", env::var("SMTP_PASS")?)
+    .tls(TlsMode::StartTls)            // also: TlsMode::Implicit (465), TlsMode::None (25)
+    .default_from("noreply@example.com")
+    .build()?;
+mailer.send(&email).await?;
+```
+
+Or drop the credentials in `[mail]` settings and let `from_settings` build it:
+
+```toml
+[mail]
+backend = "smtp"
+smtp_host = "mail.example.com"
+smtp_port = 587            # optional — defaults to 587/465/25 by tls
+smtp_tls = "starttls"       # "starttls" (default) | "implicit" | "none"
+smtp_username = "postmaster@example.com"
+# smtp_password = "..."     # set via RUSTANGO_MAIL__SMTP_PASSWORD env var
+from_address = "noreply@example.com"
+```
+
+Build failures (malformed host, unparseable `from_address`, etc.) fall back to `ConsoleMailer` with a `tracing::warn!` so apps don't refuse to boot on a typo'd section. TLS is rustls-backed (`webpki-roots`); custom CAs need `SmtpMailer::with_transport(...)`.
+
 ### File storage
 
 The framework ships three layers, each useful on its own:

@@ -47,6 +47,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
+#[cfg(feature = "email-smtp")]
+pub mod smtp;
+#[cfg(feature = "email-smtp")]
+pub use smtp::{SmtpMailer, SmtpMailerBuilder, TlsMode};
+
 // ------------------------------------------------------------------ Email
 
 /// One outbound email. Use the builder methods to assemble.
@@ -298,14 +303,7 @@ impl Mailer for NullMailer {
 #[must_use]
 pub fn from_settings(s: &crate::config::MailSettings) -> BoxedMailer {
     match s.backend.as_deref() {
-        Some("smtp") => {
-            tracing::warn!(
-                target: "rustango::email",
-                "mail.backend = \"smtp\" but SmtpMailer isn't implemented yet; falling back to ConsoleMailer. \
-                 Wire your own BoxedMailer in the meantime.",
-            );
-            Arc::new(ConsoleMailer)
-        }
+        Some("smtp") => smtp_from_settings_or_warn(s),
         Some("memory") => Arc::new(InMemoryMailer::new()),
         Some("null" | "none") => Arc::new(NullMailer),
         Some("console") | None => Arc::new(ConsoleMailer),
@@ -318,6 +316,44 @@ pub fn from_settings(s: &crate::config::MailSettings) -> BoxedMailer {
             Arc::new(ConsoleMailer)
         }
     }
+}
+
+/// SMTP-backend resolver. When the `email-smtp` feature is on,
+/// builds an [`SmtpMailer`] from the section — and falls back to
+/// [`ConsoleMailer`] with a tracing warning if the build fails (so
+/// apps don't refuse to boot on a malformed `[mail]` section). When
+/// the feature is off, emits the same legacy warning the pre-#48
+/// build did and falls back to [`ConsoleMailer`].
+#[cfg(all(feature = "config", feature = "email-smtp"))]
+fn smtp_from_settings_or_warn(s: &crate::config::MailSettings) -> BoxedMailer {
+    match smtp::from_settings(s) {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            tracing::warn!(
+                target: "rustango::email",
+                "mail.backend = \"smtp\" but [mail].smtp_host is unset; falling back to ConsoleMailer."
+            );
+            Arc::new(ConsoleMailer)
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "rustango::email",
+                error = %e,
+                "mail.backend = \"smtp\" but SmtpMailer build failed; falling back to ConsoleMailer."
+            );
+            Arc::new(ConsoleMailer)
+        }
+    }
+}
+
+#[cfg(all(feature = "config", not(feature = "email-smtp")))]
+fn smtp_from_settings_or_warn(_s: &crate::config::MailSettings) -> BoxedMailer {
+    tracing::warn!(
+        target: "rustango::email",
+        "mail.backend = \"smtp\" but the `email-smtp` feature isn't enabled in this build; \
+         falling back to ConsoleMailer. Enable `email-smtp` to ship a real SMTP transport.",
+    );
+    Arc::new(ConsoleMailer)
 }
 
 #[cfg(test)]
