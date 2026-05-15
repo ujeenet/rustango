@@ -1786,34 +1786,128 @@ pub(super) fn write_where_expr(
 }
 
 /// Emit `<lhs-expr> <op> <rhs-expr>` for [`WhereExpr::ExprCompare`].
-/// Only the binary-comparison ops make sense here — anything else is
-/// a programmer error and surfaces as
-/// [`SqlError::OpNotSupportedInDialect`] so the test suite catches it
-/// before reaching the database.
+///
+/// Covers the binary-comparison set (`Eq`/`Ne`/`Lt`/`Lte`/`Gt`/`Gte`)
+/// plus the SQL-92 standard predicates that work uniformly across
+/// every dialect inside HAVING: `IN`/`NOT IN`, `BETWEEN`, `IS NULL`/
+/// `IS NOT NULL`, `LIKE`/`NOT LIKE`. The Postgres-specific case-
+/// insensitive `ILIKE`/`NOT ILIKE` route through the dialect's
+/// `write_ilike` helper so non-PG backends fall back to `LOWER()` +
+/// `LIKE` shape automatically (issue #87).
+///
+/// JSON ops (`JsonContains` / `JsonHasKey` / etc.) and null-safe
+/// equality (`IsDistinctFrom` / `IsNotDistinctFrom`) aren't supported
+/// against an aggregate LHS — those need dialect-specific writers
+/// that take a `&str` for the LHS. The `AggregateBuilder::filter`
+/// gate rejects them at build time with [`crate::core::QueryError::HavingOpNotSupported`]
+/// so the misuse surfaces with a clear message rather than as a
+/// raw dialect error here.
 fn write_expr_compare(
     b: &mut Sql<'_>,
     lhs: &crate::core::Expr,
     op: crate::core::Op,
     rhs: &crate::core::Expr,
 ) -> Result<(), SqlError> {
-    let op_str = match op {
-        crate::core::Op::Eq => " = ",
-        crate::core::Op::Ne => " <> ",
-        crate::core::Op::Lt => " < ",
-        crate::core::Op::Lte => " <= ",
-        crate::core::Op::Gt => " > ",
-        crate::core::Op::Gte => " >= ",
-        _ => {
-            return Err(SqlError::OpNotSupportedInDialect {
-                op: "non-binary comparison in ExprCompare",
-                dialect: b.d.name(),
-            });
-        }
+    use crate::core::{Expr, Op};
+
+    let binary_op_str = match op {
+        Op::Eq => Some(" = "),
+        Op::Ne => Some(" <> "),
+        Op::Lt => Some(" < "),
+        Op::Lte => Some(" <= "),
+        Op::Gt => Some(" > "),
+        Op::Gte => Some(" >= "),
+        Op::Like => Some(" LIKE "),
+        Op::NotLike => Some(" NOT LIKE "),
+        _ => None,
     };
-    write_expr(b, lhs, None)?;
-    b.sql.push_str(op_str);
-    write_expr(b, rhs, None)?;
-    Ok(())
+    if let Some(kw) = binary_op_str {
+        write_expr(b, lhs, None)?;
+        b.sql.push_str(kw);
+        write_expr(b, rhs, None)?;
+        return Ok(());
+    }
+
+    match op {
+        Op::ILike | Op::NotILike => {
+            require_op(b.d, op)?;
+            // Render lhs first so its params land in the param vector
+            // before the rhs literal — keeps `?`-positional dialects
+            // (MySQL / SQLite) in textual order. Then carve the lhs
+            // SQL out of the buffer, bind the rhs as a string param,
+            // and ask the dialect to compose `LOWER(<lhs>) LIKE
+            // LOWER(<p>)` (or PG's native `ILIKE`).
+            let lhs_start = b.sql.len();
+            write_expr(b, lhs, None)?;
+            let lhs_str = b.sql.split_off(lhs_start);
+            let Expr::Literal(v) = rhs else {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: "ILIKE with non-literal RHS in ExprCompare",
+                    dialect: b.d.name(),
+                });
+            };
+            b.params.push(v.clone());
+            let p = b.d.placeholder(b.params.len());
+            b.d.write_ilike(&mut b.sql, &lhs_str, &p, matches!(op, Op::NotILike));
+            Ok(())
+        }
+        Op::In | Op::NotIn => {
+            let Expr::Literal(SqlValue::List(elements)) = rhs else {
+                return Err(SqlError::InRequiresList);
+            };
+            if elements.is_empty() {
+                return Err(SqlError::EmptyInList);
+            }
+            write_expr(b, lhs, None)?;
+            b.sql.push_str(if matches!(op, Op::In) {
+                " IN ("
+            } else {
+                " NOT IN ("
+            });
+            let mut first = true;
+            for elem in elements {
+                if !first {
+                    b.sql.push_str(", ");
+                }
+                first = false;
+                b.push_param_typed(elem.clone(), None);
+            }
+            b.sql.push(')');
+            Ok(())
+        }
+        Op::Between => {
+            let Expr::Literal(SqlValue::List(bounds)) = rhs else {
+                return Err(SqlError::BetweenRequiresTwoElementList);
+            };
+            if bounds.len() != 2 {
+                return Err(SqlError::BetweenRequiresTwoElementList);
+            }
+            write_expr(b, lhs, None)?;
+            b.sql.push_str(" BETWEEN ");
+            b.push_param_typed(bounds[0].clone(), None);
+            b.sql.push_str(" AND ");
+            b.push_param_typed(bounds[1].clone(), None);
+            Ok(())
+        }
+        Op::IsNull => {
+            let Expr::Literal(SqlValue::Bool(is_null)) = rhs else {
+                return Err(SqlError::IsNullRequiresBool);
+            };
+            write_expr(b, lhs, None)?;
+            b.sql
+                .push_str(if *is_null { " IS NULL" } else { " IS NOT NULL" });
+            Ok(())
+        }
+        // JSON-op family + IsDistinctFrom / IsNotDistinctFrom — the
+        // AggregateBuilder::filter gate rejects these at build time
+        // with `HavingOpNotSupported`. If we reach here, someone
+        // hand-built an `ExprCompare` with one of these ops directly;
+        // surface the same shape of error as before.
+        _ => Err(SqlError::OpNotSupportedInDialect {
+            op: "non-binary comparison in ExprCompare",
+            dialect: b.d.name(),
+        }),
+    }
 }
 
 /// Render `<col> <op> <rhs-expr>` for a [`crate::core::ColumnFilter`].

@@ -203,40 +203,59 @@ fn sqlite_emits_having_with_double_quotes() {
     );
 }
 
-// ---------- Op validation: alias + non-binary op rejected at compile() ----------
+// ---------- Richer ops on alias-routed filter (issue #87) ----------
 
-/// `Op::In` against an annotation alias is rejected at `compile()`
-/// with a clear `HavingOpNotSupported` error. v1 limitation —
-/// ExprCompare only emits binary comparison ops; richer dispatch is
-/// queued for v0.50. Pre-fix this surfaced as a cryptic
-/// `OpNotSupportedInDialect { op: "non-binary comparison in ExprCompare" }`
-/// at SQL-emit time.
+/// `Op::In` against an annotation alias emits `HAVING <agg> IN ($1, $2, …)`.
+/// Pre-#87 this rejected at `compile()` with `HavingOpNotSupported`.
 #[test]
-fn op_in_against_alias_rejected_at_compile() {
+fn op_in_against_alias_emits_having_in() {
     use rustango::core::SqlValue;
-    let r = Post::objects()
+    let q = Post::objects()
         .aggregate()
         .group_by("author_id")
         .annotate("post_count", count_all().into())
         .filter(
             "post_count",
             Op::In,
-            SqlValue::List(vec![SqlValue::I64(5), SqlValue::I64(10)]),
+            SqlValue::List(vec![SqlValue::I64(5), SqlValue::I64(10), SqlValue::I64(20)]),
         )
-        .compile();
-    match r {
-        Err(rustango::core::QueryError::HavingOpNotSupported { alias, op }) => {
-            assert_eq!(alias, "post_count");
-            assert_eq!(op, Op::In);
-        }
-        other => panic!("expected HavingOpNotSupported, got {other:?}"),
-    }
+        .compile()
+        .unwrap();
+    let stmt = Postgres.compile_aggregate(&q).unwrap();
+    assert!(
+        stmt.sql.contains("HAVING COUNT(*) IN ($1, $2, $3)"),
+        "PG: HAVING aggregate IN (...): {}",
+        stmt.sql
+    );
+    assert_eq!(stmt.params.len(), 3);
 }
 
 #[test]
-fn op_between_against_alias_rejected_at_compile() {
+fn op_not_in_against_alias_emits_having_not_in() {
     use rustango::core::SqlValue;
-    let r = Post::objects()
+    let q = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("post_count", count_all().into())
+        .filter(
+            "post_count",
+            Op::NotIn,
+            SqlValue::List(vec![SqlValue::I64(0), SqlValue::I64(1)]),
+        )
+        .compile()
+        .unwrap();
+    let stmt = Postgres.compile_aggregate(&q).unwrap();
+    assert!(
+        stmt.sql.contains("HAVING COUNT(*) NOT IN ($1, $2)"),
+        "PG: HAVING aggregate NOT IN (...): {}",
+        stmt.sql
+    );
+}
+
+#[test]
+fn op_between_against_alias_emits_having_between() {
+    use rustango::core::SqlValue;
+    let q = Post::objects()
         .aggregate()
         .group_by("author_id")
         .annotate("post_count", count_all().into())
@@ -245,42 +264,214 @@ fn op_between_against_alias_rejected_at_compile() {
             Op::Between,
             SqlValue::List(vec![SqlValue::I64(5), SqlValue::I64(10)]),
         )
-        .compile();
-    assert!(matches!(
-        r,
-        Err(rustango::core::QueryError::HavingOpNotSupported {
-            alias,
-            op: Op::Between
-        }) if alias == "post_count"
-    ));
+        .compile()
+        .unwrap();
+    let stmt = Postgres.compile_aggregate(&q).unwrap();
+    assert!(
+        stmt.sql.contains("HAVING COUNT(*) BETWEEN $1 AND $2"),
+        "PG: HAVING aggregate BETWEEN ...: {}",
+        stmt.sql
+    );
+    assert_eq!(stmt.params.len(), 2);
 }
 
 #[test]
-fn op_isnull_against_alias_rejected_at_compile() {
+fn op_isnull_against_alias_emits_having_is_null() {
     use rustango::core::SqlValue;
-    let r = Post::objects()
+    let q = Post::objects()
         .aggregate()
         .group_by("author_id")
         .annotate("post_count", count_all().into())
         .filter("post_count", Op::IsNull, SqlValue::Bool(true))
-        .compile();
-    assert!(matches!(
-        r,
-        Err(rustango::core::QueryError::HavingOpNotSupported { op: Op::IsNull, .. })
-    ));
+        .compile()
+        .unwrap();
+    let stmt = Postgres.compile_aggregate(&q).unwrap();
+    assert!(
+        stmt.sql.contains("HAVING COUNT(*) IS NULL"),
+        "PG: HAVING aggregate IS NULL: {}",
+        stmt.sql
+    );
+    // No params for IS NULL.
+    assert!(stmt.params.is_empty());
 }
 
 #[test]
-fn op_like_against_alias_rejected_at_compile() {
+fn op_isnull_false_against_alias_emits_having_is_not_null() {
+    use rustango::core::SqlValue;
+    let q = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("post_count", count_all().into())
+        .filter("post_count", Op::IsNull, SqlValue::Bool(false))
+        .compile()
+        .unwrap();
+    let stmt = Postgres.compile_aggregate(&q).unwrap();
+    assert!(
+        stmt.sql.contains("HAVING COUNT(*) IS NOT NULL"),
+        "PG: HAVING aggregate IS NOT NULL: {}",
+        stmt.sql
+    );
+}
+
+#[test]
+fn op_like_against_alias_emits_having_like() {
+    use rustango::core::aggregates::max;
+    // MAX(name) returns a string — LIKE pattern makes sense.
+    let q = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("max_status", max("status").into())
+        .filter("max_status", Op::Like, "publish%")
+        .compile()
+        .unwrap();
+    let stmt = Postgres.compile_aggregate(&q).unwrap();
+    assert!(
+        stmt.sql.contains(r#"HAVING MAX("status") LIKE $1"#),
+        "PG: HAVING aggregate LIKE pattern: {}",
+        stmt.sql
+    );
+}
+
+#[test]
+fn op_not_like_against_alias_emits_having_not_like() {
+    use rustango::core::aggregates::max;
+    let q = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("max_status", max("status").into())
+        .filter("max_status", Op::NotLike, "draft%")
+        .compile()
+        .unwrap();
+    let stmt = Postgres.compile_aggregate(&q).unwrap();
+    assert!(
+        stmt.sql.contains(r#"HAVING MAX("status") NOT LIKE $1"#),
+        "PG: HAVING aggregate NOT LIKE pattern: {}",
+        stmt.sql
+    );
+}
+
+#[test]
+fn op_ilike_against_alias_emits_pg_native_ilike() {
+    use rustango::core::aggregates::max;
+    // PG: native ILIKE — `MAX("status") ILIKE $1`.
+    let q = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("max_status", max("status").into())
+        .filter("max_status", Op::ILike, "PUBLISH%")
+        .compile()
+        .unwrap();
+    let stmt = Postgres.compile_aggregate(&q).unwrap();
+    assert!(
+        stmt.sql.contains(r#"HAVING MAX("status") ILIKE $1"#),
+        "PG: HAVING aggregate ILIKE pattern: {}",
+        stmt.sql
+    );
+}
+
+#[test]
+fn op_ilike_against_alias_falls_back_to_lower_on_mysql() {
+    use rustango::core::aggregates::max;
+    // MySQL has no ILIKE; the writer falls back to LOWER(...) LIKE LOWER(?).
+    let q = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("max_status", max("status").into())
+        .filter("max_status", Op::ILike, "PUBLISH%")
+        .compile()
+        .unwrap();
+    let stmt = MySql.compile_aggregate(&q).unwrap();
+    assert!(
+        stmt.sql
+            .contains("HAVING LOWER(MAX(`status`)) LIKE LOWER(?)"),
+        "MySQL: HAVING LOWER(agg) LIKE LOWER(?): {}",
+        stmt.sql
+    );
+}
+
+#[test]
+fn op_ilike_against_alias_falls_back_to_lower_on_sqlite() {
+    use rustango::core::aggregates::max;
+    let q = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("max_status", max("status").into())
+        .filter("max_status", Op::ILike, "PUBLISH%")
+        .compile()
+        .unwrap();
+    let stmt = Sqlite.compile_aggregate(&q).unwrap();
+    assert!(
+        stmt.sql
+            .contains(r#"HAVING LOWER(MAX("status")) LIKE LOWER(?)"#),
+        "SQLite: HAVING LOWER(agg) LIKE LOWER(?): {}",
+        stmt.sql
+    );
+}
+
+/// Param-order sanity: MySQL uses positional `?`. The lhs aggregate may
+/// carry inner literals (e.g. via `Filtered`); those must bind BEFORE the
+/// `LIKE`/`ILIKE` rhs literal so positional placeholders match the
+/// param vector textually.
+#[test]
+fn ilike_alias_param_order_preserved_for_positional_dialects() {
+    use rustango::core::aggregates::max;
+    let q = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("max_status", max("status").into())
+        .filter("status", Op::Eq, "published") // WHERE — first param
+        .filter("max_status", Op::ILike, "PUB%") // HAVING — second param
+        .compile()
+        .unwrap();
+    let stmt = MySql.compile_aggregate(&q).unwrap();
+    // Two params total; WHERE first, HAVING ILIKE last.
+    assert_eq!(stmt.params.len(), 2);
+    // The `=` placeholder for WHERE appears before the `LIKE LOWER(...)`
+    // placeholder for HAVING in the SQL text.
+    let where_pos = stmt.sql.find("`status` = ?").unwrap();
+    let having_pos = stmt.sql.find("LIKE LOWER(?)").unwrap();
+    assert!(where_pos < having_pos);
+}
+
+/// JSON ops + IsDistinctFrom are still rejected — they need dialect-
+/// specific writers that take a `&str` for the LHS.
+#[test]
+fn json_op_against_alias_still_rejected_at_compile() {
+    use rustango::core::aggregates::max;
+    use rustango::core::SqlValue;
+    let r = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("max_status", max("status").into())
+        .filter(
+            "max_status",
+            Op::JsonContains,
+            SqlValue::Json(serde_json::json!({"key": "value"})),
+        )
+        .compile();
+    match r {
+        Err(rustango::core::QueryError::HavingOpNotSupported { alias, op }) => {
+            assert_eq!(alias, "max_status");
+            assert_eq!(op, Op::JsonContains);
+        }
+        other => panic!("expected HavingOpNotSupported, got {other:?}"),
+    }
+}
+
+#[test]
+fn is_distinct_from_against_alias_still_rejected_at_compile() {
     let r = Post::objects()
         .aggregate()
         .group_by("author_id")
         .annotate("post_count", count_all().into())
-        .filter("post_count", Op::Like, "%foo%")
+        .filter("post_count", Op::IsDistinctFrom, 5_i64)
         .compile();
     assert!(matches!(
         r,
-        Err(rustango::core::QueryError::HavingOpNotSupported { op: Op::Like, .. })
+        Err(rustango::core::QueryError::HavingOpNotSupported {
+            op: Op::IsDistinctFrom,
+            ..
+        })
     ));
 }
 
@@ -311,12 +502,15 @@ fn deferred_error_swallows_subsequent_builder_calls() {
         .aggregate()
         .group_by("author_id")
         .annotate("post_count", count_all().into())
-        .filter("post_count", Op::Like, "junk") // sets deferred error
+        .filter("post_count", Op::IsDistinctFrom, 5_i64) // sets deferred error
         .filter("status", Op::Eq, "published") // should NOT overwrite
         .filter("post_count", Op::Gt, 10_i64) // should NOT overwrite
         .compile();
     match r {
-        Err(rustango::core::QueryError::HavingOpNotSupported { op: Op::Like, .. }) => {}
+        Err(rustango::core::QueryError::HavingOpNotSupported {
+            op: Op::IsDistinctFrom,
+            ..
+        }) => {}
         other => panic!("expected the FIRST error to survive, got {other:?}"),
     }
 }

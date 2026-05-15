@@ -1190,11 +1190,15 @@ pub struct AggregateBuilder<T: Model> {
     limit: Option<i64>,
     offset: Option<i64>,
     /// Issue #74 — deferred error surfacing for builder-time
-    /// validation failures (e.g. `.filter(alias, Op::In, …)` against
-    /// an annotation alias, which the auto-routing rejects because
-    /// ExprCompare doesn't support `IN`/`BETWEEN`/etc. yet). Stored
-    /// on first error; subsequent builder calls are no-ops so the
-    /// original cause isn't masked. Surfaced from `compile()`.
+    /// validation failures (e.g. `.filter(alias, Op::JsonContains, …)`
+    /// against an annotation alias, which the auto-routing rejects
+    /// because the JSON-op family + null-safe equality need
+    /// dialect-specific writers that don't compose against an
+    /// aggregate LHS). Stored on first error; subsequent builder
+    /// calls are no-ops so the original cause isn't masked. Surfaced
+    /// from `compile()`. (Issue #87 widened the supported op set to
+    /// include `IN`/`BETWEEN`/`IS NULL`/`LIKE`/`ILIKE` + negated
+    /// variants.)
     deferred_error: Option<crate::core::QueryError>,
     /// Issue #75 — projection columns set via [`Self::values`] (or
     /// [`QuerySet::values`]). When `Some(cols)` and the user hasn't
@@ -1299,19 +1303,23 @@ impl<T: Model> AggregateBuilder<T> {
             .find(|(alias, _)| *alias == field)
             .map(|(_, expr)| expr.clone());
         if let Some(agg) = agg {
-            // v1 limitation: `ExprCompare` only emits binary
-            // comparison ops. `Op::In`/`Between`/`IsNull`/`Like`/etc.
-            // would emit garbage SQL via the existing writer, so
-            // catch the misuse at builder time with a message that
-            // points at the workaround (typed `.having(WhereExpr)`).
-            if !matches!(
+            // Issue #87 — `write_expr_compare` now handles the SQL-92
+            // standard predicates that compose against an aggregate
+            // LHS (`IN` / `NOT IN` / `BETWEEN` / `IS NULL` / `LIKE` /
+            // `NOT LIKE` / `ILIKE` / `NOT ILIKE`) in addition to the
+            // binary-comparison set. JSON ops and null-safe equality
+            // (`IS DISTINCT FROM` / `IS NOT DISTINCT FROM`) still
+            // need dialect-specific writers that take a `&str` for
+            // the LHS, so they keep rejecting with the targeted error.
+            if matches!(
                 op,
-                crate::core::Op::Eq
-                    | crate::core::Op::Ne
-                    | crate::core::Op::Lt
-                    | crate::core::Op::Lte
-                    | crate::core::Op::Gt
-                    | crate::core::Op::Gte
+                crate::core::Op::JsonContains
+                    | crate::core::Op::JsonContainedBy
+                    | crate::core::Op::JsonHasKey
+                    | crate::core::Op::JsonHasAnyKey
+                    | crate::core::Op::JsonHasAllKeys
+                    | crate::core::Op::IsDistinctFrom
+                    | crate::core::Op::IsNotDistinctFrom
             ) {
                 self.deferred_error = Some(crate::core::QueryError::HavingOpNotSupported {
                     alias: field.to_owned(),
