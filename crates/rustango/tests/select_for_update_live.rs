@@ -155,11 +155,16 @@ async fn nowait_errors_immediately_on_contended_row() {
     let _ = tx2.rollback().await;
 }
 
-/// `select_for_update` outside a transaction is a no-op on PG (the
-/// implicit-tx single-statement holds the lock only for the duration
-/// of the SELECT). Validates that the queryset compiles + executes
-/// cleanly against `&PgPool` directly — even though the lock is
-/// instantly released, the SQL stays well-formed.
+/// `select_for_update` against a bare `&PgPool` — the SQL is
+/// well-formed and the statement executes, but PG treats each
+/// standalone statement as an implicit transaction that ends the
+/// moment the SELECT returns. The lock IS acquired for the duration
+/// of the statement, then immediately released — so this shape is
+/// only useful for testing the writer / smoke-checking the query.
+/// **Production "claim next available row" workflows must use an
+/// explicit `pool.begin()` transaction** (see the SKIP LOCKED test
+/// above for the canonical pattern), otherwise the lock is released
+/// before any follow-up `UPDATE` runs.
 #[tokio::test]
 async fn select_for_update_against_bare_pool_runs_cleanly() {
     let _g = lock().lock().await;

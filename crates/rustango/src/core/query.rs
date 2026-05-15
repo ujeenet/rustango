@@ -427,7 +427,15 @@ pub struct SelectQuery {
 /// `SELECT … FOR UPDATE` row-lock options — Django's
 /// `QuerySet.select_for_update(skip_locked=, nowait=, of=, no_key=)`.
 /// Issue #21.
+///
+/// `#[non_exhaustive]` — future per-backend lock flags (e.g. PG's
+/// `FOR KEY SHARE`, MySQL's `LOCK IN SHARE MODE`) can be added without
+/// breaking downstream code that constructs `LockMode { … }` directly.
+/// Build via [`LockMode::default`] + field assignment, or chain the
+/// [`crate::query::QuerySet`] builder methods (`.select_for_update()`,
+/// `.skip_locked()`, `.nowait()`, `.no_key()`, `.of(…)`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LockMode {
     /// PG 9.3+: `FOR NO KEY UPDATE` instead of `FOR UPDATE`. Holds a
     /// weaker lock that doesn't block other writers that aren't
