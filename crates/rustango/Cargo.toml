@@ -77,6 +77,12 @@ serializer = ["forms"]
 # backend is behind the separate `cache-redis` feature.
 cache = ["dep:async-trait", "dep:tokio"]
 
+# Per-view caching tower layer (`rustango::cache_page`) — Django's
+# @cache_page / @cache_control / @vary_on_headers analogs. Implies
+# `cache` (cache backend) + `admin` (axum types) + base64 for body
+# round-trip serialization. Issue #55.
+cache-page = ["cache", "admin", "dep:base64"]
+
 # Signals layer (`rustango::signals`) — Django-shape pre_save / post_save
 # / pre_delete / post_delete async dispatch. Receivers register globally
 # per model type; senders fire signals after write paths.
