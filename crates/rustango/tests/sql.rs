@@ -593,6 +593,7 @@ fn empty_select() -> SelectQuery {
         order_by: vec![],
         limit: None,
         offset: None,
+        lock_mode: None,
     }
 }
 
@@ -810,6 +811,7 @@ fn empty_post_select() -> SelectQuery {
         order_by: vec![],
         limit: None,
         offset: None,
+        lock_mode: None,
     }
 }
 

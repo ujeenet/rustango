@@ -415,6 +415,47 @@ pub struct SelectQuery {
     pub order_by: Vec<OrderItem>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    /// Row-lock mode appended after LIMIT/OFFSET — Django's
+    /// `select_for_update(skip_locked=, of=, nowait=, no_key=)`. Issue
+    /// #21. `None` (default) emits no lock clause. Must run inside a
+    /// transaction on PG and MySQL; SQLite has no row-level lock
+    /// syntax (transaction-scope locks are implicit), so the writer
+    /// no-ops on that backend.
+    pub lock_mode: Option<LockMode>,
+}
+
+/// `SELECT … FOR UPDATE` row-lock options — Django's
+/// `QuerySet.select_for_update(skip_locked=, nowait=, of=, no_key=)`.
+/// Issue #21.
+///
+/// `#[non_exhaustive]` — future per-backend lock flags (e.g. PG's
+/// `FOR KEY SHARE`, MySQL's `LOCK IN SHARE MODE`) can be added without
+/// breaking downstream code that constructs `LockMode { … }` directly.
+/// Build via [`LockMode::default`] + field assignment, or chain the
+/// [`crate::query::QuerySet`] builder methods (`.select_for_update()`,
+/// `.skip_locked()`, `.nowait()`, `.no_key()`, `.of(…)`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LockMode {
+    /// PG 9.3+: `FOR NO KEY UPDATE` instead of `FOR UPDATE`. Holds a
+    /// weaker lock that doesn't block other writers that aren't
+    /// touching the row's PK / unique columns. MySQL has no
+    /// equivalent — the writer falls back to `FOR UPDATE`.
+    pub no_key: bool,
+    /// PG / MySQL 8+: `SKIP LOCKED`. Rows currently locked by another
+    /// transaction are silently filtered out instead of waiting.
+    /// Canonical "claim next available row" pattern.
+    pub skip_locked: bool,
+    /// PG / MySQL 8+: `NOWAIT`. Returns an error immediately if any
+    /// row in the result set is currently locked. Mutually exclusive
+    /// with `skip_locked` at the database level — if both are set,
+    /// the writer emits `SKIP LOCKED` (the more permissive option).
+    pub nowait: bool,
+    /// PG 9.3+: `FOR UPDATE OF table1, table2, …`. Restricts the lock
+    /// to the named tables when the query JOINs. Aliases / table
+    /// names go in; empty vec emits no `OF` clause. MySQL accepts
+    /// `OF` since 8.0.1. SQLite no-op.
+    pub of: Vec<&'static str>,
 }
 
 /// PartialEq for `SelectQuery` — needed so [`crate::core::Expr`] (which
@@ -433,6 +474,7 @@ impl PartialEq for SelectQuery {
             && self.order_by == other.order_by
             && self.limit == other.limit
             && self.offset == other.offset
+            && self.lock_mode == other.lock_mode
     }
 }
 
