@@ -1,5 +1,5 @@
-//! Tests for `ContentType::for_models_pool` batch lookup and the
-//! `for_model_cached_pool` / `by_natural_key_cached_pool` cache layer
+//! Tests for `ContentType::get_for_models` batch lookup and the
+//! `get_for_model` / `get_by_natural_key` cache layer
 //! (issue #35). Runs against in-memory SQLite — no infra needed.
 
 #![cfg(feature = "sqlite")]
@@ -45,21 +45,21 @@ async fn sqlite_pool() -> Pool {
 /// Batch lookup returns one entry per requested pair that exists.
 /// Both `&str` literals and `String` values are accepted.
 #[tokio::test]
-async fn for_models_pool_returns_matching_rows() {
+async fn get_for_models_returns_matching_rows() {
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
 
     // &str literals — the primary ergonomic form.
     let cts =
-        ContentType::for_models_pool(&pool, [("ct_bc_blog", "post"), ("ct_bc_blog", "author")])
+        ContentType::get_for_models(&pool, [("ct_bc_blog", "post"), ("ct_bc_blog", "author")])
             .await
-            .expect("for_models_pool with &str pairs");
+            .expect("get_for_models with &str pairs");
     assert_eq!(cts.len(), 2, "both &str pairs should resolve");
     assert!(cts.contains_key(&("ct_bc_blog".into(), "post".into())));
     assert!(cts.contains_key(&("ct_bc_blog".into(), "author".into())));
 
     // String values also accepted.
-    let cts2 = ContentType::for_models_pool(
+    let cts2 = ContentType::get_for_models(
         &pool,
         [
             ("ct_bc_blog".to_string(), "post".to_string()),
@@ -67,7 +67,7 @@ async fn for_models_pool_returns_matching_rows() {
         ],
     )
     .await
-    .expect("for_models_pool with String pairs");
+    .expect("get_for_models with String pairs");
     assert_eq!(cts2.len(), 2, "both String pairs should resolve");
 }
 
@@ -75,13 +75,12 @@ async fn for_models_pool_returns_matching_rows() {
 /// shape Django's `get_for_models` returns when a model isn't
 /// migrated yet.
 #[tokio::test]
-async fn for_models_pool_omits_unknown_pairs() {
+async fn get_for_models_omits_unknown_pairs() {
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
-    let cts =
-        ContentType::for_models_pool(&pool, [("ct_bc_blog", "post"), ("nonexistent", "nope")])
-            .await
-            .expect("for_models_pool");
+    let cts = ContentType::get_for_models(&pool, [("ct_bc_blog", "post"), ("nonexistent", "nope")])
+        .await
+        .expect("get_for_models");
     assert_eq!(cts.len(), 1, "only the registered pair should appear");
     assert!(cts.contains_key(&("ct_bc_blog".into(), "post".into())));
     assert!(!cts.contains_key(&("nonexistent".into(), "nope".into())));
@@ -90,10 +89,10 @@ async fn for_models_pool_omits_unknown_pairs() {
 /// Empty input → empty output, no DB round trip (caller can skip
 /// the lookup entirely when they have nothing to ask about).
 #[tokio::test]
-async fn for_models_pool_empty_input_is_empty_output() {
+async fn get_for_models_empty_input_is_empty_output() {
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
-    let cts = ContentType::for_models_pool(&pool, std::iter::empty::<(String, String)>())
+    let cts = ContentType::get_for_models(&pool, std::iter::empty::<(String, String)>())
         .await
         .expect("empty");
     assert!(cts.is_empty());
@@ -102,14 +101,14 @@ async fn for_models_pool_empty_input_is_empty_output() {
 /// Cached lookup returns the same ContentType row as the uncached
 /// path — the cache doesn't change semantics, only speed.
 #[tokio::test]
-async fn by_natural_key_cached_matches_uncached() {
+async fn get_by_natural_key_matches_uncached() {
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
     let uncached = ContentType::by_natural_key_pool(&pool, "ct_bc_blog", "post")
         .await
         .expect("uncached lookup")
         .expect("Post is seeded");
-    let cached = ContentType::by_natural_key_cached_pool(&pool, "ct_bc_blog", "post")
+    let cached = ContentType::get_by_natural_key(&pool, "ct_bc_blog", "post")
         .await
         .expect("cached lookup")
         .expect("Post is seeded");
@@ -123,10 +122,10 @@ async fn by_natural_key_cached_matches_uncached() {
 /// dropping the table after the first call and seeing the second
 /// still succeed.
 #[tokio::test]
-async fn cached_lookup_serves_from_cache_on_repeat() {
+async fn get_by_natural_key_serves_from_cache_on_repeat() {
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
-    let _ = ContentType::by_natural_key_cached_pool(&pool, "ct_bc_blog", "post")
+    let _ = ContentType::get_by_natural_key(&pool, "ct_bc_blog", "post")
         .await
         .expect("first call populates cache")
         .expect("post seeded");
@@ -139,7 +138,7 @@ async fn cached_lookup_serves_from_cache_on_repeat() {
             .expect("drop");
     }
 
-    let second = ContentType::by_natural_key_cached_pool(&pool, "ct_bc_blog", "post")
+    let second = ContentType::get_by_natural_key(&pool, "ct_bc_blog", "post")
         .await
         .expect("second call hits cache, no DB")
         .expect("cache still has it");
@@ -153,7 +152,7 @@ async fn cached_lookup_serves_from_cache_on_repeat() {
 async fn clear_cache_forces_db_round_trip_again() {
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
-    let _ = ContentType::by_natural_key_cached_pool(&pool, "ct_bc_blog", "post")
+    let _ = ContentType::get_by_natural_key(&pool, "ct_bc_blog", "post")
         .await
         .expect("populate cache");
 
@@ -170,7 +169,7 @@ async fn clear_cache_forces_db_round_trip_again() {
 
     // clear_cache → next call hits the empty table → None.
     contenttypes::clear_cache();
-    let after = ContentType::by_natural_key_cached_pool(&pool, "ct_bc_blog", "post")
+    let after = ContentType::get_by_natural_key(&pool, "ct_bc_blog", "post")
         .await
         .expect("lookup ok");
     assert!(after.is_none(), "cache cleared + table empty → None");
@@ -183,7 +182,7 @@ async fn negative_results_are_not_cached() {
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
     // First lookup against an unknown pair → None.
-    let r1 = ContentType::by_natural_key_cached_pool(&pool, "ghost_app", "ghost_model")
+    let r1 = ContentType::get_by_natural_key(&pool, "ghost_app", "ghost_model")
         .await
         .expect("ok");
     assert!(r1.is_none());
@@ -200,7 +199,7 @@ async fn negative_results_are_not_cached() {
     }
 
     // Second lookup must find it (the None wasn't cached).
-    let r2 = ContentType::by_natural_key_cached_pool(&pool, "ghost_app", "ghost_model")
+    let r2 = ContentType::get_by_natural_key(&pool, "ghost_app", "ghost_model")
         .await
         .expect("ok")
         .expect("Some now");
@@ -208,13 +207,13 @@ async fn negative_results_are_not_cached() {
     assert_eq!(r2.model_name, "ghost_model");
 }
 
-/// `for_model_cached_pool::<T>` returns the same row as the uncached
+/// `get_for_model::<T>` returns the same row as the uncached
 /// `for_model_pool::<T>` and uses the natural-key cache.
 #[tokio::test]
-async fn for_model_cached_pool_resolves_type() {
+async fn get_for_model_resolves_type() {
     contenttypes::clear_cache();
     let pool = sqlite_pool().await;
-    let cached = ContentType::for_model_cached_pool::<Post>(&pool)
+    let cached = ContentType::get_for_model::<Post>(&pool)
         .await
         .expect("cached for_model")
         .expect("Post is seeded");

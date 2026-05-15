@@ -249,7 +249,7 @@ impl ContentType {
     /// use rustango::contenttypes::ContentType;
     ///
     /// // String literals work directly — no `.to_string()` needed.
-    /// let cts = ContentType::for_models_pool(
+    /// let cts = ContentType::get_for_models(
     ///     &pool,
     ///     [("blog", "post"), ("blog", "author"), ("auth", "user")],
     /// ).await?;
@@ -258,7 +258,7 @@ impl ContentType {
     ///
     /// # Errors
     /// As [`Self::all_pool`].
-    pub async fn for_models_pool<A, B, I>(
+    pub async fn get_for_models<A, B, I>(
         pool: &crate::sql::Pool,
         pairs: I,
     ) -> Result<std::collections::HashMap<(String, String), Self>, ExecError>
@@ -304,8 +304,8 @@ impl ContentType {
 // ============================================================ #35 — in-process cache
 
 /// Process-wide cache of `(app_label, model_name) → ContentType`.
-/// Read-mostly: populated lazily by [`ContentType::for_model_cached_pool`]
-/// / [`ContentType::by_natural_key_cached_pool`], invalidated wholesale
+/// Read-mostly: populated lazily by [`ContentType::get_for_model`]
+/// / [`ContentType::get_by_natural_key`], invalidated wholesale
 /// by [`clear_cache`]. The cache is keyed by the natural key, not by
 /// Rust `TypeId`, so cached entries survive across tenants /
 /// rebinds / hot-reloads — the bottleneck is the DB lookup, not the
@@ -343,7 +343,7 @@ impl ContentType {
     ///
     /// # Errors
     /// As [`Self::by_natural_key_pool`].
-    pub async fn by_natural_key_cached_pool(
+    pub async fn get_by_natural_key(
         pool: &crate::sql::Pool,
         app_label: &str,
         model_name: &str,
@@ -373,11 +373,11 @@ impl ContentType {
 
     /// Cached counterpart of [`Self::for_model_pool`] — issue #35.
     /// Resolves `T` to its natural key via the model registry, then
-    /// delegates to [`Self::by_natural_key_cached_pool`].
+    /// delegates to [`Self::get_by_natural_key`].
     ///
     /// # Errors
     /// As [`Self::for_model_pool`].
-    pub async fn for_model_cached_pool<T: crate::core::Model>(
+    pub async fn get_for_model<T: crate::core::Model>(
         pool: &crate::sql::Pool,
     ) -> Result<Option<Self>, ExecError> {
         let entry = inventory::iter::<ModelEntry>
@@ -388,7 +388,7 @@ impl ContentType {
             })?;
         let app = entry.resolved_app_label().unwrap_or("project");
         let name = T::SCHEMA.name.to_ascii_lowercase();
-        Self::by_natural_key_cached_pool(pool, app, &name).await
+        Self::get_by_natural_key(pool, app, &name).await
     }
 }
 

@@ -1073,18 +1073,18 @@ use rustango::contenttypes::ContentType;
 let ct = ContentType::for_model_pool::<Post>(&pool).await?;  // Option<ContentType>
 
 // By Rust type (cached — issue #35)
-let ct = ContentType::for_model_cached_pool::<Post>(&pool).await?;
+let ct = ContentType::get_for_model::<Post>(&pool).await?;
 
 // By natural key — uncached and cached forms
 let ct = ContentType::by_natural_key_pool(&pool, "blog", "post").await?;
-let ct = ContentType::by_natural_key_cached_pool(&pool, "blog", "post").await?;
+let ct = ContentType::get_by_natural_key(&pool, "blog", "post").await?;
 
 // By id
 let ct = ContentType::by_id_pool(&pool, 7).await?;
 
 // Batch lookup (issue #35) — one DB round trip for N models
 use std::collections::HashMap;
-let cts: HashMap<(String, String), ContentType> = ContentType::for_models_pool(
+let cts: HashMap<(String, String), ContentType> = ContentType::get_for_models(
     &pool,
     [("blog".to_string(), "post".to_string()), ("auth".to_string(), "user".to_string())],
 ).await?;
