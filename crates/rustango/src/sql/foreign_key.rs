@@ -299,7 +299,7 @@ where
                     table: T::SCHEMA.table,
                 })?;
             let mut rows: Vec<T> = QuerySet::<T>::new()
-                .filter(pk_field.column, Op::Eq, pk.clone())
+                .filter_op(pk_field.column, Op::Eq, pk.clone())
                 .fetch_on(executor)
                 .await?;
             let value = rows.pop().ok_or_else(|| {
@@ -368,7 +368,7 @@ where
                     table: T::SCHEMA.table,
                 })?;
             let mut rows: Vec<T> = QuerySet::<T>::new()
-                .filter(pk_field.column, Op::Eq, pk.clone())
+                .filter_op(pk_field.column, Op::Eq, pk.clone())
                 .fetch_pool(pool)
                 .await?;
             let value = rows.pop().ok_or_else(|| {

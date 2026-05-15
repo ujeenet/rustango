@@ -112,7 +112,7 @@ async fn fetched_book_has_unloaded_fk_then_get_resolves_parent() {
 
     // Round-trip via fetch — confirms FromRow lands in Unloaded.
     let mut fetched: Vec<Book> = Book::objects()
-        .filter("id", Op::Eq, book.id)
+        .filter_op("id", Op::Eq, book.id)
         .fetch(&pool)
         .await
         .unwrap();
@@ -260,7 +260,7 @@ async fn string_pk_fk_round_trips_with_lazy_load() {
 
     // Round-trip through fetch — confirms FromRow decodes a String FK.
     let mut rows: Vec<StrPost> = StrPost::objects()
-        .filter("id", Op::Eq, post.id)
+        .filter_op("id", Op::Eq, post.id)
         .fetch(&pool)
         .await
         .unwrap();

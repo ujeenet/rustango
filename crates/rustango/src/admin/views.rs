@@ -220,17 +220,16 @@ pub(crate) async fn table_view(
     };
     let joins = build_fk_joins(&state, model);
     // Default ordering: PK ASC unless `admin.ordering` overrides.
-    let order_by: Vec<crate::core::OrderClause> = if admin_cfg.ordering.is_empty() {
+    let order_by: Vec<crate::core::OrderItem> = if admin_cfg.ordering.is_empty() {
         Vec::new()
     } else {
         admin_cfg
             .ordering
             .iter()
             .filter_map(|(name, desc)| {
-                model.field(name).map(|f| crate::core::OrderClause {
-                    column: f.column,
-                    desc: *desc,
-                })
+                model
+                    .field(name)
+                    .map(|f| crate::core::OrderItem::column(f.column, *desc))
             })
             .collect()
     };

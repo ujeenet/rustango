@@ -1,3 +1,4 @@
+#![allow(irrefutable_let_patterns)] // Pool enum is single-variant in sqlite-only builds; pattern is refutable on multi-backend builds.
 //! Live integration tests for the tri-dialect `permissions::*_pool`
 //! family on SQLite — proves slice 25's new `_pool` companions
 //! (`has_perm_pool`, `has_any_perm_pool`, `has_all_perms_pool`,

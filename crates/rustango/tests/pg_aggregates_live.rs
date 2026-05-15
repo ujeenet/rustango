@@ -74,7 +74,8 @@ fn agg_per_author(expr: AggregateExpr, alias: &'static str) -> AggregateQuery {
         order_by: vec![rustango::core::OrderClause {
             column: "author",
             desc: false,
-        }],
+        }
+        .into()],
         limit: None,
         offset: None,
     }

@@ -61,7 +61,7 @@ fn o2o_defaults_on_to_id() {
 fn objects_compiles_with_resolved_columns() {
     let q = User::objects()
         .eq("name", "alice")
-        .filter("is_active", Op::Eq, true)
+        .filter_op("is_active", Op::Eq, true)
         .compile()
         .unwrap();
 
@@ -104,7 +104,7 @@ fn type_mismatch_is_rejected_at_compile() {
 #[test]
 fn null_value_skips_type_check() {
     let q = User::objects()
-        .filter("name", Op::Eq, Option::<String>::None)
+        .filter_op("name", Op::Eq, Option::<String>::None)
         .compile()
         .unwrap();
     assert_eq!(

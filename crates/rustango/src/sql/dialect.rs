@@ -189,6 +189,26 @@ pub trait Dialect {
         false
     }
 
+    /// `true` if the dialect understands the `ORDER BY … NULLS
+    /// FIRST|LAST` keyword (issue #76). Postgres + SQLite yes;
+    /// MySQL no — there the writer emulates `NULLS FIRST/LAST`
+    /// with an `<col> IS NULL` pre-sort term:
+    ///
+    /// - `NULLS FIRST` on `ASC`: emit `<col> IS NULL DESC, <col> ASC`
+    /// - `NULLS LAST`  on `ASC`: emit `<col> IS NULL ASC,  <col> ASC`
+    /// - same pattern for DESC.
+    fn supports_nulls_order(&self) -> bool {
+        true
+    }
+
+    /// SQL identifier for the dialect's "random number" function used
+    /// by `ORDER BY RANDOM()` (issue #77). PG + SQLite expose
+    /// `RANDOM()`; MySQL is the outlier with `RAND()`. Default:
+    /// `RANDOM` (covers PG + SQLite; MySQL overrides).
+    fn random_fn(&self) -> &'static str {
+        "RANDOM"
+    }
+
     /// Wrap a SUM expression in a cast back to BIGINT. PostgreSQL's
     /// SUM(BIGINT) is NUMERIC and MySQL's is DECIMAL — both fall
     /// through to Null in the aggregate row decoder which only tries

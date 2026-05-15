@@ -98,7 +98,7 @@ async fn read_pipeline_filters_and_in_clause() {
     };
 
     let actives: Vec<LiveUser> = LiveUser::objects()
-        .filter("is_active", Op::Eq, true)
+        .filter_op("is_active", Op::Eq, true)
         .fetch(&pool)
         .await
         .unwrap();
@@ -108,7 +108,7 @@ async fn read_pipeline_filters_and_in_clause() {
     assert!(actives.iter().all(|u| u.is_active));
 
     let picked: Vec<LiveUser> = LiveUser::objects()
-        .filter(
+        .filter_op(
             "id",
             Op::In,
             SqlValue::List(vec![SqlValue::I64(1), SqlValue::I64(3)]),
@@ -263,7 +263,7 @@ async fn bulk_delete_with_in_clause_removes_listed_rows() {
     };
 
     let affected = LiveUser::objects()
-        .filter(
+        .filter_op(
             "id",
             Op::In,
             SqlValue::List(vec![SqlValue::I64(1), SqlValue::I64(3)]),
@@ -603,7 +603,7 @@ async fn typed_filter_validates_at_compile_runtime_match() {
 
     let rows: Vec<LiveUser> = LiveUser::objects()
         .where_(LiveUser::is_active.eq(true))
-        .filter("name", Op::Like, "alic%")
+        .filter_op("name", Op::Like, "alic%")
         .fetch(&pool)
         .await
         .unwrap();

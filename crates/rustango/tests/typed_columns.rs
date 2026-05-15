@@ -90,7 +90,7 @@ fn typed_filters_can_be_mixed_with_string_keyed_in_order() {
     let q = User::objects()
         .eq("name", "alice")
         .where_(User::is_active.eq(true))
-        .filter("id", Op::Gt, 0_i64)
+        .filter_op("id", Op::Gt, 0_i64)
         .compile()
         .unwrap();
     let filters = q.where_clause.as_flat_and().unwrap();
@@ -111,7 +111,7 @@ fn typed_filters_compile_to_same_postgres_sql() {
 
     let string_keyed = User::objects()
         .eq("name", "alice")
-        .filter("is_active", Op::Eq, true)
+        .filter_op("is_active", Op::Eq, true)
         .compile()
         .unwrap();
     let stmt_string = Postgres.compile_select(&string_keyed).unwrap();

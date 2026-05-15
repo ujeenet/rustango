@@ -77,7 +77,7 @@ use axum::Router;
 use serde_json::Value;
 use tera::{Context, Tera};
 
-use crate::core::{Filter, ModelSchema, Op, OrderClause, SelectQuery, SqlValue, WhereExpr};
+use crate::core::{Filter, ModelSchema, Op, SelectQuery, SqlValue, WhereExpr};
 use crate::sql::Pool;
 use crate::sql::{count_rows_pool, select_one_row_as_json_pool, select_rows_as_json_pool};
 
@@ -2029,7 +2029,7 @@ fn rerender_form(
 fn resolve_order_by(
     schema: &'static ModelSchema,
     spec: &[(String, bool)],
-) -> Result<Vec<OrderClause>, String> {
+) -> Result<Vec<crate::core::OrderItem>, String> {
     if spec.is_empty() {
         return Ok(default_order_by(schema));
     }
@@ -2045,10 +2045,7 @@ fn resolve_order_by(
                     name, schema.table
                 )
             })?;
-        out.push(OrderClause {
-            column: field.column,
-            desc: *desc,
-        });
+        out.push(crate::core::OrderItem::column(field.column, *desc));
     }
     Ok(out)
 }
@@ -2063,12 +2060,9 @@ fn resolve_order_by(
 /// Models without a primary key fall through to an empty clause —
 /// the application is on its own (and pagination on a PK-less model
 /// is unusual anyway).
-fn default_order_by(schema: &'static ModelSchema) -> Vec<OrderClause> {
+fn default_order_by(schema: &'static ModelSchema) -> Vec<crate::core::OrderItem> {
     match schema.primary_key() {
-        Some(pk) => vec![OrderClause {
-            column: pk.column,
-            desc: false,
-        }],
+        Some(pk) => vec![crate::core::OrderItem::column(pk.column, false)],
         None => Vec::new(),
     }
 }
@@ -2110,7 +2104,7 @@ fn resolve_active_order(
     builder_spec: &[(String, bool)],
     ordering_fields: &[String],
     params: &HashMap<String, String>,
-) -> Result<(Vec<OrderClause>, String), String> {
+) -> Result<(Vec<crate::core::OrderItem>, String), String> {
     // URL override path.
     if let Some(raw) = params.get("ordering").filter(|s| !s.is_empty()) {
         let (name, desc) = if let Some(rest) = raw.strip_prefix('-') {
@@ -2121,10 +2115,7 @@ fn resolve_active_order(
         if ordering_fields.iter().any(|f| f == name) {
             if let Some(field) = schema.field(name) {
                 return Ok((
-                    vec![OrderClause {
-                        column: field.column,
-                        desc,
-                    }],
+                    vec![crate::core::OrderItem::column(field.column, desc)],
                     raw.clone(),
                 ));
             }
@@ -3609,8 +3600,8 @@ mod tests {
         let s = schema_two_fields();
         let r = resolve_order_by(s, &[("title".into(), false)]).unwrap();
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].column, "title");
-        assert!(!r[0].desc);
+        assert_eq!(r[0].column_name(), Some("title"));
+        assert!(!r[0].is_desc());
     }
 
     /// Unknown field name surfaces a clear error string instead of
@@ -3631,8 +3622,8 @@ mod tests {
         let s = schema_two_fields();
         let out = resolve_order_by(s, &[]).unwrap();
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].column, "id");
-        assert!(!out[0].desc, "PK fallback is ASC");
+        assert_eq!(out[0].column_name(), Some("id"));
+        assert!(!out[0].is_desc(), "PK fallback is ASC");
     }
 
     /// `ListView` builder accepts filter_fields + search_fields.
@@ -4490,8 +4481,8 @@ mod tests {
         params.insert("ordering".into(), "title".into());
         let (clauses, active) = resolve_active_order(s, &[], &["title".into()], &params).unwrap();
         assert_eq!(clauses.len(), 1);
-        assert_eq!(clauses[0].column, "title");
-        assert!(!clauses[0].desc);
+        assert_eq!(clauses[0].column_name(), Some("title"));
+        assert!(!clauses[0].is_desc());
         assert_eq!(active, "title");
     }
 
@@ -4502,8 +4493,8 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("ordering".into(), "-title".into());
         let (clauses, active) = resolve_active_order(s, &[], &["title".into()], &params).unwrap();
-        assert_eq!(clauses[0].column, "title");
-        assert!(clauses[0].desc);
+        assert_eq!(clauses[0].column_name(), Some("title"));
+        assert!(clauses[0].is_desc());
         assert_eq!(active, "-title");
     }
 
@@ -4532,8 +4523,8 @@ mod tests {
         let (clauses, active) = resolve_active_order(s, &[], &["title".into()], &params).unwrap();
         // PK-ASC fallback.
         assert_eq!(clauses.len(), 1);
-        assert_eq!(clauses[0].column, "id");
-        assert!(!clauses[0].desc);
+        assert_eq!(clauses[0].column_name(), Some("id"));
+        assert!(!clauses[0].is_desc());
         assert_eq!(active, "");
     }
 

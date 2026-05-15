@@ -119,6 +119,31 @@ pub enum WhereExpr {
     Or(Vec<WhereExpr>),
     /// Logical negation. Emits `NOT (child)`.
     Not(Box<WhereExpr>),
+    /// `EXISTS (<subquery>)` — issue #5. True when the inner
+    /// `SelectQuery` returns at least one row. Boxed because
+    /// `SelectQuery` already carries its own `WhereExpr`, which would
+    /// make the enum size unbounded otherwise.
+    Exists(Box<SelectQuery>),
+    /// `NOT EXISTS (<subquery>)` — issue #5. Django's `~Exists` shorthand.
+    NotExists(Box<SelectQuery>),
+    /// `<col> IN (<subquery>)` / `<col> NOT IN (<subquery>)` — issue
+    /// #5. Sibling to `Op::In` / `Op::NotIn` over a literal list, but
+    /// the RHS is a correlated or non-correlated SELECT.
+    InSubquery {
+        column: &'static str,
+        negated: bool,
+        subquery: Box<SelectQuery>,
+    },
+    /// `<lhs-expr> <op> <rhs-expr>` — both sides arbitrary [`Expr`]s
+    /// (issue #80). Used inside JOIN `ON` predicates where one or
+    /// both sides typically need to be qualified with a table alias
+    /// (via [`Expr::AliasedColumn`]) — outside JOIN context the
+    /// narrower [`ColumnFilter`] variant remains the right tool.
+    ///
+    /// Only the binary-comparison ops (`Eq`, `Ne`, `Lt`, `Lte`,
+    /// `Gt`, `Gte`) make sense here; the writer rejects other ops
+    /// the same way it does for `ColumnFilter`.
+    ExprCompare { lhs: Expr, op: Op, rhs: Expr },
 }
 
 impl WhereExpr {
@@ -176,8 +201,15 @@ impl WhereExpr {
             // `Filter` (the rhs is an `Expr`, not a `SqlValue`), so the
             // flat-AND view can't surface it as a `&Filter` reference.
             // Callers using `as_flat_and` only handle literal `Filter`
-            // predicates anyway.
-            Self::ColumnCompare(_) | Self::Or(_) | Self::Not(_) => None,
+            // predicates anyway. Subquery-shaped predicates (#5) also
+            // fall outside the legacy flat-AND view.
+            Self::ColumnCompare(_)
+            | Self::Or(_)
+            | Self::Not(_)
+            | Self::Exists(_)
+            | Self::NotExists(_)
+            | Self::InSubquery { .. }
+            | Self::ExprCompare { .. } => None,
         }
     }
 
@@ -217,6 +249,29 @@ impl WhereExpr {
                 Ok(())
             }
             Self::Not(child) => child.validate(model),
+            // Subquery predicates (#5) validate their inner SELECT
+            // against the inner SELECT's own model — that walk runs
+            // when the inner queryset was compiled. From the outer
+            // model's perspective there is nothing to check beyond
+            // the column on the LHS of `InSubquery`.
+            Self::Exists(_) | Self::NotExists(_) => Ok(()),
+            Self::InSubquery { column, .. } => {
+                if model.field_by_column(column).is_none() {
+                    return Err(QueryError::UnknownField {
+                        model: model.name,
+                        field: (*column).to_owned(),
+                    });
+                }
+                Ok(())
+            }
+            // ExprCompare is used inside JOIN ON predicates where both
+            // sides typically carry their own table alias via
+            // `Expr::AliasedColumn`. Validating against a single
+            // `model` would either be wrong (mismatching alias) or
+            // duplicate work (the alias-side schema isn't reachable
+            // here). Surface column typos at runtime; the JOIN writer
+            // emits clean SQL on the happy path.
+            Self::ExprCompare { .. } => Ok(()),
         }
     }
 }
@@ -246,6 +301,55 @@ fn validate_expr_columns(model: &'static ModelSchema, expr: &Expr) -> Result<(),
             }
             Ok(())
         }
+        Expr::Case { branches, default } => {
+            for b in branches {
+                b.condition.validate(model)?;
+                validate_expr_columns(model, &b.then)?;
+            }
+            if let Some(d) = default {
+                validate_expr_columns(model, d)?;
+            }
+            Ok(())
+        }
+        // Inner subquery validates against its own model when the
+        // user compiles it; nothing to check from the outer model
+        // beyond that. `OuterRef` names a column on the outer
+        // model — and from the perspective of the inner-walk it's
+        // a free name; the outer query's compile() validates it
+        // against the outer schema when it embeds this subquery.
+        // `AliasedColumn` (issue #80) carries its own table alias so
+        // it doesn't resolve against the passed-in model.
+        Expr::Subquery(_) | Expr::OuterRef(_) | Expr::AliasedColumn { .. } => Ok(()),
+        // Window (issue #7) — args / partition_by / order_by all
+        // reference the outer model's columns. Validate them.
+        Expr::Window(w) => {
+            for col in &w.partition_by {
+                if model.field_by_column(col).is_none() {
+                    return Err(QueryError::UnknownField {
+                        model: model.name,
+                        field: (*col).to_owned(),
+                    });
+                }
+            }
+            for o in &w.order_by {
+                if model.field_by_column(o.column).is_none() {
+                    return Err(QueryError::UnknownField {
+                        model: model.name,
+                        field: o.column.to_owned(),
+                    });
+                }
+            }
+            for arg in &w.args {
+                validate_expr_columns(model, arg)?;
+            }
+            Ok(())
+        }
+        // Aggregate (issue #74) — bare-column args (Sum("col"), etc.)
+        // hold raw `&'static str` names that this validator doesn't
+        // visit today; that's a pre-existing gap. Window-shaped
+        // aggregates are validated via the dedicated walker called
+        // from AggregateBuilder::compile().
+        Expr::Aggregate(_) => Ok(()),
     }
 }
 
@@ -280,14 +384,51 @@ pub struct SelectQuery {
     pub search: Option<SearchClause>,
     pub joins: Vec<Join>,
     /// `ORDER BY` clauses, in the order they should appear in SQL.
-    /// Slice 9.0b. Emitted after WHERE / JOIN / GROUP BY but before
-    /// LIMIT / OFFSET. Empty = no `ORDER BY` (existing behaviour).
-    pub order_by: Vec<OrderClause>,
+    /// Slice 9.0b + issue #76. Emitted after WHERE / JOIN / GROUP BY
+    /// but before LIMIT / OFFSET. Empty = no `ORDER BY`.
+    pub order_by: Vec<OrderItem>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
 
-/// Single column in an `ORDER BY` clause. Slice 9.0b.
+/// PartialEq for `SelectQuery` — needed so [`crate::core::Expr`] (which
+/// embeds `Box<SelectQuery>` for issue #5 subqueries) can keep its
+/// `#[derive(PartialEq)]`. `ModelSchema` doesn't implement `PartialEq`
+/// (its fields are heterogeneous + behind static refs), so the `model`
+/// pointer is compared by identity — two queries against the same
+/// schema register equal, which matches every legitimate use case
+/// since model schemas are singletons.
+impl PartialEq for SelectQuery {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.model, other.model)
+            && self.where_clause == other.where_clause
+            && self.search == other.search
+            && self.joins == other.joins
+            && self.order_by == other.order_by
+            && self.limit == other.limit
+            && self.offset == other.offset
+    }
+}
+
+/// Same ptr-eq treatment for `Join` — it also holds `&'static
+/// ModelSchema` (the join target).
+impl PartialEq for Join {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.target, other.target)
+            && self.alias == other.alias
+            && self.kind == other.kind
+            && self.on == other.on
+            && self.project == other.project
+    }
+}
+
+/// Single column in an `ORDER BY` clause. Slice 9.0b — the simple
+/// "field name + ASC/DESC" form that pre-dates [`OrderItem`].
+///
+/// New code should prefer [`OrderItem`] (issue #76) which adds Expr
+/// items and `NULLS FIRST/LAST` control. `OrderClause` remains as a
+/// convenience-constructor and converts via `Into<OrderItem>` for
+/// every `SelectQuery` / `AggregateQuery` / window-OVER ORDER BY slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderClause {
     /// SQL column name on the main table — already resolved by
@@ -298,22 +439,192 @@ pub struct OrderClause {
     pub desc: bool,
 }
 
-/// A `LEFT JOIN` against a target model.
+/// Where NULLs sort relative to non-NULL values. Issue #76.
 ///
-/// The writer emits `LEFT JOIN "<target.table>" AS "<alias>" ON
-/// "<main>"."<on_local>" = "<alias>"."<on_remote>"`, and includes each
-/// `project` column in the SELECT list aliased as
-/// `"<alias>"."<col>" AS "<alias>__<col>"`. Callers read joined values
-/// from the resulting `PgRow` by the suffixed name.
+/// Default semantics differ per dialect: PG and SQLite sort NULLs
+/// LAST on `ASC` and FIRST on `DESC` (the SQL-standard); MySQL
+/// treats NULLs as smaller than every value so they land FIRST on
+/// `ASC` and LAST on `DESC`. Pinning the order explicitly via
+/// `First` or `Last` produces consistent behavior across all three
+/// dialects (the writer emits `IFNULL(…)` workarounds on MySQL,
+/// which has no native `NULLS FIRST`/`NULLS LAST` keywords).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NullsOrder {
+    /// Backend's native default — emits no `NULLS …` clause.
+    #[default]
+    Default,
+    /// `NULLS FIRST` on PG/SQLite; emulated via `IFNULL(col, '') = ''
+    /// DESC, …` style trick on MySQL.
+    First,
+    /// `NULLS LAST` on PG/SQLite; emulated on MySQL similarly.
+    Last,
+}
+
+/// One item in a generalized `ORDER BY` list (issue #76). Carries
+/// either a plain column reference (with optional NULL-ordering) or
+/// an arbitrary [`Expr`] — `lower(col)`, `case(…)`, `F(a) + F(b)`,
+/// any builder result that lowers to `Expr`.
+///
+/// Old-shape `OrderClause` values convert into the `Column` variant
+/// via `Into<OrderItem>` so existing constructors keep working.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OrderItem {
+    /// `<col> [DESC] [NULLS FIRST|LAST]`. Equivalent of the legacy
+    /// `OrderClause` with the addition of `NullsOrder`.
+    Column {
+        column: &'static str,
+        desc: bool,
+        nulls: NullsOrder,
+    },
+    /// `<expr> [DESC] [NULLS FIRST|LAST]`. The `expr` is emitted via
+    /// the standard `Expr` writer, so function calls / `CASE` /
+    /// arithmetic / etc. all compose.
+    Expr {
+        expr: Expr,
+        desc: bool,
+        nulls: NullsOrder,
+    },
+    /// `ORDER BY RANDOM()` (PG / SQLite) or `ORDER BY RAND()` (MySQL).
+    /// Issue #77 — Django's `.order_by('?')` shape. No direction, no
+    /// NULLS clause: random ordering is by definition unordered, and
+    /// the random value is computed per-row so there are no NULLs.
+    ///
+    /// **Performance**: forces a full table scan + in-memory sort
+    /// by a per-row random key. The optimizer can't use an index.
+    /// For large tables, prefer a `WHERE pk >= rand_offset LIMIT N`
+    /// pattern instead.
+    Random,
+}
+
+impl From<OrderClause> for OrderItem {
+    fn from(c: OrderClause) -> Self {
+        Self::Column {
+            column: c.column,
+            desc: c.desc,
+            nulls: NullsOrder::Default,
+        }
+    }
+}
+
+impl OrderItem {
+    /// Convenience for the most-common case — `<col> [DESC]`, default
+    /// NULL ordering.
+    #[must_use]
+    pub fn column(column: &'static str, desc: bool) -> Self {
+        Self::Column {
+            column,
+            desc,
+            nulls: NullsOrder::Default,
+        }
+    }
+
+    /// Convenience for `<col> [DESC] [NULLS FIRST|LAST]`.
+    #[must_use]
+    pub fn column_with_nulls(column: &'static str, desc: bool, nulls: NullsOrder) -> Self {
+        Self::Column {
+            column,
+            desc,
+            nulls,
+        }
+    }
+
+    /// Convenience for `<expr> [DESC]` with default NULL ordering.
+    #[must_use]
+    pub fn expr(expr: Expr, desc: bool) -> Self {
+        Self::Expr {
+            expr,
+            desc,
+            nulls: NullsOrder::Default,
+        }
+    }
+
+    /// Convenience for `<expr> [DESC] [NULLS FIRST|LAST]`.
+    #[must_use]
+    pub fn expr_with_nulls(expr: Expr, desc: bool, nulls: NullsOrder) -> Self {
+        Self::Expr { expr, desc, nulls }
+    }
+
+    /// Construct a `Random` item — `ORDER BY RANDOM()` / `RAND()`.
+    /// Issue #77.
+    #[must_use]
+    pub fn random() -> Self {
+        Self::Random
+    }
+
+    /// Bare column name when this item is a `Column` variant; `None`
+    /// for `Expr` / `Random` variants. Used by callers that pre-dated
+    /// the enum (admin / template_views / older tests).
+    #[must_use]
+    pub fn column_name(&self) -> Option<&'static str> {
+        match self {
+            Self::Column { column, .. } => Some(column),
+            Self::Expr { .. } | Self::Random => None,
+        }
+    }
+
+    /// `true` if this item sorts descending. `Random` ordering has no
+    /// direction (it's unordered by definition) — returns `false`.
+    #[must_use]
+    pub fn is_desc(&self) -> bool {
+        match self {
+            Self::Column { desc, .. } | Self::Expr { desc, .. } => *desc,
+            Self::Random => false,
+        }
+    }
+
+    /// The `NullsOrder` setting for this item. `Random` returns
+    /// `Default` — the random key is per-row and non-NULL, so the
+    /// clause has no effect.
+    #[must_use]
+    pub fn nulls_order(&self) -> NullsOrder {
+        match self {
+            Self::Column { nulls, .. } | Self::Expr { nulls, .. } => *nulls,
+            Self::Random => NullsOrder::Default,
+        }
+    }
+}
+
+/// Which SQL `JOIN` keyword the writer should emit. Issue #80.
+///
+/// `Left` is the default — it matches the original FK-driven
+/// `select_related` semantics where every outer row is preserved
+/// regardless of whether a related row exists on the target side.
+/// `Inner` is the common ad-hoc-join shape (drop outer rows with no
+/// match). `Right` and `Full` are accepted by the IR but only emit
+/// successfully on dialects that support them — the writer raises
+/// [`crate::sql::SqlError::JoinKindNotSupported`] on attempts to
+/// emit `Right` on SQLite or `Full` on MySQL / SQLite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JoinKind {
+    Inner,
+    #[default]
+    Left,
+    Right,
+    Full,
+}
+
+/// A JOIN against a target model. Issue #80 generalized this from
+/// the original FK-only `LEFT JOIN main.fk = alias.target_pk` shape
+/// to carry an arbitrary `WhereExpr` predicate + an explicit
+/// [`JoinKind`].
+///
+/// The writer emits `<kind> JOIN "<target.table>" AS "<alias>" ON
+/// <on>` and includes each `project` column in the SELECT list
+/// aliased as `"<alias>"."<col>" AS "<alias>__<col>"`. Callers read
+/// joined values from the resulting row by the suffixed name.
 ///
 /// When a `SelectQuery` has any joins, the writer also qualifies the
 /// main table's columns as `"<table>"."<col>"` to avoid ambiguity.
+/// Cross-table column references inside `on` use
+/// [`Expr::AliasedColumn`] for explicit `<alias>.<col>` qualification.
+///
+/// [`Expr::AliasedColumn`]: crate::core::Expr::AliasedColumn
 #[derive(Debug, Clone)]
 pub struct Join {
     pub target: &'static ModelSchema,
-    pub on_local: &'static str,
-    pub on_remote: &'static str,
     pub alias: &'static str,
+    pub kind: JoinKind,
+    pub on: WhereExpr,
     pub project: Vec<&'static str>,
 }
 
@@ -535,7 +846,21 @@ pub struct BulkUpdateQuery {
 }
 
 /// One aggregate expression in an [`AggregateQuery`].
-#[derive(Debug, Clone)]
+///
+/// The flat variants (`Count`, `Sum`, etc.) emit the standard
+/// `AGG(col)` shape; the two recursive wrappers ([`Filtered`] and
+/// [`Coalesced`], issue #6) compose on top to add a `FILTER (WHERE …)`
+/// predicate or a `COALESCE(…, default)` empty-result fallback.
+///
+/// Build via the higher-level helpers in [`crate::core::aggregates`]
+/// (`count`/`sum`/`avg`/`max`/`min`/`count_distinct`/`stddev`/
+/// `stddev_pop`/`variance`/`variance_pop`) rather than constructing
+/// these variants directly — the builder enforces the right wrap
+/// order (`Coalesced` outside `Filtered`).
+///
+/// [`Filtered`]: AggregateExpr::Filtered
+/// [`Coalesced`]: AggregateExpr::Coalesced
+#[derive(Debug, Clone, PartialEq)]
 pub enum AggregateExpr {
     /// `COUNT(*)` or `COUNT(column)` when `column` is `Some`.
     Count(Option<&'static str>),
@@ -550,6 +875,43 @@ pub enum AggregateExpr {
     Max(&'static str),
     /// `MIN(column)`.
     Min(&'static str),
+    /// `STDDEV_SAMP(column)` — sample standard deviation. Issue #6.
+    /// Native on PG + MySQL 8+; the writer raises
+    /// [`crate::sql::SqlError::AggregateNotSupported`] on SQLite,
+    /// which has no built-in stddev (matches Django behavior).
+    StdDev(&'static str),
+    /// `STDDEV_POP(column)` — population standard deviation. Issue #6.
+    /// Same dialect-support story as [`StdDev`](AggregateExpr::StdDev).
+    StdDevPop(&'static str),
+    /// `VAR_SAMP(column)` — sample variance. Issue #6.
+    /// Same dialect-support story as [`StdDev`](AggregateExpr::StdDev).
+    Variance(&'static str),
+    /// `VAR_POP(column)` — population variance. Issue #6.
+    /// Same dialect-support story as [`StdDev`](AggregateExpr::StdDev).
+    VariancePop(&'static str),
+    /// `<inner> FILTER (WHERE <filter>)` on PG / SQLite (3.30+);
+    /// `<inner-with-CASE-WHEN-arg>` on MySQL. Issue #6. Wraps any
+    /// base aggregate (Count/Sum/Avg/Max/Min/CountDistinct/StdDev/
+    /// Variance/etc.) — nested `Filtered` is rejected at emit time
+    /// to keep emission unambiguous.
+    Filtered {
+        inner: Box<AggregateExpr>,
+        filter: WhereExpr,
+    },
+    /// `COALESCE(<inner>, <default>)` — empty-result fallback. Issue #6.
+    /// Always outermost when combined with `Filtered` (builder enforces
+    /// the order); nested `Coalesced` is rejected at emit time.
+    Coalesced {
+        inner: Box<AggregateExpr>,
+        default: SqlValue,
+    },
+    /// Window function — `<fn>(args) OVER (PARTITION BY … ORDER BY …)`.
+    /// Issue #7. Conceptually distinct from an aggregate (operates
+    /// over a frame, not a group), but reuses the `annotate()` slot
+    /// because the projection shape is the same. Use the builders in
+    /// [`crate::core::window`] rather than constructing this variant
+    /// directly.
+    Window(Box<super::window::WindowExpr>),
     /// PG: `array_agg(column)` — collects column values into a Postgres
     /// array. With `distinct = true` emits `array_agg(DISTINCT column)`.
     /// Issue #33. **Postgres-only**: MySQL/SQLite emit
@@ -577,6 +939,37 @@ pub enum AggregateExpr {
 }
 
 impl AggregateExpr {
+    /// Whether this annotation actually aggregates rows (and therefore
+    /// triggers GROUP BY auto-inference, issue #75).
+    ///
+    /// - `Count` / `Sum` / `Avg` / `Max` / `Min` / `CountDistinct` /
+    ///   `StdDev*` / `Variance*` / `ArrayAgg` / `StringAgg` / `JsonbAgg`
+    ///   → **aggregating** (collapses rows).
+    /// - `Window` → **not aggregating** (per-row computation over a frame).
+    /// - `Filtered { inner }` / `Coalesced { inner }` → recurse on `inner`.
+    #[must_use]
+    pub fn is_aggregating(&self) -> bool {
+        match self {
+            AggregateExpr::Count(_)
+            | AggregateExpr::CountDistinct(_)
+            | AggregateExpr::Sum(_)
+            | AggregateExpr::Avg(_)
+            | AggregateExpr::Max(_)
+            | AggregateExpr::Min(_)
+            | AggregateExpr::StdDev(_)
+            | AggregateExpr::StdDevPop(_)
+            | AggregateExpr::Variance(_)
+            | AggregateExpr::VariancePop(_)
+            | AggregateExpr::ArrayAgg { .. }
+            | AggregateExpr::StringAgg { .. }
+            | AggregateExpr::JsonbAgg { .. } => true,
+            AggregateExpr::Window(_) => false,
+            AggregateExpr::Filtered { inner, .. } | AggregateExpr::Coalesced { inner, .. } => {
+                inner.is_aggregating()
+            }
+        }
+    }
+
     /// Ergonomic constructor for [`AggregateExpr::ArrayAgg`] without
     /// `DISTINCT`. Issue #33.
     #[must_use]
@@ -639,7 +1032,7 @@ pub struct AggregateQuery {
     pub aggregates: Vec<(&'static str, AggregateExpr)>,
     /// Optional HAVING clause (applied after GROUP BY).
     pub having: Option<WhereExpr>,
-    pub order_by: Vec<OrderClause>,
+    pub order_by: Vec<OrderItem>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }

@@ -144,6 +144,75 @@ pub enum SqlError {
         expected: &'static str,
         got: usize,
     },
+
+    /// A `CASE WHEN … END` expression was built with no branches.
+    /// SQL requires at least one `WHEN` clause; the public builder
+    /// API ([`crate::core::case()`]) doesn't prevent zero-branch
+    /// construction, so the writer surfaces this here.
+    #[error("CASE expression must have at least one WHEN branch")]
+    EmptyCaseBranches,
+
+    /// A `CASE WHEN <cond> …` branch had an empty predicate (e.g.
+    /// `WhereExpr::And(vec![])`). The standard "no WHERE filter"
+    /// marker is legal at the top of an UPDATE/DELETE, but inside a
+    /// `WHEN` it would produce `WHEN  THEN …` with a hole — a parse
+    /// error on every backend. Reject it loudly here.
+    #[error("CASE WHEN branch condition must not be empty")]
+    EmptyCaseWhenCondition,
+
+    /// `Expr::OuterRef("col")` was emitted outside any subquery
+    /// scope (issue #5). `OuterRef` only makes sense inside a
+    /// correlated subquery — the writer needs at least two scope
+    /// frames on the stack (outer + subquery) to resolve the column
+    /// against the enclosing query. Programming error.
+    #[error(
+        "`OuterRef(\"{column}\")` used outside of a subquery — \
+         it can only appear inside Exists / NotExists / InSubquery / \
+         Subquery wrappers that know the enclosing query's table"
+    )]
+    OuterRefOutsideSubquery { column: &'static str },
+
+    /// A JOIN was constructed with an empty `on` predicate
+    /// (`WhereExpr::And(vec![])` — the legitimate "no WHERE filter"
+    /// marker at the top of an UPDATE/DELETE/SELECT). Inside a JOIN's
+    /// ON it would emit `ON ` with a literal hole, which every
+    /// backend rejects at parse. Mirror of `EmptyCaseWhenCondition`
+    /// for the JOIN-ON context.
+    #[error("JOIN `on` predicate must not be empty")]
+    EmptyJoinOnCondition,
+
+    /// An aggregate function isn't supported by the active dialect
+    /// (issue #6). Today raised only for `StdDev` / `StdDevPop` /
+    /// `Variance` / `VariancePop` on SQLite, which has no built-in
+    /// statistical aggregates. Caller can either switch dialects,
+    /// drop the offending annotation, or compute the variance
+    /// formula in app code.
+    #[error("aggregate `{aggregate}` is not supported by the `{dialect}` dialect")]
+    AggregateNotSupported {
+        aggregate: &'static str,
+        dialect: &'static str,
+    },
+
+    /// An ill-formed `AggregateExpr` tree was passed in (issue #6) —
+    /// e.g. `Coalesced { Coalesced { … } }` or `Filtered { Filtered {
+    /// … } }`. The public [`crate::core::aggregates`] builder never
+    /// produces these, so this is a "hand-rolled IR" programmer
+    /// error. `wrapper` names the offending shape for the error
+    /// message.
+    #[error("nested aggregate wrapper `{wrapper}` is not supported")]
+    NestedAggregateWrapper { wrapper: &'static str },
+
+    /// A [`crate::core::JoinKind`] was used on a dialect that doesn't
+    /// support it (issue #80). Today: `Right` on SQLite, `Full` on
+    /// SQLite + MySQL. Caller can either switch dialects, restructure
+    /// the query (e.g. swap operands and use `Left` instead of `Right`,
+    /// or emulate `Full` via two `Left`/`Right` joins UNION'd), or
+    /// gate the feature behind a `cfg`-flag.
+    #[error("`{kind} JOIN` is not supported by the `{dialect}` dialect")]
+    JoinKindNotSupported {
+        kind: &'static str,
+        dialect: &'static str,
+    },
 }
 
 /// Raised while compiling, writing, or executing a query end-to-end.

@@ -47,6 +47,19 @@ impl Dialect for MySql {
         "mysql"
     }
 
+    /// MySQL has no native `NULLS FIRST` / `NULLS LAST` keyword.
+    /// Returning `false` makes `write_order_limit_offset` emulate
+    /// via an `<col> IS NULL` pre-sort term — issue #76.
+    fn supports_nulls_order(&self) -> bool {
+        false
+    }
+
+    /// MySQL spells the random function as `RAND()`, not `RANDOM()`.
+    /// Issue #77.
+    fn random_fn(&self) -> &'static str {
+        "RAND"
+    }
+
     /// `MySQL` quotes identifiers with backticks, not double quotes.
     /// Embedded backticks are doubled (the `MySQL` parser's escape rule)
     /// so the output is always a valid quoted identifier even for

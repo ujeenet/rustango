@@ -1,3 +1,4 @@
+#![allow(irrefutable_let_patterns)] // Pool enum is single-variant in sqlite-only builds; pattern is refutable on multi-backend builds.
 //! Advanced ORM coverage on SQLite — closes the gap between the
 //! basic `save_pool` / `fetch_pool` round-trips in `sqlite_live.rs`
 //! and the full PG live suite (`save_live.rs`, `select_related_live.rs`,
@@ -123,7 +124,7 @@ async fn where_in_list_filters_on_sqlite() {
     seed_posts(&pool, alice, &[("a1", true)]).await;
     seed_posts(&pool, bob, &[("b1", true)]).await;
     let posts: Vec<Post> = Post::objects()
-        .filter(
+        .filter_op(
             "author",
             rustango::core::Op::In,
             SqlValue::List(vec![SqlValue::I64(alice), SqlValue::I64(bob)]),

@@ -93,7 +93,7 @@ use serde_json::{json, Value};
 
 use crate::core::{
     Assignment, CountQuery, DeleteQuery, FieldType, Filter, InsertQuery, ModelSchema, Op,
-    OrderClause, SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
+    SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
 use crate::forms::{collect_values, parse_form_value, parse_pk_string, FormError};
 use crate::sql::Pool;
@@ -855,7 +855,7 @@ async fn handle_list(
 
     // Ordering
     let ordering_param = params.get("ordering").cloned();
-    let order_by: Vec<OrderClause> = ordering_param
+    let order_by: Vec<crate::core::OrderItem> = ordering_param
         .as_deref()
         .map(|raw| {
             raw.split(',')
@@ -866,10 +866,11 @@ async fn handle_list(
                     } else {
                         (part, false)
                     };
-                    state.vs.schema.field(field_name).map(|f| OrderClause {
-                        column: f.column,
-                        desc,
-                    })
+                    state
+                        .vs
+                        .schema
+                        .field(field_name)
+                        .map(|f| crate::core::OrderItem::column(f.column, desc))
                 })
                 .collect()
         })
@@ -879,10 +880,11 @@ async fn handle_list(
                 .default_ordering
                 .iter()
                 .filter_map(|(name, desc)| {
-                    state.vs.schema.field(name).map(|f| OrderClause {
-                        column: f.column,
-                        desc: *desc,
-                    })
+                    state
+                        .vs
+                        .schema
+                        .field(name)
+                        .map(|f| crate::core::OrderItem::column(f.column, *desc))
                 })
                 .collect()
         });
@@ -1023,10 +1025,7 @@ async fn handle_list_cursor(
     };
 
     // Force ordering by the cursor field (cursor pagination requires it)
-    let order_by = vec![OrderClause {
-        column: cursor_schema.column,
-        desc,
-    }];
+    let order_by = vec![crate::core::OrderItem::column(cursor_schema.column, desc)];
 
     // Fetch page_size+1 to detect if a next page exists.
     let select_q = SelectQuery {

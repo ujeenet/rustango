@@ -1,3 +1,4 @@
+#![allow(irrefutable_let_patterns)] // Pool enum is single-variant in sqlite-only builds; pattern is refutable on multi-backend builds.
 //! Live regression for v0.34 slice 2 — `migrate_registry_pool`
 //! against a SQLite registry. Proves the backend-agnostic registry
 //! bootstrap (migration runner + audit table + contenttype seed)

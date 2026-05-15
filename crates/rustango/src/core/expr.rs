@@ -107,6 +107,89 @@ pub enum Expr {
     /// argument count. Issue #2 (Database functions DSL); see
     /// [`crate::core::funcs`] for the public builder API.
     Function { kind: ScalarFn, args: Vec<Expr> },
+    /// `CASE WHEN c1 THEN t1 [WHEN c2 THEN t2 …] [ELSE d] END` —
+    /// conditional expression (issue #4). Standard SQL; identical
+    /// emission across PG / MySQL / SQLite. `branches` carries the
+    /// `WHEN` clauses in source order; `default` is the optional
+    /// `ELSE` branch (omitted in SQL when `None`).
+    ///
+    /// Build via [`crate::core::case::case()`] rather than
+    /// constructing this variant by hand — the builder chain reads
+    /// closer to the SQL and handles the boxing.
+    Case {
+        branches: Vec<CaseBranch>,
+        default: Option<Box<Expr>>,
+    },
+    /// Scalar subquery — `(SELECT col FROM … LIMIT 1)` (issue #5).
+    /// Used in `set_expr` / `eq_expr` / WHERE-rhs slots where a single
+    /// value is expected. The inner [`SelectQuery`] is built by
+    /// calling `QuerySet::compile()` upfront — that way schema
+    /// validation errors surface at construction rather than at
+    /// outer-queryset compile time, and the same compiled subquery
+    /// can be reused across statements.
+    ///
+    /// Caller is responsible for shaping the inner queryset to a
+    /// single row + single column when the slot expects a scalar.
+    ///
+    /// [`SelectQuery`]: crate::core::SelectQuery
+    Subquery(Box<super::query::SelectQuery>),
+    /// Reference to an outer query's column from inside a correlated
+    /// subquery (issue #5). Emitted as `"<outer_table>"."<col>"`; the
+    /// outer table is threaded through the writer at emit time so
+    /// nested `EXISTS` / `IN (SELECT …)` / scalar subqueries can
+    /// reference the outer row.
+    ///
+    /// Build via [`crate::core::subquery::outer_ref`] rather than this
+    /// variant directly — the helper reads closer to Django's
+    /// `OuterRef('col')`.
+    OuterRef(&'static str),
+    /// Column reference qualified with an explicit table alias —
+    /// `"<alias>"."<column>"`. Used inside JOIN `ON` predicates (issue
+    /// #80) where both sides may reference columns on tables other
+    /// than the implicit "current" one, and a bare `Column(name)`
+    /// would qualify against the wrong scope.
+    ///
+    /// Build via [`crate::core::joins::aliased`] rather than this
+    /// variant directly.
+    AliasedColumn {
+        alias: &'static str,
+        column: &'static str,
+    },
+    /// Window function — `<fn>(args) OVER (PARTITION BY … ORDER BY …
+    /// [frame])`. Issue #7. Boxed because [`WindowExpr`] carries a
+    /// `Vec<Expr>` for arguments, which makes the enum size
+    /// unbounded otherwise.
+    ///
+    /// Build via [`crate::core::window`] (`row_number`, `rank`,
+    /// `dense_rank`, `lag`, `lead`, `first_value`, `last_value`,
+    /// `ntile`) rather than this variant directly.
+    ///
+    /// [`WindowExpr`]: crate::core::WindowExpr
+    Window(Box<super::window::WindowExpr>),
+    /// Aggregate function lifted into the Expr tree — issue #74.
+    /// Lets aggregate expressions appear in `HAVING` predicates
+    /// (which PG strictly requires the expression in, not the SELECT
+    /// alias) via [`super::query::WhereExpr::ExprCompare`]. Also
+    /// composable inside `Case` / `Coalesce` / set_expr slots when
+    /// the surrounding query is aggregating.
+    ///
+    /// Boxed because `AggregateExpr` itself carries `Box<...>`
+    /// wrappers (`Filtered { inner, ... }`, `Coalesced { inner, ... }`)
+    /// which would make the enum size unbounded otherwise.
+    Aggregate(Box<super::query::AggregateExpr>),
+}
+
+/// One arm of a [`Expr::Case`] expression — `WHEN <condition> THEN <then>`.
+///
+/// `condition` is a full [`crate::core::WhereExpr`] tree, so the same
+/// `Column::eq()` / `.and()` / `.or()` machinery that powers `WHERE`
+/// clauses works inside `CASE` predicates. `then` is any [`Expr`]:
+/// a literal, a column reference, a function call, another nested
+/// `Case`, etc.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaseBranch {
+    pub condition: super::query::WhereExpr,
+    pub then: Expr,
 }
 
 /// Scalar database functions surfaced by [`crate::core::funcs`].
@@ -174,6 +257,63 @@ pub enum ScalarFn {
     Least,
     /// `NULLIF(a, b)` — `NULL` when `a == b`, else `a`. Universal.
     NullIf,
+
+    // --- Date / time (issue #3) ---
+    /// `NOW()` (PG/MySQL) / `CURRENT_TIMESTAMP` (SQLite). 0-arg. Returns
+    /// the database server's wall-clock timestamp.
+    Now,
+    /// `EXTRACT(YEAR FROM x)` family. SQLite wraps in
+    /// `CAST(strftime('%Y', x) AS INTEGER)`. PG casts to `integer` so
+    /// the return type is consistent across dialects.
+    ExtractYear,
+    /// Month component (1–12).
+    ExtractMonth,
+    /// Day-of-month (1–31).
+    ExtractDay,
+    /// Hour (0–23).
+    ExtractHour,
+    /// Minute (0–59).
+    ExtractMinute,
+    /// Second (0–59).
+    ExtractSecond,
+    /// Week-of-year. **NOT portable across dialects** — each backend
+    /// uses a different week-numbering convention, so the same date
+    /// returns different values:
+    /// - PG (`EXTRACT(WEEK FROM x)`): ISO 8601, weeks start Monday,
+    ///   range 1–53.
+    /// - MySQL (`WEEK(x)` default mode 0): weeks start **Sunday**,
+    ///   range **0**–53.
+    /// - SQLite (`strftime('%W', x)`): weeks start Monday, first
+    ///   Monday-of-year is week 01, range 00–53.
+    ///
+    /// For 2024-01-01 (Monday): PG returns 1, MySQL returns 0, SQLite
+    /// returns 01. Use this only when you stay on one backend, or
+    /// compute the week boundary in app code via a typed
+    /// `chrono::DateTime` literal.
+    ExtractWeek,
+    /// Day-of-week. **Normalized to PG's convention: 0 = Sunday, 6 =
+    /// Saturday** across all three dialects. MySQL's `DAYOFWEEK()`
+    /// returns 1=Sunday..7=Saturday natively; the writer subtracts 1
+    /// to align. SQLite's `strftime('%w')` already matches 0=Sunday.
+    ExtractWeekDay,
+    /// Quarter (1–4). Not supported on SQLite (no native `strftime`
+    /// token); emitter errors with `OpNotSupportedInDialect`.
+    ExtractQuarter,
+    /// `DATE(x)` — strip the time component, returning a `DATE`. Same
+    /// shape on all three backends.
+    TruncDate,
+    /// Truncate timestamp to the start of the year. PG: `DATE_TRUNC('year', x)`
+    /// (returns timestamp). MySQL: `DATE_FORMAT(x, '%Y-01-01')` (returns
+    /// string). SQLite: `strftime('%Y-01-01', x)` (returns string).
+    /// **Result-type caveat**: MySQL and SQLite return text — cast on
+    /// the app side if a typed date/datetime is needed.
+    TruncYear,
+    /// Truncate timestamp to the start of the month. See `TruncYear`
+    /// re: return-type divergence on MySQL/SQLite.
+    TruncMonth,
+    /// Truncate timestamp to the start of the day. PG: `DATE_TRUNC('day', x)`
+    /// (returns timestamp). MySQL / SQLite: `DATE(x)` / `date(x)` (date).
+    TruncDay,
 }
 
 impl Expr {

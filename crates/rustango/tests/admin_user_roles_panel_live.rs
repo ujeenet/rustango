@@ -15,6 +15,9 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use rustango::sql::sqlx;
 use rustango::sql::Auto;
+// `ensure_tables` is deprecated; this fixture predates the
+// `manage migrate` path that supersedes it.
+#[allow(deprecated)]
 use rustango::tenancy::permissions::{
     assign_role, ensure_tables, get_or_create_role, grant_role_perm, set_user_perm,
 };
@@ -53,6 +56,7 @@ async fn fresh(pool: &sqlx::PgPool) {
             .await
             .unwrap();
     }
+    #[allow(deprecated)]
     ensure_tables(pool).await.unwrap();
 }
 

@@ -1,3 +1,4 @@
+#![allow(irrefutable_let_patterns)] // Pool enum is single-variant in sqlite-only builds; pattern is refutable on multi-backend builds.
 //! Live integration tests for the tri-dialect tenant-auth `_pool`
 //! helpers on SQLite — slice 25 / 27.
 //!

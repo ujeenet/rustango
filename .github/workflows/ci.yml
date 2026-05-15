@@ -64,6 +64,21 @@ jobs:
           --health-timeout 2s
           --health-retries 20
     steps:
+      # The all-features workspace build (postgres + mysql + sqlite +
+      # tenancy + admin + jobs-* + ...) produces a lot of test binaries
+      # and outgrew the runner's default 14 GB free disk. Free the
+      # pre-installed Android SDK / .NET / Haskell / large Docker
+      # images to reclaim ~25 GB before linking starts.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: true
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2

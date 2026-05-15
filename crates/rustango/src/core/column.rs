@@ -287,6 +287,23 @@ impl<M: Model> From<TypedFilter<M>> for TypedExpr<M> {
     }
 }
 
+// --- Untyped lowering for `case().when(...)` and similar untyped
+//     consumers (issue #4). Drops the model tag — callers are
+//     responsible for using the right model's columns; schema
+//     validation happens at `compile()` time on the queryset.
+
+impl<M: Model> From<TypedFilter<M>> for WhereExpr {
+    fn from(tf: TypedFilter<M>) -> Self {
+        Self::Predicate(tf.inner)
+    }
+}
+
+impl<M: Model> From<TypedExpr<M>> for WhereExpr {
+    fn from(te: TypedExpr<M>) -> Self {
+        te.inner
+    }
+}
+
 /// Typed boolean expression — a [`TypedFilter`] tree composed with
 /// `.and()` / `.or()`. Constructed implicitly from any `TypedFilter`
 /// via `Into`, so callers usually never name this type:

@@ -1185,7 +1185,7 @@ where
     // Batch-fetch the children where their FK column points at any
     // of the parent PKs.
     let children: Vec<C> = crate::query::QuerySet::<C>::new()
-        .filter(
+        .filter_op(
             child_fk_column,
             crate::core::Op::In,
             crate::core::SqlValue::List(parent_pks),
@@ -3033,7 +3033,7 @@ where
     }
 
     let children: Vec<C> = crate::query::QuerySet::<C>::new()
-        .filter(
+        .filter_op(
             child_fk_column,
             crate::core::Op::In,
             crate::core::SqlValue::List(parent_pks),
@@ -3334,7 +3334,7 @@ where
 ///
 /// ```ignore
 /// let (post, created) = rustango::sql::get_or_create_pool(
-///     Post::objects().filter("slug", Op::Eq, "hello"),
+///     Post::objects().filter("slug", "hello"),
 ///     |pool| async move {
 ///         let mut p = Post {
 ///             id: Auto::Unset,
@@ -3399,7 +3399,7 @@ where
 ///
 /// ```ignore
 /// let (post, created) = rustango::sql::update_or_create_pool(
-///     Post::objects().filter("slug", Op::Eq, "hello"),
+///     Post::objects().filter("slug", "hello"),
 ///     |pool, mut existing| async move {
 ///         existing.title = "New title".into();
 ///         existing.save_pool(&pool).await?;
@@ -3462,7 +3462,7 @@ fn ensure_pk_ordering<T: Model>(
     qs: crate::query::QuerySet<T>,
     reverse: bool,
 ) -> crate::query::QuerySet<T> {
-    if qs.order_by_clauses().is_empty() {
+    if !qs.has_order_by() {
         let pk = T::SCHEMA.primary_key().map(|f| f.column);
         if let Some(pk_col) = pk {
             return qs.replace_order_by(&[(pk_col, reverse)]);
@@ -3531,6 +3531,9 @@ where
 
 #[cfg(test)]
 mod pool_dispatch_tests {
+    // All inner tests are `#[cfg(feature = "mysql")]` gated; without
+    // that feature the imports show as unused.
+    #[allow(unused_imports)]
     use super::*;
 
     /// Smoke test: a `Pool::Mysql` from a `connect_lazy` handle picks
