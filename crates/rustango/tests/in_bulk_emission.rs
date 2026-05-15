@@ -1,5 +1,5 @@
 //! Tri-dialect SQL-emission sanity tests for the WHERE clause built
-//! by `QuerySet::in_bulk_pool` (issue #24). The map-building part runs
+//! by `QuerySet::in_bulk` (issue #24). The map-building part runs
 //! against a live DB in `in_bulk_live.rs`; this file pins the SQL
 //! shape (a plain `WHERE <col> IN (...)`) across all three dialects
 //! without needing a database.
@@ -24,7 +24,7 @@ pub struct Book {
     title: String,
 }
 
-// `in_bulk_pool` is `async` + needs a Pool, so we can't call it from
+// `in_bulk` is `async` + needs a Pool, so we can't call it from
 // a sync unit test without mocking. The function's only SQL-affecting
 // step is `self.filter_op(C::COLUMN, Op::In, SqlValue::List(ids))`
 // — pin that emission shape directly here.
@@ -101,7 +101,7 @@ fn empty_in_list_rejects_at_compile_so_short_circuit_is_load_bearing() {
         matches!(err, SqlError::EmptyInList),
         "raw empty IN list rejected: {err:?}"
     );
-    // `in_bulk_pool` with empty ids never reaches this codepath — it
+    // `in_bulk` with empty ids never reaches this codepath — it
     // returns an empty HashMap before constructing the IN list. See
     // `in_bulk_with_empty_ids_returns_empty_map_no_sql` in
     // `tests/in_bulk_live.rs` for the runtime guarantee.

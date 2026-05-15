@@ -236,7 +236,7 @@ where
         self.fetch_paginated_on(pool).await
     }
 
-    /// Tenant-scoped companion to [`QuerySet::in_bulk_pool`] — same
+    /// Tenant-scoped companion to [`QuerySet::in_bulk`] — same
     /// semantic but takes any sqlx executor (`&PgPool`,
     /// `&mut PgConnection`, or a `Transaction`) so schema-mode tenant
     /// queries route through the per-checkout `SET search_path`
@@ -3380,7 +3380,7 @@ where
     /// // Auto::Set unwrap (every fetched row has an `Auto::Set`
     /// // value; `Auto::Unset` would be a programming error).
     /// let books: HashMap<i64, Book> = Book::objects()
-    ///     .in_bulk_pool(Book::id, [1_i64, 2, 3], |b| match b.id {
+    ///     .in_bulk(Book::id, [1_i64, 2, 3], |b| match b.id {
     ///         Auto::Set(v) => v,
     ///         Auto::Unset  => unreachable!("fetched row has PK"),
     ///     }, &pool)
@@ -3388,7 +3388,7 @@ where
     ///
     /// // `field_name=` equivalent — key by any unique column.
     /// let books_by_isbn: HashMap<String, Book> = Book::objects()
-    ///     .in_bulk_pool(Book::isbn, ["isbn-1", "isbn-2"], |b| b.isbn.clone(), &pool)
+    ///     .in_bulk(Book::isbn, ["isbn-1", "isbn-2"], |b| b.isbn.clone(), &pool)
     ///     .await?;
     /// ```
     ///
@@ -3399,7 +3399,7 @@ where
     ///
     /// # Errors
     /// As [`FetcherPool::fetch_pool`].
-    pub async fn in_bulk_pool<C, K, I, F>(
+    pub async fn in_bulk<C, K, I, F>(
         self,
         column: C,
         ids: I,

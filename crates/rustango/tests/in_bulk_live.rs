@@ -1,5 +1,5 @@
 #![cfg(feature = "postgres")]
-//! Live PG tests for `QuerySet::in_bulk_pool` + `in_bulk_on` (issue #24).
+//! Live PG tests for `QuerySet::in_bulk` + `in_bulk_on` (issue #24).
 //! Verifies the IN-list filter + HashMap return shape matches Django's
 //! `Model.objects.in_bulk(ids, field_name=)`. Skips silently when
 //! `DATABASE_URL` is unset.
@@ -84,7 +84,7 @@ async fn in_bulk_by_pk_returns_map_keyed_by_id() {
     // Insert order gives ids 1..=4. Fetch a 2-of-4 subset plus a
     // non-existent id (999) — the non-existent should be absent.
     let books: HashMap<i64, Book> = Book::objects()
-        .in_bulk_pool(Book::id, [1_i64, 3, 999], pk_of, &pool)
+        .in_bulk(Book::id, [1_i64, 3, 999], pk_of, &pool)
         .await
         .unwrap();
 
@@ -106,7 +106,7 @@ async fn in_bulk_by_non_pk_unique_column_keys_on_that_column() {
     };
 
     let books: HashMap<String, Book> = Book::objects()
-        .in_bulk_pool(
+        .in_bulk(
             Book::isbn,
             ["isbn-2".to_string(), "isbn-4".to_string()],
             |b| b.isbn.clone(),
@@ -132,14 +132,14 @@ async fn in_bulk_with_empty_ids_returns_empty_map_no_sql() {
     };
 
     let books: HashMap<i64, Book> = Book::objects()
-        .in_bulk_pool(Book::id, Vec::<i64>::new(), pk_of, &pool)
+        .in_bulk(Book::id, Vec::<i64>::new(), pk_of, &pool)
         .await
         .unwrap();
 
     assert!(books.is_empty());
 }
 
-/// `in_bulk_pool` composes with prior `.where_()` calls — the IN-list
+/// `in_bulk` composes with prior `.where_()` calls — the IN-list
 /// filter AND-joins with whatever the queryset already has. Only
 /// matches that pass BOTH the existing WHERE and the IN list come
 /// back. Concrete example: filter by title prefix first, then look
@@ -157,7 +157,7 @@ async fn in_bulk_composes_with_prior_where_clauses() {
     // survives the pre-filter.
     let books: HashMap<i64, Book> = Book::objects()
         .where_(Book::title.like("Rust%"))
-        .in_bulk_pool(Book::id, [1_i64, 2, 3, 4], pk_of, &pool)
+        .in_bulk(Book::id, [1_i64, 2, 3, 4], pk_of, &pool)
         .await
         .unwrap();
 
