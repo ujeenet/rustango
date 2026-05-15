@@ -550,6 +550,79 @@ pub enum AggregateExpr {
     Max(&'static str),
     /// `MIN(column)`.
     Min(&'static str),
+    /// PG: `array_agg(column)` — collects column values into a Postgres
+    /// array. With `distinct = true` emits `array_agg(DISTINCT column)`.
+    /// Issue #33. **Postgres-only**: MySQL/SQLite emit
+    /// `SqlError::AggregateNotSupportedInDialect`. The returned column
+    /// is a `text[]` / `int[]` depending on the input type; decode it as
+    /// `Vec<T>` via `serde_json::Value` if the SqlValue decoder doesn't
+    /// recognise the array type natively.
+    ArrayAgg {
+        column: &'static str,
+        distinct: bool,
+    },
+    /// PG: `string_agg(column, delimiter)` — concatenates column values
+    /// with `delimiter`. With `distinct = true` emits
+    /// `string_agg(DISTINCT column, delimiter)`. `delimiter` is bound as
+    /// a parameter so SQL injection through the delimiter is impossible.
+    /// Issue #33. **Postgres-only**.
+    StringAgg {
+        column: &'static str,
+        delimiter: String,
+        distinct: bool,
+    },
+    /// PG: `jsonb_agg(column)` — collects column values into a JSONB
+    /// array. Issue #33. **Postgres-only**.
+    JsonbAgg { column: &'static str },
+}
+
+impl AggregateExpr {
+    /// Ergonomic constructor for [`AggregateExpr::ArrayAgg`] without
+    /// `DISTINCT`. Issue #33.
+    #[must_use]
+    pub const fn array_agg(column: &'static str) -> Self {
+        Self::ArrayAgg {
+            column,
+            distinct: false,
+        }
+    }
+
+    /// Ergonomic constructor for `array_agg(DISTINCT column)`. Issue #33.
+    #[must_use]
+    pub const fn array_agg_distinct(column: &'static str) -> Self {
+        Self::ArrayAgg {
+            column,
+            distinct: true,
+        }
+    }
+
+    /// Ergonomic constructor for [`AggregateExpr::StringAgg`] without
+    /// `DISTINCT`. Issue #33.
+    #[must_use]
+    pub fn string_agg(column: &'static str, delimiter: impl Into<String>) -> Self {
+        Self::StringAgg {
+            column,
+            delimiter: delimiter.into(),
+            distinct: false,
+        }
+    }
+
+    /// Ergonomic constructor for `string_agg(DISTINCT column, delimiter)`.
+    /// Issue #33.
+    #[must_use]
+    pub fn string_agg_distinct(column: &'static str, delimiter: impl Into<String>) -> Self {
+        Self::StringAgg {
+            column,
+            delimiter: delimiter.into(),
+            distinct: true,
+        }
+    }
+
+    /// Ergonomic constructor for [`AggregateExpr::JsonbAgg`]. Issue #33.
+    #[must_use]
+    pub const fn jsonb_agg(column: &'static str) -> Self {
+        Self::JsonbAgg { column }
+    }
 }
 
 /// A `SELECT … GROUP BY … HAVING …` query. Returned rows are untyped
