@@ -401,3 +401,76 @@ impl<M: Model> TypedAssignment<M> {
         self.inner
     }
 }
+
+/// Heterogeneous list of typed [`Column`] references for the same model.
+/// Issue #67 — drives `Model::save_partial_typed(...)`.
+///
+/// Each `#[derive(Model)]` field is its own zero-sized type, so
+/// `&[Post::title, Post::slug]` doesn't type-check (mixed element types).
+/// A tuple does — every element keeps its own concrete type, and the
+/// trait bound `Column<Model = M>` on each slot enforces same-model
+/// at compile time:
+///
+/// ```ignore
+/// post.save_partial_typed((Post::title, Post::slug), &pool).await?;
+/// //                       ──────────  ──────────
+/// //                       title_col   slug_col   ← distinct ZSTs
+/// //
+/// // (Post::title, Author::name)  →  compile error: Author::name's
+/// //                                  Model = Author, not Post.
+/// ```
+///
+/// The trait is sealed — only the built-in tuple impls implement it,
+/// so user code can't accidentally collide with future variants.
+pub trait TypedFieldList<M: Model>: sealed::Sealed {
+    /// Rust-side field names in the order the tuple was declared.
+    /// Forwarded directly to [`crate::core::ModelSchema::field`] for
+    /// SQL-column resolution, matching the string-keyed
+    /// [`Model::save_partial`] path.
+    ///
+    /// [`Model::save_partial`]: crate::core::Model
+    fn rust_field_names(&self) -> Vec<&'static str>;
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Single-element tuple — supports the `(Post::title,)` one-field call.
+impl<M: Model, A: Column<Model = M>> TypedFieldList<M> for (A,) {
+    fn rust_field_names(&self) -> Vec<&'static str> {
+        vec![A::NAME]
+    }
+}
+impl<A> sealed::Sealed for (A,) {}
+
+// Tuple impls up to 12 elements — covers every realistic update_fields
+// shape (Django's analogue is unbounded, but if you're writing more
+// than 12 distinct fields, dropping to `save_partial(&[&str], _)` is
+// cheap and probably clearer at the call site).
+macro_rules! impl_typed_field_list_tuple {
+    ( $( ( $($T:ident),+ ) ),+ $(,)? ) => {
+        $(
+            impl<M: Model, $($T: Column<Model = M>),+> TypedFieldList<M> for ($($T,)+) {
+                fn rust_field_names(&self) -> Vec<&'static str> {
+                    vec![$($T::NAME),+]
+                }
+            }
+            impl<$($T),+> sealed::Sealed for ($($T,)+) {}
+        )+
+    };
+}
+
+impl_typed_field_list_tuple!(
+    (A, B),
+    (A, B, C),
+    (A, B, C, D),
+    (A, B, C, D, E),
+    (A, B, C, D, E, F),
+    (A, B, C, D, E, F, G),
+    (A, B, C, D, E, F, G, H),
+    (A, B, C, D, E, F, G, H, I),
+    (A, B, C, D, E, F, G, H, I, J),
+    (A, B, C, D, E, F, G, H, I, J, K),
+    (A, B, C, D, E, F, G, H, I, J, K, L),
+);
