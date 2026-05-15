@@ -29,6 +29,11 @@ allow = [
     "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
+    # 0BSD is the "Zero-Clause BSD" (Free Public License 1.0.0) —
+    # effectively public domain with no restrictions. Added for
+    # `quoted_printable` (v0.5.2), a transitive dep of `lettre`
+    # (the SMTP transport added in PR #94 / issue #48).
+    "0BSD",
     "Unicode-DFS-2016",
     "Unicode-3.0",
     "Zlib",
