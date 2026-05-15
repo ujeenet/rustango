@@ -154,6 +154,102 @@ async fn having_only_no_where_clause() {
     cleanup(&pool).await;
 }
 
+/// Issue #87: `Op::In` against an annotation alias.
+/// Authors whose post_count is in {0, 8, 15} → authors 2, 3, 4.
+#[tokio::test]
+async fn op_in_against_alias_routes_to_having_in() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    fresh(&pool).await;
+
+    let q = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("total_posts", count_all().into())
+        .filter(
+            "total_posts",
+            Op::In,
+            SqlValue::List(vec![SqlValue::I64(10), SqlValue::I64(5), SqlValue::I64(15)]),
+        )
+        .order_by(&[("author_id", false)])
+        .compile()
+        .unwrap();
+    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+
+    let author_ids: Vec<i64> = rows.iter().map(|r| get_i64(r, "author_id")).collect();
+    // Authors 3 (15 posts) and 4 (5 posts) match; 1 has 15 total (matches),
+    // 2 has 10 total (matches). Expected: 1, 2, 3, 4.
+    assert_eq!(author_ids, vec![1, 2, 3, 4]);
+
+    cleanup(&pool).await;
+}
+
+/// Issue #87: `Op::Between` against an annotation alias.
+/// Authors whose total post count is between 6 and 12 inclusive → author 2 (10 posts).
+#[tokio::test]
+async fn op_between_against_alias_routes_to_having_between() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    fresh(&pool).await;
+
+    let q = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("total_posts", count_all().into())
+        .filter(
+            "total_posts",
+            Op::Between,
+            SqlValue::List(vec![SqlValue::I64(6), SqlValue::I64(12)]),
+        )
+        .order_by(&[("author_id", false)])
+        .compile()
+        .unwrap();
+    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+
+    let author_ids: Vec<i64> = rows.iter().map(|r| get_i64(r, "author_id")).collect();
+    assert_eq!(
+        author_ids,
+        vec![2],
+        "only author 2 has total_posts in [6, 12]; got: {author_ids:?}"
+    );
+
+    cleanup(&pool).await;
+}
+
+/// Issue #87: `Op::NotIn` against an annotation alias.
+/// Authors NOT in {5, 10} → author 1 (15 posts), author 3 (15 posts).
+#[tokio::test]
+async fn op_not_in_against_alias_routes_to_having_not_in() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    fresh(&pool).await;
+
+    let q = Post::objects()
+        .aggregate()
+        .group_by("author_id")
+        .annotate("total_posts", count_all().into())
+        .filter(
+            "total_posts",
+            Op::NotIn,
+            SqlValue::List(vec![SqlValue::I64(5), SqlValue::I64(10)]),
+        )
+        .order_by(&[("author_id", false)])
+        .compile()
+        .unwrap();
+    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+
+    let author_ids: Vec<i64> = rows.iter().map(|r| get_i64(r, "author_id")).collect();
+    assert_eq!(author_ids, vec![1, 3]);
+
+    cleanup(&pool).await;
+}
+
 async fn cleanup(pool: &sqlx::PgPool) {
     sqlx::query(r#"DROP TABLE IF EXISTS "harl_post" CASCADE"#)
         .execute(pool)

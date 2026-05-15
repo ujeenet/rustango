@@ -813,18 +813,30 @@ HAVING COUNT(*) > $2
 
 **Validator gap (matches existing aggregate posture)**: alias-routed HAVING predicates skip the model-schema column walk. Typo'd aliases surface at the database, not at `compile()`. Same gap as `Sum("typo_col")` — pre-existing and orthogonal.
 
-**Supported ops on alias-routed `.filter()`**: only the binary-comparison set — `Op::Eq` / `Ne` / `Lt` / `Lte` / `Gt` / `Gte`. Anything else (`Op::In`, `Op::Between`, `Op::IsNull`, `Op::Like`, `Op::ILike`, the JSON family) rejects at `compile()` with `QueryError::HavingOpNotSupported { alias, op }`. The writer's `ExprCompare` shape only emits binary comparisons; richer dispatch is a v0.50 follow-up. For aggregate-against-list / pattern / null checks, drop into the typed `.having(WhereExpr)` form with a pre-built predicate:
+**Supported ops on alias-routed `.filter()`** (issue #87): the binary-comparison set (`Op::Eq` / `Ne` / `Lt` / `Lte` / `Gt` / `Gte`) **plus** the SQL-92 standard predicates that compose against an aggregate LHS uniformly across every backend — `Op::In` / `NotIn`, `Between`, `IsNull`, `Like` / `NotLike`, `ILike` / `NotILike`. Each emits the predictable shape:
 
 ```rust
-use rustango::core::{Filter, Op, SqlValue, WhereExpr};
+use rustango::core::{Op, SqlValue};
 
-// HAVING COUNT(*) IN (5, 10, 20) — bypass auto-routing, hand-build
-// the OR-tree and pass to .having() directly.
-let inner_or = WhereExpr::Or(vec![
-    /* one ExprCompare per value, or a CASE-WHEN ladder */
-]);
-agg_builder.having_raw(inner_or);   // (where it exists in your code)
+// HAVING COUNT(*) IN ($1, $2, $3)
+Post::objects()
+    .aggregate()
+    .group_by("author_id")
+    .annotate("post_count", count_all().into())
+    .filter("post_count", Op::In, SqlValue::List(vec![5_i64.into(), 10_i64.into(), 20_i64.into()]))
+    .compile()?;
+
+// HAVING COUNT(*) BETWEEN $1 AND $2
+.filter("post_count", Op::Between, SqlValue::List(vec![5_i64.into(), 10_i64.into()]))
+
+// HAVING COUNT(*) IS NULL  /  IS NOT NULL  (bool: true = IS NULL)
+.filter("post_count", Op::IsNull, SqlValue::Bool(false))
+
+// HAVING MAX("name") LIKE $1  /  ILIKE $1 (PG) / LOWER(MAX("name")) LIKE LOWER(?) (MySQL/SQLite)
+.filter("max_name", Op::ILike, "SMITH%")
 ```
+
+The remaining ops — the JSON-op family (`JsonContains` / `JsonContainedBy` / `JsonHasKey` / `JsonHasAnyKey` / `JsonHasAllKeys`) and null-safe equality (`IsDistinctFrom` / `IsNotDistinctFrom`) — still need dialect-specific writers that take a `&str` for the LHS, so they reject at `compile()` with `QueryError::HavingOpNotSupported { alias, op }`. For those, drop into the typed `.having(<TypedExpr>)` form with a pre-built predicate.
 
 **Param-vector bloat with non-trivial aggregates**: when the alias targets a `Filtered { Count, filter: pred }` or `Coalesced { Sum, default: 0 }` annotation, the writer lifts the **whole aggregate expression** into HAVING — including its inner predicates and defaults. Their bound literals get fresh parameter slots in HAVING separate from the SELECT-list emission. Concretely:
 

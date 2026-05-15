@@ -47,22 +47,23 @@ pub enum QueryError {
     },
 
     /// `AggregateBuilder::filter(alias, op, value)` was called with
-    /// an `op` outside the binary-comparison set (`Eq`/`Ne`/`Lt`/
-    /// `Lte`/`Gt`/`Gte`) — but the alias resolves to an aggregate
-    /// annotation, so the predicate would be routed to `HAVING`
-    /// via [`crate::core::WhereExpr::ExprCompare`], which today
-    /// only supports binary comparisons. Issue #74 v1.
+    /// an `op` that doesn't compose against an aggregate LHS via
+    /// [`crate::core::WhereExpr::ExprCompare`]. After issue #87,
+    /// the supported set is the binary-comparison ops (`Eq`/`Ne`/
+    /// `Lt`/`Lte`/`Gt`/`Gte`) plus the SQL-92 standard predicates
+    /// (`In`/`NotIn`, `Between`, `IsNull`, `Like`/`NotLike`,
+    /// `ILike`/`NotILike`). The JSON-op family + null-safe equality
+    /// (`IsDistinctFrom` / `IsNotDistinctFrom`) still need
+    /// dialect-specific writers that take a `&str` for the LHS,
+    /// so they're rejected here.
     ///
-    /// Use [`crate::query::AggregateBuilder::having`] with a
-    /// pre-built `WhereExpr` (e.g. an `Or`-tree of equalities for
-    /// the `Op::In` shape) until richer ExprCompare-with-Aggregate
-    /// dispatch lands as a v0.50 follow-up.
+    /// Drop into [`crate::query::AggregateBuilder::having`] with a
+    /// pre-built `WhereExpr` if you really need one of the
+    /// remaining ops against an aggregate.
     #[error(
-        "HAVING auto-routing for annotation alias `{alias}` supports only \
-         binary-comparison ops (Eq / Ne / Lt / Lte / Gt / Gte); got {op:?}. \
-         For `IN` / `BETWEEN` / `IS NULL` / `LIKE` / etc. against an \
-         aggregate, build a `WhereExpr` directly and pass it through \
-         `AggregateBuilder::having`."
+        "HAVING auto-routing for annotation alias `{alias}` doesn't support \
+         {op:?} (JSON-op family + null-safe equality). Build a `WhereExpr` \
+         directly and pass it through `AggregateBuilder::having`."
     )]
     HavingOpNotSupported { alias: String, op: super::Op },
 
