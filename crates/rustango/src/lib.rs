@@ -819,6 +819,11 @@ pub mod viewset;
 #[cfg(feature = "template_views")]
 pub mod template_views;
 
+/// Django-shape view shortcuts — `get_object_or_404` / `get_list_or_404`
+/// / `render` / `redirect`. See [`shortcuts`]. Issue #10.
+#[cfg(feature = "template_views")]
+pub mod shortcuts;
+
 /// Django-style runserver — [`server::Builder`] owns every line of
 /// boilerplate every tenancy app would otherwise rewrite (DB pool,
 /// resolver chain, host dispatch, operator console, bind + serve).
