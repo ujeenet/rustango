@@ -86,6 +86,9 @@ impl Dialect for Postgres {
             FieldType::Date => "DATE",
             FieldType::Uuid => "UUID",
             FieldType::Json => "JSONB",
+            FieldType::Decimal => "NUMERIC",
+            FieldType::Binary => "BYTEA",
+            FieldType::Time => "TIME",
         })
     }
 

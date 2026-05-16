@@ -226,7 +226,10 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
         | FieldType::F64
         | FieldType::DateTime
         | FieldType::Date
-        | FieldType::Json => Err(FormError::UnsupportedPk {
+        | FieldType::Time
+        | FieldType::Json
+        | FieldType::Decimal
+        | FieldType::Binary => Err(FormError::UnsupportedPk {
             field: field.name.to_owned(),
             ty: field.ty.as_str(),
         }),
@@ -330,6 +333,39 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
                     })
             }
         }
+        // Decimal accepts standard `123.45` / `-0.001` / `1e3` forms via
+        // `rust_decimal::Decimal::from_str_exact`; reject anything else
+        // rather than silently truncate. Django's DecimalField behaves
+        // the same way.
+        FieldType::Decimal => raw
+            .parse::<rust_decimal::Decimal>()
+            .map(SqlValue::Decimal)
+            .map_err(|e| make_parse_err("Decimal", &e)),
+        // Binary form input is uncommon; accept lowercase hex (no
+        // separator, even-length) and reject anything else. File
+        // uploads / base64 / multipart are a separate code path.
+        FieldType::Binary => {
+            if raw.len() % 2 != 0 || !raw.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(make_parse_err(
+                    "Binary",
+                    &"expected lowercase hex (even length)",
+                ));
+            }
+            let bytes = raw
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|c| {
+                    let h = (c[0] as char).to_digit(16).unwrap_or(0) as u8;
+                    let l = (c[1] as char).to_digit(16).unwrap_or(0) as u8;
+                    (h << 4) | l
+                })
+                .collect::<Vec<u8>>();
+            Ok(SqlValue::Binary(bytes))
+        }
+        FieldType::Time => chrono::NaiveTime::parse_from_str(raw, "%H:%M:%S")
+            .or_else(|_| chrono::NaiveTime::parse_from_str(raw, "%H:%M"))
+            .map(SqlValue::Time)
+            .map_err(|e| make_parse_err("Time", &e)),
     }
 }
 
@@ -1298,8 +1334,11 @@ fn bind_sql_value_inline<'a>(
         SqlValue::String(v) => q.bind(v.clone()),
         SqlValue::DateTime(v) => q.bind(*v),
         SqlValue::Date(v) => q.bind(*v),
+        SqlValue::Time(v) => q.bind(*v),
         SqlValue::Uuid(v) => q.bind(*v),
         SqlValue::Json(v) => q.bind(v.clone()),
+        SqlValue::Decimal(v) => q.bind(*v),
+        SqlValue::Binary(v) => q.bind(v.clone()),
         SqlValue::List(_) => panic!("validate_unique_together: List not supported in pre-check"),
     }
 }
@@ -1330,8 +1369,11 @@ fn bind_sql_value_inline_my<'a>(
         SqlValue::String(v) => q.bind(v.clone()),
         SqlValue::DateTime(v) => q.bind(*v),
         SqlValue::Date(v) => q.bind(*v),
+        SqlValue::Time(v) => q.bind(*v),
         SqlValue::Uuid(v) => q.bind(v.to_string()),
         SqlValue::Json(v) => q.bind(v.to_string()),
+        SqlValue::Decimal(v) => q.bind(*v),
+        SqlValue::Binary(v) => q.bind(v.clone()),
         SqlValue::List(_) => panic!("validate_unique_together: List not supported in pre-check"),
     }
 }
@@ -1362,8 +1404,13 @@ fn bind_sql_value_inline_sqlite<'a>(
         SqlValue::String(v) => q.bind(v.clone()),
         SqlValue::DateTime(v) => q.bind(*v),
         SqlValue::Date(v) => q.bind(*v),
+        SqlValue::Time(v) => q.bind(*v),
         SqlValue::Uuid(v) => q.bind(v.to_string()),
         SqlValue::Json(v) => q.bind(v.to_string()),
+        // sqlx-sqlite has no `Decimal: Type<Sqlite>` — round-trip via
+        // TEXT.
+        SqlValue::Decimal(v) => q.bind(v.to_string()),
+        SqlValue::Binary(v) => q.bind(v.clone()),
         SqlValue::List(_) => panic!("validate_unique_together: List not supported in pre-check"),
     }
 }

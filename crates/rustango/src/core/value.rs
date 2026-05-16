@@ -3,7 +3,8 @@
 //!
 //! Every concrete bound parameter ultimately becomes one of these.
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use super::FieldType;
@@ -24,6 +25,16 @@ pub enum SqlValue {
     Date(NaiveDate),
     Uuid(Uuid),
     Json(serde_json::Value),
+    /// Fixed-point exact decimal — pairs with [`FieldType::Decimal`].
+    /// Postgres / MySQL `NUMERIC` / `DECIMAL`; SQLite text-affinity
+    /// `NUMERIC`. Rust type: `rust_decimal::Decimal`.
+    Decimal(Decimal),
+    /// Binary blob — pairs with [`FieldType::Binary`]. PG `BYTEA`,
+    /// MySQL `LONGBLOB`, SQLite `BLOB`.
+    Binary(Vec<u8>),
+    /// Time of day, no date component — pairs with
+    /// [`FieldType::Time`]. Rust type: `chrono::NaiveTime`.
+    Time(NaiveTime),
     /// Used for `IN` and `BETWEEN` lookups.
     List(Vec<SqlValue>),
 }
@@ -50,6 +61,9 @@ impl SqlValue {
             Self::Date(v) => v.to_string(),
             Self::Uuid(v) => v.to_string(),
             Self::Json(v) => v.to_string(),
+            Self::Decimal(v) => v.to_string(),
+            Self::Binary(bytes) => format!("<binary {} bytes>", bytes.len()),
+            Self::Time(v) => v.to_string(),
             Self::List(items) => {
                 let inner: Vec<String> = items.iter().map(Self::to_display_string).collect();
                 format!("[{}]", inner.join(", "))
@@ -73,6 +87,9 @@ impl SqlValue {
             Self::Date(_) => FieldType::Date,
             Self::Uuid(_) => FieldType::Uuid,
             Self::Json(_) => FieldType::Json,
+            Self::Decimal(_) => FieldType::Decimal,
+            Self::Binary(_) => FieldType::Binary,
+            Self::Time(_) => FieldType::Time,
         })
     }
 }
@@ -97,8 +114,11 @@ sql_value_from! {
     String => String,
     DateTime<Utc> => DateTime,
     NaiveDate => Date,
+    NaiveTime => Time,
     Uuid => Uuid,
     serde_json::Value => Json,
+    Decimal => Decimal,
+    Vec<u8> => Binary,
 }
 
 impl From<&str> for SqlValue {

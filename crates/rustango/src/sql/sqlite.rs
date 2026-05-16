@@ -171,8 +171,16 @@ impl Dialect for Sqlite {
             FieldType::String
             | FieldType::DateTime
             | FieldType::Date
+            | FieldType::Time
             | FieldType::Uuid
             | FieldType::Json => "TEXT".into(),
+            // `NUMERIC` affinity: SQLite stores small values as
+            // INTEGER, larger as TEXT, preserving exact arithmetic.
+            // `rust_decimal::Decimal` round-trips through `sqlx`'s
+            // text encoding on this affinity.
+            FieldType::Decimal => "NUMERIC".into(),
+            // `BLOB` storage class — round-trips `Vec<u8>` directly.
+            FieldType::Binary => "BLOB".into(),
         }
     }
 

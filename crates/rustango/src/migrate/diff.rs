@@ -798,8 +798,11 @@ fn pg_type_for_ty_name(ty: &str) -> String {
         "string" => "TEXT".into(),
         "datetime" => "TIMESTAMPTZ".into(),
         "date" => "DATE".into(),
+        "time" => "TIME".into(),
         "uuid" => "UUID".into(),
         "json" => "JSONB".into(),
+        "decimal" => "NUMERIC".into(),
+        "binary" => "BYTEA".into(),
         other => other.to_uppercase(),
     }
 }
@@ -992,8 +995,11 @@ fn sql_type_with_dialect(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -
         "string" => Some(FieldType::String),
         "datetime" => Some(FieldType::DateTime),
         "date" => Some(FieldType::Date),
+        "time" => Some(FieldType::Time),
         "uuid" => Some(FieldType::Uuid),
         "json" => Some(FieldType::Json),
+        "decimal" => Some(FieldType::Decimal),
+        "binary" => Some(FieldType::Binary),
         _ => None,
     };
     // v0.13.2: `auto = true` historically meant "PK SERIAL/BIGSERIAL"

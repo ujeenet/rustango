@@ -249,8 +249,11 @@ fn field_type_to_schema(t: FieldType) -> Schema {
         FieldType::String => Schema::string(),
         FieldType::DateTime => Schema::datetime(),
         FieldType::Date => Schema::date(),
+        FieldType::Time => Schema::time(),
         FieldType::Uuid => Schema::uuid(),
         FieldType::Json => Schema::default(), // free-form
+        FieldType::Decimal => Schema::decimal(),
+        FieldType::Binary => Schema::binary(),
     }
 }
 
