@@ -362,6 +362,53 @@ A future `iterator_on(&mut *tx, chunk_size)` companion (issue follow-up) would c
 
 **`chunk_size` must be > 0.** Zero or negative values panic. Pick a value that fits your row-size budget (Django's default is `2000`; reasonable for narrow rows, lower for wide TEXT/JSONB columns).
 
+### Pure projection — `.values_dict()` / `.values_list()` / `.values_list_flat()`
+
+Django's [`QuerySet.values('col')` / `QuerySet.values_list('col', flat=True)`](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#values) — issue #22. Skip the typed `Model` decode when you only need a few columns off a wide table, or when the result feeds dynamic downstream code (templates, CSV export, JSON serialization).
+
+```rust
+use rustango::core::SqlValue;
+use std::collections::HashMap;
+
+// 1. Column-keyed map per row — Django's `.values('id', 'title')`.
+let rows: Vec<HashMap<String, SqlValue>> = Post::objects()
+    .where_(Post::published.eq(true))
+    .order_by(&[("id", false)])
+    .values_dict(&["id", "title"])
+    .fetch(&pool).await?;
+
+// 2. Ordered tuple per row — Django's `.values_list('id', 'title')`.
+//    Cell ordering matches the column-list argument.
+let rows: Vec<Vec<SqlValue>> = Post::objects()
+    .values_list(&["title", "id"])  // title first, id second
+    .fetch(&pool).await?;
+
+// 3. Single-column typed scalar — Django's `.values_list('id', flat=True)`.
+//    Returns Vec<U> directly via sqlx's typed scalar path.
+let ids: Vec<i64> = Post::objects()
+    .where_(Post::published.eq(true))
+    .values_list_flat("id")
+    .fetch::<i64>(&pool).await?;
+```
+
+**Three builders, one IR.** All three set `SelectQuery::projection` to the validated column list — the SQL is identical across the three terminal shapes; only the row-decode differs:
+
+| Builder | SQL shape | Returns |
+|---|---|---|
+| `.values_dict(&[cols])` | `SELECT col1, col2 FROM …` | `Vec<HashMap<String, SqlValue>>` |
+| `.values_list(&[cols])` | `SELECT col1, col2 FROM …` | `Vec<Vec<SqlValue>>` (ordered by `cols`) |
+| `.values_list_flat(col)` | `SELECT col FROM …` | `Vec<U>` (typed, via `fetch::<U>(...)`) |
+
+**Composes with the rest of the QuerySet chain.** `.where_()`, `.filter()`, `.order_by()`, `.limit()`, `.offset()`, set-algebra (`.union()` / `.intersection()` / `.difference()`) — every chain method called BEFORE `.values_*` carries through. The values builders are terminal (no further chain methods on them); put query shape before, fetch after.
+
+**Validation at `.compile()` / `.fetch()` time:**
+- Empty column list (`.values_dict(&[])`) → [`QueryError::EmptyValuesProjection`].
+- Typo'd column name (`.values_dict(&["nope"])`) → [`QueryError::UnknownField`].
+
+**Tri-dialect: identical projection emission across PG / MySQL / SQLite** (only the identifier quoting differs). For `.values_list_flat::<U>(...)`, `U` must implement sqlx's `Decode + Type` on every backend the binary targets — common picks (`i64`, `i32`, `String`, `bool`, `f64`) work universally.
+
+**Why not change the existing `.values()` to do pure projection?** `QuerySet::values(cols)` already promotes to [`AggregateBuilder`] for the GROUP BY auto-inference path (issue #75). Renaming would break ~20 existing call sites. The new `.values_dict()` / `.values_list()` / `.values_list_flat()` chain methods sit alongside, leaving the aggregate path untouched. The pre-existing `QueryError::ValuesRequiresAggregate` error still fires for `.values(cols).compile()` without a subsequent `.annotate(...)` — its message now points callers at the new pure-projection methods.
+
 ### Regex lookups — `.regex()` / `.iregex()` and negated variants
 
 Django's [`__regex` / `__iregex`](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#regex) — issue #26. Match a column against a regular-expression pattern, with case-sensitive and case-insensitive flavors plus negated forms.

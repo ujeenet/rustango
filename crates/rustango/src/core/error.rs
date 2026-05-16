@@ -109,9 +109,20 @@ pub enum QueryError {
     #[error(
         "AggregateBuilder::values({cols:?}) requires at least one \
          aggregating annotation (Count / Sum / Avg / Max / Min / \
-         StdDev / Variance). Pure projection without GROUP BY is not \
-         supported yet; chain `.annotate(\"alias\", aggregate)` or \
-         use `QuerySet::fetch` instead."
+         StdDev / Variance). For pure projection (no GROUP BY) use \
+         `QuerySet::values_dict` / `values_list` / `values_list_flat` \
+         instead (issue #22)."
     )]
     ValuesRequiresAggregate { cols: Vec<&'static str> },
+
+    /// `.values_dict(&[])` / `.values_list(&[])` was called with an
+    /// empty column list. Issue #22. A projection with zero columns
+    /// would emit `SELECT FROM …` which every dialect rejects as a
+    /// syntax error; we surface the problem at builder time with a
+    /// clear message instead.
+    #[error(
+        "`.values_dict(...)` / `.values_list(...)` requires at least \
+         one column. Pass the column names you want in the projection."
+    )]
+    EmptyValuesProjection,
 }

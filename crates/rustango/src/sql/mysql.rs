@@ -731,6 +731,7 @@ mod tests {
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert_eq!(
@@ -758,6 +759,7 @@ mod tests {
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt.sql.contains("LOWER(`name`) NOT LIKE LOWER(?)"));
@@ -781,6 +783,7 @@ mod tests {
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt.sql.contains("NOT (`email` <=> ?)"));
@@ -804,6 +807,7 @@ mod tests {
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         };
         let stmt = MySql.compile_select(&q).unwrap();
         // No outer NOT; bare null-safe equality.
@@ -829,6 +833,7 @@ mod tests {
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt.sql.contains("JSON_CONTAINS(`meta`, ?)"));
@@ -853,6 +858,7 @@ mod tests {
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         };
         let stmt = MySql.compile_select(&q).unwrap();
         // Argument order is swapped vs JSON_CONTAINS — value first.
@@ -877,6 +883,7 @@ mod tests {
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt
@@ -905,6 +912,7 @@ mod tests {
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt
@@ -934,6 +942,7 @@ mod tests {
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert!(stmt
@@ -1021,6 +1030,7 @@ mod tests {
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         };
         let stmt = MySql.compile_select(&q).unwrap();
         assert_eq!(
