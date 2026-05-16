@@ -830,6 +830,10 @@ pub mod shortcuts;
 #[cfg(feature = "template_views")]
 pub mod humanize;
 
+/// Named URL reversal — Django's `reverse(name, params)` +
+/// `get_absolute_url()`. Pair with [`register_url!`]. Issue #8.
+pub mod urls;
+
 /// Django-style runserver — [`server::Builder`] owns every line of
 /// boilerplate every tenancy app would otherwise rewrite (DB pool,
 /// resolver chain, host dispatch, operator console, bind + serve).
