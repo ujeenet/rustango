@@ -2058,11 +2058,20 @@ where
 /// ```
 #[macro_export]
 macro_rules! atomic {
-    (& $pool:expr, |$tx:ident| $body:block) => {
-        $crate::sql::atomic(&$pool, |$tx| ::std::boxed::Box::pin(async move { $body }))
-    };
     ($pool:expr, |$tx:ident| $body:block) => {
-        $crate::sql::atomic($pool, |$tx| ::std::boxed::Box::pin(async move { $body }))
+        async {
+            // Clone the pool into a local so it stays alive for the
+            // full future, even when nested inside an outer `async
+            // move` block (which would otherwise try to move the
+            // caller's `pool` binding through this scope). `Pool` is
+            // cheap-clone (Arc-based) so this is a zero-cost
+            // ergonomic shim.
+            let __rustango_atomic_pool = ::core::clone::Clone::clone($pool);
+            $crate::sql::atomic(&__rustango_atomic_pool, |$tx| {
+                ::std::boxed::Box::pin(async move { $body })
+            })
+            .await
+        }
     };
 }
 

@@ -159,3 +159,93 @@ async fn on_commit_pending_outside_atomic_returns_zero() {
 async fn on_commit_outside_atomic_panics() {
     on_commit(|| {});
 }
+
+// ---------- nested atomic blocks ----------
+//
+// Each `atomic!` call sets its own task-local queue, so callbacks
+// registered inside an inner block belong to the INNER atomic and
+// follow ITS commit/rollback decision. The outer block's queue is
+// shielded — restored when the inner scope ends. These tests pin
+// the property since it's load-bearing for any nested-tx user code.
+
+#[tokio::test]
+async fn nested_atomic_inner_rollback_isolated_from_outer() {
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+    let outer = Arc::new(AtomicUsize::new(0));
+    let inner = Arc::new(AtomicUsize::new(0));
+    let outer_clone = Arc::clone(&outer);
+    let inner_clone = Arc::clone(&inner);
+
+    rustango::atomic!(&pool, |_outer_tx| {
+        on_commit(move || {
+            outer_clone.fetch_add(1, Ordering::SeqCst);
+        });
+        // Inner block fails → rollback → inner callback dropped.
+        let inner_res: Result<(), ExecError> = rustango::atomic!(&pool, |_inner_tx| {
+            on_commit(move || {
+                inner_clone.fetch_add(1, Ordering::SeqCst);
+            });
+            Err(ExecError::Sql(rustango::sql::SqlError::EmptyInList))
+        })
+        .await;
+        assert!(inner_res.is_err(), "inner should roll back");
+        // Outer continues + commits successfully.
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outer.load(Ordering::SeqCst),
+        1,
+        "outer callback should fire — outer committed"
+    );
+    assert_eq!(
+        inner.load(Ordering::SeqCst),
+        0,
+        "inner callback must NOT fire — inner rolled back"
+    );
+}
+
+#[tokio::test]
+async fn nested_atomic_outer_rollback_drops_both_queues() {
+    let Some(pool) = fresh_pool().await else {
+        return;
+    };
+    let outer = Arc::new(AtomicUsize::new(0));
+    let inner = Arc::new(AtomicUsize::new(0));
+    let outer_clone = Arc::clone(&outer);
+    let inner_clone = Arc::clone(&inner);
+
+    let result: Result<(), ExecError> = rustango::atomic!(&pool, |_outer_tx| {
+        on_commit(move || {
+            outer_clone.fetch_add(1, Ordering::SeqCst);
+        });
+        // Inner commits successfully — its callback fires.
+        rustango::atomic!(&pool, |_inner_tx| {
+            on_commit(move || {
+                inner_clone.fetch_add(1, Ordering::SeqCst);
+            });
+            Ok::<_, ExecError>(())
+        })
+        .await
+        .unwrap();
+        // Outer then bails out — its OWN callback drops.
+        Err(ExecError::Sql(rustango::sql::SqlError::EmptyInList))
+    })
+    .await;
+
+    assert!(result.is_err(), "outer should roll back");
+    assert_eq!(
+        inner.load(Ordering::SeqCst),
+        1,
+        "inner already fired before outer rolled back (correct — inner had its own scope)"
+    );
+    assert_eq!(
+        outer.load(Ordering::SeqCst),
+        0,
+        "outer callback must NOT fire — outer rolled back"
+    );
+}
