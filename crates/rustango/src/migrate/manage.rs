@@ -112,6 +112,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "db:dump" => db_dump_cmd(&args[1..], writer),
         "db:restore" => db_restore_cmd(&args[1..], writer),
         "db:info" => db_info_cmd(writer),
+        "dumpdata" => dumpdata_cmd(pool, &args[1..], writer).await,
         // v0.38 — `inspectdb` is tri-dialect: PG + MySQL via
         // `information_schema`, SQLite via `PRAGMA table_info` +
         // `sqlite_master`. Dispatch happens inside `inspectdb_cmd`.
@@ -236,6 +237,19 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         "      misconfigurations. With --deploy: production hardening checks."
     )?;
     writeln!(w, "      Exits non-zero on any error-level finding.\n")?;
+    writeln!(w, "  dumpdata [--model <name>] [--indent <N>]")?;
+    writeln!(
+        w,
+        "      Export every registered model's rows as a Django-shape JSON"
+    )?;
+    writeln!(
+        w,
+        "      fixture (`[{{\"model\": \"app.Model\", \"pk\": N, \"fields\": {{...}}}}]`)."
+    )?;
+    writeln!(
+        w,
+        "      --model limits to a single model; pass multiple times for a set.\n"
+    )?;
     writeln!(w, "  docs")?;
     writeln!(w, "      Open docs.rs/rustango in the default browser.\n")?;
     writeln!(w, "  version | --version")?;
@@ -2171,6 +2185,192 @@ fn db_info_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
     Ok(())
 }
 
+/// `manage dumpdata [--model app.Name] [--indent N]` — fixture
+/// export. Iterates every model registered in `inventory` and
+/// emits a Django-shape JSON array:
+///
+/// ```json
+/// [
+///   {"model": "blog.Article", "pk": 1, "fields": {"title": "...", ...}},
+///   {"model": "blog.Article", "pk": 2, "fields": {"title": "...", ...}}
+/// ]
+/// ```
+///
+/// `model` defaults to the resolved app label + schema name. Pass
+/// `--model <name>` to limit to a single model (full `app.Model`
+/// name OR bare model name); pass multiple times to limit to a set.
+/// `--indent N` controls JSON formatting (default `2`).
+///
+/// Output goes to stdout so users can pipe to a file:
+/// `cargo run manage dumpdata > fixtures/seed.json`.
+///
+/// `loaddata` is the companion verb that re-applies a fixture
+/// export — queued as a follow-up.
+#[derive(Debug, Default, PartialEq)]
+struct DumpdataArgs {
+    /// Limit to these `app.Model` or `Model` names. Empty = every model.
+    model_filters: Vec<String>,
+    /// JSON indent. `0` = compact single-line; otherwise pretty (2-space).
+    indent: usize,
+    /// `true` when the user passed `--help`; cmd short-circuits to help.
+    help: bool,
+}
+
+fn parse_dumpdata_args(args: &[String]) -> Result<DumpdataArgs, MigrateError> {
+    let mut out = DumpdataArgs {
+        indent: 2,
+        ..Default::default()
+    };
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                out.help = true;
+                return Ok(out);
+            }
+            "--model" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| MigrateError::Validation("--model expects a value".into()))?;
+                out.model_filters.push(v.clone());
+            }
+            "--indent" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| MigrateError::Validation("--indent expects a value".into()))?;
+                out.indent = v.parse().map_err(|e| {
+                    MigrateError::Validation(format!("--indent: not an integer ({e})"))
+                })?;
+            }
+            other if other.starts_with('-') => {
+                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+            }
+            other => {
+                return Err(MigrateError::Validation(format!(
+                    "unexpected positional argument: {other}"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+async fn dumpdata_cmd<W: Write>(
+    pool: &Pool,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    let parsed = parse_dumpdata_args(args)?;
+    if parsed.help {
+        writeln!(w, "dumpdata [--model app.Name] [--indent N]")?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "  Export every registered model's rows as JSON in Django fixture"
+        )?;
+        writeln!(
+            w,
+            "  shape: `[{{\"model\": \"app.Model\", \"pk\": N, \"fields\": {{...}}}}]`."
+        )?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "  --model <name>   Limit to a single model. Accepts either the full"
+        )?;
+        writeln!(
+            w,
+            "                   `app.Model` shape or the bare model name. Pass"
+        )?;
+        writeln!(
+            w,
+            "                   the flag multiple times to limit to a set."
+        )?;
+        writeln!(
+            w,
+            "  --indent <N>     JSON indent (default 2; 0 emits compact single-line)."
+        )?;
+        return Ok(());
+    }
+    let model_filters = &parsed.model_filters;
+    let indent = parsed.indent;
+
+    // Walk every registered model, fetching rows from each.
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for entry in inventory::iter::<crate::core::ModelEntry>() {
+        let schema = entry.schema;
+        let app_label = entry.resolved_app_label().unwrap_or("");
+        let dotted_name = if app_label.is_empty() {
+            schema.name.to_owned()
+        } else {
+            format!("{app_label}.{}", schema.name)
+        };
+
+        // Filter: if the user specified --model, only emit models
+        // whose `app.Model` or bare `Model` matches.
+        if !model_filters.is_empty()
+            && !model_filters
+                .iter()
+                .any(|f| f == &dotted_name || f == schema.name)
+        {
+            continue;
+        }
+
+        // Identify the PK column for fixture `pk` extraction.
+        let pk_field = schema.primary_key();
+
+        // Build a minimal "select every column" SelectQuery.
+        let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
+        let query = crate::core::SelectQuery {
+            model: schema,
+            where_clause: crate::core::WhereExpr::And(vec![]),
+            search: None,
+            joins: vec![],
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            lock_mode: None,
+            compound: vec![],
+            projection: None,
+        };
+
+        let rows = crate::sql::select_rows_as_json(pool, &query, &fields)
+            .await
+            .map_err(|e| {
+                MigrateError::Validation(format!(
+                    "dumpdata: select from `{}` failed: {e}",
+                    schema.table
+                ))
+            })?;
+
+        for mut row in rows {
+            // Pop the PK column off `fields` into the outer fixture
+            // entry's `pk` slot — Django fixtures separate identity
+            // from payload.
+            let pk_value = match pk_field {
+                Some(pk) => row
+                    .as_object_mut()
+                    .and_then(|m| m.remove(pk.name))
+                    .unwrap_or(serde_json::Value::Null),
+                None => serde_json::Value::Null,
+            };
+            out.push(serde_json::json!({
+                "model": dotted_name,
+                "pk": pk_value,
+                "fields": row,
+            }));
+        }
+    }
+
+    let rendered = if indent == 0 {
+        serde_json::to_string(&out)
+    } else {
+        serde_json::to_string_pretty(&out)
+    }
+    .map_err(|e| MigrateError::Validation(format!("dumpdata: serialize JSON: {e}")))?;
+    writeln!(w, "{rendered}")?;
+    Ok(())
+}
+
 /// Mask the password in a `postgres://user:pass@host/db` connection
 /// URL so it doesn't leak into log output.
 fn redact(argv: &[String]) -> Vec<String> {
@@ -2595,6 +2795,66 @@ mod gen_tests {
     fn parse_name_and_model_rejects_lowercase_name() {
         let r = parse_name_and_model(&["postviewset".into()]);
         assert!(r.is_err());
+    }
+
+    // -------- dumpdata --------
+
+    #[test]
+    fn parse_dumpdata_args_defaults() {
+        let p = parse_dumpdata_args(&[]).unwrap();
+        assert!(p.model_filters.is_empty());
+        assert_eq!(p.indent, 2);
+        assert!(!p.help);
+    }
+
+    #[test]
+    fn parse_dumpdata_args_help_flag() {
+        let p = parse_dumpdata_args(&["--help".into()]).unwrap();
+        assert!(p.help);
+    }
+
+    #[test]
+    fn parse_dumpdata_args_collects_multiple_models() {
+        let args: Vec<String> = vec![
+            "--model".into(),
+            "blog.Article".into(),
+            "--model".into(),
+            "Author".into(),
+        ];
+        let p = parse_dumpdata_args(&args).unwrap();
+        assert_eq!(p.model_filters, vec!["blog.Article", "Author"]);
+    }
+
+    #[test]
+    fn parse_dumpdata_args_indent_accepts_zero() {
+        let p = parse_dumpdata_args(&["--indent".into(), "0".into()]).unwrap();
+        assert_eq!(p.indent, 0);
+    }
+
+    #[test]
+    fn parse_dumpdata_args_rejects_unknown_flag() {
+        let r = parse_dumpdata_args(&["--unknown".into()]);
+        assert!(r.is_err());
+        assert!(format!("{}", r.unwrap_err()).contains("unknown flag"));
+    }
+
+    #[test]
+    fn parse_dumpdata_args_rejects_missing_model_value() {
+        let r = parse_dumpdata_args(&["--model".into()]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_dumpdata_args_rejects_non_integer_indent() {
+        let r = parse_dumpdata_args(&["--indent".into(), "abc".into()]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_dumpdata_args_rejects_positional() {
+        let r = parse_dumpdata_args(&["unexpected".into()]);
+        assert!(r.is_err());
+        assert!(format!("{}", r.unwrap_err()).contains("positional"));
     }
 
     /// Default template (no `--tenant`) keeps the v0.28
