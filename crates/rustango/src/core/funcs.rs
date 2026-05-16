@@ -390,6 +390,43 @@ where
     }
 }
 
+// ---------- pg_trgm functions (issue #29 follow-up) ----------
+
+/// `SIMILARITY(a, b)` — pg_trgm trigram similarity, returns a `real`
+/// in `[0, 1]`. Useful as an annotation + ORDER BY for ranked fuzzy
+/// search:
+///
+/// ```ignore
+/// use rustango::core::F;
+/// use rustango::core::funcs::trigram_similarity;
+/// Article::objects()
+///     .annotate("rank", trigram_similarity(F("title"), "rusty programming"))
+///     .order_by_desc("rank")
+/// ```
+///
+/// Requires `CREATE EXTENSION pg_trgm` on the database. **PG-only** —
+/// MySQL / SQLite reject at compile time.
+#[must_use]
+pub fn trigram_similarity(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::TrigramSimilarity,
+        args: vec![a.into(), b.into()],
+    }
+}
+
+/// `WORD_SIMILARITY(a, b)` — pg_trgm word-level similarity. Matches
+/// the per-word variant of [`trigram_similarity`]; pairs with the
+/// `__trigram_word_similar` WHERE-clause lookup.
+///
+/// Requires `CREATE EXTENSION pg_trgm`. **PG-only**.
+#[must_use]
+pub fn trigram_word_similarity(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::TrigramWordSimilarity,
+        args: vec![a.into(), b.into()],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
