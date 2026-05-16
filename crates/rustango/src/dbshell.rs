@@ -21,12 +21,24 @@ use std::process::Command;
 
 /// What the URL parser pulled out of `DATABASE_URL`. Each variant
 /// carries enough information to assemble the right CLI invocation.
+/// Passwords are kept separate from positional args because passing
+/// them through `argv` would leak the secret to anyone running
+/// `ps aux` — instead the [`run`] function sets `PGPASSWORD` /
+/// `MYSQL_PWD` in the child's environment, matching Django's
+/// dbshell behavior.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DbTarget {
-    /// PostgreSQL — `psql` accepts the full connection URI directly.
-    Postgres { url: String },
+    /// PostgreSQL. Parsed into structured components so the password
+    /// rides via `PGPASSWORD` env var rather than the URL argv.
+    Postgres {
+        host: Option<String>,
+        port: Option<u16>,
+        user: Option<String>,
+        password: Option<String>,
+        database: Option<String>,
+    },
     /// MySQL / MariaDB — `mysql` needs separate flags (`-h`, `-u`,
-    /// `-p`, etc.). Parsed into structured components.
+    /// `-p`, etc.). Password rides via `MYSQL_PWD` env var.
     Mysql {
         host: Option<String>,
         port: Option<u16>,
@@ -61,10 +73,24 @@ pub fn parse_target(url: &str) -> Result<DbTarget, String> {
         .ok_or_else(|| format!("DATABASE_URL has no scheme: `{url}`"))?;
 
     match scheme.to_ascii_lowercase().as_str() {
-        "postgres" | "postgresql" => Ok(DbTarget::Postgres {
-            url: url.to_owned(),
-        }),
-        "mysql" | "mariadb" => Ok(parse_mysql(rest)),
+        "postgres" | "postgresql" => Ok(parse_userinfo_host_db(rest, |h, p, u, pw, db| {
+            DbTarget::Postgres {
+                host: h,
+                port: p,
+                user: u,
+                password: pw,
+                database: db,
+            }
+        })),
+        "mysql" | "mariadb" => Ok(parse_userinfo_host_db(rest, |h, p, u, pw, db| {
+            DbTarget::Mysql {
+                host: h,
+                port: p,
+                user: u,
+                password: pw,
+                database: db,
+            }
+        })),
         "sqlite" => Ok(DbTarget::Sqlite {
             path: parse_sqlite_path(rest),
         }),
@@ -74,9 +100,14 @@ pub fn parse_target(url: &str) -> Result<DbTarget, String> {
     }
 }
 
-fn parse_mysql(rest: &str) -> DbTarget {
-    // Format: [user[:pass]@]host[:port][/db][?query]
-    // Strip any `?query` suffix — `mysql` CLI doesn't take URL query.
+/// Parse the `[user[:pass]@]host[:port][/db][?query]` body shared by
+/// the postgres / mysql URL shapes.
+fn parse_userinfo_host_db<F, T>(rest: &str, build: F) -> T
+where
+    F: FnOnce(Option<String>, Option<u16>, Option<String>, Option<String>, Option<String>) -> T,
+{
+    // Strip any `?query` suffix — native CLI clients don't take URL
+    // query strings.
     let body = rest.split_once('?').map_or(rest, |(b, _)| b);
     // Pull database path off the end.
     let (auth_host, database) = match body.split_once('/') {
@@ -84,7 +115,7 @@ fn parse_mysql(rest: &str) -> DbTarget {
         Some((auth_host, _)) => (auth_host, None),
         None => (body, None),
     };
-    // Split auth + host on '@' (last '@' so a `:` in password before
+    // Split auth + host on '@' (rsplit so a `:` in password before
     // it doesn't confuse the split).
     let (auth, host_port) = match auth_host.rsplit_once('@') {
         Some((a, hp)) => (Some(a), hp),
@@ -110,13 +141,7 @@ fn parse_mysql(rest: &str) -> DbTarget {
             }
         }
     };
-    DbTarget::Mysql {
-        host,
-        port,
-        user,
-        password,
-        database,
-    }
+    build(host, port, user, password, database)
 }
 
 fn parse_sqlite_path(rest: &str) -> String {
@@ -134,12 +159,51 @@ fn parse_sqlite_path(rest: &str) -> String {
     rest.to_owned()
 }
 
-/// Build the `Command` that would invoke the native CLI for `target`.
-/// Returns `(program, args)` so tests can inspect without spawning.
+/// Build the `Command` invocation for `target`. Returns
+/// `(program, args, env_vars)` where `env_vars` carries the password
+/// (out of argv to avoid `ps aux` exposure). Tests inspect all three
+/// without spawning.
+///
+/// **Password handling**:
+/// - **Postgres** — `PGPASSWORD` env var. `psql` reads it natively.
+/// - **MySQL** — `MYSQL_PWD` env var. `mysql` reads it natively
+///   (but logs a "using password on the command line is insecure"
+///   warning if you use `-p`; the env var path is the recommended
+///   one).
+/// - **SQLite** — no auth, no env var needed.
 #[must_use]
-pub fn command_for(target: &DbTarget) -> (&'static str, Vec<OsString>) {
+pub fn command_for(target: &DbTarget) -> (&'static str, Vec<OsString>, Vec<(String, String)>) {
     match target {
-        DbTarget::Postgres { url } => ("psql", vec![OsString::from(url)]),
+        DbTarget::Postgres {
+            host,
+            port,
+            user,
+            password,
+            database,
+        } => {
+            let mut args: Vec<OsString> = Vec::new();
+            if let Some(h) = host {
+                args.push("-h".into());
+                args.push(h.into());
+            }
+            if let Some(p) = port {
+                args.push("-p".into());
+                args.push(p.to_string().into());
+            }
+            if let Some(u) = user {
+                args.push("-U".into());
+                args.push(u.into());
+            }
+            if let Some(db) = database {
+                args.push("-d".into());
+                args.push(db.into());
+            }
+            let env = password
+                .as_ref()
+                .map(|pw| vec![("PGPASSWORD".to_owned(), pw.clone())])
+                .unwrap_or_default();
+            ("psql", args, env)
+        }
         DbTarget::Mysql {
             host,
             port,
@@ -160,19 +224,16 @@ pub fn command_for(target: &DbTarget) -> (&'static str, Vec<OsString>) {
                 args.push("-u".into());
                 args.push(u.into());
             }
-            if let Some(pw) = password {
-                // `-p<pass>` is the no-space form; `--password=...` is
-                // safer (mysql client supports both). Prefer the long
-                // form so the password doesn't show in ps output as
-                // `-pSECRET`.
-                args.push(format!("--password={pw}").into());
-            }
             if let Some(db) = database {
                 args.push(db.into());
             }
-            ("mysql", args)
+            let env = password
+                .as_ref()
+                .map(|pw| vec![("MYSQL_PWD".to_owned(), pw.clone())])
+                .unwrap_or_default();
+            ("mysql", args, env)
         }
-        DbTarget::Sqlite { path } => ("sqlite3", vec![OsString::from(path)]),
+        DbTarget::Sqlite { path } => ("sqlite3", vec![OsString::from(path)], Vec::new()),
     }
 }
 
@@ -188,12 +249,18 @@ pub fn command_for(target: &DbTarget) -> (&'static str, Vec<OsString>) {
 ///   non-zero exit codes from the client itself.
 pub fn run(url: &str) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let target = parse_target(url).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    let (program, args) = command_for(&target);
+    let (program, args, env) = command_for(&target);
+
+    let mut cmd = Command::new(program);
+    cmd.args(&args);
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
 
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
-        let err = Command::new(program).args(&args).exec();
+        let err = cmd.exec();
         // `exec` only returns on failure (e.g. binary not on PATH).
         Err(format!(
             "failed to exec `{program}` for dbshell: {err}. \
@@ -203,7 +270,7 @@ pub fn run(url: &str) -> Result<std::convert::Infallible, Box<dyn std::error::Er
     }
     #[cfg(not(unix))]
     {
-        let status = Command::new(program).args(&args).status()?;
+        let status = cmd.status()?;
         if status.success() {
             std::process::exit(0);
         }
@@ -219,18 +286,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_postgres_scheme_keeps_url_intact() {
+    fn parse_postgres_full_dsn_into_components() {
         assert_eq!(
-            parse_target("postgres://user:pass@localhost:5432/dbname").unwrap(),
+            parse_target("postgres://alice:secret@db.example.com:5432/myapp").unwrap(),
             DbTarget::Postgres {
-                url: "postgres://user:pass@localhost:5432/dbname".to_owned()
+                host: Some("db.example.com".to_owned()),
+                port: Some(5432),
+                user: Some("alice".to_owned()),
+                password: Some("secret".to_owned()),
+                database: Some("myapp".to_owned()),
             }
         );
-        // `postgresql://` alias.
+    }
+
+    #[test]
+    fn parse_postgresql_alias_routes_to_postgres() {
         assert_eq!(
             parse_target("postgresql://localhost/dbname").unwrap(),
             DbTarget::Postgres {
-                url: "postgresql://localhost/dbname".to_owned()
+                host: Some("localhost".to_owned()),
+                port: None,
+                user: None,
+                password: None,
+                database: Some("dbname".to_owned()),
             }
         );
     }
@@ -354,18 +432,77 @@ mod tests {
 
     // ---- command_for ----
 
-    #[test]
-    fn command_for_postgres_uses_psql_with_full_url() {
-        let target = DbTarget::Postgres {
-            url: "postgres://localhost/db".to_owned(),
-        };
-        let (prog, args) = command_for(&target);
-        assert_eq!(prog, "psql");
-        assert_eq!(args, vec![OsString::from("postgres://localhost/db")]);
+    /// Helper to fold args+env into searchable strings.
+    fn args_str(args: Vec<OsString>) -> Vec<String> {
+        args.into_iter().map(|s| s.into_string().unwrap()).collect()
     }
 
     #[test]
-    fn command_for_mysql_passes_host_user_password_db_as_flags() {
+    fn command_for_postgres_emits_structured_flags() {
+        let target = DbTarget::Postgres {
+            host: Some("db.example.com".to_owned()),
+            port: Some(5432),
+            user: Some("alice".to_owned()),
+            password: Some("secret".to_owned()),
+            database: Some("myapp".to_owned()),
+        };
+        let (prog, args, env) = command_for(&target);
+        assert_eq!(prog, "psql");
+        assert_eq!(
+            args_str(args),
+            vec![
+                "-h",
+                "db.example.com",
+                "-p",
+                "5432",
+                "-U",
+                "alice",
+                "-d",
+                "myapp",
+            ]
+        );
+        assert_eq!(env, vec![("PGPASSWORD".to_owned(), "secret".to_owned())]);
+    }
+
+    #[test]
+    fn command_for_postgres_no_password_emits_no_env_var() {
+        let target = DbTarget::Postgres {
+            host: Some("localhost".to_owned()),
+            port: None,
+            user: None,
+            password: None,
+            database: None,
+        };
+        let (_, _, env) = command_for(&target);
+        assert!(env.is_empty(), "no password → no PGPASSWORD env: {env:?}");
+    }
+
+    #[test]
+    fn command_for_postgres_password_never_appears_in_args() {
+        // Regression: passing the password via argv (whole-URL form,
+        // `-p<pass>`, etc.) leaks it to anyone running `ps aux`.
+        // Pin that no argv element ever contains the secret.
+        let target = DbTarget::Postgres {
+            host: Some("h".to_owned()),
+            port: None,
+            user: Some("u".to_owned()),
+            password: Some("SUPER_SECRET_PASSWORD".to_owned()),
+            database: Some("d".to_owned()),
+        };
+        let (_, args, env) = command_for(&target);
+        let argv = args_str(args);
+        assert!(
+            !argv.iter().any(|a| a.contains("SUPER_SECRET_PASSWORD")),
+            "password leaked into argv: {argv:?}"
+        );
+        // Env var IS allowed to carry it — it's the safe path.
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "PGPASSWORD" && v == "SUPER_SECRET_PASSWORD"));
+    }
+
+    #[test]
+    fn command_for_mysql_emits_structured_flags() {
         let target = DbTarget::Mysql {
             host: Some("db.example.com".to_owned()),
             port: Some(3307),
@@ -373,40 +510,35 @@ mod tests {
             password: Some("secret".to_owned()),
             database: Some("myapp".to_owned()),
         };
-        let (prog, args) = command_for(&target);
+        let (prog, args, env) = command_for(&target);
         assert_eq!(prog, "mysql");
-        let args_str: Vec<String> = args.into_iter().map(|s| s.into_string().unwrap()).collect();
         assert_eq!(
-            args_str,
-            vec![
-                "-h",
-                "db.example.com",
-                "-P",
-                "3307",
-                "-u",
-                "alice",
-                "--password=secret",
-                "myapp",
-            ]
+            args_str(args),
+            vec!["-h", "db.example.com", "-P", "3307", "-u", "alice", "myapp",]
         );
+        assert_eq!(env, vec![("MYSQL_PWD".to_owned(), "secret".to_owned())]);
     }
 
     #[test]
-    fn command_for_mysql_uses_long_password_form() {
-        // Defense against `ps` exposure: `-p<pass>` shows the password
-        // in `ps aux` output. `--password=<pass>` is the safer form
-        // (still imperfect, but no worse than `-h <host>`).
+    fn command_for_mysql_password_never_appears_in_args() {
+        // Same regression as postgres — no `--password=...` /
+        // `-p<pass>` shape that lands the secret in argv.
         let target = DbTarget::Mysql {
-            host: Some("localhost".to_owned()),
+            host: Some("h".to_owned()),
             port: None,
             user: Some("u".to_owned()),
-            password: Some("pw".to_owned()),
+            password: Some("SUPER_SECRET_PASSWORD".to_owned()),
             database: None,
         };
-        let (_, args) = command_for(&target);
-        let args_str: Vec<String> = args.into_iter().map(|s| s.into_string().unwrap()).collect();
-        assert!(args_str.contains(&"--password=pw".to_owned()));
-        assert!(!args_str.iter().any(|a| a.starts_with("-ppw")));
+        let (_, args, env) = command_for(&target);
+        let argv = args_str(args);
+        assert!(
+            !argv.iter().any(|a| a.contains("SUPER_SECRET_PASSWORD")),
+            "password leaked into argv: {argv:?}"
+        );
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "MYSQL_PWD" && v == "SUPER_SECRET_PASSWORD"));
     }
 
     #[test]
@@ -414,9 +546,9 @@ mod tests {
         let target = DbTarget::Sqlite {
             path: ":memory:".to_owned(),
         };
-        assert_eq!(
-            command_for(&target),
-            ("sqlite3", vec![OsString::from(":memory:")])
-        );
+        let (prog, args, env) = command_for(&target);
+        assert_eq!(prog, "sqlite3");
+        assert_eq!(args, vec![OsString::from(":memory:")]);
+        assert!(env.is_empty(), "sqlite has no auth, no env var");
     }
 }
