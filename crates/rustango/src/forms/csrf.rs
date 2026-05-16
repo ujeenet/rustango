@@ -426,6 +426,124 @@ fn forbid_response(detail: &'static str) -> Response<Body> {
     response
 }
 
+// ============================================================== template helpers (issue #15)
+
+/// Render the hidden `<input>` HTML that posts the token back to the
+/// middleware. Use this when you already have the token string and
+/// just need the form field. Pair with [`stamp_into_context`] for the
+/// full handler-side flow.
+///
+/// ```ignore
+/// let html = csrf_input_html("abc123");
+/// assert_eq!(html, r#"<input type="hidden" name="_csrf" value="abc123">"#);
+/// ```
+#[must_use]
+pub fn csrf_input_html(token: &str) -> String {
+    let escaped = html_escape_attr(token);
+    format!(r#"<input type="hidden" name="{CSRF_FORM_FIELD}" value="{escaped}">"#)
+}
+
+/// Tiny HTML-attribute escaper — sufficient for the token alphabet
+/// (`A-Z`, `a-z`, `0-9`, `-`, `_` from base64url) but defensive in
+/// case a caller passes a token from an unusual source. Avoids
+/// pulling a full HTML-escape crate for the one-string case.
+fn html_escape_attr(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Read or mint a CSRF token and stamp it into the Tera context with
+/// two keys callers can pick from: `csrf_token` (raw string, for SPA
+/// meta tags or custom HTML) and `csrf_input` (pre-rendered hidden
+/// input, ready for `{{ csrf_input | safe }}`). Returns the
+/// optional `Set-Cookie` header value the caller should attach to
+/// the response when a fresh token was minted (so the first GET
+/// doesn't render an empty token).
+///
+/// Public counterpart of the private helper used by [`crate::template_views`]
+/// — promoted so users with hand-rolled handlers don't re-implement
+/// the cookie-mint dance.
+///
+/// ```ignore
+/// async fn contact_form(headers: HeaderMap) -> Response {
+///     let mut ctx = tera::Context::new();
+///     let set_cookie = rustango::forms::csrf::stamp_into_context(&headers, &mut ctx);
+///     let mut res = render(&tera, "contact.html", &ctx);
+///     if let Some(c) = set_cookie {
+///         if let Ok(h) = axum::http::HeaderValue::from_str(&c) {
+///             res.headers_mut().append(axum::http::header::SET_COOKIE, h);
+///         }
+///     }
+///     res
+/// }
+/// ```
+///
+/// Template usage:
+///
+/// ```jinja
+/// <form method="POST">
+///   {{ csrf_input | safe }}
+///   …
+/// </form>
+///
+/// <!-- SPA meta-tag variant: -->
+/// <meta name="csrf-token" content="{{ csrf_token }}">
+/// ```
+#[cfg(feature = "template_views")]
+#[must_use]
+pub fn stamp_into_context(
+    headers: &axum::http::HeaderMap,
+    ctx: &mut tera::Context,
+) -> Option<String> {
+    let (token, set_cookie) = ensure_token(headers, CSRF_COOKIE);
+    let html = csrf_input_html(&token);
+    ctx.insert("csrf_token", &token);
+    ctx.insert("csrf_input", &html);
+    set_cookie
+}
+
+/// Register a `csrf_input` Tera filter that converts a token string
+/// to the hidden-input HTML. Useful when a template has the raw
+/// `csrf_token` in context (the existing `template_views` shape) but
+/// wants the `<input>` shape without hand-writing it:
+///
+/// ```jinja
+/// {{ csrf_token | csrf_input | safe }}
+/// ```
+///
+/// Call at app setup, alongside any other Tera registration. Pair
+/// with [`stamp_into_context`] for handlers that don't go through
+/// the built-in `template_views` CBVs.
+///
+/// Non-string filter input passes through unchanged so the chain
+/// doesn't blow up on accidental wiring.
+#[cfg(feature = "template_views")]
+pub fn register_csrf_filter(tera: &mut tera::Tera) {
+    tera.register_filter("csrf_input", csrf_input_filter);
+}
+
+#[cfg(feature = "template_views")]
+fn csrf_input_filter(
+    value: &tera::Value,
+    _: &std::collections::HashMap<String, tera::Value>,
+) -> tera::Result<tera::Value> {
+    if let Some(s) = value.as_str() {
+        Ok(tera::Value::String(csrf_input_html(s)))
+    } else {
+        Ok(value.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,5 +670,100 @@ mod tests {
         assert!(percent_decode(b"%ZZ").is_none()); // non-hex
         assert_eq!(percent_decode(b"plain").as_deref(), Some("plain"));
         assert_eq!(percent_decode(b"a%20b").as_deref(), Some("a b"));
+    }
+
+    // ---- template helpers (issue #15) ----
+
+    #[test]
+    fn csrf_input_html_uses_form_field_constant() {
+        let html = csrf_input_html("abc123");
+        assert_eq!(html, r#"<input type="hidden" name="_csrf" value="abc123">"#);
+        // The `name` attribute matches the middleware-expected constant.
+        assert!(html.contains(&format!(r#"name="{CSRF_FORM_FIELD}""#)));
+    }
+
+    #[test]
+    fn csrf_input_html_escapes_attribute_specials() {
+        // Defensive escape — base64url tokens never contain these,
+        // but a user could pass in something else by accident.
+        let html = csrf_input_html(r#"x"<&>'"#);
+        assert!(
+            !html.contains(r#"x"<&>'"#),
+            "raw specials must NOT survive: {html}"
+        );
+        assert!(html.contains("&quot;"), "{html}");
+        assert!(html.contains("&lt;"), "{html}");
+        assert!(html.contains("&amp;"), "{html}");
+        assert!(html.contains("&gt;"), "{html}");
+        assert!(html.contains("&#39;"), "{html}");
+    }
+
+    #[cfg(feature = "template_views")]
+    #[test]
+    fn stamp_into_context_stamps_both_keys_and_returns_set_cookie_on_fresh() {
+        let headers = axum::http::HeaderMap::new(); // no cookie → fresh mint
+        let mut ctx = tera::Context::new();
+        let set_cookie = stamp_into_context(&headers, &mut ctx);
+
+        assert!(set_cookie.is_some(), "fresh GET should return Set-Cookie");
+        let json = ctx.into_json();
+        let token = json
+            .get("csrf_token")
+            .and_then(|v| v.as_str())
+            .expect("csrf_token stamped");
+        let input_html = json
+            .get("csrf_input")
+            .and_then(|v| v.as_str())
+            .expect("csrf_input stamped");
+        assert!(!token.is_empty(), "minted token shouldn't be empty");
+        assert!(
+            input_html.contains(token),
+            "csrf_input should embed the token: {input_html}"
+        );
+    }
+
+    #[cfg(feature = "template_views")]
+    #[test]
+    fn stamp_into_context_reuses_existing_cookie_no_set_cookie() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            axum::http::HeaderValue::from_static("rustango_csrf=fixed_value"),
+        );
+        let mut ctx = tera::Context::new();
+        let set_cookie = stamp_into_context(&headers, &mut ctx);
+
+        assert!(set_cookie.is_none(), "existing cookie should not re-mint");
+        let json = ctx.into_json();
+        assert_eq!(
+            json.get("csrf_token").and_then(|v| v.as_str()),
+            Some("fixed_value")
+        );
+    }
+
+    #[cfg(feature = "template_views")]
+    #[test]
+    fn csrf_input_filter_converts_token_to_html() {
+        let mut tera = tera::Tera::default();
+        register_csrf_filter(&mut tera);
+        tera.add_raw_template("_", "{{ csrf_token | csrf_input | safe }}")
+            .unwrap();
+
+        let mut ctx = tera::Context::new();
+        ctx.insert("csrf_token", "tok-abc");
+        let out = tera.render("_", &ctx).unwrap();
+        assert_eq!(out, r#"<input type="hidden" name="_csrf" value="tok-abc">"#);
+    }
+
+    #[cfg(feature = "template_views")]
+    #[test]
+    fn csrf_input_filter_passes_through_non_string_values() {
+        let mut tera = tera::Tera::default();
+        register_csrf_filter(&mut tera);
+        // Number → filter passes through, Tera renders as the number.
+        tera.add_raw_template("_", "{{ n | csrf_input }}").unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("n", &42_i64);
+        assert_eq!(tera.render("_", &ctx).unwrap(), "42");
     }
 }
