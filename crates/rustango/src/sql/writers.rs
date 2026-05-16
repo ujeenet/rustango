@@ -2449,6 +2449,28 @@ fn write_filter(
             let p = b.d.placeholder(b.params.len());
             b.d.write_search(&mut b.sql, &qualified_col, &p)?;
         }
+        Op::ArrayContains | Op::ArrayContainedBy | Op::ArrayOverlap => {
+            // Postgres ArrayField operators (`@>`, `<@`, `&&`). The
+            // dialect default emits the PG shape; MySQL + SQLite
+            // override to reject with `OpNotSupportedInDialect`. The
+            // bound value MUST be `SqlValue::Array(_)` so it binds
+            // as a single PG array parameter — `List` would expand
+            // to comma-separated placeholders, which is the wrong
+            // shape for array comparison.
+            if !matches!(filter.value, SqlValue::Array(_)) {
+                return Err(SqlError::ArrayOpRequiresArray);
+            }
+            require_op(b.d, filter.op)?;
+            b.params.push(filter.value.clone());
+            let p = b.d.placeholder(b.params.len());
+            let op_str: &'static str = match filter.op {
+                Op::ArrayContains => "@>",
+                Op::ArrayContainedBy => "<@",
+                Op::ArrayOverlap => "&&",
+                _ => unreachable!(),
+            };
+            b.d.write_array_op(&mut b.sql, &qualified_col, &p, op_str)?;
+        }
         Op::In | Op::NotIn => {
             let SqlValue::List(elements) = &filter.value else {
                 return Err(SqlError::InRequiresList);
@@ -2630,6 +2652,9 @@ fn op_label(op: Op) -> &'static str {
         Op::TrigramSimilar => "% (trigram_similar)",
         Op::TrigramWordSimilar => "%> (trigram_word_similar)",
         Op::Search => "@@ (search)",
+        Op::ArrayContains => "@> (array_contains)",
+        Op::ArrayContainedBy => "<@ (array_contained_by)",
+        Op::ArrayOverlap => "&& (array_overlap)",
         Op::IRegex => "~* (iregex)",
         Op::NotIRegex => "!~* (iregex)",
     }
