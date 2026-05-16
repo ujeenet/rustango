@@ -202,6 +202,8 @@ pub fn extract_next_named(query: &HashMap<String, String>, field: &str) -> Optio
 /// - Scheme-prefixed URLs (`http://evil.example/`, `//evil.example/x`)
 /// - Backslash variants the browser normalizes to a host
 ///   (`/\evil.example/x`)
+/// - Percent-encoded variants of the above
+///   (`%2F%2Fevil.example/x` decodes to `//evil.example/x`)
 /// - Empty / whitespace
 ///
 /// ```rust
@@ -210,6 +212,7 @@ pub fn extract_next_named(query: &HashMap<String, String>, field: &str) -> Optio
 /// assert_eq!(safe_next("http://evil.example/x"), None);
 /// assert_eq!(safe_next("//evil.example/x"), None);
 /// assert_eq!(safe_next("/\\evil.example/x"), None);
+/// assert_eq!(safe_next("%2F%2Fevil.example/x"), None);  // decoded → //evil
 /// assert_eq!(safe_next(""), None);
 /// ```
 ///
@@ -222,19 +225,38 @@ pub fn safe_next(next: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    // Must be a root-relative path. Reject any scheme, any
-    // network-relative form (`//`), and the `/\…` variant that some
-    // browsers normalize to a host.
-    if !trimmed.starts_with('/') {
+    // Percent-decode first so encoded bypass attempts
+    // (`%2F%2Fevil.example/x` → `//evil.example/x`) are caught by the
+    // string-shape checks below. We discard the decoded form after
+    // validation and return the original trimmed input — that way
+    // double-encoded sequences in legitimate paths survive the
+    // redirect intact.
+    let decoded = crate::url_codec::url_decode(trimmed);
+    if !is_safe_path(&decoded) {
         return None;
     }
-    if trimmed.starts_with("//") {
-        return None;
-    }
-    if trimmed.starts_with("/\\") {
+    // Original may differ from decoded if it contained percent-escapes;
+    // both forms must be path-shaped.
+    if !is_safe_path(trimmed) {
         return None;
     }
     Some(trimmed.to_owned())
+}
+
+/// Shared check used on both the raw and percent-decoded forms of
+/// the `next` value. Path must start with `/` and must NOT start
+/// with `//` (scheme-relative) or `/\` (backslash-host).
+fn is_safe_path(s: &str) -> bool {
+    if !s.starts_with('/') {
+        return false;
+    }
+    if s.starts_with("//") {
+        return false;
+    }
+    if s.starts_with("/\\") {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -276,26 +298,20 @@ mod tests {
 
     #[test]
     fn redirect_to_login_drops_location_on_crlf_attempt() {
-        // CRLF in original URL → HeaderValue::from_str rejects it,
-        // header insertion silently fails. Status stays 302 so the
-        // bug is visible (no redirect happens).
+        // CRLF in original URL is a response-splitting vector. The
+        // builder percent-encodes the value before insertion so no
+        // raw CRLF reaches the header — that's the safety invariant
+        // worth asserting (not the specific encoded form, which is
+        // a url_encode implementation detail).
         let res = redirect_to_login("/login", "next", "/profile\r\nSet-Cookie: pwned=1");
         assert_eq!(res.status(), StatusCode::FOUND);
-        // The URL is percent-encoded so CRLF becomes %0D%0A and the
-        // header insertion actually succeeds (no raw CRLF in the
-        // value). Confirm Location header IS present and contains
-        // the encoded form, not the raw CRLF.
         let loc = res
             .headers()
             .get(header::LOCATION)
             .and_then(|v| v.to_str().ok())
             .unwrap();
-        assert!(
-            loc.contains("%0D%0A"),
-            "CRLF must be percent-encoded: {loc}"
-        );
-        assert!(!loc.contains('\r'));
-        assert!(!loc.contains('\n'));
+        assert!(!loc.contains('\r'), "raw \\r in Location header: {loc}");
+        assert!(!loc.contains('\n'), "raw \\n in Location header: {loc}");
     }
 
     #[test]
@@ -352,6 +368,30 @@ mod tests {
         // to a forward slash, producing `//evil.example/x` which
         // routes to the attacker's host.
         assert_eq!(safe_next("/\\evil.example/x"), None);
+    }
+
+    #[test]
+    fn safe_next_rejects_percent_encoded_bypass() {
+        // The raw `next` value passes the path-starts-with-`/` check
+        // but percent-decodes to `//evil.example/x` — a phishing
+        // redirect. Defense: decode before validating.
+        assert_eq!(safe_next("%2F%2Fevil.example/x"), None);
+        assert_eq!(safe_next("%2f%2fevil.example/x"), None);
+        // Double-slash with the second slash encoded.
+        assert_eq!(safe_next("/%2Fevil.example/x"), None);
+        // Backslash variant percent-encoded.
+        assert_eq!(safe_next("/%5Cevil.example/x"), None);
+    }
+
+    #[test]
+    fn safe_next_accepts_legitimate_percent_encodes_in_path() {
+        // A path containing literal `%20` (encoded space) should still
+        // be valid — `safe_next` doesn't reject every percent-encode,
+        // just the ones that decode to host-routing patterns.
+        assert_eq!(
+            safe_next("/profile/hello%20world"),
+            Some("/profile/hello%20world".to_owned())
+        );
     }
 
     #[test]
