@@ -3073,10 +3073,10 @@ async fn handle_redirect_view(State(state): State<Arc<RedirectView>>) -> Respons
 ///     send_contact_email(&form).await
 /// }
 ///
-/// let app = FormView::for_form::<ContactForm, _, _>(send)
+/// let app = FormView::<ContactForm>::for_form(send)
 ///     .template("contact.html")
 ///     .success_url("/contact/thanks")
-///     .router("/contact");
+///     .router("/contact", Arc::new(tera));
 /// ```
 ///
 /// Template context:
@@ -5406,6 +5406,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redirect_view_drops_crlf_injected_location_header() {
+        // CRLF in the target URL is a response-splitting vector.
+        // `HeaderValue::from_str` rejects it; our handler drops the
+        // header silently so no `Set-Cookie: pwned=1` slips through.
+        // Status stays at the configured value so the failure is
+        // visible (browser sees no redirect).
+        let app = RedirectView::to("/safe\r\nSet-Cookie: pwned=1").router("/x");
+        let res = app
+            .oneshot(Request::builder().uri("/x").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FOUND);
+        assert!(
+            res.headers().get(axum::http::header::LOCATION).is_none(),
+            "CRLF-injected URL must NOT produce a Location header"
+        );
+    }
+
+    #[tokio::test]
     async fn form_view_get_renders_empty_form_context() {
         use crate::forms::{Form, FormErrors};
 
@@ -5511,6 +5530,46 @@ mod tests {
                 .get(axum::http::header::LOCATION)
                 .and_then(|v| v.to_str().ok()),
             Some("/thanks")
+        );
+    }
+
+    #[tokio::test]
+    async fn form_view_post_valid_drops_crlf_injected_success_url() {
+        use crate::forms::{Form, FormErrors};
+
+        struct OkForm;
+        impl Form for OkForm {
+            fn parse(_: &HashMap<String, String>) -> Result<Self, FormErrors> {
+                Ok(OkForm)
+            }
+        }
+
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "").unwrap();
+
+        // success_url with CRLF — same response-splitting defense as
+        // RedirectView. `HeaderValue::from_str` rejects the value,
+        // the Location header is dropped, status stays 303.
+        let app = FormView::<OkForm>::for_form(|_| async { Ok(()) })
+            .template("f.html")
+            .success_url("/thanks\r\nSet-Cookie: pwned=1")
+            .router("/", Arc::new(tera));
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(""))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert!(
+            res.headers().get(axum::http::header::LOCATION).is_none(),
+            "CRLF-injected success_url must NOT produce a Location header"
         );
     }
 }
