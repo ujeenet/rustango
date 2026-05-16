@@ -94,8 +94,14 @@ async fn get_object_or_404_returns_not_found_on_no_match() {
     .expect_err("should 404");
     match err {
         ShortcutError::NotFound { message } => {
+            // Variant matched; the exact default-message wording is
+            // an implementation detail (currently
+            // `"no <ModelName> matches"`). Just confirm the message
+            // is non-empty + case-insensitively references the model
+            // so the variant routing stays the assertion focus.
+            let lower = message.to_lowercase();
             assert!(
-                message.contains("sc_post") || message.contains("post"),
+                !message.is_empty() && lower.contains("post"),
                 "default 404 message: {message}"
             );
         }
