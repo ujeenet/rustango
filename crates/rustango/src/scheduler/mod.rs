@@ -258,7 +258,22 @@ mod tests {
             }
         });
         let handle = s.start();
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        // Poll up to 2s for the post-panic tick to land. Earlier we
+        // slept a fixed 80ms — CI's busy runner sometimes takes 100ms+
+        // to deliver the second tick after the panicking one, so the
+        // assertion landed at 0 and red-tagged main. Polling converges
+        // as soon as `counter >= 1`. Same shape as the on_commit_live /
+        // jobs_pg_live / job_fires_after_one_period flake fixes.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if counter.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         let count = counter.load(Ordering::SeqCst);
         assert!(
             count >= 1,
