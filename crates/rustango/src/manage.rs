@@ -506,6 +506,21 @@ impl Cli {
     }
 
     async fn dispatch(self, args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+        // `dbshell` needs DATABASE_URL but NOT a sqlx pool — it execs
+        // the native client (psql / mysql / sqlite3). Handle it before
+        // the pool dance so it works even when sqlx can't connect
+        // (e.g. tunnel-only setups, fresh-clone scenarios).
+        if matches!(args.first().map(String::as_str), Some("dbshell")) {
+            let url = std::env::var("DATABASE_URL").map_err(|_| -> Box<dyn std::error::Error> {
+                "missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`.".into()
+            })?;
+            // On Unix `dbshell::run` swaps the process and never
+            // returns; on other targets it returns after the client
+            // exits. Either way, propagate the result.
+            let _ = crate::dbshell::run(&url)?;
+            return Ok(());
+        }
+
         // Verbs that print info and never touch the DB. We let these
         // run even when DATABASE_URL is unset so users can scaffold or
         // read help without configuring Postgres first.
