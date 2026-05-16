@@ -29,6 +29,15 @@ pub enum SqlError {
     #[error("`Op::JsonContains` / `Op::JsonContainedBy` require `SqlValue::Json`")]
     JsonOpRequiresJson,
 
+    /// PG ArrayField operators (`@>`, `<@`, `&&`) require
+    /// [`crate::core::SqlValue::Array`]. A plain `List` would expand
+    /// to comma-separated placeholders — the wrong shape for array
+    /// comparison, which needs a single PG array parameter.
+    #[error(
+        "`Op::ArrayContains` / `Op::ArrayContainedBy` / `Op::ArrayOverlap` require `SqlValue::Array`"
+    )]
+    ArrayOpRequiresArray,
+
     /// `BulkUpdateQuery` was used on a model with no `#[rustango(primary_key)]`
     /// field — the WHERE clause cannot be formed.
     #[error("bulk UPDATE requires a primary key on the model")]

@@ -103,6 +103,22 @@ pub enum Op {
     /// and SQLite has FTS5 `MATCH`, both with incompatible semantics,
     /// so both reject at compile time. Issue #28.
     Search,
+    /// Postgres array containment — Django's `__contains` lookup on
+    /// `ArrayField`. PG emits `<col> @> <value>` where the rhs is
+    /// the bound array literal. Returns rows whose array column
+    /// fully contains every element of the value array. **PG-only**
+    /// — MySQL and SQLite have no native array type and reject at
+    /// compile time with `OpNotSupportedInDialect`. Issue #30.
+    ArrayContains,
+    /// Inverse of [`Self::ArrayContains`]: `<col> <@ <value>` —
+    /// rows whose array column is fully contained by the value
+    /// array. Django's `__contained_by` lookup. **PG-only**.
+    /// Issue #30.
+    ArrayContainedBy,
+    /// Postgres array overlap — `<col> && <value>`. Rows whose
+    /// array shares at least one element with the value array.
+    /// Django's `__overlap` lookup. **PG-only**. Issue #30.
+    ArrayOverlap,
 }
 
 /// One predicate in a `WHERE` clause: `column <op> value`. Always

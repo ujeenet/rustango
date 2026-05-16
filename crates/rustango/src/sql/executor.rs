@@ -1640,6 +1640,84 @@ macro_rules! bind_match {
             SqlValue::List(_) => {
                 unreachable!("`SqlValue::List` is expanded to scalars by the SQL writer")
             }
+            // PG single-parameter array (issue #30). v1 supports
+            // I32/I64/String/Bool elements; other element kinds
+            // panic at bind time. Homogeneous-element arrays are
+            // required by PG's typed array shape.
+            SqlValue::Array(elems) => match elems.first() {
+                None => $q.bind(Vec::<i32>::new()),
+                Some(SqlValue::I64(_)) => {
+                    let v: Vec<i64> = elems
+                        .into_iter()
+                        .filter_map(|e| if let SqlValue::I64(n) = e { Some(n) } else { None })
+                        .collect();
+                    $q.bind(v)
+                }
+                Some(SqlValue::I32(_)) => {
+                    let v: Vec<i32> = elems
+                        .into_iter()
+                        .filter_map(|e| if let SqlValue::I32(n) = e { Some(n) } else { None })
+                        .collect();
+                    $q.bind(v)
+                }
+                Some(SqlValue::String(_)) => {
+                    let v: Vec<String> = elems
+                        .into_iter()
+                        .filter_map(|e| {
+                            if let SqlValue::String(s) = e {
+                                Some(s)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    $q.bind(v)
+                }
+                Some(SqlValue::Bool(_)) => {
+                    let v: Vec<bool> = elems
+                        .into_iter()
+                        .filter_map(|e| if let SqlValue::Bool(b) = e { Some(b) } else { None })
+                        .collect();
+                    $q.bind(v)
+                }
+                Some(_) => unreachable!(
+                    "SqlValue::Array elements other than I32/I64/String/Bool are not yet supported (v1, issue #30)"
+                ),
+            },
+        }
+    };
+}
+
+/// MySQL-only counterpart of [`bind_match`]. MySQL has no array
+/// type, so the `Array` arm is `unreachable!()` — the SQL writer
+/// rejects array operators via `write_array_op` before any bind
+/// is attempted. Otherwise identical to the PG bind_match. Issue
+/// #30.
+#[cfg(feature = "mysql")]
+macro_rules! bind_match_mysql {
+    ($q:expr, $value:expr) => {
+        match $value {
+            SqlValue::Null => $q.bind(None::<String>),
+            SqlValue::I16(v) => $q.bind(v),
+            SqlValue::I32(v) => $q.bind(v),
+            SqlValue::I64(v) => $q.bind(v),
+            SqlValue::F32(v) => $q.bind(v),
+            SqlValue::F64(v) => $q.bind(v),
+            SqlValue::Bool(v) => $q.bind(v),
+            SqlValue::String(v) => $q.bind(v),
+            SqlValue::DateTime(v) => $q.bind(v),
+            SqlValue::Date(v) => $q.bind(v),
+            SqlValue::Time(v) => $q.bind(v),
+            SqlValue::Uuid(v) => $q.bind(v),
+            SqlValue::Json(v) => $q.bind(sqlx::types::Json(v)),
+            SqlValue::Decimal(v) => $q.bind(v),
+            SqlValue::Binary(v) => $q.bind(v),
+            SqlValue::List(_) => {
+                unreachable!("`SqlValue::List` is expanded to scalars by the SQL writer")
+            }
+            SqlValue::Array(_) => unreachable!(
+                "MySQL has no array type; `write_array_op` rejects before bind. Issue #30."
+            ),
         }
     };
 }
@@ -1673,6 +1751,11 @@ macro_rules! bind_match_sqlite {
             SqlValue::List(_) => {
                 unreachable!("`SqlValue::List` is expanded to scalars by the SQL writer")
             }
+            // SQLite has no array type — the writer rejects array
+            // ops via `write_array_op` long before bind is reached.
+            SqlValue::Array(_) => unreachable!(
+                "SQLite has no array type; `write_array_op` rejects before bind. Issue #30."
+            ),
         }
     };
 }
@@ -2251,7 +2334,7 @@ fn bind_query_my(
     q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments>,
     value: SqlValue,
 ) -> sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> {
-    bind_match!(q, value)
+    bind_match_mysql!(q, value)
 }
 
 /// SQLite counterpart of [`bind_query_my`] / [`bind_query`]. sqlx-sqlite
@@ -3038,7 +3121,7 @@ fn bind_query_as_my<T>(
     q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments>,
     value: SqlValue,
 ) -> sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> {
-    bind_match!(q, value)
+    bind_match_mysql!(q, value)
 }
 
 /// SQLite-typed `QueryAs` binding helper, symmetric with [`bind_query_as`].
@@ -3421,7 +3504,7 @@ fn bind_query_scalar_my<U>(
     q: sqlx::query::QueryScalar<'_, sqlx::MySql, U, sqlx::mysql::MySqlArguments>,
     value: SqlValue,
 ) -> sqlx::query::QueryScalar<'_, sqlx::MySql, U, sqlx::mysql::MySqlArguments> {
-    bind_match!(q, value)
+    bind_match_mysql!(q, value)
 }
 
 #[cfg(feature = "sqlite")]

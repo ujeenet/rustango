@@ -319,6 +319,22 @@ impl Dialect for MySql {
         })
     }
 
+    /// MySQL has no native array type. Reject every PG array op at
+    /// compile time. Issue #30.
+    fn write_array_op(
+        &self,
+        _sql: &mut String,
+        _qualified_col: &str,
+        _placeholder: &str,
+        _op: &'static str,
+    ) -> Result<(), super::SqlError> {
+        Err(super::SqlError::OpNotSupportedInDialect {
+            op: "array operators (@>, <@, &&) — PG ArrayField is Postgres-only; \
+                 use JSON columns + JSON-shape operators on MySQL",
+            dialect: "mysql",
+        })
+    }
+
     fn write_null_safe_eq(
         &self,
         sql: &mut String,

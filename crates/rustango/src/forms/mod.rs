@@ -1340,6 +1340,7 @@ fn bind_sql_value_inline<'a>(
         SqlValue::Decimal(v) => q.bind(*v),
         SqlValue::Binary(v) => q.bind(v.clone()),
         SqlValue::List(_) => panic!("validate_unique_together: List not supported in pre-check"),
+        SqlValue::Array(_) => panic!("validate_unique_together: Array not supported in pre-check"),
     }
 }
 
@@ -1375,6 +1376,7 @@ fn bind_sql_value_inline_my<'a>(
         SqlValue::Decimal(v) => q.bind(*v),
         SqlValue::Binary(v) => q.bind(v.clone()),
         SqlValue::List(_) => panic!("validate_unique_together: List not supported in pre-check"),
+        SqlValue::Array(_) => panic!("validate_unique_together: Array not supported in pre-check"),
     }
 }
 
@@ -1412,6 +1414,7 @@ fn bind_sql_value_inline_sqlite<'a>(
         SqlValue::Decimal(v) => q.bind(v.to_string()),
         SqlValue::Binary(v) => q.bind(v.clone()),
         SqlValue::List(_) => panic!("validate_unique_together: List not supported in pre-check"),
+        SqlValue::Array(_) => panic!("validate_unique_together: Array not supported in pre-check"),
     }
 }
 

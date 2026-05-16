@@ -1283,6 +1283,34 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<(String, Op, SqlValue), Qu
             }
             Ok((field, Op::Search, value))
         }
+        // PG array operators (issue #30). The Django shape uses
+        // `__contains` / `__contained_by` / `__overlap` on
+        // ArrayField columns, but rustango can't dispatch by
+        // field-type from the parser (the field-type info isn't
+        // threaded through `.filter()`). We use explicit
+        // `__array_*` suffixes to keep them disjoint from text
+        // `__contains`; the typed-IR `Column::array_*` methods are
+        // the preferred call site.
+        "array_contains" | "array_contained_by" | "array_overlap" => {
+            // The bound value must be a list-of-elements; we
+            // promote `SqlValue::List` to `SqlValue::Array` so the
+            // writer binds it as a single PG array parameter.
+            let SqlValue::List(elems) = value else {
+                return Err(QueryError::InvalidLookupValue {
+                    field,
+                    suffix: suffix.to_owned(),
+                    expected: "SqlValue::List(<elements>) — typed homogeneous array",
+                    actual: sql_value_shape_name(&value),
+                });
+            };
+            let op = match suffix {
+                "array_contains" => Op::ArrayContains,
+                "array_contained_by" => Op::ArrayContainedBy,
+                "array_overlap" => Op::ArrayOverlap,
+                _ => unreachable!(),
+            };
+            Ok((field, op, SqlValue::Array(elems)))
+        }
         unknown => Err(QueryError::UnknownLookup {
             field,
             suffix: unknown.to_owned(),

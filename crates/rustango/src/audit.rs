@@ -1490,6 +1490,8 @@ fn bind_value_pg(
         SqlValue::Decimal(v) => q.bind(v),
         SqlValue::Binary(v) => q.bind(v),
         SqlValue::List(_) => unreachable!("List expanded to scalars by SQL writer"),
+        // Array values only flow through WHERE clauses, not audit row saves.
+        SqlValue::Array(_) => unreachable!("Array values never reach audited-save bind path"),
     }
 }
 
@@ -1516,6 +1518,8 @@ fn bind_value_my(
         SqlValue::Decimal(v) => q.bind(v),
         SqlValue::Binary(v) => q.bind(v),
         SqlValue::List(_) => unreachable!("List expanded to scalars by SQL writer"),
+        // Array values only flow through WHERE clauses, not audit row saves.
+        SqlValue::Array(_) => unreachable!("Array values never reach audited-save bind path"),
     }
 }
 
@@ -1544,6 +1548,8 @@ fn bind_value_sqlite<'q>(
         SqlValue::Decimal(v) => q.bind(v.to_string()),
         SqlValue::Binary(v) => q.bind(v),
         SqlValue::List(_) => unreachable!("List expanded to scalars by SQL writer"),
+        // Array values only flow through WHERE clauses, not audit row saves.
+        SqlValue::Array(_) => unreachable!("Array values never reach audited-save bind path"),
     }
 }
 

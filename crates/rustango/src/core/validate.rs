@@ -31,6 +31,7 @@ pub fn validate_value(
         // by the caller (used only for `IN`).
         SqlValue::Null
         | SqlValue::List(_)
+        | SqlValue::Array(_)
         | SqlValue::F32(_)
         | SqlValue::F64(_)
         | SqlValue::Bool(_)

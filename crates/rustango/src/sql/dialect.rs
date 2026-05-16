@@ -410,6 +410,33 @@ pub trait Dialect {
         Ok(())
     }
 
+    /// Postgres `ArrayField` containment / overlap operators —
+    /// `@>` / `<@` / `&&`. Issue #30.
+    ///
+    /// `op` is the literal SQL operator string (`"@>"`, `"<@"`,
+    /// `"&&"`). The default impl emits the PG shape
+    /// `<col> <op> <placeholder>`. MySQL + SQLite override to
+    /// reject with [`SqlError::OpNotSupportedInDialect`] since
+    /// neither has a native array type.
+    ///
+    /// # Errors
+    /// `OpNotSupportedInDialect` when the dialect doesn't support
+    /// PG array operators.
+    fn write_array_op(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        placeholder: &str,
+        op: &'static str,
+    ) -> Result<(), super::SqlError> {
+        sql.push_str(qualified_col);
+        sql.push(' ');
+        sql.push_str(op);
+        sql.push(' ');
+        sql.push_str(placeholder);
+        Ok(())
+    }
+
     /// Null-safe equality. Postgres: `<col> IS [NOT] DISTINCT FROM <p>`.
     /// `distinct = true` means "not equal under null-safe semantics".
     fn write_null_safe_eq(

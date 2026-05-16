@@ -147,6 +147,55 @@ pub trait Column: Copy + 'static {
         TypedFilter::scalar(Self::COLUMN, Op::Search, SqlValue::String(query.into()))
     }
 
+    /// `column @> value` — PG array containment. Django's `__contains`
+    /// lookup on `ArrayField`. Returns rows whose array column fully
+    /// contains every element of the value array. **PG-only** —
+    /// MySQL and SQLite reject at compile time (no native array
+    /// type). Issue #30.
+    ///
+    /// v1 supports `I32` / `I64` / `String` / `Bool` element types
+    /// at bind time; other element kinds panic at bind.
+    fn array_contains<V>(self, values: V) -> TypedFilter<Self::Model>
+    where
+        V: IntoIterator,
+        V::Item: Into<SqlValue>,
+    {
+        TypedFilter::scalar(
+            Self::COLUMN,
+            Op::ArrayContains,
+            SqlValue::Array(values.into_iter().map(Into::into).collect()),
+        )
+    }
+
+    /// `column <@ value` — PG array containment, inverted. Django's
+    /// `__contained_by` lookup. **PG-only**. Issue #30.
+    fn array_contained_by<V>(self, values: V) -> TypedFilter<Self::Model>
+    where
+        V: IntoIterator,
+        V::Item: Into<SqlValue>,
+    {
+        TypedFilter::scalar(
+            Self::COLUMN,
+            Op::ArrayContainedBy,
+            SqlValue::Array(values.into_iter().map(Into::into).collect()),
+        )
+    }
+
+    /// `column && value` — PG array overlap. Django's `__overlap`
+    /// lookup. Returns rows whose array shares at least one element
+    /// with the value array. **PG-only**. Issue #30.
+    fn array_overlap<V>(self, values: V) -> TypedFilter<Self::Model>
+    where
+        V: IntoIterator,
+        V::Item: Into<SqlValue>,
+    {
+        TypedFilter::scalar(
+            Self::COLUMN,
+            Op::ArrayOverlap,
+            SqlValue::Array(values.into_iter().map(Into::into).collect()),
+        )
+    }
+
     /// `column IS NULL`.
     fn is_null(self) -> TypedFilter<Self::Model> {
         TypedFilter::scalar(Self::COLUMN, Op::IsNull, SqlValue::Bool(true))

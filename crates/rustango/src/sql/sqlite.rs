@@ -299,6 +299,22 @@ impl Dialect for Sqlite {
         })
     }
 
+    /// SQLite has no native array type. Reject every PG array op at
+    /// compile time. Issue #30.
+    fn write_array_op(
+        &self,
+        _sql: &mut String,
+        _qualified_col: &str,
+        _placeholder: &str,
+        _op: &'static str,
+    ) -> Result<(), super::SqlError> {
+        Err(super::SqlError::OpNotSupportedInDialect {
+            op: "array operators (@>, <@, &&) — PG ArrayField is Postgres-only; \
+                 use JSON-stored arrays + JSON1 functions on SQLite",
+            dialect: "sqlite",
+        })
+    }
+
     /// SQLite's `IS` / `IS NOT` are null-safe equality / inequality
     /// (both `NULL IS NULL` and `1 IS 1` evaluate to true). Same
     /// semantics as Postgres' `IS [NOT] DISTINCT FROM` — we just

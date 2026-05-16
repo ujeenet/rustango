@@ -35,8 +35,23 @@ pub enum SqlValue {
     /// Time of day, no date component — pairs with
     /// [`FieldType::Time`]. Rust type: `chrono::NaiveTime`.
     Time(NaiveTime),
-    /// Used for `IN` and `BETWEEN` lookups.
+    /// Used for `IN` and `BETWEEN` lookups. Expanded to `($1, $2, $3)`
+    /// placeholders at writer time — each element is a separate bound
+    /// parameter.
     List(Vec<SqlValue>),
+    /// PG **single-parameter** array — binds as a single placeholder
+    /// (`$1`) holding a `Vec<T>` value. Distinct from [`Self::List`],
+    /// which fans out to one placeholder per element. Used by
+    /// [`crate::core::Op::ArrayContains`] / `ArrayContainedBy` /
+    /// `ArrayOverlap` (PG `@>` / `<@` / `&&`).
+    ///
+    /// The first element's variant determines the bind shape. **v1
+    /// supports `I64` and `String` element types** (the two most
+    /// common Django `ArrayField(IntegerField/CharField)` shapes);
+    /// other element kinds error at bind time. Empty arrays bind as
+    /// `Vec::<i32>::new()` — PG infers the element type from the
+    /// `<col> <op>` clause. Issue #30.
+    Array(Vec<SqlValue>),
 }
 
 impl SqlValue {
@@ -68,6 +83,10 @@ impl SqlValue {
                 let inner: Vec<String> = items.iter().map(Self::to_display_string).collect();
                 format!("[{}]", inner.join(", "))
             }
+            Self::Array(items) => {
+                let inner: Vec<String> = items.iter().map(Self::to_display_string).collect();
+                format!("array[{}]", inner.join(", "))
+            }
         }
     }
 
@@ -75,7 +94,7 @@ impl SqlValue {
     #[must_use]
     pub fn field_type(&self) -> Option<FieldType> {
         Some(match self {
-            Self::Null | Self::List(_) => return None,
+            Self::Null | Self::List(_) | Self::Array(_) => return None,
             Self::I16(_) => FieldType::I16,
             Self::I32(_) => FieldType::I32,
             Self::I64(_) => FieldType::I64,
