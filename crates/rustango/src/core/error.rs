@@ -79,7 +79,7 @@ pub enum QueryError {
          supported: exact, iexact, contains, icontains, startswith, \
          istartswith, endswith, iendswith, gt, gte, lt, lte, ne, in, \
          isnull, between, range, regex, iregex, trigram_similar, \
-         trigram_word_similar"
+         trigram_word_similar, search"
     )]
     UnknownLookup { field: String, suffix: String },
 

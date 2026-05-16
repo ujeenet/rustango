@@ -276,6 +276,25 @@ impl Dialect for MySql {
         })
     }
 
+    /// Postgres-shape FTS (`to_tsvector @@ plainto_tsquery`) doesn't
+    /// translate to MySQL. MySQL has its own `MATCH(col) AGAINST(?)`
+    /// shape with different semantics; the rustango FTS DSL doesn't
+    /// auto-port the lookup. Reject at compile time so the user
+    /// either retargets the backend or builds a MySQL-specific raw
+    /// `WhereExpr::Raw` predicate. Issue #28.
+    fn write_search(
+        &self,
+        _sql: &mut String,
+        _qualified_col: &str,
+        _placeholder: &str,
+    ) -> Result<(), super::SqlError> {
+        Err(super::SqlError::OpNotSupportedInDialect {
+            op: "search (__search) — full-text search shape is Postgres-only; \
+                 use MySQL `MATCH … AGAINST` via a raw predicate",
+            dialect: "mysql",
+        })
+    }
+
     fn write_null_safe_eq(
         &self,
         sql: &mut String,

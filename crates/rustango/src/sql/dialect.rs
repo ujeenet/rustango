@@ -358,6 +358,37 @@ pub trait Dialect {
         Ok(())
     }
 
+    /// Postgres full-text search — Django's `__search` lookup. Issue
+    /// #28.
+    ///
+    /// Default emits the simplest portable shape:
+    /// `to_tsvector(<col>) @@ plainto_tsquery(<p>)`. The database
+    /// applies its `default_text_search_config` (typically `english`).
+    ///
+    /// **MySQL and SQLite** have their own FTS shapes (`MATCH … AGAINST`
+    /// on MySQL, FTS5 virtual-table `MATCH` on SQLite) with
+    /// incompatible semantics — they override to return
+    /// [`SqlError::OpNotSupportedInDialect`] so the typo of using
+    /// `__search` against the wrong backend surfaces cleanly at
+    /// compile time rather than as a driver syntax error.
+    ///
+    /// # Errors
+    /// `OpNotSupportedInDialect` when the dialect doesn't support
+    /// Postgres-shape FTS.
+    fn write_search(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        placeholder: &str,
+    ) -> Result<(), super::SqlError> {
+        sql.push_str("to_tsvector(");
+        sql.push_str(qualified_col);
+        sql.push_str(") @@ plainto_tsquery(");
+        sql.push_str(placeholder);
+        sql.push(')');
+        Ok(())
+    }
+
     /// Null-safe equality. Postgres: `<col> IS [NOT] DISTINCT FROM <p>`.
     /// `distinct = true` means "not equal under null-safe semantics".
     fn write_null_safe_eq(

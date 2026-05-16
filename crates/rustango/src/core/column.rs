@@ -137,6 +137,16 @@ pub trait Column: Copy + 'static {
         )
     }
 
+    /// `to_tsvector(column) @@ plainto_tsquery(query)` — Postgres
+    /// full-text search. Django's `__search` (issue #28). Uses the
+    /// database's default text-search config. **PG-only** — MySQL
+    /// and SQLite reject at compile time; their FTS shapes
+    /// (MATCH…AGAINST, FTS5 MATCH) have incompatible semantics and
+    /// table layouts.
+    fn search(self, query: impl Into<String>) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(Self::COLUMN, Op::Search, SqlValue::String(query.into()))
+    }
+
     /// `column IS NULL`.
     fn is_null(self) -> TypedFilter<Self::Model> {
         TypedFilter::scalar(Self::COLUMN, Op::IsNull, SqlValue::Bool(true))

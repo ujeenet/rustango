@@ -92,6 +92,17 @@ pub enum Op {
     /// pattern (the bare `%` requires the WHOLE string be similar).
     /// **PG-only**, same `pg_trgm` extension requirement. Issue #29.
     TrigramWordSimilar,
+    /// Postgres full-text search — Django's `__search` lookup. PG
+    /// emits `to_tsvector(<col>) @@ plainto_tsquery(<pattern>)`,
+    /// using the database's default text-search config (typically
+    /// `english`). This is the simplest FTS shape — for explicit
+    /// language config, weighted SearchVectors, or websearch-style
+    /// query parsing, build the SearchVector / SearchQuery exprs
+    /// directly (follow-up work for issue #28). Bind a
+    /// `SqlValue::String`. **PG-only** — MySQL has `MATCH … AGAINST`
+    /// and SQLite has FTS5 `MATCH`, both with incompatible semantics,
+    /// so both reject at compile time. Issue #28.
+    Search,
 }
 
 /// One predicate in a `WHERE` clause: `column <op> value`. Always

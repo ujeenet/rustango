@@ -266,6 +266,25 @@ impl Dialect for Sqlite {
         })
     }
 
+    /// Postgres-shape FTS (`to_tsvector @@ plainto_tsquery`) doesn't
+    /// translate to SQLite. SQLite's FTS lives in FTS5 virtual tables
+    /// with a `MATCH` operator that requires the column to live on an
+    /// FTS5-shadow table — a different schema shape entirely. Reject
+    /// at compile time so the user either retargets the backend or
+    /// queries the FTS5 shadow table via a raw predicate. Issue #28.
+    fn write_search(
+        &self,
+        _sql: &mut String,
+        _qualified_col: &str,
+        _placeholder: &str,
+    ) -> Result<(), super::SqlError> {
+        Err(super::SqlError::OpNotSupportedInDialect {
+            op: "search (__search) — full-text search shape is Postgres-only; \
+                 use SQLite FTS5 `<fts5_table> MATCH ?` via a raw predicate",
+            dialect: "sqlite",
+        })
+    }
+
     /// SQLite's `IS` / `IS NOT` are null-safe equality / inequality
     /// (both `NULL IS NULL` and `1 IS 1` evaluate to true). Same
     /// semantics as Postgres' `IS [NOT] DISTINCT FROM` — we just
