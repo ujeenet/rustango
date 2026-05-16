@@ -6,9 +6,22 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use rustango::sql::{on_commit, on_commit_pending, sqlx, ExecError, Pool, PoolTx};
+use tokio::sync::{Mutex, MutexGuard};
 
-async fn fresh_pool() -> Option<Pool> {
+/// Suite-wide mutex — every test in this file shares the `oc_widget`
+/// table for DROP + CREATE + INSERT + SELECT. Cargo runs tests in
+/// parallel by default, so without this lock two `fresh_pool()` calls
+/// race the `CREATE TABLE` and PG returns `pg_type_typname_nsp_index`
+/// unique-violation. The lock serializes the entire test body, not
+/// just the DDL, so commit-counter observations stay deterministic.
+static TABLE_LOCK: Mutex<()> = Mutex::const_new(());
+
+async fn fresh_pool() -> Option<(Pool, MutexGuard<'static, ()>)> {
     let url = std::env::var("DATABASE_URL").ok()?;
+    // Poison-tolerant: tokio's Mutex doesn't poison on panic, so a
+    // panicking test won't strand the lock — but we still want a
+    // single owner at a time.
+    let guard = TABLE_LOCK.lock().await;
     let pg = sqlx::PgPool::connect(&url).await.ok()?;
     sqlx::query(r#"DROP TABLE IF EXISTS "oc_widget" CASCADE"#)
         .execute(&pg)
@@ -25,7 +38,7 @@ async fn fresh_pool() -> Option<Pool> {
     .execute(&pg)
     .await
     .unwrap();
-    Some(Pool::Postgres(pg))
+    Some((Pool::Postgres(pg), guard))
 }
 
 async fn count_widgets(pool: &Pool) -> i64 {
@@ -40,7 +53,7 @@ async fn count_widgets(pool: &Pool) -> i64 {
 
 #[tokio::test]
 async fn callback_fires_after_commit() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((pool, _guard)) = fresh_pool().await else {
         return;
     };
     let counter = Arc::new(AtomicUsize::new(0));
@@ -72,7 +85,7 @@ async fn callback_fires_after_commit() {
 
 #[tokio::test]
 async fn callback_does_not_fire_after_rollback() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((pool, _guard)) = fresh_pool().await else {
         return;
     };
     let counter = Arc::new(AtomicUsize::new(0));
@@ -105,7 +118,7 @@ async fn callback_does_not_fire_after_rollback() {
 
 #[tokio::test]
 async fn callbacks_fire_in_registration_order() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((pool, _guard)) = fresh_pool().await else {
         return;
     };
     let order = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
@@ -129,7 +142,7 @@ async fn callbacks_fire_in_registration_order() {
 
 #[tokio::test]
 async fn on_commit_pending_reflects_queue_depth() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((pool, _guard)) = fresh_pool().await else {
         return;
     };
     rustango::atomic!(&pool, |_tx| {
@@ -170,7 +183,7 @@ async fn on_commit_outside_atomic_panics() {
 
 #[tokio::test]
 async fn nested_atomic_inner_rollback_isolated_from_outer() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((pool, _guard)) = fresh_pool().await else {
         return;
     };
     let outer = Arc::new(AtomicUsize::new(0));
@@ -211,7 +224,7 @@ async fn nested_atomic_inner_rollback_isolated_from_outer() {
 
 #[tokio::test]
 async fn nested_atomic_outer_rollback_drops_both_queues() {
-    let Some(pool) = fresh_pool().await else {
+    let Some((pool, _guard)) = fresh_pool().await else {
         return;
     };
     let outer = Arc::new(AtomicUsize::new(0));
