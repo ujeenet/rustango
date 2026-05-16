@@ -6,12 +6,12 @@
 //! cases. Matches the Django [shortcuts module](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/).
 //!
 //! ```ignore
-//! use rustango::shortcuts::{get_object_or_404, render, redirect, Http404};
+//! use rustango::shortcuts::{get_object_or_404, render, redirect, ShortcutError};
 //!
 //! async fn post_detail(
 //!     State(state): State<AppState>,
 //!     Path(id): Path<i64>,
-//! ) -> Result<axum::response::Response, Http404> {
+//! ) -> Result<axum::response::Response, ShortcutError> {
 //!     let post = get_object_or_404(
 //!         Post::objects().where_(Post::id.eq(id)),
 //!         &state.pool,
@@ -37,61 +37,80 @@ use crate::sql::{
     MaybeSqliteFromRow, MaybeSqliteLoadRelated, Pool,
 };
 
-/// 404 marker error returned by [`get_object_or_404`] / [`get_list_or_404`].
-/// Implements [`IntoResponse`] so handlers that return `Result<_, Http404>`
-/// can propagate with `?` and get a plain 404 body for free.
+/// Error returned by [`get_object_or_404`] / [`get_list_or_404`].
+/// Two-variant union so the `?` operator can propagate both the
+/// "no row matched" case (→ 404) and any underlying driver error
+/// (→ 500) without conflating them — a DB outage surfacing as a 404
+/// would silently degrade observability.
 ///
-/// The `message` field is rendered as the response body; default is
-/// `"not found"`. Set a custom message when the framework's default
-/// would be unhelpful (e.g. `"post #42 not found"`).
-#[derive(Debug, Clone)]
-pub struct Http404 {
-    pub message: String,
+/// Implements [`IntoResponse`] so handlers that return
+/// `Result<_, ShortcutError>` map automatically to the right status
+/// code:
+///
+/// - [`Self::NotFound`] → `404 Not Found` with the `message` as body.
+/// - [`Self::Database`] → `500 Internal Server Error` with the
+///   underlying [`ExecError`] in the body.
+#[derive(Debug)]
+pub enum ShortcutError {
+    /// No row matched the queryset. Rendered as 404.
+    NotFound { message: String },
+    /// Driver / SQL failure on the underlying query. Rendered as 500.
+    Database(ExecError),
 }
 
-impl Http404 {
-    /// Construct a 404 with a custom message.
+impl ShortcutError {
+    /// Construct a `NotFound` variant with a custom message.
     #[must_use]
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::NotFound {
             message: message.into(),
         }
     }
 }
 
-impl Default for Http404 {
-    fn default() -> Self {
-        Self {
-            message: "not found".into(),
+impl std::fmt::Display for ShortcutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound { message } => write!(f, "{message}"),
+            Self::Database(e) => write!(f, "database error: {e}"),
         }
     }
 }
 
-impl std::fmt::Display for Http404 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
+impl std::error::Error for ShortcutError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NotFound { .. } => None,
+            Self::Database(e) => Some(e),
+        }
     }
 }
 
-impl std::error::Error for Http404 {}
-
-impl IntoResponse for Http404 {
+impl IntoResponse for ShortcutError {
     fn into_response(self) -> Response {
-        (StatusCode::NOT_FOUND, self.message).into_response()
+        match self {
+            Self::NotFound { message } => (StatusCode::NOT_FOUND, message).into_response(),
+            Self::Database(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("database error: {e}"),
+            )
+                .into_response(),
+        }
     }
 }
 
-impl From<ExecError> for Http404 {
-    /// Driver-level errors aren't 404s — keep them as 500s by tagging
-    /// the message. Callers who care about the distinction should
-    /// match on the result directly instead of using `?`.
+impl From<ExecError> for ShortcutError {
+    /// Driver errors route to the `Database` variant — `IntoResponse`
+    /// then renders them as `500`. The `?` operator in a handler
+    /// returning `Result<_, ShortcutError>` propagates DB failures
+    /// without quietly conflating them with 404s.
     fn from(e: ExecError) -> Self {
-        Self::new(format!("query failed: {e}"))
+        Self::Database(e)
     }
 }
 
 /// Fetch the first row matching `qs` against `pool`, or return
-/// [`Http404`] if none matched. Django's
+/// [`ShortcutError::NotFound`] if none matched. Django's
 /// [`get_object_or_404`](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/#get-object-or-404).
 ///
 /// Builds the queryset with whatever filters / ordering you want
@@ -105,14 +124,14 @@ impl From<ExecError> for Http404 {
 /// ).await?;
 /// ```
 ///
-/// Returns `Err(Http404)` for both the "no rows" case and any
-/// underlying driver error. If you need to distinguish, call
-/// `qs.first(&pool).await` directly.
+/// Underlying [`ExecError`]s route to [`ShortcutError::Database`] and
+/// render as `500` — distinct from the `404` of `NotFound`, so a DB
+/// outage doesn't quietly show up as "not found" in user-facing logs.
 ///
 /// # Errors
-/// [`Http404`] when no row matched the queryset, or wrapping any
-/// underlying [`ExecError`].
-pub async fn get_object_or_404<T>(qs: QuerySet<T>, pool: &Pool) -> Result<T, Http404>
+/// - [`ShortcutError::NotFound`] when no row matched the queryset.
+/// - [`ShortcutError::Database`] wrapping any underlying [`ExecError`].
+pub async fn get_object_or_404<T>(qs: QuerySet<T>, pool: &Pool) -> Result<T, ShortcutError>
 where
     T: Model
         + Send
@@ -126,12 +145,15 @@ where
 {
     match qs.first(pool).await? {
         Some(row) => Ok(row),
-        None => Err(Http404::new(format!("no {} matches", T::SCHEMA.name))),
+        None => Err(ShortcutError::not_found(format!(
+            "no {} matches",
+            T::SCHEMA.name
+        ))),
     }
 }
 
 /// Fetch every row matching `qs`. If the result is empty, return
-/// [`Http404`]. Django's
+/// [`ShortcutError::NotFound`]. Django's
 /// [`get_list_or_404`](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/#get-list-or-404).
 ///
 /// ```ignore
@@ -142,9 +164,9 @@ where
 /// ```
 ///
 /// # Errors
-/// [`Http404`] when the result set is empty, or wrapping any
-/// underlying [`ExecError`].
-pub async fn get_list_or_404<T>(qs: QuerySet<T>, pool: &Pool) -> Result<Vec<T>, Http404>
+/// - [`ShortcutError::NotFound`] when the result set is empty.
+/// - [`ShortcutError::Database`] wrapping any underlying [`ExecError`].
+pub async fn get_list_or_404<T>(qs: QuerySet<T>, pool: &Pool) -> Result<Vec<T>, ShortcutError>
 where
     T: Model
         + Send
@@ -158,7 +180,10 @@ where
 {
     let rows = qs.fetch_pool(pool).await?;
     if rows.is_empty() {
-        Err(Http404::new(format!("no {} matches", T::SCHEMA.name)))
+        Err(ShortcutError::not_found(format!(
+            "no {} matches",
+            T::SCHEMA.name
+        )))
     } else {
         Ok(rows)
     }
@@ -241,23 +266,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn http404_default_message() {
-        let err = Http404::default();
-        assert_eq!(err.message, "not found");
-        assert_eq!(err.to_string(), "not found");
-    }
-
-    #[test]
-    fn http404_custom_message() {
-        let err = Http404::new("post #42 not found");
+    fn not_found_message_round_trips() {
+        let err = ShortcutError::not_found("post #42 not found");
         assert_eq!(err.to_string(), "post #42 not found");
     }
 
     #[tokio::test]
-    async fn http404_into_response_is_404() {
-        let err = Http404::new("missing");
+    async fn not_found_into_response_is_404() {
+        let err = ShortcutError::not_found("missing");
         let res = err.into_response();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn database_error_into_response_is_500_not_404() {
+        // Regression — early draft of this module had a
+        // `From<ExecError> for Http404` impl that silently routed DB
+        // failures through a 404 response. Pin the correct split:
+        // NotFound → 404, Database → 500.
+        let exec_err = ExecError::Sql(crate::sql::SqlError::EmptyInList);
+        let err = ShortcutError::Database(exec_err);
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn from_exec_error_routes_to_database_variant() {
+        let exec_err = ExecError::Sql(crate::sql::SqlError::EmptyInList);
+        let err: ShortcutError = exec_err.into();
+        assert!(matches!(err, ShortcutError::Database(_)), "got: {err:?}");
     }
 
     #[tokio::test]
@@ -306,5 +343,19 @@ mod tests {
             .get(axum::http::header::LOCATION)
             .expect("location");
         assert_eq!(loc.to_str().unwrap(), "/posts/42");
+    }
+
+    #[tokio::test]
+    async fn redirect_with_crlf_drops_location_header_no_response_splitting() {
+        // CRLF in a Location header would be a response-splitting
+        // vector. `HeaderValue::from_str` rejects it, and our builder
+        // drops the header silently rather than panicking. Status
+        // stays 302 so the failure is visible (no redirect happens).
+        let res = redirect("/posts/42\r\nSet-Cookie: pwned=1");
+        assert_eq!(res.status(), StatusCode::FOUND);
+        assert!(
+            res.headers().get(axum::http::header::LOCATION).is_none(),
+            "CRLF-injected URL must NOT produce a Location header"
+        );
     }
 }

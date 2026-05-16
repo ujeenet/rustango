@@ -2,12 +2,12 @@
 //! Live PG tests for `rustango::shortcuts::get_object_or_404` /
 //! `get_list_or_404` (issue #10). Verifies the shortcut helpers
 //! round-trip through a real database — matching rows return Ok,
-//! empty results return Http404.
+//! empty results return `ShortcutError::NotFound`.
 
 use std::sync::OnceLock;
 
 use rustango::core::Column as _;
-use rustango::shortcuts::{get_list_or_404, get_object_or_404, Http404};
+use rustango::shortcuts::{get_list_or_404, get_object_or_404, ShortcutError};
 use rustango::sql::{sqlx, Auto, Pool};
 use rustango::Model;
 use tokio::sync::Mutex;
@@ -80,7 +80,7 @@ async fn get_object_or_404_returns_match() {
 }
 
 #[tokio::test]
-async fn get_object_or_404_returns_http404_on_no_match() {
+async fn get_object_or_404_returns_not_found_on_no_match() {
     let _g = lock().lock().await;
     let Some(pool) = fresh_pool().await else {
         return;
@@ -92,11 +92,15 @@ async fn get_object_or_404_returns_http404_on_no_match() {
     )
     .await
     .expect_err("should 404");
-    // Default message includes the model name.
-    assert!(
-        err.message.contains("sc_post") || err.message.contains("post"),
-        "default 404 message: {err:?}"
-    );
+    match err {
+        ShortcutError::NotFound { message } => {
+            assert!(
+                message.contains("sc_post") || message.contains("post"),
+                "default 404 message: {message}"
+            );
+        }
+        ShortcutError::Database(e) => panic!("expected NotFound, got Database: {e}"),
+    }
 }
 
 #[tokio::test]
@@ -113,7 +117,7 @@ async fn get_list_or_404_returns_matches() {
 }
 
 #[tokio::test]
-async fn get_list_or_404_returns_http404_on_empty() {
+async fn get_list_or_404_returns_not_found_on_empty() {
     let _g = lock().lock().await;
     let Some(pool) = fresh_pool().await else {
         return;
@@ -125,5 +129,8 @@ async fn get_list_or_404_returns_http404_on_empty() {
     )
     .await
     .expect_err("should 404 on empty");
-    let _: &Http404 = &err;
+    assert!(
+        matches!(err, ShortcutError::NotFound { .. }),
+        "expected NotFound, got: {err:?}"
+    );
 }
