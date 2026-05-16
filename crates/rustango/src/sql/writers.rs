@@ -2269,6 +2269,17 @@ fn write_filter(
                 matches!(filter.op, Op::TrigramWordSimilar),
             )?;
         }
+        Op::Search => {
+            // Postgres full-text search. The default writer emits
+            // `to_tsvector(<col>) @@ plainto_tsquery(<p>)`; MySQL +
+            // SQLite override to reject with
+            // `OpNotSupportedInDialect` (their FTS shapes are
+            // schema-bound and don't compose with a bare column).
+            require_op(b.d, filter.op)?;
+            b.params.push(filter.value.clone());
+            let p = b.d.placeholder(b.params.len());
+            b.d.write_search(&mut b.sql, &qualified_col, &p)?;
+        }
         Op::In | Op::NotIn => {
             let SqlValue::List(elements) = &filter.value else {
                 return Err(SqlError::InRequiresList);
@@ -2449,6 +2460,7 @@ fn op_label(op: Op) -> &'static str {
         Op::NotRegex => "!~ (regex)",
         Op::TrigramSimilar => "% (trigram_similar)",
         Op::TrigramWordSimilar => "%> (trigram_word_similar)",
+        Op::Search => "@@ (search)",
         Op::IRegex => "~* (iregex)",
         Op::NotIRegex => "!~* (iregex)",
     }
