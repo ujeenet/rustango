@@ -44,6 +44,12 @@
 //!
 //! ## Out of scope (queued as follow-ups)
 //!
+//! - **`Secure` cookie attribute** — currently the cookie ships with
+//!   `HttpOnly` + `SameSite=Lax` but no `Secure`. Mirror the
+//!   [`crate::forms::csrf::CsrfConfig`] shape — `secure: bool`
+//!   default true + `allow_insecure_for_dev()` opt-out — once the
+//!   config-struct surface lands. Lower stakes than CSRF (one-shot
+//!   UI hints) but worth following the same convention.
 //! - **Session-backed storage** + **FallbackStorage** (cookie + session
 //!   fallback) — requires plumbing through `sessions::SessionStore`.
 //! - **Middleware-shape auto-apply** — current API requires callers to
@@ -134,6 +140,14 @@ pub struct Message {
 /// the session / CSRF cookies so they don't collide.
 pub const MESSAGES_COOKIE: &str = "rustango_messages";
 
+/// Maximum number of messages staged in the cookie at any time.
+/// Past this point the **oldest** message is dropped — chosen because
+/// recently-pushed flashes are almost always the relevant ones (the
+/// "thing just happened" feedback). A `tracing::warn` fires on each
+/// drop so misbehaving callers surface in logs rather than silently
+/// losing data. 50 is far above any reasonable POST→303 flow.
+pub const MAX_MESSAGES: usize = 50;
+
 /// Append a message to the storage cookie and return the updated
 /// `Set-Cookie` header value the caller should attach to the
 /// response. `extra_tags` is whatever class-name-ish string the
@@ -162,6 +176,19 @@ pub fn push(
         body: body.to_owned(),
         tags: extra_tags.to_owned(),
     });
+    // Cap total staged count so the cookie doesn't grow past the
+    // 4KB browser limit. Drop oldest first (recent messages are the
+    // ones the user just produced and most wants to see). Tracing
+    // warn fires on each drop so misbehaving callers surface.
+    while existing.len() > MAX_MESSAGES {
+        let dropped = existing.remove(0);
+        tracing::warn!(
+            target: "rustango::messages",
+            level = %dropped.level.as_str(),
+            body = %dropped.body,
+            "messages cookie exceeded MAX_MESSAGES={MAX_MESSAGES} — dropped oldest message"
+        );
+    }
     set_cookie(secret, &existing, false)
 }
 
@@ -433,6 +460,25 @@ mod tests {
         let cookie = cookie_from_set(&set);
         let (msgs, _) = drain(SECRET, &headers_with(&cookie));
         assert_eq!(msgs[0].tags, "dismissible fade");
+    }
+
+    #[test]
+    fn push_caps_at_max_messages_drops_oldest() {
+        // Push enough to exceed MAX_MESSAGES (50) — the bound should
+        // drop oldest first so the most-recent N survive.
+        let mut headers = empty_headers();
+        let total = MAX_MESSAGES + 5;
+        for i in 0..total {
+            let body = format!("msg-{i}");
+            let set = push(SECRET, &headers, Level::Info, &body, "");
+            let cookie = cookie_from_set(&set);
+            headers = headers_with(&cookie);
+        }
+        let (msgs, _) = drain(SECRET, &headers);
+        assert_eq!(msgs.len(), MAX_MESSAGES, "must cap at MAX_MESSAGES");
+        // Oldest dropped → first surviving is `msg-5` (we pushed 0..54).
+        assert_eq!(msgs[0].body, "msg-5");
+        assert_eq!(msgs.last().unwrap().body, format!("msg-{}", total - 1));
     }
 
     #[cfg(feature = "template_views")]
