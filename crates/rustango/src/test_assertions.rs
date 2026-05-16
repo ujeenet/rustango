@@ -86,17 +86,22 @@ pub fn assert_status(res: &Response, expected: u16) {
 /// assert_contains(res, "Hello, world!").await;
 /// ```
 ///
-/// Panics if the status is non-2xx (catches "the page errored, that's
-/// why the fragment isn't there"), if the body exceeds 1 MiB
-/// (defensive — streamed bodies would otherwise hang the test), or
-/// if the fragment isn't found. Snippet of the actual body is
-/// included in the panic message for fast debugging.
+/// Status is NOT checked — error-page content assertions like
+/// `assert_contains(res_404, "Not Found")` are legitimate. Pair with
+/// [`assert_status`] when the status itself is part of the
+/// expectation:
+///
+/// ```ignore
+/// assert_status(&res, 200);
+/// assert_contains(res, "Hello").await;
+/// ```
+///
+/// Panics if the body exceeds 1 MiB (defensive — streamed bodies
+/// would otherwise hang the test), the body isn't UTF-8, or the
+/// fragment isn't found. Snippet of the actual body (truncated +
+/// "more chars" indicator) is included in the panic message for fast
+/// debugging.
 pub async fn assert_contains(res: Response, fragment: &str) {
-    let status = res.status();
-    assert!(
-        status.is_success(),
-        "assert_contains: response status was {status}, not 2xx — the page errored"
-    );
     let body = to_bytes(res.into_body(), MAX_BODY_BYTES)
         .await
         .unwrap_or_else(|e| panic!("assert_contains: failed to read body: {e}"));
@@ -233,17 +238,19 @@ pub fn assert_messages(res: &Response, secret: &[u8], expected: &[(&str, &str)])
     }
 }
 
-fn truncate(s: &str, max: usize) -> &str {
+/// Truncate a string at a UTF-8 char boundary at or before `max`,
+/// appending a `...(N more chars)` indicator so the panic message
+/// doesn't confuse a clipped 1000-char body for a 500-char one.
+fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
-        return s;
+        return s.to_owned();
     }
-    // Find a UTF-8 char boundary at or before `max` so we don't slice
-    // mid-codepoint.
     let mut idx = max;
     while idx > 0 && !s.is_char_boundary(idx) {
         idx -= 1;
     }
-    &s[..idx]
+    let remaining = s.len() - idx;
+    format!("{}...(+{remaining} more chars)", &s[..idx])
 }
 
 #[cfg(test)]
@@ -298,10 +305,36 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "response status was 500")]
-    async fn assert_contains_panics_on_non_2xx_status() {
-        let res = html_response(StatusCode::INTERNAL_SERVER_ERROR, "Hello");
-        assert_contains(res, "Hello").await;
+    async fn assert_contains_passes_on_error_status_when_fragment_present() {
+        // Status is intentionally NOT checked — `assertContains` is
+        // legitimate against an error page ("does the 404 say
+        // 'Not Found'?"). Pair with `assert_status` if the status
+        // itself matters.
+        let res = html_response(StatusCode::NOT_FOUND, "Not Found");
+        assert_contains(res, "Not Found").await;
+    }
+
+    #[test]
+    fn truncate_short_input_passes_through() {
+        assert_eq!(truncate("hello", 500), "hello");
+    }
+
+    #[test]
+    fn truncate_long_input_appends_more_chars_indicator() {
+        let long = "x".repeat(1000);
+        let out = truncate(&long, 500);
+        assert!(out.starts_with(&"x".repeat(500)));
+        assert!(out.contains("...(+500 more chars)"), "got: {out}");
+    }
+
+    #[test]
+    fn truncate_clips_at_utf8_boundary_no_mid_codepoint_slice() {
+        // "é" is 2 bytes in UTF-8. With max=1 we'd be trying to slice
+        // mid-codepoint; truncate should back up to byte 0.
+        let s = "é";
+        let out = truncate(s, 1);
+        // Back-up landed at 0 → 0 bytes of content + the indicator.
+        assert!(out.starts_with("..."), "got: {out}");
     }
 
     // -------- assert_not_contains --------
