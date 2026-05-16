@@ -871,6 +871,13 @@ pub mod password_hashers;
 /// child sitemaps. Issue #57.
 pub mod sitemaps;
 
+/// RSS 2.0 + Atom 1.0 feed rendering —
+/// `django.contrib.syndication`. Build a [`syndication::Feed`] with
+/// channel metadata + [`syndication::FeedItem`]s and call
+/// [`syndication::render_rss`] or [`syndication::render_atom`].
+/// Issue #57.
+pub mod syndication;
+
 /// Django-shape test assertion helpers — `assert_contains` /
 /// `assert_redirects` / `assert_status` / `assert_messages` on axum
 /// Response objects. Issue #40.
