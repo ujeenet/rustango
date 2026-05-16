@@ -341,6 +341,15 @@ pub mod serializer;
 #[cfg(feature = "cache")]
 pub mod cache;
 
+/// Fragment caching — Django's `{% cache %}` template tag.
+/// [`cache_fragment::cached_render`] is a handler-side wrapper that
+/// consults the cache before invoking a compute closure. Tera lacks
+/// the block-tag extension API a 1:1 port would need; the
+/// handler-side helper composes naturally with axum and passes the
+/// cached HTML through the template context. Issue #16.
+#[cfg(feature = "cache")]
+pub mod cache_fragment;
+
 /// Per-view caching tower layer + `Cache-Control` / `Vary` header
 /// builders — Django's `@cache_page` / `@cache_control` / `@vary_on_*`
 /// analogs (issue #55). Behind the `cache-page` feature.
