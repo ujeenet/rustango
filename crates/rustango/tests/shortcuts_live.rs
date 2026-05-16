@@ -106,12 +106,9 @@ async fn get_list_or_404_returns_matches() {
         return;
     };
 
-    let posts = get_list_or_404(
-        Post::objects().where_(Post::published.eq(true)),
-        &pool,
-    )
-    .await
-    .expect("two published posts");
+    let posts = get_list_or_404(Post::objects().where_(Post::published.eq(true)), &pool)
+        .await
+        .expect("two published posts");
     assert_eq!(posts.len(), 2);
 }
 
