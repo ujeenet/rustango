@@ -634,10 +634,9 @@ fn querystring_filter(
     let mut pairs = parse_query_pairs(current);
 
     for (k, v) in args {
-        // Remove any existing entry with this key — overrides replace.
-        pairs.retain(|(pk, _)| pk != k);
         if matches!(v, tera::Value::Null) {
-            // Null = delete. Already removed above; skip the append.
+            // Null = delete every occurrence of this key.
+            pairs.retain(|(pk, _)| pk != k);
             continue;
         }
         let s = match v {
@@ -650,7 +649,28 @@ fn querystring_filter(
                 )));
             }
         };
-        pairs.push((k.clone(), s));
+        // Match Django's `QueryDict.__setitem__` semantics: if the key
+        // already exists, replace IN PLACE (preserve position) +
+        // collapse any duplicate occurrences down to one. New keys
+        // append at the end.
+        let mut found = false;
+        let mut i = 0;
+        while i < pairs.len() {
+            if pairs[i].0 == *k {
+                if found {
+                    // Already kept the first slot for the override —
+                    // drop subsequent duplicates of this key.
+                    pairs.remove(i);
+                    continue;
+                }
+                pairs[i].1 = s.clone();
+                found = true;
+            }
+            i += 1;
+        }
+        if !found {
+            pairs.push((k.clone(), s));
+        }
     }
 
     if pairs.is_empty() {
@@ -738,14 +758,28 @@ mod querystring_tests {
     }
 
     #[test]
-    fn override_preserves_other_keys() {
+    fn override_preserves_other_keys_and_position() {
         let tera = setup();
         let mut ctx = tera::Context::new();
         ctx.insert("q", "q=hello&page=1&sort=asc");
         let out = render(&tera, "{{ q | querystring(page=2) | safe }}", ctx);
-        // Order: q, sort survive in place; page goes to the end as
-        // a "replaced" key.
-        assert_eq!(out, "?q=hello&sort=asc&page=2");
+        // Django parity: `page` keeps its position (between `q` and
+        // `sort`) — the value updates in place rather than moving to
+        // the end. Matches `QueryDict.__setitem__` semantics.
+        assert_eq!(out, "?q=hello&page=2&sort=asc");
+    }
+
+    #[test]
+    fn override_collapses_duplicate_existing_keys() {
+        // Multi-value input — Django's QueryDict replaces the entire
+        // value list with `[new]` so duplicates collapse to one.
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("q", "tag=a&tag=b&tag=c");
+        assert_eq!(
+            render(&tera, "{{ q | querystring(tag='x') | safe }}", ctx),
+            "?tag=x"
+        );
     }
 
     #[test]
