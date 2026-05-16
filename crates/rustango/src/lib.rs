@@ -848,6 +848,14 @@ pub mod auth_decorators;
 /// proxy deployments. Issue #54 (partial).
 pub mod auth_backends;
 
+/// Pluggable `AUTH_PASSWORD_VALIDATORS` chain — run an ordered list
+/// of [`password_validators::PasswordValidator`]s at signup /
+/// password-change. Built-ins: `MinimumLengthValidator`,
+/// `MaximumLengthValidator`, `NumericPasswordValidator`,
+/// `UserAttributeSimilarityValidator`, `CommonPasswordValidator`.
+/// Issue #54 (partial).
+pub mod password_validators;
+
 /// Django-shape test assertion helpers — `assert_contains` /
 /// `assert_redirects` / `assert_status` / `assert_messages` on axum
 /// Response objects. Issue #40.
