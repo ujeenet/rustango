@@ -171,6 +171,26 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
                 expr: c.expr.clone(),
             }))
         }
+        Operation::Schema(SchemaChange::AddExclusionConstraint { name, table, .. }) => {
+            // Inverse of Add is Drop. We don't carry the full
+            // definition into the down migration because PG
+            // doesn't need it for a Drop.
+            Ok(Operation::Schema(SchemaChange::DropExclusionConstraint {
+                name: name.clone(),
+                table: table.clone(),
+            }))
+        }
+        Operation::Schema(SchemaChange::DropExclusionConstraint { name, table }) => {
+            // We can't reconstruct the AddExclusionConstraint
+            // payload from a snapshot today (exclusion constraints
+            // aren't tracked in `SchemaSnapshot` yet). Surface a
+            // clear error so the user can hand-write the inverse
+            // — same shape as `DropCheckConstraint` errors when
+            // the constraint isn't in the predecessor snapshot.
+            Err(MigrateError::Validation(format!(
+                "cannot invert DropExclusionConstraint(`{name}` on `{table}`): exclusion constraints aren't tracked in SchemaSnapshot; write the inverse `AddExclusionConstraint` by hand. Issue #32.",
+            )))
+        }
         Operation::Schema(SchemaChange::CreateIndex { name, .. }) => {
             Ok(Operation::Schema(SchemaChange::DropIndex {
                 name: name.clone(),
