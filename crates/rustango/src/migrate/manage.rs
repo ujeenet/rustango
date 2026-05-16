@@ -113,6 +113,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "db:restore" => db_restore_cmd(&args[1..], writer),
         "db:info" => db_info_cmd(writer),
         "dumpdata" => dumpdata_cmd(pool, &args[1..], writer).await,
+        "loaddata" => loaddata_cmd(pool, &args[1..], writer).await,
         // v0.38 — `inspectdb` is tri-dialect: PG + MySQL via
         // `information_schema`, SQLite via `PRAGMA table_info` +
         // `sqlite_master`. Dispatch happens inside `inspectdb_cmd`.
@@ -237,6 +238,15 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         "      misconfigurations. With --deploy: production hardening checks."
     )?;
     writeln!(w, "      Exits non-zero on any error-level finding.\n")?;
+    writeln!(w, "  loaddata <fixture.json> [--fail-fast]")?;
+    writeln!(
+        w,
+        "      Insert every row in the JSON fixture. Default skips failing"
+    )?;
+    writeln!(
+        w,
+        "      rows with a warning; --fail-fast aborts on the first failure.\n"
+    )?;
     writeln!(w, "  dumpdata [--model <name>] [--indent <N>]")?;
     writeln!(
         w,
@@ -2371,6 +2381,332 @@ async fn dumpdata_cmd<W: Write>(
     Ok(())
 }
 
+#[derive(Debug, PartialEq)]
+struct LoaddataArgs {
+    /// Path to the fixture JSON file.
+    file: String,
+    /// Stop on the first error (`true`) vs. log + continue (`false`,
+    /// default).
+    fail_fast: bool,
+    /// Help short-circuit.
+    help: bool,
+}
+
+fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
+    let mut file: Option<String> = None;
+    let mut fail_fast = false;
+    let mut help = false;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                help = true;
+                break;
+            }
+            "--fail-fast" => fail_fast = true,
+            other if other.starts_with('-') => {
+                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+            }
+            other => {
+                if file.is_some() {
+                    return Err(MigrateError::Validation(format!(
+                        "unexpected positional argument: {other}"
+                    )));
+                }
+                file = Some(other.to_owned());
+            }
+        }
+    }
+    if help {
+        return Ok(LoaddataArgs {
+            file: String::new(),
+            fail_fast: false,
+            help: true,
+        });
+    }
+    let file = file.ok_or_else(|| {
+        MigrateError::Validation("loaddata: missing <fixture.json> argument".into())
+    })?;
+    Ok(LoaddataArgs {
+        file,
+        fail_fast,
+        help: false,
+    })
+}
+
+/// `manage loaddata <fixture.json> [--fail-fast]` — companion to
+/// `dumpdata`. Reads a Django-shape fixture array and inserts each
+/// row via [`crate::sql::insert_pool`]. Models are resolved by
+/// `inventory` lookup against the `"app.Model"` name in the fixture.
+///
+/// Default behaviour: log + skip rows that fail (unknown model,
+/// JSON shape mismatch, INSERT error). `--fail-fast` aborts on the
+/// first failure.
+///
+/// JSON values map onto rustango's `SqlValue` types by field kind
+/// declared in the target model's schema:
+/// - integer / float JSON → numeric `SqlValue` per `FieldType`
+/// - boolean → `SqlValue::Bool`
+/// - string → parsed per `FieldType` (Decimal / Date / DateTime /
+///   Time / Uuid / Binary [hex] / String)
+/// - null → `SqlValue::Null`
+/// - object / array → `SqlValue::Json`
+async fn loaddata_cmd<W: Write>(
+    pool: &Pool,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    let parsed = parse_loaddata_args(args)?;
+    if parsed.help {
+        writeln!(w, "loaddata <fixture.json> [--fail-fast]")?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "  Insert every row in `fixture.json` via the registered model schemas."
+        )?;
+        writeln!(
+            w,
+            "  Fixture shape: `[{{\"model\": \"app.Model\", \"pk\": N, \"fields\": {{...}}}}]`"
+        )?;
+        writeln!(w, "  — the same shape `manage dumpdata` produces.")?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "  --fail-fast   Abort on the first error instead of skipping the row."
+        )?;
+        return Ok(());
+    }
+
+    let raw = std::fs::read_to_string(&parsed.file)
+        .map_err(|e| MigrateError::Validation(format!("loaddata: read `{}`: {e}", parsed.file)))?;
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&raw).map_err(|e| {
+        MigrateError::Validation(format!("loaddata: parse `{}` as JSON: {e}", parsed.file))
+    })?;
+
+    // Build a lookup map: "app.Model" + bare "Model" → &'static ModelSchema.
+    let mut schemas: std::collections::HashMap<String, &'static crate::core::ModelSchema> =
+        std::collections::HashMap::new();
+    for entry in inventory::iter::<crate::core::ModelEntry>() {
+        let schema = entry.schema;
+        let app = entry.resolved_app_label().unwrap_or("");
+        if !app.is_empty() {
+            schemas.insert(format!("{app}.{}", schema.name), schema);
+        }
+        schemas.insert(schema.name.to_owned(), schema);
+    }
+
+    let mut loaded = 0_usize;
+    let mut skipped = 0_usize;
+    for (idx, entry) in entries.into_iter().enumerate() {
+        let line = idx + 1;
+        let model_name = entry.get("model").and_then(|v| v.as_str()).unwrap_or("");
+        let schema = match schemas.get(model_name) {
+            Some(s) => *s,
+            None => {
+                let msg = format!(
+                    "loaddata: entry #{line}: unknown model `{model_name}` (registered: {} models)",
+                    schemas.len() / 2, // dotted + bare keys
+                );
+                if parsed.fail_fast {
+                    return Err(MigrateError::Validation(msg));
+                }
+                tracing::warn!("{msg}");
+                skipped += 1;
+                continue;
+            }
+        };
+
+        // Build column/value vectors. PK rides at the top level of
+        // the fixture entry, so we re-glue it into the fields map.
+        let mut fields_obj: serde_json::Map<String, serde_json::Value> = entry
+            .get("fields")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        if let Some(pk_value) = entry.get("pk").cloned() {
+            if let Some(pk_field) = schema.primary_key() {
+                fields_obj.insert(pk_field.name.to_owned(), pk_value);
+            }
+        }
+
+        let mut columns: Vec<&'static str> = Vec::new();
+        let mut values: Vec<crate::core::SqlValue> = Vec::new();
+        let mut row_err: Option<String> = None;
+        for f in schema.scalar_fields() {
+            let raw = fields_obj
+                .get(f.name)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            match json_to_sql_value(&raw, f) {
+                Ok(v) => {
+                    columns.push(f.column);
+                    values.push(v);
+                }
+                Err(e) => {
+                    row_err = Some(format!("field `{}`: {e}", f.name));
+                    break;
+                }
+            }
+        }
+        if let Some(e) = row_err {
+            let msg = format!("loaddata: entry #{line} (`{model_name}`): {e}");
+            if parsed.fail_fast {
+                return Err(MigrateError::Validation(msg));
+            }
+            tracing::warn!("{msg}");
+            skipped += 1;
+            continue;
+        }
+
+        let query = crate::core::InsertQuery {
+            model: schema,
+            columns,
+            values,
+            returning: vec![],
+            on_conflict: None,
+        };
+        match crate::sql::insert_pool(pool, &query).await {
+            Ok(()) => loaded += 1,
+            Err(e) => {
+                let msg = format!("loaddata: entry #{line} (`{model_name}`) insert: {e}");
+                if parsed.fail_fast {
+                    return Err(MigrateError::Validation(msg));
+                }
+                tracing::warn!("{msg}");
+                skipped += 1;
+            }
+        }
+    }
+
+    writeln!(w, "loaddata: {loaded} loaded, {skipped} skipped")?;
+    Ok(())
+}
+
+/// Map a JSON value onto an [`crate::core::SqlValue`] using the target
+/// field's declared [`crate::core::FieldType`].
+///
+/// String inputs are reparsed for typed fields:
+/// - Decimal: `rust_decimal::Decimal::from_str`
+/// - Date: `chrono::NaiveDate::parse_from_str("%Y-%m-%d")`
+/// - DateTime: RFC 3339 / `%Y-%m-%dT%H:%M:%S`
+/// - Time: `%H:%M:%S` then `%H:%M`
+/// - Uuid: `Uuid::parse_str`
+/// - Binary: lowercase hex
+///
+/// Object / Array JSON nodes always land as `SqlValue::Json`.
+fn json_to_sql_value(
+    v: &serde_json::Value,
+    field: &crate::core::FieldSchema,
+) -> Result<crate::core::SqlValue, String> {
+    use crate::core::{FieldType, SqlValue};
+    if v.is_null() {
+        return Ok(SqlValue::Null);
+    }
+    match field.ty {
+        FieldType::I16 => v
+            .as_i64()
+            .and_then(|n| i16::try_from(n).ok())
+            .map(SqlValue::I16)
+            .ok_or_else(|| format!("expected i16, got {v}")),
+        FieldType::I32 => v
+            .as_i64()
+            .and_then(|n| i32::try_from(n).ok())
+            .map(SqlValue::I32)
+            .ok_or_else(|| format!("expected i32, got {v}")),
+        FieldType::I64 => v.as_i64().map(SqlValue::I64).ok_or_else(|| {
+            // Accept integer-shaped strings too (e.g. SQLite NUMERIC).
+            v.as_str()
+                .and_then(|s| s.parse::<i64>().ok())
+                .map(SqlValue::I64)
+                .map(|_| format!("expected i64, got {v}"))
+                .unwrap_or_else(|| format!("expected i64, got {v}"))
+        }),
+        FieldType::F32 => v
+            .as_f64()
+            .map(|n| SqlValue::F32(n as f32))
+            .ok_or_else(|| format!("expected f32, got {v}")),
+        FieldType::F64 => v
+            .as_f64()
+            .map(SqlValue::F64)
+            .ok_or_else(|| format!("expected f64, got {v}")),
+        FieldType::Bool => v
+            .as_bool()
+            .map(SqlValue::Bool)
+            .ok_or_else(|| format!("expected bool, got {v}")),
+        FieldType::String => v
+            .as_str()
+            .map(|s| SqlValue::String(s.to_owned()))
+            .ok_or_else(|| format!("expected string, got {v}")),
+        FieldType::DateTime => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| format!("expected string for DateTime, got {v}"))?;
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|d| SqlValue::DateTime(d.with_timezone(&chrono::Utc)))
+                .or_else(|_| {
+                    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+                        .map(|ndt| SqlValue::DateTime(ndt.and_utc()))
+                })
+                .map_err(|e| format!("DateTime parse: {e}"))
+        }
+        FieldType::Date => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| format!("expected string for Date, got {v}"))?;
+            chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map(SqlValue::Date)
+                .map_err(|e| format!("Date parse: {e}"))
+        }
+        FieldType::Time => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| format!("expected string for Time, got {v}"))?;
+            chrono::NaiveTime::parse_from_str(s, "%H:%M:%S")
+                .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M"))
+                .map(SqlValue::Time)
+                .map_err(|e| format!("Time parse: {e}"))
+        }
+        FieldType::Uuid => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| format!("expected string for Uuid, got {v}"))?;
+            uuid::Uuid::parse_str(s)
+                .map(SqlValue::Uuid)
+                .map_err(|e| format!("Uuid parse: {e}"))
+        }
+        FieldType::Json => Ok(SqlValue::Json(v.clone())),
+        FieldType::Decimal => {
+            let s = v
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| v.as_f64().map(|n| n.to_string()))
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+                .ok_or_else(|| format!("expected number/string for Decimal, got {v}"))?;
+            s.parse::<rust_decimal::Decimal>()
+                .map(SqlValue::Decimal)
+                .map_err(|e| format!("Decimal parse: {e}"))
+        }
+        FieldType::Binary => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| format!("expected lowercase-hex string for Binary, got {v}"))?;
+            if s.len() % 2 != 0 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err("Binary: not a valid lowercase-hex string".into());
+            }
+            let bytes: Vec<u8> = s
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|c| {
+                    let h = (c[0] as char).to_digit(16).unwrap_or(0) as u8;
+                    let l = (c[1] as char).to_digit(16).unwrap_or(0) as u8;
+                    (h << 4) | l
+                })
+                .collect();
+            Ok(SqlValue::Binary(bytes))
+        }
+    }
+}
+
 /// Mask the password in a `postgres://user:pass@host/db` connection
 /// URL so it doesn't leak into log output.
 fn redact(argv: &[String]) -> Vec<String> {
@@ -2855,6 +3191,145 @@ mod gen_tests {
         let r = parse_dumpdata_args(&["unexpected".into()]);
         assert!(r.is_err());
         assert!(format!("{}", r.unwrap_err()).contains("positional"));
+    }
+
+    // -------- loaddata --------
+
+    #[test]
+    fn parse_loaddata_args_requires_path() {
+        let r = parse_loaddata_args(&[]);
+        assert!(r.is_err());
+        assert!(format!("{}", r.unwrap_err()).contains("missing"));
+    }
+
+    #[test]
+    fn parse_loaddata_args_path_then_flag() {
+        let p = parse_loaddata_args(&["fixtures.json".into(), "--fail-fast".into()]).unwrap();
+        assert_eq!(p.file, "fixtures.json");
+        assert!(p.fail_fast);
+    }
+
+    #[test]
+    fn parse_loaddata_args_flag_then_path() {
+        let p = parse_loaddata_args(&["--fail-fast".into(), "fixtures.json".into()]).unwrap();
+        assert_eq!(p.file, "fixtures.json");
+        assert!(p.fail_fast);
+    }
+
+    #[test]
+    fn parse_loaddata_args_help_flag_short_circuits() {
+        let p = parse_loaddata_args(&["--help".into()]).unwrap();
+        assert!(p.help);
+    }
+
+    #[test]
+    fn parse_loaddata_args_rejects_two_positionals() {
+        let r = parse_loaddata_args(&["a.json".into(), "b.json".into()]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_loaddata_args_rejects_unknown_flag() {
+        let r = parse_loaddata_args(&["--unknown".into(), "a.json".into()]);
+        assert!(r.is_err());
+    }
+
+    // -------- json_to_sql_value --------
+
+    fn field(name: &'static str, ty: crate::core::FieldType) -> crate::core::FieldSchema {
+        crate::core::FieldSchema {
+            name,
+            column: name,
+            ty,
+            nullable: true,
+            primary_key: false,
+            relation: None,
+            max_length: None,
+            min: None,
+            max: None,
+            default: None,
+            auto: false,
+            unique: false,
+            generated_as: None,
+        }
+    }
+
+    #[test]
+    fn json_to_sql_value_null_passes_through() {
+        let f = field("x", crate::core::FieldType::I64);
+        let v = json_to_sql_value(&serde_json::Value::Null, &f).unwrap();
+        assert!(matches!(v, crate::core::SqlValue::Null));
+    }
+
+    #[test]
+    fn json_to_sql_value_i32_range_check() {
+        let f = field("x", crate::core::FieldType::I32);
+        let v = json_to_sql_value(&serde_json::json!(42), &f).unwrap();
+        assert!(matches!(v, crate::core::SqlValue::I32(42)));
+        // Out of range → Err.
+        let r = json_to_sql_value(&serde_json::json!(99999999999_i64), &f);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn json_to_sql_value_string_passes_through() {
+        let f = field("x", crate::core::FieldType::String);
+        let v = json_to_sql_value(&serde_json::json!("hello"), &f).unwrap();
+        match v {
+            crate::core::SqlValue::String(s) => assert_eq!(s, "hello"),
+            other => panic!("expected SqlValue::String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_to_sql_value_date_parses_iso() {
+        let f = field("x", crate::core::FieldType::Date);
+        let v = json_to_sql_value(&serde_json::json!("2025-01-02"), &f).unwrap();
+        assert!(matches!(v, crate::core::SqlValue::Date(_)));
+        // Malformed → Err.
+        let r = json_to_sql_value(&serde_json::json!("not a date"), &f);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn json_to_sql_value_datetime_parses_rfc3339() {
+        let f = field("x", crate::core::FieldType::DateTime);
+        let v = json_to_sql_value(&serde_json::json!("2025-01-02T12:00:00+00:00"), &f).unwrap();
+        assert!(matches!(v, crate::core::SqlValue::DateTime(_)));
+    }
+
+    #[test]
+    fn json_to_sql_value_decimal_parses_string_and_number() {
+        let f = field("x", crate::core::FieldType::Decimal);
+        // From string.
+        let v = json_to_sql_value(&serde_json::json!("123.45"), &f).unwrap();
+        assert!(matches!(v, crate::core::SqlValue::Decimal(_)));
+        // From number (Django dumpdata emits as string but be forgiving).
+        let v = json_to_sql_value(&serde_json::json!(42), &f).unwrap();
+        assert!(matches!(v, crate::core::SqlValue::Decimal(_)));
+    }
+
+    #[test]
+    fn json_to_sql_value_binary_hex_round_trip() {
+        let f = field("x", crate::core::FieldType::Binary);
+        let v = json_to_sql_value(&serde_json::json!("deadbeef"), &f).unwrap();
+        match v {
+            crate::core::SqlValue::Binary(b) => assert_eq!(b, vec![0xde, 0xad, 0xbe, 0xef]),
+            other => panic!("expected Binary, got {other:?}"),
+        }
+        // Malformed (odd length).
+        let r = json_to_sql_value(&serde_json::json!("abc"), &f);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn json_to_sql_value_json_field_stays_value() {
+        let f = field("x", crate::core::FieldType::Json);
+        let v = json_to_sql_value(&serde_json::json!({"k": "v"}), &f).unwrap();
+        match v {
+            crate::core::SqlValue::Json(j) => assert_eq!(j, serde_json::json!({"k": "v"})),
+            other => panic!("expected Json, got {other:?}"),
+        }
     }
 
     /// Default template (no `--tenant`) keeps the v0.28
