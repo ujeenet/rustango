@@ -928,6 +928,12 @@ pub mod test_data;
 #[cfg(feature = "config")]
 pub mod test_settings;
 
+/// Test-time DB isolation — Django's `TestCase` transaction
+/// wrapping. [`test_db::with_rollback`] runs an async closure
+/// inside a transaction that always rolls back, so test mutations
+/// don't leak into the next test. Issue #39 partial.
+pub mod test_db;
+
 /// `manage dbshell` — spawn `psql` / `mysql` / `sqlite3` for the
 /// current `DATABASE_URL`. Issue #56 (partial).
 pub mod dbshell;
