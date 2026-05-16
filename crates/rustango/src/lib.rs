@@ -878,6 +878,13 @@ pub mod sitemaps;
 /// Issue #57.
 pub mod syndication;
 
+/// Table-driven HTTP redirects — `django.contrib.redirects`. Build a
+/// [`redirects::RedirectMap`] (programmatically or from a CSV) and
+/// mount [`redirects::redirects_middleware`] on your axum router;
+/// matching requests short-circuit with a 301/302 response and the
+/// canonical URL in `Location`, query strings preserved. Issue #57.
+pub mod redirects;
+
 /// Django-shape test assertion helpers — `assert_contains` /
 /// `assert_redirects` / `assert_status` / `assert_messages` on axum
 /// Response objects. Issue #40.
