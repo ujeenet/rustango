@@ -72,21 +72,29 @@ async fn dispatch_persists_and_runs() {
 
     q.dispatch(&PgInc).await.expect("dispatch");
 
-    // Wait briefly for a worker to pick it up.
-    for _ in 0..40 {
-        if RAN_INC.load(Ordering::SeqCst) > 0 {
+    // Wait for the row to be deleted, not just `RAN_INC` to reach 1.
+    // The worker sets `RAN_INC` inside `Job::run()`, then deletes the
+    // row AFTER `run()` returns — that gap is wide enough on a busy
+    // CI runner that asserting on the row count immediately after
+    // `RAN_INC==1` is flaky. Poll the row count as the canonical
+    // post-success signal instead.
+    let mut row_count: i64 = -1;
+    for _ in 0..80 {
+        row_count = sqlx::query_scalar("SELECT COUNT(*) FROM rustango_jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        if row_count == 0 && RAN_INC.load(Ordering::SeqCst) >= 1 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert_eq!(RAN_INC.load(Ordering::SeqCst), 1);
-
-    // Row should be deleted on success.
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rustango_jobs")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(n, 0, "row should be deleted after successful run");
+    assert_eq!(
+        RAN_INC.load(Ordering::SeqCst),
+        1,
+        "job should have run exactly once"
+    );
+    assert_eq!(row_count, 0, "row should be deleted after successful run");
 
     q.shutdown().await;
 }
@@ -127,21 +135,28 @@ async fn retryable_failure_reschedules_with_backoff() {
 
     q.dispatch(&PgRetry).await.unwrap();
 
-    // First attempt fails immediately, then a 2-second backoff before retry,
-    // so wait ~3.5s.
+    // First attempt fails immediately, then a 2-second backoff before
+    // retry. Wait at least one full backoff, then poll for both the
+    // attempt counter AND the row deletion — same post-success race
+    // window as `dispatch_persists_and_runs`.
     tokio::time::sleep(Duration::from_millis(3500)).await;
-
+    let mut row_count: i64 = -1;
+    for _ in 0..80 {
+        row_count = sqlx::query_scalar("SELECT COUNT(*) FROM rustango_jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        if row_count == 0 && RETRY_ATTEMPTS.load(Ordering::SeqCst) >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert!(
         RETRY_ATTEMPTS.load(Ordering::SeqCst) >= 2,
         "expected at least 2 attempts, got {}",
         RETRY_ATTEMPTS.load(Ordering::SeqCst)
     );
-
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rustango_jobs")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(n, 0, "row should be cleared after eventual success");
+    assert_eq!(row_count, 0, "row should be cleared after eventual success");
 
     q.shutdown().await;
 }
