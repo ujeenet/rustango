@@ -127,6 +127,42 @@ fn only_empty_list_errors_at_compile() {
 }
 
 #[test]
+fn defer_preserves_where_clause() {
+    use rustango::core::Column as _;
+    let q = Post::objects()
+        .where_(Post::view_count.gt(100))
+        .defer(&["body"])
+        .compile()
+        .unwrap();
+    let stmt = Postgres.compile_select(&q).unwrap();
+    assert!(
+        stmt.sql.contains(r#"WHERE "view_count" > $1"#),
+        "where survives: {}",
+        stmt.sql
+    );
+    assert!(
+        !stmt.sql.contains(r#""body""#),
+        "body still excluded: {}",
+        stmt.sql
+    );
+}
+
+#[test]
+fn defer_every_field_errors_at_compile() {
+    // Edge case: deferring every scalar column on the model leaves
+    // an empty projection — must surface EmptyValuesProjection, not
+    // silently emit `SELECT FROM …`.
+    let err = Post::objects()
+        .defer(&["id", "title", "body", "view_count"])
+        .compile()
+        .unwrap_err();
+    assert!(
+        matches!(err, QueryError::EmptyValuesProjection),
+        "got: {err:?}"
+    );
+}
+
+#[test]
 fn defer_and_only_compose_with_order_limit() {
     let q = Post::objects()
         .order_by(&[("id", false)])

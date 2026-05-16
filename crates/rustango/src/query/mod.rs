@@ -838,26 +838,19 @@ impl<T: Model> QuerySet<T> {
     pub fn defer(self, cols: &[&'static str]) -> ValuesQuerySet<T> {
         let model = T::SCHEMA;
         let exclude: std::collections::HashSet<&'static str> = cols.iter().copied().collect();
-        let kept: Vec<&'static str> = model
+        let mut projection: Vec<&'static str> = model
             .scalar_fields()
             .filter(|f| !exclude.contains(f.column))
             .map(|f| f.column)
             .collect();
-        // Validate the defer list itself — any column the caller named
-        // that doesn't exist on the model gets surfaced via the same
-        // `UnknownField` path as `.only(...)`. We do this by passing the
-        // bad cols alongside `kept` so compile sees and rejects them.
-        // (Real defer cols are excluded from `kept` above; only the
-        // typo'd ones survive.)
-        let model_cols: std::collections::HashSet<&'static str> =
-            model.scalar_fields().map(|f| f.column).collect();
-        let mut all = kept;
+        // Typo'd defer cols get forwarded into the projection so
+        // `values_dict`'s `UnknownField` check rejects them at compile.
         for &col in cols {
-            if !model_cols.contains(col) {
-                all.push(col);
+            if model.field_by_column(col).is_none() {
+                projection.push(col);
             }
         }
-        self.values_dict(&all)
+        self.values_dict(&projection)
     }
 
     /// Lower this queryset to a `DeleteQuery` — same WHERE clause, no projection.
