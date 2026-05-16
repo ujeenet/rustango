@@ -847,6 +847,10 @@ pub mod auth_decorators;
 /// Response objects. Issue #40.
 pub mod test_assertions;
 
+/// `manage dbshell` — spawn `psql` / `mysql` / `sqlite3` for the
+/// current `DATABASE_URL`. Issue #56 (partial).
+pub mod dbshell;
+
 /// Django-style runserver — [`server::Builder`] owns every line of
 /// boilerplate every tenancy app would otherwise rewrite (DB pool,
 /// resolver chain, host dispatch, operator console, bind + serve).
