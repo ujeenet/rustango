@@ -838,6 +838,10 @@ pub mod urls;
 /// flash storage backed by a signed cookie. Issue #9.
 pub mod messages;
 
+/// Django-shape access decorators — `login_required` middleware +
+/// `?next=` round-trip helpers. Issue #11.
+pub mod auth_decorators;
+
 /// Django-style runserver — [`server::Builder`] owns every line of
 /// boilerplate every tenancy app would otherwise rewrite (DB pool,
 /// resolver chain, host dispatch, operator console, bind + serve).
