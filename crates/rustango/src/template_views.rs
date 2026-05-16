@@ -2890,6 +2890,338 @@ fn template_error(msg: &str) -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, msg.to_owned()).into_response()
 }
 
+// ============================================================== TemplateView
+
+/// No-model CBV that renders a Tera template with a static context.
+/// Django's [`TemplateView`](https://docs.djangoproject.com/en/6.0/ref/class-based-views/base/#templateview).
+/// Use for about pages, terms-of-service, dashboards built from
+/// context the caller assembles up front. Issue #13.
+///
+/// ```ignore
+/// use rustango::template_views::TemplateView;
+/// use std::sync::Arc;
+///
+/// let app = TemplateView::new("about.html")
+///     .context_value("contact_email", "hello@example.com")
+///     .router("/about", Arc::new(tera));
+/// ```
+#[derive(Clone)]
+pub struct TemplateView {
+    template: String,
+    context: HashMap<String, Value>,
+}
+
+impl TemplateView {
+    /// Construct a `TemplateView` that renders `template`.
+    #[must_use]
+    pub fn new(template: impl Into<String>) -> Self {
+        Self {
+            template: template.into(),
+            context: HashMap::new(),
+        }
+    }
+
+    /// Inject a static value into the Tera context under `key`.
+    /// Successive calls accumulate; the latest write wins per key.
+    #[must_use]
+    pub fn context_value(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.context.insert(key.into(), value.into());
+        self
+    }
+
+    /// Merge a JSON object into the Tera context. Each top-level key
+    /// becomes a context variable. Non-object inputs are stored under
+    /// the conventional key `"context"`.
+    #[must_use]
+    pub fn context(mut self, ctx: Value) -> Self {
+        match ctx {
+            Value::Object(map) => {
+                for (k, v) in map {
+                    self.context.insert(k, v);
+                }
+            }
+            other => {
+                self.context.insert("context".into(), other);
+            }
+        }
+        self
+    }
+
+    /// Mount the view on `prefix` (GET-only).
+    #[must_use]
+    pub fn router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        let state = Arc::new(TemplateViewState { vs: self, tera });
+        Router::new()
+            .route(prefix, get(handle_template_view))
+            .with_state(state)
+    }
+}
+
+#[derive(Clone)]
+struct TemplateViewState {
+    vs: TemplateView,
+    tera: Arc<Tera>,
+}
+
+async fn handle_template_view(State(state): State<Arc<TemplateViewState>>) -> Response {
+    let mut ctx = Context::new();
+    for (k, v) in &state.vs.context {
+        ctx.insert(k, v);
+    }
+    render(&state.tera, &state.vs.template, &ctx)
+}
+
+// ============================================================== RedirectView
+
+/// No-model CBV that returns an HTTP redirect to a fixed URL. Django's
+/// [`RedirectView`](https://docs.djangoproject.com/en/6.0/ref/class-based-views/base/#redirectview).
+/// Use for canonical URL migrations (old `/about-us` → new `/about`),
+/// short links, or "click here to go there" flows. Issue #13.
+///
+/// ```ignore
+/// use rustango::template_views::RedirectView;
+///
+/// // 302 to /about (matches Django's default temporary redirect).
+/// let app = RedirectView::to("/about").router("/about-us");
+///
+/// // 301 (permanent) — survives indexing, search engines update.
+/// let app = RedirectView::to("/about").permanent().router("/old-about");
+/// ```
+///
+/// Status codes match Django's (302 / 301) — not axum's modern
+/// defaults (303 / 308) — for method-preservation semantics consistent
+/// with the framework's [`crate::shortcuts::redirect`] helper.
+#[derive(Clone)]
+pub struct RedirectView {
+    url: String,
+    permanent: bool,
+}
+
+impl RedirectView {
+    /// Construct a `RedirectView` pointing at `url`. Default status is
+    /// `302 Found` (temporary). Call [`Self::permanent`] to switch to
+    /// `301 Moved Permanently`.
+    #[must_use]
+    pub fn to(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            permanent: false,
+        }
+    }
+
+    /// Switch this view to emit `301 Moved Permanently` instead of
+    /// `302 Found`.
+    #[must_use]
+    pub fn permanent(mut self) -> Self {
+        self.permanent = true;
+        self
+    }
+
+    /// Mount the view on `prefix` (GET-only).
+    #[must_use]
+    pub fn router(self, prefix: &str) -> Router<()> {
+        let state = Arc::new(self);
+        Router::new()
+            .route(prefix, get(handle_redirect_view))
+            .with_state(state)
+    }
+}
+
+async fn handle_redirect_view(State(state): State<Arc<RedirectView>>) -> Response {
+    use axum::http::{header, HeaderValue};
+    let status = if state.permanent {
+        StatusCode::MOVED_PERMANENTLY
+    } else {
+        StatusCode::FOUND
+    };
+    let mut res = Response::builder()
+        .status(status)
+        .body(axum::body::Body::empty())
+        .expect("status + empty body is always valid");
+    if let Ok(v) = HeaderValue::from_str(&state.url) {
+        res.headers_mut().insert(header::LOCATION, v);
+    }
+    res
+}
+
+// ============================================================== FormView
+
+/// No-model CBV that renders a `#[derive(Form)]` form on GET, parses
+/// + validates on POST, and redirects to `success_url` when valid.
+/// Django's [`FormView`](https://docs.djangoproject.com/en/6.0/ref/class-based-views/generic-editing/#formview).
+/// Issue #13.
+///
+/// Unlike [`CreateView`] / [`UpdateView`] (which know about a model
+/// schema and do the INSERT/UPDATE for you), `FormView` only handles
+/// the **form lifecycle**. The caller plugs in a callback that
+/// receives the validated form data:
+///
+/// ```ignore
+/// use rustango::template_views::FormView;
+/// use rustango::forms::Form;
+///
+/// #[derive(Form)]
+/// struct ContactForm {
+///     #[form(min_length = 1)]
+///     name: String,
+///     #[form(min_length = 1)]
+///     message: String,
+/// }
+///
+/// async fn send(form: ContactForm) -> Result<(), String> {
+///     // Send email, file ticket, etc.
+///     send_contact_email(&form).await
+/// }
+///
+/// let app = FormView::<ContactForm>::for_form(send)
+///     .template("contact.html")
+///     .success_url("/contact/thanks")
+///     .router("/contact", Arc::new(tera));
+/// ```
+///
+/// Template context:
+/// - `errors: HashMap<String, Vec<String>>` — empty on GET, populated
+///   on POST validation failure.
+/// - `values: HashMap<String, String>` — empty on GET, raw POST values
+///   on validation failure so the form can repopulate.
+///
+/// CSRF protection is the project's responsibility — mount under a
+/// CSRF-protected scope when reachable from a browser.
+pub struct FormView<F>
+where
+    F: crate::forms::Form,
+{
+    template: String,
+    success_url: String,
+    handler: Arc<
+        dyn Fn(F) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+            + Send
+            + Sync,
+    >,
+}
+
+impl<F> Clone for FormView<F>
+where
+    F: crate::forms::Form,
+{
+    fn clone(&self) -> Self {
+        Self {
+            template: self.template.clone(),
+            success_url: self.success_url.clone(),
+            handler: Arc::clone(&self.handler),
+        }
+    }
+}
+
+impl<F> FormView<F>
+where
+    F: crate::forms::Form + Send + 'static,
+{
+    /// Construct a `FormView` that hands every successfully-parsed
+    /// form to `on_valid`. The handler returns `Ok(())` to trigger
+    /// the redirect or `Err(msg)` to re-render the template with the
+    /// error.
+    #[must_use]
+    pub fn for_form<H, Fut>(on_valid: H) -> Self
+    where
+        H: Fn(F) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
+    {
+        Self {
+            template: "form.html".into(),
+            success_url: "/".into(),
+            handler: Arc::new(move |form| Box::pin(on_valid(form))),
+        }
+    }
+
+    /// Override the template used to render the form (GET) and the
+    /// validation-failure re-render (POST).
+    #[must_use]
+    pub fn template(mut self, name: impl Into<String>) -> Self {
+        self.template = name.into();
+        self
+    }
+
+    /// Where to 303-redirect after a successful POST. Defaults to `/`.
+    #[must_use]
+    pub fn success_url(mut self, url: impl Into<String>) -> Self {
+        self.success_url = url.into();
+        self
+    }
+
+    /// Mount the view on `prefix`. GET renders the empty form; POST
+    /// parses + validates + (on success) redirects.
+    #[must_use]
+    pub fn router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        let state = Arc::new(StandaloneFormViewState { vs: self, tera });
+        Router::new()
+            .route(
+                prefix,
+                get(handle_form_view_get::<F>).post(handle_form_view_post::<F>),
+            )
+            .with_state(state)
+    }
+}
+
+struct StandaloneFormViewState<F>
+where
+    F: crate::forms::Form,
+{
+    vs: FormView<F>,
+    tera: Arc<Tera>,
+}
+
+async fn handle_form_view_get<F>(State(state): State<Arc<StandaloneFormViewState<F>>>) -> Response
+where
+    F: crate::forms::Form,
+{
+    let mut ctx = Context::new();
+    ctx.insert("errors", &HashMap::<String, Vec<String>>::new());
+    ctx.insert("values", &HashMap::<String, String>::new());
+    render(&state.tera, &state.vs.template, &ctx)
+}
+
+async fn handle_form_view_post<F>(
+    State(state): State<Arc<StandaloneFormViewState<F>>>,
+    axum::extract::Form(payload): axum::extract::Form<HashMap<String, String>>,
+) -> Response
+where
+    F: crate::forms::Form,
+{
+    match F::parse(&payload) {
+        Ok(form) => match (state.vs.handler)(form).await {
+            Ok(()) => {
+                // 303 See Other for POST → GET redirect (RFC 7231).
+                use axum::http::{header, HeaderValue};
+                let mut res = Response::builder()
+                    .status(StatusCode::SEE_OTHER)
+                    .body(axum::body::Body::empty())
+                    .expect("303 + empty body is always valid");
+                if let Ok(v) = HeaderValue::from_str(&state.vs.success_url) {
+                    res.headers_mut().insert(header::LOCATION, v);
+                }
+                res
+            }
+            Err(msg) => {
+                // Handler-level failure — re-render with a top-level
+                // "non-field" error so the template can show it.
+                let mut errors: HashMap<String, Vec<String>> = HashMap::new();
+                errors.insert("__all__".into(), vec![msg]);
+                let mut ctx = Context::new();
+                ctx.insert("errors", &errors);
+                ctx.insert("values", &payload);
+                render(&state.tera, &state.vs.template, &ctx)
+            }
+        },
+        Err(form_errors) => {
+            let mut ctx = Context::new();
+            ctx.insert("errors", form_errors.fields());
+            ctx.insert("values", &payload);
+            render(&state.tera, &state.vs.template, &ctx)
+        }
+    }
+}
+
 // ============================================================== tenant variants
 
 /// Tenant-aware state structs + handlers (#A5 follow-up). Each
@@ -4985,5 +5317,259 @@ mod tests {
         let _ = UpdateView::for_model(s)
             .success_url("/posts")
             .tenant_router("/posts", tera);
+    }
+
+    // ---- TemplateView / RedirectView / FormView (issue #13) ----
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn template_view_renders_template_with_static_context() {
+        let mut tera = Tera::default();
+        tera.add_raw_template("about.html", "About — contact {{ email }}.")
+            .unwrap();
+        let app = TemplateView::new("about.html")
+            .context_value("email", "hello@example.com")
+            .router("/about", Arc::new(tera));
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/about")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            "About — contact hello@example.com."
+        );
+    }
+
+    #[tokio::test]
+    async fn template_view_context_method_merges_json_object() {
+        let mut tera = Tera::default();
+        tera.add_raw_template("t.html", "{{ a }} / {{ b }}")
+            .unwrap();
+        let app = TemplateView::new("t.html")
+            .context(serde_json::json!({"a": "first", "b": "second"}))
+            .router("/", Arc::new(tera));
+
+        let res = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert_eq!(std::str::from_utf8(&body).unwrap(), "first / second");
+    }
+
+    #[tokio::test]
+    async fn redirect_view_returns_302_with_location() {
+        let app = RedirectView::to("/new-home").router("/old-home");
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/old-home")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FOUND);
+        assert_eq!(
+            res.headers()
+                .get(axum::http::header::LOCATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("/new-home")
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_view_permanent_returns_301() {
+        let app = RedirectView::to("/canonical").permanent().router("/old");
+        let res = app
+            .oneshot(Request::builder().uri("/old").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            res.headers()
+                .get(axum::http::header::LOCATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("/canonical")
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_view_drops_crlf_injected_location_header() {
+        // CRLF in the target URL is a response-splitting vector.
+        // `HeaderValue::from_str` rejects it; our handler drops the
+        // header silently so no `Set-Cookie: pwned=1` slips through.
+        // Status stays at the configured value so the failure is
+        // visible (browser sees no redirect).
+        let app = RedirectView::to("/safe\r\nSet-Cookie: pwned=1").router("/x");
+        let res = app
+            .oneshot(Request::builder().uri("/x").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FOUND);
+        assert!(
+            res.headers().get(axum::http::header::LOCATION).is_none(),
+            "CRLF-injected URL must NOT produce a Location header"
+        );
+    }
+
+    #[tokio::test]
+    async fn form_view_get_renders_empty_form_context() {
+        use crate::forms::{Form, FormErrors};
+
+        struct DummyForm;
+        impl Form for DummyForm {
+            fn parse(_: &HashMap<String, String>) -> Result<Self, FormErrors> {
+                Ok(DummyForm)
+            }
+        }
+
+        let mut tera = Tera::default();
+        // `errors | length` resolves to 0 (the HashMap is present + empty);
+        // proves the variable was stamped on the context.
+        tera.add_raw_template("f.html", "errors:{{ errors | length }}")
+            .unwrap();
+
+        let app = FormView::<DummyForm>::for_form(|_| async { Ok(()) })
+            .template("f.html")
+            .router("/", Arc::new(tera));
+
+        let res = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert_eq!(std::str::from_utf8(&body).unwrap(), "errors:0");
+    }
+
+    #[tokio::test]
+    async fn form_view_post_invalid_re_renders_with_errors() {
+        use crate::forms::{Form, FormErrors};
+
+        struct StrictForm;
+        impl Form for StrictForm {
+            fn parse(_: &HashMap<String, String>) -> Result<Self, FormErrors> {
+                let mut e = FormErrors::default();
+                e.add("name", "required");
+                Err(e)
+            }
+        }
+
+        let mut tera = Tera::default();
+        tera.add_raw_template(
+            "f.html",
+            "{% for field, msgs in errors %}{{ field }}:{{ msgs | length }}{% endfor %}",
+        )
+        .unwrap();
+
+        let app = FormView::<StrictForm>::for_form(|_| async { Ok(()) })
+            .template("f.html")
+            .router("/", Arc::new(tera));
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("name="))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert_eq!(std::str::from_utf8(&body).unwrap(), "name:1");
+    }
+
+    #[tokio::test]
+    async fn form_view_post_valid_redirects_to_success_url() {
+        use crate::forms::{Form, FormErrors};
+
+        struct OkForm;
+        impl Form for OkForm {
+            fn parse(_: &HashMap<String, String>) -> Result<Self, FormErrors> {
+                Ok(OkForm)
+            }
+        }
+
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "").unwrap();
+
+        let app = FormView::<OkForm>::for_form(|_| async { Ok(()) })
+            .template("f.html")
+            .success_url("/thanks")
+            .router("/", Arc::new(tera));
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(""))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            res.headers()
+                .get(axum::http::header::LOCATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("/thanks")
+        );
+    }
+
+    #[tokio::test]
+    async fn form_view_post_valid_drops_crlf_injected_success_url() {
+        use crate::forms::{Form, FormErrors};
+
+        struct OkForm;
+        impl Form for OkForm {
+            fn parse(_: &HashMap<String, String>) -> Result<Self, FormErrors> {
+                Ok(OkForm)
+            }
+        }
+
+        let mut tera = Tera::default();
+        tera.add_raw_template("f.html", "").unwrap();
+
+        // success_url with CRLF — same response-splitting defense as
+        // RedirectView. `HeaderValue::from_str` rejects the value,
+        // the Location header is dropped, status stays 303.
+        let app = FormView::<OkForm>::for_form(|_| async { Ok(()) })
+            .template("f.html")
+            .success_url("/thanks\r\nSet-Cookie: pwned=1")
+            .router("/", Arc::new(tera));
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(""))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert!(
+            res.headers().get(axum::http::header::LOCATION).is_none(),
+            "CRLF-injected success_url must NOT produce a Location header"
+        );
     }
 }

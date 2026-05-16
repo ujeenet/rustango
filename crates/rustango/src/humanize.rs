@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Datelike, Duration, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use tera::{to_value, Tera, Value};
 
 /// Register every humanize filter on `tera`. Call from app setup
@@ -347,7 +347,7 @@ fn natural_day_string(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{Duration, TimeZone};
 
     fn render(tera: &Tera, src: &str, ctx: tera::Context) -> String {
         let mut t = tera.clone();
