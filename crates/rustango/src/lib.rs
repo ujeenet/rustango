@@ -856,6 +856,14 @@ pub mod auth_backends;
 /// Issue #54 (partial).
 pub mod password_validators;
 
+/// Pluggable `PASSWORD_HASHERS` chain with **upgrade-on-login** —
+/// register an ordered list of [`password_hashers::PasswordHasher`]s;
+/// the first is preferred for new hashes, every entry verifies its
+/// own format, and successful logins against an older hasher return
+/// a freshly-rehashed value so the caller can transparently
+/// upgrade the stored hash. Issue #54 (partial).
+pub mod password_hashers;
+
 /// Django-shape test assertion helpers — `assert_contains` /
 /// `assert_redirects` / `assert_status` / `assert_messages` on axum
 /// Response objects. Issue #40.
