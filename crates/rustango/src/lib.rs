@@ -824,6 +824,12 @@ pub mod template_views;
 #[cfg(feature = "template_views")]
 pub mod shortcuts;
 
+/// Django `humanize` template filters — `intcomma`, `intword`,
+/// `naturalsize`, `ordinal`, `apnumber`, `naturaltime`, `naturalday`.
+/// See [`humanize`]. Issue #17.
+#[cfg(feature = "template_views")]
+pub mod humanize;
+
 /// Django-style runserver — [`server::Builder`] owns every line of
 /// boilerplate every tenancy app would otherwise rewrite (DB pool,
 /// resolver chain, host dispatch, operator console, bind + serve).
