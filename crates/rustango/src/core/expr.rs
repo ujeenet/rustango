@@ -353,6 +353,27 @@ pub enum ScalarFn {
     /// `OpNotSupportedInDialect`. Pairs with `to_tsvector` /
     /// `plainto_tsquery` / `ts_rank`. Issue #28 follow-up.
     TsHeadline,
+    /// `phraseto_tsquery(<expr>)` — Postgres FTS query parser that
+    /// preserves word order (`'rust orm'` → `'rust' <-> 'orm'`).
+    /// Use when "exact phrase" semantics matter. Arity 1. **PG-only**.
+    /// Issue #28 follow-up.
+    PhraseToTsQuery,
+    /// `websearch_to_tsquery(<expr>)` — Postgres FTS query parser
+    /// that accepts Google-style operators: quoted "exact phrase",
+    /// unary `-exclude`, the literal `OR`. Arity 1. **PG-only**.
+    /// Issue #28 follow-up.
+    WebsearchToTsQuery,
+    /// `to_tsquery(<expr>)` — Postgres FTS query parser for the
+    /// raw `tsquery` syntax (`'rust & orm'`, `'rust | python'`,
+    /// `'rust & !python'`). Lower-level than `plainto_tsquery`;
+    /// expects pre-parsed input. Arity 1. **PG-only**. Issue #28
+    /// follow-up.
+    ToTsQuery,
+    /// `ts_rank_cd(<tsvector>, <tsquery>)` — cover-density variant
+    /// of `ts_rank`. Same shape, different ranking algorithm
+    /// (better for short documents). Arity 2. **PG-only**. Issue
+    /// #28 follow-up.
+    TsRankCd,
 }
 
 impl Expr {
