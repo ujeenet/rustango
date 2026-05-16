@@ -427,6 +427,47 @@ pub fn trigram_word_similarity(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
     }
 }
 
+// ---------- Postgres FTS scalar fns (issue #28 follow-up) ----------
+
+/// `to_tsvector(<expr>)` — build a Postgres FTS `tsvector` from a
+/// text expression using the database's default text-search config.
+/// Pairs with [`plainto_tsquery`] + [`ts_rank`] for ranked search:
+///
+/// ```ignore
+/// use rustango::core::funcs::{to_tsvector, plainto_tsquery, ts_rank};
+/// use rustango::core::F;
+/// Article::objects()
+///     .annotate(
+///         "rank",
+///         ts_rank(to_tsvector(F("body")), plainto_tsquery("rust orm")),
+///     )
+///     .order_by_desc("rank")
+/// ```
+///
+/// **PG-only** — MySQL / SQLite reject at compile time.
+#[must_use]
+pub fn to_tsvector(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::ToTsVector, arg)
+}
+
+/// `plainto_tsquery(<expr>)` — parse a plain user-provided string
+/// into a Postgres FTS `tsquery`. **PG-only**.
+#[must_use]
+pub fn plainto_tsquery(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::PlainToTsQuery, arg)
+}
+
+/// `ts_rank(<tsvector>, <tsquery>)` — Postgres FTS relevance score
+/// (`real`). Use with [`to_tsvector`] + [`plainto_tsquery`] for
+/// ranked search ordering. **PG-only**.
+#[must_use]
+pub fn ts_rank(vector: impl Into<Expr>, query: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::TsRank,
+        args: vec![vector.into(), query.into()],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

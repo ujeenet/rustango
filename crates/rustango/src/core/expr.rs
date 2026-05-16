@@ -328,6 +328,22 @@ pub enum ScalarFn {
     /// **PG-only**, same dialect rules as [`Self::TrigramSimilarity`].
     /// Pairs with `Op::TrigramWordSimilar`. Arity 2.
     TrigramWordSimilarity,
+
+    // --- Postgres full-text search (issue #28 follow-up) ---
+    /// `to_tsvector(<expr>)` — build a `tsvector` from a text
+    /// expression using the database's default text-search config.
+    /// Arity 1. **PG-only** — MySQL / SQLite emit
+    /// `OpNotSupportedInDialect`. Pairs with `Op::Search` (the
+    /// WHERE-clause `@@ plainto_tsquery` operator) shipped earlier
+    /// in the same issue.
+    ToTsVector,
+    /// `plainto_tsquery(<expr>)` — parse a plain user-provided
+    /// string into a `tsquery`. Arity 1. **PG-only**.
+    PlainToTsQuery,
+    /// `ts_rank(<tsvector>, <tsquery>)` — FTS relevance score
+    /// (`real`). Use with `to_tsvector(col)` + `plainto_tsquery(q)`
+    /// for ranked search ordering. Arity 2. **PG-only**.
+    TsRank,
 }
 
 impl Expr {
