@@ -588,3 +588,246 @@ mod tera_tests {
         );
     }
 }
+
+// ============================================================== querystring filter
+
+/// Register the Django 5.1 `{% querystring %}` equivalent as a Tera
+/// filter. Issue #19. Takes the current querystring as input and
+/// returns a new one with the given overrides applied.
+///
+/// Foundational for paginator / filter-preserving links where you
+/// want "the same URL but with `page=3` instead of `page=2`":
+///
+/// ```jinja
+/// <!-- request.query_string = "q=hello&page=1&sort=asc" -->
+/// <a href="?{{ request.query_string | querystring(page=2) | safe }}">page 2</a>
+/// <!--                                       ↑ → "?q=hello&page=2&sort=asc" -->
+/// ```
+///
+/// Behavior matches Django's [`{% querystring %}`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#querystring):
+///
+/// - Each override either **replaces** the existing key or **appends**
+///   a new one. Single value per key.
+/// - **`null` value removes the key entirely.** Lets templates drop a
+///   query param: `{{ qs | querystring(filter=null) }}`.
+/// - Empty result emits an empty string (no leading `?`) so
+///   `<a href="{{ '' | querystring() }}">` doesn't dangle a `?`.
+/// - Keys and values are percent-encoded on output via
+///   [`crate::url_codec::url_encode`].
+///
+/// Wire it once at app setup:
+///
+/// ```ignore
+/// rustango::urls::register_querystring_filter(&mut tera);
+/// ```
+#[cfg(feature = "template_views")]
+pub fn register_querystring_filter(tera: &mut tera::Tera) {
+    tera.register_filter("querystring", querystring_filter);
+}
+
+#[cfg(feature = "template_views")]
+fn querystring_filter(
+    value: &tera::Value,
+    args: &HashMap<String, tera::Value>,
+) -> tera::Result<tera::Value> {
+    let current = value.as_str().unwrap_or("");
+    let mut pairs = parse_query_pairs(current);
+
+    for (k, v) in args {
+        // Remove any existing entry with this key — overrides replace.
+        pairs.retain(|(pk, _)| pk != k);
+        if matches!(v, tera::Value::Null) {
+            // Null = delete. Already removed above; skip the append.
+            continue;
+        }
+        let s = match v {
+            tera::Value::String(s) => s.clone(),
+            tera::Value::Number(n) => n.to_string(),
+            tera::Value::Bool(b) => b.to_string(),
+            other => {
+                return Err(tera::Error::msg(format!(
+                    "querystring(): argument `{k}` must be a scalar (string / number / bool / null), got: {other:?}"
+                )));
+            }
+        };
+        pairs.push((k.clone(), s));
+    }
+
+    if pairs.is_empty() {
+        return Ok(tera::Value::String(String::new()));
+    }
+    let encoded: Vec<String> = pairs
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{}={}",
+                crate::url_codec::url_encode(k),
+                crate::url_codec::url_encode(v)
+            )
+        })
+        .collect();
+    Ok(tera::Value::String(format!("?{}", encoded.join("&"))))
+}
+
+/// Parse a querystring (with or without the leading `?`) into a
+/// list of `(key, value)` pairs preserving original order. Malformed
+/// pairs (no `=`, multiple `=`) are passed through with empty / first-
+/// `=`-split values — same loose interpretation as browsers.
+#[cfg(feature = "template_views")]
+fn parse_query_pairs(s: &str) -> Vec<(String, String)> {
+    let s = s.trim_start_matches('?');
+    if s.is_empty() {
+        return Vec::new();
+    }
+    s.split('&')
+        .filter(|chunk| !chunk.is_empty())
+        .map(|chunk| match chunk.split_once('=') {
+            Some((k, v)) => (
+                crate::url_codec::url_decode(k),
+                crate::url_codec::url_decode(v),
+            ),
+            None => (crate::url_codec::url_decode(chunk), String::new()),
+        })
+        .collect()
+}
+
+#[cfg(all(test, feature = "template_views"))]
+mod querystring_tests {
+    use super::*;
+
+    fn setup() -> tera::Tera {
+        let mut tera = tera::Tera::default();
+        register_querystring_filter(&mut tera);
+        tera
+    }
+
+    fn render(tera: &tera::Tera, src: &str, ctx: tera::Context) -> String {
+        let mut t = tera.clone();
+        t.add_raw_template("_", src).unwrap();
+        t.render("_", &ctx).unwrap()
+    }
+
+    #[test]
+    fn empty_input_with_overrides_emits_new_qs() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("q", "");
+        assert_eq!(
+            render(&tera, "{{ q | querystring(page=2) | safe }}", ctx),
+            "?page=2"
+        );
+    }
+
+    #[test]
+    fn empty_input_with_no_overrides_emits_empty_string() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("q", "");
+        assert_eq!(render(&tera, "{{ q | querystring() | safe }}", ctx), "");
+    }
+
+    #[test]
+    fn override_replaces_existing_key() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("q", "page=1");
+        assert_eq!(
+            render(&tera, "{{ q | querystring(page=2) | safe }}", ctx),
+            "?page=2"
+        );
+    }
+
+    #[test]
+    fn override_preserves_other_keys() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("q", "q=hello&page=1&sort=asc");
+        let out = render(&tera, "{{ q | querystring(page=2) | safe }}", ctx);
+        // Order: q, sort survive in place; page goes to the end as
+        // a "replaced" key.
+        assert_eq!(out, "?q=hello&sort=asc&page=2");
+    }
+
+    #[test]
+    fn override_appends_new_key() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("q", "q=hello");
+        assert_eq!(
+            render(&tera, "{{ q | querystring(filter='active') | safe }}", ctx),
+            "?q=hello&filter=active"
+        );
+    }
+
+    #[test]
+    fn null_override_removes_key() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("q", "q=hello&filter=active");
+        ctx.insert("v", &serde_json::Value::Null);
+        assert_eq!(
+            render(&tera, "{{ q | querystring(filter=v) | safe }}", ctx),
+            "?q=hello"
+        );
+    }
+
+    #[test]
+    fn percent_encodes_special_chars_in_output() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("q", "");
+        let out = render(
+            &tera,
+            "{{ q | querystring(name='hello world', special='a/b?c') | safe }}",
+            ctx,
+        );
+        // `' '` → `%20`, `/` → `%2F`, `?` → `%3F`.
+        assert!(out.contains("hello%20world"), "got: {out}");
+        assert!(out.contains("a%2Fb%3Fc"), "got: {out}");
+    }
+
+    #[test]
+    fn input_with_leading_question_mark_is_stripped() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("q", "?q=hello&page=1");
+        assert_eq!(
+            render(&tera, "{{ q | querystring(page=2) | safe }}", ctx),
+            "?q=hello&page=2"
+        );
+    }
+
+    #[test]
+    fn bool_and_number_args_stringify_via_display() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("q", "");
+        let out = render(
+            &tera,
+            "{{ q | querystring(page=2, active=true) | safe }}",
+            ctx,
+        );
+        assert!(out.contains("page=2"), "got: {out}");
+        assert!(out.contains("active=true"), "got: {out}");
+    }
+
+    #[test]
+    fn parse_pairs_handles_trailing_ampersand_and_empty_chunks() {
+        // Defensive — browsers sometimes emit `?q=x&` with a trailing
+        // separator. Filter out empty chunks.
+        let pairs = parse_query_pairs("?q=hello&&page=1&");
+        assert_eq!(
+            pairs,
+            vec![
+                ("q".to_owned(), "hello".to_owned()),
+                ("page".to_owned(), "1".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_pairs_percent_decodes_keys_and_values() {
+        let pairs = parse_query_pairs("q=hello%20world&page=1");
+        assert_eq!(pairs[0].1, "hello world");
+    }
+}
