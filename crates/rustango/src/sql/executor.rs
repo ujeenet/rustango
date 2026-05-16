@@ -1946,106 +1946,166 @@ pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'_>, ExecError> {
 }
 
 // ====================================================================
-// transaction.on_commit — after-commit hooks (issue #44)
+// atomic() + on_commit() — Django transaction.atomic + on_commit (#44)
 // ====================================================================
 
-/// Transaction wrapper that fires registered callbacks **after the
-/// commit succeeds**. Django's
-/// [`transaction.on_commit(callable)`](https://docs.djangoproject.com/en/6.0/topics/db/transactions/#performing-actions-after-commit).
+tokio::task_local! {
+    /// Active callback queue for the current `atomic` scope. Set by
+    /// [`atomic`] before running its closure; read by [`on_commit`]
+    /// from anywhere inside that closure's call tree.
+    static ON_COMMIT: std::sync::Mutex<Vec<Box<dyn FnOnce() + Send>>>;
+}
+
+/// Closure-scoped transaction with after-commit hooks. Django's
+/// [`transaction.atomic`](https://docs.djangoproject.com/en/6.0/topics/db/transactions/#django.db.transaction.atomic)
+/// + [`transaction.on_commit`](https://docs.djangoproject.com/en/6.0/topics/db/transactions/#performing-actions-after-commit),
+/// rolled into one helper. Auto-commits when `f` returns `Ok`,
+/// auto-rolls-back when `f` returns `Err`. Callbacks queued via
+/// [`on_commit`] inside `f` fire **only on the commit path** —
+/// never on rollback.
 ///
-/// Use for side effects that must NOT happen if the transaction
-/// rolls back: sending an email after `INSERT`, enqueueing a
-/// background job after `UPDATE`, invalidating a cache after
-/// `DELETE`. Without on_commit hooks, rolled-back inserts can leak
-/// dangling emails / jobs / cache invalidations.
+/// Without this guarantee, side effects like "send the welcome
+/// email" after an `INSERT` can leak: the email goes out, the
+/// transaction rolls back, the user record never lands, the email
+/// references a phantom user.
 ///
 /// ```ignore
-/// let mut tx = rustango::sql::on_commit_tx(&pool).await?;
-/// // … do queries via `tx.tx()` (returns `&mut PoolTx`) …
-/// tx.on_commit(|| {
-///     // Runs only if `tx.commit()` succeeds. Sync — spawn
-///     // for async work.
-///     tokio::spawn(async { send_welcome_email(user_id).await });
-/// });
-/// tx.commit().await?;          // → callback fires
-/// // -- OR --
-/// tx.rollback().await?;        // → callback DROPPED unfired
+/// use rustango::sql::{atomic, on_commit, insert_tx};
+///
+/// atomic(&pool, |tx| Box::pin(async move {
+///     insert_tx(tx, &user_insert).await?;
+///     on_commit(|| {
+///         // Sync. For async work, spawn here.
+///         tokio::spawn(async move { send_welcome_email(user_id).await });
+///     });
+///     Ok(())
+/// }))
+/// .await?;
 /// ```
 ///
-/// Callbacks fire in registration order. Each runs to completion
-/// before the next starts — a panicking callback aborts the chain
-/// (subsequent callbacks won't fire). If you need resilience
-/// against per-callback failures, wrap your closure in
-/// `std::panic::catch_unwind` yourself.
-pub struct OnCommitTx<'a> {
-    tx: PoolTx<'a>,
-    callbacks: Vec<Box<dyn FnOnce() + Send>>,
-}
-
-impl<'a> OnCommitTx<'a> {
-    /// Mutable access to the underlying transaction so callers can
-    /// run queries via the existing `_tx` helpers / per-backend
-    /// `sqlx::query` chain.
-    pub fn tx(&mut self) -> &mut PoolTx<'a> {
-        &mut self.tx
-    }
-
-    /// Register `f` to run after a successful `.commit()`. Order is
-    /// preserved across multiple `on_commit` calls.
-    pub fn on_commit<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        self.callbacks.push(Box::new(f));
-    }
-
-    /// Commit the transaction. On success, fire every registered
-    /// callback in registration order. On failure, the callbacks
-    /// are dropped unfired.
-    ///
-    /// # Errors
-    /// `sqlx::Error` from the underlying `COMMIT`. When this returns
-    /// `Err`, no callback has run (the DB state is whatever sqlx
-    /// left after the failed commit).
-    pub async fn commit(self) -> Result<(), sqlx::Error> {
-        self.tx.commit().await?;
-        for cb in self.callbacks {
-            cb();
-        }
-        Ok(())
-    }
-
-    /// Roll back the transaction. Dropped callbacks are NEVER fired —
-    /// that's the whole point. Returns the underlying `sqlx::Error`
-    /// from the explicit `ROLLBACK` (sqlx auto-rolls-back on drop
-    /// too if you skip this call).
-    ///
-    /// # Errors
-    /// `sqlx::Error` from the underlying `ROLLBACK`.
-    pub async fn rollback(self) -> Result<(), sqlx::Error> {
-        // Callbacks dropped here without running — `Box<dyn FnOnce>`
-        // is droppable without invocation.
-        self.tx.rollback().await
-    }
-
-    /// Number of callbacks queued so far. Useful for testing.
-    #[must_use]
-    pub fn pending(&self) -> usize {
-        self.callbacks.len()
-    }
-}
-
-/// Open a transaction with after-commit hook support. Bi-dialect
-/// counterpart of [`transaction_pool`] that additionally lets callers
-/// queue side effects via [`OnCommitTx::on_commit`].
+/// The `Box::pin(async move { … })` wrapping is the cost of an async
+/// closure that borrows `tx` mutably across `await` points on stable
+/// Rust — `&mut PoolTx<'_>` is lifetime-invariant, and `Pin<Box<dyn
+/// Future>>` is the standard escape hatch. The [`atomic!`] macro
+/// hides the ceremony if you prefer:
+///
+/// ```ignore
+/// rustango::atomic!(&pool, |tx| {
+///     insert_tx(tx, &user_insert).await?;
+///     on_commit(|| { /* … */ });
+///     Ok(())
+/// })
+/// .await?;
+/// ```
+///
+/// **Inside the closure** `tx` is `&mut PoolTx<'_>` — pass directly
+/// to the existing `_tx` helpers (`insert_tx` / `update_tx` /
+/// `select_rows_tx_with_related` / ...). Raw `sqlx::query` chains
+/// still need the per-backend `PoolTx::Postgres(...)` match (that's
+/// the escape hatch); typed ORM ops dispatch internally.
+///
+/// **Callbacks fire in registration order**, serially, after the
+/// `COMMIT` returns OK. A panicking callback aborts the chain —
+/// subsequent callbacks won't run. Wrap in `std::panic::catch_unwind`
+/// if you need per-callback resilience.
 ///
 /// # Errors
-/// Driver errors from `BEGIN`.
-pub async fn on_commit_tx(pool: &Pool) -> Result<OnCommitTx<'_>, ExecError> {
-    Ok(OnCommitTx {
-        tx: transaction_pool(pool).await?,
-        callbacks: Vec::new(),
-    })
+/// Returns the first `ExecError` produced by `f`, or a driver error
+/// from `BEGIN` / `COMMIT` / `ROLLBACK`.
+pub async fn atomic<F, T>(pool: &Pool, f: F) -> Result<T, ExecError>
+where
+    F: for<'tx> FnOnce(
+        &'tx mut PoolTx<'_>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'tx>,
+    >,
+{
+    let queue = std::sync::Mutex::new(Vec::<Box<dyn FnOnce() + Send>>::new());
+    ON_COMMIT
+        .scope(queue, async move {
+            let mut tx = transaction_pool(pool).await?;
+            match f(&mut tx).await {
+                Ok(val) => {
+                    tx.commit().await?;
+                    // Drain queue + fire callbacks in registration order.
+                    let callbacks = ON_COMMIT
+                        .with(|q| std::mem::take(&mut *q.lock().expect("on_commit mutex")));
+                    for cb in callbacks {
+                        cb();
+                    }
+                    Ok(val)
+                }
+                Err(e) => {
+                    // Callbacks drop here when the task-local scope ends.
+                    let _ = tx.rollback().await;
+                    Err(e)
+                }
+            }
+        })
+        .await
+}
+
+/// Sugar over [`atomic`] that wraps the body in `Box::pin(async move { … })`
+/// so callers don't have to. Identical semantics:
+///
+/// ```ignore
+/// rustango::atomic!(&pool, |tx| {
+///     insert_tx(tx, &q).await?;
+///     on_commit(|| spawn_email());
+///     Ok(())
+/// })
+/// .await?;
+/// ```
+#[macro_export]
+macro_rules! atomic {
+    (& $pool:expr, |$tx:ident| $body:block) => {
+        $crate::sql::atomic(&$pool, |$tx| ::std::boxed::Box::pin(async move { $body }))
+    };
+    ($pool:expr, |$tx:ident| $body:block) => {
+        $crate::sql::atomic($pool, |$tx| ::std::boxed::Box::pin(async move { $body }))
+    };
+}
+
+/// Queue `f` to run after the enclosing [`atomic`] block commits. If
+/// the transaction rolls back instead, `f` is dropped unfired.
+///
+/// `f` is sync (`FnOnce() + Send + 'static`). For async work, spawn
+/// from inside:
+///
+/// ```ignore
+/// on_commit(|| {
+///     tokio::spawn(async move { send_email().await });
+/// });
+/// ```
+///
+/// Calling `on_commit` **outside** an `atomic` scope is a programmer
+/// error and panics with a clear message — flash-fail beats silently
+/// dropping the callback into the void.
+pub fn on_commit<F>(f: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    ON_COMMIT
+        .try_with(|q| {
+            q.lock().expect("on_commit mutex").push(Box::new(f));
+        })
+        .unwrap_or_else(|_| {
+            panic!(
+                "rustango::sql::on_commit called outside an `atomic` block — \
+                 the callback would never fire. Wrap the caller in \
+                 `atomic(&pool, |tx| async move {{ ... on_commit(...) ... }})`."
+            );
+        });
+}
+
+/// Returns the number of callbacks queued in the current `atomic`
+/// scope. Useful for tests. Returns 0 when called outside an
+/// `atomic` block.
+#[must_use]
+pub fn on_commit_pending() -> usize {
+    ON_COMMIT
+        .try_with(|q| q.lock().expect("on_commit mutex").len())
+        .unwrap_or(0)
 }
 
 // ====================================================================

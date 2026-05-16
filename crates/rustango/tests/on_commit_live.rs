@@ -1,12 +1,11 @@
 #![cfg(feature = "postgres")]
-//! Live PG tests for `OnCommitTx` — Django's `transaction.on_commit`.
-//! Issue #44. Verifies the after-commit hook fires when (and only
-//! when) the wrapping transaction commits.
+//! Live PG tests for `rustango::sql::atomic` + `on_commit` —
+//! closure-scoped transactions with after-commit hooks. Issue #44.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use rustango::sql::{on_commit_tx, sqlx, Pool, PoolTx};
+use rustango::sql::{on_commit, on_commit_pending, sqlx, ExecError, Pool, PoolTx};
 
 async fn fresh_pool() -> Option<Pool> {
     let url = std::env::var("DATABASE_URL").ok()?;
@@ -47,18 +46,21 @@ async fn callback_fires_after_commit() {
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = Arc::clone(&counter);
 
-    let mut tx = on_commit_tx(&pool).await.unwrap();
-    if let PoolTx::Postgres(t) = tx.tx() {
-        sqlx::query("INSERT INTO oc_widget(label) VALUES ($1)")
-            .bind("alpha")
-            .execute(&mut **t)
-            .await
-            .unwrap();
-    }
-    tx.on_commit(move || {
-        counter_clone.fetch_add(1, Ordering::SeqCst);
-    });
-    tx.commit().await.unwrap();
+    rustango::atomic!(&pool, |tx| {
+        if let PoolTx::Postgres(t) = tx {
+            sqlx::query("INSERT INTO oc_widget(label) VALUES ($1)")
+                .bind("alpha")
+                .execute(&mut **t)
+                .await
+                .map_err(ExecError::from)?;
+        }
+        on_commit(move || {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+        Ok(())
+    })
+    .await
+    .unwrap();
 
     assert_eq!(
         counter.load(Ordering::SeqCst),
@@ -76,19 +78,23 @@ async fn callback_does_not_fire_after_rollback() {
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = Arc::clone(&counter);
 
-    let mut tx = on_commit_tx(&pool).await.unwrap();
-    if let PoolTx::Postgres(t) = tx.tx() {
-        sqlx::query("INSERT INTO oc_widget(label) VALUES ($1)")
-            .bind("beta")
-            .execute(&mut **t)
-            .await
-            .unwrap();
-    }
-    tx.on_commit(move || {
-        counter_clone.fetch_add(1, Ordering::SeqCst);
-    });
-    tx.rollback().await.unwrap();
+    let result: Result<(), ExecError> = rustango::atomic!(&pool, |tx| {
+        if let PoolTx::Postgres(t) = tx {
+            sqlx::query("INSERT INTO oc_widget(label) VALUES ($1)")
+                .bind("beta")
+                .execute(&mut **t)
+                .await
+                .map_err(ExecError::from)?;
+        }
+        on_commit(move || {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+        // Intentional bailout — rolls back.
+        Err(ExecError::Sql(rustango::sql::SqlError::EmptyInList))
+    })
+    .await;
 
+    assert!(result.is_err(), "atomic should propagate the closure's Err");
     assert_eq!(
         counter.load(Ordering::SeqCst),
         0,
@@ -103,31 +109,53 @@ async fn callbacks_fire_in_registration_order() {
         return;
     };
     let order = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+    let order_for_closure = Arc::clone(&order);
 
-    let mut tx = on_commit_tx(&pool).await.unwrap();
-    for i in 0..5_u32 {
-        let order = Arc::clone(&order);
-        tx.on_commit(move || {
-            order.lock().unwrap().push(i);
-        });
-    }
-    tx.commit().await.unwrap();
+    rustango::atomic!(&pool, |_tx| {
+        for i in 0..5_u32 {
+            let order = Arc::clone(&order_for_closure);
+            on_commit(move || {
+                order.lock().unwrap().push(i);
+            });
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
 
     let observed = order.lock().unwrap().clone();
     assert_eq!(observed, vec![0, 1, 2, 3, 4], "registration order");
 }
 
 #[tokio::test]
-async fn pending_count_reflects_queued_callbacks() {
+async fn on_commit_pending_reflects_queue_depth() {
     let Some(pool) = fresh_pool().await else {
         return;
     };
-    let mut tx = on_commit_tx(&pool).await.unwrap();
-    assert_eq!(tx.pending(), 0);
-    tx.on_commit(|| {});
-    assert_eq!(tx.pending(), 1);
-    tx.on_commit(|| {});
-    tx.on_commit(|| {});
-    assert_eq!(tx.pending(), 3);
-    tx.rollback().await.unwrap();
+    rustango::atomic!(&pool, |_tx| {
+        assert_eq!(on_commit_pending(), 0);
+        on_commit(|| {});
+        assert_eq!(on_commit_pending(), 1);
+        on_commit(|| {});
+        on_commit(|| {});
+        assert_eq!(on_commit_pending(), 3);
+        Ok::<_, ExecError>(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn on_commit_pending_outside_atomic_returns_zero() {
+    // `on_commit_pending` is safe to call outside an atomic scope —
+    // returns 0 rather than panicking. (Only `on_commit` itself
+    // panics outside scope, since calling it would otherwise drop
+    // the callback into the void.)
+    assert_eq!(on_commit_pending(), 0);
+}
+
+#[tokio::test]
+#[should_panic(expected = "called outside an `atomic` block")]
+async fn on_commit_outside_atomic_panics() {
+    on_commit(|| {});
 }
