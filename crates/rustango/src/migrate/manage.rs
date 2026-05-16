@@ -114,6 +114,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "db:info" => db_info_cmd(writer),
         "dumpdata" => dumpdata_cmd(pool, &args[1..], writer).await,
         "loaddata" => loaddata_cmd(pool, &args[1..], writer).await,
+        "showurls" => showurls_cmd(&args[1..], writer),
         // v0.38 — `inspectdb` is tri-dialect: PG + MySQL via
         // `information_schema`, SQLite via `PRAGMA table_info` +
         // `sqlite_master`. Dispatch happens inside `inspectdb_cmd`.
@@ -238,6 +239,15 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         "      misconfigurations. With --deploy: production hardening checks."
     )?;
     writeln!(w, "      Exits non-zero on any error-level finding.\n")?;
+    writeln!(w, "  showurls [--format plain|json]")?;
+    writeln!(
+        w,
+        "      Print every named URL pattern registered via `register_url!`."
+    )?;
+    writeln!(
+        w,
+        "      Useful for debugging routing + auditing `{{% url %}}` references.\n"
+    )?;
     writeln!(w, "  loaddata <fixture.json> [--fail-fast]")?;
     writeln!(
         w,
@@ -2707,6 +2717,93 @@ fn json_to_sql_value(
     }
 }
 
+/// `manage showurls [--format <plain|json>]` — print every named
+/// URL pattern registered via `register_url!`. Django parity verb.
+///
+/// Defaults to plain two-column output (name, pattern). `--format
+/// json` emits a JSON array of `{"name": "...", "pattern": "..."}`
+/// for machine consumption.
+///
+/// Sorted by name for deterministic output.
+fn showurls_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let mut format = "plain";
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                writeln!(w, "showurls [--format <plain|json>]")?;
+                writeln!(w)?;
+                writeln!(
+                    w,
+                    "  Print every named URL pattern registered via `register_url!`."
+                )?;
+                writeln!(w, "  --format plain (default) | json")?;
+                return Ok(());
+            }
+            "--format" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| MigrateError::Validation("--format expects a value".into()))?;
+                match v.as_str() {
+                    "plain" | "json" => {
+                        format = match v.as_str() {
+                            "plain" => "plain",
+                            "json" => "json",
+                            _ => unreachable!(),
+                        }
+                    }
+                    other => {
+                        return Err(MigrateError::Validation(format!(
+                            "--format: unknown value `{other}` (expected `plain` or `json`)"
+                        )));
+                    }
+                }
+            }
+            other if other.starts_with('-') => {
+                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+            }
+            other => {
+                return Err(MigrateError::Validation(format!(
+                    "unexpected positional argument: {other}"
+                )));
+            }
+        }
+    }
+
+    let mut routes: Vec<&'static crate::urls::NamedRoute> =
+        inventory::iter::<crate::urls::NamedRoute>().collect();
+    routes.sort_by_key(|r| r.name);
+
+    match format {
+        "json" => {
+            let items: Vec<serde_json::Value> = routes
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "name": r.name,
+                        "pattern": r.pattern,
+                    })
+                })
+                .collect();
+            let rendered = serde_json::to_string_pretty(&items)
+                .map_err(|e| MigrateError::Validation(format!("showurls: serialize JSON: {e}")))?;
+            writeln!(w, "{rendered}")?;
+        }
+        _ => {
+            // plain
+            if routes.is_empty() {
+                writeln!(w, "(no named URLs registered)")?;
+                return Ok(());
+            }
+            let max_name = routes.iter().map(|r| r.name.len()).max().unwrap_or(0);
+            for r in &routes {
+                writeln!(w, "  {:<width$}  {}", r.name, r.pattern, width = max_name)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Mask the password in a `postgres://user:pass@host/db` connection
 /// URL so it doesn't leak into log output.
 fn redact(argv: &[String]) -> Vec<String> {
@@ -3330,6 +3427,65 @@ mod gen_tests {
             crate::core::SqlValue::Json(j) => assert_eq!(j, serde_json::json!({"k": "v"})),
             other => panic!("expected Json, got {other:?}"),
         }
+    }
+
+    // -------- showurls --------
+
+    #[test]
+    fn showurls_help_emits_usage_line() {
+        let mut buf: Vec<u8> = Vec::new();
+        let r = showurls_cmd(&["--help".into()], &mut buf);
+        assert!(r.is_ok());
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("showurls"), "help text mentions verb: {s}");
+        assert!(s.contains("plain"));
+        assert!(s.contains("json"));
+    }
+
+    #[test]
+    fn showurls_rejects_unknown_format() {
+        let mut buf: Vec<u8> = Vec::new();
+        let r = showurls_cmd(&["--format".into(), "xml".into()], &mut buf);
+        assert!(r.is_err());
+        let e = format!("{}", r.unwrap_err());
+        assert!(e.contains("unknown value"), "error: {e}");
+    }
+
+    #[test]
+    fn showurls_rejects_unknown_flag() {
+        let mut buf: Vec<u8> = Vec::new();
+        let r = showurls_cmd(&["--badflag".into()], &mut buf);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn showurls_rejects_positional() {
+        let mut buf: Vec<u8> = Vec::new();
+        let r = showurls_cmd(&["extra".into()], &mut buf);
+        assert!(r.is_err());
+        let e = format!("{}", r.unwrap_err());
+        assert!(e.contains("positional"));
+    }
+
+    #[test]
+    fn showurls_plain_format_runs_without_error() {
+        let mut buf: Vec<u8> = Vec::new();
+        let r = showurls_cmd(&[], &mut buf);
+        // Whether named URLs exist in this test binary depends on
+        // other crates / test code that may have registered them.
+        // The verb itself must always succeed.
+        assert!(r.is_ok(), "showurls plain shouldn't error: {r:?}");
+    }
+
+    #[test]
+    fn showurls_json_format_emits_json_array() {
+        let mut buf: Vec<u8> = Vec::new();
+        let r = showurls_cmd(&["--format".into(), "json".into()], &mut buf);
+        assert!(r.is_ok());
+        let s = String::from_utf8(buf).unwrap();
+        // Must be valid JSON.
+        let parsed: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+        assert!(parsed.is_array(), "expected JSON array, got: {s}");
     }
 
     /// Default template (no `--tenant`) keeps the v0.28
