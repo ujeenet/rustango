@@ -801,6 +801,58 @@ impl<T: Model> QuerySet<T> {
         ValuesFlatQuerySet { qs: self, col }
     }
 
+    /// Project only the listed columns — Django's `.only('id', 'name')`.
+    /// Issue #20. Equivalent to [`Self::values_dict`] semantically — the
+    /// SQL is `SELECT cols FROM …` and the result is
+    /// `Vec<HashMap<String, SqlValue>>` keyed by column name. The
+    /// distinct entry point preserves Django muscle-memory at the
+    /// chain site.
+    ///
+    /// Columns are validated at `.compile()` time — typos surface as
+    /// [`QueryError::UnknownField`]; an empty list surfaces
+    /// [`QueryError::EmptyValuesProjection`].
+    ///
+    /// Note: unlike Django's `.only()`, the return shape is a
+    /// `HashMap`, not a partially-hydrated `Model` instance — rustango
+    /// has no equivalent of Django's lazy-attribute descriptor magic.
+    /// Typed partial-row decode is queued for a future slice.
+    #[must_use]
+    pub fn only(self, cols: &[&'static str]) -> ValuesQuerySet<T> {
+        self.values_dict(cols)
+    }
+
+    /// Project every scalar column EXCEPT the listed ones — Django's
+    /// `.defer('big_field', 'huge_blob')`. Issue #20. Compute the
+    /// complement against the model schema; the resulting SELECT
+    /// omits the named columns, saving IO on wide tables.
+    ///
+    /// Same return shape as [`Self::only`] (`Vec<HashMap<String, SqlValue>>`)
+    /// with the same Django parity caveat.
+    ///
+    /// Typo'd defer columns surface as [`QueryError::UnknownField`]
+    /// at `.compile()` time (any column the caller named that doesn't
+    /// exist on the model is rejected just like an `.only(...)` typo).
+    /// Empty defer list returns every scalar column on the model —
+    /// semantically a no-op vs. `.values_dict(all_cols)`.
+    #[must_use]
+    pub fn defer(self, cols: &[&'static str]) -> ValuesQuerySet<T> {
+        let model = T::SCHEMA;
+        let exclude: std::collections::HashSet<&'static str> = cols.iter().copied().collect();
+        let mut projection: Vec<&'static str> = model
+            .scalar_fields()
+            .filter(|f| !exclude.contains(f.column))
+            .map(|f| f.column)
+            .collect();
+        // Typo'd defer cols get forwarded into the projection so
+        // `values_dict`'s `UnknownField` check rejects them at compile.
+        for &col in cols {
+            if model.field_by_column(col).is_none() {
+                projection.push(col);
+            }
+        }
+        self.values_dict(&projection)
+    }
+
     /// Lower this queryset to a `DeleteQuery` — same WHERE clause, no projection.
     ///
     /// # Errors
