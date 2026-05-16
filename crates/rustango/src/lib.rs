@@ -842,6 +842,11 @@ pub mod messages;
 /// `?next=` round-trip helpers. Issue #11.
 pub mod auth_decorators;
 
+/// Django-shape test assertion helpers — `assert_contains` /
+/// `assert_redirects` / `assert_status` / `assert_messages` on axum
+/// Response objects. Issue #40.
+pub mod test_assertions;
+
 /// Django-style runserver — [`server::Builder`] owns every line of
 /// boilerplate every tenancy app would otherwise rewrite (DB pool,
 /// resolver chain, host dispatch, operator console, bind + serve).
