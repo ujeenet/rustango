@@ -904,6 +904,12 @@ pub mod test_assertions;
 /// filter it out. Issue #45.
 pub mod test_filter;
 
+/// Class-level test fixtures — Django's `setUpTestData(cls)`. Wraps
+/// `std::sync::OnceLock` / `tokio::sync::OnceCell` with the
+/// [`setup_test_data!`] / [`setup_test_data_async!`] macros so test
+/// fixtures lazily init once per test-binary process. Issue #42.
+pub mod test_data;
+
 /// `manage dbshell` — spawn `psql` / `mysql` / `sqlite3` for the
 /// current `DATABASE_URL`. Issue #56 (partial).
 pub mod dbshell;
