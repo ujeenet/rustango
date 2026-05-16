@@ -1628,6 +1628,30 @@ fn write_function(
             b.sql.push(')');
             Ok(())
         }
+        F::TsHeadline => {
+            if args.len() != 2 && args.len() != 3 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "ts_headline",
+                    expected: "2 or 3",
+                    got: args.len(),
+                });
+            }
+            if b.d.name() != "postgres" {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: "ts_headline (FTS) is Postgres-only",
+                    dialect: b.d.name(),
+                });
+            }
+            b.sql.push_str("ts_headline(");
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 {
+                    b.sql.push_str(", ");
+                }
+                write_expr(b, a, None)?;
+            }
+            b.sql.push(')');
+            Ok(())
+        }
     }
 }
 

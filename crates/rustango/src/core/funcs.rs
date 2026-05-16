@@ -468,6 +468,43 @@ pub fn ts_rank(vector: impl Into<Expr>, query: impl Into<Expr>) -> Expr {
     }
 }
 
+/// `ts_headline(<doc>, <tsquery>)` — Postgres FTS snippet generator
+/// with default highlighting (`<b>…</b>`). Use [`ts_headline_with`]
+/// for custom markers / max-fragments / etc.
+///
+/// ```ignore
+/// use rustango::core::funcs::{ts_headline, plainto_tsquery};
+/// use rustango::core::F;
+/// Article::objects()
+///     .annotate("snippet", ts_headline(F("body"), plainto_tsquery("rust orm")))
+/// ```
+///
+/// **PG-only**.
+#[must_use]
+pub fn ts_headline(doc: impl Into<Expr>, query: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::TsHeadline,
+        args: vec![doc.into(), query.into()],
+    }
+}
+
+/// `ts_headline(<doc>, <tsquery>, <options>)` — Postgres FTS snippet
+/// generator with custom markers / fragment count / etc. `options`
+/// is a Postgres-style key=value string, e.g.
+/// `"StartSel='<mark>', StopSel='</mark>', MaxFragments=1"`.
+/// **PG-only**.
+#[must_use]
+pub fn ts_headline_with(
+    doc: impl Into<Expr>,
+    query: impl Into<Expr>,
+    options: impl Into<Expr>,
+) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::TsHeadline,
+        args: vec![doc.into(), query.into(), options.into()],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

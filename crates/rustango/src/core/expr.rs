@@ -344,6 +344,15 @@ pub enum ScalarFn {
     /// (`real`). Use with `to_tsvector(col)` + `plainto_tsquery(q)`
     /// for ranked search ordering. Arity 2. **PG-only**.
     TsRank,
+    /// `ts_headline(<doc>, <tsquery> [, <options>])` — Postgres FTS
+    /// snippet generator. Returns the document with matching terms
+    /// wrapped in highlight markers (`<b>…</b>` by default; override
+    /// via the optional `options` string, e.g.
+    /// `"StartSel='<mark>', StopSel='</mark>', MaxFragments=1"`).
+    /// Arity 2 or 3. **PG-only** — MySQL / SQLite emit
+    /// `OpNotSupportedInDialect`. Pairs with `to_tsvector` /
+    /// `plainto_tsquery` / `ts_rank`. Issue #28 follow-up.
+    TsHeadline,
 }
 
 impl Expr {
