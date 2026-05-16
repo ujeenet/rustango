@@ -26,6 +26,22 @@ pub enum FieldType {
     Date,
     Uuid,
     Json,
+    /// Fixed-point exact decimal — Django's `DecimalField`. Postgres
+    /// `NUMERIC` (arbitrary precision), MySQL `DECIMAL(38, 10)`
+    /// (default precision/scale; override at schema level via attrs
+    /// once we expose them), SQLite `NUMERIC` (text affinity, exact
+    /// arithmetic via the `decimal` module of `sqlx-sqlite`). Rust
+    /// type: `rust_decimal::Decimal`. Use for money / metric data
+    /// where `f64` rounding would be unacceptable.
+    Decimal,
+    /// Binary blob — Django's `BinaryField`. Postgres `BYTEA`, MySQL
+    /// `LONGBLOB`, SQLite `BLOB`. Rust type: `Vec<u8>`. No length cap
+    /// at the type level; deployments add CHECK constraints if needed.
+    Binary,
+    /// Time of day, no date component — Django's `TimeField`. Postgres
+    /// `TIME`, MySQL `TIME(6)`, SQLite `TIME` (text affinity, `HH:MM:SS`
+    /// shape). Rust type: `chrono::NaiveTime`.
+    Time,
 }
 
 impl FieldType {
@@ -44,6 +60,9 @@ impl FieldType {
             Self::Date => "NaiveDate",
             Self::Uuid => "Uuid",
             Self::Json => "serde_json::Value",
+            Self::Decimal => "rust_decimal::Decimal",
+            Self::Binary => "Vec<u8>",
+            Self::Time => "NaiveTime",
         }
     }
 }

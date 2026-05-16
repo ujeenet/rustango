@@ -49,8 +49,20 @@ pub(crate) fn render_value(row: &PgRow, field: &FieldSchema) -> String {
         FieldType::String => format_display::<String>(row, field),
         FieldType::DateTime => format_display::<chrono::DateTime<chrono::Utc>>(row, field),
         FieldType::Date => format_display::<chrono::NaiveDate>(row, field),
+        FieldType::Time => format_display::<chrono::NaiveTime>(row, field),
         FieldType::Uuid => format_display::<uuid::Uuid>(row, field),
         FieldType::Json => format_json(row, field),
+        FieldType::Decimal => format_display::<rust_decimal::Decimal>(row, field),
+        FieldType::Binary => format_binary(row, field),
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn format_binary(row: &PgRow, field: &FieldSchema) -> String {
+    use sqlx::Row as _;
+    match row.try_get::<Option<Vec<u8>>, _>(field.column) {
+        Ok(Some(bytes)) => format!("<binary {} bytes>", bytes.len()),
+        _ => String::new(),
     }
 }
 
@@ -175,12 +187,43 @@ pub(crate) fn read_value_as_json(row: &PgRow, field: &FieldSchema) -> serde_json
             .flatten()
             .map(|d| Value::from(d.to_rfc3339()))
             .unwrap_or(Value::Null),
+        FieldType::Time => row
+            .try_get::<Option<chrono::NaiveTime>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(|t| Value::from(t.format("%H:%M:%S").to_string()))
+            .unwrap_or(Value::Null),
         FieldType::Json => row
             .try_get::<Option<Value>, _>(field.column)
             .ok()
             .flatten()
             .unwrap_or(Value::Null),
+        FieldType::Decimal => row
+            .try_get::<Option<rust_decimal::Decimal>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(|d| Value::from(d.to_string()))
+            .unwrap_or(Value::Null),
+        FieldType::Binary => row
+            .try_get::<Option<Vec<u8>>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(|b| Value::from(hex_encode_bytes(&b)))
+            .unwrap_or(Value::Null),
     }
+}
+
+/// Lowercase hex encoder — local helper used by the admin field-
+/// rendering paths to surface `BYTEA` / `BLOB` payloads as readable
+/// text. No separator, even-length output.
+fn hex_encode_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
 }
 
 /// Parse a form-payload string into a typed [`serde_json::Value`]
@@ -254,6 +297,7 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
             .unwrap_or_else(|| v.as_str().unwrap_or("").to_owned()),
         FieldType::String | FieldType::Uuid => v.as_str().unwrap_or("").to_owned(),
         FieldType::Date => v.as_str().unwrap_or("").to_owned(),
+        FieldType::Time => v.as_str().unwrap_or("").to_owned(),
         FieldType::DateTime => {
             // Truncate to `YYYY-MM-DDTHH:MM:SS` (no fractional / TZ)
             // for the datetime-local input. Accept both with-T and
@@ -273,6 +317,9 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
                 serde_json::to_string_pretty(v).unwrap_or_default()
             }
         }
+        // Decimal round-trips as a string via `row_to_json` to
+        // preserve precision; Binary likewise (hex-encoded).
+        FieldType::Decimal | FieldType::Binary => v.as_str().unwrap_or("").to_owned(),
     }
 }
 
@@ -312,6 +359,12 @@ pub(crate) fn render_value_for_input(row: &PgRow, field: &FieldSchema) -> String
             .flatten()
             .map(|d| d.format("%Y-%m-%d").to_string())
             .unwrap_or_default(),
+        FieldType::Time => row
+            .try_get::<Option<chrono::NaiveTime>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(|t| t.format("%H:%M:%S").to_string())
+            .unwrap_or_default(),
         FieldType::DateTime => row
             .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(field.column)
             .ok()
@@ -330,6 +383,18 @@ pub(crate) fn render_value_for_input(row: &PgRow, field: &FieldSchema) -> String
                     serde_json::to_string_pretty(&v).unwrap_or_default()
                 }
             })
+            .unwrap_or_default(),
+        FieldType::Decimal => row
+            .try_get::<Option<rust_decimal::Decimal>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(|d| d.to_string())
+            .unwrap_or_default(),
+        FieldType::Binary => row
+            .try_get::<Option<Vec<u8>>, _>(field.column)
+            .ok()
+            .flatten()
+            .map(|b| hex_encode_bytes(&b))
             .unwrap_or_default(),
     }
 }
@@ -392,11 +457,26 @@ pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) ->
         FieldType::DateTime => format!(
             r#"<input type="datetime-local" name="{name}" id="{name}" value="{val}"{required}{readonly}>"#
         ),
+        FieldType::Time => format!(
+            r#"<input type="time" name="{name}" id="{name}" value="{val}" step="1"{required}{readonly}>"#
+        ),
         FieldType::Uuid => format!(
             r#"<input type="text" name="{name}" id="{name}" value="{val}" pattern="[0-9a-fA-F\-]+"{required}{readonly}>"#
         ),
         FieldType::Json => format!(
             r#"<textarea name="{name}" id="{name}"{readonly} style="font-family:monospace">{val}</textarea>"#
+        ),
+        // `step="any"` on `type="number"` matches Django's
+        // DecimalField widget. Browsers handle precision via the
+        // `step` attribute when present; we omit it for now.
+        FieldType::Decimal => format!(
+            r#"<input type="number" step="any" inputmode="decimal" name="{name}" id="{name}" value="{val}"{required}{readonly}>"#
+        ),
+        // Binary inputs are typically uploads, but for admin
+        // consistency we expose a hex text field; the form parser
+        // accepts lowercase hex (even length).
+        FieldType::Binary => format!(
+            r#"<input type="text" name="{name}" id="{name}" value="{val}" pattern="[0-9a-f]*" inputmode="latin"{readonly} style="font-family:monospace">"#
         ),
     }
 }
@@ -464,8 +544,21 @@ pub(crate) fn render_value_json(row: &serde_json::Value, field: &FieldSchema) ->
             .as_f64()
             .map(|n| escape(&n.to_string()))
             .unwrap_or_else(|| escape(&v.to_string())),
-        FieldType::String | FieldType::Uuid | FieldType::Date | FieldType::DateTime => {
-            escape(v.as_str().unwrap_or(""))
+        FieldType::String
+        | FieldType::Uuid
+        | FieldType::Date
+        | FieldType::Time
+        | FieldType::DateTime
+        | FieldType::Decimal => escape(v.as_str().unwrap_or("")),
+        FieldType::Binary => {
+            // Hex-encoded by `row_to_json*`; render the head + a
+            // truncation marker so list cells stay readable.
+            let s = v.as_str().unwrap_or("");
+            if s.len() > 16 {
+                escape(&format!("{}… ({} hex chars)", &s[..16], s.len()))
+            } else {
+                escape(s)
+            }
         }
         FieldType::Json => {
             // Compact serialize to keep list cells one-line; the
@@ -530,9 +623,19 @@ pub(crate) fn read_joined_value_as_html_json(
         FieldType::I16 | FieldType::I32 | FieldType::I64 => v.as_i64().map(|n| n.to_string()),
         FieldType::F32 | FieldType::F64 => v.as_f64().map(|n| n.to_string()),
         FieldType::Bool => v.as_bool().map(|b| b.to_string()),
-        FieldType::String | FieldType::Uuid | FieldType::Date | FieldType::DateTime => {
-            v.as_str().map(str::to_owned)
-        }
+        FieldType::String
+        | FieldType::Uuid
+        | FieldType::Date
+        | FieldType::Time
+        | FieldType::DateTime
+        | FieldType::Decimal => v.as_str().map(str::to_owned),
+        FieldType::Binary => v.as_str().map(|s| {
+            if s.len() > 16 {
+                format!("{}… ({} hex chars)", &s[..16], s.len())
+            } else {
+                s.to_owned()
+            }
+        }),
         FieldType::Json => None,
     };
     text.map(|s| escape(&s))
@@ -664,11 +767,33 @@ pub(crate) fn read_joined_value_as_html(
             .ok()
             .flatten()
             .map(|v| v.to_string()),
+        FieldType::Time => row
+            .try_get::<Option<chrono::NaiveTime>, _>(prefixed.as_str())
+            .ok()
+            .flatten()
+            .map(|v| v.to_string()),
         FieldType::DateTime => row
             .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(prefixed.as_str())
             .ok()
             .flatten()
             .map(|v| v.to_string()),
+        FieldType::Decimal => row
+            .try_get::<Option<rust_decimal::Decimal>, _>(prefixed.as_str())
+            .ok()
+            .flatten()
+            .map(|v| v.to_string()),
+        FieldType::Binary => row
+            .try_get::<Option<Vec<u8>>, _>(prefixed.as_str())
+            .ok()
+            .flatten()
+            .map(|b| {
+                let hex = hex_encode_bytes(&b);
+                if hex.len() > 16 {
+                    format!("{}… ({} hex chars)", &hex[..16], hex.len())
+                } else {
+                    hex
+                }
+            }),
         FieldType::Json => None,
     };
     text.map(|s| escape(&s))

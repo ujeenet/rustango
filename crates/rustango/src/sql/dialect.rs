@@ -263,8 +263,11 @@ pub trait Dialect {
             },
             FieldType::DateTime => "TIMESTAMPTZ".into(),
             FieldType::Date => "DATE".into(),
+            FieldType::Time => "TIME".into(),
             FieldType::Uuid => "UUID".into(),
             FieldType::Json => "JSONB".into(),
+            FieldType::Decimal => "NUMERIC".into(),
+            FieldType::Binary => "BYTEA".into(),
         }
     }
 

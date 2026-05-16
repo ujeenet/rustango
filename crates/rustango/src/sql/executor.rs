@@ -589,10 +589,37 @@ pub fn row_to_json(
             FieldType::Json => row
                 .try_get::<serde_json::Value, _>(field.column)
                 .unwrap_or(Value::Null),
+            FieldType::Decimal => row
+                .try_get::<rust_decimal::Decimal, _>(field.column)
+                .map(|d| json!(d.to_string()))
+                .unwrap_or(Value::Null),
+            FieldType::Binary => row
+                .try_get::<Vec<u8>, _>(field.column)
+                .map(|b| json!(hex_encode(&b)))
+                .unwrap_or(Value::Null),
+            FieldType::Time => row
+                .try_get::<chrono::NaiveTime, _>(field.column)
+                .map(|t| json!(t.to_string()))
+                .unwrap_or(Value::Null),
         };
         map.insert(field.name.to_owned(), value);
     }
     Value::Object(map)
+}
+
+/// Render `bytes` as a lowercase hex string (no separator). Used by
+/// the `row_to_json` family for [`FieldType::Binary`] columns — the
+/// always-on crate can't pull in `base64` (gated behind several
+/// features), so hex is the lowest-dep neutral encoding.
+#[inline]
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
 }
 
 /// MySQL counterpart of [`row_to_json`]. Decodes each column by
@@ -654,6 +681,18 @@ pub fn row_to_json_my(
                 .unwrap_or(Value::Null),
             FieldType::Json => row
                 .try_get::<serde_json::Value, _>(field.column)
+                .unwrap_or(Value::Null),
+            FieldType::Decimal => row
+                .try_get::<rust_decimal::Decimal, _>(field.column)
+                .map(|d| json!(d.to_string()))
+                .unwrap_or(Value::Null),
+            FieldType::Binary => row
+                .try_get::<Vec<u8>, _>(field.column)
+                .map(|b| json!(hex_encode(&b)))
+                .unwrap_or(Value::Null),
+            FieldType::Time => row
+                .try_get::<chrono::NaiveTime, _>(field.column)
+                .map(|t| json!(t.to_string()))
                 .unwrap_or(Value::Null),
         };
         map.insert(field.name.to_owned(), value);
@@ -738,6 +777,35 @@ pub fn row_to_json_sqlite(
                     Err(_) => Value::Null,
                 }
             }
+            FieldType::Decimal => {
+                // SQLite has no `rust_decimal::Decimal: Decode<Sqlite>`
+                // impl, so we read NUMERIC-affinity columns as TEXT.
+                // The `bind_match_sqlite!` macro round-trips via
+                // `.to_string()` so the stored representation lines up.
+                row.try_get::<String, _>(field.column)
+                    .map(|s| json!(s))
+                    .or_else(|_| {
+                        // Small integers / floats may land in their
+                        // native affinity — fall back gracefully.
+                        row.try_get::<f64, _>(field.column)
+                            .map(|n| json!(n.to_string()))
+                    })
+                    .unwrap_or(Value::Null)
+            }
+            FieldType::Binary => row
+                .try_get::<Vec<u8>, _>(field.column)
+                .map(|b| json!(hex_encode(&b)))
+                .unwrap_or(Value::Null),
+            FieldType::Time => row
+                .try_get::<chrono::NaiveTime, _>(field.column)
+                .map(|t| json!(t.to_string()))
+                .unwrap_or_else(|_| {
+                    // SQLite stores TIME as TEXT — fall back to raw
+                    // string decode for non-`HH:MM:SS` shapes.
+                    row.try_get::<String, _>(field.column)
+                        .map(|s| json!(s))
+                        .unwrap_or(Value::Null)
+                }),
         };
         map.insert(field.name.to_owned(), value);
     }
@@ -1564,8 +1632,44 @@ macro_rules! bind_match {
             SqlValue::String(v) => $q.bind(v),
             SqlValue::DateTime(v) => $q.bind(v),
             SqlValue::Date(v) => $q.bind(v),
+            SqlValue::Time(v) => $q.bind(v),
             SqlValue::Uuid(v) => $q.bind(v),
             SqlValue::Json(v) => $q.bind(sqlx::types::Json(v)),
+            SqlValue::Decimal(v) => $q.bind(v),
+            SqlValue::Binary(v) => $q.bind(v),
+            SqlValue::List(_) => {
+                unreachable!("`SqlValue::List` is expanded to scalars by the SQL writer")
+            }
+        }
+    };
+}
+
+/// SQLite-only counterpart: `sqlx-sqlite` doesn't ship a
+/// `rust_decimal::Decimal: Type<Sqlite>` impl (only PG + MySQL get
+/// that via sqlx's `rust_decimal` feature), so the `Decimal` arm
+/// here serializes via `to_string()` and lands on SQLite's NUMERIC
+/// affinity as TEXT — round-trips through the matching `try_get::<String>`
+/// path in `row_to_json_sqlite`.
+#[cfg(feature = "sqlite")]
+macro_rules! bind_match_sqlite {
+    ($q:expr, $value:expr) => {
+        match $value {
+            SqlValue::Null => $q.bind(None::<String>),
+            SqlValue::I16(v) => $q.bind(v),
+            SqlValue::I32(v) => $q.bind(v),
+            SqlValue::I64(v) => $q.bind(v),
+            SqlValue::F32(v) => $q.bind(v),
+            SqlValue::F64(v) => $q.bind(v),
+            SqlValue::Bool(v) => $q.bind(v),
+            SqlValue::String(v) => $q.bind(v),
+            SqlValue::DateTime(v) => $q.bind(v),
+            SqlValue::Date(v) => $q.bind(v),
+            SqlValue::Time(v) => $q.bind(v),
+            SqlValue::Uuid(v) => $q.bind(v),
+            SqlValue::Json(v) => $q.bind(sqlx::types::Json(v)),
+            // sqlite-only string round-trip — see macro doc.
+            SqlValue::Decimal(v) => $q.bind(v.to_string()),
+            SqlValue::Binary(v) => $q.bind(v),
             SqlValue::List(_) => {
                 unreachable!("`SqlValue::List` is expanded to scalars by the SQL writer")
             }
@@ -2160,7 +2264,7 @@ fn bind_query_sqlite<'a>(
     q: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>,
     value: SqlValue,
 ) -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>> {
-    bind_match!(q, value)
+    bind_match_sqlite!(q, value)
 }
 
 /// `INSERT` against either backend. Equivalent to [`insert`] but
@@ -2943,7 +3047,7 @@ fn bind_query_as_sqlite<'a, T>(
     q: sqlx::query::QueryAs<'a, sqlx::Sqlite, T, sqlx::sqlite::SqliteArguments<'a>>,
     value: SqlValue,
 ) -> sqlx::query::QueryAs<'a, sqlx::Sqlite, T, sqlx::sqlite::SqliteArguments<'a>> {
-    bind_match!(q, value)
+    bind_match_sqlite!(q, value)
 }
 
 /// `fetch_aggregate` against either backend — runs an
@@ -3325,7 +3429,7 @@ fn bind_query_scalar_sqlite<'a, U>(
     q: sqlx::query::QueryScalar<'a, sqlx::Sqlite, U, sqlx::sqlite::SqliteArguments<'a>>,
     value: SqlValue,
 ) -> sqlx::query::QueryScalar<'a, sqlx::Sqlite, U, sqlx::sqlite::SqliteArguments<'a>> {
-    bind_match!(q, value)
+    bind_match_sqlite!(q, value)
 }
 
 // Bridge methods on the values builders so callers chain `.fetch(&pool)`.

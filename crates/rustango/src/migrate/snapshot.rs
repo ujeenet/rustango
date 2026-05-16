@@ -409,8 +409,11 @@ pub(crate) fn field_type_name(ty: FieldType) -> &'static str {
         FieldType::String => "string",
         FieldType::DateTime => "datetime",
         FieldType::Date => "date",
+        FieldType::Time => "time",
         FieldType::Uuid => "uuid",
         FieldType::Json => "json",
+        FieldType::Decimal => "decimal",
+        FieldType::Binary => "binary",
     }
 }
 

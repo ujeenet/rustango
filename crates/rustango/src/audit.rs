@@ -1484,8 +1484,11 @@ fn bind_value_pg(
         SqlValue::String(v) => q.bind(v),
         SqlValue::DateTime(v) => q.bind(v),
         SqlValue::Date(v) => q.bind(v),
+        SqlValue::Time(v) => q.bind(v),
         SqlValue::Uuid(v) => q.bind(v),
         SqlValue::Json(v) => q.bind(sqlx::types::Json(v)),
+        SqlValue::Decimal(v) => q.bind(v),
+        SqlValue::Binary(v) => q.bind(v),
         SqlValue::List(_) => unreachable!("List expanded to scalars by SQL writer"),
     }
 }
@@ -1507,8 +1510,11 @@ fn bind_value_my(
         SqlValue::String(v) => q.bind(v),
         SqlValue::DateTime(v) => q.bind(v),
         SqlValue::Date(v) => q.bind(v),
+        SqlValue::Time(v) => q.bind(v),
         SqlValue::Uuid(v) => q.bind(v),
         SqlValue::Json(v) => q.bind(sqlx::types::Json(v)),
+        SqlValue::Decimal(v) => q.bind(v),
+        SqlValue::Binary(v) => q.bind(v),
         SqlValue::List(_) => unreachable!("List expanded to scalars by SQL writer"),
     }
 }
@@ -1530,8 +1536,13 @@ fn bind_value_sqlite<'q>(
         SqlValue::String(v) => q.bind(v),
         SqlValue::DateTime(v) => q.bind(v),
         SqlValue::Date(v) => q.bind(v),
+        SqlValue::Time(v) => q.bind(v),
         SqlValue::Uuid(v) => q.bind(v),
         SqlValue::Json(v) => q.bind(sqlx::types::Json(v)),
+        // sqlx-sqlite has no `Decimal: Type<Sqlite>` — round-trip via
+        // TEXT to match `bind_match_sqlite!` in `sql::executor`.
+        SqlValue::Decimal(v) => q.bind(v.to_string()),
+        SqlValue::Binary(v) => q.bind(v),
         SqlValue::List(_) => unreachable!("List expanded to scalars by SQL writer"),
     }
 }

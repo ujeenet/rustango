@@ -1397,8 +1397,11 @@ fn field_type_label(ty: crate::core::FieldType) -> &'static str {
         T::Bool => "bool",
         T::DateTime => "datetime",
         T::Date => "date",
+        T::Time => "time",
         T::Uuid => "uuid",
         T::Json => "json",
+        T::Decimal => "decimal",
+        T::Binary => "binary",
     }
 }
 

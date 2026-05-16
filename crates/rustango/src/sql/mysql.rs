@@ -121,6 +121,17 @@ impl Dialect for MySql {
             FieldType::Date => "DATE".into(),
             FieldType::Uuid => "CHAR(36)".into(),
             FieldType::Json => "JSON".into(),
+            // MySQL `DECIMAL` defaults to `(10, 0)` — useless for app
+            // models. `(38, 10)` is the widest portable precision that
+            // matches `rust_decimal::Decimal`'s capacity. Per-column
+            // overrides land when we expose `precision`/`scale` attrs.
+            FieldType::Decimal => "DECIMAL(38, 10)".into(),
+            // `LONGBLOB` lifts the cap to 4 GiB; `BLOB` is 64 KiB,
+            // which is too small for a generic `BinaryField`.
+            FieldType::Binary => "LONGBLOB".into(),
+            // `TIME(6)` for microsecond precision — matches the
+            // `DATETIME(6)` choice elsewhere in this writer.
+            FieldType::Time => "TIME(6)".into(),
         }
     }
 

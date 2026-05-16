@@ -340,15 +340,16 @@ runserver = ["dep:axum", "dep:tokio"]
 rustango-macros = { version = "0.39.0", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
-chrono     = { workspace = true }
-indexmap   = { workspace = true }
-inventory  = { workspace = true }
-serde      = { workspace = true }
-serde_json = { workspace = true }
-sqlx       = { workspace = true }
-thiserror  = { workspace = true }
-tracing    = { workspace = true }
-uuid       = { workspace = true }
+chrono       = { workspace = true }
+indexmap     = { workspace = true }
+inventory    = { workspace = true }
+rust_decimal = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+sqlx         = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+uuid         = { workspace = true }
 
 # `config` feature dep — optional.
 toml = { workspace = true, optional = true }
@@ -402,6 +403,7 @@ tokio          = { workspace = true }
 chrono         = { workspace = true }
 uuid           = { workspace = true }
 serde_json     = { workspace = true }
+rust_decimal   = { workspace = true }
 tower          = { workspace = true }
 http-body-util = { workspace = true }
 axum           = { workspace = true }

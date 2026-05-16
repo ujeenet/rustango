@@ -712,6 +712,32 @@ impl Schema {
         s.format = Some("uuid".into());
         s
     }
+    /// Time of day. OpenAPI 3.x doesn't standardize `time`; render as
+    /// `string` with the unregistered `time` format (interoperable
+    /// with most clients).
+    #[must_use]
+    pub fn time() -> Self {
+        let mut s = Self::string();
+        s.format = Some("time".into());
+        s
+    }
+    /// Fixed-point decimal. OpenAPI conventions render as a `string`
+    /// payload (preserves precision across the JSON `number` boundary).
+    /// The `decimal` format is unregistered but widely understood.
+    #[must_use]
+    pub fn decimal() -> Self {
+        let mut s = Self::string();
+        s.format = Some("decimal".into());
+        s
+    }
+    /// Binary blob. Maps to OpenAPI's `string` + `format: byte`
+    /// (base64-encoded body shape).
+    #[must_use]
+    pub fn binary() -> Self {
+        let mut s = Self::string();
+        s.format = Some("byte".into());
+        s
+    }
     #[must_use]
     pub fn email() -> Self {
         let mut s = Self::string();

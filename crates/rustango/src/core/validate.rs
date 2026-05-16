@@ -36,8 +36,11 @@ pub fn validate_value(
         | SqlValue::Bool(_)
         | SqlValue::DateTime(_)
         | SqlValue::Date(_)
+        | SqlValue::Time(_)
         | SqlValue::Uuid(_)
-        | SqlValue::Json(_) => Ok(()),
+        | SqlValue::Json(_)
+        | SqlValue::Decimal(_)
+        | SqlValue::Binary(_) => Ok(()),
     }
 }
 
