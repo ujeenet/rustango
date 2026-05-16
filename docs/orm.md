@@ -409,6 +409,30 @@ let ids: Vec<i64> = Post::objects()
 
 **Why not change the existing `.values()` to do pure projection?** `QuerySet::values(cols)` already promotes to [`AggregateBuilder`] for the GROUP BY auto-inference path (issue #75). Renaming would break ~20 existing call sites. The new `.values_dict()` / `.values_list()` / `.values_list_flat()` chain methods sit alongside, leaving the aggregate path untouched. The pre-existing `QueryError::ValuesRequiresAggregate` error still fires for `.values(cols).compile()` without a subsequent `.annotate(...)` — its message now points callers at the new pure-projection methods.
 
+### Column pruning — `.defer()` / `.only()`
+
+Django's [`.defer('big_field')` / `.only('id', 'name')`](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#defer) — issue #20. Same projection IR as `.values_dict()` (above), exposed in Django's exclusion-list / inclusion-list shape. Use on wide tables where TEXT / BLOB / JSONB columns blow up list-view IO costs:
+
+```rust
+// .only(...) — fetch only the named columns.
+let rows: Vec<HashMap<String, SqlValue>> = Post::objects()
+    .where_(Post::published.eq(true))
+    .only(&["id", "title"])
+    .fetch(&pool).await?;
+
+// .defer(...) — fetch everything except the named columns.
+// Useful for "list view: skip body / metadata / large JSON".
+let rows: Vec<HashMap<String, SqlValue>> = Post::objects()
+    .defer(&["body", "raw_html"])
+    .fetch(&pool).await?;
+```
+
+**Semantics**: `.only(&[cols])` is a synonym for `.values_dict(cols)` — same IR, same return shape, separate entry point for Django-shape readability. `.defer(&[cols])` computes the complement against the model schema (every scalar column on the model EXCEPT the listed ones) and routes to the same path.
+
+**Caveat — return type differs from Django.** Django's `.only()` / `.defer()` return partially-hydrated `Model` instances where the deferred fields lazy-load on attribute access. rustango has no equivalent of Python's descriptor magic; the return shape is `Vec<HashMap<String, SqlValue>>` (or `Vec<Vec<SqlValue>>` if you swap in `.values_list(...)` instead). Typed partial-row decode is queued for a future slice.
+
+**Typo-safety**: `.defer(&["nope_col"])` surfaces `QueryError::UnknownField` at `.compile()` time — the typo doesn't silently turn into "project all columns." `.only(&[])` surfaces `QueryError::EmptyValuesProjection`; `.defer(&[])` is a semantic no-op (projects every column).
+
 ### Regex lookups — `.regex()` / `.iregex()` and negated variants
 
 Django's [`__regex` / `__iregex`](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#regex) — issue #26. Match a column against a regular-expression pattern, with case-sensitive and case-insensitive flavors plus negated forms.
