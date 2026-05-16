@@ -864,6 +864,13 @@ pub mod password_validators;
 /// upgrade the stored hash. Issue #54 (partial).
 pub mod password_hashers;
 
+/// XML sitemap rendering — `django.contrib.sitemaps`. Build a
+/// `Sitemap` impl (or pass a `Vec<SitemapEntry>` directly) and call
+/// [`sitemaps::render_sitemap`]; for large sites use
+/// [`sitemaps::render_sitemap_index`] to point crawlers at multiple
+/// child sitemaps. Issue #57.
+pub mod sitemaps;
+
 /// Django-shape test assertion helpers — `assert_contains` /
 /// `assert_redirects` / `assert_status` / `assert_messages` on axum
 /// Response objects. Issue #40.
