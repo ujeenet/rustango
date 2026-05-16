@@ -847,6 +847,13 @@ pub mod auth_decorators;
 /// Response objects. Issue #40.
 pub mod test_assertions;
 
+/// Tag-based test filtering — Django's `@tag('slow')` +
+/// `manage test --tag fast --exclude-tag slow`. Drop `tags!("slow")`
+/// at the top of a `#[test]` body; the test self-skips when the
+/// `RUSTANGO_TEST_TAGS` / `RUSTANGO_TEST_EXCLUDE_TAGS` env vars
+/// filter it out. Issue #45.
+pub mod test_filter;
+
 /// `manage dbshell` — spawn `psql` / `mysql` / `sqlite3` for the
 /// current `DATABASE_URL`. Issue #56 (partial).
 pub mod dbshell;
