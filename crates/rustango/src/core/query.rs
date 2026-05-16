@@ -78,6 +78,20 @@ pub enum Op {
     /// `LOWER(<col>) NOT REGEXP LOWER(<pattern>)` for the same
     /// reason as [`Op::IRegex`]. Issue #26.
     NotIRegex,
+    /// pg_trgm trigram similarity — Django's `__trigram_similar`
+    /// lookup. PG emits `<col> % <pattern>` using the `%` operator
+    /// supplied by the `pg_trgm` extension (default similarity
+    /// threshold is `0.3`; adjust via `SET pg_trgm.similarity_threshold`).
+    /// Requires `CREATE EXTENSION pg_trgm` on the database.
+    /// **PG-only** — MySQL / SQLite have no equivalent and reject
+    /// at compile time. Bind a `SqlValue::String`. Issue #29.
+    TrigramSimilar,
+    /// pg_trgm word-similarity — Django's `__trigram_word_similar`
+    /// lookup. PG emits `<col> %> <pattern>` using the `%>` operator.
+    /// Matches when any **word** in `<col>` is trigram-similar to the
+    /// pattern (the bare `%` requires the WHOLE string be similar).
+    /// **PG-only**, same `pg_trgm` extension requirement. Issue #29.
+    TrigramWordSimilar,
 }
 
 /// One predicate in a `WHERE` clause: `column <op> value`. Always

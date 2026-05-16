@@ -78,7 +78,8 @@ pub enum QueryError {
         "unknown lookup suffix `__{suffix}` on field `{field}` — \
          supported: exact, iexact, contains, icontains, startswith, \
          istartswith, endswith, iendswith, gt, gte, lt, lte, ne, in, \
-         isnull, between, range, regex, iregex"
+         isnull, between, range, regex, iregex, trigram_similar, \
+         trigram_word_similar"
     )]
     UnknownLookup { field: String, suffix: String },
 

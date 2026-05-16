@@ -2254,6 +2254,21 @@ fn write_filter(
                 matches!(filter.op, Op::NotRegex | Op::NotIRegex),
             );
         }
+        Op::TrigramSimilar | Op::TrigramWordSimilar => {
+            // pg_trgm operators — Postgres-only by language semantic.
+            // The dialect's `write_trigram_similar` default returns
+            // `OpNotSupportedInDialect` for MySQL/SQLite; Postgres
+            // emits `<col> % <p>` or `<col> %> <p>`.
+            require_op(b.d, filter.op)?;
+            b.params.push(filter.value.clone());
+            let p = b.d.placeholder(b.params.len());
+            b.d.write_trigram_similar(
+                &mut b.sql,
+                &qualified_col,
+                &p,
+                matches!(filter.op, Op::TrigramWordSimilar),
+            )?;
+        }
         Op::In | Op::NotIn => {
             let SqlValue::List(elements) = &filter.value else {
                 return Err(SqlError::InRequiresList);
@@ -2432,6 +2447,8 @@ fn op_label(op: Op) -> &'static str {
         Op::JsonHasAllKeys => "?& (json)",
         Op::Regex => "~ (regex)",
         Op::NotRegex => "!~ (regex)",
+        Op::TrigramSimilar => "% (trigram_similar)",
+        Op::TrigramWordSimilar => "%> (trigram_word_similar)",
         Op::IRegex => "~* (iregex)",
         Op::NotIRegex => "!~* (iregex)",
     }

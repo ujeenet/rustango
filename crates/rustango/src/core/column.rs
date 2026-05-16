@@ -111,6 +111,32 @@ pub trait Column: Copy + 'static {
         )
     }
 
+    /// `column % pattern` — pg_trgm trigram similarity. Django's
+    /// `__trigram_similar` (issue #29). Whole-string similarity at
+    /// the default `pg_trgm.similarity_threshold` (0.3 unless
+    /// overridden). **PG-only** — MySQL / SQLite reject at compile
+    /// time. Requires `CREATE EXTENSION pg_trgm` on the database.
+    fn trigram_similar(self, pattern: impl Into<String>) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(
+            Self::COLUMN,
+            Op::TrigramSimilar,
+            SqlValue::String(pattern.into()),
+        )
+    }
+
+    /// `column %> pattern` — pg_trgm word-similarity. Django's
+    /// `__trigram_word_similar` (issue #29). Matches when **any
+    /// word** in `column` is trigram-similar to the pattern.
+    /// **PG-only**, same `pg_trgm` extension requirement as
+    /// [`Column::trigram_similar`].
+    fn trigram_word_similar(self, pattern: impl Into<String>) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(
+            Self::COLUMN,
+            Op::TrigramWordSimilar,
+            SqlValue::String(pattern.into()),
+        )
+    }
+
     /// `column IS NULL`.
     fn is_null(self) -> TypedFilter<Self::Model> {
         TypedFilter::scalar(Self::COLUMN, Op::IsNull, SqlValue::Bool(true))

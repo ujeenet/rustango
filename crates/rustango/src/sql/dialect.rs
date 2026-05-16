@@ -328,6 +328,36 @@ pub trait Dialect {
         sql.push_str(placeholder);
     }
 
+    /// `pg_trgm` trigram similarity match — Django's
+    /// `__trigram_similar` / `__trigram_word_similar`. Issue #29.
+    ///
+    /// Default emits the Postgres shape:
+    /// - `word=false`: `<col> % <p>` (whole-string similarity)
+    /// - `word=true`:  `<col> %> <p>` (any word similar)
+    ///
+    /// Requires `CREATE EXTENSION pg_trgm` on the database.
+    ///
+    /// **MySQL and SQLite have no equivalent** — they override to
+    /// return [`SqlError::OpNotSupportedInDialect`] so the typo of
+    /// using a trigram lookup against the wrong backend surfaces
+    /// cleanly at compile time rather than as a driver syntax error.
+    ///
+    /// # Errors
+    /// `OpNotSupportedInDialect` when the dialect doesn't support
+    /// trigram operators.
+    fn write_trigram_similar(
+        &self,
+        sql: &mut String,
+        qualified_col: &str,
+        placeholder: &str,
+        word: bool,
+    ) -> Result<(), super::SqlError> {
+        sql.push_str(qualified_col);
+        sql.push_str(if word { " %> " } else { " % " });
+        sql.push_str(placeholder);
+        Ok(())
+    }
+
     /// Null-safe equality. Postgres: `<col> IS [NOT] DISTINCT FROM <p>`.
     /// `distinct = true` means "not equal under null-safe semantics".
     fn write_null_safe_eq(

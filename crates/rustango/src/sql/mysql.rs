@@ -255,6 +255,27 @@ impl Dialect for MySql {
         }
     }
 
+    /// `pg_trgm` trigram operators are Postgres-only. MySQL has no
+    /// equivalent (text similarity via `FULLTEXT` is a different
+    /// shape). Reject at compile time so the user retargets the
+    /// query rather than discovering the gap at run time. Issue #29.
+    fn write_trigram_similar(
+        &self,
+        _sql: &mut String,
+        _qualified_col: &str,
+        _placeholder: &str,
+        word: bool,
+    ) -> Result<(), super::SqlError> {
+        Err(super::SqlError::OpNotSupportedInDialect {
+            op: if word {
+                "trigram_word_similar (%>) — pg_trgm is Postgres-only"
+            } else {
+                "trigram_similar (%) — pg_trgm is Postgres-only"
+            },
+            dialect: "mysql",
+        })
+    }
+
     fn write_null_safe_eq(
         &self,
         sql: &mut String,

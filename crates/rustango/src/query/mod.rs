@@ -1256,6 +1256,22 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<(String, Op, SqlValue), Qu
             };
             Ok((field, op, value))
         }
+        "trigram_similar" | "trigram_word_similar" => {
+            if !matches!(value, SqlValue::String(_)) {
+                return Err(QueryError::InvalidLookupValue {
+                    field,
+                    suffix: suffix.to_owned(),
+                    expected: "SqlValue::String(<trigram pattern>)",
+                    actual: sql_value_shape_name(&value),
+                });
+            }
+            let op = if suffix == "trigram_similar" {
+                Op::TrigramSimilar
+            } else {
+                Op::TrigramWordSimilar
+            };
+            Ok((field, op, value))
+        }
         unknown => Err(QueryError::UnknownLookup {
             field,
             suffix: unknown.to_owned(),
