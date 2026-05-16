@@ -538,6 +538,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     name: fa.index_name.or(Some(auto_name)),
                     columns: vec![col_name],
                     unique: fa.index_unique,
+                    method: fa.index_method,
                 });
             }
         }
@@ -1342,11 +1343,24 @@ fn model_impl_tokens(
         let name = idx.name.as_deref().unwrap_or("unnamed_index");
         let cols: Vec<&str> = idx.columns.iter().map(String::as_str).collect();
         let unique = idx.unique;
+        // Map the parsed method string onto the IndexMethod enum
+        // variant — kept at the codegen layer so the IR doesn't
+        // carry the string form.
+        let method_variant = match idx.method.as_str() {
+            "gin" => quote!(::rustango::core::IndexMethod::Gin),
+            "gist" => quote!(::rustango::core::IndexMethod::Gist),
+            "brin" => quote!(::rustango::core::IndexMethod::Brin),
+            "spgist" => quote!(::rustango::core::IndexMethod::SpGist),
+            "hash" => quote!(::rustango::core::IndexMethod::Hash),
+            "bloom" => quote!(::rustango::core::IndexMethod::Bloom),
+            _ => quote!(::rustango::core::IndexMethod::BTree),
+        };
         quote! {
             ::rustango::core::IndexSchema {
                 name: #name,
                 columns: &[ #(#cols),* ],
                 unique: #unique,
+                method: #method_variant,
             }
         }
     });
@@ -3733,6 +3747,12 @@ struct IndexAttr {
     columns: Vec<String>,
     /// `true` for `CREATE UNIQUE INDEX`.
     unique: bool,
+    /// Access method token (`"btree"`, `"gin"`, `"gist"`, `"brin"`,
+    /// `"spgist"`, `"hash"`, `"bloom"`). Issue #34. Defaults to
+    /// `"btree"` when the attribute is absent — the DDL writer omits
+    /// the `USING` clause and the backend uses its own default
+    /// (btree on every supported dialect).
+    method: String,
 }
 
 /// Parsed form of one `#[rustango(check(name = "…", expr = "…"))]` declaration.
@@ -3984,7 +4004,12 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 // (col1, col2)`, where <name> defaults to
                 // `<table>_<col1>_<col2>_uq` when not supplied.
                 let (columns, name) = parse_together_attr(&meta, "unique_together")?;
-                out.indexes.push(IndexAttr { name, columns, unique: true });
+                out.indexes.push(IndexAttr {
+                    name,
+                    columns,
+                    unique: true,
+                    method: "btree".to_owned(),
+                });
                 return Ok(());
             }
             if meta.path.is_ident("index_together") {
@@ -3994,7 +4019,12 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 //   #[rustango(index_together = "created_at, status")]
                 //   #[rustango(index_together(columns = "created_at, status", name = "x"))]
                 let (columns, name) = parse_together_attr(&meta, "index_together")?;
-                out.indexes.push(IndexAttr { name, columns, unique: false });
+                out.indexes.push(IndexAttr {
+                    name,
+                    columns,
+                    unique: false,
+                    method: "btree".to_owned(),
+                });
                 return Ok(());
             }
             if meta.path.is_ident("index") {
@@ -4007,7 +4037,12 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 // emits a non-unique composite index.
                 let cols_lit: LitStr = meta.value()?.parse()?;
                 let columns = split_field_list(&cols_lit.value());
-                out.indexes.push(IndexAttr { name: None, columns, unique: false });
+                out.indexes.push(IndexAttr {
+                    name: None,
+                    columns,
+                    unique: false,
+                    method: "btree".to_owned(),
+                });
                 return Ok(());
             }
             if meta.path.is_ident("check") {
@@ -4344,6 +4379,9 @@ struct FieldAttrs {
     index: bool,
     index_unique: bool,
     index_name: Option<String>,
+    /// Index access method (`"btree"` / `"gin"` / …). Defaults to
+    /// `"btree"`. Issue #34.
+    index_method: String,
     /// `#[rustango(generated_as = "EXPR")]` — emit `GENERATED ALWAYS
     /// AS (EXPR) STORED` in the column DDL. Read-only from app code:
     /// the macro skips this column from every INSERT and UPDATE
@@ -4371,6 +4409,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         index: false,
         index_unique: false,
         index_name: None,
+        index_method: "btree".to_owned(),
         generated_as: None,
     };
     for attr in &field.attrs {
@@ -4462,7 +4501,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
             }
             if meta.path.is_ident("index") {
                 out.index = true;
-                // Optional sub-attrs: #[rustango(index(unique, name = "…"))]
+                // Optional sub-attrs: #[rustango(index(unique, name = "…", method = "gin"))]
                 if meta.input.peek(syn::token::Paren) {
                     meta.parse_nested_meta(|inner| {
                         if inner.path.is_ident("unique") {
@@ -4474,8 +4513,24 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                             out.index_name = Some(s.value());
                             return Ok(());
                         }
-                        Err(inner
-                            .error("unknown index sub-attribute (supported: `unique`, `name`)"))
+                        if inner.path.is_ident("method") {
+                            let s: LitStr = inner.value()?.parse()?;
+                            let v = s.value();
+                            match v.as_str() {
+                                "btree" | "gin" | "gist" | "brin" | "spgist" | "hash" | "bloom" => {
+                                    out.index_method = v;
+                                }
+                                other => {
+                                    return Err(inner.error(format!(
+                                        "unknown index method `{other}` (supported: btree, gin, gist, brin, spgist, hash, bloom)",
+                                    )));
+                                }
+                            }
+                            return Ok(());
+                        }
+                        Err(inner.error(
+                            "unknown index sub-attribute (supported: `unique`, `name`, `method`)",
+                        ))
                     })?;
                 }
                 return Ok(());

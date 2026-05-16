@@ -44,6 +44,18 @@ pub struct IndexSnapshot {
     pub table: String,
     pub columns: Vec<String>,
     pub unique: bool,
+    /// Access method as a lowercase token (`btree` / `gin` / `gist` /
+    /// `brin` / `spgist` / `hash` / `bloom`). Defaults to `"btree"`
+    /// when missing or unknown — keeps pre-#34 snapshots forward-
+    /// compatible (older files have no `method` key; deserialize
+    /// fills it with the default + the migration runner emits
+    /// regular btree).
+    #[serde(default = "default_index_method")]
+    pub method: String,
+}
+
+fn default_index_method() -> String {
+    "btree".to_owned()
 }
 
 /// Snapshot of one many-to-many junction table.
@@ -449,6 +461,7 @@ fn collect_indexes<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<In
                     table: schema.table.to_owned(),
                     columns: idx.columns.iter().map(|&c| c.to_owned()).collect(),
                     unique: idx.unique,
+                    method: idx.method.as_str().to_owned(),
                 });
             }
         }

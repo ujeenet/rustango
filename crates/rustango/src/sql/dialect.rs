@@ -162,6 +162,24 @@ pub trait Dialect {
         true
     }
 
+    /// Render the `USING <method>` clause appended after the table
+    /// name in `CREATE INDEX … ON tbl <USING …> (cols)`. Returns
+    /// an empty string for the default `btree` method (the standard
+    /// "no clause" shape) and for dialects that lack `USING`
+    /// support entirely (SQLite). The dialect implementation is
+    /// responsible for sanitizing the method token — unsupported
+    /// methods on a backend should degrade to `""` so the index
+    /// still gets created as btree. Issue #34.
+    fn index_method_clause(&self, method: &str) -> String {
+        // PG default: emit `USING <method>` for any non-default
+        // method. The dialect-specific overrides further restrict
+        // (e.g. SQLite always empty, MySQL only btree/hash).
+        match method {
+            "" | "btree" => String::new(),
+            other => format!(" USING {other}"),
+        }
+    }
+
     /// Render the "insert-or-skip" tail clause appended to `INSERT INTO
     /// … VALUES (…)` so the caller's row inserts cleanly on first run
     /// and is silently skipped on re-run.
