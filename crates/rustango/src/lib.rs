@@ -842,6 +842,12 @@ pub mod messages;
 /// `?next=` round-trip helpers. Issue #11.
 pub mod auth_decorators;
 
+/// Pluggable `AUTHENTICATION_BACKENDS` chain — register an ordered
+/// list of [`auth_backends::AuthBackend`] impls; the chain returns
+/// the first non-`None` result. Ships `RemoteUserBackend` for SSO
+/// proxy deployments. Issue #54 (partial).
+pub mod auth_backends;
+
 /// Django-shape test assertion helpers — `assert_contains` /
 /// `assert_redirects` / `assert_status` / `assert_messages` on axum
 /// Response objects. Issue #40.
