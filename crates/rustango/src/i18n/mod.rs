@@ -40,6 +40,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::RwLock;
 
+pub mod tera_tags;
+
 // ------------------------------------------------------------------ Locale
 
 /// A locale identifier (e.g. `"en"`, `"en-US"`, `"fr"`).
