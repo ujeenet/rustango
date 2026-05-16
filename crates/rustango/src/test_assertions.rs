@@ -26,12 +26,18 @@
 //! failures with descriptive messages. They don't return `Result` so
 //! tests stay readable (no `?` clutter for assertions).
 //!
-//! ## Implemented (this slice)
+//! ## Implemented
 //!
 //! - [`assert_status`] — exact-status match against a u16.
 //! - [`assert_contains`] — response body contains a UTF-8 substring.
 //! - [`assert_not_contains`] — body does NOT contain a substring.
+//! - [`assert_contains_count`] — body contains fragment N times
+//!   (Django's `assertContains(..., count=N)`).
 //! - [`assert_redirects`] — 3xx status + `Location` header equality.
+//! - [`assert_header`] — exact header value match.
+//! - [`assert_content_type`] — sugar for `assert_header("content-type", ...)`.
+//! - [`assert_json_eq`] — body parses as JSON and equals expected
+//!   (Django's `assertJSONEqual`).
 //! - [`assert_messages`] — read + assert on the flash-messages cookie
 //!   from [`crate::messages`]. Gated on `template_views` so consumers
 //!   that use messages get the helper for free.
@@ -238,6 +244,97 @@ pub fn assert_messages(res: &Response, secret: &[u8], expected: &[(&str, &str)])
     }
 }
 
+/// Assert that response header `name` equals `value` exactly.
+/// Matches the header name case-insensitively (per RFC 7230), and
+/// the value byte-for-byte after UTF-8 decode.
+///
+/// ```ignore
+/// assert_header(&res, "content-type", "application/json");
+/// assert_header(&res, "x-request-id", "abc-123");
+/// ```
+///
+/// Panics if the header is missing or carries a different value.
+/// Multiple headers with the same name match the FIRST occurrence
+/// (axum's default header API surfaces them in order).
+pub fn assert_header(res: &Response, name: &str, value: &str) {
+    let actual = res
+        .headers()
+        .get(name)
+        .map(|v| v.to_str().unwrap_or("<non-utf8>").to_owned());
+    match actual {
+        None => panic!("expected header `{name}: {value}`, but header was missing"),
+        Some(actual) if actual == value => {}
+        Some(actual) => panic!("expected header `{name}: {value}`, got `{name}: {actual}`",),
+    }
+}
+
+/// Assert the response `Content-Type` header equals `expected`.
+/// Sugar for [`assert_header`] with `name = "content-type"`.
+///
+/// ```ignore
+/// assert_content_type(&res, "application/json");
+/// assert_content_type(&res, "text/html; charset=utf-8");
+/// ```
+pub fn assert_content_type(res: &Response, expected: &str) {
+    assert_header(res, "content-type", expected);
+}
+
+/// Assert the response body, parsed as JSON, equals `expected`.
+/// Django's `assertJSONEqual`. Order-insensitive for object keys
+/// (JSON Value equality is structural).
+///
+/// ```ignore
+/// use serde_json::json;
+/// assert_json_eq(res, &json!({"id": 1, "name": "Alice"})).await;
+/// ```
+///
+/// Panics with both bodies in the message when:
+/// - the response body isn't valid JSON;
+/// - the parsed body doesn't structurally equal `expected`.
+pub async fn assert_json_eq(res: Response, expected: &serde_json::Value) {
+    let bytes = to_bytes(res.into_body(), MAX_BODY_BYTES)
+        .await
+        .expect("read response body");
+    let actual: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => panic!(
+            "assert_json_eq: body is not valid JSON ({e}). Raw body:\n{}",
+            truncate(&String::from_utf8_lossy(&bytes), 500),
+        ),
+    };
+    if &actual != expected {
+        // Pretty-print both sides so the diff is readable in the
+        // panic message — JSON ordering noise dominates otherwise.
+        let actual_pp = serde_json::to_string_pretty(&actual).unwrap_or_default();
+        let expected_pp = serde_json::to_string_pretty(expected).unwrap_or_default();
+        panic!("assert_json_eq mismatch.\nexpected:\n{expected_pp}\nactual:\n{actual_pp}");
+    }
+}
+
+/// Assert the response body contains `fragment` exactly `count`
+/// times. Django's `assertContains(..., count=N)`. `count = 0`
+/// asserts absence — same as [`assert_not_contains`].
+///
+/// ```ignore
+/// // Three article cards on the index.
+/// assert_contains_count(res, "<article class=\"card\">", 3).await;
+/// ```
+///
+/// Panics with the actual count and a 500-char body snippet when
+/// the counts don't match.
+pub async fn assert_contains_count(res: Response, fragment: &str, count: usize) {
+    let bytes = to_bytes(res.into_body(), MAX_BODY_BYTES)
+        .await
+        .expect("read response body");
+    let body = String::from_utf8_lossy(&bytes);
+    let actual = body.matches(fragment).count();
+    assert_eq!(
+        actual, count,
+        "expected `{fragment}` to appear {count} times, found {actual}.\nBody (first 500 chars):\n{}",
+        truncate(&body, 500),
+    );
+}
+
 /// Truncate a string at a UTF-8 char boundary at or before `max`,
 /// appending a `...(N more chars)` indicator so the panic message
 /// doesn't confuse a clipped 1000-char body for a 500-char one.
@@ -419,5 +516,105 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_messages(&res, SECRET, &[("error", "Something broke.")]);
+    }
+
+    // -------- assert_header --------
+
+    fn header_response(name: &'static str, value: &'static str) -> Response {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(name, value)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[test]
+    fn assert_header_passes_on_exact_match() {
+        let res = header_response("X-Request-Id", "abc-123");
+        assert_header(&res, "x-request-id", "abc-123");
+        // Header name is case-insensitive.
+        assert_header(&res, "X-REQUEST-ID", "abc-123");
+    }
+
+    #[test]
+    #[should_panic(expected = "header was missing")]
+    fn assert_header_panics_when_missing() {
+        let res = html_response(StatusCode::OK, "");
+        assert_header(&res, "x-not-set", "anything");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected header")]
+    fn assert_header_panics_on_value_mismatch() {
+        let res = header_response("x-tag", "actual");
+        assert_header(&res, "x-tag", "expected");
+    }
+
+    // -------- assert_content_type --------
+
+    #[test]
+    fn assert_content_type_passes() {
+        let res = header_response("content-type", "application/json");
+        assert_content_type(&res, "application/json");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected header `content-type:")]
+    fn assert_content_type_panics_on_mismatch() {
+        let res = header_response("content-type", "text/html; charset=utf-8");
+        assert_content_type(&res, "application/json");
+    }
+
+    // -------- assert_json_eq --------
+
+    #[tokio::test]
+    async fn assert_json_eq_passes_on_structural_match() {
+        let res = Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"id": 1, "name": "Alice"}"#))
+            .unwrap();
+        // Key order doesn't matter — serde_json::Value equality
+        // is structural.
+        assert_json_eq(res, &serde_json::json!({"name": "Alice", "id": 1})).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "assert_json_eq mismatch")]
+    async fn assert_json_eq_panics_on_value_mismatch() {
+        let res = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(r#"{"id": 1}"#))
+            .unwrap();
+        assert_json_eq(res, &serde_json::json!({"id": 2})).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "body is not valid JSON")]
+    async fn assert_json_eq_panics_on_malformed_body() {
+        let res = html_response(StatusCode::OK, "<html>not json</html>");
+        assert_json_eq(res, &serde_json::json!({})).await;
+    }
+
+    // -------- assert_contains_count --------
+
+    #[tokio::test]
+    async fn assert_contains_count_passes_on_exact_count() {
+        let body = "<li>a</li><li>b</li><li>c</li>";
+        let res = html_response(StatusCode::OK, body);
+        assert_contains_count(res, "<li>", 3).await;
+    }
+
+    #[tokio::test]
+    async fn assert_contains_count_zero_means_absent() {
+        let res = html_response(StatusCode::OK, "no nope");
+        assert_contains_count(res, "yes", 0).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "expected `<li>` to appear 5 times, found 3")]
+    async fn assert_contains_count_panics_on_wrong_count() {
+        let res = html_response(StatusCode::OK, "<li>a</li><li>b</li><li>c</li>");
+        assert_contains_count(res, "<li>", 5).await;
     }
 }
