@@ -80,7 +80,9 @@ pub enum QueryError {
          istartswith, endswith, iendswith, gt, gte, lt, lte, ne, in, \
          isnull, between, range, regex, iregex, trigram_similar, \
          trigram_word_similar, search, array_contains, \
-         array_contained_by, array_overlap"
+         array_contained_by, array_overlap, range_contains, \
+         range_contained_by, range_overlap, range_strictly_left, \
+         range_strictly_right, range_adjacent"
     )]
     UnknownLookup { field: String, suffix: String },
 

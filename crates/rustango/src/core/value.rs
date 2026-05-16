@@ -52,6 +52,24 @@ pub enum SqlValue {
     /// `Vec::<i32>::new()` — PG infers the element type from the
     /// `<col> <op>` clause. Issue #30.
     Array(Vec<SqlValue>),
+    /// PG range literal as text — bound as a `String` parameter that
+    /// Postgres implicit-casts to the column's range type when the
+    /// operator's LHS is a range column. Pairs with
+    /// [`crate::core::Op::RangeContains`] / `RangeContainedBy` /
+    /// `RangeOverlap` / `RangeStrictlyLeft` / `RangeStrictlyRight` /
+    /// `RangeAdjacent`. Issue #31.
+    ///
+    /// Example literals (one element type per column type):
+    /// - int4range / int8range: `"[1, 10)"`, `"(1, 10]"`, `"[5,)"`
+    /// - daterange: `"[2025-01-01, 2025-02-01)"`
+    /// - tstzrange: `"[2025-01-01 00:00+00, 2025-02-01 00:00+00)"`
+    /// - empty range: `"empty"`
+    /// - unbounded: `"(,)"`
+    ///
+    /// The string is bound as-is; we don't parse or validate the
+    /// shape (sticking to the same "PG handles the cast" pattern as
+    /// our other text-bound types like Json).
+    RangeLiteral(String),
 }
 
 impl SqlValue {
@@ -87,6 +105,7 @@ impl SqlValue {
                 let inner: Vec<String> = items.iter().map(Self::to_display_string).collect();
                 format!("array[{}]", inner.join(", "))
             }
+            Self::RangeLiteral(s) => format!("range{s}"),
         }
     }
 
@@ -94,7 +113,7 @@ impl SqlValue {
     #[must_use]
     pub fn field_type(&self) -> Option<FieldType> {
         Some(match self {
-            Self::Null | Self::List(_) | Self::Array(_) => return None,
+            Self::Null | Self::List(_) | Self::Array(_) | Self::RangeLiteral(_) => return None,
             Self::I16(_) => FieldType::I16,
             Self::I32(_) => FieldType::I32,
             Self::I64(_) => FieldType::I64,

@@ -1291,6 +1291,41 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<(String, Op, SqlValue), Qu
         // `__array_*` suffixes to keep them disjoint from text
         // `__contains`; the typed-IR `Column::array_*` methods are
         // the preferred call site.
+        "range_contains"
+        | "range_contained_by"
+        | "range_overlap"
+        | "range_strictly_left"
+        | "range_strictly_right"
+        | "range_adjacent" => {
+            // PG range operators. The bound value is a range literal
+            // string (e.g. `"[1, 10)"`); PG implicit-casts to the
+            // column's range type. Accept either a plain
+            // `SqlValue::String` (auto-wrapped into `RangeLiteral`)
+            // or a `SqlValue::RangeLiteral` from the typed-IR Column
+            // helpers — both produce the same emit shape.
+            let literal = match value {
+                SqlValue::String(s) => s,
+                SqlValue::RangeLiteral(s) => s,
+                other => {
+                    return Err(QueryError::InvalidLookupValue {
+                        field,
+                        suffix: suffix.to_owned(),
+                        expected: "SqlValue::String(<PG range literal>) — e.g. \"[1, 10)\"",
+                        actual: sql_value_shape_name(&other),
+                    });
+                }
+            };
+            let op = match suffix {
+                "range_contains" => Op::RangeContains,
+                "range_contained_by" => Op::RangeContainedBy,
+                "range_overlap" => Op::RangeOverlap,
+                "range_strictly_left" => Op::RangeStrictlyLeft,
+                "range_strictly_right" => Op::RangeStrictlyRight,
+                "range_adjacent" => Op::RangeAdjacent,
+                _ => unreachable!(),
+            };
+            Ok((field, op, SqlValue::RangeLiteral(literal)))
+        }
         "array_contains" | "array_contained_by" | "array_overlap" => {
             // The bound value must be a list-of-elements; we
             // promote `SqlValue::List` to `SqlValue::Array` so the

@@ -335,6 +335,22 @@ impl Dialect for MySql {
         })
     }
 
+    /// MySQL has no native range type. Reject every PG range op at
+    /// compile time. Issue #31.
+    fn write_range_op(
+        &self,
+        _sql: &mut String,
+        _qualified_col: &str,
+        _placeholder: &str,
+        _op: &'static str,
+    ) -> Result<(), super::SqlError> {
+        Err(super::SqlError::OpNotSupportedInDialect {
+            op: "range operators (@>, <@, &&, <<, >>, -|-) — PG RangeField is Postgres-only; \
+                 store lo/hi as separate columns on MySQL",
+            dialect: "mysql",
+        })
+    }
+
     fn write_null_safe_eq(
         &self,
         sql: &mut String,

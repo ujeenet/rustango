@@ -1640,6 +1640,9 @@ macro_rules! bind_match {
             SqlValue::List(_) => {
                 unreachable!("`SqlValue::List` is expanded to scalars by the SQL writer")
             }
+            // PG range literal — text-bound, implicit-cast by PG to
+            // the column's range type. Issue #31.
+            SqlValue::RangeLiteral(s) => $q.bind(s),
             // PG single-parameter array (issue #30). v1 supports
             // I32/I64/String/Bool elements; other element kinds
             // panic at bind time. Homogeneous-element arrays are
@@ -1718,6 +1721,9 @@ macro_rules! bind_match_mysql {
             SqlValue::Array(_) => unreachable!(
                 "MySQL has no array type; `write_array_op` rejects before bind. Issue #30."
             ),
+            SqlValue::RangeLiteral(_) => unreachable!(
+                "MySQL has no range type; `write_range_op` rejects before bind. Issue #31."
+            ),
         }
     };
 }
@@ -1755,6 +1761,9 @@ macro_rules! bind_match_sqlite {
             // ops via `write_array_op` long before bind is reached.
             SqlValue::Array(_) => unreachable!(
                 "SQLite has no array type; `write_array_op` rejects before bind. Issue #30."
+            ),
+            SqlValue::RangeLiteral(_) => unreachable!(
+                "SQLite has no range type; `write_range_op` rejects before bind. Issue #31."
             ),
         }
     };

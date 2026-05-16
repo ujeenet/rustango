@@ -2471,6 +2471,34 @@ fn write_filter(
             };
             b.d.write_array_op(&mut b.sql, &qualified_col, &p, op_str)?;
         }
+        Op::RangeContains
+        | Op::RangeContainedBy
+        | Op::RangeOverlap
+        | Op::RangeStrictlyLeft
+        | Op::RangeStrictlyRight
+        | Op::RangeAdjacent => {
+            // Postgres range operators. The bound value is either:
+            // - `SqlValue::RangeLiteral(s)` — typical "range vs range"
+            //   shape (e.g. `<col> && '[5,10)'::int4range`). PG
+            //   implicit-casts the text to the column's range type.
+            // - A scalar (`I32`/`I64`/`Date`/`DateTime`) — for the
+            //   element-containment case `<col> @> <element>`.
+            // Both shapes route through the same writer because the
+            // SQL emission is identical (`<col> <op> <placeholder>`).
+            require_op(b.d, filter.op)?;
+            b.params.push(filter.value.clone());
+            let p = b.d.placeholder(b.params.len());
+            let op_str: &'static str = match filter.op {
+                Op::RangeContains => "@>",
+                Op::RangeContainedBy => "<@",
+                Op::RangeOverlap => "&&",
+                Op::RangeStrictlyLeft => "<<",
+                Op::RangeStrictlyRight => ">>",
+                Op::RangeAdjacent => "-|-",
+                _ => unreachable!(),
+            };
+            b.d.write_range_op(&mut b.sql, &qualified_col, &p, op_str)?;
+        }
         Op::In | Op::NotIn => {
             let SqlValue::List(elements) = &filter.value else {
                 return Err(SqlError::InRequiresList);
@@ -2655,6 +2683,12 @@ fn op_label(op: Op) -> &'static str {
         Op::ArrayContains => "@> (array_contains)",
         Op::ArrayContainedBy => "<@ (array_contained_by)",
         Op::ArrayOverlap => "&& (array_overlap)",
+        Op::RangeContains => "@> (range_contains)",
+        Op::RangeContainedBy => "<@ (range_contained_by)",
+        Op::RangeOverlap => "&& (range_overlap)",
+        Op::RangeStrictlyLeft => "<< (range_strictly_left)",
+        Op::RangeStrictlyRight => ">> (range_strictly_right)",
+        Op::RangeAdjacent => "-|- (range_adjacent)",
         Op::IRegex => "~* (iregex)",
         Op::NotIRegex => "!~* (iregex)",
     }
