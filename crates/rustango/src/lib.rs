@@ -834,6 +834,10 @@ pub mod humanize;
 /// `get_absolute_url()`. Pair with [`register_url!`]. Issue #8.
 pub mod urls;
 
+/// Django messages framework — `messages.success/info/warning/error/debug`
+/// flash storage backed by a signed cookie. Issue #9.
+pub mod messages;
+
 /// Django-style runserver — [`server::Builder`] owns every line of
 /// boilerplate every tenancy app would otherwise rewrite (DB pool,
 /// resolver chain, host dispatch, operator console, bind + serve).
