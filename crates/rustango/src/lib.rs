@@ -885,6 +885,13 @@ pub mod syndication;
 /// canonical URL in `Location`, query strings preserved. Issue #57.
 pub mod redirects;
 
+/// Static "flat pages" — `django.contrib.flatpages`. Build a
+/// [`flatpages::FlatPageMap`] (path → [`flatpages::FlatPage`]) and
+/// mount [`flatpages::flatpages_middleware`] on your axum router;
+/// matching requests serve the page body with `text/html` (or a
+/// custom content-type). Bring your own Tera wrapping. Issue #57.
+pub mod flatpages;
+
 /// Django-shape test assertion helpers — `assert_contains` /
 /// `assert_redirects` / `assert_status` / `assert_messages` on axum
 /// Response objects. Issue #40.
