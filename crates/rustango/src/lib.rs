@@ -504,6 +504,14 @@ pub mod storage;
 #[cfg(feature = "admin")]
 pub mod test_client;
 
+/// Live HTTP server for tests — Django's `LiveServerTestCase`. Binds
+/// `axum::Router` to a random localhost TCP port and runs it on a
+/// background task. Use when in-process [`test_client::TestClient`]
+/// routing isn't enough (Selenium, websockets, code reading
+/// scheme/host headers). Issue #39 partial.
+#[cfg(feature = "admin")]
+pub mod test_server;
+
 /// Typed environment variable readers — `required` / `with_default` /
 /// `optional` / `list` / `duration_secs` / `duration_millis`.
 pub mod env;
