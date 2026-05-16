@@ -2245,14 +2245,20 @@ fn escape_like_pattern(input: &str) -> String {
 fn stamp_csrf(_headers: &axum::http::HeaderMap, ctx: &mut Context) -> Option<String> {
     #[cfg(feature = "csrf")]
     {
-        let (token, set_cookie) =
-            crate::forms::csrf::ensure_token(_headers, crate::forms::csrf::CSRF_COOKIE);
-        ctx.insert("csrf_token", &token);
-        set_cookie
+        // Delegate to the public helper so the CBV-side context shape
+        // matches what hand-rolled handlers get from
+        // `forms::csrf::stamp_into_context` (issue #15). Stamps both
+        // `csrf_token` (raw) and `csrf_input` (HTML).
+        crate::forms::csrf::stamp_into_context(_headers, ctx)
     }
     #[cfg(not(feature = "csrf"))]
     {
+        // CSRF feature off — render with empty token so templates that
+        // reference `{{ csrf_token }}` don't error. Validation isn't
+        // enforced in this configuration; the empty hidden input is
+        // harmless.
         ctx.insert("csrf_token", "");
+        ctx.insert("csrf_input", "");
         None
     }
 }
