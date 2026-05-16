@@ -910,6 +910,15 @@ pub mod test_filter;
 /// fixtures lazily init once per test-binary process. Issue #42.
 pub mod test_data;
 
+/// Test-only Settings overlay — Django's `@override_settings` /
+/// `with self.settings(...)`. Wraps a `tokio::task_local!`
+/// [`config::Settings`] overlay so test code can install per-task
+/// configuration without touching process-global state.
+/// [`test_settings::current`] reads through the overlay → fallback
+/// chain. Issue #43.
+#[cfg(feature = "config")]
+pub mod test_settings;
+
 /// `manage dbshell` — spawn `psql` / `mysql` / `sqlite3` for the
 /// current `DATABASE_URL`. Issue #56 (partial).
 pub mod dbshell;
