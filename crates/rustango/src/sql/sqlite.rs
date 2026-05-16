@@ -245,6 +245,27 @@ impl Dialect for Sqlite {
         }
     }
 
+    /// `pg_trgm` trigram operators are Postgres-only. SQLite has no
+    /// equivalent. Reject at compile time so the user retargets the
+    /// query rather than seeing a driver-level syntax error at run
+    /// time. Issue #29.
+    fn write_trigram_similar(
+        &self,
+        _sql: &mut String,
+        _qualified_col: &str,
+        _placeholder: &str,
+        word: bool,
+    ) -> Result<(), super::SqlError> {
+        Err(super::SqlError::OpNotSupportedInDialect {
+            op: if word {
+                "trigram_word_similar (%>) — pg_trgm is Postgres-only"
+            } else {
+                "trigram_similar (%) — pg_trgm is Postgres-only"
+            },
+            dialect: "sqlite",
+        })
+    }
+
     /// SQLite's `IS` / `IS NOT` are null-safe equality / inequality
     /// (both `NULL IS NULL` and `1 IS 1` evaluate to true). Same
     /// semantics as Postgres' `IS [NOT] DISTINCT FROM` — we just
