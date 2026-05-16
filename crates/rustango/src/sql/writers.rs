@@ -1535,6 +1535,43 @@ fn write_function(
             Ok(())
         }
         F::TruncYear | F::TruncMonth | F::TruncDay => write_trunc(b, kind, args),
+
+        // -------- pg_trgm: PG-only, arity 2 --------
+        F::TrigramSimilarity | F::TrigramWordSimilarity => {
+            let fname = if matches!(kind, F::TrigramWordSimilarity) {
+                "WORD_SIMILARITY"
+            } else {
+                "SIMILARITY"
+            };
+            if args.len() != 2 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: if matches!(kind, F::TrigramWordSimilarity) {
+                        "WORD_SIMILARITY"
+                    } else {
+                        "SIMILARITY"
+                    },
+                    expected: "2",
+                    got: args.len(),
+                });
+            }
+            if b.d.name() != "postgres" {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: if matches!(kind, F::TrigramWordSimilarity) {
+                        "WORD_SIMILARITY (pg_trgm) is Postgres-only"
+                    } else {
+                        "SIMILARITY (pg_trgm) is Postgres-only"
+                    },
+                    dialect: b.d.name(),
+                });
+            }
+            b.sql.push_str(fname);
+            b.sql.push('(');
+            write_expr(b, &args[0], None)?;
+            b.sql.push_str(", ");
+            write_expr(b, &args[1], None)?;
+            b.sql.push(')');
+            Ok(())
+        }
     }
 }
 

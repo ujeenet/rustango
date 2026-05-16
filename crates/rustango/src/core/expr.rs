@@ -314,6 +314,20 @@ pub enum ScalarFn {
     /// Truncate timestamp to the start of the day. PG: `DATE_TRUNC('day', x)`
     /// (returns timestamp). MySQL / SQLite: `DATE(x)` / `date(x)` (date).
     TruncDay,
+
+    // --- pg_trgm (issue #29 follow-up) ---
+    /// `SIMILARITY(a, b)` — pg_trgm whole-string trigram similarity,
+    /// returns a `real` in `[0, 1]`. Useful as an annotation +
+    /// ORDER BY for ranked fuzzy search. Requires `CREATE EXTENSION
+    /// pg_trgm`. **PG-only** — MySQL / SQLite emit
+    /// `OpNotSupportedInDialect`. Pairs with `Op::TrigramSimilar`
+    /// (the WHERE-clause `%` operator) shipped earlier in the same
+    /// issue. Arity 2.
+    TrigramSimilarity,
+    /// `WORD_SIMILARITY(a, b)` — pg_trgm word-level similarity.
+    /// **PG-only**, same dialect rules as [`Self::TrigramSimilarity`].
+    /// Pairs with `Op::TrigramWordSimilar`. Arity 2.
+    TrigramWordSimilarity,
 }
 
 impl Expr {
