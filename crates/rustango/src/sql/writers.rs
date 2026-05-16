@@ -1572,6 +1572,62 @@ fn write_function(
             b.sql.push(')');
             Ok(())
         }
+
+        // -------- Postgres FTS: PG-only --------
+        F::ToTsVector | F::PlainToTsQuery => {
+            let fname = if matches!(kind, F::ToTsVector) {
+                "to_tsvector"
+            } else {
+                "plainto_tsquery"
+            };
+            if args.len() != 1 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: if matches!(kind, F::ToTsVector) {
+                        "to_tsvector"
+                    } else {
+                        "plainto_tsquery"
+                    },
+                    expected: "1",
+                    got: args.len(),
+                });
+            }
+            if b.d.name() != "postgres" {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: if matches!(kind, F::ToTsVector) {
+                        "to_tsvector (FTS) is Postgres-only"
+                    } else {
+                        "plainto_tsquery (FTS) is Postgres-only"
+                    },
+                    dialect: b.d.name(),
+                });
+            }
+            b.sql.push_str(fname);
+            b.sql.push('(');
+            write_expr(b, &args[0], None)?;
+            b.sql.push(')');
+            Ok(())
+        }
+        F::TsRank => {
+            if args.len() != 2 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "ts_rank",
+                    expected: "2",
+                    got: args.len(),
+                });
+            }
+            if b.d.name() != "postgres" {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: "ts_rank (FTS) is Postgres-only",
+                    dialect: b.d.name(),
+                });
+            }
+            b.sql.push_str("ts_rank(");
+            write_expr(b, &args[0], None)?;
+            b.sql.push_str(", ");
+            write_expr(b, &args[1], None)?;
+            b.sql.push(')');
+            Ok(())
+        }
     }
 }
 
