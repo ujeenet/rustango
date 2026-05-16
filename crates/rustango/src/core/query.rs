@@ -119,6 +119,34 @@ pub enum Op {
     /// array shares at least one element with the value array.
     /// Django's `__overlap` lookup. **PG-only**. Issue #30.
     ArrayOverlap,
+    /// Postgres range containment — `<col> @> <value>`. Django's
+    /// `__range_contains` lookup on a `RangeField`. The rhs is
+    /// either a single element (range contains scalar) or a range
+    /// literal (range contains range). Same SQL operator as
+    /// [`Self::ArrayContains`] — separate enum variant keeps the
+    /// call-site intent clear and lets the bind path stamp the
+    /// right value shape (`SqlValue::RangeLiteral` for range-vs-
+    /// range, scalar for range-vs-element). **PG-only** — MySQL
+    /// and SQLite reject at compile time. Issue #31.
+    RangeContains,
+    /// Inverse of [`Self::RangeContains`]: `<col> <@ <value>`.
+    /// Django's `__range_contained_by`. **PG-only**. Issue #31.
+    RangeContainedBy,
+    /// Range overlap — `<col> && <value>`. Rows whose range
+    /// overlaps the value range. Django's `__range_overlap`.
+    /// **PG-only**. Issue #31.
+    RangeOverlap,
+    /// Range strictly-left-of — `<col> << <value>`. Rows whose
+    /// entire range falls below the value range. **PG-only**.
+    /// Issue #31.
+    RangeStrictlyLeft,
+    /// Range strictly-right-of — `<col> >> <value>`. **PG-only**.
+    /// Issue #31.
+    RangeStrictlyRight,
+    /// Range adjacent — `<col> -|- <value>`. Rows whose range
+    /// abuts the value range (no overlap, no gap). **PG-only**.
+    /// Issue #31.
+    RangeAdjacent,
 }
 
 /// One predicate in a `WHERE` clause: `column <op> value`. Always

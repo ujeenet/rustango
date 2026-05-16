@@ -32,6 +32,7 @@ pub fn validate_value(
         SqlValue::Null
         | SqlValue::List(_)
         | SqlValue::Array(_)
+        | SqlValue::RangeLiteral(_)
         | SqlValue::F32(_)
         | SqlValue::F64(_)
         | SqlValue::Bool(_)

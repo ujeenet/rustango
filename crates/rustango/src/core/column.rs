@@ -196,6 +196,67 @@ pub trait Column: Copy + 'static {
         )
     }
 
+    /// `column @> range_literal` — PG range column contains the
+    /// given range. Django's `__range_contains` lookup with a range
+    /// rhs. `literal` is a PG range literal string (e.g. `"[1, 10)"`,
+    /// `"[2025-01-01, 2025-02-01)"`); PG implicit-casts it to the
+    /// column's range type. **PG-only**. Issue #31.
+    fn range_contains(self, literal: impl Into<String>) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(
+            Self::COLUMN,
+            Op::RangeContains,
+            SqlValue::RangeLiteral(literal.into()),
+        )
+    }
+
+    /// `column <@ range_literal` — PG range column is contained by
+    /// the given range. Django's `__range_contained_by`. **PG-only**.
+    /// Issue #31.
+    fn range_contained_by(self, literal: impl Into<String>) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(
+            Self::COLUMN,
+            Op::RangeContainedBy,
+            SqlValue::RangeLiteral(literal.into()),
+        )
+    }
+
+    /// `column && range_literal` — PG range overlap. Django's
+    /// `__range_overlap` lookup. **PG-only**. Issue #31.
+    fn range_overlap(self, literal: impl Into<String>) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(
+            Self::COLUMN,
+            Op::RangeOverlap,
+            SqlValue::RangeLiteral(literal.into()),
+        )
+    }
+
+    /// `column << range_literal` — PG strictly-left-of. Issue #31.
+    fn range_strictly_left(self, literal: impl Into<String>) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(
+            Self::COLUMN,
+            Op::RangeStrictlyLeft,
+            SqlValue::RangeLiteral(literal.into()),
+        )
+    }
+
+    /// `column >> range_literal` — PG strictly-right-of. Issue #31.
+    fn range_strictly_right(self, literal: impl Into<String>) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(
+            Self::COLUMN,
+            Op::RangeStrictlyRight,
+            SqlValue::RangeLiteral(literal.into()),
+        )
+    }
+
+    /// `column -|- range_literal` — PG range adjacency. Issue #31.
+    fn range_adjacent(self, literal: impl Into<String>) -> TypedFilter<Self::Model> {
+        TypedFilter::scalar(
+            Self::COLUMN,
+            Op::RangeAdjacent,
+            SqlValue::RangeLiteral(literal.into()),
+        )
+    }
+
     /// `column IS NULL`.
     fn is_null(self) -> TypedFilter<Self::Model> {
         TypedFilter::scalar(Self::COLUMN, Op::IsNull, SqlValue::Bool(true))
