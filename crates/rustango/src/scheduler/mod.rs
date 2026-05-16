@@ -303,7 +303,19 @@ mod tests {
         });
         let handle = s.start();
         assert_eq!(handle.running_count(), 2);
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Same poll-loop pattern as the other timing tests in this
+        // file — CI's busy runner can blow well past a fixed 50ms
+        // sleep before delivering the first tick.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if a_count.load(Ordering::SeqCst) >= 1 && b_count.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         assert!(a_count.load(Ordering::SeqCst) >= 1);
         assert!(b_count.load(Ordering::SeqCst) >= 1);
         handle.shutdown().await;
