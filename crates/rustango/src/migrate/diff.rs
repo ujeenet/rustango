@@ -33,6 +33,10 @@ fn default_index_method_diff() -> String {
     "btree".to_owned()
 }
 
+fn default_exclusion_method() -> String {
+    "gist".to_owned()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SchemaChange {
     CreateTable(String /* table name */),
@@ -129,6 +133,41 @@ pub enum SchemaChange {
     },
     /// Drop a CHECK constraint by name.
     DropCheckConstraint {
+        name: String,
+        table: String,
+    },
+    /// Add a Postgres `EXCLUDE` constraint — Django's
+    /// `ExclusionConstraint`. **PG-only** (MySQL + SQLite have no
+    /// equivalent; render emits nothing + logs a warning so the
+    /// rest of the migration still applies). Issue #32.
+    ///
+    /// Renders as `ALTER TABLE <table> ADD CONSTRAINT <name>
+    /// EXCLUDE USING <method> (<elements>) [WHERE (<where>)]`,
+    /// where each element is a `(column, operator)` pair like
+    /// `("room_id", "=")` or `("during", "&&")`. The canonical
+    /// shape for booking-conflict prevention is:
+    /// `EXCLUDE USING gist (room_id WITH =, during WITH &&)`.
+    AddExclusionConstraint {
+        name: String,
+        table: String,
+        /// Index method (`gist` / `btree_gist` / `spgist`). Defaults
+        /// to `gist` when absent — most exclusion constraints rely
+        /// on GiST's range-overlap support.
+        #[serde(default = "default_exclusion_method")]
+        using: String,
+        /// `(column, operator)` pairs in declaration order. The
+        /// operator is the PG comparison op for that column —
+        /// usually `=` for equality columns, `&&` for range
+        /// overlap, `@>` for containment.
+        elements: Vec<(String, String)>,
+        /// Optional `WHERE` predicate that narrows the constraint
+        /// to a subset of rows (e.g. only active bookings).
+        /// `None` = unconditional.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        where_clause: Option<String>,
+    },
+    /// Drop an `EXCLUDE` constraint by name. PG-only. Issue #32.
+    DropExclusionConstraint {
         name: String,
         table: String,
     },
@@ -745,6 +784,58 @@ fn render_changes_split_inner(
                 ));
             }
             SchemaChange::DropCheckConstraint { name, table } => {
+                out.immediate.push(format!(
+                    r#"ALTER TABLE "{table}" DROP CONSTRAINT IF EXISTS "{name}""#,
+                ));
+            }
+            SchemaChange::AddExclusionConstraint {
+                name,
+                table,
+                using,
+                elements,
+                where_clause,
+            } => {
+                if dialect.name() != "postgres" {
+                    // MySQL + SQLite have no EXCLUDE constraint. Emit
+                    // nothing and warn so the rest of the migration
+                    // applies cleanly; the user's app is responsible
+                    // for porting the constraint to an
+                    // application-level check (transaction-scoped
+                    // SELECT + UPDATE) on these backends. Issue #32.
+                    tracing::warn!(
+                        constraint = %name,
+                        table = %table,
+                        dialect = dialect.name(),
+                        "skipping AddExclusionConstraint — PG-only, no equivalent on this backend",
+                    );
+                    continue;
+                }
+                // PG: `ALTER TABLE "t" ADD CONSTRAINT "n" EXCLUDE
+                // USING <using> ("col1" WITH op1, "col2" WITH op2)
+                // [WHERE (<predicate>)]`.
+                let elem_sql: Vec<String> = elements
+                    .iter()
+                    .map(|(col, op)| format!(r#""{col}" WITH {op}"#))
+                    .collect();
+                let mut stmt = format!(
+                    r#"ALTER TABLE "{table}" ADD CONSTRAINT "{name}" EXCLUDE USING {using} ({})"#,
+                    elem_sql.join(", "),
+                );
+                if let Some(pred) = where_clause {
+                    stmt.push_str(&format!(" WHERE ({pred})"));
+                }
+                out.immediate.push(stmt);
+            }
+            SchemaChange::DropExclusionConstraint { name, table } => {
+                if dialect.name() != "postgres" {
+                    tracing::warn!(
+                        constraint = %name,
+                        table = %table,
+                        dialect = dialect.name(),
+                        "skipping DropExclusionConstraint — PG-only",
+                    );
+                    continue;
+                }
                 out.immediate.push(format!(
                     r#"ALTER TABLE "{table}" DROP CONSTRAINT IF EXISTS "{name}""#,
                 ));
