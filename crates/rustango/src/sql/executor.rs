@@ -1946,6 +1946,109 @@ pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'_>, ExecError> {
 }
 
 // ====================================================================
+// transaction.on_commit — after-commit hooks (issue #44)
+// ====================================================================
+
+/// Transaction wrapper that fires registered callbacks **after the
+/// commit succeeds**. Django's
+/// [`transaction.on_commit(callable)`](https://docs.djangoproject.com/en/6.0/topics/db/transactions/#performing-actions-after-commit).
+///
+/// Use for side effects that must NOT happen if the transaction
+/// rolls back: sending an email after `INSERT`, enqueueing a
+/// background job after `UPDATE`, invalidating a cache after
+/// `DELETE`. Without on_commit hooks, rolled-back inserts can leak
+/// dangling emails / jobs / cache invalidations.
+///
+/// ```ignore
+/// let mut tx = rustango::sql::on_commit_tx(&pool).await?;
+/// // … do queries via `tx.tx()` (returns `&mut PoolTx`) …
+/// tx.on_commit(|| {
+///     // Runs only if `tx.commit()` succeeds. Sync — spawn
+///     // for async work.
+///     tokio::spawn(async { send_welcome_email(user_id).await });
+/// });
+/// tx.commit().await?;          // → callback fires
+/// // -- OR --
+/// tx.rollback().await?;        // → callback DROPPED unfired
+/// ```
+///
+/// Callbacks fire in registration order. Each runs to completion
+/// before the next starts — a panicking callback aborts the chain
+/// (subsequent callbacks won't fire). If you need resilience
+/// against per-callback failures, wrap your closure in
+/// `std::panic::catch_unwind` yourself.
+pub struct OnCommitTx<'a> {
+    tx: PoolTx<'a>,
+    callbacks: Vec<Box<dyn FnOnce() + Send>>,
+}
+
+impl<'a> OnCommitTx<'a> {
+    /// Mutable access to the underlying transaction so callers can
+    /// run queries via the existing `_tx` helpers / per-backend
+    /// `sqlx::query` chain.
+    pub fn tx(&mut self) -> &mut PoolTx<'a> {
+        &mut self.tx
+    }
+
+    /// Register `f` to run after a successful `.commit()`. Order is
+    /// preserved across multiple `on_commit` calls.
+    pub fn on_commit<F>(&mut self, f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.callbacks.push(Box::new(f));
+    }
+
+    /// Commit the transaction. On success, fire every registered
+    /// callback in registration order. On failure, the callbacks
+    /// are dropped unfired.
+    ///
+    /// # Errors
+    /// `sqlx::Error` from the underlying `COMMIT`. When this returns
+    /// `Err`, no callback has run (the DB state is whatever sqlx
+    /// left after the failed commit).
+    pub async fn commit(self) -> Result<(), sqlx::Error> {
+        self.tx.commit().await?;
+        for cb in self.callbacks {
+            cb();
+        }
+        Ok(())
+    }
+
+    /// Roll back the transaction. Dropped callbacks are NEVER fired —
+    /// that's the whole point. Returns the underlying `sqlx::Error`
+    /// from the explicit `ROLLBACK` (sqlx auto-rolls-back on drop
+    /// too if you skip this call).
+    ///
+    /// # Errors
+    /// `sqlx::Error` from the underlying `ROLLBACK`.
+    pub async fn rollback(self) -> Result<(), sqlx::Error> {
+        // Callbacks dropped here without running — `Box<dyn FnOnce>`
+        // is droppable without invocation.
+        self.tx.rollback().await
+    }
+
+    /// Number of callbacks queued so far. Useful for testing.
+    #[must_use]
+    pub fn pending(&self) -> usize {
+        self.callbacks.len()
+    }
+}
+
+/// Open a transaction with after-commit hook support. Bi-dialect
+/// counterpart of [`transaction_pool`] that additionally lets callers
+/// queue side effects via [`OnCommitTx::on_commit`].
+///
+/// # Errors
+/// Driver errors from `BEGIN`.
+pub async fn on_commit_tx(pool: &Pool) -> Result<OnCommitTx<'_>, ExecError> {
+    Ok(OnCommitTx {
+        tx: transaction_pool(pool).await?,
+        callbacks: Vec::new(),
+    })
+}
+
+// ====================================================================
 // `&Pool` dispatch — bi-dialect executor surface (v0.23.0-batch5)
 // ====================================================================
 //
