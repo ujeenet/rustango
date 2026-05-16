@@ -198,8 +198,22 @@ mod tests {
             }
         });
         let handle = s.start();
-        // Wait for ~3 ticks (60ms gives us 3 fires at 20ms intervals)
-        tokio::time::sleep(Duration::from_millis(70)).await;
+        // Poll up to 2 seconds for at least 2 fires. Earlier the test
+        // used a fixed 70ms sleep, expecting 3 fires at the 20ms
+        // cadence — but CI's busy runner can deliver the first tick
+        // 50ms+ late, leaving the assertion at 1 fire and red. Polling
+        // converges as soon as the assertion holds; the upper bound
+        // is generous so we don't false-fail under heavy load.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if counter.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         let count = counter.load(Ordering::SeqCst);
         assert!(count >= 2, "expected at least 2 fires, got {count}");
         handle.shutdown().await;
