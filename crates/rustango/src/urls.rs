@@ -31,11 +31,29 @@
 //! no compile-time check today (would require either codegen or a
 //! shared sentinel; queued as a future enhancement).
 //!
+//! **Manual sync with axum routes**: `register_url!` only registers
+//! the *pattern string* with the reverse-lookup table — it does NOT
+//! mount a route on any axum `Router`. Callers must keep their
+//! axum routing in sync with their `register_url!` calls. A common
+//! shape is to put both side-by-side in `src/urls.rs`:
+//!
+//! ```ignore
+//! register_url!("post-detail", "/posts/{id}");
+//! pub fn router() -> axum::Router {
+//!     axum::Router::new().route("/posts/{id}", get(post_detail_view))
+//! }
+//! ```
+//!
+//! **Duplicate names**: two `register_url!("name", ...)` calls in the
+//! same binary collide silently — `reverse` picks the first match it
+//! finds in the inventory. Call [`duplicates`] at boot to surface any
+//! name registered more than once. Future work: a startup validator
+//! that turns this into a clean error before the server binds.
+//!
 //! Namespaced reverse (Django's `reverse("app:detail")` /
-//! `include("app.urls", namespace=...)`) is **out of scope for v1** —
-//! the same plain name appears in the global registry. Two PRs in the
-//! same binary registering `"detail"` will collide; defer namespace
-//! support until users hit it.
+//! `include("app.urls", namespace=...)`) is **out of scope for v1**.
+//! Use unique per-app name prefixes (`"posts:detail"` / `"users:detail"`)
+//! as a manual convention until namespace support lands.
 
 use std::collections::{HashMap, HashSet};
 
@@ -88,6 +106,45 @@ pub enum ReverseError {
     /// to catch typos that would otherwise silently disappear.
     #[error("URL `{name}` doesn't have a `{{{param}}}` placeholder")]
     UnexpectedParam { name: String, param: String },
+
+    /// The registered pattern is malformed — most commonly an
+    /// unclosed `{` placeholder. Programmer bug at `register_url!`
+    /// time; surfaces from `reverse` so it's at least catchable.
+    #[error("URL `{name}` has a malformed pattern: {detail}")]
+    MalformedPattern { name: String, detail: String },
+}
+
+/// Snapshot of the route registry — every entry registered via
+/// [`register_url!`] across every loaded module. Useful for boot-time
+/// diagnostics (see [`duplicates`]) or admin endpoints that surface
+/// the URL map.
+#[must_use]
+pub fn all_routes() -> Vec<&'static NamedRoute> {
+    inventory::iter::<NamedRoute>.into_iter().collect()
+}
+
+/// List every name that's been registered more than once. Empty
+/// vec on a clean registry. Call at app boot — duplicates surface
+/// as silent "first wins" otherwise.
+///
+/// ```ignore
+/// let dups = rustango::urls::duplicates();
+/// if !dups.is_empty() {
+///     panic!("duplicate URL registrations: {dups:?}");
+/// }
+/// ```
+#[must_use]
+pub fn duplicates() -> Vec<&'static str> {
+    let mut seen: std::collections::HashMap<&'static str, usize> = std::collections::HashMap::new();
+    for r in inventory::iter::<NamedRoute> {
+        *seen.entry(r.name).or_insert(0) += 1;
+    }
+    let mut out: Vec<&'static str> = seen
+        .into_iter()
+        .filter_map(|(name, count)| (count > 1).then_some(name))
+        .collect();
+    out.sort_unstable();
+    out
 }
 
 /// Resolve a registered name + parameters into a concrete URL string.
@@ -134,16 +191,16 @@ fn substitute(
     params: &HashMap<&str, String>,
 ) -> Result<String, ReverseError> {
     let mut out = String::with_capacity(pattern.len() + 16);
-    let mut used: HashSet<&str> = HashSet::new();
+    let mut used: HashSet<String> = HashSet::new();
     let mut chars = pattern.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '{' {
             out.push(c);
             continue;
         }
-        // Read until the matching '}'. Bail with a clear error if the
-        // pattern has an unclosed placeholder — that's a programmer
-        // bug, but the message is more useful than a stuck loop.
+        // Read until the matching '}'. An unclosed placeholder is a
+        // programmer bug in the registered pattern — surface it
+        // cleanly via `MalformedPattern`.
         let mut placeholder = String::new();
         let mut closed = false;
         for nc in chars.by_ref() {
@@ -154,30 +211,25 @@ fn substitute(
             placeholder.push(nc);
         }
         if !closed {
-            return Err(ReverseError::MissingParam {
+            return Err(ReverseError::MalformedPattern {
                 name: name.to_owned(),
-                param: format!("(unclosed `{{{placeholder}`)"),
+                detail: format!("unclosed placeholder starting at `{{{placeholder}`"),
             });
         }
-        // Strip axum-style type annotations like `{id:int}` — axum 0.8
-        // doesn't use them by default but Django patterns sometimes
-        // carry `<int:id>`. We accept either `name` or `type:name`.
+        // Strip axum-style / Django-style type annotations like
+        // `{id:int}` — accept both `name` and `type:name` shapes so
+        // patterns ported from Django routes work as-is.
         let key = placeholder.split(':').next_back().unwrap_or(&placeholder);
         let value = params.get(key).ok_or_else(|| ReverseError::MissingParam {
             name: name.to_owned(),
             param: key.to_owned(),
         })?;
         out.push_str(&crate::url_codec::url_encode(value));
-        // Find the params key with the same identity (str pointer is
-        // unreliable since they come from the caller's HashMap). Look
-        // it up by string equality to mark "used."
-        if let Some((k, _)) = params.iter().find(|(k, _)| **k == key) {
-            used.insert(*k);
-        }
+        used.insert(key.to_owned());
     }
-    // Reject extra params.
+    // Reject extra params (typo-safety).
     for k in params.keys() {
-        if !used.contains(k) {
+        if !used.contains(*k) {
             return Err(ReverseError::UnexpectedParam {
                 name: name.to_owned(),
                 param: (*k).to_owned(),
@@ -271,5 +323,47 @@ mod tests {
             reverse_owned("__test_post_detail", &p).unwrap(),
             "/posts/99"
         );
+    }
+
+    // Pattern intentionally malformed — unclosed `{`.
+    register_url!("__test_malformed", "/items/{unclosed");
+
+    #[test]
+    fn reverse_malformed_pattern_surfaces_dedicated_error() {
+        let err = reverse("__test_malformed", &HashMap::new()).unwrap_err();
+        match err {
+            ReverseError::MalformedPattern { name, detail } => {
+                assert_eq!(name, "__test_malformed");
+                assert!(detail.contains("unclosed"), "detail: {detail}");
+            }
+            other => panic!("expected MalformedPattern, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn all_routes_returns_at_least_registered_test_routes() {
+        let names: Vec<&str> = all_routes().iter().map(|r| r.name).collect();
+        for required in [
+            "__test_home",
+            "__test_post_detail",
+            "__test_two_args",
+            "__test_typed_placeholder",
+            "__test_malformed",
+        ] {
+            assert!(names.contains(&required), "missing {required}: {names:?}");
+        }
+    }
+
+    #[test]
+    fn duplicates_helper_is_callable() {
+        // The test registry has no intentional duplicates among
+        // `__test_*` names. Other test files in the same binary may
+        // or may not register routes; just confirm the function
+        // doesn't panic and returns a Vec of names (sorted).
+        let dups = duplicates();
+        // Sort property: every two adjacent entries are ordered.
+        for w in dups.windows(2) {
+            assert!(w[0] <= w[1], "duplicates() must return sorted: {dups:?}");
+        }
     }
 }
