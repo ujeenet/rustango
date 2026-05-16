@@ -367,3 +367,184 @@ mod tests {
         }
     }
 }
+
+// ============================================================== Tera tag
+
+/// Register Django's `{% url %}` equivalent as a Tera function on
+/// `tera`. Call this once at app setup alongside any other Tera
+/// configuration. Issue #14.
+///
+/// Tera doesn't have Django-style `{% tag %}` syntax for arbitrary
+/// function calls — it has function-call expressions `{{ func(...) }}`
+/// — so the natural mapping is a `url(...)` function with keyword
+/// arguments:
+///
+/// ```jinja
+/// <a href="{{ url(name='post-detail', id=42) }}">View post</a>
+/// ```
+///
+/// Equivalent to Django's `{% url 'post-detail' id=42 %}`. For the
+/// `{% url 'foo' as my_url %}` capture pattern, use Tera's `{% set %}`:
+///
+/// ```jinja
+/// {% set my_url = url(name='post-detail', id=42) %}
+/// <a href="{{ my_url }}">…</a>
+/// ```
+///
+/// Argument parsing:
+/// - `name` (required): the registered route name, as a string.
+/// - Every other keyword argument: a path parameter, stringified and
+///   passed through [`reverse_owned`]. Numbers / bools are accepted
+///   and rendered with their `Display` form.
+///
+/// Errors from [`reverse`] propagate as Tera render errors (rendered
+/// as a 500 by [`crate::shortcuts::render`] / [`crate::template_views`]).
+#[cfg(feature = "template_views")]
+pub fn register_url_tag(tera: &mut tera::Tera) {
+    tera.register_function("url", url_tag_fn);
+}
+
+#[cfg(feature = "template_views")]
+fn url_tag_fn(args: &std::collections::HashMap<String, tera::Value>) -> tera::Result<tera::Value> {
+    let name = match args.get("name") {
+        Some(tera::Value::String(s)) => s.clone(),
+        Some(other) => {
+            return Err(tera::Error::msg(format!(
+                "url(): `name` must be a string, got: {other:?}"
+            )));
+        }
+        None => return Err(tera::Error::msg("url(): missing required `name` argument")),
+    };
+    // Every non-`name` arg becomes a path parameter. Coerce numbers /
+    // bools / strings via their JSON Display form; reject objects + arrays
+    // (path params can't reasonably be composite).
+    let mut params: HashMap<String, String> = HashMap::new();
+    for (k, v) in args {
+        if k == "name" {
+            continue;
+        }
+        let s = match v {
+            tera::Value::String(s) => s.clone(),
+            tera::Value::Number(n) => n.to_string(),
+            tera::Value::Bool(b) => b.to_string(),
+            tera::Value::Null => "".to_owned(),
+            other => {
+                return Err(tera::Error::msg(format!(
+                    "url(): argument `{k}` must be a scalar (string / number / bool), got: {other:?}"
+                )));
+            }
+        };
+        params.insert(k.clone(), s);
+    }
+    reverse_owned(&name, &params)
+        .map(tera::Value::String)
+        .map_err(|e| tera::Error::msg(e.to_string()))
+}
+
+#[cfg(all(test, feature = "template_views"))]
+mod tera_tests {
+    use super::*;
+
+    register_url!("__test_tag_home", "/");
+    register_url!("__test_tag_post", "/posts/{id}");
+    register_url!("__test_tag_users_posts", "/users/{user_id}/posts/{post_id}");
+
+    fn setup() -> tera::Tera {
+        let mut tera = tera::Tera::default();
+        register_url_tag(&mut tera);
+        tera
+    }
+
+    fn render(tera: &tera::Tera, src: &str) -> String {
+        let mut t = tera.clone();
+        t.add_raw_template("_", src).unwrap();
+        t.render("_", &tera::Context::new()).unwrap()
+    }
+
+    #[test]
+    fn url_tag_resolves_static_route() {
+        let tera = setup();
+        assert_eq!(render(&tera, "{{ url(name='__test_tag_home') }}"), "/");
+    }
+
+    #[test]
+    fn url_tag_substitutes_int_param_via_display() {
+        // Tera passes `42` as a number; `url()` stringifies via Display.
+        let tera = setup();
+        assert_eq!(
+            render(&tera, "{{ url(name='__test_tag_post', id=42) }}"),
+            "/posts/42"
+        );
+    }
+
+    #[test]
+    fn url_tag_substitutes_string_param() {
+        let tera = setup();
+        assert_eq!(
+            render(&tera, "{{ url(name='__test_tag_post', id='hello') }}"),
+            "/posts/hello"
+        );
+    }
+
+    #[test]
+    fn url_tag_substitutes_multiple_params() {
+        let tera = setup();
+        assert_eq!(
+            render(
+                &tera,
+                "{{ url(name='__test_tag_users_posts', user_id=5, post_id=10) }}"
+            ),
+            "/users/5/posts/10"
+        );
+    }
+
+    #[test]
+    fn url_tag_set_capture_works_via_tera_set() {
+        // Django's `{% url 'foo' as bar %}` shape, ported to Tera's
+        // `{% set %}`.
+        let tera = setup();
+        let src = "{% set u = url(name='__test_tag_post', id=7) %}<a href='{{ u }}'>x</a>";
+        assert_eq!(render(&tera, src), "<a href='/posts/7'>x</a>");
+    }
+
+    /// Walk a Tera error's `source` chain into one searchable string.
+    /// Tera wraps function errors so `format!("{e}")` on the outer
+    /// only says "Failed to render '_'" — the actual cause is on
+    /// `e.source()`.
+    fn full_error_chain(e: &tera::Error) -> String {
+        use std::error::Error as _;
+        let mut out = format!("{e}");
+        let mut cur: Option<&dyn std::error::Error> = e.source();
+        while let Some(c) = cur {
+            out.push_str(" | ");
+            out.push_str(&c.to_string());
+            cur = c.source();
+        }
+        out
+    }
+
+    #[test]
+    fn url_tag_missing_name_arg_errors() {
+        let mut tera = setup();
+        tera.add_raw_template("_", "{{ url(id=1) }}").unwrap();
+        let err = tera.render("_", &tera::Context::new()).unwrap_err();
+        let msg = full_error_chain(&err).to_lowercase();
+        assert!(
+            msg.contains("name") || msg.contains("url()"),
+            "expected error about missing `name`, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn url_tag_unknown_route_propagates_reverse_error() {
+        let mut tera = setup();
+        tera.add_raw_template("_", "{{ url(name='nope_nope_nope') }}")
+            .unwrap();
+        let err = tera.render("_", &tera::Context::new()).unwrap_err();
+        let msg = full_error_chain(&err).to_lowercase();
+        assert!(
+            msg.contains("no url registered") || msg.contains("nope_nope_nope"),
+            "expected unknown-name error, got: {msg}"
+        );
+    }
+}
