@@ -427,7 +427,16 @@ fn url_tag_fn(args: &std::collections::HashMap<String, tera::Value>) -> tera::Re
             tera::Value::String(s) => s.clone(),
             tera::Value::Number(n) => n.to_string(),
             tera::Value::Bool(b) => b.to_string(),
-            tera::Value::Null => "".to_owned(),
+            tera::Value::Null => {
+                // A null param is almost always a template typo
+                // (`{{ url(name='post', id=missing_var) }}` where
+                // `missing_var` is undefined). Silently emitting
+                // `/posts/` would mask the bug; error explicitly
+                // so the developer sees it.
+                return Err(tera::Error::msg(format!(
+                    "url(): argument `{k}` is null — likely an undefined template variable"
+                )));
+            }
             other => {
                 return Err(tera::Error::msg(format!(
                     "url(): argument `{k}` must be a scalar (string / number / bool), got: {other:?}"
@@ -545,6 +554,37 @@ mod tera_tests {
         assert!(
             msg.contains("no url registered") || msg.contains("nope_nope_nope"),
             "expected unknown-name error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn url_tag_non_string_name_errors_clearly() {
+        let mut tera = setup();
+        tera.add_raw_template("_", "{{ url(name=42) }}").unwrap();
+        let err = tera.render("_", &tera::Context::new()).unwrap_err();
+        let msg = full_error_chain(&err).to_lowercase();
+        assert!(
+            msg.contains("name") && msg.contains("string"),
+            "expected `name must be a string` error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn url_tag_null_param_errors_instead_of_emitting_empty_segment() {
+        // Regression: a context value set to JSON null hits the
+        // function as `Value::Null`. Earlier draft coerced that to ""
+        // and emitted `/posts/` — a silent URL bug. Now it errors
+        // explicitly so the typo / data hole surfaces.
+        let mut tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("v", &serde_json::Value::Null);
+        tera.add_raw_template("_", "{{ url(name='__test_tag_post', id=v) }}")
+            .unwrap();
+        let err = tera.render("_", &ctx).unwrap_err();
+        let msg = full_error_chain(&err).to_lowercase();
+        assert!(
+            msg.contains("null") || msg.contains("undefined"),
+            "expected null/undefined error, got: {msg}"
         );
     }
 }
