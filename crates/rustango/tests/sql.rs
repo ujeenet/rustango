@@ -595,6 +595,7 @@ fn empty_select() -> SelectQuery {
         offset: None,
         lock_mode: None,
         compound: vec![],
+        projection: None,
     }
 }
 
@@ -814,6 +815,7 @@ fn empty_post_select() -> SelectQuery {
         offset: None,
         lock_mode: None,
         compound: vec![],
+        projection: None,
     }
 }
 

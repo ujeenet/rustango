@@ -582,6 +582,7 @@ async fn handle_list(
         offset: Some(offset),
         lock_mode: None,
         compound: vec![],
+        projection: None,
     };
     let count_q = crate::core::CountQuery {
         model: state.vs.schema,
@@ -831,6 +832,7 @@ async fn handle_detail(
         offset: None,
         lock_mode: None,
         compound: vec![],
+        projection: None,
     };
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
@@ -959,6 +961,7 @@ async fn handle_delete_confirm(
         offset: None,
         lock_mode: None,
         compound: vec![],
+        projection: None,
     };
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
@@ -1791,6 +1794,7 @@ async fn handle_update_get(
         offset: None,
         lock_mode: None,
         compound: vec![],
+        projection: None,
     };
     let scalars: Vec<&'static crate::core::FieldSchema> = state.schema.scalar_fields().collect();
     let row_json = match select_one_row_as_json(&state.pool, &select_q, &scalars).await {
@@ -2643,6 +2647,7 @@ fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
         offset: None,
         lock_mode: None,
         compound: vec![],
+        projection: None,
     }
 }
 
@@ -2809,6 +2814,7 @@ async fn fetch_pks_as_objects_pool(
         offset: None,
         lock_mode: None,
         compound: vec![],
+        projection: None,
     };
     let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
     let rows = select_rows_as_json(pool, &q, &fields)
@@ -2949,6 +2955,7 @@ mod tenant {
             offset: Some(offset),
             lock_mode: None,
             compound: vec![],
+            projection: None,
         };
         let count_q = crate::core::CountQuery {
             model: state.vs.schema,
@@ -3137,6 +3144,7 @@ mod tenant {
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         };
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
@@ -3184,6 +3192,7 @@ mod tenant {
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         };
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
@@ -3332,6 +3341,7 @@ mod tenant {
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         };
         let scalars: Vec<&'static crate::core::FieldSchema> =
             state.schema.scalar_fields().collect();

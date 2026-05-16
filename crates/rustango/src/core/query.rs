@@ -464,6 +464,13 @@ pub struct SelectQuery {
     /// parens. The compound's outer `order_by` / `limit` / `offset` /
     /// `lock_mode` apply to the merged result.
     pub compound: Vec<CompoundBranch>,
+    /// Column-list override for pure projection — Django's `.values()`
+    /// / `.values_list()` shape (issue #22). `None` (default) emits
+    /// every scalar field on the model; `Some(cols)` emits exactly
+    /// `cols` in the order given. Joins still contribute their
+    /// `project` columns. Validated at builder time so every column
+    /// resolves on the model schema.
+    pub projection: Option<Vec<&'static str>>,
 }
 
 /// One branch of a set-algebra compound query. Issue #25.
@@ -573,6 +580,7 @@ impl PartialEq for SelectQuery {
             && self.offset == other.offset
             && self.lock_mode == other.lock_mode
             && self.compound == other.compound
+            && self.projection == other.projection
     }
 }
 

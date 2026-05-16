@@ -181,6 +181,7 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
         offset: None,
         lock_mode: None,
         compound: Vec::new(),
+        projection: None,
     };
     b.sql.push('(');
     write_select_inner(b, &head)?;
@@ -222,16 +223,34 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
 
     b.sql.push_str("SELECT ");
     let mut first_col = true;
-    for field in query.model.scalar_fields() {
-        if !first_col {
-            b.sql.push_str(", ");
+    if let Some(cols) = query.projection.as_ref() {
+        // Pure projection (issue #22 — `.values_dict()` /
+        // `.values_list()` / `.values_list_flat()`): emit exactly
+        // the listed columns in the given order. Validation that
+        // each column resolves on the model is the builder's job.
+        for col in cols {
+            if !first_col {
+                b.sql.push_str(", ");
+            }
+            first_col = false;
+            if qualify {
+                b.write_ident(query.model.table);
+                b.sql.push('.');
+            }
+            b.write_ident(col);
         }
-        first_col = false;
-        if qualify {
-            b.write_ident(query.model.table);
-            b.sql.push('.');
+    } else {
+        for field in query.model.scalar_fields() {
+            if !first_col {
+                b.sql.push_str(", ");
+            }
+            first_col = false;
+            if qualify {
+                b.write_ident(query.model.table);
+                b.sql.push('.');
+            }
+            b.write_ident(field.column);
         }
-        b.write_ident(field.column);
     }
     for join in &query.joins {
         for col in &join.project {

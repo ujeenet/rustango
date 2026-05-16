@@ -254,6 +254,7 @@ pub(crate) async fn table_view(
             offset: Some(offset),
             lock_mode: None,
             compound: vec![],
+            projection: None,
         },
         &scalar_fields,
     )
@@ -868,6 +869,7 @@ pub(crate) async fn detail_view(
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         },
         &detail_fields,
     )
@@ -1142,6 +1144,7 @@ pub(crate) async fn edit_form(
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         },
         &edit_fields,
     )
@@ -1229,6 +1232,7 @@ pub(crate) async fn update_submit(
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         },
         &before_fields,
     )
@@ -1298,6 +1302,7 @@ pub(crate) async fn delete_submit(
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         },
         &delete_fields,
     )
@@ -1465,6 +1470,7 @@ pub(crate) async fn action_submit(
             offset: None,
             lock_mode: None,
             compound: vec![],
+            projection: None,
         },
         &action_fields,
     )

@@ -745,7 +745,60 @@ impl<T: Model> QuerySet<T> {
             offset: self.offset,
             lock_mode: self.lock_mode,
             compound: self.compound,
+            projection: None,
         })
+    }
+
+    /// Project to `Vec<HashMap<String, SqlValue>>` — Django's
+    /// `.values('id', 'name')`. Issue #22. Returns a
+    /// [`ValuesQuerySet`] whose terminal `.fetch_pool(&pool)` decodes
+    /// rows into a `HashMap` keyed by column name.
+    ///
+    /// Skips the typed `Model` decode — useful when you only need a
+    /// few fields off a wide table, or when the result feeds
+    /// downstream code that wants dynamic column access (templates,
+    /// JSON serialization, CSV export). The existing
+    /// [`QuerySet::values`] method (which promotes to
+    /// [`AggregateBuilder`] for GROUP BY) is unchanged; this is a
+    /// separate, pure-projection entry point.
+    ///
+    /// Columns are validated against the model schema at `.compile()`
+    /// time — typo'd column names surface
+    /// [`QueryError::UnknownField`]. Empty `cols` surfaces
+    /// [`QueryError::EmptyValuesProjection`].
+    #[must_use]
+    pub fn values_dict(self, cols: &[&'static str]) -> ValuesQuerySet<T> {
+        ValuesQuerySet {
+            qs: self,
+            cols: cols.to_vec(),
+        }
+    }
+
+    /// Project to `Vec<Vec<SqlValue>>` — Django's
+    /// `.values_list('id', 'name')`. Issue #22. Same projection as
+    /// [`Self::values_dict`] but each row comes back as an
+    /// ordered `Vec<SqlValue>` (cell ordering matches the `cols`
+    /// argument), not a `HashMap`.
+    #[must_use]
+    pub fn values_list(self, cols: &[&'static str]) -> ValuesListQuerySet<T> {
+        ValuesListQuerySet {
+            qs: self,
+            cols: cols.to_vec(),
+        }
+    }
+
+    /// Single-column flat projection — Django's
+    /// `.values_list('id', flat=True)`. Issue #22. Returns
+    /// [`ValuesFlatQuerySet`] whose terminal `.fetch_pool::<U>(&pool)`
+    /// decodes the single column into `Vec<U>` directly via sqlx's
+    /// typed `query_scalar` path.
+    ///
+    /// `U` must be decodable from the column's SQL type on every
+    /// dialect the binary targets. Common picks: `i64` / `i32` /
+    /// `String` / `bool` / `f64`.
+    #[must_use]
+    pub fn values_list_flat(self, col: &'static str) -> ValuesFlatQuerySet<T> {
+        ValuesFlatQuerySet { qs: self, col }
     }
 
     /// Lower this queryset to a `DeleteQuery` — same WHERE clause, no projection.
@@ -1727,4 +1780,109 @@ fn validate_aggregate_expr_columns(
         // Schema typos surface at execution. Pre-existing gap.
         _ => Ok(()),
     }
+}
+
+// ====================================================================
+// Pure projection — Django `.values()` / `.values_list()` (issue #22)
+// ====================================================================
+
+/// Pure-projection queryset returned by [`QuerySet::values_dict`].
+/// Compiles to a `SELECT <cols> FROM …` with the WHERE / ORDER BY /
+/// LIMIT / OFFSET / set-algebra branches of the underlying queryset
+/// preserved. Terminal `fetch_pool` lives in
+/// [`crate::sql::fetch_values_dict_pool`].
+pub struct ValuesQuerySet<T: Model> {
+    pub(crate) qs: QuerySet<T>,
+    pub(crate) cols: Vec<&'static str>,
+}
+
+/// Pure-projection queryset returned by [`QuerySet::values_list`].
+/// Same shape as [`ValuesQuerySet`] but the terminal fetch yields
+/// `Vec<Vec<SqlValue>>` (cells ordered to match `cols`) instead of a
+/// `HashMap`.
+pub struct ValuesListQuerySet<T: Model> {
+    pub(crate) qs: QuerySet<T>,
+    pub(crate) cols: Vec<&'static str>,
+}
+
+/// Single-column flat-projection queryset returned by
+/// [`QuerySet::values_list_flat`]. Terminal fetch decodes the column
+/// directly into `Vec<U>` via sqlx's typed scalar path.
+pub struct ValuesFlatQuerySet<T: Model> {
+    pub(crate) qs: QuerySet<T>,
+    pub(crate) col: &'static str,
+}
+
+impl<T: Model> ValuesQuerySet<T> {
+    /// Compile to a [`SelectQuery`] with `projection` set to the
+    /// validated column list.
+    ///
+    /// # Errors
+    /// - [`QueryError::EmptyValuesProjection`] if `cols` is empty.
+    /// - [`QueryError::UnknownField`] if any column doesn't exist on
+    ///   the model.
+    /// - Anything [`QuerySet::compile`] surfaces.
+    pub fn compile(self) -> Result<SelectQuery, QueryError> {
+        compile_values_select(self.qs, self.cols)
+    }
+
+    /// The validated column list — exposed so the terminal fetch in
+    /// [`crate::sql`] can pass it to the row decoder.
+    #[must_use]
+    pub fn columns(&self) -> &[&'static str] {
+        &self.cols
+    }
+}
+
+impl<T: Model> ValuesListQuerySet<T> {
+    /// See [`ValuesQuerySet::compile`].
+    ///
+    /// # Errors
+    /// As [`ValuesQuerySet::compile`].
+    pub fn compile(self) -> Result<SelectQuery, QueryError> {
+        compile_values_select(self.qs, self.cols)
+    }
+
+    /// The validated column list — exposed for the terminal fetch.
+    #[must_use]
+    pub fn columns(&self) -> &[&'static str] {
+        &self.cols
+    }
+}
+
+impl<T: Model> ValuesFlatQuerySet<T> {
+    /// Compile to a [`SelectQuery`] with `projection` set to the
+    /// single column.
+    ///
+    /// # Errors
+    /// - [`QueryError::UnknownField`] if `col` doesn't exist on the
+    ///   model.
+    /// - Anything [`QuerySet::compile`] surfaces.
+    pub fn compile(self) -> Result<SelectQuery, QueryError> {
+        compile_values_select(self.qs, vec![self.col])
+    }
+}
+
+/// Shared compile path for the three values builders. Validates the
+/// column list, then delegates to `QuerySet::compile` and stamps the
+/// projection onto the resulting [`SelectQuery`].
+fn compile_values_select<T: Model>(
+    qs: QuerySet<T>,
+    cols: Vec<&'static str>,
+) -> Result<SelectQuery, QueryError> {
+    if cols.is_empty() {
+        return Err(QueryError::EmptyValuesProjection);
+    }
+    let model: &'static ModelSchema = T::SCHEMA;
+    for col in &cols {
+        if model.field_by_column(col).is_none() {
+            return Err(QueryError::UnknownField {
+                model: model.name,
+                field: (*col).to_owned(),
+            });
+        }
+    }
+    let mut q = qs.compile()?;
+    q.projection = Some(cols);
+    Ok(q)
 }
