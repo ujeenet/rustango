@@ -728,6 +728,7 @@ fn snap_with_index(name: &str, columns: &[&str], unique: bool) -> SchemaSnapshot
             table: "diff_user".into(),
             columns: columns.iter().map(|s| (*s).into()).collect(),
             unique,
+            method: "btree".into(),
         }],
         ..Default::default()
     }
