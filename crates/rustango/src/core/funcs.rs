@@ -505,6 +505,47 @@ pub fn ts_headline_with(
     }
 }
 
+/// `phraseto_tsquery(<expr>)` — Postgres FTS phrase-preserving query
+/// parser. Builds a `tsquery` from a phrase, preserving word order:
+/// `"rust orm"` → `'rust' <-> 'orm'`. Use when exact-phrase semantics
+/// matter (vs `plainto_tsquery`, which ignores word order). **PG-only**.
+#[must_use]
+pub fn phraseto_tsquery(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::PhraseToTsQuery, arg)
+}
+
+/// `websearch_to_tsquery(<expr>)` — Postgres FTS query parser that
+/// accepts Google-style search syntax: quoted `"exact phrase"`,
+/// unary `-exclude`, the literal `OR`. Best fit for end-user search
+/// boxes. **PG-only**.
+#[must_use]
+pub fn websearch_to_tsquery(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::WebsearchToTsQuery, arg)
+}
+
+/// `to_tsquery(<expr>)` — Postgres FTS query parser for the raw
+/// `tsquery` operator syntax (`'rust & orm'`, `'rust | python'`,
+/// `'rust & !python'`). Lower-level than [`plainto_tsquery`]; the
+/// caller is responsible for valid `tsquery` syntax. Use when the
+/// app constructs queries programmatically (composed AND/OR/NOT)
+/// rather than from raw user input. **PG-only**.
+#[must_use]
+pub fn to_tsquery(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::ToTsQuery, arg)
+}
+
+/// `ts_rank_cd(<tsvector>, <tsquery>)` — Postgres FTS cover-density
+/// ranking. Same shape as [`ts_rank`], different algorithm (factors
+/// in how closely matched terms cluster — better for short
+/// documents and phrase searches). **PG-only**.
+#[must_use]
+pub fn ts_rank_cd(vector: impl Into<Expr>, query: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::TsRankCd,
+        args: vec![vector.into(), query.into()],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

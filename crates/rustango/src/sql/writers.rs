@@ -1652,6 +1652,58 @@ fn write_function(
             b.sql.push(')');
             Ok(())
         }
+        F::PhraseToTsQuery | F::WebsearchToTsQuery | F::ToTsQuery => {
+            let fname = match kind {
+                F::PhraseToTsQuery => "phraseto_tsquery",
+                F::WebsearchToTsQuery => "websearch_to_tsquery",
+                F::ToTsQuery => "to_tsquery",
+                _ => unreachable!(),
+            };
+            if args.len() != 1 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: fname,
+                    expected: "1",
+                    got: args.len(),
+                });
+            }
+            if b.d.name() != "postgres" {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: match kind {
+                        F::PhraseToTsQuery => "phraseto_tsquery (FTS) is Postgres-only",
+                        F::WebsearchToTsQuery => "websearch_to_tsquery (FTS) is Postgres-only",
+                        F::ToTsQuery => "to_tsquery (FTS) is Postgres-only",
+                        _ => unreachable!(),
+                    },
+                    dialect: b.d.name(),
+                });
+            }
+            b.sql.push_str(fname);
+            b.sql.push('(');
+            write_expr(b, &args[0], None)?;
+            b.sql.push(')');
+            Ok(())
+        }
+        F::TsRankCd => {
+            if args.len() != 2 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "ts_rank_cd",
+                    expected: "2",
+                    got: args.len(),
+                });
+            }
+            if b.d.name() != "postgres" {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: "ts_rank_cd (FTS) is Postgres-only",
+                    dialect: b.d.name(),
+                });
+            }
+            b.sql.push_str("ts_rank_cd(");
+            write_expr(b, &args[0], None)?;
+            b.sql.push_str(", ");
+            write_expr(b, &args[1], None)?;
+            b.sql.push(')');
+            Ok(())
+        }
     }
 }
 
