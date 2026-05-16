@@ -29,6 +29,10 @@ use super::snapshot::{FieldSnapshot, SchemaSnapshot, TableSnapshot};
 /// Serializes externally-tagged: `{"CreateTable": "foo"}`,
 /// `{"AddColumn": {"table": "foo", "column": "bar"}}`. That's what
 /// migration files store under `Operation::Schema`.
+fn default_index_method_diff() -> String {
+    "btree".to_owned()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SchemaChange {
     CreateTable(String /* table name */),
@@ -106,6 +110,12 @@ pub enum SchemaChange {
         table: String,
         columns: Vec<String>,
         unique: bool,
+        /// Access method as a lowercase token (`btree` / `gin` /
+        /// `gist` / …). Defaults to `"btree"` when absent — keeps
+        /// migration JSON files written before issue #34 forward-
+        /// compatible.
+        #[serde(default = "default_index_method_diff")]
+        method: String,
     },
     /// Drop an index by name.
     DropIndex {
@@ -238,6 +248,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
                 table: idx.table.clone(),
                 columns: idx.columns.clone(),
                 unique: idx.unique,
+                method: idx.method.clone(),
             });
         }
     }
@@ -260,6 +271,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             if prev_idx.columns != idx.columns
                 || prev_idx.unique != idx.unique
                 || prev_idx.table != idx.table
+                || prev_idx.method != idx.method
             {
                 changes.push(SchemaChange::DropIndex {
                     name: idx.name.clone(),
@@ -269,6 +281,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
                     table: idx.table.clone(),
                     columns: idx.columns.clone(),
                     unique: idx.unique,
+                    method: idx.method.clone(),
                 });
             }
         }
@@ -697,6 +710,7 @@ fn render_changes_split_inner(
                 table,
                 columns,
                 unique,
+                method,
             } => {
                 let unique_kw = if *unique { "UNIQUE " } else { "" };
                 let if_not_exists = if dialect.supports_create_index_if_not_exists() {
@@ -709,10 +723,16 @@ fn render_changes_split_inner(
                     .map(|c| dialect.quote_ident(c))
                     .collect::<Vec<_>>()
                     .join(", ");
+                // `USING <method>` — emit only when non-default and
+                // the dialect honours the keyword. Backends that
+                // don't support the method silently fall through to
+                // their default (btree); see `IndexMethod` docs.
+                let using = dialect.index_method_clause(method);
                 out.immediate.push(format!(
-                    "CREATE {unique_kw}INDEX {if_not_exists}{} ON {} ({cols})",
+                    "CREATE {unique_kw}INDEX {if_not_exists}{} ON {}{} ({cols})",
                     dialect.quote_ident(name),
                     dialect.quote_ident(table),
+                    using,
                 ));
             }
             SchemaChange::DropIndex { name } => {

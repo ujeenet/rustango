@@ -306,6 +306,94 @@ pub struct IndexSchema {
     pub columns: &'static [&'static str],
     /// `true` for `CREATE UNIQUE INDEX`.
     pub unique: bool,
+    /// Access method — defaults to [`IndexMethod::BTree`] when not
+    /// specified. Selects the `USING <method>` clause emitted by
+    /// the DDL writer. Issue #34.
+    pub method: IndexMethod,
+}
+
+/// Index access method — Postgres `CREATE INDEX … USING <method>`.
+/// Mirrors Django's `django.contrib.postgres.indexes` types (`GinIndex`,
+/// `GistIndex`, `BrinIndex`, `SpGistIndex`, `BloomIndex`, `HashIndex`)
+/// plus the default `Btree`. Issue #34.
+///
+/// ## Backend support matrix
+/// - **Postgres**: all variants supported. `Bloom` requires the
+///   `bloom` extension (`CREATE EXTENSION bloom`).
+/// - **MySQL**: only `Btree` (and `Hash` on the MEMORY engine). All
+///   other variants degrade silently to btree at emit time —
+///   MySQL's optimizer ignores the `USING` token for unsupported
+///   methods, so the index still works (just as btree).
+/// - **SQLite**: only btree. Non-btree methods are silently dropped
+///   at emit time; SQLite has no `USING` clause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IndexMethod {
+    /// Default B-tree. Universal — every backend supports it.
+    #[default]
+    BTree,
+    /// Generalized Inverted Index — for full-text search, JSONB
+    /// keys, array containment. **PG-only**.
+    Gin,
+    /// Generalized Search Tree — for geometric, full-text, range,
+    /// and trigram queries. **PG-only**.
+    Gist,
+    /// Block Range Index — compact summary index for very large
+    /// tables where rows correlate to physical storage order
+    /// (time-series, log tables). **PG-only**.
+    Brin,
+    /// Space-Partitioned GiST — variants of GiST for non-balanced
+    /// data structures (quadtrees, k-d trees, suffix trees).
+    /// **PG-only**.
+    SpGist,
+    /// Hash index — equality-only lookups, smaller than btree.
+    /// PG: WAL-logged since 10. MySQL: MEMORY engine only.
+    Hash,
+    /// Bloom filter index — multi-column equality with controllable
+    /// false-positive rate. **PG-only**, requires the `bloom`
+    /// extension.
+    Bloom,
+}
+
+impl IndexMethod {
+    /// Stable lower-case token for snapshot serialization +
+    /// `USING <token>` emission.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BTree => "btree",
+            Self::Gin => "gin",
+            Self::Gist => "gist",
+            Self::Brin => "brin",
+            Self::SpGist => "spgist",
+            Self::Hash => "hash",
+            Self::Bloom => "bloom",
+        }
+    }
+
+    /// Parse from the lower-case token used in snapshot JSON. Unknown
+    /// values fall back to [`Self::BTree`] so older snapshots that
+    /// pre-date this addition keep deserializing cleanly.
+    #[must_use]
+    pub fn from_token(s: &str) -> Self {
+        match s {
+            "gin" => Self::Gin,
+            "gist" => Self::Gist,
+            "brin" => Self::Brin,
+            "spgist" => Self::SpGist,
+            "hash" => Self::Hash,
+            "bloom" => Self::Bloom,
+            _ => Self::BTree,
+        }
+    }
+
+    /// `true` when this method only works on Postgres.
+    #[must_use]
+    pub const fn is_postgres_only(self) -> bool {
+        matches!(
+            self,
+            Self::Gin | Self::Gist | Self::Brin | Self::SpGist | Self::Bloom
+        )
+    }
 }
 
 /// Django ModelAdmin-shape per-model admin customization. Populated by

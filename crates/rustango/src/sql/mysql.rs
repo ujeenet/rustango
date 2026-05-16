@@ -184,6 +184,19 @@ impl Dialect for MySql {
     /// 8.x — parse error). The ledger already serializes migration
     /// application so the idempotency guard is unnecessary in
     /// practice.
+    /// MySQL accepts `USING BTREE` and `USING HASH` (the latter is
+    /// MEMORY-engine-only and silently downgraded to BTREE on
+    /// InnoDB). Any other method is a PG-ism — drop the clause and
+    /// let MySQL build a regular btree. Issue #34.
+    fn index_method_clause(&self, method: &str) -> String {
+        match method {
+            "hash" => " USING HASH".to_owned(),
+            // Everything else (including the explicit "btree") emits
+            // no clause — MySQL's default is already btree.
+            _ => String::new(),
+        }
+    }
+
     fn supports_create_index_if_not_exists(&self) -> bool {
         false
     }

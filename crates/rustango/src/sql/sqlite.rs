@@ -162,6 +162,12 @@ impl Dialect for Sqlite {
     ///   internally; the parser sees it as text).
     /// - `String` with `max_length` → `TEXT` (SQLite ignores VARCHAR
     ///   lengths but accepts the keyword; emit `TEXT` for clarity).
+    /// SQLite has no `USING` clause — drop the method entirely.
+    /// Indexes work as btree on every SQLite engine. Issue #34.
+    fn index_method_clause(&self, _method: &str) -> String {
+        String::new()
+    }
+
     fn column_type(&self, ty: FieldType, max_length: Option<u32>) -> String {
         let _ = max_length; // SQLite has no length constraint on TEXT
         match ty {
