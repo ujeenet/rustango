@@ -300,6 +300,57 @@ pub fn login_required_or_401() -> impl tower::Layer<
     user_passes_test_or_403(|_| true)
 }
 
+/// Convenience wrapper: gate a route to active superusers only.
+/// Equivalent to
+/// `user_passes_test(login_url, |u| u.is_superuser && u.active)`
+/// but reads tighter at call sites and pins the common
+/// "is_superuser && active" predicate so individual handlers don't
+/// silently diverge on whether `active = false` users still count.
+///
+/// ```ignore
+/// use rustango::auth_decorators::superuser_required;
+///
+/// let admin_routes = Router::new()
+///     .route("/admin/dashboard", get(dashboard))
+///     .layer(superuser_required("/login"));
+/// ```
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub fn superuser_required(
+    login_url: impl Into<String>,
+) -> impl tower::Layer<
+    axum::routing::Route,
+    Service = impl tower::Service<
+        Request<Body>,
+        Response = Response,
+        Error = std::convert::Infallible,
+        Future = impl Send + 'static,
+    > + Clone
+                  + Send
+                  + Sync
+                  + 'static,
+> + Clone {
+    user_passes_test(login_url, |u| u.is_superuser && u.active)
+}
+
+/// API-endpoint variant of [`superuser_required`] — returns
+/// 401 for anonymous and 403 for non-superuser, instead of
+/// redirecting.
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub fn superuser_required_or_403() -> impl tower::Layer<
+    axum::routing::Route,
+    Service = impl tower::Service<
+        Request<Body>,
+        Response = Response,
+        Error = std::convert::Infallible,
+        Future = impl Send + 'static,
+    > + Clone
+                  + Send
+                  + Sync
+                  + 'static,
+> + Clone {
+    user_passes_test_or_403(|u| u.is_superuser && u.active)
+}
+
 #[cfg(all(feature = "tenancy", feature = "postgres"))]
 async fn handle_login_required(
     cfg: Arc<LoginRequiredConfig>,
@@ -706,5 +757,69 @@ mod tests {
         let _ = || {
             let _layer = login_required_or_401();
         };
+    }
+
+    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[tokio::test]
+    async fn superuser_required_redirects_anonymous_to_login() {
+        use axum::body::Body;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt as _;
+
+        async fn admin_only() -> &'static str {
+            "admin zone"
+        }
+
+        let app = Router::new()
+            .route("/admin/dashboard", get(admin_only))
+            .layer(superuser_required("/login"));
+
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/dashboard")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::FOUND);
+        let loc = res
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap();
+        assert_eq!(loc, "/login?next=%2Fadmin%2Fdashboard");
+    }
+
+    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[tokio::test]
+    async fn superuser_required_or_403_returns_401_for_anonymous() {
+        use axum::body::Body;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt as _;
+
+        async fn admin_api() -> &'static str {
+            "ok"
+        }
+
+        let app = Router::new()
+            .route("/api/admin", get(admin_api))
+            .layer(superuser_required_or_403());
+
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 }
