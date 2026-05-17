@@ -3,8 +3,9 @@
 //! Django built-ins that Tera doesn't ship out of the box and that
 //! templates reach for constantly: `pluralize`, `truncatewords`,
 //! `linebreaks`, `default_if_none`, `add`, `cut`, `divisibleby`,
-//! `floatformat`, `escapejs`, `yesno`, `get_digit`, `dictsort`. Call
-//! [`register_filters`] on a Tera instance to make them available:
+//! `floatformat`, `escapejs`, `yesno`, `get_digit`, `dictsort`,
+//! `slugify_unicode`. Call [`register_filters`] on a Tera instance
+//! to make them available:
 //!
 //! ```ignore
 //! let mut tera = tera::Tera::default();
@@ -38,6 +39,7 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("yesno", yesno);
     tera.register_filter("get_digit", get_digit);
     tera.register_filter("dictsort", dictsort);
+    tera.register_filter("slugify_unicode", slugify_unicode);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -523,6 +525,52 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
         // the sort stays deterministic. Rarely needed in practice.
         _ => a.to_string().cmp(&b.to_string()),
     }
+}
+
+// ------------------------------------------------------------------ slugify_unicode
+
+/// `slugify_unicode` — Django's `slugify(allow_unicode=True)` variant.
+/// Convert a value to a URL-safe slug while preserving non-ASCII
+/// letters. Useful for blog-post slugs / handles in apps that serve
+/// users typing in scripts other than Latin.
+///
+/// Behaviour:
+/// - lowercase everything,
+/// - keep Unicode letters / digits and `_`,
+/// - collapse runs of whitespace / hyphens / other punctuation into
+///   a single `-`,
+/// - strip leading + trailing `-`.
+///
+/// ```jinja
+/// {{ "Hello World!" | slugify_unicode }}   {# → "hello-world" #}
+/// {{ "Привет мир"   | slugify_unicode }}   {# → "привет-мир" #}
+/// {{ "café-au-lait" | slugify_unicode }}   {# → "café-au-lait" #}
+/// ```
+///
+/// Tera ships an ASCII-only `slugify` already — that filter
+/// transliterates non-ASCII to ASCII or drops it. Use this one
+/// when the project actively wants Unicode in URLs.
+fn slugify_unicode(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(s) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let mut out = String::with_capacity(s.len());
+    let mut last_was_dash = false;
+    for ch in s.to_lowercase().chars() {
+        if ch.is_alphanumeric() || ch == '_' {
+            out.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash && !out.is_empty() {
+            out.push('-');
+            last_was_dash = true;
+        }
+        // Anything else when last_was_dash is true: skip (collapse run).
+        // Same when the output is empty (no leading dash).
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    Ok(to_value(out)?)
 }
 
 #[cfg(test)]
@@ -1075,5 +1123,64 @@ mod tests {
         let mut ctx = tera::Context::new();
         ctx.insert("n", &567);
         assert_eq!(tera.render("t", &ctx).unwrap(), "6");
+    }
+
+    // -------- slugify_unicode --------
+
+    #[test]
+    fn slugify_unicode_handles_basic_ascii() {
+        let out = slugify_unicode(&json!("Hello World!"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("hello-world"));
+    }
+
+    #[test]
+    fn slugify_unicode_preserves_non_ascii_letters() {
+        let out = slugify_unicode(&json!("Привет мир"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("привет-мир"));
+    }
+
+    #[test]
+    fn slugify_unicode_lowercases_uppercase_diacritics() {
+        let out = slugify_unicode(&json!("CAFÉ AU LAIT"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("café-au-lait"));
+    }
+
+    #[test]
+    fn slugify_unicode_collapses_punctuation_runs_to_single_dash() {
+        let out = slugify_unicode(&json!("a---b___c   d!!!e"), &HashMap::new()).unwrap();
+        // `_` is treated as alnum-equivalent; punctuation + space
+        // collapses to dashes.
+        assert_eq!(out, json!("a-b___c-d-e"));
+    }
+
+    #[test]
+    fn slugify_unicode_strips_leading_and_trailing_dashes() {
+        let out = slugify_unicode(&json!("   hello   "), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("hello"));
+        let out2 = slugify_unicode(&json!("!!!hi!!!"), &HashMap::new()).unwrap();
+        assert_eq!(out2, json!("hi"));
+    }
+
+    #[test]
+    fn slugify_unicode_keeps_digits_and_underscores() {
+        let out = slugify_unicode(&json!("year_2026!post_42"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("year_2026-post_42"));
+    }
+
+    #[test]
+    fn slugify_unicode_passes_non_string_through() {
+        let out = slugify_unicode(&json!(42), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(42));
+    }
+
+    #[test]
+    fn register_filters_wires_slugify_unicode_through_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ s|slugify_unicode }}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("s", "Hello World 日本");
+        assert_eq!(tera.render("t", &ctx).unwrap(), "hello-world-日本");
     }
 }
