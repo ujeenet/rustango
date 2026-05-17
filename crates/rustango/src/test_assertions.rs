@@ -29,6 +29,10 @@
 //! ## Implemented
 //!
 //! - [`assert_status`] — exact-status match against a u16.
+//! - [`assert_status_in`] — status is one of an allowed set.
+//! - [`assert_status_2xx`] — status is in the 200–299 range.
+//! - [`assert_status_4xx`] — status is in the 400–499 range.
+//! - [`assert_status_5xx`] — status is in the 500–599 range.
 //! - [`assert_contains`] — response body contains a UTF-8 substring.
 //! - [`assert_not_contains`] — body does NOT contain a substring.
 //! - [`assert_contains_count`] — body contains fragment N times
@@ -90,6 +94,53 @@ pub fn assert_status(res: &Response, expected: u16) {
     assert_eq!(
         actual, expected,
         "expected HTTP status {expected}, got {actual}"
+    );
+}
+
+/// Assert the response status is one of `allowed`. Useful when a
+/// handler can legitimately return either of several success
+/// codes — e.g. `POST /items` might return 200 (idempotent
+/// touch) OR 201 (new resource).
+///
+/// ```ignore
+/// assert_status_in(&res, &[200, 201]);
+/// assert_status_in(&res, &[301, 302, 307, 308]);
+/// ```
+pub fn assert_status_in(res: &Response, allowed: &[u16]) {
+    let actual = res.status().as_u16();
+    assert!(
+        allowed.contains(&actual),
+        "expected HTTP status to be one of {allowed:?}, got {actual}"
+    );
+}
+
+/// Assert the response status is in the 2xx range (success).
+/// Sugar for the very common "any success" check.
+pub fn assert_status_2xx(res: &Response) {
+    let actual = res.status().as_u16();
+    assert!(
+        (200..300).contains(&actual),
+        "expected a 2xx status, got {actual}"
+    );
+}
+
+/// Assert the response status is in the 4xx range (client error).
+pub fn assert_status_4xx(res: &Response) {
+    let actual = res.status().as_u16();
+    assert!(
+        (400..500).contains(&actual),
+        "expected a 4xx status, got {actual}"
+    );
+}
+
+/// Assert the response status is in the 5xx range (server error).
+/// Useful for negative tests of error pages / handlers that must
+/// surface internal failures rather than degrade silently.
+pub fn assert_status_5xx(res: &Response) {
+    let actual = res.status().as_u16();
+    assert!(
+        (500..600).contains(&actual),
+        "expected a 5xx status, got {actual}"
     );
 }
 
@@ -880,5 +931,65 @@ mod tests {
     fn assert_cookie_not_set_panics_when_cookie_present() {
         let res = cookie_response(&["session=abc; Path=/"]);
         assert_cookie_not_set(&res, "session");
+    }
+
+    // -------- assert_status_in / _2xx / _4xx / _5xx --------
+
+    #[test]
+    fn assert_status_in_passes_on_allowed_match() {
+        let res = html_response(StatusCode::CREATED, "");
+        assert_status_in(&res, &[200, 201, 202]);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected HTTP status to be one of")]
+    fn assert_status_in_panics_on_mismatch() {
+        let res = html_response(StatusCode::OK, "");
+        assert_status_in(&res, &[201, 202]);
+    }
+
+    #[test]
+    fn assert_status_2xx_accepts_range() {
+        for code in [200, 201, 202, 204, 299] {
+            let res = html_response(StatusCode::from_u16(code).unwrap(), "");
+            assert_status_2xx(&res);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "expected a 2xx status, got 301")]
+    fn assert_status_2xx_panics_on_redirect() {
+        let res = html_response(StatusCode::MOVED_PERMANENTLY, "");
+        assert_status_2xx(&res);
+    }
+
+    #[test]
+    fn assert_status_4xx_accepts_range() {
+        for code in [400, 401, 403, 404, 422, 499] {
+            let res = html_response(StatusCode::from_u16(code).unwrap(), "");
+            assert_status_4xx(&res);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "expected a 4xx status, got 200")]
+    fn assert_status_4xx_panics_on_success() {
+        let res = html_response(StatusCode::OK, "");
+        assert_status_4xx(&res);
+    }
+
+    #[test]
+    fn assert_status_5xx_accepts_range() {
+        for code in [500, 502, 503, 504, 599] {
+            let res = html_response(StatusCode::from_u16(code).unwrap(), "");
+            assert_status_5xx(&res);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "expected a 5xx status, got 400")]
+    fn assert_status_5xx_panics_on_4xx() {
+        let res = html_response(StatusCode::BAD_REQUEST, "");
+        assert_status_5xx(&res);
     }
 }
