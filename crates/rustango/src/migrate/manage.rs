@@ -116,6 +116,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "loaddata" => loaddata_cmd(pool, &args[1..], writer).await,
         "showurls" => showurls_cmd(&args[1..], writer),
         "showmodels" => showmodels_cmd(&args[1..], writer),
+        "flush" => flush_cmd(pool, &args[1..], writer).await,
         // v0.38 — `inspectdb` is tri-dialect: PG + MySQL via
         // `information_schema`, SQLite via `PRAGMA table_info` +
         // `sqlite_master`. Dispatch happens inside `inspectdb_cmd`.
@@ -240,6 +241,16 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         "      misconfigurations. With --deploy: production hardening checks."
     )?;
     writeln!(w, "      Exits non-zero on any error-level finding.\n")?;
+    writeln!(w, "  flush [--yes] [--app <label>] [--model <name>]")?;
+    writeln!(
+        w,
+        "      Wipe all rows from registered model tables. Schema + migrations"
+    )?;
+    writeln!(
+        w,
+        "      ledger stay intact. Without --yes, prints the planned"
+    )?;
+    writeln!(w, "      action and exits (no DB write).\n")?;
     writeln!(w, "  showmodels [--format plain|json] [--app <label>]")?;
     writeln!(
         w,
@@ -2948,6 +2959,176 @@ fn showmodels_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateErr
     Ok(())
 }
 
+#[derive(Debug, Default, PartialEq)]
+struct FlushArgs {
+    /// `--yes` confirms data destruction. Without it, the command
+    /// prints what would happen (dry-run) and exits.
+    yes: bool,
+    /// Limit to a specific app or set of apps.
+    apps: Vec<String>,
+    /// Limit to a specific model or set of models.
+    models: Vec<String>,
+    help: bool,
+}
+
+fn parse_flush_args(args: &[String]) -> Result<FlushArgs, MigrateError> {
+    let mut out = FlushArgs::default();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                out.help = true;
+                return Ok(out);
+            }
+            "--yes" => out.yes = true,
+            "--app" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| MigrateError::Validation("--app expects a value".into()))?;
+                out.apps.push(v.clone());
+            }
+            "--model" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| MigrateError::Validation("--model expects a value".into()))?;
+                out.models.push(v.clone());
+            }
+            other if other.starts_with('-') => {
+                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+            }
+            other => {
+                return Err(MigrateError::Validation(format!(
+                    "unexpected positional argument: {other}"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `manage flush [--yes] [--app <label>] [--model <name>]` — wipe
+/// all rows from registered model tables. Django parity verb.
+/// Without `--yes`, prints what would happen and exits without
+/// touching the database (dry-run by default — a hand-typed
+/// `manage flush` doesn't accidentally nuke production).
+///
+/// On PG, emits `TRUNCATE table1, table2, ... RESTART IDENTITY
+/// CASCADE` in a single statement so FK constraints resolve and
+/// sequences reset. On MySQL/SQLite, emits per-table `DELETE FROM
+/// <table>` in registration order; sequences are NOT reset
+/// (caller can `DROP SEQUENCE` + `CREATE SEQUENCE` manually if
+/// they need that). The migrations ledger is left untouched —
+/// flush wipes data, not schema or schema history.
+///
+/// `--app <label>` / `--model <name>` filters narrow the wipe.
+/// Pass either flag multiple times to limit to a set.
+async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let parsed = parse_flush_args(args)?;
+    if parsed.help {
+        writeln!(w, "flush [--yes] [--app <label>] [--model <name>]")?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "  Wipe all rows from registered model tables. Schema + migrations ledger"
+        )?;
+        writeln!(w, "  stay intact.")?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "  --yes              Confirm. Without this, prints the planned action"
+        )?;
+        writeln!(w, "                     and exits without touching the DB.")?;
+        writeln!(w, "  --app <label>      Limit to one app (repeatable).")?;
+        writeln!(w, "  --model <name>     Limit to one model (repeatable).")?;
+        return Ok(());
+    }
+
+    // Collect target tables in inventory order.
+    let mut targets: Vec<&'static str> = Vec::new();
+    for entry in inventory::iter::<crate::core::ModelEntry>() {
+        let schema = entry.schema;
+        let app = entry.resolved_app_label().unwrap_or("");
+        let dotted = if app.is_empty() {
+            schema.name.to_owned()
+        } else {
+            format!("{app}.{}", schema.name)
+        };
+        if !parsed.apps.is_empty() && !parsed.apps.iter().any(|a| a == app) {
+            continue;
+        }
+        if !parsed.models.is_empty()
+            && !parsed
+                .models
+                .iter()
+                .any(|m| m == &dotted || m == schema.name)
+        {
+            continue;
+        }
+        targets.push(schema.table);
+    }
+    if targets.is_empty() {
+        writeln!(w, "flush: no tables match the filter (nothing to do)")?;
+        return Ok(());
+    }
+
+    if !parsed.yes {
+        writeln!(
+            w,
+            "flush: would clear {} table(s) (run with --yes to execute):",
+            targets.len()
+        )?;
+        for t in &targets {
+            writeln!(w, "  - {t}")?;
+        }
+        return Ok(());
+    }
+
+    // Execute. Per-dialect strategy:
+    let dialect = pool.dialect().name();
+    let mut cleared = 0_usize;
+    let mut failures: Vec<(String, String)> = Vec::new();
+    if dialect == "postgres" {
+        // One big TRUNCATE — atomic, FK-aware, sequence-resetting.
+        let quoted: Vec<String> = targets
+            .iter()
+            .map(|t| format!(r#""{}""#, t.replace('"', r#""""#)))
+            .collect();
+        let sql = format!(
+            "TRUNCATE TABLE {} RESTART IDENTITY CASCADE",
+            quoted.join(", "),
+        );
+        match crate::sql::raw_execute_pool(pool, &sql, Vec::new()).await {
+            Ok(_) => cleared = targets.len(),
+            Err(e) => failures.push(("TRUNCATE".to_owned(), e.to_string())),
+        }
+    } else {
+        // MySQL / SQLite: per-table DELETE in registration order.
+        // FK constraints from referencing tables may error; caller
+        // can scope with --app / --model.
+        for table in &targets {
+            let sql = format!(r#"DELETE FROM "{}""#, table.replace('"', r#""""#));
+            match crate::sql::raw_execute_pool(pool, &sql, Vec::new()).await {
+                Ok(_) => cleared += 1,
+                Err(e) => failures.push(((*table).to_owned(), e.to_string())),
+            }
+        }
+    }
+
+    writeln!(w, "flush: cleared {cleared} table(s)")?;
+    if !failures.is_empty() {
+        writeln!(w, "flush: {} table(s) failed:", failures.len())?;
+        for (t, e) in &failures {
+            writeln!(w, "  - {t}: {e}")?;
+        }
+        // Surface as an error so the caller's exit code reflects partial failure.
+        return Err(MigrateError::Validation(format!(
+            "flush completed with {} failure(s)",
+            failures.len()
+        )));
+    }
+    Ok(())
+}
+
 /// Mask the password in a `postgres://user:pass@host/db` connection
 /// URL so it doesn't leak into log output.
 fn redact(argv: &[String]) -> Vec<String> {
@@ -3691,6 +3872,70 @@ mod gen_tests {
         let s = String::from_utf8(buf).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
         assert!(parsed.is_array());
+    }
+
+    // -------- flush --------
+
+    #[test]
+    fn parse_flush_args_defaults() {
+        let p = parse_flush_args(&[]).unwrap();
+        assert!(!p.yes);
+        assert!(p.apps.is_empty());
+        assert!(p.models.is_empty());
+        assert!(!p.help);
+    }
+
+    #[test]
+    fn parse_flush_args_yes_flag() {
+        let p = parse_flush_args(&["--yes".into()]).unwrap();
+        assert!(p.yes);
+    }
+
+    #[test]
+    fn parse_flush_args_collects_multiple_apps_and_models() {
+        let args: Vec<String> = vec![
+            "--app".into(),
+            "blog".into(),
+            "--model".into(),
+            "Article".into(),
+            "--app".into(),
+            "shop".into(),
+            "--model".into(),
+            "shop.Order".into(),
+        ];
+        let p = parse_flush_args(&args).unwrap();
+        assert_eq!(p.apps, vec!["blog", "shop"]);
+        assert_eq!(p.models, vec!["Article", "shop.Order"]);
+    }
+
+    #[test]
+    fn parse_flush_args_help_short_circuits() {
+        let p = parse_flush_args(&["--help".into()]).unwrap();
+        assert!(p.help);
+    }
+
+    #[test]
+    fn parse_flush_args_rejects_unknown_flag() {
+        let r = parse_flush_args(&["--badflag".into()]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_flush_args_rejects_positional() {
+        let r = parse_flush_args(&["unexpected".into()]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_flush_args_app_requires_value() {
+        let r = parse_flush_args(&["--app".into()]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_flush_args_model_requires_value() {
+        let r = parse_flush_args(&["--model".into()]);
+        assert!(r.is_err());
     }
 
     #[test]
