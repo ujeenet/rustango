@@ -320,6 +320,68 @@ fn build_redirect(status: StatusCode, url: String) -> Response {
     res
 }
 
+/// Serialize `data` to JSON and wrap it in a Response with the given
+/// `status` and `Content-Type: application/json`. Django's
+/// [`JsonResponse(data, status=...)`](https://docs.djangoproject.com/en/6.0/ref/request-response/#jsonresponse-objects).
+///
+/// Slightly more concise than the axum equivalent
+/// `(StatusCode::BAD_REQUEST, Json(data)).into_response()` at API
+/// error sites, and gives a single fall-through (`200 OK`,
+/// `application/json`) for the common success path:
+///
+/// ```ignore
+/// use rustango::shortcuts::{json_response, json_ok};
+///
+/// // Success path:
+/// json_ok(&serde_json::json!({"id": 1, "name": "Alice"}))
+///
+/// // Error path:
+/// json_response(&serde_json::json!({"error": "validation failed"}), 400)
+/// ```
+///
+/// Failure modes:
+/// - Serialization failure → `500 Internal Server Error` with an
+///   empty body. Almost never happens with `serde_json::Value` /
+///   ordinary structs; would require a custom Serialize that fails.
+/// - Invalid `status` (outside u16 range or not a valid HTTP code)
+///   → falls back to `200 OK` so the response still parses.
+#[must_use]
+pub fn json_response<T: serde::Serialize>(data: &T, status: u16) -> Response {
+    let body = match serde_json::to_vec(data) {
+        Ok(b) => b,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(axum::body::Body::empty())
+                .expect("500 + empty body is always valid");
+        }
+    };
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+    let mut res = Response::builder()
+        .status(status)
+        .body(axum::body::Body::from(body))
+        .expect("status + non-empty body is always valid");
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    res
+}
+
+/// Sugar for [`json_response`] with status `200 OK` — the most
+/// common success-path shape.
+#[must_use]
+pub fn json_ok<T: serde::Serialize>(data: &T) -> Response {
+    json_response(data, 200)
+}
+
+/// Sugar for [`json_response`] with status `400 Bad Request` — the
+/// most common error-path shape for input validation failures.
+#[must_use]
+pub fn json_bad_request<T: serde::Serialize>(data: &T) -> Response {
+    json_response(data, 400)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,5 +550,69 @@ mod tests {
         assert!(!loc[12..].contains(' '), "next= must percent-escape spaces");
         assert!(!loc[12..].contains('&'), "next= must percent-escape &");
         assert!(!loc[12..].contains('?'), "next= must percent-escape ?");
+    }
+
+    // ---------------- json_response / json_ok / json_bad_request ----------------
+
+    async fn body_bytes(res: Response) -> Vec<u8> {
+        axum::body::to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn json_response_emits_status_content_type_and_serialized_body() {
+        let res = json_response(&serde_json::json!({"id": 1, "name": "Alice"}), 201);
+        assert_eq!(res.status(), StatusCode::CREATED);
+        assert_eq!(
+            res.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "application/json"
+        );
+        let body = body_bytes(res).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v, serde_json::json!({"id": 1, "name": "Alice"}));
+    }
+
+    #[tokio::test]
+    async fn json_ok_is_200() {
+        let res = json_ok(&serde_json::json!({"hello": "world"}));
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn json_bad_request_is_400() {
+        let res = json_bad_request(&serde_json::json!({"error": "validation"}));
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = body_bytes(res).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "validation");
+    }
+
+    #[tokio::test]
+    async fn json_response_status_below_100_falls_back_to_200() {
+        // Valid HTTP statuses are 100-999. Anything below 100 fails
+        // `from_u16` and the helper falls back to 200 OK so the
+        // response still parses.
+        let res = json_response(&serde_json::json!({}), 42);
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn json_response_serializes_arbitrary_struct() {
+        #[derive(serde::Serialize)]
+        struct Out {
+            ok: bool,
+            count: u32,
+        }
+        let res = json_response(&Out { ok: true, count: 7 }, 200);
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_bytes(res).await;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v, serde_json::json!({"ok": true, "count": 7}));
     }
 }
