@@ -58,5 +58,5 @@ mod views;
 pub use auth::protect_with_basic_auth;
 pub use computed_fields::{ComputedField, ComputedFieldRenderFn};
 pub use errors::AdminError;
-pub use inlines::{InlineAdmin, InlineKind, InlinePanel};
+pub use inlines::{InlineAdmin, InlineApplyOutcome, InlineFormPanel, InlineKind, InlinePanel};
 pub use urls::{router, AdminActionFn, AdminActionFuture, Builder};

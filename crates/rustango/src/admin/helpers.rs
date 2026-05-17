@@ -503,3 +503,115 @@ pub(crate) fn render_form(
         chrome_context(state, Some(model.table)),
     )
 }
+
+/// As [`render_form`] but threads a list of `InlineFormPanel` into
+/// the form context so the template can render editable inline
+/// panels below the parent fieldsets. Used by `edit_form` only —
+/// the create form runs before the parent PK exists, so child rows
+/// can't be attached yet (Django's create-form-doesn't-render-inlines
+/// behavior).
+pub(crate) fn render_form_with_inlines(
+    state: &AppState,
+    model: &'static ModelSchema,
+    prefill: Option<&HashMap<String, String>>,
+    pk_locked: bool,
+    error_msg: Option<&str>,
+    inline_panels: Vec<super::inlines::InlineFormPanel>,
+) -> String {
+    let admin_prefix = state.config.admin_prefix.as_str();
+    let (action, edit_pk) = if pk_locked {
+        let pk_field = model.primary_key().expect("pk_locked requires a PK");
+        let pk_value = prefill
+            .and_then(|m| m.get(pk_field.name).cloned())
+            .unwrap_or_default();
+        (
+            format!(
+                "{admin_prefix}/{}/{}",
+                model.table,
+                render::escape(&pk_value)
+            ),
+            Some(pk_value),
+        )
+    } else {
+        (format!("{admin_prefix}/{}", model.table), None)
+    };
+    let title = if pk_locked {
+        format!("Edit {}", model.name)
+    } else {
+        format!("New {}", model.name)
+    };
+    let admin_cfg = model
+        .admin
+        .copied()
+        .unwrap_or(crate::core::AdminConfig::DEFAULT);
+    let row_for_field = |f: &'static FieldSchema| -> serde_json::Value {
+        let value = prefill
+            .and_then(|m| m.get(f.name))
+            .map_or("", String::as_str);
+        let is_readonly_field = admin_cfg.readonly_fields.iter().any(|n| *n == f.name);
+        let extra = if f.primary_key {
+            " <small>(pk)</small>"
+        } else if is_readonly_field {
+            " <small>read-only</small>"
+        } else if f.auto {
+            " <small>auto</small>"
+        } else if !f.nullable {
+            " <small>required</small>"
+        } else {
+            ""
+        };
+        let lock_input = f.auto || (pk_locked && (f.primary_key || is_readonly_field));
+        serde_json::json!({
+            "label": f.name,
+            "extra": extra,
+            "input": render::render_input(f, value, lock_input),
+        })
+    };
+    let visible = |f: &&'static FieldSchema| -> bool {
+        if f.auto && !pk_locked {
+            return false;
+        }
+        true
+    };
+    let fieldsets_ctx: Vec<serde_json::Value> = if admin_cfg.fieldsets.is_empty() {
+        let rows: Vec<serde_json::Value> = model
+            .scalar_fields()
+            .filter(visible)
+            .map(row_for_field)
+            .collect();
+        vec![serde_json::json!({ "title": "", "rows": rows })]
+    } else {
+        admin_cfg
+            .fieldsets
+            .iter()
+            .map(|set| {
+                let rows: Vec<serde_json::Value> = set
+                    .fields
+                    .iter()
+                    .filter_map(|name| model.field(name))
+                    .filter(visible)
+                    .map(row_for_field)
+                    .collect();
+                serde_json::json!({ "title": set.title, "rows": rows })
+            })
+            .collect()
+    };
+    let inline_form_panels_ctx: Vec<serde_json::Value> = inline_panels
+        .into_iter()
+        .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null))
+        .collect();
+    let mut ctx = serde_json::json!({
+        "model": { "name": model.name, "table": model.table },
+        "title": title,
+        "action": action,
+        "edit_pk": edit_pk,
+        "error": error_msg,
+        "fieldsets": fieldsets_ctx,
+        "inline_form_panels": inline_form_panels_ctx,
+    });
+    super::templates::render_with_chrome(
+        "form.html",
+        &mut ctx,
+        chrome_context(state, Some(model.table)),
+    )
+}

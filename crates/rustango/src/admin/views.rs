@@ -1154,7 +1154,7 @@ pub(crate) async fn edit_form(
             where_clause: WhereExpr::Predicate(Filter {
                 column: pk_field.column,
                 op: Op::Eq,
-                value: pk_value,
+                value: pk_value.clone(),
             }),
             search: None,
             joins: vec![],
@@ -1180,7 +1180,20 @@ pub(crate) async fn edit_form(
             render::render_value_for_input_json(&row, f),
         );
     }
-    Ok(Html(render_form(&state, model, Some(&prefill), true, None)))
+    // #50 slice 2 — editable inline panels under the parent form.
+    // Best-effort: a child-table fetch failure drops the inlines to
+    // empty rather than breaking the whole edit page.
+    let inline_panels = super::inlines::render_form_for_parent(&state.pool, model, pk_value)
+        .await
+        .unwrap_or_default();
+    Ok(Html(super::helpers::render_form_with_inlines(
+        &state,
+        model,
+        Some(&prefill),
+        true,
+        None,
+        inline_panels,
+    )))
 }
 
 pub(crate) async fn update_submit(
@@ -1277,6 +1290,16 @@ pub(crate) async fn update_submit(
     // `tenancy::admin`, so operators get a "who changed what" trail
     // automatically.
     super::audit::emit_admin_audit_diff(&state, model, &pk_raw, before_row.as_ref(), &form).await;
+
+    // #50 slice 2 — process inline FormSet payloads. Best-effort: a
+    // per-row write failure increments `outcome.failed` and is logged
+    // separately, but the parent UPDATE has already committed at this
+    // point. Matches the existing audit-emit posture (no cross-row
+    // transaction wrapping).
+    let parent_pk_for_inlines =
+        forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
+    let _ = super::inlines::apply_post(&state.pool, model, parent_pk_for_inlines, &form).await;
+
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_raw, &form);
     Ok(Redirect::to(&target).into_response())
 }

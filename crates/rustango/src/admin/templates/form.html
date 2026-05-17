@@ -27,6 +27,61 @@
     </table>
   </fieldset>
 {% endfor %}
+{# #50 slice 2 — editable inline panels. Mirrors the read-only
+   layout in `_inline_panels.html` but each cell renders an <input>
+   and each panel carries the FormSet management form. #}
+{% if inline_form_panels and inline_form_panels | length > 0 %}
+  {% for panel in inline_form_panels %}
+    <section class="admin-inline-form admin-inline-form-{{ panel.kind }}"
+             data-child-table="{{ panel.child_table }}">
+      <h2>{{ panel.label }}</h2>
+      <input type="hidden" name="{{ panel.prefix }}-TOTAL_FORMS" value="{{ panel.total_forms }}">
+      <input type="hidden" name="{{ panel.prefix }}-INITIAL_FORMS" value="{{ panel.initial_forms }}">
+      <input type="hidden" name="{{ panel.prefix }}-MAX_NUM_FORMS"
+             value="{% if panel.max_num %}{{ panel.max_num }}{% endif %}">
+      {% if panel.kind == "tabular" %}
+        <table class="inline-form-table">
+          <thead>
+            <tr>
+              {% for label in panel.field_labels %}<th>{{ label }}</th>{% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in panel.rows %}
+              <tr>
+                {% for cell in row.cells %}<td>{{ cell.input_html | safe }}</td>{% endfor %}
+                {% if row.pk %}<td>{{ row.delete_input_html | safe }}{{ row.hidden_pk | safe }}</td>{% endif %}
+                {% if not row.pk and panel.initial_forms > 0 %}<td></td>{% endif %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        {# stacked #}
+        {% for row in panel.rows %}
+          <fieldset class="inline-form-stacked">
+            {% if row.pk %}
+              <legend>#{{ row.pk }}</legend>
+              {{ row.hidden_pk | safe }}
+            {% else %}
+              <legend>New</legend>
+            {% endif %}
+            <dl>
+              {% for cell in row.cells %}
+                <dt>{{ cell.label }}</dt>
+                <dd>{{ cell.input_html | safe }}</dd>
+              {% endfor %}
+              {% if row.pk %}
+                <dt>Delete</dt>
+                <dd>{{ row.delete_input_html | safe }}</dd>
+              {% endif %}
+            </dl>
+          </fieldset>
+        {% endfor %}
+      {% endif %}
+    </section>
+  {% endfor %}
+{% endif %}
   <p class="form-submit-row">
     <button type="submit" name="_save">Save</button>
     <button type="submit" name="_continue">Save and continue editing</button>
