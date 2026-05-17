@@ -67,6 +67,9 @@
 //!   does NOT verify the card is real / not expired / has funds.
 //! - `validate_isbn` — ISBN-10 or ISBN-13 checksum (auto-detects
 //!   which form by digit count).
+//! - `validate_hostname` — RFC 1123 hostname format. Each
+//!   dot-separated label 1–63 chars, letters/digits/hyphens, no
+//!   leading or trailing hyphen, total length ≤ 253.
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -690,6 +693,64 @@ fn validate_isbn_13(s: &str) -> Result<(), ValidationError> {
             "invalid_isbn",
             "Enter a valid ISBN-10 or ISBN-13.",
         ));
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------ hostname
+
+/// Validate an RFC 1123 hostname: dot-separated labels, each label
+/// 1–63 chars containing only ASCII letters / digits / hyphens, no
+/// leading or trailing hyphen on any label, total length ≤ 253.
+/// Empty string is rejected.
+///
+/// Suited for admin form fields that take a server hostname /
+/// DNS name. Distinct from `validate_url` (which expects a scheme)
+/// and `validate_ipv4_address` (which is for literal IPs).
+///
+/// Examples:
+/// - `validate_hostname("example.com")` → Ok
+/// - `validate_hostname("sub.example.co.uk")` → Ok
+/// - `validate_hostname("localhost")` → Ok (single-label allowed)
+/// - `validate_hostname("-bad.example.com")` → Err (leading `-`)
+/// - `validate_hostname("very-long-label-that-exceeds-the-sixty-three-character-limit-XX.com")` → Err
+/// - `validate_hostname("")` → Err
+///
+/// # Errors
+/// `ValidationError { code: "invalid_hostname", ... }`.
+pub fn validate_hostname(s: &str) -> Result<(), ValidationError> {
+    if s.is_empty() || s.len() > 253 {
+        return Err(ValidationError::new(
+            "invalid_hostname",
+            "Enter a valid hostname.",
+        ));
+    }
+    // Reject leading/trailing dot at the whole-name level.
+    if s.starts_with('.') || s.ends_with('.') {
+        return Err(ValidationError::new(
+            "invalid_hostname",
+            "Enter a valid hostname.",
+        ));
+    }
+    for label in s.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return Err(ValidationError::new(
+                "invalid_hostname",
+                "Enter a valid hostname.",
+            ));
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err(ValidationError::new(
+                "invalid_hostname",
+                "Enter a valid hostname.",
+            ));
+        }
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Err(ValidationError::new(
+                "invalid_hostname",
+                "Enter a valid hostname.",
+            ));
+        }
     }
     Ok(())
 }
@@ -1721,5 +1782,65 @@ mod tests {
         // X only valid as the 10th digit of ISBN-10.
         assert!(validate_isbn("9780131103X27").is_err());
         assert!(validate_isbn("X131103628").is_err());
+    }
+
+    // -------- validate_hostname --------
+
+    #[test]
+    fn hostname_accepts_common_shapes() {
+        assert!(validate_hostname("example.com").is_ok());
+        assert!(validate_hostname("sub.example.co.uk").is_ok());
+        assert!(validate_hostname("localhost").is_ok()); // single label
+        assert!(validate_hostname("api-v1.example.com").is_ok()); // hyphen in middle
+        assert!(validate_hostname("123.example.com").is_ok()); // numeric leading label
+    }
+
+    #[test]
+    fn hostname_rejects_leading_or_trailing_hyphen() {
+        assert!(validate_hostname("-bad.example.com").is_err());
+        assert!(validate_hostname("example-.com").is_err());
+        assert!(validate_hostname("sub.-bad.com").is_err());
+    }
+
+    #[test]
+    fn hostname_rejects_leading_or_trailing_dot() {
+        assert!(validate_hostname(".example.com").is_err());
+        assert!(validate_hostname("example.com.").is_err());
+    }
+
+    #[test]
+    fn hostname_rejects_empty_label_between_dots() {
+        assert!(validate_hostname("example..com").is_err());
+    }
+
+    #[test]
+    fn hostname_rejects_invalid_chars() {
+        assert!(validate_hostname("example.com/path").is_err());
+        assert!(validate_hostname("ex_ample.com").is_err()); // underscore not allowed
+        assert!(validate_hostname("ex ample.com").is_err());
+        assert!(validate_hostname("café.com").is_err()); // ASCII only
+    }
+
+    #[test]
+    fn hostname_rejects_oversize_label() {
+        // 64-char label — 1 too long.
+        let long_label: String = "a".repeat(64);
+        assert!(validate_hostname(&format!("{long_label}.com")).is_err());
+        // 63 chars is the max allowed.
+        let max_label: String = "a".repeat(63);
+        assert!(validate_hostname(&format!("{max_label}.com")).is_ok());
+    }
+
+    #[test]
+    fn hostname_rejects_oversize_total() {
+        // 254 chars total — 1 over the 253 cap.
+        let label = "a".repeat(63);
+        let too_long = format!("{label}.{label}.{label}.{label}xx"); // 63*4 + 3 dots + 2 = 257
+        assert!(validate_hostname(&too_long).is_err());
+    }
+
+    #[test]
+    fn hostname_rejects_empty() {
+        assert!(validate_hostname("").is_err());
     }
 }
