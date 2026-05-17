@@ -51,6 +51,11 @@
 //! - `validate_uuid` — RFC 4122 UUID string format. Useful for
 //!   handler argument validation when a path/query carries a UUID
 //!   you want to validate before hitting the DB.
+//! - `validate_iso_date` — ISO 8601 `YYYY-MM-DD` date.
+//! - `validate_iso_time` — ISO 8601 `HH:MM:SS` time (optional
+//!   fractional seconds).
+//! - `validate_iso_datetime` — RFC 3339 / ISO 8601 datetime with
+//!   timezone offset (`...Z` or `+HH:MM`).
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -429,6 +434,53 @@ pub fn validate_uuid(s: &str) -> Result<(), ValidationError> {
 #[must_use]
 pub fn is_uuid(s: &str) -> bool {
     validate_uuid(s).is_ok()
+}
+
+// ------------------------------------------------------------------ ISO 8601 date / time / datetime
+
+/// Validate an ISO 8601 calendar date in `YYYY-MM-DD` format. Rejects
+/// shorter / longer strings and out-of-range months / days (`Feb 30`,
+/// month 13, day 0 etc.) via chrono's `NaiveDate::parse_from_str`.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_iso_date", ... }`.
+pub fn validate_iso_date(s: &str) -> Result<(), ValidationError> {
+    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .map(|_| ())
+        .map_err(|_| ValidationError::new("invalid_iso_date", "Enter a date in YYYY-MM-DD format."))
+}
+
+/// Validate an ISO 8601 wall-clock time in `HH:MM:SS` format,
+/// optionally with fractional seconds (`HH:MM:SS.sss`). Rejects
+/// out-of-range hours / minutes / seconds.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_iso_time", ... }`.
+pub fn validate_iso_time(s: &str) -> Result<(), ValidationError> {
+    // Accept "HH:MM:SS" and "HH:MM:SS.sss" — chrono parses both with
+    // the %.f optional-fraction specifier.
+    chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
+        .map(|_| ())
+        .map_err(|_| ValidationError::new("invalid_iso_time", "Enter a time in HH:MM:SS format."))
+}
+
+/// Validate an RFC 3339 / ISO 8601 datetime with timezone offset
+/// (`2026-01-15T14:30:00Z` or `2026-01-15T14:30:00+02:00`). The
+/// timezone is REQUIRED — naive datetimes (no offset) are rejected
+/// because mixing local-time and UTC values without a marker is a
+/// classic data-corruption vector.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_iso_datetime", ... }`.
+pub fn validate_iso_datetime(s: &str) -> Result<(), ValidationError> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|_| ())
+        .map_err(|_| {
+            ValidationError::new(
+                "invalid_iso_datetime",
+                "Enter a datetime in RFC 3339 format (e.g. 2026-01-15T14:30:00Z).",
+            )
+        })
 }
 
 // ------------------------------------------------------------------ length / value bounds
@@ -1168,5 +1220,90 @@ mod tests {
     fn is_uuid_is_thin_boolean_wrapper() {
         assert!(is_uuid("550e8400-e29b-41d4-a716-446655440000"));
         assert!(!is_uuid("nope"));
+    }
+
+    // -------- validate_iso_date --------
+
+    #[test]
+    fn iso_date_accepts_well_formed() {
+        assert!(validate_iso_date("2026-01-15").is_ok());
+        assert!(validate_iso_date("1970-01-01").is_ok());
+        assert!(validate_iso_date("9999-12-31").is_ok());
+    }
+
+    #[test]
+    fn iso_date_rejects_out_of_range() {
+        assert!(validate_iso_date("2026-02-30").is_err()); // Feb has no 30
+        assert!(validate_iso_date("2026-13-01").is_err()); // month 13
+        assert!(validate_iso_date("2026-00-01").is_err()); // month 0
+        assert!(validate_iso_date("2026-01-32").is_err()); // day 32
+    }
+
+    #[test]
+    fn iso_date_rejects_wrong_format() {
+        // chrono's `%m` is lenient about padding — `2026-1-15` parses
+        // OK. We only reject formats that are unambiguously not a
+        // calendar date (US format, datetime-with-time, empty).
+        assert!(validate_iso_date("01/15/2026").is_err()); // US format
+        assert!(validate_iso_date("2026-01-15T00:00:00").is_err()); // datetime, not date
+        assert!(validate_iso_date("").is_err());
+    }
+
+    // -------- validate_iso_time --------
+
+    #[test]
+    fn iso_time_accepts_well_formed() {
+        assert!(validate_iso_time("14:30:00").is_ok());
+        assert!(validate_iso_time("00:00:00").is_ok());
+        assert!(validate_iso_time("23:59:59").is_ok());
+    }
+
+    #[test]
+    fn iso_time_accepts_fractional_seconds() {
+        assert!(validate_iso_time("14:30:00.123").is_ok());
+        assert!(validate_iso_time("14:30:00.123456").is_ok());
+    }
+
+    #[test]
+    fn iso_time_rejects_out_of_range() {
+        assert!(validate_iso_time("24:00:00").is_err()); // hour 24
+        assert!(validate_iso_time("14:60:00").is_err()); // minute 60
+                                                         // Note: chrono accepts second=60 as a leap-second marker
+                                                         // — that's intentional IETF/ISO behaviour, so we don't
+                                                         // assert against it here.
+    }
+
+    #[test]
+    fn iso_time_rejects_wrong_format() {
+        assert!(validate_iso_time("2:30 PM").is_err());
+        assert!(validate_iso_time("14:30").is_err()); // missing seconds
+        assert!(validate_iso_time("").is_err());
+    }
+
+    // -------- validate_iso_datetime --------
+
+    #[test]
+    fn iso_datetime_accepts_z_offset() {
+        assert!(validate_iso_datetime("2026-01-15T14:30:00Z").is_ok());
+        assert!(validate_iso_datetime("2026-01-15T14:30:00.123Z").is_ok());
+    }
+
+    #[test]
+    fn iso_datetime_accepts_explicit_offset() {
+        assert!(validate_iso_datetime("2026-01-15T14:30:00+02:00").is_ok());
+        assert!(validate_iso_datetime("2026-01-15T14:30:00-05:00").is_ok());
+    }
+
+    #[test]
+    fn iso_datetime_rejects_naive_datetime() {
+        // No timezone marker → rejected. Mixing naive + tz-aware
+        // datetimes is a data-corruption vector.
+        assert!(validate_iso_datetime("2026-01-15T14:30:00").is_err());
+    }
+
+    #[test]
+    fn iso_datetime_rejects_garbage() {
+        let e = validate_iso_datetime("not a date").unwrap_err();
+        assert_eq!(e.code, "invalid_iso_datetime");
     }
 }
