@@ -86,6 +86,8 @@
 //!   exists.
 //! - `validate_currency_code` — ISO 4217 currency code (3 uppercase
 //!   letters). Format-only.
+//! - `validate_language_tag` — BCP 47 light: `lang[-region]`
+//!   (e.g. `en`, `en-US`, `fr-CA`, `zh-Hans`).
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -1132,6 +1134,86 @@ pub fn validate_currency_code(s: &str) -> Result<(), ValidationError> {
         ));
     }
     Ok(())
+}
+
+/// Validate a [BCP 47](https://tools.ietf.org/html/bcp47)-shape
+/// language tag in its most common forms:
+/// - `lang` — 2 or 3 lowercase letters (ISO 639-1 / 639-2).
+/// - `lang-REGION` — 2-letter region (`en-US`, `fr-CA`).
+/// - `lang-Script` — 4-letter Title-case script subtag
+///   (`zh-Hans`, `sr-Cyrl`).
+/// - `lang-Script-REGION` — both (`zh-Hans-CN`).
+/// - Numeric 3-digit UN region code in place of the 2-letter
+///   region (`es-419` for Latin America).
+///
+/// **Subset only** — doesn't cover the full BCP 47 grammar (no
+/// extensions, no private use, no variants beyond Script).
+/// Doesn't validate that the language / region codes correspond
+/// to real entries in the IANA registry — that needs an embedded
+/// list.
+///
+/// Examples:
+/// - `validate_language_tag("en")` → Ok
+/// - `validate_language_tag("en-US")` → Ok
+/// - `validate_language_tag("fr-CA")` → Ok
+/// - `validate_language_tag("zh-Hans-CN")` → Ok
+/// - `validate_language_tag("es-419")` → Ok
+/// - `validate_language_tag("EN")` → Err (uppercase lang)
+/// - `validate_language_tag("en-us")` → Err (lowercase region)
+/// - `validate_language_tag("english")` → Err (too long)
+///
+/// # Errors
+/// `ValidationError { code: "invalid_language_tag", ... }`.
+pub fn validate_language_tag(s: &str) -> Result<(), ValidationError> {
+    let bad = || {
+        ValidationError::new(
+            "invalid_language_tag",
+            "Enter a valid language tag (e.g. en, en-US, zh-Hans-CN).",
+        )
+    };
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return Err(bad());
+    }
+    // Part 0: language subtag — 2 or 3 lowercase letters.
+    let lang = parts[0];
+    if !(2..=3).contains(&lang.len()) || !lang.chars().all(|c| c.is_ascii_lowercase()) {
+        return Err(bad());
+    }
+    let mut idx = 1;
+    // Optional script subtag — 4 letters, Title-case (Xxxx).
+    if idx < parts.len() {
+        let p = parts[idx];
+        if p.len() == 4 && is_script_subtag(p) {
+            idx += 1;
+        }
+    }
+    // Optional region subtag — 2 uppercase letters OR 3 digits.
+    if idx < parts.len() {
+        let p = parts[idx];
+        let is_alpha2 = p.len() == 2 && p.chars().all(|c| c.is_ascii_uppercase());
+        let is_num3 = p.len() == 3 && p.chars().all(|c| c.is_ascii_digit());
+        if !is_alpha2 && !is_num3 {
+            return Err(bad());
+        }
+        idx += 1;
+    }
+    if idx != parts.len() {
+        return Err(bad());
+    }
+    Ok(())
+}
+
+fn is_script_subtag(s: &str) -> bool {
+    if s.len() != 4 {
+        return false;
+    }
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_lowercase())
 }
 
 // ------------------------------------------------------------------ length / value bounds
@@ -2555,5 +2637,64 @@ mod tests {
         assert!(validate_currency_code("usd").is_err());
         assert!(validate_currency_code("UsD").is_err());
         assert!(validate_currency_code("U5D").is_err());
+    }
+
+    // -------- validate_language_tag --------
+
+    #[test]
+    fn language_tag_accepts_bare_lang() {
+        assert!(validate_language_tag("en").is_ok());
+        assert!(validate_language_tag("fr").is_ok());
+        assert!(validate_language_tag("zh").is_ok());
+        // 3-letter language (ISO 639-2/3).
+        assert!(validate_language_tag("eng").is_ok());
+    }
+
+    #[test]
+    fn language_tag_accepts_lang_with_region() {
+        assert!(validate_language_tag("en-US").is_ok());
+        assert!(validate_language_tag("fr-CA").is_ok());
+        assert!(validate_language_tag("pt-BR").is_ok());
+        // Numeric UN region code (es-419 = Latin American Spanish).
+        assert!(validate_language_tag("es-419").is_ok());
+    }
+
+    #[test]
+    fn language_tag_accepts_lang_with_script() {
+        assert!(validate_language_tag("zh-Hans").is_ok());
+        assert!(validate_language_tag("sr-Cyrl").is_ok());
+        // Script + region.
+        assert!(validate_language_tag("zh-Hans-CN").is_ok());
+    }
+
+    #[test]
+    fn language_tag_rejects_uppercase_lang() {
+        assert!(validate_language_tag("EN").is_err());
+        assert!(validate_language_tag("En").is_err());
+    }
+
+    #[test]
+    fn language_tag_rejects_wrong_region_case() {
+        assert!(validate_language_tag("en-us").is_err());
+        assert!(validate_language_tag("en-Us").is_err());
+    }
+
+    #[test]
+    fn language_tag_rejects_wrong_lang_length() {
+        assert!(validate_language_tag("e").is_err());
+        assert!(validate_language_tag("english").is_err());
+    }
+
+    #[test]
+    fn language_tag_rejects_too_many_parts() {
+        // Variants / extensions / private-use not supported here.
+        assert!(validate_language_tag("en-US-x-something").is_err());
+    }
+
+    #[test]
+    fn language_tag_rejects_empty_or_garbage() {
+        assert!(validate_language_tag("").is_err());
+        assert!(validate_language_tag("not a tag").is_err());
+        assert!(validate_language_tag("en_US").is_err()); // wrong separator
     }
 }
