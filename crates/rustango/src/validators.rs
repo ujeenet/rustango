@@ -29,6 +29,13 @@
 //! - `validate_slug` — `[a-zA-Z0-9_-]+`. Django's `slug_re`.
 //! - `validate_min_length` / `validate_max_length` — string char count.
 //! - `validate_min_value` / `validate_max_value` — i64 numeric bounds.
+//! - `validate_integer` — parses as `i64`.
+//! - `validate_decimal` — `max_digits` + `decimal_places` bounds
+//!   (Django's `DecimalValidator`).
+//! - `validate_ipv4_address` / `validate_ipv6_address` — dotted-quad /
+//!   colon-hex address shape via `std::net::Ipv4Addr` / `Ipv6Addr`.
+//! - `validate_comma_separated_integer_list` — `"1,2,3"`. Django's
+//!   `validate_comma_separated_integer_list`.
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -276,6 +283,150 @@ pub fn validate_max_value(n: i64, max: i64) -> Result<(), ValidationError> {
     Ok(())
 }
 
+// ------------------------------------------------------------------ integer / decimal
+
+/// Validate that `s` parses as a signed 64-bit integer. Django's
+/// `validate_integer`. Leading/trailing whitespace is rejected
+/// (Django's implementation calls `int()` which is strict about
+/// surrounding whitespace).
+///
+/// # Errors
+/// `ValidationError { code: "invalid_integer", ... }`.
+pub fn validate_integer(s: &str) -> Result<(), ValidationError> {
+    if s != s.trim() || s.is_empty() {
+        return Err(ValidationError::new(
+            "invalid_integer",
+            "Enter a valid integer.",
+        ));
+    }
+    s.parse::<i64>()
+        .map(|_| ())
+        .map_err(|_| ValidationError::new("invalid_integer", "Enter a valid integer."))
+}
+
+/// Validate a decimal-number string under Django's
+/// `DecimalValidator` shape: at most `max_digits` total digits
+/// (excluding sign + decimal point), and at most `decimal_places`
+/// digits after the point.
+///
+/// `max_digits` is the **total** digit count — pre- and
+/// post-decimal combined. So `12.34` is 4 digits, 2 decimal_places.
+/// Pass `None` for either bound to disable that check.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_decimal", ... }` for non-numeric
+/// input. `code: "max_digits"` / `"max_decimal_places"` for bound
+/// violations.
+pub fn validate_decimal(
+    s: &str,
+    max_digits: Option<usize>,
+    decimal_places: Option<usize>,
+) -> Result<(), ValidationError> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err(ValidationError::new("invalid_decimal", "Enter a number."));
+    }
+    let unsigned = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
+    let (int_part, frac_part) = match unsigned.split_once('.') {
+        Some((a, b)) => (a, b),
+        None => (unsigned, ""),
+    };
+    // Either side may be empty individually (".5" or "5."), but
+    // not both (a bare "." or empty string).
+    if int_part.is_empty() && frac_part.is_empty() {
+        return Err(ValidationError::new("invalid_decimal", "Enter a number."));
+    }
+    if !int_part.chars().all(|c| c.is_ascii_digit())
+        || !frac_part.chars().all(|c| c.is_ascii_digit())
+    {
+        return Err(ValidationError::new("invalid_decimal", "Enter a number."));
+    }
+    // Drop leading zeros from int_part when counting, so "007.5"
+    // has 2 digits not 4 — matches Django's Decimal coercion.
+    let int_digits = int_part.trim_start_matches('0').len();
+    let frac_digits = frac_part.len();
+    if let Some(places) = decimal_places {
+        if frac_digits > places {
+            return Err(ValidationError::new(
+                "max_decimal_places",
+                format!(
+                    "Ensure there are no more than {places} decimal places (got {frac_digits})."
+                ),
+            ));
+        }
+    }
+    if let Some(total) = max_digits {
+        let total_digits = int_digits + frac_digits;
+        if total_digits > total {
+            return Err(ValidationError::new(
+                "max_digits",
+                format!(
+                    "Ensure there are no more than {total} digits in total (got {total_digits})."
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------ IPv4 / IPv6
+
+/// Validate that `s` parses as an IPv4 address (dotted-quad). Uses
+/// `std::net::Ipv4Addr::from_str` so the parse rules match the rest
+/// of the standard library.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_ipv4_address", ... }`.
+pub fn validate_ipv4_address(s: &str) -> Result<(), ValidationError> {
+    use std::str::FromStr as _;
+    std::net::Ipv4Addr::from_str(s)
+        .map(|_| ())
+        .map_err(|_| ValidationError::new("invalid_ipv4_address", "Enter a valid IPv4 address."))
+}
+
+/// Validate that `s` parses as an IPv6 address. Uses
+/// `std::net::Ipv6Addr::from_str`.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_ipv6_address", ... }`.
+pub fn validate_ipv6_address(s: &str) -> Result<(), ValidationError> {
+    use std::str::FromStr as _;
+    std::net::Ipv6Addr::from_str(s)
+        .map(|_| ())
+        .map_err(|_| ValidationError::new("invalid_ipv6_address", "Enter a valid IPv6 address."))
+}
+
+// ------------------------------------------------------------------ comma-separated integer list
+
+/// Validate that `s` is a comma-separated list of integers
+/// (`"1,2,3"`). Empty string is rejected (Django returns an error
+/// — use `Option<String>` upstream if the field is optional).
+///
+/// Whitespace around individual entries is tolerated (`"1, 2, 3"`
+/// passes) since this is how operators typically type lists into
+/// forms — Django accepts it too.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_comma_separated_integer_list", ... }`.
+pub fn validate_comma_separated_integer_list(s: &str) -> Result<(), ValidationError> {
+    if s.trim().is_empty() {
+        return Err(ValidationError::new(
+            "invalid_comma_separated_integer_list",
+            "Enter only digits separated by commas.",
+        ));
+    }
+    for part in s.split(',') {
+        let part = part.trim();
+        if part.is_empty() || part.parse::<i64>().is_err() {
+            return Err(ValidationError::new(
+                "invalid_comma_separated_integer_list",
+                "Enter only digits separated by commas.",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +583,127 @@ mod tests {
         let e = ValidationError::new("invalid_email", "Bad email.");
         assert_eq!(format!("{e}"), "Bad email.");
         assert_eq!(e.code, "invalid_email");
+    }
+
+    // -------- validate_integer --------
+
+    #[test]
+    fn integer_accepts_positive_negative_zero() {
+        assert!(validate_integer("0").is_ok());
+        assert!(validate_integer("42").is_ok());
+        assert!(validate_integer("-7").is_ok());
+        assert!(validate_integer("+1").is_ok());
+    }
+
+    #[test]
+    fn integer_rejects_decimals_and_letters() {
+        assert!(validate_integer("3.14").is_err());
+        assert!(validate_integer("abc").is_err());
+        assert!(validate_integer("12abc").is_err());
+    }
+
+    #[test]
+    fn integer_rejects_surrounding_whitespace() {
+        // Django's `int()` rejects whitespace — we match.
+        assert!(validate_integer(" 42").is_err());
+        assert!(validate_integer("42 ").is_err());
+        assert!(validate_integer("").is_err());
+    }
+
+    // -------- validate_decimal --------
+
+    #[test]
+    fn decimal_accepts_well_formed_numbers() {
+        assert!(validate_decimal("12.34", None, None).is_ok());
+        assert!(validate_decimal("-12.34", None, None).is_ok());
+        assert!(validate_decimal("+0.5", None, None).is_ok());
+        assert!(validate_decimal(".5", None, None).is_ok());
+        assert!(validate_decimal("5.", None, None).is_ok());
+        assert!(validate_decimal("100", None, None).is_ok());
+    }
+
+    #[test]
+    fn decimal_rejects_non_numeric() {
+        assert!(validate_decimal("abc", None, None).is_err());
+        assert!(validate_decimal("12.3.4", None, None).is_err());
+        assert!(validate_decimal(".", None, None).is_err());
+        assert!(validate_decimal("", None, None).is_err());
+    }
+
+    #[test]
+    fn decimal_enforces_max_decimal_places() {
+        // 2 places allowed; "12.345" has 3 → error.
+        let e = validate_decimal("12.345", None, Some(2)).unwrap_err();
+        assert_eq!(e.code, "max_decimal_places");
+        // Equal-to-limit passes.
+        assert!(validate_decimal("12.34", None, Some(2)).is_ok());
+    }
+
+    #[test]
+    fn decimal_enforces_max_total_digits() {
+        // 5 total digits allowed; "12345.6" has 6 → error.
+        let e = validate_decimal("12345.6", Some(5), None).unwrap_err();
+        assert_eq!(e.code, "max_digits");
+        assert!(validate_decimal("1234.5", Some(5), None).is_ok());
+    }
+
+    #[test]
+    fn decimal_max_digits_ignores_leading_zeros() {
+        // "007.5" should count as 2 digits (7 + 5) not 4.
+        assert!(validate_decimal("007.5", Some(2), None).is_ok());
+    }
+
+    // -------- validate_ipv4_address --------
+
+    #[test]
+    fn ipv4_accepts_dotted_quad() {
+        assert!(validate_ipv4_address("127.0.0.1").is_ok());
+        assert!(validate_ipv4_address("0.0.0.0").is_ok());
+        assert!(validate_ipv4_address("255.255.255.255").is_ok());
+    }
+
+    #[test]
+    fn ipv4_rejects_malformed_or_out_of_range() {
+        assert!(validate_ipv4_address("256.0.0.1").is_err());
+        assert!(validate_ipv4_address("not.an.ip.addr").is_err());
+        assert!(validate_ipv4_address("1.2.3").is_err());
+        assert!(validate_ipv4_address("").is_err());
+    }
+
+    // -------- validate_ipv6_address --------
+
+    #[test]
+    fn ipv6_accepts_full_and_shorthand() {
+        assert!(validate_ipv6_address("2001:db8::1").is_ok());
+        assert!(validate_ipv6_address("::1").is_ok());
+        assert!(validate_ipv6_address("fe80::1234:5678:9abc:def0").is_ok());
+    }
+
+    #[test]
+    fn ipv6_rejects_v4_addresses_and_garbage() {
+        assert!(validate_ipv6_address("127.0.0.1").is_err());
+        assert!(validate_ipv6_address("zzz").is_err());
+        assert!(validate_ipv6_address("").is_err());
+    }
+
+    // -------- validate_comma_separated_integer_list --------
+
+    #[test]
+    fn comma_list_accepts_clean_form() {
+        assert!(validate_comma_separated_integer_list("1,2,3").is_ok());
+        assert!(validate_comma_separated_integer_list("42").is_ok());
+        assert!(validate_comma_separated_integer_list("-1,0,1").is_ok());
+    }
+
+    #[test]
+    fn comma_list_tolerates_inner_whitespace() {
+        assert!(validate_comma_separated_integer_list("1, 2, 3").is_ok());
+    }
+
+    #[test]
+    fn comma_list_rejects_empty_and_non_integers() {
+        assert!(validate_comma_separated_integer_list("").is_err());
+        assert!(validate_comma_separated_integer_list("1,abc,3").is_err());
+        assert!(validate_comma_separated_integer_list("1,,3").is_err());
     }
 }
