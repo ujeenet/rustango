@@ -5,9 +5,9 @@
 //! `linebreaks`, `default_if_none`, `add`, `cut`, `divisibleby`,
 //! `floatformat`, `escapejs`, `yesno`, `get_digit`, `dictsort`,
 //! `slugify_unicode`, `iriencode`, `wordwrap`, `mask_email`,
-//! `mask_card`, `mask_phone`, `dictsortreversed`, `oxford_join`.
-//! Call [`register_filters`] on a Tera instance to make them
-//! available:
+//! `mask_card`, `mask_phone`, `dictsortreversed`, `oxford_join`,
+//! `initials`. Call [`register_filters`] on a Tera instance to
+//! make them available:
 //!
 //! ```ignore
 //! let mut tera = tera::Tera::default();
@@ -49,6 +49,7 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("mask_phone", mask_phone);
     tera.register_filter("dictsortreversed", dictsortreversed);
     tera.register_filter("oxford_join", oxford_join);
+    tera.register_filter("initials", initials);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -573,6 +574,52 @@ fn oxford_join(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Val
             format!("{head}, {conj} {last}")
         }
     };
+    Ok(to_value(out)?)
+}
+
+// ------------------------------------------------------------------ initials
+
+/// `initials` — return the uppercase first character of each
+/// whitespace-separated word in the input. Used for the
+/// avatar-fallback shape every web app builds (one or two letters
+/// inside a colored circle when no profile picture is uploaded).
+///
+/// Behaviour:
+/// - Default: first character of every word, uppercased.
+/// - `count` argument: limit to the first N initials.
+/// - Non-alphabetic leading chars are skipped so `"123 Alice"`
+///   yields `"A"` not `"1"`.
+/// - Single string of one char yields that uppercased char.
+///
+/// Examples:
+/// - `"Alice"` → `"A"`
+/// - `"Alice Bob"` → `"AB"`
+/// - `"alice m. bob"` → `"AMB"`
+/// - `"alice m. bob" | initials(count=2)` → `"AM"`
+/// - `""` → `""`
+fn initials(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(s) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let limit = args
+        .get("count")
+        .or_else(|| args.values().next())
+        .and_then(Value::as_i64)
+        .map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+    let mut out = String::new();
+    for word in s.split_whitespace() {
+        // Find the first alphabetic char in the word.
+        if let Some(ch) = word.chars().find(|c| c.is_alphabetic()) {
+            for upper_ch in ch.to_uppercase() {
+                out.push(upper_ch);
+            }
+            if let Some(lim) = limit {
+                if out.chars().count() >= lim {
+                    break;
+                }
+            }
+        }
+    }
     Ok(to_value(out)?)
 }
 
@@ -1848,5 +1895,58 @@ mod tests {
     fn oxford_join_passes_through_non_array() {
         let out = oxford_join(&json!("not a list"), &HashMap::new()).unwrap();
         assert_eq!(out, json!("not a list"));
+    }
+
+    // -------- initials --------
+
+    #[test]
+    fn initials_extracts_first_char_of_each_word() {
+        let out = initials(&json!("Alice Bob"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("AB"));
+    }
+
+    #[test]
+    fn initials_uppercases_lowercase_input() {
+        let out = initials(&json!("alice m. bob"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("AMB"));
+    }
+
+    #[test]
+    fn initials_single_word_yields_one_char() {
+        let out = initials(&json!("Alice"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("A"));
+    }
+
+    #[test]
+    fn initials_skips_leading_non_alpha_in_word() {
+        // "123 Alice" → "A" (digit word produces nothing, second
+        // word contributes its first letter).
+        let out = initials(&json!("123 Alice"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("A"));
+    }
+
+    #[test]
+    fn initials_count_limits_result() {
+        let out = initials(&json!("alice m. bob"), &args_pos(json!(2))).unwrap();
+        assert_eq!(out, json!("AM"));
+    }
+
+    #[test]
+    fn initials_handles_unicode_letters() {
+        let out = initials(&json!("ümlaut éclair"), &HashMap::new()).unwrap();
+        // Unicode uppercase.
+        assert_eq!(out, json!("ÜÉ"));
+    }
+
+    #[test]
+    fn initials_empty_input_yields_empty() {
+        let out = initials(&json!(""), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(""));
+    }
+
+    #[test]
+    fn initials_passes_through_non_string() {
+        let out = initials(&json!(42), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(42));
     }
 }
