@@ -41,6 +41,8 @@
 //!   colon-hex address shape via `std::net::Ipv4Addr` / `Ipv6Addr`.
 //! - `validate_comma_separated_integer_list` — `"1,2,3"`. Django's
 //!   `validate_comma_separated_integer_list`.
+//! - `validate_email_list` — comma-separated list of email addresses,
+//!   one per "CC" field entry.
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -457,6 +459,38 @@ pub fn validate_ipv6_address(s: &str) -> Result<(), ValidationError> {
 
 // ------------------------------------------------------------------ comma-separated integer list
 
+/// Validate a comma-separated list of email addresses (e.g. a
+/// "CC" field that takes multiple recipients). Each entry must
+/// pass [`validate_email`]; surrounding whitespace per entry is
+/// tolerated.
+///
+/// Empty list and empty entries (`"a@b.com,,c@d.com"`) are
+/// rejected — they're almost certainly a typo, not intent.
+///
+/// # Errors
+/// Returns the FIRST invalid entry's error, with the same code
+/// (`"invalid_email"`) so handlers can surface a single "fix this"
+/// message to the user.
+pub fn validate_email_list(s: &str) -> Result<(), ValidationError> {
+    if s.trim().is_empty() {
+        return Err(ValidationError::new(
+            "invalid_email",
+            "Enter at least one email address.",
+        ));
+    }
+    for part in s.split(',') {
+        let entry = part.trim();
+        if entry.is_empty() {
+            return Err(ValidationError::new(
+                "invalid_email",
+                "Enter a valid email address.",
+            ));
+        }
+        validate_email(entry)?;
+    }
+    Ok(())
+}
+
 /// Validate that `s` is a comma-separated list of integers
 /// (`"1,2,3"`). Empty string is rejected (Django returns an error
 /// — use `Option<String>` upstream if the field is optional).
@@ -803,5 +837,35 @@ mod tests {
     fn prohibit_null_rejects_strings_containing_nul() {
         let e = validate_prohibit_null_characters("hello\0world").unwrap_err();
         assert_eq!(e.code, "null_characters_not_allowed");
+    }
+
+    // -------- validate_email_list --------
+
+    #[test]
+    fn email_list_accepts_single_email() {
+        assert!(validate_email_list("alice@example.com").is_ok());
+    }
+
+    #[test]
+    fn email_list_accepts_multiple_with_whitespace() {
+        assert!(validate_email_list("a@b.com, c@d.com,e@f.com").is_ok());
+    }
+
+    #[test]
+    fn email_list_rejects_empty_string() {
+        assert!(validate_email_list("").is_err());
+        assert!(validate_email_list("   ").is_err());
+    }
+
+    #[test]
+    fn email_list_rejects_empty_entries() {
+        assert!(validate_email_list("a@b.com,,c@d.com").is_err());
+        assert!(validate_email_list("a@b.com, ,c@d.com").is_err());
+    }
+
+    #[test]
+    fn email_list_rejects_invalid_entry() {
+        let e = validate_email_list("a@b.com,not-an-email,c@d.com").unwrap_err();
+        assert_eq!(e.code, "invalid_email");
     }
 }
