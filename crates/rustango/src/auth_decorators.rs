@@ -210,6 +210,96 @@ where
     redirect_to_login(&cfg.login_url, &cfg.redirect_field, &original)
 }
 
+/// Predicate-based access gate that returns `403 Forbidden` on
+/// failure instead of redirecting to a login page. Same shape as
+/// [`user_passes_test`] but suited to JSON API endpoints where a
+/// 302 to `/login` makes no sense — clients can't follow it and
+/// shouldn't render an HTML login page.
+///
+/// Anonymous requests get 401 (Unauthorized) so the client can
+/// distinguish "you need to authenticate" from "you authenticated
+/// but lack the required permission" — matches IETF's RFC 7231
+/// guidance.
+///
+/// ```ignore
+/// use rustango::auth_decorators::user_passes_test_or_403;
+///
+/// let api = Router::new()
+///     .route("/api/admin/stats", get(stats))
+///     .layer(user_passes_test_or_403(|u| u.is_superuser));
+/// ```
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub fn user_passes_test_or_403<F>(
+    predicate: F,
+) -> impl tower::Layer<
+    axum::routing::Route,
+    Service = impl tower::Service<
+        Request<Body>,
+        Response = Response,
+        Error = std::convert::Infallible,
+        Future = impl Send + 'static,
+    > + Clone
+                  + Send
+                  + Sync
+                  + 'static,
+> + Clone
+where
+    F: Fn(&crate::tenancy::auth::User) -> bool + Send + Sync + 'static,
+{
+    let pred = Arc::new(predicate);
+    axum::middleware::from_fn(move |req: Request<Body>, next: Next| {
+        let pred = pred.clone();
+        async move { handle_user_passes_test_or_403(pred, req, next).await }
+    })
+}
+
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+async fn handle_user_passes_test_or_403<F>(pred: Arc<F>, req: Request<Body>, next: Next) -> Response
+where
+    F: Fn(&crate::tenancy::auth::User) -> bool + Send + Sync + 'static,
+{
+    use axum::extract::FromRequestParts as _;
+    let (mut parts, body) = req.into_parts();
+    let user = crate::extractors::SessionUser::from_request_parts(&mut parts, &())
+        .await
+        .unwrap_or(crate::extractors::SessionUser(None));
+    match user.0.as_ref() {
+        None => Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .body(Body::empty())
+            .expect("401 + empty body is always valid"),
+        Some(u) if pred(u) => {
+            let req = Request::from_parts(parts, body);
+            next.run(req).await
+        }
+        Some(_) => Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(Body::empty())
+            .expect("403 + empty body is always valid"),
+    }
+}
+
+/// Authentication-only gate that returns 401 on anonymous requests
+/// (instead of redirecting). The API-endpoint counterpart to
+/// [`login_required`]; equivalent to
+/// `user_passes_test_or_403(|_| true)` but reads tighter at call
+/// sites.
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub fn login_required_or_401() -> impl tower::Layer<
+    axum::routing::Route,
+    Service = impl tower::Service<
+        Request<Body>,
+        Response = Response,
+        Error = std::convert::Infallible,
+        Future = impl Send + 'static,
+    > + Clone
+                  + Send
+                  + Sync
+                  + 'static,
+> + Clone {
+    user_passes_test_or_403(|_| true)
+}
+
 #[cfg(all(feature = "tenancy", feature = "postgres"))]
 async fn handle_login_required(
     cfg: Arc<LoginRequiredConfig>,
@@ -573,6 +663,48 @@ mod tests {
             let _layer = user_passes_test("/login", |u: &crate::tenancy::auth::User| {
                 u.is_superuser && u.active
             });
+        };
+    }
+
+    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[tokio::test]
+    async fn user_passes_test_or_403_returns_401_for_anonymous() {
+        use axum::body::Body;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt as _;
+
+        async fn admin_only() -> &'static str {
+            "ok"
+        }
+
+        let app = Router::new()
+            .route("/api/admin/stats", get(admin_only))
+            .layer(user_passes_test_or_403(|u| u.is_superuser));
+
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/admin/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // No SessionUser → 401 (not authenticated). Distinct from
+        // 403 (authenticated-but-not-allowed) so clients can
+        // distinguish.
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[test]
+    fn login_required_or_401_signature_compiles() {
+        // Compile-only: the no-arg variant is sugar over
+        // `user_passes_test_or_403(|_| true)`. Pin the signature.
+        let _ = || {
+            let _layer = login_required_or_401();
         };
     }
 }
