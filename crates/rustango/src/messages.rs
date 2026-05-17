@@ -241,6 +241,99 @@ pub fn error(secret: &[u8], headers: &axum::http::HeaderMap, body: &str) -> Stri
     push(secret, headers, Level::Error, body, "")
 }
 
+// ------------------------------------------------------------------ redirect-with-message
+
+/// Stage a message at `level` and return a `302 Found` redirect to
+/// `url` with the `Set-Cookie` header pre-attached. Combines the
+/// "push + build response + attach cookie" idiom that handlers
+/// otherwise hand-roll in 4-5 lines per flash redirect.
+///
+/// Mirrors Django's `messages.add_message + redirect(url)` flow —
+/// the canonical post-save flash pattern.
+///
+/// ```ignore
+/// use rustango::messages::{redirect_with_message, Level};
+///
+/// async fn save_handler(headers: HeaderMap) -> Response {
+///     // ... do the save ...
+///     redirect_with_message(
+///         SECRET, &headers, Level::Success, "Saved.", "/items",
+///     )
+/// }
+/// ```
+///
+/// On `HeaderValue::from_str` failure (the cookie value somehow
+/// contains a forbidden byte — should never happen with normal
+/// message bodies) the redirect is returned WITHOUT the cookie, so
+/// the navigation still works but the message is silently dropped.
+#[must_use]
+pub fn redirect_with_message(
+    secret: &[u8],
+    headers: &axum::http::HeaderMap,
+    level: Level,
+    body: &str,
+    url: &str,
+) -> axum::response::Response {
+    let cookie = push(secret, headers, level, body, "");
+    let mut res = axum::response::Response::builder()
+        .status(axum::http::StatusCode::FOUND)
+        .body(axum::body::Body::empty())
+        .expect("302 + empty body is always valid");
+    if let Ok(v) = axum::http::HeaderValue::from_str(url) {
+        res.headers_mut().insert(axum::http::header::LOCATION, v);
+    }
+    if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
+        res.headers_mut().append(axum::http::header::SET_COOKIE, v);
+    }
+    res
+}
+
+/// Sugar for [`redirect_with_message`] at `Level::Success`. The
+/// success path of the post-save flash idiom: stage a green message,
+/// redirect to the list view.
+#[must_use]
+pub fn redirect_with_success(
+    secret: &[u8],
+    headers: &axum::http::HeaderMap,
+    body: &str,
+    url: &str,
+) -> axum::response::Response {
+    redirect_with_message(secret, headers, Level::Success, body, url)
+}
+
+/// Sugar for [`redirect_with_message`] at `Level::Info`.
+#[must_use]
+pub fn redirect_with_info(
+    secret: &[u8],
+    headers: &axum::http::HeaderMap,
+    body: &str,
+    url: &str,
+) -> axum::response::Response {
+    redirect_with_message(secret, headers, Level::Info, body, url)
+}
+
+/// Sugar for [`redirect_with_message`] at `Level::Warning`.
+#[must_use]
+pub fn redirect_with_warning(
+    secret: &[u8],
+    headers: &axum::http::HeaderMap,
+    body: &str,
+    url: &str,
+) -> axum::response::Response {
+    redirect_with_message(secret, headers, Level::Warning, body, url)
+}
+
+/// Sugar for [`redirect_with_message`] at `Level::Error`.
+#[must_use]
+pub fn redirect_with_error(
+    secret: &[u8],
+    headers: &axum::http::HeaderMap,
+    body: &str,
+    url: &str,
+) -> axum::response::Response {
+    redirect_with_message(secret, headers, Level::Error, body, url)
+}
+
 // ------------------------------------------------------------------ Tera helper
 
 /// Drain messages from the request cookie and stamp them into the
@@ -499,5 +592,115 @@ mod tests {
         .unwrap();
         let out = tera.render("_", &ctx).unwrap();
         assert_eq!(out, "success:Saved;");
+    }
+
+    // -------- redirect_with_message + sugar helpers --------
+
+    /// Pull the Set-Cookie's name=value first segment so we can fold
+    /// it back into the next request and confirm the message survives
+    /// the round-trip.
+    fn set_cookie_value(res: &axum::response::Response) -> String {
+        let v = res
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .expect("Set-Cookie present");
+        cookie_from_set(v.to_str().unwrap())
+    }
+
+    #[test]
+    fn redirect_with_message_emits_302_with_location_and_set_cookie() {
+        let res =
+            redirect_with_message(SECRET, &empty_headers(), Level::Success, "Saved.", "/items");
+        assert_eq!(res.status(), axum::http::StatusCode::FOUND);
+        let loc = res
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(loc, "/items");
+        assert!(res.headers().get(axum::http::header::SET_COOKIE).is_some());
+    }
+
+    #[test]
+    fn redirect_with_message_cookie_decodes_back_to_message() {
+        // Stage one, redirect, then read the cookie back via the
+        // public `drain` API — proves the helper produced a valid
+        // signed payload the framework's own reader accepts.
+        let res =
+            redirect_with_message(SECRET, &empty_headers(), Level::Warning, "Heads up.", "/x");
+        let cookie = set_cookie_value(&res);
+        let (msgs, _clear) = drain(SECRET, &headers_with(&cookie));
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].level, Level::Warning);
+        assert_eq!(msgs[0].body, "Heads up.");
+    }
+
+    #[test]
+    fn redirect_with_success_stages_at_success_level() {
+        let res = redirect_with_success(SECRET, &empty_headers(), "Created.", "/items");
+        let cookie = set_cookie_value(&res);
+        let (msgs, _) = drain(SECRET, &headers_with(&cookie));
+        assert_eq!(msgs[0].level, Level::Success);
+        assert_eq!(msgs[0].body, "Created.");
+    }
+
+    #[test]
+    fn redirect_with_info_stages_at_info_level() {
+        let res = redirect_with_info(SECRET, &empty_headers(), "FYI.", "/x");
+        let cookie = set_cookie_value(&res);
+        let (msgs, _) = drain(SECRET, &headers_with(&cookie));
+        assert_eq!(msgs[0].level, Level::Info);
+    }
+
+    #[test]
+    fn redirect_with_warning_stages_at_warning_level() {
+        let res = redirect_with_warning(SECRET, &empty_headers(), "Careful.", "/x");
+        let cookie = set_cookie_value(&res);
+        let (msgs, _) = drain(SECRET, &headers_with(&cookie));
+        assert_eq!(msgs[0].level, Level::Warning);
+    }
+
+    #[test]
+    fn redirect_with_error_stages_at_error_level() {
+        let res = redirect_with_error(SECRET, &empty_headers(), "Boom.", "/x");
+        let cookie = set_cookie_value(&res);
+        let (msgs, _) = drain(SECRET, &headers_with(&cookie));
+        assert_eq!(msgs[0].level, Level::Error);
+    }
+
+    #[test]
+    fn redirect_with_message_preserves_existing_staged_messages() {
+        // Push a message first, then build a redirect-with-message —
+        // the cookie attached to the redirect should carry BOTH.
+        let first_set = push(SECRET, &empty_headers(), Level::Info, "First.", "");
+        let inbound = headers_with(&cookie_from_set(&first_set));
+        let res = redirect_with_message(SECRET, &inbound, Level::Success, "Second.", "/x");
+        let cookie = set_cookie_value(&res);
+        let (msgs, _) = drain(SECRET, &headers_with(&cookie));
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].body, "First.");
+        assert_eq!(msgs[1].body, "Second.");
+    }
+
+    #[test]
+    fn redirect_with_message_drops_cookie_on_invalid_url_but_keeps_redirect_status() {
+        // CRLF in URL is rejected by HeaderValue::from_str — same
+        // anti-response-splitting posture as `shortcuts::redirect`.
+        // The cookie is independently valid and still attached.
+        let res = redirect_with_message(
+            SECRET,
+            &empty_headers(),
+            Level::Info,
+            "Note.",
+            "/safe\r\nX: y",
+        );
+        assert_eq!(res.status(), axum::http::StatusCode::FOUND);
+        assert!(
+            res.headers().get(axum::http::header::LOCATION).is_none(),
+            "CRLF URL must be dropped",
+        );
+        // The valid cookie still rides along so the message isn't lost.
+        assert!(res.headers().get(axum::http::header::SET_COOKIE).is_some());
     }
 }
