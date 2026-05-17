@@ -351,6 +351,59 @@ pub fn superuser_required_or_403() -> impl tower::Layer<
     user_passes_test_or_403(|u| u.is_superuser && u.active)
 }
 
+/// Convenience wrapper: gate a route to active users only.
+/// Anonymous sessions and deactivated accounts (`active = false`)
+/// are 302'd to `login_url`. Equivalent to
+/// `user_passes_test(login_url, |u| u.active)`.
+///
+/// Useful when a route should be open to any logged-in user, but
+/// the operator console has marked some accounts as inactive
+/// (suspended billing, security freeze, etc.) and those shouldn't
+/// be able to access ANYTHING.
+///
+/// Note that [`login_required`] already only counts logged-in
+/// users — but if the underlying SessionUser extractor was extended
+/// to surface deactivated accounts (it currently filters them out
+/// via `u.active` already), this gate would still be correct. Use
+/// it when you want the active-only invariant explicit at the call
+/// site.
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub fn active_required(
+    login_url: impl Into<String>,
+) -> impl tower::Layer<
+    axum::routing::Route,
+    Service = impl tower::Service<
+        Request<Body>,
+        Response = Response,
+        Error = std::convert::Infallible,
+        Future = impl Send + 'static,
+    > + Clone
+                  + Send
+                  + Sync
+                  + 'static,
+> + Clone {
+    user_passes_test(login_url, |u| u.active)
+}
+
+/// API-endpoint variant of [`active_required`] — returns 401 for
+/// anonymous and 403 for deactivated accounts, instead of
+/// redirecting.
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub fn active_required_or_403() -> impl tower::Layer<
+    axum::routing::Route,
+    Service = impl tower::Service<
+        Request<Body>,
+        Response = Response,
+        Error = std::convert::Infallible,
+        Future = impl Send + 'static,
+    > + Clone
+                  + Send
+                  + Sync
+                  + 'static,
+> + Clone {
+    user_passes_test_or_403(|u| u.active)
+}
+
 #[cfg(all(feature = "tenancy", feature = "postgres"))]
 async fn handle_login_required(
     cfg: Arc<LoginRequiredConfig>,
@@ -814,6 +867,70 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/api/admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[tokio::test]
+    async fn active_required_redirects_anonymous_to_login() {
+        use axum::body::Body;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt as _;
+
+        async fn dashboard() -> &'static str {
+            "dashboard"
+        }
+
+        let app = Router::new()
+            .route("/dashboard", get(dashboard))
+            .layer(active_required("/login"));
+
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/dashboard")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::FOUND);
+        let loc = res
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap();
+        assert_eq!(loc, "/login?next=%2Fdashboard");
+    }
+
+    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[tokio::test]
+    async fn active_required_or_403_returns_401_for_anonymous() {
+        use axum::body::Body;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt as _;
+
+        async fn me_api() -> &'static str {
+            "ok"
+        }
+
+        let app = Router::new()
+            .route("/api/me", get(me_api))
+            .layer(active_required_or_403());
+
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/me")
                     .body(Body::empty())
                     .unwrap(),
             )
