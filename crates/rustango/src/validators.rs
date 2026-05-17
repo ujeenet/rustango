@@ -77,6 +77,8 @@
 //! - `validate_base64` — standard base64 (`[A-Za-z0-9+/]` +
 //!   optional `=` padding).
 //! - `validate_base64_urlsafe` — URL-safe base64 (`[A-Za-z0-9_-]`).
+//! - `validate_jwt_shape` — three dot-separated URL-safe base64
+//!   segments. Shape check only, NO signature verification.
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -944,13 +946,50 @@ fn validate_base64_impl(s: &str, urlsafe: bool) -> Result<(), ValidationError> {
     // URL-safe base64 without padding: any length is fine PROVIDED
     // there's no padding present. URL-safe WITH padding follows the
     // standard rule.
-    if pad > 0 || !urlsafe {
-        if !s.len().is_multiple_of(4) {
+    if (pad > 0 || !urlsafe) && !s.len().is_multiple_of(4) {
+        return Err(ValidationError::new(
+            "invalid_base64",
+            "Enter a valid base64 string.",
+        ));
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------ JWT shape
+
+/// Validate that `s` looks like a JWT: three URL-safe base64 segments
+/// separated by `.`, each non-empty.
+///
+/// **Shape check only — does NOT verify the signature.** The whole
+/// point of this validator is to catch a typoed / truncated JWT at
+/// form-input time before the real JWT library returns a less clear
+/// error. Use [`crate::auth`] / `jsonwebtoken` to actually verify
+/// the signature and claims.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_jwt", ... }`.
+pub fn validate_jwt_shape(s: &str) -> Result<(), ValidationError> {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 3 {
+        return Err(ValidationError::new(
+            "invalid_jwt",
+            "Enter a valid JWT (header.payload.signature).",
+        ));
+    }
+    for part in &parts {
+        if part.is_empty() {
             return Err(ValidationError::new(
-                "invalid_base64",
-                "Enter a valid base64 string.",
+                "invalid_jwt",
+                "Enter a valid JWT (header.payload.signature).",
             ));
         }
+        // Each part is unpadded URL-safe base64.
+        validate_base64_urlsafe(part).map_err(|_| {
+            ValidationError::new(
+                "invalid_jwt",
+                "Enter a valid JWT (header.payload.signature).",
+            )
+        })?;
     }
     Ok(())
 }
@@ -2215,5 +2254,44 @@ mod tests {
         // URL-safe base64 commonly omits padding (JWT, etc.).
         // 5 chars, no padding — allowed for url-safe.
         assert!(validate_base64_urlsafe("ABCDE").is_ok());
+    }
+
+    // -------- validate_jwt_shape --------
+
+    #[test]
+    fn jwt_shape_accepts_valid_three_segments() {
+        // Canonical JWT example: header.payload.signature
+        // (3 URL-safe base64 segments, each non-empty).
+        let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
+                   eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.\
+                   SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        assert!(validate_jwt_shape(jwt).is_ok());
+    }
+
+    #[test]
+    fn jwt_shape_rejects_wrong_segment_count() {
+        assert!(validate_jwt_shape("abc.def").is_err()); // 2 segments
+        assert!(validate_jwt_shape("a.b.c.d").is_err()); // 4 segments
+        assert!(validate_jwt_shape("no-dots").is_err());
+    }
+
+    #[test]
+    fn jwt_shape_rejects_empty_segments() {
+        assert!(validate_jwt_shape(".payload.sig").is_err());
+        assert!(validate_jwt_shape("header..sig").is_err());
+        assert!(validate_jwt_shape("header.payload.").is_err());
+    }
+
+    #[test]
+    fn jwt_shape_rejects_non_urlsafe_chars_in_segment() {
+        // `+` and `/` are standard-base64, not URL-safe — JWT spec
+        // uses URL-safe alphabet.
+        assert!(validate_jwt_shape("abc.de+f.ghi").is_err());
+        assert!(validate_jwt_shape("abc.def.gh/i").is_err());
+    }
+
+    #[test]
+    fn jwt_shape_rejects_empty() {
+        assert!(validate_jwt_shape("").is_err());
     }
 }
