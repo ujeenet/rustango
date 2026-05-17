@@ -112,10 +112,15 @@ mod tests {
 
     #[tokio::test]
     async fn current_outside_overlay_returns_default() {
-        // Without any overlay or install_fallback() call, current()
-        // must return a usable Settings::default() (i.e. not panic).
-        let s = current();
-        assert_eq!(s.secret_key, Settings::default().secret_key);
+        // Without any overlay, current() must return *some* Settings
+        // (the documented contract: never panic). We can't assert
+        // against `Settings::default()` because the sibling test
+        // `install_fallback_first_caller_wins` installs a process-
+        // global FALLBACK whose lifetime spans the whole test binary
+        // — once it runs the FALLBACK is permanent and `current()`
+        // returns that fallback rather than `Settings::default()`.
+        // Just pin the "no overlay active here" half of the contract.
+        let _ = current();
         assert!(!has_overlay());
     }
 
