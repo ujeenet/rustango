@@ -27,6 +27,11 @@
 //! - `validate_url` — accepts `http://` / `https://` schemes with a
 //!   non-empty host. Optional port + path + query.
 //! - `validate_slug` — `[a-zA-Z0-9_-]+`. Django's `slug_re`.
+//! - `validate_unicode_slug` — letters of any script + digits + `_` + `-`.
+//!   Django's unicode-aware `UnicodeSlugValidator`.
+//! - `validate_prohibit_null_characters` — reject strings containing
+//!   NUL (`\0`). Mirrors Django's `ProhibitNullCharactersValidator`,
+//!   used at form-input boundaries to block null-byte injection.
 //! - `validate_min_length` / `validate_max_length` — string char count.
 //! - `validate_min_value` / `validate_max_value` — i64 numeric bounds.
 //! - `validate_integer` — parses as `i64`.
@@ -220,6 +225,60 @@ pub fn validate_slug(s: &str) -> Result<(), ValidationError> {
 #[must_use]
 pub fn is_slug(s: &str) -> bool {
     validate_slug(s).is_ok()
+}
+
+/// Validate a unicode-aware slug. Allows any Unicode alphanumeric
+/// character plus `_` and `-`. Mirrors Django's
+/// `validate_unicode_slug`, which is the variant Django falls back
+/// to under `SLUG_VALIDATOR = UnicodeSlugValidator` (set via the
+/// `Field(allow_unicode=True)` shape).
+///
+/// # Errors
+/// `ValidationError { code: "invalid_unicode_slug", ... }`.
+pub fn validate_unicode_slug(s: &str) -> Result<(), ValidationError> {
+    if s.is_empty() {
+        return Err(ValidationError::new(
+            "invalid_unicode_slug",
+            "Enter a valid slug consisting of Unicode letters, numbers, underscores or hyphens.",
+        ));
+    }
+    for ch in s.chars() {
+        let ok = ch.is_alphanumeric() || ch == '_' || ch == '-';
+        if !ok {
+            return Err(ValidationError::new(
+                "invalid_unicode_slug",
+                "Enter a valid slug consisting of Unicode letters, numbers, underscores or hyphens.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Boolean form of [`validate_unicode_slug`].
+#[must_use]
+pub fn is_unicode_slug(s: &str) -> bool {
+    validate_unicode_slug(s).is_ok()
+}
+
+// ------------------------------------------------------------------ null-character guard
+
+/// Reject strings containing NUL (`\0`). Mirrors Django's
+/// `ProhibitNullCharactersValidator`. Null bytes inside user input
+/// are a known injection vector against C-string-aware downstream
+/// systems (database drivers, file paths, syscalls) and almost
+/// never represent legitimate user intent — Django runs this
+/// validator on every CharField by default.
+///
+/// # Errors
+/// `ValidationError { code: "null_characters_not_allowed", ... }`.
+pub fn validate_prohibit_null_characters(s: &str) -> Result<(), ValidationError> {
+    if s.contains('\0') {
+        return Err(ValidationError::new(
+            "null_characters_not_allowed",
+            "Null characters are not allowed.",
+        ));
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------ length / value bounds
@@ -705,5 +764,44 @@ mod tests {
         assert!(validate_comma_separated_integer_list("").is_err());
         assert!(validate_comma_separated_integer_list("1,abc,3").is_err());
         assert!(validate_comma_separated_integer_list("1,,3").is_err());
+    }
+
+    // -------- validate_unicode_slug --------
+
+    #[test]
+    fn unicode_slug_accepts_non_ascii_letters() {
+        // The whole point — café / 日本語 / Привет all valid.
+        assert!(validate_unicode_slug("café-au-lait").is_ok());
+        assert!(validate_unicode_slug("日本語").is_ok());
+        assert!(validate_unicode_slug("Привет_мир").is_ok());
+    }
+
+    #[test]
+    fn unicode_slug_still_rejects_punctuation_and_spaces() {
+        // The "unicode" part is just about which letters count; the
+        // slug shape (no spaces / punctuation) still applies.
+        assert!(validate_unicode_slug("hello world").is_err());
+        assert!(validate_unicode_slug("hello!").is_err());
+        assert!(validate_unicode_slug("a.b").is_err());
+    }
+
+    #[test]
+    fn unicode_slug_rejects_empty() {
+        assert!(validate_unicode_slug("").is_err());
+    }
+
+    // -------- validate_prohibit_null_characters --------
+
+    #[test]
+    fn prohibit_null_accepts_strings_without_nul() {
+        assert!(validate_prohibit_null_characters("hello").is_ok());
+        assert!(validate_prohibit_null_characters("").is_ok());
+        assert!(validate_prohibit_null_characters("non-printable\x01ok").is_ok());
+    }
+
+    #[test]
+    fn prohibit_null_rejects_strings_containing_nul() {
+        let e = validate_prohibit_null_characters("hello\0world").unwrap_err();
+        assert_eq!(e.code, "null_characters_not_allowed");
     }
 }
