@@ -382,6 +382,45 @@ pub fn json_bad_request<T: serde::Serialize>(data: &T) -> Response {
     json_response(data, 400)
 }
 
+/// Sugar for [`json_response`] with status `401 Unauthorized`.
+/// Pair with [`crate::auth_decorators::login_required_or_401`] for
+/// hand-rolled auth checks: when the request lacks credentials,
+/// return a JSON error body so the API client can render it
+/// without parsing HTML.
+#[must_use]
+pub fn json_unauthorized<T: serde::Serialize>(data: &T) -> Response {
+    json_response(data, 401)
+}
+
+/// Sugar for [`json_response`] with status `403 Forbidden`.
+/// Use when the caller IS authenticated but lacks the permission
+/// required for this endpoint — distinct from 401 so clients can
+/// distinguish "log in" from "you can't access this." Pair with
+/// [`crate::auth_decorators::user_passes_test_or_403`].
+#[must_use]
+pub fn json_forbidden<T: serde::Serialize>(data: &T) -> Response {
+    json_response(data, 403)
+}
+
+/// Sugar for [`json_response`] with status `404 Not Found`. The
+/// API counterpart to [`ShortcutError::NotFound`], which renders a
+/// `text/plain` 404. Use this when the endpoint contract is JSON
+/// and a plain-text body would confuse the client parser.
+#[must_use]
+pub fn json_not_found<T: serde::Serialize>(data: &T) -> Response {
+    json_response(data, 404)
+}
+
+/// Sugar for [`json_response`] with status `500 Internal Server
+/// Error`. Use when a handler catches an internal failure and
+/// wants to surface a JSON-shaped error to the client (with a
+/// stable error code the client can branch on) instead of a bare
+/// status line.
+#[must_use]
+pub fn json_server_error<T: serde::Serialize>(data: &T) -> Response {
+    json_response(data, 500)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,5 +653,53 @@ mod tests {
         let body = body_bytes(res).await;
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v, serde_json::json!({"ok": true, "count": 7}));
+    }
+
+    #[tokio::test]
+    async fn json_unauthorized_is_401() {
+        let res = json_unauthorized(&serde_json::json!({"error": "login required"}));
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn json_forbidden_is_403() {
+        let res = json_forbidden(&serde_json::json!({"error": "no access"}));
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn json_not_found_is_404() {
+        let res = json_not_found(&serde_json::json!({"error": "no such item"}));
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn json_server_error_is_500() {
+        let res = json_server_error(&serde_json::json!({"error": "internal"}));
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn json_error_helpers_all_emit_application_json_content_type() {
+        // Pin the content-type contract across every sugar variant
+        // — a single switched-off helper would silently break
+        // browser dev-tools "Parsed as JSON" indicators and tests
+        // that assertContent-Type.
+        let cases: Vec<axum::response::Response> = vec![
+            json_unauthorized(&serde_json::json!({})),
+            json_forbidden(&serde_json::json!({})),
+            json_not_found(&serde_json::json!({})),
+            json_server_error(&serde_json::json!({})),
+        ];
+        for res in cases {
+            let ct = res
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            assert_eq!(ct, "application/json");
+        }
     }
 }
