@@ -120,6 +120,62 @@ impl TestClient {
         self.post(path).form(fields).send().await
     }
 
+    /// Mint a tenant session cookie directly into the jar — Django's
+    /// `Client.force_login(user)` for the tenancy stack. Bypasses the
+    /// login form entirely: subsequent requests look authenticated to
+    /// the [`crate::extractors::SessionUser`] extractor as long as the
+    /// row at `user_id` is `active = true` in the tenant DB.
+    ///
+    /// Useful when the login flow is incidental to what's being tested
+    /// (typing through the form per test is slow, and tests of
+    /// non-auth handlers shouldn't depend on the auth surface working).
+    ///
+    /// `slug` is the tenant slug the cookie should be bound to (the
+    /// decoder rejects cookies minted for a different slug, so this
+    /// must match the resolved tenant at request time). `ttl_secs` is
+    /// the session expiry; one hour (3600) is a fine default for a
+    /// test run.
+    ///
+    /// Issue #41 — Django `Client.force_login` parity for tenancy.
+    #[cfg(feature = "tenancy")]
+    pub fn force_login_tenant_user(
+        &self,
+        secret: &crate::tenancy::session::SessionSecret,
+        slug: impl Into<String>,
+        user_id: i64,
+        ttl_secs: i64,
+    ) -> &Self {
+        use crate::tenancy::tenant_console;
+        let payload = tenant_console::TenantSessionPayload::new(user_id, slug, ttl_secs);
+        let cookie = tenant_console::encode(secret, &payload);
+        self.set_cookie(tenant_console::COOKIE_NAME, cookie);
+        self
+    }
+
+    /// Mint an operator-console session cookie directly into the jar
+    /// — `force_login` for the operator stack. Same shape as
+    /// [`Self::force_login_tenant_user`] but for the operator
+    /// (control-plane) cookie that [`crate::extractors::SessionOperator`]
+    /// reads.
+    ///
+    /// Operator sessions aren't slug-bound — operators span all
+    /// tenants in the registry — so no slug parameter.
+    ///
+    /// Issue #41 — Django `Client.force_login` parity for operators.
+    #[cfg(feature = "tenancy")]
+    pub fn force_login_operator(
+        &self,
+        secret: &crate::tenancy::session::SessionSecret,
+        operator_id: i64,
+        ttl_secs: i64,
+    ) -> &Self {
+        use crate::tenancy::session;
+        let payload = session::SessionPayload::new(operator_id, ttl_secs);
+        let cookie = session::encode(secret, &payload);
+        self.set_cookie(session::COOKIE_NAME, cookie);
+        self
+    }
+
     /// Convenience: clear the cookie jar (so the next request looks
     /// fully logged-out) and optionally hit `path` (a logout endpoint
     /// that may itself emit a `Set-Cookie: name=; Max-Age=0`
@@ -795,5 +851,73 @@ mod tests {
         assert_eq!(res.status, 302);
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].1, "/old");
+    }
+
+    // ---------------- force_login (tenancy) ----------------
+
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn force_login_tenant_user_writes_decodable_cookie() {
+        use crate::tenancy::session::SessionSecret;
+        use crate::tenancy::tenant_console::{decode, COOKIE_NAME};
+
+        let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
+        let c = TestClient::new(Router::new());
+        c.force_login_tenant_user(&secret, "acme", 42, 3600);
+
+        let cookie = c.cookie(COOKIE_NAME).expect("session cookie present");
+        let payload = decode(&secret, "acme", &cookie).expect("cookie decodes");
+        assert_eq!(payload.uid, 42);
+        assert_eq!(payload.slug, "acme");
+        assert!(!payload.is_impersonation());
+    }
+
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn force_login_tenant_user_rejects_wrong_slug() {
+        use crate::tenancy::session::SessionSecret;
+        use crate::tenancy::tenant_console::decode;
+
+        let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
+        let c = TestClient::new(Router::new());
+        c.force_login_tenant_user(&secret, "acme", 42, 3600);
+        let cookie = c
+            .cookie(crate::tenancy::tenant_console::COOKIE_NAME)
+            .unwrap();
+
+        // Cross-tenant replay fails — the slug binding holds.
+        assert!(decode(&secret, "globex", &cookie).is_err());
+    }
+
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn force_login_operator_writes_decodable_cookie() {
+        use crate::tenancy::session::{decode, SessionSecret, COOKIE_NAME};
+
+        let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
+        let c = TestClient::new(Router::new());
+        c.force_login_operator(&secret, 7, 3600);
+
+        let cookie = c.cookie(COOKIE_NAME).expect("operator cookie present");
+        let payload = decode(&secret, &cookie).expect("cookie decodes");
+        assert_eq!(payload.oid, 7);
+    }
+
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn force_login_bad_secret_does_not_validate() {
+        use crate::tenancy::session::SessionSecret;
+        use crate::tenancy::tenant_console::decode;
+
+        let mint_secret = SessionSecret::from_bytes(b"mint-secret-thirty-two-bytes-xxx".to_vec());
+        let wrong_secret = SessionSecret::from_bytes(b"wrong-secret-thirty-two-bytes-xx".to_vec());
+
+        let c = TestClient::new(Router::new());
+        c.force_login_tenant_user(&mint_secret, "acme", 1, 3600);
+        let cookie = c
+            .cookie(crate::tenancy::tenant_console::COOKIE_NAME)
+            .unwrap();
+
+        assert!(decode(&wrong_secret, "acme", &cookie).is_err());
     }
 }
