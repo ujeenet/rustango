@@ -46,6 +46,8 @@
 //! - `validate_phone_e164` — E.164 international phone format
 //!   (`+` followed by 1–15 digits). Not a Django built-in but
 //!   widely needed in the same role.
+//! - `validate_hex_color` — `#rgb` / `#rrggbb` / `#rrggbbaa` /
+//!   `#rgba` web-color hex codes. For color-picker form fields.
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -340,6 +342,59 @@ pub fn validate_phone_e164(s: &str) -> Result<(), ValidationError> {
 #[must_use]
 pub fn is_phone_e164(s: &str) -> bool {
     validate_phone_e164(s).is_ok()
+}
+
+// ------------------------------------------------------------------ hex color
+
+/// Validate a web-color hex code: `#rgb`, `#rrggbb`, `#rgba`, or
+/// `#rrggbbaa`. The `#` prefix is required; hex digits are
+/// case-insensitive. Anything else (named colors, `rgb()` /
+/// `hsl()` functions, hex without `#`) is rejected.
+///
+/// Useful for color-picker form fields in admin / theme-config
+/// surfaces. Pair with [`validate_max_length`] to bound the input
+/// to 9 characters total.
+///
+/// Examples:
+/// - `validate_hex_color("#fff")` → `Ok(())`
+/// - `validate_hex_color("#ffaabb")` → `Ok(())`
+/// - `validate_hex_color("#FFAA00CC")` → `Ok(())` (8 = with alpha)
+/// - `validate_hex_color("fff")` → `Err` (missing `#`)
+/// - `validate_hex_color("#ffffg")` → `Err` (`g` not hex)
+/// - `validate_hex_color("#ffff")` → `Err` (4 chars: only valid
+///   shorthand is 3 / 6 / 4 / 8)
+///
+/// # Errors
+/// `ValidationError { code: "invalid_hex_color", ... }`.
+pub fn validate_hex_color(s: &str) -> Result<(), ValidationError> {
+    let rest = match s.strip_prefix('#') {
+        Some(r) => r,
+        None => {
+            return Err(ValidationError::new(
+                "invalid_hex_color",
+                "Enter a hex color like `#fff` or `#ffaa00`.",
+            ));
+        }
+    };
+    if !matches!(rest.len(), 3 | 4 | 6 | 8) {
+        return Err(ValidationError::new(
+            "invalid_hex_color",
+            "Enter a hex color like `#fff` or `#ffaa00`.",
+        ));
+    }
+    if !rest.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ValidationError::new(
+            "invalid_hex_color",
+            "Enter a hex color like `#fff` or `#ffaa00`.",
+        ));
+    }
+    Ok(())
+}
+
+/// Boolean form of [`validate_hex_color`].
+#[must_use]
+pub fn is_hex_color(s: &str) -> bool {
+    validate_hex_color(s).is_ok()
 }
 
 // ------------------------------------------------------------------ length / value bounds
@@ -980,5 +1035,59 @@ mod tests {
     fn is_phone_e164_is_thin_boolean_wrapper() {
         assert!(is_phone_e164("+14155552671"));
         assert!(!is_phone_e164("14155552671"));
+    }
+
+    // -------- validate_hex_color --------
+
+    #[test]
+    fn hex_color_accepts_rgb_shorthand() {
+        assert!(validate_hex_color("#fff").is_ok());
+        assert!(validate_hex_color("#000").is_ok());
+        assert!(validate_hex_color("#fA0").is_ok());
+    }
+
+    #[test]
+    fn hex_color_accepts_full_rrggbb() {
+        assert!(validate_hex_color("#ffffff").is_ok());
+        assert!(validate_hex_color("#FFAA00").is_ok());
+    }
+
+    #[test]
+    fn hex_color_accepts_alpha_variants() {
+        // 4 = rgba shorthand, 8 = rrggbbaa.
+        assert!(validate_hex_color("#fff8").is_ok());
+        assert!(validate_hex_color("#FFAA00CC").is_ok());
+    }
+
+    #[test]
+    fn hex_color_rejects_missing_hash() {
+        assert!(validate_hex_color("fff").is_err());
+    }
+
+    #[test]
+    fn hex_color_rejects_non_hex_chars() {
+        let e = validate_hex_color("#ffffg0").unwrap_err();
+        assert_eq!(e.code, "invalid_hex_color");
+    }
+
+    #[test]
+    fn hex_color_rejects_wrong_length() {
+        // 1, 2, 5, 7 are all rejected — only 3/4/6/8 are valid.
+        assert!(validate_hex_color("#f").is_err());
+        assert!(validate_hex_color("#ff").is_err());
+        assert!(validate_hex_color("#fffff").is_err());
+        assert!(validate_hex_color("#fffffff").is_err());
+    }
+
+    #[test]
+    fn hex_color_rejects_empty_and_hash_only() {
+        assert!(validate_hex_color("").is_err());
+        assert!(validate_hex_color("#").is_err());
+    }
+
+    #[test]
+    fn is_hex_color_is_thin_boolean_wrapper() {
+        assert!(is_hex_color("#fff"));
+        assert!(!is_hex_color("fff"));
     }
 }
