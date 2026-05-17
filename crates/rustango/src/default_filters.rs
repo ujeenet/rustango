@@ -6,8 +6,8 @@
 //! `floatformat`, `escapejs`, `yesno`, `get_digit`, `dictsort`,
 //! `slugify_unicode`, `iriencode`, `wordwrap`, `mask_email`,
 //! `mask_card`, `mask_phone`, `dictsortreversed`, `oxford_join`,
-//! `initials`, `truncatechars`. Call [`register_filters`] on a
-//! Tera instance to make them available:
+//! `initials`, `truncatechars`, `normalize_whitespace`. Call
+//! [`register_filters`] on a Tera instance to make them available:
 //!
 //! ```ignore
 //! let mut tera = tera::Tera::default();
@@ -51,6 +51,7 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("oxford_join", oxford_join);
     tera.register_filter("initials", initials);
     tera.register_filter("truncatechars", truncatechars);
+    tera.register_filter("normalize_whitespace", normalize_whitespace);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -666,6 +667,29 @@ fn truncatechars(value: &Value, args: &HashMap<String, Value>) -> tera::Result<V
     let keep = n.saturating_sub(1);
     let truncated: String = s.chars().take(keep).collect();
     Ok(to_value(format!("{truncated}…"))?)
+}
+
+// ------------------------------------------------------------------ normalize_whitespace
+
+/// `normalize_whitespace` — collapse any run of whitespace
+/// (spaces, tabs, newlines, NBSP, etc.) into a single space, and
+/// trim leading + trailing whitespace.
+///
+/// Useful for sanitizing free-text fields before display in a
+/// single-line context (admin list columns, email subjects, page
+/// titles) where the original line breaks shouldn't show.
+///
+/// - `"  hello   world  "` → `"hello world"`
+/// - `"line\n\n\twith tabs"` → `"line with tabs"`
+/// - `""` → `""`
+///
+/// Non-string input passes through unchanged.
+fn normalize_whitespace(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(s) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    Ok(to_value(normalized)?)
 }
 
 /// Total ordering across heterogeneous JSON `Value`s. Null < bool <
@@ -2043,6 +2067,40 @@ mod tests {
     #[test]
     fn truncatechars_passes_through_non_string() {
         let out = truncatechars(&json!(42), &args_pos(json!(2))).unwrap();
+        assert_eq!(out, json!(42));
+    }
+
+    // -------- normalize_whitespace --------
+
+    #[test]
+    fn normalize_whitespace_collapses_runs_of_spaces() {
+        let out = normalize_whitespace(&json!("  hello   world  "), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("hello world"));
+    }
+
+    #[test]
+    fn normalize_whitespace_collapses_tabs_and_newlines() {
+        let out = normalize_whitespace(&json!("line\n\n\twith tabs"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("line with tabs"));
+    }
+
+    #[test]
+    fn normalize_whitespace_trims_leading_and_trailing() {
+        let out = normalize_whitespace(&json!("\t  hello  \n"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("hello"));
+    }
+
+    #[test]
+    fn normalize_whitespace_empty_input_yields_empty() {
+        let out = normalize_whitespace(&json!(""), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(""));
+        let blank = normalize_whitespace(&json!("   \t\n"), &HashMap::new()).unwrap();
+        assert_eq!(blank, json!(""));
+    }
+
+    #[test]
+    fn normalize_whitespace_passes_through_non_string() {
+        let out = normalize_whitespace(&json!(42), &HashMap::new()).unwrap();
         assert_eq!(out, json!(42));
     }
 }
