@@ -3,8 +3,8 @@
 //! Django built-ins that Tera doesn't ship out of the box and that
 //! templates reach for constantly: `pluralize`, `truncatewords`,
 //! `linebreaks`, `default_if_none`, `add`, `cut`, `divisibleby`,
-//! `floatformat`. Call [`register_filters`] on a Tera instance to
-//! make them available:
+//! `floatformat`, `escapejs`, `yesno`, `get_digit`, `dictsort`. Call
+//! [`register_filters`] on a Tera instance to make them available:
 //!
 //! ```ignore
 //! let mut tera = tera::Tera::default();
@@ -34,6 +34,10 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("cut", cut);
     tera.register_filter("divisibleby", divisibleby);
     tera.register_filter("floatformat", floatformat);
+    tera.register_filter("escapejs", escapejs);
+    tera.register_filter("yesno", yesno);
+    tera.register_filter("get_digit", get_digit);
+    tera.register_filter("dictsort", dictsort);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -344,6 +348,181 @@ fn floatformat(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Val
         }
     }
     Ok(to_value(formatted)?)
+}
+
+// ------------------------------------------------------------------ escapejs
+
+/// `escapejs` — escape a string for safe embedding inside a JS
+/// string literal in HTML. Django:
+///
+/// ```html
+/// <script>var s = "{{ value|escapejs }}";</script>
+/// ```
+///
+/// Escapes characters that have either HTML or JS-context meaning,
+/// so neither `</script>` injection nor JS-syntax breakage is
+/// possible regardless of operator input. Quotes, slashes, brackets,
+/// `&`, `=`, `-`, `;`, backticks, line separators (U+2028 / U+2029)
+/// and every control character all turn into `\uXXXX` escapes;
+/// everything else passes through.
+fn escapejs(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(s) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' | '\'' | '"' | '>' | '<' | '&' | '=' | '-' | ';' | '`' => {
+                out.push_str(&format!("\\u{:04X}", ch as u32));
+            }
+            // Line separator + paragraph separator — JS allows them
+            // inside string literals on older engines; escape so
+            // string termination behaves the same everywhere.
+            '\u{2028}' | '\u{2029}' => {
+                out.push_str(&format!("\\u{:04X}", ch as u32));
+            }
+            ch if (ch as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04X}", ch as u32));
+            }
+            other => out.push(other),
+        }
+    }
+    Ok(to_value(out)?)
+}
+
+// ------------------------------------------------------------------ yesno
+
+/// `yesno` — three-way string mapper for booleans. Django:
+/// - `{{ true|yesno:"yes,no" }}` → `"yes"`
+/// - `{{ false|yesno:"yes,no" }}` → `"no"`
+/// - `{{ null|yesno:"yes,no,maybe" }}` → `"maybe"`
+/// - `{{ null|yesno:"yes,no" }}` → `"no"` (no third token → use "no")
+///
+/// Argument shape: comma-separated `"yes,no"` or `"yes,no,maybe"`.
+/// Missing arg defaults to Django's `"yes,no,maybe"`.
+fn yesno(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let raw = args
+        .get("choices")
+        .or_else(|| args.values().next())
+        .and_then(Value::as_str)
+        .unwrap_or("yes,no,maybe");
+    let mut parts = raw.splitn(3, ',');
+    let yes = parts.next().unwrap_or("yes");
+    let no = parts.next().unwrap_or("no");
+    let maybe = parts.next().unwrap_or(no);
+    let pick = if value.is_null() {
+        maybe
+    } else if value.as_bool().unwrap_or(true) {
+        yes
+    } else {
+        no
+    };
+    Ok(to_value(pick)?)
+}
+
+// ------------------------------------------------------------------ get_digit
+
+/// `get_digit` — extract the Nth digit (1-indexed, from the RIGHT)
+/// of an integer. Django:
+/// - `{{ 1234|get_digit:1 }}` → `"4"` (rightmost)
+/// - `{{ 1234|get_digit:2 }}` → `"3"`
+/// - `{{ 1234|get_digit:4 }}` → `"1"`
+/// - `{{ 1234|get_digit:5 }}` → `"0"` (past the leftmost digit)
+///
+/// Non-integer values pass through unchanged. Argument `< 1`
+/// returns the value as-is (Django's documented passthrough on
+/// invalid index).
+fn get_digit(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(n) = value.as_i64() else {
+        return Ok(value.clone());
+    };
+    let idx = args
+        .get("index")
+        .or_else(|| args.values().next())
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if idx < 1 {
+        return Ok(value.clone());
+    }
+    let s = n.unsigned_abs().to_string();
+    let chars: Vec<char> = s.chars().rev().collect();
+    let pick = chars
+        .get(usize::try_from(idx - 1).unwrap_or(0))
+        .copied()
+        .unwrap_or('0');
+    Ok(to_value(pick.to_string())?)
+}
+
+// ------------------------------------------------------------------ dictsort
+
+/// `dictsort` — sort a list of objects by a named key. Django:
+/// - `{{ users|dictsort:"name" }}` → list reordered alphabetically
+///   by each entry's `name` field
+/// - `{{ users|dictsort:"age" }}` → reordered numerically by `age`
+///
+/// Sort is stable and uses the JSON `Value` Ord we implement here:
+/// numbers and booleans first (numerically/by bool order), then
+/// strings (lexicographic), then everything else (compared via the
+/// JSON string form). Non-list input passes through unchanged.
+/// Entries missing the key sort first (treated as `null`).
+///
+/// Nested key paths (`"address.city"`) are NOT supported in this
+/// slice — Django allows dotted paths; we add them when the first
+/// caller needs them.
+fn dictsort(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(arr) = value.as_array() else {
+        return Ok(value.clone());
+    };
+    let key = args
+        .get("key")
+        .or_else(|| args.values().next())
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if key.is_empty() {
+        return Ok(value.clone());
+    }
+    let mut sorted = arr.clone();
+    sorted.sort_by(|a, b| {
+        let ak = a.get(key).cloned().unwrap_or(Value::Null);
+        let bk = b.get(key).cloned().unwrap_or(Value::Null);
+        compare_values(&ak, &bk)
+    });
+    Ok(Value::Array(sorted))
+}
+
+/// Total ordering across heterogeneous JSON `Value`s. Null < bool <
+/// number < string < array < object. Within a type, use the type's
+/// natural ordering (numeric for numbers, lexicographic for strings).
+fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    fn rank(v: &Value) -> u8 {
+        match v {
+            Value::Null => 0,
+            Value::Bool(_) => 1,
+            Value::Number(_) => 2,
+            Value::String(_) => 3,
+            Value::Array(_) => 4,
+            Value::Object(_) => 5,
+        }
+    }
+    let ra = rank(a);
+    let rb = rank(b);
+    if ra != rb {
+        return ra.cmp(&rb);
+    }
+    match (a, b) {
+        (Value::Null, Value::Null) => Equal,
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        (Value::Number(x), Value::Number(y)) => x
+            .as_f64()
+            .unwrap_or(0.0)
+            .partial_cmp(&y.as_f64().unwrap_or(0.0))
+            .unwrap_or(Equal),
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        // Arrays + Objects: fall back to JSON-stringified compare so
+        // the sort stays deterministic. Rarely needed in practice.
+        _ => a.to_string().cmp(&b.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -701,5 +880,200 @@ mod tests {
         let mut ctx = tera::Context::new();
         ctx.insert("n", &3.14159);
         assert_eq!(tera.render("t", &ctx).unwrap(), "3.14");
+    }
+
+    // -------- escapejs --------
+
+    #[test]
+    fn escapejs_escapes_quotes_and_brackets() {
+        let out = escapejs(&json!("<script>alert('xss')</script>"), &HashMap::new()).unwrap();
+        // < > ' all become \uXXXX; everything else passes through.
+        let s = out.as_str().unwrap().to_owned();
+        assert!(!s.contains('<'), "got: {s}");
+        assert!(!s.contains('>'), "got: {s}");
+        assert!(!s.contains('\''), "got: {s}");
+        // Letters / safe punctuation pass through.
+        assert!(s.contains("script"));
+        assert!(s.contains("alert"));
+    }
+
+    #[test]
+    fn escapejs_escapes_line_separators() {
+        // U+2028 and U+2029 must escape — older JS engines treated
+        // them as string-terminators inside string literals.
+        let ls = "a\u{2028}b\u{2029}c";
+        let out = escapejs(&json!(ls), &HashMap::new()).unwrap();
+        let s = out.as_str().unwrap().to_owned();
+        assert!(s.contains("\\u2028"));
+        assert!(s.contains("\\u2029"));
+        assert!(!s.contains('\u{2028}'));
+    }
+
+    #[test]
+    fn escapejs_escapes_control_chars() {
+        let out = escapejs(&json!("a\nb"), &HashMap::new()).unwrap();
+        // 0x0A (LF) escapes to the literal sequence backslash-u-0-0-0-A
+        // so a newline can't break out of the JS string context.
+        let s = out.as_str().unwrap().to_owned();
+        assert!(s.contains("\\u000A"), "got: {s}");
+        assert!(!s.contains('\n'));
+    }
+
+    #[test]
+    fn escapejs_passes_non_string_through() {
+        let out = escapejs(&json!(42), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(42));
+    }
+
+    // -------- yesno --------
+
+    #[test]
+    fn yesno_true_maps_to_first_token() {
+        let out = yesno(&json!(true), &args_pos(json!("yes,no"))).unwrap();
+        assert_eq!(out, json!("yes"));
+    }
+
+    #[test]
+    fn yesno_false_maps_to_second_token() {
+        let out = yesno(&json!(false), &args_pos(json!("yes,no"))).unwrap();
+        assert_eq!(out, json!("no"));
+    }
+
+    #[test]
+    fn yesno_null_uses_third_token_when_provided() {
+        let out = yesno(&Value::Null, &args_pos(json!("yes,no,maybe"))).unwrap();
+        assert_eq!(out, json!("maybe"));
+    }
+
+    #[test]
+    fn yesno_null_falls_back_to_no_when_third_token_omitted() {
+        let out = yesno(&Value::Null, &args_pos(json!("yes,no"))).unwrap();
+        assert_eq!(out, json!("no"));
+    }
+
+    #[test]
+    fn yesno_no_arg_defaults_to_yes_no_maybe() {
+        let out = yesno(&Value::Null, &HashMap::new()).unwrap();
+        assert_eq!(out, json!("maybe"));
+    }
+
+    // -------- get_digit --------
+
+    #[test]
+    fn get_digit_extracts_rightmost_digit() {
+        let out = get_digit(&json!(1234), &args_pos(json!(1))).unwrap();
+        assert_eq!(out, json!("4"));
+    }
+
+    #[test]
+    fn get_digit_extracts_leftmost_digit() {
+        let out = get_digit(&json!(1234), &args_pos(json!(4))).unwrap();
+        assert_eq!(out, json!("1"));
+    }
+
+    #[test]
+    fn get_digit_past_leftmost_returns_zero() {
+        let out = get_digit(&json!(12), &args_pos(json!(5))).unwrap();
+        assert_eq!(out, json!("0"));
+    }
+
+    #[test]
+    fn get_digit_invalid_index_returns_value_unchanged() {
+        let out = get_digit(&json!(12), &args_pos(json!(0))).unwrap();
+        assert_eq!(out, json!(12));
+        let neg = get_digit(&json!(12), &args_pos(json!(-1))).unwrap();
+        assert_eq!(neg, json!(12));
+    }
+
+    #[test]
+    fn get_digit_non_integer_passes_through() {
+        let out = get_digit(&json!("hi"), &args_pos(json!(1))).unwrap();
+        assert_eq!(out, json!("hi"));
+    }
+
+    // -------- dictsort --------
+
+    #[test]
+    fn dictsort_sorts_by_string_key() {
+        let input = json!([
+            {"name": "Charlie"},
+            {"name": "Alice"},
+            {"name": "Bob"},
+        ]);
+        let out = dictsort(&input, &args_pos(json!("name"))).unwrap();
+        let arr = out.as_array().unwrap();
+        assert_eq!(arr[0]["name"], "Alice");
+        assert_eq!(arr[1]["name"], "Bob");
+        assert_eq!(arr[2]["name"], "Charlie");
+    }
+
+    #[test]
+    fn dictsort_sorts_by_numeric_key() {
+        let input = json!([
+            {"age": 30},
+            {"age": 5},
+            {"age": 20},
+        ]);
+        let out = dictsort(&input, &args_pos(json!("age"))).unwrap();
+        let arr = out.as_array().unwrap();
+        assert_eq!(arr[0]["age"], 5);
+        assert_eq!(arr[1]["age"], 20);
+        assert_eq!(arr[2]["age"], 30);
+    }
+
+    #[test]
+    fn dictsort_entries_missing_key_sort_first() {
+        // Missing key → treated as null → ranks lowest.
+        let input = json!([
+            {"name": "C"},
+            {"other": "x"},
+            {"name": "A"},
+        ]);
+        let out = dictsort(&input, &args_pos(json!("name"))).unwrap();
+        let arr = out.as_array().unwrap();
+        assert!(
+            arr[0].get("name").is_none(),
+            "missing-key entry should be first"
+        );
+        assert_eq!(arr[1]["name"], "A");
+        assert_eq!(arr[2]["name"], "C");
+    }
+
+    #[test]
+    fn dictsort_non_list_passes_through() {
+        let out = dictsort(&json!({"k": 1}), &args_pos(json!("k"))).unwrap();
+        assert_eq!(out, json!({"k": 1}));
+    }
+
+    #[test]
+    fn dictsort_empty_key_passes_through() {
+        let input = json!([{"a": 2}, {"a": 1}]);
+        let out = dictsort(&input, &args_pos(json!(""))).unwrap();
+        // Unchanged — no sort happened.
+        assert_eq!(out, input);
+    }
+
+    // -------- register_filters: end-to-end --------
+
+    #[test]
+    fn register_filters_wires_yesno_through_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ b|yesno(choices=\"on,off\") }}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("b", &true);
+        assert_eq!(tera.render("t", &ctx).unwrap(), "on");
+    }
+
+    #[test]
+    fn register_filters_wires_get_digit_through_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ n|get_digit(index=2) }}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("n", &567);
+        assert_eq!(tera.render("t", &ctx).unwrap(), "6");
     }
 }
