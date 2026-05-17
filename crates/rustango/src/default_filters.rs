@@ -4,8 +4,9 @@
 //! templates reach for constantly: `pluralize`, `truncatewords`,
 //! `linebreaks`, `default_if_none`, `add`, `cut`, `divisibleby`,
 //! `floatformat`, `escapejs`, `yesno`, `get_digit`, `dictsort`,
-//! `slugify_unicode`, `iriencode`, `wordwrap`, `mask_email`. Call
-//! [`register_filters`] on a Tera instance to make them available:
+//! `slugify_unicode`, `iriencode`, `wordwrap`, `mask_email`,
+//! `mask_card`, `mask_phone`. Call [`register_filters`] on a Tera
+//! instance to make them available:
 //!
 //! ```ignore
 //! let mut tera = tera::Tera::default();
@@ -43,6 +44,8 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("iriencode", iriencode);
     tera.register_filter("wordwrap", wordwrap);
     tera.register_filter("mask_email", mask_email);
+    tera.register_filter("mask_card", mask_card);
+    tera.register_filter("mask_phone", mask_phone);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -721,6 +724,97 @@ fn mask_email(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> 
         n => format!("{}***{}", local_chars[0], local_chars[n - 1]),
     };
     Ok(to_value(format!("{masked_local}@{domain}"))?)
+}
+
+// ------------------------------------------------------------------ mask_card
+
+/// `mask_card` — render the canonical "************1234"-style
+/// masked credit card number from a digit string. Strips spaces
+/// and hyphens (typical human-typed shape) before masking.
+///
+/// Format: every digit except the LAST 4 is replaced with `*`.
+/// If the input has fewer than 5 digits, the whole thing is
+/// masked. Non-digit input passes through unchanged.
+///
+/// - `"4111 1111 1111 1111"` → `"************1111"`
+/// - `"4111111111111111"` → `"************1111"`
+/// - `"4111"` → `"****"` (≤ 4 digits, fully masked)
+/// - `"not a card"` → `"not a card"` (no digits, passes through)
+///
+/// Pair with [`crate::validators::validate_creditcard_luhn`] at
+/// intake; use this filter at render time when displaying a
+/// stored / processed card for confirmation. Helpful in admin
+/// UIs that show order details with a "card on file" line.
+fn mask_card(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(s) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .collect();
+    if cleaned.is_empty() || !cleaned.chars().all(|c| c.is_ascii_digit()) {
+        return Ok(value.clone());
+    }
+    let chars: Vec<char> = cleaned.chars().collect();
+    let n = chars.len();
+    if n <= 4 {
+        return Ok(to_value("*".repeat(n))?);
+    }
+    let last4: String = chars[n - 4..].iter().collect();
+    let masked = "*".repeat(n - 4);
+    Ok(to_value(format!("{masked}{last4}"))?)
+}
+
+// ------------------------------------------------------------------ mask_phone
+
+/// `mask_phone` — render a partly-obscured phone number. Keeps
+/// the original separator characters in place; masks every digit
+/// except the last 4. Useful for admin lists / order summaries
+/// where a full phone number would be PII over-share.
+///
+/// - `"+1 415 555 2671"` → `"+* *** *** 2671"`
+/// - `"(415) 555-2671"` → `"(***) ***-2671"`
+/// - `"4155552671"` → `"******2671"`
+/// - `"123"` → `"***"` (≤ 4 digits → all masked)
+/// - `"no digits"` → `"no digits"` (passes through)
+///
+/// Non-string passes through unchanged.
+fn mask_phone(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(s) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    // Count total digits so we know which digits to keep.
+    let total_digits = s.chars().filter(|c| c.is_ascii_digit()).count();
+    if total_digits == 0 {
+        return Ok(value.clone());
+    }
+    // If ≤ 4 digits total, mask ALL of them (no privacy benefit
+    // to leaving the last few visible when the whole thing is
+    // short).
+    let keep_from = if total_digits <= 4 {
+        total_digits
+    } else {
+        total_digits - 4
+    };
+    let mut digit_idx = 0;
+    let masked: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_digit() {
+                let keep = digit_idx >= keep_from;
+                digit_idx += 1;
+                if keep {
+                    c
+                } else {
+                    '*'
+                }
+            } else {
+                c
+            }
+        })
+        .collect();
+    Ok(to_value(masked)?)
 }
 
 #[cfg(test)]
@@ -1506,5 +1600,77 @@ mod tests {
         let mut ctx = tera::Context::new();
         ctx.insert("email", "operator@example.com");
         assert_eq!(tera.render("t", &ctx).unwrap(), "o***r@example.com");
+    }
+
+    // -------- mask_card --------
+
+    #[test]
+    fn mask_card_keeps_last_four_digits() {
+        let out = mask_card(&json!("4111111111111111"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("************1111"));
+    }
+
+    #[test]
+    fn mask_card_strips_separators_then_masks() {
+        let out = mask_card(&json!("4111 1111 1111 1111"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("************1111"));
+        let out2 = mask_card(&json!("4111-1111-1111-1111"), &HashMap::new()).unwrap();
+        assert_eq!(out2, json!("************1111"));
+    }
+
+    #[test]
+    fn mask_card_fully_masks_short_input() {
+        let out = mask_card(&json!("1234"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("****"));
+        let out2 = mask_card(&json!("12"), &HashMap::new()).unwrap();
+        assert_eq!(out2, json!("**"));
+    }
+
+    #[test]
+    fn mask_card_passes_through_non_digit_input() {
+        let out = mask_card(&json!("not a card"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("not a card"));
+        let out2 = mask_card(&json!("4111-abcd"), &HashMap::new()).unwrap();
+        assert_eq!(out2, json!("4111-abcd"));
+    }
+
+    #[test]
+    fn mask_card_passes_through_non_string() {
+        let out = mask_card(&json!(42), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(42));
+    }
+
+    // -------- mask_phone --------
+
+    #[test]
+    fn mask_phone_keeps_separators_and_last_four_digits() {
+        let out = mask_phone(&json!("+1 415 555 2671"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("+* *** *** 2671"));
+        let out2 = mask_phone(&json!("(415) 555-2671"), &HashMap::new()).unwrap();
+        assert_eq!(out2, json!("(***) ***-2671"));
+    }
+
+    #[test]
+    fn mask_phone_handles_bare_digits() {
+        let out = mask_phone(&json!("4155552671"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("******2671"));
+    }
+
+    #[test]
+    fn mask_phone_fully_masks_short_input() {
+        let out = mask_phone(&json!("123"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("***"));
+    }
+
+    #[test]
+    fn mask_phone_passes_through_no_digits() {
+        let out = mask_phone(&json!("no digits"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("no digits"));
+    }
+
+    #[test]
+    fn mask_phone_passes_through_non_string() {
+        let out = mask_phone(&json!(42), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(42));
     }
 }
