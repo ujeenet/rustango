@@ -853,6 +853,12 @@ pub mod humanize;
 #[cfg(feature = "template_views")]
 pub mod default_filters;
 
+/// Django-shape standalone validators — `validate_email`,
+/// `validate_url`, `validate_slug`, `validate_min_length` /
+/// `validate_max_length`, `validate_min_value` / `validate_max_value`.
+/// See [`validators`]. Issue #54.
+pub mod validators;
+
 /// Named URL reversal — Django's `reverse(name, params)` +
 /// `get_absolute_url()`. Pair with [`register_url!`]. Issue #8.
 pub mod urls;
