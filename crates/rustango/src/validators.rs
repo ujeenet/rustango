@@ -43,6 +43,9 @@
 //!   `validate_comma_separated_integer_list`.
 //! - `validate_email_list` — comma-separated list of email addresses,
 //!   one per "CC" field entry.
+//! - `validate_phone_e164` — E.164 international phone format
+//!   (`+` followed by 1–15 digits). Not a Django built-in but
+//!   widely needed in the same role.
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -281,6 +284,62 @@ pub fn validate_prohibit_null_characters(s: &str) -> Result<(), ValidationError>
         ));
     }
     Ok(())
+}
+
+// ------------------------------------------------------------------ phone (E.164)
+
+/// Validate an [E.164](https://en.wikipedia.org/wiki/E.164)
+/// international phone number: a `+` followed by 1 to 15 ASCII
+/// digits, no other characters. This is the format every modern
+/// phone API (Twilio, AWS SNS, Vonage) expects.
+///
+/// Not a Django built-in — Django delegates phone validation to
+/// the `django-phonenumber-field` package which depends on
+/// `phonenumbers` (the Google libphonenumber port). E.164 is a
+/// reasonable lowest-common-denominator that doesn't require a
+/// 20MB country-codes database. For full national-format /
+/// region-aware parsing, plug a `phonenumbers`-backed validator
+/// alongside this one.
+///
+/// Examples:
+/// - `validate_phone_e164("+14155552671")` → `Ok(())`
+/// - `validate_phone_e164("+442012345678")` → `Ok(())`
+/// - `validate_phone_e164("415-555-2671")` → `Err(invalid_phone)` (no `+`)
+/// - `validate_phone_e164("+1")` → `Ok(())` (1 digit is the minimum)
+/// - `validate_phone_e164("+0123456789012345")` → `Err(invalid_phone)` (16 digits)
+///
+/// # Errors
+/// `ValidationError { code: "invalid_phone", ... }`.
+pub fn validate_phone_e164(s: &str) -> Result<(), ValidationError> {
+    let rest = match s.strip_prefix('+') {
+        Some(r) => r,
+        None => {
+            return Err(ValidationError::new(
+                "invalid_phone",
+                "Enter a phone number in E.164 format (e.g. +14155552671).",
+            ));
+        }
+    };
+    let len = rest.len();
+    if !(1..=15).contains(&len) {
+        return Err(ValidationError::new(
+            "invalid_phone",
+            "Enter a phone number in E.164 format (e.g. +14155552671).",
+        ));
+    }
+    if !rest.chars().all(|c| c.is_ascii_digit()) {
+        return Err(ValidationError::new(
+            "invalid_phone",
+            "Enter a phone number in E.164 format (e.g. +14155552671).",
+        ));
+    }
+    Ok(())
+}
+
+/// Boolean form of [`validate_phone_e164`].
+#[must_use]
+pub fn is_phone_e164(s: &str) -> bool {
+    validate_phone_e164(s).is_ok()
 }
 
 // ------------------------------------------------------------------ length / value bounds
@@ -867,5 +926,59 @@ mod tests {
     fn email_list_rejects_invalid_entry() {
         let e = validate_email_list("a@b.com,not-an-email,c@d.com").unwrap_err();
         assert_eq!(e.code, "invalid_email");
+    }
+
+    // -------- validate_phone_e164 --------
+
+    #[test]
+    fn phone_e164_accepts_typical_examples() {
+        assert!(validate_phone_e164("+14155552671").is_ok());
+        assert!(validate_phone_e164("+442012345678").is_ok());
+        assert!(validate_phone_e164("+919876543210").is_ok());
+    }
+
+    #[test]
+    fn phone_e164_accepts_minimum_length_of_one_digit() {
+        assert!(validate_phone_e164("+1").is_ok());
+    }
+
+    #[test]
+    fn phone_e164_accepts_maximum_length_of_fifteen_digits() {
+        assert!(validate_phone_e164("+123456789012345").is_ok());
+    }
+
+    #[test]
+    fn phone_e164_rejects_missing_plus() {
+        let e = validate_phone_e164("14155552671").unwrap_err();
+        assert_eq!(e.code, "invalid_phone");
+    }
+
+    #[test]
+    fn phone_e164_rejects_too_many_digits() {
+        // 16 digits — one too many.
+        assert!(validate_phone_e164("+1234567890123456").is_err());
+    }
+
+    #[test]
+    fn phone_e164_rejects_zero_digits_after_plus() {
+        assert!(validate_phone_e164("+").is_err());
+    }
+
+    #[test]
+    fn phone_e164_rejects_separators_and_letters() {
+        assert!(validate_phone_e164("+1-415-555-2671").is_err());
+        assert!(validate_phone_e164("+1 (415) 555-2671").is_err());
+        assert!(validate_phone_e164("+1abc4155552671").is_err());
+    }
+
+    #[test]
+    fn phone_e164_rejects_empty() {
+        assert!(validate_phone_e164("").is_err());
+    }
+
+    #[test]
+    fn is_phone_e164_is_thin_boolean_wrapper() {
+        assert!(is_phone_e164("+14155552671"));
+        assert!(!is_phone_e164("14155552671"));
     }
 }
