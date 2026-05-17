@@ -870,6 +870,11 @@ pub mod manager;
 /// [`inheritance`] for the canonical worked mappings. Issue #51.
 pub mod inheritance;
 
+/// Composite-primary-key patterns — Django 5.2's `CompositePrimaryKey`
+/// mapped to `Auto<i64>` surrogate + `unique_together`. See
+/// [`composite_pk`] for the canonical worked pattern. Issue #46.
+pub mod composite_pk;
+
 /// Named URL reversal — Django's `reverse(name, params)` +
 /// `get_absolute_url()`. Pair with [`register_url!`]. Issue #8.
 pub mod urls;
