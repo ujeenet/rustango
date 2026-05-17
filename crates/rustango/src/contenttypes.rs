@@ -722,6 +722,200 @@ where
     Ok(out)
 }
 
+// ============================================================ Reverse generic relation (issue #37)
+
+/// Fetch all rows of the model described by `child_schema` whose
+/// `GenericForeignKey` pair points at `(parent_ct_id, parent_pk)`.
+///
+/// Reverse-direction counterpart of [`GenericForeignKey::get_object`]
+/// — Django's `GenericRelation(...)` field. The polymorphic-target
+/// child rows are returned as JSON maps (same shape as
+/// [`fetch_row_as_json`]) so callers don't have to commit to a
+/// specific typed `Child: Model + Decode<...>` here.
+///
+/// `relation_name` selects which entry of the child schema's
+/// [`crate::core::ModelSchema::generic_relations`] to filter on:
+/// - `Some("target")` — match the named relation exactly.
+/// - `None` — use the FIRST relation declared on the child. Fine
+///   for the common case where a child carries exactly one GFK.
+///
+/// Returns an empty `Vec` (NOT an error) when:
+/// - The child schema has no `generic_relations` declared at all.
+/// - The named relation doesn't exist on the child.
+/// - No matching rows exist in the child table.
+///
+/// # Errors
+/// Driver / SELECT failures from [`crate::sql::select_rows_as_json`].
+pub async fn fetch_reverse_generic(
+    pool: &crate::sql::Pool,
+    child_schema: &'static crate::core::ModelSchema,
+    parent_ct_id: i64,
+    parent_pk: i64,
+    relation_name: Option<&str>,
+) -> Result<Vec<serde_json::Value>, ExecError> {
+    use crate::core::{Filter, Op, SelectQuery, WhereExpr};
+    // Pick the relation: by name, or the first one declared.
+    let rel = match relation_name {
+        Some(name) => child_schema
+            .generic_relations
+            .iter()
+            .find(|r| r.name == name),
+        None => child_schema.generic_relations.first(),
+    };
+    let Some(rel) = rel else {
+        // No GFK declared on child → no reverse traversal possible.
+        // Return empty rather than error; callers using a model
+        // that doesn't have a GFK have a bigger problem than a
+        // panic deep in the framework.
+        return Ok(Vec::new());
+    };
+    let select_q = SelectQuery {
+        model: child_schema,
+        where_clause: WhereExpr::And(vec![
+            WhereExpr::Predicate(Filter {
+                column: rel.ct_column,
+                op: Op::Eq,
+                value: crate::core::SqlValue::I64(parent_ct_id),
+            }),
+            WhereExpr::Predicate(Filter {
+                column: rel.pk_column,
+                op: Op::Eq,
+                value: crate::core::SqlValue::I64(parent_pk),
+            }),
+        ]),
+        search: None,
+        joins: vec![],
+        order_by: vec![],
+        limit: None,
+        offset: None,
+        lock_mode: None,
+        compound: vec![],
+        projection: None,
+    };
+    let fields: Vec<&'static crate::core::FieldSchema> = child_schema.scalar_fields().collect();
+    crate::sql::select_rows_as_json(pool, &select_q, &fields).await
+}
+
+/// Resolve `Parent`'s ContentType automatically and dispatch to
+/// [`fetch_reverse_generic`]. The convenient entry point when you
+/// have the parent's Rust type in scope:
+///
+/// ```ignore
+/// // Find every TaggedItem pointing at this Post.
+/// let tags = reverse_generic_for::<Post>(
+///     &pool,
+///     TaggedItem::SCHEMA,
+///     post.id,
+///     None,
+/// ).await?;
+/// ```
+///
+/// # Errors
+/// - `Parent`'s ContentType not seeded (run
+///   [`ensure_seeded`](crate::contenttypes::ensure_seeded) first).
+/// - Driver / SELECT failures from [`fetch_reverse_generic`].
+pub async fn reverse_generic_for<Parent: crate::core::Model>(
+    pool: &crate::sql::Pool,
+    child_schema: &'static crate::core::ModelSchema,
+    parent_pk: i64,
+    relation_name: Option<&str>,
+) -> Result<Vec<serde_json::Value>, ExecError> {
+    let ct = ContentType::get_for_model::<Parent>(pool)
+        .await?
+        .ok_or_else(|| ExecError::MissingPrimaryKey {
+            table: Parent::SCHEMA.table,
+        })?;
+    let ct_id = ct.id.get().copied().ok_or(ExecError::MissingPrimaryKey {
+        table: ContentType::SCHEMA.table,
+    })?;
+    fetch_reverse_generic(pool, child_schema, ct_id, parent_pk, relation_name).await
+}
+
+/// Batched reverse-generic prefetch — Django's `GenericPrefetch`.
+/// Given a list of parent primary keys (same model), fetches all
+/// matching child rows in a single SELECT and groups them by
+/// parent_pk. Eliminates the N+1 query pattern when rendering an
+/// index page that shows children per parent.
+///
+/// Returns a `HashMap<parent_pk, Vec<child_json>>` keyed by the
+/// parent_pk side of the GFK. Parents with zero children get no
+/// entry (caller's responsibility to default to `&[]` per parent).
+///
+/// # Errors
+/// As [`fetch_reverse_generic`].
+pub async fn prefetch_reverse_generic_for<Parent: crate::core::Model>(
+    pool: &crate::sql::Pool,
+    child_schema: &'static crate::core::ModelSchema,
+    parent_pks: &[i64],
+    relation_name: Option<&str>,
+) -> Result<::std::collections::HashMap<i64, Vec<serde_json::Value>>, ExecError> {
+    use crate::core::{Filter, Op, SelectQuery, WhereExpr};
+
+    if parent_pks.is_empty() {
+        return Ok(::std::collections::HashMap::new());
+    }
+    let rel = match relation_name {
+        Some(name) => child_schema
+            .generic_relations
+            .iter()
+            .find(|r| r.name == name),
+        None => child_schema.generic_relations.first(),
+    };
+    let Some(rel) = rel else {
+        return Ok(::std::collections::HashMap::new());
+    };
+    let ct = ContentType::get_for_model::<Parent>(pool)
+        .await?
+        .ok_or_else(|| ExecError::MissingPrimaryKey {
+            table: Parent::SCHEMA.table,
+        })?;
+    let ct_id = ct.id.get().copied().ok_or(ExecError::MissingPrimaryKey {
+        table: ContentType::SCHEMA.table,
+    })?;
+    let mut pks: Vec<i64> = parent_pks.to_vec();
+    pks.sort_unstable();
+    pks.dedup();
+    let pk_values: Vec<crate::core::SqlValue> = pks
+        .iter()
+        .copied()
+        .map(crate::core::SqlValue::I64)
+        .collect();
+    let select_q = SelectQuery {
+        model: child_schema,
+        where_clause: WhereExpr::And(vec![
+            WhereExpr::Predicate(Filter {
+                column: rel.ct_column,
+                op: Op::Eq,
+                value: crate::core::SqlValue::I64(ct_id),
+            }),
+            WhereExpr::Predicate(Filter {
+                column: rel.pk_column,
+                op: Op::In,
+                value: crate::core::SqlValue::List(pk_values),
+            }),
+        ]),
+        search: None,
+        joins: vec![],
+        order_by: vec![],
+        limit: None,
+        offset: None,
+        lock_mode: None,
+        compound: vec![],
+        projection: None,
+    };
+    let fields: Vec<&'static crate::core::FieldSchema> = child_schema.scalar_fields().collect();
+    let rows = crate::sql::select_rows_as_json(pool, &select_q, &fields).await?;
+    let mut grouped: ::std::collections::HashMap<i64, Vec<serde_json::Value>> =
+        ::std::collections::HashMap::new();
+    for row in rows {
+        // The pk column on the row carries the parent_pk we matched on.
+        if let Some(pk_val) = row.get(rel.pk_column).and_then(serde_json::Value::as_i64) {
+            grouped.entry(pk_val).or_default().push(row);
+        }
+    }
+    Ok(grouped)
+}
+
 // v0.34 — `ensure_table` (below) routes through
 // [`crate::migrate::ddl::create_table_if_not_exists_sql_with_dialect`]
 // which already knows how to emit the table for any backend rustango
