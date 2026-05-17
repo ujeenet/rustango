@@ -65,6 +65,8 @@
 //! - `validate_creditcard_luhn` — Luhn checksum on a credit card
 //!   PAN string. Catches typos before hitting the PCI processor;
 //!   does NOT verify the card is real / not expired / has funds.
+//! - `validate_isbn` — ISBN-10 or ISBN-13 checksum (auto-detects
+//!   which form by digit count).
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -603,6 +605,90 @@ pub fn validate_creditcard_luhn(s: &str) -> Result<(), ValidationError> {
         return Err(ValidationError::new(
             "invalid_card_number",
             "Enter a valid credit card number.",
+        ));
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------ ISBN
+
+/// Verify the checksum on an ISBN-10 or ISBN-13 string. Strips
+/// spaces and hyphens (the typical printed shape), then dispatches
+/// on digit count:
+///
+/// - **10 chars**: ISBN-10 form. First 9 must be digits; 10th may
+///   be `0`–`9` or `X` (representing 10). Checksum:
+///   `sum(i * d_i) mod 11 == 0` for i = 1..10.
+/// - **13 chars**: ISBN-13 form. All digits. Checksum:
+///   `sum(d_i * w_i) mod 10 == 0` where weights alternate
+///   `1, 3, 1, 3, …`.
+///
+/// Anything else is rejected. Used by Library / catalog admin
+/// pages to catch typoed ISBNs at form-input time before the row
+/// hits the DB.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_isbn", ... }`.
+pub fn validate_isbn(s: &str) -> Result<(), ValidationError> {
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .collect();
+    match cleaned.len() {
+        10 => validate_isbn_10(&cleaned),
+        13 => validate_isbn_13(&cleaned),
+        _ => Err(ValidationError::new(
+            "invalid_isbn",
+            "Enter a valid ISBN-10 or ISBN-13.",
+        )),
+    }
+}
+
+fn validate_isbn_10(s: &str) -> Result<(), ValidationError> {
+    // First 9 chars must be digits; last may be `X` for 10.
+    let chars: Vec<char> = s.chars().collect();
+    let mut sum = 0u32;
+    for (i, &ch) in chars.iter().enumerate() {
+        let digit = if i == 9 && (ch == 'X' || ch == 'x') {
+            10
+        } else if let Some(d) = ch.to_digit(10) {
+            d
+        } else {
+            return Err(ValidationError::new(
+                "invalid_isbn",
+                "Enter a valid ISBN-10 or ISBN-13.",
+            ));
+        };
+        // Weight = (i + 1) per the ISBN-10 spec.
+        sum += digit * (u32::try_from(i).unwrap_or(0) + 1);
+    }
+    if sum % 11 != 0 {
+        return Err(ValidationError::new(
+            "invalid_isbn",
+            "Enter a valid ISBN-10 or ISBN-13.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_isbn_13(s: &str) -> Result<(), ValidationError> {
+    if !s.chars().all(|c| c.is_ascii_digit()) {
+        return Err(ValidationError::new(
+            "invalid_isbn",
+            "Enter a valid ISBN-10 or ISBN-13.",
+        ));
+    }
+    let mut sum = 0u32;
+    for (i, ch) in s.chars().enumerate() {
+        let d = ch.to_digit(10).expect("digit-only by check above");
+        // Alternating weights: 1, 3, 1, 3, ...
+        let weight = if i.is_multiple_of(2) { 1 } else { 3 };
+        sum += d * weight;
+    }
+    if sum % 10 != 0 {
+        return Err(ValidationError::new(
+            "invalid_isbn",
+            "Enter a valid ISBN-10 or ISBN-13.",
         ));
     }
     Ok(())
@@ -1585,5 +1671,55 @@ mod tests {
     fn luhn_rejects_empty_and_whitespace_only() {
         assert!(validate_creditcard_luhn("").is_err());
         assert!(validate_creditcard_luhn("   ").is_err());
+    }
+
+    // -------- validate_isbn --------
+
+    #[test]
+    fn isbn10_accepts_real_books() {
+        // "The C Programming Language" — ISBN-10 0131103628.
+        assert!(validate_isbn("0131103628").is_ok());
+        // ISBN-10 ending in X (check digit = 10).
+        assert!(validate_isbn("080442957X").is_ok());
+        // Lower-case x also accepted.
+        assert!(validate_isbn("080442957x").is_ok());
+    }
+
+    #[test]
+    fn isbn13_accepts_real_books() {
+        // "The C Programming Language" 2nd ed — ISBN-13 9780131103627.
+        assert!(validate_isbn("9780131103627").is_ok());
+    }
+
+    #[test]
+    fn isbn_strips_spaces_and_hyphens() {
+        assert!(validate_isbn("0-13-110362-8").is_ok());
+        assert!(validate_isbn("978-0-13-110362-7").is_ok());
+        assert!(validate_isbn(" 978 0 13 110362 7 ").is_ok());
+    }
+
+    #[test]
+    fn isbn_rejects_wrong_checksum() {
+        // Flip the last digit of a known good ISBN.
+        let e = validate_isbn("0131103627").unwrap_err();
+        assert_eq!(e.code, "invalid_isbn");
+        assert!(validate_isbn("9780131103620").is_err());
+    }
+
+    #[test]
+    fn isbn_rejects_wrong_length() {
+        // 11 / 14 digits — neither valid ISBN length.
+        assert!(validate_isbn("01311036280").is_err());
+        assert!(validate_isbn("97801311036270").is_err());
+        assert!(validate_isbn("").is_err());
+    }
+
+    #[test]
+    fn isbn_rejects_non_digit_chars() {
+        // Letters in the middle are never valid.
+        assert!(validate_isbn("01311a3628").is_err());
+        // X only valid as the 10th digit of ISBN-10.
+        assert!(validate_isbn("9780131103X27").is_err());
+        assert!(validate_isbn("X131103628").is_err());
     }
 }
