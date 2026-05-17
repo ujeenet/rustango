@@ -4,8 +4,8 @@
 //! templates reach for constantly: `pluralize`, `truncatewords`,
 //! `linebreaks`, `default_if_none`, `add`, `cut`, `divisibleby`,
 //! `floatformat`, `escapejs`, `yesno`, `get_digit`, `dictsort`,
-//! `slugify_unicode`. Call [`register_filters`] on a Tera instance
-//! to make them available:
+//! `slugify_unicode`, `iriencode`. Call [`register_filters`] on a
+//! Tera instance to make them available:
 //!
 //! ```ignore
 //! let mut tera = tera::Tera::default();
@@ -40,6 +40,7 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("get_digit", get_digit);
     tera.register_filter("dictsort", dictsort);
     tera.register_filter("slugify_unicode", slugify_unicode);
+    tera.register_filter("iriencode", iriencode);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -569,6 +570,53 @@ fn slugify_unicode(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Va
     }
     while out.ends_with('-') {
         out.pop();
+    }
+    Ok(to_value(out)?)
+}
+
+// ------------------------------------------------------------------ iriencode
+
+/// `iriencode` — Django's encoder for [IRIs](https://tools.ietf.org/html/rfc3987).
+/// Percent-encodes only the bytes that aren't valid in a URI:
+/// non-ASCII characters and a handful of reserved-but-unsafe ones.
+/// Everything else (`/`, `:`, `?`, `#`, `=`, `&`, `-`, `_`, `.`,
+/// `~`, etc.) passes through unchanged.
+///
+/// Useful for href attributes when you already have a URL with
+/// non-ASCII content (a hash, a translated path) and want it
+/// browser-safe without mangling the URL structure:
+///
+/// ```jinja
+/// <a href="{{ url | iriencode }}">link</a>
+/// ```
+///
+/// Distinct from Tera's `urlencode` which is for query-string
+/// VALUES — it percent-encodes everything except `[a-zA-Z0-9_-]`
+/// (no `/`, no `:`, etc.), so passing a URL through `urlencode`
+/// breaks the URL structure. Use `iriencode` for href / src
+/// attributes; use `urlencode` for individual query-string values.
+fn iriencode(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(s) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        // RFC 3987 + Django's safe set: keep unreserved + most
+        // reserved chars (those that are syntactically meaningful
+        // in URIs). Encode everything else.
+        let safe = matches!(
+            byte,
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
+                | b'-' | b'_' | b'.' | b'~'
+                | b'/' | b':' | b'?' | b'#' | b'[' | b']' | b'@'
+                | b'!' | b'$' | b'&' | b'\'' | b'(' | b')'
+                | b'*' | b'+' | b',' | b';' | b'=' | b'%'
+        );
+        if safe {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
     }
     Ok(to_value(out)?)
 }
@@ -1182,5 +1230,61 @@ mod tests {
         let mut ctx = tera::Context::new();
         ctx.insert("s", "Hello World 日本");
         assert_eq!(tera.render("t", &ctx).unwrap(), "hello-world-日本");
+    }
+
+    // -------- iriencode --------
+
+    #[test]
+    fn iriencode_preserves_ascii_uri_structural_chars() {
+        // The URL itself (path / query / fragment delimiters) must
+        // survive unchanged — this is the whole point of iriencode.
+        let out = iriencode(
+            &json!("https://example.com/path/with?q=1&z=2#frag"),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(out, json!("https://example.com/path/with?q=1&z=2#frag"));
+    }
+
+    #[test]
+    fn iriencode_percent_encodes_non_ascii_bytes() {
+        // "café" — the é is 2 bytes in UTF-8 (0xC3, 0xA9), each
+        // becomes %C3 %A9.
+        let out = iriencode(&json!("/blog/café"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("/blog/caf%C3%A9"));
+    }
+
+    #[test]
+    fn iriencode_percent_encodes_spaces() {
+        // Space is not in the safe set even though it appears in
+        // browser URL bars — encode it.
+        let out = iriencode(&json!("/path with spaces"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("/path%20with%20spaces"));
+    }
+
+    #[test]
+    fn iriencode_preserves_already_percent_encoded_input() {
+        // Percent sign itself is in the safe set — already-encoded
+        // input round-trips unchanged. (Compare to `urlencode`,
+        // which would double-encode by escaping the %.)
+        let out = iriencode(&json!("/path/caf%C3%A9"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("/path/caf%C3%A9"));
+    }
+
+    #[test]
+    fn iriencode_passes_non_string_through() {
+        let out = iriencode(&json!(42), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(42));
+    }
+
+    #[test]
+    fn register_filters_wires_iriencode_through_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ url|iriencode|safe }}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("url", "/blog/café?lang=fr");
+        assert_eq!(tera.render("t", &ctx).unwrap(), "/blog/caf%C3%A9?lang=fr");
     }
 }
