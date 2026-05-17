@@ -72,6 +72,8 @@
 //!   leading or trailing hyphen, total length ≤ 253.
 //! - `validate_iban` — ISO 13616 IBAN mod-97 checksum (catches typos
 //!   in bank account fields).
+//! - `validate_mac_address` — EUI-48 MAC address (6 hex pairs
+//!   separated by `:` or `-`).
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -823,6 +825,55 @@ pub fn validate_iban(s: &str) -> Result<(), ValidationError> {
     }
     if remainder != 1 {
         return Err(ValidationError::new("invalid_iban", "Enter a valid IBAN."));
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------ MAC address
+
+/// Validate an EUI-48 MAC address: six pairs of hex digits
+/// separated by `:` or `-`. Case-insensitive. The separator must
+/// be consistent across the string (no mix-and-match between `:`
+/// and `-`).
+///
+/// Examples:
+/// - `validate_mac_address("00:1A:2B:3C:4D:5E")` → Ok
+/// - `validate_mac_address("00-1a-2b-3c-4d-5e")` → Ok (case-insensitive)
+/// - `validate_mac_address("001A2B3C4D5E")` → Err (separators required)
+/// - `validate_mac_address("00:1A:2B-3C:4D:5E")` → Err (mixed separators)
+///
+/// # Errors
+/// `ValidationError { code: "invalid_mac_address", ... }`.
+pub fn validate_mac_address(s: &str) -> Result<(), ValidationError> {
+    // 6 pairs of hex digits + 5 separators = 17 chars exactly.
+    if s.len() != 17 {
+        return Err(ValidationError::new(
+            "invalid_mac_address",
+            "Enter a valid MAC address (e.g. 00:1A:2B:3C:4D:5E).",
+        ));
+    }
+    // Detect the separator from position 2.
+    let sep = s.as_bytes()[2] as char;
+    if sep != ':' && sep != '-' {
+        return Err(ValidationError::new(
+            "invalid_mac_address",
+            "Enter a valid MAC address (e.g. 00:1A:2B:3C:4D:5E).",
+        ));
+    }
+    let parts: Vec<&str> = s.split(sep).collect();
+    if parts.len() != 6 {
+        return Err(ValidationError::new(
+            "invalid_mac_address",
+            "Enter a valid MAC address (e.g. 00:1A:2B:3C:4D:5E).",
+        ));
+    }
+    for part in parts {
+        if part.len() != 2 || !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ValidationError::new(
+                "invalid_mac_address",
+                "Enter a valid MAC address (e.g. 00:1A:2B:3C:4D:5E).",
+            ));
+        }
     }
     Ok(())
 }
@@ -1968,5 +2019,61 @@ mod tests {
     fn iban_rejects_empty_and_whitespace_only() {
         assert!(validate_iban("").is_err());
         assert!(validate_iban("   ").is_err());
+    }
+
+    // -------- validate_mac_address --------
+
+    #[test]
+    fn mac_accepts_colon_separated() {
+        assert!(validate_mac_address("00:1A:2B:3C:4D:5E").is_ok());
+        assert!(validate_mac_address("FF:FF:FF:FF:FF:FF").is_ok());
+        assert!(validate_mac_address("00:00:00:00:00:00").is_ok());
+    }
+
+    #[test]
+    fn mac_accepts_hyphen_separated() {
+        assert!(validate_mac_address("00-1A-2B-3C-4D-5E").is_ok());
+    }
+
+    #[test]
+    fn mac_accepts_lowercase_hex() {
+        assert!(validate_mac_address("00:1a:2b:3c:4d:5e").is_ok());
+        assert!(validate_mac_address("ff:ff:ff:ff:ff:ff").is_ok());
+    }
+
+    #[test]
+    fn mac_rejects_no_separators() {
+        // Bare 12-hex form (Cisco style) intentionally NOT supported
+        // here — operators typing into a form expect : or - to
+        // separate octets, and accepting both with-and-without
+        // makes UX murky.
+        assert!(validate_mac_address("001A2B3C4D5E").is_err());
+    }
+
+    #[test]
+    fn mac_rejects_mixed_separators() {
+        assert!(validate_mac_address("00:1A:2B-3C:4D:5E").is_err());
+        assert!(validate_mac_address("00-1A:2B:3C:4D:5E").is_err());
+    }
+
+    #[test]
+    fn mac_rejects_non_hex_chars() {
+        assert!(validate_mac_address("00:1A:2B:3C:4D:5Z").is_err());
+        assert!(validate_mac_address("00:1G:2B:3C:4D:5E").is_err());
+    }
+
+    #[test]
+    fn mac_rejects_wrong_octet_length() {
+        // Single-digit octets rejected (operators should zero-pad).
+        assert!(validate_mac_address("0:1A:2B:3C:4D:5E").is_err());
+        // Triple-digit octets rejected.
+        assert!(validate_mac_address("000:1A:2B:3C:4D:5E").is_err());
+    }
+
+    #[test]
+    fn mac_rejects_wrong_total_length() {
+        assert!(validate_mac_address("").is_err());
+        assert!(validate_mac_address("00:1A:2B:3C:4D").is_err()); // 5 octets
+        assert!(validate_mac_address("00:1A:2B:3C:4D:5E:6F").is_err()); // 7 octets
     }
 }
