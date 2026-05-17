@@ -70,6 +70,8 @@
 //! - `validate_hostname` — RFC 1123 hostname format. Each
 //!   dot-separated label 1–63 chars, letters/digits/hyphens, no
 //!   leading or trailing hyphen, total length ≤ 253.
+//! - `validate_iban` — ISO 13616 IBAN mod-97 checksum (catches typos
+//!   in bank account fields).
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -751,6 +753,76 @@ pub fn validate_hostname(s: &str) -> Result<(), ValidationError> {
                 "Enter a valid hostname.",
             ));
         }
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------ IBAN
+
+/// Validate an ISO 13616 IBAN (International Bank Account Number)
+/// via the mod-97 check. Strips spaces (the typical printed
+/// "GB82 WEST 1234 5698 7654 32" shape) before validating.
+///
+/// Format requirements:
+/// - 2-letter ISO country code (uppercase).
+/// - 2-digit check digits.
+/// - 1–30 additional ASCII alphanumeric chars.
+/// - Total length 5–34.
+///
+/// Algorithm:
+/// 1. Move the first 4 chars to the end.
+/// 2. Replace each letter with two digits: A=10, B=11, ..., Z=35.
+/// 3. Treat the result as a single integer; mod 97 must equal 1.
+///
+/// This catches typos before hitting the bank-rails verification
+/// API. Does NOT verify the account exists / has funds — only the
+/// payment provider can do that.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_iban", ... }`.
+pub fn validate_iban(s: &str) -> Result<(), ValidationError> {
+    let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    if !(5..=34).contains(&cleaned.len()) {
+        return Err(ValidationError::new("invalid_iban", "Enter a valid IBAN."));
+    }
+    let bytes = cleaned.as_bytes();
+    // First 2 must be uppercase letters (country code), next 2 digits.
+    if !bytes[0].is_ascii_uppercase()
+        || !bytes[1].is_ascii_uppercase()
+        || !bytes[2].is_ascii_digit()
+        || !bytes[3].is_ascii_digit()
+    {
+        return Err(ValidationError::new("invalid_iban", "Enter a valid IBAN."));
+    }
+    // Remaining chars must be uppercase alphanumeric.
+    if !bytes[4..]
+        .iter()
+        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    {
+        return Err(ValidationError::new("invalid_iban", "Enter a valid IBAN."));
+    }
+    // Rearrange: move first 4 to end. Then convert letters → digits.
+    let rearranged: String = cleaned[4..]
+        .chars()
+        .chain(cleaned[..4].chars())
+        .flat_map(|c| {
+            if c.is_ascii_digit() {
+                vec![c]
+            } else {
+                let n = c as u32 - 'A' as u32 + 10;
+                n.to_string().chars().collect()
+            }
+        })
+        .collect();
+    // mod-97 on a string of digits — fold from the left to avoid
+    // overflowing u64 on the full 30+-digit number.
+    let mut remainder: u64 = 0;
+    for ch in rearranged.chars() {
+        let d = ch.to_digit(10).expect("digit-only after letter map");
+        remainder = (remainder * 10 + u64::from(d)) % 97;
+    }
+    if remainder != 1 {
+        return Err(ValidationError::new("invalid_iban", "Enter a valid IBAN."));
     }
     Ok(())
 }
@@ -1842,5 +1914,59 @@ mod tests {
     #[test]
     fn hostname_rejects_empty() {
         assert!(validate_hostname("").is_err());
+    }
+
+    // -------- validate_iban --------
+
+    #[test]
+    fn iban_accepts_known_valid_examples() {
+        // Standard test IBANs from various countries (ISO 13616).
+        // UK
+        assert!(validate_iban("GB82WEST12345698765432").is_ok());
+        // Germany
+        assert!(validate_iban("DE89370400440532013000").is_ok());
+        // France
+        assert!(validate_iban("FR1420041010050500013M02606").is_ok());
+        // Norway (shortest standard IBAN — 15 chars)
+        assert!(validate_iban("NO9386011117947").is_ok());
+    }
+
+    #[test]
+    fn iban_strips_spaces() {
+        // Printed form is space-grouped.
+        assert!(validate_iban("GB82 WEST 1234 5698 7654 32").is_ok());
+    }
+
+    #[test]
+    fn iban_rejects_wrong_checksum() {
+        // Flip a digit in the check region.
+        let e = validate_iban("GB82WEST12345698765431").unwrap_err();
+        assert_eq!(e.code, "invalid_iban");
+    }
+
+    #[test]
+    fn iban_rejects_wrong_format() {
+        // Lowercase country code rejected (must be uppercase).
+        assert!(validate_iban("gb82WEST12345698765432").is_err());
+        // First 2 must be letters, next 2 digits.
+        assert!(validate_iban("1B82WEST12345698765432").is_err());
+        assert!(validate_iban("GBAB12345678901234567890").is_err());
+        // Non-alphanumeric chars after the prefix rejected.
+        assert!(validate_iban("GB82WEST!2345698765432").is_err());
+    }
+
+    #[test]
+    fn iban_rejects_out_of_range_length() {
+        // 4 chars total — below the 5-char floor.
+        assert!(validate_iban("GB82").is_err());
+        // 35 chars total — above the 34-char ceiling.
+        let too_long = format!("GB82{}", "X".repeat(31));
+        assert!(validate_iban(&too_long).is_err());
+    }
+
+    #[test]
+    fn iban_rejects_empty_and_whitespace_only() {
+        assert!(validate_iban("").is_err());
+        assert!(validate_iban("   ").is_err());
     }
 }
