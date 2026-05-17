@@ -5,8 +5,8 @@
 //! `linebreaks`, `default_if_none`, `add`, `cut`, `divisibleby`,
 //! `floatformat`, `escapejs`, `yesno`, `get_digit`, `dictsort`,
 //! `slugify_unicode`, `iriencode`, `wordwrap`, `mask_email`,
-//! `mask_card`, `mask_phone`. Call [`register_filters`] on a Tera
-//! instance to make them available:
+//! `mask_card`, `mask_phone`, `dictsortreversed`. Call
+//! [`register_filters`] on a Tera instance to make them available:
 //!
 //! ```ignore
 //! let mut tera = tera::Tera::default();
@@ -46,6 +46,7 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("mask_email", mask_email);
     tera.register_filter("mask_card", mask_card);
     tera.register_filter("mask_phone", mask_phone);
+    tera.register_filter("dictsortreversed", dictsortreversed);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -494,6 +495,32 @@ fn dictsort(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value>
         let ak = a.get(key).cloned().unwrap_or(Value::Null);
         let bk = b.get(key).cloned().unwrap_or(Value::Null);
         compare_values(&ak, &bk)
+    });
+    Ok(Value::Array(sorted))
+}
+
+/// `dictsortreversed` — Django's `dictsortreversed`. Descending
+/// counterpart of [`dictsort`]: stable sort by named key, largest
+/// first. Same semantics: missing-key entries treated as null and
+/// sort to the END (lowest after reversal). Non-list input passes
+/// through. Empty key is a no-op (returns unchanged).
+fn dictsortreversed(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(arr) = value.as_array() else {
+        return Ok(value.clone());
+    };
+    let key = args
+        .get("key")
+        .or_else(|| args.values().next())
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if key.is_empty() {
+        return Ok(value.clone());
+    }
+    let mut sorted = arr.clone();
+    sorted.sort_by(|a, b| {
+        let ak = a.get(key).cloned().unwrap_or(Value::Null);
+        let bk = b.get(key).cloned().unwrap_or(Value::Null);
+        compare_values(&bk, &ak) // swap for reversed
     });
     Ok(Value::Array(sorted))
 }
@@ -1672,5 +1699,59 @@ mod tests {
     fn mask_phone_passes_through_non_string() {
         let out = mask_phone(&json!(42), &HashMap::new()).unwrap();
         assert_eq!(out, json!(42));
+    }
+
+    // -------- dictsortreversed --------
+
+    #[test]
+    fn dictsortreversed_sorts_descending_by_string_key() {
+        let input = json!([
+            {"name": "Alice"},
+            {"name": "Charlie"},
+            {"name": "Bob"},
+        ]);
+        let out = dictsortreversed(&input, &args_pos(json!("name"))).unwrap();
+        let arr = out.as_array().unwrap();
+        assert_eq!(arr[0]["name"], "Charlie");
+        assert_eq!(arr[1]["name"], "Bob");
+        assert_eq!(arr[2]["name"], "Alice");
+    }
+
+    #[test]
+    fn dictsortreversed_sorts_descending_by_numeric_key() {
+        let input = json!([
+            {"age": 5},
+            {"age": 30},
+            {"age": 20},
+        ]);
+        let out = dictsortreversed(&input, &args_pos(json!("age"))).unwrap();
+        let arr = out.as_array().unwrap();
+        assert_eq!(arr[0]["age"], 30);
+        assert_eq!(arr[1]["age"], 20);
+        assert_eq!(arr[2]["age"], 5);
+    }
+
+    #[test]
+    fn dictsortreversed_missing_key_sorts_last() {
+        // Reversed: null (missing) ranks lowest, so it goes LAST.
+        let input = json!([
+            {"name": "A"},
+            {"other": "x"},
+            {"name": "C"},
+        ]);
+        let out = dictsortreversed(&input, &args_pos(json!("name"))).unwrap();
+        let arr = out.as_array().unwrap();
+        assert_eq!(arr[0]["name"], "C");
+        assert_eq!(arr[1]["name"], "A");
+        assert!(arr[2].get("name").is_none());
+    }
+
+    #[test]
+    fn dictsortreversed_passes_through_non_list_and_empty_key() {
+        let out = dictsortreversed(&json!({"k": 1}), &args_pos(json!("k"))).unwrap();
+        assert_eq!(out, json!({"k": 1}));
+        let input = json!([{"a": 2}, {"a": 1}]);
+        let out2 = dictsortreversed(&input, &args_pos(json!(""))).unwrap();
+        assert_eq!(out2, input);
     }
 }
