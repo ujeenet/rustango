@@ -47,6 +47,10 @@
 //! - [`assert_messages`] — read + assert on the flash-messages cookie
 //!   from [`crate::messages`]. Gated on `template_views` so consumers
 //!   that use messages get the helper for free.
+//! - [`assert_cookie_set`] — assert a `Set-Cookie` header for the
+//!   given cookie name was emitted, with optional exact-value match.
+//! - [`assert_cookie_not_set`] — inverse: assert no `Set-Cookie` for
+//!   the given name was emitted.
 //!
 //! ## Out of scope (queued as follow-ups)
 //!
@@ -402,6 +406,71 @@ pub async fn assert_contains_count(res: Response, fragment: &str, count: usize) 
     );
 }
 
+/// Assert that the response emitted a `Set-Cookie` header for the
+/// given cookie `name`. If `expected_value` is `Some`, also assert
+/// the cookie's value (the portion BEFORE the first `;` — i.e. the
+/// `name=value` segment without `Path` / `HttpOnly` / etc.) equals
+/// that value byte-for-byte. Returns the matched `Set-Cookie` header
+/// value(s).
+///
+/// Use to verify that handlers set session / CSRF / messages /
+/// custom cookies as expected.
+///
+/// ```ignore
+/// assert_cookie_set(&res, "rustango_messages", None);  // present, value not pinned
+/// assert_cookie_set(&res, "session", Some("abc123"));  // present with exact value
+/// ```
+///
+/// Panics with the full Set-Cookie list when no header for that
+/// name is found, or when the value doesn't match.
+pub fn assert_cookie_set(res: &Response, name: &str, expected_value: Option<&str>) {
+    let mut matches: Vec<String> = Vec::new();
+    for v in res.headers().get_all(axum::http::header::SET_COOKIE).iter() {
+        let Ok(s) = v.to_str() else { continue };
+        let first = s.split(';').next().unwrap_or("");
+        if let Some(val) = first.trim().strip_prefix(&format!("{name}=")) {
+            matches.push(val.to_owned());
+        }
+    }
+    if matches.is_empty() {
+        let all_cookies: Vec<String> = res
+            .headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok().map(str::to_owned))
+            .collect();
+        panic!(
+            "assert_cookie_set: no `Set-Cookie` for `{name}` found. \
+             Found {} Set-Cookie header(s): {all_cookies:?}",
+            all_cookies.len()
+        );
+    }
+    if let Some(expected) = expected_value {
+        let any_match = matches.iter().any(|v| v == expected);
+        assert!(
+            any_match,
+            "assert_cookie_set: `{name}` was set, but its value didn't match. \
+             Expected `{expected}`, got: {matches:?}"
+        );
+    }
+}
+
+/// Inverse of [`assert_cookie_set`] — panic if a `Set-Cookie` for
+/// `name` IS present. Use to verify that a handler did NOT set a
+/// cookie under specific conditions (logged-out request shouldn't
+/// touch the session cookie, etc.).
+pub fn assert_cookie_not_set(res: &Response, name: &str) {
+    for v in res.headers().get_all(axum::http::header::SET_COOKIE).iter() {
+        let Ok(s) = v.to_str() else { continue };
+        let first = s.split(';').next().unwrap_or("");
+        if first.trim().starts_with(&format!("{name}=")) {
+            panic!(
+                "assert_cookie_not_set: `Set-Cookie: {name}=...` was unexpectedly emitted: `{s}`"
+            );
+        }
+    }
+}
+
 /// Truncate a string at a UTF-8 char boundary at or before `max`,
 /// appending a `...(N more chars)` indicator so the panic message
 /// doesn't confuse a clipped 1000-char body for a 500-char one.
@@ -747,5 +816,69 @@ mod tests {
     fn assert_redirect_chain_panics_on_wrong_final_status() {
         let chain = vec![(302u16, "/old".to_owned()), (404, "/canonical".to_owned())];
         assert_redirect_chain(&chain, "/canonical", 200);
+    }
+
+    // -------- assert_cookie_set / assert_cookie_not_set --------
+
+    fn cookie_response(set_cookies: &[&str]) -> Response {
+        let mut builder = Response::builder().status(StatusCode::OK);
+        for c in set_cookies {
+            builder = builder.header(axum::http::header::SET_COOKIE, *c);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    #[test]
+    fn assert_cookie_set_passes_when_cookie_present() {
+        let res = cookie_response(&["session=abc123; Path=/; HttpOnly"]);
+        assert_cookie_set(&res, "session", None);
+    }
+
+    #[test]
+    fn assert_cookie_set_passes_with_exact_value_match() {
+        let res = cookie_response(&["session=abc123; Path=/; HttpOnly"]);
+        assert_cookie_set(&res, "session", Some("abc123"));
+    }
+
+    #[test]
+    #[should_panic(expected = "no `Set-Cookie` for `session` found")]
+    fn assert_cookie_set_panics_when_cookie_absent() {
+        let res = cookie_response(&["other=value"]);
+        assert_cookie_set(&res, "session", None);
+    }
+
+    #[test]
+    #[should_panic(expected = "value didn't match")]
+    fn assert_cookie_set_panics_on_value_mismatch() {
+        let res = cookie_response(&["session=abc; Path=/"]);
+        assert_cookie_set(&res, "session", Some("xyz"));
+    }
+
+    #[test]
+    fn assert_cookie_set_handles_multiple_set_cookie_headers() {
+        // Multiple Set-Cookie headers can appear in one response;
+        // the helper should match against any of them.
+        let res = cookie_response(&["csrftoken=tok; Path=/", "session=abc; Path=/; HttpOnly"]);
+        assert_cookie_set(&res, "csrftoken", Some("tok"));
+        assert_cookie_set(&res, "session", Some("abc"));
+    }
+
+    #[test]
+    fn assert_cookie_not_set_passes_when_cookie_absent() {
+        let res = cookie_response(&["other=value"]);
+        assert_cookie_not_set(&res, "session");
+    }
+
+    #[test]
+    fn assert_cookie_not_set_passes_when_no_cookies_at_all() {
+        let res = cookie_response(&[]);
+        assert_cookie_not_set(&res, "session");
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpectedly emitted")]
+    fn assert_cookie_not_set_panics_when_cookie_present() {
+        let res = cookie_response(&["session=abc; Path=/"]);
+        assert_cookie_not_set(&res, "session");
     }
 }
