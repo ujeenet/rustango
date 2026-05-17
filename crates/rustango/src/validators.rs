@@ -74,6 +74,9 @@
 //!   in bank account fields).
 //! - `validate_mac_address` — EUI-48 MAC address (6 hex pairs
 //!   separated by `:` or `-`).
+//! - `validate_base64` — standard base64 (`[A-Za-z0-9+/]` +
+//!   optional `=` padding).
+//! - `validate_base64_urlsafe` — URL-safe base64 (`[A-Za-z0-9_-]`).
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -872,6 +875,80 @@ pub fn validate_mac_address(s: &str) -> Result<(), ValidationError> {
             return Err(ValidationError::new(
                 "invalid_mac_address",
                 "Enter a valid MAC address (e.g. 00:1A:2B:3C:4D:5E).",
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------ base64
+
+/// Validate that `s` is a well-formed standard base64 string:
+/// characters from `[A-Za-z0-9+/]`, length a multiple of 4 after
+/// optional `=` padding (at most two trailing `=`).
+///
+/// Doesn't decode the bytes — just checks the shape. Useful for
+/// admin form fields capturing encoded secrets / tokens / blobs
+/// where the caller will decode separately.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_base64", ... }`.
+pub fn validate_base64(s: &str) -> Result<(), ValidationError> {
+    validate_base64_impl(s, false)
+}
+
+/// Validate that `s` is a well-formed URL-safe base64 string:
+/// characters from `[A-Za-z0-9_-]`, length a multiple of 4 after
+/// optional `=` padding (or, by RFC 4648 convention, padding may
+/// be omitted in URL-safe encoding — we accept either).
+///
+/// # Errors
+/// `ValidationError { code: "invalid_base64", ... }`.
+pub fn validate_base64_urlsafe(s: &str) -> Result<(), ValidationError> {
+    validate_base64_impl(s, true)
+}
+
+fn validate_base64_impl(s: &str, urlsafe: bool) -> Result<(), ValidationError> {
+    if s.is_empty() {
+        return Err(ValidationError::new(
+            "invalid_base64",
+            "Enter a valid base64 string.",
+        ));
+    }
+    // Trailing padding count.
+    let pad = s.bytes().rev().take_while(|b| *b == b'=').count();
+    if pad > 2 {
+        return Err(ValidationError::new(
+            "invalid_base64",
+            "Enter a valid base64 string.",
+        ));
+    }
+    let body = &s[..s.len() - pad];
+    // Body must contain no `=`. Body chars must be in the right
+    // alphabet.
+    for ch in body.chars() {
+        let ok = ch.is_ascii_alphanumeric()
+            || (if urlsafe {
+                ch == '-' || ch == '_'
+            } else {
+                ch == '+' || ch == '/'
+            });
+        if !ok {
+            return Err(ValidationError::new(
+                "invalid_base64",
+                "Enter a valid base64 string.",
+            ));
+        }
+    }
+    // Standard base64 with padding: total length multiple of 4.
+    // URL-safe base64 without padding: any length is fine PROVIDED
+    // there's no padding present. URL-safe WITH padding follows the
+    // standard rule.
+    if pad > 0 || !urlsafe {
+        if !s.len().is_multiple_of(4) {
+            return Err(ValidationError::new(
+                "invalid_base64",
+                "Enter a valid base64 string.",
             ));
         }
     }
@@ -2075,5 +2152,68 @@ mod tests {
         assert!(validate_mac_address("").is_err());
         assert!(validate_mac_address("00:1A:2B:3C:4D").is_err()); // 5 octets
         assert!(validate_mac_address("00:1A:2B:3C:4D:5E:6F").is_err()); // 7 octets
+    }
+
+    // -------- validate_base64 --------
+
+    #[test]
+    fn base64_accepts_standard_alphabet() {
+        // "Hello" → "SGVsbG8="
+        assert!(validate_base64("SGVsbG8=").is_ok());
+        // "Many hands" → "TWFueSBoYW5kcw=="
+        assert!(validate_base64("TWFueSBoYW5kcw==").is_ok());
+        // No padding needed when len % 3 == 0.
+        assert!(validate_base64("abcd").is_ok());
+    }
+
+    #[test]
+    fn base64_accepts_plus_and_slash() {
+        // "?>>>" → "Pz4+Pg==" (uses + character).
+        // Build a likely-valid string with + and /.
+        assert!(validate_base64("AB+/").is_ok());
+    }
+
+    #[test]
+    fn base64_rejects_urlsafe_chars() {
+        // - and _ are URL-safe, not standard.
+        assert!(validate_base64("AB-_").is_err());
+    }
+
+    #[test]
+    fn base64_rejects_bad_padding_count() {
+        // Three trailing = is never valid.
+        assert!(validate_base64("AB===").is_err());
+    }
+
+    #[test]
+    fn base64_rejects_non_multiple_of_4() {
+        // Standard base64 with any padding must be a multiple of 4.
+        assert!(validate_base64("ABCDE=").is_err()); // 6 chars, not 4n
+    }
+
+    #[test]
+    fn base64_rejects_empty() {
+        assert!(validate_base64("").is_err());
+        assert!(validate_base64_urlsafe("").is_err());
+    }
+
+    // -------- validate_base64_urlsafe --------
+
+    #[test]
+    fn base64_urlsafe_accepts_dash_and_underscore() {
+        assert!(validate_base64_urlsafe("AB-_").is_ok());
+        assert!(validate_base64_urlsafe("SGVsbG8=").is_ok()); // standard chars also fine
+    }
+
+    #[test]
+    fn base64_urlsafe_rejects_plus_and_slash() {
+        assert!(validate_base64_urlsafe("AB+/").is_err());
+    }
+
+    #[test]
+    fn base64_urlsafe_accepts_unpadded() {
+        // URL-safe base64 commonly omits padding (JWT, etc.).
+        // 5 chars, no padding — allowed for url-safe.
+        assert!(validate_base64_urlsafe("ABCDE").is_ok());
     }
 }
