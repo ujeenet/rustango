@@ -139,6 +139,56 @@ impl TestClient {
         self.request(Method::GET, path)
     }
 
+    /// Issue a GET request and follow up to `max_hops` 3xx redirects.
+    /// Returns the final response **plus** the chain of visited
+    /// (status, location) pairs. Django's `Client.get(..., follow=True)`.
+    /// Issue #41 follow-up.
+    ///
+    /// Each hop reuses the same cookie jar, so `Set-Cookie` from an
+    /// intermediate hop is visible to the next request. The original
+    /// request's headers / content-type are NOT propagated — Django
+    /// follows redirects as GET regardless of the request method,
+    /// matching browser behaviour.
+    ///
+    /// Stops following when:
+    /// - The response status is not 3xx.
+    /// - The response is 3xx but has no `Location` header.
+    /// - `max_hops` has been reached. The final response in the
+    ///   chain is whatever the last hop returned (likely still 3xx).
+    ///
+    /// ```ignore
+    /// let (final_res, chain) = client.get_following_redirects("/old", 5).await;
+    /// // chain = [(302, "/new"), (302, "/canonical"), (200, "/canonical")]
+    /// assert_eq!(final_res.status, 200);
+    /// assert_eq!(chain.last().unwrap().1, "/canonical");
+    /// ```
+    pub async fn get_following_redirects(
+        &self,
+        path: impl Into<String>,
+        max_hops: usize,
+    ) -> (TestResponse, Vec<(u16, String)>) {
+        let mut current_path: String = path.into();
+        let mut chain: Vec<(u16, String)> = Vec::new();
+        let mut last: TestResponse = self.get(current_path.clone()).send().await;
+        for _ in 0..max_hops {
+            let status = last.status;
+            if !(300..400).contains(&status) {
+                break;
+            }
+            let location = match last.header("location") {
+                Some(loc) => loc.to_owned(),
+                None => break,
+            };
+            chain.push((status, location.clone()));
+            current_path = location;
+            last = self.get(current_path.clone()).send().await;
+        }
+        // Final hop's status + (resolved) location, for callers that
+        // want the destination URL alongside the response.
+        chain.push((last.status, current_path));
+        (last, chain)
+    }
+
     /// Build a `POST` request to `path`.
     #[must_use]
     pub fn post(&self, path: impl Into<String>) -> RequestBuilder<'_> {
@@ -647,5 +697,103 @@ mod tests {
             ("expired".to_owned(), String::new())
         );
         assert!(parse_set_cookie("no-equals-sign").is_none());
+    }
+
+    // ---------- get_following_redirects (issue #41 follow-up) ----------
+
+    fn redirect_app() -> Router {
+        use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+        use axum::response::IntoResponse;
+
+        async fn old() -> impl IntoResponse {
+            let mut h = HeaderMap::new();
+            h.insert(header::LOCATION, HeaderValue::from_static("/middle"));
+            (StatusCode::FOUND, h, "")
+        }
+        async fn middle() -> impl IntoResponse {
+            let mut h = HeaderMap::new();
+            h.insert(header::LOCATION, HeaderValue::from_static("/new"));
+            (StatusCode::MOVED_PERMANENTLY, h, "")
+        }
+        async fn new_handler() -> impl IntoResponse {
+            (StatusCode::OK, "final")
+        }
+        async fn loops() -> impl IntoResponse {
+            let mut h = HeaderMap::new();
+            h.insert(header::LOCATION, HeaderValue::from_static("/loop"));
+            (StatusCode::FOUND, h, "")
+        }
+        async fn redirect_no_location() -> impl IntoResponse {
+            // 3xx with no Location header — the follower should stop.
+            (StatusCode::FOUND, "")
+        }
+
+        Router::new()
+            .route("/old", get(old))
+            .route("/middle", get(middle))
+            .route("/new", get(new_handler))
+            .route("/loop", get(loops))
+            .route("/dangling", get(redirect_no_location))
+            .route("/direct", get(|| async { "hi" }))
+    }
+
+    #[tokio::test]
+    async fn follows_two_hop_chain_to_final_200() {
+        let c = TestClient::new(redirect_app());
+        let (final_res, chain) = c.get_following_redirects("/old", 5).await;
+        assert_eq!(final_res.status, 200);
+        assert_eq!(final_res.text(), "final");
+        // chain = [(302, "/middle"), (301, "/new"), (200, "/new")]
+        assert_eq!(chain.len(), 3);
+        assert_eq!(chain[0], (302, "/middle".to_owned()));
+        assert_eq!(chain[1], (301, "/new".to_owned()));
+        assert_eq!(chain[2].0, 200);
+        assert_eq!(chain[2].1, "/new");
+    }
+
+    #[tokio::test]
+    async fn follow_no_op_when_first_response_is_200() {
+        let c = TestClient::new(redirect_app());
+        let (res, chain) = c.get_following_redirects("/direct", 5).await;
+        assert_eq!(res.status, 200);
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].0, 200);
+    }
+
+    #[tokio::test]
+    async fn follow_stops_at_max_hops() {
+        // /loop always redirects to itself. With max_hops=3, we
+        // should follow exactly 3 hops then bail with the last 3xx.
+        let c = TestClient::new(redirect_app());
+        let (res, chain) = c.get_following_redirects("/loop", 3).await;
+        // After 3 follows we ran out — the final response is still 3xx.
+        assert_eq!(res.status, 302);
+        // The chain holds the 3 hops plus the final unresolved-as-3xx.
+        assert_eq!(chain.len(), 4);
+        for hop in &chain[..3] {
+            assert_eq!(hop.0, 302);
+            assert_eq!(hop.1, "/loop");
+        }
+    }
+
+    #[tokio::test]
+    async fn follow_stops_when_3xx_has_no_location() {
+        // /dangling: 302 without Location header. The follower
+        // shouldn't try to "go" anywhere; it just returns that 3xx.
+        let c = TestClient::new(redirect_app());
+        let (res, chain) = c.get_following_redirects("/dangling", 5).await;
+        assert_eq!(res.status, 302);
+        // Only the initial dangling 302 is in the chain.
+        assert_eq!(chain.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn follow_max_hops_zero_returns_first_response() {
+        let c = TestClient::new(redirect_app());
+        let (res, chain) = c.get_following_redirects("/old", 0).await;
+        // No follows performed — first response surfaced as-is.
+        assert_eq!(res.status, 302);
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].1, "/old");
     }
 }
