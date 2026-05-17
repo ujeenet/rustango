@@ -1,0 +1,60 @@
+{# Admin inlines — Django TabularInline / StackedInline display.
+   Issue #50 slice 1: read-only listing of child rows on the parent
+   detail page. Each panel is one `register_admin_inline!` registration.
+   Rendered with `{{ value | safe }}` because the cell renderer
+   already HTML-escapes its inputs. #}
+{% if inline_panels and inline_panels | length > 0 %}
+    {% for panel in inline_panels %}
+        <section class="admin-inline admin-inline-{{ panel.kind }}"
+                 data-child-table="{{ panel.child_table }}">
+            <h2>{{ panel.label }}</h2>
+            {% if panel.empty %}
+                <p>
+                    <em>No related rows.</em>
+                </p>
+            {% else %}
+                {% if panel.kind == "tabular" %}
+                    <table class="inline-table">
+                        <thead>
+                            <tr>
+                                {% for label in panel.field_labels %}<th>{{ label }}</th>{% endfor %}
+                                <th aria-label="actions"></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in panel.rows %}
+                                <tr>
+                                    {% for cell in row.cells %}<td>{{ cell.value | safe }}</td>{% endfor %}
+                                    <td>
+                                        {% if row.pk %}
+                                            <a href="{{ admin_prefix }}/{{ panel.child_table }}/{{ row.pk }}">View</a>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                {% else %}
+                    {# stacked #}
+                    {% for row in panel.rows %}
+                        <fieldset class="inline-stacked">
+                            <legend>
+                                {% if row.pk %}
+                                    <a href="{{ admin_prefix }}/{{ panel.child_table }}/{{ row.pk }}">#{{ row.pk }}</a>
+                                {% else %}
+                                    Row
+                                {% endif %}
+                            </legend>
+                            <dl>
+                                {% for cell in row.cells %}
+                                    <dt>{{ cell.label }}</dt>
+                                    <dd>{{ cell.value | safe }}</dd>
+                                {% endfor %}
+                            </dl>
+                        </fieldset>
+                    {% endfor %}
+                {% endif %}
+            {% endif %}
+        </section>
+    {% endfor %}
+{% endif %}

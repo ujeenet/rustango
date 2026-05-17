@@ -860,7 +860,7 @@ pub(crate) async fn detail_view(
             where_clause: WhereExpr::Predicate(Filter {
                 column: pk_field.column,
                 op: Op::Eq,
-                value: pk_value,
+                value: pk_value.clone(),
             }),
             search: None,
             joins: build_fk_joins(&state, model),
@@ -933,6 +933,24 @@ pub(crate) async fn detail_view(
         }));
     }
 
+    // #50 — admin inlines. Walk every `register_admin_inline!`
+    // submission keyed on this parent table, fetch the matching child
+    // rows, and hand the renderer a list of `InlinePanel`s. Best-effort:
+    // a fetch error on one panel (e.g. the child table doesn't exist
+    // yet on this tenant) drops the panels list to empty rather than
+    // taking down the whole detail page.
+    let inline_panels_ctx: Vec<serde_json::Value> =
+        super::inlines::render_for_parent(&state.pool, model, pk_value)
+            .await
+            .ok()
+            .map(|panels| {
+                panels
+                    .into_iter()
+                    .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null))
+                    .collect()
+            })
+            .unwrap_or_default();
+
     // v0.12.2: Audit trail panel for this row. Best-effort — if the
     // audit table doesn't exist yet (project hasn't called
     // `audit::ensure_table` per tenant), the lookup returns Err and
@@ -979,6 +997,7 @@ pub(crate) async fn detail_view(
         "read_only": state.is_read_only(model.table),
         "audit_entries": audit_entries_ctx,
         "user_roles_panel": user_roles_ctx,
+        "inline_panels": inline_panels_ctx,
     });
     let html = render_with_chrome(
         "detail.html",

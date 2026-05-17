@@ -29,6 +29,10 @@ fn templates() -> &'static tera::Tera {
             ("index.html", include_str!("templates/index.html")),
             ("list.html", include_str!("templates/list.html")),
             ("detail.html", include_str!("templates/detail.html")),
+            (
+                "_inline_panels.html",
+                include_str!("templates/_inline_panels.html"),
+            ),
             ("form.html", include_str!("templates/form.html")),
             ("audit_log.html", include_str!("templates/audit_log.html")),
         ])

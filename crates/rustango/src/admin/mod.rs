@@ -45,6 +45,7 @@ pub mod computed_fields;
 mod errors;
 mod forms;
 mod helpers;
+pub mod inlines;
 // `pub(crate)` so the operator console can reuse `render_input` /
 // `render_value_for_input` for its `/orgs/{slug}/edit` form. Stays
 // non-public outside the crate — the helpers' signatures are still
@@ -57,4 +58,5 @@ mod views;
 pub use auth::protect_with_basic_auth;
 pub use computed_fields::{ComputedField, ComputedFieldRenderFn};
 pub use errors::AdminError;
+pub use inlines::{InlineAdmin, InlineKind, InlinePanel};
 pub use urls::{router, AdminActionFn, AdminActionFuture, Builder};
