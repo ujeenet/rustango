@@ -79,6 +79,8 @@
 //! - `validate_base64_urlsafe` — URL-safe base64 (`[A-Za-z0-9_-]`).
 //! - `validate_jwt_shape` — three dot-separated URL-safe base64
 //!   segments. Shape check only, NO signature verification.
+//! - `validate_semver` — semantic version 2.0.0 (`MAJOR.MINOR.PATCH`
+//!   with optional `-pre.release` and `+build` suffixes).
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -992,6 +994,103 @@ pub fn validate_jwt_shape(s: &str) -> Result<(), ValidationError> {
         })?;
     }
     Ok(())
+}
+
+// ------------------------------------------------------------------ semver
+
+/// Validate a [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html)
+/// version string: `MAJOR.MINOR.PATCH` with optional `-pre.release`
+/// and `+build.metadata` suffixes.
+///
+/// Rules:
+/// - MAJOR / MINOR / PATCH are non-negative integers. Leading zeros
+///   are forbidden except the bare `0` itself.
+/// - Pre-release: dot-separated identifiers, each non-empty,
+///   `[0-9A-Za-z-]`. Numeric identifiers must not have leading
+///   zeros (except `0`).
+/// - Build metadata: dot-separated identifiers, each non-empty,
+///   `[0-9A-Za-z-]`. Numeric leading zeros ARE allowed (per spec).
+///
+/// Examples:
+/// - `validate_semver("1.0.0")` → Ok
+/// - `validate_semver("1.0.0-alpha.1")` → Ok
+/// - `validate_semver("1.0.0+20240101")` → Ok
+/// - `validate_semver("1.0.0-rc.1+build.42")` → Ok
+/// - `validate_semver("1.0")` → Err (missing patch)
+/// - `validate_semver("01.0.0")` → Err (leading zero in major)
+/// - `validate_semver("1.0.0-")` → Err (empty pre-release)
+///
+/// # Errors
+/// `ValidationError { code: "invalid_semver", ... }`.
+pub fn validate_semver(s: &str) -> Result<(), ValidationError> {
+    let bad = || ValidationError::new("invalid_semver", "Enter a valid semver (e.g. 1.2.3).");
+    // Split off build metadata (after first `+`).
+    let (core_pre, build) = match s.split_once('+') {
+        Some((cp, b)) => (cp, Some(b)),
+        None => (s, None),
+    };
+    // Split off pre-release (after first `-`).
+    let (core, pre) = match core_pre.split_once('-') {
+        Some((c, p)) => (c, Some(p)),
+        None => (core_pre, None),
+    };
+    // Core: exactly three dot-separated non-negative-integer
+    // identifiers with no leading zeros.
+    let core_parts: Vec<&str> = core.split('.').collect();
+    if core_parts.len() != 3 {
+        return Err(bad());
+    }
+    for part in core_parts {
+        if !is_valid_numeric_id(part) {
+            return Err(bad());
+        }
+    }
+    if let Some(p) = pre {
+        if !is_valid_semver_id_list(p, /* allow_numeric_leading_zero = */ false) {
+            return Err(bad());
+        }
+    }
+    if let Some(b) = build {
+        // Build metadata identifiers may have leading zeros.
+        if !is_valid_semver_id_list(b, /* allow_numeric_leading_zero = */ true) {
+            return Err(bad());
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_numeric_id(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    if !s.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    // No leading zero unless the value IS "0".
+    !(s.len() > 1 && s.starts_with('0'))
+}
+
+fn is_valid_semver_id_list(s: &str, allow_numeric_leading_zero: bool) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    for part in s.split('.') {
+        if part.is_empty() {
+            return false;
+        }
+        if !part.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return false;
+        }
+        // Numeric-only identifier without leading-zero permission?
+        if !allow_numeric_leading_zero
+            && part.chars().all(|c| c.is_ascii_digit())
+            && part.len() > 1
+            && part.starts_with('0')
+        {
+            return false;
+        }
+    }
+    true
 }
 
 // ------------------------------------------------------------------ length / value bounds
@@ -2293,5 +2392,73 @@ mod tests {
     #[test]
     fn jwt_shape_rejects_empty() {
         assert!(validate_jwt_shape("").is_err());
+    }
+
+    // -------- validate_semver --------
+
+    #[test]
+    fn semver_accepts_canonical_form() {
+        assert!(validate_semver("1.0.0").is_ok());
+        assert!(validate_semver("0.0.1").is_ok());
+        assert!(validate_semver("10.20.30").is_ok());
+    }
+
+    #[test]
+    fn semver_accepts_pre_release() {
+        assert!(validate_semver("1.0.0-alpha").is_ok());
+        assert!(validate_semver("1.0.0-alpha.1").is_ok());
+        assert!(validate_semver("1.0.0-0.3.7").is_ok());
+        assert!(validate_semver("1.0.0-x-y-z.--").is_ok());
+    }
+
+    #[test]
+    fn semver_accepts_build_metadata() {
+        assert!(validate_semver("1.0.0+20130313144700").is_ok());
+        assert!(validate_semver("1.0.0+exp.sha.5114f85").is_ok());
+        // Build metadata IS allowed to have leading-zero numeric ids.
+        assert!(validate_semver("1.0.0+007").is_ok());
+    }
+
+    #[test]
+    fn semver_accepts_full_form() {
+        assert!(validate_semver("1.0.0-rc.1+build.42").is_ok());
+    }
+
+    #[test]
+    fn semver_rejects_missing_core_parts() {
+        assert!(validate_semver("1").is_err());
+        assert!(validate_semver("1.0").is_err());
+        assert!(validate_semver("1.0.0.0").is_err());
+        assert!(validate_semver("").is_err());
+    }
+
+    #[test]
+    fn semver_rejects_leading_zero_in_core() {
+        assert!(validate_semver("01.0.0").is_err());
+        assert!(validate_semver("1.02.0").is_err());
+        assert!(validate_semver("1.0.03").is_err());
+        // But "0" itself is fine.
+        assert!(validate_semver("0.0.0").is_ok());
+    }
+
+    #[test]
+    fn semver_rejects_leading_zero_in_numeric_prerelease_id() {
+        // Numeric pre-release IDs may NOT have leading zeros.
+        assert!(validate_semver("1.0.0-01").is_err());
+        assert!(validate_semver("1.0.0-alpha.01").is_err());
+    }
+
+    #[test]
+    fn semver_rejects_empty_prerelease_or_build() {
+        assert!(validate_semver("1.0.0-").is_err());
+        assert!(validate_semver("1.0.0+").is_err());
+        assert!(validate_semver("1.0.0-alpha..1").is_err());
+    }
+
+    #[test]
+    fn semver_rejects_invalid_chars() {
+        assert!(validate_semver("1.0.0-alpha_1").is_err()); // underscore not allowed
+        assert!(validate_semver("1.0.0-alpha 1").is_err()); // space
+        assert!(validate_semver("v1.0.0").is_err()); // leading v
     }
 }
