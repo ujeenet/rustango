@@ -90,6 +90,10 @@
 //!   (e.g. `en`, `en-US`, `fr-CA`, `zh-Hans`).
 //! - `validate_postal_code_us` — US ZIP code in `12345` or
 //!   `12345-6789` (ZIP+4) form.
+//! - `validate_postal_code_ca` — Canadian postal code in `A1A 1A1`
+//!   form (uppercase, single space).
+//! - `validate_postal_code_uk` — UK postcode (`SW1A 1AA` shape;
+//!   loose check on the well-formed cases).
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -1259,6 +1263,103 @@ pub fn validate_postal_code_us(s: &str) -> Result<(), ValidationError> {
             Ok(())
         }
     }
+}
+
+/// Validate a Canadian postal code: 6 characters in the
+/// alternating letter-digit-letter-space-digit-letter-digit
+/// pattern (`A1A 1A1`). Letters must be uppercase ASCII.
+///
+/// Per Canada Post, the letters D, F, I, O, Q, U are NOT used in
+/// the first position; and W, Z are not used as the first letter.
+/// This validator does the format check only — it doesn't reject
+/// codes with those letters (they'd just never be issued; making
+/// a typo here is worth catching, but a strict version is a
+/// follow-up).
+///
+/// # Errors
+/// `ValidationError { code: "invalid_postal_code", ... }`.
+pub fn validate_postal_code_ca(s: &str) -> Result<(), ValidationError> {
+    let bad = || {
+        ValidationError::new(
+            "invalid_postal_code",
+            "Enter a valid Canadian postal code (A1A 1A1).",
+        )
+    };
+    if s.len() != 7 {
+        return Err(bad());
+    }
+    let bytes = s.as_bytes();
+    let is_uppercase_letter = |b: u8| b.is_ascii_uppercase();
+    let is_digit = |b: u8| b.is_ascii_digit();
+    if !is_uppercase_letter(bytes[0])
+        || !is_digit(bytes[1])
+        || !is_uppercase_letter(bytes[2])
+        || bytes[3] != b' '
+        || !is_digit(bytes[4])
+        || !is_uppercase_letter(bytes[5])
+        || !is_digit(bytes[6])
+    {
+        return Err(bad());
+    }
+    Ok(())
+}
+
+/// Validate a UK postcode in the canonical `OUTWARD INWARD` shape:
+/// 1-2 outward characters + space + 3 inward characters.
+///
+/// The detailed UK postcode rules (Royal Mail BS7666) have several
+/// allowed patterns; this validator covers the common shapes:
+/// - `A9 9AA` (e.g. `M1 1AA`)
+/// - `A99 9AA` (`B33 8TH`)
+/// - `AA9 9AA` (`CR2 6XH`)
+/// - `AA99 9AA` (`DN55 1PT`)
+/// - `A9A 9AA` (`W1A 1AA`)
+/// - `AA9A 9AA` (`EC1A 1BB`)
+///
+/// The inward part is always digit-letter-letter; outward is 2-4
+/// characters mixing letters and digits per the patterns above.
+/// Single mandatory space; letters must be uppercase.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_postal_code", ... }`.
+pub fn validate_postal_code_uk(s: &str) -> Result<(), ValidationError> {
+    let bad = || {
+        ValidationError::new(
+            "invalid_postal_code",
+            "Enter a valid UK postcode (e.g. SW1A 1AA).",
+        )
+    };
+    let (outward, inward) = s.split_once(' ').ok_or_else(bad)?;
+    // Inward must be exactly 3: digit, letter, letter.
+    if inward.len() != 3 {
+        return Err(bad());
+    }
+    let inward_bytes = inward.as_bytes();
+    if !inward_bytes[0].is_ascii_digit()
+        || !inward_bytes[1].is_ascii_uppercase()
+        || !inward_bytes[2].is_ascii_uppercase()
+    {
+        return Err(bad());
+    }
+    // Outward: 2-4 chars. First is letter. Last is digit OR letter
+    // (`W1A`, `EC1A`). Middle chars follow specific patterns; for
+    // a loose check we just require: first is letter, all chars
+    // are uppercase-letter-or-digit, last position covers the
+    // valid `Letter/Digit` set.
+    if !(2..=4).contains(&outward.len()) {
+        return Err(bad());
+    }
+    let outward_bytes = outward.as_bytes();
+    if !outward_bytes[0].is_ascii_uppercase() {
+        return Err(bad());
+    }
+    if !outward
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    {
+        return Err(bad());
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------ length / value bounds
@@ -2777,5 +2878,82 @@ mod tests {
     fn postal_code_us_rejects_non_digit_in_base() {
         assert!(validate_postal_code_us("9411A").is_err());
         assert!(validate_postal_code_us("").is_err());
+    }
+
+    // -------- validate_postal_code_ca --------
+
+    #[test]
+    fn postal_code_ca_accepts_canonical_shape() {
+        assert!(validate_postal_code_ca("K1A 0B1").is_ok()); // Parliament Hill
+        assert!(validate_postal_code_ca("M5W 1E6").is_ok()); // Toronto
+        assert!(validate_postal_code_ca("V6B 4Y8").is_ok()); // Vancouver
+    }
+
+    #[test]
+    fn postal_code_ca_rejects_lowercase_letters() {
+        assert!(validate_postal_code_ca("k1a 0b1").is_err());
+        assert!(validate_postal_code_ca("K1a 0B1").is_err());
+    }
+
+    #[test]
+    fn postal_code_ca_rejects_missing_space_or_wrong_separator() {
+        assert!(validate_postal_code_ca("K1A0B1").is_err()); // no space
+        assert!(validate_postal_code_ca("K1A-0B1").is_err()); // hyphen
+        assert!(validate_postal_code_ca("K1A  0B1").is_err()); // double space
+    }
+
+    #[test]
+    fn postal_code_ca_rejects_wrong_pattern() {
+        assert!(validate_postal_code_ca("1AB 0B1").is_err()); // starts with digit
+        assert!(validate_postal_code_ca("AAA 0B1").is_err()); // all letters
+        assert!(validate_postal_code_ca("K1A 000").is_err()); // all digits
+        assert!(validate_postal_code_ca("").is_err());
+    }
+
+    // -------- validate_postal_code_uk --------
+
+    #[test]
+    fn postal_code_uk_accepts_canonical_shapes() {
+        // All the patterns from the docstring.
+        assert!(validate_postal_code_uk("M1 1AA").is_ok()); // A9 9AA
+        assert!(validate_postal_code_uk("B33 8TH").is_ok()); // A99 9AA
+        assert!(validate_postal_code_uk("CR2 6XH").is_ok()); // AA9 9AA
+        assert!(validate_postal_code_uk("DN55 1PT").is_ok()); // AA99 9AA
+        assert!(validate_postal_code_uk("W1A 1AA").is_ok()); // A9A 9AA
+        assert!(validate_postal_code_uk("EC1A 1BB").is_ok()); // AA9A 9AA
+        assert!(validate_postal_code_uk("SW1A 1AA").is_ok()); // Downing Street
+    }
+
+    #[test]
+    fn postal_code_uk_rejects_missing_space() {
+        assert!(validate_postal_code_uk("SW1A1AA").is_err());
+    }
+
+    #[test]
+    fn postal_code_uk_rejects_lowercase() {
+        assert!(validate_postal_code_uk("sw1a 1aa").is_err());
+    }
+
+    #[test]
+    fn postal_code_uk_rejects_wrong_inward_length() {
+        assert!(validate_postal_code_uk("M1 1A").is_err());
+        assert!(validate_postal_code_uk("M1 1AAA").is_err());
+    }
+
+    #[test]
+    fn postal_code_uk_rejects_wrong_inward_pattern() {
+        // Inward must be digit-letter-letter.
+        assert!(validate_postal_code_uk("M1 AAA").is_err()); // letter-letter-letter
+        assert!(validate_postal_code_uk("M1 123").is_err()); // all digits
+    }
+
+    #[test]
+    fn postal_code_uk_rejects_outward_starting_with_digit() {
+        assert!(validate_postal_code_uk("1A 1AA").is_err());
+    }
+
+    #[test]
+    fn postal_code_uk_rejects_empty() {
+        assert!(validate_postal_code_uk("").is_err());
     }
 }
