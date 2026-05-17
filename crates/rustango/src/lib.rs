@@ -859,6 +859,12 @@ pub mod default_filters;
 /// See [`validators`]. Issue #54.
 pub mod validators;
 
+/// Custom Manager / QuerySet-extension pattern — Django's
+/// `class PublishedManager(Manager)` / `QuerySet.as_manager()`
+/// adapted to Rust's extension-trait idiom. See [`manager`] for
+/// the canonical worked examples. Issue #52.
+pub mod manager;
+
 /// Named URL reversal — Django's `reverse(name, params)` +
 /// `get_absolute_url()`. Pair with [`register_url!`]. Issue #8.
 pub mod urls;
