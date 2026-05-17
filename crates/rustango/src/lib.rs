@@ -847,6 +847,12 @@ pub mod shortcuts;
 #[cfg(feature = "template_views")]
 pub mod humanize;
 
+/// Django `defaultfilters` template filters — `pluralize`,
+/// `truncatewords`, `linebreaks`, `default_if_none`. See
+/// [`default_filters`]. Issue #61.
+#[cfg(feature = "template_views")]
+pub mod default_filters;
+
 /// Named URL reversal — Django's `reverse(name, params)` +
 /// `get_absolute_url()`. Pair with [`register_url!`]. Issue #8.
 pub mod urls;
