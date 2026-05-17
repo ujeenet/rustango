@@ -421,6 +421,69 @@ pub fn json_server_error<T: serde::Serialize>(data: &T) -> Response {
     json_response(data, 500)
 }
 
+/// Wrap a pre-rendered HTML string in a Response with the given
+/// status and `Content-Type: text/html; charset=utf-8`. Django's
+/// [`HttpResponse(html, status=...)`](https://docs.djangoproject.com/en/6.0/ref/request-response/#httpresponse-objects)
+/// for plain-HTML responses.
+///
+/// Use when you have HTML in hand (string-built, snipped from another
+/// source, hard-coded for a tiny error page) and don't want to spin
+/// up Tera just for the response. For Tera-rendered output, use
+/// [`render`] (returns a Response directly) or [`render_to_string`]
+/// (returns a String you can pass to this function).
+///
+/// ```ignore
+/// use rustango::shortcuts::html_response;
+///
+/// async fn maintenance() -> Response {
+///     html_response("<h1>Down for maintenance</h1>", 503)
+/// }
+/// ```
+///
+/// Invalid `status` (below 100) falls back to `200 OK` so a typoed
+/// status code doesn't panic the builder.
+#[must_use]
+pub fn html_response(content: impl Into<String>, status: u16) -> Response {
+    let body = content.into();
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+    let mut res = Response::builder()
+        .status(status)
+        .body(axum::body::Body::from(body))
+        .expect("status + body is always valid");
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    res
+}
+
+/// Wrap a plain-text string in a Response with the given status and
+/// `Content-Type: text/plain; charset=utf-8`. Useful for tiny ops
+/// endpoints (`/health`, `/version`) and CLI-style HTTP that doesn't
+/// want HTML escaping.
+///
+/// ```ignore
+/// use rustango::shortcuts::text_response;
+///
+/// async fn health() -> Response {
+///     text_response("ok", 200)
+/// }
+/// ```
+#[must_use]
+pub fn text_response(content: impl Into<String>, status: u16) -> Response {
+    let body = content.into();
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+    let mut res = Response::builder()
+        .status(status)
+        .body(axum::body::Body::from(body))
+        .expect("status + body is always valid");
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    res
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,5 +764,57 @@ mod tests {
                 .to_owned();
             assert_eq!(ct, "application/json");
         }
+    }
+
+    // ---------------- html_response / text_response ----------------
+
+    #[tokio::test]
+    async fn html_response_emits_html_content_type_and_body() {
+        let res = html_response("<h1>Hello</h1>", 200);
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "text/html; charset=utf-8"
+        );
+        let body = body_bytes(res).await;
+        assert_eq!(String::from_utf8(body).unwrap(), "<h1>Hello</h1>");
+    }
+
+    #[tokio::test]
+    async fn html_response_respects_custom_status() {
+        let res = html_response("<h1>Down</h1>", 503);
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn html_response_invalid_status_falls_back_to_200() {
+        let res = html_response("x", 42);
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn text_response_emits_text_content_type_and_body() {
+        let res = text_response("ok", 200);
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        let body = body_bytes(res).await;
+        assert_eq!(String::from_utf8(body).unwrap(), "ok");
+    }
+
+    #[tokio::test]
+    async fn text_response_respects_custom_status() {
+        let res = text_response("teapot", 418);
+        assert_eq!(res.status(), StatusCode::IM_A_TEAPOT);
     }
 }
