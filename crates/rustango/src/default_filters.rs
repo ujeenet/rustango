@@ -5,8 +5,9 @@
 //! `linebreaks`, `default_if_none`, `add`, `cut`, `divisibleby`,
 //! `floatformat`, `escapejs`, `yesno`, `get_digit`, `dictsort`,
 //! `slugify_unicode`, `iriencode`, `wordwrap`, `mask_email`,
-//! `mask_card`, `mask_phone`, `dictsortreversed`. Call
-//! [`register_filters`] on a Tera instance to make them available:
+//! `mask_card`, `mask_phone`, `dictsortreversed`, `oxford_join`.
+//! Call [`register_filters`] on a Tera instance to make them
+//! available:
 //!
 //! ```ignore
 //! let mut tera = tera::Tera::default();
@@ -47,6 +48,7 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("mask_card", mask_card);
     tera.register_filter("mask_phone", mask_phone);
     tera.register_filter("dictsortreversed", dictsortreversed);
+    tera.register_filter("oxford_join", oxford_join);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -523,6 +525,55 @@ fn dictsortreversed(value: &Value, args: &HashMap<String, Value>) -> tera::Resul
         compare_values(&bk, &ak) // swap for reversed
     });
     Ok(Value::Array(sorted))
+}
+
+// ------------------------------------------------------------------ oxford_join
+
+/// `oxford_join` — join a list of strings as a natural-language
+/// list with the Oxford (serial) comma. Single-arg variant uses
+/// the default conjunction `"and"`:
+///
+/// - `[]` → `""`
+/// - `["a"]` → `"a"`
+/// - `["a", "b"]` → `"a and b"` (no comma)
+/// - `["a", "b", "c"]` → `"a, b, and c"` (Oxford comma)
+/// - `["a", "b", "c", "d"]` → `"a, b, c, and d"`
+///
+/// Two-arg variant lets you switch the conjunction:
+///
+/// ```jinja
+/// {{ items | oxford_join(conj="or") }}  {# "a, b, or c" #}
+/// ```
+///
+/// Non-string list elements get stringified via `to_string()`.
+/// Non-array input passes through unchanged.
+fn oxford_join(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(arr) = value.as_array() else {
+        return Ok(value.clone());
+    };
+    let conj = args
+        .get("conj")
+        .or_else(|| args.values().next())
+        .and_then(Value::as_str)
+        .unwrap_or("and");
+    let items: Vec<String> = arr
+        .iter()
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .collect();
+    let out = match items.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [a, b] => format!("{a} {conj} {b}"),
+        rest => {
+            let (last, init) = rest.split_last().unwrap();
+            let head = init.join(", ");
+            format!("{head}, {conj} {last}")
+        }
+    };
+    Ok(to_value(out)?)
 }
 
 /// Total ordering across heterogeneous JSON `Value`s. Null < bool <
@@ -1753,5 +1804,49 @@ mod tests {
         let input = json!([{"a": 2}, {"a": 1}]);
         let out2 = dictsortreversed(&input, &args_pos(json!(""))).unwrap();
         assert_eq!(out2, input);
+    }
+
+    // -------- oxford_join --------
+
+    #[test]
+    fn oxford_join_empty_list_yields_empty_string() {
+        let out = oxford_join(&json!([]), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(""));
+    }
+
+    #[test]
+    fn oxford_join_single_item_is_returned_as_is() {
+        let out = oxford_join(&json!(["Alice"]), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("Alice"));
+    }
+
+    #[test]
+    fn oxford_join_two_items_uses_and_without_comma() {
+        let out = oxford_join(&json!(["Alice", "Bob"]), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("Alice and Bob"));
+    }
+
+    #[test]
+    fn oxford_join_three_items_uses_serial_comma() {
+        let out = oxford_join(&json!(["Alice", "Bob", "Carol"]), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("Alice, Bob, and Carol"));
+    }
+
+    #[test]
+    fn oxford_join_many_items_uses_serial_comma() {
+        let out = oxford_join(&json!(["one", "two", "three", "four"]), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("one, two, three, and four"));
+    }
+
+    #[test]
+    fn oxford_join_with_custom_conjunction() {
+        let out = oxford_join(&json!(["red", "green", "blue"]), &args_pos(json!("or"))).unwrap();
+        assert_eq!(out, json!("red, green, or blue"));
+    }
+
+    #[test]
+    fn oxford_join_passes_through_non_array() {
+        let out = oxford_join(&json!("not a list"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("not a list"));
     }
 }
