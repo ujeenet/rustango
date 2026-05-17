@@ -38,6 +38,12 @@
 //! - [`assert_content_type`] — sugar for `assert_header("content-type", ...)`.
 //! - [`assert_json_eq`] — body parses as JSON and equals expected
 //!   (Django's `assertJSONEqual`).
+//! - [`assert_json_not_eq`] — body parses as JSON and DIFFERS from
+//!   expected (Django's `assertJSONNotEqual`).
+//! - [`assert_redirect_chain`] — inspect the chain produced by
+//!   [`crate::test_client::TestClient::get_following_redirects`] and
+//!   assert it ends at a given (path, status). Django's
+//!   `assertRedirects(..., fetch_redirect_response=True)`.
 //! - [`assert_messages`] — read + assert on the flash-messages cookie
 //!   from [`crate::messages`]. Gated on `template_views` so consumers
 //!   that use messages get the helper for free.
@@ -54,12 +60,10 @@
 //!   specific. Right now `FormView` stamps `errors: HashMap` into
 //!   context — a helper could inspect that map but only for views
 //!   that use the canonical key.
-//! - `assertRedirectChain` — follow multi-step redirects. Needs a
-//!   test-client wrapper that re-issues requests on 3xx.
 //!
-//! These pair naturally with a future test-client wrapper. The
-//! helpers here are the high-leverage subset that needs nothing
-//! beyond `axum::Response`.
+//! The helpers here are the high-leverage subset that needs nothing
+//! beyond `axum::Response` plus the existing test_client redirect
+//! follower.
 
 use axum::body::to_bytes;
 use axum::http::header;
@@ -145,7 +149,7 @@ pub async fn assert_not_contains(res: Response, fragment: &str) {
 /// ```
 ///
 /// Does NOT follow the redirect or check what the target serves —
-/// that's `assert_redirect_chain` territory (queued).
+/// pair with [`assert_redirect_chain`] for that.
 pub fn assert_redirects(res: &Response, target: &str) {
     let status = res.status();
     assert!(
@@ -308,6 +312,69 @@ pub async fn assert_json_eq(res: Response, expected: &serde_json::Value) {
         let actual_pp = serde_json::to_string_pretty(&actual).unwrap_or_default();
         let expected_pp = serde_json::to_string_pretty(expected).unwrap_or_default();
         panic!("assert_json_eq mismatch.\nexpected:\n{expected_pp}\nactual:\n{actual_pp}");
+    }
+}
+
+/// Inverse of [`assert_json_eq`] — Django's `assertJSONNotEqual`.
+/// Asserts the parsed JSON body **differs** from `unexpected`.
+///
+/// Useful for negative regression tests: "this endpoint no longer
+/// returns the leaky old shape." Same body-decode safety as the
+/// positive form (panics on non-JSON with a 500-char snippet).
+///
+/// ```ignore
+/// assert_json_not_eq(res, &serde_json::json!({"password": "leaked"})).await;
+/// ```
+pub async fn assert_json_not_eq(res: Response, unexpected: &serde_json::Value) {
+    let bytes = to_bytes(res.into_body(), MAX_BODY_BYTES)
+        .await
+        .expect("read response body");
+    let actual: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => panic!(
+            "assert_json_not_eq: body is not valid JSON ({e}). Raw body:\n{}",
+            truncate(&String::from_utf8_lossy(&bytes), 500),
+        ),
+    };
+    if &actual == unexpected {
+        let actual_pp = serde_json::to_string_pretty(&actual).unwrap_or_default();
+        panic!("assert_json_not_eq: body equals the unexpected value:\n{actual_pp}",);
+    }
+}
+
+/// Assert the redirect chain produced by
+/// [`crate::test_client::TestClient::get_following_redirects`] ends at
+/// `final_path` with `final_status`. Django's `assertRedirects` with
+/// `fetch_redirect_response=True`.
+///
+/// The chain is a `Vec<(u16, String)>` where each entry is the
+/// (status, location) of one hop, and the final entry is the
+/// (status, resolved_path) of the last response. This helper inspects
+/// only the final entry.
+///
+/// ```ignore
+/// let (_res, chain) = client.get_following_redirects("/old", 5).await;
+/// assert_redirect_chain(&chain, "/new-home", 200);
+/// ```
+///
+/// Panics with the full chain in the message when the final hop's
+/// status or path doesn't match — so a misconfigured chain is easy
+/// to diagnose.
+pub fn assert_redirect_chain(chain: &[(u16, String)], final_path: &str, final_status: u16) {
+    let last = chain
+        .last()
+        .unwrap_or_else(|| panic!("assert_redirect_chain: chain is empty"));
+    if last.0 != final_status || last.1 != final_path {
+        let pretty = chain
+            .iter()
+            .enumerate()
+            .map(|(i, (s, p))| format!("  {i}: {s} {p}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        panic!(
+            "assert_redirect_chain: expected final hop to be `{final_status} {final_path}`, got `{} {}`.\nFull chain:\n{pretty}",
+            last.0, last.1,
+        );
     }
 }
 
@@ -616,5 +683,69 @@ mod tests {
     async fn assert_contains_count_panics_on_wrong_count() {
         let res = html_response(StatusCode::OK, "<li>a</li><li>b</li><li>c</li>");
         assert_contains_count(res, "<li>", 5).await;
+    }
+
+    // -------- assert_json_not_eq --------
+
+    #[tokio::test]
+    async fn assert_json_not_eq_passes_when_values_differ() {
+        let res = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(r#"{"id": 1}"#))
+            .unwrap();
+        assert_json_not_eq(res, &serde_json::json!({"id": 2})).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "body equals the unexpected value")]
+    async fn assert_json_not_eq_panics_on_structural_match() {
+        let res = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(r#"{"id": 1, "name": "Alice"}"#))
+            .unwrap();
+        // Key order doesn't matter — structural equality strikes.
+        assert_json_not_eq(res, &serde_json::json!({"name": "Alice", "id": 1})).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "body is not valid JSON")]
+    async fn assert_json_not_eq_panics_on_malformed_body() {
+        let res = html_response(StatusCode::OK, "<html>not json</html>");
+        assert_json_not_eq(res, &serde_json::json!({})).await;
+    }
+
+    // -------- assert_redirect_chain --------
+
+    #[test]
+    fn assert_redirect_chain_passes_on_matching_final_hop() {
+        // Chain shape mirrors what TestClient::get_following_redirects
+        // produces: (status, path) per hop, last entry is the final
+        // landing response.
+        let chain = vec![
+            (302u16, "/old".to_owned()),
+            (302, "/intermediate".to_owned()),
+            (200, "/canonical".to_owned()),
+        ];
+        assert_redirect_chain(&chain, "/canonical", 200);
+    }
+
+    #[test]
+    #[should_panic(expected = "chain is empty")]
+    fn assert_redirect_chain_panics_on_empty_chain() {
+        assert_redirect_chain(&[], "/anywhere", 200);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected final hop to be `200 /canonical`")]
+    fn assert_redirect_chain_panics_on_wrong_final_path() {
+        let chain = vec![(302u16, "/old".to_owned()), (200, "/elsewhere".to_owned())];
+        assert_redirect_chain(&chain, "/canonical", 200);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected final hop to be `200 /canonical`")]
+    fn assert_redirect_chain_panics_on_wrong_final_status() {
+        let chain = vec![(302u16, "/old".to_owned()), (404, "/canonical".to_owned())];
+        assert_redirect_chain(&chain, "/canonical", 200);
     }
 }
