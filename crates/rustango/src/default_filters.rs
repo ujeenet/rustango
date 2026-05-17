@@ -4,8 +4,8 @@
 //! templates reach for constantly: `pluralize`, `truncatewords`,
 //! `linebreaks`, `default_if_none`, `add`, `cut`, `divisibleby`,
 //! `floatformat`, `escapejs`, `yesno`, `get_digit`, `dictsort`,
-//! `slugify_unicode`, `iriencode`. Call [`register_filters`] on a
-//! Tera instance to make them available:
+//! `slugify_unicode`, `iriencode`, `wordwrap`. Call
+//! [`register_filters`] on a Tera instance to make them available:
 //!
 //! ```ignore
 //! let mut tera = tera::Tera::default();
@@ -41,6 +41,7 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("dictsort", dictsort);
     tera.register_filter("slugify_unicode", slugify_unicode);
     tera.register_filter("iriencode", iriencode);
+    tera.register_filter("wordwrap", wordwrap);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -619,6 +620,70 @@ fn iriencode(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
         }
     }
     Ok(to_value(out)?)
+}
+
+// ------------------------------------------------------------------ wordwrap
+
+/// `wordwrap` — wrap text at word boundaries so no rendered line
+/// exceeds `width` columns. Django:
+///
+/// - `{{ "Joel is a slug"|wordwrap:5 }}` → `"Joel\nis a\nslug"`
+/// - `{{ "one two three"|wordwrap:7 }}` → `"one two\nthree"`
+///
+/// Useful for plain-text emails / SMS / fixed-width displays.
+/// Existing `\n` newlines in the input are honored — content
+/// already wrapped never gets re-flowed across an explicit line
+/// break.
+///
+/// Words longer than `width` are *not* hyphenated — they end up
+/// on a line of their own (same as Django's textwrap-backed
+/// behaviour). `width <= 0` returns the input unchanged.
+fn wordwrap(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(s) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let width = args
+        .get("width")
+        .or_else(|| args.values().next())
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if width <= 0 {
+        return Ok(value.clone());
+    }
+    let width = usize::try_from(width).unwrap_or(usize::MAX);
+    // Honor explicit \n in the input by wrapping each line independently
+    // and re-joining. Empty lines stay empty (preserves paragraph breaks).
+    let wrapped = s
+        .split('\n')
+        .map(|line| wrap_one_line(line, width))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(to_value(wrapped)?)
+}
+
+fn wrap_one_line(line: &str, width: usize) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut current_len = 0usize;
+    for (i, word) in line.split_whitespace().enumerate() {
+        let word_chars = word.chars().count();
+        if i == 0 {
+            out.push_str(word);
+            current_len = word_chars;
+            continue;
+        }
+        // Would this word push the line past width?
+        let proposed = current_len + 1 + word_chars; // " " + word
+        if proposed <= width {
+            out.push(' ');
+            out.push_str(word);
+            current_len = proposed;
+        } else {
+            out.push('\n');
+            out.push_str(word);
+            current_len = word_chars;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1286,5 +1351,73 @@ mod tests {
         let mut ctx = tera::Context::new();
         ctx.insert("url", "/blog/café?lang=fr");
         assert_eq!(tera.render("t", &ctx).unwrap(), "/blog/caf%C3%A9?lang=fr");
+    }
+
+    // -------- wordwrap --------
+
+    #[test]
+    fn wordwrap_wraps_at_word_boundaries() {
+        let out = wordwrap(&json!("Joel is a slug"), &args_pos(json!(5))).unwrap();
+        assert_eq!(out, json!("Joel\nis a\nslug"));
+    }
+
+    #[test]
+    fn wordwrap_keeps_line_under_width() {
+        let out = wordwrap(&json!("one two three"), &args_pos(json!(7))).unwrap();
+        assert_eq!(out, json!("one two\nthree"));
+    }
+
+    #[test]
+    fn wordwrap_passes_short_input_unchanged() {
+        let out = wordwrap(&json!("hi"), &args_pos(json!(80))).unwrap();
+        assert_eq!(out, json!("hi"));
+    }
+
+    #[test]
+    fn wordwrap_honors_existing_newlines() {
+        // \n in input separates pre-wrapped paragraphs — don't
+        // re-flow across them. Width=15: each input line wraps
+        // independently. "first paragraph" fits exactly (15 chars);
+        // "second paragraph" doesn't (16 chars including the space)
+        // so it breaks after "second".
+        let out = wordwrap(
+            &json!("first paragraph here\nsecond paragraph here"),
+            &args_pos(json!(15)),
+        )
+        .unwrap();
+        assert_eq!(out, json!("first paragraph\nhere\nsecond\nparagraph here"));
+    }
+
+    #[test]
+    fn wordwrap_zero_or_negative_width_passes_through() {
+        let zero = wordwrap(&json!("anything goes"), &args_pos(json!(0))).unwrap();
+        assert_eq!(zero, json!("anything goes"));
+        let neg = wordwrap(&json!("anything goes"), &args_pos(json!(-1))).unwrap();
+        assert_eq!(neg, json!("anything goes"));
+    }
+
+    #[test]
+    fn wordwrap_long_word_stands_alone_no_hyphenation() {
+        // A word longer than width is not split; it ends up on a
+        // line of its own.
+        let out = wordwrap(&json!("a verylongword b"), &args_pos(json!(5))).unwrap();
+        assert_eq!(out, json!("a\nverylongword\nb"));
+    }
+
+    #[test]
+    fn wordwrap_passes_non_string_through() {
+        let out = wordwrap(&json!(42), &args_pos(json!(5))).unwrap();
+        assert_eq!(out, json!(42));
+    }
+
+    #[test]
+    fn register_filters_wires_wordwrap_through_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ s|wordwrap(width=5) }}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("s", "Joel is a slug");
+        assert_eq!(tera.render("t", &ctx).unwrap(), "Joel\nis a\nslug");
     }
 }
