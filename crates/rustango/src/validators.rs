@@ -48,6 +48,9 @@
 //!   widely needed in the same role.
 //! - `validate_hex_color` — `#rgb` / `#rrggbb` / `#rrggbbaa` /
 //!   `#rgba` web-color hex codes. For color-picker form fields.
+//! - `validate_uuid` — RFC 4122 UUID string format. Useful for
+//!   handler argument validation when a path/query carries a UUID
+//!   you want to validate before hitting the DB.
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -395,6 +398,37 @@ pub fn validate_hex_color(s: &str) -> Result<(), ValidationError> {
 #[must_use]
 pub fn is_hex_color(s: &str) -> bool {
     validate_hex_color(s).is_ok()
+}
+
+// ------------------------------------------------------------------ uuid
+
+/// Validate a UUID string in any of the formats `uuid::Uuid::parse_str`
+/// accepts (hyphenated, simple, URN, or braced). Backs onto the
+/// `uuid` crate so the accepted shapes match the rest of rustango.
+///
+/// Useful for handler argument validation when a path / query
+/// parameter carries a UUID you want to validate before hitting the
+/// DB — gives a clean `ValidationError` with a stable code instead
+/// of a "no rows matched" 500 deeper in the stack.
+///
+/// Examples:
+/// - `validate_uuid("550e8400-e29b-41d4-a716-446655440000")` → Ok
+/// - `validate_uuid("550e8400e29b41d4a716446655440000")` → Ok (simple)
+/// - `validate_uuid("urn:uuid:550e8400-e29b-41d4-a716-446655440000")` → Ok
+/// - `validate_uuid("not-a-uuid")` → Err
+///
+/// # Errors
+/// `ValidationError { code: "invalid_uuid", ... }`.
+pub fn validate_uuid(s: &str) -> Result<(), ValidationError> {
+    uuid::Uuid::parse_str(s)
+        .map(|_| ())
+        .map_err(|_| ValidationError::new("invalid_uuid", "Enter a valid UUID."))
+}
+
+/// Boolean form of [`validate_uuid`].
+#[must_use]
+pub fn is_uuid(s: &str) -> bool {
+    validate_uuid(s).is_ok()
 }
 
 // ------------------------------------------------------------------ length / value bounds
@@ -1089,5 +1123,50 @@ mod tests {
     fn is_hex_color_is_thin_boolean_wrapper() {
         assert!(is_hex_color("#fff"));
         assert!(!is_hex_color("fff"));
+    }
+
+    // -------- validate_uuid --------
+
+    #[test]
+    fn uuid_accepts_hyphenated_form() {
+        assert!(validate_uuid("550e8400-e29b-41d4-a716-446655440000").is_ok());
+    }
+
+    #[test]
+    fn uuid_accepts_simple_form_no_hyphens() {
+        assert!(validate_uuid("550e8400e29b41d4a716446655440000").is_ok());
+    }
+
+    #[test]
+    fn uuid_accepts_urn_prefix() {
+        assert!(validate_uuid("urn:uuid:550e8400-e29b-41d4-a716-446655440000").is_ok());
+    }
+
+    #[test]
+    fn uuid_accepts_braced_form() {
+        assert!(validate_uuid("{550e8400-e29b-41d4-a716-446655440000}").is_ok());
+    }
+
+    #[test]
+    fn uuid_rejects_garbage() {
+        let e = validate_uuid("not-a-uuid").unwrap_err();
+        assert_eq!(e.code, "invalid_uuid");
+    }
+
+    #[test]
+    fn uuid_rejects_wrong_length() {
+        // 31 hex chars instead of 32.
+        assert!(validate_uuid("550e8400e29b41d4a71644665544000").is_err());
+    }
+
+    #[test]
+    fn uuid_rejects_non_hex() {
+        assert!(validate_uuid("550e8400-e29b-41d4-a716-44665544000g").is_err());
+    }
+
+    #[test]
+    fn is_uuid_is_thin_boolean_wrapper() {
+        assert!(is_uuid("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(!is_uuid("nope"));
     }
 }
