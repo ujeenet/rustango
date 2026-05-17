@@ -34,6 +34,9 @@
 //!   used at form-input boundaries to block null-byte injection.
 //! - `validate_min_length` / `validate_max_length` — string char count.
 //! - `validate_min_value` / `validate_max_value` — i64 numeric bounds.
+//! - `validate_min_value_f64` / `validate_max_value_f64` — float
+//!   bounds, for prices / measurements / scientific values that
+//!   don't fit `i64`.
 //! - `validate_integer` — parses as `i64`.
 //! - `validate_decimal` — `max_digits` + `decimal_places` bounds
 //!   (Django's `DecimalValidator`).
@@ -603,6 +606,37 @@ pub fn validate_max_value(n: i64, max: i64) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// Reject floats below `min`. Float variant of [`validate_min_value`]
+/// for prices, measurements, scientific values that don't fit `i64`.
+/// NaN is rejected.
+///
+/// # Errors
+/// `ValidationError { code: "min_value", ... }`.
+pub fn validate_min_value_f64(n: f64, min: f64) -> Result<(), ValidationError> {
+    if n.is_nan() || n < min {
+        return Err(ValidationError::new(
+            "min_value",
+            format!("Ensure this value is greater than or equal to {min}."),
+        ));
+    }
+    Ok(())
+}
+
+/// Reject floats above `max`. Float variant of [`validate_max_value`].
+/// NaN is rejected.
+///
+/// # Errors
+/// `ValidationError { code: "max_value", ... }`.
+pub fn validate_max_value_f64(n: f64, max: f64) -> Result<(), ValidationError> {
+    if n.is_nan() || n > max {
+        return Err(ValidationError::new(
+            "max_value",
+            format!("Ensure this value is less than or equal to {max}."),
+        ));
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------ integer / decimal
 
 /// Validate that `s` parses as a signed 64-bit integer. Django's
@@ -926,6 +960,31 @@ mod tests {
         assert!(validate_max_value(5, 5).is_ok());
         assert!(validate_min_value(4, 5).is_err());
         assert!(validate_max_value(6, 5).is_err());
+    }
+
+    #[test]
+    fn min_and_max_value_f64_bounds_are_inclusive() {
+        assert!(validate_min_value_f64(5.0, 5.0).is_ok());
+        assert!(validate_max_value_f64(5.0, 5.0).is_ok());
+        assert!(validate_min_value_f64(4.999, 5.0).is_err());
+        assert!(validate_max_value_f64(5.001, 5.0).is_err());
+    }
+
+    #[test]
+    fn min_and_max_value_f64_reject_nan() {
+        // NaN compares false against any value, so the bare `<`/`>`
+        // check would silently accept it. We explicitly reject it.
+        assert!(validate_min_value_f64(f64::NAN, 0.0).is_err());
+        assert!(validate_max_value_f64(f64::NAN, 100.0).is_err());
+    }
+
+    #[test]
+    fn min_and_max_value_f64_handle_infinities() {
+        // +Inf passes min check, fails max check (and vice versa).
+        assert!(validate_min_value_f64(f64::INFINITY, 5.0).is_ok());
+        assert!(validate_max_value_f64(f64::INFINITY, 5.0).is_err());
+        assert!(validate_min_value_f64(f64::NEG_INFINITY, 5.0).is_err());
+        assert!(validate_max_value_f64(f64::NEG_INFINITY, 5.0).is_ok());
     }
 
     // -------- ValidationError --------
