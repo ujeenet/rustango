@@ -62,6 +62,9 @@
 //! - `validate_alphanumeric` — `[a-zA-Z0-9]+` ASCII only.
 //! - `validate_numeric` — `[0-9]+` ASCII digits only.
 //! - `validate_alpha` — `[a-zA-Z]+` ASCII letters only.
+//! - `validate_creditcard_luhn` — Luhn checksum on a credit card
+//!   PAN string. Catches typos before hitting the PCI processor;
+//!   does NOT verify the card is real / not expired / has funds.
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -541,6 +544,66 @@ pub fn validate_alpha(s: &str) -> Result<(), ValidationError> {
     }
     if !s.chars().all(|c| c.is_ascii_alphabetic()) {
         return Err(ValidationError::new("not_alpha", "Enter only letters."));
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------ credit card (Luhn)
+
+/// Verify the Luhn checksum on a credit-card-shape Primary Account
+/// Number (PAN). Strips spaces and hyphens (the typical
+/// human-typed shape), then checks that:
+///
+/// 1. Every remaining character is a digit.
+/// 2. The total length is between 12 and 19 (current PAN range).
+/// 3. The Luhn algorithm reports a valid trailing check digit.
+///
+/// **Scope**: catches typos before hitting the PCI processor. This
+/// does NOT verify the card is real / unexpired / has funds — only
+/// the upstream payment-gateway authorization can do that. Use as
+/// a client-side sanity check, never as the only line of defence.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_card_number", ... }`.
+pub fn validate_creditcard_luhn(s: &str) -> Result<(), ValidationError> {
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .collect();
+    if !cleaned.chars().all(|c| c.is_ascii_digit()) {
+        return Err(ValidationError::new(
+            "invalid_card_number",
+            "Enter a valid credit card number.",
+        ));
+    }
+    if !(12..=19).contains(&cleaned.len()) {
+        return Err(ValidationError::new(
+            "invalid_card_number",
+            "Enter a valid credit card number.",
+        ));
+    }
+    // Luhn: walk digits right-to-left. Every second digit (starting
+    // at the second from the right) is doubled; if the doubled value
+    // is >= 10, sum its digits (which is equivalent to subtracting 9).
+    // Total must be divisible by 10.
+    let mut sum = 0u32;
+    let mut double = false;
+    for ch in cleaned.chars().rev() {
+        let mut d = ch.to_digit(10).expect("digit-only by check above");
+        if double {
+            d *= 2;
+            if d >= 10 {
+                d -= 9;
+            }
+        }
+        sum += d;
+        double = !double;
+    }
+    if sum % 10 != 0 {
+        return Err(ValidationError::new(
+            "invalid_card_number",
+            "Enter a valid credit card number.",
+        ));
     }
     Ok(())
 }
@@ -1474,5 +1537,53 @@ mod tests {
         assert!(validate_alpha("a b").is_err());
         assert!(validate_alpha("a-b").is_err());
         assert!(validate_alpha("").is_err());
+    }
+
+    // -------- validate_creditcard_luhn --------
+
+    #[test]
+    fn luhn_accepts_known_valid_pans() {
+        // Standard test PANs from the major card networks.
+        // Visa
+        assert!(validate_creditcard_luhn("4111111111111111").is_ok());
+        // Mastercard
+        assert!(validate_creditcard_luhn("5555555555554444").is_ok());
+        // Amex (15 digits — within 12-19 range)
+        assert!(validate_creditcard_luhn("378282246310005").is_ok());
+        // Discover
+        assert!(validate_creditcard_luhn("6011111111111117").is_ok());
+    }
+
+    #[test]
+    fn luhn_strips_spaces_and_hyphens() {
+        // Typical human-typed shapes.
+        assert!(validate_creditcard_luhn("4111 1111 1111 1111").is_ok());
+        assert!(validate_creditcard_luhn("4111-1111-1111-1111").is_ok());
+        assert!(validate_creditcard_luhn(" 4111-1111 1111-1111 ").is_ok());
+    }
+
+    #[test]
+    fn luhn_rejects_wrong_checksum() {
+        // Off-by-one on the last digit: Luhn catches it.
+        let e = validate_creditcard_luhn("4111111111111112").unwrap_err();
+        assert_eq!(e.code, "invalid_card_number");
+    }
+
+    #[test]
+    fn luhn_rejects_non_digit_chars() {
+        assert!(validate_creditcard_luhn("4111-1111-1111-abcd").is_err());
+    }
+
+    #[test]
+    fn luhn_rejects_too_short_or_too_long() {
+        // 11 digits: too short. 20 digits: too long.
+        assert!(validate_creditcard_luhn("41111111111").is_err());
+        assert!(validate_creditcard_luhn("41111111111111111111").is_err());
+    }
+
+    #[test]
+    fn luhn_rejects_empty_and_whitespace_only() {
+        assert!(validate_creditcard_luhn("").is_err());
+        assert!(validate_creditcard_luhn("   ").is_err());
     }
 }
