@@ -33,6 +33,8 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("apnumber", apnumber);
     tera.register_filter("naturaltime", naturaltime);
     tera.register_filter("naturalday", naturalday);
+    tera.register_filter("timesince", timesince);
+    tera.register_filter("timeuntil", timeuntil);
 }
 
 // ------------------------------------------------------------------ intcomma
@@ -344,6 +346,80 @@ fn natural_day_string(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
     }
 }
 
+// ------------------------------------------------------------------ timesince / timeuntil
+
+/// Magnitude-only equivalent of [`natural_time_string`]: emits
+/// `"N units"` without an `"ago"` / `"in"` decorator. Used by
+/// [`timesince`] / [`timeuntil`].
+///
+/// Returns `"0 minutes"` for non-positive deltas — Django's
+/// `timesince` does the same (negative deltas indicate the page
+/// rendered AFTER the target, which we treat as "no time has
+/// passed yet").
+fn magnitude_string(seconds: i64) -> String {
+    if seconds <= 0 {
+        return "0 minutes".to_owned();
+    }
+    if seconds < 60 {
+        return format_magnitude(seconds, "second");
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format_magnitude(minutes, "minute");
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        return format_magnitude(hours, "hour");
+    }
+    let days = hours / 24;
+    if days < 30 {
+        return format_magnitude(days, "day");
+    }
+    let months = days / 30;
+    if months < 12 {
+        return format_magnitude(months, "month");
+    }
+    let years = days / 365;
+    format_magnitude(years, "year")
+}
+
+fn format_magnitude(n: i64, unit: &str) -> String {
+    let plural = if n == 1 { "" } else { "s" };
+    format!("{n} {unit}{plural}")
+}
+
+/// `timesince` — duration from `value` to now, formatted as
+/// `"N units"`. Django's `{{ post.created | timesince }}` shape.
+/// Returns `"0 minutes"` when the input is in the future (caller
+/// likely wants [`timeuntil`] for that case).
+///
+/// Bucketing matches [`naturaltime`] — seconds / minutes / hours
+/// / days / months (30-day) / years (365-day) — and pluralization
+/// drops the trailing `s` only for `1`.
+fn timesince(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let dt = match parse_datetime(value) {
+        Some(d) => d,
+        None => return Ok(value.clone()),
+    };
+    let now = Utc::now();
+    let delta = now.signed_duration_since(dt).num_seconds();
+    Ok(to_value(magnitude_string(delta))?)
+}
+
+/// `timeuntil` — duration from now to `value`, formatted as
+/// `"N units"`. Mirror of [`timesince`] for future-pointing values:
+/// `{{ event.start | timeuntil }}` → `"3 days"`. Past timestamps
+/// produce `"0 minutes"`.
+fn timeuntil(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let dt = match parse_datetime(value) {
+        Some(d) => d,
+        None => return Ok(value.clone()),
+    };
+    let now = Utc::now();
+    let delta = dt.signed_duration_since(now).num_seconds();
+    Ok(to_value(magnitude_string(delta))?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,5 +630,75 @@ mod tests {
         let mut ctx = tera::Context::new();
         ctx.insert("n", &1_000_000_i64);
         assert_eq!(render(&tera, "{{ n | intcomma }}", ctx), "1,000,000");
+    }
+
+    // -------- timesince / timeuntil --------
+
+    #[test]
+    fn magnitude_string_buckets_match_naturaltime() {
+        assert_eq!(magnitude_string(0), "0 minutes");
+        assert_eq!(magnitude_string(-5), "0 minutes");
+        assert_eq!(magnitude_string(1), "1 second");
+        assert_eq!(magnitude_string(45), "45 seconds");
+        assert_eq!(magnitude_string(60), "1 minute");
+        assert_eq!(magnitude_string(120), "2 minutes");
+        assert_eq!(magnitude_string(60 * 60), "1 hour");
+        assert_eq!(magnitude_string(60 * 60 * 5), "5 hours");
+        assert_eq!(magnitude_string(60 * 60 * 24), "1 day");
+        assert_eq!(magnitude_string(60 * 60 * 24 * 31), "1 month");
+        assert_eq!(magnitude_string(60 * 60 * 24 * 366), "1 year");
+    }
+
+    #[test]
+    fn timesince_filter_emits_magnitude_for_past() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        // 2 hours ago, give-or-take.
+        let then = Utc::now() - Duration::hours(2);
+        ctx.insert("then", &then.to_rfc3339());
+        let out = render(&tera, "{{ then | timesince }}", ctx);
+        assert_eq!(out, "2 hours");
+    }
+
+    #[test]
+    fn timesince_filter_emits_zero_for_future() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        let later = Utc::now() + Duration::hours(2);
+        ctx.insert("later", &later.to_rfc3339());
+        let out = render(&tera, "{{ later | timesince }}", ctx);
+        assert_eq!(out, "0 minutes");
+    }
+
+    #[test]
+    fn timeuntil_filter_emits_magnitude_for_future() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        // Use a wider gap so test-wall-clock-drift between insert
+        // and render-time doesn't bump us across the day boundary.
+        let later = Utc::now() + Duration::days(3) + Duration::hours(1);
+        ctx.insert("later", &later.to_rfc3339());
+        let out = render(&tera, "{{ later | timeuntil }}", ctx);
+        assert_eq!(out, "3 days", "got: {out}");
+    }
+
+    #[test]
+    fn timeuntil_filter_emits_zero_for_past() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        let then = Utc::now() - Duration::days(3);
+        ctx.insert("then", &then.to_rfc3339());
+        let out = render(&tera, "{{ then | timeuntil }}", ctx);
+        assert_eq!(out, "0 minutes");
+    }
+
+    #[test]
+    fn timesince_pluralizes_correctly() {
+        // 1 second → "1 second"; 2 → "2 seconds"
+        assert_eq!(magnitude_string(1), "1 second");
+        assert_eq!(magnitude_string(2), "2 seconds");
+        // 1 minute → "1 minute"; 2 → "2 minutes"
+        assert_eq!(magnitude_string(60), "1 minute");
+        assert_eq!(magnitude_string(120), "2 minutes");
     }
 }
