@@ -56,6 +56,9 @@
 //!   fractional seconds).
 //! - `validate_iso_datetime` — RFC 3339 / ISO 8601 datetime with
 //!   timezone offset (`...Z` or `+HH:MM`).
+//! - `validate_alphanumeric` — `[a-zA-Z0-9]+` ASCII only.
+//! - `validate_numeric` — `[0-9]+` ASCII digits only.
+//! - `validate_alpha` — `[a-zA-Z]+` ASCII letters only.
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -481,6 +484,62 @@ pub fn validate_iso_datetime(s: &str) -> Result<(), ValidationError> {
                 "Enter a datetime in RFC 3339 format (e.g. 2026-01-15T14:30:00Z).",
             )
         })
+}
+
+// ------------------------------------------------------------------ character-class predicates
+
+/// Reject any input that contains characters outside
+/// `[a-zA-Z0-9]`. Non-empty input required. ASCII only — for the
+/// Unicode-aware variant use [`validate_unicode_slug`] (which adds
+/// `_` / `-` to letters/digits).
+///
+/// # Errors
+/// `ValidationError { code: "not_alphanumeric", ... }`.
+pub fn validate_alphanumeric(s: &str) -> Result<(), ValidationError> {
+    if s.is_empty() {
+        return Err(ValidationError::new(
+            "not_alphanumeric",
+            "Enter only letters and digits.",
+        ));
+    }
+    if !s.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(ValidationError::new(
+            "not_alphanumeric",
+            "Enter only letters and digits.",
+        ));
+    }
+    Ok(())
+}
+
+/// Reject any input that contains characters outside `[0-9]`.
+/// Non-empty input required. No sign, no decimal point, no
+/// underscores — use [`validate_integer`] for those.
+///
+/// # Errors
+/// `ValidationError { code: "not_numeric", ... }`.
+pub fn validate_numeric(s: &str) -> Result<(), ValidationError> {
+    if s.is_empty() {
+        return Err(ValidationError::new("not_numeric", "Enter only digits."));
+    }
+    if !s.chars().all(|c| c.is_ascii_digit()) {
+        return Err(ValidationError::new("not_numeric", "Enter only digits."));
+    }
+    Ok(())
+}
+
+/// Reject any input that contains characters outside `[a-zA-Z]`.
+/// Non-empty input required. ASCII only.
+///
+/// # Errors
+/// `ValidationError { code: "not_alpha", ... }`.
+pub fn validate_alpha(s: &str) -> Result<(), ValidationError> {
+    if s.is_empty() {
+        return Err(ValidationError::new("not_alpha", "Enter only letters."));
+    }
+    if !s.chars().all(|c| c.is_ascii_alphabetic()) {
+        return Err(ValidationError::new("not_alpha", "Enter only letters."));
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------ length / value bounds
@@ -1305,5 +1364,56 @@ mod tests {
     fn iso_datetime_rejects_garbage() {
         let e = validate_iso_datetime("not a date").unwrap_err();
         assert_eq!(e.code, "invalid_iso_datetime");
+    }
+
+    // -------- validate_alphanumeric / numeric / alpha --------
+
+    #[test]
+    fn alphanumeric_accepts_letters_and_digits() {
+        assert!(validate_alphanumeric("abc123").is_ok());
+        assert!(validate_alphanumeric("ABC").is_ok());
+        assert!(validate_alphanumeric("9").is_ok());
+    }
+
+    #[test]
+    fn alphanumeric_rejects_punctuation_spaces_and_empty() {
+        assert!(validate_alphanumeric("abc 123").is_err());
+        assert!(validate_alphanumeric("abc-123").is_err());
+        assert!(validate_alphanumeric("abc!").is_err());
+        assert!(validate_alphanumeric("").is_err());
+    }
+
+    #[test]
+    fn alphanumeric_rejects_non_ascii_letters() {
+        // ASCII-only — use unicode_slug for the broader variant.
+        assert!(validate_alphanumeric("café").is_err());
+    }
+
+    #[test]
+    fn numeric_accepts_digits_only() {
+        assert!(validate_numeric("123").is_ok());
+        assert!(validate_numeric("0").is_ok());
+    }
+
+    #[test]
+    fn numeric_rejects_signs_decimal_letters_empty() {
+        assert!(validate_numeric("-1").is_err());
+        assert!(validate_numeric("3.14").is_err());
+        assert!(validate_numeric("12a").is_err());
+        assert!(validate_numeric("").is_err());
+    }
+
+    #[test]
+    fn alpha_accepts_letters_only() {
+        assert!(validate_alpha("Alice").is_ok());
+        assert!(validate_alpha("Z").is_ok());
+    }
+
+    #[test]
+    fn alpha_rejects_digits_punctuation_empty() {
+        assert!(validate_alpha("abc1").is_err());
+        assert!(validate_alpha("a b").is_err());
+        assert!(validate_alpha("a-b").is_err());
+        assert!(validate_alpha("").is_err());
     }
 }
