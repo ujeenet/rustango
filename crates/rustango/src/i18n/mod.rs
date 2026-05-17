@@ -41,6 +41,7 @@ use std::path::Path;
 use std::sync::RwLock;
 
 pub mod tera_tags;
+pub mod timezone;
 
 // ------------------------------------------------------------------ Locale
 
