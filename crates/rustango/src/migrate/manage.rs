@@ -117,6 +117,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "showurls" => showurls_cmd(&args[1..], writer),
         "showmodels" => showmodels_cmd(&args[1..], writer),
         "flush" => flush_cmd(pool, &args[1..], writer).await,
+        "sendtestemail" => sendtestemail_cmd(&args[1..], writer).await,
         // v0.38 — `inspectdb` is tri-dialect: PG + MySQL via
         // `information_schema`, SQLite via `PRAGMA table_info` +
         // `sqlite_master`. Dispatch happens inside `inspectdb_cmd`.
@@ -251,6 +252,18 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         "      ledger stay intact. Without --yes, prints the planned"
     )?;
     writeln!(w, "      action and exits (no DB write).\n")?;
+    writeln!(
+        w,
+        "  sendtestemail --to <addr> [--from <addr>] [--subject <text>]"
+    )?;
+    writeln!(
+        w,
+        "      Send a test message through the [mail] backend (console / memory /"
+    )?;
+    writeln!(
+        w,
+        "      null / smtp). Use to verify SMTP credentials before deploy.\n"
+    )?;
     writeln!(w, "  showmodels [--format plain|json] [--app <label>]")?;
     writeln!(
         w,
@@ -3129,6 +3142,157 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
     Ok(())
 }
 
+/// Parsed `manage sendtestemail` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SendTestEmailArgs {
+    to: Option<String>,
+    from: Option<String>,
+    subject: Option<String>,
+    help: bool,
+}
+
+fn parse_sendtestemail_args(args: &[String]) -> Result<SendTestEmailArgs, MigrateError> {
+    let mut out = SendTestEmailArgs::default();
+    let mut iter = args.iter();
+    while let Some(a) = iter.next() {
+        match a.as_str() {
+            "--help" | "-h" => out.help = true,
+            "--to" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| MigrateError::Validation("--to requires a value".to_owned()))?;
+                out.to = Some(v.clone());
+            }
+            "--from" => {
+                let v = iter.next().ok_or_else(|| {
+                    MigrateError::Validation("--from requires a value".to_owned())
+                })?;
+                out.from = Some(v.clone());
+            }
+            "--subject" => {
+                let v = iter.next().ok_or_else(|| {
+                    MigrateError::Validation("--subject requires a value".to_owned())
+                })?;
+                out.subject = Some(v.clone());
+            }
+            other if other.starts_with("--") => {
+                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+            }
+            other => {
+                return Err(MigrateError::Validation(format!(
+                    "unexpected positional argument: {other}"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `manage sendtestemail --to <addr>` — send a fixed test email
+/// through the mail backend configured in `[mail]` settings. Django
+/// parity verb for verifying SMTP credentials / mail wiring without
+/// digging into a REPL.
+///
+/// Requires the `config` feature so settings can be loaded. Without
+/// `--to`, errors with a usage hint. `--from` defaults to the
+/// `[mail].from_address` setting (and errors if neither is set).
+/// `--subject` defaults to `"rustango: test email"`.
+///
+/// Successful send prints `sendtestemail: ok` plus the resolved
+/// backend name. Send failures surface the underlying `MailError`
+/// as a [`MigrateError::Validation`].
+#[cfg(feature = "config")]
+async fn sendtestemail_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let parsed = parse_sendtestemail_args(args)?;
+    if parsed.help {
+        writeln!(
+            w,
+            "sendtestemail --to <addr> [--from <addr>] [--subject <text>]"
+        )?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "  Send a test message through the [mail] backend (console / memory /"
+        )?;
+        writeln!(
+            w,
+            "  null / smtp). Use to verify SMTP credentials or mail wiring."
+        )?;
+        writeln!(w)?;
+        writeln!(w, "  --to       Recipient address (REQUIRED).")?;
+        writeln!(
+            w,
+            "  --from     From address. Defaults to [mail].from_address."
+        )?;
+        writeln!(
+            w,
+            "  --subject  Subject line. Defaults to `rustango: test email`."
+        )?;
+        return Ok(());
+    }
+
+    let to = parsed.to.as_deref().ok_or_else(|| {
+        MigrateError::Validation(
+            "sendtestemail: --to <addr> is required (run with --help for usage)".to_owned(),
+        )
+    })?;
+
+    let settings = crate::config::Settings::load_from_env().map_err(|e| {
+        MigrateError::Validation(format!(
+            "sendtestemail: failed to load settings: {e} — check config/{{default,$tier}}.toml",
+        ))
+    })?;
+
+    let from = parsed
+        .from
+        .clone()
+        .or_else(|| settings.mail.from_address.clone())
+        .ok_or_else(|| {
+            MigrateError::Validation(
+                "sendtestemail: no --from supplied and [mail].from_address is unset".to_owned(),
+            )
+        })?;
+
+    let subject = parsed
+        .subject
+        .clone()
+        .unwrap_or_else(|| "rustango: test email".to_owned());
+    let body = "If you're reading this in a real inbox, your mail backend is wired correctly.\n\n\
+         Sent by `manage sendtestemail`."
+        .to_owned();
+
+    let mailer = crate::email::from_settings(&settings.mail);
+    let backend = settings.mail.backend.as_deref().unwrap_or("console");
+
+    let email = crate::email::Email::new()
+        .to(to)
+        .from(&from)
+        .subject(subject)
+        .body(body);
+
+    match mailer.send(&email).await {
+        Ok(()) => {
+            writeln!(
+                w,
+                "sendtestemail: ok (backend = {backend}, to = {to}, from = {from})"
+            )?;
+            Ok(())
+        }
+        Err(e) => Err(MigrateError::Validation(format!(
+            "sendtestemail: mailer.send failed (backend = {backend}): {e}"
+        ))),
+    }
+}
+
+#[cfg(not(feature = "config"))]
+async fn sendtestemail_cmd<W: Write>(_args: &[String], _w: &mut W) -> Result<(), MigrateError> {
+    Err(MigrateError::Validation(
+        "sendtestemail: this build was compiled without the `config` feature — settings \
+         can't be loaded. Rebuild with `--features config`."
+            .to_owned(),
+    ))
+}
+
 /// Mask the password in a `postgres://user:pass@host/db` connection
 /// URL so it doesn't leak into log output.
 fn redact(argv: &[String]) -> Vec<String> {
@@ -3936,6 +4100,88 @@ mod gen_tests {
     fn parse_flush_args_model_requires_value() {
         let r = parse_flush_args(&["--model".into()]);
         assert!(r.is_err());
+    }
+
+    // -------- sendtestemail --------
+
+    #[test]
+    fn parse_sendtestemail_args_defaults_empty() {
+        let p = parse_sendtestemail_args(&[]).unwrap();
+        assert!(p.to.is_none());
+        assert!(p.from.is_none());
+        assert!(p.subject.is_none());
+        assert!(!p.help);
+    }
+
+    #[test]
+    fn parse_sendtestemail_args_collects_to_from_subject() {
+        let args: Vec<String> = vec![
+            "--to".into(),
+            "ops@example.com".into(),
+            "--from".into(),
+            "bot@example.com".into(),
+            "--subject".into(),
+            "ping".into(),
+        ];
+        let p = parse_sendtestemail_args(&args).unwrap();
+        assert_eq!(p.to.as_deref(), Some("ops@example.com"));
+        assert_eq!(p.from.as_deref(), Some("bot@example.com"));
+        assert_eq!(p.subject.as_deref(), Some("ping"));
+    }
+
+    #[test]
+    fn parse_sendtestemail_args_help_short_circuits() {
+        let p = parse_sendtestemail_args(&["--help".into()]).unwrap();
+        assert!(p.help);
+    }
+
+    #[test]
+    fn parse_sendtestemail_args_rejects_unknown_flag() {
+        let r = parse_sendtestemail_args(&["--bogus".into()]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_sendtestemail_args_rejects_positional() {
+        let r = parse_sendtestemail_args(&["unexpected".into()]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_sendtestemail_args_to_requires_value() {
+        let r = parse_sendtestemail_args(&["--to".into()]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_sendtestemail_args_from_requires_value() {
+        let r = parse_sendtestemail_args(&["--from".into()]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_sendtestemail_args_subject_requires_value() {
+        let r = parse_sendtestemail_args(&["--subject".into()]);
+        assert!(r.is_err());
+    }
+
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn sendtestemail_help_short_circuits_without_settings_lookup() {
+        let mut buf: Vec<u8> = Vec::new();
+        let r = sendtestemail_cmd(&["--help".into()], &mut buf).await;
+        assert!(r.is_ok());
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("sendtestemail"));
+        assert!(s.contains("--to"));
+    }
+
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn sendtestemail_errors_when_to_missing() {
+        let mut buf: Vec<u8> = Vec::new();
+        let r = sendtestemail_cmd(&[], &mut buf).await;
+        assert!(r.is_err(), "expected Validation error for missing --to");
     }
 
     #[test]
