@@ -215,6 +215,37 @@ pub fn render(tera: &tera::Tera, name: &str, ctx: &tera::Context) -> Response {
     }
 }
 
+/// Render a Tera template to a `String` (no Response wrapping).
+/// Django's
+/// [`render_to_string(template_name, context)`](https://docs.djangoproject.com/en/6.0/topics/templates/#django.template.loader.render_to_string).
+///
+/// Use when the rendered output isn't going straight back over HTTP —
+/// emails, generated reports, PDF source, snapshot tests, an
+/// inner-template-rendered string spliced into a parent context, etc.
+///
+/// Returns the underlying [`tera::Error`] on failure so the caller can
+/// distinguish a missing-template situation from a runtime render
+/// error (vs [`render`] which collapses both into a 500).
+///
+/// ```ignore
+/// let mut ctx = tera::Context::new();
+/// ctx.insert("user", &user);
+/// let email_body = render_to_string(&tera, "welcome_email.txt", &ctx)?;
+/// send_email(&user.email, "Welcome", &email_body).await?;
+/// ```
+///
+/// # Errors
+/// Returns [`tera::Error`] when the named template is missing, the
+/// template fails to parse, or any filter/function inside it returns
+/// an error during render.
+pub fn render_to_string(
+    tera: &tera::Tera,
+    name: &str,
+    ctx: &tera::Context,
+) -> Result<String, tera::Error> {
+    tera.render(name, ctx)
+}
+
 /// Return a `302 Found` redirect to `url`. Django's
 /// [`redirect(to)`](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/#redirect).
 ///
@@ -243,6 +274,34 @@ pub fn redirect(url: impl Into<String>) -> Response {
 #[must_use]
 pub fn redirect_permanent(url: impl Into<String>) -> Response {
     build_redirect(StatusCode::MOVED_PERMANENTLY, url.into())
+}
+
+/// Redirect to a login page, preserving the current request URL as
+/// `?next=<path>` so the login handler can bounce the user back after
+/// authenticating. Django's
+/// [`redirect_to_login(next, login_url)`](https://docs.djangoproject.com/en/6.0/_modules/django/contrib/auth/views/#redirect_to_login).
+///
+/// The `next` value is URL-encoded before being appended. If
+/// `login_url` already carries a query string, `next=` is added with
+/// `&`; otherwise with `?`.
+///
+/// ```ignore
+/// // Inside a view that requires auth:
+/// if user.is_none() {
+///     return redirect_to_login(req.uri().path_and_query()
+///         .map(|p| p.as_str())
+///         .unwrap_or("/"), "/login");
+/// }
+/// ```
+///
+/// Returns a `302 Found` (matching [`redirect`]'s status), so the
+/// browser keeps the original method semantics consistent with the
+/// rest of the shortcuts module.
+#[must_use]
+pub fn redirect_to_login(next: &str, login_url: &str) -> Response {
+    let encoded = crate::url_codec::url_encode(next);
+    let separator = if login_url.contains('?') { '&' } else { '?' };
+    redirect(format!("{login_url}{separator}next={encoded}"))
 }
 
 fn build_redirect(status: StatusCode, url: String) -> Response {
@@ -357,5 +416,77 @@ mod tests {
             res.headers().get(axum::http::header::LOCATION).is_none(),
             "CRLF-injected URL must NOT produce a Location header"
         );
+    }
+
+    // ---------------- render_to_string ----------------
+
+    #[test]
+    fn render_to_string_returns_rendered_body() {
+        let mut tera = tera::Tera::default();
+        tera.add_raw_template("hi", "Hello, {{ name }}!").unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("name", "alice");
+        let out = render_to_string(&tera, "hi", &ctx).unwrap();
+        assert_eq!(out, "Hello, alice!");
+    }
+
+    #[test]
+    fn render_to_string_propagates_template_errors() {
+        let tera = tera::Tera::default();
+        let ctx = tera::Context::new();
+        let err = render_to_string(&tera, "absent.html", &ctx).unwrap_err();
+        // The error string should mention the template name so the
+        // caller can debug without a stack trace. Tera's exact
+        // formatting varies; just check the name shows up somewhere.
+        let s = format!("{err}");
+        assert!(s.contains("absent") || s.contains("not found"), "got: {s}");
+    }
+
+    // ---------------- redirect_to_login ----------------
+
+    #[tokio::test]
+    async fn redirect_to_login_appends_next_with_question_mark() {
+        let res = redirect_to_login("/profile", "/login");
+        assert_eq!(res.status(), StatusCode::FOUND);
+        let loc = res
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(loc, "/login?next=%2Fprofile");
+    }
+
+    #[tokio::test]
+    async fn redirect_to_login_appends_next_with_ampersand_when_url_has_query() {
+        let res = redirect_to_login("/profile", "/login?lang=fr");
+        let loc = res
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(loc, "/login?lang=fr&next=%2Fprofile");
+    }
+
+    #[tokio::test]
+    async fn redirect_to_login_encodes_special_chars_in_next() {
+        // Path with spaces, ampersand, slashes — all must survive the
+        // round-trip back into the login handler as a clean ?next=.
+        let res = redirect_to_login("/posts/42?utm=ad&q=spaces here", "/login");
+        let loc = res
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(loc.starts_with("/login?next="), "got: {loc}");
+        // Spaces / ? / & all become percent-escaped.
+        assert!(!loc[12..].contains(' '), "next= must percent-escape spaces");
+        assert!(!loc[12..].contains('&'), "next= must percent-escape &");
+        assert!(!loc[12..].contains('?'), "next= must percent-escape ?");
     }
 }
