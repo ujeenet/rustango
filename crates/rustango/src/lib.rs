@@ -865,6 +865,11 @@ pub mod validators;
 /// the canonical worked examples. Issue #52.
 pub mod manager;
 
+/// Model-inheritance patterns — Django's `Meta.abstract`,
+/// multi-table, and proxy shapes adapted to Rust idioms. See
+/// [`inheritance`] for the canonical worked mappings. Issue #51.
+pub mod inheritance;
+
 /// Named URL reversal — Django's `reverse(name, params)` +
 /// `get_absolute_url()`. Pair with [`register_url!`]. Issue #8.
 pub mod urls;
