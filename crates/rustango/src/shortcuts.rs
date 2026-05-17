@@ -276,6 +276,44 @@ pub fn redirect_permanent(url: impl Into<String>) -> Response {
     build_redirect(StatusCode::MOVED_PERMANENTLY, url.into())
 }
 
+/// Return a `303 See Other` redirect to `url`. The proper status
+/// code for the "after a successful POST" pattern: it forces the
+/// client to follow with `GET` regardless of the original request
+/// method, so the user can refresh the resulting page without
+/// re-submitting the form (the classic POST→303→GET flow).
+///
+/// Distinct from [`redirect`] (302 Found), which historically had
+/// the same "force GET" behaviour but RFC 7231 leaves it
+/// implementation-defined for non-GET requests. 303 is the
+/// unambiguous choice for "form submit succeeded, look here for
+/// the result."
+#[must_use]
+pub fn redirect_see_other(url: impl Into<String>) -> Response {
+    build_redirect(StatusCode::SEE_OTHER, url.into())
+}
+
+/// Return a `307 Temporary Redirect` to `url`. Unlike `302` and
+/// `303`, the client is required to use the SAME request method on
+/// the redirect target. Use when the resource has moved temporarily
+/// but the verb still applies — e.g. a load balancer 307-redirecting
+/// `POST /api/v1/...` to `POST /api/v1-new/...`.
+///
+/// For "form submit succeeded" use [`redirect_see_other`] instead.
+/// For "this URL has moved permanently" use [`redirect_permanent`].
+#[must_use]
+pub fn redirect_temporary(url: impl Into<String>) -> Response {
+    build_redirect(StatusCode::TEMPORARY_REDIRECT, url.into())
+}
+
+/// Return a `308 Permanent Redirect` to `url`. The method-preserving
+/// counterpart of [`redirect_permanent`] (301): same long-term
+/// migration semantics, but clients must reuse the request method
+/// on the new URL. Useful for API endpoint canonicalization.
+#[must_use]
+pub fn redirect_permanent_preserve_method(url: impl Into<String>) -> Response {
+    build_redirect(StatusCode::PERMANENT_REDIRECT, url.into())
+}
+
 /// Redirect to a login page, preserving the current request URL as
 /// `?next=<path>` so the login handler can bounce the user back after
 /// authenticating. Django's
@@ -627,6 +665,38 @@ mod tests {
             .get(axum::http::header::LOCATION)
             .expect("location");
         assert_eq!(loc.to_str().unwrap(), "/posts/42");
+    }
+
+    #[tokio::test]
+    async fn redirect_see_other_is_303_with_location_header() {
+        let res = redirect_see_other("/items");
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        let loc = res
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(loc, "/items");
+    }
+
+    #[tokio::test]
+    async fn redirect_temporary_is_307_with_location_header() {
+        let res = redirect_temporary("/api/v1-new/widgets");
+        assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
+        let loc = res
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(loc, "/api/v1-new/widgets");
+    }
+
+    #[tokio::test]
+    async fn redirect_permanent_preserve_method_is_308() {
+        let res = redirect_permanent_preserve_method("/api/v2/widgets");
+        assert_eq!(res.status(), StatusCode::PERMANENT_REDIRECT);
     }
 
     #[tokio::test]
