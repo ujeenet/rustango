@@ -54,8 +54,6 @@
 //! - `permission_required(perm)` — needs the tenancy permission
 //!   registry; pairs naturally with `login_required` but warrants its
 //!   own slice once the auth-flow API stabilizes.
-//! - `user_passes_test(predicate)` — generic predicate gate; useful
-//!   once we have a tighter `SessionUser` API.
 //! - `LoginRequiredMixin` on the CBV surface — small wiring on
 //!   `TemplateView` / `DetailView` etc.
 //! - Single-tenant / non-tenancy variant — `login_required` today
@@ -124,6 +122,92 @@ pub fn login_required(
         let cfg = cfg.clone();
         async move { handle_login_required(cfg, req, next).await }
     })
+}
+
+/// Predicate-based access gate. Django's
+/// `@user_passes_test(test_func, login_url=…)`. Runs `predicate`
+/// against the resolved [`crate::extractors::SessionUser`]; on
+/// `true` the request continues, on `false` (or anonymous) it 302s
+/// to `login_url` with `?next=` preserved — same shape as
+/// [`login_required`].
+///
+/// The predicate receives a reference to the
+/// [`crate::tenancy::auth::User`] row so it can inspect any field
+/// (`is_superuser`, `active`, role flags, custom permissions
+/// expressed on the row, etc.).
+///
+/// ```ignore
+/// use rustango::auth_decorators::user_passes_test;
+///
+/// // Superuser-only sub-router:
+/// let admin_only = Router::new()
+///     .route("/admin/dashboard", get(dashboard))
+///     .layer(user_passes_test("/login", |u| u.is_superuser));
+/// ```
+///
+/// Note that anonymous requests don't reach the predicate — they
+/// short-circuit straight to the login redirect. Pair with
+/// [`login_required`] only if you want anonymous to be the *only*
+/// reason for the redirect (this gate already handles it).
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub fn user_passes_test<F>(
+    login_url: impl Into<String>,
+    predicate: F,
+) -> impl tower::Layer<
+    axum::routing::Route,
+    Service = impl tower::Service<
+        Request<Body>,
+        Response = Response,
+        Error = std::convert::Infallible,
+        Future = impl Send + 'static,
+    > + Clone
+                  + Send
+                  + Sync
+                  + 'static,
+> + Clone
+where
+    F: Fn(&crate::tenancy::auth::User) -> bool + Send + Sync + 'static,
+{
+    let cfg = Arc::new(LoginRequiredConfig {
+        login_url: login_url.into(),
+        ..Default::default()
+    });
+    let pred = Arc::new(predicate);
+    axum::middleware::from_fn(move |req: Request<Body>, next: Next| {
+        let cfg = cfg.clone();
+        let pred = pred.clone();
+        async move { handle_user_passes_test(cfg, pred, req, next).await }
+    })
+}
+
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+async fn handle_user_passes_test<F>(
+    cfg: Arc<LoginRequiredConfig>,
+    pred: Arc<F>,
+    req: Request<Body>,
+    next: Next,
+) -> Response
+where
+    F: Fn(&crate::tenancy::auth::User) -> bool + Send + Sync + 'static,
+{
+    use axum::extract::FromRequestParts as _;
+    let (mut parts, body) = req.into_parts();
+    let user = crate::extractors::SessionUser::from_request_parts(&mut parts, &())
+        .await
+        .unwrap_or(crate::extractors::SessionUser(None));
+    if let Some(u) = user.0.as_ref() {
+        if pred(u) {
+            let req = Request::from_parts(parts, body);
+            return next.run(req).await;
+        }
+    }
+    // Anonymous OR predicate failed — redirect to login with ?next=.
+    let original = parts
+        .uri
+        .path_and_query()
+        .map(|p| p.as_str().to_owned())
+        .unwrap_or_else(|| "/".to_owned());
+    redirect_to_login(&cfg.login_url, &cfg.redirect_field, &original)
 }
 
 #[cfg(all(feature = "tenancy", feature = "postgres"))]
@@ -441,5 +525,54 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap();
         assert_eq!(loc, "/login?next=%2Fprofile");
+    }
+
+    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[tokio::test]
+    async fn user_passes_test_redirects_anonymous_to_login_url() {
+        use axum::body::Body;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt as _;
+
+        async fn staff_only() -> &'static str {
+            "staff zone"
+        }
+
+        // Predicate is never called when the request is anonymous —
+        // the gate short-circuits to the redirect.
+        let app = Router::new()
+            .route("/admin/dashboard", get(staff_only))
+            .layer(user_passes_test("/login", |u| u.is_superuser));
+
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/dashboard")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::FOUND);
+        let loc = res
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap();
+        assert_eq!(loc, "/login?next=%2Fadmin%2Fdashboard");
+    }
+
+    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[test]
+    fn user_passes_test_signature_compiles_with_closure_predicate() {
+        // Compile-only: pin the signature so the predicate can be
+        // a closure capturing locals. The body never runs.
+        let _ = || {
+            let _layer = user_passes_test("/login", |u: &crate::tenancy::auth::User| {
+                u.is_superuser && u.active
+            });
+        };
     }
 }
