@@ -81,6 +81,11 @@
 //!   segments. Shape check only, NO signature verification.
 //! - `validate_semver` — semantic version 2.0.0 (`MAJOR.MINOR.PATCH`
 //!   with optional `-pre.release` and `+build` suffixes).
+//! - `validate_country_code` — ISO 3166-1 alpha-2 country code
+//!   (2 uppercase letters). Format-only; doesn't check the code
+//!   exists.
+//! - `validate_currency_code` — ISO 4217 currency code (3 uppercase
+//!   letters). Format-only.
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -1091,6 +1096,42 @@ fn is_valid_semver_id_list(s: &str, allow_numeric_leading_zero: bool) -> bool {
         }
     }
     true
+}
+
+// ------------------------------------------------------------------ ISO country / currency codes
+
+/// Validate an ISO 3166-1 alpha-2 country code: exactly 2 uppercase
+/// ASCII letters (`US`, `GB`, `DE`, `JP`, ...). Format-only — does
+/// NOT check that the code corresponds to a real country (that
+/// would need an embedded list of 249 codes maintained against
+/// every ISO update).
+///
+/// # Errors
+/// `ValidationError { code: "invalid_country_code", ... }`.
+pub fn validate_country_code(s: &str) -> Result<(), ValidationError> {
+    if s.len() != 2 || !s.chars().all(|c| c.is_ascii_uppercase()) {
+        return Err(ValidationError::new(
+            "invalid_country_code",
+            "Enter a 2-letter ISO 3166-1 country code (e.g. US, GB).",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate an ISO 4217 currency code: exactly 3 uppercase ASCII
+/// letters (`USD`, `EUR`, `GBP`, `JPY`, ...). Format-only — does
+/// NOT check that the code corresponds to a circulating currency.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_currency_code", ... }`.
+pub fn validate_currency_code(s: &str) -> Result<(), ValidationError> {
+    if s.len() != 3 || !s.chars().all(|c| c.is_ascii_uppercase()) {
+        return Err(ValidationError::new(
+            "invalid_currency_code",
+            "Enter a 3-letter ISO 4217 currency code (e.g. USD, EUR).",
+        ));
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------ length / value bounds
@@ -2460,5 +2501,59 @@ mod tests {
         assert!(validate_semver("1.0.0-alpha_1").is_err()); // underscore not allowed
         assert!(validate_semver("1.0.0-alpha 1").is_err()); // space
         assert!(validate_semver("v1.0.0").is_err()); // leading v
+    }
+
+    // -------- validate_country_code --------
+
+    #[test]
+    fn country_code_accepts_two_uppercase_letters() {
+        assert!(validate_country_code("US").is_ok());
+        assert!(validate_country_code("GB").is_ok());
+        assert!(validate_country_code("DE").is_ok());
+        assert!(validate_country_code("JP").is_ok());
+        // The format check accepts ANY 2 uppercase letters — `ZZ`
+        // isn't a real country, but full validation against ISO
+        // 3166-1 needs a maintained list (documented).
+        assert!(validate_country_code("ZZ").is_ok());
+    }
+
+    #[test]
+    fn country_code_rejects_wrong_length() {
+        assert!(validate_country_code("U").is_err());
+        assert!(validate_country_code("USA").is_err()); // alpha-3, not alpha-2
+        assert!(validate_country_code("").is_err());
+    }
+
+    #[test]
+    fn country_code_rejects_lowercase_or_non_letters() {
+        assert!(validate_country_code("us").is_err());
+        assert!(validate_country_code("Us").is_err());
+        assert!(validate_country_code("U1").is_err());
+        assert!(validate_country_code("U-").is_err());
+    }
+
+    // -------- validate_currency_code --------
+
+    #[test]
+    fn currency_code_accepts_three_uppercase_letters() {
+        assert!(validate_currency_code("USD").is_ok());
+        assert!(validate_currency_code("EUR").is_ok());
+        assert!(validate_currency_code("GBP").is_ok());
+        assert!(validate_currency_code("JPY").is_ok());
+        assert!(validate_currency_code("XXX").is_ok()); // ZZZ-style
+    }
+
+    #[test]
+    fn currency_code_rejects_wrong_length() {
+        assert!(validate_currency_code("US").is_err());
+        assert!(validate_currency_code("USDD").is_err());
+        assert!(validate_currency_code("").is_err());
+    }
+
+    #[test]
+    fn currency_code_rejects_lowercase_or_non_letters() {
+        assert!(validate_currency_code("usd").is_err());
+        assert!(validate_currency_code("UsD").is_err());
+        assert!(validate_currency_code("U5D").is_err());
     }
 }
