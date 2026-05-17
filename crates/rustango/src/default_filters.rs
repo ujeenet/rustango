@@ -6,8 +6,8 @@
 //! `floatformat`, `escapejs`, `yesno`, `get_digit`, `dictsort`,
 //! `slugify_unicode`, `iriencode`, `wordwrap`, `mask_email`,
 //! `mask_card`, `mask_phone`, `dictsortreversed`, `oxford_join`,
-//! `initials`. Call [`register_filters`] on a Tera instance to
-//! make them available:
+//! `initials`, `truncatechars`. Call [`register_filters`] on a
+//! Tera instance to make them available:
 //!
 //! ```ignore
 //! let mut tera = tera::Tera::default();
@@ -50,6 +50,7 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("dictsortreversed", dictsortreversed);
     tera.register_filter("oxford_join", oxford_join);
     tera.register_filter("initials", initials);
+    tera.register_filter("truncatechars", truncatechars);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -621,6 +622,50 @@ fn initials(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value>
         }
     }
     Ok(to_value(out)?)
+}
+
+// ------------------------------------------------------------------ truncatechars
+
+/// `truncatechars` — Django's `truncatechars`. Truncate the input
+/// to at most `count` characters; if any chars were dropped,
+/// append `…` (single ellipsis char). The ellipsis counts toward
+/// the `count` budget — `truncatechars(5)` produces at most 5
+/// chars of output total.
+///
+/// Distinct from Tera's built-in `truncate` (which adds the
+/// ellipsis BEYOND the count, and uses the literal `...`).
+///
+/// Examples:
+/// - `"Joel is a slug" | truncatechars(count=7)` → `"Joel i…"` (7 chars)
+/// - `"Hi" | truncatechars(count=10)` → `"Hi"` (no truncation needed)
+/// - `"abc" | truncatechars(count=3)` → `"abc"` (boundary)
+/// - `"abcd" | truncatechars(count=3)` → `"ab…"` (3 chars total)
+/// - `"any" | truncatechars(count=0)` → `""` (zero budget)
+///
+/// Negative / non-integer `count` returns the input unchanged.
+fn truncatechars(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(s) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let n = match args
+        .get("count")
+        .or_else(|| args.values().next())
+        .and_then(Value::as_i64)
+    {
+        Some(n) if n >= 0 => n as usize,
+        _ => return Ok(value.clone()),
+    };
+    let total = s.chars().count();
+    if total <= n {
+        return Ok(value.clone());
+    }
+    if n == 0 {
+        return Ok(to_value("")?);
+    }
+    // Reserve 1 char for the ellipsis.
+    let keep = n.saturating_sub(1);
+    let truncated: String = s.chars().take(keep).collect();
+    Ok(to_value(format!("{truncated}…"))?)
 }
 
 /// Total ordering across heterogeneous JSON `Value`s. Null < bool <
@@ -1947,6 +1992,57 @@ mod tests {
     #[test]
     fn initials_passes_through_non_string() {
         let out = initials(&json!(42), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(42));
+    }
+
+    // -------- truncatechars --------
+
+    #[test]
+    fn truncatechars_keeps_input_under_or_equal_to_count() {
+        let out = truncatechars(&json!("Hi"), &args_pos(json!(10))).unwrap();
+        assert_eq!(out, json!("Hi"));
+        // Boundary: exactly count chars.
+        let boundary = truncatechars(&json!("abc"), &args_pos(json!(3))).unwrap();
+        assert_eq!(boundary, json!("abc"));
+    }
+
+    #[test]
+    fn truncatechars_appends_ellipsis_within_budget() {
+        // 14 chars in, count=7 → 6 chars + … = 7 total.
+        let out = truncatechars(&json!("Joel is a slug"), &args_pos(json!(7))).unwrap();
+        assert_eq!(out, json!("Joel i…"));
+        // 4 chars in, count=3 → 2 chars + … = 3 total.
+        let three = truncatechars(&json!("abcd"), &args_pos(json!(3))).unwrap();
+        assert_eq!(three, json!("ab…"));
+    }
+
+    #[test]
+    fn truncatechars_zero_count_returns_empty() {
+        let out = truncatechars(&json!("anything"), &args_pos(json!(0))).unwrap();
+        assert_eq!(out, json!(""));
+    }
+
+    #[test]
+    fn truncatechars_negative_or_non_int_passes_through() {
+        let neg = truncatechars(&json!("anything"), &args_pos(json!(-1))).unwrap();
+        assert_eq!(neg, json!("anything"));
+        let str_arg = truncatechars(&json!("anything"), &args_pos(json!("five"))).unwrap();
+        assert_eq!(str_arg, json!("anything"));
+    }
+
+    #[test]
+    fn truncatechars_unicode_counts_chars_not_bytes() {
+        // "éé" is 2 chars (4 bytes). count=2 means no truncation.
+        let out = truncatechars(&json!("éé"), &args_pos(json!(2))).unwrap();
+        assert_eq!(out, json!("éé"));
+        // "ééé" with count=2 → 1 char + … = 2 chars total.
+        let trunc = truncatechars(&json!("ééé"), &args_pos(json!(2))).unwrap();
+        assert_eq!(trunc, json!("é…"));
+    }
+
+    #[test]
+    fn truncatechars_passes_through_non_string() {
+        let out = truncatechars(&json!(42), &args_pos(json!(2))).unwrap();
         assert_eq!(out, json!(42));
     }
 }
