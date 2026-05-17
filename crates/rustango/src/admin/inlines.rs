@@ -374,6 +374,494 @@ fn stringify_pk(value: &serde_json::Value) -> String {
     }
 }
 
+// ============================================================ Editable rendering (slice 2)
+
+/// One editable inline panel for the `form.html` template. Mirrors
+/// [`InlinePanel`] but each cell carries pre-rendered `<input>`
+/// HTML instead of a static value, plus the FormSet management-form
+/// fields and Django's `<prefix>-N-<field>` naming.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InlineFormPanel {
+    /// Panel header text.
+    pub label: String,
+    /// Child model's SQL table — used by the POST processor to look
+    /// up the schema. Also surfaces in the rendered DOM so JS could
+    /// scope row-add buttons to this panel.
+    pub child_table: String,
+    /// `"tabular"` or `"stacked"`.
+    pub kind: String,
+    /// FormSet prefix used for every input on every row. Stable across
+    /// GET + POST (defaults to `child_table`).
+    pub prefix: String,
+    /// Total form rows (existing + extra blanks). Drives the
+    /// `<prefix>-TOTAL_FORMS` management input.
+    pub total_forms: usize,
+    /// Existing-rows count. Drives `<prefix>-INITIAL_FORMS`.
+    pub initial_forms: usize,
+    /// `<prefix>-MAX_NUM_FORMS` value; `None` renders as empty
+    /// (Django's "no cap" sentinel).
+    pub max_num: Option<usize>,
+    /// Column headers, in render order. Padded with a final
+    /// `"Delete"` column when at least one existing row is present
+    /// (so the delete-checkbox column lines up with the others).
+    pub field_labels: Vec<String>,
+    /// One entry per form row. Each row carries pre-rendered
+    /// `{ label, input_html }` cells, plus `pk` (empty for new rows)
+    /// and `delete_input_html` (empty for new rows).
+    pub rows: Vec<serde_json::Value>,
+}
+
+/// As [`render_for_parent`] but produces an editable [`InlineFormPanel`]
+/// — N existing-row inputs prefilled, then `extra` blank rows below.
+/// Each existing row carries a hidden `<prefix>-N-<pk>` input + a
+/// `<prefix>-N-DELETE` checkbox so the POST handler can identify which
+/// rows to UPDATE vs DELETE.
+///
+/// Pair with [`apply_post`] to round-trip a submitted edit page.
+///
+/// # Errors
+/// As [`render_for_parent`].
+pub async fn render_form_for_parent(
+    pool: &Pool,
+    parent_model: &'static ModelSchema,
+    parent_pk: SqlValue,
+) -> Result<Vec<InlineFormPanel>, ExecError> {
+    let registrations = for_parent_table(parent_model.table);
+    if registrations.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut panels = Vec::with_capacity(registrations.len());
+    for inline in registrations {
+        let Some(child_model) = find_model_by_table(inline.child_table) else {
+            continue;
+        };
+        if child_model.field_by_column(inline.fk_column).is_none() {
+            continue;
+        }
+
+        let display_fields = resolve_render_fields(child_model, inline);
+        let pk_field = child_model.primary_key();
+        let select_fields: Vec<&'static FieldSchema> = match pk_field {
+            Some(pk) if !display_fields.iter().any(|f| f.column == pk.column) => {
+                let mut v = Vec::with_capacity(display_fields.len() + 1);
+                v.push(pk);
+                v.extend_from_slice(&display_fields);
+                v
+            }
+            _ => display_fields.clone(),
+        };
+        let order_pk: Vec<OrderItem> = pk_field
+            .map(|pk| OrderItem::Column {
+                column: pk.column,
+                desc: false,
+                nulls: NullsOrder::Default,
+            })
+            .into_iter()
+            .collect();
+
+        let rows = select_rows_as_json(
+            pool,
+            &SelectQuery {
+                model: child_model,
+                where_clause: WhereExpr::Predicate(Filter {
+                    column: inline.fk_column,
+                    op: Op::Eq,
+                    value: parent_pk.clone(),
+                }),
+                search: None,
+                joins: vec![],
+                order_by: order_pk,
+                limit: None,
+                offset: None,
+                lock_mode: None,
+                compound: vec![],
+                projection: None,
+            },
+            &select_fields,
+        )
+        .await?;
+
+        let prefix = child_model.table.to_owned();
+        let initial_forms = rows.len();
+        let total_forms = initial_forms + inline.extra;
+        let pk_column = pk_field.map(|p| p.column).unwrap_or("id");
+
+        let mut field_labels: Vec<String> =
+            display_fields.iter().map(|f| f.name.to_owned()).collect();
+        // Append a Delete column only when there's something to delete.
+        if initial_forms > 0 {
+            field_labels.push("Delete".to_owned());
+        }
+
+        let mut rendered_rows: Vec<serde_json::Value> = Vec::with_capacity(total_forms);
+        for (idx, row) in rows.iter().enumerate() {
+            let pk_text = row.get(pk_column).map(stringify_pk).unwrap_or_default();
+            let cells: Vec<serde_json::Value> = display_fields
+                .iter()
+                .map(|f| {
+                    let raw_str = row
+                        .get(f.column)
+                        .map(value_as_form_string)
+                        .unwrap_or_default();
+                    let input_html = render_prefixed_input(f, &raw_str, &prefix, idx, false);
+                    serde_json::json!({
+                        "label": f.name,
+                        "input_html": input_html,
+                    })
+                })
+                .collect();
+            // Hidden PK input keeps the row identifiable through the
+            // round-trip even if the operator changes nothing else.
+            let pk_field_name = pk_field.map(|p| p.name).unwrap_or("id");
+            let hidden_pk = format!(
+                r#"<input type="hidden" name="{p}-{i}-{n}" value="{v}">"#,
+                p = html_escape(&prefix),
+                i = idx,
+                n = html_escape(pk_field_name),
+                v = html_escape(&pk_text),
+            );
+            let delete_input_html = format!(
+                r#"<input type="checkbox" name="{p}-{i}-DELETE" value="on">"#,
+                p = html_escape(&prefix),
+                i = idx,
+            );
+            rendered_rows.push(serde_json::json!({
+                "pk": pk_text,
+                "cells": cells,
+                "hidden_pk": hidden_pk,
+                "delete_input_html": delete_input_html,
+            }));
+        }
+        // Extra blank rows for adding new children. No hidden PK (the
+        // POST handler treats absence as "INSERT") and no DELETE box.
+        for idx in initial_forms..total_forms {
+            let cells: Vec<serde_json::Value> = display_fields
+                .iter()
+                .map(|f| {
+                    let input_html = render_prefixed_input(f, "", &prefix, idx, false);
+                    serde_json::json!({
+                        "label": f.name,
+                        "input_html": input_html,
+                    })
+                })
+                .collect();
+            rendered_rows.push(serde_json::json!({
+                "pk": "",
+                "cells": cells,
+                "hidden_pk": "",
+                "delete_input_html": "",
+            }));
+        }
+
+        let label = if inline.label.is_empty() {
+            child_model.name.to_owned()
+        } else {
+            inline.label.to_owned()
+        };
+
+        panels.push(InlineFormPanel {
+            label,
+            child_table: child_model.table.to_owned(),
+            kind: match inline.kind {
+                InlineKind::Tabular => "tabular".to_owned(),
+                InlineKind::Stacked => "stacked".to_owned(),
+            },
+            prefix,
+            total_forms,
+            initial_forms,
+            max_num: inline.max_num,
+            field_labels,
+            rows: rendered_rows,
+        });
+    }
+    Ok(panels)
+}
+
+/// Wrap `super::render::render_input` so the generated `name=` /
+/// `id=` attributes are prefix-mangled into Django's FormSet
+/// `<prefix>-<idx>-<field>` shape. We accomplish this with a
+/// `str::replace` on the rendered HTML — `render_input` always emits
+/// `name="<field>"` and `id="<field>"`, so the substitution is
+/// uniquely targetable.
+fn render_prefixed_input(
+    field: &FieldSchema,
+    value: &str,
+    prefix: &str,
+    idx: usize,
+    pk_locked: bool,
+) -> String {
+    let base = crate::admin::render::render_input(field, value, pk_locked);
+    let target_name = format!(r#"name="{}""#, field.name);
+    let new_name = format!(r#"name="{prefix}-{idx}-{}""#, field.name);
+    let target_id = format!(r#"id="{}""#, field.name);
+    let new_id = format!(r#"id="{prefix}-{idx}-{}""#, field.name);
+    base.replacen(&target_name, &new_name, 1)
+        .replacen(&target_id, &new_id, 1)
+}
+
+/// Convert a JSON value into the string form an HTML `<input>` would
+/// have produced for it. Mirrors `render::render_value_for_input_json`
+/// at the rough level needed for inline rows — JSON / Binary fall
+/// back to the raw text representation so the operator can still see
+/// the value.
+fn value_as_form_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+// ============================================================ POST processing (slice 2)
+
+/// Outcome of processing a single inline POST payload. Aggregated
+/// across panels by [`apply_post`] so the caller can report counts to
+/// the operator without caring about per-row mechanics.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct InlineApplyOutcome {
+    /// Existing rows successfully updated.
+    pub updated: usize,
+    /// Existing rows successfully deleted (DELETE checkbox was on).
+    pub deleted: usize,
+    /// New rows successfully inserted (extra/empty slots with content).
+    pub inserted: usize,
+    /// Rows that failed to validate or write — counted but skipped.
+    pub failed: usize,
+}
+
+impl InlineApplyOutcome {
+    fn add(&mut self, other: Self) {
+        self.updated += other.updated;
+        self.deleted += other.deleted;
+        self.inserted += other.inserted;
+        self.failed += other.failed;
+    }
+}
+
+/// Process every inline FormSet payload on a parent edit POST. For
+/// each row: an empty PK + any non-empty field → INSERT; a present PK
+/// + DELETE checkbox → DELETE; a present PK + no DELETE → UPDATE.
+///
+/// `parent_pk` is the parent's primary-key value — every INSERT pins
+/// the FK column to it.
+///
+/// Best-effort: a row that fails to validate or write increments
+/// `failed` and is skipped; other rows continue. The caller decides
+/// whether to surface the failure (the admin's `update_submit`
+/// reports a flash message via the audit log path).
+///
+/// # Errors
+/// Only when the registration's child model isn't in the registry —
+/// per-row write errors are absorbed into `failed`.
+pub async fn apply_post(
+    pool: &Pool,
+    parent_model: &'static ModelSchema,
+    parent_pk: SqlValue,
+    form: &std::collections::HashMap<String, String>,
+) -> Result<InlineApplyOutcome, ExecError> {
+    let registrations = for_parent_table(parent_model.table);
+    let mut total = InlineApplyOutcome::default();
+    for inline in registrations {
+        let Some(child_model) = find_model_by_table(inline.child_table) else {
+            continue;
+        };
+        if child_model.field_by_column(inline.fk_column).is_none() {
+            continue;
+        }
+        let prefix = child_model.table;
+        let total_forms = match crate::forms::formset::total_forms(form, prefix) {
+            Ok(n) => n,
+            Err(_) => {
+                // No management form for this inline (operator left
+                // the panel hidden, JS didn't render it, etc.). Skip
+                // silently — slice 1's display path doesn't render
+                // the management inputs either.
+                continue;
+            }
+        };
+        let outcome = apply_one_inline(
+            pool,
+            child_model,
+            inline,
+            prefix,
+            total_forms,
+            &parent_pk,
+            form,
+        )
+        .await;
+        total.add(outcome);
+    }
+    Ok(total)
+}
+
+async fn apply_one_inline(
+    pool: &Pool,
+    child_model: &'static ModelSchema,
+    inline: &InlineAdmin,
+    prefix: &str,
+    total_forms: usize,
+    parent_pk: &SqlValue,
+    form: &std::collections::HashMap<String, String>,
+) -> InlineApplyOutcome {
+    let mut outcome = InlineApplyOutcome::default();
+    let pk_field = match child_model.primary_key() {
+        Some(p) => p,
+        None => return outcome,
+    };
+    let display_fields = resolve_render_fields(child_model, inline);
+
+    for idx in 0..total_forms {
+        let row = crate::forms::formset::row_payload(form, prefix, idx);
+        let raw_pk = row.get(pk_field.name).cloned().unwrap_or_default();
+        let has_pk = !raw_pk.trim().is_empty();
+        let delete_flag = row
+            .get("DELETE")
+            .map(|s| s == "on" || s == "true" || s == "1")
+            .unwrap_or(false);
+
+        // Existing row + DELETE → DELETE child row.
+        if has_pk && delete_flag {
+            let pk_val = match crate::forms::parse_pk_string(pk_field, &raw_pk) {
+                Ok(v) => v,
+                Err(_) => {
+                    outcome.failed += 1;
+                    continue;
+                }
+            };
+            let q = crate::core::DeleteQuery {
+                model: child_model,
+                where_clause: WhereExpr::Predicate(Filter {
+                    column: pk_field.column,
+                    op: Op::Eq,
+                    value: pk_val,
+                }),
+            };
+            match crate::sql::delete_pool(pool, &q).await {
+                Ok(_) => outcome.deleted += 1,
+                Err(_) => outcome.failed += 1,
+            }
+            continue;
+        }
+
+        // Existing row, no DELETE → UPDATE child row.
+        if has_pk {
+            let pk_val = match crate::forms::parse_pk_string(pk_field, &raw_pk) {
+                Ok(v) => v,
+                Err(_) => {
+                    outcome.failed += 1;
+                    continue;
+                }
+            };
+            let assignments = match build_assignments(&display_fields, &row, Some(inline.fk_column))
+            {
+                Ok(a) => a,
+                Err(_) => {
+                    outcome.failed += 1;
+                    continue;
+                }
+            };
+            if assignments.is_empty() {
+                // Nothing changed; not a failure.
+                continue;
+            }
+            let q = crate::core::UpdateQuery {
+                model: child_model,
+                set: assignments,
+                where_clause: WhereExpr::Predicate(Filter {
+                    column: pk_field.column,
+                    op: Op::Eq,
+                    value: pk_val,
+                }),
+            };
+            match crate::sql::update_pool(pool, &q).await {
+                Ok(_) => outcome.updated += 1,
+                Err(_) => outcome.failed += 1,
+            }
+            continue;
+        }
+
+        // No PK → INSERT, but only when the operator typed something
+        // into at least one display field. Empty extras stay empty.
+        let row_nonempty = display_fields.iter().any(|f| {
+            row.get(f.name)
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+        });
+        if !row_nonempty {
+            continue;
+        }
+        let assignments = match build_assignments(&display_fields, &row, None) {
+            Ok(a) => a,
+            Err(_) => {
+                outcome.failed += 1;
+                continue;
+            }
+        };
+        // Pin the FK to the parent's PK so the new row attaches.
+        // `build_assignments` returns `Assignment` whose `value` is an
+        // `Expr::Literal(SqlValue)` — unwrap back to the SqlValue for
+        // InsertQuery's positional `values: Vec<SqlValue>` shape.
+        let mut columns: Vec<&'static str> = assignments.iter().map(|a| a.column).collect();
+        let mut values: Vec<SqlValue> = assignments
+            .into_iter()
+            .map(|a| match a.value {
+                crate::core::Expr::Literal(v) => v,
+                _ => SqlValue::Null,
+            })
+            .collect();
+        // Skip duplicate FK assignment if for some reason the operator
+        // also submitted the FK column directly.
+        if !columns.contains(&inline.fk_column) {
+            columns.push(inline.fk_column);
+            values.push(parent_pk.clone());
+        }
+        let q = crate::core::InsertQuery {
+            model: child_model,
+            columns,
+            values,
+            returning: vec![],
+            on_conflict: None,
+        };
+        match crate::sql::insert_pool(pool, &q).await {
+            Ok(_) => outcome.inserted += 1,
+            Err(_) => outcome.failed += 1,
+        }
+    }
+
+    outcome
+}
+
+/// Translate one row payload into `Assignment` values keyed on SQL
+/// columns. `skip_column`, when set, drops that column from the
+/// output — UPDATE skips the FK so a malicious POST can't reparent
+/// a child row to another parent.
+fn build_assignments(
+    display_fields: &[&'static FieldSchema],
+    row: &std::collections::HashMap<String, String>,
+    skip_column: Option<&str>,
+) -> Result<Vec<crate::core::Assignment>, crate::forms::FormError> {
+    let mut out = Vec::with_capacity(display_fields.len());
+    for f in display_fields {
+        if let Some(skip) = skip_column {
+            if f.column == skip {
+                continue;
+            }
+        }
+        let raw = row.get(f.name).map(String::as_str);
+        // Empty strings + nullable → NULL. Empty strings + required:
+        // bubble up the FormError so the panel marks this row failed.
+        let value = crate::forms::parse_form_value(f, raw)?;
+        out.push(crate::core::Assignment {
+            column: f.column,
+            value: crate::core::Expr::Literal(value),
+        });
+    }
+    Ok(out)
+}
+
 /// Minimal HTML-escape — pre-rendered cells are dropped into the
 /// detail template with `| safe` so untrusted strings need escaping
 /// here. Mirrors the helper the list view uses.
