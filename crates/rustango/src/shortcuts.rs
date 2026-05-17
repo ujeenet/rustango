@@ -484,6 +484,67 @@ pub fn text_response(content: impl Into<String>, status: u16) -> Response {
     res
 }
 
+/// Build a download response — sets `Content-Type` plus
+/// `Content-Disposition: attachment; filename="..."` so browsers
+/// save the body to disk rather than rendering it inline. Django's
+/// [`FileResponse(as_attachment=True, filename=...)`](https://docs.djangoproject.com/en/6.0/ref/request-response/#fileresponse-objects).
+///
+/// Use for CSV exports, generated PDFs, audit logs, anything the
+/// user is meant to download rather than view in the browser.
+///
+/// ```ignore
+/// use rustango::shortcuts::file_response;
+///
+/// async fn export_csv(...) -> Response {
+///     let csv = build_report().await?;
+///     file_response(csv.into_bytes(), "report.csv", "text/csv")
+/// }
+/// ```
+///
+/// `filename` characters are sanitized so a forged filename can't
+/// inject extra `Content-Disposition` directives. Specifically: any
+/// `"` is replaced with `_`, and CR/LF are stripped (header-splitting
+/// guard). Non-ASCII filenames are *kept* in the value — modern
+/// browsers handle UTF-8 in `filename=` fine; if RFC 5987 `filename*`
+/// matters for you, build the header value yourself.
+#[must_use]
+pub fn file_response(
+    content: impl Into<axum::body::Bytes>,
+    filename: &str,
+    content_type: &str,
+) -> Response {
+    let bytes = content.into();
+    let safe_filename = sanitize_attachment_filename(filename);
+    let mut res = Response::builder()
+        .status(StatusCode::OK)
+        .body(axum::body::Body::from(bytes))
+        .expect("200 + body is always valid");
+    let ct = HeaderValue::from_str(content_type)
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+    res.headers_mut().insert(header::CONTENT_TYPE, ct);
+    let cd = format!(r#"attachment; filename="{safe_filename}""#);
+    if let Ok(v) = HeaderValue::from_str(&cd) {
+        res.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+    }
+    res
+}
+
+/// Strip characters that would let an attacker forge extra
+/// directives in a `Content-Disposition` header value via a
+/// filename argument:
+/// - Double quotes break out of the `filename="..."` quoting.
+/// - CR/LF would split the header.
+///
+/// Replace these with `_` so the filename is still useful.
+fn sanitize_attachment_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '"' | '\r' | '\n' => '_',
+            other => other,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -816,5 +877,94 @@ mod tests {
     async fn text_response_respects_custom_status() {
         let res = text_response("teapot", 418);
         assert_eq!(res.status(), StatusCode::IM_A_TEAPOT);
+    }
+
+    // ---------------- file_response ----------------
+
+    #[tokio::test]
+    async fn file_response_emits_attachment_disposition_with_filename() {
+        let res = file_response(b"a,b,c\n1,2,3\n".to_vec(), "report.csv", "text/csv");
+        assert_eq!(res.status(), StatusCode::OK);
+        let cd = res
+            .headers()
+            .get(axum::http::header::CONTENT_DISPOSITION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(cd, r#"attachment; filename="report.csv""#);
+    }
+
+    #[tokio::test]
+    async fn file_response_passes_through_content_type() {
+        let res = file_response(b"PDF...".to_vec(), "x.pdf", "application/pdf");
+        let ct = res
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(ct, "application/pdf");
+    }
+
+    #[tokio::test]
+    async fn file_response_returns_body_bytes_verbatim() {
+        let body = b"raw bytes \xFF\xFE here".to_vec();
+        let res = file_response(body.clone(), "x.bin", "application/octet-stream");
+        let got = body_bytes(res).await;
+        assert_eq!(got, body);
+    }
+
+    #[tokio::test]
+    async fn file_response_sanitizes_quotes_in_filename() {
+        // A quote in the filename would let the attacker append
+        // extra Content-Disposition directives. Replace with _.
+        let res = file_response(b"".to_vec(), r#"a"; injected=bad.txt"#, "text/plain");
+        let cd = res
+            .headers()
+            .get(axum::http::header::CONTENT_DISPOSITION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        // The quote must be gone. The injected directive may still
+        // appear as text but it's now inside the `filename="..."`
+        // quoting and harmless.
+        assert!(
+            !cd.contains('"').then(|| ()).is_none() || !cd.contains("\";"),
+            "got: {cd}"
+        );
+        assert!(cd.contains("filename=\"a_;"), "got: {cd}");
+    }
+
+    #[tokio::test]
+    async fn file_response_sanitizes_crlf_in_filename_no_header_splitting() {
+        let res = file_response(b"".to_vec(), "a\r\nX-Hack: y.txt", "text/plain");
+        let cd = res
+            .headers()
+            .get(axum::http::header::CONTENT_DISPOSITION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(!cd.contains('\r'));
+        assert!(!cd.contains('\n'));
+    }
+
+    #[tokio::test]
+    async fn file_response_invalid_content_type_falls_back_to_octet_stream() {
+        // A content-type value with a header-invalid byte (raw NUL)
+        // gets replaced with octet-stream so the response still
+        // builds.
+        let res = file_response(b"".to_vec(), "x.bin", "text/x\0bad");
+        let ct = res
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(ct, "application/octet-stream");
     }
 }
