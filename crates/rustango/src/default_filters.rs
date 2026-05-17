@@ -4,7 +4,7 @@
 //! templates reach for constantly: `pluralize`, `truncatewords`,
 //! `linebreaks`, `default_if_none`, `add`, `cut`, `divisibleby`,
 //! `floatformat`, `escapejs`, `yesno`, `get_digit`, `dictsort`,
-//! `slugify_unicode`, `iriencode`, `wordwrap`. Call
+//! `slugify_unicode`, `iriencode`, `wordwrap`, `mask_email`. Call
 //! [`register_filters`] on a Tera instance to make them available:
 //!
 //! ```ignore
@@ -42,6 +42,7 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("slugify_unicode", slugify_unicode);
     tera.register_filter("iriencode", iriencode);
     tera.register_filter("wordwrap", wordwrap);
+    tera.register_filter("mask_email", mask_email);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -684,6 +685,42 @@ fn wrap_one_line(line: &str, width: usize) -> String {
         }
     }
     out
+}
+
+// ------------------------------------------------------------------ mask_email
+
+/// `mask_email` — render a partly-obscured email address for
+/// display in admin lists / audit logs where leaking the full
+/// address would be a privacy / PII concern.
+///
+/// Format: first + last char of local part stay; middle is
+/// replaced with three `*`. Domain is unchanged. Local parts of
+/// 0–2 chars degrade gracefully (no double-show).
+///
+/// - `alice@example.com` → `a***e@example.com`
+/// - `bob@example.com` → `b***b@example.com`
+/// - `a@example.com` → `*@example.com`
+/// - `@example.com` → `@example.com` (empty local, unchanged shape)
+/// - `not-an-email` → `not-an-email` (no `@`, passes through)
+///
+/// Pure transform — emits the masked string. Doesn't validate the
+/// input is actually a valid email (use [`crate::validators::validate_email`]
+/// before storage if that matters).
+fn mask_email(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(s) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let Some((local, domain)) = s.split_once('@') else {
+        return Ok(value.clone());
+    };
+    let local_chars: Vec<char> = local.chars().collect();
+    let masked_local = match local_chars.len() {
+        0 => String::new(),
+        1 => "*".to_owned(),
+        2 => format!("{}*", local_chars[0]),
+        n => format!("{}***{}", local_chars[0], local_chars[n - 1]),
+    };
+    Ok(to_value(format!("{masked_local}@{domain}"))?)
 }
 
 #[cfg(test)]
@@ -1419,5 +1456,55 @@ mod tests {
         let mut ctx = tera::Context::new();
         ctx.insert("s", "Joel is a slug");
         assert_eq!(tera.render("t", &ctx).unwrap(), "Joel\nis a\nslug");
+    }
+
+    // -------- mask_email --------
+
+    #[test]
+    fn mask_email_masks_middle_of_local_part() {
+        let out = mask_email(&json!("alice@example.com"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("a***e@example.com"));
+    }
+
+    #[test]
+    fn mask_email_handles_short_local_parts_gracefully() {
+        // Single-char local: just `*`.
+        let one = mask_email(&json!("a@example.com"), &HashMap::new()).unwrap();
+        assert_eq!(one, json!("*@example.com"));
+        // Two-char local: first char + `*`.
+        let two = mask_email(&json!("ab@example.com"), &HashMap::new()).unwrap();
+        assert_eq!(two, json!("a*@example.com"));
+        // Three-char local: first + *** + last.
+        let three = mask_email(&json!("abc@example.com"), &HashMap::new()).unwrap();
+        assert_eq!(three, json!("a***c@example.com"));
+    }
+
+    #[test]
+    fn mask_email_handles_empty_local_part() {
+        let out = mask_email(&json!("@example.com"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("@example.com"));
+    }
+
+    #[test]
+    fn mask_email_passes_through_non_email() {
+        let out = mask_email(&json!("not-an-email"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("not-an-email"));
+    }
+
+    #[test]
+    fn mask_email_passes_through_non_string() {
+        let out = mask_email(&json!(42), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(42));
+    }
+
+    #[test]
+    fn register_filters_wires_mask_email_through_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ email|mask_email }}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("email", "operator@example.com");
+        assert_eq!(tera.render("t", &ctx).unwrap(), "o***r@example.com");
     }
 }
