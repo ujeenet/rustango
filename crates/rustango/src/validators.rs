@@ -88,6 +88,8 @@
 //!   letters). Format-only.
 //! - `validate_language_tag` — BCP 47 light: `lang[-region]`
 //!   (e.g. `en`, `en-US`, `fr-CA`, `zh-Hans`).
+//! - `validate_postal_code_us` — US ZIP code in `12345` or
+//!   `12345-6789` (ZIP+4) form.
 //!
 //! What's NOT here (yet):
 //! - Locale-sensitive numeric formats.
@@ -1214,6 +1216,49 @@ fn is_script_subtag(s: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_lowercase())
+}
+
+// ------------------------------------------------------------------ postal code (US)
+
+/// Validate a US ZIP code: either 5 digits (`94110`) or the
+/// ZIP+4 form `12345-6789`. No other separators or formats are
+/// accepted.
+///
+/// Examples:
+/// - `validate_postal_code_us("94110")` → Ok
+/// - `validate_postal_code_us("12345-6789")` → Ok
+/// - `validate_postal_code_us("123456789")` → Err (need hyphen for +4)
+/// - `validate_postal_code_us("9411")` → Err (too short)
+/// - `validate_postal_code_us("94110-")` → Err (incomplete +4)
+///
+/// # Errors
+/// `ValidationError { code: "invalid_postal_code", ... }`.
+pub fn validate_postal_code_us(s: &str) -> Result<(), ValidationError> {
+    let bad = || {
+        ValidationError::new(
+            "invalid_postal_code",
+            "Enter a valid US ZIP code (12345 or 12345-6789).",
+        )
+    };
+    match s.split_once('-') {
+        Some((first, second)) => {
+            if first.len() != 5 || second.len() != 4 {
+                return Err(bad());
+            }
+            if !first.chars().all(|c| c.is_ascii_digit())
+                || !second.chars().all(|c| c.is_ascii_digit())
+            {
+                return Err(bad());
+            }
+            Ok(())
+        }
+        None => {
+            if s.len() != 5 || !s.chars().all(|c| c.is_ascii_digit()) {
+                return Err(bad());
+            }
+            Ok(())
+        }
+    }
 }
 
 // ------------------------------------------------------------------ length / value bounds
@@ -2696,5 +2741,41 @@ mod tests {
         assert!(validate_language_tag("").is_err());
         assert!(validate_language_tag("not a tag").is_err());
         assert!(validate_language_tag("en_US").is_err()); // wrong separator
+    }
+
+    // -------- validate_postal_code_us --------
+
+    #[test]
+    fn postal_code_us_accepts_five_digit_zip() {
+        assert!(validate_postal_code_us("94110").is_ok());
+        assert!(validate_postal_code_us("00501").is_ok()); // valid northeast ZIP
+        assert!(validate_postal_code_us("99950").is_ok());
+    }
+
+    #[test]
+    fn postal_code_us_accepts_zip_plus_four() {
+        assert!(validate_postal_code_us("12345-6789").is_ok());
+        assert!(validate_postal_code_us("94110-0001").is_ok());
+    }
+
+    #[test]
+    fn postal_code_us_rejects_wrong_length() {
+        assert!(validate_postal_code_us("1234").is_err()); // 4 digits
+        assert!(validate_postal_code_us("123456").is_err()); // 6 digits
+        assert!(validate_postal_code_us("123456789").is_err()); // 9 digits without hyphen
+    }
+
+    #[test]
+    fn postal_code_us_rejects_bad_plus_four_shape() {
+        assert!(validate_postal_code_us("94110-").is_err()); // missing +4
+        assert!(validate_postal_code_us("9411-12345").is_err()); // wrong prefix length
+        assert!(validate_postal_code_us("94110-12").is_err()); // wrong suffix length
+        assert!(validate_postal_code_us("94110-123A").is_err()); // non-digit in +4
+    }
+
+    #[test]
+    fn postal_code_us_rejects_non_digit_in_base() {
+        assert!(validate_postal_code_us("9411A").is_err());
+        assert!(validate_postal_code_us("").is_err());
     }
 }
