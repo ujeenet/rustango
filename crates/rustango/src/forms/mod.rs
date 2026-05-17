@@ -61,6 +61,11 @@ use crate::core::{
 #[cfg(feature = "csrf")]
 pub mod csrf;
 
+/// Form sets — Django's `formset_factory` / `modelformset_factory`
+/// shape. Parse N copies of the same [`Form`] from a single
+/// HTTP request payload keyed `<prefix>-<N>-<field>`. Issue #49.
+pub mod formset;
+
 // ------------------------------------------------------------------ FormErrors
 
 /// All validation errors collected from a form submission.
