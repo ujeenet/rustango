@@ -37,9 +37,18 @@
     {% if session_user %}
         <form method="post" action="{{ admin_prefix }}/logout" class="logout-form">
             <p class="signed-in-as">
-                Signed in
+                {% if session_user.username %}
+                    Signed in as <strong>{{ session_user.username }}</strong>
+                {% else %}
+                    Signed in
+                {% endif %}
                 {% if session_user.is_superuser %}<small>(superuser)</small>{% endif %}
             </p>
+            {% if change_password_url %}
+                <p class="account-links">
+                    <a href="{{ admin_prefix }}{{ change_password_url }}">Change password</a>
+                </p>
+            {% endif %}
             <button type="submit">Logout</button>
         </form>
     {% endif %}

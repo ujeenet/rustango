@@ -346,6 +346,13 @@ impl Builder {
     #[must_use]
     pub fn with_session_auth(mut self, secret: crate::session::SessionSecret) -> Self {
         self.config.session_secret = Some(secret);
+        // #253 slice B — opt-into the standard `/account/password`
+        // route so the sidebar's "Change password" link renders.
+        // Operators that already set `change_password_url` to a
+        // custom path keep theirs untouched.
+        if self.config.change_password_url.is_none() {
+            self.config.change_password_url = Some("/account/password".to_owned());
+        }
         self
     }
 
@@ -633,8 +640,9 @@ impl Builder {
 
         // #253 — when session auth is configured, mount the
         // `/login` + `/logout` routes BEFORE applying the auth
-        // middleware so they stay reachable while every other route
-        // requires a valid session.
+        // middleware so they stay reachable while every other
+        // route — including the new `/account/password` page
+        // (slice B) — requires a valid session.
         if let Some(secret) = session_secret {
             use std::sync::Arc as StdArc;
             let gate = super::login_view::SessionGate {
@@ -645,12 +653,17 @@ impl Builder {
                     format!("{admin_prefix}/login")
                 },
             };
-            let protected = protected.route_layer(axum::middleware::from_fn_with_state(
-                gate,
-                super::login_view::require_session,
-            ));
+            // Account routes layer on the *inside* of the auth
+            // middleware — they require a valid session, just like
+            // the rest of the admin surface.
+            let protected = protected
+                .merge(super::login_view::protected_router(state.clone()))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    gate,
+                    super::login_view::require_session,
+                ));
             return Router::new()
-                .merge(super::login_view::router(state))
+                .merge(super::login_view::public_router(state))
                 .merge(protected);
         }
 

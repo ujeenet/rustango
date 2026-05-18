@@ -283,6 +283,10 @@ admin = [
     "dep:hmac",
     "dep:sha2",
     "dep:subtle",
+    # `manage create-admin` (slice B) prompts for a password
+    # interactively when `--password` isn't supplied. `rpassword` was
+    # tenancy-only before #253; admin now picks it up too.
+    "dep:rpassword",
     "dep:http",
     "dep:http-body-util",
     "dep:serde_urlencoded",

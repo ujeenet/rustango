@@ -31,13 +31,26 @@ use super::urls::AppState;
 use super::user::AdminUser;
 use crate::core::{Filter, Model, Op, SelectQuery, SqlValue, WhereExpr};
 
-/// Mount the login + logout routes. Returns a `Router` that should
-/// be merged into the admin router BEFORE the auth middleware is
-/// applied so the login form itself stays publicly reachable.
-pub(crate) fn router(state: AppState) -> Router {
+/// Public (unauthenticated) routes — `/login` + `/logout`. Merged
+/// into the admin router BEFORE the auth middleware is applied so
+/// the login form itself stays publicly reachable.
+pub(crate) fn public_router(state: AppState) -> Router {
     Router::new()
         .route("/login", get(login_form).post(login_submit))
         .route("/logout", post(logout_submit))
+        .with_state(state)
+}
+
+/// Authenticated routes that ride on top of the session middleware.
+/// `/account/password` lives here so an unauthenticated visitor
+/// can't reach the password-change form. Mounted from
+/// [`crate::admin::Builder::build`] when `with_session_auth` is set.
+pub(crate) fn protected_router(state: AppState) -> Router {
+    Router::new()
+        .route(
+            "/account/password",
+            get(change_password_form).post(change_password_submit),
+        )
         .with_state(state)
 }
 
@@ -130,6 +143,7 @@ async fn login_submit(State(state): State<AppState>, Form(form): Form<LoginInput
         &secret,
         AdminSession {
             user_id: id,
+            username: form.username.clone(),
             is_superuser,
         },
     );
@@ -148,6 +162,149 @@ async fn login_submit(State(state): State<AppState>, Form(form): Form<LoginInput
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }
     resp
+}
+
+// ============================================================ Change password (GET + POST)
+
+async fn change_password_form(State(state): State<AppState>) -> Html<String> {
+    Html(render_change_password_form(&state, None, None))
+}
+
+#[derive(serde::Deserialize)]
+struct ChangePasswordInput {
+    current_password: String,
+    new_password: String,
+    new_password_confirm: String,
+}
+
+async fn change_password_submit(
+    State(state): State<AppState>,
+    Form(form): Form<ChangePasswordInput>,
+) -> Response {
+    // The middleware guarantees a session is in scope here; if not,
+    // bail loudly — a request reaching this handler without one is
+    // a programmer bug.
+    let Some(session) = super::session::current() else {
+        return (StatusCode::UNAUTHORIZED, "session required").into_response();
+    };
+
+    if form.new_password != form.new_password_confirm {
+        return Html(render_change_password_form(
+            &state,
+            None,
+            Some("Confirmation password did not match."),
+        ))
+        .into_response();
+    }
+    if form.new_password.len() < 8 {
+        return Html(render_change_password_form(
+            &state,
+            None,
+            Some("New password must be at least 8 characters."),
+        ))
+        .into_response();
+    }
+
+    // Look up the current row by user_id (from the session) so we
+    // can verify the *current* password before mutating the hash.
+    let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
+    let select = SelectQuery {
+        model: AdminUser::SCHEMA,
+        where_clause: WhereExpr::Predicate(Filter {
+            column: "id",
+            op: Op::Eq,
+            value: SqlValue::I64(session.user_id),
+        }),
+        search: None,
+        joins: vec![],
+        order_by: vec![],
+        limit: Some(1),
+        offset: None,
+        lock_mode: None,
+        compound: vec![],
+        projection: None,
+    };
+    let row = crate::sql::select_one_row_as_json(&state.pool, &select, &fields)
+        .await
+        .ok()
+        .flatten();
+    let Some(row) = row else {
+        return (StatusCode::UNAUTHORIZED, "user not found").into_response();
+    };
+    let stored_hash = row
+        .get("password_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if !crate::passwords::verify(&form.current_password, stored_hash).unwrap_or(false) {
+        return Html(render_change_password_form(
+            &state,
+            None,
+            Some("Current password is incorrect."),
+        ))
+        .into_response();
+    }
+
+    let new_hash = match crate::passwords::hash(&form.new_password) {
+        Ok(h) => h,
+        Err(_) => {
+            return Html(render_change_password_form(
+                &state,
+                None,
+                Some("Internal hashing error."),
+            ))
+            .into_response();
+        }
+    };
+
+    // Schema-driven UPDATE — keeps the bare admin compiling without
+    // tenancy's typed query helpers.
+    use crate::core::{Assignment, Expr, UpdateQuery};
+    let q = UpdateQuery {
+        model: AdminUser::SCHEMA,
+        set: vec![Assignment {
+            column: "password_hash",
+            value: Expr::Literal(SqlValue::String(new_hash)),
+        }],
+        where_clause: WhereExpr::Predicate(Filter {
+            column: "id",
+            op: Op::Eq,
+            value: SqlValue::I64(session.user_id),
+        }),
+    };
+    if let Err(e) = crate::sql::update_pool(&state.pool, &q).await {
+        return Html(render_change_password_form(
+            &state,
+            None,
+            Some(&format!("Update failed: {e}")),
+        ))
+        .into_response();
+    }
+
+    Html(render_change_password_form(
+        &state,
+        Some("Password updated."),
+        None,
+    ))
+    .into_response()
+}
+
+fn render_change_password_form(
+    state: &AppState,
+    success: Option<&str>,
+    error: Option<&str>,
+) -> String {
+    let admin_prefix = &state.config.admin_prefix;
+    let mut ctx = serde_json::json!({
+        "title": "Change password",
+        "action": format!("{admin_prefix}/account/password"),
+        "success": success,
+        "error": error,
+    });
+    super::templates::render_with_chrome(
+        "change_password.html",
+        &mut ctx,
+        super::helpers::chrome_context(state, None),
+    )
 }
 
 // ============================================================ Logout (POST)
@@ -193,8 +350,13 @@ pub(crate) async fn require_session(
     }
 
     if let Some(session) = read_session_cookie(&request, &gate.secret) {
-        request.extensions_mut().insert(session);
-        return next.run(request).await;
+        request.extensions_mut().insert(session.clone());
+        // Scope the task-local so `chrome_context` (deep in the
+        // template render stack) can read it without every handler
+        // threading the session through its argument list.
+        return super::session::CURRENT_SESSION
+            .scope(session, next.run(request))
+            .await;
     }
 
     // No valid session — bounce to the login form. Use 303 See Other

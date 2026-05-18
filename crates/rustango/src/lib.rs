@@ -921,6 +921,18 @@ pub mod password_hashers;
 #[cfg(any(feature = "admin", feature = "tenancy"))]
 pub mod session;
 
+/// TTY-gated interactive prompts for `manage` verbs — `ask(prompt)`
+/// reads a line, `ask_password(prompt)` reads a password without
+/// echoing. Both return `Ok(None)` on non-TTY stdin so scripted
+/// callers keep the existing "missing required flag" error path.
+///
+/// Shared by `manage create-admin` (bare admin) and
+/// `manage create-operator` / `create-user` (tenancy). Promoted to
+/// the crate root in v0.45 (#253 slice B); pre-v0.45 it lived
+/// under `tenancy::manage_interactive`.
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+pub mod manage_interactive;
+
 /// XML sitemap rendering — `django.contrib.sitemaps`. Build a
 /// `Sitemap` impl (or pass a `Vec<SitemapEntry>` directly) and call
 /// [`sitemaps::render_sitemap`]; for large sites use

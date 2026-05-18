@@ -70,7 +70,11 @@ mod error;
 pub mod impersonation_handoff;
 pub mod jwt_lifecycle;
 pub mod manage;
-mod manage_interactive;
+// v0.45 (#253) — `manage_interactive` was promoted to the crate
+// root so the bare admin's `create-admin` verb (slice B) can reuse
+// the same TTY-gated prompt helpers. Re-export keeps existing
+// tenancy callers (`tenants.rs`, `users.rs`) working.
+pub(crate) use crate::manage_interactive;
 pub mod middleware;
 pub mod migrate;
 pub mod operator_console;

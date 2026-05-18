@@ -47,6 +47,7 @@ mod forms;
 mod helpers;
 pub mod inlines;
 mod login_view;
+mod manage_admin;
 pub mod session;
 pub mod user;
 // `pub(crate)` so the operator console can reuse `render_input` /
@@ -64,6 +65,7 @@ pub use errors::AdminError;
 pub use inlines::{
     InlineAdmin, InlineAdminGeneric, InlineApplyOutcome, InlineFormPanel, InlineKind, InlinePanel,
 };
+pub use manage_admin::create_admin_cmd;
 pub use session::{AdminSession, AdminSessionSecret};
 pub use urls::{router, AdminActionFn, AdminActionFuture, Builder};
 pub use user::AdminUser;
