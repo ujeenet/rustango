@@ -30,4 +30,17 @@
     {% else %}
         <p class="empty">No models registered.</p>
     {% endif %}
+    {# #253 — sidebar Logout button. Rendered as a POST form so a
+       cross-site GET can't sign the operator out. The chrome
+       context only sets `session_user` when the session-auth
+       middleware seated an `AdminSession` on the request. #}
+    {% if session_user %}
+        <form method="post" action="{{ admin_prefix }}/logout" class="logout-form">
+            <p class="signed-in-as">
+                Signed in
+                {% if session_user.is_superuser %}<small>(superuser)</small>{% endif %}
+            </p>
+            <button type="submit">Logout</button>
+        </form>
+    {% endif %}
 </aside>

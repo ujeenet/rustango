@@ -46,6 +46,9 @@ mod errors;
 mod forms;
 mod helpers;
 pub mod inlines;
+mod login_view;
+pub mod session;
+pub mod user;
 // `pub(crate)` so the operator console can reuse `render_input` /
 // `render_value_for_input` for its `/orgs/{slug}/edit` form. Stays
 // non-public outside the crate — the helpers' signatures are still
@@ -61,4 +64,6 @@ pub use errors::AdminError;
 pub use inlines::{
     InlineAdmin, InlineAdminGeneric, InlineApplyOutcome, InlineFormPanel, InlineKind, InlinePanel,
 };
+pub use session::{AdminSession, AdminSessionSecret};
 pub use urls::{router, AdminActionFn, AdminActionFuture, Builder};
+pub use user::AdminUser;

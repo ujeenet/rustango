@@ -2,6 +2,7 @@
 //! articles, and attaches tags + comments to each target — exercising
 //! both the typed setter (`#240`) and reverse traversal.
 
+use rustango::admin::AdminUser;
 use rustango::contenttypes;
 use rustango::sql::{Auto, FetcherPool as _, Pool};
 
@@ -12,10 +13,23 @@ pub async fn run(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
     // (`Tag::set_target_for::<Post>`) can resolve the CT id.
     contenttypes::ensure_seeded(pool).await?;
 
+    // #253 — seed the admin user used by the session-login form.
+    // Credentials default to `admin / admin`; override via the
+    // `RUSTANGO_DEMO_USER` / `RUSTANGO_DEMO_PASS` env vars.
+    let existing_admin: Vec<AdminUser> = AdminUser::objects().fetch_pool(pool).await?;
+    if existing_admin.is_empty() {
+        let username = std::env::var("RUSTANGO_DEMO_USER").unwrap_or_else(|_| "admin".to_owned());
+        let password = std::env::var("RUSTANGO_DEMO_PASS").unwrap_or_else(|_| "admin".to_owned());
+        let mut admin =
+            AdminUser::new_with_password(username, &password, /* superuser */ true)?;
+        admin.save_pool(pool).await?;
+        println!("→ seed: admin user created");
+    }
+
     // Skip the rest if we've already populated.
     let existing_posts: Vec<Post> = Post::objects().fetch_pool(pool).await?;
     if !existing_posts.is_empty() {
-        println!("→ seed: data already present, skipping");
+        println!("→ seed: demo data already present, skipping");
         return Ok(());
     }
 
