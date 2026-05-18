@@ -96,6 +96,23 @@ pub(crate) fn chrome_context(state: &AppState, active_table: Option<&str>) -> se
         // v0.28.2 (#77) — sidebar "Change password" link target.
         // Threaded from the tenant admin's RouteConfig.
         "change_password_url": &state.config.change_password_url,
+        // #253 — Logout button visibility. The bare admin's
+        // session middleware redirects unauthenticated requests to
+        // `/login`, so by the time chrome renders we know any
+        // visitor is logged in. Templates show the button when
+        // `session_user` is non-null. Tenancy admins thread their
+        // own session info through a parallel path; this signal is
+        // only set when the bare admin's `with_session_auth` is on.
+        "session_user": if state.config.session_secret.is_some() {
+            // Per-user info (username, is_superuser) is Slice B
+            // — Slice A just renders the Logout button. The
+            // `authenticated: true` marker keeps Tera's `{% if
+            // session_user %}` evaluation truthy (Tera treats
+            // empty objects as falsy).
+            serde_json::json!({ "authenticated": true })
+        } else {
+            serde_json::Value::Null
+        },
     })
 }
 

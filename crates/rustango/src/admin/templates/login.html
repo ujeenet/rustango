@@ -1,0 +1,87 @@
+{# Login form for the bare admin's session-auth layer (#253).
+   Reuses the shared theme tokens + admin styles so the form
+   matches the rest of the admin chrome. #}
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<title>{{ title }} — {{ admin_title }}</title>
+{% include "_theme_tokens.html" %}
+{% include "_admin_styles.html" %}
+<style>
+  body.admin-login {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    background: var(--color-bg);
+  }
+  .login-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-6);
+    width: min(100%, 380px);
+    box-shadow: var(--shadow-md);
+  }
+  .login-card h1 {
+    margin: 0 0 var(--space-4);
+    font-size: 1.4rem;
+  }
+  .login-card label {
+    display: block;
+    margin-top: var(--space-3);
+    font-size: 0.9rem;
+    color: var(--color-text-muted);
+  }
+  .login-card input[type="text"],
+  .login-card input[type="password"] {
+    width: 100%;
+    margin-top: var(--space-1);
+    padding: var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-bg);
+    color: var(--color-text);
+    font: inherit;
+    box-sizing: border-box;
+  }
+  .login-card button {
+    margin-top: var(--space-4);
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-accent);
+    color: var(--color-on-accent);
+    border: 0;
+    border-radius: var(--radius);
+    font: inherit;
+    cursor: pointer;
+  }
+  .login-card button:hover { filter: brightness(1.05); }
+  .login-card .error {
+    margin-top: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, var(--color-danger, #d33) 12%, transparent);
+    border: 1px solid var(--color-danger, #d33);
+    border-radius: var(--radius);
+    color: var(--color-danger, #d33);
+    font-size: 0.9rem;
+  }
+</style>
+</head>
+<body class="admin-login">
+  <form class="login-card" method="post" action="{{ action }}">
+    <h1>{{ admin_title }}</h1>
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <label>
+      Username
+      <input type="text" name="username" autocomplete="username" autofocus required>
+    </label>
+    <label>
+      Password
+      <input type="password" name="password" autocomplete="current-password" required>
+    </label>
+    <button type="submit">Sign in</button>
+  </form>
+</body>
+</html>

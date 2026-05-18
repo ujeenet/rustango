@@ -34,6 +34,7 @@ fn templates() -> &'static tera::Tera {
                 include_str!("templates/_inline_panels.html"),
             ),
             ("form.html", include_str!("templates/form.html")),
+            ("login.html", include_str!("templates/login.html")),
             ("audit_log.html", include_str!("templates/audit_log.html")),
         ])
         .expect("admin templates compile");

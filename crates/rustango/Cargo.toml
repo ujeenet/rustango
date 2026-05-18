@@ -271,9 +271,18 @@ template_views = ["forms", "dep:axum", "dep:tera", "dep:tokio"]
 admin = [
     "forms",
     "csrf",
+    # #253 — admin session auth uses argon2 via crate::passwords for
+    # the AdminUser password hash. `passwords` was already a
+    # transitive dep through forms/tenancy in practice; this makes
+    # the relationship explicit so `--features sqlite,admin` builds
+    # cleanly without `tenancy` or `passwords` named.
+    "passwords",
     "dep:axum",
     "dep:tera",
     "dep:base64",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:subtle",
     "dep:http",
     "dep:http-body-util",
     "dep:serde_urlencoded",

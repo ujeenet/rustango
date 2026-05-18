@@ -909,6 +909,18 @@ pub mod password_validators;
 /// upgrade the stored hash. Issue #54 (partial).
 pub mod password_hashers;
 
+/// Signed-cookie session primitives — HMAC-SHA256 key wrapper +
+/// `sign(secret, msg)` helper. Shared by every layer that ships a
+/// signed cookie ([`tenancy::session`], [`admin::session`]) so the
+/// crypto lives in one place. See [`session::SessionSecret`].
+///
+/// Compiled when either the `admin` or `tenancy` feature is on —
+/// both bring in the underlying HMAC + base64 crates as transitive
+/// deps. Bare-ORM builds (`default-features = false` without admin
+/// / tenancy) skip the module entirely.
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+pub mod session;
+
 /// XML sitemap rendering — `django.contrib.sitemaps`. Build a
 /// `Sitemap` impl (or pass a `Vec<SitemapEntry>` directly) and call
 /// [`sitemaps::render_sitemap`]; for large sites use

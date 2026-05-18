@@ -193,6 +193,14 @@ pub(crate) struct Config {
     /// Per-request override: `?count=skip` (or `?count=0`) on the
     /// list URL applies the same skip without a code change.
     pub(crate) skip_count_tables: HashSet<String>,
+    /// v0.45 (#253) — opt-in session auth. When `Some`, the
+    /// Builder installs `/login` + `/logout` routes and gates
+    /// every other admin route behind a valid signed-cookie
+    /// session. Set via
+    /// [`Builder::with_session_auth`]. `None` = legacy behavior
+    /// (no auth, or basic-auth via the separate
+    /// `protect_with_basic_auth` wrapper).
+    pub(crate) session_secret: Option<crate::session::SessionSecret>,
 }
 
 impl Builder {
@@ -302,6 +310,42 @@ impl Builder {
         let s: String = prefix.into();
         let trimmed = s.trim_end_matches('/').to_owned();
         self.config.admin_prefix = trimmed;
+        self
+    }
+
+    /// v0.45 (#253) — opt into signed-cookie session auth. When set,
+    /// `.build()` will:
+    ///
+    /// 1. Mount `/login` (GET form + POST submit) + `/logout` (POST).
+    /// 2. Wrap every other admin route in an auth middleware that
+    ///    redirects unauthenticated requests to `/login`.
+    /// 3. Render the sidebar "Logout" form so the operator can
+    ///    sign out.
+    ///
+    /// Credentials are stored in the `rustango_admin_users` table
+    /// ([`crate::admin::AdminUser`]). Bootstrap the table via
+    /// [`crate::server::AppBuilder::bootstrap`] or apply a
+    /// migration; create your first operator with
+    /// `AdminUser::new_with_password(...).insert(pool)`.
+    ///
+    /// The signing key comes from
+    /// [`crate::session::SessionSecret`] — same primitive
+    /// `tenancy::session` uses, so a host running both layers can
+    /// share one key (cookie names + payload shapes differ so the
+    /// two layers never cross-decode).
+    ///
+    /// ```ignore
+    /// use rustango::session::SessionSecret;
+    ///
+    /// let secret = SessionSecret::from_env_or_random();
+    /// let admin = rustango::admin::Builder::new(pool)
+    ///     .admin_prefix("")
+    ///     .with_session_auth(secret)
+    ///     .build();
+    /// ```
+    #[must_use]
+    pub fn with_session_auth(mut self, secret: crate::session::SessionSecret) -> Self {
+        self.config.session_secret = Some(secret);
         self
     }
 
@@ -559,7 +603,14 @@ impl Builder {
         // dialect emitters (`audit::*_pool`, `tenancy::permissions::*_pool`).
         let audit_path = self.config.audit_url.clone();
         let audit_cleanup_path = format!("{audit_path}/cleanup");
-        Router::new()
+        let session_secret = self.config.session_secret.clone();
+        let admin_prefix = self.config.admin_prefix.clone();
+        let state = AppState {
+            pool: self.pool,
+            config: Arc::new(self.config),
+        };
+
+        let protected = Router::new()
             .route("/", get(views::index))
             .route(&audit_path, get(super::audit::audit_log_view))
             .route(
@@ -578,10 +629,32 @@ impl Builder {
             )
             .route("/{table}/{pk}/edit", get(views::edit_form))
             .route("/{table}/{pk}/delete", post(views::delete_submit))
-            .with_state(AppState {
-                pool: self.pool,
-                config: Arc::new(self.config),
-            })
+            .with_state(state.clone());
+
+        // #253 — when session auth is configured, mount the
+        // `/login` + `/logout` routes BEFORE applying the auth
+        // middleware so they stay reachable while every other route
+        // requires a valid session.
+        if let Some(secret) = session_secret {
+            use std::sync::Arc as StdArc;
+            let gate = super::login_view::SessionGate {
+                secret: StdArc::new(secret),
+                login_path: if admin_prefix.is_empty() {
+                    "/login".to_owned()
+                } else {
+                    format!("{admin_prefix}/login")
+                },
+            };
+            let protected = protected.route_layer(axum::middleware::from_fn_with_state(
+                gate,
+                super::login_view::require_session,
+            ));
+            return Router::new()
+                .merge(super::login_view::router(state))
+                .merge(protected);
+        }
+
+        protected
     }
 }
 

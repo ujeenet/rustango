@@ -21,11 +21,19 @@
 //! ```
 
 use base64::Engine;
-use hmac::{Hmac, Mac};
-use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use subtle::ConstantTimeEq;
+
+// v0.45 (#253) — `SessionSecret` + `sign` were promoted to the
+// crate-root `crate::session` module so the bare `admin` module can
+// reuse the same HMAC primitives without compiling in `tenancy`.
+// The re-exports below keep every pre-existing `crate::tenancy::session::SessionSecret`
+// caller working.
+pub use crate::session::{SessionSecret, SessionSecretError};
+// `sign` re-exported at crate-internal visibility so existing
+// callers (`tenant_console`, `impersonation_handoff`) keep working
+// after the v0.45 move to `crate::session`.
+pub(crate) use crate::session::sign;
 
 /// Default cookie name. Visible in browser devtools — namespaced so
 /// it doesn't collide with tenant cookies.
@@ -86,286 +94,6 @@ impl SessionPayload {
     }
 }
 
-/// Server-held signing key. Wrap `Vec<u8>` so callers can't
-/// accidentally print it. `Clone` is opt-in so the same secret can
-/// be handed to both the operator console and the tenant admin —
-/// they use different cookie names + payload shapes, so sharing
-/// the key is safe.
-#[derive(Clone)]
-pub struct SessionSecret(Vec<u8>);
-
-/// Error returned by [`SessionSecret::try_from_env`] when the
-/// `RUSTANGO_SESSION_SECRET` env var is set but the value isn't a
-/// valid signing key. Used by production boot paths that prefer to
-/// fail loudly over silently downgrading to an ephemeral random key.
-#[derive(Debug)]
-pub enum SessionSecretError {
-    /// The env var didn't decode as base64.
-    BadBase64 { cause: String },
-    /// Decoded successfully but the resulting key is fewer than 32
-    /// bytes — too short for HMAC-SHA256.
-    TooShort { actual: usize },
-}
-
-impl core::fmt::Display for SessionSecretError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::BadBase64 { cause } => write!(
-                f,
-                "RUSTANGO_SESSION_SECRET is not valid base64: {cause} \
-                 (generate one with: openssl rand -base64 32)"
-            ),
-            Self::TooShort { actual } => write!(
-                f,
-                "RUSTANGO_SESSION_SECRET decoded to {actual} bytes; need at least 32 \
-                 (generate one with: openssl rand -base64 32)"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SessionSecretError {}
-
-impl SessionSecret {
-    /// Read the secret from `RUSTANGO_SESSION_SECRET` (base64-encoded
-    /// 32+ bytes). Falls back to a randomly generated secret with a
-    /// `tracing::warn` when the var is *unset* — sessions are then
-    /// invalidated on every server restart.
-    ///
-    /// v0.13.2 — when the var IS set but unparseable (bad base64,
-    /// fewer than 32 bytes), we now ALSO print a loud
-    /// `eprintln!` to stderr in addition to the tracing::warn.
-    /// Operators who set the var and forget to run it through
-    /// `base64` quietly lost session persistence on every redeploy
-    /// before this fix, with the only signal being a structured
-    /// log line buried in the boot output. The eprintln! makes the
-    /// failure mode loud at the boot console.
-    #[must_use]
-    pub fn from_env_or_random() -> Self {
-        if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
-            match base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
-                Ok(bytes) if bytes.len() >= 32 => return Self(bytes),
-                Ok(bytes) => {
-                    tracing::warn!(
-                        target: "crate::tenancy",
-                        actual_len = bytes.len(),
-                        "RUSTANGO_SESSION_SECRET decoded to fewer than 32 bytes — falling back to random",
-                    );
-                    eprintln!(
-                        "\x1b[33;1mwarning:\x1b[0m RUSTANGO_SESSION_SECRET is set but \
-                         decoded to {} bytes (need ≥ 32). Using a random key. \
-                         Sessions will NOT survive a server restart. \
-                         Generate one with: \
-                         openssl rand -base64 32",
-                        bytes.len()
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "crate::tenancy",
-                        error = %e,
-                        "RUSTANGO_SESSION_SECRET is not valid base64 — falling back to random",
-                    );
-                    eprintln!(
-                        "\x1b[33;1mwarning:\x1b[0m RUSTANGO_SESSION_SECRET is set but \
-                         is not valid base64 ({}). Using a random key. \
-                         Sessions will NOT survive a server restart. \
-                         Generate one with: \
-                         openssl rand -base64 32",
-                        e
-                    );
-                }
-            }
-        } else {
-            tracing::warn!(
-                target: "crate::tenancy",
-                "RUSTANGO_SESSION_SECRET not set — generating random key (sessions \
-                 will not survive server restarts; set the env var for production)",
-            );
-        }
-        let mut buf = vec![0u8; 32];
-        // v0.30.12 — use OsRng directly (cryptographic secret).
-        // Consistent with src/forms/csrf.rs + src/passwords.rs.
-        OsRng.fill_bytes(&mut buf);
-        Self(buf)
-    }
-
-    /// Dev-friendly variant of [`Self::from_env_or_random`] that
-    /// persists the generated key to disk so sessions survive
-    /// server restarts even without `RUSTANGO_SESSION_SECRET` set.
-    ///
-    /// Resolution order:
-    /// 1. `RUSTANGO_SESSION_SECRET` env var (same shape as
-    ///    [`Self::from_env_or_random`]) — production path.
-    /// 2. Read `disk_path` if it exists and contains ≥ 32 bytes.
-    /// 3. Generate a random key, atomically write it to
-    ///    `disk_path` (creating parent directories as needed),
-    ///    and return it.
-    /// 4. If the write fails (read-only filesystem, no perms),
-    ///    fall back to ephemeral random + a `tracing::warn!`.
-    ///
-    /// Used by the runserver boot path so dev `cargo run` cycles
-    /// don't sign every operator out on every reload (#69).
-    /// Production deployments should still set
-    /// `RUSTANGO_SESSION_SECRET` so the secret lives in env/secret-
-    /// manager rather than the filesystem.
-    #[must_use]
-    pub fn from_env_or_disk(disk_path: &std::path::Path) -> Self {
-        // Env var path: identical to `from_env_or_random`'s first
-        // branch. Duplicating here rather than calling the existing
-        // method because that method falls through to ephemeral
-        // random — we want disk fallback in between.
-        if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
-            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
-                if bytes.len() >= 32 {
-                    return Self(bytes);
-                }
-            }
-            // Bad env var — fall through to disk/random with the
-            // same loud warnings as `from_env_or_random` would emit.
-            // (We don't re-emit them here to keep the boot log
-            // tidy — the env-var path is exercised by
-            // `from_env_or_random` if anyone wants the warnings.)
-        }
-        // Disk path: read existing key if present.
-        if let Ok(bytes) = std::fs::read(disk_path) {
-            if bytes.len() >= 32 {
-                // v0.31.1 (#7): bumped from `debug!` to `info!` so the
-                // happy-path "your session keys are persistent" message
-                // shows up in default-log boots and operators can tell
-                // at a glance whether the secret is freshly generated
-                // or carried over from a prior run.
-                tracing::info!(
-                    target: "crate::tenancy::session",
-                    path = %disk_path.display(),
-                    "loaded persisted session secret from disk",
-                );
-                return Self(bytes);
-            }
-        }
-        // Generate a fresh key and try to persist it.
-        let mut buf = vec![0u8; 32];
-        // v0.30.12 — use OsRng directly (cryptographic secret).
-        // Consistent with src/forms/csrf.rs + src/passwords.rs.
-        OsRng.fill_bytes(&mut buf);
-        if let Some(parent) = disk_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        // Atomic write: tmp file → rename. Avoids half-written
-        // keys if the process is killed mid-write.
-        let tmp_path = disk_path.with_extension("tmp");
-        match std::fs::write(&tmp_path, &buf).and_then(|_| std::fs::rename(&tmp_path, disk_path)) {
-            Ok(()) => {
-                // v0.43 — restrict to 0600 on Unix so other users on
-                // the host can't read the session-signing key. Windows
-                // ACL hardening is a separate piece of work (DPAPI /
-                // restricted DACL); the warn below documents the gap.
-                restrict_session_secret_perms(disk_path);
-                // v0.31.1 (#7): clarify the "(dev fallback)" wording —
-                // the message previously made it look like the secret
-                // was being regenerated on every boot. It only fires
-                // when no env var AND no on-disk key were found, i.e.
-                // the very first boot.
-                tracing::info!(
-                    target: "crate::tenancy::session",
-                    path = %disk_path.display(),
-                    "generated new session secret and persisted to disk \
-                     (set RUSTANGO_SESSION_SECRET to override; this message \
-                     only fires on first boot)",
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "crate::tenancy::session",
-                    path = %disk_path.display(),
-                    error = %e,
-                    "could not persist session secret to disk — using ephemeral random key (sessions will not survive restart)",
-                );
-                let _ = std::fs::remove_file(&tmp_path);
-            }
-        }
-        Self(buf)
-    }
-
-    /// Strict variant of [`Self::from_env_or_random`]: returns
-    /// `Err(...)` when the env var is *set but unparseable* or
-    /// *too short*. Use this from production boot paths where a
-    /// malformed secret should fail loudly instead of silently
-    /// downgrading to a random ephemeral key.
-    ///
-    /// Behaviour:
-    /// * Var set + ≥ 32 bytes after base64 decode → `Ok(SessionSecret)`.
-    /// * Var set but bad base64 / too short → `Err(SessionSecretError)`.
-    /// * Var unset → `Ok(random key)` with the same warn-and-go path
-    ///   as `from_env_or_random` (this is the dev/test default and
-    ///   is fine in those contexts).
-    ///
-    /// # Errors
-    /// `SessionSecretError::BadBase64` when decode fails;
-    /// `SessionSecretError::TooShort` when the decoded bytes are
-    /// fewer than 32.
-    pub fn try_from_env() -> Result<Self, SessionSecretError> {
-        if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
-            return match base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
-                Ok(bytes) if bytes.len() >= 32 => Ok(Self(bytes)),
-                Ok(bytes) => Err(SessionSecretError::TooShort {
-                    actual: bytes.len(),
-                }),
-                Err(e) => Err(SessionSecretError::BadBase64 {
-                    cause: e.to_string(),
-                }),
-            };
-        }
-        // Var unset is the dev/test path; fall back to random.
-        tracing::warn!(
-            target: "crate::tenancy",
-            "RUSTANGO_SESSION_SECRET not set — generating random key (sessions \
-             will not survive server restarts; set the env var for production)",
-        );
-        let mut buf = vec![0u8; 32];
-        // v0.30.12 — use OsRng directly (cryptographic secret).
-        // Consistent with src/forms/csrf.rs + src/passwords.rs.
-        OsRng.fill_bytes(&mut buf);
-        Ok(Self(buf))
-    }
-
-    /// Construct from raw bytes — useful for tests.
-    #[must_use]
-    pub fn from_bytes(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-
-    /// Raw key material — only callers inside the tenancy crate should
-    /// reach into this; external callers go through encode/decode.
-    pub(crate) fn key(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-/// v0.43 — chmod the persisted session-secret file to 0600 on Unix.
-/// On Windows we currently rely on user-profile ACLs inherited by
-/// `./var/`; tightening the DACL is a separate effort.
-#[cfg(unix)]
-fn restrict_session_secret_perms(path: &std::path::Path) {
-    use std::os::unix::fs::PermissionsExt;
-    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-        tracing::warn!(
-            target: "crate::tenancy::session",
-            path = %path.display(),
-            error = %e,
-            "could not chmod session secret to 0600 — file may be world-readable",
-        );
-    }
-}
-
-#[cfg(not(unix))]
-fn restrict_session_secret_perms(_path: &std::path::Path) {
-    // No portable equivalent. On Windows the file inherits the
-    // parent directory's ACL; for hard isolation set
-    // `RUSTANGO_SESSION_SECRET` from a vault instead of relying on
-    // the on-disk fallback.
-}
-
 /// Serialize and sign a payload into a cookie value.
 #[must_use]
 pub fn encode(secret: &SessionSecret, payload: &SessionPayload) -> String {
@@ -403,18 +131,7 @@ pub fn decode(secret: &SessionSecret, value: &str) -> Result<SessionPayload, Ses
     Ok(payload)
 }
 
-/// HMAC-SHA256(secret, msg), truncated to 32 bytes (the full SHA256
-/// length). Crate-visible so the tenant console can share the same
-/// MAC primitive without duplicating crypto.
-pub(crate) fn sign(secret: &SessionSecret, msg: &[u8]) -> [u8; 32] {
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(secret.key()).expect("HMAC accepts any key length");
-    mac.update(msg);
-    let bytes = mac.finalize().into_bytes();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes[..32]);
-    out
-}
+// `sign` moved to `crate::session` in v0.45 (#253) — `use` above.
 
 #[cfg(test)]
 mod tests {
