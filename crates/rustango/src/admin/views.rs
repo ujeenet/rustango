@@ -1270,9 +1270,18 @@ pub(crate) async fn edit_form(
     // #50 slice 2 — editable inline panels under the parent form.
     // Best-effort: a child-table fetch failure drops the inlines to
     // empty rather than breaking the whole edit page.
-    let inline_panels = super::inlines::render_form_for_parent(&state.pool, model, pk_value)
-        .await
-        .unwrap_or_default();
+    //
+    // #243 — editable generic inline panels are appended after the
+    // regular ones, in registration order.
+    let mut inline_panels =
+        super::inlines::render_form_for_parent(&state.pool, model, pk_value.clone())
+            .await
+            .unwrap_or_default();
+    let generic_panels =
+        super::inlines::render_form_generic_for_parent(&state.pool, model, pk_value)
+            .await
+            .unwrap_or_default();
+    inline_panels.extend(generic_panels);
     Ok(Html(super::helpers::render_form_with_inlines(
         &state,
         model,
@@ -1383,9 +1392,15 @@ pub(crate) async fn update_submit(
     // separately, but the parent UPDATE has already committed at this
     // point. Matches the existing audit-emit posture (no cross-row
     // transaction wrapping).
+    //
+    // #243 — generic (ContentType-keyed) inline payloads are processed
+    // after the regular ones with the same per-row dispatch shape.
     let parent_pk_for_inlines =
         forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
-    let _ = super::inlines::apply_post(&state.pool, model, parent_pk_for_inlines, &form).await;
+    let _ =
+        super::inlines::apply_post(&state.pool, model, parent_pk_for_inlines.clone(), &form).await;
+    let _ =
+        super::inlines::apply_post_generic(&state.pool, model, parent_pk_for_inlines, &form).await;
 
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_raw, &form);
     Ok(Redirect::to(&target).into_response())
