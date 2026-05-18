@@ -767,6 +767,69 @@ act.save(&pool).await?;
 
 **Verified by**: `generic_fk_schema_and_content_type_lookup`
 
+### 2.24b Typed `<name>_pool` accessor on the GFK target (#239)
+
+**What**: The `Model` derive emits one `<name>_pool(&pool)` async method per `#[rustango(generic_fk(name = "..."))]` declaration. Reads `self.<ct_column>` + `self.<pk_column>`, calls `ContentType::by_id`, and fetches the target row as a `serde_json::Value`. Stand-in for Django's `activity.target` lazy accessor.
+
+**Recipe**:
+
+```rust
+#[derive(Model)]
+#[rustango(generic_fk(name = "target", ct_column = "...", pk_column = "..."))]
+pub struct Activity { /* ... */ }
+
+if let Some(target_json) = activity.target_pool(&pool).await? {
+    println!("{}", target_json["title"]);
+}
+```
+
+Returns `Ok(None)` gracefully when the ContentType is stale or the target row was deleted — never panics on a dangling polymorphic pointer.
+
+**Verified by**: `tests/gfk_typed_accessors.rs::typed_accessor_resolves_to_target_row_as_json`. Live in [`examples/gfk_demo`](../gfk_demo/).
+
+### 2.24c Typed `set_<name>_for::<T>` setter (#240)
+
+**What**: Companion to 2.24b — `Model` derive emits `set_<name>_for::<T: Model>(&pool, target_pk)` per declaration. Resolves the ContentType for `T` via the cached registry and assigns both columns on `self`. Stand-in for Django's `activity.target = post` one-liner.
+
+**Recipe**:
+
+```rust
+let mut act = Activity {
+    id: Auto::Unset,
+    target_content_type_id: 0,
+    target_object_pk: 0,
+    action: "tagged".into(),
+    ..
+};
+act.set_target_for::<Post>(&pool, post_pk).await?;
+act.insert(&pool).await?;
+```
+
+Two columns assigned in one call — caller never deals with the integer CT id by hand.
+
+**Verified by**: `tests/gfk_typed_accessors.rs::typed_setter_assigns_ct_and_pk_for_target_model`. Live in [`examples/gfk_demo`](../gfk_demo/).
+
+### 2.24d Admin list view collapses GFK pair into one link (#241)
+
+**What**: When `list_display` names a `generic_fk` relation by its `name`, the admin renders a single column whose cells are `<a href="/{target_table}/{pk}">{app_label}.{model_name} #{pk}</a>` — same shape `contenttypes::render_generic_fk_link` emits on the detail page.
+
+**Recipe**:
+
+```rust
+#[derive(Model)]
+#[rustango(
+    generic_fk(name = "target", ct_column = "...", pk_column = "..."),
+    admin(list_display = "action, target, created_at"),
+)]
+pub struct Activity { /* ... */ }
+```
+
+The admin list view at `/__admin/cookbook_activity` shows `action | target | created_at`, where `target` is one clickable link per row. Raw `ct_column` / `pk_column` integers stay hidden.
+
+Implementation prefetches the page's distinct CT ids once before the row loop (usually 1 round-trip per distinct target type), so the cell render is hot-path.
+
+**Verified by**: `tests/admin_gfk_list_render_live.rs`.
+
 ## Chapter 3 — ORM
 
 13 live recipes against the Author / Post fixture from Chapter 2.
@@ -1277,6 +1340,124 @@ this UX gap. Tracked in Gaps section below.
 8.108 (generic-FK link rendering), 8.109 (basic-auth wrap),
 8.110 (custom actions), 8.111 (inline editing) queued for Slice 8b
 which would need a tenant-scoped cookbook migration applied.*
+
+### 8.112 `register_admin_inline!` — read-only inline display (#50 slice 1, PR #237)
+
+**What**: Render N child rows under a parent's admin detail page,
+keyed on a single FK column. Each row links into the child's admin
+detail. Foundation for the editable variant in 8.113.
+
+**Recipe**:
+
+```rust
+rustango::register_admin_inline!(
+    parent = "blog_post",     // ModelSchema::table of the parent
+    child  = "blog_comment",  // ModelSchema::table of the child
+    fk     = "post_id",       // child column pointing back at the parent
+    kind   = rustango::admin::InlineKind::Tabular,  // or Stacked
+    label  = "Comments",
+    fields = &["body", "created_at"],
+);
+```
+
+The parent's `/__admin/blog_post/<pk>` page renders a "Comments"
+panel below the parent fields. Multiple inlines per parent are
+supported — each registration produces a separate panel.
+
+**Verified by**: `tests/admin_inlines_live.rs`.
+
+### 8.113 `register_admin_inline!` — editable inlines + FormSet POST (#50 slice 2, PR #238)
+
+**What**: Same registration shape as 8.112; rows on the **edit** page
+become editable inputs. `extra` blank rows let the operator add new
+children, each existing row gets a hidden PK + a `DELETE` checkbox.
+On POST the handler dispatches per row: PK+DELETE → `delete_pool`;
+PK → `update_pool` (FK column skipped — no reparenting); no PK +
+non-empty → `insert_pool` with FK pinned to the parent.
+
+```rust
+rustango::register_admin_inline!(
+    parent = "blog_post",
+    child  = "blog_comment",
+    fk     = "post_id",
+    extra  = 2,                 // two blank rows for adding new children
+    max_num = Some(20),         // upper bound (rendered to mgmt form)
+);
+```
+
+The full Django FormSet shape is rendered: `<prefix>-TOTAL_FORMS`,
+`<prefix>-INITIAL_FORMS`, `<prefix>-MAX_NUM_FORMS`, prefix-mangled
+`<prefix>-N-<field>` inputs.
+
+**Verified by**: `tests/admin_inlines_edit_live.rs`.
+
+### 8.114 `register_admin_inline_generic!` — generic admin inlines (#242 + #243, epic #246)
+
+**What**: Generic variant of 8.112/8.113. Keys on a
+`(content_type_id, object_pk)` pair instead of a single FK column —
+Django's `GenericTabularInline` / `GenericStackedInline` shape.
+
+**Recipe**:
+
+```rust
+rustango::register_admin_inline_generic!(
+    parent = "blog_post",
+    child  = "blog_tag",
+    ct     = "content_type_id",  // child's CT column
+    pk     = "object_pk",        // child's PK column
+    kind   = rustango::admin::InlineKind::Tabular,
+    label  = "Tags",
+    fields = &["name"],
+    extra  = 1,
+);
+```
+
+The same `Tag` model can register inlines under multiple parents
+(e.g. one under `blog_post`, another under `blog_article`). The
+INSERT path pins BOTH polymorphic columns to the parent's CT id +
+PK; UPDATE skips both columns so a malicious POST can't reparent a
+row to a different parent.
+
+**Verified by**: `tests/admin_inline_generic_live.rs` (read-only) +
+`tests/admin_inline_generic_edit_live.rs` (editable + reparenting-
+attack pin).
+
+### 8.115 GFK `<select>` picker on the standalone create/edit form (#244)
+
+**What**: When a model carries `#[rustango(generic_fk(...))]`, its
+standalone `/__admin/<table>/new` and `/__admin/<table>/<pk>/edit`
+pages render the `ct_column` as a `<select>` populated from
+`rustango_content_types`. Each option is labeled
+`<app_label>.<model_name>`; the row's current CT is pre-selected
+on edit.
+
+No extra wiring required — the picker is automatic when the schema
+declares a `generic_fk`. Operators no longer have to memorize
+integer CT ids.
+
+**Verified by**: `tests/admin_gfk_picker_live.rs`.
+
+### 8.116 Full GFK demo (#245)
+
+The complete polymorphic-relations surface — declaration, accessor,
+setter, list-view link, both inline variants, and the picker — is
+exercised end-to-end in [`examples/gfk_demo`](../gfk_demo/). Run
+locally with:
+
+```sh
+mkdir -p var
+DATABASE_URL='sqlite:./var/gfk_demo.db?mode=rwc' \
+  cargo run -p rustango --example gfk_demo \
+  --features sqlite,admin,runserver
+```
+
+Visit `http://localhost:8080/` and click through:
+- `/gfkdemo_post/1` — Tags + Comments inline panels (read-only display)
+- `/gfkdemo_post/1/edit` — editable inlines with `extra` blank rows
+- `/gfkdemo_tag` — list view with the `target` column as one clickable link
+- `/gfkdemo_tag/new` — create form with the CT `<select>` picker
+
+One sqlite file, no tenancy, ~150 LOC across `main.rs` + `models.rs` + `seed.rs`.
 
 ## Chapter 9b — Template views (Django-shape CBVs)
 

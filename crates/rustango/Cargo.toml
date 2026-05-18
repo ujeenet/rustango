@@ -440,6 +440,16 @@ name              = "sqlite_app_demo"
 path              = "examples/sqlite_app_demo.rs"
 required-features = ["sqlite", "runserver"]
 
+# Epic #246 demo — full GenericForeignKey surface: generic_fk
+# accessor/setter codegen, list-view target links, register_admin_inline_generic!
+# panels (read-only + editable), CT <select> picker. SQLite-backed,
+# no tenancy. Run with `cargo run -p rustango --example gfk_demo
+# --features sqlite,admin,runserver`.
+[[example]]
+name              = "gfk_demo"
+path              = "examples/gfk_demo/main.rs"
+required-features = ["sqlite", "admin", "runserver"]
+
 # Multi-tenant SQLite demo (v0.33) — wires the DatabaseTenant<Sqlite>
 # extractor for per-tenant-file SQLite databases. Pairs with the
 # `database_pools_sqlite_*_live.rs` tests; this is the manual-running
