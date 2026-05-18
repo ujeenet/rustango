@@ -1148,6 +1148,414 @@ fn build_assignments(
     Ok(out)
 }
 
+// ============================================================ Editable generic rendering (issue #243)
+
+/// As [`render_form_for_parent`] but for generic inlines (#243).
+/// Mirrors slice 2's editable shape — hidden child PK + DELETE box
+/// on existing rows, `extra` blank rows below — except the WHERE
+/// uses the parent's ContentType id + PK pair.
+///
+/// # Errors
+/// As [`render_generic_for_parent`].
+pub async fn render_form_generic_for_parent(
+    pool: &Pool,
+    parent_model: &'static ModelSchema,
+    parent_pk: SqlValue,
+) -> Result<Vec<InlineFormPanel>, ExecError> {
+    let registrations = generic_for_parent_table(parent_model.table);
+    if registrations.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(ct_id) = resolve_ct_id_for_schema(pool, parent_model).await? else {
+        return Ok(Vec::new());
+    };
+    let parent_pk_i64 = match &parent_pk {
+        SqlValue::I64(v) => *v,
+        SqlValue::I32(v) => i64::from(*v),
+        SqlValue::I16(v) => i64::from(*v),
+        _ => return Ok(Vec::new()),
+    };
+
+    let mut panels = Vec::with_capacity(registrations.len());
+    for inline in registrations {
+        let Some(child_model) = find_model_by_table(inline.child_table) else {
+            continue;
+        };
+        if child_model.field_by_column(inline.ct_column).is_none()
+            || child_model.field_by_column(inline.pk_column).is_none()
+        {
+            continue;
+        }
+
+        let display_fields = resolve_render_fields_generic(child_model, inline);
+        let pk_field = child_model.primary_key();
+        let select_fields: Vec<&'static FieldSchema> = match pk_field {
+            Some(pk) if !display_fields.iter().any(|f| f.column == pk.column) => {
+                let mut v = Vec::with_capacity(display_fields.len() + 1);
+                v.push(pk);
+                v.extend_from_slice(&display_fields);
+                v
+            }
+            _ => display_fields.clone(),
+        };
+        let order_pk: Vec<OrderItem> = pk_field
+            .map(|pk| OrderItem::Column {
+                column: pk.column,
+                desc: false,
+                nulls: NullsOrder::Default,
+            })
+            .into_iter()
+            .collect();
+
+        let rows = select_rows_as_json(
+            pool,
+            &SelectQuery {
+                model: child_model,
+                where_clause: WhereExpr::And(vec![
+                    WhereExpr::Predicate(Filter {
+                        column: inline.ct_column,
+                        op: Op::Eq,
+                        value: SqlValue::I64(ct_id),
+                    }),
+                    WhereExpr::Predicate(Filter {
+                        column: inline.pk_column,
+                        op: Op::Eq,
+                        value: SqlValue::I64(parent_pk_i64),
+                    }),
+                ]),
+                search: None,
+                joins: vec![],
+                order_by: order_pk,
+                limit: None,
+                offset: None,
+                lock_mode: None,
+                compound: vec![],
+                projection: None,
+            },
+            &select_fields,
+        )
+        .await?;
+
+        let prefix = child_model.table.to_owned();
+        let initial_forms = rows.len();
+        let total_forms = initial_forms + inline.extra;
+        let pk_column = pk_field.map(|p| p.column).unwrap_or("id");
+
+        let mut field_labels: Vec<String> =
+            display_fields.iter().map(|f| f.name.to_owned()).collect();
+        if initial_forms > 0 {
+            field_labels.push("Delete".to_owned());
+        }
+
+        let mut rendered_rows: Vec<serde_json::Value> = Vec::with_capacity(total_forms);
+        for (idx, row) in rows.iter().enumerate() {
+            let pk_text = row.get(pk_column).map(stringify_pk).unwrap_or_default();
+            let cells: Vec<serde_json::Value> = display_fields
+                .iter()
+                .map(|f| {
+                    let raw_str = row
+                        .get(f.column)
+                        .map(value_as_form_string)
+                        .unwrap_or_default();
+                    let input_html = render_prefixed_input(f, &raw_str, &prefix, idx, false);
+                    serde_json::json!({
+                        "label": f.name,
+                        "input_html": input_html,
+                    })
+                })
+                .collect();
+            let pk_field_name = pk_field.map(|p| p.name).unwrap_or("id");
+            let hidden_pk = format!(
+                r#"<input type="hidden" name="{p}-{i}-{n}" value="{v}">"#,
+                p = html_escape(&prefix),
+                i = idx,
+                n = html_escape(pk_field_name),
+                v = html_escape(&pk_text),
+            );
+            let delete_input_html = format!(
+                r#"<input type="checkbox" name="{p}-{i}-DELETE" value="on">"#,
+                p = html_escape(&prefix),
+                i = idx,
+            );
+            rendered_rows.push(serde_json::json!({
+                "pk": pk_text,
+                "cells": cells,
+                "hidden_pk": hidden_pk,
+                "delete_input_html": delete_input_html,
+            }));
+        }
+        for idx in initial_forms..total_forms {
+            let cells: Vec<serde_json::Value> = display_fields
+                .iter()
+                .map(|f| {
+                    let input_html = render_prefixed_input(f, "", &prefix, idx, false);
+                    serde_json::json!({
+                        "label": f.name,
+                        "input_html": input_html,
+                    })
+                })
+                .collect();
+            rendered_rows.push(serde_json::json!({
+                "pk": "",
+                "cells": cells,
+                "hidden_pk": "",
+                "delete_input_html": "",
+            }));
+        }
+
+        let label = if inline.label.is_empty() {
+            child_model.name.to_owned()
+        } else {
+            inline.label.to_owned()
+        };
+
+        panels.push(InlineFormPanel {
+            label,
+            child_table: child_model.table.to_owned(),
+            kind: match inline.kind {
+                InlineKind::Tabular => "tabular".to_owned(),
+                InlineKind::Stacked => "stacked".to_owned(),
+            },
+            prefix,
+            total_forms,
+            initial_forms,
+            max_num: inline.max_num,
+            field_labels,
+            rows: rendered_rows,
+        });
+    }
+    Ok(panels)
+}
+
+/// Process every generic-inline FormSet payload on a parent edit POST.
+/// Same dispatch rules as [`apply_post`] but pins BOTH
+/// `ct_column = parent_ct_id` AND `pk_column = parent_pk` on INSERT
+/// and skips BOTH on UPDATE (so a malicious POST can't reparent a
+/// generic-inline row to a different `(content_type, target)` pair).
+///
+/// # Errors
+/// As [`apply_post`].
+pub async fn apply_post_generic(
+    pool: &Pool,
+    parent_model: &'static ModelSchema,
+    parent_pk: SqlValue,
+    form: &std::collections::HashMap<String, String>,
+) -> Result<InlineApplyOutcome, ExecError> {
+    let registrations = generic_for_parent_table(parent_model.table);
+    if registrations.is_empty() {
+        return Ok(InlineApplyOutcome::default());
+    }
+    let Some(ct_id) = resolve_ct_id_for_schema(pool, parent_model).await? else {
+        return Ok(InlineApplyOutcome::default());
+    };
+    let parent_pk_i64 = match &parent_pk {
+        SqlValue::I64(v) => *v,
+        SqlValue::I32(v) => i64::from(*v),
+        SqlValue::I16(v) => i64::from(*v),
+        _ => return Ok(InlineApplyOutcome::default()),
+    };
+
+    let mut total = InlineApplyOutcome::default();
+    for inline in registrations {
+        let Some(child_model) = find_model_by_table(inline.child_table) else {
+            continue;
+        };
+        if child_model.field_by_column(inline.ct_column).is_none()
+            || child_model.field_by_column(inline.pk_column).is_none()
+        {
+            continue;
+        }
+        let prefix = child_model.table;
+        let total_forms = match crate::forms::formset::total_forms(form, prefix) {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let outcome = apply_one_inline_generic(
+            pool,
+            child_model,
+            inline,
+            prefix,
+            total_forms,
+            ct_id,
+            parent_pk_i64,
+            form,
+        )
+        .await;
+        total.add(outcome);
+    }
+    Ok(total)
+}
+
+async fn apply_one_inline_generic(
+    pool: &Pool,
+    child_model: &'static ModelSchema,
+    inline: &InlineAdminGeneric,
+    prefix: &str,
+    total_forms: usize,
+    parent_ct_id: i64,
+    parent_pk_i64: i64,
+    form: &std::collections::HashMap<String, String>,
+) -> InlineApplyOutcome {
+    let mut outcome = InlineApplyOutcome::default();
+    let pk_field = match child_model.primary_key() {
+        Some(p) => p,
+        None => return outcome,
+    };
+    let display_fields = resolve_render_fields_generic(child_model, inline);
+
+    for idx in 0..total_forms {
+        let row = crate::forms::formset::row_payload(form, prefix, idx);
+        let raw_pk = row.get(pk_field.name).cloned().unwrap_or_default();
+        let has_pk = !raw_pk.trim().is_empty();
+        let delete_flag = row
+            .get("DELETE")
+            .map(|s| s == "on" || s == "true" || s == "1")
+            .unwrap_or(false);
+
+        // Existing row + DELETE → DELETE child row.
+        if has_pk && delete_flag {
+            let pk_val = match crate::forms::parse_pk_string(pk_field, &raw_pk) {
+                Ok(v) => v,
+                Err(_) => {
+                    outcome.failed += 1;
+                    continue;
+                }
+            };
+            let q = crate::core::DeleteQuery {
+                model: child_model,
+                where_clause: WhereExpr::Predicate(Filter {
+                    column: pk_field.column,
+                    op: Op::Eq,
+                    value: pk_val,
+                }),
+            };
+            match crate::sql::delete_pool(pool, &q).await {
+                Ok(_) => outcome.deleted += 1,
+                Err(_) => outcome.failed += 1,
+            }
+            continue;
+        }
+
+        // Existing row, no DELETE → UPDATE child row, skipping both
+        // polymorphic columns so the relationship stays pinned to
+        // this parent.
+        if has_pk {
+            let pk_val = match crate::forms::parse_pk_string(pk_field, &raw_pk) {
+                Ok(v) => v,
+                Err(_) => {
+                    outcome.failed += 1;
+                    continue;
+                }
+            };
+            let assignments = match build_assignments_generic(
+                &display_fields,
+                &row,
+                inline.ct_column,
+                inline.pk_column,
+            ) {
+                Ok(a) => a,
+                Err(_) => {
+                    outcome.failed += 1;
+                    continue;
+                }
+            };
+            if assignments.is_empty() {
+                continue;
+            }
+            let q = crate::core::UpdateQuery {
+                model: child_model,
+                set: assignments,
+                where_clause: WhereExpr::Predicate(Filter {
+                    column: pk_field.column,
+                    op: Op::Eq,
+                    value: pk_val,
+                }),
+            };
+            match crate::sql::update_pool(pool, &q).await {
+                Ok(_) => outcome.updated += 1,
+                Err(_) => outcome.failed += 1,
+            }
+            continue;
+        }
+
+        // No PK → INSERT, but only when the operator typed something.
+        let row_nonempty = display_fields.iter().any(|f| {
+            row.get(f.name)
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+        });
+        if !row_nonempty {
+            continue;
+        }
+        let assignments = match build_assignments_generic(
+            &display_fields,
+            &row,
+            inline.ct_column,
+            inline.pk_column,
+        ) {
+            Ok(a) => a,
+            Err(_) => {
+                outcome.failed += 1;
+                continue;
+            }
+        };
+        // Pin BOTH polymorphic columns to the parent's CT id + PK.
+        let mut columns: Vec<&'static str> = assignments.iter().map(|a| a.column).collect();
+        let mut values: Vec<SqlValue> = assignments
+            .into_iter()
+            .map(|a| match a.value {
+                crate::core::Expr::Literal(v) => v,
+                _ => SqlValue::Null,
+            })
+            .collect();
+        if !columns.contains(&inline.ct_column) {
+            columns.push(inline.ct_column);
+            values.push(SqlValue::I64(parent_ct_id));
+        }
+        if !columns.contains(&inline.pk_column) {
+            columns.push(inline.pk_column);
+            values.push(SqlValue::I64(parent_pk_i64));
+        }
+        let q = crate::core::InsertQuery {
+            model: child_model,
+            columns,
+            values,
+            returning: vec![],
+            on_conflict: None,
+        };
+        match crate::sql::insert_pool(pool, &q).await {
+            Ok(_) => outcome.inserted += 1,
+            Err(_) => outcome.failed += 1,
+        }
+    }
+
+    outcome
+}
+
+/// As [`build_assignments`] but skips BOTH polymorphic columns so an
+/// UPDATE / INSERT can't smuggle in a different `(content_type_id,
+/// object_pk)` pair through the inline FormSet payload.
+fn build_assignments_generic(
+    display_fields: &[&'static FieldSchema],
+    row: &std::collections::HashMap<String, String>,
+    ct_column: &str,
+    pk_column: &str,
+) -> Result<Vec<crate::core::Assignment>, crate::forms::FormError> {
+    let mut out = Vec::with_capacity(display_fields.len());
+    for f in display_fields {
+        if f.column == ct_column || f.column == pk_column {
+            continue;
+        }
+        let raw = row.get(f.name).map(String::as_str);
+        let value = crate::forms::parse_form_value(f, raw)?;
+        out.push(crate::core::Assignment {
+            column: f.column,
+            value: crate::core::Expr::Literal(value),
+        });
+    }
+    Ok(out)
+}
+
 /// Minimal HTML-escape — pre-rendered cells are dropped into the
 /// detail template with `| safe` so untrusted strings need escaping
 /// here. Mirrors the helper the list view uses.
