@@ -1134,9 +1134,36 @@ pub(crate) async fn create_form(
             table: model.table.to_owned(),
         });
     }
-    Ok(Html(render_form(
-        &state, model, None, /* pk_locked */ false, None,
+    // #244 — pre-load the ContentType list so `generic_fk` ct_columns
+    // render as a CT `<select>` picker instead of a raw integer input.
+    // Best-effort: empty list on failure falls back to the default
+    // input via the same code path slice 1 already used.
+    let gfk_cts = preload_gfk_cts(&state, model).await;
+    Ok(Html(super::helpers::render_form_with_inlines_and_picker(
+        &state,
+        model,
+        None,
+        /* pk_locked */ false,
+        None,
+        Vec::new(),
+        &gfk_cts,
     )))
+}
+
+/// Pre-load every ContentType when the model carries any
+/// `generic_fk(...)` declaration; return empty otherwise (the picker
+/// hook only fires when both the model has a generic_fk AND the
+/// caller supplied a non-empty CT list).
+async fn preload_gfk_cts(
+    state: &AppState,
+    model: &'static crate::core::ModelSchema,
+) -> Vec<crate::contenttypes::ContentType> {
+    if model.generic_relations.is_empty() {
+        return Vec::new();
+    }
+    crate::contenttypes::ContentType::all(&state.pool)
+        .await
+        .unwrap_or_default()
 }
 
 pub(crate) async fn create_submit(
@@ -1282,13 +1309,17 @@ pub(crate) async fn edit_form(
             .await
             .unwrap_or_default();
     inline_panels.extend(generic_panels);
-    Ok(Html(super::helpers::render_form_with_inlines(
+    // #244 — same picker preload as `create_form` so the edit form
+    // also renders a CT `<select>` for `generic_fk` ct_columns.
+    let gfk_cts = preload_gfk_cts(&state, model).await;
+    Ok(Html(super::helpers::render_form_with_inlines_and_picker(
         &state,
         model,
         Some(&prefill),
         true,
         None,
         inline_panels,
+        &gfk_cts,
     )))
 }
 
