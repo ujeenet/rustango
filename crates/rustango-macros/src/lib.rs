@@ -591,6 +591,11 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let from_row_impl = from_row_impl_tokens(struct_name, &collected.from_row_inits);
     let reverse_helpers = reverse_helper_tokens(struct_name, &collected.fk_relations);
     let m2m_accessors = m2m_accessor_tokens(struct_name, &container.m2m);
+    let generic_fk_accessors = generic_fk_accessor_tokens(
+        struct_name,
+        &container.generic_fks,
+        &collected.column_entries,
+    );
 
     Ok(quote! {
         #model_impl
@@ -599,6 +604,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #column_module
         #reverse_helpers
         #m2m_accessors
+        #generic_fk_accessors
 
         ::rustango::core::inventory::submit! {
             ::rustango::core::ModelEntry {
@@ -955,6 +961,106 @@ fn reverse_helper_tokens(child_ident: &syn::Ident, fk_relations: &[FkRelation]) 
 
 /// Emit `<name>_m2m(&self) -> M2MManager` inherent methods for every M2M
 /// relation declared on the model.
+/// Emit `{name}_pool` accessor + `set_{name}_for` setter for every
+/// `#[rustango(generic_fk(name, ct_column, pk_column))]` declaration.
+///
+/// Closes #239 + #240 — the Django-shape `comment.content_object` /
+/// `comment.content_object = post` ergonomics on top of the existing
+/// `GenericForeignKey { content_type_id, object_pk }` primitive.
+///
+/// `column_entries` is passed so we can resolve each `ct_column` /
+/// `pk_column` SQL name back to its Rust field ident — the macro
+/// only sees the column-side strings in the attribute, but the
+/// emitted accessor needs to read the actual struct field.
+fn generic_fk_accessor_tokens(
+    struct_name: &syn::Ident,
+    generic_fks: &[GenericFkAttr],
+    column_entries: &[ColumnEntry],
+) -> TokenStream2 {
+    if generic_fks.is_empty() {
+        return TokenStream2::new();
+    }
+    let methods = generic_fks.iter().filter_map(|gfk| {
+        // Resolve `ct_column` + `pk_column` to the struct's Rust
+        // field idents. A typo (column name doesn't match any field)
+        // emits no method for that registration — the user will see
+        // the compiler reject the SCHEMA literal anyway, so there's
+        // a clear error path without us double-reporting.
+        let ct_ident = column_entries
+            .iter()
+            .find(|c| c.column == gfk.ct_column)
+            .map(|c| c.ident.clone())?;
+        let pk_ident = column_entries
+            .iter()
+            .find(|c| c.column == gfk.pk_column)
+            .map(|c| c.ident.clone())?;
+
+        let accessor_ident =
+            syn::Ident::new(&format!("{}_pool", gfk.name), struct_name.span());
+        let setter_ident =
+            syn::Ident::new(&format!("set_{}_for", gfk.name), struct_name.span());
+        let name_literal = gfk.name.as_str();
+
+        Some(quote! {
+            #[doc = concat!(
+                "Resolve the polymorphic `",
+                #name_literal,
+                "` relation. Reads `self.",
+                stringify!(#ct_ident),
+                "` + `self.",
+                stringify!(#pk_ident),
+                "`, looks up the matching `ContentType`, and fetches the target row as a JSON map.\n\n",
+                "Returns `Ok(None)` when the ContentType is stale / unseeded or the target row was deleted. Emitted by `#[rustango(generic_fk(name = \"",
+                #name_literal,
+                "\", ...))]`."
+            )]
+            pub async fn #accessor_ident(
+                &self,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::core::option::Option<::serde_json::Value>,
+                ::rustango::sql::ExecError,
+            > {
+                let gfk = ::rustango::contenttypes::GenericForeignKey::new(
+                    self.#ct_ident as i64,
+                    self.#pk_ident as i64,
+                );
+                gfk.get_object(pool).await
+            }
+
+            #[doc = concat!(
+                "Set the polymorphic `",
+                #name_literal,
+                "` target. Looks up the `ContentType` for `T` via the cached registry, then assigns both `self.",
+                stringify!(#ct_ident),
+                "` and `self.",
+                stringify!(#pk_ident),
+                "`.\n\nFollow with `self.insert(pool)` or `self.update(pool)` to persist. Emitted by `#[rustango(generic_fk(name = \"",
+                #name_literal,
+                "\", ...))]`."
+            )]
+            pub async fn #setter_ident<T: ::rustango::core::Model>(
+                &mut self,
+                pool: &::rustango::sql::Pool,
+                target_pk: i64,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                let gfk = ::rustango::contenttypes::GenericForeignKey::for_target::<T>(
+                    pool,
+                    target_pk,
+                ).await?;
+                self.#ct_ident = gfk.content_type_id as _;
+                self.#pk_ident = gfk.object_pk as _;
+                ::core::result::Result::Ok(())
+            }
+        })
+    });
+    quote! {
+        impl #struct_name {
+            #( #methods )*
+        }
+    }
+}
+
 fn m2m_accessor_tokens(struct_name: &syn::Ident, m2m_relations: &[M2MAttr]) -> TokenStream2 {
     if m2m_relations.is_empty() {
         return TokenStream2::new();
