@@ -20,10 +20,17 @@ use rustango::Model;
 pub struct Post {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
-    #[rustango(max_length = 200)]
+    #[rustango(
+        max_length = 200,
+        help_text = "Short, descriptive headline shown in listings and feeds."
+    )]
     pub title: String,
-    #[rustango(max_length = 8000)]
+    #[rustango(
+        max_length = 8000,
+        help_text = "Markdown is supported. First paragraph appears as the summary on index pages."
+    )]
     pub body: String,
+    #[rustango(help_text = "Future timestamps schedule the post; leave blank to publish now.")]
     pub published_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -71,7 +78,10 @@ pub struct Tag {
     pub id: Auto<i64>,
     pub content_type_id: i64,
     pub object_pk: i64,
-    #[rustango(max_length = 40)]
+    #[rustango(
+        max_length = 40,
+        help_text = "Lowercase, no spaces. Used in URLs and filter chips."
+    )]
     pub name: String,
 }
 

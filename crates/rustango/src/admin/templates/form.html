@@ -21,7 +21,13 @@
     {% for row in set.rows %}
       <tr>
         <th><label for="{{ row.label }}">{{ row.label }}{{ row.extra | safe }}</label></th>
-        <td>{{ row.input | safe }}</td>
+        <td>
+          {{ row.input | safe }}
+          {# Django-shape help text rendered as a muted caption under
+             the input. `None` (no `#[rustango(help_text = "…")]`) is
+             falsy in Tera so nothing renders. #}
+          {% if row.help_text %}<p class="help-text">{{ row.help_text }}</p>{% endif %}
+        </td>
       </tr>
     {% endfor %}
     </table>

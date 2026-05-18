@@ -4494,6 +4494,11 @@ struct FieldAttrs {
     /// path, so the database always recomputes the value from
     /// `EXPR`. Backlog item #35.
     generated_as: Option<String>,
+    /// `#[rustango(help_text = "…")]` — Django-shape help text
+    /// rendered below the admin form's input. Threaded into
+    /// `FieldSchema::help_text` so admin / serializer / OpenAPI
+    /// layers can read it.
+    help_text: Option<String>,
 }
 
 fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
@@ -4517,6 +4522,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         index_name: None,
         index_method: "btree".to_owned(),
         generated_as: None,
+        help_text: None,
     };
     for attr in &field.attrs {
         if !attr.path().is_ident("rustango") {
@@ -4570,6 +4576,11 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
             if meta.path.is_ident("generated_as") {
                 let s: LitStr = meta.value()?.parse()?;
                 out.generated_as = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("help_text") {
+                let s: LitStr = meta.value()?.parse()?;
+                out.help_text = Some(s.value());
                 return Ok(());
             }
             if meta.path.is_ident("auto_uuid") {
@@ -4739,6 +4750,11 @@ struct FieldInfo<'a> {
     /// every INSERT and UPDATE path; the database recomputes the
     /// value from `EXPR`. Backlog item #35.
     generated_as: Option<String>,
+    /// `Some` when this field carried `#[rustango(help_text = "…")]`.
+    /// Threaded into the generated `FieldSchema::help_text` so the
+    /// admin form (and any future surface — DRF / OpenAPI) can render
+    /// the caption below the input.
+    help_text: Option<String>,
 }
 
 /// Reject table names that won't survive SQL identifier
@@ -4924,6 +4940,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
 
     let unique = attrs.unique;
     let generated_as = optional_str(attrs.generated_as.as_deref());
+    let help_text = optional_str(attrs.help_text.as_deref());
     let schema = quote! {
         ::rustango::core::FieldSchema {
             name: #name,
@@ -4939,6 +4956,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             auto: #auto,
             unique: #unique,
             generated_as: #generated_as,
+            help_text: #help_text,
         }
     };
 
@@ -4969,6 +4987,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         auto_now_add: attrs.auto_now_add,
         soft_delete: attrs.soft_delete,
         generated_as: attrs.generated_as.clone(),
+        help_text: attrs.help_text.clone(),
     })
 }
 

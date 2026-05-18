@@ -861,6 +861,7 @@ mod tests {
             default: None,
             relation: None,
             generated_as: None,
+            help_text: None,
         }
     }
 
