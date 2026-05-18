@@ -257,6 +257,16 @@ input:invalid + small, textarea:invalid + small { color: var(--color-error-fg); 
   align-items: center;
   margin: var(--space-3) 0;
 }
+
+/* Django-shape `help_text` caption rendered under each form input
+   when `#[rustango(help_text = "...")]` is set on the field. */
+.help-text {
+  margin: var(--space-1) 0 0;
+  color: var(--color-fg-muted);
+  font-size: 0.85em;
+  line-height: 1.4;
+  max-width: 42em;
+}
 dl { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-4); }
 dt { font-weight: var(--font-weight-bold); }
 .audit-cleanup {

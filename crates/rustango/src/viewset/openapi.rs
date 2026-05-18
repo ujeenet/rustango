@@ -293,6 +293,7 @@ mod tests {
             auto: true,
             unique: false,
             generated_as: None,
+            help_text: None,
         }
     }
 
@@ -311,6 +312,7 @@ mod tests {
             auto: false,
             unique: false,
             generated_as: None,
+            help_text: None,
         }
     }
 
@@ -329,6 +331,7 @@ mod tests {
             auto: false,
             unique: false,
             generated_as: None,
+            help_text: None,
         }
     }
 
@@ -348,6 +351,7 @@ mod tests {
                 auto: true,
                 unique: false,
                 generated_as: None,
+                help_text: None,
             },
             FieldSchema {
                 name: "title",
@@ -363,6 +367,7 @@ mod tests {
                 auto: false,
                 unique: false,
                 generated_as: None,
+                help_text: None,
             },
             FieldSchema {
                 name: "author_id",
@@ -378,6 +383,7 @@ mod tests {
                 auto: false,
                 unique: false,
                 generated_as: None,
+                help_text: None,
             },
         ];
         // Suppress unused warnings on field helpers if we keep them.

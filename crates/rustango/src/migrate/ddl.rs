@@ -326,6 +326,7 @@ mod tests {
             auto,
             unique: false,
             generated_as: None,
+            help_text: None,
         }
     }
 

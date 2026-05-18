@@ -532,6 +532,10 @@ fn render_form_with_inlines_and_pickers(
             "label": f.name,
             "extra": extra,
             "input": input_html,
+            // Django-shape `help_text` (#admin-helptext) — short
+            // caption rendered under the input. `None` means no
+            // caption; template treats it as falsy and renders nothing.
+            "help_text": f.help_text,
         })
     };
 

@@ -3824,6 +3824,7 @@ mod tests {
                     auto: true,
                     unique: false,
                     generated_as: None,
+                    help_text: None,
                 },
                 crate::core::FieldSchema {
                     name: "title",
@@ -3839,6 +3840,7 @@ mod tests {
                     auto: false,
                     unique: false,
                     generated_as: None,
+                    help_text: None,
                 },
             ])),
             display: None,
@@ -3878,6 +3880,7 @@ mod tests {
                     auto: true,
                     unique: false,
                     generated_as: None,
+                    help_text: None,
                 },
                 crate::core::FieldSchema {
                     name: "title",
@@ -3893,6 +3896,7 @@ mod tests {
                     auto: false,
                     unique: false,
                     generated_as: None,
+                    help_text: None,
                 },
                 crate::core::FieldSchema {
                     name: "score",
@@ -3908,6 +3912,7 @@ mod tests {
                     auto: false,
                     unique: false,
                     generated_as: None,
+                    help_text: None,
                 },
             ])),
             display: None,
@@ -4278,6 +4283,7 @@ mod tests {
                 auto: false,
                 unique: false,
                 generated_as: None,
+                help_text: None,
             }])),
             display: None,
             app_label: None,
@@ -4513,6 +4519,7 @@ mod tests {
                 auto: false,
                 unique: false,
                 generated_as: None,
+                help_text: None,
             }])),
             display: None,
             app_label: None,
@@ -4560,6 +4567,7 @@ mod tests {
                 auto: false,
                 unique: false,
                 generated_as: None,
+                help_text: None,
             }])),
             display: None,
             app_label: None,
@@ -5080,6 +5088,7 @@ mod tests {
                 auto: false,
                 unique: false,
                 generated_as: None,
+                help_text: None,
             })) as &'static crate::core::FieldSchema
         };
         assert!(matches!(

@@ -3843,6 +3843,7 @@ mod gen_tests {
             auto: false,
             unique: false,
             generated_as: None,
+            help_text: None,
         }
     }
 

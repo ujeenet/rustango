@@ -50,6 +50,13 @@ pub struct FieldSchema {
     /// total: f64,` produces `total DOUBLE PRECISION GENERATED
     /// ALWAYS AS (price * quantity) STORED`.
     pub generated_as: Option<&'static str>,
+    /// Django-shape help text — short caption rendered below the
+    /// admin form's input to explain what the field is for. Set
+    /// via `#[rustango(help_text = "...")]`. `None` means no
+    /// caption (admin renders just the input). Future surfaces
+    /// (DRF serializer schemas, OpenAPI descriptions, ModelForm
+    /// `<label>` annotations) can read the same string.
+    pub help_text: Option<&'static str>,
 }
 
 /// Static description of a relation to another model.
