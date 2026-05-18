@@ -399,6 +399,47 @@ pub(crate) fn render_value_for_input(row: &PgRow, field: &FieldSchema) -> String
     }
 }
 
+/// Render a `<select>` widget over registered ContentType rows, for
+/// the `ct_column` of a `#[rustango(generic_fk(...))]` declaration.
+/// Issue #244 — replaces the raw `<input type="number">` an operator
+/// would otherwise have to fill with a `rustango_content_types.id`
+/// integer they'd have to memorize.
+///
+/// `value` is the currently-selected CT id as a string (numeric).
+/// Empty string renders no row pre-selected. `readonly` true emits a
+/// `disabled` attribute (matches the read-only feel `pk_locked` gives
+/// the regular [`render_input`] path).
+pub(crate) fn render_gfk_select(
+    field: &FieldSchema,
+    value: &str,
+    readonly: bool,
+    cts: &[crate::contenttypes::ContentType],
+) -> String {
+    let name = escape(field.name);
+    let disabled = if readonly { " disabled" } else { "" };
+    let required = if field.nullable || field.primary_key {
+        ""
+    } else {
+        " required"
+    };
+    let mut out = format!(r#"<select name="{name}" id="{name}"{required}{disabled}>"#,);
+    out.push_str(r#"<option value="">— choose target —</option>"#);
+    for ct in cts {
+        let Some(id) = ct.id.get().copied() else {
+            continue;
+        };
+        let selected = if value == id.to_string() {
+            " selected"
+        } else {
+            ""
+        };
+        let label = escape(&format!("{}.{}", ct.app_label, ct.model_name));
+        let _ = write!(out, r#"<option value="{id}"{selected}>{label}</option>"#);
+    }
+    out.push_str("</select>");
+    out
+}
+
 /// Render a form input for `field`, optionally pre-filled with `value`.
 /// PK fields get `readonly` when `pk_locked` is true (edit mode).
 pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) -> String {
