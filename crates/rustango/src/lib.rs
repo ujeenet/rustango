@@ -9,10 +9,53 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.39"                                       # Postgres (default)
-//! rustango = { version = "0.39", features = ["sqlite"] }  # SQLite
-//! rustango = { version = "0.39", features = ["mysql"] }   # MySQL 8.0+
+//! rustango = "0.40"                                       # Postgres (default)
+//! rustango = { version = "0.40", features = ["sqlite"] }  # SQLite
+//! rustango = { version = "0.40", features = ["mysql"] }   # MySQL 8.0+
 //! ```
+//!
+//! ## What's new in v0.40 (May 2026)
+//!
+//! - **Admin session auth without tenancy** ([epic #253]) — bare
+//!   [`admin`] now ships a styled `/login` form, signed-cookie
+//!   sessions ([`session::SessionSecret`]), sidebar Logout, password
+//!   change at `/account/password`, [`manage create-admin`][admin-cli]
+//!   CLI verb, and `is_superuser` gating. Opt in via
+//!   [`admin::Builder::with_session_auth`]. Same signing key works
+//!   across [`tenancy::session`] + [`admin::session`] (different
+//!   cookie names + payloads so cookies never cross-decode).
+//! - **GenericForeignKey ergonomics + admin inlines** ([epic #246])
+//!   — `#[rustango(generic_fk(name, ct_column, pk_column))]` emits
+//!   typed `target_pool()` accessor + `set_target_for::<T>()`
+//!   setter. Admin list view collapses the `(ct_id, object_pk)` pair
+//!   into one clickable target link. New
+//!   [`register_admin_inline_generic!`] renders polymorphic children
+//!   as inline panels on the parent's detail + edit pages.
+//!   ContentType `<select>` picker replaces raw integer inputs on
+//!   the standalone create/edit form.
+//! - **Field [`help_text`]** — `#[rustango(help_text = "…")]` on any
+//!   field renders a muted caption below the admin form input.
+//!   The string lives on [`core::FieldSchema::help_text`] so future
+//!   surfaces (DRF schemas, OpenAPI descriptions) can read the same
+//!   source.
+//! - **Shared `.btn` family** — admin + operator-console buttons,
+//!   links, sidebar Logout, inline-panel row links all look like
+//!   one product. Consistent across bare admin / tenant admin /
+//!   operator console.
+//! - **Reusable foundations** — [`session::SessionSecret`] +
+//!   [`session::sign`] (HMAC primitive) and
+//!   [`manage_interactive`] (TTY prompts) promoted to the crate
+//!   root so the bare admin can reuse them without `tenancy`
+//!   compiled in.
+//! - **Runnable demo**: [`examples/gfk_demo`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/gfk_demo)
+//!   exercises every new admin + GFK surface end-to-end on SQLite.
+//!
+//! [epic #246]: https://github.com/ujeenet/rustango/issues/246
+//! [epic #253]: https://github.com/ujeenet/rustango/issues/253
+//! [admin-cli]: crate::manage::Cli
+//! [`help_text`]: crate::core::FieldSchema::help_text
+//! [`register_admin_inline_generic!`]: crate::register_admin_inline_generic
+//! [`manage_interactive`]: crate::manage_interactive
 //!
 //! Defaults pull `postgres`, `admin`, and `runserver` (the bi-dialect
 //! single-pool [`server::AppBuilder`]). Add `"tenancy"` for the

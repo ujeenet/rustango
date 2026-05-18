@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/ujeenet/rustango/main/crates/rustango/src/tenancy/static/rustango.png" alt="rustango" width="160">
+</p>
+
 # rustango
 
 **A Django-shaped, batteries-included web framework for Rust.**
@@ -9,17 +13,31 @@ Every feature works on every supported backend out of the box. The only PG-speci
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.39"
+rustango = "0.40"
 
 # SQLite — file-backed or in-memory, full tri-dialect framework
-rustango = { version = "0.39", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
+rustango = { version = "0.40", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
 
 # MySQL 8+
-rustango = { version = "0.39", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
+rustango = { version = "0.40", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
 
 # Multiple backends in one binary
-rustango = { version = "0.39", features = ["postgres", "sqlite"] }
+rustango = { version = "0.40", features = ["postgres", "sqlite"] }
 ```
+
+### What's new in v0.40.0 (May 2026) — admin auth + GFK ergonomics + field help_text
+
+Three closing slices on the admin surface, plus the polymorphic-relations finishing pass:
+
+- **Admin session auth without tenancy** (#253) — bare `admin` now ships a styled `/login` form, signed-cookie sessions, sidebar Logout, password-change UI at `/account/password`, `manage create-admin` CLI verb, and `is_superuser` gating. Opt in via [`admin::Builder::with_session_auth`](https://docs.rs/rustango/latest/rustango/admin/struct.Builder.html#method.with_session_auth). Shared signing primitive lives at [`crate::session::SessionSecret`](https://docs.rs/rustango/latest/rustango/session/struct.SessionSecret.html) — same key feeds tenancy operator + tenant + bare-admin cookies safely.
+- **GenericForeignKey ergonomics + admin inlines** (#246) — `#[rustango(generic_fk(name, ct_column, pk_column))]` now emits typed `comment.content_object_pool(&pool)` accessor + `comment.set_content_object_for::<Post>(&pool, pk)` setter. List view collapses `(ct_id, object_pk)` into one clickable target link. New [`register_admin_inline_generic!`](https://docs.rs/rustango/latest/rustango/macro.register_admin_inline_generic.html) renders polymorphic children as inline panels on the parent's admin detail + edit pages (read-only + FormSet-backed editor). ContentType `<select>` picker replaces raw integer inputs on the standalone create/edit form.
+- **Django-shape `help_text`** — `#[rustango(help_text = "Markdown is supported.")]` on any field renders a muted caption below the input on the admin form. The string lives on `FieldSchema::help_text` so future surfaces (DRF serializer schemas, OpenAPI descriptions) can read the same source.
+- **`admin::Builder::with_session_auth(secret)`** auto-bootstraps an `rustango_admin_users` table (idempotent via `CREATE TABLE IF NOT EXISTS`) and defaults `change_password_url = "/account/password"` so the sidebar's Change-password link routes correctly with zero operator wiring.
+- **Admin UX consolidation** — unified `.btn` / `.btn-primary` / `.btn-secondary` / `.btn-danger` / `.btn-link` / `.btn-row-action` class system shared with the operator console; detail-page Edit + Delete, sidebar Logout + Change-password, inline-panel row links all look like one product.
+- **Reusable foundations** — [`crate::session`](https://docs.rs/rustango/latest/rustango/session/index.html) (signed-cookie HMAC) and [`crate::manage_interactive`](https://docs.rs/rustango/latest/rustango/manage_interactive/index.html) (TTY-gated prompts) promoted to the crate root. Tenancy continues to re-export from these so existing callers are unaffected.
+- **Runnable demo**: [`examples/gfk_demo`](crates/rustango/examples/gfk_demo) exercises every GFK surface end-to-end on SQLite. `cargo run -p rustango --example gfk_demo --features sqlite,admin,runserver`, then visit `http://localhost:8080/` (login `admin / admin`).
+
+Closes epics #246 + #253. ~3000 LOC across 13 PRs.
 
 ### What's new in v0.38.0 (May 2026) — every feature, every backend
 
@@ -954,8 +972,8 @@ or SQLite at runtime via the connection URL.
 ```toml
 # Cargo.toml — opt in to MySQL or SQLite alongside (or instead of)
 # the default postgres feature
-rustango = { version = "0.39", features = ["mysql"] }
-rustango = { version = "0.39", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
+rustango = { version = "0.40", features = ["mysql"] }
+rustango = { version = "0.40", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
 ```
 
 ```rust
@@ -2653,16 +2671,16 @@ The default features cover everything most apps need. Trim them when shipping a 
 
 ```toml
 # Default — everything except tenancy + cache-redis
-rustango = "0.39"
+rustango = "0.40"
 
 # Multi-tenant
-rustango = { version = "0.39", features = ["tenancy"] }
+rustango = { version = "0.40", features = ["tenancy"] }
 
 # With Redis cache
-rustango = { version = "0.39", features = ["cache-redis"] }
+rustango = { version = "0.40", features = ["cache-redis"] }
 
 # Bare ORM only (no admin, no forms, no email, no storage)
-rustango = { version = "0.39", default-features = false, features = ["postgres"] }
+rustango = { version = "0.40", default-features = false, features = ["postgres"] }
 ```
 
 | Feature | What it adds | On by default? |
