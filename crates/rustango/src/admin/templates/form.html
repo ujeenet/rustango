@@ -82,10 +82,10 @@
     </section>
   {% endfor %}
 {% endif %}
-  <p class="form-submit-row">
-    <button type="submit" name="_save">Save</button>
-    <button type="submit" name="_continue">Save and continue editing</button>
-    <button type="submit" name="_addanother">Save and add another</button>
-  </p>
+  <div class="action-row form-submit-row">
+    <button type="submit" name="_save" class="btn btn-primary">Save</button>
+    <button type="submit" name="_continue" class="btn btn-secondary">Save and continue editing</button>
+    <button type="submit" name="_addanother" class="btn btn-secondary">Save and add another</button>
+  </div>
 </form>
 {% endblock body %}

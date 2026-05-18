@@ -27,7 +27,8 @@
                                     {% for cell in row.cells %}<td>{{ cell.value | safe }}</td>{% endfor %}
                                     <td>
                                         {% if row.pk %}
-                                            <a href="{{ admin_prefix }}/{{ panel.child_table }}/{{ row.pk }}">View</a>
+                                            <a class="btn-row-action"
+                                               href="{{ admin_prefix }}/{{ panel.child_table }}/{{ row.pk }}">View</a>
                                         {% endif %}
                                     </td>
                                 </tr>
@@ -40,7 +41,8 @@
                         <fieldset class="inline-stacked">
                             <legend>
                                 {% if row.pk %}
-                                    <a href="{{ admin_prefix }}/{{ panel.child_table }}/{{ row.pk }}">#{{ row.pk }}</a>
+                                    <a class="btn-row-action"
+                                       href="{{ admin_prefix }}/{{ panel.child_table }}/{{ row.pk }}">#{{ row.pk }}</a>
                                 {% else %}
                                     Row
                                 {% endif %}
