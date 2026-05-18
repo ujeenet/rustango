@@ -109,16 +109,28 @@ impl AppBuilder {
         use crate::migrate::ddl;
         let dialect = self.pool.dialect();
         for schema in schemas {
-            let sql = ddl::create_table_sql_with_dialect(dialect, schema);
+            let mut sql = ddl::create_table_sql_with_dialect(dialect, schema);
+            // v0.45 — make `bootstrap` idempotent so a second run
+            // against the same SQLite file (the common dev-restart
+            // shape) doesn't panic with "table already exists".
+            // All three supported dialects (PG, MySQL, SQLite)
+            // accept `CREATE TABLE IF NOT EXISTS`.
+            if let Some(rest) = sql.strip_prefix("CREATE TABLE ") {
+                sql = format!("CREATE TABLE IF NOT EXISTS {rest}");
+            }
             raw_execute_pool(&self.pool, &sql, vec![]).await?;
         }
         // SQLite parser rejects ALTER TABLE … ADD CONSTRAINT FOREIGN
         // KEY — FK constraints have to be declared inline at CREATE
         // TABLE time. Skip the FK loop on SQLite.
+        // On PG / MySQL, the ALTER TABLE ADD CONSTRAINT statements
+        // emitted here aren't idempotent. Wrap each in a best-effort
+        // attempt so a redundant bootstrap doesn't fail; the migration
+        // path remains the source of truth for schema correctness.
         if dialect.name() != "sqlite" {
             for schema in schemas {
                 for sql in ddl::create_constraints_sql_with_dialect(dialect, schema) {
-                    raw_execute_pool(&self.pool, &sql, vec![]).await?;
+                    let _ = raw_execute_pool(&self.pool, &sql, vec![]).await;
                 }
             }
         }
