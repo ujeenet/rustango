@@ -44,12 +44,12 @@
                 {% endif %}
                 {% if session_user.is_superuser %}<small>(superuser)</small>{% endif %}
             </p>
-            {% if change_password_url %}
-                <p class="account-links">
-                    <a href="{{ admin_prefix }}{{ change_password_url }}">Change password</a>
-                </p>
-            {% endif %}
-            <button type="submit">Logout</button>
+            <div class="action-row">
+                {% if change_password_url %}
+                    <a class="btn btn-link" href="{{ admin_prefix }}{{ change_password_url }}">Change password</a>
+                {% endif %}
+                <button type="submit" class="btn btn-secondary">Logout</button>
+            </div>
         </form>
     {% endif %}
 </aside>

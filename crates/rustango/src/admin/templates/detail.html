@@ -32,15 +32,15 @@
             <em>This table is read-only.</em>
         </p>
     {% else %}
-        <p>
-            <a href="{{ admin_prefix }}/{{ model.table }}/{{ pk }}/edit">Edit</a> &middot;
+        <div class="action-row">
+            <a class="btn btn-primary"
+               href="{{ admin_prefix }}/{{ model.table }}/{{ pk }}/edit">Edit</a>
             <form method="post"
                   action="{{ admin_prefix }}/{{ model.table }}/{{ pk }}/delete"
-                  style="display:inline"
                   onsubmit="return confirm('Delete this row?')">
-                <button type="submit">Delete</button>
+                <button type="submit" class="btn btn-danger">Delete</button>
             </form>
-        </p>
+        </div>
     {% endif %}
     {% include "_inline_panels.html" %}
     {% if user_roles_panel %}
