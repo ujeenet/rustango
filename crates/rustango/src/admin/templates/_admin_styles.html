@@ -157,7 +157,15 @@ input:invalid + small, textarea:invalid + small { color: var(--color-error-fg); 
    modifier class.
    ------------------------------------------------------------------ */
 
-.btn, button:not(.theme-toggle):not([data-rustango-theme-toggle]) {
+/* Button + button-like-anchor baseline. `.btn, button` as a
+   selector list — each selector takes its own specificity
+   (`button` = 0,0,1; `.btn` = 0,1,0). The variant classes below
+   are also 0,1,0 and declared later, so they win by source order
+   for any property they re-declare. No `:not()` negations needed
+   (and the previous `button:not(.theme-toggle)` shape was the bug
+   that out-specified `.btn-secondary`). `.theme-toggle` (0,1,0)
+   declared later in the file overrides this for the theme switcher. */
+.btn, button {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
@@ -171,38 +179,40 @@ input:invalid + small, textarea:invalid + small { color: var(--color-error-fg); 
   text-decoration: none;
   line-height: 1.2;
 }
-.btn:hover, button:not(.theme-toggle):not([data-rustango-theme-toggle]):hover {
-  background: var(--color-bg-hover);
-}
+.btn:hover, button:hover { background: var(--color-bg-hover); }
 .btn:focus-visible, button:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
-.btn-primary, button.btn-primary {
+
+/* Variants — same specificity as `.btn` (0,1,0), declared later so
+   source order wins. Each variant overrides the surface color +
+   border-color + text color. */
+.btn-primary {
   background: var(--color-accent);
   color: var(--color-fg-on-accent, #fff);
   border-color: var(--color-accent);
 }
-.btn-primary:hover, button.btn-primary:hover {
+.btn-primary:hover {
   background: var(--color-accent-hover);
   border-color: var(--color-accent-hover);
   color: var(--color-fg-on-accent, #fff);
 }
-.btn-secondary, button.btn-secondary {
+.btn-secondary {
   background: transparent;
   color: var(--color-accent);
   border-color: var(--color-accent);
 }
-.btn-secondary:hover, button.btn-secondary:hover {
+.btn-secondary:hover {
   background: var(--color-accent-bg-soft);
   color: var(--color-accent);
 }
-.btn-danger, button.btn-danger {
+.btn-danger {
   background: transparent;
   color: var(--color-error-fg, #b04141);
   border-color: var(--color-error-fg, #b04141);
 }
-.btn-danger:hover, button.btn-danger:hover {
+.btn-danger:hover {
   background: var(--color-error-fg, #b04141);
   color: #fff;
 }
