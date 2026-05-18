@@ -330,6 +330,13 @@ async fn logout_submit(State(state): State<AppState>) -> Response {
 pub(crate) struct SessionGate {
     pub(crate) secret: Arc<AdminSessionSecret>,
     pub(crate) login_path: String,
+    /// #253 slice C — when `true`, non-superuser sessions are
+    /// rejected with a 403 page. Default for the bare admin; mirrors
+    /// Django's `is_staff` requirement (the bare admin has no
+    /// per-model permission system yet, so the only access tier is
+    /// "superuser"). Future epics layering in real permissions can
+    /// flip this off and consult a `user_perms` set instead.
+    pub(crate) require_superuser: bool,
 }
 
 /// Gate every admin request behind a valid session cookie. The
@@ -338,7 +345,10 @@ pub(crate) struct SessionGate {
 /// `/__static__/...` also pass through.
 ///
 /// On valid session: inserts `Extension<AdminSession>` into the
-/// request so handlers can read the current user.
+/// request so handlers can read the current user. When
+/// `gate.require_superuser` is set (the bare-admin default), a
+/// non-superuser session is rejected with a 403 page — Django's
+/// "must be staff to access /admin" shape.
 pub(crate) async fn require_session(
     State(gate): State<SessionGate>,
     mut request: Request<Body>,
@@ -350,6 +360,13 @@ pub(crate) async fn require_session(
     }
 
     if let Some(session) = read_session_cookie(&request, &gate.secret) {
+        if gate.require_superuser && !session.is_superuser {
+            // #253 slice C — render a 403 inline rather than redirect
+            // to /login, so the operator gets a clear "you are signed
+            // in but not allowed here" signal instead of an infinite
+            // login → 403 → login loop.
+            return forbidden_page(&session);
+        }
         request.extensions_mut().insert(session.clone());
         // Scope the task-local so `chrome_context` (deep in the
         // template render stack) can read it without every handler
@@ -362,6 +379,49 @@ pub(crate) async fn require_session(
     // No valid session — bounce to the login form. Use 303 See Other
     // so the GET semantics are preserved (browsers follow with GET).
     Redirect::to(&gate.login_path).into_response()
+}
+
+/// #253 slice C — minimal 403 page for non-superuser sessions. Plain
+/// HTML, no chrome (chrome rendering needs the same auth gate to
+/// have already passed). The body invites the operator to contact
+/// their administrator and offers a link to sign out + back to
+/// login.
+fn forbidden_page(session: &AdminSession) -> Response {
+    // Tiny inline escape — the page renders BEFORE the admin chrome
+    // (the gate fires before `next.run`), so we can't reach the
+    // chrome's `render::escape` helper without rebuilding state.
+    let mut username = String::with_capacity(session.username.len());
+    for ch in session.username.chars() {
+        match ch {
+            '&' => username.push_str("&amp;"),
+            '<' => username.push_str("&lt;"),
+            '>' => username.push_str("&gt;"),
+            '"' => username.push_str("&quot;"),
+            '\'' => username.push_str("&#39;"),
+            other => username.push(other),
+        }
+    }
+    let body = format!(
+        "<!doctype html>\
+         <html><head><title>Forbidden</title>\
+         <style>body{{font-family:system-ui;max-width:42em;margin:4em auto;padding:0 1em;line-height:1.5}}\
+         h1{{font-size:1.4em}}\
+         .meta{{color:#666;font-size:.9em}}\
+         </style></head><body>\
+         <h1>403 — Admin access required</h1>\
+         <p>You are signed in as <strong>{username}</strong>, but only \
+         superusers can use the admin.</p>\
+         <p class=\"meta\">Ask your administrator to grant superuser \
+         status, or sign out below if this isn't the account you \
+         intended to use.</p>\
+         <form method=\"post\" action=\"/logout\">\
+           <button type=\"submit\">Sign out</button>\
+         </form>\
+         </body></html>"
+    );
+    let mut resp = Html(body).into_response();
+    *resp.status_mut() = StatusCode::FORBIDDEN;
+    resp
 }
 
 fn read_session_cookie(req: &Request<Body>, secret: &AdminSessionSecret) -> Option<AdminSession> {

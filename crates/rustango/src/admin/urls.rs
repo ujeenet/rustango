@@ -652,6 +652,10 @@ impl Builder {
                 } else {
                     format!("{admin_prefix}/login")
                 },
+                // #253 slice C — superuser-only by default. Future
+                // permission-system epics will add a builder knob
+                // to flip this off and consult `user_perms` instead.
+                require_superuser: true,
             };
             // Account routes layer on the *inside* of the auth
             // middleware — they require a valid session, just like

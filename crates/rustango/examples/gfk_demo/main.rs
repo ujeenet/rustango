@@ -68,10 +68,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     seed::run(&pool).await?;
 
     // #253 — opt into signed-cookie session auth. The signing key
-    // is loaded from `RUSTANGO_SESSION_SECRET` (production path) or
-    // generated randomly for dev. Pair with the admin user seeded
-    // by `seed::run` (default credentials: admin / admin).
-    let secret = SessionSecret::from_env_or_random();
+    // is loaded in this priority order:
+    //
+    //   1. `RUSTANGO_SESSION_SECRET` env var (production path).
+    //   2. `./var/.rustango_admin_session.key` if present
+    //      (persistent dev path — sessions survive `cargo run`
+    //      reloads).
+    //   3. Newly-generated random key + atomic write to (2) so
+    //      the next boot reuses it.
+    //
+    // Pair with the admin user seeded by `seed::run` (default
+    // credentials: admin / admin).
+    let secret =
+        SessionSecret::from_env_or_disk(std::path::Path::new("./var/.rustango_admin_session.key"));
     let admin = rustango::admin::Builder::new(pool)
         .admin_prefix("")
         .with_session_auth(secret)
