@@ -23,6 +23,43 @@ use super::render;
 use super::templates::render_with_chrome;
 use super::urls::AppState;
 
+/// Render a single GFK cell — reads `(ct_column, pk_column)` off the
+/// JSON row and emits a clickable target link using the preloaded
+/// ContentType map. Mirrors `contenttypes::render_generic_fk_link`'s
+/// output shape, but synchronous — the caller (list view) batch-loads
+/// every distinct CT touched on the page before entering the per-row
+/// loop, so this helper is hot-path with no further DB I/O. Issue #241.
+fn render_gfk_cell(
+    row: &serde_json::Value,
+    gr: &crate::core::GenericRelation,
+    ct_map: &HashMap<i64, crate::contenttypes::ContentType>,
+) -> String {
+    let ct_id = row
+        .get(gr.ct_column)
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_default();
+    let object_pk = row
+        .get(gr.pk_column)
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_default();
+    if ct_id == 0 && object_pk == 0 {
+        return "<em>NULL</em>".to_owned();
+    }
+    let Some(ct) = ct_map.get(&ct_id) else {
+        // CT stale / not seeded — same fallback `render_generic_fk_link` uses.
+        return format!("<em>(ct={ct_id}, pk={object_pk})</em>");
+    };
+    let label = format!("{}.{}", ct.app_label, ct.model_name);
+    let table_esc = render::escape(&ct.table);
+    let label_esc = render::escape(&label);
+    format!(
+        r#"<a href="/{table}/{pk}">{label} #{pk}</a>"#,
+        table = table_esc,
+        pk = object_pk,
+        label = label_esc,
+    )
+}
+
 // ============================================================== INDEX
 
 pub(crate) async fn index(State(state): State<AppState>) -> Html<String> {
@@ -286,13 +323,17 @@ pub(crate) async fn table_view(
     // 2. a registered computed field for this table (the
     //    `register_admin_computed!` path — receives the row and returns
     //    HTML),
+    // 3. a `#[rustango(generic_fk(name = "…"))]` declaration (#241) —
+    //    the `(ct_column, pk_column)` pair collapses into a single
+    //    clickable target link.
     //
-    // Names that match neither are silently dropped. Empty
+    // Names that match none are silently dropped. Empty
     // `list_display` falls back to every scalar field (today's
     // behavior).
     enum DisplayItem {
         Field(&'static FieldSchema),
         Computed(&'static crate::admin::computed_fields::ComputedField),
+        GenericFk(&'static crate::core::GenericRelation),
     }
     let display_items: Vec<DisplayItem> = if admin_cfg.list_display.is_empty() {
         model.scalar_fields().map(DisplayItem::Field).collect()
@@ -301,12 +342,52 @@ pub(crate) async fn table_view(
             .list_display
             .iter()
             .filter_map(|name| {
-                model.field(name).map(DisplayItem::Field).or_else(|| {
-                    crate::admin::computed_fields::find(model.table, name)
-                        .map(DisplayItem::Computed)
-                })
+                model
+                    .field(name)
+                    .map(DisplayItem::Field)
+                    .or_else(|| {
+                        crate::admin::computed_fields::find(model.table, name)
+                            .map(DisplayItem::Computed)
+                    })
+                    .or_else(|| {
+                        model
+                            .generic_relations
+                            .iter()
+                            .find(|gr| gr.name == *name)
+                            .map(DisplayItem::GenericFk)
+                    })
             })
             .collect()
+    };
+
+    // #241 — preload every ContentType referenced by any
+    // `DisplayItem::GenericFk` cell so the row loop renders synchronously
+    // from a `HashMap<ct_id, ContentType>` instead of issuing an async
+    // CT lookup per cell. CT registry is process-cached, so this is
+    // usually a single DB round-trip per distinct ct_id (often just
+    // one for a homogeneous page).
+    let gfk_ct_map: std::collections::HashMap<i64, crate::contenttypes::ContentType> = {
+        use std::collections::HashSet;
+        let mut needed: HashSet<i64> = HashSet::new();
+        for gr in model.generic_relations {
+            if display_items
+                .iter()
+                .any(|i| matches!(i, DisplayItem::GenericFk(g) if g.name == gr.name))
+            {
+                for row in &rows {
+                    if let Some(id) = row.get(gr.ct_column).and_then(serde_json::Value::as_i64) {
+                        needed.insert(id);
+                    }
+                }
+            }
+        }
+        let mut map = std::collections::HashMap::with_capacity(needed.len());
+        for id in needed {
+            if let Ok(Some(ct)) = crate::contenttypes::ContentType::by_id(&state.pool, id).await {
+                map.insert(id, ct);
+            }
+        }
+        map
     };
 
     // Per-column header label. Scalar columns get a `<small>(pk)</small>`
@@ -326,6 +407,7 @@ pub(crate) async fn table_view(
                 DisplayItem::Computed(m) => {
                     render::escape(if m.label.is_empty() { m.name } else { m.label })
                 }
+                DisplayItem::GenericFk(gr) => render::escape(gr.name),
             };
             serde_json::json!({ "label": label })
         })
@@ -346,6 +428,7 @@ pub(crate) async fn table_view(
                 .map(|item| match item {
                     DisplayItem::Field(f) => render_cell_json(row, f, &fk_map),
                     DisplayItem::Computed(m) => (m.render)(row),
+                    DisplayItem::GenericFk(gr) => render_gfk_cell(row, gr, &gfk_ct_map),
                 })
                 .collect();
             let pk =
