@@ -1022,17 +1022,21 @@ pub(crate) async fn detail_view(
     // a fetch error on one panel (e.g. the child table doesn't exist
     // yet on this tenant) drops the panels list to empty rather than
     // taking down the whole detail page.
-    let inline_panels_ctx: Vec<serde_json::Value> =
-        super::inlines::render_for_parent(&state.pool, model, pk_value)
-            .await
-            .ok()
-            .map(|panels| {
-                panels
-                    .into_iter()
-                    .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null))
-                    .collect()
-            })
-            .unwrap_or_default();
+    //
+    // #242 — generic (ContentType-keyed) inlines are appended after the
+    // regular FK inlines, in registration order. Mirrors Django's
+    // `GenericTabularInline` shape.
+    let mut inline_panels = super::inlines::render_for_parent(&state.pool, model, pk_value.clone())
+        .await
+        .unwrap_or_default();
+    let generic_panels = super::inlines::render_generic_for_parent(&state.pool, model, pk_value)
+        .await
+        .unwrap_or_default();
+    inline_panels.extend(generic_panels);
+    let inline_panels_ctx: Vec<serde_json::Value> = inline_panels
+        .into_iter()
+        .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null))
+        .collect();
 
     // v0.12.2: Audit trail panel for this row. Best-effort — if the
     // audit table doesn't exist yet (project hasn't called
