@@ -47,14 +47,21 @@ aside.sidebar h3 {
 }
 aside.sidebar ul { list-style: none; padding: 0; margin: 0; }
 aside.sidebar li { margin: 0.15rem 0; }
-aside.sidebar a {
+/* Sidebar nav links — Home / Activity / model items. The
+   `:not(.btn)` carve-out keeps `.btn` / `.btn-link` family
+   members (Change password, Logout's POST button, etc.) from
+   inheriting the block layout + neutral color, so they render
+   with their own variant styling instead. */
+aside.sidebar a:not(.btn):not(.btn-link):not(.btn-row-action) {
   display: block;
   padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-sm);
   color: var(--color-fg);
   text-decoration: none;
 }
-aside.sidebar a:hover { background: var(--color-bg-hover); }
+aside.sidebar a:not(.btn):not(.btn-link):not(.btn-row-action):hover {
+  background: var(--color-bg-hover);
+}
 aside.sidebar a.active {
   background: var(--color-bg-surface);
   color: var(--color-accent);
