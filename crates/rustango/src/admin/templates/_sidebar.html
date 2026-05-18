@@ -10,11 +10,10 @@
         <a href="{{ admin_prefix }}{{ audit_url }}"
            class="{% if active_table == '__audit' %}active{% endif %}">Activity</a>
     </p>
-    {% if change_password_url %}
-        <p>
-            <a href="{{ change_password_url }}">Change password</a>
-        </p>
-    {% endif %}
+    {# #253 follow-up — Change-password link moved into the
+       Logout form at the bottom of the sidebar to keep all
+       account actions in one place. The old standalone <p>
+       link above the model list is intentionally removed. #}
     {% if sidebar_groups %}
         {% for group in sidebar_groups %}
             <h3>{{ group.app }}</h3>

@@ -202,14 +202,42 @@ fieldset.section th {
   border-color: var(--color-accent);
 }
 .btn-primary:hover { background: var(--color-accent-hover); border-color: var(--color-accent-hover); }
+/* #253 follow-up — secondary + danger variants synced from the
+   admin's `.btn` family so the same class names render identically
+   on both consoles. */
+.btn-secondary {
+  background: transparent;
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.btn-secondary:hover {
+  background: var(--color-accent-bg-soft);
+  color: var(--color-accent);
+}
+.btn-danger {
+  background: transparent;
+  color: var(--color-error-fg, #b04141);
+  border-color: var(--color-error-fg, #b04141);
+}
+.btn-danger:hover {
+  background: var(--color-error-fg, #b04141);
+  color: #fff;
+}
+/* #253 follow-up — synced with admin's `.btn-link` so the same
+   element renders identically on both consoles. Previously this
+   used `--color-fg-muted` (too low-contrast on the warm beige
+   sidebar surface — operators complained the link was nearly
+   invisible). Accent gives high contrast in both themes and
+   matches the rest of the chrome's link style. */
 .btn-link {
-  color: var(--color-fg-muted);
+  color: var(--color-accent);
   text-decoration: none;
   font-size: 13px;
   background: transparent;
   border: 0;
+  font-weight: var(--font-weight-medium, 500);
 }
-.btn-link:hover { color: var(--color-accent); text-decoration: underline; }
+.btn-link:hover { color: var(--color-accent-hover); text-decoration: underline; }
 /* Inline action button in tables (#75). Pill-shaped, accent-tinted,
    doesn't compete visually with the row data. */
 .btn-row-action {
@@ -218,9 +246,12 @@ fieldset.section th {
   border-radius: var(--radius-sm);
   background: var(--color-accent-bg-soft);
   color: var(--color-accent);
-  font-size: 12px;
+  /* #253 follow-up — relative size (matches admin's `.btn-row-action`)
+     so both consoles inherit from their context uniformly. */
+  font-size: 0.85em;
   text-decoration: none;
   border: 1px solid transparent;
+  line-height: 1.4;
 }
 .btn-row-action:hover {
   background: var(--color-accent);

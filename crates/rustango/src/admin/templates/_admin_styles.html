@@ -203,10 +203,16 @@ input:invalid + small, textarea:invalid + small { color: var(--color-error-fg); 
   background: transparent;
   border: 0;
   padding: 0.4rem 0;
-  color: var(--color-link, var(--color-accent));
+  /* Use accent for high contrast in both themes. Previously used
+     `--color-link` which is too muted on the warm beige sidebar
+     surface, and `--color-fg-muted` (op console's prior shape) was
+     even worse. Accent is the same color the rest of the chrome
+     uses for active links. */
+  color: var(--color-accent);
   text-decoration: none;
+  font-weight: var(--font-weight-medium, 500);
 }
-.btn-link:hover { color: var(--color-link-hover, var(--color-accent-hover)); text-decoration: underline; }
+.btn-link:hover { color: var(--color-accent-hover); text-decoration: underline; }
 .btn-row-action {
   display: inline-block;
   padding: 0.2rem 0.7rem;
