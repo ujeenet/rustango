@@ -58,6 +58,22 @@ pub(crate) fn inventory_entries_dedup_by_table() -> Vec<&'static ModelEntry> {
 /// the config — they're set per-request by the tenancy admin from
 /// the resolved [`crate::tenancy::Org`].
 pub(crate) fn chrome_context(state: &AppState, active_table: Option<&str>) -> serde_json::Value {
+    // #253 slice B — pick up the request-scoped AdminSession via
+    // the task-local installed by `require_session`. Falling back
+    // to `None` when called outside an admin request keeps
+    // non-admin chrome callers (tests, hand-rendered pages) working.
+    let session = super::session::current();
+    chrome_context_with_session(state, active_table, session.as_ref())
+}
+
+/// As [`chrome_context`] but takes an explicit `Option<&AdminSession>`.
+/// Used by tests and any path that has the session in hand directly
+/// (without going through the task-local). #253 slice B.
+pub(crate) fn chrome_context_with_session(
+    state: &AppState,
+    active_table: Option<&str>,
+    session: Option<&super::session::AdminSession>,
+) -> serde_json::Value {
     let admin_title = state.config.title.as_deref().unwrap_or("Rustango Admin");
     let brand_name = state.config.brand_name.as_deref().unwrap_or(admin_title);
     let brand_tagline = state
@@ -103,15 +119,21 @@ pub(crate) fn chrome_context(state: &AppState, active_table: Option<&str>) -> se
         // `session_user` is non-null. Tenancy admins thread their
         // own session info through a parallel path; this signal is
         // only set when the bare admin's `with_session_auth` is on.
-        "session_user": if state.config.session_secret.is_some() {
-            // Per-user info (username, is_superuser) is Slice B
-            // — Slice A just renders the Logout button. The
-            // `authenticated: true` marker keeps Tera's `{% if
-            // session_user %}` evaluation truthy (Tera treats
-            // empty objects as falsy).
-            serde_json::json!({ "authenticated": true })
-        } else {
-            serde_json::Value::Null
+        // #253 slice B — per-user chrome info. When a request-bound
+        // `AdminSession` is available the sidebar renders "Signed in
+        // as <username>" + the (superuser) badge. When session auth
+        // is configured but no session was threaded (e.g. older
+        // callers using the bare `chrome_context`), fall back to
+        // just `authenticated: true` so the Logout button still
+        // renders.
+        "session_user": match (session, state.config.session_secret.is_some()) {
+            (Some(s), _) => serde_json::json!({
+                "authenticated": true,
+                "username": s.username,
+                "is_superuser": s.is_superuser,
+            }),
+            (None, true) => serde_json::json!({ "authenticated": true }),
+            (None, false) => serde_json::Value::Null,
         },
     })
 }

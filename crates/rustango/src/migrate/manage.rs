@@ -116,6 +116,12 @@ pub async fn run_with_writer<W: Write + Send>(
         "loaddata" => loaddata_cmd(pool, &args[1..], writer).await,
         "showurls" => showurls_cmd(&args[1..], writer),
         "showmodels" => showmodels_cmd(&args[1..], writer),
+        // #253 slice B — bootstrap an AdminUser row for projects
+        // using `admin::Builder::with_session_auth`. Only compiled
+        // when the `admin` feature is on; without it, fall through
+        // to the unknown-subcommand error.
+        #[cfg(feature = "admin")]
+        "create-admin" => crate::admin::create_admin_cmd(pool, &args[1..], writer).await,
         "flush" => flush_cmd(pool, &args[1..], writer).await,
         "sendtestemail" => sendtestemail_cmd(&args[1..], writer).await,
         // v0.38 — `inspectdb` is tri-dialect: PG + MySQL via

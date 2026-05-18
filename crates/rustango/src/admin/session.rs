@@ -21,6 +21,23 @@ use subtle::ConstantTimeEq;
 use crate::session::sign;
 pub use crate::session::SessionSecret as AdminSessionSecret;
 
+tokio::task_local! {
+    /// Per-request session set by the `require_session` middleware
+    /// so deep-stack helpers (chrome context, audit emit, …) can
+    /// read the current user without every handler threading
+    /// `Option<Extension<AdminSession>>` through its arg list.
+    /// Cleared by tokio when the scoped future completes.
+    pub(crate) static CURRENT_SESSION: AdminSession;
+}
+
+/// Read the current request's session, if the middleware installed
+/// one. Returns `None` outside an admin request (the task-local was
+/// never scoped) or when the request is unauthenticated.
+#[must_use]
+pub fn current() -> Option<AdminSession> {
+    CURRENT_SESSION.try_with(|s| s.clone()).ok()
+}
+
 /// Default session TTL — 8 hours. Operators get re-prompted once a
 /// workday. Future slice exposes this as a knob on
 /// [`crate::admin::Builder`].
@@ -34,10 +51,14 @@ pub(crate) const SESSION_COOKIE: &str = "rustango_admin_session";
 /// request extension on every authenticated request. Use as an
 /// extractor on admin-side handlers if you need to know who's
 /// signed in.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminSession {
     /// Primary key of the [`AdminUser`](super::user::AdminUser) row.
     pub user_id: i64,
+    /// Username of the logged-in admin, cached on the cookie so the
+    /// chrome can render "Signed in as <username>" without a DB hit
+    /// per request. Added in slice B (#253).
+    pub username: String,
     /// `true` when the user's `is_superuser` flag was set at
     /// login time. Cached on the cookie so the visibility check
     /// in the chrome doesn't need a DB hit per request.
@@ -49,6 +70,7 @@ pub struct AdminSession {
 #[derive(Serialize, Deserialize)]
 struct CookiePayload {
     user_id: i64,
+    username: String,
     is_superuser: bool,
     /// Unix timestamp the session expires at.
     exp: i64,
@@ -66,6 +88,7 @@ impl CookiePayload {
 pub(crate) fn encode(secret: &AdminSessionSecret, session: AdminSession) -> String {
     let payload = CookiePayload {
         user_id: session.user_id,
+        username: session.username,
         is_superuser: session.is_superuser,
         exp: chrono::Utc::now().timestamp() + DEFAULT_TTL_SECS,
     };
@@ -101,6 +124,7 @@ pub(crate) fn decode(secret: &AdminSessionSecret, value: &str) -> Option<AdminSe
     }
     Some(AdminSession {
         user_id: payload.user_id,
+        username: payload.username,
         is_superuser: payload.is_superuser,
     })
 }
@@ -116,6 +140,7 @@ mod tests {
             &secret,
             AdminSession {
                 user_id: 7,
+                username: "alice".into(),
                 is_superuser: true,
             },
         );
@@ -131,6 +156,7 @@ mod tests {
             &secret,
             AdminSession {
                 user_id: 1,
+                username: "bob".into(),
                 is_superuser: false,
             },
         );
@@ -147,6 +173,7 @@ mod tests {
             &secret_a,
             AdminSession {
                 user_id: 1,
+                username: "bob".into(),
                 is_superuser: false,
             },
         );
