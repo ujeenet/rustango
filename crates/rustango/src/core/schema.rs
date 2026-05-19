@@ -317,6 +317,16 @@ pub struct IndexSchema {
     /// specified. Selects the `USING <method>` clause emitted by
     /// the DDL writer. Issue #34.
     pub method: IndexMethod,
+    /// Optional `WHERE <expr>` clause for partial indexes — Django's
+    /// `UniqueConstraint(condition=Q(...))`. Issue #265 / T1.3.
+    /// `None` (default) emits a plain index. `Some(expr)` emits
+    /// `CREATE UNIQUE INDEX <name> ON <table> (cols) WHERE <expr>` on
+    /// PG / SQLite (both ship partial indexes natively); MySQL has no
+    /// native support and silently degrades to a plain UNIQUE index
+    /// with a doc-level warning (the SQL accepted; the partial filter
+    /// is ignored, so duplicates outside the partition would also be
+    /// rejected — document the limitation).
+    pub where_clause: Option<&'static str>,
 }
 
 /// Index access method — Postgres `CREATE INDEX … USING <method>`.

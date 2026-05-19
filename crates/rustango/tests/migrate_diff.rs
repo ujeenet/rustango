@@ -729,6 +729,7 @@ fn snap_with_index(name: &str, columns: &[&str], unique: bool) -> SchemaSnapshot
             columns: columns.iter().map(|s| (*s).into()).collect(),
             unique,
             method: "btree".into(),
+            where_clause: None,
         }],
         ..Default::default()
     }

@@ -255,6 +255,16 @@ pub trait Dialect {
         None
     }
 
+    /// Whether `CREATE [UNIQUE] INDEX ... WHERE <expr>` partial-index
+    /// syntax is supported. PG and SQLite (3.8+) both ship it natively;
+    /// MySQL has no equivalent (the migration writer drops the WHERE
+    /// clause + emits a warning so the rest of the migration still
+    /// applies). Default `true`; MySQL overrides to `false`. Issue
+    /// #265 / T1.3.
+    fn supports_partial_index(&self) -> bool {
+        true
+    }
+
     /// Dialect-specific SQL type token for the rhs of `CAST(<expr> AS <ty>)`
     /// — distinct from [`Self::null_cast`] (which is PG-specific) and
     /// [`Self::column_type`] (DDL, which includes lengths like

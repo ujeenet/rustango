@@ -763,6 +763,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     columns: vec![col_name],
                     unique: fa.index_unique,
                     method: fa.index_method,
+                    where_clause: None,
                 });
             }
         }
@@ -1704,12 +1705,17 @@ fn model_impl_tokens(
             "bloom" => quote!(::rustango::core::IndexMethod::Bloom),
             _ => quote!(::rustango::core::IndexMethod::BTree),
         };
+        let where_clause = match &idx.where_clause {
+            Some(s) => quote!(::core::option::Option::Some(#s)),
+            None => quote!(::core::option::Option::None),
+        };
         quote! {
             ::rustango::core::IndexSchema {
                 name: #name,
                 columns: &[ #(#cols),* ],
                 unique: #unique,
                 method: #method_variant,
+                where_clause: #where_clause,
             }
         }
     });
@@ -4231,6 +4237,10 @@ struct IndexAttr {
     /// the `USING` clause and the backend uses its own default
     /// (btree on every supported dialect).
     method: String,
+    /// Optional `WHERE <expr>` clause for partial indexes. Issue #265 /
+    /// T1.3. Set via `#[rustango(unique_when(columns = "...",
+    /// condition = "...", name = "..."))]`. `None` for plain indexes.
+    where_clause: Option<String>,
 }
 
 /// Parsed form of one `#[rustango(check(name = "…", expr = "…"))]` declaration.
@@ -4510,6 +4520,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     columns,
                     unique: true,
                     method: "btree".to_owned(),
+                    where_clause: None,
                 });
                 return Ok(());
             }
@@ -4525,6 +4536,65 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     columns,
                     unique: false,
                     method: "btree".to_owned(),
+                    where_clause: None,
+                });
+                return Ok(());
+            }
+            if meta.path.is_ident("unique_when") {
+                // Django 4.0+ `UniqueConstraint(condition=Q(...))` —
+                // partial unique index. Issue #265 / T1.3.
+                //
+                //   #[rustango(unique_when(
+                //       columns   = "email",
+                //       condition = "deleted_at IS NULL",
+                //       name      = "unique_active_email"
+                //   ))]
+                //
+                // → `CREATE UNIQUE INDEX <name> ON <table> (cols) WHERE <condition>`
+                // on PG / SQLite (both ship partial indexes natively).
+                // MySQL falls back to a plain UNIQUE index — the
+                // condition is lost; document the limitation in the
+                // generated migration.
+                let mut columns: Option<Vec<String>> = None;
+                let mut condition: Option<String> = None;
+                let mut name: Option<String> = None;
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("columns") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        columns = Some(split_field_list(&s.value()));
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("condition") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        condition = Some(s.value());
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("name") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        name = Some(s.value());
+                        return Ok(());
+                    }
+                    Err(inner.error(
+                        "unknown unique_when attribute (supported: \
+                         `columns = \"...\"`, `condition = \"...\"`, \
+                         `name = \"...\"`)",
+                    ))
+                })?;
+                let columns = columns.ok_or_else(|| {
+                    meta.error("`unique_when(...)` requires `columns = \"...\"`")
+                })?;
+                let condition = condition.ok_or_else(|| {
+                    meta.error("`unique_when(...)` requires `condition = \"...\"`")
+                })?;
+                if columns.is_empty() {
+                    return Err(meta.error("`unique_when(columns = \"\")` is empty"));
+                }
+                out.indexes.push(IndexAttr {
+                    name,
+                    columns,
+                    unique: true,
+                    method: "btree".to_owned(),
+                    where_clause: Some(condition),
                 });
                 return Ok(());
             }
@@ -4543,6 +4613,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     columns,
                     unique: false,
                     method: "btree".to_owned(),
+                    where_clause: None,
                 });
                 return Ok(());
             }

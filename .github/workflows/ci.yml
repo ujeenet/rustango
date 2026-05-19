@@ -170,6 +170,7 @@ jobs:
             --test tenant_extractor_sqlite_live \
             --test tenant_pools_sqlite_live \
             --test tx_methods_sqlite_live \
+            --test unique_when_sqlite_live \
             --test viewset_sqlite_live
 
   # v0.41 MySQL parity — the marketing claim is tri-dialect end-to-end
