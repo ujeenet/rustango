@@ -120,6 +120,14 @@ pub enum SchemaChange {
         /// compatible.
         #[serde(default = "default_index_method_diff")]
         method: String,
+        /// Optional partial-index `WHERE` clause — Django
+        /// `UniqueConstraint(condition=Q(...))`. Issue #265 / T1.3.
+        /// `None` for plain indexes; `Some(expr)` emits
+        /// `CREATE UNIQUE INDEX ... WHERE <expr>` on PG / SQLite.
+        /// MySQL has no partial-index syntax — the writer drops the
+        /// WHERE clause with a doc-level warning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        where_clause: Option<String>,
     },
     /// Drop an index by name.
     DropIndex {
@@ -288,6 +296,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
                 columns: idx.columns.clone(),
                 unique: idx.unique,
                 method: idx.method.clone(),
+                where_clause: idx.where_clause.clone(),
             });
         }
     }
@@ -311,6 +320,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
                 || prev_idx.unique != idx.unique
                 || prev_idx.table != idx.table
                 || prev_idx.method != idx.method
+                || prev_idx.where_clause != idx.where_clause
             {
                 changes.push(SchemaChange::DropIndex {
                     name: idx.name.clone(),
@@ -321,6 +331,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
                     columns: idx.columns.clone(),
                     unique: idx.unique,
                     method: idx.method.clone(),
+                    where_clause: idx.where_clause.clone(),
                 });
             }
         }
@@ -549,6 +560,7 @@ pub fn render_changes(
     let RenderedBatch {
         mut immediate,
         deferred_fks,
+        warnings: _,
     } = render_changes_split(changes, current)?;
     immediate.extend(deferred_fks);
     Ok(immediate)
@@ -570,6 +582,11 @@ pub struct RenderedBatch {
     /// for new tables in this batch. Run them after every other
     /// migration op has executed so the referenced tables exist.
     pub deferred_fks: Vec<String>,
+    /// Non-fatal advisories the writer surfaced during rendering —
+    /// e.g. "MySQL has no partial-index syntax; emitted plain UNIQUE
+    /// INDEX, add an application-level uniqueness check". Issue #265
+    /// / T1.3. Empty when there's nothing to flag.
+    pub warnings: Vec<String>,
 }
 
 /// Same as [`render_changes`] but keeps FK ALTER constraints in a
@@ -750,6 +767,7 @@ fn render_changes_split_inner(
                 columns,
                 unique,
                 method,
+                where_clause,
             } => {
                 let unique_kw = if *unique { "UNIQUE " } else { "" };
                 let if_not_exists = if dialect.supports_create_index_if_not_exists() {
@@ -767,8 +785,30 @@ fn render_changes_split_inner(
                 // don't support the method silently fall through to
                 // their default (btree); see `IndexMethod` docs.
                 let using = dialect.index_method_clause(method);
+                // Partial-index `WHERE <expr>` — issue #265 / T1.3.
+                // PG / SQLite ship native partial indexes; MySQL has
+                // no equivalent (the writer drops the clause + emits
+                // a warning so the rest of the migration still
+                // applies). The dialect controls inclusion.
+                let where_suffix = if let Some(expr) = where_clause {
+                    if dialect.supports_partial_index() {
+                        format!(" WHERE {expr}")
+                    } else {
+                        out.warnings.push(format!(
+                            "index {name:?} declares a partial WHERE \
+                             clause ({expr:?}); {} has no partial-index \
+                             syntax — emitting plain UNIQUE INDEX. Add \
+                             an application-level uniqueness check to \
+                             cover the partition.",
+                            dialect.name()
+                        ));
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
                 out.immediate.push(format!(
-                    "CREATE {unique_kw}INDEX {if_not_exists}{} ON {}{} ({cols})",
+                    "CREATE {unique_kw}INDEX {if_not_exists}{} ON {}{} ({cols}){where_suffix}",
                     dialect.quote_ident(name),
                     dialect.quote_ident(table),
                     using,

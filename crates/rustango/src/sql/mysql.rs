@@ -231,6 +231,17 @@ impl Dialect for MySql {
         false
     }
 
+    /// MySQL has no `CREATE INDEX ... WHERE <expr>` syntax. Issue #265
+    /// / T1.3. The migration writer drops the WHERE clause + surfaces
+    /// a warning so a partial-unique declaration still creates the
+    /// underlying UNIQUE index (just without the partial filter).
+    /// Document the limitation; users requiring strict partial
+    /// uniqueness on MySQL should add an application-level check or
+    /// a CHECK constraint over a generated column.
+    fn supports_partial_index(&self) -> bool {
+        false
+    }
+
     /// MySQL has no `ON CONFLICT`. The semantic equivalent is
     /// `ON DUPLICATE KEY UPDATE <col> = <col>` — a no-op write
     /// against an existing row that satisfies MySQL's requirement

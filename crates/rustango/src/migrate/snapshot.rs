@@ -52,6 +52,12 @@ pub struct IndexSnapshot {
     /// regular btree).
     #[serde(default = "default_index_method")]
     pub method: String,
+    /// Optional partial-index `WHERE <expr>` clause — Django's
+    /// `UniqueConstraint(condition=Q(...))`. Issue #265 / T1.3.
+    /// `None` (default) emits a plain index. Older snapshots without
+    /// this key deserialize cleanly via `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub where_clause: Option<String>,
 }
 
 fn default_index_method() -> String {
@@ -462,6 +468,7 @@ fn collect_indexes<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<In
                     columns: idx.columns.iter().map(|&c| c.to_owned()).collect(),
                     unique: idx.unique,
                     method: idx.method.as_str().to_owned(),
+                    where_clause: idx.where_clause.map(str::to_owned),
                 });
             }
         }

@@ -37,7 +37,10 @@ mod runner;
 pub mod scaffold;
 pub mod snapshot;
 
-pub use diff::{detect_changes, detect_unsupported_field_changes, render_changes, SchemaChange};
+pub use diff::{
+    detect_changes, detect_unsupported_field_changes, render_changes,
+    render_changes_split_with_dialect, RenderedBatch, SchemaChange,
+};
 pub use error::MigrateError;
 pub use file::{discover_migration_dirs, list_dirs, DataOp, Migration, MigrationScope, Operation};
 pub use invert::invert;
