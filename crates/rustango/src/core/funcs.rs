@@ -546,6 +546,134 @@ pub fn ts_rank_cd(vector: impl Into<Expr>, query: impl Into<Expr>) -> Expr {
     }
 }
 
+// ---------- DB functions batch 1 (issue #266 / T1.4) ----------
+
+/// `CAST(<expr> AS <ty>)` — explicit type coercion. The writer maps
+/// `ty` to the dialect-specific SQL type token via
+/// [`crate::sql::Dialect::null_cast`], so the same call emits the
+/// correct token on PG / MySQL / SQLite.
+///
+/// ```ignore
+/// use rustango::core::{funcs, FieldType, F};
+/// funcs::cast(F("amount"), FieldType::I64);
+/// // PG/MySQL/SQLite: CAST("amount" AS BIGINT|BIGINT|BIGINT)
+/// ```
+#[must_use]
+pub fn cast(expr: impl Into<Expr>, ty: super::field_type::FieldType) -> Expr {
+    Expr::Cast {
+        expr: Box::new(expr.into()),
+        ty,
+    }
+}
+
+/// `LPAD(s, len, fill)` — left-pad string `s` to `len` characters
+/// using `fill`. SQLite gets a `substr(printf(...))` fallback because
+/// the function isn't built-in.
+#[must_use]
+pub fn lpad(s: impl Into<Expr>, len: impl Into<Expr>, fill: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::LPad,
+        args: vec![s.into(), len.into(), fill.into()],
+    }
+}
+
+/// `RPAD(s, len, fill)` — right-pad. Mirror of [`lpad`].
+#[must_use]
+pub fn rpad(s: impl Into<Expr>, len: impl Into<Expr>, fill: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::RPad,
+        args: vec![s.into(), len.into(), fill.into()],
+    }
+}
+
+/// `MD5(s)` → hex string. PG `md5()` (built-in), MySQL `MD5()`
+/// (built-in). **SQLite errors** with `OpNotSupportedInDialect`.
+#[must_use]
+pub fn md5(s: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::Md5, s)
+}
+
+/// `SHA1(s)` → hex string. PG uses `pgcrypto`'s `digest()` (requires
+/// `CREATE EXTENSION pgcrypto`), MySQL `SHA1()`. **SQLite errors**.
+#[must_use]
+pub fn sha1(s: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::Sha1, s)
+}
+
+/// `SHA256(s)` → hex string. PG uses `pgcrypto`'s `digest()`, MySQL
+/// `SHA2(s, 256)`. **SQLite errors**.
+#[must_use]
+pub fn sha256(s: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::Sha256, s)
+}
+
+/// `POSITION(needle IN hay)` (PG) / `LOCATE(needle, hay)` (MySQL) /
+/// `INSTR(hay, needle)` (SQLite). All return the 1-indexed position
+/// of the first occurrence, or 0 if not found.
+///
+/// Argument order is `(needle, hay)` to match Django's `StrIndex`;
+/// the SQLite writer swaps for the native `INSTR(hay, needle)` shape.
+#[must_use]
+pub fn position(needle: impl Into<Expr>, hay: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::Position,
+        args: vec![needle.into(), hay.into()],
+    }
+}
+
+/// `REPEAT(s, n)` — repeat string `s`, `n` times. SQLite emits a
+/// `replace(printf(...))` workaround because the function isn't native.
+#[must_use]
+pub fn repeat(s: impl Into<Expr>, n: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::Repeat,
+        args: vec![s.into(), n.into()],
+    }
+}
+
+/// `REVERSE(s)` — reverse a string. PG and MySQL native;
+/// **SQLite errors** (no built-in).
+#[must_use]
+pub fn reverse(s: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::Reverse, s)
+}
+
+/// `SIGN(x)` → -1, 0, or 1. PG/MySQL native; SQLite emits a CASE
+/// expression with equivalent semantics.
+#[must_use]
+pub fn sign(x: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::Sign, x)
+}
+
+/// `a % b` — modulo. Lowered to [`Expr::BinOp`] with [`super::expr::BinOp::Mod`]
+/// rather than a function call, because every dialect uses the same
+/// `%` operator. The function-shape spelling is provided to match the
+/// Django `Mod(F('a'), F('b'))` ergonomics.
+#[must_use]
+pub fn mod_(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
+    a.into().binop(super::expr::BinOp::Mod, b)
+}
+
+/// `POWER(a, b)` — `a` raised to the `b`th. PG/MySQL native. **SQLite
+/// errors** unless the library was built with `SQLITE_ENABLE_MATH_FUNCTIONS`
+/// (sqlx-sqlite's default build does not enable this) — the writer
+/// surfaces `OpNotSupportedInDialect` rather than producing a runtime
+/// `no such function: POWER` error.
+#[must_use]
+pub fn power(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::Power,
+        args: vec![a.into(), b.into()],
+    }
+}
+
+/// `SQRT(x)` — square root. PG/MySQL native; SQLite same build-flag
+/// caveat as [`power`].
+#[must_use]
+pub fn sqrt(x: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::Sqrt, x)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

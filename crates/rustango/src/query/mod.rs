@@ -1541,6 +1541,7 @@ fn validate_expr_columns_in_model(
             }
             Ok(())
         }
+        Expr::Cast { expr: inner, .. } => validate_expr_columns_in_model(model, inner),
         Expr::Case { branches, default } => {
             for b in branches {
                 b.condition.validate(model)?;

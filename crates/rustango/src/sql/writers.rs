@@ -1062,6 +1062,22 @@ fn write_expr(
             Ok(())
         }
         Expr::Function { kind, args } => write_function(b, *kind, args),
+        Expr::Cast { expr, ty } => {
+            // CAST(<expr> AS <ty>) — identical syntax on PG/MySQL/SQLite;
+            // only the type token varies (handled by `cast_type`).
+            let ty_token =
+                b.d.cast_type(*ty)
+                    .ok_or(SqlError::OpNotSupportedInDialect {
+                        op: "CAST: dialect cannot map this FieldType",
+                        dialect: b.d.name(),
+                    })?;
+            b.sql.push_str("CAST(");
+            write_expr(b, expr, None)?;
+            b.sql.push_str(" AS ");
+            b.sql.push_str(ty_token);
+            b.sql.push(')');
+            Ok(())
+        }
         Expr::Case { branches, default } => write_case(b, branches, default.as_deref()),
         Expr::Subquery(inner) => {
             // `(SELECT … FROM …)` — write_select pushes/pops its own
@@ -1704,7 +1720,274 @@ fn write_function(
             b.sql.push(')');
             Ok(())
         }
+
+        // -------- DB functions batch 1 (issue #266 / T1.4) --------
+        F::LPad | F::RPad => write_pad(b, kind, args),
+        F::Md5 | F::Sha1 | F::Sha256 => write_hash(b, kind, args),
+        F::Position => write_position(b, args),
+        F::Repeat => write_repeat(b, args),
+        F::Reverse => {
+            if args.len() != 1 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "REVERSE",
+                    expected: "1",
+                    got: args.len(),
+                });
+            }
+            if b.d.name() == "sqlite" {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: "REVERSE (SQLite has no built-in; reverse the string in Rust before binding)",
+                    dialect: b.d.name(),
+                });
+            }
+            write_call(b, "REVERSE", args)
+        }
+        F::Sign => write_sign(b, args),
+        F::Power => {
+            if args.len() != 2 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "POWER",
+                    expected: "2",
+                    got: args.len(),
+                });
+            }
+            // SQLite's `POWER`/`SQRT` ship in libsqlite3 3.35+ but only
+            // when compiled with `SQLITE_ENABLE_MATH_FUNCTIONS`. sqlx's
+            // default sqlite build does not enable it, so emitting
+            // `POWER(...)` would produce a `no such function` runtime
+            // error. Surface the limitation at write time.
+            if b.d.name() == "sqlite" {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: "POWER (SQLite needs SQLITE_ENABLE_MATH_FUNCTIONS at build time; not enabled in sqlx-sqlite default build)",
+                    dialect: b.d.name(),
+                });
+            }
+            write_call(b, "POWER", args)
+        }
+        F::Sqrt => {
+            if b.d.name() == "sqlite" {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: "SQRT (SQLite needs SQLITE_ENABLE_MATH_FUNCTIONS at build time; not enabled in sqlx-sqlite default build)",
+                    dialect: b.d.name(),
+                });
+            }
+            write_call_unary(b, "SQRT", args)
+        }
     }
+}
+
+/// `LPAD(s, len, fill)` / `RPAD(s, len, fill)` — PG/MySQL native;
+/// SQLite gets a `substr(s || repeat(fill, len), 1, len)`-style
+/// workaround for left-pad and a symmetric form for right-pad.
+fn write_pad(
+    b: &mut Sql<'_>,
+    kind: crate::core::ScalarFn,
+    args: &[crate::core::Expr],
+) -> Result<(), SqlError> {
+    use crate::core::ScalarFn as F;
+    if args.len() != 3 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: match kind {
+                F::LPad => "LPAD",
+                _ => "RPAD",
+            },
+            expected: "3",
+            got: args.len(),
+        });
+    }
+    let name = match kind {
+        F::LPad => "LPAD",
+        _ => "RPAD",
+    };
+    if b.d.name() != "sqlite" {
+        return write_call(b, name, args);
+    }
+    // SQLite has no LPAD/RPAD. Build it from `substr` + `replace(printf)`.
+    // For LPad: `substr(replace(printf('%.*c', len, ' '), ' ', fill) || s, -len)`
+    // For RPad: `substr(s || replace(printf('%.*c', len, ' '), ' ', fill), 1, len)`
+    //
+    // The `printf('%.*c', n, ' ')` trick generates `n` space characters,
+    // which we then `replace` with the fill character. Wrapped in `substr`
+    // to clip to `len` characters (handles the case where the source
+    // string is already >= len, where the spec says to truncate to `len`
+    // from one side — LPAD keeps the right side, RPAD keeps the left).
+    b.sql.push_str("substr(");
+    if matches!(kind, F::LPad) {
+        b.sql.push_str("replace(printf('%.*c', ");
+        write_expr(b, &args[1], None)?;
+        b.sql.push_str(", ' '), ' ', ");
+        write_expr(b, &args[2], None)?;
+        b.sql.push_str(") || ");
+        write_expr(b, &args[0], None)?;
+        b.sql.push_str(", -");
+        write_expr(b, &args[1], None)?;
+        b.sql.push(')');
+    } else {
+        write_expr(b, &args[0], None)?;
+        b.sql.push_str(" || replace(printf('%.*c', ");
+        write_expr(b, &args[1], None)?;
+        b.sql.push_str(", ' '), ' ', ");
+        write_expr(b, &args[2], None)?;
+        b.sql.push_str("), 1, ");
+        write_expr(b, &args[1], None)?;
+        b.sql.push(')');
+    }
+    Ok(())
+}
+
+/// `MD5(s)` / `SHA1(s)` / `SHA256(s)` — PG via `pgcrypto`'s `digest`
+/// + `encode(..., 'hex')`, MySQL via native `MD5/SHA1/SHA2`, SQLite
+/// errors (no built-in hash).
+fn write_hash(
+    b: &mut Sql<'_>,
+    kind: crate::core::ScalarFn,
+    args: &[crate::core::Expr],
+) -> Result<(), SqlError> {
+    use crate::core::ScalarFn as F;
+    if args.len() != 1 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: match kind {
+                F::Md5 => "MD5",
+                F::Sha1 => "SHA1",
+                _ => "SHA256",
+            },
+            expected: "1",
+            got: args.len(),
+        });
+    }
+    if b.d.name() == "sqlite" {
+        return Err(SqlError::OpNotSupportedInDialect {
+            op: match kind {
+                F::Md5 => "MD5 (SQLite has no built-in hash; hash before binding)",
+                F::Sha1 => "SHA1 (SQLite has no built-in hash; hash before binding)",
+                _ => "SHA256 (SQLite has no built-in hash; hash before binding)",
+            },
+            dialect: b.d.name(),
+        });
+    }
+    if b.d.name() == "postgres" {
+        // Postgres has a native md5() returning hex; SHA1/SHA256 need
+        // pgcrypto's digest(). Emit the right shape per kind.
+        match kind {
+            F::Md5 => {
+                b.sql.push_str("md5(");
+                write_expr(b, &args[0], None)?;
+                b.sql.push(')');
+            }
+            F::Sha1 => {
+                b.sql.push_str("encode(digest(");
+                write_expr(b, &args[0], None)?;
+                b.sql.push_str(", 'sha1'), 'hex')");
+            }
+            _ => {
+                b.sql.push_str("encode(digest(");
+                write_expr(b, &args[0], None)?;
+                b.sql.push_str(", 'sha256'), 'hex')");
+            }
+        }
+        Ok(())
+    } else {
+        // MySQL.
+        match kind {
+            F::Md5 => write_call(b, "MD5", args),
+            F::Sha1 => write_call(b, "SHA1", args),
+            _ => {
+                b.sql.push_str("SHA2(");
+                write_expr(b, &args[0], None)?;
+                b.sql.push_str(", 256)");
+                Ok(())
+            }
+        }
+    }
+}
+
+/// `POSITION(needle, hay)` — diverges most across dialects.
+fn write_position(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
+    if args.len() != 2 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: "POSITION",
+            expected: "2",
+            got: args.len(),
+        });
+    }
+    let needle = &args[0];
+    let hay = &args[1];
+    match b.d.name() {
+        "postgres" => {
+            b.sql.push_str("POSITION(");
+            write_expr(b, needle, None)?;
+            b.sql.push_str(" IN ");
+            write_expr(b, hay, None)?;
+            b.sql.push(')');
+        }
+        "mysql" => {
+            b.sql.push_str("LOCATE(");
+            write_expr(b, needle, None)?;
+            b.sql.push_str(", ");
+            write_expr(b, hay, None)?;
+            b.sql.push(')');
+        }
+        _ => {
+            // SQLite: INSTR(hay, needle) — argument order is reversed.
+            b.sql.push_str("INSTR(");
+            write_expr(b, hay, None)?;
+            b.sql.push_str(", ");
+            write_expr(b, needle, None)?;
+            b.sql.push(')');
+        }
+    }
+    Ok(())
+}
+
+/// `REPEAT(s, n)` — PG/MySQL native; SQLite fakes it via
+/// `replace(printf('%.*c', n, '_'), '_', s)`. The `_` placeholder is
+/// arbitrary — we just need a single char `printf` can stamp `n`
+/// times and `replace` can swap for `s`.
+fn write_repeat(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
+    if args.len() != 2 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: "REPEAT",
+            expected: "2",
+            got: args.len(),
+        });
+    }
+    if b.d.name() == "sqlite" {
+        // Use `_` as the placeholder. SQLite's `printf('%.*c', n, '_')`
+        // produces `n` underscores; `replace(...)` swaps each for `s`.
+        // Caveat: if `s` itself contains `_`, the underscore form of
+        // the input is lost — for that corner case the caller should
+        // pre-compute the repeated value in Rust.
+        b.sql.push_str("replace(printf('%.*c', ");
+        write_expr(b, &args[1], None)?;
+        b.sql.push_str(", '_'), '_', ");
+        write_expr(b, &args[0], None)?;
+        b.sql.push(')');
+        return Ok(());
+    }
+    write_call(b, "REPEAT", args)
+}
+
+/// `SIGN(x)` — PG/MySQL native; SQLite gets a CASE-WHEN expansion.
+fn write_sign(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
+    if args.len() != 1 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: "SIGN",
+            expected: "1",
+            got: args.len(),
+        });
+    }
+    if b.d.name() != "sqlite" {
+        return write_call(b, "SIGN", args);
+    }
+    // SQLite: CASE WHEN x > 0 THEN 1 WHEN x < 0 THEN -1 ELSE 0 END.
+    // We can't use bind params here without exploding the parameter
+    // count three-fold; literal `0` / `1` / `-1` are inlined.
+    b.sql.push_str("(CASE WHEN ");
+    write_expr(b, &args[0], None)?;
+    b.sql.push_str(" > 0 THEN 1 WHEN ");
+    write_expr(b, &args[0], None)?;
+    b.sql.push_str(" < 0 THEN -1 ELSE 0 END)");
+    Ok(())
 }
 
 /// Emit an `EXTRACT(<field> FROM x)` family call. PG uses the SQL
