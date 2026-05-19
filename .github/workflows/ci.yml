@@ -149,6 +149,7 @@ jobs:
             --test database_pools_sqlite_file_live \
             --test database_pools_sqlite_live \
             --test database_tenant_sqlite_live \
+            --test explain_pool_sqlite_live \
             --test first_last_sqlite_live \
             --test fixtures_sqlite_live \
             --test foreign_key_sqlite_live \
@@ -201,6 +202,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p rustango --features mysql,jobs-postgres --test jobs_mysql_live
       - run: cargo test -p rustango --features mysql --test mysql_live
+      - run: cargo test -p rustango --features mysql --test explain_pool_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy --test tenancy_manage_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy --test permissions_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy --test database_pools_mysql_live

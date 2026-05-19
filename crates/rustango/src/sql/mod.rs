@@ -37,8 +37,8 @@ pub use executor::row_to_json_my;
 pub use executor::row_to_json_sqlite;
 pub use executor::{
     atomic, bulk_insert_pool, bulk_update_pool, count_rows_pool, delete_pool, delete_tx,
-    fetch_aggregate_pool, fetch_paginated_pool, fetch_with_prefetch_pool, get_or_create,
-    insert_pool, insert_returning_pool, insert_returning_tx, insert_tx, on_commit,
+    explain_pool, fetch_aggregate_pool, fetch_paginated_pool, fetch_with_prefetch_pool,
+    get_or_create, insert_pool, insert_returning_pool, insert_returning_tx, insert_tx, on_commit,
     on_commit_pending, raw_execute_pool, raw_query_pool, select_one_row_as_json,
     select_one_row_pool, select_rows_as_json, select_rows_pool, select_rows_pool_with_related,
     select_rows_tx_with_related, transaction_pool, update_or_create, update_pool, update_tx,
