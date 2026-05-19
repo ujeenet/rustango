@@ -166,6 +166,63 @@ pub fn embed_migrations(input: TokenStream) -> TokenStream {
         .into()
 }
 
+/// `Q!()` — Django-shape filter syntax compile-time-resolved against
+/// typed columns. Issue #269 / T1.7.
+///
+/// Each invocation lowers to the equivalent typed-column method call:
+///
+/// ```ignore
+/// // These expand identically:
+/// Q!(User.email__icontains = "alice")
+/// User::email.ilike("%alice%")
+/// ```
+///
+/// Field-name typos fail the build (the macro emits `User::no_such_field`
+/// which doesn't exist) — the headline ergonomic win of this slice over
+/// Django's stringly-typed `__lookup` filters.
+///
+/// # Supported lookup suffixes
+///
+/// * bare `=` / `__exact` → `.eq(value)`
+/// * `__iexact` → `.ilike(value)` (case-insensitive equality, no wildcards)
+/// * `__ne` → `.ne(value)`
+/// * `__gt` / `__gte` / `__lt` / `__lte` → corresponding comparison
+/// * `__contains` / `__icontains` → `.like("%v%")` / `.ilike("%v%")`
+/// * `__startswith` / `__istartswith` → `.like("v%")` / `.ilike("v%")`
+/// * `__endswith` / `__iendswith` → `.like("%v")` / `.ilike("%v")`
+/// * `__in` → `.is_in(iterable)`
+/// * `__not_in` → `.not_in(iterable)`
+/// * `__isnull = true` → `.is_null()`; `__isnull = false` → `.is_not_null()`
+/// * `__between` accepts a tuple literal `(lo, hi)` → `.between(lo, hi)`
+/// * `__regex` / `__iregex` → `.regex(pattern)` / `.iregex(pattern)`
+///
+/// Unknown suffixes fail the build with a `compile_error!` pointing at
+/// the lookup token.
+///
+/// # Combine
+///
+/// Each `Q!()` returns a `TypedFilter<Model>` — chain via the existing
+/// `.and()` / `.or()` / `.not()` methods:
+///
+/// ```ignore
+/// User::objects()
+///     .where_(
+///         Q!(User.active = true)
+///             .and(Q!(User.email__icontains = "alice"))
+///     )
+///     .fetch_pool(&pool).await?;
+/// ```
+///
+/// All emitted code routes through existing per-dialect writers — no new
+/// SQL emission machinery. Tri-dialect support is inherent.
+#[allow(non_snake_case)]
+#[proc_macro]
+pub fn Q(input: TokenStream) -> TokenStream {
+    expand_q(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 /// `#[rustango::main]` — the Django-shape runserver entrypoint. Wraps
 /// `#[tokio::main]` and a default `tracing_subscriber` initialisation
 /// (env-filter, falling back to `info,sqlx=warn`) so user `main`
@@ -268,6 +325,173 @@ fn parse_flavor(args: &TokenStream2) -> Flavor {
     } else {
         Flavor::MultiThread
     }
+}
+
+/// Parse form for `Q!()` — `<TypePath>.<Ident> = <Expr>`.
+struct QInput {
+    base_path: syn::Path,
+    field: syn::Ident,
+    value: syn::Expr,
+}
+
+impl syn::parse::Parse for QInput {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let base_path: syn::Path = input.parse()?;
+        input.parse::<syn::Token![.]>()?;
+        let field: syn::Ident = input.parse()?;
+        input.parse::<syn::Token![=]>()?;
+        let value: syn::Expr = input.parse()?;
+        Ok(QInput {
+            base_path,
+            field,
+            value,
+        })
+    }
+}
+
+fn expand_q(input: TokenStream2) -> syn::Result<TokenStream2> {
+    let q: QInput = syn::parse2(input)?;
+    let field_str = q.field.to_string();
+    let field_span = q.field.span();
+    let (base, suffix) = match field_str.find("__") {
+        Some(idx) => (&field_str[..idx], &field_str[idx + 2..]),
+        None => (field_str.as_str(), ""),
+    };
+    if base.is_empty() {
+        return Err(syn::Error::new(
+            field_span,
+            "Q!(): field name is empty before `__` suffix",
+        ));
+    }
+    let base_ident = syn::Ident::new(base, field_span);
+    let value = &q.value;
+    let path = &q.base_path;
+
+    // Most suffixes map directly to a Column method with the value
+    // forwarded unchanged. Some need value-shape massaging (wildcards
+    // for LIKE-family, tuple destructure for BETWEEN, literal-bool for
+    // ISNULL). Unknown suffixes fail the build.
+    let expanded = match suffix {
+        "" | "exact" => quote! {
+            ::rustango::core::Column::eq(#path::#base_ident, #value)
+        },
+        "ne" => quote! {
+            ::rustango::core::Column::ne(#path::#base_ident, #value)
+        },
+        "gt" => quote! {
+            ::rustango::core::Column::gt(#path::#base_ident, #value)
+        },
+        "gte" => quote! {
+            ::rustango::core::Column::gte(#path::#base_ident, #value)
+        },
+        "lt" => quote! {
+            ::rustango::core::Column::lt(#path::#base_ident, #value)
+        },
+        "lte" => quote! {
+            ::rustango::core::Column::lte(#path::#base_ident, #value)
+        },
+        "iexact" => quote! {
+            // Django emulates `__iexact` as case-insensitive equality.
+            // The non-wildcard `ILIKE value` is semantically identical
+            // for plain strings; LIKE-metachars `%` `_` in the rhs would
+            // accidentally match more — document the caveat.
+            ::rustango::core::Column::ilike(#path::#base_ident, ::std::string::ToString::to_string(&(#value)))
+        },
+        "contains" => quote! {
+            ::rustango::core::Column::like(
+                #path::#base_ident,
+                ::std::format!("%{}%", #value),
+            )
+        },
+        "icontains" => quote! {
+            ::rustango::core::Column::ilike(
+                #path::#base_ident,
+                ::std::format!("%{}%", #value),
+            )
+        },
+        "startswith" => quote! {
+            ::rustango::core::Column::like(
+                #path::#base_ident,
+                ::std::format!("{}%", #value),
+            )
+        },
+        "istartswith" => quote! {
+            ::rustango::core::Column::ilike(
+                #path::#base_ident,
+                ::std::format!("{}%", #value),
+            )
+        },
+        "endswith" => quote! {
+            ::rustango::core::Column::like(
+                #path::#base_ident,
+                ::std::format!("%{}", #value),
+            )
+        },
+        "iendswith" => quote! {
+            ::rustango::core::Column::ilike(
+                #path::#base_ident,
+                ::std::format!("%{}", #value),
+            )
+        },
+        "in" => quote! {
+            ::rustango::core::Column::is_in(#path::#base_ident, #value)
+        },
+        "not_in" => quote! {
+            ::rustango::core::Column::not_in(#path::#base_ident, #value)
+        },
+        "isnull" => {
+            // Must be a bool literal at macro time so we can route to
+            // is_null vs is_not_null without a runtime branch.
+            let b = match value {
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Bool(b),
+                    ..
+                }) => b.value(),
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        value,
+                        "Q!(): `__isnull` requires a `true` or `false` literal",
+                    ));
+                }
+            };
+            if b {
+                quote! { ::rustango::core::Column::is_null(#path::#base_ident) }
+            } else {
+                quote! { ::rustango::core::Column::is_not_null(#path::#base_ident) }
+            }
+        }
+        "between" => {
+            // Accept a tuple literal `(lo, hi)`.
+            let tuple = match value {
+                syn::Expr::Tuple(t) if t.elems.len() == 2 => t,
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        value,
+                        "Q!(): `__between` requires a tuple literal `(lo, hi)`",
+                    ));
+                }
+            };
+            let lo = &tuple.elems[0];
+            let hi = &tuple.elems[1];
+            quote! { ::rustango::core::Column::between(#path::#base_ident, #lo, #hi) }
+        }
+        "regex" => quote! {
+            ::rustango::core::Column::regex(#path::#base_ident, #value)
+        },
+        "iregex" => quote! {
+            ::rustango::core::Column::iregex(#path::#base_ident, #value)
+        },
+        _ => {
+            return Err(syn::Error::new(
+                field_span,
+                format!(
+                    "Q!(): unknown lookup suffix `__{}`. Supported: __exact / __iexact / __ne / __gt / __gte / __lt / __lte / __contains / __icontains / __startswith / __istartswith / __endswith / __iendswith / __in / __not_in / __isnull / __between / __regex / __iregex",
+                    suffix
+                ),
+            ));
+        }
+    };
+    Ok(expanded)
 }
 
 fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
