@@ -514,6 +514,20 @@ pub struct TypedExpr<M: Model> {
 }
 
 impl<M: Model> TypedExpr<M> {
+    /// Wrap a dialect-neutral [`WhereExpr`] as a typed expression
+    /// against `M`. Used by the [`crate::query::Q`] runtime builder
+    /// (issue #263 / T1.1) and any other untyped-source-of-WhereExpr
+    /// that wants to land in `.where_()`. Field-name validation still
+    /// runs at `compile()` time on the queryset, so a typo in the
+    /// underlying `WhereExpr` errors there.
+    #[must_use]
+    pub fn from_where_expr(inner: WhereExpr) -> Self {
+        Self {
+            inner,
+            _model: PhantomData,
+        }
+    }
+
     /// Build a [`WhereExpr::ColumnCompare`] leaf — the `F()`-style
     /// "column <op> expr" predicate. Used by [`Column::eq_expr`] &
     /// friends; not normally constructed directly by user code.

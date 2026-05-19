@@ -13,6 +13,9 @@ use crate::core::{
     QueryError, SelectQuery, SqlValue, TypedAssignment, TypedExpr, UpdateQuery, WhereExpr,
 };
 
+mod q;
+pub use q::Q;
+
 /// A lazy builder for a `SELECT` over `T`.
 ///
 /// Filters are accumulated in insertion order; nothing touches the schema
