@@ -138,6 +138,7 @@ pub async fn create_admin_cmd<W: Write + Send>(
         lock_mode: None,
         compound: vec![],
         projection: None,
+        distinct: None,
     };
     let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
     let existing = crate::sql::select_one_row_as_json(pool, &select, &fields)

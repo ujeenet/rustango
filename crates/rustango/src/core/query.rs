@@ -541,6 +541,26 @@ pub struct SelectQuery {
     /// `project` columns. Validated at builder time so every column
     /// resolves on the model schema.
     pub projection: Option<Vec<&'static str>>,
+    /// Django `.distinct(*fields)` — issue #264 / T1.2. `None` is the
+    /// default (no DISTINCT clause). `Some(DistinctMode::All)` emits
+    /// `SELECT DISTINCT ...`. `Some(DistinctMode::On(cols))` emits PG
+    /// `SELECT DISTINCT ON (cols) ...` natively; on MySQL/SQLite the
+    /// writer wraps the query in a `ROW_NUMBER() OVER (PARTITION BY
+    /// cols ORDER BY <order_by>) AS __rn` subquery with an outer
+    /// `WHERE __rn = 1` so the "first row per group" semantics carry.
+    pub distinct: Option<DistinctMode>,
+}
+
+/// Distinct mode — Django's `.distinct()` / `.distinct(*fields)`.
+/// Issue #264 / T1.2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DistinctMode {
+    /// `SELECT DISTINCT ...` — works on every dialect identically.
+    All,
+    /// `SELECT DISTINCT ON (cols) ...` — PG-native syntax with portable
+    /// `ROW_NUMBER()` fallback on MySQL / SQLite. Empty `cols` is
+    /// rejected at builder time (would degenerate to `DISTINCT`).
+    On(Vec<&'static str>),
 }
 
 /// One branch of a set-algebra compound query. Issue #25.

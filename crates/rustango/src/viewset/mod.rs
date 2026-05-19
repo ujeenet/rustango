@@ -911,6 +911,7 @@ async fn handle_list(
                 lock_mode: None,
                 compound: vec![],
                 projection: None,
+                distinct: None,
             };
             let count_q = CountQuery {
                 model: state.vs.schema,
@@ -1042,6 +1043,7 @@ async fn handle_list_cursor(
         lock_mode: None,
         compound: vec![],
         projection: None,
+        distinct: None,
     };
     let rows = match acq.select_rows_as_json(&select_q, &fields).await {
         Ok(r) => r,
@@ -1134,6 +1136,7 @@ async fn handle_retrieve(
         lock_mode: None,
         compound: vec![],
         projection: None,
+        distinct: None,
     };
 
     let fields = state.effective_fields();
@@ -1372,6 +1375,7 @@ async fn fetch_by_pk(
         lock_mode: None,
         compound: vec![],
         projection: None,
+        distinct: None,
     };
     let _ = state;
     acq.select_one_as_json(&select_q, fields)

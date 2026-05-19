@@ -2391,6 +2391,7 @@ async fn dumpdata_cmd<W: Write>(
             lock_mode: None,
             compound: vec![],
             projection: None,
+            distinct: None,
         };
 
         let rows = crate::sql::select_rows_as_json(pool, &query, &fields)

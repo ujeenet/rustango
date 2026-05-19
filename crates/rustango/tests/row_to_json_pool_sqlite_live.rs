@@ -82,6 +82,7 @@ async fn select_rows_as_json_pool_decodes_sqlite_rows() {
             lock_mode: None,
             compound: vec![],
             projection: None,
+            distinct: None,
         },
         &fields,
     )
@@ -120,6 +121,7 @@ async fn select_one_row_as_json_pool_returns_none_for_miss() {
             lock_mode: None,
             compound: vec![],
             projection: None,
+            distinct: None,
         },
         &fields,
     )
@@ -160,6 +162,7 @@ async fn select_one_row_as_json_pool_returns_decoded_row_for_hit() {
             lock_mode: None,
             compound: vec![],
             projection: None,
+            distinct: None,
         },
         &fields,
     )

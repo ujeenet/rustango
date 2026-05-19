@@ -112,6 +112,7 @@ async fn login_submit(State(state): State<AppState>, Form(form): Form<LoginInput
         lock_mode: None,
         compound: vec![],
         projection: None,
+        distinct: None,
     };
     let row = crate::sql::select_one_row_as_json(&state.pool, &select, &fields)
         .await
@@ -223,6 +224,7 @@ async fn change_password_submit(
         lock_mode: None,
         compound: vec![],
         projection: None,
+        distinct: None,
     };
     let row = crate::sql::select_one_row_as_json(&state.pool, &select, &fields)
         .await

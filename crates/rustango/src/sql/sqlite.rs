@@ -664,6 +664,7 @@ mod tests {
             lock_mode: None,
             compound: vec![],
             projection: None,
+            distinct: None,
         };
         let stmt = Sqlite.compile_select(&q).unwrap();
         // SQLite emits ANSI-quoted identifiers and `?` placeholders.

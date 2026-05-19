@@ -193,6 +193,7 @@ async fn empty_or_branch_returns_named_writer_error() {
         lock_mode: None,
         compound: vec![],
         projection: None,
+        distinct: None,
     };
     let err = Postgres.compile_select(&q).unwrap_err();
     assert!(matches!(err, SqlError::EmptyOrBranch));
@@ -213,6 +214,7 @@ async fn empty_or_branch_returns_named_writer_error() {
         lock_mode: None,
         compound: vec![],
         projection: None,
+        distinct: None,
     };
     rustango::sql::select_rows(&pool, &q2).await.unwrap();
 }

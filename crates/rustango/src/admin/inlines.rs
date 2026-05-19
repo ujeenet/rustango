@@ -366,6 +366,7 @@ pub async fn render_for_parent(
                 lock_mode: None,
                 compound: vec![],
                 projection: None,
+                distinct: None,
             },
             &select_fields,
         )
@@ -514,6 +515,7 @@ pub async fn render_generic_for_parent(
                 lock_mode: None,
                 compound: vec![],
                 projection: None,
+                distinct: None,
             },
             &select_fields,
         )
@@ -763,6 +765,7 @@ pub async fn render_form_for_parent(
                 lock_mode: None,
                 compound: vec![],
                 projection: None,
+                distinct: None,
             },
             &select_fields,
         )
@@ -1231,6 +1234,7 @@ pub async fn render_form_generic_for_parent(
                 lock_mode: None,
                 compound: vec![],
                 projection: None,
+                distinct: None,
             },
             &select_fields,
         )
