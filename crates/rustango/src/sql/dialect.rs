@@ -255,6 +255,36 @@ pub trait Dialect {
         None
     }
 
+    /// Dialect-specific SQL type token for the rhs of `CAST(<expr> AS <ty>)`
+    /// — distinct from [`Self::null_cast`] (which is PG-specific) and
+    /// [`Self::column_type`] (DDL, which includes lengths like
+    /// `VARCHAR(N)`). Returns `None` when the dialect genuinely can't
+    /// cast to that `FieldType` (e.g. SQLite has no native UUID /
+    /// JSONB types — caller should error).
+    ///
+    /// Default returns the Postgres-standard token names (`BIGINT`,
+    /// `TEXT`, `TIMESTAMPTZ`, …). Backends with divergent CAST grammar
+    /// (MySQL's `SIGNED`/`UNSIGNED` for ints, no `CAST AS JSON`, etc.)
+    /// override.
+    fn cast_type(&self, ty: FieldType) -> Option<&'static str> {
+        Some(match ty {
+            FieldType::I16 => "SMALLINT",
+            FieldType::I32 => "INTEGER",
+            FieldType::I64 => "BIGINT",
+            FieldType::F32 => "REAL",
+            FieldType::F64 => "DOUBLE PRECISION",
+            FieldType::Bool => "BOOLEAN",
+            FieldType::String => "TEXT",
+            FieldType::DateTime => "TIMESTAMPTZ",
+            FieldType::Date => "DATE",
+            FieldType::Uuid => "UUID",
+            FieldType::Json => "JSONB",
+            FieldType::Decimal => "NUMERIC",
+            FieldType::Binary => "BYTEA",
+            FieldType::Time => "TIME",
+        })
+    }
+
     /// SQL column type for a non-`Auto<T>` field, used by the DDL
     /// writer (`CREATE TABLE`). `max_length` is honored on
     /// [`FieldType::String`] (`VARCHAR(N)` vs unbounded text).

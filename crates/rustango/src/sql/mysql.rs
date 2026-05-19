@@ -90,6 +90,36 @@ impl Dialect for MySql {
         format!("CAST({expr} AS DOUBLE)")
     }
 
+    /// MySQL CAST type tokens. Differs from the trait default in that:
+    /// - Integer types use `SIGNED` (8.x supports `BIGINT`/`INT` since
+    ///   8.0.17 but `SIGNED` works on 5.7 + 8.x uniformly — pick the
+    ///   widest-compatible token).
+    /// - Floats: `FLOAT`/`DOUBLE` (no `DOUBLE PRECISION` token).
+    /// - Bool: `UNSIGNED` (TINYINT(1) isn't a valid CAST target).
+    /// - String: `CHAR` (TEXT isn't a valid CAST target on MySQL).
+    /// - DateTime: `DATETIME` (no `TIMESTAMPTZ`).
+    /// - UUID / JSON / Binary: not supported as CAST targets — return
+    ///   `None`. Caller can serialize to a `CHAR` if string-shaped.
+    fn cast_type(&self, ty: FieldType) -> Option<&'static str> {
+        Some(match ty {
+            FieldType::I16 | FieldType::I32 | FieldType::I64 => "SIGNED",
+            FieldType::F32 => "FLOAT",
+            FieldType::F64 => "DOUBLE",
+            FieldType::Bool => "UNSIGNED",
+            FieldType::String => "CHAR",
+            FieldType::DateTime => "DATETIME",
+            FieldType::Date => "DATE",
+            FieldType::Time => "TIME",
+            FieldType::Decimal => "DECIMAL(38, 10)",
+            FieldType::Binary => "BINARY",
+            // MySQL has no `CAST AS JSON` form — `JSON_EXTRACT` /
+            // string parsing are the substitutes. UUID has no CAST
+            // target either (it's CHAR(36) in DDL but the user would
+            // cast to CHAR in expression form).
+            FieldType::Uuid | FieldType::Json => return None,
+        })
+    }
+
     /// `MySQL` column types — major divergences from the ANSI / Postgres
     /// shape:
     /// - no native `BOOLEAN`; `BOOL`/`BOOLEAN` are aliases for `TINYINT(1)`

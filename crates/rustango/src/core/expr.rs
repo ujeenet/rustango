@@ -177,6 +177,15 @@ pub enum Expr {
     /// wrappers (`Filtered { inner, ... }`, `Coalesced { inner, ... }`)
     /// which would make the enum size unbounded otherwise.
     Aggregate(Box<super::query::AggregateExpr>),
+    /// `CAST(<expr> AS <ty>)` — explicit type coercion. Issue #266 / T1.4.
+    /// `ty` is a dialect-neutral [`crate::core::FieldType`]; the writer
+    /// maps it to the dialect's SQL token via [`crate::sql::Dialect::null_cast`].
+    /// Emits identical `CAST(... AS ...)` syntax on PG / MySQL / SQLite —
+    /// only the type token differs.
+    Cast {
+        expr: Box<Expr>,
+        ty: super::field_type::FieldType,
+    },
 }
 
 /// One arm of a [`Expr::Case`] expression — `WHEN <condition> THEN <then>`.
@@ -374,6 +383,51 @@ pub enum ScalarFn {
     /// (better for short documents). Arity 2. **PG-only**. Issue
     /// #28 follow-up.
     TsRankCd,
+
+    // --- DB functions batch 1 (issue #266 / T1.4) ---
+    /// `LPAD(s, len, fill)` — left-pad string `s` to `len` characters
+    /// using `fill`. PG/MySQL native; SQLite gets a `printf`/`substr`
+    /// fallback because the function isn't built-in. Arity 3.
+    LPad,
+    /// `RPAD(s, len, fill)` — right-pad. Same dialect map as `LPad`.
+    RPad,
+    /// `MD5(s)` → hex string. PG `md5()` (built-in), MySQL `MD5()`
+    /// (built-in). **SQLite errors** with `OpNotSupportedInDialect`
+    /// (no built-in hash; the app should hash before binding). Arity 1.
+    Md5,
+    /// `SHA1(s)` → hex string. PG `encode(digest(s, 'sha1'), 'hex')`
+    /// (requires `pgcrypto`), MySQL `SHA1()` (built-in). **SQLite errors**.
+    /// Arity 1.
+    Sha1,
+    /// `SHA256(s)` → hex string. PG `encode(digest(s, 'sha256'), 'hex')`
+    /// (requires `pgcrypto`), MySQL `SHA2(s, 256)`. **SQLite errors**.
+    /// Arity 1.
+    Sha256,
+    /// `POSITION(needle IN hay)` (PG) / `LOCATE(needle, hay)` (MySQL) /
+    /// `INSTR(hay, needle)` (SQLite). All return the 1-indexed position
+    /// of the first occurrence, or 0 if not found. Arity 2: `(needle, hay)`.
+    Position,
+    /// `REPEAT(s, n)` — repeat string `s`, `n` times. PG/MySQL native;
+    /// SQLite gets a `replace(printf('%.*c', n, ' '), ' ', s)` workaround.
+    /// Arity 2.
+    Repeat,
+    /// `REVERSE(s)` — reverse a string. PG and MySQL native;
+    /// **SQLite errors** (no built-in). Arity 1.
+    Reverse,
+    /// `SIGN(x)` → -1, 0, or 1. PG/MySQL native; SQLite emits a
+    /// `CASE WHEN x>0 THEN 1 WHEN x<0 THEN -1 ELSE 0 END` expansion.
+    /// Arity 1.
+    Sign,
+    /// `POWER(a, b)` — `a` raised to the `b`th. PG/MySQL ship native
+    /// `power`/`POWER`. **SQLite caveat**: the function exists in 3.35+
+    /// only when `SQLITE_ENABLE_MATH_FUNCTIONS` was set at build time;
+    /// sqlx-sqlite does not enable it by default, so the writer errors
+    /// with `OpNotSupportedInDialect` rather than emit SQL that the
+    /// runtime would reject. Arity 2.
+    Power,
+    /// `SQRT(x)` — square root. PG/MySQL native; SQLite has the same
+    /// build-flag caveat as [`Self::Power`]. Arity 1.
+    Sqrt,
 }
 
 impl Expr {

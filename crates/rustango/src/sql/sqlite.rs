@@ -168,6 +168,24 @@ impl Dialect for Sqlite {
         String::new()
     }
 
+    /// SQLite CAST targets are the affinity names: `INTEGER`, `REAL`,
+    /// `TEXT`, `NUMERIC`, `BLOB`. Datetime/UUID/JSON have no native
+    /// CAST target — they store as TEXT, so cast routes through TEXT.
+    fn cast_type(&self, ty: FieldType) -> Option<&'static str> {
+        Some(match ty {
+            FieldType::I16 | FieldType::I32 | FieldType::I64 | FieldType::Bool => "INTEGER",
+            FieldType::F32 | FieldType::F64 => "REAL",
+            FieldType::String
+            | FieldType::DateTime
+            | FieldType::Date
+            | FieldType::Time
+            | FieldType::Uuid
+            | FieldType::Json => "TEXT",
+            FieldType::Decimal => "NUMERIC",
+            FieldType::Binary => "BLOB",
+        })
+    }
+
     fn column_type(&self, ty: FieldType, max_length: Option<u32>) -> String {
         let _ = max_length; // SQLite has no length constraint on TEXT
         match ty {

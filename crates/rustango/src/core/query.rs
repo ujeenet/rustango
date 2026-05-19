@@ -419,6 +419,7 @@ fn validate_expr_columns(model: &'static ModelSchema, expr: &Expr) -> Result<(),
             }
             Ok(())
         }
+        Expr::Cast { expr: inner, .. } => validate_expr_columns(model, inner),
         Expr::Case { branches, default } => {
             for b in branches {
                 b.condition.validate(model)?;
