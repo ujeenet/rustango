@@ -990,6 +990,42 @@ pub struct BulkInsertQuery {
 }
 
 impl BulkInsertQuery {
+    /// Chainable builder — Django's `bulk_create(update_conflicts=True,
+    /// unique_fields=..., update_fields=...)`. Sets the `on_conflict`
+    /// clause to `DoUpdate { target, update_columns }`. Issue #267 / T1.5.
+    ///
+    /// Per-dialect emission (handled by the writer):
+    /// * Postgres / SQLite (3.24+): `ON CONFLICT (target) DO UPDATE SET col = EXCLUDED.col`
+    /// * MySQL: `ON DUPLICATE KEY UPDATE col = VALUES(col)` — target is
+    ///   not emitted (MySQL matches on every UNIQUE index automatically).
+    #[must_use]
+    pub fn on_conflict_do_update(
+        mut self,
+        target: &[&'static str],
+        update_columns: &[&'static str],
+    ) -> Self {
+        self.on_conflict = Some(ConflictClause::DoUpdate {
+            target: target.to_vec(),
+            update_columns: update_columns.to_vec(),
+        });
+        self
+    }
+
+    /// Chainable builder — Django's `bulk_create(ignore_conflicts=True)`.
+    /// Sets the `on_conflict` clause to `DoNothing`. Issue #267 / T1.5.
+    ///
+    /// Per-dialect emission:
+    /// * Postgres / SQLite: `ON CONFLICT DO NOTHING`
+    /// * MySQL: `ON DUPLICATE KEY UPDATE <pivot> = <pivot>` — the
+    ///   no-op write trick.
+    #[must_use]
+    pub fn on_conflict_do_nothing(mut self) -> Self {
+        self.on_conflict = Some(ConflictClause::DoNothing);
+        self
+    }
+}
+
+impl BulkInsertQuery {
     /// Walk every `(column, value)` pair in every row and check it
     /// against the field's declared bounds.
     ///
