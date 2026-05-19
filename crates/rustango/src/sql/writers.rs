@@ -182,6 +182,7 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
         lock_mode: None,
         compound: Vec::new(),
         projection: None,
+        distinct: None,
     };
     b.sql.push('(');
     write_select_inner(b, &head)?;
@@ -218,10 +219,164 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
     Ok(())
 }
 
+/// MySQL / SQLite portable fallback for PG's `SELECT DISTINCT ON (cols)`.
+/// Wraps the original SELECT in a subquery that adds
+/// `ROW_NUMBER() OVER (PARTITION BY cols ORDER BY <user_order>) AS __rn`
+/// and selects the outer rows where `__rn = 1`. The user-specified
+/// `ORDER BY` drives both the per-partition row pick (inside the
+/// `OVER (...)`) and the outer row order. Issue #264 / T1.2.
+///
+/// Layout:
+/// ```text
+/// SELECT <orig_cols> FROM (
+///   SELECT <orig_cols>,
+///          ROW_NUMBER() OVER (PARTITION BY <cols> ORDER BY <order>) AS __rn
+///   FROM <table> [JOIN ...] WHERE <where>
+/// ) sub
+/// WHERE __rn = 1
+/// [ORDER BY <order>] [LIMIT N] [OFFSET M]
+/// ```
+fn write_distinct_on_via_window(
+    b: &mut Sql<'_>,
+    query: &SelectQuery,
+    distinct_cols: &[&'static str],
+) -> Result<(), SqlError> {
+    // v1 limitation: the window-function rewrite doesn't yet handle
+    // joins (`.select_related` / `.join`). Tracked as a follow-up;
+    // surface a clear error so users on MySQL/SQLite know the gap
+    // rather than seeing wrong-shape SQL.
+    if !query.joins.is_empty() {
+        return Err(SqlError::OpNotSupportedInDialect {
+            op: "DISTINCT ON combined with joins (workaround: pre-collapse \
+                 with a subquery, or run on Postgres which supports DISTINCT \
+                 ON natively)",
+            dialect: b.d.name(),
+        });
+    }
+
+    // ---------- Outer SELECT — projection columns only (no __rn). ----------
+    b.sql.push_str("SELECT ");
+    let mut first_col = true;
+    if let Some(cols) = query.projection.as_ref() {
+        for col in cols {
+            if !first_col {
+                b.sql.push_str(", ");
+            }
+            first_col = false;
+            b.write_ident(col);
+        }
+    } else {
+        for field in query.model.scalar_fields() {
+            if !first_col {
+                b.sql.push_str(", ");
+            }
+            first_col = false;
+            b.write_ident(field.column);
+        }
+    }
+    b.sql.push_str(" FROM (");
+
+    // ---------- Inner SELECT — original projection + __rn. ----------
+    b.sql.push_str("SELECT ");
+    let mut inner_first = true;
+    if let Some(cols) = query.projection.as_ref() {
+        for col in cols {
+            if !inner_first {
+                b.sql.push_str(", ");
+            }
+            inner_first = false;
+            b.write_ident(col);
+        }
+    } else {
+        for field in query.model.scalar_fields() {
+            if !inner_first {
+                b.sql.push_str(", ");
+            }
+            inner_first = false;
+            b.write_ident(field.column);
+        }
+    }
+    // ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) AS __rn
+    b.sql.push_str(", ROW_NUMBER() OVER (PARTITION BY ");
+    for (i, col) in distinct_cols.iter().enumerate() {
+        if i > 0 {
+            b.sql.push_str(", ");
+        }
+        b.write_ident(col);
+    }
+    if !query.order_by.is_empty() {
+        b.sql.push_str(" ORDER BY ");
+        for (i, item) in query.order_by.iter().enumerate() {
+            if i > 0 {
+                b.sql.push_str(", ");
+            }
+            match item {
+                crate::core::OrderItem::Column { column, desc, .. } => {
+                    b.write_ident(column);
+                    if *desc {
+                        b.sql.push_str(" DESC");
+                    }
+                }
+                crate::core::OrderItem::Expr { expr, desc, .. } => {
+                    write_expr(b, expr, None)?;
+                    if *desc {
+                        b.sql.push_str(" DESC");
+                    }
+                }
+                crate::core::OrderItem::Random => {
+                    b.sql.push_str(if b.d.name() == "mysql" {
+                        "RAND()"
+                    } else {
+                        "RANDOM()"
+                    });
+                }
+            }
+        }
+    }
+    b.sql.push_str(") AS __rn FROM ");
+    b.write_ident(query.model.table);
+    write_where(b, &query.where_clause, Some(query.model))?;
+
+    b.sql.push_str(") sub WHERE sub.__rn = 1");
+
+    // Outer ORDER BY / LIMIT / OFFSET — applied to the survivors.
+    write_order_limit_offset(b, &query.order_by, query.limit, query.offset, None)?;
+
+    Ok(())
+}
+
 fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
+    // Issue #264 / T1.2 — `.distinct_on(cols)` lowers natively on PG
+    // (`SELECT DISTINCT ON (...)`); on MySQL / SQLite the writer
+    // wraps the query in a ROW_NUMBER() OVER (PARTITION BY ...)
+    // subquery with an outer `WHERE __rn = 1`. The wrap path returns
+    // early because it owns the whole SQL emission.
+    if let Some(crate::core::DistinctMode::On(cols)) = &query.distinct {
+        if b.d.name() != "postgres" {
+            return write_distinct_on_via_window(b, query, cols);
+        }
+    }
     let qualify = !query.joins.is_empty();
 
     b.sql.push_str("SELECT ");
+    // PG native DISTINCT / DISTINCT ON. `.distinct()` (DistinctMode::All)
+    // emits on every dialect uniformly.
+    if let Some(distinct) = &query.distinct {
+        match distinct {
+            crate::core::DistinctMode::All => b.sql.push_str("DISTINCT "),
+            crate::core::DistinctMode::On(cols) => {
+                // Reached only on PG (non-PG returned early above).
+                b.sql.push_str("DISTINCT ON (");
+                for (i, col) in cols.iter().enumerate() {
+                    if i > 0 {
+                        b.sql.push_str(", ");
+                    }
+                    b.write_ident(col);
+                }
+                b.sql.push_str(") ");
+            }
+        }
+    }
     let mut first_col = true;
     if let Some(cols) = query.projection.as_ref() {
         // Pure projection (issue #22 — `.values_dict()` /

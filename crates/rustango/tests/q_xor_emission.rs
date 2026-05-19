@@ -33,6 +33,7 @@ fn select(where_clause: WhereExpr) -> SelectQuery {
         lock_mode: None,
         compound: vec![],
         projection: None,
+        distinct: None,
     }
 }
 

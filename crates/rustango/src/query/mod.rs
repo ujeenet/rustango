@@ -30,6 +30,10 @@ pub struct QuerySet<T: Model> {
     pending: Vec<PendingFilter>,
     limit: Option<i64>,
     offset: Option<i64>,
+    /// Django `.distinct(*fields)` — issue #264 / T1.2. `None` (default)
+    /// emits no DISTINCT clause. See [`crate::core::DistinctMode`] for
+    /// the per-mode semantics.
+    distinct: Option<crate::core::DistinctMode>,
     /// FK field names registered for [`Self::select_related`] — slice
     /// 9.0d. Each name resolves to a `Join` against the FK target at
     /// `compile()` time, so the SELECT pulls the parent rows along
@@ -141,6 +145,7 @@ impl<T: Model> QuerySet<T> {
             pending: Vec::new(),
             limit: None,
             offset: None,
+            distinct: None,
             select_related: Vec::new(),
             ad_hoc_joins: Vec::new(),
             order_by: Vec::new(),
@@ -148,6 +153,42 @@ impl<T: Model> QuerySet<T> {
             compound: Vec::new(),
             _model: PhantomData,
         }
+    }
+
+    /// Django `.distinct()` — emit `SELECT DISTINCT ...`. Works on
+    /// every dialect identically. Pair with `.order_by(...)` to
+    /// disambiguate which row survives among duplicates (DB doesn't
+    /// guarantee an order otherwise).
+    ///
+    /// For PG-shape "DISTINCT ON (cols)" (latest-per-group), use
+    /// [`Self::distinct_on`] which is portable across all three
+    /// backends via a window-function fallback.
+    ///
+    /// Issue #264 / T1.2.
+    #[must_use]
+    pub fn distinct(mut self) -> Self {
+        self.distinct = Some(crate::core::DistinctMode::All);
+        self
+    }
+
+    /// Django `.distinct(*fields)` — emit `SELECT DISTINCT ON (col1, col2)`
+    /// on PG natively; lower to a `ROW_NUMBER() OVER (PARTITION BY cols
+    /// ORDER BY <existing order_by>)` subquery wrapper on MySQL / SQLite.
+    /// In all three the result is "first row per group", where "first"
+    /// is determined by the queryset's `ORDER BY`.
+    ///
+    /// **Constraint**: the columns passed must appear at the head of
+    /// `.order_by(...)` (matches Django's runtime check). `.compile()`
+    /// returns [`QueryError::DistinctOnOrderBy`] otherwise — the order
+    /// is what makes the "first row" deterministic.
+    ///
+    /// Empty `fields` is rejected (would degenerate to `.distinct()`).
+    ///
+    /// Issue #264 / T1.2.
+    #[must_use]
+    pub fn distinct_on(mut self, fields: &[&'static str]) -> Self {
+        self.distinct = Some(crate::core::DistinctMode::On(fields.to_vec()));
+        self
     }
 
     /// Issue #21 — Django's `QuerySet.select_for_update(skip_locked=,
@@ -738,6 +779,49 @@ impl<T: Model> QuerySet<T> {
         // issue-#76 `.order_by_with_nulls(...)` / `.order_by_expr(...)`
         // calls so a mixed chain emits in the order it was written.
         let order_by = lower_order_items(model, self.order_by)?;
+        // Issue #264 / T1.2 — `.distinct_on(&[...])` requires the
+        // listed columns to head the ORDER BY (Django enforces this
+        // at runtime; we catch it at builder time). Empty list is
+        // rejected because it would degenerate to `.distinct()`.
+        if let Some(crate::core::DistinctMode::On(cols)) = &self.distinct {
+            if cols.is_empty() {
+                return Err(QueryError::DistinctOnEmpty);
+            }
+            for col in cols {
+                if model.field_by_column(col).is_none() {
+                    return Err(QueryError::UnknownField {
+                        model: model.name,
+                        field: (*col).to_owned(),
+                    });
+                }
+            }
+            // First `cols.len()` order_by items must be the distinct-on
+            // columns in the same order. Bare `OrderItem::Column` only;
+            // expressions / random can't be DISTINCT-ON keys.
+            if order_by.len() < cols.len() {
+                return Err(QueryError::DistinctOnOrderByMismatch {
+                    distinct_on: cols.iter().map(|s| (*s).to_owned()).collect(),
+                    order_by: order_by_column_names(&order_by),
+                });
+            }
+            for (i, col) in cols.iter().enumerate() {
+                let head = match &order_by[i] {
+                    crate::core::OrderItem::Column { column, .. } => *column,
+                    _ => {
+                        return Err(QueryError::DistinctOnOrderByMismatch {
+                            distinct_on: cols.iter().map(|s| (*s).to_owned()).collect(),
+                            order_by: order_by_column_names(&order_by),
+                        });
+                    }
+                };
+                if head != *col {
+                    return Err(QueryError::DistinctOnOrderByMismatch {
+                        distinct_on: cols.iter().map(|s| (*s).to_owned()).collect(),
+                        order_by: order_by_column_names(&order_by),
+                    });
+                }
+            }
+        }
         Ok(SelectQuery {
             model,
             where_clause,
@@ -749,6 +833,7 @@ impl<T: Model> QuerySet<T> {
             lock_mode: self.lock_mode,
             compound: self.compound,
             projection: None,
+            distinct: self.distinct,
         })
     }
 
@@ -1049,6 +1134,21 @@ impl<T: Model> UpdateBuilder<T> {
 /// the field name against the model schema; `Expr` variants pass
 /// through verbatim (the writer surfaces DB-side errors for typos
 /// inside expressions, matching the existing `set_expr` posture).
+/// Render the column-only view of an `order_by` list for error
+/// reporting (`DistinctOnOrderByMismatch`). `Expr` / `Random` entries
+/// render as `<expr>` / `RANDOM` so the error message still locates
+/// where the mismatch begins.
+fn order_by_column_names(order_by: &[crate::core::OrderItem]) -> Vec<String> {
+    order_by
+        .iter()
+        .map(|item| match item {
+            crate::core::OrderItem::Column { column, .. } => (*column).to_owned(),
+            crate::core::OrderItem::Expr { .. } => "<expr>".to_owned(),
+            crate::core::OrderItem::Random => "RANDOM".to_owned(),
+        })
+        .collect()
+}
+
 fn lower_order_items(
     model: &'static ModelSchema,
     items: Vec<PendingOrderItem>,

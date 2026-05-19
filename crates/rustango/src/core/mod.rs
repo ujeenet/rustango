@@ -25,9 +25,9 @@ pub use expr::{BinOp, CaseBranch, Expr, ScalarFn, F};
 pub use field_type::FieldType;
 pub use query::{
     AggregateExpr, AggregateQuery, Assignment, BulkInsertQuery, BulkUpdateQuery, ColumnFilter,
-    CompoundBranch, ConflictClause, CountQuery, DeleteQuery, Filter, InsertQuery, Join, JoinKind,
-    LockMode, NullsOrder, Op, OrderClause, OrderItem, SearchClause, SelectQuery, SetOp,
-    UpdateQuery, WhereExpr,
+    CompoundBranch, ConflictClause, CountQuery, DeleteQuery, DistinctMode, Filter, InsertQuery,
+    Join, JoinKind, LockMode, NullsOrder, Op, OrderClause, OrderItem, SearchClause, SelectQuery,
+    SetOp, UpdateQuery, WhereExpr,
 };
 pub use schema::{
     infer_app_label_from_module_path, AdminConfig, CheckConstraint, CompositeFkRelation,

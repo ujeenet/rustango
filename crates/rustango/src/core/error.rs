@@ -129,4 +129,23 @@ pub enum QueryError {
          one column. Pass the column names you want in the projection."
     )]
     EmptyValuesProjection,
+
+    /// `.distinct_on(&[])` was called with an empty column list — would
+    /// degenerate to `.distinct()` and is almost always a bug. Issue
+    /// #264 / T1.2.
+    #[error("`.distinct_on(...)` requires at least one column; use `.distinct()` for plain SELECT DISTINCT")]
+    DistinctOnEmpty,
+
+    /// `.distinct_on(cols)` was called but the queryset's `ORDER BY`
+    /// doesn't lead with those columns. Django enforces the same
+    /// constraint at runtime — the order is what makes the
+    /// "first row per group" deterministic. Issue #264 / T1.2.
+    #[error(
+        "`.distinct_on({distinct_on:?})` requires those columns at the head of `.order_by(...)`; \
+         got order_by={order_by:?}"
+    )]
+    DistinctOnOrderByMismatch {
+        distinct_on: Vec<String>,
+        order_by: Vec<String>,
+    },
 }
