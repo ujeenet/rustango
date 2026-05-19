@@ -1105,6 +1105,22 @@ pub use sql::Auto;
 /// with [`migrate::migrate_embedded`].
 pub use rustango_macros::embed_migrations;
 
+/// `Q!()` — Django-shape filter syntax compile-time-resolved against
+/// typed columns. Each invocation expands to the equivalent typed-column
+/// method call, so field-name typos fail the build. See
+/// [`rustango_macros::Q`] for the supported lookup suffixes.
+///
+/// ```ignore
+/// use rustango::{Q, core::Column as _};
+///
+/// User::objects()
+///     .where_(Q!(User.email__icontains = "alice"))
+///     .fetch_pool(&pool).await?;
+/// // → WHERE "email" ILIKE $1   ($1 = "%alice%")
+/// ```
+#[allow(non_upper_case_globals)]
+pub use rustango_macros::Q;
+
 /// `#[derive(Form)]` — implements [`forms::Form`] so a struct can be
 /// parsed from an HTTP form payload with multi-error validation.
 /// Re-exported only when the `forms` feature is on.
