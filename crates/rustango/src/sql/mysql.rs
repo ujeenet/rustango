@@ -487,12 +487,14 @@ impl Dialect for MySql {
                 target,
                 update_columns,
             } => {
-                if !target.is_empty() {
-                    return Err(SqlError::ConflictNotSupportedInDialect {
-                        shape: "DO UPDATE with target columns",
-                        dialect: self.name(),
-                    });
-                }
+                // MySQL has no conflict-target concept — `ON DUPLICATE
+                // KEY UPDATE` matches every UNIQUE index automatically.
+                // We accept a non-empty `target` for tri-dialect call-
+                // site uniformity (PG / SQLite need it) and silently
+                // ignore the value here. Issue #267 — pre-T1.5 this
+                // path errored; the bulk_upsert API now relies on the
+                // silent-ignore.
+                let _ = target;
                 if update_columns.is_empty() {
                     return Err(SqlError::EmptyUpdateSet);
                 }
@@ -819,9 +821,13 @@ mod tests {
     }
 
     #[test]
-    fn conflict_do_update_with_target_errors() {
+    fn conflict_do_update_with_target_silently_ignores_target() {
+        // Issue #267 / T1.5 — MySQL silently ignores the conflict
+        // target (it matches on every UNIQUE index automatically).
+        // Pre-T1.5 the writer errored; the bulk_upsert API needs
+        // the silent-ignore for tri-dialect call-site uniformity.
         let mut sql = String::new();
-        let err = MySql
+        MySql
             .write_conflict_clause(
                 &mut sql,
                 &ConflictClause::DoUpdate {
@@ -829,14 +835,8 @@ mod tests {
                     update_columns: vec!["a"],
                 },
             )
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            SqlError::ConflictNotSupportedInDialect {
-                dialect: "mysql",
-                ..
-            }
-        ));
+            .expect("MySQL should accept target and silently ignore it");
+        assert_eq!(sql, " ON DUPLICATE KEY UPDATE `a` = VALUES(`a`)");
     }
 
     #[test]

@@ -3726,6 +3726,126 @@ fn inherent_impl_tokens(
         }
     };
 
+    // Tri-dialect `bulk_upsert_pool` — issue #267 / T1.5. Always emitted
+    // (no postgres-feature gate); routes through the existing
+    // `bulk_insert_pool` + per-dialect conflict writer.
+    //
+    // Auto<T> PKs are required to be `Auto::Unset` for every row so the
+    // sequence picks the PK for fresh inserts; the UPDATE branch never
+    // touches the Auto column.
+    let bulk_upsert_pool_method = {
+        // Pick the "no Auto" columns when the model has Auto fields,
+        // else every column.
+        let (upsert_cols, upsert_pushes): (Vec<_>, Vec<_>) = if fields.has_auto {
+            (
+                fields.bulk_columns_no_auto.clone(),
+                fields.bulk_pushes_no_auto.clone(),
+            )
+        } else {
+            (
+                fields.bulk_columns_all.clone(),
+                fields.bulk_pushes_all.clone(),
+            )
+        };
+        quote! {
+            /// Tri-dialect `bulk_create(update_conflicts=True)` — Django's
+            /// canonical "import a batch idempotently" shape. Issue #267
+            /// / T1.5.
+            ///
+            /// Per-row values are extracted and lowered into a
+            /// [`::rustango::core::BulkInsertQuery`] with
+            /// `on_conflict = DoUpdate { target, update_columns }`. The
+            /// writer dispatches per-dialect:
+            /// * Postgres / SQLite: `INSERT … ON CONFLICT (target) DO UPDATE SET col = EXCLUDED.col`
+            /// * MySQL: `INSERT … ON DUPLICATE KEY UPDATE col = VALUES(col)` (target ignored — MySQL matches every UNIQUE index)
+            ///
+            /// `target` names the column(s) whose unique constraint
+            /// defines the conflict (typically a `unique` or
+            /// `unique_together` natural-key column, NOT the `Auto<T>`
+            /// PK). `update_cols` names the columns to overwrite on
+            /// conflict — every other column is left untouched on the
+            /// existing row.
+            ///
+            /// Auto-PK rows must all have `Auto::Unset` (the sequence
+            /// picks the PK on insert; the update path never touches
+            /// the Auto column). Auto-set rows trigger a hard error.
+            /// Empty slice is a no-op.
+            ///
+            /// # Errors
+            /// Returns [`::rustango::sql::ExecError`] for validation,
+            /// SQL-writing, or driver failures.
+            pub async fn bulk_upsert_pool(
+                rows: &[Self],
+                target: &[&'static str],
+                update_cols: &[&'static str],
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                if rows.is_empty() {
+                    return ::core::result::Result::Ok(());
+                }
+                let mut _all_rows: ::std::vec::Vec<
+                    ::std::vec::Vec<::rustango::core::SqlValue>,
+                > = ::std::vec::Vec::with_capacity(rows.len());
+                for _row in rows.iter() {
+                    let mut _row_vals: ::std::vec::Vec<::rustango::core::SqlValue> =
+                        ::std::vec::Vec::new();
+                    #( #upsert_pushes )*
+                    _all_rows.push(_row_vals);
+                }
+                let _query = ::rustango::core::BulkInsertQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    columns: ::std::vec![ #( #upsert_cols ),* ],
+                    rows: _all_rows,
+                    returning: ::std::vec::Vec::new(),
+                    on_conflict: ::core::option::Option::Some(
+                        ::rustango::core::ConflictClause::DoUpdate {
+                            target: target.to_vec(),
+                            update_columns: update_cols.to_vec(),
+                        }
+                    ),
+                };
+                ::rustango::sql::bulk_insert_pool(pool, &_query).await
+            }
+
+            /// Tri-dialect `bulk_create(ignore_conflicts=True)` — silently
+            /// skip rows that would violate a unique constraint. Issue
+            /// #267 / T1.5. Same per-dialect dispatch as
+            /// [`Self::bulk_upsert_pool`] but with `ON CONFLICT … DO
+            /// NOTHING` (Postgres / SQLite) / `ON DUPLICATE KEY UPDATE
+            /// <pivot> = <pivot>` (MySQL no-op write).
+            ///
+            /// # Errors
+            /// As [`Self::bulk_upsert_pool`].
+            pub async fn bulk_insert_or_ignore_pool(
+                rows: &[Self],
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                if rows.is_empty() {
+                    return ::core::result::Result::Ok(());
+                }
+                let mut _all_rows: ::std::vec::Vec<
+                    ::std::vec::Vec<::rustango::core::SqlValue>,
+                > = ::std::vec::Vec::with_capacity(rows.len());
+                for _row in rows.iter() {
+                    let mut _row_vals: ::std::vec::Vec<::rustango::core::SqlValue> =
+                        ::std::vec::Vec::new();
+                    #( #upsert_pushes )*
+                    _all_rows.push(_row_vals);
+                }
+                let _query = ::rustango::core::BulkInsertQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    columns: ::std::vec![ #( #upsert_cols ),* ],
+                    rows: _all_rows,
+                    returning: ::std::vec::Vec::new(),
+                    on_conflict: ::core::option::Option::Some(
+                        ::rustango::core::ConflictClause::DoNothing
+                    ),
+                };
+                ::rustango::sql::bulk_insert_pool(pool, &_query).await
+            }
+        }
+    };
+
     let pk_value_helper = primary_key.map(|(pk_ident, _)| {
         quote! {
             /// Hidden runtime accessor for the primary-key value as a
@@ -3888,6 +4008,8 @@ fn inherent_impl_tokens(
             #insert_method
 
             #bulk_insert_method
+
+            #bulk_upsert_pool_method
 
             #save_method
 
