@@ -884,6 +884,7 @@ impl<T: Model> QuerySet<T> {
             qs: self,
             group_by: Vec::new(),
             aggregates: Vec::new(),
+            aliases: Vec::new(),
             having: None,
             order_by: Vec::new(),
             limit: None,
@@ -917,6 +918,7 @@ impl<T: Model> QuerySet<T> {
             qs: self,
             group_by: Vec::new(),
             aggregates: Vec::new(),
+            aliases: Vec::new(),
             having: None,
             order_by: Vec::new(),
             limit: None,
@@ -1595,6 +1597,11 @@ pub struct AggregateBuilder<T: Model> {
     qs: QuerySet<T>,
     group_by: Vec<&'static str>,
     aggregates: Vec<(&'static str, AggregateExpr)>,
+    /// Django 3.2 `.alias()` — non-projected annotations. Resolvable in
+    /// `.filter(name, …)` and `.order_by([(name, …)])` (the builder lifts
+    /// the expression into the predicate/ORDER item at `compile()` time),
+    /// but never emitted in the SELECT list. Issue #268.
+    aliases: Vec<(&'static str, AggregateExpr)>,
     having: Option<WhereExpr>,
     order_by: Vec<(&'static str, bool)>,
     limit: Option<i64>,
@@ -1645,6 +1652,42 @@ impl<T: Model> AggregateBuilder<T> {
     #[must_use]
     pub fn annotate(mut self, alias: &'static str, expr: AggregateExpr) -> Self {
         self.aggregates.push((alias, expr));
+        self
+    }
+
+    /// Django 3.2 `.alias()` — annotate without projecting. The expression
+    /// is registered under `name` and resolvable in [`Self::filter`] /
+    /// [`Self::order_by`] (the builder lifts it in-place at compile time),
+    /// but the writer **omits it from the SELECT list**. Issue #268.
+    ///
+    /// Use this when you want to filter or order by a derived aggregate
+    /// without paying the column-decode cost on every row:
+    ///
+    /// ```ignore
+    /// // Authors with > 5 posts, ordered by post count desc — but no post
+    /// // count column in the result row.
+    /// Author::objects()
+    ///     .aggregate()
+    ///     .group_by("id")
+    ///     .alias("c", count_all().into())
+    ///     .filter("c", Op::Gt, 5_i64)
+    ///     .order_by(&[("c", true)])
+    ///     .compile()?;
+    /// // SELECT "id" FROM "author"
+    /// // GROUP BY "id"
+    /// // HAVING COUNT(*) > $1
+    /// // ORDER BY COUNT(*) DESC
+    /// ```
+    ///
+    /// **Chain ordering matters** — same caveat as [`Self::annotate`]: call
+    /// `.alias(name, ...)` BEFORE the corresponding `.filter(name, ...)` /
+    /// `.order_by([(name, ...)])` so the registry lookup sees it.
+    ///
+    /// When `name` collides with an existing annotate alias, the existing
+    /// annotate wins (it's projected; semantics-preserving).
+    #[must_use]
+    pub fn alias(mut self, name: &'static str, expr: AggregateExpr) -> Self {
+        self.aliases.push((name, expr));
         self
     }
 
@@ -1707,9 +1750,12 @@ impl<T: Model> AggregateBuilder<T> {
         // expression into the predicate rather than passing the
         // alias by name — `HAVING COUNT(*) > $1` emits uniformly on
         // every backend.
+        // Issue #268 — `.alias()` annotations also register as lift-able
+        // names. Annotate wins on collision (projected entry first).
         let agg = self
             .aggregates
             .iter()
+            .chain(self.aliases.iter())
             .find(|(alias, _)| *alias == field)
             .map(|(_, expr)| expr.clone());
         if let Some(agg) = agg {
@@ -1809,17 +1855,42 @@ impl<T: Model> AggregateBuilder<T> {
         // `AggregateExpr::Window` (issue #7) — the older `Sum("col")` /
         // `Count(Some("col"))` shapes don't validate yet; that's a
         // pre-existing gap orthogonal to this slice.
-        for (_alias, expr) in &self.aggregates {
+        for (_alias, expr) in self.aggregates.iter().chain(self.aliases.iter()) {
             validate_aggregate_expr_columns(model, expr)?;
         }
+        // Issue #268 — `.order_by((name, desc))` resolves against the same
+        // alias registry as `.filter(name, ...)`. If the name matches an
+        // annotate OR alias entry, we lift the aggregate expression so the
+        // emitted `ORDER BY` references the full expression — required when
+        // the name belongs to `.alias()` (not in SELECT) but also harmless
+        // for `.annotate()` (the writer compares structurally).
+        let alias_for = |name: &str| -> Option<crate::core::AggregateExpr> {
+            self.aggregates
+                .iter()
+                .chain(self.aliases.iter())
+                .find(|(a, _)| *a == name)
+                .map(|(_, e)| e.clone())
+        };
         let order_by = self
             .order_by
             .into_iter()
-            .map(|(col, desc)| crate::core::OrderItem::column(col, desc))
+            .map(|(col, desc)| match alias_for(col) {
+                Some(agg) => {
+                    crate::core::OrderItem::expr(crate::core::Expr::Aggregate(Box::new(agg)), desc)
+                }
+                None => crate::core::OrderItem::column(col, desc),
+            })
             .collect();
 
-        // Issue #75 — GROUP BY auto-inference.
-        let has_aggregating = self.aggregates.iter().any(|(_, e)| e.is_aggregating());
+        // Issue #75 — GROUP BY auto-inference. `.alias()` annotations
+        // (issue #268) participate in this check: a pure `.alias(...,
+        // Count(...))` still needs GROUP BY even though nothing is
+        // projected.
+        let has_aggregating = self
+            .aggregates
+            .iter()
+            .chain(self.aliases.iter())
+            .any(|(_, e)| e.is_aggregating());
         let group_by = if !self.group_by.is_empty() {
             // Explicit `.group_by(...)` always wins. Validate columns
             // belong to the model (caught early — typos otherwise
@@ -1866,6 +1937,7 @@ impl<T: Model> AggregateBuilder<T> {
             where_clause,
             group_by,
             aggregates: self.aggregates,
+            aliases: self.aliases,
             having: self.having,
             order_by,
             limit: self.limit,
