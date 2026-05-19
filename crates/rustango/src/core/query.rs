@@ -1273,6 +1273,13 @@ pub struct AggregateQuery {
     pub group_by: Vec<&'static str>,
     /// `(alias, expr)` pairs — the alias becomes the key in each result row.
     pub aggregates: Vec<(&'static str, AggregateExpr)>,
+    /// Non-projected annotations — Django 3.2 `.alias()`. Same `(name, expr)`
+    /// shape as [`Self::aggregates`] but the writer omits these from the SELECT
+    /// projection. They remain resolvable inside `HAVING` and `ORDER BY` (the
+    /// builder lifts the expression in-place at compile time). Useful when you
+    /// want to filter/order by a derived aggregate without paying the
+    /// column-decode cost. Issue #268.
+    pub aliases: Vec<(&'static str, AggregateExpr)>,
     /// Optional HAVING clause (applied after GROUP BY).
     pub having: Option<WhereExpr>,
     pub order_by: Vec<OrderItem>,

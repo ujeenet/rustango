@@ -32,6 +32,7 @@ fn agg(expr: AggregateExpr) -> AggregateQuery {
         model: User::SCHEMA,
         where_clause: WhereExpr::And(vec![]),
         aggregates: vec![("w", expr)],
+        aliases: vec![],
         group_by: vec![],
         having: None,
         order_by: vec![],

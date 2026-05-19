@@ -318,6 +318,7 @@ fn fetch_aggregate_pool_is_callable() {
             where_clause: WhereExpr::And(vec![]),
             group_by: vec![],
             aggregates: vec![],
+            aliases: vec![],
             having: None,
             order_by: vec![],
             limit: None,
