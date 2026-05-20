@@ -513,6 +513,22 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
 fn write_lock_clause(b: &mut Sql<'_>, lock: &crate::core::LockMode) {
     if b.d.name() == "sqlite" {
         // No row-lock syntax — transaction-scope locks are implicit.
+        // Issue #290 / T2.9: warn at write time so callers debugging
+        // concurrency bugs against a sqlite-backed test fixture see
+        // the no-op. Users who knowingly use the SQLite global writer
+        // lock (test apps, single-writer CLIs) can opt out via
+        // `LockMode { silent_on_sqlite: true, .. }`.
+        if !lock.silent_on_sqlite {
+            tracing::warn!(
+                target: "rustango::sql::lock",
+                skip_locked = lock.skip_locked,
+                nowait = lock.nowait,
+                "select_for_update modifier dropped — SQLite has no row-level lock syntax. \
+                 The transaction's implicit global writer lock applies. \
+                 Set `LockMode {{ silent_on_sqlite: true, .. }}` (or call \
+                 `.silent_on_sqlite()` on the QuerySet) to suppress this warning."
+            );
+        }
         return;
     }
     b.sql.push_str(" FOR ");

@@ -650,6 +650,13 @@ pub struct LockMode {
     /// names go in; empty vec emits no `OF` clause. MySQL accepts
     /// `OF` since 8.0.1. SQLite no-op.
     pub of: Vec<&'static str>,
+    /// Suppress the `tracing::warn!` the writer emits when this
+    /// `LockMode` lands on a SQLite query. Issue #290 / T2.9. SQLite
+    /// has no row-level lock syntax — locks are silently dropped, and
+    /// the writer logs at warn-level by default so users notice. Set
+    /// this `true` on test fixtures or single-writer apps where you
+    /// know the SQLite global writer lock is sufficient.
+    pub silent_on_sqlite: bool,
 }
 
 /// PartialEq for `SelectQuery` — needed so [`crate::core::Expr`] (which
