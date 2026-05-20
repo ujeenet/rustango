@@ -265,6 +265,26 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// Suppress the SQLite-no-locking warning emitted by the writer
+    /// when this queryset's lock modifiers land against a SQLite pool.
+    /// Issue #290 / T2.9.
+    ///
+    /// SQLite has no `FOR UPDATE` row-level lock syntax — locks are
+    /// silently dropped, and the writer logs `tracing::warn!` by
+    /// default so users debugging concurrency bugs against a sqlite-
+    /// backed test fixture see the no-op. Call this on querysets
+    /// where you know the SQLite global writer lock is sufficient
+    /// (single-writer apps, test fixtures).
+    ///
+    /// No effect on PG / MySQL — locks emit normally there.
+    #[must_use]
+    pub fn silent_on_sqlite(mut self) -> Self {
+        let mut lock = self.lock_mode.take().unwrap_or_default();
+        lock.silent_on_sqlite = true;
+        self.lock_mode = Some(lock);
+        self
+    }
+
     /// Issue #25 — Django's `QuerySet.union(other_qs)`. Combines this
     /// queryset with `other` via SQL `UNION` (deduplicates). Both
     /// querysets must target the same model `T`; the column shape is

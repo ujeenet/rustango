@@ -158,6 +158,7 @@ jobs:
             --test get_or_create_sqlite_live \
             --test inspectdb_sqlite_live \
             --test jobs_sqlite_live \
+            --test lock_sqlite_warning \
             --test m2m_sqlite_live \
             --test media_sqlite_live \
             --test migrate_registry_pool_sqlite_live \
