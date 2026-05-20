@@ -13,17 +13,65 @@ Every feature works on every supported backend out of the box. The only PG-speci
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.40"
+rustango = "0.41"
 
 # SQLite — file-backed or in-memory, full tri-dialect framework
-rustango = { version = "0.40", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
+rustango = { version = "0.41", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
 
 # MySQL 8+
-rustango = { version = "0.40", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
+rustango = { version = "0.41", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
 
 # Multiple backends in one binary
-rustango = { version = "0.40", features = ["postgres", "sqlite"] }
+rustango = { version = "0.41", features = ["postgres", "sqlite"] }
 ```
+
+### What's new in v0.41.0 (May 2026) — Tier 1 ORM gap-closure batch
+
+**Django-shape syntax with Rust-shape compile-time safety.** Ten ORM tickets shipped across 14 PRs, plus the PG-typed legacy executor surface is gone from the public API.
+
+```rust
+use rustango::{Q, query::Q as Qb, core::Column as _};
+
+// Compile-time-safe Django-shape filter macro (#269 — typo'd field fails build):
+User::objects()
+    .where_(Q!(User.email__icontains = "alice"))
+    .where_(Q!(User.age__gt = 18_i64))
+    .fetch_pool(&pool).await?;
+
+// Runtime-composable Q() builder (#263 — for admin filter chips, dynamic API params):
+let q = Qb::eq("active", true) & (Qb::gt("age", 18_i64) | !Qb::eq("banned", true));
+User::objects().where_(q).fetch_pool(&pool).await?;
+
+// PG DISTINCT ON + portable window-function fallback (#264 — "latest per group"):
+Post::objects()
+    .distinct_on(&["author_id"])
+    .order_by(&[("author_id", false), ("created", true)])
+    .fetch_pool(&pool).await?;
+
+// Tri-dialect UPSERT — Django's bulk_create(update_conflicts=True) (#267):
+Post::bulk_upsert_pool(
+    &rows,
+    &["slug"],                  // unique_fields / conflict target
+    &["title", "view_count"],   // update_fields
+    &pool,
+).await?;
+```
+
+Plus:
+- **`#[rustango(unique_when(columns = "email", condition = "deleted_at IS NULL"))]`** — partial unique constraints (#265). PG/SQLite native; MySQL falls back to a plain UNIQUE with a migration-time warning. Universal "unique email per non-deleted row" / "unique slug per tenant" pattern.
+- **`AggregateBuilder::alias()`** (#268) — Django 3.2 non-projected annotations. Filter/order by a derived aggregate without paying the column-decode cost.
+- **`explain_pool()`** (#272) — tri-dialect query-plan helper. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)`, MySQL `EXPLAIN ANALYZE` / `FORMAT=TREE` / `FORMAT=JSON`, SQLite `EXPLAIN QUERY PLAN`.
+- **DB functions batch 1** (#266) — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Per-dialect emission with clear `OpNotSupportedInDialect` errors where SQLite genuinely lacks the function.
+- **`#[rustango(manager(ext = "PostManagerExt"))]`** (#271) — Django-shape custom-manager extension trait emitted next to the model.
+
+**Breaking changes** (the PG-typed legacy executor deletion — #270, 4 waves):
+- `use rustango::sql::{Fetcher, Counter, Updater, Deleter};` → all four trait imports unresolved. The methods are now inherent on `QuerySet` / `UpdateBuilder`: `.fetch_on(&pool)`, `.count_on(&pool)`, `.delete_on(&pool)`, `.update().set(...).execute_on(&pool)`.
+- `use rustango::sql::{insert, update, delete, select_rows, transaction, count_rows, raw_execute, bulk_update, ...};` → bare `&PgPool` wrappers unresolved. Use the tri-dialect `_pool` family (`insert_pool`, `update_pool`, `transaction_pool`, …).
+- `qs.fetch(&pool)` → `qs.fetch_on(&pool)` (no trait import needed); same for `.count` / `.delete` / `.execute`.
+
+Net: 9 features added, ~340 LOC removed from the public surface, every shipped feature works on all three backends via the canonical `cargo build --no-default-features --features sqlite,tenancy` litmus.
+
+Full ticket index: PRs #274–#286. Closes [epic #273](https://github.com/ujeenet/rustango/issues/273).
 
 ### What's new in v0.40.0 (May 2026) — admin auth + GFK ergonomics + field help_text
 
