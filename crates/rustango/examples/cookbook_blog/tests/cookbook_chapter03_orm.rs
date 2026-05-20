@@ -7,7 +7,7 @@
 
 use cookbook_blog::apps::blog::models::*;
 use rustango::core::Op;
-use rustango::sql::{sqlx, Auto, Fetcher};
+use rustango::sql::{sqlx, Auto, };
 use rustango::Model;
 
 fn url() -> Option<String> {
@@ -87,8 +87,7 @@ async fn filter_eq_fetch_returns_matching_rows() {
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
     let published: Vec<Post> = Post::objects()
-        .filter("published", Op::Eq, true)
-        .fetch(&pool).await.unwrap();
+        .filter("published", Op::Eq, true).fetch_on(&pool).await.unwrap();
     assert_eq!(published.len(), 3, "3 of 5 posts are published");
     for p in &published { assert!(p.published, "filter must keep only published"); }
 }
@@ -101,8 +100,7 @@ async fn filter_with_gt_lt_op() {
     let popular: Vec<Post> = Post::objects()
         // Bind as i64 — the column is BIGINT, and `90` would otherwise
         // infer as i32 and trip rustango's TypeMismatch guard.
-        .filter("view_count", Op::Gt, 90i64)
-        .fetch(&pool).await.unwrap();
+        .filter("view_count", Op::Gt, 90i64).fetch_on(&pool).await.unwrap();
     assert_eq!(popular.len(), 2, "view_count>90: rust-orm(100) + django-shape(250)");
     let titles: Vec<&str> = popular.iter().map(|p| p.title.as_str()).collect();
     assert!(titles.contains(&"Rust ORM"));
@@ -115,8 +113,7 @@ async fn filter_with_ilike_case_insensitive() {
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
     let drafts: Vec<Post> = Post::objects()
-        .filter("title", Op::ILike, "%draft%")
-        .fetch(&pool).await.unwrap();
+        .filter("title", Op::ILike, "%draft%").fetch_on(&pool).await.unwrap();
     assert_eq!(drafts.len(), 2);
 }
 
@@ -130,8 +127,7 @@ async fn filter_with_in_list() {
         .filter("slug", Op::In, SqlValue::List(vec![
             SqlValue::String("rust-orm".into()),
             SqlValue::String("axum-101".into()),
-        ]))
-        .fetch(&pool).await.unwrap();
+        ])).fetch_on(&pool).await.unwrap();
     assert_eq!(picks.len(), 2);
 }
 
@@ -144,8 +140,7 @@ async fn filter_with_between_range() {
     let mid: Vec<Post> = Post::objects()
         .filter("view_count", Op::Between, SqlValue::List(vec![
             SqlValue::I64(50), SqlValue::I64(150),
-        ]))
-        .fetch(&pool).await.unwrap();
+        ])).fetch_on(&pool).await.unwrap();
     assert_eq!(mid.len(), 2, "axum-101(80) + rust-orm(100) within [50, 150]");
 }
 
@@ -156,8 +151,7 @@ async fn filter_with_is_null_unpublished() {
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
     let drafts: Vec<Post> = Post::objects()
-        .filter("published_at", Op::IsNull, SqlValue::Bool(true))
-        .fetch(&pool).await.unwrap();
+        .filter("published_at", Op::IsNull, SqlValue::Bool(true)).fetch_on(&pool).await.unwrap();
     assert_eq!(drafts.len(), 2, "draft-1 + draft-2 have NULL published_at");
 }
 
@@ -169,8 +163,7 @@ async fn order_by_view_count_desc() {
     let by_views: Vec<Post> = Post::objects()
         .filter("published", Op::Eq, true)
         // QuerySet::order_by uses (column, desc): true = DESC, false = ASC.
-        .order_by(&[("view_count", true)])
-        .fetch(&pool).await.unwrap();
+        .order_by(&[("view_count", true)]).fetch_on(&pool).await.unwrap();
     assert_eq!(by_views[0].slug, "django-shape", "250 views first");
     assert_eq!(by_views[1].slug, "rust-orm", "100 views second");
     assert_eq!(by_views[2].slug, "axum-101", "80 views third");
@@ -185,8 +178,7 @@ async fn limit_offset_paginates() {
         // ASC by id, skip 2, take 2 → posts 3 and 4 (draft-1, axum-101).
         .order_by(&[("id", false)])
         .limit(2)
-        .offset(2)
-        .fetch(&pool).await.unwrap();
+        .offset(2).fetch_on(&pool).await.unwrap();
     assert_eq!(page2.len(), 2);
     assert_eq!(page2[0].slug, "draft-1");
     assert_eq!(page2[1].slug, "axum-101");
@@ -242,8 +234,7 @@ async fn save_inserts_then_updates_in_place() {
     p.save(&pool).await.unwrap();
 
     let back: Vec<Post> = Post::objects()
-        .filter("id", Op::Eq, id)
-        .fetch(&pool).await.unwrap();
+        .filter("id", Op::Eq, id).fetch_on(&pool).await.unwrap();
     assert_eq!(back[0].body, "v2");
     assert!(back[0].published);
 }
@@ -306,8 +297,7 @@ async fn or_nested_predicates_via_where_raw() {
         }),
     ]);
     let hits: Vec<Post> = Post::objects()
-        .where_raw(predicate)
-        .fetch(&pool).await.unwrap();
+        .where_raw(predicate).fetch_on(&pool).await.unwrap();
     let slugs: Vec<&str> = hits.iter().map(|p| p.slug.as_str()).collect();
     assert!(slugs.contains(&"rust-orm"), "OR-arm-1 (slug match) missing: {slugs:?}");
     assert!(slugs.contains(&"django-shape"), "OR-arm-2 (>200 views) missing: {slugs:?}");
@@ -330,8 +320,7 @@ async fn where_expr_not_negates_predicate() {
         }),
     ));
     let drafts: Vec<Post> = Post::objects()
-        .where_raw(predicate)
-        .fetch(&pool).await.unwrap();
+        .where_raw(predicate).fetch_on(&pool).await.unwrap();
     assert_eq!(drafts.len(), 2, "2 unpublished posts");
     for p in &drafts { assert!(!p.published); }
 }
@@ -390,8 +379,7 @@ async fn select_related_smoke_compiles_and_runs() {
     // shape. (Lazy-load typed wrapper requires ForeignKey<T> field;
     // covered by tests/foreign_key_live.rs in rustango itself.)
     let posts: Vec<Post> = Post::objects()
-        .select_related("author_id")
-        .fetch(&pool).await
+        .select_related("author_id").fetch_on(&pool).await
         // Loose smoke: as long as no SQL error fires, the API accepts
         // the field. A typed FK schema (ForeignKey<Author>) is what
         // turns this into an actual JOIN — see chapter 3b plans.

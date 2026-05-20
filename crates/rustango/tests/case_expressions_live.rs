@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use rustango::core::case::{case, value};
 use rustango::core::funcs::lower;
 use rustango::core::{Column as _, F};
-use rustango::sql::{sqlx, Auto, Fetcher, Updater};
+use rustango::sql::{sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -99,13 +99,13 @@ async fn case_writes_branch_value_per_row() {
                 .when(Post::status.eq("draft"), value("Draft"))
                 .default(value("Live")),
         )
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
     let rows: Vec<Post> = Post::objects()
         .order_by(&[("id", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     let labels: Vec<&str> = rows.iter().map(|p| p.label.as_str()).collect();
@@ -142,13 +142,13 @@ async fn case_drives_a_derived_ordering_column() {
                 .when(Post::status.eq("draft"), 2_i64)
                 .default(99_i64),
         )
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
     let ordered: Vec<Post> = Post::objects()
         .order_by(&[("priority", false), ("id", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     let statuses: Vec<&str> = ordered.iter().map(|p| p.status.as_str()).collect();
@@ -186,13 +186,13 @@ async fn case_with_function_in_then_branch_executes() {
                 .when(Post::status.eq("draft"), lower(F("title")))
                 .default(F("title")),
         )
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
     let rows: Vec<Post> = Post::objects()
         .order_by(&[("id", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     // First row has status='draft', title='First Draft', should land as 'first draft'.
@@ -232,13 +232,13 @@ async fn case_with_and_or_predicate_executes() {
                 .when(Post::status.eq("published"), value("live"))
                 .default(value("pending")),
         )
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
     let rows: Vec<Post> = Post::objects()
         .order_by(&[("id", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     // Row 1 draft → pending, row 2 review → pending,
@@ -273,13 +273,13 @@ async fn case_without_else_returns_null_for_unmatched_rows() {
             "maybe_label",
             case().when(Post::status.eq("draft"), value("Draft")),
         )
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
     let rows: Vec<Post> = Post::objects()
         .order_by(&[("id", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     // Row 1 (draft) hits the WHEN branch; rows 2-4 fall through and

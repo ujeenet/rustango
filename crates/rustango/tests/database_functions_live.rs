@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use rustango::core::funcs::{coalesce, concat, length, lower, round_to, upper};
 use rustango::core::F;
-use rustango::sql::{sqlx, Auto, Fetcher, Updater};
+use rustango::sql::{sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -73,11 +73,15 @@ async fn lower_upper_length_update_round_trip() {
         .eq("id", id)
         .update()
         .set_expr("name", lower(F("name")))
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
-    let after: Vec<FnDemo> = FnDemo::objects().eq("id", id).fetch(&pool).await.unwrap();
+    let after: Vec<FnDemo> = FnDemo::objects()
+        .eq("id", id)
+        .fetch_on(&pool)
+        .await
+        .unwrap();
     assert_eq!(after[0].name, "mixed case name");
 
     sqlx::query(r#"DROP TABLE IF EXISTS "fn_demo" CASCADE"#)
@@ -107,11 +111,15 @@ async fn concat_with_literal_separator_actually_concatenates() {
         .eq("id", id)
         .update()
         .set_expr("name", concat([F("name").into(), "-suffix".into()]))
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
-    let after: Vec<FnDemo> = FnDemo::objects().eq("id", id).fetch(&pool).await.unwrap();
+    let after: Vec<FnDemo> = FnDemo::objects()
+        .eq("id", id)
+        .fetch_on(&pool)
+        .await
+        .unwrap();
     assert_eq!(after[0].name, "prefix-suffix");
 
     sqlx::query(r#"DROP TABLE IF EXISTS "fn_demo" CASCADE"#)
@@ -140,11 +148,11 @@ async fn coalesce_picks_first_non_null() {
     FnDemo::objects()
         .update()
         .set_expr("name", coalesce([F("name").into(), "fallback".into()]))
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
-    let after: Vec<FnDemo> = FnDemo::objects().fetch(&pool).await.unwrap();
+    let after: Vec<FnDemo> = FnDemo::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(after[0].name, "keep");
 
     sqlx::query(r#"DROP TABLE IF EXISTS "fn_demo" CASCADE"#)
@@ -173,11 +181,11 @@ async fn round_to_two_places_works_on_double() {
     FnDemo::objects()
         .update()
         .set_expr("score", round(F("score")))
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
-    let after: Vec<FnDemo> = FnDemo::objects().fetch(&pool).await.unwrap();
+    let after: Vec<FnDemo> = FnDemo::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(after[0].score, 1.0); // 1.23456 → 1.0
 
     // round_to also compiles — we don't execute it on `double` (PG
@@ -208,11 +216,11 @@ async fn nested_function_call_executes() {
     FnDemo::objects()
         .update()
         .set_expr("name", upper(trim(F("name"))))
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
-    let after: Vec<FnDemo> = FnDemo::objects().fetch(&pool).await.unwrap();
+    let after: Vec<FnDemo> = FnDemo::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(after[0].name, "PADDED");
 
     // Bonus: LENGTH after the trim is 6, no padding.

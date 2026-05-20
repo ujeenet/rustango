@@ -11,7 +11,7 @@ use axum::body::Body;
 use axum::http::header;
 use axum::http::Request;
 use rustango::core::Column as _;
-use rustango::sql::{sqlx, Auto, Fetcher};
+use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::admin::TenantAdminBuilder;
 use rustango::tenancy::operator_console::{router_with_pools, SessionSecret};
 use rustango::tenancy::{branding, HeaderResolver, Org, StorageMode, TenantPools};
@@ -197,7 +197,7 @@ async fn upload_then_serve_round_trip() {
     // Org row picked up the new logo_path.
     let updates: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(slug.clone()))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     let updated = updates.into_iter().next().expect("org row exists");

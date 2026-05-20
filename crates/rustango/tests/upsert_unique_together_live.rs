@@ -15,7 +15,7 @@
 
 use rustango::core::Column as _;
 use rustango::sql::sqlx;
-use rustango::sql::{Auto, Fetcher};
+use rustango::sql::Auto;
 
 #[derive(rustango::Model, Debug, Clone)]
 #[rustango(table = "_upsert_uq_demo", unique_together = "team_id, codename")]
@@ -87,7 +87,7 @@ async fn upsert_uses_unique_together_as_conflict_target() {
     let rows: Vec<DemoMembership> = DemoMembership::objects()
         .where_(DemoMembership::team_id.eq(7_i64))
         .where_(DemoMembership::codename.eq("manage"))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1, "second upsert should NOT insert a duplicate");

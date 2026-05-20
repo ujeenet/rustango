@@ -12,7 +12,7 @@
 use std::sync::OnceLock;
 
 use rustango::core::Op;
-use rustango::sql::{sqlx, Auto, Counter, Fetcher};
+use rustango::sql::{sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -72,7 +72,7 @@ async fn save_inserts_when_pk_unset_and_populates_it() {
     t.save(&pool).await.unwrap();
 
     assert!(matches!(t.id, Auto::Set(_)));
-    assert_eq!(Thing::objects().count(&pool).await.unwrap(), 1);
+    assert_eq!(Thing::objects().count_on(&pool).await.unwrap(), 1);
 }
 
 #[tokio::test]
@@ -105,13 +105,13 @@ async fn save_updates_when_pk_set_without_changing_pk() {
 
     let fetched: Vec<Thing> = Thing::objects()
         .filter_op("id", Op::Eq, after_id)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(fetched.len(), 1);
     assert_eq!(fetched[0].label, "beta");
     assert_eq!(fetched[0].count, 42);
-    assert_eq!(Thing::objects().count(&pool).await.unwrap(), 1);
+    assert_eq!(Thing::objects().count_on(&pool).await.unwrap(), 1);
 }
 
 #[tokio::test]
@@ -128,5 +128,5 @@ async fn save_with_set_pk_matching_no_row_is_silent_ok() {
     };
     t.save(&pool).await.unwrap();
 
-    assert_eq!(Thing::objects().count(&pool).await.unwrap(), 0);
+    assert_eq!(Thing::objects().count_on(&pool).await.unwrap(), 0);
 }

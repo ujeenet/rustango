@@ -7,7 +7,7 @@
 use std::sync::OnceLock;
 
 use rustango::core::Column as _;
-use rustango::sql::{sqlx, Auto, Fetcher};
+use rustango::sql::{sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -88,7 +88,7 @@ async fn binary_xor_matches_exactly_one_true() {
 
     let rows: Vec<Person> = Person::objects()
         .where_(Person::name.eq("alice").xor(Person::active.eq(true)))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
 
@@ -115,7 +115,7 @@ async fn ternary_xor_matches_odd_parity() {
                 .xor(Person::active.eq(true))
                 .xor(Person::age.gte(40_i32)),
         )
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
 

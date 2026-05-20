@@ -13,7 +13,7 @@ use rustango::core::funcs::{
     extract_month, extract_weekday, extract_year, now, trunc_date, trunc_month,
 };
 use rustango::core::F;
-use rustango::sql::{sqlx, Auto, Dialect, Fetcher, Updater};
+use rustango::sql::{sqlx, Auto, Dialect};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -76,8 +76,7 @@ async fn now_assigns_server_timestamp() {
     // Insert a row with a known-old timestamp.
     sqlx::query(
         r#"INSERT INTO "dt_signup" ("username", "created_at") VALUES ('alice', '2020-01-01 00:00:00+00')"#,
-    )
-    .execute(&pool)
+    ).execute(&pool)
     .await
     .unwrap();
 
@@ -85,12 +84,12 @@ async fn now_assigns_server_timestamp() {
     Signup::objects()
         .update()
         .set_expr("created_at", now())
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
     // Re-fetch and confirm the timestamp moved forward (year != 2020).
-    let rows: Vec<Signup> = Signup::objects().fetch(&pool).await.unwrap();
+    let rows: Vec<Signup> = Signup::objects().fetch_on(&pool).await.unwrap();
     let year_now = chrono::Utc::now().date_naive().format("%Y").to_string();
     let year_row = rows[0].created_at.date_naive().format("%Y").to_string();
     assert_eq!(year_row, year_now, "NOW() should set current year");
@@ -113,8 +112,7 @@ async fn extract_year_and_month_pull_components_out_of_timestamp() {
     // extracted ints are stable.
     sqlx::query(
         r#"INSERT INTO "dt_signup" ("username", "created_at") VALUES ('bob', '2024-03-15 14:30:00+00')"#,
-    )
-    .execute(&pool)
+    ).execute(&pool)
     .await
     .unwrap();
 
@@ -123,17 +121,17 @@ async fn extract_year_and_month_pull_components_out_of_timestamp() {
     Signup::objects()
         .update()
         .set_expr("bucket_year", extract_year(F("created_at")))
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
     Signup::objects()
         .update()
         .set_expr("bucket_month", extract_month(F("created_at")))
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
-    let rows: Vec<Signup> = Signup::objects().fetch(&pool).await.unwrap();
+    let rows: Vec<Signup> = Signup::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(rows[0].bucket_year, 2024);
     assert_eq!(rows[0].bucket_month, 3);
 
@@ -183,13 +181,13 @@ async fn count_signups_by_month_headline_acceptance() {
     Signup::objects()
         .update()
         .set_expr("bucket_year", extract_year(F("created_at")))
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
     Signup::objects()
         .update()
         .set_expr("bucket_month", extract_month(F("created_at")))
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
@@ -240,8 +238,7 @@ async fn trunc_date_and_trunc_month_smoke_check() {
 
     sqlx::query(
         r#"INSERT INTO "dt_signup" ("username", "created_at") VALUES ('x', '2024-07-15 13:45:00+00')"#,
-    )
-    .execute(&pool)
+    ).execute(&pool)
     .await
     .unwrap();
 
@@ -319,7 +316,7 @@ async fn cookbook_store_then_filter_by_weekday_pattern() {
     Signup::objects()
         .update()
         .set_expr("weekday", extract_weekday(F("created_at")))
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
@@ -329,7 +326,7 @@ async fn cookbook_store_then_filter_by_weekday_pattern() {
     use rustango::core::Column as _;
     let fridays: Vec<Signup> = Signup::objects()
         .where_(Signup::weekday.eq(5_i64))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(fridays.len(), 1, "expected exactly 1 Friday");
@@ -340,7 +337,7 @@ async fn cookbook_store_then_filter_by_weekday_pattern() {
     // EXTRACT(DOW) emitter regressing to MySQL's 1-indexed shape.
     let by_day: Vec<Signup> = Signup::objects()
         .order_by(&[("weekday", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(by_day[0].weekday, 0, "Sunday must be 0");
@@ -373,8 +370,7 @@ async fn cookbook_rust_computed_year_boundary_pattern() {
     let two_years_ago = this_year - 2;
     sqlx::query(&format!(
         r#"INSERT INTO "dt_signup" ("username", "created_at") VALUES ('old', '{two_years_ago}-06-15 12:00:00+00'), ('new', '{this_year}-06-15 12:00:00+00')"#
-    ))
-    .execute(&pool)
+    )).execute(&pool)
     .await
     .unwrap();
 
@@ -391,7 +387,7 @@ async fn cookbook_rust_computed_year_boundary_pattern() {
     use rustango::core::Column as _;
     let recent: Vec<Signup> = Signup::objects()
         .where_(Signup::created_at.gte(year_start))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(recent.len(), 1, "only 'new' should match this-year filter");

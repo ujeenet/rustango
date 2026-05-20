@@ -23,7 +23,7 @@
 //! Reads DATABASE_URL; skips silently if unset.
 
 use rustango::core::{Model as _, Op};
-use rustango::sql::{sqlx, Auto, Fetcher};
+use rustango::sql::{sqlx, Auto};
 use rustango::Model;
 
 #[derive(Model, Debug, Clone)]
@@ -123,7 +123,7 @@ async fn live_self_fk_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut root_children: Vec<Page> = Page::objects()
         .filter_op("parent_id", Op::Eq, root_id)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await?;
     root_children.sort_by(|a, b| a.title.cmp(&b.title));
     assert_eq!(root_children.len(), 2);
@@ -132,7 +132,7 @@ async fn live_self_fk_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 
     let grandkids: Vec<Page> = Page::objects()
         .filter_op("parent_id", Op::Eq, child_b_id)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await?;
     assert_eq!(grandkids.len(), 1);
     assert_eq!(grandkids[0].title, "grand");

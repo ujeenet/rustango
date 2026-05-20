@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use rustango::core::subquery::{exists, not_exists, outer_ref};
 use rustango::core::Column as _;
-use rustango::sql::{sqlx, Auto, Fetcher, Updater};
+use rustango::sql::{sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -114,13 +114,13 @@ async fn not_exists_finds_authors_with_no_books() {
         .where_raw(not_exists(inner))
         .update()
         .set("book_count", -1_i64)
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
     let rows: Vec<Author> = Author::objects()
         .order_by(&[("id", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     // Alice + Bob keep 0 (they have books); Carol jumps to -1.
@@ -150,13 +150,13 @@ async fn exists_finds_authors_with_published_books() {
         .where_raw(exists(inner))
         .update()
         .set("book_count", 99_i64)
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
     let rows: Vec<Author> = Author::objects()
         .order_by(&[("id", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     // Only Alice has a published book.
@@ -188,13 +188,13 @@ async fn exists_filters_by_correlated_inner_predicate() {
         .where_raw(exists(inner))
         .update()
         .set("book_count", 77_i64)
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
     let rows: Vec<Author> = Author::objects()
         .order_by(&[("id", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows[0].book_count, 77, "Alice has a 200-page book");
@@ -228,13 +228,13 @@ async fn exists_composes_with_or_in_outer_where() {
         ]))
         .update()
         .set("book_count", 7_i64)
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
 
     let rows: Vec<Author> = Author::objects()
         .order_by(&[("id", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows[0].book_count, 7, "Alice via EXISTS");

@@ -11,7 +11,7 @@
 use std::sync::OnceLock;
 
 use rustango::core::{Column as _, Op, QueryError, SqlValue};
-use rustango::sql::{sqlx, Counter, Deleter, ExecError, Fetcher, Updater};
+use rustango::sql::{sqlx, ExecError};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -99,7 +99,7 @@ async fn read_pipeline_filters_and_in_clause() {
 
     let actives: Vec<LiveUser> = LiveUser::objects()
         .filter_op("is_active", Op::Eq, true)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     let mut names: Vec<&str> = actives.iter().map(|u| u.name.as_str()).collect();
@@ -113,14 +113,14 @@ async fn read_pipeline_filters_and_in_clause() {
             Op::In,
             SqlValue::List(vec![SqlValue::I64(1), SqlValue::I64(3)]),
         )
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     let mut ids: Vec<i64> = picked.iter().map(|u| u.id).collect();
     ids.sort_unstable();
     assert_eq!(ids, vec![1, 3]);
 
-    let all: Vec<LiveUser> = LiveUser::objects().fetch(&pool).await.unwrap();
+    let all: Vec<LiveUser> = LiveUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(all.len(), 3);
 }
 
@@ -135,14 +135,14 @@ async fn bulk_update_changes_only_matching_rows() {
         .eq("name", "alice")
         .update()
         .set("is_active", false)
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
     assert_eq!(affected, 1);
 
     let alice = LiveUser::objects()
         .eq("id", 1_i64)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(alice.len(), 1);
@@ -151,13 +151,13 @@ async fn bulk_update_changes_only_matching_rows() {
     // Bob & Carol untouched.
     let bob = LiveUser::objects()
         .eq("id", 2_i64)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert!(!bob[0].is_active); // bob was already inactive
     let carol = LiveUser::objects()
         .eq("id", 3_i64)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert!(carol[0].is_active);
@@ -173,12 +173,12 @@ async fn bulk_update_with_no_filter_touches_every_row() {
     let affected = LiveUser::objects()
         .update()
         .set("is_active", true)
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
     assert_eq!(affected, 3);
 
-    let all: Vec<LiveUser> = LiveUser::objects().fetch(&pool).await.unwrap();
+    let all: Vec<LiveUser> = LiveUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(all.len(), 3);
     assert!(all.iter().all(|u| u.is_active));
 }
@@ -195,14 +195,14 @@ async fn bulk_update_with_multiple_set_columns() {
         .update()
         .set("name", "BOB")
         .set("is_active", true)
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
     assert_eq!(affected, 1);
 
     let bob = LiveUser::objects()
         .eq("id", 2_i64)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(bob.len(), 1);
@@ -221,7 +221,7 @@ async fn bulk_update_matching_zero_rows_returns_zero() {
         .eq("id", 999_i64)
         .update()
         .set("is_active", false)
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
     assert_eq!(affected, 0);
@@ -237,7 +237,7 @@ async fn bulk_delete_removes_matching_rows() {
 
     let affected = LiveUser::objects()
         .eq("is_active", false)
-        .delete(&pool)
+        .delete_on(&pool)
         .await
         .unwrap();
     assert_eq!(affected, 1);
@@ -245,7 +245,7 @@ async fn bulk_delete_removes_matching_rows() {
 
     // Remaining rows are alice and carol.
     let mut remaining: Vec<i64> = LiveUser::objects()
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap()
         .into_iter()
@@ -268,12 +268,12 @@ async fn bulk_delete_with_in_clause_removes_listed_rows() {
             Op::In,
             SqlValue::List(vec![SqlValue::I64(1), SqlValue::I64(3)]),
         )
-        .delete(&pool)
+        .delete_on(&pool)
         .await
         .unwrap();
     assert_eq!(affected, 2);
 
-    let remaining: Vec<LiveUser> = LiveUser::objects().fetch(&pool).await.unwrap();
+    let remaining: Vec<LiveUser> = LiveUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].id, 2);
 }
@@ -356,7 +356,7 @@ async fn insert_within_bounds_succeeds() {
     .await
     .unwrap();
 
-    let rows: Vec<BoundedUser> = BoundedUser::objects().fetch(&pool).await.unwrap();
+    let rows: Vec<BoundedUser> = BoundedUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].name, "alice");
     assert_eq!(rows[0].age, 30);
@@ -379,7 +379,7 @@ async fn insert_too_long_string_is_rejected_before_db() {
         ExecError::Query(QueryError::MaxLengthExceeded { max: 8, .. })
     ));
     // Confirm DB unchanged.
-    let rows: Vec<BoundedUser> = BoundedUser::objects().fetch(&pool).await.unwrap();
+    let rows: Vec<BoundedUser> = BoundedUser::objects().fetch_on(&pool).await.unwrap();
     assert!(rows.is_empty());
 }
 
@@ -446,7 +446,7 @@ async fn insert_at_inclusive_bounds_is_accepted() {
     .await
     .unwrap();
 
-    let rows: Vec<BoundedUser> = BoundedUser::objects().fetch(&pool).await.unwrap();
+    let rows: Vec<BoundedUser> = BoundedUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(rows.len(), 2);
 }
 
@@ -469,7 +469,7 @@ async fn update_too_long_string_is_rejected_before_db() {
         .eq("id", 7_i64)
         .update()
         .set("name", "this_is_way_too_long")
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -480,7 +480,7 @@ async fn update_too_long_string_is_rejected_before_db() {
     // Row unchanged.
     let rows: Vec<BoundedUser> = BoundedUser::objects()
         .eq("id", 7_i64)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows[0].name, "ok");
@@ -504,7 +504,7 @@ async fn update_out_of_range_age_is_rejected() {
     let err = BoundedUser::objects()
         .update()
         .set("age", 200_i32)
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -532,7 +532,7 @@ async fn filter_with_long_string_still_works_at_runtime() {
 
     let rows: Vec<BoundedUser> = BoundedUser::objects()
         .eq("name", "definitely_longer_than_eight")
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert!(rows.is_empty());
@@ -548,7 +548,7 @@ async fn typed_columns_drive_full_pipeline() {
     // Read with typed filters.
     let actives: Vec<LiveUser> = LiveUser::objects()
         .where_(LiveUser::is_active.eq(true))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     let mut names: Vec<&str> = actives.iter().map(|u| u.name.as_str()).collect();
@@ -558,7 +558,7 @@ async fn typed_columns_drive_full_pipeline() {
     // Typed IN.
     let picked: Vec<LiveUser> = LiveUser::objects()
         .where_(LiveUser::id.is_in([1_i64, 3]))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(picked.len(), 2);
@@ -569,14 +569,14 @@ async fn typed_columns_drive_full_pipeline() {
         .update()
         .set_typed(LiveUser::is_active.set(true))
         .set_typed(LiveUser::name.set("BOB"))
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
     assert_eq!(affected, 1);
 
     let bob: Vec<LiveUser> = LiveUser::objects()
         .where_(LiveUser::id.eq(2_i64))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(bob[0].name, "BOB");
@@ -585,7 +585,7 @@ async fn typed_columns_drive_full_pipeline() {
     // Typed delete.
     let affected = LiveUser::objects()
         .where_(LiveUser::id.eq(2_i64))
-        .delete(&pool)
+        .delete_on(&pool)
         .await
         .unwrap();
     assert_eq!(affected, 1);
@@ -604,7 +604,7 @@ async fn typed_filter_validates_at_compile_runtime_match() {
     let rows: Vec<LiveUser> = LiveUser::objects()
         .where_(LiveUser::is_active.eq(true))
         .filter_op("name", Op::Like, "alic%")
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -633,7 +633,7 @@ async fn full_crud_round_trip() {
         .update()
         .set("is_active", true)
         .set("name", "DAVE")
-        .execute(&pool)
+        .execute_on(&pool)
         .await
         .unwrap();
     assert_eq!(affected, 1);
@@ -641,7 +641,7 @@ async fn full_crud_round_trip() {
     // FETCH the updated row.
     let dave_fetched: Vec<LiveUser> = LiveUser::objects()
         .eq("id", 4_i64)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(dave_fetched.len(), 1);
@@ -651,7 +651,7 @@ async fn full_crud_round_trip() {
     // DELETE via QuerySet.
     let affected = LiveUser::objects()
         .eq("id", 4_i64)
-        .delete(&pool)
+        .delete_on(&pool)
         .await
         .unwrap();
     assert_eq!(affected, 1);
@@ -660,7 +660,7 @@ async fn full_crud_round_trip() {
     // Confirm gone.
     let gone: Vec<LiveUser> = LiveUser::objects()
         .eq("id", 4_i64)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert!(gone.is_empty());
@@ -675,7 +675,7 @@ async fn limit_caps_returned_rows() {
         return;
     };
 
-    let users = LiveUser::objects().limit(2).fetch(&pool).await.unwrap();
+    let users = LiveUser::objects().limit(2).fetch_on(&pool).await.unwrap();
     assert_eq!(users.len(), 2);
 }
 
@@ -687,7 +687,7 @@ async fn offset_skips_rows() {
     };
 
     // 3 seeded rows; offset 2 → just 1 left.
-    let users = LiveUser::objects().offset(2).fetch(&pool).await.unwrap();
+    let users = LiveUser::objects().offset(2).fetch_on(&pool).await.unwrap();
     assert_eq!(users.len(), 1);
 }
 
@@ -701,13 +701,13 @@ async fn limit_and_offset_compose_for_paging() {
     let page1 = LiveUser::objects()
         .limit(2)
         .offset(0)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     let page2 = LiveUser::objects()
         .limit(2)
         .offset(2)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(page1.len(), 2);
@@ -720,7 +720,7 @@ async fn count_returns_total_with_no_filter() {
     let Some(pool) = fresh_pool().await else {
         return;
     };
-    let n = LiveUser::objects().count(&pool).await.unwrap();
+    let n = LiveUser::objects().count_on(&pool).await.unwrap();
     assert_eq!(n, 3);
 }
 
@@ -733,7 +733,7 @@ async fn count_respects_filters_and_ignores_limit() {
 
     let actives = LiveUser::objects()
         .eq("is_active", true)
-        .count(&pool)
+        .count_on(&pool)
         .await
         .unwrap();
     assert_eq!(actives, 2);
@@ -742,7 +742,7 @@ async fn count_respects_filters_and_ignores_limit() {
     let n = LiveUser::objects()
         .limit(1)
         .offset(0)
-        .count(&pool)
+        .count_on(&pool)
         .await
         .unwrap();
     assert_eq!(n, 3);

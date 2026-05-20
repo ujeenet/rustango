@@ -835,7 +835,7 @@ Implementation prefetches the page's distinct CT ids once before the row loop (u
 13 live recipes against the Author / Post fixture from Chapter 2.
 Run with `DATABASE_URL=... cargo test --test cookbook_chapter03_orm -- --test-threads=1`.
 
-* §3.31 `Post::objects().filter("published", Op::Eq, true).fetch(&pool)` →
+* §3.31 `Post::objects().filter("published", Op::Eq, true).fetch_on(&pool)` →
   `filter_eq_fetch_returns_matching_rows`
 * §3.34 `Op::Gt` / `Op::Lt` / `Op::ILike` / `Op::In` / `Op::Between` /
   `Op::IsNull` — six tests covering the full Op surface.

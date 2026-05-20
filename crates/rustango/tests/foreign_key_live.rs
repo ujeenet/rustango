@@ -19,7 +19,7 @@
 use std::sync::OnceLock;
 
 use rustango::core::Op;
-use rustango::sql::{sqlx, Auto, ExecError, Fetcher, ForeignKey};
+use rustango::sql::{sqlx, Auto, ExecError, ForeignKey};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -113,7 +113,7 @@ async fn fetched_book_has_unloaded_fk_then_get_resolves_parent() {
     // Round-trip via fetch — confirms FromRow lands in Unloaded.
     let mut fetched: Vec<Book> = Book::objects()
         .filter_op("id", Op::Eq, book.id)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(fetched.len(), 1);
@@ -261,7 +261,7 @@ async fn string_pk_fk_round_trips_with_lazy_load() {
     // Round-trip through fetch — confirms FromRow decodes a String FK.
     let mut rows: Vec<StrPost> = StrPost::objects()
         .filter_op("id", Op::Eq, post.id)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     let mut fetched = rows.pop().expect("post round-trip");
@@ -380,7 +380,7 @@ async fn nullable_fk_round_trip_with_some_and_none() {
 
     let rows: Vec<NlBook> = NlBook::objects()
         .order_by(&[("id", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2);
@@ -481,7 +481,7 @@ async fn i16_field_round_trips_against_smallint() {
 
     let rows: Vec<StatusRow> = StatusRow::objects()
         .order_by(&[("id", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 3);

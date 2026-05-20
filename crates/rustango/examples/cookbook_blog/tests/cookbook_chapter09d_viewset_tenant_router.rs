@@ -101,8 +101,7 @@ async fn fixture() -> Option<(String, sqlx::PgPool, axum::Router)> {
     let _ = sqlx::query(&format!(
         r#"DROP TABLE IF EXISTS "{}" CASCADE"#,
         rmig::LEDGER_TABLE
-    ))
-    .execute(&pool)
+    )).execute(&pool)
     .await;
     let pools_for_init = TenantPools::new(pool.clone());
     let dir = std::env::temp_dir().join(format!(
@@ -212,8 +211,7 @@ async fn tenant_router_lists_paginated_payload() {
     ] {
         sqlx::query("INSERT INTO cookbook_author (name, email) VALUES ($1, $2)")
             .bind(n)
-            .bind(e)
-            .execute(&pool)
+            .bind(e).execute(&pool)
             .await
             .unwrap();
     }
@@ -245,8 +243,7 @@ async fn tenant_router_search_param_narrows_count_and_results() {
     ] {
         sqlx::query("INSERT INTO cookbook_author (name, email) VALUES ($1, $2)")
             .bind(n)
-            .bind(e)
-            .execute(&pool)
+            .bind(e).execute(&pool)
             .await
             .unwrap();
     }
@@ -271,8 +268,7 @@ async fn tenant_router_filter_param_exact_match() {
     for (n, e) in [("Alice", "alice@x.com"), ("Bob", "bob@x.com")] {
         sqlx::query("INSERT INTO cookbook_author (name, email) VALUES ($1, $2)")
             .bind(n)
-            .bind(e)
-            .execute(&pool)
+            .bind(e).execute(&pool)
             .await
             .unwrap();
     }

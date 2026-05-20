@@ -83,44 +83,6 @@ pub trait LoadRelated {}
 #[cfg(not(feature = "postgres"))]
 impl<T> LoadRelated for T {}
 
-/// Extension trait that drives a `QuerySet` to completion against a Postgres pool.
-///
-/// Adds `.fetch(&pool)` to any `QuerySet<T>` whose `T` is `Model + FromRow`.
-/// Pulled in via `use rustango::sql::Fetcher;`.
-#[cfg(feature = "postgres")]
-pub trait Fetcher<T>
-where
-    T: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
-{
-    /// Compile the queryset, write Postgres SQL, and run `fetch_all`.
-    ///
-    /// # Errors
-    /// Returns [`ExecError`] if any of the three stages fails: schema
-    /// validation, SQL writing, or the underlying sqlx call.
-    fn fetch(
-        self,
-        pool: &PgPool,
-    ) -> impl std::future::Future<Output = Result<Vec<T>, ExecError>> + Send;
-}
-
-#[cfg(feature = "postgres")]
-impl<T> Fetcher<T> for QuerySet<T>
-where
-    T: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
-{
-    async fn fetch(self, pool: &PgPool) -> Result<Vec<T>, ExecError> {
-        let select = self.compile()?;
-        let stmt = Postgres.compile_select(&select)?;
-
-        let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> = sqlx::query_as::<_, T>(&stmt.sql);
-        for value in stmt.params {
-            q = bind_query_as(q, value);
-        }
-        let rows = q.fetch_all(pool).await?;
-        Ok(rows)
-    }
-}
-
 #[cfg(feature = "postgres")]
 impl<T> QuerySet<T>
 where
@@ -1144,7 +1106,7 @@ where
     P: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin + LoadRelated + HasPkValue,
     C: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin + LoadRelated + FkPkAccess,
 {
-    let parents: Vec<P> = parent_qs.fetch(pool).await?;
+    let parents: Vec<P> = parent_qs.fetch_on(pool).await?;
     if parents.is_empty() {
         return Ok(Vec::new());
     }
@@ -1184,7 +1146,7 @@ where
             crate::core::Op::In,
             crate::core::SqlValue::List(parent_pks),
         )
-        .fetch(pool)
+        .fetch_on(pool)
         .await?;
 
     // Group children by FK PK. Key is the `SqlValue::to_display_string`
@@ -1241,36 +1203,15 @@ pub trait HasPkValue {
     fn __rustango_pk_value_impl(&self) -> crate::core::SqlValue;
 }
 
-/// Extension trait that runs a `SELECT COUNT(*)` against the queryset's
-/// filters. Pulled in via `use rustango::sql::Counter;`.
 #[cfg(feature = "postgres")]
-pub trait Counter<T: Model + Send> {
-    /// Count rows matching the queryset's filters.
+impl<T: Model + Send> QuerySet<T> {
+    /// Count rows matching the queryset's filters. Issue #270 / T1.8
+    /// wave 3 — replaces the `Counter` extension trait (deleted).
+    /// Accepts any sqlx executor (`&PgPool` or `&mut PgConnection` for
+    /// tenancy-scoped reads), same as [`Self::fetch_on`].
     ///
     /// # Errors
     /// Returns [`ExecError`] for schema, SQL-writing, or driver failures.
-    fn count(
-        self,
-        pool: &PgPool,
-    ) -> impl std::future::Future<Output = Result<i64, ExecError>> + Send;
-}
-
-#[cfg(feature = "postgres")]
-impl<T: Model + Send> Counter<T> for QuerySet<T> {
-    async fn count(self, pool: &PgPool) -> Result<i64, ExecError> {
-        self.count_on(pool).await
-    }
-}
-
-#[cfg(feature = "postgres")]
-impl<T: Model + Send> QuerySet<T> {
-    /// Like [`Counter::count`] but accepts any sqlx executor — for
-    /// tenant-scoped counts against a connection that has the
-    /// `search_path` already set. See [`QuerySet::fetch_on`] for the
-    /// rationale.
-    ///
-    /// # Errors
-    /// As [`Counter::count`].
     pub async fn count_on<'c, E>(self, executor: E) -> Result<i64, ExecError>
     where
         E: sqlx::Executor<'c, Database = sqlx::Postgres>,
@@ -1587,45 +1528,39 @@ pub async fn explain_pool(
 ///
 /// Pulled in via `use rustango::sql::Deleter;`.
 #[cfg(feature = "postgres")]
-pub trait Deleter<T: Model + Send> {
-    /// Delete every row matching the queryset's filters. Returns rows affected.
+#[cfg(feature = "postgres")]
+impl<T: Model + Send> QuerySet<T> {
+    /// Bulk-DELETE every row matching this queryset's filters. Issue
+    /// #270 / T1.8 wave 3 — replaces the `Deleter` extension trait
+    /// (deleted). Accepts any sqlx executor (`&PgPool` or `&mut
+    /// PgConnection` for tenancy-scoped writes), same as
+    /// [`Self::fetch_on`]. Returns rows affected.
     ///
     /// # Errors
     /// Returns [`ExecError`] for schema, SQL-writing, or driver failures.
-    fn delete(
-        self,
-        pool: &PgPool,
-    ) -> impl std::future::Future<Output = Result<u64, ExecError>> + Send;
-}
-
-#[cfg(feature = "postgres")]
-impl<T: Model + Send> Deleter<T> for QuerySet<T> {
-    async fn delete(self, pool: &PgPool) -> Result<u64, ExecError> {
+    pub async fn delete_on<'c, E>(self, executor: E) -> Result<u64, ExecError>
+    where
+        E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+    {
         let query = self.compile_delete()?;
-        delete_on(pool, &query).await
+        delete_on(executor, &query).await
     }
 }
 
-/// Extension trait that drives an `UpdateBuilder` to a bulk `UPDATE`.
-///
-/// Pulled in via `use rustango::sql::Updater;`.
 #[cfg(feature = "postgres")]
-pub trait Updater<T: Model + Send> {
-    /// Compile and execute the update. Returns rows affected.
+impl<T: Model + Send> UpdateBuilder<T> {
+    /// Compile + execute this `UpdateBuilder` against any sqlx
+    /// executor. Issue #270 / T1.8 wave 3 — replaces the `Updater`
+    /// extension trait (deleted). Returns rows affected.
     ///
     /// # Errors
     /// Returns [`ExecError`] for schema, SQL-writing, or driver failures.
-    fn execute(
-        self,
-        pool: &PgPool,
-    ) -> impl std::future::Future<Output = Result<u64, ExecError>> + Send;
-}
-
-#[cfg(feature = "postgres")]
-impl<T: Model + Send> Updater<T> for UpdateBuilder<T> {
-    async fn execute(self, pool: &PgPool) -> Result<u64, ExecError> {
+    pub async fn execute_on<'c, E>(self, executor: E) -> Result<u64, ExecError>
+    where
+        E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+    {
         let query = self.compile()?;
-        update_on(pool, &query).await
+        update_on(executor, &query).await
     }
 }
 

@@ -136,8 +136,7 @@ async fn list_paginates_and_renders_search_context() {
     ] {
         sqlx::query("INSERT INTO cookbook_author (name, email) VALUES ($1, $2)")
             .bind(n)
-            .bind(e)
-            .execute(&pool)
+            .bind(e).execute(&pool)
             .await
             .unwrap();
     }

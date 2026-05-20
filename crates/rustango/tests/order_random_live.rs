@@ -9,7 +9,7 @@
 
 use std::sync::OnceLock;
 
-use rustango::sql::{sqlx, Auto, Fetcher};
+use rustango::sql::{sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -63,7 +63,7 @@ async fn fresh(pool: &sqlx::PgPool) {
     .unwrap();
 }
 
-/// Two consecutive `order_random().limit(10).fetch(...)` calls must
+/// Two consecutive `order_random().limit(10).fetch_on(...)` calls must
 /// return different orderings with overwhelming probability. If they
 /// match, RANDOM() is broken (or the writer is emitting a sort key
 /// other than RANDOM()).
@@ -78,13 +78,13 @@ async fn order_random_returns_different_orderings_across_calls() {
     let draw_a: Vec<Post> = Post::objects()
         .order_random()
         .limit(10)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     let draw_b: Vec<Post> = Post::objects()
         .order_random()
         .limit(10)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(draw_a.len(), 10, "draw a should have 10 rows");
@@ -114,7 +114,7 @@ async fn order_random_with_limit_returns_distinct_rows() {
     let rows: Vec<Post> = Post::objects()
         .order_random()
         .limit(15)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 15);

@@ -23,7 +23,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use rustango::core::Column as _;
 use rustango::migrate as rmig;
-use rustango::sql::{sqlx, Auto, Fetcher};
+use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::{
     operator_console::{router_with_pools, SessionSecret},
     Org, StorageMode, TenantPools,
@@ -250,7 +250,7 @@ async fn post_edit_updates_only_editable_fields() {
     // Re-fetch and assert.
     let row: Org = Org::objects()
         .where_(Org::slug.eq(slug.clone()))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap()
         .into_iter()
@@ -293,7 +293,7 @@ async fn post_edit_with_blank_database_url_keeps_existing() {
 
     let row: Org = Org::objects()
         .where_(Org::slug.eq(slug.clone()))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap()
         .into_iter()
@@ -334,7 +334,7 @@ async fn post_edit_active_toggle_off() {
 
     let row: Org = Org::objects()
         .where_(Org::slug.eq(slug.clone()))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap()
         .into_iter()

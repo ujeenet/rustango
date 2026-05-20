@@ -10,7 +10,7 @@
 
 use cookbook_blog::apps::blog::models::*;
 use rustango::core::{Model as _, Op};
-use rustango::sql::{sqlx, Auto, Fetcher};
+use rustango::sql::{sqlx, Auto, };
 
 fn url() -> Option<String> {
     std::env::var("DATABASE_URL").ok()
@@ -209,8 +209,7 @@ async fn option_field_round_trips_null() {
 
     let id = match a.id { Auto::Set(v) => v, Auto::Unset => unreachable!() };
     let row: Vec<Author> = Author::objects()
-        .filter("id", Op::Eq, id)
-        .fetch(&pool).await.unwrap();
+        .filter("id", Op::Eq, id).fetch_on(&pool).await.unwrap();
     assert_eq!(row.len(), 1);
     assert_eq!(row[0].bio, None, "Option<String>::None should round-trip as NULL");
 }
@@ -232,8 +231,7 @@ async fn auto_now_add_assigns_at_insert() {
     let id = match a.id { Auto::Set(v) => v, Auto::Unset => unreachable!() };
 
     let row: Vec<Author> = Author::objects()
-        .filter("id", Op::Eq, id)
-        .fetch(&pool).await.unwrap();
+        .filter("id", Op::Eq, id).fetch_on(&pool).await.unwrap();
     let joined = match row[0].joined_at {
         Auto::Set(t) => t,
         Auto::Unset => panic!("auto_now_add did not populate joined_at"),
@@ -323,8 +321,7 @@ async fn fk_column_round_trips() {
     p.save(&pool).await.unwrap();
 
     let posts: Vec<Post> = Post::objects()
-        .filter("author_id", Op::Eq, author_id)
-        .fetch(&pool).await.unwrap();
+        .filter("author_id", Op::Eq, author_id).fetch_on(&pool).await.unwrap();
     assert_eq!(posts.len(), 1);
     assert_eq!(posts[0].title, "first");
     assert_eq!(posts[0].metadata["tags"][0], "intro");
@@ -364,8 +361,7 @@ async fn jsonb_field_round_trips_structured_data() {
     p.save(&pool).await.unwrap();
 
     let posts: Vec<Post> = Post::objects()
-        .filter("slug", Op::Eq, "j")
-        .fetch(&pool).await.unwrap();
+        .filter("slug", Op::Eq, "j").fetch_on(&pool).await.unwrap();
     assert_eq!(posts[0].metadata, payload);
 }
 
@@ -410,9 +406,9 @@ async fn datetime_option_round_trips() {
     };
     p2.save(&pool).await.unwrap();
 
-    let now_back: Vec<Post> = Post::objects().filter("slug", Op::Eq, "now").fetch(&pool).await.unwrap();
+    let now_back: Vec<Post> = Post::objects().filter("slug", Op::Eq, "now").fetch_on(&pool).await.unwrap();
     assert!(now_back[0].published_at.is_some(), "Some(when) lost on round-trip");
-    let never_back: Vec<Post> = Post::objects().filter("slug", Op::Eq, "never").fetch(&pool).await.unwrap();
+    let never_back: Vec<Post> = Post::objects().filter("slug", Op::Eq, "never").fetch_on(&pool).await.unwrap();
     assert_eq!(never_back[0].published_at, None);
 }
 
@@ -484,8 +480,7 @@ async fn m2m_through_junction_table_round_trips() {
     let t2_id = match t2.id { Auto::Set(v) => v, _ => unreachable!() };
 
     sqlx::query("INSERT INTO cookbook_post_tag (post_id, tag_id) VALUES ($1, $2), ($1, $3)")
-        .bind(post_id).bind(t1_id).bind(t2_id)
-        .execute(&pool).await.expect("link tags");
+        .bind(post_id).bind(t1_id).bind(t2_id).execute(&pool).await.expect("link tags");
 
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM cookbook_post_tag WHERE post_id = $1"
@@ -590,8 +585,7 @@ async fn generic_fk_schema_and_content_type_lookup() {
     act.save(&pool).await.expect("activity insert");
 
     let rows: Vec<Activity> = Activity::objects()
-        .filter("target_object_pk", Op::Eq, author_id)
-        .fetch(&pool).await.unwrap();
+        .filter("target_object_pk", Op::Eq, author_id).fetch_on(&pool).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].action, "viewed");
 }
@@ -611,8 +605,7 @@ async fn soft_delete_column_round_trips_and_deleted_at_defaults_null() {
     let id = match n.id { Auto::Set(v) => v, _ => unreachable!() };
 
     let rows: Vec<ArchiveNote> = ArchiveNote::objects()
-        .filter("id", Op::Eq, id)
-        .fetch(&pool).await.unwrap();
+        .filter("id", Op::Eq, id).fetch_on(&pool).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].deleted_at, None, "fresh row deleted_at should be NULL");
 }

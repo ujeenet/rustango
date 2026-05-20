@@ -57,7 +57,7 @@ pub use executor::{
 pub use executor::{
     annotate_count_children, annotate_count_children_on, bulk_insert_on, delete_on,
     fetch_aggregate_on, fetch_with_prefetch, insert_on, insert_returning_on, raw_query_on,
-    row_to_json, select_one_row_on, select_rows_on, update_on, Counter, Deleter, Fetcher, Updater,
+    row_to_json, select_one_row_on, select_rows_on, update_on,
 };
 
 #[cfg(feature = "mysql")]

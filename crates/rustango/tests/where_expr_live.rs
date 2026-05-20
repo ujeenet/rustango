@@ -19,7 +19,7 @@
 use std::sync::OnceLock;
 
 use rustango::core::{Column as _, Model as _, WhereExpr};
-use rustango::sql::{sqlx, Fetcher, SqlError};
+use rustango::sql::{sqlx, SqlError};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -93,7 +93,7 @@ async fn or_two_eq_predicates_matches_either() {
 
     let rows: Vec<Person> = Person::objects()
         .where_(Person::name.eq("alice").or(Person::name.eq("bob")))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
 
@@ -118,7 +118,7 @@ async fn and_after_or_groups_correctly() {
                 .or(Person::name.eq("carol")),
         )
         .where_(Person::active.eq(true))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
 
@@ -142,7 +142,7 @@ async fn nested_or_and_complex_expression() {
                 .and(Person::active.eq(false))
                 .or(Person::name.eq("alice")),
         )
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
 
@@ -161,7 +161,7 @@ async fn multiple_where_calls_still_and_at_top_level() {
     let rows: Vec<Person> = Person::objects()
         .where_(Person::name.eq("alice").or(Person::name.eq("bob")))
         .where_(Person::age.gte(35_i32))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
 
