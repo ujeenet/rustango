@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use rustango::core::aggregates::count_all;
 use rustango::core::{Op, SqlValue};
-use rustango::sql::{fetch_aggregate, sqlx, Auto};
+use rustango::sql::{fetch_aggregate_on, sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -108,7 +108,7 @@ async fn authors_with_gt_10_published_posts_uses_where_plus_having() {
         .order_by(&[("author_id", false)])
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
 
     assert_eq!(
         rows.len(),
@@ -142,7 +142,7 @@ async fn having_only_no_where_clause() {
         .order_by(&[("author_id", false)])
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
 
     let author_ids: Vec<i64> = rows.iter().map(|r| get_i64(r, "author_id")).collect();
     assert_eq!(
@@ -176,7 +176,7 @@ async fn op_in_against_alias_routes_to_having_in() {
         .order_by(&[("author_id", false)])
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
 
     let author_ids: Vec<i64> = rows.iter().map(|r| get_i64(r, "author_id")).collect();
     // Authors 3 (15 posts) and 4 (5 posts) match; 1 has 15 total (matches),
@@ -208,7 +208,7 @@ async fn op_between_against_alias_routes_to_having_between() {
         .order_by(&[("author_id", false)])
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
 
     let author_ids: Vec<i64> = rows.iter().map(|r| get_i64(r, "author_id")).collect();
     assert_eq!(
@@ -242,7 +242,7 @@ async fn op_not_in_against_alias_routes_to_having_not_in() {
         .order_by(&[("author_id", false)])
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
 
     let author_ids: Vec<i64> = rows.iter().map(|r| get_i64(r, "author_id")).collect();
     assert_eq!(author_ids, vec![1, 3]);

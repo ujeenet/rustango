@@ -55,11 +55,9 @@ pub use executor::{
 // subsequent waves migrate it.
 #[cfg(feature = "postgres")]
 pub use executor::{
-    annotate_count_children, annotate_count_children_on, bulk_insert, bulk_insert_on, delete,
-    delete_on, fetch_aggregate, fetch_aggregate_on, fetch_with_prefetch, insert, insert_on,
-    insert_returning, insert_returning_on, raw_query, raw_query_on, row_to_json, select_one_row,
-    select_one_row_on, select_rows, select_rows_on, update, update_on, Counter, Deleter, Fetcher,
-    Updater,
+    annotate_count_children, annotate_count_children_on, bulk_insert_on, delete_on,
+    fetch_aggregate_on, fetch_with_prefetch, insert_on, insert_returning_on, raw_query_on,
+    row_to_json, select_one_row_on, select_rows_on, update_on, Counter, Deleter, Fetcher, Updater,
 };
 
 #[cfg(feature = "mysql")]

@@ -855,7 +855,7 @@ pub async fn grant_role_perm(
         returning: vec![],
         on_conflict: Some(ConflictClause::DoNothing),
     };
-    crate::sql::insert(pool, &query).await?;
+    crate::sql::insert_on(pool, &query).await?;
     Ok(())
 }
 
@@ -886,7 +886,7 @@ pub async fn revoke_role_perm(
     codename: &str,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
-    crate::sql::delete(
+    crate::sql::delete_on(
         pool,
         &DeleteQuery {
             model: RolePermission::SCHEMA,
@@ -951,7 +951,7 @@ pub async fn assign_role(user_id: i64, role_id: i64, pool: &PgPool) -> Result<()
         returning: vec![],
         on_conflict: Some(ConflictClause::DoNothing),
     };
-    crate::sql::insert(pool, &query).await?;
+    crate::sql::insert_on(pool, &query).await?;
     Ok(())
 }
 
@@ -975,7 +975,7 @@ pub async fn assign_role_pool(
 /// Remove a user from a role.
 #[cfg(feature = "postgres")]
 pub async fn remove_role(user_id: i64, role_id: i64, pool: &PgPool) -> Result<(), TenancyError> {
-    crate::sql::delete(
+    crate::sql::delete_on(
         pool,
         &DeleteQuery {
             model: UserRole::SCHEMA,
@@ -1055,7 +1055,7 @@ pub async fn set_user_perm(
             update_columns: vec!["granted"],
         }),
     };
-    crate::sql::insert(pool, &query).await?;
+    crate::sql::insert_on(pool, &query).await?;
     Ok(())
 }
 
@@ -1092,7 +1092,7 @@ pub async fn clear_user_perm(
     codename: &str,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
-    crate::sql::delete(
+    crate::sql::delete_on(
         pool,
         &DeleteQuery {
             model: UserPermission::SCHEMA,

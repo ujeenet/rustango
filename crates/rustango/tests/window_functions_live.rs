@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 
 use rustango::core::window::{dense_rank, lag, rank, row_number};
 use rustango::core::SqlValue;
-use rustango::sql::{fetch_aggregate, sqlx, Auto};
+use rustango::sql::{fetch_aggregate_on, sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -85,7 +85,7 @@ async fn rank_by_score_within_each_tenant() {
 
     // Use a raw SELECT to project both the row + the window — the
     // aggregate path returns rows keyed by ("id", "name", "r"). To
-    // make this work with `fetch_aggregate`, group by every column
+    // make this work with `fetch_aggregate_on`, group by every column
     // we want to project (PG accepts the equivalent of "GROUP BY
     // ALL" via the trivial group on the PK).
     use rustango::core::aggregates::max;
@@ -106,7 +106,7 @@ async fn rank_by_score_within_each_tenant() {
         .order_by(&[("tenant_id", false), ("score", true)])
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     assert_eq!(rows.len(), 5);
     // Order is tenant_id asc, score desc → Alice(t1,30,1), Bob(t1,20,2),
     // Carol(t1,10,3), Dave(t2,100,1), Eve(t2,50,2).
@@ -157,7 +157,7 @@ async fn dense_rank_does_not_skip_on_ties() {
         .order_by(&[("tenant_id", false), ("score", true), ("id", false)])
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     // Tenant 2 rows in score-desc order: Dave (100), Eve/Frank/Grace
     // (all 50). Dense ranks: 1, 2, 2, 2. Sorted as appended in fresh()
     // + the two ties, the tenant_id=2 segment is the last 4 rows.
@@ -212,7 +212,7 @@ async fn row_number_returns_sequential_index() {
         .order_by(&[("tenant_id", false), ("score", true), ("id", false)])
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     // Tenant 1 has 3 rows → row numbers 1, 2, 3.
     let tenant1: Vec<i64> = rows
         .iter()
@@ -252,7 +252,7 @@ async fn lag_returns_prior_row_value_with_default_on_edge() {
         .order_by(&[("tenant_id", false), ("score", true), ("id", false)])
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     // Tenant 1 in score-desc: Alice(30) → prev=0 (no prior),
     // Bob(20)   → prev=30, Carol(10) → prev=20.
     let tenant1: Vec<i64> = rows

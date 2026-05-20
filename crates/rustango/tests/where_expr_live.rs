@@ -216,5 +216,5 @@ async fn empty_or_branch_returns_named_writer_error() {
         projection: None,
         distinct: None,
     };
-    rustango::sql::select_rows(&pool, &q2).await.unwrap();
+    rustango::sql::select_rows_on(&pool, &q2).await.unwrap();
 }

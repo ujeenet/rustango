@@ -983,7 +983,7 @@ impl DynamicForm {
 /// // POST /posts { title: "hello", body: "world" }
 /// let mf: ModelFormFor<Post> = ModelForm::parse(&form_payload)?;
 /// let query = mf.into_insert_query();
-/// rustango::sql::insert(&pool, &query).await?;
+/// rustango::sql::insert_on(&pool, &query).await?;
 /// ```
 ///
 /// Skips the `Auto<T>` PK on create; rejects unknown form keys with

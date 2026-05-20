@@ -5,7 +5,7 @@
 use std::sync::OnceLock;
 
 use rustango::core::{AggregateExpr, AggregateQuery, SqlValue, WhereExpr};
-use rustango::sql::{fetch_aggregate, sqlx, Auto};
+use rustango::sql::{fetch_aggregate_on, sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -91,7 +91,7 @@ async fn array_agg_collects_tags_per_author() {
     fresh(&pool).await;
 
     let q = agg_per_author(AggregateExpr::array_agg("tag"), "tags");
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     assert_eq!(rows.len(), 2, "two distinct authors");
 
     // Alice should have both rust + sql tags. The exact array
@@ -124,7 +124,7 @@ async fn string_agg_concatenates_tags_per_author() {
     // alphabetically before this call. For this test we accept
     // either "rust,sql" or "sql,rust".
     let q = agg_per_author(AggregateExpr::string_agg("tag", ","), "tag_list");
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     let alice = rows
         .iter()
         .find(|r| matches!(r.get("author"), Some(SqlValue::String(s)) if s == "alice"))
@@ -150,7 +150,7 @@ async fn jsonb_agg_returns_json_array_per_author() {
     fresh(&pool).await;
 
     let q = agg_per_author(AggregateExpr::jsonb_agg("tag"), "tag_json");
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     let alice = rows
         .iter()
         .find(|r| matches!(r.get("author"), Some(SqlValue::String(s)) if s == "alice"))
