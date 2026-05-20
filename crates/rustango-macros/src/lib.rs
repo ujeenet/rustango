@@ -734,6 +734,20 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     }
 
+    // Issue #291 / T2.5 — validate each `default_order` column name
+    // against the model's collected fields. Typos fail at macro-expand
+    // time, not at the database.
+    for (col, _desc, span) in &container.default_order {
+        if !collected.field_names.iter().any(|n| n == col) {
+            return Err(syn::Error::new(
+                *span,
+                format!(
+                    "`default_order = \"...\"`: \"{col}\" is not a declared field on this struct"
+                ),
+            ));
+        }
+    }
+
     // Build the audit_track list for ModelSchema: None when no audit attr,
     // Some(empty) when audit present without track, Some(names) when explicit.
     let audit_track_names: Option<Vec<String>> = container.audit.as_ref().map(|audit| {
@@ -776,6 +790,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         display.as_deref(),
         app_label.as_deref(),
         container.admin.as_ref(),
+        &container.default_order,
         &collected.field_schemas,
         collected.soft_delete_column.as_deref(),
         container.permissions,
@@ -1649,6 +1664,7 @@ fn model_impl_tokens(
     display: Option<&str>,
     app_label: Option<&str>,
     admin: Option<&AdminAttrs>,
+    default_order: &[(String, bool, proc_macro2::Span)],
     field_schemas: &[TokenStream2],
     soft_delete_column: Option<&str>,
     permissions: bool,
@@ -1756,6 +1772,13 @@ fn model_impl_tokens(
             }
         }
     });
+    // Issue #291 / T2.5 — `default_order` slice literal. Empty when
+    // no `#[rustango(default_order = "...")]` attribute was supplied.
+    let default_order_tokens = default_order.iter().map(|(col, desc, _)| {
+        let col_lit = col.as_str();
+        quote! { (#col_lit, #desc) }
+    });
+
     let m2m_tokens = m2m_relations.iter().map(|rel| {
         let name = rel.name.as_str();
         let to = rel.to.as_str();
@@ -1790,6 +1813,7 @@ fn model_impl_tokens(
                 composite_relations: &[ #(#composite_fk_tokens),* ],
                 generic_relations: &[ #(#generic_fk_tokens),* ],
                 scope: #scope_tokens,
+                default_order: &[ #(#default_order_tokens),* ],
             };
         }
     }
@@ -4257,6 +4281,12 @@ struct ContainerAttrs {
     /// Each value adds a `pub fn <name>() -> QuerySet<Self>` next to
     /// the default `Self::objects()`. Multiple attributes allowed.
     manager_fns: Vec<syn::Ident>,
+    /// Default ordering declared via `#[rustango(default_order =
+    /// "-created_at, status")]`. Issue #291 / T2.5. Each entry is
+    /// `(column_name, desc_flag, span_for_error_reporting)` — the
+    /// `-` prefix means descending; the `+` prefix or no prefix means
+    /// ascending.
+    default_order: Vec<(String, bool, proc_macro2::Span)>,
 }
 
 /// Parsed form of one index declaration (field-level or container-level).
@@ -4386,6 +4416,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         scope: None,
         manager_ext: None,
         manager_fns: Vec::new(),
+        default_order: Vec::new(),
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -4536,6 +4567,55 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     )));
                 }
                 out.manager_fns.push(ident);
+                return Ok(());
+            }
+            if meta.path.is_ident("default_order") {
+                // `#[rustango(default_order = "-created_at, status")]`
+                // — issue #291 / T2.5. Comma-separated list; `-prefix`
+                // means descending, `+prefix` or bare name means ascending.
+                // Per-query opt-in via `QuerySet::with_default_order()`.
+                let s: LitStr = meta.value()?.parse()?;
+                let raw = s.value();
+                let span = s.span();
+                let mut parsed: Vec<(String, bool, proc_macro2::Span)> =
+                    Vec::new();
+                for entry in raw.split(',') {
+                    let trimmed = entry.trim();
+                    if trimmed.is_empty() {
+                        return Err(syn::Error::new(
+                            span,
+                            "`default_order = \"...\"` has an empty entry — \
+                             check for a stray comma",
+                        ));
+                    }
+                    let (desc, name) = if let Some(rest) = trimmed.strip_prefix('-') {
+                        (true, rest.trim().to_owned())
+                    } else if let Some(rest) = trimmed.strip_prefix('+') {
+                        (false, rest.trim().to_owned())
+                    } else {
+                        (false, trimmed.to_owned())
+                    };
+                    if name.is_empty() {
+                        return Err(syn::Error::new(
+                            span,
+                            "`default_order` entry has no column name after the prefix",
+                        ));
+                    }
+                    if parsed.iter().any(|(n, _, _)| *n == name) {
+                        return Err(syn::Error::new(
+                            span,
+                            format!("duplicate column `{name}` in `default_order`"),
+                        ));
+                    }
+                    parsed.push((name, desc, span));
+                }
+                if parsed.is_empty() {
+                    return Err(syn::Error::new(
+                        span,
+                        "`default_order = \"...\"` cannot be empty",
+                    ));
+                }
+                out.default_order = parsed;
                 return Ok(());
             }
             if meta.path.is_ident("audit") {
