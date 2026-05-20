@@ -46,15 +46,20 @@ pub use executor::{
     InsertReturningPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow,
     MaybeSqliteFromRow, MaybeSqliteLoadRelated, Page, PoolTx, UpdaterPool,
 };
-// PG-typed back-compat surface: only re-exported when `postgres` is on.
+// PG-typed back-compat surface (issue #270 / T1.8 — wave 1):
+// Deleted: `count_rows` / `count_rows_on` / `raw_execute` /
+// `raw_execute_on` / `bulk_update` / `bulk_update_on` / `transaction`
+// — every one has a tri-dialect `_pool` counterpart (`count_rows_pool`,
+// `raw_execute_pool`, `bulk_update_pool`, `transaction_pool`). Use
+// those instead. The rest of the PG-typed surface stays for now;
+// subsequent waves migrate it.
 #[cfg(feature = "postgres")]
 pub use executor::{
-    annotate_count_children, annotate_count_children_on, bulk_insert, bulk_insert_on, bulk_update,
-    bulk_update_on, count_rows, count_rows_on, delete, delete_on, fetch_aggregate,
-    fetch_aggregate_on, fetch_with_prefetch, insert, insert_on, insert_returning,
-    insert_returning_on, raw_execute, raw_execute_on, raw_query, raw_query_on, row_to_json,
-    select_one_row, select_one_row_on, select_rows, select_rows_on, transaction, update, update_on,
-    Counter, Deleter, Fetcher, Updater,
+    annotate_count_children, annotate_count_children_on, bulk_insert, bulk_insert_on, delete,
+    delete_on, fetch_aggregate, fetch_aggregate_on, fetch_with_prefetch, insert, insert_on,
+    insert_returning, insert_returning_on, raw_query, raw_query_on, row_to_json, select_one_row,
+    select_one_row_on, select_rows, select_rows_on, update, update_on, Counter, Deleter, Fetcher,
+    Updater,
 };
 
 #[cfg(feature = "mysql")]
