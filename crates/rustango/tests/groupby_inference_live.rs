@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use rustango::core::aggregates::{count_all, sum};
 use rustango::core::SqlValue;
-use rustango::sql::{fetch_aggregate, sqlx, Auto};
+use rustango::sql::{fetch_aggregate_on, sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -103,7 +103,7 @@ async fn shape2_posts_per_author() {
         .annotate("n", count_all().into())
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     assert_eq!(rows.len(), 3, "three distinct authors");
     let mut by_author: HashMap<i64, i64> = rows
         .iter()
@@ -131,7 +131,7 @@ async fn shape2_monthly_revenue_per_author() {
         .annotate("total", sum("amount").into())
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     // Distinct (author, month) pairs: (1,'01'), (1,'02'), (2,'01'),
     // (2,'02'), (3,'01') = 5 rows.
     assert_eq!(rows.len(), 5, "5 (author, month) buckets");
@@ -169,7 +169,7 @@ async fn shape3_bare_annotate_runs_with_group_by_all() {
         .annotate("n", count_all().into())
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     // Every row has a unique (id, author_id, month, amount) tuple,
     // so GROUP-BY-all-cols collapses to no-op — 7 rows in, 7 rows out.
     assert_eq!(rows.len(), 7, "GROUP BY every col → row count unchanged");

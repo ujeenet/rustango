@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use rustango::core::aggregates::{count, count_all, stddev, sum};
 use rustango::core::{Column as _, SqlValue};
-use rustango::sql::{fetch_aggregate, sqlx, Auto};
+use rustango::sql::{fetch_aggregate_on, sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -103,7 +103,7 @@ async fn filtered_count_matches_predicate() {
         )
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     assert_eq!(get_i64(&rows, "active_published"), 2);
 
     cleanup(&pool).await;
@@ -132,7 +132,7 @@ async fn filtered_sum_with_default_falls_back_when_empty() {
         )
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     assert_eq!(get_i64(&rows, "revenue"), 300);
 
     let q = Post::objects()
@@ -147,7 +147,7 @@ async fn filtered_sum_with_default_falls_back_when_empty() {
         )
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     assert_eq!(
         get_i64(&rows, "revenue"),
         0,
@@ -173,7 +173,7 @@ async fn filtered_count_column_arg_executes() {
         .annotate("n", count("price").filter(Post::pages.gt(75_i64)).into())
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     // pages > 75: rows with pages=100, pages=200 → 2.
     assert_eq!(get_i64(&rows, "n"), 2);
 
@@ -197,7 +197,7 @@ async fn stddev_returns_a_finite_positive_number() {
         .annotate("sd", stddev("pages").into())
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     let sd = get_f64(&rows, "sd");
     assert!(
         sd.is_finite() && sd > 0.0,

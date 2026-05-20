@@ -333,18 +333,6 @@ fn inject_total_count(sql: &str) -> String {
     }
 }
 
-/// Run an `InsertQuery` against a Postgres pool.
-///
-/// Validates each value against the declared field bounds (`max_length`,
-/// `min`, `max`) before opening the connection.
-///
-/// # Errors
-/// Returns [`ExecError`] for validation, SQL-writing, or driver failures.
-#[cfg(feature = "postgres")]
-pub async fn insert(pool: &PgPool, query: &InsertQuery) -> Result<(), ExecError> {
-    insert_on(pool, query).await
-}
-
 /// Like [`insert`] but accepts any sqlx executor — `&PgPool`,
 /// `&mut PgConnection`, or a transaction. Tenant-scoped writes need
 /// this: schema-mode tenants share the registry pool and rely on the
@@ -366,24 +354,6 @@ where
     }
     q.execute(executor).await?;
     Ok(())
-}
-
-/// Run an `InsertQuery` and return the row created by the
-/// `RETURNING` clause.
-///
-/// Used by macro-generated insert paths for models with `Auto<T>` PKs:
-/// the column is omitted from the INSERT (so Postgres' BIGSERIAL
-/// sequence fires) and the assigned value is read back via `RETURNING`.
-/// Caller pulls each returned column out via `sqlx::Row::try_get` —
-/// e.g. `Auto<i64>::decode` rebuilds an `Auto::Set(value)`.
-///
-/// # Errors
-/// Returns [`ExecError::EmptyReturning`] if `query.returning` is empty
-/// (use [`insert`] for those); validation, SQL-writing, or driver
-/// failures otherwise.
-#[cfg(feature = "postgres")]
-pub async fn insert_returning(pool: &PgPool, query: &InsertQuery) -> Result<PgRow, ExecError> {
-    insert_returning_on(pool, query).await
 }
 
 /// Like [`insert_returning`] but accepts any sqlx executor.
@@ -409,22 +379,6 @@ where
     }
     let row = q.fetch_one(executor).await?;
     Ok(row)
-}
-
-/// Run a `BulkInsertQuery` against a Postgres pool — one round-trip
-/// for every row. Returns the rows produced by the `RETURNING`
-/// clause (one per input row), or an empty `Vec` if the query
-/// requested no `RETURNING`.
-///
-/// Used by macro-generated `Model::bulk_insert(pool, &mut rows)`.
-/// Validates each row against the model's bounds before opening
-/// the connection.
-///
-/// # Errors
-/// Returns [`ExecError`] for validation, SQL-writing, or driver failures.
-#[cfg(feature = "postgres")]
-pub async fn bulk_insert(pool: &PgPool, query: &BulkInsertQuery) -> Result<Vec<PgRow>, ExecError> {
-    bulk_insert_on(pool, query).await
 }
 
 /// Like [`bulk_insert`] but accepts any sqlx executor.
@@ -453,18 +407,6 @@ where
     }
 }
 
-/// Run an `UpdateQuery` against a Postgres pool. Returns rows affected.
-///
-/// Validates each `SET` value against the declared field bounds before
-/// opening the connection.
-///
-/// # Errors
-/// Returns [`ExecError`] for validation, SQL-writing, or driver failures.
-#[cfg(feature = "postgres")]
-pub async fn update(pool: &PgPool, query: &UpdateQuery) -> Result<u64, ExecError> {
-    update_on(pool, query).await
-}
-
 /// Like [`update`] but accepts any sqlx executor.
 ///
 /// # Errors
@@ -484,15 +426,6 @@ where
     Ok(result.rows_affected())
 }
 
-/// Run a `DeleteQuery` against a Postgres pool. Returns rows affected.
-///
-/// # Errors
-/// Returns [`ExecError`] for SQL-writing or driver failures.
-#[cfg(feature = "postgres")]
-pub async fn delete(pool: &PgPool, query: &DeleteQuery) -> Result<u64, ExecError> {
-    delete_on(pool, query).await
-}
-
 /// Like [`delete`] but accepts any sqlx executor.
 ///
 /// # Errors
@@ -509,17 +442,6 @@ where
     }
     let result = q.execute(executor).await?;
     Ok(result.rows_affected())
-}
-
-/// Run a `SelectQuery` and return raw `PgRow`s — for tooling that needs to
-/// render or inspect rows without statically knowing the row type
-/// (e.g. the admin UI).
-///
-/// # Errors
-/// Returns [`ExecError`] for SQL-writing or driver failures.
-#[cfg(feature = "postgres")]
-pub async fn select_rows(pool: &PgPool, query: &SelectQuery) -> Result<Vec<PgRow>, ExecError> {
-    select_rows_on(pool, query).await
 }
 
 /// Schema-driven decode of a Postgres row into a JSON object.
@@ -1043,19 +965,6 @@ where
         q = bind_query(q, value);
     }
     Ok(q.fetch_all(executor).await?)
-}
-
-/// Run a `SelectQuery` and return at most one raw `PgRow`. Used by detail
-/// views and PK lookups.
-///
-/// # Errors
-/// Returns [`ExecError`] for SQL-writing or driver failures.
-#[cfg(feature = "postgres")]
-pub async fn select_one_row(
-    pool: &PgPool,
-    query: &SelectQuery,
-) -> Result<Option<PgRow>, ExecError> {
-    select_one_row_on(pool, query).await
 }
 
 /// Like [`select_one_row`] but accepts any sqlx executor.
@@ -1693,7 +1602,7 @@ pub trait Deleter<T: Model + Send> {
 impl<T: Model + Send> Deleter<T> for QuerySet<T> {
     async fn delete(self, pool: &PgPool) -> Result<u64, ExecError> {
         let query = self.compile_delete()?;
-        delete(pool, &query).await
+        delete_on(pool, &query).await
     }
 }
 
@@ -1716,7 +1625,7 @@ pub trait Updater<T: Model + Send> {
 impl<T: Model + Send> Updater<T> for UpdateBuilder<T> {
     async fn execute(self, pool: &PgPool) -> Result<u64, ExecError> {
         let query = self.compile()?;
-        update(pool, &query).await
+        update_on(pool, &query).await
     }
 }
 
@@ -1918,27 +1827,6 @@ fn bind_query(
 
 // ------------------------------------------------------------------ raw SQL escape hatch
 
-/// Execute arbitrary SQL and decode each row into `T` using the same
-/// `sqlx::FromRow` impl generated by `#[derive(Model)]`.
-///
-/// `binds` must be in `$1` / `$2` / … placeholder order. This bypasses all
-/// ORM validation and audit; use it when the query IR can't express what you
-/// need (CTEs, LATERAL joins, UNNEST, window functions, etc.).
-///
-/// # Errors
-/// Driver / SQL failures.
-#[cfg(feature = "postgres")]
-pub async fn raw_query<T>(
-    sql: &str,
-    binds: Vec<SqlValue>,
-    pool: &PgPool,
-) -> Result<Vec<T>, ExecError>
-where
-    T: for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
-{
-    raw_query_on(sql, binds, pool).await
-}
-
 /// Like [`raw_query`] but accepts any sqlx executor.
 ///
 /// # Errors
@@ -1961,20 +1849,6 @@ where
 }
 
 // ------------------------------------------------------------------ aggregate
-
-/// Execute an [`AggregateQuery`] and return each result row as a
-/// `HashMap<String, SqlValue>`. Keys are the `group_by` column names and
-/// the aggregate aliases from `aggregates`.
-///
-/// # Errors
-/// SQL-writing or driver failures.
-#[cfg(feature = "postgres")]
-pub async fn fetch_aggregate(
-    query: &AggregateQuery,
-    pool: &PgPool,
-) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
-    fetch_aggregate_on(query, pool).await
-}
 
 /// Like [`fetch_aggregate`] but accepts any sqlx executor.
 ///
