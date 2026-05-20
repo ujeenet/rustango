@@ -9,6 +9,7 @@ mod column;
 mod error;
 mod expr;
 mod field_type;
+pub mod fts;
 pub mod funcs;
 pub mod joins;
 mod query;

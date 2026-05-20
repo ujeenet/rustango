@@ -480,6 +480,20 @@ pub enum ScalarFn {
     /// "hour" | "minute" | "second"`. Other values emit
     /// `OpNotSupportedInDialect`. Arity 3: `(ts, unit, tz)`.
     TruncWithTz,
+
+    // --- Full-text-search builder (issue #295 / T2.4) ---
+    /// `setweight(<tsvector>, <'A'|'B'|'C'|'D'>)` — Postgres weighting
+    /// modifier used by [`crate::core::fts::SearchVector::weighted`].
+    /// **PG-only**; MySQL / SQLite reject with
+    /// `OpNotSupportedInDialect`. Arity 2: `(tsvector, weight_literal)`
+    /// where the weight literal is an `Expr::Literal(SqlValue::String("A"))`-shaped value.
+    SetWeight,
+    /// `(a || b || c)` over tsvector operands — Postgres uses the `||`
+    /// operator to concatenate tsvectors. The builder uses this rather
+    /// than `Concat` (which would emit `CONCAT(...)` returning text
+    /// and dropping tsvector semantics). **PG-only**; MySQL / SQLite
+    /// reject with `OpNotSupportedInDialect`. Variadic ≥ 2 args.
+    TsConcat,
 }
 
 impl Expr {

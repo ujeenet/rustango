@@ -1954,6 +1954,10 @@ fn write_function(
         F::MakeInterval => write_make_interval(b, args),
         F::Age => write_age(b, args),
         F::TruncWithTz => write_trunc_with_tz(b, args),
+
+        // -------- Full-text search builder (issue #295 / T2.4) --------
+        F::SetWeight => write_setweight(b, args),
+        F::TsConcat => write_ts_concat(b, args),
     }
 }
 
@@ -2453,6 +2457,82 @@ fn sqlite_trunc_mask(unit: &str) -> &'static str {
     }
 }
 
+// ====================================================================
+// Full-text-search builder (issue #295 / T2.4)
+// ====================================================================
+
+/// `setweight(<tsvector>, '<weight>')`. **PG-only**. The weight is
+/// carried as `Expr::Literal(SqlValue::String("A"))` so the writer can
+/// inline it (PG's `setweight` requires the weight literal to live in
+/// the SQL text, not in a bound parameter — `bind` rejects char-typed
+/// inputs and a quoted `'A'` is the only portable form).
+fn write_setweight(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
+    use crate::core::{Expr, SqlValue};
+    if args.len() != 2 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: "setweight",
+            expected: "2",
+            got: args.len(),
+        });
+    }
+    if b.d.name() != "postgres" {
+        return Err(SqlError::OpNotSupportedInDialect {
+            op: "setweight (FTS) is Postgres-only",
+            dialect: b.d.name(),
+        });
+    }
+    let weight = match &args[1] {
+        Expr::Literal(SqlValue::String(w)) => w.as_str(),
+        _ => {
+            return Err(SqlError::OpNotSupportedInDialect {
+                op: "setweight weight argument must be a string literal — build via fts::SearchVector::weighted",
+                dialect: b.d.name(),
+            });
+        }
+    };
+    if !matches!(weight, "A" | "B" | "C" | "D") {
+        return Err(SqlError::OpNotSupportedInDialect {
+            op: "setweight weight must be one of 'A' | 'B' | 'C' | 'D'",
+            dialect: b.d.name(),
+        });
+    }
+    b.sql.push_str("setweight(");
+    write_expr(b, &args[0], None)?;
+    b.sql.push_str(", '");
+    b.sql.push_str(weight);
+    b.sql.push_str("')");
+    Ok(())
+}
+
+/// `(a || b || c)` — Postgres tsvector concatenation. **PG-only**;
+/// MySQL / SQLite reject because their FTS shapes are schema-bound
+/// (FULLTEXT INDEX + MATCH/AGAINST on MySQL, FTS5 virtual tables on
+/// SQLite) and don't compose with `||`.
+fn write_ts_concat(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
+    if args.len() < 2 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: "ts_concat (||)",
+            expected: ">= 2",
+            got: args.len(),
+        });
+    }
+    if b.d.name() != "postgres" {
+        return Err(SqlError::OpNotSupportedInDialect {
+            op: "tsvector `||` concatenation (FTS) is Postgres-only",
+            dialect: b.d.name(),
+        });
+    }
+    b.sql.push('(');
+    for (i, a) in args.iter().enumerate() {
+        if i > 0 {
+            b.sql.push_str(" || ");
+        }
+        write_expr(b, a, None)?;
+    }
+    b.sql.push(')');
+    Ok(())
+}
+
 /// Emit an `EXTRACT(<field> FROM x)` family call. PG uses the SQL
 /// standard syntax + cast to integer; MySQL has direct per-field
 /// functions; SQLite routes through `strftime` + cast.
@@ -2892,6 +2972,19 @@ fn write_expr_compare(
     }
 
     match op {
+        Op::Search => {
+            // PG full-text search match: `<tsvector> @@ <tsquery>`.
+            // **PG-only by language semantics** — MySQL's MATCH … AGAINST
+            // and SQLite's FTS5 virtual tables don't compose with bare
+            // expression operands. `require_op` routes through the
+            // dialect to surface the same OpNotSupportedInDialect that
+            // the column-bound Op::Search path emits on non-PG.
+            require_op(b.d, op)?;
+            write_expr(b, lhs, None)?;
+            b.sql.push_str(" @@ ");
+            write_expr(b, rhs, None)?;
+            Ok(())
+        }
         Op::ILike | Op::NotILike => {
             require_op(b.d, op)?;
             // Render lhs first so its params land in the param vector
