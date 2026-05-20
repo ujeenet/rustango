@@ -120,6 +120,7 @@ jobs:
       - run: cargo check -p rustango --no-default-features --features sqlite,tenancy
       - run: cargo clippy -p rustango --no-default-features --features sqlite,tenancy --lib --no-deps
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test sqlite_pragmas_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_fk_no_postgres
 
   # Per-dialect SQLite live suite — runs every `_sqlite_live.rs` file
   # explicitly under `--no-default-features --features sqlite,...`. This
@@ -167,6 +168,7 @@ jobs:
             --test migrate_registry_pool_sqlite_live \
             --test orm_advanced_sqlite_live \
             --test permissions_sqlite_live \
+            --test prefetch_filtered_sqlite_live \
             --test row_to_json_pool_sqlite_live \
             --test sqlite_pragmas_live \
             --test tenancy_manage_sqlite_live \
