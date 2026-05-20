@@ -249,6 +249,13 @@ pub struct ModelSchema {
     /// every query (including `.count()` / `.exists()`) pays for the
     /// sort by default.
     pub default_order: &'static [(&'static str, bool)],
+    /// `true` when the model is backed by a SQL **view** rather than a
+    /// table — set via `#[rustango(view)]` on the struct. Issue #293 /
+    /// T2.10. View-backed models are excluded from the migration
+    /// snapshot so `makemigrations` / `migrate` never emit `CREATE
+    /// TABLE` / `DROP TABLE` against them (the view is owned by the
+    /// operator, not by rustango). Reads behave like any other model.
+    pub is_view: bool,
 }
 
 /// Where a model's table lives in a tenancy deployment. Mirrors

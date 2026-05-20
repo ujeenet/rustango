@@ -1259,6 +1259,7 @@ mod tests {
             // (mysql introspection isn't used for registry models).
             scope: crate::core::ModelScope::Tenant,
             default_order: &[],
+            is_view: false,
         }))
     }
 }

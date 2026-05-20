@@ -20,6 +20,10 @@
 //! ## What it covers
 //!
 //! - Tables (`BASE TABLE` on PG/MySQL; `type = 'table'` on SQLite)
+//! - Views — emitted with `#[rustango(view)]` so the migration runner
+//!   skips `CREATE TABLE` / `DROP TABLE` against them. The view's
+//!   `view_definition` lands in a fenced ```sql doc comment above the
+//!   emitted struct. Issue #293 / T2.10.
 //! - Standard column types per backend (integers, text/varchar,
 //!   bool, timestamp[tz], date, uuid/blob, json[b]/text-as-json,
 //!   numeric/decimal)
@@ -32,7 +36,7 @@
 //!
 //! ## What it skips (v1)
 //!
-//! - Views, materialized views, foreign tables
+//! - Materialized views, foreign tables (regular views are walked)
 //! - Composite primary keys (emits the first PK column with the
 //!   marker; the user adjusts as needed)
 //! - CHECK constraints (no rustango-side equivalent yet)
@@ -103,7 +107,9 @@ pub(super) fn parse_inspectdb_args(args: &[String]) -> Result<InspectdbArgs, Mig
 }
 
 /// Top-level entry — read the live schema, emit Rust source. v0.38 —
-/// tri-dialect via [`crate::sql::Pool`].
+/// tri-dialect via [`crate::sql::Pool`]. Issue #293 / T2.10 —
+/// walks views as well as tables; view-backed models are emitted with
+/// `#[rustango(view)]` so the migration runner skips them.
 pub(super) async fn inspectdb_cmd<W: Write>(
     pool: &Pool,
     args: &[String],
@@ -112,13 +118,18 @@ pub(super) async fn inspectdb_cmd<W: Write>(
     let parsed = parse_inspectdb_args(args)?;
     let dialect_name = pool.dialect().name();
     let tables = list_tables(pool, &parsed.schema, parsed.table.as_deref()).await?;
-    if tables.is_empty() {
+    let views = list_views(pool, &parsed.schema, parsed.table.as_deref()).await?;
+    if tables.is_empty() && views.is_empty() {
         let label = if dialect_name == "sqlite" {
             "<database file>".to_owned()
         } else {
             parsed.schema.clone()
         };
-        writeln!(w, "// no tables found in `{}`", escape_for_comment(&label))?;
+        writeln!(
+            w,
+            "// no tables or views found in `{}`",
+            escape_for_comment(&label)
+        )?;
         return Ok(());
     }
     write_header(w, &parsed.schema, dialect_name)?;
@@ -127,6 +138,12 @@ pub(super) async fn inspectdb_cmd<W: Write>(
         let pk_columns = list_pk_columns(pool, &parsed.schema, table).await?;
         let fks = list_fks(pool, &parsed.schema, table).await?;
         write_model_with_dialect(w, table, &columns, &pk_columns, &fks, dialect_name)?;
+        writeln!(w)?;
+    }
+    for view in &views {
+        let columns = list_columns(pool, &parsed.schema, view).await?;
+        let definition = view_definition(pool, &parsed.schema, view).await?;
+        write_view_model_with_dialect(w, view, &columns, definition.as_deref(), dialect_name)?;
         writeln!(w)?;
     }
     Ok(())
@@ -264,6 +281,44 @@ async fn list_fks(
     }
 }
 
+#[cfg_attr(
+    not(any(feature = "postgres", feature = "mysql")),
+    allow(unused_variables)
+)]
+async fn list_views(
+    pool: &Pool,
+    schema: &str,
+    only: Option<&str>,
+) -> Result<Vec<String>, MigrateError> {
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => list_views_pg(pg, schema, only).await,
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => list_views_my(my, schema, only).await,
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(sq) => list_views_sqlite(sq, only).await,
+    }
+}
+
+#[cfg_attr(
+    not(any(feature = "postgres", feature = "mysql")),
+    allow(unused_variables)
+)]
+async fn view_definition(
+    pool: &Pool,
+    schema: &str,
+    view: &str,
+) -> Result<Option<String>, MigrateError> {
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => view_definition_pg(pg, schema, view).await,
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => view_definition_my(my, schema, view).await,
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(sq) => view_definition_sqlite(sq, view).await,
+    }
+}
+
 // -------------------------------------------------------------- Postgres
 
 #[cfg(feature = "postgres")]
@@ -396,6 +451,51 @@ async fn list_fks_pg(
             )
         })
         .collect())
+}
+
+#[cfg(feature = "postgres")]
+async fn list_views_pg(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    only: Option<&str>,
+) -> Result<Vec<String>, MigrateError> {
+    use sqlx::Row as _;
+    let sql = if only.is_some() {
+        r#"SELECT table_name FROM information_schema.views
+           WHERE table_schema = $1 AND table_name = $2
+           ORDER BY table_name"#
+    } else {
+        r#"SELECT table_name FROM information_schema.views
+           WHERE table_schema = $1
+           ORDER BY table_name"#
+    };
+    let mut q = sqlx::query(sql).bind(schema);
+    if let Some(v) = only {
+        q = q.bind(v);
+    }
+    let rows = q.fetch_all(pool).await.map_err(MigrateError::Driver)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| r.try_get::<String, _>("table_name").unwrap_or_default())
+        .collect())
+}
+
+#[cfg(feature = "postgres")]
+async fn view_definition_pg(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    view: &str,
+) -> Result<Option<String>, MigrateError> {
+    let def: Option<String> = sqlx::query_scalar(
+        r#"SELECT view_definition FROM information_schema.views
+           WHERE table_schema = $1 AND table_name = $2"#,
+    )
+    .bind(schema)
+    .bind(view)
+    .fetch_optional(pool)
+    .await
+    .map_err(MigrateError::Driver)?;
+    Ok(def)
 }
 
 // -------------------------------------------------------------- MySQL
@@ -597,6 +697,76 @@ async fn list_fks_my(
         .collect())
 }
 
+#[cfg(feature = "mysql")]
+async fn list_views_my(
+    pool: &sqlx::MySqlPool,
+    schema: &str,
+    only: Option<&str>,
+) -> Result<Vec<String>, MigrateError> {
+    use sqlx::Row as _;
+    // See `list_tables_my` for why every string column is `CAST AS CHAR`.
+    let use_default = schema == "public" || schema.is_empty();
+    let sql = match (only, use_default) {
+        (Some(_), true) => {
+            r#"SELECT CAST(TABLE_NAME AS CHAR) AS TABLE_NAME FROM information_schema.views
+               WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+               ORDER BY TABLE_NAME"#
+        }
+        (Some(_), false) => {
+            r#"SELECT CAST(TABLE_NAME AS CHAR) AS TABLE_NAME FROM information_schema.views
+               WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+               ORDER BY TABLE_NAME"#
+        }
+        (None, true) => {
+            r#"SELECT CAST(TABLE_NAME AS CHAR) AS TABLE_NAME FROM information_schema.views
+               WHERE TABLE_SCHEMA = DATABASE()
+               ORDER BY TABLE_NAME"#
+        }
+        (None, false) => {
+            r#"SELECT CAST(TABLE_NAME AS CHAR) AS TABLE_NAME FROM information_schema.views
+               WHERE TABLE_SCHEMA = ?
+               ORDER BY TABLE_NAME"#
+        }
+    };
+    let mut q = sqlx::query(sql);
+    if !use_default {
+        q = q.bind(schema);
+    }
+    if let Some(v) = only {
+        q = q.bind(v);
+    }
+    let rows = q.fetch_all(pool).await.map_err(MigrateError::Driver)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| r.try_get::<String, _>("TABLE_NAME").unwrap_or_default())
+        .collect())
+}
+
+#[cfg(feature = "mysql")]
+async fn view_definition_my(
+    pool: &sqlx::MySqlPool,
+    schema: &str,
+    view: &str,
+) -> Result<Option<String>, MigrateError> {
+    let use_default = schema == "public" || schema.is_empty();
+    let sql = if use_default {
+        r#"SELECT CAST(VIEW_DEFINITION AS CHAR) AS VIEW_DEFINITION
+           FROM information_schema.views
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?"#
+    } else {
+        r#"SELECT CAST(VIEW_DEFINITION AS CHAR) AS VIEW_DEFINITION
+           FROM information_schema.views
+           WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"#
+    };
+    let mut q = sqlx::query_scalar::<_, Option<String>>(sql);
+    if !use_default {
+        q = q.bind(schema);
+    }
+    q = q.bind(view);
+    let row = q.fetch_optional(pool).await.map_err(MigrateError::Driver)?;
+    Ok(row.flatten())
+}
+
 // -------------------------------------------------------------- SQLite
 
 #[cfg(feature = "sqlite")]
@@ -724,6 +894,43 @@ async fn list_fks_sqlite(
         out.push((local, target));
     }
     Ok(out)
+}
+
+#[cfg(feature = "sqlite")]
+async fn list_views_sqlite(
+    pool: &sqlx::SqlitePool,
+    only: Option<&str>,
+) -> Result<Vec<String>, MigrateError> {
+    use sqlx::Row as _;
+    let sql = if only.is_some() {
+        "SELECT name FROM sqlite_master WHERE type = 'view' AND name NOT LIKE 'sqlite_%' AND name = ? ORDER BY name"
+    } else {
+        "SELECT name FROM sqlite_master WHERE type = 'view' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    };
+    let mut q = sqlx::query(sql);
+    if let Some(v) = only {
+        q = q.bind(v);
+    }
+    let rows = q.fetch_all(pool).await.map_err(MigrateError::Driver)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| r.try_get::<String, _>("name").unwrap_or_default())
+        .collect())
+}
+
+#[cfg(feature = "sqlite")]
+async fn view_definition_sqlite(
+    pool: &sqlx::SqlitePool,
+    view: &str,
+) -> Result<Option<String>, MigrateError> {
+    let def: Option<String> =
+        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = ?")
+            .bind(view)
+            .fetch_optional(pool)
+            .await
+            .map_err(MigrateError::Driver)?
+            .flatten();
+    Ok(def)
 }
 
 #[cfg(feature = "sqlite")]
@@ -918,6 +1125,57 @@ fn write_model<W: Write>(
     fks: &[(String, String)],
 ) -> std::io::Result<()> {
     write_model_with_dialect(w, table, columns, pk_columns, fks, "postgres")
+}
+
+/// Emit one `#[derive(Model)]` block for a SQL view. Issue #293 /
+/// T2.10. The struct carries `#[rustango(view)]` so the migration
+/// runner skips it (the view is operator-owned). `view_definition` —
+/// when present — lands as a fenced doc comment above the struct so
+/// reviewers can read the SQL without hunting through `pg_views`.
+///
+/// Unlike `write_model_with_dialect`, view models do NOT emit a PK
+/// attribute or FK attributes: the view's underlying expression is
+/// already constrained by the source tables. Users editing the
+/// emitted source can add `#[rustango(primary_key)]` to the column
+/// they want to use as the ORM-side identity if the view exposes
+/// one (Django's `Meta.managed = False` convention).
+fn write_view_model_with_dialect<W: Write>(
+    w: &mut W,
+    view: &str,
+    columns: &[ColumnRow],
+    definition: Option<&str>,
+    dialect: &str,
+) -> std::io::Result<()> {
+    let struct_name = table_to_struct_name(view);
+    writeln!(w, "/// Auto-emitted from view `{view}` by `inspectdb`.")?;
+    writeln!(w, "///")?;
+    writeln!(
+        w,
+        "/// This struct is backed by a SQL **view** — `#[rustango(view)]` tells the"
+    )?;
+    writeln!(
+        w,
+        "/// migration runner to skip `CREATE TABLE` / `DROP TABLE` against it."
+    )?;
+    if let Some(def) = definition {
+        let trimmed = def.trim();
+        if !trimmed.is_empty() {
+            writeln!(w, "///")?;
+            writeln!(w, "/// ```sql")?;
+            for line in trimmed.lines() {
+                writeln!(w, "/// {}", escape_for_comment(line))?;
+            }
+            writeln!(w, "/// ```")?;
+        }
+    }
+    writeln!(w, "#[derive(Model, Debug, Clone)]")?;
+    writeln!(w, r#"#[rustango(table = "{view}", view)]"#)?;
+    writeln!(w, "pub struct {struct_name} {{")?;
+    for col in columns {
+        emit_field(w, col, None, &[], dialect)?;
+    }
+    writeln!(w, "}}")?;
+    Ok(())
 }
 
 fn write_model_with_dialect<W: Write>(
