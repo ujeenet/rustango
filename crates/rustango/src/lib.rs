@@ -9,10 +9,75 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.40"                                       # Postgres (default)
-//! rustango = { version = "0.40", features = ["sqlite"] }  # SQLite
-//! rustango = { version = "0.40", features = ["mysql"] }   # MySQL 8.0+
+//! rustango = "0.41"                                       # Postgres (default)
+//! rustango = { version = "0.41", features = ["sqlite"] }  # SQLite
+//! rustango = { version = "0.41", features = ["mysql"] }   # MySQL 8.0+
 //! ```
+//!
+//! ## What's new in v0.41 (May 2026) — Tier 1 ORM gap-closure batch
+//!
+//! Django-shape syntax with Rust-shape compile-time safety. Ten ORM
+//! tickets across 14 PRs ([epic #273]):
+//!
+//! - **[`Q!()`] compile-time macro** ([#269]) — `Q!(User.email__icontains
+//!   = "alice")` expands at parse time to the typed-column call.
+//!   Typo'd field names fail the build.
+//! - **[`query::Q`] runtime composable predicate** ([#263]) — for
+//!   dynamic filter trees (admin chips, REST query params). Operator
+//!   overloads: `&` / `|` / `^` / `!`.
+//! - **[`QuerySet::distinct_on`]** ([#264]) — PG `DISTINCT ON` native +
+//!   `ROW_NUMBER()` portable fallback on MySQL/SQLite. The "latest per
+//!   group" pattern, tri-dialect.
+//! - **[`Model::bulk_upsert_pool`] / [`Model::bulk_insert_or_ignore_pool`]**
+//!   ([#267]) — Django `bulk_create(update_conflicts=True)` /
+//!   `(ignore_conflicts=True)` across PG, MySQL, and SQLite.
+//! - **`#[rustango(unique_when(...))]`** ([#265]) — partial unique
+//!   indexes (Django `UniqueConstraint(condition=Q(...))`). PG/SQLite
+//!   native; MySQL warns + falls back.
+//! - **DB functions batch 1** ([#266]) — Cast, LPad, RPad, MD5, SHA1,
+//!   SHA256, Position, Repeat, Reverse, Sign, Mod, Power, Sqrt — per-
+//!   dialect emission with clean `NotSupported` errors on SQLite for
+//!   the genuinely-missing items (hashes, Reverse, Power/Sqrt without
+//!   `SQLITE_ENABLE_MATH_FUNCTIONS`).
+//! - **`AggregateBuilder::alias()`** ([#268]) — Django 3.2 non-
+//!   projected annotation. Filter/order by a derived aggregate without
+//!   paying the column-decode cost.
+//! - **`#[rustango(manager(ext = "..."))]`** ([#271]) — derive emits
+//!   the custom-manager extension trait next to the model.
+//! - **[`sql::explain_pool`]** ([#272]) — tri-dialect query plan
+//!   helper. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)`, MySQL
+//!   `EXPLAIN ANALYZE` / `FORMAT=TREE` / `FORMAT=JSON`, SQLite
+//!   `EXPLAIN QUERY PLAN`.
+//! - **PG-typed legacy executor deleted** ([#270], 4 waves) — the
+//!   bi-API confusion is gone. `Fetcher`/`Counter`/`Updater`/`Deleter`
+//!   extension traits + the `&PgPool` standalone fns +
+//!   `transaction`/`count_rows`/`raw_execute`/`bulk_update` are
+//!   removed. The `_on` family moved to a `#[doc(hidden)]` module for
+//!   macro use only. **Migration**: drop the trait imports, switch
+//!   `.fetch(pool)` → `.fetch_on(pool)` (inherent on QuerySet),
+//!   `.delete(pool)` → `.delete_on(pool)`, `.execute(pool)` (on
+//!   UpdateBuilder) → `.execute_on(pool)`. Use the `_pool` family for
+//!   tri-dialect calls.
+//!
+//! Full ticket index: PRs #274–#286.
+//!
+//! [`Q!()`]: rustango_macros::Q
+//! [`query::Q`]: crate::query::Q
+//! [`QuerySet::distinct_on`]: crate::query::QuerySet::distinct_on
+//! [`Model::bulk_upsert_pool`]: crate::core::Model
+//! [`Model::bulk_insert_or_ignore_pool`]: crate::core::Model
+//! [`sql::explain_pool`]: crate::sql::explain_pool
+//! [epic #273]: https://github.com/ujeenet/rustango/issues/273
+//! [#263]: https://github.com/ujeenet/rustango/pull/279
+//! [#264]: https://github.com/ujeenet/rustango/pull/280
+//! [#265]: https://github.com/ujeenet/rustango/pull/282
+//! [#266]: https://github.com/ujeenet/rustango/pull/277
+//! [#267]: https://github.com/ujeenet/rustango/pull/281
+//! [#268]: https://github.com/ujeenet/rustango/pull/274
+//! [#269]: https://github.com/ujeenet/rustango/pull/276
+//! [#270]: https://github.com/ujeenet/rustango/issues/270
+//! [#271]: https://github.com/ujeenet/rustango/pull/278
+//! [#272]: https://github.com/ujeenet/rustango/pull/275
 //!
 //! ## What's new in v0.40 (May 2026)
 //!
