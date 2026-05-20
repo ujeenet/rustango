@@ -46,19 +46,33 @@ pub use executor::{
     InsertReturningPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow,
     MaybeSqliteFromRow, MaybeSqliteLoadRelated, Page, PoolTx, UpdaterPool,
 };
-// PG-typed back-compat surface (issue #270 / T1.8 — wave 1):
-// Deleted: `count_rows` / `count_rows_on` / `raw_execute` /
-// `raw_execute_on` / `bulk_update` / `bulk_update_on` / `transaction`
-// — every one has a tri-dialect `_pool` counterpart (`count_rows_pool`,
-// `raw_execute_pool`, `bulk_update_pool`, `transaction_pool`). Use
-// those instead. The rest of the PG-typed surface stays for now;
-// subsequent waves migrate it.
+// PG-typed back-compat surface gone (issue #270 / T1.8 waves 1–4):
+// the entire family of `_on` functions + `&PgPool` wrappers + the
+// `Fetcher`/`Counter`/`Updater`/`Deleter` extension traits is deleted
+// from the public API. Use the tri-dialect `_pool` family
+// (`insert_pool`, `update_pool`, `select_rows_pool`, `count_rows_pool`,
+// …) or the inherent `_on` methods on QuerySet / UpdateBuilder
+// (`fetch_on`, `count_on`, `delete_on`, `execute_on`). `row_to_json` is
+// still useful for raw-row decoders and stays exported.
 #[cfg(feature = "postgres")]
-pub use executor::{
-    annotate_count_children, annotate_count_children_on, bulk_insert_on, delete_on,
-    fetch_aggregate_on, fetch_with_prefetch, insert_on, insert_returning_on, raw_query_on,
-    row_to_json, select_one_row_on, select_rows_on, update_on,
-};
+pub use executor::row_to_json;
+
+/// Hidden path for the `#[derive(Model)]` macro's generic-executor
+/// emissions. The functions inside are PG-typed (`E: sqlx::Executor<
+/// Database = Postgres>`) and exist purely to support the macro's
+/// `Self::save_on` / `Self::delete_on` / `Self::insert_on` /
+/// `Self::insert_returning_on` / `Self::bulk_insert_on` codegen that
+/// needs a generic executor for tenancy schema-mode `SET search_path`
+/// scoping. **Not part of the public API; do not import.**
+#[cfg(feature = "postgres")]
+#[doc(hidden)]
+pub mod __macro_internals {
+    pub use super::executor::{
+        annotate_count_children, annotate_count_children_on, bulk_insert_on, delete_on,
+        fetch_aggregate_on, fetch_with_prefetch, insert_on, insert_returning_on, raw_query_on,
+        select_one_row_on, select_rows_on, update_on,
+    };
+}
 
 #[cfg(feature = "mysql")]
 pub use executor::LoadRelatedMy;

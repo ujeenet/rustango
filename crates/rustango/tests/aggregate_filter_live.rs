@@ -10,7 +10,8 @@ use std::sync::OnceLock;
 
 use rustango::core::aggregates::{count, count_all, stddev, sum};
 use rustango::core::{Column as _, SqlValue};
-use rustango::sql::{fetch_aggregate_on, sqlx, Auto};
+use rustango::sql::__macro_internals::fetch_aggregate_on;
+use rustango::sql::{sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 

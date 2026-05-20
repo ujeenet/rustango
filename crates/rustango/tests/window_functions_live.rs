@@ -9,7 +9,8 @@ use std::sync::OnceLock;
 
 use rustango::core::window::{dense_rank, lag, rank, row_number};
 use rustango::core::SqlValue;
-use rustango::sql::{fetch_aggregate_on, sqlx, Auto};
+use rustango::sql::__macro_internals::fetch_aggregate_on;
+use rustango::sql::{sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 

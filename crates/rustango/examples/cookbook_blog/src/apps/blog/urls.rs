@@ -120,7 +120,7 @@ async fn submit_new_form(
         }
     };
     let query = mf.into_insert_query();
-    if let Err(e) = rustango::sql::insert_on(tenant.conn(), &query).await {
+    if let Err(e) = rustango::sql::__macro_internals::insert_on(tenant.conn(), &query).await {
         return new_form(Some(&e.to_string()), Some(&form))
             .await
             .into_response();
@@ -166,7 +166,7 @@ async fn submit_edit_form(
         Some(q) => q,
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "Author has no PK").into_response(),
     };
-    if let Err(e) = rustango::sql::update_on(tenant.conn(), &query).await {
+    if let Err(e) = rustango::sql::__macro_internals::update_on(tenant.conn(), &query).await {
         let preview = form_preview(&form);
         return edit_form(id, &preview, Some(&e.to_string())).into_response();
     }
