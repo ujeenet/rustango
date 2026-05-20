@@ -428,6 +428,58 @@ pub enum ScalarFn {
     /// `SQRT(x)` — square root. PG/MySQL native; SQLite has the same
     /// build-flag caveat as [`Self::Power`]. Arity 1.
     Sqrt,
+
+    // --- DB functions batch 2 (issue #294 / T2.7) ---
+    /// `LN(x)` — natural log (base e). PG `ln(x)`, MySQL `LN(x)`,
+    /// SQLite `ln(x)` (3.35+ with `SQLITE_ENABLE_MATH_FUNCTIONS`;
+    /// emitter errors on default sqlx-sqlite builds). Arity 1.
+    Log,
+    /// `LOG(base, x)` — log of `x` in base `base`. PG `log(base, x)`,
+    /// MySQL `LOG(base, x)`, SQLite `log(base, x)` (3.35+ with the
+    /// math-functions build flag; emitter errors otherwise). Arity 2:
+    /// `(base, x)`.
+    LogWithBase,
+    /// `EXP(x)` — `e^x`. PG `exp(x)`, MySQL `EXP(x)`, SQLite `exp(x)`
+    /// (3.35+ build-flag caveat; emitter errors otherwise). Arity 1.
+    Exp,
+    /// `PI()` — π as a numeric constant. PG `pi()`, MySQL `PI()`,
+    /// SQLite emits the literal `3.141592653589793` (no native fn;
+    /// always available). Arity 0.
+    Pi,
+    /// `RANDOM()` — pseudo-random number. **Return-range divergence**:
+    /// PG `random()` and MySQL `RAND()` return a float in `[0, 1)`,
+    /// while SQLite `random()` returns a signed 64-bit integer in
+    /// `[-2^63, 2^63)`. Callers that need cross-dialect `[0, 1)`
+    /// normalization should do the math app-side. Arity 0.
+    Random,
+    /// `MAKE_INTERVAL(years, months, days, hours, minutes, seconds)`.
+    /// **PG-only**: MySQL has no native `interval` type and SQLite has
+    /// neither — both emit `OpNotSupportedInDialect`. The emitter uses
+    /// PG's keyword-arg shape (`make_interval(years => $1, …)`). Arity 6.
+    MakeInterval,
+    /// `AGE(ts1, ts2)` — duration between two timestamps. **Return-type
+    /// divergence**:
+    /// - PG `age(ts1, ts2)` returns `interval`.
+    /// - MySQL `TIMESTAMPDIFF(SECOND, ts2, ts1)` returns numeric seconds.
+    /// - SQLite `(julianday(ts1) - julianday(ts2)) * 86400.0` returns
+    ///   a `REAL` count of seconds.
+    ///
+    /// PG callers receive an interval; MySQL / SQLite callers receive
+    /// a numeric count of seconds. Cross-dialect app code should cast
+    /// to a canonical numeric or call only on a single backend. Arity 2:
+    /// `(ts1, ts2)`.
+    Age,
+    /// `TRUNC_WITH_TZ(ts, unit, tz)` — timezone-aware date_trunc.
+    /// PG: `date_trunc(unit, ts AT TIME ZONE tz)`. MySQL:
+    /// `DATE_FORMAT(CONVERT_TZ(ts, '+00:00', tz), '<unit-format>')`.
+    /// SQLite: `strftime(<unit-format>, ts, <tz-modifier>)` — TZ awareness
+    /// is approximate (sqlite has no TZ DB; pass a fixed `±HH:MM`).
+    ///
+    /// `unit` and `tz` are bound as string literals at write time; the
+    /// caller passes `unit` as one of `"year" | "month" | "day" |
+    /// "hour" | "minute" | "second"`. Other values emit
+    /// `OpNotSupportedInDialect`. Arity 3: `(ts, unit, tz)`.
+    TruncWithTz,
 }
 
 impl Expr {
