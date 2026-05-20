@@ -3688,6 +3688,144 @@ where
     Ok(out)
 }
 
+/// `fetch_with_prefetch_pool` with a user-supplied **filtered** child
+/// queryset — Django's `Prefetch(queryset=...)` shape. Issue #298 /
+/// T2.1.
+///
+/// Drop-in replacement for [`fetch_with_prefetch_pool`] when the
+/// caller wants to **filter / order / limit** the child fetch:
+///
+/// ```ignore
+/// use rustango::core::Column as _;
+/// use rustango::query::QuerySet;
+///
+/// // Authors + their PUBLISHED posts, newest first.
+/// let published_posts = QuerySet::<Post>::default()
+///     .filter("published", true)
+///     .order_by(&[("created", true)]);
+///
+/// let authors_with_posts: Vec<(Author, Vec<Post>)> =
+///     fetch_with_prefetch_filtered_pool(
+///         Author::objects(),
+///         "author",
+///         published_posts,
+///         &pool,
+///     ).await?;
+/// ```
+///
+/// The function:
+///
+///  1. Compiles `parent_qs`, fetches parents.
+///  2. Collects parent PKs.
+///  3. Takes the user-supplied `child_qs` and **injects an
+///     `AND child_fk_column IN (parent_pks)` predicate** into its
+///     filter list (any filters / order / limit the user already
+///     wrote are preserved).
+///  4. Compiles + executes the augmented child query.
+///  5. Groups children by FK PK and stitches.
+///
+/// # Caveat — global vs. per-parent `LIMIT`
+///
+/// `child_qs.limit(N)` applies **globally** across the joined fetch,
+/// not per parent. Django's per-parent slice on prefetch (`.filter(
+/// post_set__lt=...)` semantics + LATERAL JOIN on PG, `ROW_NUMBER()
+/// OVER (PARTITION BY ...)` elsewhere) is a follow-up — the per-
+/// dialect LATERAL/window-fn dispatch is substantial work.
+///
+/// For the common shapes ("authors + every published post" / "authors
+/// + every post ordered DESC"), this signature is the right tool. For
+/// "authors + their N most-recent posts", today the calling pattern
+/// is per-parent fetch in a loop (or wait for the LATERAL follow-up).
+///
+/// # Errors
+/// As [`fetch_with_prefetch_pool`].
+pub async fn fetch_with_prefetch_filtered_pool<P, C>(
+    parent_qs: crate::query::QuerySet<P>,
+    child_fk_column: &'static str,
+    child_qs: crate::query::QuerySet<C>,
+    pool: &Pool,
+) -> Result<Vec<(P, Vec<C>)>, ExecError>
+where
+    P: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + HasPkValue
+        + Send
+        + Unpin,
+    C: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + FkPkAccess
+        + Send
+        + Unpin,
+{
+    let parents: Vec<P> = parent_qs.fetch_pool(pool).await?;
+    if parents.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let pk_field = P::SCHEMA
+        .primary_key()
+        .ok_or(ExecError::MissingPrimaryKey {
+            table: P::SCHEMA.table,
+        })?;
+    let mut parent_pks: Vec<crate::core::SqlValue> = Vec::with_capacity(parents.len());
+    for parent in &parents {
+        let pk = extract_pk_value(parent);
+        if !matches!(pk, crate::core::SqlValue::Null) {
+            parent_pks.push(pk);
+        }
+    }
+    {
+        let mut seen = std::collections::HashSet::new();
+        parent_pks.retain(|v| seen.insert(v.to_display_string()));
+    }
+    if parent_pks.is_empty() {
+        return Ok(parents.into_iter().map(|p| (p, Vec::new())).collect());
+    }
+
+    // Inject the IN-predicate by `filter_op` on top of whatever the
+    // user already chained — preserves their order_by / limit /
+    // existing filters. The IN-predicate AND-composes with the user's
+    // WHERE clause (QuerySet default-ANDs raw filters).
+    let children: Vec<C> = child_qs
+        .filter_op(
+            child_fk_column,
+            crate::core::Op::In,
+            crate::core::SqlValue::List(parent_pks),
+        )
+        .fetch_pool(pool)
+        .await?;
+
+    let mut grouped: std::collections::HashMap<String, Vec<C>> = std::collections::HashMap::new();
+    for child in children {
+        let Some(fk_pk) = child.__rustango_fk_pk_value(child_fk_column) else {
+            continue;
+        };
+        grouped
+            .entry(fk_pk.to_display_string())
+            .or_default()
+            .push(child);
+    }
+
+    let mut out = Vec::with_capacity(parents.len());
+    for parent in parents {
+        let pk = extract_pk_value(&parent).to_display_string();
+        let kids = grouped.remove(&pk).unwrap_or_default();
+        out.push((parent, kids));
+    }
+    let _ = pk_field;
+    Ok(out)
+}
+
 /// `select_rows_pool` with `select_related` join decoding. When the
 /// query carries no joins, behaves identically to [`select_rows_pool`]
 /// (fast `query_as` path). When joins are present, fetches raw rows
