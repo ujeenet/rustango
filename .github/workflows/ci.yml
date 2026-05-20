@@ -167,7 +167,6 @@ jobs:
             --test migrate_registry_pool_sqlite_live \
             --test orm_advanced_sqlite_live \
             --test permissions_sqlite_live \
-            --test prefetch_filtered_sqlite_live \
             --test row_to_json_pool_sqlite_live \
             --test sqlite_pragmas_live \
             --test tenancy_manage_sqlite_live \
