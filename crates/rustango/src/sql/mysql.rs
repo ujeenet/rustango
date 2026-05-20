@@ -1258,6 +1258,7 @@ mod tests {
             // v0.27.7 — every introspected schema is tenant-scoped
             // (mysql introspection isn't used for registry models).
             scope: crate::core::ModelScope::Tenant,
+            default_order: &[],
         }))
     }
 }

@@ -3865,6 +3865,7 @@ mod tests {
             composite_relations: &[],
             generic_relations: &[],
             scope: crate::core::ModelScope::Tenant,
+            default_order: &[],
         }))
     }
 
@@ -3937,6 +3938,7 @@ mod tests {
             composite_relations: &[],
             generic_relations: &[],
             scope: crate::core::ModelScope::Tenant,
+            default_order: &[],
         }))
     }
 
@@ -4307,6 +4309,7 @@ mod tests {
             composite_relations: &[],
             generic_relations: &[],
             scope: crate::core::ModelScope::Tenant,
+            default_order: &[],
         }));
         assert!(default_order_by(no_pk).is_empty());
     }
@@ -4543,6 +4546,7 @@ mod tests {
             composite_relations: &[],
             generic_relations: &[],
             scope: crate::core::ModelScope::Tenant,
+            default_order: &[],
         }));
         let pk = uuid_schema.primary_key().unwrap();
         let raw = "550e8400-e29b-41d4-a716-446655440000";
@@ -4591,6 +4595,7 @@ mod tests {
             composite_relations: &[],
             generic_relations: &[],
             scope: crate::core::ModelScope::Tenant,
+            default_order: &[],
         }));
         let pk = str_schema.primary_key().unwrap();
         match coerce_pk(pk, "hello-world") {

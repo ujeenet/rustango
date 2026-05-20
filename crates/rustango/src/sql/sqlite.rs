@@ -648,6 +648,7 @@ mod tests {
             composite_relations: &[],
             generic_relations: &[],
             scope: ModelScope::Tenant,
+            default_order: &[],
         };
         let q = SelectQuery {
             model: &MODEL,

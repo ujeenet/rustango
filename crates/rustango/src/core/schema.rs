@@ -238,6 +238,17 @@ pub struct ModelSchema {
     /// projects ignore this entirely — every model defaults to
     /// `Tenant` and `makemigrations` produces one file as before.
     pub scope: ModelScope,
+    /// Default ordering declared via `#[rustango(default_order = "...")]`.
+    /// Issue #291 / T2.5. Each tuple is `(column_name, desc)` — `desc =
+    /// true` means descending. Empty slice when the model has no
+    /// default order declared.
+    ///
+    /// **Per-query opt-in**: this list is NOT applied automatically.
+    /// Callers must chain `QuerySet::with_default_order()` to invoke
+    /// it — this avoids the Django `Meta.ordering` footgun where
+    /// every query (including `.count()` / `.exists()`) pays for the
+    /// sort by default.
+    pub default_order: &'static [(&'static str, bool)],
 }
 
 /// Where a model's table lives in a tenancy deployment. Mirrors

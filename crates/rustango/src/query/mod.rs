@@ -428,6 +428,76 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// Apply the schema-declared `default_order` for `T`. Issue #291
+    /// / T2.5. Each entry from `#[rustango(default_order = "...")]`
+    /// gets pre-pended to the queryset's pending ORDER BY list, so a
+    /// later `.order_by(...)` call appends secondary sort keys.
+    ///
+    /// **Per-query opt-in by design** — unlike Django's
+    /// `Meta.ordering`, the default ordering is NOT applied
+    /// automatically. Every queryset starts unsorted; chain
+    /// `.with_default_order()` when you want the schema default. This
+    /// avoids the Django footgun where `.count()` / `.exists()` /
+    /// `.delete()` pay for a sort they don't need.
+    ///
+    /// No-op when the model carries no `default_order`. Idempotent
+    /// (calling it twice doesn't duplicate the entries).
+    #[must_use]
+    pub fn with_default_order(mut self) -> Self {
+        let model = T::SCHEMA;
+        // Build the new entries first so we can pre-pend them.
+        let new_entries: Vec<PendingOrderItem> = model
+            .default_order
+            .iter()
+            .map(|(name, desc)| PendingOrderItem::Field {
+                name: (*name).to_owned(),
+                desc: *desc,
+                nulls: crate::core::NullsOrder::Default,
+            })
+            .collect();
+        if new_entries.is_empty() {
+            return self;
+        }
+        // Idempotency check: if the head of `order_by` already matches
+        // the model's default sequence, skip re-prepending.
+        let already_applied = self.order_by.len() >= new_entries.len()
+            && self
+                .order_by
+                .iter()
+                .zip(new_entries.iter())
+                .all(|(a, b)| match (a, b) {
+                    (
+                        PendingOrderItem::Field {
+                            name: an, desc: ad, ..
+                        },
+                        PendingOrderItem::Field {
+                            name: bn, desc: bd, ..
+                        },
+                    ) => an == bn && ad == bd,
+                    _ => false,
+                });
+        if already_applied {
+            return self;
+        }
+        // Pre-pend.
+        let mut combined = new_entries;
+        combined.extend(self.order_by.drain(..));
+        self.order_by = combined;
+        self
+    }
+
+    /// Clear every accumulated `ORDER BY` entry on this queryset.
+    /// Issue #291 / T2.5. Resets both legacy `.order_by(...)` columns
+    /// and `.order_by_expr(...)` / `.with_default_order()` entries
+    /// from earlier in the chain. Useful for explicitly bypassing a
+    /// queryset's default order when re-borrowing from a builder
+    /// helper that already chained `.with_default_order()`.
+    #[must_use]
+    pub fn unordered(mut self) -> Self {
+        self.order_by.clear();
+        self
+    }
+
     /// Append `ORDER BY` columns with explicit `NULLS FIRST|LAST`
     /// control. Issue #76. PG + SQLite emit the `NULLS …` keyword
     /// natively; MySQL emulates via `<col> IS NULL` pre-sort

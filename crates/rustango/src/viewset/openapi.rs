@@ -404,6 +404,7 @@ mod tests {
             composite_relations: &[],
             generic_relations: &[],
             scope: crate::core::ModelScope::Tenant,
+            default_order: &[],
         };
         &MS
     }

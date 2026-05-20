@@ -543,6 +543,7 @@ mod composite_fk_snapshot_tests {
             composite_relations: &COMPS,
             generic_relations: &[],
             scope: crate::core::ModelScope::Tenant,
+            default_order: &[],
         };
         &MS
     }
@@ -595,6 +596,7 @@ mod composite_fk_snapshot_tests {
             composite_relations: &[],
             generic_relations: &[],
             scope: crate::core::ModelScope::Tenant,
+            default_order: &[],
         };
         let snap = TableSnapshot::from_schema(&MS);
         let json = serde_json::to_string(&snap).expect("serialize");
