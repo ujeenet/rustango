@@ -674,6 +674,119 @@ pub fn sqrt(x: impl Into<Expr>) -> Expr {
     unary(ScalarFn::Sqrt, x)
 }
 
+// ---------- DB functions batch 2 (issue #294 / T2.7) ----------
+
+/// `LN(x)` — natural log (base e). PG `ln`, MySQL `LN`, SQLite `ln`
+/// (3.35+ with `SQLITE_ENABLE_MATH_FUNCTIONS`; the writer errors on
+/// default sqlx-sqlite builds).
+#[must_use]
+pub fn log(x: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::Log, x)
+}
+
+/// `LOG(base, x)` — log of `x` in base `base`. PG `log(base, x)`,
+/// MySQL `LOG(base, x)`, SQLite `log(base, x)` (3.35+ build-flag
+/// caveat; writer errors otherwise).
+#[must_use]
+pub fn log_with_base(base: impl Into<Expr>, x: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::LogWithBase,
+        args: vec![base.into(), x.into()],
+    }
+}
+
+/// `EXP(x)` — `e^x`. PG / MySQL native; SQLite same 3.35+ build-flag
+/// caveat as [`log`].
+#[must_use]
+pub fn exp(x: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::Exp, x)
+}
+
+/// `PI()` — π as a numeric constant. PG `pi()`, MySQL `PI()`, SQLite
+/// emits the literal `3.141592653589793`.
+#[must_use]
+pub fn pi() -> Expr {
+    Expr::Function {
+        kind: ScalarFn::Pi,
+        args: Vec::new(),
+    }
+}
+
+/// `RANDOM()` — pseudo-random number. **Return-range divergence**: PG
+/// `random()` and MySQL `RAND()` return a float in `[0, 1)`; SQLite
+/// `random()` returns a 64-bit integer in `[-2^63, 2^63)`. Normalize
+/// app-side when cross-dialect floats matter.
+#[must_use]
+pub fn random() -> Expr {
+    Expr::Function {
+        kind: ScalarFn::Random,
+        args: Vec::new(),
+    }
+}
+
+/// `MAKE_INTERVAL(years, months, days, hours, minutes, seconds)` —
+/// **PG-only**. MySQL has no native `interval` type; SQLite has neither
+/// — both emit `OpNotSupportedInDialect`. Pass zeros for unused fields.
+#[must_use]
+pub fn make_interval(
+    years: impl Into<Expr>,
+    months: impl Into<Expr>,
+    days: impl Into<Expr>,
+    hours: impl Into<Expr>,
+    minutes: impl Into<Expr>,
+    seconds: impl Into<Expr>,
+) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::MakeInterval,
+        args: vec![
+            years.into(),
+            months.into(),
+            days.into(),
+            hours.into(),
+            minutes.into(),
+            seconds.into(),
+        ],
+    }
+}
+
+/// `AGE(ts1, ts2)` — duration between two timestamps. **Return-type
+/// divergence**:
+/// - PG returns `interval`.
+/// - MySQL returns numeric seconds (`TIMESTAMPDIFF(SECOND, ts2, ts1)`).
+/// - SQLite returns a `REAL` count of seconds.
+///
+/// Use only when staying on a single backend, or wrap with
+/// `EXTRACT(EPOCH FROM age(...))` on PG to normalize to seconds across
+/// the three dialects.
+#[must_use]
+pub fn age(ts1: impl Into<Expr>, ts2: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::Age,
+        args: vec![ts1.into(), ts2.into()],
+    }
+}
+
+/// `date_trunc(unit, ts AT TIME ZONE tz)` (PG) and equivalents on
+/// MySQL / SQLite. `unit` must be one of `"year" | "month" | "day" |
+/// "hour" | "minute" | "second"`; `tz` is an IANA name on PG / MySQL
+/// (`"America/New_York"`) or a `±HH:MM` offset on SQLite. Other units
+/// or unsupported backends emit `OpNotSupportedInDialect`.
+///
+/// **Return-type divergence**: PG returns timestamp; MySQL / SQLite
+/// return text. Cast app-side if a typed value is needed.
+#[must_use]
+pub fn trunc_with_tz(ts: impl Into<Expr>, unit: &'static str, tz: &'static str) -> Expr {
+    use super::SqlValue;
+    Expr::Function {
+        kind: ScalarFn::TruncWithTz,
+        args: vec![
+            ts.into(),
+            Expr::Literal(SqlValue::String(unit.to_owned())),
+            Expr::Literal(SqlValue::String(tz.to_owned())),
+        ],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

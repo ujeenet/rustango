@@ -1944,6 +1944,16 @@ fn write_function(
             }
             write_call_unary(b, "SQRT", args)
         }
+
+        // -------- DB functions batch 2 (issue #294 / T2.7) --------
+        F::Log => write_log(b, args),
+        F::LogWithBase => write_log_with_base(b, args),
+        F::Exp => write_exp(b, args),
+        F::Pi => write_pi(b, args),
+        F::Random => write_random(b, args),
+        F::MakeInterval => write_make_interval(b, args),
+        F::Age => write_age(b, args),
+        F::TruncWithTz => write_trunc_with_tz(b, args),
     }
 }
 
@@ -2159,6 +2169,288 @@ fn write_sign(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlErro
     write_expr(b, &args[0], None)?;
     b.sql.push_str(" < 0 THEN -1 ELSE 0 END)");
     Ok(())
+}
+
+// ====================================================================
+// DB functions batch 2 (issue #294 / T2.7)
+// ====================================================================
+
+/// `LN(x)` — natural log. Same name on PG / MySQL; SQLite errors
+/// because `ln` ships only when libsqlite3 was built with
+/// `SQLITE_ENABLE_MATH_FUNCTIONS` (sqlx-sqlite's default build does
+/// not enable it).
+fn write_log(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
+    if args.len() != 1 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: "LN",
+            expected: "1",
+            got: args.len(),
+        });
+    }
+    if b.d.name() == "sqlite" {
+        return Err(SqlError::OpNotSupportedInDialect {
+            op: "LN (SQLite needs SQLITE_ENABLE_MATH_FUNCTIONS at build time; not enabled in sqlx-sqlite default build)",
+            dialect: b.d.name(),
+        });
+    }
+    write_call_unary(b, "LN", args)
+}
+
+/// `LOG(base, x)` — log of `x` in base `base`. PG / MySQL native (same
+/// argument order); SQLite errors (build-flag caveat per [`write_log`]).
+fn write_log_with_base(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
+    if args.len() != 2 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: "LOG",
+            expected: "2",
+            got: args.len(),
+        });
+    }
+    if b.d.name() == "sqlite" {
+        return Err(SqlError::OpNotSupportedInDialect {
+            op: "LOG(base, x) (SQLite needs SQLITE_ENABLE_MATH_FUNCTIONS at build time)",
+            dialect: b.d.name(),
+        });
+    }
+    write_call(b, "LOG", args)
+}
+
+/// `EXP(x)` — `e^x`. PG / MySQL native; SQLite errors (build-flag).
+fn write_exp(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
+    if args.len() != 1 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: "EXP",
+            expected: "1",
+            got: args.len(),
+        });
+    }
+    if b.d.name() == "sqlite" {
+        return Err(SqlError::OpNotSupportedInDialect {
+            op: "EXP (SQLite needs SQLITE_ENABLE_MATH_FUNCTIONS at build time; not enabled in sqlx-sqlite default build)",
+            dialect: b.d.name(),
+        });
+    }
+    write_call_unary(b, "EXP", args)
+}
+
+/// `PI()` — π. PG `pi()`, MySQL `PI()`. SQLite has no native pi, so
+/// the writer inlines the IEEE-754 double constant.
+fn write_pi(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
+    if !args.is_empty() {
+        return Err(SqlError::FunctionArityMismatch {
+            func: "PI",
+            expected: "0",
+            got: args.len(),
+        });
+    }
+    if b.d.name() == "sqlite" {
+        // Inline f64::consts::PI to 16 sig digits. SQLite has no pi()
+        // even with the math-functions build flag.
+        b.sql.push_str("3.141592653589793");
+    } else {
+        b.sql.push_str("PI()");
+    }
+    Ok(())
+}
+
+/// `RANDOM()` / `RAND()` — pseudo-random number. **Return-range
+/// divergence is documented** at [`crate::core::ScalarFn::Random`].
+fn write_random(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
+    if !args.is_empty() {
+        return Err(SqlError::FunctionArityMismatch {
+            func: "RANDOM",
+            expected: "0",
+            got: args.len(),
+        });
+    }
+    match b.d.name() {
+        "postgres" => b.sql.push_str("random()"),
+        "mysql" => b.sql.push_str("RAND()"),
+        // SQLite returns a 64-bit signed integer; range divergence
+        // documented at the constructor + enum variant.
+        _ => b.sql.push_str("random()"),
+    }
+    Ok(())
+}
+
+/// `make_interval(years => ..., months => ..., days => ..., hours => ...,
+/// mins => ..., secs => ...)` — **PG-only**.
+fn write_make_interval(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
+    if args.len() != 6 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: "MAKE_INTERVAL",
+            expected: "6",
+            got: args.len(),
+        });
+    }
+    if b.d.name() != "postgres" {
+        return Err(SqlError::OpNotSupportedInDialect {
+            op: "MAKE_INTERVAL (PG-only; MySQL/SQLite have no native interval type — compute the duration app-side)",
+            dialect: b.d.name(),
+        });
+    }
+    let kws = ["years", "months", "days", "hours", "mins", "secs"];
+    b.sql.push_str("make_interval(");
+    for (i, kw) in kws.iter().enumerate() {
+        if i > 0 {
+            b.sql.push_str(", ");
+        }
+        b.sql.push_str(kw);
+        b.sql.push_str(" => ");
+        write_expr(b, &args[i], None)?;
+    }
+    b.sql.push(')');
+    Ok(())
+}
+
+/// `AGE(ts1, ts2)` — duration between two timestamps. **Return type
+/// diverges**: PG `interval`; MySQL / SQLite numeric seconds.
+fn write_age(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
+    if args.len() != 2 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: "AGE",
+            expected: "2",
+            got: args.len(),
+        });
+    }
+    match b.d.name() {
+        "postgres" => {
+            b.sql.push_str("age(");
+            write_expr(b, &args[0], None)?;
+            b.sql.push_str(", ");
+            write_expr(b, &args[1], None)?;
+            b.sql.push(')');
+        }
+        "mysql" => {
+            // TIMESTAMPDIFF takes (ts_a, ts_b) and returns ts_b - ts_a;
+            // swap so the result is ts1 - ts2 to match PG's `age(ts1, ts2)`
+            // = ts1 - ts2 sign convention.
+            b.sql.push_str("TIMESTAMPDIFF(SECOND, ");
+            write_expr(b, &args[1], None)?;
+            b.sql.push_str(", ");
+            write_expr(b, &args[0], None)?;
+            b.sql.push(')');
+        }
+        _ => {
+            b.sql.push_str("((julianday(");
+            write_expr(b, &args[0], None)?;
+            b.sql.push_str(") - julianday(");
+            write_expr(b, &args[1], None)?;
+            b.sql.push_str(")) * 86400.0)");
+        }
+    }
+    Ok(())
+}
+
+/// `date_trunc(unit, ts AT TIME ZONE tz)` (PG) and equivalents.
+/// `unit` and `tz` arrive as `Expr::Literal(SqlValue::String(...))`
+/// from [`crate::core::funcs::trunc_with_tz`]; this writer extracts
+/// them at emission time (no rebound — the strings are inlined into
+/// the SQL since per-dialect format tokens vary).
+fn write_trunc_with_tz(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), SqlError> {
+    use crate::core::SqlValue;
+    if args.len() != 3 {
+        return Err(SqlError::FunctionArityMismatch {
+            func: "TRUNC_WITH_TZ",
+            expected: "3",
+            got: args.len(),
+        });
+    }
+    let (unit, tz) = match (&args[1], &args[2]) {
+        (
+            crate::core::Expr::Literal(SqlValue::String(u)),
+            crate::core::Expr::Literal(SqlValue::String(z)),
+        ) => (u.as_str(), z.as_str()),
+        _ => {
+            return Err(SqlError::OpNotSupportedInDialect {
+                op: "TRUNC_WITH_TZ requires string literals for `unit` and `tz` (build via funcs::trunc_with_tz)",
+                dialect: b.d.name(),
+            });
+        }
+    };
+    let unit_lc = unit.to_ascii_lowercase();
+    if !matches!(
+        unit_lc.as_str(),
+        "year" | "month" | "day" | "hour" | "minute" | "second"
+    ) {
+        return Err(SqlError::OpNotSupportedInDialect {
+            op: "TRUNC_WITH_TZ unit (allowed: year, month, day, hour, minute, second)",
+            dialect: b.d.name(),
+        });
+    }
+    // Cheap defense against SQL injection via a bogus unit/tz string.
+    // Reject anything outside `[A-Za-z0-9_/+\-: ]` since the value is
+    // inlined into the SQL.
+    let safe_charset = |s: &str| {
+        s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '+' | '-' | ':' | ' '))
+    };
+    if !safe_charset(tz) {
+        return Err(SqlError::OpNotSupportedInDialect {
+            op: "TRUNC_WITH_TZ tz contains characters outside the safe set [A-Za-z0-9_/+-: ]",
+            dialect: b.d.name(),
+        });
+    }
+    match b.d.name() {
+        "postgres" => {
+            b.sql.push_str("date_trunc('");
+            b.sql.push_str(&unit_lc);
+            b.sql.push_str("', ");
+            write_expr(b, &args[0], None)?;
+            b.sql.push_str(" AT TIME ZONE '");
+            b.sql.push_str(tz);
+            b.sql.push_str("')");
+        }
+        "mysql" => {
+            // CONVERT_TZ takes a from/to pair; assume the stored ts is
+            // UTC (the rustango ORM defaults are TIMESTAMPTZ-equivalent).
+            // The DATE_FORMAT mask truncates to the requested unit.
+            let mask = mysql_trunc_mask(&unit_lc);
+            b.sql.push_str("DATE_FORMAT(CONVERT_TZ(");
+            write_expr(b, &args[0], None)?;
+            b.sql.push_str(", '+00:00', '");
+            b.sql.push_str(tz);
+            b.sql.push_str("'), '");
+            b.sql.push_str(mask);
+            b.sql.push_str("')");
+        }
+        _ => {
+            // SQLite has no TZ DB. The user passes a `±HH:MM` offset or
+            // a plain IANA-shaped string; strftime applies it as a
+            // modifier. The mask truncates to the requested unit.
+            let mask = sqlite_trunc_mask(&unit_lc);
+            b.sql.push_str("strftime('");
+            b.sql.push_str(mask);
+            b.sql.push_str("', ");
+            write_expr(b, &args[0], None)?;
+            b.sql.push_str(", '");
+            b.sql.push_str(tz);
+            b.sql.push_str("')");
+        }
+    }
+    Ok(())
+}
+
+fn mysql_trunc_mask(unit: &str) -> &'static str {
+    match unit {
+        "year" => "%Y-01-01 00:00:00",
+        "month" => "%Y-%m-01 00:00:00",
+        "day" => "%Y-%m-%d 00:00:00",
+        "hour" => "%Y-%m-%d %H:00:00",
+        "minute" => "%Y-%m-%d %H:%i:00",
+        _ => "%Y-%m-%d %H:%i:%S",
+    }
+}
+
+fn sqlite_trunc_mask(unit: &str) -> &'static str {
+    match unit {
+        "year" => "%Y-01-01 00:00:00",
+        "month" => "%Y-%m-01 00:00:00",
+        "day" => "%Y-%m-%d 00:00:00",
+        "hour" => "%Y-%m-%d %H:00:00",
+        "minute" => "%Y-%m-%d %H:%M:00",
+        _ => "%Y-%m-%d %H:%M:%S",
+    }
 }
 
 /// Emit an `EXTRACT(<field> FROM x)` family call. PG uses the SQL
