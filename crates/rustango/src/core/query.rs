@@ -469,6 +469,10 @@ fn validate_expr_columns(model: &'static ModelSchema, expr: &Expr) -> Result<(),
         // aggregates are validated via the dedicated walker called
         // from AggregateBuilder::compile().
         Expr::Aggregate(_) => Ok(()),
+        // JsonPath (issue #296 / T2.3) — only the `source` expression
+        // references a model column; path steps are JSON-pointer
+        // keys/indices.
+        Expr::JsonPath { source, .. } => validate_expr_columns(model, source),
     }
 }
 

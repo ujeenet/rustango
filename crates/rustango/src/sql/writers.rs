@@ -1319,7 +1319,129 @@ fn write_expr(
                 .expect("Expr::Aggregate emitted outside any scope frame");
             write_aggregate_expr(b, agg, model)
         }
+        Expr::JsonPath {
+            source,
+            path,
+            as_text,
+        } => write_json_path(b, source, path, *as_text),
     }
+}
+
+/// Emit a JSON-path traversal — issue #296 / T2.3.
+///
+/// **PG**: chained `->` operators, with the final hop using `->>`
+/// when `as_text` (which returns the unwrapped scalar text instead of
+/// JSON). Each key/index is bound as a parameter so user-supplied
+/// strings can't break out of the SQL.
+///
+/// **MySQL / SQLite**: a single `JSON_EXTRACT` / `json_extract` call
+/// with a JSON-pointer-style path string (`$.k1.k2[0]`). The path is
+/// inlined into the SQL because both backends require a literal
+/// string for the path argument. To keep the inlined path safe,
+/// keys are validated against a strict charset (`A-Za-z0-9_`) at
+/// write time — anything outside emits `OpNotSupportedInDialect`.
+fn write_json_path(
+    b: &mut Sql<'_>,
+    source: &crate::core::Expr,
+    path: &[crate::core::JsonPathStep],
+    as_text: bool,
+) -> Result<(), SqlError> {
+    use crate::core::{JsonPathStep, SqlValue};
+    if path.is_empty() {
+        return Err(SqlError::OpNotSupportedInDialect {
+            op: "JsonPath requires at least one path step",
+            dialect: b.d.name(),
+        });
+    }
+    // Key safety: ASCII alphanumeric + `_` for MySQL / SQLite inlining.
+    // PG binds keys as parameters so the validation isn't strictly
+    // necessary there, but apply the same rule for consistency.
+    let key_safe =
+        |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    for step in path {
+        if let JsonPathStep::Key(k) = step {
+            if !key_safe(k) {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: "JsonPath key contains characters outside the safe set [A-Za-z0-9_]",
+                    dialect: b.d.name(),
+                });
+            }
+        }
+    }
+    let dialect = b.d.name();
+    if dialect == "postgres" {
+        // Chained `->` … `->>` form. Negative array indices are PG-
+        // native (count-from-end).
+        write_expr(b, source, None)?;
+        for (i, step) in path.iter().enumerate() {
+            let is_last = i + 1 == path.len();
+            let op = if is_last && as_text { " ->> " } else { " -> " };
+            b.sql.push_str(op);
+            match step {
+                JsonPathStep::Key(k) => {
+                    b.params.push(SqlValue::String(k.clone()));
+                    let p = b.d.placeholder(b.params.len());
+                    b.sql.push_str(&p);
+                }
+                JsonPathStep::Index(n) => {
+                    // PG's `->` accepts integer literals inline; binding
+                    // as a parameter forces a `text` cast (PG infers
+                    // `text` from the unknown-typed `$N`) and the
+                    // operator overload resolution then fails. Inline
+                    // the integer.
+                    b.sql.push_str(&n.to_string());
+                }
+            }
+        }
+        return Ok(());
+    }
+    // MySQL + SQLite — build `$.<k>.<k>[<n>]` path string and call
+    // the dialect's JSON_EXTRACT.
+    let mut json_path = String::from("$");
+    for step in path {
+        match step {
+            JsonPathStep::Key(k) => {
+                json_path.push('.');
+                json_path.push_str(k);
+            }
+            JsonPathStep::Index(n) => {
+                if *n < 0 {
+                    return Err(SqlError::OpNotSupportedInDialect {
+                        op: "JsonPath negative indices are PG-only (MySQL/SQLite require non-negative)",
+                        dialect,
+                    });
+                }
+                json_path.push('[');
+                json_path.push_str(&n.to_string());
+                json_path.push(']');
+            }
+        }
+    }
+    if dialect == "mysql" {
+        if as_text {
+            b.sql.push_str("JSON_UNQUOTE(JSON_EXTRACT(");
+            write_expr(b, source, None)?;
+            b.sql.push_str(", '");
+            b.sql.push_str(&json_path);
+            b.sql.push_str("'))");
+        } else {
+            b.sql.push_str("JSON_EXTRACT(");
+            write_expr(b, source, None)?;
+            b.sql.push_str(", '");
+            b.sql.push_str(&json_path);
+            b.sql.push_str("')");
+        }
+        return Ok(());
+    }
+    // SQLite — json_extract returns scalars unquoted already, so
+    // `as_text` is a no-op on this backend.
+    let _ = as_text;
+    b.sql.push_str("json_extract(");
+    write_expr(b, source, None)?;
+    b.sql.push_str(", '");
+    b.sql.push_str(&json_path);
+    b.sql.push_str("')");
+    Ok(())
 }
 
 /// Emit a window expression — `<fn>(args) OVER (PARTITION BY … ORDER
