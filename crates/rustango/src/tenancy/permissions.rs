@@ -56,6 +56,30 @@ use crate::Model;
 
 use super::error::TenancyError;
 
+// ------------------------------------------------------------------ Reserved codenames (issue #311)
+
+/// Reserved permission codename gating the framework's auto-admin
+/// surface (`/__admin/`, `/admin/`). Issue #311.
+///
+/// Granting this codename to a user (or to a role they belong to)
+/// lets them load the framework admin without `is_superuser = true`.
+/// Superusers bypass this check (and every other codename check) —
+/// the bypass is baked into [`has_perm_pool`].
+///
+/// Downstream consuming crates (`rustango-cms`, etc.) declare their
+/// own admin codenames following the same convention:
+/// `auth.access_<crate>_admin`. They seed the row at their own
+/// migration time and check it with
+/// [`crate::auth_decorators::permission_required`].
+pub const ACCESS_ADMIN_CODENAME: &str = "auth.access_admin";
+
+/// Logical "table" prefix used when seeding non-model-bound codenames
+/// into `rustango_permissions`. The auto-admin model-CRUD codenames
+/// use the model's actual table name; reserved cross-cutting
+/// codenames like [`ACCESS_ADMIN_CODENAME`] sit under the `auth`
+/// namespace.
+const AUTH_NAMESPACE: &str = "auth";
+
 // ------------------------------------------------------------------ Models
 
 /// A named group of permissions (Django `Group` equivalent).
@@ -1486,6 +1510,17 @@ pub async fn auto_create_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
 pub async fn auto_create_permissions_pool(pool: &crate::sql::Pool) -> Result<(), TenancyError> {
     use crate::core::{inventory, ModelEntry};
 
+    // Seed the framework-reserved codenames first — they aren't
+    // model-bound so the inventory loop below doesn't cover them.
+    // Issue #311.
+    seed_reserved_codename_pool(
+        pool,
+        AUTH_NAMESPACE,
+        ACCESS_ADMIN_CODENAME,
+        "Can access framework admin",
+    )
+    .await?;
+
     let action_names = [
         ("add", "Can add"),
         ("change", "Can change"),
@@ -1542,6 +1577,53 @@ pub async fn auto_create_permissions_pool(pool: &crate::sql::Pool) -> Result<(),
             })?;
         }
     }
+    Ok(())
+}
+
+/// Idempotently insert one row into `rustango_permissions` for a
+/// non-model-bound (cross-cutting) codename. Used by
+/// [`auto_create_permissions_pool`] to seed reserved codenames like
+/// [`ACCESS_ADMIN_CODENAME`]. Downstream consuming crates can call
+/// this directly at their own migration time to register their own
+/// reserved codenames (e.g. `auth.access_cms_admin`).
+///
+/// # Errors
+/// Driver / SQL failures from the INSERT.
+pub async fn seed_reserved_codename_pool(
+    pool: &crate::sql::Pool,
+    namespace: &str,
+    codename: &str,
+    display_name: &str,
+) -> Result<(), TenancyError> {
+    let dialect = pool.dialect();
+    let perm_t = dialect.quote_ident("rustango_permissions");
+    let table_col = dialect.quote_ident("table_name");
+    let codename_col = dialect.quote_ident("codename");
+    let name_col = dialect.quote_ident("name");
+    let p1 = dialect.placeholder(1);
+    let p2 = dialect.placeholder(2);
+    let p3 = dialect.placeholder(3);
+    let conflict_tail = dialect.insert_on_conflict_skip(&[&table_col, &codename_col]);
+    let sql = format!(
+        "INSERT INTO {perm_t} ({table_col}, {codename_col}, {name_col}) \
+         VALUES ({p1}, {p2}, {p3}) \
+         {conflict_tail}"
+    );
+    crate::sql::raw_execute_pool(
+        pool,
+        &sql,
+        vec![
+            SqlValue::from(namespace.to_owned()),
+            SqlValue::from(codename.to_owned()),
+            SqlValue::from(display_name.to_owned()),
+        ],
+    )
+    .await
+    .map_err(|e| {
+        TenancyError::Validation(format!(
+            "seed_reserved_codename_pool: INSERT for `{codename}` failed: {e}"
+        ))
+    })?;
     Ok(())
 }
 

@@ -404,6 +404,217 @@ pub fn active_required_or_403() -> impl tower::Layer<
     user_passes_test_or_403(|u| u.active)
 }
 
+/// Permission-codename access gate. Issue #311.
+///
+/// Asynchronous counterpart to [`user_passes_test`] — the predicate
+/// is a permission check against the tenant's perm engine rather
+/// than a sync closure over the `User` row. Anonymous requests 302
+/// to `login_url` with the original URL in `?next=`; authenticated
+/// users without the codename receive `403 Forbidden`. Superusers
+/// bypass the codename check entirely (the bypass is baked into
+/// [`crate::tenancy::permissions::has_perm_pool`]).
+///
+/// ```ignore
+/// use rustango::auth_decorators::permission_required;
+/// use rustango::tenancy::permissions::ACCESS_ADMIN_CODENAME;
+///
+/// // Gate the framework admin behind the reserved codename. Existing
+/// // superusers keep working (bypass is automatic); non-superusers
+/// // need an explicit grant via `set_user_perm_pool(uid,
+/// // ACCESS_ADMIN_CODENAME, true, ...)`.
+/// let admin = Router::new()
+///     .route("/admin", get(dashboard))
+///     .layer(permission_required("/login", ACCESS_ADMIN_CODENAME));
+/// ```
+///
+/// **Tenant resolution**: the gate extracts [`crate::extractors::Tenant`]
+/// to obtain the tenant-scoped pool that `has_perm_pool` queries.
+/// Routes that compose this middleware MUST therefore be mounted under
+/// the tenant context (Settings-driven `TenantContext` in extensions);
+/// untenant'd routes get a 500.
+///
+/// **Per-request cost**: one extractor call for `SessionUser` + one for
+/// `Tenant` + one `has_perm_pool` round-trip (three indexed lookups on
+/// PG/MySQL/SQLite). For high-RPS admin surfaces, the perm result can
+/// be cached at the session layer in a follow-up; today every request
+/// pays the lookup.
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub fn permission_required(
+    login_url: impl Into<String>,
+    codename: &'static str,
+) -> impl tower::Layer<
+    axum::routing::Route,
+    Service = impl tower::Service<
+        Request<Body>,
+        Response = Response,
+        Error = std::convert::Infallible,
+        Future = impl Send + 'static,
+    > + Clone
+                  + Send
+                  + Sync
+                  + 'static,
+> + Clone {
+    let cfg = Arc::new(LoginRequiredConfig {
+        login_url: login_url.into(),
+        ..Default::default()
+    });
+    axum::middleware::from_fn(move |req: Request<Body>, next: Next| {
+        let cfg = cfg.clone();
+        async move { handle_permission_required(cfg, codename, req, next).await }
+    })
+}
+
+/// API-endpoint counterpart to [`permission_required`] — returns 401
+/// for anonymous and 403 for authenticated-but-unauthorized requests
+/// instead of redirecting to a login page. Same codename semantics +
+/// superuser bypass as [`permission_required`].
+///
+/// ```ignore
+/// use rustango::auth_decorators::permission_required_or_403;
+///
+/// let api = Router::new()
+///     .route("/api/admin/stats", get(stats))
+///     .layer(permission_required_or_403("auth.access_admin"));
+/// ```
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub fn permission_required_or_403(
+    codename: &'static str,
+) -> impl tower::Layer<
+    axum::routing::Route,
+    Service = impl tower::Service<
+        Request<Body>,
+        Response = Response,
+        Error = std::convert::Infallible,
+        Future = impl Send + 'static,
+    > + Clone
+                  + Send
+                  + Sync
+                  + 'static,
+> + Clone {
+    axum::middleware::from_fn(move |req: Request<Body>, next: Next| async move {
+        handle_permission_required_or_403(codename, req, next).await
+    })
+}
+
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+async fn handle_permission_required(
+    cfg: Arc<LoginRequiredConfig>,
+    codename: &'static str,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    use axum::extract::FromRequestParts as _;
+    let (mut parts, body) = req.into_parts();
+    let user = crate::extractors::SessionUser::from_request_parts(&mut parts, &())
+        .await
+        .unwrap_or(crate::extractors::SessionUser(None));
+    let Some(u) = user.0.as_ref() else {
+        // Anonymous → redirect to login with ?next=.
+        let original = parts
+            .uri
+            .path_and_query()
+            .map(|p| p.as_str().to_owned())
+            .unwrap_or_else(|| "/".to_owned());
+        return redirect_to_login(&cfg.login_url, &cfg.redirect_field, &original);
+    };
+    let uid = match u.id.get().copied() {
+        Some(id) => id,
+        None => {
+            // Auto<i64> with no value — a session pointing at an unsaved
+            // user is a framework bug. Treat as 500 so it gets investigated.
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::empty())
+                .expect("500 + empty body is always valid");
+        }
+    };
+    // Need the tenant-scoped pool to query the perm engine. Tenant
+    // resolution failure (missing TenantContext, unknown tenant)
+    // surfaces as 500 — the user IS authenticated but we can't tell
+    // whether they're authorised.
+    let tenant = match crate::extractors::Tenant::<sqlx::Postgres>::from_request_parts(
+        &mut parts,
+        &(),
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::empty())
+                .expect("500 + empty body is always valid");
+        }
+    };
+    let has = crate::tenancy::permissions::has_perm_pool(uid, codename, tenant.pool())
+        .await
+        .unwrap_or(false);
+    if has {
+        let req = Request::from_parts(parts, body);
+        return next.run(req).await;
+    }
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .body(Body::empty())
+        .expect("403 + empty body is always valid")
+}
+
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+async fn handle_permission_required_or_403(
+    codename: &'static str,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    use axum::extract::FromRequestParts as _;
+    let (mut parts, body) = req.into_parts();
+    let user = crate::extractors::SessionUser::from_request_parts(&mut parts, &())
+        .await
+        .unwrap_or(crate::extractors::SessionUser(None));
+    let Some(u) = user.0.as_ref() else {
+        // Anonymous → 401 (RFC 7231: "you need to authenticate").
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .body(Body::empty())
+            .expect("401 + empty body is always valid");
+    };
+    let uid = match u.id.get().copied() {
+        Some(id) => id,
+        None => {
+            // Auto<i64> with no value — a session pointing at an unsaved
+            // user is a framework bug. Treat as 500 so it gets investigated.
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::empty())
+                .expect("500 + empty body is always valid");
+        }
+    };
+    let tenant = match crate::extractors::Tenant::<sqlx::Postgres>::from_request_parts(
+        &mut parts,
+        &(),
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::empty())
+                .expect("500 + empty body is always valid");
+        }
+    };
+    let has = crate::tenancy::permissions::has_perm_pool(uid, codename, tenant.pool())
+        .await
+        .unwrap_or(false);
+    if has {
+        let req = Request::from_parts(parts, body);
+        return next.run(req).await;
+    }
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .body(Body::empty())
+        .expect("403 + empty body is always valid")
+}
+
 #[cfg(all(feature = "tenancy", feature = "postgres"))]
 async fn handle_login_required(
     cfg: Arc<LoginRequiredConfig>,
