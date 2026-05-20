@@ -1079,6 +1079,11 @@ impl<T: Model> QuerySet<T> {
     /// emits `SELECT cols, AGGR(...) FROM t GROUP BY cols` — GROUP BY is
     /// inferred from the values list.
     ///
+    /// This is **Django Shape 2** (`.values(cols).annotate(agg)` →
+    /// `GROUP BY cols`). The same IR compiles to structurally-equivalent
+    /// SQL on Postgres, MySQL, and SQLite; see
+    /// `tests/values_annotate_parity.rs` for the cross-dialect parity pins.
+    ///
     /// ```ignore
     /// // "Posts per author" — Django's canonical example.
     /// Post::objects()
@@ -1088,8 +1093,21 @@ impl<T: Model> QuerySet<T> {
     /// // → SELECT "author_id", COUNT(*) AS "n" FROM "post" GROUP BY "author_id"
     /// ```
     ///
+    /// Filtering by an `.annotate()` alias routes to `HAVING`; filtering
+    /// by a model column routes to `WHERE`:
+    ///
+    /// ```ignore
+    /// // Authors with > 5 published posts.
+    /// Post::objects()
+    ///     .values(&["author_id"])
+    ///     .annotate("n", count_all().into())
+    ///     .filter("status", Op::Eq, "published") // → WHERE
+    ///     .filter("n", Op::Gt, 5_i64)            // → HAVING
+    ///     .compile()?;
+    /// ```
+    ///
     /// Calling `.values()` without a subsequent aggregating `.annotate(...)`
-    /// is a pure projection (no GROUP BY emitted).
+    /// is **Django Shape 1** — a pure projection (no GROUP BY emitted).
     #[must_use]
     pub fn values(self, columns: &[&'static str]) -> AggregateBuilder<T> {
         AggregateBuilder {
@@ -1111,7 +1129,11 @@ impl<T: Model> QuerySet<T> {
     /// Promotes to an [`AggregateBuilder`]. If the annotation aggregates rows
     /// (`Count`, `Sum`, `Avg`, …) and `.values()` wasn't called, `compile()`
     /// auto-populates GROUP BY with every non-aggregate scalar column on the
-    /// model (Django Shape 3 — "per-row count of children").
+    /// model — this is **Django Shape 3** ("each row + a derived aggregate
+    /// over its children").
+    ///
+    /// The same IR compiles to structurally-equivalent SQL on Postgres,
+    /// MySQL, and SQLite; see `tests/values_annotate_parity.rs`.
     ///
     /// ```ignore
     /// // "Each author + their post count" — every column of `Author`
@@ -1120,6 +1142,14 @@ impl<T: Model> QuerySet<T> {
     ///     .annotate("post_count", count_all().into())
     ///     .compile()?;
     /// ```
+    ///
+    /// # Django shape cheat-sheet
+    ///
+    /// | Shape | Call site                                | GROUP BY        |
+    /// |-------|------------------------------------------|-----------------|
+    /// | 1     | `.values_dict(&[cols])`                  | (none)          |
+    /// | 2     | `.values(&[cols]).annotate(alias, agg)`  | the values cols |
+    /// | 3     | `.annotate(alias, agg)` (alone)          | every scalar    |
     #[must_use]
     pub fn annotate(self, alias: &'static str, expr: AggregateExpr) -> AggregateBuilder<T> {
         self.aggregate().annotate(alias, expr)
