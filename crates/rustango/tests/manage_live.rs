@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rustango::sql::{sqlx, Fetcher};
+use rustango::sql::sqlx;
 use rustango::tenancy::{manage, Org, TenantPools};
 use rustango::{core::Column as _, migrate as rmig};
 
@@ -107,7 +107,7 @@ async fn create_tenant_inserts_row_creates_schema_and_runs_migrations() {
     // Org row landed.
     let rows: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(slug.clone()))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -256,7 +256,7 @@ async fn drop_tenant_soft_deletes_with_confirm() {
 
     let rows: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(slug.clone()))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1, "row preserved");

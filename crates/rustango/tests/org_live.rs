@@ -9,7 +9,7 @@
 
 use rustango::core::Column as _;
 use rustango::migrate;
-use rustango::sql::{sqlx, Auto, Fetcher};
+use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::{Org, StorageMode};
 
 use tokio::sync::Mutex;
@@ -72,7 +72,7 @@ async fn org_round_trip_insert_and_fetch() {
     let acme_id = *acme.id.get().unwrap();
     assert!(acme_id > 0, "BIGSERIAL should assign a positive id");
 
-    let fetched: Vec<Org> = Org::objects().fetch(&pool).await.unwrap();
+    let fetched: Vec<Org> = Org::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(fetched.len(), 1);
     assert_eq!(fetched[0].slug, "acme");
     assert_eq!(fetched[0].storage_mode, "schema");
@@ -117,7 +117,7 @@ async fn org_filter_by_slug_returns_single_match() {
 
     let matches: Vec<Org> = Org::objects()
         .where_(Org::slug.eq("globex"))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(matches.len(), 1);
@@ -131,7 +131,7 @@ async fn org_filter_by_slug_returns_single_match() {
 
     let actives: Vec<Org> = Org::objects()
         .where_(Org::active.eq(true))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(actives.len(), 3);
@@ -175,7 +175,7 @@ async fn org_inactive_orgs_are_persistable_and_queryable() {
 
     let fetched: Vec<Org> = Org::objects()
         .where_(Org::active.eq(false))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(fetched.len(), 1);

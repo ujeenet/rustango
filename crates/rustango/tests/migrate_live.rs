@@ -8,7 +8,7 @@
 
 use rustango::core::Column as _;
 use rustango::migrate;
-use rustango::sql::{sqlx, Fetcher};
+use rustango::sql::sqlx;
 use rustango::{Auto, Model};
 use tokio::sync::Mutex;
 
@@ -88,11 +88,11 @@ async fn apply_all_creates_every_registered_table() {
     .await
     .unwrap();
 
-    let users: Vec<MigUser> = MigUser::objects().fetch(&pool).await.unwrap();
+    let users: Vec<MigUser> = MigUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(users.len(), 1);
     assert_eq!(users[0].name, "alice");
 
-    let posts: Vec<MigPost> = MigPost::objects().fetch(&pool).await.unwrap();
+    let posts: Vec<MigPost> = MigPost::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(posts.len(), 1);
     assert_eq!(posts[0].title, "hello");
 
@@ -233,7 +233,7 @@ async fn auto_pk_insert_populates_id_from_sequence() {
         "second insert should get a strictly-greater id; got alice={alice_id}, bob={bob_id}"
     );
 
-    let users: Vec<AutoUser> = AutoUser::objects().fetch(&pool).await.unwrap();
+    let users: Vec<AutoUser> = AutoUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(users.len(), 2);
 
     migrate::drop_all(&pool).await.unwrap();
@@ -284,7 +284,7 @@ async fn bulk_insert_non_auto_model_writes_n_rows_one_round_trip() {
 
     MigUser::bulk_insert(&rows, &pool).await.unwrap();
 
-    let fetched: Vec<MigUser> = MigUser::objects().fetch(&pool).await.unwrap();
+    let fetched: Vec<MigUser> = MigUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(fetched.len(), 10, "all 10 rows should be present");
 
     migrate::drop_all(&pool).await.unwrap();
@@ -319,7 +319,7 @@ async fn bulk_insert_auto_model_unset_path_populates_each_pk() {
         last = v;
     }
 
-    let fetched: Vec<AutoUser> = AutoUser::objects().fetch(&pool).await.unwrap();
+    let fetched: Vec<AutoUser> = AutoUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(fetched.len(), 5);
 
     migrate::drop_all(&pool).await.unwrap();
@@ -384,7 +384,7 @@ async fn bulk_insert_auto_model_mixed_set_unset_is_rejected() {
     );
 
     // No rows should have been inserted.
-    let fetched: Vec<AutoUser> = AutoUser::objects().fetch(&pool).await.unwrap();
+    let fetched: Vec<AutoUser> = AutoUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(fetched.len(), 0);
 
     migrate::drop_all(&pool).await.unwrap();
@@ -405,7 +405,7 @@ async fn bulk_insert_empty_slice_is_noop() {
     let empty_non_auto: Vec<MigUser> = Vec::new();
     MigUser::bulk_insert(&empty_non_auto, &pool).await.unwrap();
 
-    let fetched: Vec<AutoUser> = AutoUser::objects().fetch(&pool).await.unwrap();
+    let fetched: Vec<AutoUser> = AutoUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(fetched.len(), 0);
 
     migrate::drop_all(&pool).await.unwrap();
@@ -437,7 +437,7 @@ async fn apply_all_is_safe_to_call_after_drop_all() {
     .unwrap();
     let count = MigUser::objects()
         .where_(MigUser::id.eq(42_i64))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap()
         .len();

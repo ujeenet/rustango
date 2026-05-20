@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustango::core::Column as _;
 use rustango::migrate as rmig;
-use rustango::sql::{sqlx, Fetcher};
+use rustango::sql::sqlx;
 use rustango::tenancy::{
     authenticate_operator, authenticate_user, manage, password, Org, TenantPools,
 };
@@ -27,7 +27,7 @@ fn live_lock() -> &'static Mutex<()> {
 async fn lookup_org(pool: &sqlx::PgPool, slug: &str) -> Org {
     let mut rows: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(slug.to_owned()))
-        .fetch(pool)
+        .fetch_on(pool)
         .await
         .unwrap();
     rows.pop().expect("org should exist")

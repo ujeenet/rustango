@@ -4,7 +4,7 @@
 //!
 //! The framework's auth and admin paths read the seven core columns
 //! by name; the extras here are for the application to use via the
-//! ORM (`AppUser::objects().fetch(...)`).
+//! ORM (`AppUser::objects().fetch_on(...)`).
 
 use rustango::sql::Auto;
 use rustango::Model;

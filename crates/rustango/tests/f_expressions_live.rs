@@ -28,7 +28,7 @@
 use std::sync::OnceLock;
 
 use rustango::core::{Column as _, F};
-use rustango::sql::{sqlx, Auto, Fetcher, Updater};
+use rustango::sql::{sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -106,7 +106,7 @@ async fn f_expression_increment_is_atomic_under_concurrent_load() {
                 .eq("id", id)
                 .update()
                 .set_expr("views", F("views") + 1_i64)
-                .execute(&pool)
+                .execute_on(&pool)
                 .await
                 .expect("update succeeds");
         }));
@@ -118,7 +118,7 @@ async fn f_expression_increment_is_atomic_under_concurrent_load() {
     // Re-fetch and assert the counter equals N — no lost updates.
     let posts: Vec<Post> = Post::objects()
         .where_(Post::id.eq(id))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(posts.len(), 1);
@@ -160,7 +160,7 @@ async fn f_expression_column_to_column_compare_filters_correctly() {
     // `views > 2` — sanity literal compare baseline.
     let high: Vec<Post> = Post::objects()
         .where_(Post::views.gt(2_i64))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     // Expected matches: "ab" (10) and "abc" (3) = 2 rows.
@@ -170,7 +170,7 @@ async fn f_expression_column_to_column_compare_filters_correctly() {
     // Proves the column-vs-column path emits the right SQL with no params.
     let all: Vec<Post> = Post::objects()
         .where_(Post::views.gte_expr(F("views")))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(all.len(), 4, "self-compare matches every row: {all:?}");

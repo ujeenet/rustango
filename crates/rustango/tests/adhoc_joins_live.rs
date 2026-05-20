@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 
 use rustango::core::joins::aliased;
 use rustango::core::{Filter, Join, JoinKind, Model as _, Op, SqlValue, WhereExpr};
-use rustango::sql::{sqlx, Auto, Fetcher};
+use rustango::sql::{sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -123,7 +123,7 @@ async fn inner_join_with_extra_predicate_filters_outer_rows() {
     let posts: Vec<Post> = Post::objects()
         .join(join)
         .order_by(&[("id", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
 
@@ -163,7 +163,7 @@ async fn left_join_preserves_outer_rows_without_match() {
     let posts: Vec<Post> = Post::objects()
         .join(join)
         .order_by(&[("id", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
 

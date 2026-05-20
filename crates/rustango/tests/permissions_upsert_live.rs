@@ -17,7 +17,7 @@
 
 use rustango::core::Column as _;
 use rustango::sql::sqlx;
-use rustango::sql::{Auto, Fetcher};
+use rustango::sql::Auto;
 use rustango::tenancy::permissions::{
     assign_role, get_or_create_role, grant_role_perm, set_user_perm, RolePermission,
     UserPermission, UserRole,
@@ -115,7 +115,7 @@ async fn grant_role_perm_is_idempotent_via_on_conflict_do_nothing() {
     let rows: Vec<RolePermission> = RolePermission::objects()
         .where_(RolePermission::role_id.eq(role_id))
         .where_(RolePermission::codename.eq("post.add"))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(
@@ -145,7 +145,7 @@ async fn assign_role_is_idempotent_via_on_conflict_do_nothing() {
     let rows: Vec<UserRole> = UserRole::objects()
         .where_(UserRole::user_id.eq(user_id))
         .where_(UserRole::role_id.eq(role_id))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1, "two assigns should leave one row");
@@ -170,7 +170,7 @@ async fn set_user_perm_flips_existing_row_via_on_conflict_do_update() {
     let rows: Vec<UserPermission> = UserPermission::objects()
         .where_(UserPermission::user_id.eq(user_id))
         .where_(UserPermission::codename.eq(codename))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1, "first call should insert one row");
@@ -186,7 +186,7 @@ async fn set_user_perm_flips_existing_row_via_on_conflict_do_update() {
     let rows: Vec<UserPermission> = UserPermission::objects()
         .where_(UserPermission::user_id.eq(user_id))
         .where_(UserPermission::codename.eq(codename))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1, "second call should NOT insert a duplicate");

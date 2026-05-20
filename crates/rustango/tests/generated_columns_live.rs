@@ -8,7 +8,7 @@
 #![cfg(feature = "tenancy")]
 
 use rustango::core::Column as _;
-use rustango::sql::{sqlx, Auto, Fetcher};
+use rustango::sql::{sqlx, Auto};
 
 #[derive(rustango::Model, Debug, Clone)]
 #[rustango(table = "_gen_invoice")]
@@ -72,7 +72,7 @@ async fn generated_column_is_computed_on_insert() {
     // GENERATED column normally, so `total` should be 9.99 * 4.
     let rows: Vec<Invoice> = Invoice::objects()
         .where_(Invoice::id.eq(id))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -98,7 +98,7 @@ async fn generated_column_is_computed_on_insert() {
     let wrong_id = *wrong.id.get().unwrap();
     let rows: Vec<Invoice> = Invoice::objects()
         .where_(Invoice::id.eq(wrong_id))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     let approx = (rows[0].total - 20.0).abs() < 1e-6;
@@ -142,7 +142,7 @@ async fn generated_column_is_recomputed_on_update() {
 
     let rows: Vec<Invoice> = Invoice::objects()
         .where_(Invoice::id.eq(id))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     let approx = (rows[0].total - 30.0).abs() < 1e-6;

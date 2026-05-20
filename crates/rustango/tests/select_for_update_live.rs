@@ -172,12 +172,12 @@ async fn select_for_update_against_bare_pool_runs_cleanly() {
         return;
     };
 
-    use rustango::sql::Fetcher as _;
+    // Fetcher trait deleted in T1.8 wave 3 — fetch_on is inherent on QuerySet.
     let rows: Vec<Job> = Job::objects()
         .where_(Job::status.eq("pending"))
         .select_for_update()
         .skip_locked()
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     // No other tx is competing — all 3 pending rows come back.

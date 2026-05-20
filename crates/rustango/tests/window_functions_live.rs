@@ -134,8 +134,7 @@ async fn dense_rank_does_not_skip_on_ties() {
     };
     fresh(&pool).await;
     // Add two rows tied at score=50 in tenant 2.
-    sqlx::query(r#"INSERT INTO "wfl_user" ("tenant_id", "name", "score") VALUES (2, 'Frank', 50), (2, 'Grace', 50)"#)
-        .execute(&pool)
+    sqlx::query(r#"INSERT INTO "wfl_user" ("tenant_id", "name", "score") VALUES (2, 'Frank', 50), (2, 'Grace', 50)"#).execute(&pool)
         .await
         .unwrap();
 

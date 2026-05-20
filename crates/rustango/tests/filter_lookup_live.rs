@@ -9,7 +9,7 @@
 use std::sync::OnceLock;
 
 use rustango::core::SqlValue;
-use rustango::sql::{sqlx, Auto, Fetcher};
+use rustango::sql::{sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -86,7 +86,7 @@ async fn live_bare_field_eq() {
 
     let rows: Vec<Post> = Post::objects()
         .filter("status", "published")
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 3, "three published rows");
@@ -105,7 +105,7 @@ async fn live_gt_lt_comparisons() {
 
     let rows: Vec<Post> = Post::objects()
         .filter("views__gt", 50_i64)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2, "two rows with views > 50");
@@ -113,7 +113,7 @@ async fn live_gt_lt_comparisons() {
 
     let rows: Vec<Post> = Post::objects()
         .filter("views__lte", 10_i64)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2, "two rows with views <= 10");
@@ -133,7 +133,7 @@ async fn live_icontains_matches_case_insensitively() {
     // → "Hello Rust", "Goodbye Rust", "Rusty Spoon".
     let rows: Vec<Post> = Post::objects()
         .filter("title__icontains", "rust")
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
@@ -155,7 +155,7 @@ async fn live_startswith_endswith() {
 
     let rows: Vec<Post> = Post::objects()
         .filter("title__startswith", "Hello")
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2, "two titles start with 'Hello'");
@@ -163,7 +163,7 @@ async fn live_startswith_endswith() {
 
     let rows: Vec<Post> = Post::objects()
         .filter("title__endswith", "Rust")
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2, "two titles end with 'Rust'");
@@ -185,7 +185,7 @@ async fn live_in_list_filters_match() {
             "author_id__in",
             SqlValue::List(vec![SqlValue::I64(1), SqlValue::I64(3)]),
         )
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 3, "authors 1 and 3 own three rows total");
@@ -204,7 +204,7 @@ async fn live_isnull_true_and_false() {
 
     let live_rows: Vec<Post> = Post::objects()
         .filter("deleted_at__isnull", true)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(live_rows.len(), 3, "three non-deleted rows");
@@ -212,7 +212,7 @@ async fn live_isnull_true_and_false() {
 
     let dead_rows: Vec<Post> = Post::objects()
         .filter("deleted_at__isnull", false)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(dead_rows.len(), 2, "two soft-deleted rows");
@@ -235,7 +235,7 @@ async fn live_between_range_alias() {
             "views__between",
             SqlValue::List(vec![SqlValue::I64(10), SqlValue::I64(100)]),
         )
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 3, "views in [10,100] hits 3 rows");
@@ -247,7 +247,7 @@ async fn live_between_range_alias() {
             "views__range",
             SqlValue::List(vec![SqlValue::I64(10), SqlValue::I64(100)]),
         )
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 3);
@@ -267,7 +267,7 @@ async fn live_multi_filter_and_chain() {
         .filter("status", "published")
         .filter("views__gt", 50_i64)
         .filter("title__icontains", "rust")
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(

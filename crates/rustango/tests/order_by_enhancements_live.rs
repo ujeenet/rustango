@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use rustango::core::funcs::lower;
 use rustango::core::{NullsOrder, F};
-use rustango::sql::{sqlx, Auto, Fetcher};
+use rustango::sql::{sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -76,7 +76,7 @@ async fn nulls_last_on_asc_groups_nulls_after_non_nulls() {
     let rows: Vec<Post> = Post::objects()
         .order_by_with_nulls(&[("score", false, NullsOrder::Last)])
         .order_by(&[("id", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     // Scores ASC NULLS LAST → 10, 20, 30, NULL, NULL.
@@ -102,7 +102,7 @@ async fn nulls_first_on_desc_groups_nulls_first() {
     let rows: Vec<Post> = Post::objects()
         .order_by_with_nulls(&[("score", true, NullsOrder::First)])
         .order_by(&[("id", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     // Scores DESC NULLS FIRST → NULL, NULL, 30, 20, 10.
@@ -129,7 +129,7 @@ async fn order_by_expr_lower_title_sorts_case_insensitively() {
 
     let rows: Vec<Post> = Post::objects()
         .order_by_expr(lower(F("title")), false)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     let titles: Vec<&str> = rows.iter().map(|p| p.title.as_str()).collect();

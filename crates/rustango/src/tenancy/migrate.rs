@@ -59,8 +59,6 @@ use crate::migrate;
 use crate::sql::sqlx::postgres::PgPoolOptions;
 #[cfg(feature = "postgres")]
 use crate::sql::sqlx::PgPool;
-#[cfg(feature = "postgres")]
-use crate::sql::Fetcher;
 use sqlx::Database;
 
 use super::error::TenancyError;
@@ -336,7 +334,7 @@ pub async fn migrate_tenants(
 
     let orgs: Vec<Org> = Org::objects()
         .where_(Org::active.eq(true))
-        .fetch(pools.registry())
+        .fetch_on(pools.registry())
         .await?;
 
     info!(

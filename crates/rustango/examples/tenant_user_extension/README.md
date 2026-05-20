@@ -100,4 +100,4 @@ this example ships with `migrations/` empty for exactly that reason.
 - Extras must be `NULL`-able or carry `default = "…"` so the bootstrap
   migration applies cleanly to a fresh tenant schema.
 - Framework auth/admin still reads the seven core columns by name;
-  the two extras are only visible via `AppUser::objects().fetch(...)`.
+  the two extras are only visible via `AppUser::objects().fetch_on(...)`.

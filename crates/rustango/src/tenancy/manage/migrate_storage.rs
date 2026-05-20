@@ -57,7 +57,6 @@ use std::io::Write;
 use std::process::Stdio;
 
 use crate::core::Column as _;
-use crate::sql::Fetcher;
 use crate::tenancy::error::TenancyError;
 use crate::tenancy::manage::args::{next_value, quote_ident};
 use crate::tenancy::org::{Org, StorageMode};
@@ -87,7 +86,7 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
     // 1. Look up the Org row.
     let mut orgs: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(parsed.slug.clone()))
-        .fetch(pools.registry())
+        .fetch_on(pools.registry())
         .await?;
     let mut org = orgs
         .pop()

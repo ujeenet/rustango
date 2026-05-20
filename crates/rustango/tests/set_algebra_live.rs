@@ -7,7 +7,7 @@
 use std::sync::OnceLock;
 
 use rustango::core::Column as _;
-use rustango::sql::{sqlx, Auto, Fetcher as _};
+use rustango::sql::{sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -87,7 +87,7 @@ async fn union_combines_branches_and_dedupes() {
         .where_(Post::status.eq("draft"))
         .union(Post::objects().where_(Post::status.eq("review")))
         .order_by(&[("id", false)])
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     // 2 drafts + 1 review = 3 rows.
@@ -111,7 +111,7 @@ async fn union_all_keeps_duplicates() {
     let rows: Vec<Post> = Post::objects()
         .where_(Post::status.eq("draft"))
         .union_all(Post::objects().where_(Post::status.eq("draft")))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     // 2 drafts × 2 branches = 4 rows.
@@ -135,7 +135,7 @@ async fn intersect_keeps_only_rows_in_both_branches() {
     let rows: Vec<Post> = Post::objects()
         .where_(Post::status.eq("published"))
         .intersection(Post::objects().where_(Post::status.eq("published")))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2, "2 published posts intersect themselves");
@@ -144,7 +144,7 @@ async fn intersect_keeps_only_rows_in_both_branches() {
     let empty: Vec<Post> = Post::objects()
         .where_(Post::status.eq("draft"))
         .intersection(Post::objects().where_(Post::status.eq("published")))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert!(
@@ -166,7 +166,7 @@ async fn except_excludes_matching_rows() {
 
     let rows: Vec<Post> = Post::objects()
         .difference(Post::objects().where_(Post::author_id.eq(1_i64)))
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 4, "6 total - 2 author-1 = 4: got {rows:?}");
@@ -190,7 +190,7 @@ async fn outer_limit_caps_combined_result() {
         .union(Post::objects().where_(Post::status.eq("review")))
         .order_by(&[("id", false)])
         .limit(2)
-        .fetch(&pool)
+        .fetch_on(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2, "outer LIMIT 2 wins: got {rows:?}");
