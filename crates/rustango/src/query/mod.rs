@@ -1298,12 +1298,36 @@ fn lower_order_items(
     Ok(out)
 }
 
-/// Convert `select_related` field names into `Join`s — slice 9.0d.
+/// Convert `select_related` field names into `Join`s — slice 9.0d,
+/// extended for multi-hop chains in issue #297 / T2.2.
 ///
-/// For each name: look up the field on `model`, verify it's a
-/// `Relation::Fk`, find the target schema in inventory, build a
-/// `Join` projecting all of the target's columns. Errors out on any
-/// unresolvable name with a clear `SelectRelatedInvalid` reason.
+/// **Single hop** (e.g. `"author"`): look up the field on `model`,
+/// verify it's a `Relation::Fk` / `Relation::O2O`, find the target
+/// schema in inventory, build a LEFT `Join` projecting all of the
+/// target's columns.
+///
+/// **Multi-hop** (e.g. `"author__profile__country"`): split on `__`,
+/// resolve each hop against the previous hop's target schema.
+/// Successive hops use the **previous join's alias** as the LHS of
+/// their `ON` predicate so the FK chain stitches in SQL. The
+/// emitted join alias is the full dotted path (`"author__profile"`,
+/// `"author__profile__country"`) — globally unique and
+/// composition-safe even when two different roots share a tail name.
+///
+/// Errors out on any unresolvable hop with a clear
+/// `SelectRelatedInvalid` reason, including the position in the
+/// chain.
+///
+/// **Decoder caveat (T2.2 partial-ship note):** the LoadRelated
+/// dispatcher in `crate::sql::executor` currently stitches single-
+/// hop FKs only. Multi-hop chains emit the JOIN + projection
+/// correctly, so callers can `.filter()` / `.where_raw()` against
+/// deep columns via `Expr::AliasedColumn`, but the lazy
+/// `post.author.profile` field stitching across the chain is
+/// follow-up work (the macro-generated `__rustango_load_related` on
+/// the parent only knows about its own model's FKs; recursive
+/// dispatch on the loaded child instance needs additional macro +
+/// executor wiring).
 fn lower_select_related(
     model: &'static ModelSchema,
     names: &[String],
@@ -1311,59 +1335,108 @@ fn lower_select_related(
     use crate::core::{inventory, Expr, Join, JoinKind, ModelEntry, Op, Relation, WhereExpr};
     let mut out: Vec<Join> = Vec::with_capacity(names.len());
     for name in names {
-        let field = model
-            .field(name)
-            .ok_or_else(|| QueryError::SelectRelatedInvalid {
-                model: model.name,
-                field: name.clone(),
-                reason: format!("no field `{name}` on this model"),
-            })?;
-        let (to, on) = match field.relation {
-            Some(Relation::Fk { to, on }) | Some(Relation::O2O { to, on }) => (to, on),
-            _ => {
-                return Err(QueryError::SelectRelatedInvalid {
-                    model: model.name,
-                    field: name.clone(),
-                    reason: "not a `ForeignKey<T>` field".into(),
-                });
-            }
-        };
-        let target = inventory::iter::<ModelEntry>
-            .into_iter()
-            .find(|e| e.schema.table == to)
-            .map(|e| e.schema)
-            .ok_or_else(|| QueryError::SelectRelatedInvalid {
+        // Walk each `__`-separated hop. `current` tracks the schema
+        // we look up the next hop's FK on; `prev_alias` tracks the
+        // alias the next hop's ON predicate joins against on the
+        // LHS. For the first hop, that LHS is the main table.
+        let hops: Vec<&str> = name.split("__").collect();
+        if hops.iter().any(|h| h.is_empty()) {
+            return Err(QueryError::SelectRelatedInvalid {
                 model: model.name,
                 field: name.clone(),
                 reason: format!(
-                    "target table `{to}` is not registered (is the parent's `#[derive(Model)]` linked into the binary?)"
+                    "empty hop in chain `{name}` (use `field` or `field__nested`, not `field____nested`)"
                 ),
-            })?;
-        // Project every column on the target so the decoder has the
-        // full row to rebuild a `Target` instance.
-        let project: Vec<&'static str> = target.scalar_fields().map(|f| f.column).collect();
-        // The Rust field name is unique within the model, so it makes
-        // a clean alias prefix that doesn't collide with other JOINs
-        // the writer or admin might add later.
-        let alias = field.name;
-        out.push(Join {
-            target,
-            alias,
-            kind: JoinKind::Left,
-            // `<main_table>.<fk_col> = <alias>.<target_pk>` — both
-            // sides aliased so the writer doesn't need to remember
-            // which side is "outer". Same SQL the legacy emitter
-            // produced; just expressed as a WhereExpr now.
-            on: WhereExpr::ExprCompare {
-                lhs: Expr::AliasedColumn {
-                    alias: model.table,
-                    column: field.column,
+            });
+        }
+        let mut current: &'static ModelSchema = model;
+        let mut prev_alias: &'static str = model.table;
+        let mut prev_alias_owned: String = String::new();
+        for (depth, hop) in hops.iter().enumerate() {
+            let field = current
+                .field(hop)
+                .ok_or_else(|| QueryError::SelectRelatedInvalid {
+                    model: current.name,
+                    field: name.clone(),
+                    reason: format!(
+                        "no field `{hop}` on `{}` (hop {} of chain `{name}`)",
+                        current.name,
+                        depth + 1
+                    ),
+                })?;
+            let (to, on) = match field.relation {
+                Some(Relation::Fk { to, on }) | Some(Relation::O2O { to, on }) => (to, on),
+                _ => {
+                    return Err(QueryError::SelectRelatedInvalid {
+                        model: current.name,
+                        field: name.clone(),
+                        reason: format!(
+                            "`{hop}` on `{}` is not a `ForeignKey<T>` field (hop {} of chain `{name}`)",
+                            current.name,
+                            depth + 1
+                        ),
+                    });
+                }
+            };
+            let target = inventory::iter::<ModelEntry>
+                .into_iter()
+                .find(|e| e.schema.table == to)
+                .map(|e| e.schema)
+                .ok_or_else(|| QueryError::SelectRelatedInvalid {
+                    model: current.name,
+                    field: name.clone(),
+                    reason: format!(
+                        "target table `{to}` is not registered (hop {} of chain `{name}` — is `{}`'s `#[derive(Model)]` linked into the binary?)",
+                        depth + 1,
+                        current.name
+                    ),
+                })?;
+            // Per-hop alias: the full dotted path up to and including
+            // this hop. For single-hop chains this is just `field.name`
+            // (matches pre-T2.2 behavior bit-identically). For multi-
+            // hop, the alias accumulates: `author`, then
+            // `author__profile`, then `author__profile__country`.
+            //
+            // Joins-alias names live for the lifetime of the QuerySet
+            // compile, but the writer needs `&'static str`. For
+            // single-hop we already have `field.name` (a `&'static
+            // str` from the schema). For multi-hop, we leak the
+            // composite alias intentionally: the count is small
+            // (depth ≤ ~5 in practice) and bounded by the user's
+            // schema, so this is a tiny one-time cost paid at
+            // compile() time. Same trick `Join::alias` accepts a
+            // `&'static str` elsewhere.
+            let alias: &'static str = if hops.len() == 1 {
+                field.name
+            } else {
+                // Build the cumulative alias.
+                let owned = if depth == 0 {
+                    (*hop).to_owned()
+                } else {
+                    format!("{prev_alias_owned}__{hop}")
+                };
+                prev_alias_owned = owned.clone();
+                Box::leak(owned.into_boxed_str())
+            };
+            let project: Vec<&'static str> = target.scalar_fields().map(|f| f.column).collect();
+            out.push(Join {
+                target,
+                alias,
+                kind: JoinKind::Left,
+                on: WhereExpr::ExprCompare {
+                    lhs: Expr::AliasedColumn {
+                        alias: prev_alias,
+                        column: field.column,
+                    },
+                    op: Op::Eq,
+                    rhs: Expr::AliasedColumn { alias, column: on },
                 },
-                op: Op::Eq,
-                rhs: Expr::AliasedColumn { alias, column: on },
-            },
-            project,
-        });
+                project,
+            });
+            // Advance the chain for the next hop.
+            current = target;
+            prev_alias = alias;
+        }
     }
     Ok(out)
 }
