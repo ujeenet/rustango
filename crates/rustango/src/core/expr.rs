@@ -186,6 +186,39 @@ pub enum Expr {
         expr: Box<Expr>,
         ty: super::field_type::FieldType,
     },
+    /// JSON path extraction — `<source> -> 'k1' -> 'k2' ->> 'k3'` on PG,
+    /// `JSON_UNQUOTE(JSON_EXTRACT(<source>, '$.k1.k2.k3'))` on MySQL,
+    /// `json_extract(<source>, '$.k1.k2.k3')` on SQLite. Issue #296 /
+    /// T2.3. `as_text = true` requests the unwrapped-text form
+    /// (`->>` / `JSON_UNQUOTE` / `json_extract` returns text by default
+    /// for scalars); `false` keeps the JSON-typed form for further
+    /// chaining or for use as a JSON-shape value.
+    JsonPath {
+        source: Box<Expr>,
+        path: Vec<JsonPathStep>,
+        as_text: bool,
+    },
+}
+
+/// One segment of a [`Expr::JsonPath`] traversal. Keys are dictionary
+/// lookups (`{"k": v}` → `JsonPathStep::Key("k")`); indices are array
+/// lookups (`[a, b, c]` → `JsonPathStep::Index(0)`).
+///
+/// Negative indices follow PG's convention: PG's `->` accepts negative
+/// indices ("count from the end"); MySQL / SQLite emit `$[N]` which
+/// only accepts non-negative — the writer rejects negative indices on
+/// non-PG with a clear error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JsonPathStep {
+    /// Object key lookup. The string is emitted as a quoted SQL
+    /// literal on PG (`-> 'name'`) and as part of the JSON-pointer
+    /// path on MySQL / SQLite (`$.name`). Caller-supplied keys must
+    /// be JSON-pointer-safe: ASCII alphanumeric plus `_`. Other
+    /// characters are rejected at writer time to keep the inlined
+    /// path string injection-safe.
+    Key(String),
+    /// Array index lookup, 0-based.
+    Index(i64),
 }
 
 /// One arm of a [`Expr::Case`] expression — `WHEN <condition> THEN <then>`.

@@ -787,6 +787,57 @@ pub fn trunc_with_tz(ts: impl Into<Expr>, unit: &'static str, tz: &'static str) 
     }
 }
 
+// ---------- JSON path extraction (issue #296 / T2.3) ----------
+
+/// `<source> -> 'k1' -> 'k2' ->> 'k3'` (PG) /
+/// `JSON_UNQUOTE(JSON_EXTRACT(...))` (MySQL) /
+/// `json_extract(...)` (SQLite). Issue #296 / T2.3.
+///
+/// Builds an [`Expr::JsonPath`] over a JSON-typed column or expression.
+/// Each `&str` in `path` is treated as an object-key step (`$.<key>`).
+/// `as_text = true` requests the unwrapped scalar form (PG's `->>`),
+/// `false` keeps the JSON-typed form.
+///
+/// ```ignore
+/// use rustango::core::F;
+/// use rustango::core::funcs::json_path;
+///
+/// // data->'address'->>'city' (PG) /
+/// // JSON_UNQUOTE(JSON_EXTRACT(data, '$.address.city')) (MySQL) /
+/// // json_extract(data, '$.address.city') (SQLite)
+/// json_path(F("data"), &["address", "city"], true);
+/// ```
+///
+/// Use [`json_path_indexed`] when array indices are needed.
+#[must_use]
+pub fn json_path(source: impl Into<Expr>, keys: &[&str], as_text: bool) -> Expr {
+    use super::JsonPathStep;
+    Expr::JsonPath {
+        source: Box::new(source.into()),
+        path: keys
+            .iter()
+            .map(|k| JsonPathStep::Key((*k).to_owned()))
+            .collect(),
+        as_text,
+    }
+}
+
+/// Like [`json_path`] but accepts a heterogeneous list of key + index
+/// steps — `&[JsonPathStep::Key("items"), JsonPathStep::Index(0),
+/// JsonPathStep::Key("name")]` for `data.items[0].name`.
+#[must_use]
+pub fn json_path_indexed(
+    source: impl Into<Expr>,
+    steps: impl IntoIterator<Item = super::JsonPathStep>,
+    as_text: bool,
+) -> Expr {
+    Expr::JsonPath {
+        source: Box::new(source.into()),
+        path: steps.into_iter().collect(),
+        as_text,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

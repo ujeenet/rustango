@@ -1811,6 +1811,10 @@ fn validate_expr_columns_in_model(
         // gap. Window-shaped aggregates are validated via the
         // dedicated walker in `validate_aggregate_expr_columns`.
         Expr::Aggregate(_) => Ok(()),
+        // JsonPath (issue #296 / T2.3) — the `source` is a column
+        // expression to validate; the path steps are JSON-pointer
+        // keys/indices and don't reference model columns themselves.
+        Expr::JsonPath { source, .. } => validate_expr_columns_in_model(model, source),
     }
 }
 
