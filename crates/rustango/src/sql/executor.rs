@@ -1078,33 +1078,6 @@ where
     Ok(q.fetch_optional(executor).await?)
 }
 
-/// Run a `CountQuery` and return the row count.
-///
-/// # Errors
-/// Returns [`ExecError`] for SQL-writing or driver failures.
-#[cfg(feature = "postgres")]
-pub async fn count_rows(pool: &PgPool, query: &CountQuery) -> Result<i64, ExecError> {
-    count_rows_on(pool, query).await
-}
-
-/// Like [`count_rows`] but accepts any sqlx executor.
-///
-/// # Errors
-/// As [`count_rows`].
-#[cfg(feature = "postgres")]
-pub async fn count_rows_on<'c, E>(executor: E, query: &CountQuery) -> Result<i64, ExecError>
-where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-{
-    let stmt = Postgres.compile_count(query)?;
-    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-    for value in stmt.params {
-        q = bind_query(q, value);
-    }
-    let row = q.fetch_one(executor).await?;
-    Ok(sqlx::Row::try_get::<i64, _>(&row, 0)?)
-}
-
 /// Slice 9.0b — annotate each parent row with the COUNT of its
 /// children, returning `Vec<(Parent, i64)>` from a **single** SQL:
 ///
@@ -1394,15 +1367,18 @@ impl<T: Model + Send> QuerySet<T> {
         E: sqlx::Executor<'c, Database = sqlx::Postgres>,
     {
         let select = self.compile()?;
-        count_rows_on(
-            executor,
-            &CountQuery {
-                model: select.model,
-                where_clause: select.where_clause,
-                search: select.search,
-            },
-        )
-        .await
+        let stmt = Postgres.compile_count(&CountQuery {
+            model: select.model,
+            where_clause: select.where_clause,
+            search: select.search,
+        })?;
+        let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+        for value in stmt.params {
+            q = bind_query(q, value);
+        }
+        let row = q.fetch_one(executor).await?;
+        let count: i64 = sqlx::Row::try_get(&row, 0)?;
+        Ok(count)
     }
 
     /// Run `EXPLAIN [(...)] <select>` against this queryset and return
@@ -1940,37 +1916,6 @@ fn bind_query(
 
 // ------------------------------------------------------------------ bulk UPDATE
 
-/// Execute a [`BulkUpdateQuery`] — `UPDATE … FROM (VALUES …)` — and return
-/// the number of rows affected. One round-trip for any number of rows.
-///
-/// # Errors
-/// SQL-writing or driver failures, or [`SqlError::EmptyBulkInsert`] if
-/// `query.rows` is empty (the caller should short-circuit).
-#[cfg(feature = "postgres")]
-pub async fn bulk_update(pool: &PgPool, query: &BulkUpdateQuery) -> Result<u64, ExecError> {
-    bulk_update_on(pool, query).await
-}
-
-/// Like [`bulk_update`] but accepts any sqlx executor.
-///
-/// # Errors
-/// As [`bulk_update`].
-#[cfg(feature = "postgres")]
-pub async fn bulk_update_on<'c, E>(executor: E, query: &BulkUpdateQuery) -> Result<u64, ExecError>
-where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-{
-    if query.rows.is_empty() {
-        return Ok(0);
-    }
-    let stmt = Postgres.compile_bulk_update(query)?;
-    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-    for p in stmt.params {
-        q = bind_query(q, p);
-    }
-    Ok(q.execute(executor).await?.rows_affected())
-}
-
 // ------------------------------------------------------------------ raw SQL escape hatch
 
 /// Execute arbitrary SQL and decode each row into `T` using the same
@@ -2013,36 +1958,6 @@ where
         q = bind_query_as(q, b);
     }
     Ok(q.fetch_all(executor).await?)
-}
-
-/// Execute arbitrary SQL that does not return rows (INSERT / UPDATE / DELETE /
-/// DDL). Returns the number of rows affected.
-///
-/// # Errors
-/// Driver / SQL failures.
-#[cfg(feature = "postgres")]
-pub async fn raw_execute(sql: &str, binds: Vec<SqlValue>, pool: &PgPool) -> Result<u64, ExecError> {
-    raw_execute_on(sql, binds, pool).await
-}
-
-/// Like [`raw_execute`] but accepts any sqlx executor.
-///
-/// # Errors
-/// As [`raw_execute`].
-#[cfg(feature = "postgres")]
-pub async fn raw_execute_on<'c, E>(
-    sql: &str,
-    binds: Vec<SqlValue>,
-    executor: E,
-) -> Result<u64, ExecError>
-where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-{
-    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
-    for b in binds {
-        q = bind_query(q, b);
-    }
-    Ok(q.execute(executor).await?.rows_affected())
 }
 
 // ------------------------------------------------------------------ aggregate
@@ -2130,42 +2045,6 @@ where
 }
 
 // ------------------------------------------------------------------ transaction
-
-/// Run `f` inside a Postgres transaction. Commits on `Ok`, rolls back on `Err`.
-///
-/// Every `_on(executor)` method accepts `&mut PgConnection`, which is what the
-/// closure receives — so all ORM writes can be composed inside a single atomic
-/// block with no extra boilerplate:
-///
-/// ```ignore
-/// rustango::sql::transaction(&pool, |conn| async move {
-///     user.save_on(conn).await?;
-///     post.save_on(conn).await?;
-///     Ok(())
-/// }).await?;
-/// ```
-///
-/// # Errors
-/// Returns the first `ExecError` produced by `f`, or a driver error if
-/// `BEGIN` / `COMMIT` / `ROLLBACK` fails.
-#[cfg(feature = "postgres")]
-pub async fn transaction<F, Fut, T>(pool: &PgPool, f: F) -> Result<T, ExecError>
-where
-    F: FnOnce(&mut sqlx::PgConnection) -> Fut,
-    Fut: std::future::Future<Output = Result<T, ExecError>>,
-{
-    let mut tx = pool.begin().await?;
-    match f(&mut *tx).await {
-        Ok(val) => {
-            tx.commit().await?;
-            Ok(val)
-        }
-        Err(e) => {
-            let _ = tx.rollback().await;
-            Err(e)
-        }
-    }
-}
 
 // ====================================================================
 // `transaction_pool` — user-facing bi-dialect transaction helper
