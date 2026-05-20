@@ -188,7 +188,7 @@ async fn limit_offset_paginates() {
 #[tokio::test]
 async fn aggregate_count_and_sum() {
     use rustango::core::{AggregateExpr, SqlValue};
-    use rustango::sql::fetch_aggregate_on;
+    use rustango::sql::__macro_internals::fetch_aggregate_on;
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
 
@@ -329,7 +329,7 @@ async fn where_expr_not_negates_predicate() {
 #[tokio::test]
 async fn bulk_insert_writes_many_rows_in_one_round_trip() {
     use rustango::core::{BulkInsertQuery, SqlValue};
-    use rustango::sql::bulk_insert_on;
+    use rustango::sql::__macro_internals::bulk_insert_on;
     use rustango::core::Model as _;
 
     let Some(pool) = pool().await else { return };

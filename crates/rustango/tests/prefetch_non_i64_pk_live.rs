@@ -11,7 +11,8 @@
 
 #![cfg(feature = "tenancy")]
 
-use rustango::sql::{fetch_with_prefetch, sqlx, Auto, ForeignKey};
+use rustango::sql::__macro_internals::fetch_with_prefetch;
+use rustango::sql::{sqlx, Auto, ForeignKey};
 
 #[derive(rustango::Model, Debug, Clone)]
 #[rustango(table = "_pf_str_tenant", display = "slug")]

@@ -7,7 +7,8 @@
 
 use std::sync::OnceLock;
 
-use rustango::sql::{annotate_count_children, annotate_count_children_on, sqlx, Auto, ForeignKey};
+use rustango::sql::__macro_internals::{annotate_count_children, annotate_count_children_on};
+use rustango::sql::{sqlx, Auto, ForeignKey};
 use rustango::Model;
 use tokio::sync::Mutex;
 

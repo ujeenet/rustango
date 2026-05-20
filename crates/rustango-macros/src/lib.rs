@@ -3200,7 +3200,7 @@ fn inherent_impl_tokens(
                         }
                     ),
                 };
-                let _ = ::rustango::sql::update_on(
+                let _ = ::rustango::sql::__macro_internals::update_on(
                     #executor_passes_to_data_write,
                     &_query,
                 ).await?;
@@ -3270,7 +3270,7 @@ fn inherent_impl_tokens(
                     returning: ::std::vec![ #( #upsert_returning ),* ],
                     on_conflict: ::core::option::Option::Some(#conflict_clause),
                 };
-                let _returning_row_v = ::rustango::sql::insert_returning_on(
+                let _returning_row_v = ::rustango::sql::__macro_internals::insert_returning_on(
                     #executor_passes_to_data_write,
                     &query,
                 ).await?;
@@ -3331,7 +3331,7 @@ fn inherent_impl_tokens(
                             }
                         ),
                     };
-                    let _affected = ::rustango::sql::update_on(
+                    let _affected = ::rustango::sql::__macro_internals::update_on(
                         #executor_passes_to_data_write,
                         &_query,
                     ).await?;
@@ -3371,7 +3371,7 @@ fn inherent_impl_tokens(
                             }
                         ),
                     };
-                    let _affected = ::rustango::sql::update_on(
+                    let _affected = ::rustango::sql::__macro_internals::update_on(
                         #executor_passes_to_data_write,
                         &_query,
                     ).await?;
@@ -3423,7 +3423,7 @@ fn inherent_impl_tokens(
                         }
                     ),
                 };
-                let _affected = ::rustango::sql::delete_on(
+                let _affected = ::rustango::sql::__macro_internals::delete_on(
                     #executor_passes_to_data_write,
                     &query,
                 ).await?;
@@ -3501,7 +3501,7 @@ fn inherent_impl_tokens(
                     returning: ::std::vec![ #( #returning_cols ),* ],
                     on_conflict: ::core::option::Option::None,
                 };
-                let _returning_row_v = ::rustango::sql::insert_returning_on(
+                let _returning_row_v = ::rustango::sql::__macro_internals::insert_returning_on(
                     #executor_passes_to_data_write,
                     &query,
                 ).await?;
@@ -3564,7 +3564,7 @@ fn inherent_impl_tokens(
                     returning: ::std::vec::Vec::new(),
                     on_conflict: ::core::option::Option::None,
                 };
-                ::rustango::sql::insert_on(_executor, &query).await
+                ::rustango::sql::__macro_internals::insert_on(_executor, &query).await
             }
         }
     };
@@ -3652,7 +3652,7 @@ fn inherent_impl_tokens(
                     returning: ::std::vec![ #( #returning_cols ),* ],
                     on_conflict: ::core::option::Option::None,
                 };
-                let _returned = ::rustango::sql::bulk_insert_on(
+                let _returned = ::rustango::sql::__macro_internals::bulk_insert_on(
                     #executor_passes_to_data_write,
                     &_query,
                 ).await?;
@@ -3726,7 +3726,7 @@ fn inherent_impl_tokens(
                     returning: ::std::vec::Vec::new(),
                     on_conflict: ::core::option::Option::None,
                 };
-                let _ = ::rustango::sql::bulk_insert_on(_executor, &_query).await?;
+                let _ = ::rustango::sql::__macro_internals::bulk_insert_on(_executor, &_query).await?;
                 ::core::result::Result::Ok(())
             }
         }
