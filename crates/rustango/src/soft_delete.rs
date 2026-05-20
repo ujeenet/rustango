@@ -267,6 +267,7 @@ mod tests {
         generic_relations: &[],
         scope: crate::core::ModelScope::Tenant,
         default_order: &[],
+        is_view: false,
     };
 
     static MODEL_WITHOUT_SD: ModelSchema = ModelSchema {
@@ -286,6 +287,7 @@ mod tests {
         generic_relations: &[],
         scope: crate::core::ModelScope::Tenant,
         default_order: &[],
+        is_view: false,
     };
 
     #[test]

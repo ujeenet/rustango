@@ -137,3 +137,58 @@ async fn inspectdb_filters_by_table_flag_on_mysql() {
         "did NOT expect Posts when filtered to authors, got:\n{out}"
     );
 }
+
+/// View-walking on MySQL — issue #293 / T2.10. Creates a view over
+/// `posts`, runs inspectdb, asserts the view emission carries the
+/// `view` marker and the view body lands in the doc comment.
+#[tokio::test]
+async fn inspectdb_emits_view_with_marker_and_definition_on_mysql() {
+    let _serial = serial_lock().lock().await;
+    let Some(pool) = make_pool().await else {
+        return;
+    };
+    let pool_inner = match &pool {
+        Pool::Mysql(p) => p.clone(),
+        _ => unreachable!(),
+    };
+    let _ = sqlx::query("DROP VIEW IF EXISTS `published_posts`")
+        .execute(&pool_inner)
+        .await;
+    sqlx::query(
+        "CREATE VIEW `published_posts` AS
+            SELECT `id`, `author_id`, `title` FROM `posts` WHERE `published` = 1",
+    )
+    .execute(&pool_inner)
+    .await
+    .unwrap();
+
+    let mut buf: Vec<u8> = Vec::new();
+    rustango::migrate::manage::run_with_writer(
+        &pool,
+        std::path::Path::new("./migrations"),
+        vec!["inspectdb".to_owned()],
+        &mut buf,
+    )
+    .await
+    .expect("inspectdb_cmd");
+    let out = String::from_utf8(buf).expect("utf8 output");
+
+    assert!(
+        out.contains("pub struct PublishedPosts"),
+        "expected `pub struct PublishedPosts` (view), got:\n{out}"
+    );
+    assert!(
+        out.contains(r#"#[rustango(table = "published_posts", view)]"#),
+        "view emission must carry the `view` marker, got:\n{out}"
+    );
+    assert!(
+        out.contains("```sql"),
+        "view definition should land in a fenced ```sql block, got:\n{out}"
+    );
+
+    // Cleanup so a re-run of `make_pool` (which drops only tables)
+    // doesn't trip over a stale dependent view.
+    let _ = sqlx::query("DROP VIEW IF EXISTS `published_posts`")
+        .execute(&pool_inner)
+        .await;
+}

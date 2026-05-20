@@ -153,9 +153,17 @@ pub struct RelationSnapshot {
 
 impl SchemaSnapshot {
     /// Capture every model registered in the binary's `inventory`.
+    ///
+    /// Issue #293 / T2.10 — models marked `#[rustango(view)]` are
+    /// excluded. Their underlying SQL view is operator-owned, not
+    /// rustango-owned, so the diff machinery must never emit
+    /// `CREATE TABLE` / `DROP TABLE` against them.
     #[must_use]
     pub fn from_registry() -> Self {
-        let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>.into_iter().collect();
+        let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
+            .into_iter()
+            .filter(|e| !e.schema.is_view)
+            .collect();
         let mut tables: Vec<TableSnapshot> = entries
             .iter()
             .map(|e| TableSnapshot::from_schema(e.schema))
@@ -187,7 +195,7 @@ impl SchemaSnapshot {
     pub fn from_registry_for_scope(scope: crate::core::ModelScope) -> Self {
         let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
             .into_iter()
-            .filter(|e| e.schema.scope == scope)
+            .filter(|e| e.schema.scope == scope && !e.schema.is_view)
             .collect();
         let mut tables: Vec<TableSnapshot> = entries
             .iter()
@@ -272,7 +280,7 @@ impl SchemaSnapshot {
     pub fn from_registry_for_app(app: &str) -> Self {
         let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
             .into_iter()
-            .filter(|e| e.resolved_app_label() == Some(app))
+            .filter(|e| e.resolved_app_label() == Some(app) && !e.schema.is_view)
             .collect();
         let mut tables: Vec<TableSnapshot> = entries
             .iter()
@@ -295,8 +303,12 @@ impl SchemaSnapshot {
     /// want a curated snapshot rather than every linked model (e.g.
     /// `rustango-tenancy`'s bootstrap migrations, which pin themselves
     /// to `rustango_orgs` + `rustango_operators` + `rustango_users`).
+    ///
+    /// View-backed models (`#[rustango(view)]`) are filtered out — same
+    /// rule as [`from_registry`].
     #[must_use]
     pub fn from_models(models: &[&ModelSchema]) -> Self {
+        let models: Vec<&ModelSchema> = models.iter().copied().filter(|s| !s.is_view).collect();
         let mut tables: Vec<TableSnapshot> = models
             .iter()
             .map(|s| TableSnapshot::from_schema(s))
@@ -544,6 +556,7 @@ mod composite_fk_snapshot_tests {
             generic_relations: &[],
             scope: crate::core::ModelScope::Tenant,
             default_order: &[],
+            is_view: false,
         };
         &MS
     }
@@ -597,6 +610,7 @@ mod composite_fk_snapshot_tests {
             generic_relations: &[],
             scope: crate::core::ModelScope::Tenant,
             default_order: &[],
+            is_view: false,
         };
         let snap = TableSnapshot::from_schema(&MS);
         let json = serde_json::to_string(&snap).expect("serialize");

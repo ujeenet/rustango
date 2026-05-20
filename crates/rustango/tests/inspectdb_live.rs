@@ -212,7 +212,61 @@ async fn inspectdb_unknown_schema_emits_friendly_comment() {
     .expect("inspectdb succeeds even on empty schema");
     let out = String::from_utf8(buf).unwrap();
     assert!(
-        out.contains("no tables found"),
+        out.contains("no tables or views found"),
         "expected friendly empty-schema comment, got: {out}"
     );
+}
+
+/// View-walking on PG — issue #293 / T2.10. Creates a view alongside
+/// the table fixture, runs inspectdb, asserts the view emission
+/// carries the `view` marker plus the view definition in the doc
+/// comment.
+#[tokio::test]
+async fn inspectdb_emits_view_with_marker_and_definition_on_pg() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else { return };
+    fresh_fixture(&pool).await;
+    sqlx::query("DROP VIEW IF EXISTS inspectdb_published_posts")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE VIEW inspectdb_published_posts AS
+            SELECT id, author_id, slug FROM inspectdb_post WHERE published = true",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut buf: Vec<u8> = Vec::new();
+    let pool_enum: rustango::sql::Pool = pool.clone().into();
+    rustango::migrate::manage::run_with_writer(
+        &pool_enum,
+        std::path::Path::new("/tmp/_inspectdb_unused"),
+        vec!["inspectdb".into()],
+        &mut buf,
+    )
+    .await
+    .expect("inspectdb succeeds");
+    let out = String::from_utf8(buf).unwrap();
+
+    assert!(
+        out.contains("pub struct InspectdbPublishedPosts"),
+        "view should emit a PascalCased struct, got:\n{out}"
+    );
+    assert!(
+        out.contains(r#"#[rustango(table = "inspectdb_published_posts", view)]"#),
+        "view emission must carry the `view` marker, got:\n{out}"
+    );
+    assert!(
+        out.contains("```sql"),
+        "view definition should land in a fenced ```sql block, got:\n{out}"
+    );
+
+    // Cleanup so the next test that uses fresh_fixture isn't blocked
+    // by the dependent view.
+    sqlx::query("DROP VIEW IF EXISTS inspectdb_published_posts")
+        .execute(&pool)
+        .await
+        .unwrap();
 }

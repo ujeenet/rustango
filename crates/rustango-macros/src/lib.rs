@@ -801,6 +801,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         &container.composite_fks,
         &container.generic_fks,
         container.scope.as_deref(),
+        container.is_view,
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -1675,6 +1676,7 @@ fn model_impl_tokens(
     composite_fks: &[CompositeFkAttr],
     generic_fks: &[GenericFkAttr],
     scope: Option<&str>,
+    is_view: bool,
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
@@ -1814,6 +1816,7 @@ fn model_impl_tokens(
                 generic_relations: &[ #(#generic_fk_tokens),* ],
                 scope: #scope_tokens,
                 default_order: &[ #(#default_order_tokens),* ],
+                is_view: #is_view,
             };
         }
     }
@@ -4287,6 +4290,11 @@ struct ContainerAttrs {
     /// `-` prefix means descending; the `+` prefix or no prefix means
     /// ascending.
     default_order: Vec<(String, bool, proc_macro2::Span)>,
+    /// `true` when `#[rustango(view)]` is present. Issue #293 / T2.10.
+    /// Routes the emitted schema's `is_view = true` so the migration
+    /// snapshot skips this model (its underlying SQL view is operator-
+    /// managed, not rustango-managed).
+    is_view: bool,
 }
 
 /// Parsed form of one index declaration (field-level or container-level).
@@ -4417,6 +4425,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         manager_ext: None,
         manager_fns: Vec::new(),
         default_order: Vec::new(),
+        is_view: false,
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -4644,6 +4653,20 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     out.permissions = lit.value;
                 } else {
                     out.permissions = true;
+                }
+                return Ok(());
+            }
+            if meta.path.is_ident("view") {
+                // Issue #293 / T2.10. Two forms accepted, matching
+                // the `permissions` flag pattern:
+                //   #[rustango(view)]          — flag form, true
+                //   #[rustango(view = false)]  — explicit opt-out
+                //   #[rustango(view = true)]   — explicit opt-in
+                if let Ok(v) = meta.value() {
+                    let lit: syn::LitBool = v.parse()?;
+                    out.is_view = lit.value;
+                } else {
+                    out.is_view = true;
                 }
                 return Ok(());
             }

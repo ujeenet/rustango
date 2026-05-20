@@ -405,6 +405,7 @@ mod tests {
             generic_relations: &[],
             scope: crate::core::ModelScope::Tenant,
             default_order: &[],
+            is_view: false,
         };
         &MS
     }
