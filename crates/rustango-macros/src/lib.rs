@@ -1170,6 +1170,14 @@ fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
 /// Reads the parent's PK via the macro-generated `__rustango_pk_value`
 /// and runs a single `SELECT … FROM <child_table> WHERE <fk_column> = $1`
 /// — the canonical reverse-FK fetch. One round trip, no N+1.
+///
+/// **PG-only emission**: the accessor is bounded on
+/// `sqlx::Executor<Database = sqlx::Postgres>` and calls `fetch_on`,
+/// both of which are gated behind the `postgres` cargo feature. The
+/// emitted code is wrapped in `#[cfg(feature = "postgres")]` so the
+/// model derive itself compiles on tri-dialect / sqlite-only
+/// downstream builds — the accessor just isn't materialised. A tri-
+/// dialect `_set_pool` variant is a separate follow-up.
 fn reverse_helper_tokens(child_ident: &syn::Ident, fk_relations: &[FkRelation]) -> TokenStream2 {
     if fk_relations.is_empty() {
         return TokenStream2::new();
@@ -1189,6 +1197,7 @@ fn reverse_helper_tokens(child_ident: &syn::Ident, fk_relations: &[FkRelation]) 
              further `{child_ident}::objects()` filters via direct queryset use."
         );
         quote! {
+            #[cfg(feature = "postgres")]
             impl #parent_ty {
                 #[doc = #doc]
                 ///
