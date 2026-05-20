@@ -155,10 +155,12 @@ jobs:
             --test fixtures_sqlite_live \
             --test foreign_key_sqlite_live \
             --test funcs_batch1_sqlite_live \
+            --test funcs_batch2_sqlite_live \
             --test get_or_create_sqlite_live \
             --test inspectdb_sqlite_live \
             --test inspectdb_views_sqlite_live \
             --test jobs_sqlite_live \
+            --test json_path_sqlite_live \
             --test lock_sqlite_warning \
             --test m2m_sqlite_live \
             --test media_sqlite_live \
