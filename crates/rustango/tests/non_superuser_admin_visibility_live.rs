@@ -1,8 +1,4 @@
 #![cfg(feature = "postgres")]
-// Tests intentionally exercise the deprecated `ensure_tables(&PgPool)`
-// path — covers the legacy-bootstrap behaviour, not the migration
-// that replaces it.
-#![allow(deprecated)]
 //! Live integration test for #67 — the "scaffold an app, see it in
 //! admin as a non-superuser" loop that #61–#66 collectively broke.
 //!
@@ -24,14 +20,9 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use rustango::sql::sqlx;
-use rustango::sql::Auto;
-// `ensure_tables` is deprecated in favor of `manage migrate` (which
-// the bootstrap tenant migration covers). The test predates that
-// helper and uses the legacy DDL path for setup — keep until the
-// fixture is migrated.
-#[allow(deprecated)]
+use rustango::sql::{Auto, Pool};
 use rustango::tenancy::permissions::{
-    assign_role, auto_create_permissions, ensure_tables, get_or_create_role, grant_role_perm,
+    assign_role, auto_create_permissions, ensure_tables_pool, get_or_create_role, grant_role_perm,
     user_permissions,
 };
 use rustango::tenancy::User;
@@ -70,8 +61,9 @@ async fn fresh(pool: &sqlx::PgPool) {
             .await
             .unwrap();
     }
-    #[allow(deprecated)]
-    ensure_tables(pool).await.unwrap();
+    ensure_tables_pool(&Pool::Postgres(pool.clone()))
+        .await
+        .unwrap();
 }
 
 /// `auto_create_permissions` walks the inventory of registered models

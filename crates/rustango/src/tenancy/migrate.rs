@@ -546,7 +546,6 @@ where
 }
 
 #[cfg(feature = "postgres")]
-#[allow(deprecated)] // calls `permissions::ensure_tables` as a best-effort back-compat fallback for tenants on schemas/DBs that pre-date the bootstrap migration.
 async fn run_for_one_tenant(
     pools: &TenantPools,
     org: &Org,
@@ -571,8 +570,8 @@ async fn run_for_one_tenant(
             if let Err(e) = crate::audit::ensure_table(&pool).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "audit::ensure_table failed for schema-mode tenant");
             }
-            if let Err(e) = super::permissions::ensure_tables(&pool).await {
-                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "permissions::ensure_tables failed for schema-mode tenant");
+            if let Err(e) = super::permissions::ensure_tables_pool(&pool.clone().into()).await {
+                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "permissions::ensure_tables_pool failed for schema-mode tenant");
             }
             // v0.27.2 — seed the `rustango_permissions` catalog with
             // the four CRUD codenames for every registered Model
@@ -605,8 +604,10 @@ async fn run_for_one_tenant(
             if let Err(e) = crate::audit::ensure_table(tenant_pool.pool()).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "audit::ensure_table failed for database-mode tenant");
             }
-            if let Err(e) = super::permissions::ensure_tables(tenant_pool.pool()).await {
-                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "permissions::ensure_tables failed for database-mode tenant");
+            if let Err(e) =
+                super::permissions::ensure_tables_pool(&tenant_pool.pool().clone().into()).await
+            {
+                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "permissions::ensure_tables_pool failed for database-mode tenant");
             }
             // See schema-mode comment above (#61).
             if let Err(e) = super::permissions::auto_create_permissions(tenant_pool.pool()).await {
