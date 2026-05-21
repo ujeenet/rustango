@@ -124,6 +124,7 @@ fn form_parser_decimal() {
         generated_as: None,
         help_text: None,
         choices: None,
+        db_comment: None,
     };
     let v = parse_form_value(&f, Some("123.45")).unwrap();
     assert!(matches!(v, SqlValue::Decimal(d) if d == Decimal::from_str("123.45").unwrap()));
@@ -152,6 +153,7 @@ fn form_parser_binary_hex() {
         generated_as: None,
         help_text: None,
         choices: None,
+        db_comment: None,
     };
     let v = parse_form_value(&f, Some("deadbeef")).unwrap();
     assert!(matches!(v, SqlValue::Binary(b) if b == vec![0xde, 0xad, 0xbe, 0xef]));
@@ -182,6 +184,7 @@ fn form_parser_time() {
         generated_as: None,
         help_text: None,
         choices: None,
+        db_comment: None,
     };
     // Full HH:MM:SS form.
     let v = parse_form_value(&f, Some("14:30:45")).unwrap();

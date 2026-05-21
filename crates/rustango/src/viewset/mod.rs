@@ -1531,6 +1531,7 @@ mod lookup_tests {
             generated_as: None,
             help_text: None,
             choices: None,
+            db_comment: None,
         }
     }
 
@@ -1551,6 +1552,7 @@ mod lookup_tests {
             generated_as: None,
             help_text: None,
             choices: None,
+            db_comment: None,
         }
     }
 

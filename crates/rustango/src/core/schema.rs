@@ -66,6 +66,14 @@ pub struct FieldSchema {
     /// and `validate_value` rejects values not in the list. Only
     /// meaningful for `FieldType::String`.
     pub choices: Option<&'static [(&'static str, &'static str)]>,
+    /// Django-shape `db_comment="..."` — DB-side column comment
+    /// emitted alongside CREATE TABLE. Set via
+    /// `#[rustango(db_comment = "...")]`. MySQL inlines it
+    /// (`<col> <type> COMMENT '...'`); Postgres emits a separate
+    /// `COMMENT ON COLUMN "<table>"."<col>" IS '...'` statement
+    /// after the table is created; SQLite has no native column
+    /// comments and silently drops the value.
+    pub db_comment: Option<&'static str>,
 }
 
 /// Static description of a relation to another model.

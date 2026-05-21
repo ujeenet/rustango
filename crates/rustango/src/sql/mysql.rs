@@ -69,6 +69,15 @@ impl Dialect for MySql {
         format!("`{escaped}`")
     }
 
+    /// MySQL spells column comments inline in the CREATE TABLE column
+    /// definition (`<col> <type> [NULL/NOT NULL] [DEFAULT …] COMMENT
+    /// '<escaped>'`). Single quotes are doubled per the MySQL parser's
+    /// escape rule.
+    fn write_inline_column_comment(&self, comment: &str) -> Option<String> {
+        let escaped = comment.replace('\'', "''");
+        Some(format!(" COMMENT '{escaped}'"))
+    }
+
     // `?`-style placeholders are the trait default — no override needed.
 
     fn serial_type(&self, field_type: FieldType) -> &'static str {
@@ -1238,6 +1247,7 @@ mod tests {
                 generated_as: None,
                 help_text: None,
                 choices: None,
+                db_comment: None,
             })
             .collect();
         let leaked: &'static [crate::core::FieldSchema] = Box::leak(field_vec.into_boxed_slice());

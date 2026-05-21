@@ -306,6 +306,14 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
             crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
         }
     }
+    // #450 — post-hoc `COMMENT ON COLUMN` for dialects that need it
+    // (Postgres). MySQL already inlined comments in CREATE TABLE;
+    // SQLite returns an empty vec (no native column comments).
+    for model in &models {
+        for sql in ddl::column_comment_statements_with_dialect(dialect, model) {
+            crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
+        }
+    }
     Ok(())
 }
 

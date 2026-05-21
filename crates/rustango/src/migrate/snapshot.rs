@@ -533,6 +533,7 @@ mod composite_fk_snapshot_tests {
             generated_as: None,
             help_text: None,
             choices: None,
+            db_comment: None,
         }];
         static COMPS: [CompositeFkRelation; 1] = [CompositeFkRelation {
             name: "target",
@@ -594,6 +595,7 @@ mod composite_fk_snapshot_tests {
             generated_as: None,
             help_text: None,
             choices: None,
+            db_comment: None,
         }];
         static MS: ModelSchema = ModelSchema {
             name: "Plain",

@@ -233,6 +233,35 @@ fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) 
         s.push_str(" UNIQUE");
     }
     write_check_constraint(s, dialect, field);
+    // #450 — MySQL splices `COMMENT '...'` into the column line. PG +
+    // SQLite get nothing here; PG gets a separate `COMMENT ON COLUMN`
+    // statement via `column_comment_statements_with_dialect`, SQLite
+    // is a no-op (no native column comments).
+    if let Some(comment) = field.db_comment {
+        if let Some(inline) = dialect.write_inline_column_comment(comment) {
+            s.push_str(&inline);
+        }
+    }
+}
+
+/// Per-model post-CREATE-TABLE statements for `db_comment` (#450) — one
+/// `COMMENT ON COLUMN "<table>"."<col>" IS '...'` per field on Postgres;
+/// empty `Vec` on MySQL (already inlined) and SQLite (no-op).
+#[must_use]
+pub fn column_comment_statements_with_dialect(
+    dialect: &dyn Dialect,
+    model: &ModelSchema,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for field in model.scalar_fields() {
+        let Some(comment) = field.db_comment else {
+            continue;
+        };
+        if let Some(stmt) = dialect.column_comment_statement(model.table, field.column, comment) {
+            out.push(stmt);
+        }
+    }
+    out
 }
 
 fn write_check_constraint(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) {
@@ -328,6 +357,7 @@ mod tests {
             generated_as: None,
             help_text: None,
             choices: None,
+            db_comment: None,
         }
     }
 
