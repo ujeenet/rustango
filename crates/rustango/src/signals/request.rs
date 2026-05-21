@@ -96,14 +96,30 @@ pub struct RequestFinishedContext {
     pub elapsed_ms: f64,
 }
 
-/// Payload delivered to `got_request_exception` receivers — the inner
-/// service returned an error rather than a `Response`.
+/// Payload delivered to `got_request_exception` receivers — the
+/// handler stack produced an exceptional outcome.
+///
+/// The layer fires this signal under two conditions:
+/// 1. Inner service returned `Err` (rare — axum's `Service::Error` is
+///    `Infallible`; only fires when a downstream layer short-circuits).
+/// 2. Inner service returned a response with status `5xx` (#413). Maps
+///    closely to Django's `got_request_exception` semantics —
+///    "something went wrong while processing the request".
+///
+/// `error` carries either the stringified service error or a
+/// `"http <code>"` token for the 5xx path; `status` is `None` for
+/// service-error firings and `Some(code)` for 5xx firings, so audit
+/// receivers can pivot on which case they're handling.
 #[derive(Debug, Clone)]
 pub struct RequestExceptionContext {
     pub method: String,
     pub path: String,
-    /// Stringified error from the inner service.
+    /// Stringified error from the inner service, or `"http <code>"`
+    /// when the trigger was a 5xx response.
     pub error: String,
+    /// `Some(code)` when fired on a 5xx response; `None` when the
+    /// trigger was a service-level error (Service::Error).
+    pub status: Option<u16>,
 }
 
 // ---------------------------------------------------------------- Internal storage
@@ -347,6 +363,24 @@ where
                 Ok(resp) => {
                     let elapsed_ms = (started_at.elapsed().as_micros() as f64) / 1000.0;
                     let status = resp.status().as_u16();
+                    // #413 — Django-shape `got_request_exception` also
+                    // fires on 5xx responses, not just service-error
+                    // panics. axum's Service::Error is Infallible in
+                    // practice, so without this branch the signal would
+                    // never fire on real failures. Audit / SIEM
+                    // receivers want to know about 500s; the
+                    // `status: Some(code)` field lets them tell the
+                    // 5xx-response case apart from the (rare)
+                    // service-error case below.
+                    if (500..600).contains(&status) {
+                        send_got_request_exception(RequestExceptionContext {
+                            method: method.clone(),
+                            path: path.clone(),
+                            error: format!("http {status}"),
+                            status: Some(status),
+                        })
+                        .await;
+                    }
                     send_request_finished(RequestFinishedContext {
                         method,
                         path,
@@ -367,6 +401,7 @@ where
                             method,
                             path,
                             error: "inner service returned Err".to_owned(),
+                            status: None,
                         })
                         .await;
                         Ok(error_response())
