@@ -175,13 +175,22 @@ impl ViewSet {
                 )),
             );
         }
-        // Ordering (only when default_ordering is configured — otherwise sort
-        // is always default and irrelevant).
-        if !self.default_ordering.is_empty() {
-            out.push(
-                Parameter::query("ordering", Schema::string())
-                    .description("Comma-separated field names; prefix `-` for DESC"),
-            );
+        // Ordering — surface the `?ordering=` parameter when EITHER a
+        // default ordering is configured OR an explicit
+        // `ordering_fields` whitelist is set (#439). The description
+        // enumerates the allowed fields when a whitelist is in play
+        // so clients can discover the API surface without reading code.
+        if !self.default_ordering.is_empty() || !self.ordering_fields.is_empty() {
+            let description = if self.ordering_fields.is_empty() {
+                "Comma-separated field names; prefix `-` for DESC".to_owned()
+            } else {
+                format!(
+                    "Comma-separated field names from: {}. Prefix `-` for DESC. \
+                     Unknown / off-whitelist names are silently dropped.",
+                    self.ordering_fields.join(", "),
+                )
+            };
+            out.push(Parameter::query("ordering", Schema::string()).description(description));
         }
         // One filter param per filter_field. We don't enumerate all the
         // Django-style lookups individually — the description tells the

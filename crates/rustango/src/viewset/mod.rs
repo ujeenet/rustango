@@ -184,6 +184,11 @@ pub struct ViewSet {
     fields: Option<Vec<String>>,
     filter_fields: Vec<String>,
     search_fields: Vec<String>,
+    /// DRF `ordering_fields` whitelist — when non-empty, only the
+    /// listed fields are honored via `?ordering=`. Unknown names get
+    /// silently dropped. When empty (the default), any field on the
+    /// schema is sortable — the v0.30 behavior. Issue #439.
+    ordering_fields: Vec<String>,
     default_page_size: usize,
     default_ordering: Vec<(String, bool)>,
     perms: ViewSetPerms,
@@ -204,6 +209,7 @@ impl ViewSet {
             fields: None,
             filter_fields: Vec::new(),
             search_fields: Vec::new(),
+            ordering_fields: Vec::new(),
             default_page_size: 20,
             default_ordering: Vec::new(),
             perms: ViewSetPerms::default(),
@@ -292,6 +298,16 @@ impl ViewSet {
     /// Fields searched by the `?search=` query param.
     pub fn search_fields(mut self, fields: &[&str]) -> Self {
         self.search_fields = fields.iter().map(|&s| s.to_owned()).collect();
+        self
+    }
+
+    /// DRF `ordering_fields` whitelist — when set, only the listed
+    /// field names are honored via `?ordering=`. Unknown names are
+    /// silently dropped so a hostile client can't sort on a sensitive
+    /// column. When unset (the default), any schema field is sortable.
+    /// Issue #439.
+    pub fn ordering_fields(mut self, fields: &[&str]) -> Self {
+        self.ordering_fields = fields.iter().map(|&s| s.to_owned()).collect();
         self
     }
 
@@ -853,7 +869,12 @@ async fn handle_list(
             .collect(),
     });
 
-    // Ordering
+    // Ordering — #439 honors the DRF `ordering_fields` whitelist when
+    // set: only listed field names are sortable via `?ordering=`. An
+    // empty whitelist (the default) keeps the v0.30 behavior of
+    // allowing any schema field. Unknown / off-whitelist names are
+    // silently dropped (mirrors DRF's defensive default — a hostile
+    // client can't sort on `password_hash` just because it's a column).
     let ordering_param = params.get("ordering").cloned();
     let order_by: Vec<crate::core::OrderItem> = ordering_param
         .as_deref()
@@ -866,6 +887,11 @@ async fn handle_list(
                     } else {
                         (part, false)
                     };
+                    if !state.vs.ordering_fields.is_empty()
+                        && !state.vs.ordering_fields.iter().any(|f| f == field_name)
+                    {
+                        return None;
+                    }
                     state
                         .vs
                         .schema
