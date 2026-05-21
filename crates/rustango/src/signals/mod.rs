@@ -56,6 +56,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use crate::core::Model;
 
 pub mod auth;
+pub mod m2m;
 pub mod migrate;
 pub mod request;
 

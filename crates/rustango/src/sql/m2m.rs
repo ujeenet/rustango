@@ -94,6 +94,16 @@ impl M2MManager {
         );
         let binds = vec![SqlValue::I64(self.src_pk_i64()), SqlValue::I64(dst_id)];
         super::executor::raw_execute_pool(pool, &sql, binds).await?;
+        // #410 — fire m2m_changed after successful junction-row write.
+        crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
+            action: crate::signals::m2m::M2mAction::Add,
+            through: self.through,
+            src_col: self.src_col,
+            dst_col: self.dst_col,
+            src_pk: self.src_pk_i64(),
+            dst_pks: vec![dst_id],
+        })
+        .await;
         Ok(())
     }
 
@@ -114,6 +124,16 @@ impl M2MManager {
         );
         let binds = vec![SqlValue::I64(self.src_pk_i64()), SqlValue::I64(dst_id)];
         super::executor::raw_execute_pool(pool, &sql, binds).await?;
+        // #410 — fire m2m_changed after successful junction-row remove.
+        crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
+            action: crate::signals::m2m::M2mAction::Remove,
+            through: self.through,
+            src_col: self.src_col,
+            dst_col: self.dst_col,
+            src_pk: self.src_pk_i64(),
+            dst_pks: vec![dst_id],
+        })
+        .await;
         Ok(())
     }
 
@@ -160,7 +180,7 @@ impl M2MManager {
         // Per-backend transaction. Each arm runs the DELETE + (optional)
         // INSERT inside the same `.begin()`/`.commit()` pair so the
         // junction is atomic from any reader's view.
-        match pool {
+        let result: Result<(), ExecError> = match pool {
             #[cfg(feature = "postgres")]
             Pool::Postgres(pg) => {
                 let mut tx = pg.begin().await.map_err(ExecError::Driver)?;
@@ -215,7 +235,21 @@ impl M2MManager {
                 tx.commit().await.map_err(ExecError::Driver)?;
                 Ok(())
             }
-        }
+        };
+        result?;
+        // #410 — fire m2m_changed after the atomic DELETE+INSERT
+        // commits. `dst_pks` is the new full set (may be empty when
+        // `set([])` was called).
+        crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
+            action: crate::signals::m2m::M2mAction::Set,
+            through: self.through,
+            src_col: self.src_col,
+            dst_col: self.dst_col,
+            src_pk: self.src_pk_i64(),
+            dst_pks: ids.to_vec(),
+        })
+        .await;
+        Ok(())
     }
 
     /// Remove all junction rows for the source instance.
@@ -233,6 +267,16 @@ impl M2MManager {
         );
         let binds = vec![SqlValue::I64(self.src_pk_i64())];
         super::executor::raw_execute_pool(pool, &sql, binds).await?;
+        // #410 — fire m2m_changed after clear.
+        crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
+            action: crate::signals::m2m::M2mAction::Clear,
+            through: self.through,
+            src_col: self.src_col,
+            dst_col: self.dst_col,
+            src_pk: self.src_pk_i64(),
+            dst_pks: Vec::new(),
+        })
+        .await;
         Ok(())
     }
 
