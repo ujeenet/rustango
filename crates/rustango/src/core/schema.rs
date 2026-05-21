@@ -114,6 +114,8 @@ pub struct FieldSchema {
     /// `validate_iso_time`, `validate_iso_datetime`, `validate_ipv4`,
     /// `validate_ipv6`, `validate_ip_address` /
     /// `validate_genericipaddress` (#337 — accepts either family),
+    /// `validate_filepath` / `validate_filepath_field` (#338 — non-empty
+    /// + no NUL + no `..` path traversal),
     /// `validate_no_null`). Unknown names error at runtime via
     /// [`crate::core::QueryError::UnknownValidator`].
     pub validators: &'static [&'static str],

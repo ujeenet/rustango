@@ -117,6 +117,11 @@ fn check_named_validators(
             // family. Alias `genericipaddress` for callers translating
             // verbatim from a Django Field.
             "ip_address" | "genericipaddress" => v::validate_ip_address(value),
+            // #338 — Django `FilePathField` — structural-only check
+            // (non-empty, no NUL, no `..` segments). Existence-on-disk
+            // is project-specific; callers add their own validator
+            // when needed.
+            "filepath" | "filepath_field" => v::validate_filepath(value),
             "no_null" => v::validate_prohibit_null_characters(value),
             "email_list" => v::validate_email_list(value),
             "integer" => v::validate_integer(value),
