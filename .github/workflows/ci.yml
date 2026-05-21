@@ -137,6 +137,7 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test migrate_signals_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test queryset_reverse
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test queryset_contains
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test m2m_changed_signal_sqlite_live
 
   # Per-dialect SQLite live suite — runs every `_sqlite_live.rs` file
   # explicitly under `--no-default-features --features sqlite,...`. This
