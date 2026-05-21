@@ -717,7 +717,7 @@ fn count_propagates_filter_errors() {
 // ---------------- SEARCH ----------------
 
 #[test]
-fn search_alone_emits_or_chain_with_one_param() {
+fn search_alone_emits_or_chain_with_one_param_per_column() {
     let q = SelectQuery {
         search: Some(SearchClause {
             columns: vec!["name", "is_active"],
@@ -726,11 +726,21 @@ fn search_alone_emits_or_chain_with_one_param() {
         ..empty_select()
     };
     let stmt = pg().compile_select(&q).unwrap();
+    // #438 — one param + placeholder per column instead of one shared
+    // `$1` repeated. Lets MySQL/SQLite (positional `?`) round-trip
+    // multi-column search; PG accepts either shape and the new one is
+    // a hair more explicit.
     assert_eq!(
         stmt.sql,
-        r#"SELECT "id", "name", "is_active" FROM "user" WHERE ("name" ILIKE $1 OR "is_active" ILIKE $1)"#,
+        r#"SELECT "id", "name", "is_active" FROM "user" WHERE ("name" ILIKE $1 OR "is_active" ILIKE $2)"#,
     );
-    assert_eq!(stmt.params, vec![SqlValue::String("%ali%".into())]);
+    assert_eq!(
+        stmt.params,
+        vec![
+            SqlValue::String("%ali%".into()),
+            SqlValue::String("%ali%".into()),
+        ],
+    );
 }
 
 #[test]
