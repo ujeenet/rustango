@@ -1908,6 +1908,20 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
     let actions_on_bottom = admin.actions_on_bottom.unwrap_or(false);
     let date_hierarchy = admin.date_hierarchy.as_deref().unwrap_or("");
 
+    let prepopulated = admin
+        .prepopulated_fields
+        .as_ref()
+        .map(|(v, _)| v.as_slice())
+        .unwrap_or(&[]);
+    let prepopulated_tokens = prepopulated.iter().map(|(target, sources)| {
+        let target = target.as_str();
+        let source_lits = sources.iter().map(|s| s.as_str());
+        quote!(::rustango::core::PrepopulatedField {
+            target: #target,
+            sources: &[ #( #source_lits ),* ],
+        })
+    });
+
     let list_per_page = admin.list_per_page.unwrap_or(0);
 
     let ordering_pairs = admin
@@ -1936,6 +1950,7 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
             actions_on_top: #actions_on_top,
             actions_on_bottom: #actions_on_bottom,
             date_hierarchy: #date_hierarchy,
+            prepopulated_fields: &[ #( #prepopulated_tokens ),* ],
         })
     }
 }
@@ -4462,6 +4477,12 @@ struct AdminAttrs {
     /// year / month / day drill-down strip above the list table.
     /// Empty / unset disables the strip. Issue #355.
     date_hierarchy: Option<String>,
+    /// `admin(prepopulated_fields = "slug:title")` — Django-shape.
+    /// Each entry is `target:source[+source2]`; multiple entries are
+    /// comma-separated, e.g. `"slug:title,short_code:section+title"`.
+    /// The admin change-form emits JS that slugifies the source values
+    /// into the target field on every keystroke. Issue #356.
+    prepopulated_fields: Option<(Vec<(String, Vec<String>)>, proc_macro2::Span)>,
 }
 
 fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
@@ -4613,6 +4634,12 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                         admin.date_hierarchy = Some(s.value());
                         return Ok(());
                     }
+                    if inner.path.is_ident("prepopulated_fields") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        admin.prepopulated_fields =
+                            Some((parse_prepopulated_list(&s.value()), s.span()));
+                        return Ok(());
+                    }
                     Err(inner.error(
                         "unknown admin attribute (supported: \
                          `list_display`, `list_display_links`, \
@@ -4621,6 +4648,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                          `list_filter`, `list_per_page`, `ordering`, `actions`, \
                          `actions_on_top`, `actions_on_bottom`, \
                          `date_hierarchy`, \
+                         `prepopulated_fields`, \
                          `fieldsets`)",
                     ))
                 })?;
@@ -5162,6 +5190,33 @@ fn parse_fieldset_list(raw: &str) -> Vec<(String, Vec<String>)> {
             };
             let fields = split_field_list(rest);
             (title, fields)
+        })
+        .collect()
+}
+
+/// Parse `prepopulated_fields = "target:source[+src2,...]"` — each
+/// comma-separated entry maps a target field to one or more source
+/// fields joined with `+`. Whitespace around tokens is trimmed.
+/// Entries missing `:` or with empty target/source lists are dropped.
+fn parse_prepopulated_list(raw: &str) -> Vec<(String, Vec<String>)> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|entry| {
+            let (target, sources_raw) = entry.split_once(':')?;
+            let target = target.trim().to_owned();
+            if target.is_empty() {
+                return None;
+            }
+            let sources: Vec<String> = sources_raw
+                .split('+')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if sources.is_empty() {
+                return None;
+            }
+            Some((target, sources))
         })
         .collect()
 }

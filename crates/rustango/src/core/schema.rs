@@ -608,6 +608,25 @@ pub struct AdminConfig {
     /// drill-down strip above the list table. Empty string disables
     /// the strip (today's default). Issue #355.
     pub date_hierarchy: &'static str,
+    /// Django-shape `prepopulated_fields` — list of
+    /// `target ← source(s)` derivations for the admin change-form's
+    /// client-side slug-population JS. Empty slice means no
+    /// auto-population (today's default). Issue #356.
+    pub prepopulated_fields: &'static [PrepopulatedField],
+}
+
+/// One `prepopulated_fields` derivation: `target ← source(s)`. The
+/// admin form emits client-side JS that listens for `input` events on
+/// each source field and rewrites the target field's value from a
+/// slugified concatenation of the source values. Mirrors Django's
+/// `prepopulated_fields = {"slug": ("title",)}` shape.
+#[derive(Debug, Clone, Copy)]
+pub struct PrepopulatedField {
+    /// Rust field name to populate (e.g. `"slug"`).
+    pub target: &'static str,
+    /// Ordered list of source Rust field names whose values feed the
+    /// slug computation (e.g. `&["title"]` or `&["section", "title"]`).
+    pub sources: &'static [&'static str],
 }
 
 /// One group of fields on a create/edit form (slice 10.5).
@@ -640,6 +659,7 @@ impl AdminConfig {
         actions_on_top: true,
         actions_on_bottom: false,
         date_hierarchy: "",
+        prepopulated_fields: &[],
     };
 }
 

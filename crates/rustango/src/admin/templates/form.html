@@ -94,4 +94,42 @@
     <button type="submit" name="_addanother" class="btn btn-secondary">Save and add another</button>
   </div>
 </form>
+{% if prepopulated_active %}
+<script id="prepopulated-config" type="application/json">{{ prepopulated_fields | json_encode | safe }}</script>
+<script>
+(function() {
+  // #356 — Django-shape `prepopulated_fields`. Lowercase + ascii-fold
+  // + strip non-[a-z0-9] + collapse-into-`-` is the conservative
+  // shape; Django ships fuller Unicode transliteration via the
+  // `URLify` admin JS, which apps that need it can replace in-place.
+  function slugify(s) {
+    return String(s)
+      .toLowerCase()
+      .normalize('NFKD')
+      .replace(/[̀-ͯ]/g, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+  var cfg = JSON.parse(document.getElementById('prepopulated-config').textContent);
+  cfg.forEach(function(entry) {
+    var target = document.querySelector('[name="' + entry.target + '"]');
+    if (!target) return;
+    // Stop syncing once the user manually edits the target — Django's
+    // semantic. We track this via a data flag on the target itself.
+    target.addEventListener('input', function() {
+      target.dataset.userEdited = '1';
+    });
+    var sources = entry.sources.map(function(name) {
+      return document.querySelector('[name="' + name + '"]');
+    }).filter(Boolean);
+    function recompute() {
+      if (target.dataset.userEdited === '1') return;
+      var parts = sources.map(function(el) { return el.value || ''; });
+      target.value = slugify(parts.join(' '));
+    }
+    sources.forEach(function(el) { el.addEventListener('input', recompute); });
+  });
+})();
+</script>
+{% endif %}
 {% endblock body %}
