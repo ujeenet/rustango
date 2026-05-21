@@ -603,7 +603,7 @@ Summary: **1 SHIPPED / 2 PARTIAL / 6 MISSING / 0 N/A**. **One of the weakest sec
 | Test tags (`@tag('slow')`) | [tags](https://docs.djangoproject.com/en/6.0/topics/testing/tools/#tagging-tests) | SHIPPED | `test_filter::*` (`#[rustango_test(tag = "slow")]`) | |
 | Fixtures (JSON / YAML) | [fixtures](https://docs.djangoproject.com/en/6.0/howto/initial-data/) | SHIPPED | `fixtures::load_pool` | |
 | Test assertions (`assertContains`, `assertRedirects`, `assertStatus`, etc.) | [assertions](https://docs.djangoproject.com/en/6.0/topics/testing/tools/#assertions) | SHIPPED | `test_assertions::*` | |
-| `assertNumQueries(N)` | [assertNumQueries](https://docs.djangoproject.com/en/6.0/topics/testing/tools/#django.test.TransactionTestCase.assertNumQueries) | MISSING | n/a (#431) | Per-query counter would need sqlx interceptor. |
+| `assertNumQueries(N)` | [assertNumQueries](https://docs.djangoproject.com/en/6.0/topics/testing/tools/#django.test.TransactionTestCase.assertNumQueries) | SHIPPED | `test_assertions::assert_num_queries(N, async {...}).await` + `QueryCounter::{scope, current, take}` (#431, v0.42). Per-task counter via `tokio::task_local!`; instrumented at every `*_pool` chokepoint in `sql::executor`. Zero overhead outside an active scope. | |
 | Email outbox assertions | [mail outbox](https://docs.djangoproject.com/en/6.0/topics/testing/tools/#django.core.mail.outbox) | SHIPPED | `InMemoryMailer.messages()` | |
 | Factories (factory-boy shape) | n/a (3rd-party) | PARTIAL | `test_data::*` shipped basics; less ergonomic (#432) | |
 | `selenium` / `playwright` integration | (Django uses LiveServerTestCase + selenium) | MISSING | n/a (#433) | Playwright MCP available externally. |

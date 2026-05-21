@@ -77,6 +77,9 @@ use axum::body::to_bytes;
 use axum::http::header;
 use axum::response::Response;
 
+pub mod query_counter;
+pub use query_counter::{assert_num_queries, QueryCounter};
+
 /// Maximum bytes consumed from a response body for inspection.
 /// 1 MiB is far above any reasonable test payload; gives a clean
 /// error if a streamed body would otherwise hang the test.
