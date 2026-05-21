@@ -612,8 +612,14 @@ struct LoginSubmit {
 
 async fn login_submit(
     State(state): State<ConsoleState>,
+    headers: axum::http::HeaderMap,
     Form(form): Form<LoginSubmit>,
 ) -> Response<Body> {
+    use crate::signals::auth::{
+        meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
+        UserLoggedInContext, UserLoginFailedContext,
+    };
+    let meta = meta_from_headers(&headers, Some("/login"));
     let next = sanitize_next(form.next.as_deref());
     let principal =
         match auth::authenticate_operator_pool(&state.registry, &form.username, &form.password)
@@ -621,6 +627,13 @@ async fn login_submit(
         {
             Ok(Some(op)) => op,
             Ok(None) => {
+                send_user_login_failed(UserLoginFailedContext {
+                    source: "operator",
+                    attempted_username: Some(form.username.clone()),
+                    reason: AuthFailureReason::InvalidCredentials,
+                    request: meta,
+                })
+                .await;
                 return Redirect::to(&format!(
                     "/login?error=Invalid+credentials&next={}",
                     urlencoding_lite(&next)
@@ -646,10 +659,29 @@ async fn login_submit(
         header::SET_COOKIE,
         HeaderValue::from_str(&cookie.to_string()).expect("cookie is ascii"),
     );
+    send_user_logged_in(UserLoggedInContext {
+        source: "operator",
+        user_id: oid,
+        username: form.username.clone(),
+        // Operator principals are uniformly "superuser-equivalent" at
+        // the framework boundary — they're the people minting tenant
+        // sessions. There's no separate flag on the Operator row.
+        is_superuser: true,
+        request: meta,
+    })
+    .await;
     resp
 }
 
-async fn logout(State(_state): State<ConsoleState>) -> Response<Body> {
+async fn logout(
+    State(state): State<ConsoleState>,
+    headers: axum::http::HeaderMap,
+) -> Response<Body> {
+    use crate::signals::auth::{meta_from_headers, send_user_logged_out, UserLoggedOutContext};
+    // Best-effort: decode the session cookie so the signal carries
+    // operator_id. Receivers tolerate `None`.
+    let oid = decode_operator_session(&headers, &state.session_secret);
+    let meta = meta_from_headers(&headers, Some("/logout"));
     let clear = Cookie::build((COOKIE_NAME, ""))
         .path("/")
         .http_only(true)
@@ -661,7 +693,28 @@ async fn logout(State(_state): State<ConsoleState>) -> Response<Body> {
         header::SET_COOKIE,
         HeaderValue::from_str(&clear.to_string()).expect("cookie is ascii"),
     );
+    send_user_logged_out(UserLoggedOutContext {
+        source: "operator",
+        user_id: oid,
+        username: None,
+        request: meta,
+    })
+    .await;
     resp
+}
+
+/// Best-effort: decode the operator session cookie to recover the
+/// operator id for audit signals. `None` on any error.
+fn decode_operator_session(headers: &axum::http::HeaderMap, secret: &SessionSecret) -> Option<i64> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    for part in raw.split(';').map(str::trim) {
+        if let Some(val) = part.strip_prefix(&format!("{COOKIE_NAME}=")) {
+            if let Ok(p) = session::decode(secret, val) {
+                return Some(p.oid);
+            }
+        }
+    }
+    None
 }
 
 // ----------------------------- views

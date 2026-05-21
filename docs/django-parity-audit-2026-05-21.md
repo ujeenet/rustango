@@ -524,7 +524,7 @@ Summary: **7 / 1 / 2 / 0**.
 | `class_prepared` | (above) | N/A — Rust doesn't have lazy class creation | n/a | |
 | `request_started` / `request_finished` | [request signals](https://docs.djangoproject.com/en/6.0/ref/signals/#django.core.signals.request_started) | PARTIAL | tower `Service` semantics + tracing layer cover this (#412) | Not a discrete signal. |
 | `got_request_exception` | (above) | PARTIAL | tower error handling + tracing (#413) | |
-| `user_logged_in` / `user_logged_out` / `user_login_failed` | [auth signals](https://docs.djangoproject.com/en/6.0/ref/contrib/auth/#module-django.contrib.auth.signals) | MISSING | n/a (#414) | Useful for audit. Wire a `pre_save` on user-row or expose explicit signals. |
+| `user_logged_in` / `user_logged_out` / `user_login_failed` | [auth signals](https://docs.djangoproject.com/en/6.0/ref/contrib/auth/#module-django.contrib.auth.signals) | SHIPPED | `signals::auth::*` (#414, v0.42) — fired from admin / tenant admin / operator console / JWT login + logout paths with `AuthRequestMeta` context | |
 | `setting_changed` | (above) | MISSING | n/a (#415) | |
 | Disconnect / weak references | (above) | SHIPPED | `signals::disconnect_*` | |
 | Async receivers | (Django 4.1+ async receivers) | SHIPPED | All rustango signal receivers are `async fn` | |

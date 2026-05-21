@@ -55,6 +55,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::core::Model;
 
+pub mod auth;
 pub mod request;
 
 /// Future returned by signal receivers. `'static` because the receiver

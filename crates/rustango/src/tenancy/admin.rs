@@ -456,6 +456,20 @@ where
             };
         }
         if path == routes.logout_url && method == axum::http::Method::POST {
+            use crate::signals::auth::{
+                meta_from_headers, send_user_logged_out, UserLoggedOutContext,
+            };
+            // Best-effort: decode the session cookie so the signal
+            // carries user_id / username. Receivers tolerate `None`.
+            let (uid, uname) = decode_session_user(&parts.headers, cfg, &org.slug);
+            let meta = meta_from_headers(&parts.headers, Some(routes.logout_url.as_str()));
+            send_user_logged_out(UserLoggedOutContext {
+                source: "tenant_admin",
+                user_id: uid,
+                username: uname,
+                request: meta,
+            })
+            .await;
             return logout_response(routes);
         }
         // v0.27.8 (#78) — end-impersonation routes. Recognized
@@ -618,6 +632,28 @@ enum SessionCheck {
     },
     Anonymous,
     Error(String),
+}
+
+/// Best-effort: extract `(user_id, username_unknown)` from a session
+/// cookie so the auth-logout signal can carry the user id even when no
+/// further DB lookup is feasible. Returns `(None, None)` on any decode
+/// error (missing cookie, bad signature, expired, wrong slug).
+///
+/// Username is unrecoverable from the cookie payload alone (the tenant
+/// session payload only stores `uid`), so we return `None` for it and
+/// leave the receiver responsible for a username lookup if needed.
+fn decode_session_user(
+    headers: &HeaderMap,
+    cfg: &TenantSessionConfig,
+    slug: &str,
+) -> (Option<i64>, Option<String>) {
+    let Some(cookie_value) = read_cookie(headers, tenant_console::COOKIE_NAME) else {
+        return (None, None);
+    };
+    match tenant_console::decode(&cfg.secret, slug, &cookie_value) {
+        Ok(p) => (Some(p.uid), None),
+        Err(_) => (None, None),
+    }
 }
 
 async fn validate_session(
@@ -787,11 +823,17 @@ async fn login_submit(
     cfg: &TenantSessionConfig,
     tenant_pool: &crate::sql::Pool,
     routes: &super::routes::RouteConfig,
-    _headers: HeaderMap,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
     use crate::core::Column as _;
+    use crate::signals::auth::{
+        meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
+        UserLoggedInContext, UserLoginFailedContext,
+    };
     use crate::sql::FetcherPool as _;
+
+    let meta = meta_from_headers(&headers, Some(routes.login_url.as_str()));
 
     let bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(b) => b.to_bytes(),
@@ -826,10 +868,21 @@ async fn login_submit(
         ))
         .into_response()
     };
+    let fire_failed = |reason: AuthFailureReason| {
+        let ctx = UserLoginFailedContext {
+            source: "tenant_admin",
+            attempted_username: Some(form.username.clone()),
+            reason,
+            request: meta.clone(),
+        };
+        async move { send_user_login_failed(ctx).await }
+    };
     let Some(user) = users.into_iter().next() else {
+        fire_failed(AuthFailureReason::InvalidCredentials).await;
         return bad_creds();
     };
     if !user.active {
+        fire_failed(AuthFailureReason::Inactive).await;
         return bad_creds();
     }
     let hash = user.password_hash.clone();
@@ -838,10 +891,12 @@ async fn login_submit(
         Err(_) => false,
     };
     if !ok {
+        fire_failed(AuthFailureReason::InvalidCredentials).await;
         return bad_creds();
     }
     let uid: i64 = user.id.get().copied().unwrap_or(0);
     if uid == 0 {
+        fire_failed(AuthFailureReason::InvalidCredentials).await;
         return bad_creds();
     }
     let ttl_secs = i64::try_from(routes.tenant_session_ttl.as_secs())
@@ -859,6 +914,14 @@ async fn login_submit(
         header::SET_COOKIE,
         HeaderValue::from_str(&cookie.to_string()).expect("cookie is ascii"),
     );
+    send_user_logged_in(UserLoggedInContext {
+        source: "tenant_admin",
+        user_id: uid,
+        username: form.username.clone(),
+        is_superuser: user.is_superuser,
+        request: meta,
+    })
+    .await;
     resp
 }
 

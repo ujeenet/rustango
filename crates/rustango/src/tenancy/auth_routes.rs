@@ -185,10 +185,28 @@ pub struct LoginOutput {
     pub user: UserBrief,
 }
 
-async fn login(t: Tenant, Json(body): Json<LoginInput>) -> Result<Json<LoginOutput>, Response> {
+async fn login(
+    t: Tenant,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<LoginInput>,
+) -> Result<Json<LoginOutput>, Response> {
     use crate::core::Column as _;
+    use crate::signals::auth::{
+        meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
+        UserLoggedInContext, UserLoginFailedContext,
+    };
     use crate::sql::FetcherPool as _;
     use crate::tenancy::auth::User;
+
+    let meta = meta_from_headers(&headers, Some("/auth/login"));
+    let fire_failed = |reason: AuthFailureReason| -> UserLoginFailedContext {
+        UserLoginFailedContext {
+            source: "jwt",
+            attempted_username: Some(body.username.clone()),
+            reason,
+            request: meta.clone(),
+        }
+    };
 
     let users = User::objects()
         .where_(User::username.eq(body.username.clone()))
@@ -196,22 +214,32 @@ async fn login(t: Tenant, Json(body): Json<LoginInput>) -> Result<Json<LoginOutp
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
 
-    let user = users
-        .into_iter()
-        .next()
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "invalid credentials").into_response())?;
+    let Some(user) = users.into_iter().next() else {
+        send_user_login_failed(fire_failed(AuthFailureReason::InvalidCredentials)).await;
+        return Err((StatusCode::UNAUTHORIZED, "invalid credentials").into_response());
+    };
 
     if !user.active {
+        send_user_login_failed(fire_failed(AuthFailureReason::Inactive)).await;
         return Err((StatusCode::FORBIDDEN, "account inactive").into_response());
     }
 
     let ok = crate::tenancy::password::verify(&body.password, &user.password_hash)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
     if !ok {
+        send_user_login_failed(fire_failed(AuthFailureReason::InvalidCredentials)).await;
         return Err((StatusCode::UNAUTHORIZED, "invalid credentials").into_response());
     }
 
     let user_id = user.id.get().copied().unwrap_or(0);
+    send_user_logged_in(UserLoggedInContext {
+        source: "jwt",
+        user_id,
+        username: user.username.clone(),
+        is_superuser: user.is_superuser,
+        request: meta,
+    })
+    .await;
     // Bake the resolved tenant's slug into the token so a JWT
     // signed on `acme.<apex>` cannot be replayed on
     // `sju.<apex>` — even though both tenants share
@@ -264,8 +292,24 @@ async fn refresh(Json(body): Json<RefreshInput>) -> Result<Json<RefreshOutput>, 
 /// Revoke the access token's `jti`. Subsequent requests with the
 /// same token return 401 even though `exp` would otherwise still be
 /// valid.
-async fn logout(bearer: Bearer) -> Result<StatusCode, Response> {
+async fn logout(headers: axum::http::HeaderMap, bearer: Bearer) -> Result<StatusCode, Response> {
+    use crate::signals::auth::{meta_from_headers, send_user_logged_out, UserLoggedOutContext};
+    // Best-effort: decode the bearer to recover the user id for the
+    // signal. We don't reject on verify-failure here — the revoke
+    // call below still runs, and a stale/expired token logout is a
+    // valid audit event in its own right.
+    let user_id = jwt_handle().verify_access(&bearer.0).map(|c| c.sub);
+    let meta = meta_from_headers(&headers, Some("/auth/logout"));
+
     jwt_handle().revoke(&bearer.0);
+
+    send_user_logged_out(UserLoggedOutContext {
+        source: "jwt",
+        user_id,
+        username: None,
+        request: meta,
+    })
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
