@@ -140,6 +140,7 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test m2m_changed_signal_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,config,email --test setting_changed_signal
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_ipaddress_field
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_filepath_field
 
   # Per-dialect SQLite live suite — runs every `_sqlite_live.rs` file
   # explicitly under `--no-default-features --features sqlite,...`. This

@@ -1585,6 +1585,53 @@ pub fn validate_ip_address(s: &str) -> Result<(), ValidationError> {
     ))
 }
 
+/// Validate that `s` looks like a safe filesystem path string. Mirrors
+/// the *structural* half of Django's `FilePathField` validation:
+/// non-empty, no NUL bytes, no `..` parent-directory segments (path
+/// traversal). Does NOT touch the filesystem — caller's responsibility
+/// to verify existence + readability + sandbox membership when that
+/// matters. Issue #338.
+///
+/// Accepted shapes:
+/// - Relative: `docs/intro.md`, `assets/logo.png`
+/// - Absolute (any platform): `/var/uploads/x.txt`, `C:\Users\me\f.txt`
+/// - Trailing slash on directories
+///
+/// Rejected shapes:
+/// - Empty string
+/// - Strings containing `\0` (also caught by `validate_prohibit_null_characters`)
+/// - Strings with a `..` segment between separators
+///   (`docs/../etc/passwd`, `../secret`, `a/../b`)
+///
+/// # Errors
+/// `ValidationError { code: "invalid_filepath", ... }` on any of the
+/// rejected shapes above.
+pub fn validate_filepath(s: &str) -> Result<(), ValidationError> {
+    if s.is_empty() {
+        return Err(ValidationError::new(
+            "invalid_filepath",
+            "Enter a non-empty file path.",
+        ));
+    }
+    if s.contains('\0') {
+        return Err(ValidationError::new(
+            "invalid_filepath",
+            "File path must not contain NUL characters.",
+        ));
+    }
+    // Reject `..` segments between separators. Split on both `/` and
+    // `\` so Windows-style paths get the same defense.
+    for segment in s.split(['/', '\\']) {
+        if segment == ".." {
+            return Err(ValidationError::new(
+                "invalid_filepath",
+                "File path must not contain `..` parent-directory segments.",
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------ comma-separated integer list
 
 /// Validate a comma-separated list of email addresses (e.g. a
