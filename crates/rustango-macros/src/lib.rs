@@ -1906,6 +1906,7 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
     let search_help_text = admin.search_help_text.as_deref().unwrap_or("");
     let actions_on_top = admin.actions_on_top.unwrap_or(true);
     let actions_on_bottom = admin.actions_on_bottom.unwrap_or(false);
+    let date_hierarchy = admin.date_hierarchy.as_deref().unwrap_or("");
 
     let list_per_page = admin.list_per_page.unwrap_or(0);
 
@@ -1934,6 +1935,7 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
             search_help_text: #search_help_text,
             actions_on_top: #actions_on_top,
             actions_on_bottom: #actions_on_bottom,
+            date_hierarchy: #date_hierarchy,
         })
     }
 }
@@ -4455,6 +4457,11 @@ struct AdminAttrs {
     /// additional action-bar below the table. Default `false`.
     /// Issue #354.
     actions_on_bottom: Option<bool>,
+    /// `admin(date_hierarchy = "created_at")` — Django-shape. Name of
+    /// a date / datetime field whose values render as a clickable
+    /// year / month / day drill-down strip above the list table.
+    /// Empty / unset disables the strip. Issue #355.
+    date_hierarchy: Option<String>,
 }
 
 fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
@@ -4601,6 +4608,11 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                         admin.actions_on_bottom = Some(lit.value);
                         return Ok(());
                     }
+                    if inner.path.is_ident("date_hierarchy") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        admin.date_hierarchy = Some(s.value());
+                        return Ok(());
+                    }
                     Err(inner.error(
                         "unknown admin attribute (supported: \
                          `list_display`, `list_display_links`, \
@@ -4608,6 +4620,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                          `readonly_fields`, \
                          `list_filter`, `list_per_page`, `ordering`, `actions`, \
                          `actions_on_top`, `actions_on_bottom`, \
+                         `date_hierarchy`, \
                          `fieldsets`)",
                     ))
                 })?;

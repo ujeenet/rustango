@@ -603,6 +603,11 @@ pub struct AdminConfig {
     /// useful for long list pages where the operator has scrolled
     /// past the top bar. Issue #354.
     pub actions_on_bottom: bool,
+    /// Django-shape `date_hierarchy` — the name of a date / datetime
+    /// field whose values render as a clickable year / month / day
+    /// drill-down strip above the list table. Empty string disables
+    /// the strip (today's default). Issue #355.
+    pub date_hierarchy: &'static str,
 }
 
 /// One group of fields on a create/edit form (slice 10.5).
@@ -634,6 +639,7 @@ impl AdminConfig {
         search_help_text: "",
         actions_on_top: true,
         actions_on_bottom: false,
+        date_hierarchy: "",
     };
 }
 

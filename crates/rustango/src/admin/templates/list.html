@@ -23,6 +23,25 @@
 {% endif %}
 </p>
 
+{% if date_hierarchy %}
+<nav class="date-hierarchy" aria-label="date hierarchy">
+  <ol class="date-hierarchy-crumbs">
+    {% for c in date_hierarchy.crumbs %}
+      <li{% if c.active %} class="active"{% endif %}>
+        {% if c.active %}<strong>{{ c.label }}</strong>{% else %}<a href="{{ c.url }}">{{ c.label }}</a>{% endif %}
+      </li>
+    {% endfor %}
+  </ol>
+  {% if date_hierarchy.buckets and date_hierarchy.buckets | length > 0 %}
+  <ul class="date-hierarchy-buckets">
+    {% for b in date_hierarchy.buckets %}
+      <li><a href="{{ b.url }}">{{ b.label }} <small>({{ b.count }})</small></a></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</nav>
+{% endif %}
+
 {% if has_searchable %}
 <form method="get" action="{{ admin_prefix }}/{{ model.table }}" class="search">
   <input type="search" name="q" value="{{ q }}" placeholder="Search&hellip;">
