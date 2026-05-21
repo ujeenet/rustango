@@ -588,6 +588,11 @@ pub struct AdminConfig {
     /// column's cell wraps its inner HTML in an `<a href=…>` so operators
     /// can click the title (or any other column) directly. Issue #350.
     pub list_display_links: &'static [&'static str],
+    /// Django-shape `search_help_text` — short caption rendered beside
+    /// the admin list view's search box. Empty string suppresses the
+    /// caption. Lets operators know what fields the search actually
+    /// matches against (`"by title and author"`, etc.). Issue #353.
+    pub search_help_text: &'static str,
 }
 
 /// One group of fields on a create/edit form (slice 10.5).
@@ -616,6 +621,7 @@ impl AdminConfig {
         actions: &[],
         fieldsets: &[],
         list_display_links: &[],
+        search_help_text: "",
     };
 }
 

@@ -166,6 +166,7 @@ jobs:
             --test access_admin_codename_sqlite_live \
             --test admin_sqlite_live \
             --test admin_list_display_links_sqlite_live \
+            --test admin_search_help_text_sqlite_live \
             --test audit_pool_sqlite_live \
             --test bulk_upsert_sqlite_live \
             --test count_distinct_sqlite_live \

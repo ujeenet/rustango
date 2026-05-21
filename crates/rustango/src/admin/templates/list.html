@@ -30,6 +30,7 @@
   {% for f in active_filters %}
     <input type="hidden" name="{{ f.key }}" value="{{ f.value }}">
   {% endfor %}
+  {% if search_help_text %}<small class="search-help">{{ search_help_text }}</small>{% endif %}
 </form>
 {% endif %}
 
