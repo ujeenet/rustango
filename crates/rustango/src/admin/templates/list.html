@@ -46,8 +46,8 @@
 <p><em>No rows on this page.</em></p>
 {% else %}
 <form method="post" action="/{{ model.table }}/__action" class="list-form">
-  {% if actions and actions | length > 0 and not read_only %}
-  <div class="action-bar">
+  {% if actions and actions | length > 0 and not read_only and actions_on_top %}
+  <div class="action-bar action-bar-top">
     <label>Action:
       <select name="action">
         <option value="">— Select —</option>
@@ -83,6 +83,19 @@
     {% endfor %}
     </tbody>
   </table>
+  {% if actions and actions | length > 0 and not read_only and actions_on_bottom %}
+  <div class="action-bar action-bar-bottom">
+    <label>Action:
+      <select name="action_bottom">
+        <option value="">— Select —</option>
+        {% for a in actions %}
+        <option value="{{ a.name }}">{{ a.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit" class="btn btn-secondary">Go</button>
+  </div>
+  {% endif %}
 </form>
 {% endif %}
 

@@ -1904,6 +1904,8 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
     let list_display_links_lits = list_display_links.iter().map(|s| s.as_str());
 
     let search_help_text = admin.search_help_text.as_deref().unwrap_or("");
+    let actions_on_top = admin.actions_on_top.unwrap_or(true);
+    let actions_on_bottom = admin.actions_on_bottom.unwrap_or(false);
 
     let list_per_page = admin.list_per_page.unwrap_or(0);
 
@@ -1930,6 +1932,8 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
             fieldsets: &[ #( #fieldset_tokens ),* ],
             list_display_links: &[ #( #list_display_links_lits ),* ],
             search_help_text: #search_help_text,
+            actions_on_top: #actions_on_top,
+            actions_on_bottom: #actions_on_bottom,
         })
     }
 }
@@ -4444,6 +4448,13 @@ struct AdminAttrs {
     /// caption rendered beside the admin list view's search box.
     /// Issue #353.
     search_help_text: Option<String>,
+    /// `admin(actions_on_top = false)` — Django-shape. Hides the
+    /// action-bar above the table. Default `true`. Issue #354.
+    actions_on_top: Option<bool>,
+    /// `admin(actions_on_bottom = true)` — Django-shape. Renders an
+    /// additional action-bar below the table. Default `false`.
+    /// Issue #354.
+    actions_on_bottom: Option<bool>,
 }
 
 fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
@@ -4580,12 +4591,23 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                         admin.search_help_text = Some(s.value());
                         return Ok(());
                     }
+                    if inner.path.is_ident("actions_on_top") {
+                        let lit: syn::LitBool = inner.value()?.parse()?;
+                        admin.actions_on_top = Some(lit.value);
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("actions_on_bottom") {
+                        let lit: syn::LitBool = inner.value()?.parse()?;
+                        admin.actions_on_bottom = Some(lit.value);
+                        return Ok(());
+                    }
                     Err(inner.error(
                         "unknown admin attribute (supported: \
                          `list_display`, `list_display_links`, \
                          `search_fields`, `search_help_text`, \
                          `readonly_fields`, \
                          `list_filter`, `list_per_page`, `ordering`, `actions`, \
+                         `actions_on_top`, `actions_on_bottom`, \
                          `fieldsets`)",
                     ))
                 })?;
