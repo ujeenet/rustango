@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}
-    {{ model.name }} #{{ pk }} — rustango admin
+    {{ model.label | default(value=model.name) }} #{{ pk }} — rustango admin
 {% endblock title %}
 {% block body %}
     <nav class="breadcrumb" aria-label="breadcrumb">
@@ -9,7 +9,7 @@
                 <a href="{{ admin_prefix }}/">{{ admin_title }}</a>
             </li>
             <li>
-                <a href="{{ admin_prefix }}/{{ model.table }}">{{ model.name }}</a>
+                <a href="{{ admin_prefix }}/{{ model.table }}">{{ model.label_plural | default(value=model.name) }}</a>
             </li>
             <li>
                 <strong>#{{ pk }}</strong>
@@ -17,7 +17,7 @@
         </ol>
     </nav>
     <h1>
-        {{ model.name }} <small>#{{ pk }}</small>
+        {{ model.label | default(value=model.name) }} <small>#{{ pk }}</small>
     </h1>
     <dl>
         {% for cell in cells %}

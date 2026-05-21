@@ -1272,6 +1272,8 @@ mod tests {
             scope: crate::core::ModelScope::Tenant,
             default_order: &[],
             is_view: false,
+            verbose_name: None,
+            verbose_name_plural: None,
         }))
     }
 }

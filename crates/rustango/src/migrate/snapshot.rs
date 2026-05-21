@@ -560,6 +560,8 @@ mod composite_fk_snapshot_tests {
             scope: crate::core::ModelScope::Tenant,
             default_order: &[],
             is_view: false,
+            verbose_name: None,
+            verbose_name_plural: None,
         };
         &MS
     }
@@ -617,6 +619,8 @@ mod composite_fk_snapshot_tests {
             scope: crate::core::ModelScope::Tenant,
             default_order: &[],
             is_view: false,
+            verbose_name: None,
+            verbose_name_plural: None,
         };
         let snap = TableSnapshot::from_schema(&MS);
         let json = serde_json::to_string(&snap).expect("serialize");

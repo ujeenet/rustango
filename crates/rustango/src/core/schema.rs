@@ -291,6 +291,43 @@ pub struct ModelSchema {
     /// TABLE` / `DROP TABLE` against them (the view is owned by the
     /// operator, not by rustango). Reads behave like any other model.
     pub is_view: bool,
+    /// Django-shape `Meta.verbose_name` — human-readable singular label
+    /// for the model. Set via
+    /// `#[rustango(verbose_name = "blog post")]`. Used by admin section
+    /// headers, breadcrumbs, "Add <X>" buttons, and any other surface
+    /// that wants a friendly caption instead of the Rust struct name.
+    /// `None` means callers fall back to [`Self::name`].
+    pub verbose_name: Option<&'static str>,
+    /// Django-shape `Meta.verbose_name_plural` — plural form of
+    /// [`Self::verbose_name`]. Set via
+    /// `#[rustango(verbose_name_plural = "blog posts")]`. Used by admin
+    /// list-page headings ("All blog posts"). `None` means callers
+    /// should auto-pluralize (`format!("{}s", verbose_name_or_name)`).
+    pub verbose_name_plural: Option<&'static str>,
+}
+
+impl ModelSchema {
+    /// Human-readable singular label for the model — `verbose_name` if
+    /// set, otherwise the Rust struct name (`name`). Use this from
+    /// admin / form / serializer renderers that want a friendly
+    /// caption without re-implementing the fallback each time.
+    #[must_use]
+    pub fn display_label(&self) -> &'static str {
+        self.verbose_name.unwrap_or(self.name)
+    }
+
+    /// Human-readable plural label for the model — `verbose_name_plural`
+    /// if set, else `verbose_name + "s"` if `verbose_name` is set, else
+    /// `name + "s"`. Returns an owned `String` because the auto-plural
+    /// fallback can't be `&'static`.
+    #[must_use]
+    pub fn display_label_plural(&self) -> String {
+        if let Some(plural) = self.verbose_name_plural {
+            return plural.to_owned();
+        }
+        let base = self.verbose_name.unwrap_or(self.name);
+        format!("{base}s")
+    }
 }
 
 /// Where a model's table lives in a tenancy deployment. Mirrors

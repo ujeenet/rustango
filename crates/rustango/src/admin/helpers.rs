@@ -407,9 +407,9 @@ fn render_form_with_inlines_and_pickers(
         (format!("{admin_prefix}/{}", model.table), None)
     };
     let title = if pk_locked {
-        format!("Edit {}", model.name)
+        format!("Edit {}", model.display_label())
     } else {
-        format!("New {}", model.name)
+        format!("New {}", model.display_label())
     };
 
     let admin_cfg = model
@@ -515,7 +515,12 @@ fn render_form_with_inlines_and_pickers(
         .collect();
 
     let mut ctx = serde_json::json!({
-        "model": { "name": model.name, "table": model.table },
+        "model": {
+            "name": model.name,
+            "table": model.table,
+            "label": model.display_label(),
+            "label_plural": model.display_label_plural(),
+        },
         "title": title,
         "action": action,
         "edit_pk": edit_pk,
