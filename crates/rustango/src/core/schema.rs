@@ -91,6 +91,19 @@ pub struct FieldSchema {
     /// `admin.readonly_fields` which renders the input disabled —
     /// `editable = false` removes the input entirely.
     pub editable: bool,
+    /// Django-shape `blank` flag — `true` means the form layer
+    /// allows the field to be submitted empty even when the column
+    /// is `NOT NULL`. Set via `#[rustango(blank)]` or
+    /// `#[rustango(blank = true)]`. The admin form drops the
+    /// `required` HTML attribute when this is set, and form-side
+    /// validators treat an empty string as valid (the DB still
+    /// enforces NOT NULL — empty string is a valid non-null value).
+    ///
+    /// Distinct from `nullable` (which controls whether the SQL
+    /// column accepts NULL): a CharField can be
+    /// `nullable=false, blank=true` to require *some* value in DB
+    /// but accept `""` from the form.
+    pub blank: bool,
 }
 
 impl FieldSchema {

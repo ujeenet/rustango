@@ -219,6 +219,7 @@ mod tests {
             db_comment: None,
             verbose_name: None,
             editable: true,
+            blank: false,
         },
         FieldSchema {
             name: "title",
@@ -239,6 +240,7 @@ mod tests {
             db_comment: None,
             verbose_name: None,
             editable: true,
+            blank: false,
         },
         FieldSchema {
             name: "deleted_at",
@@ -259,6 +261,7 @@ mod tests {
             db_comment: None,
             verbose_name: None,
             editable: true,
+            blank: false,
         },
     ];
 

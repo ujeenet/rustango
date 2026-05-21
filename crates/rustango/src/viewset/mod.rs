@@ -1534,6 +1534,7 @@ mod lookup_tests {
             db_comment: None,
             verbose_name: None,
             editable: true,
+            blank: false,
         }
     }
 
@@ -1557,6 +1558,7 @@ mod lookup_tests {
             db_comment: None,
             verbose_name: None,
             editable: true,
+            blank: false,
         }
     }
 

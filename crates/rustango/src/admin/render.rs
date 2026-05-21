@@ -168,12 +168,20 @@ pub(crate) fn render_gfk_select(
 pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) -> String {
     let name = escape(field.name);
     let val = escape(value);
-    let required =
-        if field.nullable || field.ty == FieldType::Bool || field.auto || field.primary_key {
-            ""
-        } else {
-            " required"
-        };
+    // #445 — Django-shape `blank = true` drops the `required` HTML
+    // attribute even on NOT-NULL columns (form may submit empty
+    // even when the DB is NOT NULL — empty string is a valid
+    // non-null value for CharField).
+    let required = if field.nullable
+        || field.ty == FieldType::Bool
+        || field.auto
+        || field.primary_key
+        || field.blank
+    {
+        ""
+    } else {
+        " required"
+    };
     // Caller passes `pk_locked=true` to mean "render this field as
     // read-only" — used both for PKs on edit forms (slice 10.5
     // pre-existing behavior) and for `readonly_fields` flagged via
@@ -522,6 +530,7 @@ mod tests {
             db_comment: None,
             verbose_name: None,
             editable: true,
+            blank: false,
         }
     }
 
@@ -670,5 +679,37 @@ mod tests {
         assert!(html.contains("&lt;b&gt;"));
         assert!(!html.contains("<a>"));
         assert!(!html.contains("<b>"));
+    }
+
+    /// `#[rustango(blank)]` drops the `required` HTML attribute even
+    /// on NOT NULL columns — Django-shape "form may submit empty even
+    /// when DB is NOT NULL" semantics (#445).
+    #[test]
+    fn render_input_blank_drops_required_on_not_null_column() {
+        let mut f = field("subtitle", "subtitle", FieldType::String);
+        f.nullable = false; // DB-side NOT NULL
+        f.blank = true; // form-side allow empty
+        f.max_length = Some(50);
+
+        let html = render_input(&f, "", false);
+        assert!(
+            !html.contains(" required"),
+            "blank=true should drop `required`, got: {html}"
+        );
+    }
+
+    /// NOT NULL + blank=false (default) still emits `required`.
+    #[test]
+    fn render_input_keeps_required_on_not_null_when_blank_false() {
+        let mut f = field("title", "title", FieldType::String);
+        f.nullable = false;
+        f.blank = false;
+        f.max_length = Some(50);
+
+        let html = render_input(&f, "", false);
+        assert!(
+            html.contains(" required"),
+            "NOT NULL non-blank field should be required, got: {html}"
+        );
     }
 }

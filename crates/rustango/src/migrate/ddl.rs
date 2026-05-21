@@ -360,6 +360,7 @@ mod tests {
             db_comment: None,
             verbose_name: None,
             editable: true,
+            blank: false,
         }
     }
 

@@ -5196,6 +5196,10 @@ struct FieldAttrs {
     /// (the value is still visible on detail / list views, just not
     /// editable).
     editable: bool,
+    /// `#[rustango(blank)]` / `#[rustango(blank = true)]` — Django-shape
+    /// "form may submit empty even when DB is NOT NULL". Threaded into
+    /// `FieldSchema::blank`. Defaults to `false`.
+    blank: bool,
 }
 
 fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
@@ -5224,6 +5228,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         db_comment: None,
         verbose_name: None,
         editable: true,
+        blank: false,
     };
     for attr in &field.attrs {
         if !attr.path().is_ident("rustango") {
@@ -5334,6 +5339,18 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                     out.editable = lit.value;
                 } else {
                     out.editable = true;
+                }
+                return Ok(());
+            }
+            if meta.path.is_ident("blank") {
+                // Two forms accepted:
+                //   #[rustango(blank)] — flag form, true
+                //   #[rustango(blank = false)] / true — explicit
+                if let Ok(v) = meta.value() {
+                    let lit: syn::LitBool = v.parse()?;
+                    out.blank = lit.value;
+                } else {
+                    out.blank = true;
                 }
                 return Ok(());
             }
@@ -5694,6 +5711,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let db_comment = optional_str(attrs.db_comment.as_deref());
     let verbose_name = optional_str(attrs.verbose_name.as_deref());
     let editable = attrs.editable;
+    let blank = attrs.blank;
     let schema = quote! {
         ::rustango::core::FieldSchema {
             name: #name,
@@ -5714,6 +5732,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             db_comment: #db_comment,
             verbose_name: #verbose_name,
             editable: #editable,
+            blank: #blank,
         }
     };
 

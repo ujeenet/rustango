@@ -156,7 +156,7 @@ Field options:
 |---|---|---|---|
 | `max_length` | SHIPPED | `#[rustango(max_length = N)]` | |
 | `null=True` (DB-level nullable) | SHIPPED | `Option<T>` Rust type | |
-| `blank=True` (form-level allow empty) | PARTIAL | Form fields treat `Option<T>` as optional; no separate `blank` attribute (#445) | |
+| `blank=True` (form-level allow empty) | SHIPPED | `#[rustango(blank)]` (#445, v0.42) — admin form drops the `required` HTML attribute even on NOT NULL columns; distinct from `Option<T>` which controls SQL nullability | |
 | `default` | SHIPPED | `#[rustango(default = "expr")]` | |
 | `choices=[...]` | SHIPPED | `#[rustango(choices = "draft:Draft, published:Published")]` (#446, v0.42) — admin renders `<select>`, validator rejects off-choice values | |
 | `validators=[...]` | PARTIAL | Form-side: `validate_email`, `validate_url`, `validate_min_length`, file validators (#447) | Model-side validators on save MISSING. |
