@@ -411,6 +411,209 @@ fn parse_set_cookie(raw: &str) -> Option<(String, String)> {
     Some((name.trim().to_owned(), value.trim().to_owned()))
 }
 
+// ============================================================================
+// RequestFactory — Django-parity #430
+// ============================================================================
+
+/// Django-shape `RequestFactory` — builds `axum::http::Request<Body>`
+/// instances for direct handler / extractor tests, without dispatching
+/// through a router and without the cookie persistence machinery
+/// [`TestClient`] adds.
+///
+/// Use this when you want to call a handler function directly, or
+/// build a request to pass into [`tower::ServiceExt::oneshot`] yourself
+/// against a single component (a `tower::Layer`, an extractor).
+/// For full router round-trips with cookie persistence, prefer
+/// [`TestClient`].
+///
+/// ## Quick start
+///
+/// ```ignore
+/// use rustango::test_client::RequestFactory;
+///
+/// let factory = RequestFactory::new();
+///
+/// // Plain GET
+/// let req = factory.get("/api/posts").build();
+///
+/// // GET with query string and header
+/// let req = factory
+///     .get("/api/posts?author=42")
+///     .header("authorization", "Bearer abc")
+///     .build();
+///
+/// // POST with JSON body
+/// let req = factory
+///     .post("/api/posts")
+///     .json(&serde_json::json!({"title": "Hello"}))
+///     .build();
+/// ```
+///
+/// ## Attaching extensions
+///
+/// For tests that bypass the auth layer and need to pre-populate the
+/// request extensions (e.g. an extracted user), use
+/// [`FactoryRequestBuilder::extension`]:
+///
+/// ```ignore
+/// use rustango::test_client::RequestFactory;
+///
+/// struct MockUser { id: i64 }
+///
+/// let req = RequestFactory::new()
+///     .get("/admin/dashboard")
+///     .extension(MockUser { id: 42 })
+///     .build();
+/// // pass `req` to a handler / middleware directly
+/// ```
+#[derive(Default, Clone, Copy)]
+pub struct RequestFactory;
+
+impl RequestFactory {
+    /// Construct a new factory. Stateless — clones are free.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Build a `GET` request to `path`.
+    #[must_use]
+    pub fn get(self, path: &str) -> FactoryRequestBuilder {
+        FactoryRequestBuilder::new(Method::GET, path)
+    }
+
+    /// Build a `POST` request to `path`.
+    #[must_use]
+    pub fn post(self, path: &str) -> FactoryRequestBuilder {
+        FactoryRequestBuilder::new(Method::POST, path)
+    }
+
+    /// Build a `PUT` request to `path`.
+    #[must_use]
+    pub fn put(self, path: &str) -> FactoryRequestBuilder {
+        FactoryRequestBuilder::new(Method::PUT, path)
+    }
+
+    /// Build a `PATCH` request to `path`.
+    #[must_use]
+    pub fn patch(self, path: &str) -> FactoryRequestBuilder {
+        FactoryRequestBuilder::new(Method::PATCH, path)
+    }
+
+    /// Build a `DELETE` request to `path`.
+    #[must_use]
+    pub fn delete(self, path: &str) -> FactoryRequestBuilder {
+        FactoryRequestBuilder::new(Method::DELETE, path)
+    }
+
+    /// Build a `HEAD` request to `path`.
+    #[must_use]
+    pub fn head(self, path: &str) -> FactoryRequestBuilder {
+        FactoryRequestBuilder::new(Method::HEAD, path)
+    }
+
+    /// Build an `OPTIONS` request to `path`.
+    #[must_use]
+    pub fn options(self, path: &str) -> FactoryRequestBuilder {
+        FactoryRequestBuilder::new(Method::OPTIONS, path)
+    }
+}
+
+/// Chained builder returned by [`RequestFactory`] verb methods. Finalize
+/// with [`Self::build`] to get an `axum::http::Request<Body>`.
+pub struct FactoryRequestBuilder {
+    method: Method,
+    path: String,
+    headers: Vec<(HeaderName, HeaderValue)>,
+    body: Body,
+    content_type: Option<&'static str>,
+    extensions: axum::http::Extensions,
+}
+
+impl FactoryRequestBuilder {
+    fn new(method: Method, path: &str) -> Self {
+        Self {
+            method,
+            path: path.to_owned(),
+            headers: Vec::new(),
+            body: Body::empty(),
+            content_type: None,
+            extensions: axum::http::Extensions::new(),
+        }
+    }
+
+    /// Add a request header. Invalid header names / values are silently
+    /// dropped — the typical test path provides valid ASCII.
+    #[must_use]
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        if let (Ok(n), Ok(v)) = (HeaderName::try_from(name), HeaderValue::try_from(value)) {
+            self.headers.push((n, v));
+        }
+        self
+    }
+
+    /// Set the body to a JSON-serialized value, plus `content-type:
+    /// application/json`.
+    #[must_use]
+    pub fn json<T: serde::Serialize>(mut self, value: &T) -> Self {
+        let bytes = serde_json::to_vec(value).unwrap_or_default();
+        self.body = Body::from(bytes);
+        self.content_type = Some("application/json");
+        self
+    }
+
+    /// Set a form-encoded body, plus
+    /// `content-type: application/x-www-form-urlencoded`. Field names
+    /// and values are URL-encoded the same way [`TestClient`] does.
+    #[must_use]
+    pub fn form(mut self, fields: &[(&str, &str)]) -> Self {
+        let body = fields
+            .iter()
+            .map(|(k, v)| format!("{}={}", url_encode(k), url_encode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        self.body = Body::from(body);
+        self.content_type = Some("application/x-www-form-urlencoded");
+        self
+    }
+
+    /// Set a raw bytes / arbitrary body.
+    #[must_use]
+    pub fn body(mut self, body: impl Into<Body>) -> Self {
+        self.body = body.into();
+        self
+    }
+
+    /// Attach a typed extension to the request, mirroring axum's
+    /// `Extension` extractor. Tests use this to pre-populate auth
+    /// context, mock services, or per-request configuration.
+    #[must_use]
+    pub fn extension<T: Clone + Send + Sync + 'static>(mut self, value: T) -> Self {
+        self.extensions.insert(value);
+        self
+    }
+
+    /// Finalize and return the built request.
+    ///
+    /// # Panics
+    /// Only if the configured path is not a valid URI — every other
+    /// step is infallible. Keeping panic-on-build matches the test-only
+    /// nature of this builder; production code should use
+    /// `Request::builder()` directly.
+    pub fn build(self) -> Request<Body> {
+        let mut req = Request::builder().method(&self.method).uri(&self.path);
+        if let Some(ct) = self.content_type {
+            req = req.header("content-type", ct);
+        }
+        for (k, v) in self.headers {
+            req = req.header(k, v);
+        }
+        let mut req = req.body(self.body).expect("invalid path / URI");
+        *req.extensions_mut() = self.extensions;
+        req
+    }
+}
+
 /// Captured response from a test request.
 pub struct TestResponse {
     pub status: u16,
@@ -919,5 +1122,130 @@ mod tests {
             .unwrap();
 
         assert!(decode(&wrong_secret, "acme", &cookie).is_err());
+    }
+
+    // -- RequestFactory (Django-parity #430) --
+
+    async fn read_body_bytes(req: Request<Body>) -> Vec<u8> {
+        let (_, body) = req.into_parts();
+        to_bytes(body, 64 * 1024).await.unwrap().to_vec()
+    }
+
+    #[tokio::test]
+    async fn request_factory_get_emits_method_path_empty_body() {
+        let req = RequestFactory::new().get("/api/posts").build();
+        assert_eq!(req.method(), Method::GET);
+        assert_eq!(req.uri().path(), "/api/posts");
+        assert!(req.headers().is_empty(), "no headers on plain GET");
+        let body = read_body_bytes(req).await;
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_factory_get_preserves_query_string() {
+        let req = RequestFactory::new()
+            .get("/api/posts?author=42&sort=desc")
+            .build();
+        assert_eq!(req.uri().path(), "/api/posts");
+        assert_eq!(req.uri().query(), Some("author=42&sort=desc"));
+    }
+
+    #[tokio::test]
+    async fn request_factory_post_with_json_sets_content_type_and_body() {
+        let req = RequestFactory::new()
+            .post("/api/posts")
+            .json(&json!({"title": "Hi", "draft": true}))
+            .build();
+        assert_eq!(req.method(), Method::POST);
+        assert_eq!(
+            req.headers().get("content-type").unwrap().to_str().unwrap(),
+            "application/json"
+        );
+        let body = read_body_bytes(req).await;
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["title"], "Hi");
+        assert_eq!(parsed["draft"], true);
+    }
+
+    #[tokio::test]
+    async fn request_factory_post_with_form_sets_content_type_and_url_encodes() {
+        let req = RequestFactory::new()
+            .post("/login")
+            .form(&[("user", "alice & bob"), ("pw", "p@ss=word")])
+            .build();
+        assert_eq!(
+            req.headers().get("content-type").unwrap().to_str().unwrap(),
+            "application/x-www-form-urlencoded"
+        );
+        let body = String::from_utf8(read_body_bytes(req).await).unwrap();
+        // Special chars are URL-encoded (matches the TestClient form
+        // encoder so the two stay symmetric).
+        assert!(
+            body.contains("user=alice%20%26%20bob"),
+            "missing encoded user, got: {body}"
+        );
+        assert!(
+            body.contains("pw=p%40ss%3Dword"),
+            "missing encoded pw, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_factory_header_overrides_user_provided() {
+        let req = RequestFactory::new()
+            .get("/me")
+            .header("authorization", "Bearer eyJabc")
+            .header("x-custom", "v1")
+            .build();
+        assert_eq!(
+            req.headers()
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer eyJabc"
+        );
+        assert_eq!(
+            req.headers().get("x-custom").unwrap().to_str().unwrap(),
+            "v1"
+        );
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct MockUser {
+        id: i64,
+    }
+
+    #[tokio::test]
+    async fn request_factory_extension_attaches_typed_value() {
+        let req = RequestFactory::new()
+            .get("/admin/dashboard")
+            .extension(MockUser { id: 42 })
+            .build();
+        let user = req.extensions().get::<MockUser>().expect("extension set");
+        assert_eq!(user.id, 42);
+    }
+
+    #[tokio::test]
+    async fn request_factory_all_verbs_round_trip() {
+        let f = RequestFactory::new();
+        assert_eq!(f.get("/x").build().method(), Method::GET);
+        assert_eq!(f.post("/x").build().method(), Method::POST);
+        assert_eq!(f.put("/x").build().method(), Method::PUT);
+        assert_eq!(f.patch("/x").build().method(), Method::PATCH);
+        assert_eq!(f.delete("/x").build().method(), Method::DELETE);
+        assert_eq!(f.head("/x").build().method(), Method::HEAD);
+        assert_eq!(f.options("/x").build().method(), Method::OPTIONS);
+    }
+
+    #[tokio::test]
+    async fn request_factory_request_is_usable_with_oneshot() {
+        // End-to-end shape: build a request via the factory, then
+        // dispatch it directly through a Router via tower::oneshot —
+        // the Django-parity reason for this helper.
+        let app = Router::new().route("/hello", axum::routing::get(|| async { "hi" }));
+        let req = RequestFactory::new().get("/hello").build();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
     }
 }
