@@ -520,7 +520,7 @@ Summary: **7 / 1 / 2 / 0**.
 | `pre_save` / `post_save` | [signals](https://docs.djangoproject.com/en/6.0/topics/signals/) | SHIPPED | `signals::connect_pre_save` / `_post_save` | |
 | `pre_delete` / `post_delete` | (above) | SHIPPED | (above) | |
 | `m2m_changed` | (above) | MISSING | n/a (#410) | M2M operations don't fire signals yet. |
-| `pre_migrate` / `post_migrate` | [pre_migrate](https://docs.djangoproject.com/en/6.0/ref/signals/#pre-migrate) | MISSING | n/a (#411) | |
+| `pre_migrate` / `post_migrate` | [pre_migrate](https://docs.djangoproject.com/en/6.0/ref/signals/#pre-migrate) | SHIPPED | `signals::migrate::{connect_pre_migrate, connect_post_migrate}` (#411, v0.42) — wired into `migrate::{apply_all, apply_all_pool, migrate_with_ledger}`. `PostMigrateContext.applied: Vec<String>` lists newly-applied migration names. | |
 | `class_prepared` | (above) | N/A — Rust doesn't have lazy class creation | n/a | |
 | `request_started` / `request_finished` | [request signals](https://docs.djangoproject.com/en/6.0/ref/signals/#django.core.signals.request_started) | PARTIAL | tower `Service` semantics + tracing layer cover this (#412) | Not a discrete signal. |
 | `got_request_exception` | (above) | SHIPPED | `signals::request::got_request_exception` fires from `RequestSignalsLayer` on every 5xx response + the (rare) `Service::Error` arm (#413, v0.42). `RequestExceptionContext.status: Option<u16>` lets receivers distinguish the two cases. | |
