@@ -1250,6 +1250,7 @@ mod tests {
                 db_comment: None,
                 verbose_name: None,
                 editable: true,
+                blank: false,
             })
             .collect();
         let leaked: &'static [crate::core::FieldSchema] = Box::leak(field_vec.into_boxed_slice());

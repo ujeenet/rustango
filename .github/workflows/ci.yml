@@ -128,6 +128,7 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_verbose_name
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_meta_verbose_name
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_editable
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_blank
 
   # Per-dialect SQLite live suite — runs every `_sqlite_live.rs` file
   # explicitly under `--no-default-features --features sqlite,...`. This

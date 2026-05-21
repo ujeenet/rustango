@@ -298,6 +298,7 @@ mod tests {
             db_comment: None,
             verbose_name: None,
             editable: true,
+            blank: false,
         }
     }
 
@@ -321,6 +322,7 @@ mod tests {
             db_comment: None,
             verbose_name: None,
             editable: true,
+            blank: false,
         }
     }
 
@@ -344,6 +346,7 @@ mod tests {
             db_comment: None,
             verbose_name: None,
             editable: true,
+            blank: false,
         }
     }
 
@@ -368,6 +371,7 @@ mod tests {
                 db_comment: None,
                 verbose_name: None,
                 editable: true,
+                blank: false,
             },
             FieldSchema {
                 name: "title",
@@ -388,6 +392,7 @@ mod tests {
                 db_comment: None,
                 verbose_name: None,
                 editable: true,
+                blank: false,
             },
             FieldSchema {
                 name: "author_id",
@@ -408,6 +413,7 @@ mod tests {
                 db_comment: None,
                 verbose_name: None,
                 editable: true,
+                blank: false,
             },
         ];
         // Suppress unused warnings on field helpers if we keep them.
