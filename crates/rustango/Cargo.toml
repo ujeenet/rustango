@@ -277,6 +277,11 @@ admin = [
     # the relationship explicit so `--features sqlite,admin` builds
     # cleanly without `tenancy` or `passwords` named.
     "passwords",
+    # #414 — login / logout handlers fire the auth lifecycle signals
+    # (`user_logged_in` / `user_logged_out` / `user_login_failed`).
+    # Tokio was already in the admin closure; signals adds only the
+    # in-process registry helpers.
+    "signals",
     "dep:axum",
     "dep:tera",
     "dep:base64",
@@ -314,6 +319,9 @@ tenancy = [
     # depending on the target deployment. Apps that *also* want
     # schema-mode tenants get `postgres` automatically by including it.
     "runtime",
+    # #414 — tenant admin + operator console login_submit / logout
+    # fire the auth lifecycle signals.
+    "signals",
     "storage",
     "uploads",
     "dep:async-trait",

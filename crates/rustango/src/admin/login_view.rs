@@ -85,7 +85,17 @@ struct LoginInput {
     password: String,
 }
 
-async fn login_submit(State(state): State<AppState>, Form(form): Form<LoginInput>) -> Response {
+async fn login_submit(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Form(form): Form<LoginInput>,
+) -> Response {
+    use crate::signals::auth::{
+        meta_from_headers, send_user_logged_in, send_user_login_failed, AuthFailureReason,
+        UserLoggedInContext, UserLoginFailedContext,
+    };
+    let meta = meta_from_headers(&headers, Some("/login"));
+
     let Some(secret) = state.config.session_secret.clone() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -120,6 +130,13 @@ async fn login_submit(State(state): State<AppState>, Form(form): Form<LoginInput
         .flatten();
 
     let Some(row) = row else {
+        send_user_login_failed(UserLoginFailedContext {
+            source: "admin",
+            attempted_username: Some(form.username.clone()),
+            reason: AuthFailureReason::InvalidCredentials,
+            request: meta.clone(),
+        })
+        .await;
         return Html(render_login_form(&state, Some("Invalid credentials."))).into_response();
     };
     let id = row.get("id").and_then(|v| v.as_i64()).unwrap_or_default();
@@ -134,9 +151,23 @@ async fn login_submit(State(state): State<AppState>, Form(form): Form<LoginInput
         .unwrap_or(false);
 
     if !is_active {
+        send_user_login_failed(UserLoginFailedContext {
+            source: "admin",
+            attempted_username: Some(form.username.clone()),
+            reason: AuthFailureReason::Inactive,
+            request: meta.clone(),
+        })
+        .await;
         return Html(render_login_form(&state, Some("Account is disabled."))).into_response();
     }
     if !crate::passwords::verify(&form.password, stored_hash).unwrap_or(false) {
+        send_user_login_failed(UserLoginFailedContext {
+            source: "admin",
+            attempted_username: Some(form.username.clone()),
+            reason: AuthFailureReason::InvalidCredentials,
+            request: meta.clone(),
+        })
+        .await;
         return Html(render_login_form(&state, Some("Invalid credentials."))).into_response();
     }
 
@@ -162,6 +193,14 @@ async fn login_submit(State(state): State<AppState>, Form(form): Form<LoginInput
     if let Ok(v) = HeaderValue::from_str(&cookie) {
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }
+    send_user_logged_in(UserLoggedInContext {
+        source: "admin",
+        user_id: id,
+        username: form.username.clone(),
+        is_superuser,
+        request: meta,
+    })
+    .await;
     resp
 }
 
@@ -311,7 +350,30 @@ fn render_change_password_form(
 
 // ============================================================ Logout (POST)
 
-async fn logout_submit(State(state): State<AppState>) -> Response {
+async fn logout_submit(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    use crate::signals::auth::{meta_from_headers, send_user_logged_out, UserLoggedOutContext};
+    let meta = meta_from_headers(&headers, Some("/logout"));
+
+    // Best-effort session decode so the signal carries the user id /
+    // username when the cookie is still valid. Receivers that key off
+    // those fields fall through to the `None` branch cleanly.
+    let (user_id, username) = state
+        .config
+        .session_secret
+        .as_ref()
+        .and_then(|secret| {
+            let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+            for part in raw.split(';').map(str::trim) {
+                if let Some(val) = part.strip_prefix(&format!("{SESSION_COOKIE}=")) {
+                    if let Some(sess) = session::decode(secret, val) {
+                        return Some((Some(sess.user_id), Some(sess.username)));
+                    }
+                }
+            }
+            None
+        })
+        .unwrap_or((None, None));
+
     let cookie = format!(
         "{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
         name = SESSION_COOKIE,
@@ -320,6 +382,13 @@ async fn logout_submit(State(state): State<AppState>) -> Response {
     if let Ok(v) = HeaderValue::from_str(&cookie) {
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }
+    send_user_logged_out(UserLoggedOutContext {
+        source: "admin",
+        user_id,
+        username,
+        request: meta,
+    })
+    .await;
     resp
 }
 
