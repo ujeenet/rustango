@@ -603,6 +603,35 @@ impl<T: Model> QuerySet<T> {
         self.order_by(items)
     }
 
+    /// Django-shape `QuerySet.reverse()` — flip the direction of every
+    /// pending `ORDER BY` clause. Each `Field { desc, .. }` and
+    /// `Expr { desc, .. }` has its `desc` flag toggled; `Random` is
+    /// untouched (no direction to invert). Issue #325.
+    ///
+    /// No-op when no ordering is set — Django's `reverse()` likewise
+    /// does nothing in that case (the resulting iteration order is
+    /// implementation-defined either way).
+    ///
+    /// ```ignore
+    /// // newest first
+    /// let q = Post::objects()
+    ///     .order_by(&[("published_at", true)]);
+    /// // oldest first — same predicate set, flipped sort
+    /// let r = q.reverse();
+    /// ```
+    #[must_use]
+    pub fn reverse(mut self) -> Self {
+        for item in &mut self.order_by {
+            match item {
+                PendingOrderItem::Field { desc, .. } | PendingOrderItem::Expr { desc, .. } => {
+                    *desc = !*desc
+                }
+                PendingOrderItem::Random => {}
+            }
+        }
+        self
+    }
+
     /// v0.45 — flip every ordering direction in place. Used by
     /// `last` to invert the queryset's natural sort and take
     /// the first row from the reversed sequence — avoids OFFSET +
