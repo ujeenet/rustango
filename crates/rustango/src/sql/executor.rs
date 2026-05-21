@@ -1590,7 +1590,12 @@ impl<T: Model + Send> UpdaterPool<T> for UpdateBuilder<T> {
 }
 
 /// Match on `SqlValue` and bind to a sqlx query builder. Used twice below for
-/// `Query` and `QueryAs`, which don't share a bind trait.
+/// `Query` and `QueryAs`, which don't share a bind trait. PG-only — the
+/// macro depends on `sqlx::types::Json` round-tripping through
+/// `PgArguments` and `SqlValue::Array` binding as a typed PG array,
+/// neither of which exists on MySQL / SQLite. The bi-directional
+/// counterparts are `bind_match_mysql!` + `bind_match_sqlite!`.
+#[cfg(feature = "postgres")]
 macro_rules! bind_match {
     ($q:expr, $value:expr) => {
         match $value {

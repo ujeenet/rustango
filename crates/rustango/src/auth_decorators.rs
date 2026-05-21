@@ -61,11 +61,14 @@
 //!   non-session auth (JWT, basic auth) plug their own predicate.
 
 use std::collections::HashMap;
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
 use std::sync::Arc;
 
 use axum::body::Body;
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
 use axum::extract::Request;
 use axum::http::{header, HeaderValue, StatusCode};
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
 use axum::middleware::Next;
 use axum::response::Response;
 

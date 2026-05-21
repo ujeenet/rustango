@@ -44,7 +44,11 @@
 
 use std::future::Future;
 
-use chrono::{DateTime, FixedOffset, TimeZone, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
+// `TimeZone` is the trait that supplies `Utc.timestamp_opt(...)` —
+// only used by the `template_views`-gated Tera filter below.
+#[cfg(feature = "template_views")]
+use chrono::TimeZone;
 
 tokio::task_local! {
     /// The active timezone for this request / task. `None` (no
