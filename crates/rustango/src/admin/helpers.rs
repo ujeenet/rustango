@@ -480,6 +480,13 @@ fn render_form_with_inlines_and_pickers(
             // Hide auto fields entirely on the create form.
             return false;
         }
+        // #449 — Django-shape `editable = false` removes the field
+        // from the auto-generated change-form entirely. The value
+        // is still visible on list / detail views (those don't
+        // route through this filter).
+        if !f.editable {
+            return false;
+        }
         true
     };
 

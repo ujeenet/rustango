@@ -5189,6 +5189,13 @@ struct FieldAttrs {
     /// surfaces can prefer the friendly caption over the Rust
     /// identifier. `None` means renderers fall back to the field name.
     verbose_name: Option<String>,
+    /// `#[rustango(editable = false)]` — Django-shape opt-out from
+    /// auto-generated form rendering. Defaults to `true` so existing
+    /// fields keep their current admin / form behavior; setting
+    /// `false` removes the field from the admin change-form entirely
+    /// (the value is still visible on detail / list views, just not
+    /// editable).
+    editable: bool,
 }
 
 fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
@@ -5216,6 +5223,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         choices: None,
         db_comment: None,
         verbose_name: None,
+        editable: true,
     };
     for attr in &field.attrs {
         if !attr.path().is_ident("rustango") {
@@ -5314,6 +5322,19 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
             if meta.path.is_ident("verbose_name") {
                 let s: LitStr = meta.value()?.parse()?;
                 out.verbose_name = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("editable") {
+                // Two forms accepted:
+                //   #[rustango(editable = false)] / true — explicit
+                //   #[rustango(editable)] — flag form (= true, the
+                //   default, so harmless; included for symmetry)
+                if let Ok(v) = meta.value() {
+                    let lit: syn::LitBool = v.parse()?;
+                    out.editable = lit.value;
+                } else {
+                    out.editable = true;
+                }
                 return Ok(());
             }
             if meta.path.is_ident("auto_uuid") {
@@ -5672,6 +5693,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let choices = optional_choices(attrs.choices.as_deref());
     let db_comment = optional_str(attrs.db_comment.as_deref());
     let verbose_name = optional_str(attrs.verbose_name.as_deref());
+    let editable = attrs.editable;
     let schema = quote! {
         ::rustango::core::FieldSchema {
             name: #name,
@@ -5691,6 +5713,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             choices: #choices,
             db_comment: #db_comment,
             verbose_name: #verbose_name,
+            editable: #editable,
         }
     };
 

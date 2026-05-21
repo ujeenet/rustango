@@ -1533,6 +1533,7 @@ mod lookup_tests {
             choices: None,
             db_comment: None,
             verbose_name: None,
+            editable: true,
         }
     }
 
@@ -1555,6 +1556,7 @@ mod lookup_tests {
             choices: None,
             db_comment: None,
             verbose_name: None,
+            editable: true,
         }
     }
 

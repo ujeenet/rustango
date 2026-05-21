@@ -81,6 +81,16 @@ pub struct FieldSchema {
     /// `#[rustango(verbose_name = "Display title")]`. `None` means
     /// callers should fall back to [`Self::name`].
     pub verbose_name: Option<&'static str>,
+    /// Django-shape `editable` flag — `true` (default) means the
+    /// field appears in admin / form input renderers; `false` means
+    /// the admin change-form excludes the field entirely (the value
+    /// is still visible on detail / list views, just not editable).
+    /// Set via `#[rustango(editable = false)]`. Mirrors Django's
+    /// `editable=False` semantics: auto-generated ModelForms drop
+    /// the field. Different from the model-level
+    /// `admin.readonly_fields` which renders the input disabled —
+    /// `editable = false` removes the input entirely.
+    pub editable: bool,
 }
 
 impl FieldSchema {
