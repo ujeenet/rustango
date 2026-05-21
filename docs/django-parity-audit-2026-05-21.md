@@ -646,7 +646,7 @@ Summary: **5 / 0 / 0 / 2**. Async is native; no parity gap.
 | `ModelViewSet` | [ModelViewSet](https://www.django-rest-framework.org/api-guide/viewsets/#modelviewset) | SHIPPED | (above, includes list/retrieve/create/update/delete) | |
 | Routers (`DefaultRouter`, `SimpleRouter`) | [routers](https://www.django-rest-framework.org/api-guide/routers/) | SHIPPED | `ViewSet::router(prefix, &Pool)` + `tenant_router(prefix)` | |
 | `DjangoFilterBackend` | [filtering](https://www.django-rest-framework.org/api-guide/filtering/) | SHIPPED | `?field=value` querystring filtering via `Q!` (v0.41) | |
-| `SearchFilter` | (above) | PARTIAL | Manual `?q=...` parse; no `search_fields` declarative (#438) | |
+| `SearchFilter` | (above) | SHIPPED | `ViewSet::search_fields(&["title", "body"])` + `?search=q` (closed #438, v0.42) — emits per-column ILIKE OR'd via dialect `write_ilike`; tri-dialect (PG/MySQL/SQLite). Same PR fixed a multi-column placeholder bug that affected MySQL+SQLite. | |
 | `OrderingFilter` | (above) | PARTIAL | Manual `?ordering=...` parse (#439) | |
 | Pagination — PageNumber / LimitOffset | [pagination](https://www.django-rest-framework.org/api-guide/pagination/) | SHIPPED | `pagination::*` + RFC 5988 Link headers | |
 | Pagination — Cursor | [cursor pagination](https://www.django-rest-framework.org/api-guide/pagination/#cursorpagination) | SHIPPED | `ViewSet::cursor_pagination("id")` / `cursor_pagination_desc("id")` + `pagination::CursorPaginator` (closed #440 — audit was wrong; primitive already shipped, just lacked an HTTP end-to-end test) | |

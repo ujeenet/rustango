@@ -2972,18 +2972,23 @@ pub(super) fn write_where_with_search(
         // Search routes through the dialect's `write_ilike` so each
         // backend emits the case-insensitive LIKE shape it actually
         // supports — Postgres native `ILIKE`, MySQL/SQLite the
-        // `LOWER(col) LIKE LOWER(?)` fallback. v0.37 fix: previous
-        // code wrote the literal `ILIKE` token whenever
-        // `supports_op(Op::ILike)` returned true, but SQLite says
-        // true (because it can *lower* via `write_ilike`) yet has no
-        // native `ILIKE` keyword, so the emitted SQL failed at parse.
-        b.params.push(SqlValue::String(format!("%{}%", s.query)));
-        let placeholder = b.d.placeholder(b.params.len());
+        // `LOWER(col) LIKE LOWER(?)` fallback.
+        //
+        // #438 — push a separate param + placeholder per column. PG
+        // could share one (`$N` references repeat), but MySQL/SQLite
+        // bind positionally so each `?` needs its own pushed param.
+        // Sharing one placeholder across N columns silently failed
+        // on multi-column search on non-PG dialects (only the first
+        // column got the bound value; subsequent ones bound to NULL
+        // / empty / nothing depending on driver). Keeping per-column
+        // binds also keeps the writer dialect-agnostic.
         b.sql.push('(');
         for (i, col) in s.columns.iter().enumerate() {
             if i > 0 {
                 b.sql.push_str(" OR ");
             }
+            b.params.push(SqlValue::String(format!("%{}%", s.query)));
+            let placeholder = b.d.placeholder(b.params.len());
             // Build the qualified column identifier the same way the
             // rest of the writer does, then hand it to `write_ilike`.
             let mut qualified = String::new();
