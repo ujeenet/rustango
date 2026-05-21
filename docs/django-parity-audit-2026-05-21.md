@@ -640,7 +640,7 @@ Summary: **5 / 0 / 0 / 2**. Async is native; no parity gap.
 | Nested serializer (one-to-many auto-expand) | [nested](https://www.django-rest-framework.org/api-guide/serializers/#dealing-with-nested-objects) | SHIPPED | `#[serializer(nested = ChildSerializer)]` (v0.18) | |
 | `SerializerMethodField` | [SerializerMethodField](https://www.django-rest-framework.org/api-guide/fields/#serializermethodfield) | SHIPPED | v0.18 | |
 | Per-field validators chain | (above) | SHIPPED | v0.18 | |
-| Cross-field validation (`validate()`) | [object-level validation](https://www.django-rest-framework.org/api-guide/serializers/#object-level-validation) | MISSING | n/a (#436) | Backlog. |
+| Cross-field validation (`validate()`) | [object-level validation](https://www.django-rest-framework.org/api-guide/serializers/#object-level-validation) | SHIPPED | `#[serializer(validate = "fn_name")]` container attr (closed #436, v0.42) — emitted `validate()` runs per-field validators first, then `self.<fn_name>()` returning `Result<(), FormErrors>`, merging both via new `FormErrors::merge`. | |
 | `UniqueTogetherValidator` | [UniqueTogetherValidator](https://www.django-rest-framework.org/api-guide/validators/#uniquetogethervalidator) | MISSING | n/a (#437) | Friendly form errors on `unique_together`. |
 | `ViewSet` | [ViewSet](https://www.django-rest-framework.org/api-guide/viewsets/) | SHIPPED | `#[derive(ViewSet)]` (v0.16+, tri-dialect v0.38) | |
 | `ModelViewSet` | [ModelViewSet](https://www.django-rest-framework.org/api-guide/viewsets/#modelviewset) | SHIPPED | (above, includes list/retrieve/create/update/delete) | |

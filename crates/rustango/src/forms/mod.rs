@@ -108,6 +108,16 @@ impl FormErrors {
         &self.non_field
     }
 
+    /// Drain every entry from `other` into `self`. Used by composable
+    /// validation flows that aggregate per-field + cross-field errors
+    /// into one collection. #436.
+    pub fn merge(&mut self, mut other: FormErrors) {
+        for (field, msgs) in other.fields.drain() {
+            self.fields.entry(field).or_default().extend(msgs);
+        }
+        self.non_field.extend(other.non_field.drain(..));
+    }
+
     /// All messages for `field`, or an empty slice.
     pub fn get(&self, field: &str) -> &[String] {
         self.fields.get(field).map(Vec::as_slice).unwrap_or(&[])
