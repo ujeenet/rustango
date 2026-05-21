@@ -715,6 +715,7 @@ pub async fn select_rows_as_json(
     query: &SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
 ) -> Result<Vec<serde_json::Value>, ExecError> {
+    crate::test_assertions::query_counter::bump();
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
         #[cfg(feature = "postgres")]
@@ -863,6 +864,7 @@ pub async fn select_one_row_as_json(
     query: &SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
 ) -> Result<Option<serde_json::Value>, ExecError> {
+    crate::test_assertions::query_counter::bump();
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
         #[cfg(feature = "postgres")]
@@ -2253,6 +2255,7 @@ pub async fn insert_returning_pool(
     pool: &Pool,
     query: &InsertQuery,
 ) -> Result<InsertReturningPool, ExecError> {
+    crate::test_assertions::query_counter::bump();
     query.validate()?;
     if query.returning.is_empty() {
         return Err(ExecError::EmptyReturning);
@@ -2424,6 +2427,9 @@ pub async fn raw_execute_pool(
 /// Execute a parameterized statement that doesn't return rows. Used
 /// by every non-`FromRow` `_pool` function.
 async fn execute_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<u64, ExecError> {
+    // #431 — bump the per-task query counter when an `assert_num_queries`
+    // scope is active. No-op in production (try_with returns Err).
+    crate::test_assertions::query_counter::bump();
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -2934,6 +2940,7 @@ pub async fn select_one_row_pool<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
+    crate::test_assertions::query_counter::bump();
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
         #[cfg(feature = "postgres")]
@@ -3858,6 +3865,7 @@ where
         + Send
         + Unpin,
 {
+    crate::test_assertions::query_counter::bump();
     let stmt = pool.dialect().compile_select(query)?;
     let aliases: Vec<&'static str> = query.joins.iter().map(|j| j.alias).collect();
 
