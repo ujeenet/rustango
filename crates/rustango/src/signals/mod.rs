@@ -59,6 +59,7 @@ pub mod auth;
 pub mod m2m;
 pub mod migrate;
 pub mod request;
+pub mod setting;
 
 /// Future returned by signal receivers. `'static` because the receiver
 /// is stored as `Box<dyn ...>` and may run after the caller has returned.
