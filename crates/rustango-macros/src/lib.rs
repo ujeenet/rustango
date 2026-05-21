@@ -1903,6 +1903,8 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
         .unwrap_or(&[]);
     let list_display_links_lits = list_display_links.iter().map(|s| s.as_str());
 
+    let search_help_text = admin.search_help_text.as_deref().unwrap_or("");
+
     let list_per_page = admin.list_per_page.unwrap_or(0);
 
     let ordering_pairs = admin
@@ -1927,6 +1929,7 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
             actions: &[ #( #actions_lits ),* ],
             fieldsets: &[ #( #fieldset_tokens ),* ],
             list_display_links: &[ #( #list_display_links_lits ),* ],
+            search_help_text: #search_help_text,
         })
     }
 }
@@ -4437,6 +4440,10 @@ struct AdminAttrs {
     /// from `list_display` whose cells should link to detail/edit.
     /// Issue #350.
     list_display_links: Option<(Vec<String>, proc_macro2::Span)>,
+    /// `admin(search_help_text = "...")` — Django-shape. Short
+    /// caption rendered beside the admin list view's search box.
+    /// Issue #353.
+    search_help_text: Option<String>,
 }
 
 fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
@@ -4568,10 +4575,16 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                             Some((split_field_list(&s.value()), s.span()));
                         return Ok(());
                     }
+                    if inner.path.is_ident("search_help_text") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        admin.search_help_text = Some(s.value());
+                        return Ok(());
+                    }
                     Err(inner.error(
                         "unknown admin attribute (supported: \
                          `list_display`, `list_display_links`, \
-                         `search_fields`, `readonly_fields`, \
+                         `search_fields`, `search_help_text`, \
+                         `readonly_fields`, \
                          `list_filter`, `list_per_page`, `ordering`, `actions`, \
                          `fieldsets`)",
                     ))

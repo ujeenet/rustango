@@ -545,6 +545,9 @@ pub(crate) async fn table_view(
         "plural": if total == 1 { "" } else { "s" },
         "read_only": read_only,
         "has_searchable": !search_columns.is_empty(),
+        // #353 — Django-shape `search_help_text`. Empty string means
+        // suppress the caption (today's behavior).
+        "search_help_text": admin_cfg.search_help_text,
         "q": q.unwrap_or_default(),
         "active_filters": active_filters_ctx,
         "facets": facets_ctx,
