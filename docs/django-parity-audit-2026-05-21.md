@@ -649,7 +649,7 @@ Summary: **5 / 0 / 0 / 2**. Async is native; no parity gap.
 | `SearchFilter` | (above) | PARTIAL | Manual `?q=...` parse; no `search_fields` declarative (#438) | |
 | `OrderingFilter` | (above) | PARTIAL | Manual `?ordering=...` parse (#439) | |
 | Pagination — PageNumber / LimitOffset | [pagination](https://www.django-rest-framework.org/api-guide/pagination/) | SHIPPED | `pagination::*` + RFC 5988 Link headers | |
-| Pagination — Cursor | [cursor pagination](https://www.django-rest-framework.org/api-guide/pagination/#cursorpagination) | MISSING | n/a (#440) | Backlog. |
+| Pagination — Cursor | [cursor pagination](https://www.django-rest-framework.org/api-guide/pagination/#cursorpagination) | SHIPPED | `ViewSet::cursor_pagination("id")` / `cursor_pagination_desc("id")` + `pagination::CursorPaginator` (closed #440 — audit was wrong; primitive already shipped, just lacked an HTTP end-to-end test) | |
 | Throttling (Anon / User / Scoped) | [throttling](https://www.django-rest-framework.org/api-guide/throttling/) | SHIPPED | `rate_limit::*` (per-IP / per-user) | |
 | Permission classes (IsAuthenticated, AllowAny, IsAdminUser, etc.) | [permissions](https://www.django-rest-framework.org/api-guide/permissions/) | SHIPPED | `auth_decorators::*` + `viewset::permissions` | |
 | Authentication classes (TokenAuth, BasicAuth, SessionAuth) | [authentication](https://www.django-rest-framework.org/api-guide/authentication/) | SHIPPED | `hmac_auth`, `api_keys`, `jwt`, session auth | |
