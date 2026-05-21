@@ -143,7 +143,7 @@ Built-in Django fields:
 | `EmailField` (validator) | [EmailField](https://docs.djangoproject.com/en/6.0/ref/models/fields/#emailfield) | PARTIAL | `String` + `validators::validate_email` form-side (#334) | No model-level email validation on insert/update. |
 | `URLField` | [URLField](https://docs.djangoproject.com/en/6.0/ref/models/fields/#urlfield) | PARTIAL | Same shape as EmailField (#335) | |
 | `SlugField` | [SlugField](https://docs.djangoproject.com/en/6.0/ref/models/fields/#slugfield) | PARTIAL | `String` + `slug_field` macro attr (slug generation) (#336) | No slugify on save signal. |
-| `IPAddressField` / `GenericIPAddressField` | [GenericIPAddressField](https://docs.djangoproject.com/en/6.0/ref/models/fields/#genericipaddressfield) | MISSING | n/a (#337) | Use `String`; no validator. |
+| `IPAddressField` / `GenericIPAddressField` | [GenericIPAddressField](https://docs.djangoproject.com/en/6.0/ref/models/fields/#genericipaddressfield) | SHIPPED | `#[rustango(validators = "ip_address")]` (or `"ipv4"` / `"ipv6"` for protocol-specific) (#337, v0.42). Alias `genericipaddress` accepted for direct Django translation. Column type stays `String`. | |
 | `FilePathField` | [FilePathField](https://docs.djangoproject.com/en/6.0/ref/models/fields/#filepathfield) | MISSING | n/a (#338) | |
 | `FileField` (model side) | [FileField](https://docs.djangoproject.com/en/6.0/ref/models/fields/#filefield) | MISSING | n/a (#339) | rustango has `Media` model + Storage backends; not a native FileField on arbitrary models. |
 | `ImageField` | [ImageField](https://docs.djangoproject.com/en/6.0/ref/models/fields/#imagefield) | MISSING | n/a (#340) | Same — image-specific FileField pattern not surfaced. |

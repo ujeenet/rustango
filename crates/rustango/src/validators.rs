@@ -1567,6 +1567,24 @@ pub fn validate_ipv6_address(s: &str) -> Result<(), ValidationError> {
         .map_err(|_| ValidationError::new("invalid_ipv6_address", "Enter a valid IPv6 address."))
 }
 
+/// Validate that `s` parses as either an IPv4 or IPv6 address.
+/// Mirrors Django's `GenericIPAddressField(protocol="both")` (the
+/// default). Issue #337 / Django-parity.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_ip_address", ... }` when the
+/// value doesn't parse as either family.
+pub fn validate_ip_address(s: &str) -> Result<(), ValidationError> {
+    use std::str::FromStr as _;
+    if std::net::Ipv4Addr::from_str(s).is_ok() || std::net::Ipv6Addr::from_str(s).is_ok() {
+        return Ok(());
+    }
+    Err(ValidationError::new(
+        "invalid_ip_address",
+        "Enter a valid IPv4 or IPv6 address.",
+    ))
+}
+
 // ------------------------------------------------------------------ comma-separated integer list
 
 /// Validate a comma-separated list of email addresses (e.g. a

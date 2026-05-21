@@ -113,6 +113,10 @@ fn check_named_validators(
             "iso_datetime" => v::validate_iso_datetime(value),
             "ipv4" => v::validate_ipv4_address(value),
             "ipv6" => v::validate_ipv6_address(value),
+            // #337 — Django `GenericIPAddressField` accepts either
+            // family. Alias `genericipaddress` for callers translating
+            // verbatim from a Django Field.
+            "ip_address" | "genericipaddress" => v::validate_ip_address(value),
             "no_null" => v::validate_prohibit_null_characters(value),
             "email_list" => v::validate_email_list(value),
             "integer" => v::validate_integer(value),

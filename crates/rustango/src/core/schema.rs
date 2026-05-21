@@ -112,8 +112,10 @@ pub struct FieldSchema {
     /// `validate_slug`, `validate_unicode_slug`, `validate_phone_e164`,
     /// `validate_hex_color`, `validate_uuid`, `validate_iso_date`,
     /// `validate_iso_time`, `validate_iso_datetime`, `validate_ipv4`,
-    /// `validate_ipv6`, `validate_no_null`). Unknown names error at
-    /// runtime via [`crate::core::QueryError::UnknownValidator`].
+    /// `validate_ipv6`, `validate_ip_address` /
+    /// `validate_genericipaddress` (#337 — accepts either family),
+    /// `validate_no_null`). Unknown names error at runtime via
+    /// [`crate::core::QueryError::UnknownValidator`].
     pub validators: &'static [&'static str],
 }
 
