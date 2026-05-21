@@ -634,6 +634,7 @@ mod tests {
             choices: None,
             db_comment: None,
             verbose_name: None,
+            editable: true,
         }];
         static MODEL: ModelSchema = ModelSchema {
             name: "demo",

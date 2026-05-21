@@ -166,7 +166,7 @@ Field options:
 | `verbose_name` | SHIPPED | `#[rustango(verbose_name = "Display title")]` (#448, v0.42) — admin column headers + form labels render via `FieldSchema::display_label()` | |
 | `primary_key=True` | SHIPPED | `#[rustango(primary_key)]` | |
 | `unique=True` | SHIPPED | `#[rustango(unique)]` | |
-| `editable=False` | MISSING | n/a (#449) | Use `#[rustango(readonly)]` admin attribute instead. |
+| `editable=False` | SHIPPED | `#[rustango(editable = false)]` (#449, v0.42) — admin change-form skips the field entirely; list / detail views still show the value | |
 | `db_comment` | SHIPPED | `#[rustango(db_comment = "...")]` (#450, v0.42) — PG emits post-table `COMMENT ON COLUMN`, MySQL inlines `COMMENT '...'`, SQLite no-op (no native support) | |
 | `db_tablespace` | N/A | n/a | Tablespaces are PG-specific niche. |
 
