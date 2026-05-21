@@ -85,16 +85,21 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
             Err(_) => return Ok(SessionUser(None)),
         };
 
-        let mut conn = match ctx.pools.acquire(&org).await {
-            Ok(c) => c,
+        // v0.41 (#317) — route through the tri-dialect Pool enum
+        // instead of acquiring a backend-specific TenantConn. This
+        // lets `SessionUser` resolve on sqlite + mysql tenancy builds
+        // the same way `SessionOperator` already does (via
+        // `fetch_pool` on the registry pool below).
+        let pool = match ctx.pools.scoped_pool_dyn(&org).await {
+            Ok(p) => p,
             Err(_) => return Ok(SessionUser(None)),
         };
 
         use crate::core::Column as _;
-        // Double deref: TenantConn → PoolConnection<Pg> → PgConnection
+        use crate::sql::FetcherPool as _;
         let users = User::objects()
             .where_(User::id.eq(payload.uid))
-            .fetch_on(&mut **conn)
+            .fetch_pool(&pool)
             .await
             .unwrap_or_default();
 
