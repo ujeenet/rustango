@@ -42,9 +42,10 @@ pub use executor::{
     insert_returning_tx, insert_tx, on_commit, on_commit_pending, raw_execute_pool, raw_query_pool,
     select_one_row_as_json, select_one_row_pool, select_rows_as_json, select_rows_pool,
     select_rows_pool_with_related, select_rows_tx_with_related, transaction_pool, update_or_create,
-    update_pool, update_tx, CounterPool, ExplainFormat, ExplainOptions, FetcherPool, FetcherTx,
-    FkPkAccess, HasPkValue, InsertReturningPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated,
-    MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated, Page, PoolTx, UpdaterPool,
+    update_pool, update_tx, CounterPool, ExistsPool, ExplainFormat, ExplainOptions, FetcherPool,
+    FetcherTx, FkPkAccess, HasPkValue, InsertReturningPool, LoadRelated, MaybeMyFromRow,
+    MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated, Page, PoolTx,
+    UpdaterPool,
 };
 // PG-typed back-compat surface gone (issue #270 / T1.8 waves 1–4):
 // the entire family of `_on` functions + `&PgPool` wrappers + the
