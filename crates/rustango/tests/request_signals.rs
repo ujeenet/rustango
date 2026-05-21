@@ -116,6 +116,11 @@ async fn exception_dispatch_works() {
         method: "GET".into(),
         path: "/boom".into(),
         error: "kaboom".into(),
+        // #413 — pre-existing test was for the service-error
+        // dispatch path (axum::Service::Error fired the signal);
+        // that arm now carries `status: None` while the new
+        // 5xx-response arm carries `Some(code)`.
+        status: None,
     })
     .await;
 
