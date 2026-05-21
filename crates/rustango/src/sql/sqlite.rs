@@ -636,6 +636,7 @@ mod tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            validators: &[],
         }];
         static MODEL: ModelSchema = ModelSchema {
             name: "demo",

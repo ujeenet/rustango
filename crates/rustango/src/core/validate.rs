@@ -24,7 +24,8 @@ pub fn validate_value(
     match value {
         SqlValue::String(s) => {
             check_max_length(model, field, s)?;
-            check_choices(model, field, s)
+            check_choices(model, field, s)?;
+            check_named_validators(model, field, s)
         }
         SqlValue::I16(v) => check_int_range(model, field, i64::from(*v)),
         SqlValue::I32(v) => check_int_range(model, field, i64::from(*v)),
@@ -83,6 +84,56 @@ fn check_choices(model: &'static str, field: &FieldSchema, value: &str) -> Resul
         value: value.to_owned(),
         allowed: choices.iter().map(|(v, _)| *v).collect(),
     })
+}
+
+/// Dispatch each `#[rustango(validators = "...")]` name in
+/// `field.validators` to the built-in `validators::*` family. #447.
+///
+/// Unknown names surface as [`QueryError::UnknownValidator`]; a
+/// validator that rejects the value surfaces as
+/// [`QueryError::ValidatorFailed`].
+fn check_named_validators(
+    model: &'static str,
+    field: &FieldSchema,
+    value: &str,
+) -> Result<(), QueryError> {
+    use crate::validators as v;
+
+    for name in field.validators {
+        let result = match *name {
+            "email" => v::validate_email(value),
+            "url" => v::validate_url(value),
+            "slug" => v::validate_slug(value),
+            "unicode_slug" => v::validate_unicode_slug(value),
+            "phone_e164" => v::validate_phone_e164(value),
+            "hex_color" => v::validate_hex_color(value),
+            "uuid" => v::validate_uuid(value),
+            "iso_date" => v::validate_iso_date(value),
+            "iso_time" => v::validate_iso_time(value),
+            "iso_datetime" => v::validate_iso_datetime(value),
+            "ipv4" => v::validate_ipv4_address(value),
+            "ipv6" => v::validate_ipv6_address(value),
+            "no_null" => v::validate_prohibit_null_characters(value),
+            "email_list" => v::validate_email_list(value),
+            "integer" => v::validate_integer(value),
+            other => {
+                return Err(QueryError::UnknownValidator {
+                    model,
+                    field: field.name.to_owned(),
+                    validator: other,
+                });
+            }
+        };
+        if let Err(e) = result {
+            return Err(QueryError::ValidatorFailed {
+                model,
+                field: field.name.to_owned(),
+                validator: name,
+                reason: e.to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn check_int_range(model: &'static str, field: &FieldSchema, value: i64) -> Result<(), QueryError> {

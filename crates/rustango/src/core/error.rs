@@ -48,6 +48,27 @@ pub enum QueryError {
         allowed: Vec<&'static str>,
     },
 
+    /// `#[rustango(validators = "email,url")]` named a validator that's
+    /// not in the dispatch table. Names must match one of the entries
+    /// documented on [`crate::core::FieldSchema::validators`].
+    #[error("field `{model}.{field}` references unknown validator `{validator}`")]
+    UnknownValidator {
+        model: &'static str,
+        field: String,
+        validator: &'static str,
+    },
+
+    /// One of the named [`crate::core::FieldSchema::validators`] rejected
+    /// the bound value. Mirrors Django's `ValidationError` raised on
+    /// save when a custom validator on `Field.validators=[]` fails.
+    #[error("field `{model}.{field}` validator `{validator}` rejected value: {reason}")]
+    ValidatorFailed {
+        model: &'static str,
+        field: String,
+        validator: &'static str,
+        reason: String,
+    },
+
     /// `QuerySet::select_related("foo")` couldn't be lowered: the
     /// field doesn't exist, isn't a `ForeignKey<T>`, the target
     /// table isn't registered in `inventory`, or the target has no

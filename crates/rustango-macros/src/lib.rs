@@ -5200,6 +5200,11 @@ struct FieldAttrs {
     /// "form may submit empty even when DB is NOT NULL". Threaded into
     /// `FieldSchema::blank`. Defaults to `false`.
     blank: bool,
+    /// `#[rustango(validators = "email,url")]` — Django-shape
+    /// model-level validator chain. Comma-separated names that
+    /// dispatch to the `validators::*` family in `validate_value`.
+    /// Empty by default; fires on every typed INSERT/UPDATE.
+    validators: Vec<String>,
 }
 
 fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
@@ -5229,6 +5234,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         verbose_name: None,
         editable: true,
         blank: false,
+        validators: Vec::new(),
     };
     for attr in &field.attrs {
         if !attr.path().is_ident("rustango") {
@@ -5351,6 +5357,23 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                     out.blank = lit.value;
                 } else {
                     out.blank = true;
+                }
+                return Ok(());
+            }
+            if meta.path.is_ident("validators") {
+                let s: LitStr = meta.value()?.parse()?;
+                let raw = s.value();
+                out.validators = raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                if out.validators.is_empty() {
+                    return Err(syn::Error::new(
+                        s.span(),
+                        "`validators = \"…\"` must list at least one name",
+                    ));
                 }
                 return Ok(());
             }
@@ -5712,6 +5735,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let verbose_name = optional_str(attrs.verbose_name.as_deref());
     let editable = attrs.editable;
     let blank = attrs.blank;
+    let validators_lits: Vec<&str> = attrs.validators.iter().map(String::as_str).collect();
     let schema = quote! {
         ::rustango::core::FieldSchema {
             name: #name,
@@ -5733,6 +5757,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             verbose_name: #verbose_name,
             editable: #editable,
             blank: #blank,
+            validators: &[ #(#validators_lits),* ],
         }
     };
 
