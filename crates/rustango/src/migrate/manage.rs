@@ -3150,6 +3150,11 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
 }
 
 /// Parsed `manage sendtestemail` arguments.
+///
+/// Only the `feature = "config"` build of `sendtestemail_cmd` uses
+/// this; the `not(feature = "config")` stub short-circuits with a
+/// friendly error, so the parser is unreachable there.
+#[cfg(feature = "config")]
 #[derive(Debug, Default, PartialEq, Eq)]
 struct SendTestEmailArgs {
     to: Option<String>,
@@ -3158,6 +3163,7 @@ struct SendTestEmailArgs {
     help: bool,
 }
 
+#[cfg(feature = "config")]
 fn parse_sendtestemail_args(args: &[String]) -> Result<SendTestEmailArgs, MigrateError> {
     let mut out = SendTestEmailArgs::default();
     let mut iter = args.iter();
@@ -4111,7 +4117,13 @@ mod gen_tests {
     }
 
     // -------- sendtestemail --------
+    //
+    // These tests + the args struct live under `feature = "config"`
+    // because `sendtestemail_cmd` reads `Settings.email.*` to pick a
+    // backend; the `not(feature = "config")` stub short-circuits with
+    // a friendly error and never reaches the parser.
 
+    #[cfg(feature = "config")]
     #[test]
     fn parse_sendtestemail_args_defaults_empty() {
         let p = parse_sendtestemail_args(&[]).unwrap();
@@ -4121,6 +4133,7 @@ mod gen_tests {
         assert!(!p.help);
     }
 
+    #[cfg(feature = "config")]
     #[test]
     fn parse_sendtestemail_args_collects_to_from_subject() {
         let args: Vec<String> = vec![
@@ -4137,36 +4150,42 @@ mod gen_tests {
         assert_eq!(p.subject.as_deref(), Some("ping"));
     }
 
+    #[cfg(feature = "config")]
     #[test]
     fn parse_sendtestemail_args_help_short_circuits() {
         let p = parse_sendtestemail_args(&["--help".into()]).unwrap();
         assert!(p.help);
     }
 
+    #[cfg(feature = "config")]
     #[test]
     fn parse_sendtestemail_args_rejects_unknown_flag() {
         let r = parse_sendtestemail_args(&["--bogus".into()]);
         assert!(r.is_err());
     }
 
+    #[cfg(feature = "config")]
     #[test]
     fn parse_sendtestemail_args_rejects_positional() {
         let r = parse_sendtestemail_args(&["unexpected".into()]);
         assert!(r.is_err());
     }
 
+    #[cfg(feature = "config")]
     #[test]
     fn parse_sendtestemail_args_to_requires_value() {
         let r = parse_sendtestemail_args(&["--to".into()]);
         assert!(r.is_err());
     }
 
+    #[cfg(feature = "config")]
     #[test]
     fn parse_sendtestemail_args_from_requires_value() {
         let r = parse_sendtestemail_args(&["--from".into()]);
         assert!(r.is_err());
     }
 
+    #[cfg(feature = "config")]
     #[test]
     fn parse_sendtestemail_args_subject_requires_value() {
         let r = parse_sendtestemail_args(&["--subject".into()]);
