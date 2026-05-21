@@ -1532,6 +1532,7 @@ mod lookup_tests {
             help_text: None,
             choices: None,
             db_comment: None,
+            verbose_name: None,
         }
     }
 
@@ -1553,6 +1554,7 @@ mod lookup_tests {
             help_text: None,
             choices: None,
             db_comment: None,
+            verbose_name: None,
         }
     }
 

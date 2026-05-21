@@ -74,6 +74,24 @@ pub struct FieldSchema {
     /// after the table is created; SQLite has no native column
     /// comments and silently drops the value.
     pub db_comment: Option<&'static str>,
+    /// Django-shape `verbose_name` — human-readable label for the
+    /// field, used in admin column headers, form labels, and any
+    /// other surface that wants to display the field with a friendly
+    /// caption instead of the Rust identifier. Set via
+    /// `#[rustango(verbose_name = "Display title")]`. `None` means
+    /// callers should fall back to [`Self::name`].
+    pub verbose_name: Option<&'static str>,
+}
+
+impl FieldSchema {
+    /// Human-readable label for this field — `verbose_name` if set,
+    /// otherwise the Rust field identifier (`name`). Use this from
+    /// admin / form / serializer renderers that want a friendly
+    /// caption without re-implementing the fallback each time.
+    #[must_use]
+    pub fn display_label(&self) -> &'static str {
+        self.verbose_name.unwrap_or(self.name)
+    }
 }
 
 /// Static description of a relation to another model.

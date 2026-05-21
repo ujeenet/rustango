@@ -461,7 +461,7 @@ fn render_form_with_inlines_and_pickers(
             render::render_input(f, value, lock_input)
         };
         serde_json::json!({
-            "label": f.name,
+            "label": f.display_label(),
             "extra": extra,
             "input": input_html,
             // Django-shape `help_text` (#admin-helptext) — short

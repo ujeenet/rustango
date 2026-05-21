@@ -633,6 +633,7 @@ mod tests {
             help_text: None,
             choices: None,
             db_comment: None,
+            verbose_name: None,
         }];
         static MODEL: ModelSchema = ModelSchema {
             name: "demo",
