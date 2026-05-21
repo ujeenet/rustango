@@ -6870,6 +6870,14 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
 
 struct SerializerContainerAttrs {
     model: syn::Path,
+    /// `#[serializer(validate = "fn_name")]` on the struct — DRF-shape
+    /// cross-field validation hook (#436). The named inherent method
+    /// must take `&self` and return
+    /// `Result<(), rustango::forms::FormErrors>`. The macro-emitted
+    /// `validate()` runs every per-field validator first; then calls
+    /// the cross-field method if declared; aggregates all errors into
+    /// one `FormErrors`.
+    cross_validate: Option<syn::Ident>,
 }
 
 #[derive(Default)]
@@ -6925,6 +6933,7 @@ struct SerializerFieldAttrs {
 
 fn parse_serializer_container_attrs(input: &DeriveInput) -> syn::Result<SerializerContainerAttrs> {
     let mut model: Option<syn::Path> = None;
+    let mut cross_validate: Option<syn::Ident> = None;
     for attr in &input.attrs {
         if !attr.path().is_ident("serializer") {
             continue;
@@ -6935,7 +6944,19 @@ fn parse_serializer_container_attrs(input: &DeriveInput) -> syn::Result<Serializ
                 model = Some(meta.input.parse()?);
                 return Ok(());
             }
-            Err(meta.error("unknown serializer container attribute (supported: `model`)"))
+            if meta.path.is_ident("validate") {
+                // #436 — container-level `validate = "fn_name"` for the
+                // DRF cross-field-validation shape. Field-level
+                // `#[serializer(validate = "...")]` on a field is
+                // parsed separately in `parse_serializer_field_attrs`.
+                let s: LitStr = meta.value()?.parse()?;
+                cross_validate = Some(syn::Ident::new(&s.value(), s.span()));
+                return Ok(());
+            }
+            Err(meta.error(
+                "unknown serializer container attribute \
+                 (supported: `model`, `validate`)",
+            ))
         })?;
     }
     let model = model.ok_or_else(|| {
@@ -6944,7 +6965,10 @@ fn parse_serializer_container_attrs(input: &DeriveInput) -> syn::Result<Serializ
             "`#[serializer(model = SomeModel)]` is required",
         )
     })?;
-    Ok(SerializerContainerAttrs { model })
+    Ok(SerializerContainerAttrs {
+        model,
+        cross_validate,
+    })
 }
 
 fn parse_serializer_field_attrs(field: &syn::Field) -> syn::Result<SerializerFieldAttrs> {
@@ -7182,17 +7206,36 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             })
         })
         .collect();
-    let validate_method = if validator_calls.is_empty() {
+    // #436 — DRF cross-field `validate(self)` shape. If the
+    // container declared `#[serializer(validate = "fn_name")]`,
+    // the macro-generated `validate(&self)` runs every per-field
+    // validator first, then calls the user's cross-field method,
+    // merging its `FormErrors` into the per-field errors. Either
+    // alone is enough to emit the wrapper.
+    let cross_validate_call = container.cross_validate.as_ref().map(|method_ident| {
+        quote! {
+            // Merge cross-field errors into the per-field bucket so
+            // a single .validate() call surfaces both layers.
+            if let ::core::result::Result::Err(__cross) = self.#method_ident() {
+                __errors.merge(__cross);
+            }
+        }
+    });
+    let validate_method = if validator_calls.is_empty() && container.cross_validate.is_none() {
         quote! {}
     } else {
         quote! {
             impl #struct_name {
                 /// Run every `#[serializer(validate = "...")]` per-field
-                /// validator. Aggregates errors into `FormErrors` keyed
-                /// by the field name. Returns `Ok(())` when all pass.
+                /// validator and, when declared, the container-level
+                /// cross-field validator. Aggregates errors into
+                /// `FormErrors` keyed by the field name (plus any
+                /// non-field keys the cross-field method adds).
+                /// Returns `Ok(())` when all pass.
                 pub fn validate(&self) -> ::core::result::Result<(), ::rustango::forms::FormErrors> {
                     let mut __errors = ::rustango::forms::FormErrors::default();
                     #( #validator_calls )*
+                    #cross_validate_call
                     if __errors.is_empty() {
                         ::core::result::Result::Ok(())
                     } else {
