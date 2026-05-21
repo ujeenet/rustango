@@ -3506,6 +3506,74 @@ impl<T: Model + Send> CounterPool<T> for QuerySet<T> {
     }
 }
 
+/// Django-shape `QuerySet.exists()` + `QuerySet.contains(obj)`
+/// (issue #330) — boolean predicates on top of the existing count
+/// path.
+///
+/// `exists_pool` returns `Ok(true)` when at least one row matches the
+/// queryset's filters, `Ok(false)` otherwise. Internally runs the
+/// same `COUNT(*)` as [`CounterPool::count_pool`] and compares to
+/// zero — simple + dialect-agnostic. Future optimization: emit
+/// `SELECT 1 FROM … LIMIT 1` instead of `COUNT(*)`, which doesn't
+/// scan all matching rows. Tracked as a follow-up; the count
+/// path is correct semantically.
+///
+/// `contains_pk` adds the convenience of "is THIS pk in the
+/// queryset?" — looks up the model's primary key column from the
+/// schema, builds an `Eq` predicate, and forwards to `exists_pool`.
+/// Equivalent to `qs.filter("<pk_col>", pk).exists_pool(pool)` with
+/// the column lookup baked in.
+///
+/// Pulled in via `use rustango::sql::ExistsPool;`.
+pub trait ExistsPool<T: Model + Send> {
+    /// `Ok(true)` when at least one row matches the queryset's
+    /// filters, `Ok(false)` otherwise. #330.
+    ///
+    /// # Errors
+    /// As [`CounterPool::count_pool`].
+    fn exists_pool(
+        self,
+        pool: &Pool,
+    ) -> impl std::future::Future<Output = Result<bool, ExecError>> + Send;
+
+    /// `Ok(true)` when a row with `pk = pk_value` is contained in the
+    /// queryset. #330. Looks up the PK column from `T::SCHEMA`; errors
+    /// when the model has no primary key (very rare — view-backed
+    /// models without an explicit `#[rustango(primary_key)]`).
+    ///
+    /// # Errors
+    /// As [`Self::exists_pool`], plus a model-without-PK error wrapped
+    /// in `ExecError::Query`.
+    fn contains_pk(
+        self,
+        pool: &Pool,
+        pk_value: impl Into<crate::core::SqlValue> + Send,
+    ) -> impl std::future::Future<Output = Result<bool, ExecError>> + Send;
+}
+
+impl<T: Model + Send> ExistsPool<T> for QuerySet<T> {
+    async fn exists_pool(self, pool: &Pool) -> Result<bool, ExecError> {
+        let count = self.count_pool(pool).await?;
+        Ok(count > 0)
+    }
+
+    async fn contains_pk(
+        self,
+        pool: &Pool,
+        pk_value: impl Into<crate::core::SqlValue> + Send,
+    ) -> Result<bool, ExecError> {
+        let Some(pk_field) = T::SCHEMA.primary_key() else {
+            return Err(ExecError::Query(crate::core::QueryError::UnknownField {
+                model: T::SCHEMA.name,
+                field: "primary_key".into(),
+            }));
+        };
+        self.filter_op(pk_field.column, crate::core::Op::Eq, pk_value.into())
+            .exists_pool(pool)
+            .await
+    }
+}
+
 /// `fetch_paginated` against either backend — fetches a page of rows
 /// AND the pre-LIMIT total count in a single SQL round trip via
 /// `COUNT(*) OVER ()`. Bi-dialect counterpart of
