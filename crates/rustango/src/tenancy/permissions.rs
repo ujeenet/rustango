@@ -4,7 +4,7 @@
 //! queryset ORM, the auto-admin, and `make_migrations` sees them as
 //! baseline (they live in the bootstrap snapshot, not user migrations).
 //!
-//! ## Tables (per-tenant, created via [`ensure_tables`])
+//! ## Tables (per-tenant, created via [`ensure_tables_pool`])
 //!
 //! | Model | Table | Description |
 //! |---|---|---|
@@ -176,7 +176,7 @@ pub struct UserPermission {
     pub data: serde_json::Value,
 }
 
-// ------------------------------------------------------------------ ensure_tables (DDL)
+// ------------------------------------------------------------------ ensure_tables_pool (DDL)
 
 const ENSURE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS "rustango_permissions" (
@@ -343,38 +343,8 @@ CREATE TABLE IF NOT EXISTS `rustango_user_permissions` (
 "#;
 
 /// Ensure all four permission tables exist in `pool`'s schema.
-/// Idempotent — safe to call on every boot. The tables are framework-
-/// managed (like `rustango_audit_log`) and live outside the user's
-/// migration chain; `make_migrations` sees them as baseline.
-///
-/// # Errors
-/// Driver failures from `CREATE TABLE IF NOT EXISTS`.
-///
-/// v0.38 — deprecated. The framework's bootstrap migrations
-/// (`0001_rustango_tenant_initial.json` written by `init-tenancy`)
-/// already create every permission table the engine needs, with
-/// per-dialect DDL emitted by the migration runner. New code should
-/// rely on `migrate` / `migrate-tenants` instead of calling this
-/// directly. Kept for downstream tests that scaffold a registry by
-/// hand and expect the tables to exist mid-test.
-#[cfg(feature = "postgres")]
-#[deprecated(
-    since = "0.38.0",
-    note = "use `cargo run -- migrate` (the bootstrap tenant migration creates these tables per-dialect); this runtime DDL helper is PG-only and predates the bootstrap migrations"
-)]
-pub async fn ensure_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
-    for stmt in ENSURE_SQL
-        .split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        sqlx::query(stmt).execute(pool).await?;
-    }
-    Ok(())
-}
-
-/// v0.38 — tri-dialect counterpart of [`ensure_tables`]. Picks the
-/// per-dialect DDL constant ([`ENSURE_SQL`] / [`ENSURE_SQL_SQLITE`] /
+/// Idempotent — safe to call on every boot. Picks the per-dialect
+/// DDL constant ([`ENSURE_SQL`] / [`ENSURE_SQL_SQLITE`] /
 /// [`ENSURE_SQL_MYSQL`]) and runs each statement as its own round-trip
 /// because sqlx's simple-prepare path rejects multi-statement strings.
 ///
@@ -1435,7 +1405,7 @@ pub fn model_codenames(table: &str) -> [String; 4] {
 /// codenames for every model that carries `#[rustango(permissions)]`.
 ///
 /// Idempotent — uses `ON CONFLICT DO NOTHING`. Call once at startup after
-/// [`ensure_tables`] so the catalog reflects the current model set.
+/// [`ensure_tables_pool`] so the catalog reflects the current model set.
 ///
 /// # Errors
 /// Driver / SQL failures.
@@ -1487,7 +1457,7 @@ pub async fn auto_create_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
 
 /// v0.38 — tri-dialect counterpart of [`auto_create_permissions`].
 ///
-/// Unlike [`ensure_tables`], this is *not* redundant with the
+/// Unlike [`ensure_tables_pool`], this is *not* redundant with the
 /// bootstrap migration: the migration creates the `rustango_permissions`
 /// table but cannot know which models the binary has compiled in.
 /// This walks the runtime `inventory::<ModelEntry>` and seeds one row

@@ -114,13 +114,10 @@ pub use middleware::{AuthenticatedUser, CurrentUser, RouterAuthExt};
 // v0.38 — the PG-typed permission helpers stay PG-only re-exports;
 // the tri-dialect `_pool` variants are the cross-dialect entry points.
 #[cfg(feature = "postgres")]
-#[allow(deprecated)]
-// `ensure_tables` is intentionally re-exported as `ensure_permission_tables` for back-compat.
 pub use permissions::{
-    assign_role, auto_create_permissions, clear_user_perm,
-    ensure_tables as ensure_permission_tables, get_or_create_role, grant_role_perm, has_all_perms,
-    has_any_perm, has_perm, remove_role, revoke_role_perm, set_user_perm, user_permissions,
-    user_roles,
+    assign_role, auto_create_permissions, clear_user_perm, get_or_create_role, grant_role_perm,
+    has_all_perms, has_any_perm, has_perm, remove_role, revoke_role_perm, set_user_perm,
+    user_permissions, user_roles,
 };
 pub use permissions::{
     auto_create_permissions_pool, clear_user_perm_pool, create_role_pool, ensure_tables_pool,

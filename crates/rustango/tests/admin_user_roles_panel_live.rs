@@ -1,7 +1,4 @@
 #![cfg(feature = "postgres")]
-// Tests intentionally exercise the deprecated `ensure_tables(&PgPool)`
-// path — that's what they're testing.
-#![allow(deprecated)]
 //! Live test for the v0.28 user-roles+permissions panel rendered on
 //! the `rustango_users` admin detail page (Step 5 / item #76).
 //!
@@ -14,12 +11,9 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use rustango::sql::sqlx;
-use rustango::sql::Auto;
-// `ensure_tables` is deprecated; this fixture predates the
-// `manage migrate` path that supersedes it.
-#[allow(deprecated)]
+use rustango::sql::{Auto, Pool};
 use rustango::tenancy::permissions::{
-    assign_role, ensure_tables, get_or_create_role, grant_role_perm, set_user_perm,
+    assign_role, ensure_tables_pool, get_or_create_role, grant_role_perm, set_user_perm,
 };
 use rustango::tenancy::User;
 use tower::ServiceExt;
@@ -56,8 +50,9 @@ async fn fresh(pool: &sqlx::PgPool) {
             .await
             .unwrap();
     }
-    #[allow(deprecated)]
-    ensure_tables(pool).await.unwrap();
+    ensure_tables_pool(&Pool::Postgres(pool.clone()))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

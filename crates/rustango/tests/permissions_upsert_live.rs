@@ -10,17 +10,13 @@
 //! existing row instead of inserting a duplicate.
 
 #![cfg(feature = "tenancy")]
-// The legacy `ensure_tables(&PgPool)` is intentionally exercised
-// below — these tests cover the upsert behaviour, not the migration
-// path that superseded it.
-#![allow(deprecated)]
 
 use rustango::core::Column as _;
 use rustango::sql::sqlx;
-use rustango::sql::Auto;
+use rustango::sql::{Auto, Pool};
 use rustango::tenancy::permissions::{
-    assign_role, get_or_create_role, grant_role_perm, set_user_perm, RolePermission,
-    UserPermission, UserRole,
+    assign_role, ensure_tables_pool, get_or_create_role, grant_role_perm, set_user_perm,
+    RolePermission, UserPermission, UserRole,
 };
 use rustango::tenancy::User;
 
@@ -50,10 +46,10 @@ async fn fresh(pool: &sqlx::PgPool) {
     // declared in `permissions::ENSURE_SQL` (the constraints aren't
     // currently on the Model defs as `unique_together`). For these
     // tests to exercise ON CONFLICT we need those constraints, so
-    // drop the tables and let `ensure_tables` re-create them with
-    // the constraints. Production deployments hit this same code
-    // path because `ensure_tables` runs before any inventory-driven
-    // CREATE TABLE for these model types.
+    // drop the tables and let `ensure_tables_pool` re-create them
+    // with the constraints. Production deployments hit this same
+    // code path because `ensure_tables_pool` runs before any
+    // inventory-driven CREATE TABLE for these model types.
     for t in [
         "rustango_user_permissions",
         "rustango_user_roles",
@@ -65,11 +61,7 @@ async fn fresh(pool: &sqlx::PgPool) {
             .await
             .unwrap();
     }
-    // Deprecated helper still used by this fixture; migration to
-    // `manage migrate` will happen alongside the broader admin/perms
-    // test cleanup.
-    #[allow(deprecated)]
-    rustango::tenancy::ensure_permission_tables(pool)
+    ensure_tables_pool(&Pool::Postgres(pool.clone()))
         .await
         .unwrap();
 }
