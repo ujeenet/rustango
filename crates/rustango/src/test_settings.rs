@@ -69,7 +69,16 @@ pub async fn with_overridden<F>(overlay: Settings, future: F) -> F::Output
 where
     F: std::future::Future,
 {
-    OVERLAY.scope(overlay, future).await
+    use crate::signals::setting::{send_setting_changed, SettingChangedContext};
+    // #415 — fire setting_changed on scope entry. Cache-invalidation
+    // / config-derived state receivers get a chance to flush before
+    // the user's overlay-aware code runs.
+    send_setting_changed(SettingChangedContext { enter: true }).await;
+    let result = OVERLAY.scope(overlay, future).await;
+    // Fire again on scope exit so receivers can refresh against the
+    // restored fallback Settings.
+    send_setting_changed(SettingChangedContext { enter: false }).await;
+    result
 }
 
 /// Return the active Settings: the task-local overlay when one is

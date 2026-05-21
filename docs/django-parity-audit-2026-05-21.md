@@ -525,7 +525,7 @@ Summary: **7 / 1 / 2 / 0**.
 | `request_started` / `request_finished` | [request signals](https://docs.djangoproject.com/en/6.0/ref/signals/#django.core.signals.request_started) | PARTIAL | tower `Service` semantics + tracing layer cover this (#412) | Not a discrete signal. |
 | `got_request_exception` | (above) | SHIPPED | `signals::request::got_request_exception` fires from `RequestSignalsLayer` on every 5xx response + the (rare) `Service::Error` arm (#413, v0.42). `RequestExceptionContext.status: Option<u16>` lets receivers distinguish the two cases. | |
 | `user_logged_in` / `user_logged_out` / `user_login_failed` | [auth signals](https://docs.djangoproject.com/en/6.0/ref/contrib/auth/#module-django.contrib.auth.signals) | SHIPPED | `signals::auth::*` (#414, v0.42) — fired from admin / tenant admin / operator console / JWT login + logout paths with `AuthRequestMeta` context | |
-| `setting_changed` | (above) | MISSING | n/a (#415) | |
+| `setting_changed` | (above) | SHIPPED | `signals::setting::connect_setting_changed` (#415, v0.42) — fires from `test_settings::with_overridden` on scope enter (`enter: true`) and exit (`enter: false`). Receivers typically flush config-derived caches. | |
 | Disconnect / weak references | (above) | SHIPPED | `signals::disconnect_*` | |
 | Async receivers | (Django 4.1+ async receivers) | SHIPPED | All rustango signal receivers are `async fn` | |
 
