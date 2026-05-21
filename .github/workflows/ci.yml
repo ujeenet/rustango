@@ -171,6 +171,7 @@ jobs:
             --test admin_search_help_text_sqlite_live \
             --test admin_actions_position_sqlite_live \
             --test admin_date_hierarchy_sqlite_live \
+            --test admin_prepopulated_sqlite_live \
             --test audit_pool_sqlite_live \
             --test bulk_upsert_sqlite_live \
             --test count_distinct_sqlite_live \

@@ -521,6 +521,38 @@ fn render_form_with_inlines_and_pickers(
         .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null))
         .collect();
 
+    // #356 — Django-shape `prepopulated_fields`. Build the
+    // `{ target_input_name: [source_input_name, …] }` map the
+    // form.html JS reads to wire change events. We translate Rust
+    // field names → HTML input `name=` (which == Rust field name in
+    // rustango admin today — no `form_id-` prefix is applied to the
+    // top-level form). Entries pointing at unknown fields are
+    // silently dropped so a stale model attr can't break the form.
+    let prepopulated_ctx: Vec<serde_json::Value> = admin_cfg
+        .prepopulated_fields
+        .iter()
+        .filter_map(|p| {
+            let target = model.field(p.target)?;
+            // Skip target if it isn't editable on this form (auto, PK
+            // locked on edit, or `editable = false`).
+            if !target.editable || target.auto {
+                return None;
+            }
+            let sources: Vec<&str> = p
+                .sources
+                .iter()
+                .filter_map(|src| model.field(src).map(|f| f.name))
+                .collect();
+            if sources.is_empty() {
+                return None;
+            }
+            Some(serde_json::json!({
+                "target": target.name,
+                "sources": sources,
+            }))
+        })
+        .collect();
+
     let mut ctx = serde_json::json!({
         "model": {
             "name": model.name,
@@ -534,6 +566,12 @@ fn render_form_with_inlines_and_pickers(
         "error": error_msg,
         "fieldsets": fieldsets_ctx,
         "inline_form_panels": inline_form_panels_ctx,
+        "prepopulated_fields": prepopulated_ctx,
+        // Only emit the slug script when not editing — Django's
+        // semantic is "stop populating once the value is set" and a
+        // stored slug usually wants to remain stable. The form has
+        // a `prepopulated_active` flag the template can branch on.
+        "prepopulated_active": !pk_locked && !prepopulated_ctx.is_empty(),
     });
     super::templates::render_with_chrome(
         "form.html",

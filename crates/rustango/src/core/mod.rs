@@ -33,7 +33,7 @@ pub use query::{
 pub use schema::{
     infer_app_label_from_module_path, AdminConfig, CheckConstraint, CompositeFkRelation,
     FieldSchema, Fieldset, GenericRelation, IndexMethod, IndexSchema, M2MRelation, Model,
-    ModelEntry, ModelSchema, ModelScope, Relation,
+    ModelEntry, ModelSchema, ModelScope, PrepopulatedField, Relation,
 };
 pub use validate::validate_value;
 pub use value::SqlValue;
