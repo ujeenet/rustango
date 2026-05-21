@@ -22,7 +22,10 @@ pub fn validate_value(
     value: &SqlValue,
 ) -> Result<(), QueryError> {
     match value {
-        SqlValue::String(s) => check_max_length(model, field, s),
+        SqlValue::String(s) => {
+            check_max_length(model, field, s)?;
+            check_choices(model, field, s)
+        }
         SqlValue::I16(v) => check_int_range(model, field, i64::from(*v)),
         SqlValue::I32(v) => check_int_range(model, field, i64::from(*v)),
         SqlValue::I64(v) => check_int_range(model, field, *v),
@@ -65,6 +68,21 @@ fn check_max_length(
         });
     }
     Ok(())
+}
+
+fn check_choices(model: &'static str, field: &FieldSchema, value: &str) -> Result<(), QueryError> {
+    let Some(choices) = field.choices else {
+        return Ok(());
+    };
+    if choices.iter().any(|(v, _)| *v == value) {
+        return Ok(());
+    }
+    Err(QueryError::InvalidChoice {
+        model,
+        field: field.name.to_owned(),
+        value: value.to_owned(),
+        allowed: choices.iter().map(|(v, _)| *v).collect(),
+    })
 }
 
 fn check_int_range(model: &'static str, field: &FieldSchema, value: i64) -> Result<(), QueryError> {

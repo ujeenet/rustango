@@ -215,6 +215,7 @@ mod tests {
             unique: false,
             generated_as: None,
             help_text: None,
+            choices: None,
         },
         FieldSchema {
             name: "title",
@@ -231,6 +232,7 @@ mod tests {
             unique: false,
             generated_as: None,
             help_text: None,
+            choices: None,
         },
         FieldSchema {
             name: "deleted_at",
@@ -247,6 +249,7 @@ mod tests {
             unique: false,
             generated_as: None,
             help_text: None,
+            choices: None,
         },
     ];
 

@@ -35,6 +35,19 @@ pub enum QueryError {
         max: Option<i64>,
     },
 
+    /// `#[rustango(choices = "…")]` declared a closed set of allowed
+    /// values and the bound value isn't one of them. Mirrors Django's
+    /// `ValidationError` raised on save when `choices` is set.
+    #[error(
+        "field `{model}.{field}` value `{value}` is not one of the declared choices: {allowed:?}"
+    )]
+    InvalidChoice {
+        model: &'static str,
+        field: String,
+        value: String,
+        allowed: Vec<&'static str>,
+    },
+
     /// `QuerySet::select_related("foo")` couldn't be lowered: the
     /// field doesn't exist, isn't a `ForeignKey<T>`, the target
     /// table isn't registered in `inventory`, or the target has no

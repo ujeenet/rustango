@@ -3851,6 +3851,7 @@ mod gen_tests {
             unique: false,
             generated_as: None,
             help_text: None,
+            choices: None,
         }
     }
 
