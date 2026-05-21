@@ -167,7 +167,7 @@ Field options:
 | `primary_key=True` | SHIPPED | `#[rustango(primary_key)]` | |
 | `unique=True` | SHIPPED | `#[rustango(unique)]` | |
 | `editable=False` | MISSING | n/a (#449) | Use `#[rustango(readonly)]` admin attribute instead. |
-| `db_comment` | MISSING | n/a (#450) | |
+| `db_comment` | SHIPPED | `#[rustango(db_comment = "...")]` (#450, v0.42) — PG emits post-table `COMMENT ON COLUMN`, MySQL inlines `COMMENT '...'`, SQLite no-op (no native support) | |
 | `db_tablespace` | N/A | n/a | Tablespaces are PG-specific niche. |
 
 Summary: **14 SHIPPED / 4 PARTIAL / 7 MISSING / 0 N/A** in this section. Gaps cluster around: `choices`, `verbose_name`, `editable`, IP/FilePath/File/ImageField, model-level validators.

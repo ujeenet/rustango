@@ -633,6 +633,37 @@ pub trait Dialect {
         None
     }
 
+    /// Inline column-comment fragment to splice into a CREATE TABLE
+    /// column definition for the field's `db_comment` attribute (#450).
+    /// MySQL returns `" COMMENT '<escaped>'"`; Postgres + SQLite return
+    /// `None` because they need a different mechanism (post-hoc
+    /// `COMMENT ON COLUMN` for Postgres, no-op for SQLite) — see
+    /// [`Self::column_comment_statement`].
+    ///
+    /// Implementations are responsible for properly escaping single
+    /// quotes in the supplied comment.
+    fn write_inline_column_comment(&self, _comment: &str) -> Option<String> {
+        None
+    }
+
+    /// Standalone `COMMENT ON COLUMN "<table>"."<col>" IS '<escaped>'`
+    /// statement emitted after CREATE TABLE for dialects that need it.
+    /// Postgres returns `Some(_)`; MySQL handles it inline (see
+    /// [`Self::write_inline_column_comment`]) and returns `None`;
+    /// SQLite returns `None` (no native column comments).
+    ///
+    /// The migration runner calls this for every field whose
+    /// `db_comment.is_some()` after the table is created. Implementations
+    /// are responsible for properly escaping single quotes.
+    fn column_comment_statement(
+        &self,
+        _table: &str,
+        _column: &str,
+        _comment: &str,
+    ) -> Option<String> {
+        None
+    }
+
     // ====== Compilation (always overridden) ======
 
     /// Lower a `SelectQuery` to a `CompiledStatement` for this dialect.

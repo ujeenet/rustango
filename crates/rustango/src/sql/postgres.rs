@@ -46,6 +46,16 @@ impl Dialect for Postgres {
         format!("${n}")
     }
 
+    fn column_comment_statement(&self, table: &str, column: &str, comment: &str) -> Option<String> {
+        let escaped = comment.replace('\'', "''");
+        Some(format!(
+            "COMMENT ON COLUMN {}.{} IS '{}'",
+            self.quote_ident(table),
+            self.quote_ident(column),
+            escaped,
+        ))
+    }
+
     fn serial_type(&self, field_type: FieldType) -> &'static str {
         match field_type {
             FieldType::I32 => "SERIAL",

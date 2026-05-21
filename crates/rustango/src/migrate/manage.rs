@@ -3852,6 +3852,7 @@ mod gen_tests {
             generated_as: None,
             help_text: None,
             choices: None,
+            db_comment: None,
         }
     }
 

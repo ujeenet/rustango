@@ -3836,6 +3836,7 @@ mod tests {
                     generated_as: None,
                     help_text: None,
                     choices: None,
+                    db_comment: None,
                 },
                 crate::core::FieldSchema {
                     name: "title",
@@ -3853,6 +3854,7 @@ mod tests {
                     generated_as: None,
                     help_text: None,
                     choices: None,
+                    db_comment: None,
                 },
             ])),
             display: None,
@@ -3896,6 +3898,7 @@ mod tests {
                     generated_as: None,
                     help_text: None,
                     choices: None,
+                    db_comment: None,
                 },
                 crate::core::FieldSchema {
                     name: "title",
@@ -3913,6 +3916,7 @@ mod tests {
                     generated_as: None,
                     help_text: None,
                     choices: None,
+                    db_comment: None,
                 },
                 crate::core::FieldSchema {
                     name: "score",
@@ -3930,6 +3934,7 @@ mod tests {
                     generated_as: None,
                     help_text: None,
                     choices: None,
+                    db_comment: None,
                 },
             ])),
             display: None,
@@ -4304,6 +4309,7 @@ mod tests {
                 generated_as: None,
                 help_text: None,
                 choices: None,
+                db_comment: None,
             }])),
             display: None,
             app_label: None,
@@ -4543,6 +4549,7 @@ mod tests {
                 generated_as: None,
                 help_text: None,
                 choices: None,
+                db_comment: None,
             }])),
             display: None,
             app_label: None,
@@ -4594,6 +4601,7 @@ mod tests {
                 generated_as: None,
                 help_text: None,
                 choices: None,
+                db_comment: None,
             }])),
             display: None,
             app_label: None,
@@ -5118,6 +5126,7 @@ mod tests {
                 generated_as: None,
                 help_text: None,
                 choices: None,
+                db_comment: None,
             })) as &'static crate::core::FieldSchema
         };
         assert!(matches!(

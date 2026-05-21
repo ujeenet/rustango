@@ -5147,6 +5147,12 @@ struct FieldAttrs {
     /// for `FieldType::String`; the macro errors at compile time if
     /// applied to a non-string field.
     choices: Option<Vec<(String, String)>>,
+    /// `#[rustango(db_comment = "…")]` — Django-shape DB-side column
+    /// comment. Threaded into `FieldSchema::db_comment`. MySQL inlines
+    /// the comment in CREATE TABLE; Postgres emits a separate
+    /// `COMMENT ON COLUMN` statement after the table is created;
+    /// SQLite silently drops the value (no native column comments).
+    db_comment: Option<String>,
 }
 
 fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
@@ -5172,6 +5178,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         generated_as: None,
         help_text: None,
         choices: None,
+        db_comment: None,
     };
     for attr in &field.attrs {
         if !attr.path().is_ident("rustango") {
@@ -5260,6 +5267,11 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                     ));
                 }
                 out.choices = Some(pairs);
+                return Ok(());
+            }
+            if meta.path.is_ident("db_comment") {
+                let s: LitStr = meta.value()?.parse()?;
+                out.db_comment = Some(s.value());
                 return Ok(());
             }
             if meta.path.is_ident("auto_uuid") {
@@ -5616,6 +5628,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let generated_as = optional_str(attrs.generated_as.as_deref());
     let help_text = optional_str(attrs.help_text.as_deref());
     let choices = optional_choices(attrs.choices.as_deref());
+    let db_comment = optional_str(attrs.db_comment.as_deref());
     let schema = quote! {
         ::rustango::core::FieldSchema {
             name: #name,
@@ -5633,6 +5646,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             generated_as: #generated_as,
             help_text: #help_text,
             choices: #choices,
+            db_comment: #db_comment,
         }
     };
 
