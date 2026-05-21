@@ -613,6 +613,14 @@ pub struct AdminConfig {
     /// client-side slug-population JS. Empty slice means no
     /// auto-population (today's default). Issue #356.
     pub prepopulated_fields: &'static [PrepopulatedField],
+    /// Django-shape `raw_id_fields` — names of FK fields whose
+    /// change-form widget renders a "magnifying-glass" lookup link
+    /// next to the input. Clicking the link navigates to the target
+    /// model's admin list view so the operator can find the right
+    /// PK without scrolling a `<select>` of every FK row. Empty
+    /// slice means no lookup link rendered (today's default).
+    /// Issue #357.
+    pub raw_id_fields: &'static [&'static str],
 }
 
 /// One `prepopulated_fields` derivation: `target ← source(s)`. The
@@ -660,6 +668,7 @@ impl AdminConfig {
         actions_on_bottom: false,
         date_hierarchy: "",
         prepopulated_fields: &[],
+        raw_id_fields: &[],
     };
 }
 

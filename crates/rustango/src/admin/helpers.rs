@@ -455,11 +455,31 @@ fn render_form_with_inlines_and_pickers(
         let lock_input = f.auto || (pk_locked && (f.primary_key || is_readonly_field));
         // #244 — swap raw integer input for a ContentType `<select>`
         // on fields named as a `generic_fk` ct_column.
-        let input_html = if gfk_ct_columns.contains(f.column) {
+        let mut input_html = if gfk_ct_columns.contains(f.column) {
             render::render_gfk_select(f, value, lock_input, gfk_picker_cts)
         } else {
             render::render_input(f, value, lock_input)
         };
+        // #357 — Django-shape `raw_id_fields`. When the field is an
+        // FK / O2O AND is named in `admin.raw_id_fields`, append a
+        // magnifying-glass lookup link that points at the target
+        // model's admin list view. Lets the operator find the right
+        // PK to type without scrolling through every option.
+        if admin_cfg.raw_id_fields.iter().any(|n| *n == f.name) {
+            if let Some(rel) = f.relation {
+                let target_table = match rel {
+                    crate::core::Relation::Fk { to, .. }
+                    | crate::core::Relation::O2O { to, .. } => to,
+                };
+                let lookup_url = format!("{}/{}", admin_prefix, render::escape(target_table));
+                use std::fmt::Write as _;
+                let _ = write!(
+                    input_html,
+                    r#" <a class="raw-id-lookup" href="{lookup_url}" target="_blank" rel="noopener" title="Look up {label}">🔍</a>"#,
+                    label = render::escape(f.display_label()),
+                );
+            }
+        }
         serde_json::json!({
             "label": f.display_label(),
             "extra": extra,
