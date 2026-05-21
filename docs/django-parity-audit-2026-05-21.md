@@ -221,7 +221,7 @@ Summary: **11 SHIPPED / 2 PARTIAL / 2 MISSING / 1 N/A**. Gaps: `sqlmigrate` raw-
 | `list_display` (method/computed fields) | same | MISSING | n/a (#348) | Backlog #51 — needs method-field hook + custom cell renderer. |
 | `list_display` (boolean checkbox icon) | same | SHIPPED | v0.37+ render in admin/render.rs | |
 | `list_display` (callable display_link) | same | MISSING | n/a (#349) | FK columns auto-link; method-field callables don't. |
-| `list_display_links` | [list_display_links](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#django.contrib.admin.ModelAdmin.list_display_links) | MISSING | n/a (#350) | First display field is always the link; not configurable. |
+| `list_display_links` | [list_display_links](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#django.contrib.admin.ModelAdmin.list_display_links) | SHIPPED | `admin(list_display_links = "title, views")` (#350, v0.42) — comma-separated names from `list_display`. Each matched cell wraps its inner HTML in `<a href="{admin_prefix}/{table}/{pk}">…</a>`. Empty whitelist keeps the trailing "View" column as the only link. | |
 | `list_filter` (FieldListFilter) | [list_filter](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#django.contrib.admin.ModelAdmin.list_filter) | SHIPPED | `#[rustango(admin(list_filter = "..."))]` | |
 | `list_filter` (SimpleListFilter — custom) | same | MISSING | n/a (#351) | Filter chips currently field-value-driven only. |
 | `list_per_page` | [list_per_page](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#django.contrib.admin.ModelAdmin.list_per_page) | SHIPPED | `#[rustango(admin(list_per_page = 50))]` | |

@@ -417,6 +417,29 @@ pub(crate) async fn table_view(
         })
         .collect();
 
+    // #350 — Django-shape `list_display_links` whitelist. When set,
+    // each item from `display_items` whose name appears in the
+    // whitelist has its rendered cell wrapped in an `<a href=…>`
+    // pointing at the detail view. When unset (the today's-default
+    // empty slice), no cells are wrapped — the trailing "View"
+    // column in the template stays the only link.
+    let link_columns: std::collections::HashSet<&str> =
+        admin_cfg.list_display_links.iter().copied().collect();
+    // Pre-resolve the per-DisplayItem "should I wrap this cell?"
+    // bit by name, in the same order as `display_items`, so the row
+    // loop doesn't redo the lookup per row.
+    let cell_is_link: Vec<bool> = display_items
+        .iter()
+        .map(|item| {
+            let name = match item {
+                DisplayItem::Field(f) => f.name,
+                DisplayItem::Computed(m) => m.name,
+                DisplayItem::GenericFk(gr) => gr.name,
+            };
+            link_columns.contains(name)
+        })
+        .collect();
+
     // Per-row payload. Computed-field cells are pre-escaped HTML
     // supplied by the user's closure; scalar cells go through the
     // standard `render_cell_json` path (FK link or escaped scalar).
@@ -427,16 +450,46 @@ pub(crate) async fn table_view(
     let rows_ctx: Vec<serde_json::Value> = rows
         .iter()
         .map(|row| {
+            let pk_raw = pk_field
+                .map(|pk| render::render_value_for_input_json(row, pk))
+                .unwrap_or_default();
+            let pk = if pk_raw.is_empty() {
+                None
+            } else {
+                Some(render::escape(&pk_raw))
+            };
+            // #350 — wrap matched cells in `<a>`. We can only build a
+            // valid detail URL when the row has a pk (the standard
+            // `model.table/<pk>` shape); rows without a pk just keep
+            // the plain cell content.
+            let detail_href = pk.as_deref().map(|pk_str| {
+                format!(
+                    "{prefix}/{table}/{pk_str}",
+                    prefix = state.config.admin_prefix,
+                    table = model.table,
+                )
+            });
             let cells: Vec<String> = display_items
                 .iter()
-                .map(|item| match item {
-                    DisplayItem::Field(f) => render_cell_json(row, f, &fk_map),
-                    DisplayItem::Computed(m) => (m.render)(row),
-                    DisplayItem::GenericFk(gr) => render_gfk_cell(row, gr, &gfk_ct_map),
+                .enumerate()
+                .map(|(idx, item)| {
+                    let inner = match item {
+                        DisplayItem::Field(f) => render_cell_json(row, f, &fk_map),
+                        DisplayItem::Computed(m) => (m.render)(row),
+                        DisplayItem::GenericFk(gr) => render_gfk_cell(row, gr, &gfk_ct_map),
+                    };
+                    match (
+                        cell_is_link.get(idx).copied().unwrap_or(false),
+                        &detail_href,
+                    ) {
+                        (true, Some(href)) => format!(
+                            "<a href=\"{href}\">{inner}</a>",
+                            href = render::escape(href),
+                        ),
+                        _ => inner,
+                    }
                 })
                 .collect();
-            let pk =
-                pk_field.map(|pk| render::escape(&render::render_value_for_input_json(row, pk)));
             serde_json::json!({ "cells": cells, "pk": pk })
         })
         .collect();

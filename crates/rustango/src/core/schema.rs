@@ -581,6 +581,13 @@ pub struct AdminConfig {
     /// block in the listed order. Empty slice means "one unnamed
     /// group with every visible field" (today's default).
     pub fieldsets: &'static [Fieldset],
+    /// Django-shape `list_display_links` — names from [`Self::list_display`]
+    /// whose rendered cells should link to the row's detail / edit view.
+    /// Empty slice means "the trailing 'View' column is the only link"
+    /// (today's behavior, kept for back-compat). When set, each named
+    /// column's cell wraps its inner HTML in an `<a href=…>` so operators
+    /// can click the title (or any other column) directly. Issue #350.
+    pub list_display_links: &'static [&'static str],
 }
 
 /// One group of fields on a create/edit form (slice 10.5).
@@ -608,6 +615,7 @@ impl AdminConfig {
         list_filter: &[],
         actions: &[],
         fieldsets: &[],
+        list_display_links: &[],
     };
 }
 
