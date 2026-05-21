@@ -159,7 +159,7 @@ Field options:
 | `blank=True` (form-level allow empty) | SHIPPED | `#[rustango(blank)]` (#445, v0.42) — admin form drops the `required` HTML attribute even on NOT NULL columns; distinct from `Option<T>` which controls SQL nullability | |
 | `default` | SHIPPED | `#[rustango(default = "expr")]` | |
 | `choices=[...]` | SHIPPED | `#[rustango(choices = "draft:Draft, published:Published")]` (#446, v0.42) — admin renders `<select>`, validator rejects off-choice values | |
-| `validators=[...]` | PARTIAL | Form-side: `validate_email`, `validate_url`, `validate_min_length`, file validators (#447) | Model-side validators on save MISSING. |
+| `validators=[...]` | SHIPPED | `#[rustango(validators = "email,url")]` (#447, v0.42) — comma-separated names dispatch to the `validators::*` family on every typed INSERT/UPDATE via `core::validate_value`. Supports email, url, slug, unicode_slug, phone_e164, hex_color, uuid, iso_date, iso_time, iso_datetime, ipv4, ipv6, no_null, email_list, integer. | |
 | `db_index=True` | SHIPPED | `#[rustango(index)]` (field-level) + container-level `index(...)` | |
 | `db_column` | SHIPPED | `#[rustango(db_column = "...")]` | |
 | `help_text` | SHIPPED | `#[rustango(help_text = "...")]` (v0.40) — admin renders below input | |
@@ -267,7 +267,7 @@ Summary: **18 SHIPPED / 7 PARTIAL / 11 MISSING / 2 N/A**. Concentration of MISSI
 | `ModelForm` | [ModelForm](https://docs.djangoproject.com/en/6.0/topics/forms/modelforms/) | PARTIAL | `forms::ModelForm` struct + `from_model_schema` runtime — works for admin path (#369) | No `#[derive(ModelForm)]` shortcut. Backlog. |
 | Form fields (CharField, IntegerField, etc.) | [Form fields](https://docs.djangoproject.com/en/6.0/ref/forms/fields/) | SHIPPED | Field attrs in `Form` derive | |
 | Widgets (Select, Textarea, RadioSelect, etc.) | [Widgets](https://docs.djangoproject.com/en/6.0/ref/forms/widgets/) | PARTIAL | Admin renders fixed HTML per FieldType; no widget swap (#370) | |
-| Per-field validators chain | [validators](https://docs.djangoproject.com/en/6.0/ref/validators/) | PARTIAL | `validators::{validate_email, validate_url, validate_min_length, file_type, file_size_max}` shipped (#371) | `validators=[...]` declarative-stack MISSING. |
+| Per-field validators chain | [validators](https://docs.djangoproject.com/en/6.0/ref/validators/) | SHIPPED | `#[rustango(validators = "email,url")]` (#447, v0.42) — declarative comma-separated chain dispatched in `core::validate_value` on every INSERT/UPDATE. Closes #371 alongside this PR. | |
 | `clean_<field>` per-field clean | [clean methods](https://docs.djangoproject.com/en/6.0/ref/forms/validation/) | MISSING | n/a (#372) | Macro doesn't emit per-field clean hooks. |
 | `clean()` cross-field validation | (above) | MISSING | n/a (#373) | Closes ORM-improvement backlog #9. |
 | `FormErrors` (multi-error) | [error handling](https://docs.djangoproject.com/en/6.0/ref/forms/validation/) | SHIPPED | `forms::FormErrors` collects all field+non-field errors | |

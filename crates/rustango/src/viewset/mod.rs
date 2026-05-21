@@ -1561,6 +1561,7 @@ mod lookup_tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            validators: &[],
         }
     }
 
@@ -1585,6 +1586,7 @@ mod lookup_tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            validators: &[],
         }
     }
 

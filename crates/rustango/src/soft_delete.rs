@@ -220,6 +220,7 @@ mod tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            validators: &[],
         },
         FieldSchema {
             name: "title",
@@ -241,6 +242,7 @@ mod tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            validators: &[],
         },
         FieldSchema {
             name: "deleted_at",
@@ -262,6 +264,7 @@ mod tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            validators: &[],
         },
     ];
 

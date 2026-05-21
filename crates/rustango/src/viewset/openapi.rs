@@ -308,6 +308,7 @@ mod tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            validators: &[],
         }
     }
 
@@ -332,6 +333,7 @@ mod tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            validators: &[],
         }
     }
 
@@ -356,6 +358,7 @@ mod tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            validators: &[],
         }
     }
 
@@ -381,6 +384,7 @@ mod tests {
                 verbose_name: None,
                 editable: true,
                 blank: false,
+                validators: &[],
             },
             FieldSchema {
                 name: "title",
@@ -402,6 +406,7 @@ mod tests {
                 verbose_name: None,
                 editable: true,
                 blank: false,
+                validators: &[],
             },
             FieldSchema {
                 name: "author_id",
@@ -423,6 +428,7 @@ mod tests {
                 verbose_name: None,
                 editable: true,
                 blank: false,
+                validators: &[],
             },
         ];
         // Suppress unused warnings on field helpers if we keep them.

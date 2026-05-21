@@ -104,6 +104,17 @@ pub struct FieldSchema {
     /// `nullable=false, blank=true` to require *some* value in DB
     /// but accept `""` from the form.
     pub blank: bool,
+    /// Django-shape `validators=[...]` — names of value-shape validators
+    /// to run on every INSERT/UPDATE through the typed query layer. Set
+    /// via `#[rustango(validators = "email,url")]` (comma-separated).
+    /// Names dispatch to the `validators::*` family
+    /// ([`crate::validators::validate_email`], `validate_url`,
+    /// `validate_slug`, `validate_unicode_slug`, `validate_phone_e164`,
+    /// `validate_hex_color`, `validate_uuid`, `validate_iso_date`,
+    /// `validate_iso_time`, `validate_iso_datetime`, `validate_ipv4`,
+    /// `validate_ipv6`, `validate_no_null`). Unknown names error at
+    /// runtime via [`crate::core::QueryError::UnknownValidator`].
+    pub validators: &'static [&'static str],
 }
 
 impl FieldSchema {
