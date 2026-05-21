@@ -5139,6 +5139,14 @@ struct FieldAttrs {
     /// `FieldSchema::help_text` so admin / serializer / OpenAPI
     /// layers can read it.
     help_text: Option<String>,
+    /// `#[rustango(choices = "value:Label, value:Label")]` — Django-shape
+    /// enumerated allowed values. Threaded into `FieldSchema::choices`
+    /// as a `&'static [(&'static str, &'static str)]` slice. When
+    /// present, the admin form renders a `<select>` instead of `<input>`
+    /// and the validator rejects values not in the list. Only meaningful
+    /// for `FieldType::String`; the macro errors at compile time if
+    /// applied to a non-string field.
+    choices: Option<Vec<(String, String)>>,
 }
 
 fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
@@ -5163,6 +5171,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         index_method: "btree".to_owned(),
         generated_as: None,
         help_text: None,
+        choices: None,
     };
     for attr in &field.attrs {
         if !attr.path().is_ident("rustango") {
@@ -5221,6 +5230,36 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
             if meta.path.is_ident("help_text") {
                 let s: LitStr = meta.value()?.parse()?;
                 out.help_text = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("choices") {
+                let s: LitStr = meta.value()?.parse()?;
+                let raw = s.value();
+                let mut pairs: Vec<(String, String)> = Vec::new();
+                for chunk in raw.split(',') {
+                    let chunk = chunk.trim();
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    let (value, label) = match chunk.split_once(':') {
+                        Some((v, l)) => (v.trim().to_owned(), l.trim().to_owned()),
+                        None => (chunk.to_owned(), chunk.to_owned()),
+                    };
+                    if value.is_empty() {
+                        return Err(syn::Error::new(
+                            s.span(),
+                            "`choices` entry has empty value before `:`",
+                        ));
+                    }
+                    pairs.push((value, label));
+                }
+                if pairs.is_empty() {
+                    return Err(syn::Error::new(
+                        s.span(),
+                        "`choices = \"…\"` must contain at least one value",
+                    ));
+                }
+                out.choices = Some(pairs);
                 return Ok(());
             }
             if meta.path.is_ident("auto_uuid") {
@@ -5576,6 +5615,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let unique = attrs.unique;
     let generated_as = optional_str(attrs.generated_as.as_deref());
     let help_text = optional_str(attrs.help_text.as_deref());
+    let choices = optional_choices(attrs.choices.as_deref());
     let schema = quote! {
         ::rustango::core::FieldSchema {
             name: #name,
@@ -5592,6 +5632,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             unique: #unique,
             generated_as: #generated_as,
             help_text: #help_text,
+            choices: #choices,
         }
     };
 
@@ -5636,6 +5677,14 @@ fn check_bound_compatibility(
             "`max_length` is only valid on `String` fields (or `Option<String>`)",
         ));
     }
+    if attrs.choices.is_some() && kind != DetectedKind::String {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`choices` is only valid on `String` fields (or `Option<String>`) — \
+             integer-valued enumerations should be modeled with a Rust enum and \
+             custom (de)serializer for now",
+        ));
+    }
     if (attrs.min.is_some() || attrs.max.is_some()) && !kind.is_integer() {
         return Err(syn::Error::new_spanned(
             field,
@@ -5675,6 +5724,14 @@ fn optional_str(value: Option<&str>) -> TokenStream2 {
     } else {
         quote!(::core::option::Option::None)
     }
+}
+
+fn optional_choices(pairs: Option<&[(String, String)]>) -> TokenStream2 {
+    let Some(pairs) = pairs else {
+        return quote!(::core::option::Option::None);
+    };
+    let entries = pairs.iter().map(|(v, l)| quote!((#v, #l)));
+    quote!(::core::option::Option::Some(&[#(#entries),*]))
 }
 
 fn relation_tokens(

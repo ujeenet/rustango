@@ -180,6 +180,28 @@ pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) ->
     // `#[rustango(admin(...))]`.
     let readonly = if pk_locked { " readonly" } else { "" };
 
+    // `#[rustango(choices = "...")]` renders as a `<select>` regardless of
+    // FieldType. The option values are emitted as-is and the admin form
+    // parser already accepts the string back through the field's column.
+    if let Some(choices) = field.choices {
+        let disabled = if pk_locked { " disabled" } else { "" };
+        let mut out = format!(r#"<select name="{name}" id="{name}"{required}{disabled}>"#);
+        if field.nullable {
+            out.push_str(r#"<option value=""></option>"#);
+        }
+        for (v, label) in choices {
+            let v_esc = escape(v);
+            let label_esc = escape(label);
+            let selected = if value == *v { " selected" } else { "" };
+            let _ = write!(
+                out,
+                r#"<option value="{v_esc}"{selected}>{label_esc}</option>"#
+            );
+        }
+        out.push_str("</select>");
+        return out;
+    }
+
     match field.ty {
         FieldType::Bool => {
             let checked = if value == "true" { " checked" } else { "" };
@@ -496,6 +518,7 @@ mod tests {
             relation: None,
             generated_as: None,
             help_text: None,
+            choices: None,
         }
     }
 
@@ -593,5 +616,56 @@ mod tests {
         let f = field("count", "count", FieldType::I64);
         let v = read_value_as_json_from_json(&row, &f);
         assert_eq!(v, json!(7));
+    }
+
+    /// `#[rustango(choices = "...")]` swaps the rendered `<input>` for a
+    /// `<select>` populated with the declared options, with the current
+    /// value pre-selected. NULL columns get a blank leading option so
+    /// the user can clear the field; NOT NULL columns omit it.
+    #[test]
+    fn render_input_emits_select_when_choices_present() {
+        let mut f = field("status", "status", FieldType::String);
+        f.choices = Some(&[("draft", "Draft"), ("published", "Published")]);
+        f.nullable = false;
+
+        let html = render_input(&f, "published", false);
+        assert!(
+            html.starts_with("<select "),
+            "expected <select>, got: {html}"
+        );
+        assert!(html.contains(r#"<option value="draft">Draft</option>"#));
+        assert!(html.contains(r#"<option value="published" selected>Published</option>"#));
+        assert!(
+            !html.contains(r#"<option value="">"#),
+            "NOT NULL field should not have empty option, got: {html}"
+        );
+        assert!(html.contains(" required"));
+    }
+
+    #[test]
+    fn render_input_choices_include_blank_option_when_nullable() {
+        let mut f = field("status", "status", FieldType::String);
+        f.choices = Some(&[("a", "Alpha"), ("b", "Beta")]);
+        f.nullable = true;
+
+        let html = render_input(&f, "", false);
+        assert!(html.contains(r#"<option value=""></option>"#));
+        // No selection ⇒ no "selected" attribute on any option
+        assert!(!html.contains("selected"));
+        // Nullable ⇒ no `required` attribute
+        assert!(!html.contains(" required"));
+    }
+
+    #[test]
+    fn render_input_choices_escape_html() {
+        let mut f = field("status", "status", FieldType::String);
+        f.choices = Some(&[(r#"<a>"#, r#"<b>"#)]);
+        f.nullable = false;
+
+        let html = render_input(&f, "<a>", false);
+        assert!(html.contains("&lt;a&gt;"));
+        assert!(html.contains("&lt;b&gt;"));
+        assert!(!html.contains("<a>"));
+        assert!(!html.contains("<b>"));
     }
 }

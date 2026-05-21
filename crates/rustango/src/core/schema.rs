@@ -57,6 +57,15 @@ pub struct FieldSchema {
     /// (DRF serializer schemas, OpenAPI descriptions, ModelForm
     /// `<label>` annotations) can read the same string.
     pub help_text: Option<&'static str>,
+    /// Django-shape `choices=[(value, label), ...]` — enumerated
+    /// allowed values for a string field. Set via
+    /// `#[rustango(choices = "draft:Draft, published:Published")]`
+    /// (each pair is `value:label`, separated by commas; if no
+    /// `:` is present the value is reused as the label). When
+    /// `Some`, the admin renders a `<select>` instead of `<input>`,
+    /// and `validate_value` rejects values not in the list. Only
+    /// meaningful for `FieldType::String`.
+    pub choices: Option<&'static [(&'static str, &'static str)]>,
 }
 
 /// Static description of a relation to another model.
