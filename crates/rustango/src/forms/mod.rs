@@ -151,12 +151,6 @@ pub trait Form: Sized {
     fn parse(data: &HashMap<String, String>) -> Result<Self, FormErrors>;
 }
 
-/// Backwards-compatible alias — prefer [`Form`].
-#[deprecated(since = "0.16.0", note = "use `Form` and `FormErrors` instead")]
-pub trait FormStruct: Sized {
-    fn parse(form: &HashMap<String, String>) -> Result<Self, FormError>;
-}
-
 // ------------------------------------------------------------------ FormError (legacy single-error)
 
 /// Single-field error type used by the low-level parsers and the admin.

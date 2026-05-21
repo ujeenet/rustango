@@ -254,46 +254,6 @@ pub(crate) fn build_fk_joins(state: &AppState, model: &'static ModelSchema) -> V
     joins
 }
 
-/// Walk a row set produced with `joins` set, and for each row build the
-/// `(target_table, source_value_string) → display_html` map entry. Rows
-/// where the joined display value is `NULL` (LEFT JOIN miss — target row
-/// not present) are skipped, so `render_cell` falls back to the raw value.
-///
-/// v0.37 — PG-typed back-compat; admin internals call
-/// [`fk_map_from_joined_rows_json`] which works on any backend.
-#[cfg(feature = "postgres")]
-#[allow(dead_code)] // back-compat surface; live callers go through the `_json` variant.
-pub(crate) fn fk_map_from_joined_rows(
-    state: &AppState,
-    model: &'static ModelSchema,
-    rows: &[sqlx::postgres::PgRow],
-) -> FkMap {
-    let mut map: FkMap = HashMap::new();
-    for field in model.scalar_fields() {
-        let Some(rel) = field.relation else { continue };
-        let to = match rel {
-            Relation::Fk { to, .. } | Relation::O2O { to, .. } => to,
-        };
-        let Some(target) = lookup_model(state, to) else {
-            continue;
-        };
-        let Some(display_field) = target.display_field() else {
-            continue;
-        };
-        for row in rows {
-            let Some(source) = render::read_value_as_string(row, field) else {
-                continue;
-            };
-            let Some(display) = render::read_joined_value_as_html(row, field.name, display_field)
-            else {
-                continue;
-            };
-            map.insert((to.to_owned(), source), display);
-        }
-    }
-    map
-}
-
 /// Build a `&q=…&<field>=<v>…` tail for prev/next pager URLs so the
 /// active search and filters survive page navigation. Each value is
 /// percent-encoded via a tiny ASCII-safe escaper good enough for the
@@ -329,40 +289,12 @@ fn url_encode(s: &str) -> String {
     out
 }
 
-/// Render one cell. For FK columns this resolves to a link into the target
-/// table; everything else delegates to [`render::render_value`].
-///
-/// v0.37 — PG-typed back-compat; admin internals call
-/// [`render_cell_json`] which works on any backend.
-#[cfg(feature = "postgres")]
-#[allow(dead_code)] // back-compat surface; live callers go through the `_json` variant.
-pub(crate) fn render_cell(
-    row: &sqlx::postgres::PgRow,
-    field: &FieldSchema,
-    fk_map: &FkMap,
-) -> String {
-    if let Some(rel) = field.relation {
-        let to = match rel {
-            Relation::Fk { to, .. } | Relation::O2O { to, .. } => to,
-        };
-        let Some(raw_value) = render::read_value_as_string(row, field) else {
-            return "<em>NULL</em>".to_owned();
-        };
-        let raw_esc = render::escape(&raw_value);
-        let to_esc = render::escape(to);
-        return match fk_map.get(&(to.to_owned(), raw_value)) {
-            Some(display) => format!(r#"<a href="/{to_esc}/{raw_esc}">{display}</a>"#),
-            // Target hidden by show_only or row genuinely missing — show raw.
-            None => raw_esc,
-        };
-    }
-    render::render_value(row, field)
-}
-
-/// v0.37 — JSON-bridge counterpart of [`fk_map_from_joined_rows`]. Walks a
-/// `Vec<serde_json::Value>` (one row per Value) instead of `Vec<PgRow>`,
-/// using the dialect-agnostic `*_json` reader companions. Same output
-/// shape: `(target_table, source_value_string) → display_html`.
+/// Walk a row set produced with `joins` set, and for each row build the
+/// `(target_table, source_value_string) → display_html` map entry. Tri-
+/// dialect: takes a `Vec<serde_json::Value>` (one row per Value), uses
+/// the dialect-agnostic `*_json` reader companions. Rows where the
+/// joined display value is `NULL` (LEFT JOIN miss) are skipped so the
+/// cell renderer falls back to the raw value.
 pub(crate) fn fk_map_from_joined_rows_json(
     state: &AppState,
     model: &'static ModelSchema,

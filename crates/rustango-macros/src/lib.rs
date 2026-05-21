@@ -63,8 +63,8 @@ pub fn derive_viewset(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Derive `rustango::forms::FormStruct` (slice 8.4B). Generates a
-/// `parse(&HashMap<String, String>) -> Result<Self, FormError>` impl
+/// Derive `rustango::forms::Form` (slice 8.4B). Generates a
+/// `parse(&HashMap<String, String>) -> Result<Self, FormErrors>` impl
 /// that walks every named field and:
 ///
 /// * Parses the string value into the field's Rust type (`String`,
@@ -5390,11 +5390,6 @@ struct FieldInfo<'a> {
     /// every INSERT and UPDATE path; the database recomputes the
     /// value from `EXPR`. Backlog item #35.
     generated_as: Option<String>,
-    /// `Some` when this field carried `#[rustango(help_text = "…")]`.
-    /// Threaded into the generated `FieldSchema::help_text` so the
-    /// admin form (and any future surface — DRF / OpenAPI) can render
-    /// the caption below the input.
-    help_text: Option<String>,
 }
 
 /// Reject table names that won't survive SQL identifier
@@ -5627,7 +5622,6 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         auto_now_add: attrs.auto_now_add,
         soft_delete: attrs.soft_delete,
         generated_as: attrs.generated_as.clone(),
-        help_text: attrs.help_text.clone(),
     })
 }
 
