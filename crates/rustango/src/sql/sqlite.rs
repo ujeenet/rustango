@@ -653,6 +653,8 @@ mod tests {
             scope: ModelScope::Tenant,
             default_order: &[],
             is_view: false,
+            verbose_name: None,
+            verbose_name_plural: None,
         };
         let q = SelectQuery {
             model: &MODEL,

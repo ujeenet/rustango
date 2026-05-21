@@ -1,13 +1,13 @@
 {% extends "base.html" %}
-{% block title %}{{ model.name }} — rustango admin{% endblock title %}
+{% block title %}{{ model.label_plural | default(value=model.name) }} — rustango admin{% endblock title %}
 {% block body %}
 <nav class="breadcrumb" aria-label="breadcrumb">
   <ol>
     <li><a href="{{ admin_prefix }}/">{{ admin_title }}</a></li>
-    <li><strong>{{ model.name }}</strong></li>
+    <li><strong>{{ model.label_plural | default(value=model.name) }}</strong></li>
   </ol>
 </nav>
-<h1>{{ model.name }}</h1>
+<h1>{{ model.label_plural | default(value=model.name) }}</h1>
 <div class="list-shell">
 <div class="list-main">
 <p>Table: <code>{{ model.table }}</code>
@@ -19,7 +19,7 @@
 {% if read_only %}
   &nbsp;&middot;&nbsp; <em>read-only</em>
 {% else %}
-  &nbsp;&middot;&nbsp; <a href="{{ admin_prefix }}/{{ model.table }}/new">+ new {{ model.name }}</a>
+  &nbsp;&middot;&nbsp; <a href="{{ admin_prefix }}/{{ model.table }}/new">+ new {{ model.label | default(value=model.name) }}</a>
 {% endif %}
 </p>
 

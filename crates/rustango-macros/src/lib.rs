@@ -802,6 +802,8 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         &container.generic_fks,
         container.scope.as_deref(),
         container.is_view,
+        container.verbose_name.as_deref(),
+        container.verbose_name_plural.as_deref(),
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -1686,6 +1688,8 @@ fn model_impl_tokens(
     generic_fks: &[GenericFkAttr],
     scope: Option<&str>,
     is_view: bool,
+    verbose_name: Option<&str>,
+    verbose_name_plural: Option<&str>,
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
@@ -1717,6 +1721,8 @@ fn model_impl_tokens(
         Some("registry") => quote!(::rustango::core::ModelScope::Registry),
         _ => quote!(::rustango::core::ModelScope::Tenant),
     };
+    let verbose_name_tokens = optional_str(verbose_name);
+    let verbose_name_plural_tokens = optional_str(verbose_name_plural);
     let indexes_tokens = indexes.iter().map(|idx| {
         let name = idx.name.as_deref().unwrap_or("unnamed_index");
         let cols: Vec<&str> = idx.columns.iter().map(String::as_str).collect();
@@ -1826,6 +1832,8 @@ fn model_impl_tokens(
                 scope: #scope_tokens,
                 default_order: &[ #(#default_order_tokens),* ],
                 is_view: #is_view,
+                verbose_name: #verbose_name_tokens,
+                verbose_name_plural: #verbose_name_plural_tokens,
             };
         }
     }
@@ -4304,6 +4312,16 @@ struct ContainerAttrs {
     /// snapshot skips this model (its underlying SQL view is operator-
     /// managed, not rustango-managed).
     is_view: bool,
+    /// `#[rustango(verbose_name = "blog post")]` — Django-shape
+    /// human-readable singular label for the model. Threaded into
+    /// `ModelSchema::verbose_name` so admin section headers /
+    /// breadcrumbs / "Add X" buttons can prefer the friendly caption
+    /// over the Rust struct identifier.
+    verbose_name: Option<String>,
+    /// `#[rustango(verbose_name_plural = "blog posts")]` — explicit
+    /// plural form. Threaded into `ModelSchema::verbose_name_plural`.
+    /// When unset, `display_label_plural()` auto-suffixes `s`.
+    verbose_name_plural: Option<String>,
 }
 
 /// Parsed form of one index declaration (field-level or container-level).
@@ -4435,6 +4453,8 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         manager_fns: Vec::new(),
         default_order: Vec::new(),
         is_view: false,
+        verbose_name: None,
+        verbose_name_plural: None,
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -4677,6 +4697,16 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 } else {
                     out.is_view = true;
                 }
+                return Ok(());
+            }
+            if meta.path.is_ident("verbose_name") {
+                let s: LitStr = meta.value()?.parse()?;
+                out.verbose_name = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("verbose_name_plural") {
+                let s: LitStr = meta.value()?.parse()?;
+                out.verbose_name_plural = Some(s.value());
                 return Ok(());
             }
             if meta.path.is_ident("unique_together") {

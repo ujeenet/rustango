@@ -478,7 +478,16 @@ pub(crate) async fn table_view(
         .collect();
 
     let mut ctx = serde_json::json!({
-        "model": { "name": model.name, "table": model.table },
+        "model": {
+            "name": model.name,
+            "table": model.table,
+            // #320 — friendly caption + plural form when set via
+            // `#[rustango(verbose_name = "…", verbose_name_plural = "…")]`.
+            // Templates prefer these for headings / breadcrumbs and
+            // fall back to `name` for routing.
+            "label": model.display_label(),
+            "label_plural": model.display_label_plural(),
+        },
         "total": total,
         "plural": if total == 1 { "" } else { "s" },
         "read_only": read_only,
@@ -1083,7 +1092,16 @@ pub(crate) async fn detail_view(
     let user_roles_ctx: Option<serde_json::Value> = None;
 
     let mut ctx = serde_json::json!({
-        "model": { "name": model.name, "table": model.table },
+        "model": {
+            "name": model.name,
+            "table": model.table,
+            // #320 — friendly caption + plural form when set via
+            // `#[rustango(verbose_name = "…", verbose_name_plural = "…")]`.
+            // Templates prefer these for headings / breadcrumbs and
+            // fall back to `name` for routing.
+            "label": model.display_label(),
+            "label_plural": model.display_label_plural(),
+        },
         "pk": pk_raw,
         "cells": cells_ctx,
         "read_only": state.is_read_only(model.table),
