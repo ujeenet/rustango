@@ -5153,6 +5153,12 @@ struct FieldAttrs {
     /// `COMMENT ON COLUMN` statement after the table is created;
     /// SQLite silently drops the value (no native column comments).
     db_comment: Option<String>,
+    /// `#[rustango(verbose_name = "…")]` — Django-shape human-readable
+    /// label for the field. Threaded into `FieldSchema::verbose_name`
+    /// so admin column headers, form labels, and other display
+    /// surfaces can prefer the friendly caption over the Rust
+    /// identifier. `None` means renderers fall back to the field name.
+    verbose_name: Option<String>,
 }
 
 fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
@@ -5179,6 +5185,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         help_text: None,
         choices: None,
         db_comment: None,
+        verbose_name: None,
     };
     for attr in &field.attrs {
         if !attr.path().is_ident("rustango") {
@@ -5272,6 +5279,11 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
             if meta.path.is_ident("db_comment") {
                 let s: LitStr = meta.value()?.parse()?;
                 out.db_comment = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("verbose_name") {
+                let s: LitStr = meta.value()?.parse()?;
+                out.verbose_name = Some(s.value());
                 return Ok(());
             }
             if meta.path.is_ident("auto_uuid") {
@@ -5629,6 +5641,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let help_text = optional_str(attrs.help_text.as_deref());
     let choices = optional_choices(attrs.choices.as_deref());
     let db_comment = optional_str(attrs.db_comment.as_deref());
+    let verbose_name = optional_str(attrs.verbose_name.as_deref());
     let schema = quote! {
         ::rustango::core::FieldSchema {
             name: #name,
@@ -5647,6 +5660,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             help_text: #help_text,
             choices: #choices,
             db_comment: #db_comment,
+            verbose_name: #verbose_name,
         }
     };
 

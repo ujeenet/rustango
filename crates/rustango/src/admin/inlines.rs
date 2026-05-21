@@ -385,7 +385,7 @@ pub async fn render_for_parent(
                             .cloned()
                             .unwrap_or(serde_json::Value::Null);
                         serde_json::json!({
-                            "label": f.name,
+                            "label": f.display_label(),
                             "value": render_cell_text(&raw),
                         })
                     })
@@ -534,7 +534,7 @@ pub async fn render_generic_for_parent(
                             .cloned()
                             .unwrap_or(serde_json::Value::Null);
                         serde_json::json!({
-                            "label": f.name,
+                            "label": f.display_label(),
                             "value": render_cell_text(&raw),
                         })
                     })
@@ -795,7 +795,7 @@ pub async fn render_form_for_parent(
                         .unwrap_or_default();
                     let input_html = render_prefixed_input(f, &raw_str, &prefix, idx, false);
                     serde_json::json!({
-                        "label": f.name,
+                        "label": f.display_label(),
                         "input_html": input_html,
                     })
                 })
@@ -830,7 +830,7 @@ pub async fn render_form_for_parent(
                 .map(|f| {
                     let input_html = render_prefixed_input(f, "", &prefix, idx, false);
                     serde_json::json!({
-                        "label": f.name,
+                        "label": f.display_label(),
                         "input_html": input_html,
                     })
                 })
@@ -1263,7 +1263,7 @@ pub async fn render_form_generic_for_parent(
                         .unwrap_or_default();
                     let input_html = render_prefixed_input(f, &raw_str, &prefix, idx, false);
                     serde_json::json!({
-                        "label": f.name,
+                        "label": f.display_label(),
                         "input_html": input_html,
                     })
                 })
@@ -1294,7 +1294,7 @@ pub async fn render_form_generic_for_parent(
                 .map(|f| {
                     let input_html = render_prefixed_input(f, "", &prefix, idx, false);
                     serde_json::json!({
-                        "label": f.name,
+                        "label": f.display_label(),
                         "input_html": input_html,
                     })
                 })

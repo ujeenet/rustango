@@ -163,7 +163,7 @@ Field options:
 | `db_index=True` | SHIPPED | `#[rustango(index)]` (field-level) + container-level `index(...)` | |
 | `db_column` | SHIPPED | `#[rustango(db_column = "...")]` | |
 | `help_text` | SHIPPED | `#[rustango(help_text = "...")]` (v0.40) — admin renders below input | |
-| `verbose_name` | MISSING | n/a (#448) | Admin column headers use field name as-is. |
+| `verbose_name` | SHIPPED | `#[rustango(verbose_name = "Display title")]` (#448, v0.42) — admin column headers + form labels render via `FieldSchema::display_label()` | |
 | `primary_key=True` | SHIPPED | `#[rustango(primary_key)]` | |
 | `unique=True` | SHIPPED | `#[rustango(unique)]` | |
 | `editable=False` | MISSING | n/a (#449) | Use `#[rustango(readonly)]` admin attribute instead. |

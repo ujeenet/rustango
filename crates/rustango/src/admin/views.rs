@@ -399,10 +399,13 @@ pub(crate) async fn table_view(
         .map(|item| {
             let label = match item {
                 DisplayItem::Field(f) => {
+                    // #448 — `#[rustango(verbose_name = "...")]` overrides
+                    // the Rust identifier on admin list column headers.
+                    let caption = f.display_label();
                     if f.primary_key {
-                        format!("{} <small>(pk)</small>", render::escape(f.name))
+                        format!("{} <small>(pk)</small>", render::escape(caption))
                     } else {
-                        render::escape(f.name)
+                        render::escape(caption)
                     }
                 }
                 DisplayItem::Computed(m) => {
@@ -971,7 +974,7 @@ pub(crate) async fn detail_view(
         .scalar_fields()
         .map(|f| {
             serde_json::json!({
-                "label": f.name,
+                "label": f.display_label(),
                 "value": render_cell_json(&row, f, &fk_map),
             })
         })
