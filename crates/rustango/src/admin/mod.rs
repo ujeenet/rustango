@@ -42,6 +42,7 @@
 mod audit;
 mod auth;
 pub mod computed_fields;
+mod date_hierarchy;
 mod errors;
 mod forms;
 mod helpers;

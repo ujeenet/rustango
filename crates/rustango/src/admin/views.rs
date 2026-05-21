@@ -139,7 +139,16 @@ pub(crate) async fn index(State(state): State<AppState>) -> Html<String> {
 const DEFAULT_PAGE_SIZE: i64 = 50;
 
 /// Reserved query parameters; everything else is treated as a per-field filter.
-const RESERVED_PARAMS: &[&str] = &["page", "q", "facet_show_all", "count"];
+const RESERVED_PARAMS: &[&str] = &[
+    "page",
+    "q",
+    "facet_show_all",
+    "count",
+    // Consumed by the date-hierarchy strip (issue #355).
+    "year",
+    "month",
+    "day",
+];
 
 /// Default cap on how many values a single facet shows. v0.13.1 —
 /// keeps the right rail compact on high-cardinality columns. The
@@ -200,6 +209,19 @@ pub(crate) async fn table_view(
             value: v,
         });
         active_field_filters.push((field.name, value.clone()));
+    }
+
+    // #355 — date-hierarchy. When the model declares
+    // `admin(date_hierarchy = "field")` and the URL carries `?year[&month[&day]]`,
+    // inject the half-open `[lo, hi)` range predicates onto the same
+    // filter list and remember the selection for strip rendering.
+    let date_sel = crate::admin::date_hierarchy::DateSelection::parse(&params);
+    if !admin_cfg.date_hierarchy.is_empty() {
+        filters.extend(crate::admin::date_hierarchy::predicates(
+            model,
+            admin_cfg.date_hierarchy,
+            date_sel,
+        ));
     }
 
     // Build the search clause. If `admin.search_fields` is set, that's
@@ -516,6 +538,24 @@ pub(crate) async fn table_view(
     )
     .await?;
 
+    // #355 — date-hierarchy strip. Skipped when `admin.date_hierarchy`
+    // is empty. Otherwise builds the breadcrumb + child bucket list at
+    // the current drill level (year / month / day) by issuing one
+    // tri-dialect GROUP BY query, with the parent-level WHERE applied.
+    let date_hierarchy_ctx: Option<serde_json::Value> = if admin_cfg.date_hierarchy.is_empty() {
+        None
+    } else {
+        compute_date_hierarchy(
+            &state,
+            model,
+            &admin_cfg,
+            date_sel,
+            q.as_deref(),
+            &active_field_filters,
+        )
+        .await?
+    };
+
     // Action menu items (slice 10.6). Empty when the model declares
     // no `admin.actions`, hiding the picker entirely.
     let actions_ctx: Vec<serde_json::Value> = admin_cfg
@@ -555,6 +595,7 @@ pub(crate) async fn table_view(
         "q": q.unwrap_or_default(),
         "active_filters": active_filters_ctx,
         "facets": facets_ctx,
+        "date_hierarchy": date_hierarchy_ctx,
         "actions": actions_ctx,
         "columns": columns_ctx,
         "rows": rows_ctx,
@@ -919,6 +960,301 @@ fn stringify_facet_value_sqlite(row: &sqlx::sqlite::SqliteRow) -> String {
         return b.to_string();
     }
     String::new()
+}
+
+// ============================================================== DATE HIERARCHY
+//
+// #355 — Django-shape `date_hierarchy`. Computes the breadcrumb + drill
+// children for the admin list view's clickable year/month/day strip.
+//
+// The query is one tri-dialect GROUP BY against the model's table,
+// narrowed by the parent-level WHERE so deeper drill levels only see
+// the slice they're scoped to. Dialect routing:
+//
+// - PG / MySQL: `EXTRACT({YEAR|MONTH|DAY} FROM <col>)`
+// - SQLite:     `CAST(strftime('%Y'|'%m'|'%d', <col>) AS INTEGER)`
+async fn compute_date_hierarchy(
+    state: &AppState,
+    model: &'static crate::core::ModelSchema,
+    admin_cfg: &crate::core::AdminConfig,
+    sel: crate::admin::date_hierarchy::DateSelection,
+    q: Option<&str>,
+    active_field_filters: &[(&'static str, String)],
+) -> Result<Option<serde_json::Value>, AdminError> {
+    use crate::admin::date_hierarchy::{range, DrillLevel};
+
+    let field_name = admin_cfg.date_hierarchy;
+    let Some(field) = model.field(field_name) else {
+        return Ok(None);
+    };
+    if !matches!(
+        field.ty,
+        crate::core::FieldType::Date | crate::core::FieldType::DateTime
+    ) {
+        return Ok(None);
+    }
+
+    // ---------- Breadcrumb -------------------------------------------------
+    let admin_prefix = state.config.admin_prefix.as_str();
+    let preserved: Vec<(String, String)> = {
+        let mut out = Vec::new();
+        if let Some(qv) = q {
+            out.push(("q".into(), qv.into()));
+        }
+        for (k, v) in active_field_filters {
+            out.push(((*k).into(), v.clone()));
+        }
+        out
+    };
+
+    let url_for = |year: Option<i32>, month: Option<u32>, day: Option<u32>| -> String {
+        let mut params = preserved.clone();
+        if let Some(y) = year {
+            params.push(("year".into(), y.to_string()));
+            if let Some(m) = month {
+                params.push(("month".into(), m.to_string()));
+                if let Some(d) = day {
+                    params.push(("day".into(), d.to_string()));
+                }
+            }
+        }
+        build_query_url(admin_prefix, model.table, &params)
+    };
+
+    const MONTH_NAMES: &[&str] = &[
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+
+    let mut crumbs: Vec<serde_json::Value> = vec![serde_json::json!({
+        "label": "All",
+        "url": url_for(None, None, None),
+        "active": sel.year.is_none(),
+    })];
+    if let Some(y) = sel.year {
+        crumbs.push(serde_json::json!({
+            "label": y.to_string(),
+            "url": url_for(Some(y), None, None),
+            "active": sel.month.is_none(),
+        }));
+    }
+    if let (Some(y), Some(m)) = (sel.year, sel.month) {
+        crumbs.push(serde_json::json!({
+            "label": MONTH_NAMES.get((m as usize).saturating_sub(1)).copied().unwrap_or(""),
+            "url": url_for(Some(y), Some(m), None),
+            "active": sel.day.is_none(),
+        }));
+    }
+    if let (Some(y), Some(m), Some(d)) = (sel.year, sel.month, sel.day) {
+        crumbs.push(serde_json::json!({
+            "label": d.to_string(),
+            "url": url_for(Some(y), Some(m), Some(d)),
+            "active": true,
+        }));
+    }
+
+    // ---------- Children ---------------------------------------------------
+    let Some(level) = DrillLevel::for_selection(sel) else {
+        return Ok(Some(serde_json::json!({
+            "field": field_name,
+            "crumbs": crumbs,
+            "buckets": Vec::<serde_json::Value>::new(),
+        })));
+    };
+
+    let dialect = state.pool.dialect();
+    let table_q = dialect.quote_ident(model.table);
+    let col_q = format!("{}.{}", table_q, dialect.quote_ident(field.column));
+    let bucket_expr = level.bucket_expr(dialect, &col_q);
+    let where_sql = if range(sel).is_some() {
+        // Bind via positional placeholders so dialect quoting + escape
+        // are handled by sqlx rather than string-formatted in.
+        let p1 = dialect.placeholder(1);
+        let p2 = dialect.placeholder(2);
+        format!("WHERE {col_q} >= {p1} AND {col_q} < {p2}")
+    } else {
+        String::new()
+    };
+    let order_dir = match level {
+        DrillLevel::Year => "DESC", // newest year first
+        _ => "ASC",
+    };
+    let sql = format!(
+        "SELECT {bucket_expr} AS bucket, COUNT(*) AS bucket_count \
+         FROM {table_q} {where_sql} \
+         GROUP BY bucket \
+         ORDER BY bucket {order_dir}"
+    );
+
+    let buckets_raw =
+        fetch_date_hierarchy_buckets(&state.pool, &sql, range(sel), &field.ty).await?;
+
+    let buckets_ctx: Vec<serde_json::Value> = buckets_raw
+        .into_iter()
+        .filter_map(|(bucket, count)| {
+            let label;
+            let next_year;
+            let next_month;
+            let next_day;
+            match level {
+                DrillLevel::Year => {
+                    label = bucket.to_string();
+                    next_year = Some(bucket);
+                    next_month = None;
+                    next_day = None;
+                }
+                DrillLevel::Month => {
+                    if !(1..=12).contains(&bucket) {
+                        return None;
+                    }
+                    label = MONTH_NAMES
+                        .get((bucket as usize).saturating_sub(1))
+                        .copied()
+                        .unwrap_or("")
+                        .to_owned();
+                    next_year = sel.year;
+                    next_month = Some(bucket as u32);
+                    next_day = None;
+                }
+                DrillLevel::Day => {
+                    if !(1..=31).contains(&bucket) {
+                        return None;
+                    }
+                    label = bucket.to_string();
+                    next_year = sel.year;
+                    next_month = sel.month;
+                    next_day = Some(bucket as u32);
+                }
+            }
+            Some(serde_json::json!({
+                "label": label,
+                "value": bucket,
+                "count": count,
+                "url": url_for(next_year, next_month, next_day),
+            }))
+        })
+        .collect();
+
+    Ok(Some(serde_json::json!({
+        "field": field_name,
+        "crumbs": crumbs,
+        "buckets": buckets_ctx,
+    })))
+}
+
+/// Tri-dialect bucket fetch — binds the parent-level [lo, hi) range as
+/// real parameters (no string-interpolated date literals).
+async fn fetch_date_hierarchy_buckets(
+    pool: &crate::sql::Pool,
+    sql: &str,
+    range: Option<(chrono::NaiveDate, chrono::NaiveDate)>,
+    field_ty: &crate::core::FieldType,
+) -> Result<Vec<(i32, i64)>, AdminError> {
+    use chrono::{TimeZone, Utc};
+    use sqlx::Row as _;
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => {
+            let mut q = sqlx::query(sql);
+            if let Some((lo, hi)) = range {
+                match field_ty {
+                    crate::core::FieldType::Date => {
+                        q = q.bind(lo).bind(hi);
+                    }
+                    crate::core::FieldType::DateTime => {
+                        let lo_dt = Utc.from_utc_datetime(&lo.and_hms_opt(0, 0, 0).unwrap());
+                        let hi_dt = Utc.from_utc_datetime(&hi.and_hms_opt(0, 0, 0).unwrap());
+                        q = q.bind(lo_dt).bind(hi_dt);
+                    }
+                    _ => {}
+                }
+            }
+            let rows = q
+                .fetch_all(pg)
+                .await
+                .map_err(|e| AdminError::Internal(e.to_string()))?;
+            // `bucket` arrives as PG NUMERIC (EXTRACT result). Decode as
+            // f64 then cast — keeps the code minimal and avoids
+            // dialect-specific Decimal feature pulls.
+            let mut out = Vec::with_capacity(rows.len());
+            for r in rows {
+                let bucket: f64 = r.try_get("bucket").unwrap_or(0.0);
+                let count: i64 = r.try_get("bucket_count").unwrap_or(0);
+                out.push((bucket as i32, count));
+            }
+            Ok(out)
+        }
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => {
+            let mut q = sqlx::query(sql);
+            if let Some((lo, hi)) = range {
+                match field_ty {
+                    crate::core::FieldType::Date => {
+                        q = q.bind(lo).bind(hi);
+                    }
+                    crate::core::FieldType::DateTime => {
+                        let lo_dt = Utc.from_utc_datetime(&lo.and_hms_opt(0, 0, 0).unwrap());
+                        let hi_dt = Utc.from_utc_datetime(&hi.and_hms_opt(0, 0, 0).unwrap());
+                        q = q.bind(lo_dt).bind(hi_dt);
+                    }
+                    _ => {}
+                }
+            }
+            let rows = q
+                .fetch_all(my)
+                .await
+                .map_err(|e| AdminError::Internal(e.to_string()))?;
+            let mut out = Vec::with_capacity(rows.len());
+            for r in rows {
+                // MySQL EXTRACT returns INT; try i64 first then i32.
+                let bucket: i64 = r
+                    .try_get::<i64, _>("bucket")
+                    .or_else(|_| r.try_get::<i32, _>("bucket").map(i64::from))
+                    .unwrap_or(0);
+                let count: i64 = r.try_get("bucket_count").unwrap_or(0);
+                out.push((bucket as i32, count));
+            }
+            Ok(out)
+        }
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => {
+            let mut q = sqlx::query(sql);
+            if let Some((lo, hi)) = range {
+                match field_ty {
+                    crate::core::FieldType::Date => {
+                        q = q.bind(lo).bind(hi);
+                    }
+                    crate::core::FieldType::DateTime => {
+                        let lo_dt = Utc.from_utc_datetime(&lo.and_hms_opt(0, 0, 0).unwrap());
+                        let hi_dt = Utc.from_utc_datetime(&hi.and_hms_opt(0, 0, 0).unwrap());
+                        q = q.bind(lo_dt).bind(hi_dt);
+                    }
+                    _ => {}
+                }
+            }
+            let rows = q
+                .fetch_all(sq)
+                .await
+                .map_err(|e| AdminError::Internal(e.to_string()))?;
+            let mut out = Vec::with_capacity(rows.len());
+            for r in rows {
+                let bucket: i64 = r.try_get("bucket").unwrap_or(0);
+                let count: i64 = r.try_get("bucket_count").unwrap_or(0);
+                out.push((bucket as i32, count));
+            }
+            Ok(out)
+        }
+    }
 }
 
 // v0.46 — Django save-and-X redirect target.
