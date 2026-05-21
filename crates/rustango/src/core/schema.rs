@@ -593,6 +593,14 @@ pub struct AdminConfig {
     /// caption. Lets operators know what fields the search actually
     /// matches against (`"by title and author"`, etc.). Issue #353.
     pub search_help_text: &'static str,
+    /// Django-shape `actions_on_top` (default `true`). When `false`,
+    /// suppresses the action-bar above the table. Issue #354.
+    pub actions_on_top: bool,
+    /// Django-shape `actions_on_bottom` (default `false`). When
+    /// `true`, an additional action-bar renders BELOW the table —
+    /// useful for long list pages where the operator has scrolled
+    /// past the top bar. Issue #354.
+    pub actions_on_bottom: bool,
 }
 
 /// One group of fields on a create/edit form (slice 10.5).
@@ -622,6 +630,8 @@ impl AdminConfig {
         fieldsets: &[],
         list_display_links: &[],
         search_help_text: "",
+        actions_on_top: true,
+        actions_on_bottom: false,
     };
 }
 

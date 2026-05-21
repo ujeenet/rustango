@@ -548,6 +548,10 @@ pub(crate) async fn table_view(
         // #353 — Django-shape `search_help_text`. Empty string means
         // suppress the caption (today's behavior).
         "search_help_text": admin_cfg.search_help_text,
+        // #354 — Django-shape action-bar position flags. Default
+        // top=true, bottom=false; templates gate the render on these.
+        "actions_on_top": admin_cfg.actions_on_top,
+        "actions_on_bottom": admin_cfg.actions_on_bottom,
         "q": q.unwrap_or_default(),
         "active_filters": active_filters_ctx,
         "facets": facets_ctx,
@@ -1660,10 +1664,14 @@ pub(crate) async fn action_submit(
     let pairs: Vec<(String, String)> = serde_urlencoded::from_bytes(&body)
         .map_err(|e| AdminError::Internal(format!("parse action form: {e}")))?;
 
+    // #354 — bottom action-bar uses `action_bottom` to avoid clashing
+    // with the top bar's empty default. The first non-empty value
+    // wins regardless of which bar emitted it; an empty value never
+    // overrides a previously-set one.
     let mut action_name: Option<String> = None;
     let mut selected_raw: Vec<String> = Vec::new();
     for (k, v) in pairs {
-        if k == "action" {
+        if (k == "action" || k == "action_bottom") && !v.is_empty() && action_name.is_none() {
             action_name = Some(v);
         } else if k == "_selected" {
             selected_raw.push(v);
