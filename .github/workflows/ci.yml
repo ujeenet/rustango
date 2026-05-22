@@ -150,6 +150,7 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test positive_int_field
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test queryset_dates
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,admin --test admin_list_select_related_sqlite_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test form_clean_methods
 
   # Per-dialect SQLite live suite — runs every `_sqlite_live.rs` file
   # explicitly under `--no-default-features --features sqlite,...`. This
