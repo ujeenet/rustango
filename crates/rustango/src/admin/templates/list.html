@@ -148,8 +148,21 @@
 </p>
 {% endif %}
 </div>{# /list-main #}
-{% if facets and facets | length > 0 %}
+{% if (facets and facets | length > 0) or (custom_filters and custom_filters | length > 0) %}
 <aside class="list-rail">
+  {% if custom_filters %}{% for cf in custom_filters %}
+  <section class="facet custom-filter">
+    <h4>{{ cf.title }}</h4>
+    <ul>
+      <li><a href="{{ cf.clear_url | safe }}">All</a></li>
+      {% for v in cf.values %}
+      <li>
+        <a href="{{ v.url | safe }}"{% if v.active %} class="active"{% endif %}>{{ v.label }}</a>
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endfor %}{% endif %}
   {% for facet in facets %}
   <section class="facet">
     <h4>By {{ facet.field }}</h4>

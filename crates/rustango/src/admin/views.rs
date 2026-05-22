@@ -218,8 +218,17 @@ pub(crate) async fn table_view(
     // unparseable values are silently dropped — bad URLs shouldn't 500.
     let mut filters: Vec<Filter> = Vec::new();
     let mut active_field_filters: Vec<(&'static str, String)> = Vec::new();
+    // #351 — collect names reserved by custom list filters so we don't
+    // misinterpret `?status=draft` as a field-filter on a column that
+    // happens to share the name.
+    let custom_filter_names: Vec<&'static str> = crate::admin::list_filters::for_table(model.table)
+        .map(|f| f.parameter_name)
+        .collect();
     for (key, value) in &params {
         if RESERVED_PARAMS.contains(&key.as_str()) {
+            continue;
+        }
+        if custom_filter_names.contains(&key.as_str()) {
             continue;
         }
         if value.is_empty() {
@@ -237,6 +246,21 @@ pub(crate) async fn table_view(
             value: v,
         });
         active_field_filters.push((field.name, value.clone()));
+    }
+
+    // #351 — Django-shape `SimpleListFilter`. For each registered
+    // custom filter on this table, look up its parameter in the URL;
+    // when set, call the user-supplied predicate function and append
+    // the resulting predicates to the list view's filter list.
+    let mut active_custom_filters: Vec<(&'static str, String)> = Vec::new();
+    for cf in crate::admin::list_filters::for_table(model.table) {
+        if let Some(value) = params.get(cf.parameter_name) {
+            if value.is_empty() {
+                continue;
+            }
+            filters.extend((cf.to_filters)(value));
+            active_custom_filters.push((cf.parameter_name, value.clone()));
+        }
     }
 
     // #355 — date-hierarchy. When the model declares
@@ -584,6 +608,58 @@ pub(crate) async fn table_view(
         .await?
     };
 
+    // #351 — Build the right-rail card context for each registered
+    // custom list filter on this table. Each card shows the filter
+    // title + clickable lookup options; the active value is marked.
+    let admin_prefix = state.config.admin_prefix.as_str();
+    let preserved_params_for_custom: Vec<(String, String)> = {
+        let mut out = Vec::new();
+        if let Some(qv) = q.as_deref() {
+            out.push(("q".into(), qv.into()));
+        }
+        for (k, v) in &active_field_filters {
+            out.push(((*k).into(), v.clone()));
+        }
+        out
+    };
+    let custom_filters_ctx: Vec<serde_json::Value> =
+        crate::admin::list_filters::for_table(model.table)
+            .map(|cf| {
+                let active_value: Option<&str> = active_custom_filters
+                    .iter()
+                    .find(|(k, _)| *k == cf.parameter_name)
+                    .map(|(_, v)| v.as_str());
+                let mut params_clear = preserved_params_for_custom.clone();
+                // Preserve OTHER custom filters' selections.
+                for (k, v) in &active_custom_filters {
+                    if *k != cf.parameter_name {
+                        params_clear.push(((*k).into(), v.clone()));
+                    }
+                }
+                let clear_url = build_query_url(admin_prefix, model.table, &params_clear);
+                let values: Vec<serde_json::Value> = cf
+                    .lookups
+                    .iter()
+                    .map(|(value, label)| {
+                        let mut p = params_clear.clone();
+                        p.push((cf.parameter_name.into(), (*value).into()));
+                        serde_json::json!({
+                            "value": value,
+                            "label": label,
+                            "active": active_value == Some(*value),
+                            "url": build_query_url(admin_prefix, model.table, &p),
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "parameter_name": cf.parameter_name,
+                    "title": cf.title,
+                    "values": values,
+                    "clear_url": clear_url,
+                })
+            })
+            .collect();
+
     // Action menu items (slice 10.6). Empty when the model declares
     // no `admin.actions`, hiding the picker entirely.
     let actions_ctx: Vec<serde_json::Value> = admin_cfg
@@ -623,6 +699,7 @@ pub(crate) async fn table_view(
         "q": q.unwrap_or_default(),
         "active_filters": active_filters_ctx,
         "facets": facets_ctx,
+        "custom_filters": custom_filters_ctx,
         "date_hierarchy": date_hierarchy_ctx,
         "actions": actions_ctx,
         "columns": columns_ctx,

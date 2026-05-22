@@ -47,6 +47,7 @@ mod errors;
 mod forms;
 mod helpers;
 pub mod inlines;
+pub mod list_filters;
 mod login_view;
 mod manage_admin;
 pub mod session;
