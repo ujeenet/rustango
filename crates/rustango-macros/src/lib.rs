@@ -1802,6 +1802,7 @@ fn model_impl_tokens(
         let through = rel.through.as_str();
         let src = rel.src.as_str();
         let dst = rel.dst.as_str();
+        let auto_create = rel.auto_create;
         quote! {
             ::rustango::core::M2MRelation {
                 name: #name,
@@ -1809,6 +1810,7 @@ fn model_impl_tokens(
                 through: #through,
                 src_col: #src,
                 dst_col: #dst,
+                auto_create: #auto_create,
             }
         }
     });
@@ -4454,6 +4456,11 @@ struct M2MAttr {
     src: String,
     /// Destination FK column in the junction table (e.g. `"tag_id"`).
     dst: String,
+    /// Whether the migration writer should auto-create the junction
+    /// table. Default `true`. Set `auto_create = false` (#324) when
+    /// the operator declares the through table as its own
+    /// `#[derive(Model)]` struct with extra columns.
+    auto_create: bool,
 }
 
 /// Parsed shape of `#[rustango(audit(track = "name, body", source =
@@ -5110,6 +5117,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     through: String::new(),
                     src: String::new(),
                     dst: String::new(),
+                    auto_create: true,
                 };
                 meta.parse_nested_meta(|inner| {
                     if inner.path.is_ident("name") {
@@ -5137,7 +5145,12 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                         m2m.dst = s.value();
                         return Ok(());
                     }
-                    Err(inner.error("unknown m2m attribute (supported: `name`, `to`, `through`, `src`, `dst`)"))
+                    if inner.path.is_ident("auto_create") {
+                        let lit: syn::LitBool = inner.value()?.parse()?;
+                        m2m.auto_create = lit.value;
+                        return Ok(());
+                    }
+                    Err(inner.error("unknown m2m attribute (supported: `name`, `to`, `through`, `src`, `dst`, `auto_create`)"))
                 })?;
                 if m2m.name.is_empty() {
                     return Err(meta.error("m2m requires `name = \"...\"`"));
