@@ -94,6 +94,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "migrate" => migrate(pool, dir, &args[1..], writer).await,
         "downgrade" => downgrade(pool, dir, &args[1..], writer).await,
         "showmigrations" | "status" => showmigrations(pool, dir, writer).await,
+        "sqlmigrate" => sqlmigrate_cmd(dir, &args[1..], writer),
         "forget-pending" => forget_pending_cmd(pool, dir, &args[1..], writer).await,
         "startapp" => startapp(&args[1..], writer),
         "add-data-op" => add_data_op_cmd(dir, &args[1..], writer),
@@ -201,6 +202,11 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(w, "      Step back N applied migrations (default 1).\n")?;
     writeln!(w, "  showmigrations | status")?;
     writeln!(w, "      List migrations with [X]/[ ] applied marker.\n")?;
+    writeln!(w, "  sqlmigrate <name>")?;
+    writeln!(
+        w,
+        "      Print the SQL the named migration would emit when applied.\n"
+    )?;
     writeln!(w, "  forget-pending <name>")?;
     writeln!(
         w,
@@ -810,6 +816,57 @@ async fn downgrade<W: Write>(
         for m in &touched {
             writeln!(w, "  rolled back {}", m.name)?;
         }
+    }
+    Ok(())
+}
+
+/// Django-shape `sqlmigrate <name>` — print the SQL that would run
+/// when the named migration is applied, without touching the database.
+/// Issue #345.
+///
+/// Output format mirrors `migrate --dry-run` per-migration: a comment
+/// header (`-- <name> (atomic|non-atomic)`) followed by every emitted
+/// statement, semicolon-terminated, one per line.
+fn sqlmigrate_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let mut positional: Option<&str> = None;
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                writeln!(
+                    w,
+                    "sqlmigrate <name>          print the SQL the named migration would emit\n\
+                                                without applying it"
+                )?;
+                return Ok(());
+            }
+            other if other.starts_with('-') => {
+                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+            }
+            other => {
+                if positional.is_some() {
+                    return Err(MigrateError::Validation(format!(
+                        "unexpected positional argument: {other}"
+                    )));
+                }
+                positional = Some(other);
+            }
+        }
+    }
+    let name = positional
+        .ok_or_else(|| MigrateError::Validation("sqlmigrate requires a migration name".into()))?;
+    let preview = runner::sqlmigrate_one(dir, name)?;
+    writeln!(
+        w,
+        "-- {} ({})",
+        preview.name,
+        if preview.atomic {
+            "atomic"
+        } else {
+            "non-atomic"
+        }
+    )?;
+    for stmt in &preview.statements {
+        writeln!(w, "{stmt};")?;
     }
     Ok(())
 }
