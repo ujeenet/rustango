@@ -40,6 +40,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::RwLock;
 
+pub mod middleware;
 pub mod tera_tags;
 pub mod timezone;
 
