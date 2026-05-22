@@ -61,6 +61,13 @@ pub struct QuerySet<T: Model> {
     /// Each entry is a pre-compiled [`crate::core::CompoundBranch`].
     /// Empty (default) emits a plain SELECT.
     compound: Vec<crate::core::CompoundBranch>,
+    /// Django `.none()` short-circuit — issue #331. When `true`, every
+    /// terminal op compiles to a guaranteed-empty SQL statement: SELECT
+    /// gets `LIMIT 0`, UPDATE / DELETE gain an `IS NULL` predicate
+    /// against the (NOT NULL) primary key so no row matches. Builders
+    /// chained after `.none()` keep accumulating filters / orderings,
+    /// matching Django's "an immutable empty queryset" semantic.
+    is_none: bool,
     _model: PhantomData<fn() -> T>,
 }
 
@@ -151,8 +158,23 @@ impl<T: Model> QuerySet<T> {
             order_by: Vec::new(),
             lock_mode: None,
             compound: Vec::new(),
+            is_none: false,
             _model: PhantomData,
         }
+    }
+
+    /// Django `.none()` — return a queryset guaranteed to match zero
+    /// rows. Useful as a safe base for conditional filters
+    /// (`if !user.has_perm: qs = qs.none()`) and for typed pipelines
+    /// that must return an empty result deterministically.
+    ///
+    /// SELECTs compile to `LIMIT 0`; UPDATE / DELETE add an `IS NULL`
+    /// predicate against the (NOT NULL) primary key so the DB rejects
+    /// every row. Issue #331.
+    #[must_use]
+    pub fn none(mut self) -> Self {
+        self.is_none = true;
+        self
     }
 
     /// Django `.distinct()` — emit `SELECT DISTINCT ...`. Works on
@@ -941,13 +963,19 @@ impl<T: Model> QuerySet<T> {
                 }
             }
         }
+        // #331 — `.none()` forces an always-empty result via `LIMIT 0`.
+        // Cheap on every dialect (PG/MySQL/SQLite skip plan
+        // materialization), and the other terminal ops (count, exists,
+        // first) read off the same SelectQuery so they see the same
+        // empty result without further special-casing.
+        let limit = if self.is_none { Some(0) } else { self.limit };
         Ok(SelectQuery {
             model,
             where_clause,
             search: None,
             joins,
             order_by,
-            limit: self.limit,
+            limit,
             offset: self.offset,
             lock_mode: self.lock_mode,
             compound: self.compound,
@@ -1067,6 +1095,14 @@ impl<T: Model> QuerySet<T> {
     pub fn compile_delete(self) -> Result<DeleteQuery, QueryError> {
         let model: &'static ModelSchema = T::SCHEMA;
         let where_clause = resolve_pending(model, self.pending)?;
+        // #331 — `.none().delete()` is a guaranteed no-op. Append an
+        // `IS NULL` predicate against the (NOT NULL) primary key so
+        // the DB refuses to match any row.
+        let where_clause = if self.is_none {
+            never_match_clause(model, where_clause)?
+        } else {
+            where_clause
+        };
         Ok(DeleteQuery {
             model,
             where_clause,
@@ -1269,6 +1305,14 @@ impl<T: Model> UpdateBuilder<T> {
             .collect::<Result<Vec<_>, _>>()?;
 
         let where_clause = resolve_pending(model, self.qs.pending)?;
+        // #331 — `.none().update().set(...)` is a no-op for the same
+        // reason `.none().delete()` is: the never-match predicate
+        // forces zero affected rows.
+        let where_clause = if self.qs.is_none {
+            never_match_clause(model, where_clause)?
+        } else {
+            where_clause
+        };
 
         Ok(UpdateQuery {
             model,
@@ -1722,6 +1766,41 @@ fn sql_value_shape_name(v: &SqlValue) -> &'static str {
         SqlValue::List(_) => "SqlValue::List",
         _ => "SqlValue::<other>",
     }
+}
+
+/// #331 — append an always-false predicate onto `base` so the
+/// surrounding statement (UPDATE / DELETE) cannot match any row.
+/// Uses `<primary_key> IS NULL`: every Django/rustango model declares a
+/// NOT NULL primary key, so this predicate is unsatisfiable across
+/// every backend and every row. We deliberately don't try `1 = 0` /
+/// `FALSE` literal predicates — those need raw-SQL escape hatches our
+/// IR doesn't expose today, and the IS NULL trick lives entirely in
+/// existing `Op::IsNull` machinery.
+fn never_match_clause(
+    model: &'static ModelSchema,
+    base: WhereExpr,
+) -> Result<WhereExpr, QueryError> {
+    let pk = model
+        .primary_key()
+        .ok_or_else(|| QueryError::UnknownField {
+            model: model.name,
+            field: "<primary_key>".to_owned(),
+        })?;
+    let never = WhereExpr::Predicate(crate::core::Filter {
+        column: pk.column,
+        op: Op::IsNull,
+        value: SqlValue::Bool(true),
+    });
+    Ok(match base {
+        // Vacuously-true `And(vec![])` collapses to just the never-match
+        // predicate — keeps the emitted WHERE clean (single column ref).
+        WhereExpr::And(nodes) if nodes.is_empty() => never,
+        WhereExpr::And(mut nodes) => {
+            nodes.push(never);
+            WhereExpr::And(nodes)
+        }
+        other => WhereExpr::And(vec![other, never]),
+    })
 }
 
 fn resolve_pending(
@@ -2262,6 +2341,17 @@ impl<T: Model> AggregateBuilder<T> {
             Vec::new()
         };
 
+        // #331 — `.none().count()` / `.none().aggregate(...)` must
+        // return zero / empty result without scanning any row. Apply
+        // the same never-match guard the UPDATE / DELETE path uses;
+        // also clamp `LIMIT 0` so the executor short-circuits even if
+        // group-by would produce rows from non-matched buckets.
+        let (where_clause, limit) = if self.qs.is_none {
+            (never_match_clause(model, where_clause)?, Some(0))
+        } else {
+            (where_clause, self.limit)
+        };
+
         Ok(AggregateQuery {
             model,
             where_clause,
@@ -2270,7 +2360,7 @@ impl<T: Model> AggregateBuilder<T> {
             aliases: self.aliases,
             having: self.having,
             order_by,
-            limit: self.limit,
+            limit,
             offset: self.offset,
         })
     }
