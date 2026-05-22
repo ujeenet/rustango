@@ -1762,6 +1762,15 @@ pub(crate) async fn create_submit(
         &form,
     )
     .await;
+    // #365 — Django-shape `save_model` hook. The admin signal fires
+    // only from admin write paths (not every ORM insert), giving
+    // operators a seam for admin-only side effects.
+    crate::signals::admin::send_admin_post_save(crate::signals::admin::AdminSaveContext {
+        table: model.table,
+        pk: pk_value.clone(),
+        change: false,
+    })
+    .await;
     let target = post_save_redirect(&state.config.admin_prefix, model.table, &pk_value, &form);
     Ok(Redirect::to(&target).into_response())
 }
@@ -1939,6 +1948,14 @@ pub(crate) async fn update_submit(
     // `tenancy::admin`, so operators get a "who changed what" trail
     // automatically.
     super::audit::emit_admin_audit_diff(&state, model, &pk_raw, before_row.as_ref(), &form).await;
+    // #365 — admin `post_save` hook fires AFTER the UPDATE +
+    // audit-log emit. `change = true` mirrors Django's argument.
+    crate::signals::admin::send_admin_post_save(crate::signals::admin::AdminSaveContext {
+        table: model.table,
+        pk: pk_raw.clone(),
+        change: true,
+    })
+    .await;
 
     // #50 slice 2 — process inline FormSet payloads. Best-effort: a
     // per-row write failure increments `outcome.failed` and is logged
@@ -2071,6 +2088,13 @@ pub(crate) async fn delete_submit(
             "admin audit emit failed for delete",
         );
     }
+    // #365 — admin `delete_model` hook fires after the DELETE +
+    // audit-log emit, regardless of soft/hard delete mode.
+    crate::signals::admin::send_admin_post_delete(crate::signals::admin::AdminDeleteContext {
+        table: model.table,
+        pk: pk_raw.clone(),
+    })
+    .await;
     Ok(Redirect::to(&format!("{}/{}", state.config.admin_prefix, model.table)).into_response())
 }
 
