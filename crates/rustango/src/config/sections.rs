@@ -314,6 +314,16 @@ pub struct MailSettings {
     pub smtp_tls: Option<String>,
     /// `From:` address for sent mail.
     pub from_address: Option<String>,
+    /// Django-shape `ADMINS` — list of email addresses that
+    /// `email::mail_admins(...)` sends to. Typically the project's
+    /// site operators (the "5xx pages me at 3am" cohort). Issue #416.
+    #[serde(default)]
+    pub admins: Vec<String>,
+    /// Django-shape `MANAGERS` — list of email addresses that
+    /// `email::mail_managers(...)` sends to. Conventionally a
+    /// broader-but-less-urgent ops list than `admins`. Issue #416.
+    #[serde(default)]
+    pub managers: Vec<String>,
 }
 
 /// HTTP server bind + request-timeout knobs (#87).

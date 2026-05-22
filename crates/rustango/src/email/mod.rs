@@ -299,6 +299,86 @@ impl Mailer for NullMailer {
 /// let mailer: rustango::email::BoxedMailer =
 ///     rustango::email::from_settings(&cfg.mail);
 /// ```
+/// Django-shape `mail_admins(subject, message)` — sends to the
+/// addresses configured in `MailSettings.admins`. Returns Ok(0) when
+/// the list is empty (a no-op without warning, matching Django's
+/// "no ADMINS → silent skip" behavior). Issue #416.
+///
+/// `subject` is prefixed with `"[admin] "` to match Django's default
+/// `EMAIL_SUBJECT_PREFIX`. Override the subject yourself if you need
+/// a different prefix.
+///
+/// `from` falls back to `MailSettings.from_address`; if neither is
+/// set the mailer's `Email::validate()` will surface a
+/// `MailError::InvalidMessage`.
+///
+/// # Errors
+/// Forwarded from the mailer's `send` call. Returns `Ok(count)` on
+/// success — `count` is the number of recipients the message went to.
+#[cfg(feature = "config")]
+pub async fn mail_admins(
+    mailer: &dyn Mailer,
+    s: &crate::config::MailSettings,
+    subject: impl Into<String>,
+    body: impl Into<String>,
+) -> Result<usize, MailError> {
+    send_to_list(
+        mailer,
+        s,
+        &s.admins,
+        "[admin] ",
+        subject.into(),
+        body.into(),
+    )
+    .await
+}
+
+/// Django-shape `mail_managers(subject, message)` — sends to the
+/// addresses configured in `MailSettings.managers`. Same shape as
+/// [`mail_admins`]; subject is prefixed with `"[manager] "`. Issue #416.
+#[cfg(feature = "config")]
+pub async fn mail_managers(
+    mailer: &dyn Mailer,
+    s: &crate::config::MailSettings,
+    subject: impl Into<String>,
+    body: impl Into<String>,
+) -> Result<usize, MailError> {
+    send_to_list(
+        mailer,
+        s,
+        &s.managers,
+        "[manager] ",
+        subject.into(),
+        body.into(),
+    )
+    .await
+}
+
+#[cfg(feature = "config")]
+async fn send_to_list(
+    mailer: &dyn Mailer,
+    s: &crate::config::MailSettings,
+    list: &[String],
+    prefix: &str,
+    subject: String,
+    body: String,
+) -> Result<usize, MailError> {
+    if list.is_empty() {
+        return Ok(0);
+    }
+    let mut email = Email::new()
+        .subject(format!("{prefix}{subject}"))
+        .body(body);
+    if let Some(from) = s.from_address.as_deref() {
+        email = email.from(from.to_owned());
+    }
+    for addr in list {
+        email = email.to(addr.clone());
+    }
+    mailer.send(&email).await?;
+    Ok(list.len())
+}
+
 #[cfg(feature = "config")]
 #[must_use]
 pub fn from_settings(s: &crate::config::MailSettings) -> BoxedMailer {
