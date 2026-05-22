@@ -176,6 +176,7 @@ jobs:
             --test admin_autocomplete_sqlite_live \
             --test admin_save_hook_sqlite_live \
             --test admin_recent_actions_sqlite_live \
+            --test admin_simple_list_filter_sqlite_live \
             --test audit_pool_sqlite_live \
             --test bulk_upsert_sqlite_live \
             --test count_distinct_sqlite_live \
