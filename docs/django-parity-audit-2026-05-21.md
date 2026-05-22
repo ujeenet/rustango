@@ -277,7 +277,7 @@ Summary: **18 SHIPPED / 7 PARTIAL / 11 MISSING / 2 N/A**. Concentration of MISSI
 | File upload | [File uploads](https://docs.djangoproject.com/en/6.0/topics/http/file-uploads/) | SHIPPED | `uploads::*` + multer | |
 | `save(commit=False)` + `save_m2m()` | [ModelForm.save](https://docs.djangoproject.com/en/6.0/topics/forms/modelforms/#the-save-method) | MISSING | n/a (#375) | `ModelForm::save(pool)` is one-shot. |
 | CSRF token | [CSRF](https://docs.djangoproject.com/en/6.0/ref/csrf/) | SHIPPED | `forms::csrf::CsrfLayer` + `{{ csrf_token \| csrf_input \| safe }}` Tera | |
-| `UniqueTogetherValidator` | [DRF form-level uniqueness](https://docs.djangoproject.com/en/6.0/ref/contrib/postgres/constraints/) | MISSING | n/a (#376) | Backlog: friendly form-error on `unique_together` violation. |
+| `UniqueTogetherValidator` | [DRF form-level uniqueness](https://docs.djangoproject.com/en/6.0/ref/contrib/postgres/constraints/) | SHIPPED | `serializer::check_unique_together_pool` — see the DRF section row for #437 (v0.42). #376 is a duplicate; closing alongside #437. | |
 
 Summary: **8 SHIPPED / 3 PARTIAL / 4 MISSING / 0 N/A**.
 
@@ -641,7 +641,7 @@ Summary: **5 / 0 / 0 / 2**. Async is native; no parity gap.
 | `SerializerMethodField` | [SerializerMethodField](https://www.django-rest-framework.org/api-guide/fields/#serializermethodfield) | SHIPPED | v0.18 | |
 | Per-field validators chain | (above) | SHIPPED | v0.18 | |
 | Cross-field validation (`validate()`) | [object-level validation](https://www.django-rest-framework.org/api-guide/serializers/#object-level-validation) | SHIPPED | `#[serializer(validate = "fn_name")]` container attr (closed #436, v0.42) — emitted `validate()` runs per-field validators first, then `self.<fn_name>()` returning `Result<(), FormErrors>`, merging both via new `FormErrors::merge`. | |
-| `UniqueTogetherValidator` | [UniqueTogetherValidator](https://www.django-rest-framework.org/api-guide/validators/#uniquetogethervalidator) | MISSING | n/a (#437) | Friendly form errors on `unique_together`. |
+| `UniqueTogetherValidator` | [UniqueTogetherValidator](https://www.django-rest-framework.org/api-guide/validators/#uniquetogethervalidator) | SHIPPED | `serializer::check_unique_together_pool(pool, schema, &values, exclude_pk)` (closed #437, v0.42). Walks `ModelSchema.indexes` for multi-column `unique=true` entries (the migration writer's `unique_together` deposit), runs `SELECT 1 FROM <table> WHERE … LIMIT 1` for each, and attaches a non-field error per collision. `exclude_pk` lets row updates skip self-collisions; partial-bound value maps silently skip the check (Django shape). | |
 | `ViewSet` | [ViewSet](https://www.django-rest-framework.org/api-guide/viewsets/) | SHIPPED | `#[derive(ViewSet)]` (v0.16+, tri-dialect v0.38) | |
 | `ModelViewSet` | [ModelViewSet](https://www.django-rest-framework.org/api-guide/viewsets/#modelviewset) | SHIPPED | (above, includes list/retrieve/create/update/delete) | |
 | Routers (`DefaultRouter`, `SimpleRouter`) | [routers](https://www.django-rest-framework.org/api-guide/routers/) | SHIPPED | `ViewSet::router(prefix, &Pool)` + `tenant_router(prefix)` | |
