@@ -2341,6 +2341,17 @@ impl<T: Model> AggregateBuilder<T> {
             Vec::new()
         };
 
+        // #331 — `.none().count()` / `.none().aggregate(...)` must
+        // return zero / empty result without scanning any row. Apply
+        // the same never-match guard the UPDATE / DELETE path uses;
+        // also clamp `LIMIT 0` so the executor short-circuits even if
+        // group-by would produce rows from non-matched buckets.
+        let (where_clause, limit) = if self.qs.is_none {
+            (never_match_clause(model, where_clause)?, Some(0))
+        } else {
+            (where_clause, self.limit)
+        };
+
         Ok(AggregateQuery {
             model,
             where_clause,
@@ -2349,7 +2360,7 @@ impl<T: Model> AggregateBuilder<T> {
             aliases: self.aliases,
             having: self.having,
             order_by,
-            limit: self.limit,
+            limit,
             offset: self.offset,
         })
     }

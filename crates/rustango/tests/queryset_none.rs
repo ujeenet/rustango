@@ -120,6 +120,27 @@ async fn live_select_returns_empty_set() {
     );
 }
 
+#[test]
+fn aggregate_compile_short_circuits() {
+    // `.none()` must also short-circuit aggregate paths so callers
+    // like `.aggregate().annotate("n", Count(...))` see the empty
+    // result without a separate code path.
+    use rustango::core::AggregateExpr;
+    let q = QuerySet::<QsnPost>::new()
+        .none()
+        .aggregate()
+        .annotate("n", AggregateExpr::Count(None))
+        .compile()
+        .unwrap();
+    let has_never = where_contains_pk_is_null(&q.where_clause);
+    assert!(
+        has_never,
+        "aggregate WHERE missing IS NULL guard: {:?}",
+        q.where_clause
+    );
+    assert_eq!(q.limit, Some(0));
+}
+
 #[tokio::test]
 async fn live_delete_affects_zero_rows() {
     let pool = build_pool().await;
