@@ -174,3 +174,128 @@ pub trait ModelSerializer: serde::Serialize + Sized {
     /// incoming JSON body.
     fn writable_fields() -> &'static [&'static str];
 }
+
+/// Django-shape `UniqueTogetherValidator` — pre-save check that a
+/// candidate row doesn't collide with an existing row on any of the
+/// model's declared `unique_together` constraints. Issue #437.
+///
+/// Returns `Ok(())` when no collision is detected. Returns `Err(FormErrors)`
+/// with a non-field error per colliding constraint (DRF shape:
+/// `"The fields a, b must be unique together"`).
+///
+/// ## Usage
+///
+/// ```ignore
+/// use std::collections::HashMap;
+/// use rustango::core::SqlValue;
+/// use rustango::serializer::check_unique_together_pool;
+///
+/// let mut values: HashMap<&'static str, SqlValue> = HashMap::new();
+/// values.insert("org_id", SqlValue::I64(self.org_id));
+/// values.insert("user_id", SqlValue::I64(self.user_id));
+/// check_unique_together_pool(&pool, Membership::SCHEMA, &values, None).await?;
+/// ```
+///
+/// Pass `exclude_pk = Some(&pk)` on updates so the row being edited
+/// doesn't collide with itself. The PK column is read off
+/// `ModelSchema::primary_key()` — pass `None` for inserts.
+///
+/// Partial unique constraints (`unique_when` / `WHERE`-clause partial
+/// indexes) are skipped — their conflict semantics depend on the
+/// predicate, which this layer doesn't evaluate.
+///
+/// # Errors
+/// - [`crate::sql::ExecError`] forwarded from the underlying query.
+/// - The check is non-fatal on errors: a query failure surfaces as
+///   `Err` rather than masking as "no collision".
+pub async fn check_unique_together_pool(
+    pool: &crate::sql::Pool,
+    schema: &'static crate::core::ModelSchema,
+    values: &std::collections::HashMap<&'static str, crate::core::SqlValue>,
+    exclude_pk: Option<&crate::core::SqlValue>,
+) -> Result<(), crate::forms::FormErrors> {
+    use crate::core::{Filter, Op};
+
+    let mut errors = crate::forms::FormErrors::default();
+
+    for index in schema.indexes {
+        // Only multi-column unique indexes — Django's `unique_together`.
+        // Single-column UNIQUE is the `unique` field attr (caught by
+        // INSERT's RETURNING-on-conflict). Partial unique
+        // (`where_clause = Some(_)`) skipped — predicate evaluation
+        // would need a stub planner we don't have today.
+        if !index.unique || index.columns.len() < 2 || index.where_clause.is_some() {
+            continue;
+        }
+
+        // Build the AND-of-equality WHERE clause. Missing column values
+        // skip the constraint — Django's behavior when only a partial
+        // subset of the unique-together fields is bound.
+        let mut predicates: Vec<Filter> = Vec::with_capacity(index.columns.len());
+        let mut all_bound = true;
+        for col in index.columns {
+            let Some(val) = values.get(*col) else {
+                all_bound = false;
+                break;
+            };
+            predicates.push(Filter {
+                column: col,
+                op: Op::Eq,
+                value: val.clone(),
+            });
+        }
+        if !all_bound {
+            continue;
+        }
+
+        // Exclude-self on updates: PK != $N.
+        if let (Some(pk_field), Some(pk_value)) = (schema.primary_key(), exclude_pk) {
+            predicates.push(Filter {
+                column: pk_field.column,
+                op: Op::Ne,
+                value: pk_value.clone(),
+            });
+        }
+
+        // SELECT 1 FROM table WHERE … LIMIT 1.
+        let dialect = pool.dialect();
+        let table_q = dialect.quote_ident(schema.table);
+        let mut clauses: Vec<String> = Vec::with_capacity(predicates.len());
+        let mut params: Vec<crate::core::SqlValue> = Vec::with_capacity(predicates.len());
+        for (i, pred) in predicates.iter().enumerate() {
+            let col = dialect.quote_ident(pred.column);
+            let op_str = match pred.op {
+                Op::Eq => "=",
+                Op::Ne => "<>",
+                _ => unreachable!("only Eq/Ne above"),
+            };
+            let placeholder = dialect.placeholder(i + 1);
+            clauses.push(format!("{col} {op_str} {placeholder}"));
+            params.push(pred.value.clone());
+        }
+        let where_sql = clauses.join(" AND ");
+        let sql = format!("SELECT 1 FROM {table_q} WHERE {where_sql} LIMIT 1");
+
+        // Use `raw_query_pool::<(i64,)>` and ignore the actual returned
+        // value — presence of any row means a collision.
+        let hits: Vec<(i64,)> = crate::sql::raw_query_pool(&sql, params, pool)
+            .await
+            .map_err(|e| {
+                let mut errs = crate::forms::FormErrors::default();
+                errs.add_non_field(format!("unique_together check failed: {e}"));
+                errs
+            })?;
+        if !hits.is_empty() {
+            errors.add_non_field(format!(
+                "The fields {} must be unique together.",
+                index.columns.join(", "),
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
