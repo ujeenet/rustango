@@ -89,6 +89,10 @@ pub enum I18nError {
 /// Translation backend — keyed by `(locale, key)`.
 pub struct Translator {
     default_locale: Locale,
+    /// Optional explicit fallback chain — checked AFTER the
+    /// requested locale + its base language, BEFORE `default_locale`.
+    /// Django parity #425. Lowercased on insert.
+    fallback_chain: Vec<Locale>,
     catalogs: RwLock<HashMap<Locale, HashMap<String, String>>>,
 }
 
@@ -98,8 +102,42 @@ impl Translator {
     pub fn new(default_locale: Locale) -> Self {
         Self {
             default_locale,
+            fallback_chain: Vec::new(),
             catalogs: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Set an explicit fallback chain (#425, Django parity). When
+    /// `translate(locale, key, ...)` doesn't find a key in `locale`
+    /// or its base language, the lookup walks `chain` in order
+    /// before falling through to the default locale.
+    ///
+    /// ```ignore
+    /// // Spanish missing? try Portuguese, then English (default).
+    /// let t = Translator::new(Locale::new("en"))
+    ///     .with_fallback_chain(&["pt"]);
+    /// ```
+    ///
+    /// Duplicate entries and entries equal to `default_locale` are
+    /// silently dropped (the default-locale check is already at the
+    /// end of the chain).
+    #[must_use]
+    pub fn with_fallback_chain(mut self, chain: &[&str]) -> Self {
+        let mut seen: std::collections::HashSet<Locale> = std::collections::HashSet::new();
+        seen.insert(self.default_locale.clone());
+        self.fallback_chain = chain
+            .iter()
+            .map(|s| Locale::new(*s))
+            .filter(|loc| seen.insert(loc.clone()))
+            .collect();
+        self
+    }
+
+    /// Current explicit fallback chain (without the implicit
+    /// default-locale terminus). Useful for diagnostics.
+    #[must_use]
+    pub fn fallback_chain(&self) -> &[Locale] {
+        &self.fallback_chain
     }
 
     /// Add a translation catalog for `locale`. Replaces any existing
@@ -121,8 +159,9 @@ impl Translator {
             .insert(locale, catalog);
     }
 
-    /// Look up `key` in `locale`'s catalog, falling back to the default
-    /// locale, and finally to `key` itself if nothing matches.
+    /// Look up `key` in `locale`'s catalog, walking the fallback
+    /// chain in order: exact locale → base language → explicit
+    /// `fallback_chain` (#425) → default locale → `key` itself.
     ///
     /// `params` substitutes `{name}` placeholders in the result.
     #[must_use]
@@ -130,16 +169,31 @@ impl Translator {
         let cats = self.catalogs.read().expect("translator poisoned");
         let req = Locale::new(locale);
 
-        // Try exact locale, then base language, then default
-        let template = cats
+        // Walk the lookup chain in priority order.
+        let mut template: Option<String> = cats
             .get(&req)
             .and_then(|c| c.get(key))
             .or_else(|| {
                 cats.get(&Locale::new(req.base_language()))
                     .and_then(|c| c.get(key))
             })
-            .or_else(|| cats.get(&self.default_locale).and_then(|c| c.get(key)))
-            .cloned()
+            .cloned();
+
+        if template.is_none() {
+            for fb in &self.fallback_chain {
+                if let Some(v) = cats.get(fb).and_then(|c| c.get(key)) {
+                    template = Some(v.clone());
+                    break;
+                }
+            }
+        }
+
+        let template = template
+            .or_else(|| {
+                cats.get(&self.default_locale)
+                    .and_then(|c| c.get(key))
+                    .cloned()
+            })
             .unwrap_or_else(|| key.to_owned());
 
         substitute(&template, params)
@@ -327,6 +381,57 @@ mod tests {
         assert!(t.has_locale("fr"));
         assert!(t.has_locale("en-US"));
         assert!(!t.has_locale("ja"));
+    }
+
+    /// Issue #425 — explicit fallback chain. Build a translator where
+    /// only Spanish is missing the key; it should walk pt → en (default).
+    #[test]
+    fn fallback_chain_walks_in_order() {
+        let mut es: HashMap<String, String> = HashMap::new();
+        es.insert("welcome".into(), "Bienvenido".into());
+        // No `hello` in `es`.
+        let mut pt: HashMap<String, String> = HashMap::new();
+        pt.insert("hello".into(), "Olá".into());
+        let mut en: HashMap<String, String> = HashMap::new();
+        en.insert("hello".into(), "Hello".into());
+
+        let t = Translator::new(Locale::new("en"))
+            .with_fallback_chain(&["pt"])
+            .add_locale(Locale::new("es"), es)
+            .add_locale(Locale::new("pt"), pt)
+            .add_locale(Locale::new("en"), en);
+
+        // `welcome` exists in `es` — direct hit.
+        assert_eq!(t.translate("es", "welcome", &[]), "Bienvenido");
+        // `hello` is missing in `es`; chain says try `pt` next.
+        assert_eq!(t.translate("es", "hello", &[]), "Olá");
+    }
+
+    /// Issue #425 — default locale is still the last terminus when
+    /// nothing in the chain has the key.
+    #[test]
+    fn fallback_chain_then_default() {
+        let mut en: HashMap<String, String> = HashMap::new();
+        en.insert("hello".into(), "Hello".into());
+        let pt: HashMap<String, String> = HashMap::new();
+
+        let t = Translator::new(Locale::new("en"))
+            .with_fallback_chain(&["pt"])
+            .add_locale(Locale::new("pt"), pt)
+            .add_locale(Locale::new("en"), en);
+
+        // `es` not in catalogs, chain entry `pt` doesn't have the key,
+        // default `en` does.
+        assert_eq!(t.translate("es", "hello", &[]), "Hello");
+    }
+
+    /// Issue #425 — chain accessor returns what was set, sans duplicates
+    /// and sans the default-locale entry.
+    #[test]
+    fn fallback_chain_accessor_deduplicates() {
+        let t = Translator::new(Locale::new("en")).with_fallback_chain(&["pt", "pt", "en", "es"]);
+        let chain: Vec<&str> = t.fallback_chain().iter().map(Locale::as_str).collect();
+        assert_eq!(chain, vec!["pt", "es"]);
     }
 
     #[test]
