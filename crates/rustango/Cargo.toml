@@ -75,7 +75,7 @@ serializer = ["forms"]
 # Caching layer (`rustango::cache`) — pluggable `Cache` trait with
 # `NullCache` (no-op) and `InMemoryCache` (tokio RwLock + TTL). Redis
 # backend is behind the separate `cache-redis` feature.
-cache = ["dep:async-trait", "dep:tokio"]
+cache = ["dep:async-trait", "dep:tokio", "dep:sha2"]
 
 # Per-view caching tower layer (`rustango::cache_page`) — Django's
 # @cache_page / @cache_control / @vary_on_headers analogs. Implies
