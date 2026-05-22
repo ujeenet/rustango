@@ -470,7 +470,7 @@ Summary: **10 / 4 / 4 / 2**. Multi-DB routing is the headline MISSING.
 | `AuthenticationMiddleware` | [auth middleware](https://docs.djangoproject.com/en/6.0/ref/middleware/#django.contrib.auth.middleware.AuthenticationMiddleware) | SHIPPED | `SessionUser` extractor | |
 | `MessageMiddleware` | [messages](https://docs.djangoproject.com/en/6.0/ref/contrib/messages/) | SHIPPED | `messages::*` flash-message store | |
 | `CommonMiddleware` (trailing slash) | [CommonMiddleware](https://docs.djangoproject.com/en/6.0/ref/middleware/#django.middleware.common.CommonMiddleware) | SHIPPED | `trailing_slash::*` | |
-| `LocaleMiddleware` | [LocaleMiddleware](https://docs.djangoproject.com/en/6.0/ref/middleware/#django.middleware.locale.LocaleMiddleware) | PARTIAL | `i18n::Translator` Accept-Language negotiation + cookie (#406) | Per-URL locale prefix MISSING. |
+| `LocaleMiddleware` | [LocaleMiddleware](https://docs.djangoproject.com/en/6.0/ref/middleware/#django.middleware.locale.LocaleMiddleware) | SHIPPED | `i18n::middleware::LocaleMiddleware` tower layer — cookie + `Accept-Language` resolver injecting `ActiveLocale` into request extensions (`i18n/middleware.rs`). URL prefix via documented `Router::nest("/<lang>", ...)` composition (axum-shape #424 parity). | |
 | `GZipMiddleware` | [GZip](https://docs.djangoproject.com/en/6.0/ref/middleware/#django.middleware.gzip.GZipMiddleware) | SHIPPED | `compression::*` (gzip + deflate) | |
 | `ConditionalGetMiddleware` (ETag / Last-Modified) | [ConditionalGet](https://docs.djangoproject.com/en/6.0/ref/middleware/#django.middleware.http.ConditionalGetMiddleware) | SHIPPED | `etag::*` body-hash + 304 | |
 | Real-IP extraction | n/a in Django core | SHIPPED | `real_ip::*` (X-Forwarded-For / X-Real-IP / RFC 7239) | |
@@ -490,7 +490,7 @@ Summary: **10 / 4 / 4 / 2**. Multi-DB routing is the headline MISSING.
 | `SECURE_PROXY_SSL_HEADER` | [proxy headers](https://docs.djangoproject.com/en/6.0/ref/settings/#secure-proxy-ssl-header) | SHIPPED | Real-IP layer handles it | |
 | API versioning (header / query / prefix) | n/a | SHIPPED | `api_version::*` | |
 
-Summary: **14 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A** for the dimensions enumerated. Rustango is notably ahead on per-request observability + CSRF / rate limiting / CSP / OTel out-of-the-box.
+Summary: **15 SHIPPED / 0 PARTIAL / 1 MISSING / 0 N/A** for the dimensions enumerated. Rustango is notably ahead on per-request observability + CSRF / rate limiting / CSP / OTel out-of-the-box.
 
 ---
 
@@ -577,7 +577,7 @@ Summary: **3 / 2 / 3 / 0**.
 |---|---|---|---|---|
 | `gettext` / `pgettext` / `ngettext` translation API | [translation](https://docs.djangoproject.com/en/6.0/topics/i18n/translation/) | PARTIAL | `i18n::Translator::t(key)` lookup against JSON per-locale (#422) | Not gettext shape; ICU MessageFormat partial. |
 | `.po` / `.mo` compilation (`makemessages`, `compilemessages`) | (sec 13) | MISSING | n/a (#423) | |
-| Per-language URL prefix (`/en/foo` / `/es/foo`) | [URL i18n](https://docs.djangoproject.com/en/6.0/topics/i18n/translation/#internationalization-in-url-patterns) | MISSING | n/a — rustango-cms ships a `LocaleMode::PathOrQuery` for itself, framework doesn't (#424) | |
+| Per-language URL prefix (`/en/foo` / `/es/foo`) | [URL i18n](https://docs.djangoproject.com/en/6.0/topics/i18n/translation/#internationalization-in-url-patterns) | SHIPPED | `Router::nest("/<lang>", router.layer(LocaleMiddleware::new(&[lang])))` composes per-locale prefixes — axum-shape parity with Django's `i18n_patterns()`. Documented in `i18n::middleware` + regression test `tests/locale_middleware.rs::router_nest_per_locale_pattern`. | |
 | Fallback locales | [fallbacks](https://docs.djangoproject.com/en/6.0/topics/i18n/translation/#how-django-discovers-translations) | PARTIAL | `Translator` falls back to default locale (#425) | |
 | Per-user TIME_ZONE activation | [time zones](https://docs.djangoproject.com/en/6.0/topics/i18n/timezones/) | SHIPPED | `i18n::timezone::with_tz(fixed_offset, future)` task-local + `tz_offset` cookie middleware | rustango-cms uses this end-to-end. |
 | Locale-aware number / date formatting | [formatting](https://docs.djangoproject.com/en/6.0/topics/i18n/formatting/) | MISSING | n/a (#426) | |
@@ -585,7 +585,7 @@ Summary: **3 / 2 / 3 / 0**.
 | Currency / region formatting | [LANGUAGES setting](https://docs.djangoproject.com/en/6.0/ref/settings/#languages) | MISSING | n/a (#428) | |
 | Right-to-left layout support | [BiDi text](https://docs.djangoproject.com/en/6.0/topics/i18n/translation/#translator-comments-in-templates) | MISSING | n/a (#429) | |
 
-Summary: **1 SHIPPED / 2 PARTIAL / 6 MISSING / 0 N/A**. **One of the weakest sections.** Backlog #87 sub-bullets track this; deliberate deferral pending demand signal.
+Summary: **2 SHIPPED / 2 PARTIAL / 5 MISSING / 0 N/A**. **Still one of the weaker sections.** Backlog #87 sub-bullets track this; deliberate deferral pending demand signal.
 
 ---
 
