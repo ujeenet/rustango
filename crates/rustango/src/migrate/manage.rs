@@ -3212,7 +3212,7 @@ async fn flush_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
 /// Only the `feature = "config"` build of `sendtestemail_cmd` uses
 /// this; the `not(feature = "config")` stub short-circuits with a
 /// friendly error, so the parser is unreachable there.
-#[cfg(feature = "config")]
+#[cfg(all(feature = "config", feature = "email"))]
 #[derive(Debug, Default, PartialEq, Eq)]
 struct SendTestEmailArgs {
     to: Option<String>,
@@ -3221,7 +3221,7 @@ struct SendTestEmailArgs {
     help: bool,
 }
 
-#[cfg(feature = "config")]
+#[cfg(all(feature = "config", feature = "email"))]
 fn parse_sendtestemail_args(args: &[String]) -> Result<SendTestEmailArgs, MigrateError> {
     let mut out = SendTestEmailArgs::default();
     let mut iter = args.iter();
@@ -3272,7 +3272,7 @@ fn parse_sendtestemail_args(args: &[String]) -> Result<SendTestEmailArgs, Migrat
 /// Successful send prints `sendtestemail: ok` plus the resolved
 /// backend name. Send failures surface the underlying `MailError`
 /// as a [`MigrateError::Validation`].
-#[cfg(feature = "config")]
+#[cfg(all(feature = "config", feature = "email"))]
 async fn sendtestemail_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let parsed = parse_sendtestemail_args(args)?;
     if parsed.help {
@@ -3360,6 +3360,15 @@ async fn sendtestemail_cmd<W: Write>(_args: &[String], _w: &mut W) -> Result<(),
     Err(MigrateError::Validation(
         "sendtestemail: this build was compiled without the `config` feature — settings \
          can't be loaded. Rebuild with `--features config`."
+            .to_owned(),
+    ))
+}
+
+#[cfg(all(feature = "config", not(feature = "email")))]
+async fn sendtestemail_cmd<W: Write>(_args: &[String], _w: &mut W) -> Result<(), MigrateError> {
+    Err(MigrateError::Validation(
+        "sendtestemail: this build was compiled without the `email` feature — \
+         the mail backend isn't linked. Rebuild with `--features email`."
             .to_owned(),
     ))
 }
