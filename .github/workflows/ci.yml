@@ -157,6 +157,7 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,passwords,auth_flows --test password_reset_confirm
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,cache,config --test file_cache_backend
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test factories
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,config,email --test file_email_backend
 
   # Per-dialect SQLite live suite — runs every `_sqlite_live.rs` file
   # explicitly under `--no-default-features --features sqlite,...`. This

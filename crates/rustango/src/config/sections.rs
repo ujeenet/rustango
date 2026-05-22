@@ -331,6 +331,12 @@ pub struct MailSettings {
     /// broader-but-less-urgent ops list than `admins`. Issue #416.
     #[serde(default)]
     pub managers: Vec<String>,
+    /// Django-shape `EMAIL_FILE_PATH` — directory the `"file"` mail
+    /// backend writes outgoing `.eml` files to (instead of sending).
+    /// Set alongside `backend = "file"`; if `backend = "file"` is
+    /// requested but this is unset, the resolver falls back to
+    /// `ConsoleMailer` with a tracing warning. Issue #417.
+    pub file_email_dir: Option<std::path::PathBuf>,
 }
 
 /// HTTP server bind + request-timeout knobs (#87).
