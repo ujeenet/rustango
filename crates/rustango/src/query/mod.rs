@@ -2497,6 +2497,242 @@ impl<T: Model> ValuesFlatQuerySet<T> {
     }
 }
 
+// ====================================================================
+// Django `.dates(field, kind)` — distinct truncated dates (issue #327)
+// ====================================================================
+
+/// Truncation granularity for [`QuerySet::dates`] / [`QuerySet::datetimes`].
+/// Mirrors Django's `'year' | 'month' | 'day'` shape. Issue #327 / #328.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DateKind {
+    Year,
+    Month,
+    Day,
+}
+
+impl DateKind {
+    /// Emit the dialect-portable SQL fragment that truncates the
+    /// column to this granularity. `col_quoted` must already be a
+    /// quoted identifier (`"name"` / `\`name\``).
+    pub(crate) fn trunc_sql(self, dialect_name: &str, col_quoted: &str) -> String {
+        match (dialect_name, self) {
+            ("postgres", DateKind::Year) => format!("DATE_TRUNC('year', {col_quoted})::date"),
+            ("postgres", DateKind::Month) => format!("DATE_TRUNC('month', {col_quoted})::date"),
+            ("postgres", DateKind::Day) => format!("DATE({col_quoted})"),
+            ("mysql", DateKind::Year) => {
+                format!("DATE(DATE_FORMAT({col_quoted}, '%Y-01-01'))")
+            }
+            ("mysql", DateKind::Month) => {
+                format!("DATE(DATE_FORMAT({col_quoted}, '%Y-%m-01'))")
+            }
+            ("mysql", DateKind::Day) => format!("DATE({col_quoted})"),
+            ("sqlite", DateKind::Year) => {
+                format!("date(strftime('%Y-01-01', {col_quoted}))")
+            }
+            ("sqlite", DateKind::Month) => {
+                format!("date(strftime('%Y-%m-01', {col_quoted}))")
+            }
+            ("sqlite", DateKind::Day) => format!("date({col_quoted})"),
+            // Unknown dialect — fall back to PG-shape DATE_TRUNC; the
+            // driver will surface a clear syntax error if the dialect
+            // doesn't support it.
+            (_, DateKind::Year) => format!("DATE_TRUNC('year', {col_quoted})"),
+            (_, DateKind::Month) => format!("DATE_TRUNC('month', {col_quoted})"),
+            (_, DateKind::Day) => format!("DATE({col_quoted})"),
+        }
+    }
+}
+
+/// Builder returned by [`QuerySet::dates`]. The terminal
+/// [`fetch_pool`](Self::fetch_pool) emits
+/// `SELECT DISTINCT <trunc(col)> AS d FROM (<inner-query>) sub ORDER BY d`
+/// — the wrap inherits the underlying queryset's WHERE / JOINs / LIMIT
+/// / ORDER BY so filters on the QuerySet pass through to `.dates()`.
+pub struct DatesQuerySet<T: Model> {
+    pub(crate) qs: QuerySet<T>,
+    pub(crate) field: &'static str,
+    pub(crate) kind: DateKind,
+    pub(crate) descending: bool,
+}
+
+impl<T: Model> DatesQuerySet<T> {
+    /// Reverse the ORDER BY direction. Default ascending (oldest
+    /// first), matching Django.
+    #[must_use]
+    pub fn order_desc(mut self, desc: bool) -> Self {
+        self.descending = desc;
+        self
+    }
+
+    /// Validate the field + return the column name resolved on the
+    /// model schema.
+    pub fn resolve_column(&self) -> Result<&'static str, QueryError> {
+        let model: &'static ModelSchema = T::SCHEMA;
+        let field = model
+            .field(self.field)
+            .ok_or_else(|| QueryError::UnknownField {
+                model: model.name,
+                field: self.field.to_owned(),
+            })?;
+        // Field must be a Date or DateTime — operators expect the
+        // truncation to be meaningful. Other types (i64, String, etc.)
+        // would silently produce garbage on some backends.
+        if !matches!(
+            field.ty,
+            crate::core::FieldType::Date | crate::core::FieldType::DateTime
+        ) {
+            return Err(QueryError::TypeMismatch {
+                model: model.name,
+                field: self.field.to_owned(),
+                // `.dates()` requires a Date or DateTime column; the
+                // shape uses `expected: DateTime` as the canonical
+                // representative since the truncation always produces
+                // a Date regardless of input.
+                expected: crate::core::FieldType::DateTime,
+                actual: field.ty,
+            });
+        }
+        Ok(field.column)
+    }
+}
+
+impl<T: Model> QuerySet<T> {
+    /// Django `.dates(field, kind)` — return the distinct date values
+    /// of `field` truncated to `kind`. Issue #327.
+    ///
+    /// Output order is ascending by default (oldest first). Chain
+    /// [`DatesQuerySet::order_desc(true)`] for newest-first.
+    ///
+    /// Filters / joins / limits set on the underlying queryset pass
+    /// through to the truncation pipeline — `.filter(...).dates(...)`
+    /// only considers matching rows.
+    #[must_use]
+    pub fn dates(self, field: &'static str, kind: DateKind) -> DatesQuerySet<T> {
+        DatesQuerySet {
+            qs: self,
+            field,
+            kind,
+            descending: false,
+        }
+    }
+
+    /// Django `.datetimes(field, kind)` — return the distinct datetime
+    /// values of `field` truncated to `kind`. Issue #328.
+    ///
+    /// Supports finer granularity than [`Self::dates`]: in addition to
+    /// `Year` / `Month` / `Day`, accepts `Hour` / `Minute` / `Second`.
+    /// Returns `DateTime<Utc>` at the truncated instant.
+    #[must_use]
+    pub fn datetimes(self, field: &'static str, kind: DateTimeKind) -> DateTimesQuerySet<T> {
+        DateTimesQuerySet {
+            qs: self,
+            field,
+            kind,
+            descending: false,
+        }
+    }
+}
+
+/// Truncation granularity for [`QuerySet::datetimes`]. Mirrors
+/// Django's `'year' | 'month' | 'day' | 'hour' | 'minute' | 'second'`.
+/// Issue #328.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DateTimeKind {
+    Year,
+    Month,
+    Day,
+    Hour,
+    Minute,
+    Second,
+}
+
+impl DateTimeKind {
+    /// Dialect-portable SQL fragment that truncates a `TIMESTAMP` /
+    /// `DATETIME` column to this granularity, returning a value
+    /// shaped to decode as `DateTime<Utc>`.
+    pub(crate) fn trunc_sql(self, dialect_name: &str, col_quoted: &str) -> String {
+        match dialect_name {
+            "postgres" => {
+                let unit = match self {
+                    DateTimeKind::Year => "year",
+                    DateTimeKind::Month => "month",
+                    DateTimeKind::Day => "day",
+                    DateTimeKind::Hour => "hour",
+                    DateTimeKind::Minute => "minute",
+                    DateTimeKind::Second => "second",
+                };
+                format!("DATE_TRUNC('{unit}', {col_quoted})")
+            }
+            "mysql" => {
+                let fmt = match self {
+                    DateTimeKind::Year => "%Y-01-01 00:00:00",
+                    DateTimeKind::Month => "%Y-%m-01 00:00:00",
+                    DateTimeKind::Day => "%Y-%m-%d 00:00:00",
+                    DateTimeKind::Hour => "%Y-%m-%d %H:00:00",
+                    DateTimeKind::Minute => "%Y-%m-%d %H:%i:00",
+                    DateTimeKind::Second => "%Y-%m-%d %H:%i:%s",
+                };
+                // CAST back to DATETIME so the decoder sees the right type.
+                format!("CAST(DATE_FORMAT({col_quoted}, '{fmt}') AS DATETIME)")
+            }
+            _ => {
+                // SQLite (and any other dialect): use strftime to
+                // format, then re-parse via datetime() so the value
+                // round-trips to the standard ISO-8601 shape.
+                let fmt = match self {
+                    DateTimeKind::Year => "%Y-01-01 00:00:00",
+                    DateTimeKind::Month => "%Y-%m-01 00:00:00",
+                    DateTimeKind::Day => "%Y-%m-%d 00:00:00",
+                    DateTimeKind::Hour => "%Y-%m-%d %H:00:00",
+                    DateTimeKind::Minute => "%Y-%m-%d %H:%M:00",
+                    DateTimeKind::Second => "%Y-%m-%d %H:%M:%S",
+                };
+                format!("strftime('{fmt}', {col_quoted})")
+            }
+        }
+    }
+}
+
+/// Builder returned by [`QuerySet::datetimes`]. Issue #328 — sibling
+/// to [`DatesQuerySet`] with finer granularity + `DateTime<Utc>`
+/// return type.
+pub struct DateTimesQuerySet<T: Model> {
+    pub(crate) qs: QuerySet<T>,
+    pub(crate) field: &'static str,
+    pub(crate) kind: DateTimeKind,
+    pub(crate) descending: bool,
+}
+
+impl<T: Model> DateTimesQuerySet<T> {
+    #[must_use]
+    pub fn order_desc(mut self, desc: bool) -> Self {
+        self.descending = desc;
+        self
+    }
+
+    pub fn resolve_column(&self) -> Result<&'static str, QueryError> {
+        let model: &'static ModelSchema = T::SCHEMA;
+        let field = model
+            .field(self.field)
+            .ok_or_else(|| QueryError::UnknownField {
+                model: model.name,
+                field: self.field.to_owned(),
+            })?;
+        if !matches!(
+            field.ty,
+            crate::core::FieldType::Date | crate::core::FieldType::DateTime
+        ) {
+            return Err(QueryError::TypeMismatch {
+                model: model.name,
+                field: self.field.to_owned(),
+                expected: crate::core::FieldType::DateTime,
+                actual: field.ty,
+            });
+        }
+        Ok(field.column)
+    }
+}
+
 /// Shared compile path for the three values builders. Validates the
 /// column list, then delegates to `QuerySet::compile` and stamps the
 /// projection onto the resulting [`SelectQuery`].
