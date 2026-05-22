@@ -501,7 +501,7 @@ Summary: **14 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A** for the dimensions enume
 | Cache trait + pluggable backends | [cache framework](https://docs.djangoproject.com/en/6.0/topics/cache/) | SHIPPED | `cache::Cache` trait | |
 | Memcached backend | [memcached](https://docs.djangoproject.com/en/6.0/topics/cache/#memcached) | MISSING | n/a (#407) | Use Redis or in-memory. |
 | Redis backend | [redis](https://docs.djangoproject.com/en/6.0/topics/cache/#redis) | SHIPPED | `cache-redis` feature (v0.18) | |
-| File-system cache | [filesystem](https://docs.djangoproject.com/en/6.0/topics/cache/#file-system-caching) | MISSING | n/a (#408) | |
+| File-system cache | [filesystem](https://docs.djangoproject.com/en/6.0/topics/cache/#file-system-caching) | SHIPPED | `cache::FileCache` (`backend = "file"` + `[cache].file_cache_dir`) — `src/cache/mod.rs` | |
 | In-memory cache | [local-memory](https://docs.djangoproject.com/en/6.0/topics/cache/#local-memory-caching) | SHIPPED | `InMemoryCache` | |
 | Database cache | [db](https://docs.djangoproject.com/en/6.0/topics/cache/#database-caching) | PARTIAL | DB tables can back the trait; no first-class `DbCache` (#409) | |
 | `@cache_page` view decorator | [cache_page](https://docs.djangoproject.com/en/6.0/topics/cache/#the-per-view-cache) | SHIPPED | `cache_page::cache_page_layer` (v0.19) | |
@@ -509,7 +509,7 @@ Summary: **14 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A** for the dimensions enume
 | `@vary_on_headers` / `@vary_on_cookie` | [vary](https://docs.djangoproject.com/en/6.0/topics/cache/#using-vary-headers) | SHIPPED | Vary header helpers | |
 | Template fragment caching | [template fragments](https://docs.djangoproject.com/en/6.0/topics/cache/#template-fragment-caching) | SHIPPED | `cache_fragment::cached_render` | |
 
-Summary: **7 / 1 / 2 / 0**.
+Summary: **8 / 1 / 1 / 0**.
 
 ---
 

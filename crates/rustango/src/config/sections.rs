@@ -270,10 +270,17 @@ pub struct TenancySettings {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct CacheSettings {
-    /// `"memory"` (default), `"redis"`, `"postgres"`.
+    /// `"memory"` (default), `"redis"`, `"file"`, `"postgres"`.
     pub backend: Option<String>,
     /// Redis connection URL when `backend = "redis"`.
     pub redis_url: Option<String>,
+    /// Django-shape `CACHES["default"]["LOCATION"]` for the
+    /// file-system cache backend (#408). Directory the `"file"` cache
+    /// backend stores entries under, one file per key. When unset
+    /// while `backend = "file"`, the resolver falls back to
+    /// `InMemoryCache` with a tracing warning so a misconfig doesn't
+    /// block boot.
+    pub file_cache_dir: Option<std::path::PathBuf>,
 }
 
 /// Background-jobs runner config. Slice 10.1 lights up.

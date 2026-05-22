@@ -177,12 +177,31 @@ pub fn from_settings(s: &crate::config::CacheSettings) -> BoxedCache {
             Arc::new(InMemoryCache::new())
         }
         Some("null" | "none") => Arc::new(NullCache),
+        Some("file") => file_from_settings_or_warn(s),
         Some("memory") | None => Arc::new(InMemoryCache::new()),
         Some(other) => {
             tracing::warn!(
                 target: "rustango::cache",
                 backend = %other,
                 "unknown cache.backend value; falling back to InMemoryCache",
+            );
+            Arc::new(InMemoryCache::new())
+        }
+    }
+}
+
+/// File-backend resolver — needs `[cache].file_cache_dir` set,
+/// otherwise warns and falls back to `InMemoryCache` so the app still
+/// boots on misconfig. Issue #408.
+#[cfg(feature = "config")]
+fn file_from_settings_or_warn(s: &crate::config::CacheSettings) -> BoxedCache {
+    match s.file_cache_dir.as_deref() {
+        Some(dir) => Arc::new(FileCache::new(dir)),
+        None => {
+            tracing::warn!(
+                target: "rustango::cache",
+                "cache.backend = \"file\" but [cache].file_cache_dir is unset; \
+                 falling back to InMemoryCache.",
             );
             Arc::new(InMemoryCache::new())
         }
@@ -395,6 +414,163 @@ impl Cache for InMemoryCache {
 
     async fn clear(&self) -> Result<(), CacheError> {
         self.inner.write().await.clear();
+        Ok(())
+    }
+}
+
+// ------------------------------------------------------------------ FileCache
+
+/// File-system cache — one file per key, mirroring Django's
+/// `django.core.cache.backends.filebased.FileBasedCache` (issue #408).
+///
+/// Useful when you want process-restart-durable caching without
+/// running Redis, and when the working set fits the local disk.
+/// Keys are SHA-256-hashed to produce filenames that are safe across
+/// platforms (no path-separator surprises, no length limits, no case
+/// folding on macOS). The directory is auto-created on the first
+/// `set`.
+///
+/// ## File format
+///
+/// Each entry is a small binary blob:
+///   `[expires_at_unix_secs: i64 big-endian][value bytes]`
+///
+/// `expires_at_unix_secs` is `0` when the entry has no TTL. Expired
+/// entries are pruned lazily on the next `get` / `exists` call —
+/// there is no background reaper.
+///
+/// ## Limitations vs Django
+///
+/// Django's FBC takes a `_lock` file for atomic multi-process writes
+/// + supports MAX_ENTRIES with a cull strategy. This implementation
+/// is the minimal Django-shape primitive: same on-disk semantics,
+/// per-process atomicity via `std::fs::write` (atomic per-call on
+/// most filesystems). Add file locking when a project actually
+/// shares the directory across processes.
+pub struct FileCache {
+    dir: std::path::PathBuf,
+}
+
+impl FileCache {
+    /// Build a cache that stores entries under `dir`. The directory
+    /// is auto-created on the first `set` call.
+    #[must_use]
+    pub fn new(dir: impl Into<std::path::PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
+    /// The directory entries are stored under.
+    #[must_use]
+    pub fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    /// Hash the key into a stable, filesystem-safe filename. Uses
+    /// SHA-256 (already a workspace dep via `passwords` / `signed_url`)
+    /// hexlified; no separators, no length surprises.
+    fn key_path(&self, key: &str) -> std::path::PathBuf {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(key.as_bytes());
+        let mut name = String::with_capacity(64 + 6);
+        for b in hash {
+            use std::fmt::Write as _;
+            let _ = write!(&mut name, "{b:02x}");
+        }
+        name.push_str(".cache");
+        self.dir.join(name)
+    }
+
+    fn now_unix_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
+    /// Encode `[expires_at: i64 BE][value bytes]`. expires_at = 0
+    /// means no TTL.
+    fn encode(value: &str, ttl: Option<Duration>) -> Vec<u8> {
+        let expires_at = ttl
+            .map(|d| Self::now_unix_secs().saturating_add(d.as_secs() as i64))
+            .unwrap_or(0);
+        let mut out = Vec::with_capacity(8 + value.len());
+        out.extend_from_slice(&expires_at.to_be_bytes());
+        out.extend_from_slice(value.as_bytes());
+        out
+    }
+
+    /// Decode the file body. Returns `Some(value)` if present + not
+    /// expired, else `None`. Caller is responsible for deleting the
+    /// file when this returns `None` due to expiry.
+    fn decode(buf: &[u8]) -> Option<(String, bool /* expired */)> {
+        if buf.len() < 8 {
+            return None;
+        }
+        let mut ts = [0u8; 8];
+        ts.copy_from_slice(&buf[..8]);
+        let expires_at = i64::from_be_bytes(ts);
+        let value = std::str::from_utf8(&buf[8..]).ok()?.to_owned();
+        let expired = expires_at != 0 && Self::now_unix_secs() >= expires_at;
+        Some((value, expired))
+    }
+}
+
+#[async_trait]
+impl Cache for FileCache {
+    async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
+        let path = self.key_path(key);
+        let buf = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(CacheError::Connection(format!("read: {e}"))),
+        };
+        match Self::decode(&buf) {
+            Some((_, true)) => {
+                let _ = std::fs::remove_file(&path);
+                Ok(None)
+            }
+            Some((v, false)) => Ok(Some(v)),
+            None => {
+                let _ = std::fs::remove_file(&path);
+                Ok(None)
+            }
+        }
+    }
+
+    async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| CacheError::Connection(format!("create_dir_all: {e}")))?;
+        let path = self.key_path(key);
+        std::fs::write(&path, Self::encode(value, ttl))
+            .map_err(|e| CacheError::Connection(format!("write: {e}")))?;
+        Ok(())
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), CacheError> {
+        let path = self.key_path(key);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(CacheError::Connection(format!("remove_file: {e}"))),
+        }
+    }
+
+    async fn exists(&self, key: &str) -> Result<bool, CacheError> {
+        Ok(self.get(key).await?.is_some())
+    }
+
+    async fn clear(&self) -> Result<(), CacheError> {
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(CacheError::Connection(format!("read_dir: {e}"))),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("cache") {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
         Ok(())
     }
 }
