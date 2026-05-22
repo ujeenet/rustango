@@ -545,11 +545,11 @@ Summary: **7 / 2 / 5 / 0**. Gaps cluster around `m2m_changed`, migrate signals, 
 | In-memory / dummy backend | [locmem](https://docs.djangoproject.com/en/6.0/topics/email/#in-memory-backend) | SHIPPED | `email::InMemoryMailer` + `NullMailer` | |
 | SMTP backend | [smtp](https://docs.djangoproject.com/en/6.0/topics/email/#smtp-backend) | SHIPPED | `SmtpMailer` via lettre + rustls (`email-smtp` feature) | |
 | Email templates (Tera) | n/a in Django core | SHIPPED | `email_templates::EmailRenderer` | |
-| File backend | [file backend](https://docs.djangoproject.com/en/6.0/topics/email/#file-backend) | MISSING | n/a (#417) | Niche dev tool. |
+| File backend | [file backend](https://docs.djangoproject.com/en/6.0/topics/email/#file-backend) | SHIPPED | `email::FileMailer` (`backend = "file"` + `[mail].file_email_dir`) — `src/email/mod.rs` | |
 | Email job queue integration | n/a | SHIPPED | `email_jobs::dispatch_email` | |
 | Multi-channel notifications (Mail + Slack + DB) | n/a (Django needs `django-notifications`) | PARTIAL | `notifications::*` skeleton (v0.21); incomplete provider set (#418) | |
 
-Summary: **6 / 2 / 1 / 0**.
+Summary: **7 / 2 / 0 / 0**.
 
 ---
 

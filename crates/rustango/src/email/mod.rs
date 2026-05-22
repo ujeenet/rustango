@@ -260,6 +260,111 @@ impl Mailer for InMemoryMailer {
     }
 }
 
+// ------------------------------------------------------------------ FileMailer
+
+/// Development / debug mailer — writes each outgoing email to a
+/// timestamped `.eml` file in a configured directory instead of
+/// sending it.
+///
+/// Mirrors Django's `django.core.mail.backends.filebased.EmailBackend`
+/// (issue #417). Useful when you want to inspect rendered email
+/// content (password-reset links, signup confirmations) during
+/// development without wiring an SMTP relay or piping stdout into a
+/// log file.
+///
+/// File names are `YYYYMMDDHHMMSS-<seq>.eml` so a burst of emails
+/// inside the same second still get unique paths. The directory is
+/// created on `send` if it doesn't yet exist.
+pub struct FileMailer {
+    dir: std::path::PathBuf,
+    seq: std::sync::atomic::AtomicU64,
+}
+
+impl FileMailer {
+    /// Build a mailer that writes `.eml` files into `dir`. The
+    /// directory is auto-created on the first `send` call.
+    #[must_use]
+    pub fn new(dir: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            dir: dir.into(),
+            seq: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// The directory `.eml` files are written into.
+    #[must_use]
+    pub fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+}
+
+/// Serialize an `Email` to RFC-822-ish text. Headers first, blank
+/// line, then body. HTML alternative (when present) is appended as a
+/// `--- HTML alternative ---` block — this matches the human-readable
+/// shape Django's file backend uses for dev inspection. We are NOT
+/// producing a fully-spec-compliant multipart MIME message; this is a
+/// debugging dump format.
+fn serialize_eml(email: &Email) -> String {
+    let mut out = String::with_capacity(256 + email.body.len());
+    if let Some(f) = &email.from {
+        out.push_str("From: ");
+        out.push_str(f);
+        out.push('\n');
+    }
+    if !email.to.is_empty() {
+        out.push_str("To: ");
+        out.push_str(&email.to.join(", "));
+        out.push('\n');
+    }
+    if !email.cc.is_empty() {
+        out.push_str("Cc: ");
+        out.push_str(&email.cc.join(", "));
+        out.push('\n');
+    }
+    if !email.bcc.is_empty() {
+        out.push_str("Bcc: ");
+        out.push_str(&email.bcc.join(", "));
+        out.push('\n');
+    }
+    if let Some(rt) = &email.reply_to {
+        out.push_str("Reply-To: ");
+        out.push_str(rt);
+        out.push('\n');
+    }
+    out.push_str("Subject: ");
+    out.push_str(&email.subject);
+    out.push('\n');
+    for (k, v) in &email.headers {
+        out.push_str(k);
+        out.push_str(": ");
+        out.push_str(v);
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(&email.body);
+    if let Some(html) = &email.html_body {
+        out.push_str("\n\n--- HTML alternative ---\n");
+        out.push_str(html);
+    }
+    out
+}
+
+#[async_trait]
+impl Mailer for FileMailer {
+    async fn send(&self, email: &Email) -> Result<(), MailError> {
+        email.validate()?;
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| MailError::Transport(format!("create_dir_all: {e}")))?;
+        let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let stamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
+        let name = format!("{stamp}-{seq:04}.eml");
+        let path = self.dir.join(name);
+        std::fs::write(&path, serialize_eml(email))
+            .map_err(|e| MailError::Transport(format!("write {}: {e}", path.display())))?;
+        Ok(())
+    }
+}
+
 // ------------------------------------------------------------------ NullMailer
 
 /// Discards all emails. Useful for disabling email sending in environments
@@ -386,12 +491,31 @@ pub fn from_settings(s: &crate::config::MailSettings) -> BoxedMailer {
         Some("smtp") => smtp_from_settings_or_warn(s),
         Some("memory") => Arc::new(InMemoryMailer::new()),
         Some("null" | "none") => Arc::new(NullMailer),
+        Some("file") => file_from_settings_or_warn(s),
         Some("console") | None => Arc::new(ConsoleMailer),
         Some(other) => {
             tracing::warn!(
                 target: "rustango::email",
                 backend = %other,
                 "unknown mail.backend value; falling back to ConsoleMailer",
+            );
+            Arc::new(ConsoleMailer)
+        }
+    }
+}
+
+/// File-backend resolver — needs `[mail].file_email_dir` to be set,
+/// otherwise warns and falls back to `ConsoleMailer` so the app still
+/// boots. Issue #417.
+#[cfg(feature = "config")]
+fn file_from_settings_or_warn(s: &crate::config::MailSettings) -> BoxedMailer {
+    match s.file_email_dir.as_deref() {
+        Some(dir) => Arc::new(FileMailer::new(dir)),
+        None => {
+            tracing::warn!(
+                target: "rustango::email",
+                "mail.backend = \"file\" but [mail].file_email_dir is unset; \
+                 falling back to ConsoleMailer.",
             );
             Arc::new(ConsoleMailer)
         }
