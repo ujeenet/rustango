@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block body %}
 <h1>{{ admin_title | default(value='Rustango Admin') }}</h1>
+<div class="index-shell">
+<div class="index-main">
 {% if models | length == 0 %}
 <p><em>No models registered.</em></p>
 {% else %}
@@ -24,4 +26,20 @@
 </section>
 {% endfor %}
 {% endif %}
+</div>
+{% if recent_actions and recent_actions | length > 0 %}
+<aside class="recent-actions">
+  <h3>Recent actions</h3>
+  <ul>
+  {% for a in recent_actions %}
+    <li>
+      <strong>{{ a.operation }}</strong>
+      <a href="{{ a.url }}">{{ a.table }}/{{ a.pk }}</a>
+      <small>{{ a.occurred_at }}{% if a.source %} &middot; {{ a.source }}{% endif %}</small>
+    </li>
+  {% endfor %}
+  </ul>
+</aside>
+{% endif %}
+</div>
 {% endblock body %}
