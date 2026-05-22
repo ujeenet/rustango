@@ -217,6 +217,17 @@ pub struct M2MRelation {
     pub src_col: &'static str,
     /// Column in the junction table that references the target model's PK.
     pub dst_col: &'static str,
+    /// Whether the migration writer should auto-create the junction
+    /// table. Default `true` — the writer emits `CREATE TABLE
+    /// <through> (src_col, dst_col, UNIQUE(src_col, dst_col))`.
+    ///
+    /// Set to `false` (via `#[rustango(m2m(..., auto_create = false))]`)
+    /// when the operator declares the through table themselves with
+    /// a `#[derive(Model)]` struct that adds extra columns (a
+    /// "through MODEL" in Django's terminology). Mirrors Django's
+    /// `ManyToManyField(through=…)` with custom through model.
+    /// Issue #324.
+    pub auto_create: bool,
 }
 
 /// Static description of a model.

@@ -491,11 +491,21 @@ fn collect_indexes<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<In
 
 /// Collect all M2M junction table descriptors from a set of model schemas,
 /// deduplicating by `through` table name and sorting for deterministic output.
+///
+/// #324 — relations marked `auto_create = false` are skipped here.
+/// The operator owns those junction tables via their own
+/// `#[derive(Model)]` struct, so the migration writer must not emit a
+/// second `CREATE TABLE` for them (which would conflict on apply).
+/// The Rust-side `<name>_m2m()` accessor still works because it
+/// references the through table by name, not by snapshot.
 fn collect_m2m_tables<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<M2MTableSnapshot> {
     let mut seen = std::collections::HashSet::new();
     let mut out: Vec<M2MTableSnapshot> = Vec::new();
     for schema in schemas {
         for rel in schema.m2m {
+            if !rel.auto_create {
+                continue;
+            }
             if seen.insert(rel.through) {
                 out.push(M2MTableSnapshot {
                     through: rel.through.to_owned(),
