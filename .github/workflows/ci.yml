@@ -144,6 +144,8 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,serializer --test serializer_cross_validate
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test queryset_none
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test sqlmigrate
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test queryset_set_ops
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test set_algebra_emission
 
   # Per-dialect SQLite live suite — runs every `_sqlite_live.rs` file
   # explicitly under `--no-default-features --features sqlite,...`. This
