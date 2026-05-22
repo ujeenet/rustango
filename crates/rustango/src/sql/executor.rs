@@ -3475,6 +3475,70 @@ where
     }
 }
 
+/// Django `.dates(field, kind)` terminal — issue #327. Compiles the
+/// underlying queryset to a `SELECT … WHERE …` statement, then wraps
+/// it in `SELECT DISTINCT <trunc(col)> FROM (<inner>) ORDER BY d` to
+/// extract distinct truncated date values. Params from the WHERE
+/// clause pass through unchanged.
+///
+/// # Errors
+/// - [`ExecError::Query`] forwarded from the underlying
+///   [`raw_query_pool`] call.
+/// - Driver / SQL errors on decode (e.g. NULL date columns surface as
+///   sqlx decode errors when the column type isn't `Option<NaiveDate>`).
+pub async fn fetch_dates_pool<T: crate::core::Model + Send>(
+    pool: &Pool,
+    qs: crate::query::DatesQuerySet<T>,
+) -> Result<Vec<chrono::NaiveDate>, ExecError> {
+    let descending = qs.descending;
+    let kind = qs.kind;
+    let column = qs.resolve_column()?;
+    // Compile the underlying queryset into a SelectQuery — preserves
+    // WHERE / JOINs / ORDER BY / LIMIT. The wrap below then ignores
+    // the inner ORDER BY (the truncated bucket order is what callers
+    // expect from `.dates()`).
+    let select_query = qs.qs.compile()?;
+    let dialect = pool.dialect();
+    let inner = dialect.compile_select(&select_query)?;
+    let col_quoted = dialect.quote_ident(column);
+    let trunc_sql = kind.trunc_sql(dialect.name(), &col_quoted);
+    let order_dir = if descending { "DESC" } else { "ASC" };
+    let sql = format!(
+        "SELECT DISTINCT {trunc_sql} AS rs_dates_bucket FROM ({inner_sql}) AS rs_dates_sub ORDER BY rs_dates_bucket {order_dir}",
+        inner_sql = inner.sql,
+    );
+    let rows: Vec<(chrono::NaiveDate,)> = raw_query_pool(&sql, inner.params, pool).await?;
+    Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+/// Django `.datetimes(field, kind)` terminal — issue #328. Sibling
+/// to [`fetch_dates_pool`] with finer granularity (`Hour` / `Minute` /
+/// `Second`) and `DateTime<Utc>` return type.
+///
+/// # Errors
+/// Same shape as [`fetch_dates_pool`].
+pub async fn fetch_datetimes_pool<T: crate::core::Model + Send>(
+    pool: &Pool,
+    qs: crate::query::DateTimesQuerySet<T>,
+) -> Result<Vec<chrono::DateTime<chrono::Utc>>, ExecError> {
+    let descending = qs.descending;
+    let kind = qs.kind;
+    let column = qs.resolve_column()?;
+    let select_query = qs.qs.compile()?;
+    let dialect = pool.dialect();
+    let inner = dialect.compile_select(&select_query)?;
+    let col_quoted = dialect.quote_ident(column);
+    let trunc_sql = kind.trunc_sql(dialect.name(), &col_quoted);
+    let order_dir = if descending { "DESC" } else { "ASC" };
+    let sql = format!(
+        "SELECT DISTINCT {trunc_sql} AS rs_datetimes_bucket FROM ({inner_sql}) AS rs_datetimes_sub ORDER BY rs_datetimes_bucket {order_dir}",
+        inner_sql = inner.sql,
+    );
+    let rows: Vec<(chrono::DateTime<chrono::Utc>,)> =
+        raw_query_pool(&sql, inner.params, pool).await?;
+    Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
 /// `Counter::count` against either backend — fills the QuerySet
 /// counter gap from batches 5/15. Counts rows matching the queryset's
 /// filters via `count_rows_pool`.
