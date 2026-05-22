@@ -368,7 +368,7 @@ Summary: **7 / 3 / 1 / 0**.
 | Rate limiting / account lockout | n/a | SHIPPED | `account_lockout::Lockout` + `rate_limit::*` | |
 | LoginView / LogoutView CBVs | [Auth CBVs](https://docs.djangoproject.com/en/6.0/topics/auth/default/#all-authentication-views) | SHIPPED | `admin::login_view::{public_router, protected_router, login_submit, logout_submit}` (`admin/login_view.rs:37, 88, 353`) — bundled login/logout views with session-cookie mint + redirect handling; `tenancy::auth_routes::jwt_router` provides the JWT analog. Closes #390. | |
 | PasswordChangeView CBV | (above) | SHIPPED | `/account/password` (v0.40) | |
-| PasswordResetConfirmView | (above) | MISSING | n/a (#391) | Email + token machinery is there; no view scaffold. |
+| PasswordResetConfirmView | (above) | SHIPPED | `auth_flows::confirm_password_reset_pool(pool, url, new_password, secret)` + `confirm_password_reset_pool_into(... table, pk_col, password_col)` (closed #391, v0.42). Verifies the signed reset URL via `PasswordReset::verify`, validates new-password length (≥ 8 → `AuthFlowError::WeakPassword`), hashes via `passwords::hash`, and writes the new hash to the named user table. Defaults target `rustango_users(id, password_hash)`; the `_into` variant takes table + column names for custom user models. | |
 | Passkey / WebAuthn | (Django 5.2+) | MISSING | n/a (#392) | |
 
 Summary: **14 SHIPPED / 4 PARTIAL / 4 MISSING / 1 N/A**.

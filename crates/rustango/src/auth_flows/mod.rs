@@ -60,6 +60,18 @@ pub enum AuthFlowError {
     Expired,
     #[error("token is for the wrong purpose ({0})")]
     WrongPurpose(String),
+    /// `confirm_password_reset_pool` rejected the new password — too
+    /// short, too common, or otherwise out-of-spec. Message is the
+    /// validator's complaint, suitable for surfacing to the user.
+    /// Issue #391.
+    #[error("password rejected: {0}")]
+    WeakPassword(String),
+    /// Driver / SQL failure during the password UPDATE. The message
+    /// carries the underlying driver error; callers typically log it
+    /// and surface a generic "try again" message to the operator.
+    /// Issue #391.
+    #[error("database error: {0}")]
+    Database(String),
 }
 
 impl From<SignedUrlError> for AuthFlowError {
@@ -113,6 +125,92 @@ impl PasswordReset {
             .parse::<i64>()
             .map_err(|_| AuthFlowError::Malformed)
     }
+}
+
+/// Django-shape `PasswordResetConfirmView` — verifies a reset URL,
+/// validates the new password, hashes it, and updates the named
+/// user row. Returns the `user_id` on success. Issue #391.
+///
+/// Sensible defaults:
+/// - `user_table` = `"rustango_users"`
+/// - `pk_column` = `"id"`
+/// - `password_column` = `"password_hash"`
+///
+/// The password is rejected if shorter than 8 characters
+/// (`AuthFlowError::WeakPassword`); operators wanting stricter rules
+/// run their own validators on the input before calling this helper.
+///
+/// Pairs with [`PasswordReset::issue`] — issue the URL, email it,
+/// and call this helper from your POST `/password-reset/confirm`
+/// endpoint to land the new password.
+///
+/// # Errors
+/// - [`AuthFlowError`] from `PasswordReset::verify` (Malformed,
+///   InvalidSignature, Expired, WrongPurpose).
+/// - [`AuthFlowError::WeakPassword`] when `new_password.len() < 8`.
+/// - [`AuthFlowError::Database`] for SQL / driver failures.
+#[cfg(feature = "passwords")]
+pub async fn confirm_password_reset_pool(
+    pool: &crate::sql::Pool,
+    url: &str,
+    new_password: &str,
+    secret: &[u8],
+) -> Result<i64, AuthFlowError> {
+    confirm_password_reset_pool_into(
+        pool,
+        url,
+        new_password,
+        secret,
+        "rustango_users",
+        "id",
+        "password_hash",
+    )
+    .await
+}
+
+/// As [`confirm_password_reset_pool`] but writes the new hash into a
+/// caller-named table / columns. Use when the user model lives in a
+/// custom table (e.g. tenant `app_users`) rather than the framework's
+/// default `rustango_users`. Issue #391.
+///
+/// # Errors
+/// Same shape as [`confirm_password_reset_pool`].
+#[cfg(feature = "passwords")]
+pub async fn confirm_password_reset_pool_into(
+    pool: &crate::sql::Pool,
+    url: &str,
+    new_password: &str,
+    secret: &[u8],
+    user_table: &str,
+    pk_column: &str,
+    password_column: &str,
+) -> Result<i64, AuthFlowError> {
+    let user_id = PasswordReset::verify(url, secret)?;
+    if new_password.len() < 8 {
+        return Err(AuthFlowError::WeakPassword(
+            "Password must be at least 8 characters.".into(),
+        ));
+    }
+    let hash =
+        crate::passwords::hash(new_password).map_err(|e| AuthFlowError::Database(e.to_string()))?;
+    let dialect = pool.dialect();
+    let t = dialect.quote_ident(user_table);
+    let pw = dialect.quote_ident(password_column);
+    let pk = dialect.quote_ident(pk_column);
+    let p1 = dialect.placeholder(1);
+    let p2 = dialect.placeholder(2);
+    let sql = format!("UPDATE {t} SET {pw} = {p1} WHERE {pk} = {p2}");
+    crate::sql::raw_execute_pool(
+        pool,
+        &sql,
+        vec![
+            crate::core::SqlValue::String(hash),
+            crate::core::SqlValue::I64(user_id),
+        ],
+    )
+    .await
+    .map_err(|e| AuthFlowError::Database(e.to_string()))?;
+    Ok(user_id)
 }
 
 // ------------------------------------------------------------------ Email verification
