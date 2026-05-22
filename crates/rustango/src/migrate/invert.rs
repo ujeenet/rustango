@@ -279,6 +279,18 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
                 reversible: false,
             }))
         }
+        Operation::Callback(c) => {
+            let Some(reverse_name) = &c.reverse_name else {
+                return Err(MigrateError::Validation(format!(
+                    "callback `{}` cannot be rolled back: no `reverse_name` set",
+                    c.name,
+                )));
+            };
+            Ok(Operation::Callback(crate::migrate::file::CallbackOp {
+                name: reverse_name.clone(),
+                reverse_name: None,
+            }))
+        }
     }
 }
 

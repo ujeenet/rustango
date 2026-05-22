@@ -98,7 +98,7 @@ fn default_atomic() -> bool {
 /// One step inside [`Migration::forward`].
 ///
 /// Externally tagged with lowercase variant names so the JSON reads as
-/// `{"schema": …}` / `{"data": …}`.
+/// `{"schema": …}` / `{"data": …}` / `{"callback": …}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Operation {
@@ -107,6 +107,28 @@ pub enum Operation {
     Schema(SchemaChange),
     /// Raw SQL the user wrote by hand, typically a backfill.
     Data(DataOp),
+    /// Django-shape `RunPython` — invokes a named Rust callback at
+    /// apply time. The callback must be registered with
+    /// [`crate::register_migration_callback!`] at startup; the name
+    /// here is matched against the inventory registry.
+    /// Issue #347.
+    Callback(CallbackOp),
+}
+
+/// `Operation::Callback` payload — references a registered Rust
+/// callback by name. The runner looks up the name in the
+/// [`crate::migrate::callbacks`] inventory at apply time; unknown
+/// names surface as [`crate::migrate::MigrateError::Validation`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CallbackOp {
+    /// Forward-callback name. Required.
+    pub name: String,
+    /// Optional reverse-callback name. When `None` the migration is
+    /// effectively non-reversible at the data layer; the runner
+    /// rejects unapply attempts the same way it rejects `DataOp`
+    /// entries with `reversible: true` and no `reverse_sql`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reverse_name: Option<String>,
 }
 
 /// User-authored SQL plus its inverse. Both fields are raw Postgres
