@@ -14,6 +14,7 @@
 //! `__rustango_migrations__` ledger. The `make_migrations` /
 //! `migrate` / `downgrade` UX wraps it all (Slices 2-6).
 
+pub mod callbacks;
 pub mod ddl;
 pub mod diff;
 mod error;
@@ -42,7 +43,9 @@ pub use diff::{
     render_changes_split_with_dialect, RenderedBatch, SchemaChange,
 };
 pub use error::MigrateError;
-pub use file::{discover_migration_dirs, list_dirs, DataOp, Migration, MigrationScope, Operation};
+pub use file::{
+    discover_migration_dirs, list_dirs, CallbackOp, DataOp, Migration, MigrationScope, Operation,
+};
 pub use invert::invert;
 pub use make::{make_migrations, make_migrations_for_app, make_migrations_from};
 #[cfg(feature = "postgres")]

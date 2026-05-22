@@ -1211,6 +1211,7 @@ fn describe_op(op: &Operation) -> String {
             };
             format!("data: {head}{ellipsis}")
         }
+        Operation::Callback(c) => format!("callback: {}", c.name),
     }
 }
 

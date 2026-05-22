@@ -608,6 +608,25 @@ pub fn sqlmigrate_one(dir: &Path, name: &str) -> Result<MigrationPreview, Migrat
     preview_migration(&mig, LEDGER_TABLE)
 }
 
+/// #347 — invoke a named migration callback. Looks the name up in
+/// the inventory registry and `await`s the future. Unknown names
+/// surface as `MigrateError::Validation` so the operator gets a clear
+/// pointer to the missing `register_migration_callback!` call.
+async fn invoke_migration_callback(
+    op: &crate::migrate::file::CallbackOp,
+    pool: crate::sql::Pool,
+) -> Result<(), MigrateError> {
+    let cb = crate::migrate::callbacks::find(&op.name).ok_or_else(|| {
+        MigrateError::Validation(format!(
+            "migration callback `{}` is not registered — \
+             call `rustango::register_migration_callback!(\"{0}\", …)` \
+             at startup",
+            op.name,
+        ))
+    })?;
+    (cb.forward)(pool).await
+}
+
 /// Build a [`MigrationPreview`] for a single migration. Pure —
 /// no DB access. Same render path as `apply_atomic` / `apply_loose`
 /// but the statements stream into a `Vec<String>` instead of a tx.
@@ -627,6 +646,13 @@ fn preview_migration(mig: &Migration, ledger: &str) -> Result<MigrationPreview, 
             }
             Operation::Data(d) => {
                 statements.push(d.sql.clone());
+            }
+            Operation::Callback(c) => {
+                // #347 — RunPython preview. The callback body isn't
+                // SQL, so the preview emits a comment marker so
+                // operators can see WHERE the side effect lands in
+                // the apply order.
+                statements.push(format!("-- RunPython: {}", c.name));
             }
         }
     }
@@ -662,6 +688,15 @@ async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<()
             }
             Operation::Data(d) => {
                 sqlx::query(&d.sql).execute(&mut *tx).await?;
+            }
+            Operation::Callback(c) => {
+                // #347 — RunPython runs OUTSIDE the migration's tx
+                // because our callback signature takes an owned `Pool`
+                // (drives its own connections). Document the limitation
+                // — operators who want atomicity should set
+                // `atomic: false` on the migration and manage their
+                // own transactions.
+                invoke_migration_callback(c, pool.clone().into()).await?;
             }
         }
     }
@@ -1119,6 +1154,11 @@ async fn unapply_atomic(
             Operation::Data(d) => {
                 sqlx::query(&d.sql).execute(&mut *tx).await?;
             }
+            Operation::Callback(c) => {
+                // #347 — callback runs OUTSIDE the surrounding tx; see
+                // `invoke_migration_callback` doc.
+                invoke_migration_callback(c, pool.clone().into()).await?;
+            }
         }
     }
     for stmt in deferred_fks {
@@ -1155,6 +1195,11 @@ async fn unapply_loose(
             Operation::Data(d) => {
                 sqlx::query(&d.sql).execute(pool).await?;
             }
+            Operation::Callback(c) => {
+                // #347 — non-tx PG path; pool is &PgPool, convert to
+                // the Pool enum via the From impl.
+                invoke_migration_callback(c, pool.clone().into()).await?;
+            }
         }
     }
     for stmt in deferred_fks {
@@ -1183,6 +1228,11 @@ async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(),
             }
             Operation::Data(d) => {
                 sqlx::query(&d.sql).execute(pool).await?;
+            }
+            Operation::Callback(c) => {
+                // #347 — non-tx PG path; pool is &PgPool, convert to
+                // the Pool enum via the From impl.
+                invoke_migration_callback(c, pool.clone().into()).await?;
             }
         }
     }
@@ -1458,6 +1508,10 @@ async fn apply_atomic_pool(
                     Operation::Data(d) => {
                         sqlx::query(&d.sql).execute(&mut *tx).await?;
                     }
+                    Operation::Callback(c) => {
+                        // #347 — see `invoke_migration_callback` doc.
+                        invoke_migration_callback(c, pool.clone().into()).await?;
+                    }
                 }
             }
             for stmt in deferred_fks {
@@ -1489,6 +1543,10 @@ async fn apply_atomic_pool(
                     }
                     Operation::Data(d) => {
                         sqlx::query(&d.sql).execute(&mut *tx).await?;
+                    }
+                    Operation::Callback(c) => {
+                        // #347 — see `invoke_migration_callback` doc.
+                        invoke_migration_callback(c, pool.clone().into()).await?;
                     }
                 }
             }
@@ -1523,6 +1581,10 @@ async fn apply_atomic_pool(
                     }
                     Operation::Data(d) => {
                         sqlx::query(&d.sql).execute(&mut *tx).await?;
+                    }
+                    Operation::Callback(c) => {
+                        // #347 — see `invoke_migration_callback` doc.
+                        invoke_migration_callback(c, pool.clone().into()).await?;
                     }
                 }
             }
@@ -1561,6 +1623,10 @@ async fn apply_nonatomic_pool(
             }
             Operation::Data(d) => {
                 crate::sql::raw_execute_pool(pool, &d.sql, ::std::vec::Vec::new()).await?;
+            }
+            Operation::Callback(c) => {
+                // #347 — non-tx context; pass the pool directly.
+                invoke_migration_callback(c, pool.clone()).await?;
             }
         }
     }
@@ -1942,6 +2008,10 @@ async fn unapply_atomic_pool(
                     Operation::Data(d) => {
                         sqlx::query(&d.sql).execute(&mut *tx).await?;
                     }
+                    Operation::Callback(c) => {
+                        // #347 — see `invoke_migration_callback` doc.
+                        invoke_migration_callback(c, pool.clone().into()).await?;
+                    }
                 }
             }
             for stmt in deferred_fks {
@@ -1970,6 +2040,10 @@ async fn unapply_atomic_pool(
                     Operation::Data(d) => {
                         sqlx::query(&d.sql).execute(&mut *tx).await?;
                     }
+                    Operation::Callback(c) => {
+                        // #347 — see `invoke_migration_callback` doc.
+                        invoke_migration_callback(c, pool.clone().into()).await?;
+                    }
                 }
             }
             for stmt in deferred_fks {
@@ -1997,6 +2071,10 @@ async fn unapply_atomic_pool(
                     }
                     Operation::Data(d) => {
                         sqlx::query(&d.sql).execute(&mut *tx).await?;
+                    }
+                    Operation::Callback(c) => {
+                        // #347 — see `invoke_migration_callback` doc.
+                        invoke_migration_callback(c, pool.clone().into()).await?;
                     }
                 }
             }
@@ -2094,6 +2172,10 @@ async fn unapply_nonatomic_pool(
             }
             Operation::Data(d) => {
                 crate::sql::raw_execute_pool(pool, &d.sql, ::std::vec::Vec::new()).await?;
+            }
+            Operation::Callback(c) => {
+                // #347 — non-tx context; pass the pool directly.
+                invoke_migration_callback(c, pool.clone()).await?;
             }
         }
     }
