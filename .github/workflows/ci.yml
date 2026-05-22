@@ -49,6 +49,17 @@ jobs:
   # `mysql_live`, `sqlite_live`.
   postgres_test:
     runs-on: ubuntu-latest
+    strategy:
+      # Sharded with cargo-nextest's --partition flag so test
+      # execution fans out across N runners in parallel. Each shard
+      # still does its own compile (we can't share build artifacts
+      # across runners), but `Swatinem/rust-cache` hits between shards
+      # and test execution time is divided. `fail-fast: false` so a
+      # flaky postgres-only test in one shard doesn't cancel the
+      # others mid-run.
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4]
     services:
       postgres:
         image: postgres:16-alpine
@@ -68,7 +79,10 @@ jobs:
       # tenancy + admin + jobs-* + ...) produces a lot of test binaries
       # and outgrew the runner's default 14 GB free disk. Free the
       # pre-installed Android SDK / .NET / Haskell / large Docker
-      # images to reclaim ~25 GB before linking starts.
+      # images + the apt large-packages set (~35 GB total) before
+      # linking starts. `large-packages: true` was flipped from
+      # false because we kept hitting `ld: No space left on device`
+      # under load.
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -76,13 +90,19 @@ jobs:
           android: true
           dotnet: true
           haskell: true
-          large-packages: false
+          large-packages: true
           docker-images: true
           swap-storage: true
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features
+        with:
+          # Each matrix shard gets its own cache slot so they don't
+          # stomp each other. The shared workspace lock is upstream
+          # of partitioning.
+          key: pg-shard-${{ matrix.partition }}
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --workspace --all-features --partition count:${{ matrix.partition }}/4 --no-fail-fast
 
   doc:
     runs-on: ubuntu-latest

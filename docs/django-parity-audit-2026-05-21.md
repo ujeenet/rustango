@@ -547,9 +547,9 @@ Summary: **7 / 2 / 5 / 0**. Gaps cluster around `m2m_changed`, migrate signals, 
 | Email templates (Tera) | n/a in Django core | SHIPPED | `email_templates::EmailRenderer` | |
 | File backend | [file backend](https://docs.djangoproject.com/en/6.0/topics/email/#file-backend) | SHIPPED | `email::FileMailer` (`backend = "file"` + `[mail].file_email_dir`) — `src/email/mod.rs` | |
 | Email job queue integration | n/a | SHIPPED | `email_jobs::dispatch_email` | |
-| Multi-channel notifications (Mail + Slack + DB) | n/a (Django needs `django-notifications`) | PARTIAL | `notifications::*` skeleton (v0.21); incomplete provider set (#418) | |
+| Multi-channel notifications (Mail + Slack + DB) | n/a (Django needs `django-notifications`) | SHIPPED | `notifications::*` mail/db/log/broadcast channels + built-in Slack webhook provider (`notifications::slack::webhook_callback(url)`) on `http-client` feature. Custom providers (Discord, Teams, SES, etc.) plug into `NotificationContext::with_broadcast`. | |
 
-Summary: **7 / 2 / 0 / 0**.
+Summary: **8 / 1 / 0 / 0**.
 
 ---
 
