@@ -313,12 +313,12 @@ Summary: **5 SHIPPED / 2 PARTIAL / 3 MISSING / 0 N/A**.
 | `path("/foo", view)` | [URL dispatcher](https://docs.djangoproject.com/en/6.0/topics/http/urls/) | SHIPPED | axum `Router::route` | |
 | `re_path()` (regex) | same | N/A | axum uses path patterns (not regex by default) | Use axum's `:param` and `*rest`. |
 | `include("app.urls")` | [include](https://docs.djangoproject.com/en/6.0/topics/http/urls/#including-other-urlconfs) | SHIPPED | `Router::nest("/app", app::router())` | |
-| URL namespaces | [namespaces](https://docs.djangoproject.com/en/6.0/topics/http/urls/#url-namespaces) | MISSING | n/a (#380) | Just nest paths. |
+| URL namespaces | [namespaces](https://docs.djangoproject.com/en/6.0/topics/http/urls/#url-namespaces) | SHIPPED | `register_url!("app:detail", "/app/{id}")` + `reverse("app:detail", &p)` — colon-prefixed names round-trip through the registry (`urls.rs`); no `include()` concept since every macro call lands in the global `inventory` registry. | |
 | `reverse("name")` | [reverse](https://docs.djangoproject.com/en/6.0/ref/urlresolvers/#reverse) | SHIPPED | `urls::reverse(name, &HashMap)` (`urls.rs:163`) — named-route reverse lookup against the `register_url!`-populated registry; `all_routes()` at `urls.rs:122`. Closes #381. | |
 | `{% url 'name' %}` template tag | [url tag](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#url) | SHIPPED | `urls::register_url_tag(&mut Tera)` (`urls.rs:403`) registers the Tera `url(name=...)` function so templates can call `{{ url(name="dashboard") }}`. Closes #382. | |
 | Static + media URLs | [static](https://docs.djangoproject.com/en/6.0/ref/contrib/staticfiles/) | SHIPPED | `Cli::with_static(prefix, dir)` + `Media` model + `Storage` | |
 
-Summary: **5 / 1 / 1 / 1**.
+Summary: **6 / 0 / 0 / 1**.
 
 ---
 
