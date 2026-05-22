@@ -218,7 +218,7 @@ Summary: **11 SHIPPED / 2 PARTIAL / 2 MISSING / 1 N/A**. Gaps: `sqlmigrate` raw-
 | ModelAdmin option | Doc | Status | rustango | Notes |
 |---|---|---|---|---|
 | `list_display` (scalar fields) | [list_display](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#django.contrib.admin.ModelAdmin.list_display) | SHIPPED | `#[rustango(admin(list_display = "title, status"))]` | |
-| `list_display` (method/computed fields) | same | MISSING | n/a (#348) | Backlog #51 — needs method-field hook + custom cell renderer. |
+| `list_display` (method/computed fields) | same | SHIPPED | Two paths: `register_admin_computed!(table, name, label, fn)` for arbitrary HTML renderers (pre-v0.42), and `list_display = "data.headline"` dotted-path syntax for JSON-column subkeys (closed #348, v0.42). The dotted path drills into a `FieldType::Json` column at `.split('.')` segments (numeric segments index arrays); bools render as ☑/☐ glyphs, missing paths fall back to `<em>NULL</em>`. | |
 | `list_display` (boolean checkbox icon) | same | SHIPPED | v0.37+ render in admin/render.rs | |
 | `list_display` (callable display_link) | same | MISSING | n/a (#349) | FK columns auto-link; method-field callables don't. |
 | `list_display_links` | [list_display_links](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#django.contrib.admin.ModelAdmin.list_display_links) | SHIPPED | `admin(list_display_links = "title, views")` (#350, v0.42) — comma-separated names from `list_display`. Each matched cell wraps its inner HTML in `<a href="{admin_prefix}/{table}/{pk}">…</a>`. Empty whitelist keeps the trailing "View" column as the only link. | |

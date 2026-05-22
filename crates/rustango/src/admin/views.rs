@@ -23,6 +23,51 @@ use super::render;
 use super::templates::render_with_chrome;
 use super::urls::AppState;
 
+/// Render a `data.<key>` cell — drills into a JSON column at the
+/// supplied key path and emits an HTML-escaped scalar. Issue #348.
+///
+/// Supports dotted paths (`a.b.c`) and bracketed array indexing
+/// (`items.0` for `data["items"][0]`). Returns `<em>NULL</em>` when
+/// the path doesn't resolve.
+fn render_json_path_cell(
+    row: &serde_json::Value,
+    field: &'static crate::core::FieldSchema,
+    key: &str,
+) -> String {
+    let mut node = match row.get(field.column).or_else(|| row.get(field.name)) {
+        Some(v) => v,
+        None => return "<em>NULL</em>".to_owned(),
+    };
+    for seg in key.split('.') {
+        if seg.is_empty() {
+            continue;
+        }
+        let next = if let Ok(idx) = seg.parse::<usize>() {
+            node.as_array().and_then(|a| a.get(idx))
+        } else {
+            node.as_object().and_then(|o| o.get(seg))
+        };
+        node = match next {
+            Some(n) => n,
+            None => return "<em>NULL</em>".to_owned(),
+        };
+    }
+    match node {
+        serde_json::Value::Null => "<em>NULL</em>".to_owned(),
+        serde_json::Value::String(s) => render::escape(s),
+        serde_json::Value::Bool(true) => {
+            r#"<span class="rcms-bool yes" aria-label="true">☑</span>"#.to_owned()
+        }
+        serde_json::Value::Bool(false) => {
+            r#"<span class="rcms-bool no" aria-label="false">☐</span>"#.to_owned()
+        }
+        serde_json::Value::Number(n) => n.to_string(),
+        // Nested objects / arrays serialize as compact JSON — readable
+        // in the list cell, full structure visible on the detail page.
+        other => render::escape(&other.to_string()),
+    }
+}
+
 /// Render a single GFK cell — reads `(ct_column, pk_column)` off the
 /// JSON row and emits a clickable target link using the preloaded
 /// ContentType map. Mirrors `contenttypes::render_generic_fk_link`'s
@@ -409,6 +454,11 @@ pub(crate) async fn table_view(
         Field(&'static FieldSchema),
         Computed(&'static crate::admin::computed_fields::ComputedField),
         GenericFk(&'static crate::core::GenericRelation),
+        /// #348 — `list_display = "data.title"` drills into a JSON
+        /// column at a dotted key path. The first segment names a
+        /// `FieldType::Json` column; everything after the first `.`
+        /// is the JSON pointer path.
+        JsonPath(&'static FieldSchema, &'static str),
     }
     let display_items: Vec<DisplayItem> = if admin_cfg.list_display.is_empty() {
         model.scalar_fields().map(DisplayItem::Field).collect()
@@ -430,6 +480,17 @@ pub(crate) async fn table_view(
                             .iter()
                             .find(|gr| gr.name == *name)
                             .map(DisplayItem::GenericFk)
+                    })
+                    .or_else(|| {
+                        // #348 — `data.title` dotted-path syntax. Look up
+                        // the head segment as a Json column on the model.
+                        let (head, tail) = name.split_once('.')?;
+                        let field = model.field(head)?;
+                        if field.ty == crate::core::FieldType::Json {
+                            Some(DisplayItem::JsonPath(field, tail))
+                        } else {
+                            None
+                        }
                     })
             })
             .collect()
@@ -486,6 +547,9 @@ pub(crate) async fn table_view(
                     render::escape(if m.label.is_empty() { m.name } else { m.label })
                 }
                 DisplayItem::GenericFk(gr) => render::escape(gr.name),
+                DisplayItem::JsonPath(f, key) => {
+                    render::escape(&format!("{}.{}", f.display_label(), key))
+                }
             };
             serde_json::json!({ "label": label })
         })
@@ -509,6 +573,9 @@ pub(crate) async fn table_view(
                 DisplayItem::Field(f) => f.name,
                 DisplayItem::Computed(m) => m.name,
                 DisplayItem::GenericFk(gr) => gr.name,
+                // JsonPath columns aren't link targets — their value is
+                // a nested datum, not the row's identity.
+                DisplayItem::JsonPath(_, _) => return false,
             };
             link_columns.contains(name)
         })
@@ -551,6 +618,7 @@ pub(crate) async fn table_view(
                         DisplayItem::Field(f) => render_cell_json(row, f, &fk_map),
                         DisplayItem::Computed(m) => (m.render)(row),
                         DisplayItem::GenericFk(gr) => render_gfk_cell(row, gr, &gfk_ct_map),
+                        DisplayItem::JsonPath(f, key) => render_json_path_cell(row, f, key),
                     };
                     match (
                         cell_is_link.get(idx).copied().unwrap_or(false),
