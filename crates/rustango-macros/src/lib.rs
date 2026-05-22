@@ -1936,6 +1936,20 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
         .unwrap_or(&[]);
     let autocomplete_fields_lits = autocomplete_fields.iter().map(|s| s.as_str());
 
+    // #352 — list_select_related accepts "all" | "none" | "field, field, …".
+    let list_select_related_tokens = match admin.list_select_related.as_deref() {
+        None | Some("all") => quote!(::rustango::core::ListSelectRelated::All),
+        Some("none") => quote!(::rustango::core::ListSelectRelated::None),
+        Some(raw) => {
+            let names: Vec<&str> = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            quote!(::rustango::core::ListSelectRelated::Only(&[ #( #names ),* ]))
+        }
+    };
+
     let list_per_page = admin.list_per_page.unwrap_or(0);
 
     let ordering_pairs = admin
@@ -1967,6 +1981,7 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
             prepopulated_fields: &[ #( #prepopulated_tokens ),* ],
             raw_id_fields: &[ #( #raw_id_fields_lits ),* ],
             autocomplete_fields: &[ #( #autocomplete_fields_lits ),* ],
+            list_select_related: #list_select_related_tokens,
         })
     }
 }
@@ -4508,6 +4523,11 @@ struct AdminAttrs {
     /// Ajax-driven typeahead populated from a `__autocomplete`
     /// endpoint on the target model. Issue #358.
     autocomplete_fields: Option<(Vec<String>, proc_macro2::Span)>,
+    /// `admin(list_select_related = "all" | "none" | "author, …")`
+    /// — Django-shape. Tunes the admin list view's FK auto-JOIN
+    /// policy. Default `"all"` matches rustango's join-everything
+    /// behavior; `"none"` opts out; CSV restricts. Issue #352.
+    list_select_related: Option<String>,
 }
 
 fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
@@ -4677,6 +4697,11 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                             Some((split_field_list(&s.value()), s.span()));
                         return Ok(());
                     }
+                    if inner.path.is_ident("list_select_related") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        admin.list_select_related = Some(s.value());
+                        return Ok(());
+                    }
                     Err(inner.error(
                         "unknown admin attribute (supported: \
                          `list_display`, `list_display_links`, \
@@ -4688,6 +4713,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                          `prepopulated_fields`, \
                          `raw_id_fields`, \
                          `autocomplete_fields`, \
+                         `list_select_related`, \
                          `fieldsets`)",
                     ))
                 })?;

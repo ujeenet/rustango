@@ -216,9 +216,34 @@ pub(crate) fn lookup_model(state: &AppState, table: &str) -> Option<&'static Mod
 /// Build one [`Join`] per FK / O2O column on `model` whose target is
 /// visible and has a display field. The join's `project` carries only
 /// the target's display column — that's all the admin renders.
+///
+/// #352 — Django-shape `list_select_related` lets operators opt out
+/// of specific FK joins (`ListSelectRelated::None` for "no joins";
+/// `ListSelectRelated::Only(&[...])` for a whitelist). The default
+/// `ListSelectRelated::All` preserves rustango's join-everything
+/// behavior.
 pub(crate) fn build_fk_joins(state: &AppState, model: &'static ModelSchema) -> Vec<Join> {
+    let admin_cfg = model
+        .admin
+        .copied()
+        .unwrap_or(crate::core::AdminConfig::DEFAULT);
+    if matches!(
+        admin_cfg.list_select_related,
+        crate::core::ListSelectRelated::None
+    ) {
+        return Vec::new();
+    }
+    let whitelist: Option<&'static [&'static str]> = match admin_cfg.list_select_related {
+        crate::core::ListSelectRelated::Only(names) => Some(names),
+        _ => None,
+    };
     let mut joins = Vec::new();
     for field in model.scalar_fields() {
+        if let Some(allowed) = whitelist {
+            if !allowed.contains(&field.name) {
+                continue;
+            }
+        }
         let Some(rel) = field.relation else { continue };
         let (to, on) = match rel {
             Relation::Fk { to, on } | Relation::O2O { to, on } => (to, on),
