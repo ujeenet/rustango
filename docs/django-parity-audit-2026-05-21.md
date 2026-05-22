@@ -540,7 +540,7 @@ Summary: **7 / 2 / 5 / 0**. Gaps cluster around `m2m_changed`, migrate signals, 
 | `EmailMessage` builder | [email message](https://docs.djangoproject.com/en/6.0/topics/email/#emailmessage-and-emailmultialternatives) | SHIPPED | `email::Email` + `Mailable` pattern | |
 | `EmailMultiAlternatives` (HTML+text) | (above) | SHIPPED | `email::Email::with_html(...)` | |
 | `send_mail()` shortcut | [send_mail](https://docs.djangoproject.com/en/6.0/topics/email/#send-mail) | SHIPPED | `email::send_pool(mailer, msg)` | |
-| `mail_admins` / `mail_managers` | [mail_admins](https://docs.djangoproject.com/en/6.0/topics/email/#mail-admins) | PARTIAL | Manual recipient list (#416) | No `ADMINS` setting hook. |
+| `mail_admins` / `mail_managers` | [mail_admins](https://docs.djangoproject.com/en/6.0/topics/email/#mail-admins) | SHIPPED | `email::mail_admins(mailer, settings, subject, body)` + `email::mail_managers(...)` (closed #416, v0.42). Reads recipient lists from new `MailSettings.admins` / `MailSettings.managers` (TOML / env-overlay). Subject auto-prefixed with `[admin]` / `[manager]` matching Django's `EMAIL_SUBJECT_PREFIX`. Empty list = silent no-op (Django shape). | |
 | Console backend | [console backend](https://docs.djangoproject.com/en/6.0/topics/email/#console-backend) | SHIPPED | `email::ConsoleMailer` | |
 | In-memory / dummy backend | [locmem](https://docs.djangoproject.com/en/6.0/topics/email/#in-memory-backend) | SHIPPED | `email::InMemoryMailer` + `NullMailer` | |
 | SMTP backend | [smtp](https://docs.djangoproject.com/en/6.0/topics/email/#smtp-backend) | SHIPPED | `SmtpMailer` via lettre + rustls (`email-smtp` feature) | |
