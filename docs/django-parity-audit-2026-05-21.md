@@ -288,7 +288,7 @@ Summary: **8 SHIPPED / 3 PARTIAL / 4 MISSING / 0 N/A**.
 | Django CBV | Doc | Status | rustango | Notes |
 |---|---|---|---|---|
 | `View` (base) | [base View](https://docs.djangoproject.com/en/6.0/ref/class-based-views/base/#view) | N/A | axum handlers play the role | |
-| `TemplateView` | [TemplateView](https://docs.djangoproject.com/en/6.0/ref/class-based-views/base/#templateview) | PARTIAL | `shortcuts::render(template, ctx)` (#377) | No view builder — handler renders directly. |
+| `TemplateView` | [TemplateView](https://docs.djangoproject.com/en/6.0/ref/class-based-views/base/#templateview) | SHIPPED | `template_views::TemplateView::new(template).context_value(k, v).context(json!(...)).router(prefix, tera)` — builder mounts a GET route that renders the template with the accumulated context (`template_views.rs:2924`). | |
 | `RedirectView` | [RedirectView](https://docs.djangoproject.com/en/6.0/ref/class-based-views/base/#redirectview) | SHIPPED | `redirects::*` table-driven + `shortcuts::redirect()` | |
 | `ListView` | [ListView](https://docs.djangoproject.com/en/6.0/ref/class-based-views/generic-display/#listview) | SHIPPED | `template_views::ListView::for_model(...)` (v0.21+, tri-dialect v0.38) | |
 | `DetailView` | [DetailView](https://docs.djangoproject.com/en/6.0/ref/class-based-views/generic-display/#detailview) | SHIPPED | `template_views::DetailView` | |
@@ -302,7 +302,7 @@ Summary: **8 SHIPPED / 3 PARTIAL / 4 MISSING / 0 N/A**.
 | `PermissionRequiredMixin` | [PermissionRequiredMixin](https://docs.djangoproject.com/en/6.0/topics/auth/default/#django.contrib.auth.mixins.PermissionRequiredMixin) | SHIPPED | `auth_decorators::permission_required` (PR #313) | |
 | MultipleObjectMixin / SingleObjectMixin (object-level customization) | [generic-display](https://docs.djangoproject.com/en/6.0/ref/class-based-views/generic-display/#multipleobjectmixin) | PARTIAL | `ListView::with_queryset(custom_qs)` exists (#379) | Mixin composability MISSING. |
 
-Summary: **5 SHIPPED / 2 PARTIAL / 3 MISSING / 0 N/A**.
+Summary: **11 SHIPPED / 1 PARTIAL / 1 MISSING / 1 N/A**.
 
 ---
 
