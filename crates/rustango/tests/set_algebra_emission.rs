@@ -1,10 +1,18 @@
 //! Tri-dialect SQL-emission tests for `QuerySet` set algebra
-//! (issue #25). Django's `.union(other_qs, all=)` /
+//! (issue #25 / #329). Django's `.union(other_qs, all=)` /
 //! `.intersection(other_qs)` / `.difference(other_qs)` lower to SQL
 //! `UNION` / `UNION ALL` / `INTERSECT` / `EXCEPT`. Postgres + SQLite
 //! support all four; MySQL needs 8.0.31+ for INTERSECT/EXCEPT, but
 //! the writer emits the same SQL — older MySQL just returns a syntax
 //! error from the driver.
+//!
+//! The writer emits the **bare** compound shape — `SELECT … UNION
+//! SELECT …` — which is portable across all three dialects (SQLite's
+//! `compound-select-stmt` grammar forbids parenthesizing select-cores).
+//! Branches that carry their own `ORDER BY` / `LIMIT` / `OFFSET` get
+//! wrapped in a derived-table `SELECT * FROM (<branch>)` so those
+//! clauses scope correctly to the branch instead of attaching to
+//! the outer compound.
 
 use rustango::core::Column as _;
 #[cfg(feature = "mysql")]
@@ -28,25 +36,28 @@ pub struct Post {
 // ---------- UNION ----------
 
 #[test]
-fn union_emits_parenthesized_union_on_pg() {
+fn union_emits_bare_union_on_pg() {
     let q = Post::objects()
         .where_(Post::status.eq("draft"))
         .union(Post::objects().where_(Post::status.eq("review")))
         .compile()
         .unwrap();
     let stmt = Postgres.compile_select(&q).unwrap();
-    // Each branch wrapped in parens, joined with UNION.
+    // Both branches present with their own params.
     assert!(
         stmt.sql.contains(r#"WHERE "status" = $1"#) && stmt.sql.contains(r#"WHERE "status" = $2"#),
         "two branches: {}",
         stmt.sql
     );
+    // Bare UNION between branches (no parens — portable across PG / MySQL / SQLite).
+    assert!(stmt.sql.contains(" UNION "), "bare UNION: {}", stmt.sql);
+    assert!(!stmt.sql.contains(" UNION ALL "));
+    // The whole statement starts with SELECT, not '(' — SQLite hard rule.
     assert!(
-        stmt.sql.contains(") UNION ("),
-        "parens + UNION: {}",
+        stmt.sql.starts_with("SELECT"),
+        "no leading paren: {}",
         stmt.sql
     );
-    assert!(!stmt.sql.contains(") UNION ALL ("));
     // No outer ORDER BY when none set.
     assert!(
         !stmt.sql.contains("ORDER BY"),
@@ -62,11 +73,7 @@ fn union_all_emits_union_all_keyword() {
         .compile()
         .unwrap();
     let stmt = Postgres.compile_select(&q).unwrap();
-    assert!(
-        stmt.sql.contains(") UNION ALL ("),
-        "UNION ALL: {}",
-        stmt.sql
-    );
+    assert!(stmt.sql.contains(" UNION ALL "), "UNION ALL: {}", stmt.sql);
 }
 
 #[test]
@@ -77,11 +84,7 @@ fn intersection_emits_intersect_keyword() {
         .compile()
         .unwrap();
     let stmt = Postgres.compile_select(&q).unwrap();
-    assert!(
-        stmt.sql.contains(") INTERSECT ("),
-        "INTERSECT: {}",
-        stmt.sql
-    );
+    assert!(stmt.sql.contains(" INTERSECT "), "INTERSECT: {}", stmt.sql);
 }
 
 #[test]
@@ -91,7 +94,7 @@ fn difference_emits_except_keyword() {
         .compile()
         .unwrap();
     let stmt = Postgres.compile_select(&q).unwrap();
-    assert!(stmt.sql.contains(") EXCEPT ("), "EXCEPT: {}", stmt.sql);
+    assert!(stmt.sql.contains(" EXCEPT "), "EXCEPT: {}", stmt.sql);
 }
 
 // ---------- Outer ORDER BY / LIMIT / OFFSET apply to merged result ----------
@@ -106,23 +109,24 @@ fn outer_order_by_emitted_after_compound() {
         .compile()
         .unwrap();
     let stmt = Postgres.compile_select(&q).unwrap();
-    // Outer ORDER BY comes after the last `)` of the compound.
-    let last_paren = stmt.sql.rfind(')').expect("compound has close paren");
+    // Outer ORDER BY comes after the last UNION, before LIMIT.
+    let union_pos = stmt.sql.rfind(" UNION ").expect("has UNION");
     let order_pos = stmt.sql.find("ORDER BY").expect("has ORDER BY");
     let limit_pos = stmt.sql.find("LIMIT").expect("has LIMIT");
     assert!(
-        last_paren < order_pos,
-        "ORDER BY after compound close: {}",
+        union_pos < order_pos,
+        "ORDER BY after final UNION: {}",
         stmt.sql
     );
     assert!(order_pos < limit_pos, "ORDER BY before LIMIT: {}", stmt.sql);
 }
 
 #[test]
-fn branch_order_by_stays_inside_parens() {
-    // Branch has its own order_by + limit. Outer compound has no
-    // order_by. The branch ORDER BY stays INSIDE the branch's parens
-    // (PG/SQLite reject mid-compound ORDER BY otherwise).
+fn branch_order_by_wraps_in_derived_table() {
+    // Branch has its own order_by + limit. Without scoping the
+    // ORDER BY/LIMIT would attach to the whole compound — the writer
+    // wraps such branches in `SELECT * FROM (<branch>)` to keep
+    // those clauses local to the branch on every dialect.
     let q = Post::objects()
         .union(
             Post::objects()
@@ -133,14 +137,26 @@ fn branch_order_by_stays_inside_parens() {
         .compile()
         .unwrap();
     let stmt = Postgres.compile_select(&q).unwrap();
-    // The branch's `ORDER BY "id" DESC LIMIT 5` lives between two
-    // parens, and there's no outer ORDER BY after the last `)`.
-    let union_pos = stmt.sql.find(") UNION (").expect("has UNION");
+    // The branch is wrapped: `... UNION SELECT * FROM (... ORDER BY "id" DESC LIMIT 5)`.
+    assert!(
+        stmt.sql.contains("UNION SELECT * FROM ("),
+        "branch with ORDER BY wraps in derived table: {}",
+        stmt.sql
+    );
+    // ORDER BY + LIMIT live INSIDE the parens, between UNION and the
+    // closing paren — they belong to the branch, not the outer compound.
+    let union_pos = stmt.sql.find("UNION SELECT * FROM (").unwrap();
     let last_paren = stmt.sql.rfind(')').unwrap();
     let order_pos = stmt.sql.find("ORDER BY").expect("branch ORDER BY exists");
+    let limit_pos = stmt.sql.find("LIMIT").expect("branch LIMIT exists");
     assert!(
         order_pos > union_pos && order_pos < last_paren,
-        "branch ORDER BY sits inside the second branch's parens: {}",
+        "branch ORDER BY inside derived table: {}",
+        stmt.sql
+    );
+    assert!(
+        limit_pos > union_pos && limit_pos < last_paren,
+        "branch LIMIT inside derived table: {}",
         stmt.sql
     );
 }
@@ -156,13 +172,13 @@ fn three_branch_union_emits_three_set_op_keywords() {
         .compile()
         .unwrap();
     let stmt = Postgres.compile_select(&q).unwrap();
-    let count = stmt.sql.matches(") UNION (").count();
-    assert_eq!(count, 2, "two ) UNION ( joins for 3 branches: {}", stmt.sql);
+    let count = stmt.sql.matches(" UNION ").count();
+    assert_eq!(count, 2, "two UNIONs join 3 branches: {}", stmt.sql);
 }
 
 #[test]
 fn mixed_union_intersection_chain_preserves_order() {
-    // (A) UNION (B) INTERSECT (C) — SQL evaluates left-to-right.
+    // A UNION B INTERSECT C — SQL evaluates left-to-right.
     let q = Post::objects()
         .where_(Post::status.eq("a"))
         .union(Post::objects().where_(Post::status.eq("b")))
@@ -170,9 +186,8 @@ fn mixed_union_intersection_chain_preserves_order() {
         .compile()
         .unwrap();
     let stmt = Postgres.compile_select(&q).unwrap();
-    // UNION comes before INTERSECT.
-    let union_pos = stmt.sql.find(") UNION (").expect("has UNION");
-    let intersect_pos = stmt.sql.find(") INTERSECT (").expect("has INTERSECT");
+    let union_pos = stmt.sql.find(" UNION ").expect("has UNION");
+    let intersect_pos = stmt.sql.find(" INTERSECT ").expect("has INTERSECT");
     assert!(
         union_pos < intersect_pos,
         "UNION before INTERSECT (chain order): {}",
@@ -191,7 +206,7 @@ fn union_emits_backtick_identifiers_on_mysql() {
         .unwrap();
     let stmt = MySql.compile_select(&q).unwrap();
     assert!(
-        stmt.sql.contains(") UNION (") && stmt.sql.contains("`status`"),
+        stmt.sql.contains(" UNION ") && stmt.sql.contains("`status`"),
         "MySQL UNION + backticks: {}",
         stmt.sql
     );
@@ -205,13 +220,16 @@ fn except_emits_on_sqlite() {
         .compile()
         .unwrap();
     let stmt = Sqlite.compile_select(&q).unwrap();
-    assert!(
-        stmt.sql.contains(") EXCEPT ("),
-        "SQLite EXCEPT: {}",
-        stmt.sql
-    );
+    assert!(stmt.sql.contains(" EXCEPT "), "SQLite EXCEPT: {}", stmt.sql);
     // SQLite uses `?` placeholders.
     assert!(stmt.sql.contains("?"), "sqlite placeholders: {}", stmt.sql);
+    // SQLite hard rule: the outermost statement must start with SELECT,
+    // not `(`. The bare compound shape satisfies this.
+    assert!(
+        stmt.sql.starts_with("SELECT"),
+        "no leading paren: {}",
+        stmt.sql
+    );
 }
 
 // ---------- Default queryset (no compound) — no parens around base ----------
@@ -264,9 +282,6 @@ fn each_branch_contributes_its_own_params() {
 #[cfg(feature = "mysql")]
 #[test]
 fn intersect_emits_with_backticks_on_mysql() {
-    // MySQL 8.0.31+ supports INTERSECT. Pre-31 surfaces a syntax
-    // error from the driver — the writer emits the same SQL either
-    // way (no client-side gate).
     let q = Post::objects()
         .where_(Post::status.eq("published"))
         .intersection(Post::objects().where_(Post::author_id.eq(1_i64)))
@@ -274,7 +289,7 @@ fn intersect_emits_with_backticks_on_mysql() {
         .unwrap();
     let stmt = MySql.compile_select(&q).unwrap();
     assert!(
-        stmt.sql.contains(") INTERSECT ("),
+        stmt.sql.contains(" INTERSECT "),
         "MySQL INTERSECT keyword: {}",
         stmt.sql
     );
@@ -294,7 +309,7 @@ fn except_emits_with_backticks_on_mysql() {
         .unwrap();
     let stmt = MySql.compile_select(&q).unwrap();
     assert!(
-        stmt.sql.contains(") EXCEPT ("),
+        stmt.sql.contains(" EXCEPT "),
         "MySQL EXCEPT keyword: {}",
         stmt.sql
     );
@@ -309,11 +324,12 @@ fn except_emits_with_backticks_on_mysql() {
 
 /// `qs_outer.union(qs_inner_compound)` where the inner is itself a
 /// compound `qs_a.union(qs_b)`. The recursive `write_compound_select`
-/// renders the inner compound inside its own parens, with the outer
-/// `UNION` joining them. Verifies the writer doesn't flatten or
-/// mis-nest.
+/// renders the inner compound wrapped in a derived-table subquery so
+/// its `UNION` operators stay scoped — without scoping the inner
+/// UNIONs would flatten into the outer compound and lose the nesting
+/// semantic.
 #[test]
-fn nested_compound_inside_outer_union_emits_double_parens() {
+fn nested_compound_inside_outer_union_wraps_in_subquery() {
     let inner = Post::objects()
         .where_(Post::status.eq("a"))
         .union(Post::objects().where_(Post::status.eq("b")));
@@ -323,14 +339,10 @@ fn nested_compound_inside_outer_union_emits_double_parens() {
         .compile()
         .unwrap();
     let stmt = Postgres.compile_select(&outer).unwrap();
-    // Outer compound: (...) UNION (...).
-    // Inner compound substituted for the second branch:
-    //   (... WHERE c ...) UNION ((... WHERE a ...) UNION (... WHERE b ...))
-    // So we expect "(( ... ) UNION ( ... ))" — a double-open paren
-    // somewhere in the SQL marking the inner-compound boundary.
+    // Outer: `SELECT … UNION SELECT * FROM (<inner-compound>)`.
     assert!(
-        stmt.sql.contains("(("),
-        "nested compound has `((` boundary: {}",
+        stmt.sql.contains("UNION SELECT * FROM ("),
+        "nested compound wrapped in derived table: {}",
         stmt.sql
     );
     // Three WHERE clauses total (one per branch).
@@ -358,7 +370,7 @@ fn with_compound_takes_precompiled_branch() {
         .unwrap();
     let stmt = Postgres.compile_select(&q).unwrap();
     assert!(
-        stmt.sql.contains(") EXCEPT ("),
+        stmt.sql.contains(" EXCEPT "),
         "with_compound(Difference, …): {}",
         stmt.sql
     );

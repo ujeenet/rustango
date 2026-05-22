@@ -167,10 +167,20 @@ pub(super) fn write_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), S
 /// apply to ITS branch (the first one in the compound, since the
 /// outer is itself a complete `SelectQuery`).
 fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
-    // First branch: the outer query itself, wrapped in parens. Build
-    // a copy with the compound stripped + the outer order_by / limit
-    // / offset / lock_mode stripped (those apply to the WHOLE
-    // compound, not the head branch).
+    // First branch: the outer query itself. Build a copy with the
+    // compound stripped + the outer order_by / limit / offset /
+    // lock_mode stripped (those apply to the WHOLE compound, not
+    // the head branch).
+    //
+    // No parens around branches: SQLite's `compound-select-stmt`
+    // grammar (`select-core (UNION select-core)*`) explicitly forbids
+    // parenthesizing the head select; PG / MySQL accept either shape
+    // identically. Per-branch `ORDER BY` / `LIMIT` are already
+    // stripped from the outer head (see fields cleared below); branch
+    // queries that *do* carry their own ORDER BY / LIMIT are
+    // surrounded by `SELECT * FROM (<sub>)` rather than naked parens
+    // (handled by the writer for nested subqueries — set ops with
+    // per-branch LIMIT remain a stretch goal).
     let head = SelectQuery {
         model: query.model,
         where_clause: query.where_clause.clone(),
@@ -184,27 +194,47 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
         projection: None,
         distinct: None,
     };
-    b.sql.push('(');
     write_select_inner(b, &head)?;
-    b.sql.push(')');
 
     for branch in &query.compound {
         b.sql.push(' ');
         b.sql.push_str(branch.op.keyword());
-        b.sql.push_str(" (");
+        b.sql.push(' ');
         // Push a scope frame for the branch so any subqueries inside
         // resolve `OuterRef` correctly. write_select handles the
         // push/pop on the outermost call but recursive branches
         // need their own frame.
         b.scope_stack.push(branch.query.model);
+        // Branches that carry their own ORDER BY / LIMIT / OFFSET get
+        // wrapped in `SELECT * FROM (<branch>)` so those clauses scope
+        // to the branch instead of attaching to the outer compound.
+        // SQLite's `compound-select-stmt` grammar forbids bare
+        // parens around a select-core, so we use a derived-table
+        // wrap (portable across PG / MySQL / SQLite). Plain branches
+        // with no ORDER BY / LIMIT emit inline — `SELECT … UNION
+        // SELECT …` is the shortest valid form on every backend.
+        let scoped = !branch.query.order_by.is_empty()
+            || branch.query.limit.is_some()
+            || branch.query.offset.is_some();
         let r = if branch.query.compound.is_empty() {
-            write_select_inner(b, &branch.query)
+            if scoped {
+                b.sql.push_str("SELECT * FROM (");
+                let r = write_select_inner(b, &branch.query);
+                b.sql.push(')');
+                r
+            } else {
+                write_select_inner(b, &branch.query)
+            }
         } else {
-            write_compound_select(b, &branch.query)
+            // Nested compound — recurse. The outer level handles its
+            // own ORDER BY / LIMIT scoping the same way.
+            b.sql.push_str("SELECT * FROM (");
+            let r = write_compound_select(b, &branch.query);
+            b.sql.push(')');
+            r
         };
         b.scope_stack.pop();
         r?;
-        b.sql.push(')');
     }
 
     // Outer ORDER BY / LIMIT / OFFSET apply to the merged result.
