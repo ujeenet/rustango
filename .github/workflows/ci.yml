@@ -68,7 +68,10 @@ jobs:
       # tenancy + admin + jobs-* + ...) produces a lot of test binaries
       # and outgrew the runner's default 14 GB free disk. Free the
       # pre-installed Android SDK / .NET / Haskell / large Docker
-      # images to reclaim ~25 GB before linking starts.
+      # images + the apt large-packages set (~35 GB total) before
+      # linking starts. `large-packages: true` was flipped from
+      # false because we kept hitting `ld: No space left on device`
+      # under load.
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -76,7 +79,7 @@ jobs:
           android: true
           dotnet: true
           haskell: true
-          large-packages: false
+          large-packages: true
           docker-images: true
           swap-storage: true
       - uses: actions/checkout@v4

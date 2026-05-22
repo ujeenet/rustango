@@ -70,6 +70,9 @@ use std::sync::Arc;
 
 use crate::email::{BoxedMailer, Email};
 
+#[cfg(feature = "http-client")]
+pub mod slack;
+
 #[cfg(feature = "cache")]
 use std::time::Duration;
 
