@@ -382,12 +382,12 @@ Summary: **14 SHIPPED / 4 PARTIAL / 4 MISSING / 1 N/A**.
 | Signed-cookie session | [signed cookies](https://docs.djangoproject.com/en/6.0/topics/http/sessions/#using-cookie-based-sessions) | SHIPPED | `session::SessionSecret` HMAC-SHA256 signed cookie (v0.40 admin) | |
 | Cache-backed session | [cache backend](https://docs.djangoproject.com/en/6.0/topics/http/sessions/#using-cache-sessions) | SHIPPED | Server-side opaque-id sessions via `Cache` backend (v0.24+) | |
 | Database-backed session | [database backend](https://docs.djangoproject.com/en/6.0/topics/http/sessions/#using-database-backed-sessions) | SHIPPED | `sessions::SessionStore` (`sessions.rs:130`) wraps the `Cache` trait; `PgCache` backend persists session blobs in a database table, matching Django's `db_session` semantics. Closes #393. | |
-| File-backed session | [file backend](https://docs.djangoproject.com/en/6.0/topics/http/sessions/#using-file-based-sessions) | MISSING | n/a (#394) | Niche. |
+| File-backed session | [file backend](https://docs.djangoproject.com/en/6.0/topics/http/sessions/#using-file-based-sessions) | SHIPPED | `SessionStore::new(Arc::new(FileCache::new(dir)))` composes the file-system cache (#408) into a session backend — process-restart-durable, zero new code. Regression test: `tests/file_backed_sessions.rs`. | |
 | Cached-DB hybrid | [cached_db backend](https://docs.djangoproject.com/en/6.0/topics/http/sessions/#using-cached-database-sessions) | SHIPPED | Cache backend can wrap any storage | |
 | Session expiry / `SESSION_COOKIE_AGE` | (cookie options) | SHIPPED | Configurable TTL per backend | |
 | Session middleware (autoinstall) | (auto in MIDDLEWARE) | SHIPPED | `Cli::tenancy()` and `Admin::Builder` auto-attach | |
 
-Summary: **4 / 1 / 1 / 0**.
+Summary: **7 / 0 / 0 / 0**.
 
 ---
 
