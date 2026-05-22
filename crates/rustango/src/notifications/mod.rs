@@ -161,10 +161,18 @@ pub type BroadcastFn = Arc<
 ///
 /// Build once at startup and pass by reference to every `notify()` call.
 /// Channels you don't configure get silently skipped.
+///
+/// The `database` channel requires the `postgres` feature — it currently
+/// emits PG-typed JSONB INSERTs (the column is `JSONB`, placeholders are
+/// `$1, $2, $3`). Tri-dialect support is on the roadmap; until then,
+/// non-PG builds get a struct without the database channel + a
+/// `with_database` method that doesn't exist.
 #[derive(Default, Clone)]
 pub struct NotificationContext {
     mailer: Option<BoxedMailer>,
+    #[cfg(feature = "postgres")]
     database_pool: Option<crate::sql::sqlx::PgPool>,
+    #[cfg(feature = "postgres")]
     database_table: Option<String>,
     broadcast: Option<BroadcastFn>,
 }
@@ -184,6 +192,9 @@ impl NotificationContext {
     /// Configure the database channel — INSERTs into `table` with columns:
     /// `(notifiable_id BIGINT, type TEXT, data JSONB, created_at TIMESTAMPTZ DEFAULT NOW())`.
     /// Create the table separately via your migrations.
+    ///
+    /// Requires the `postgres` feature.
+    #[cfg(feature = "postgres")]
     #[must_use]
     pub fn with_database(
         mut self,
@@ -280,7 +291,8 @@ pub async fn notify<N: Notifiable, T: Notification<N>>(
         };
     }
 
-    // Database
+    // Database (postgres-only for now — see NotificationContext docs).
+    #[cfg(feature = "postgres")]
     if let Some(payload) = &dispatch.database {
         result.database = match (
             &ctx.database_pool,
@@ -303,6 +315,11 @@ pub async fn notify<N: Notifiable, T: Notification<N>>(
             }
             (_, _, None) => ChannelOutcome::Skipped, // recipient opted out via notification_id
         };
+    }
+    #[cfg(not(feature = "postgres"))]
+    if dispatch.database.is_some() {
+        result.database =
+            ChannelOutcome::Failed("database channel requires the `postgres` feature".into());
     }
 
     // Log
@@ -339,6 +356,7 @@ pub async fn notify_many<N: Notifiable, T: Notification<N>>(
     out
 }
 
+#[cfg(feature = "postgres")]
 async fn insert_database_notification(
     pool: &crate::sql::sqlx::PgPool,
     table: &str,
@@ -360,6 +378,7 @@ async fn insert_database_notification(
 }
 
 /// Reject table names with characters that could break the quoted form.
+#[cfg(feature = "postgres")]
 fn validate_table_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("table name is empty".into());
