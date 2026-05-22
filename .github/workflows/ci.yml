@@ -49,17 +49,6 @@ jobs:
   # `mysql_live`, `sqlite_live`.
   postgres_test:
     runs-on: ubuntu-latest
-    strategy:
-      # Sharded with cargo-nextest's --partition flag so test
-      # execution fans out across N runners in parallel. Each shard
-      # still does its own compile (we can't share build artifacts
-      # across runners), but `Swatinem/rust-cache` hits between shards
-      # and test execution time is divided. `fail-fast: false` so a
-      # flaky postgres-only test in one shard doesn't cancel the
-      # others mid-run.
-      fail-fast: false
-      matrix:
-        partition: [1, 2, 3, 4]
     services:
       postgres:
         image: postgres:16-alpine
@@ -96,13 +85,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
-        with:
-          # Each matrix shard gets its own cache slot so they don't
-          # stomp each other. The shared workspace lock is upstream
-          # of partitioning.
-          key: pg-shard-${{ matrix.partition }}
-      - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --workspace --all-features --partition count:${{ matrix.partition }}/4 --no-fail-fast
+      - run: cargo test --workspace --all-features
 
   doc:
     runs-on: ubuntu-latest
