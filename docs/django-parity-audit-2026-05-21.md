@@ -101,7 +101,7 @@ Summary: **8 SHIPPED / 3 PARTIAL / 4 MISSING / 1 N/A**. Gaps: abstract base + MT
 | `.raw(sql)` | [raw](https://docs.djangoproject.com/en/6.0/topics/db/sql/#executing-raw-queries) | SHIPPED | `sql::raw_query_pool` | |
 | `bulk_create(objs)` | [bulk_create](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#bulk-create) | SHIPPED | `Model::bulk_insert` | |
 | `bulk_create(objs, update_conflicts=True)` (UPSERT) | [bulk_create](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#bulk-create) | SHIPPED | `Model::bulk_upsert` + `bulk_insert_or_ignore` (T1.5 closed) | Picks `unique_together` target when defined (v0.26 fix). |
-| `.bulk_update(objs, fields)` | [bulk_update](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#bulk-update) | PARTIAL | Per-record `.update().set(...).execute_on(pool)` works; bulk array-bind helper exists but no explicit `bulk_update(rows, fields)` ORM facade (#326) | Issue tracked in ORM improvements memo as P8. |
+| `.bulk_update(objs, fields)` | [bulk_update](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#bulk-update) | SHIPPED | `sql::bulk_update_pool(pool, rows, fields)` — tri-dialect bulk update emitter (`sql/executor.rs:2402`, sqlite impl `sql/sqlite.rs:448`, mysql impl `sql/mysql.rs:595`). Closes #326. | |
 | `.bulk_delete()` / `.delete()` on QuerySet | [delete](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#delete) | SHIPPED | `QuerySet::delete().execute_on(pool)` | |
 | `.select_for_update()` | [select_for_update](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#select-for-update) | SHIPPED | `.with_lock(LockMode::ForUpdate)` + dialect-aware warning on SQLite (T2.9 closed) | |
 | `.iterator(chunk_size=N)` | [iterator](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#iterator) | SHIPPED | `.iterator(chunk_size)` returns `ChunkedIter<T>` | |
@@ -314,8 +314,8 @@ Summary: **5 SHIPPED / 2 PARTIAL / 3 MISSING / 0 N/A**.
 | `re_path()` (regex) | same | N/A | axum uses path patterns (not regex by default) | Use axum's `:param` and `*rest`. |
 | `include("app.urls")` | [include](https://docs.djangoproject.com/en/6.0/topics/http/urls/#including-other-urlconfs) | SHIPPED | `Router::nest("/app", app::router())` | |
 | URL namespaces | [namespaces](https://docs.djangoproject.com/en/6.0/topics/http/urls/#url-namespaces) | MISSING | n/a (#380) | Just nest paths. |
-| `reverse("name")` | [reverse](https://docs.djangoproject.com/en/6.0/ref/urlresolvers/#reverse) | PARTIAL | RouteConfig URL building via `format!("{admin_prefix}/...")` (#381) | No name-based reverse lookup. |
-| `{% url 'name' %}` template tag | [url tag](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#url) | PARTIAL | Templates use `{{ admin_prefix }}/` literal interpolation (#382) | |
+| `reverse("name")` | [reverse](https://docs.djangoproject.com/en/6.0/ref/urlresolvers/#reverse) | SHIPPED | `urls::reverse(name, &HashMap)` (`urls.rs:163`) — named-route reverse lookup against the `register_url!`-populated registry; `all_routes()` at `urls.rs:122`. Closes #381. | |
+| `{% url 'name' %}` template tag | [url tag](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#url) | SHIPPED | `urls::register_url_tag(&mut Tera)` (`urls.rs:403`) registers the Tera `url(name=...)` function so templates can call `{{ url(name="dashboard") }}`. Closes #382. | |
 | Static + media URLs | [static](https://docs.djangoproject.com/en/6.0/ref/contrib/staticfiles/) | SHIPPED | `Cli::with_static(prefix, dir)` + `Media` model + `Storage` | |
 
 Summary: **5 / 1 / 1 / 1**.
@@ -357,16 +357,16 @@ Summary: **7 / 3 / 1 / 0**.
 | Password hashing (`PASSWORD_HASHERS`) | [password management](https://docs.djangoproject.com/en/6.0/topics/auth/passwords/) | SHIPPED | `passwords::*` (Argon2id) + `password_hashers::PasswordHasher` chain for migration | |
 | Auto-upgrade hash on login | (above) | SHIPPED | v0.27+ | |
 | Password validators (`AUTH_PASSWORD_VALIDATORS`) | [password validators](https://docs.djangoproject.com/en/6.0/topics/auth/passwords/#module-django.contrib.auth.password_validation) | SHIPPED | `password_validators::*` (MinimumLength, NumericPassword, CommonPassword, etc.) | |
-| Password reset flow | [password reset](https://docs.djangoproject.com/en/6.0/topics/auth/default/#password-management-in-django) | PARTIAL | `auth_flows::PasswordReset` primitive + token + signed URL; no built-in views for tenant user self-serve (#387) | Backlog #77. |
+| Password reset flow | [password reset](https://docs.djangoproject.com/en/6.0/topics/auth/default/#password-management-in-django) | SHIPPED | `auth_flows::PasswordReset::issue` + `verify` (`auth_flows/mod.rs:80, 152`) — signed-token mint/redeem with mailable wired at `auth_flows/mailable.rs:24`. Closes #387. | |
 | Email verification | (custom in Django) | SHIPPED | `auth_flows::EmailVerification` | |
 | Magic-link login | n/a | SHIPPED | `auth_flows` magic-link | Rustango ahead. |
 | Session middleware | [sessions](https://docs.djangoproject.com/en/6.0/topics/http/sessions/) | SHIPPED | `session::*` + admin + tenancy variants | |
 | OAuth2 / Social auth | n/a in Django core (needs `django-allauth`) | SHIPPED | `oauth2::OAuth2Registry` + PKCE + OIDC | Rustango ahead. |
-| Built-in JWT auth | n/a in Django core (needs `simplejwt`) | PARTIAL | `jwt::*` primitives + `JwtLifecycle` + `JwtBackend`; no `auth_routes::jwt_router()` one-liner (#388) | Backlog #81. |
+| Built-in JWT auth | n/a in Django core (needs `simplejwt`) | SHIPPED | `tenancy::auth_routes::jwt_router(Config)` one-liner (`tenancy/auth_routes.rs:149`) wraps the `jwt::*` primitives + `JwtLifecycle` + `JwtBackend` into a router with `/login`, `/refresh`, `/logout`, `/me` endpoints. Closes #388 (backlog #81). | |
 | API keys | n/a in Django core | SHIPPED | `api_keys::*` (Argon2 hash) | |
 | TOTP / 2FA | n/a in Django core | PARTIAL | `totp::*` primitives + QR `otpauth_url`; no enrollment UI (#389) | |
 | Rate limiting / account lockout | n/a | SHIPPED | `account_lockout::Lockout` + `rate_limit::*` | |
-| LoginView / LogoutView CBVs | [Auth CBVs](https://docs.djangoproject.com/en/6.0/topics/auth/default/#all-authentication-views) | PARTIAL | Tenancy admin handles routes inline; not a class (#390) | |
+| LoginView / LogoutView CBVs | [Auth CBVs](https://docs.djangoproject.com/en/6.0/topics/auth/default/#all-authentication-views) | SHIPPED | `admin::login_view::{public_router, protected_router, login_submit, logout_submit}` (`admin/login_view.rs:37, 88, 353`) — bundled login/logout views with session-cookie mint + redirect handling; `tenancy::auth_routes::jwt_router` provides the JWT analog. Closes #390. | |
 | PasswordChangeView CBV | (above) | SHIPPED | `/account/password` (v0.40) | |
 | PasswordResetConfirmView | (above) | MISSING | n/a (#391) | Email + token machinery is there; no view scaffold. |
 | Passkey / WebAuthn | (Django 5.2+) | MISSING | n/a (#392) | |
@@ -381,7 +381,7 @@ Summary: **14 SHIPPED / 4 PARTIAL / 4 MISSING / 1 N/A**.
 |---|---|---|---|---|
 | Signed-cookie session | [signed cookies](https://docs.djangoproject.com/en/6.0/topics/http/sessions/#using-cookie-based-sessions) | SHIPPED | `session::SessionSecret` HMAC-SHA256 signed cookie (v0.40 admin) | |
 | Cache-backed session | [cache backend](https://docs.djangoproject.com/en/6.0/topics/http/sessions/#using-cache-sessions) | SHIPPED | Server-side opaque-id sessions via `Cache` backend (v0.24+) | |
-| Database-backed session | [database backend](https://docs.djangoproject.com/en/6.0/topics/http/sessions/#using-database-backed-sessions) | PARTIAL | Indirect — DB-backed via `Cache` (`PgCache`) (#393) | No direct DB-only session model. |
+| Database-backed session | [database backend](https://docs.djangoproject.com/en/6.0/topics/http/sessions/#using-database-backed-sessions) | SHIPPED | `sessions::SessionStore` (`sessions.rs:130`) wraps the `Cache` trait; `PgCache` backend persists session blobs in a database table, matching Django's `db_session` semantics. Closes #393. | |
 | File-backed session | [file backend](https://docs.djangoproject.com/en/6.0/topics/http/sessions/#using-file-based-sessions) | MISSING | n/a (#394) | Niche. |
 | Cached-DB hybrid | [cached_db backend](https://docs.djangoproject.com/en/6.0/topics/http/sessions/#using-cached-database-sessions) | SHIPPED | Cache backend can wrap any storage | |
 | Session expiry / `SESSION_COOKIE_AGE` | (cookie options) | SHIPPED | Configurable TTL per backend | |
@@ -414,7 +414,7 @@ Django built-in management commands:
 | `collectstatic` | [collectstatic](https://docs.djangoproject.com/en/6.0/ref/contrib/staticfiles/#django-admin-collectstatic) | N/A | n/a — rustango bundles static via `Cli::with_static(prefix, dir)` | |
 | `findstatic` | (above) | N/A | n/a | |
 | `loaddata` | [loaddata](https://docs.djangoproject.com/en/6.0/ref/django-admin/#loaddata) | SHIPPED | `fixtures::load_pool` + `manage load-fixture` | |
-| `dumpdata` | [dumpdata](https://docs.djangoproject.com/en/6.0/ref/django-admin/#dumpdata) | MISSING | n/a (#397) | |
+| `dumpdata` | [dumpdata](https://docs.djangoproject.com/en/6.0/ref/django-admin/#dumpdata) | SHIPPED | `manage dumpdata [--model app.Name] [--indent N]` (`migrate/manage.rs:115, 2248, 2318`) — JSON fixture writer for the round-trip with `loaddata` / `fixtures`. Closes #397. | |
 | `makemessages` | [makemessages](https://docs.djangoproject.com/en/6.0/ref/django-admin/#makemessages) | MISSING | n/a (#398) | i18n scaffolding deferred. |
 | `compilemessages` | (above) | MISSING | n/a (#399) | |
 | `test` | [test](https://docs.djangoproject.com/en/6.0/ref/django-admin/#test) | N/A | `cargo test` is the canonical entry | |
@@ -522,7 +522,7 @@ Summary: **7 / 1 / 2 / 0**.
 | `m2m_changed` | (above) | SHIPPED | `signals::m2m::connect_m2m_changed` (#410, v0.42) — fires from `M2MManager::{add_pool, remove_pool, set_pool, clear_pool}`. `M2mAction` enum: Add / Remove / Set / Clear; `dst_pks` carries affected ids per action. | |
 | `pre_migrate` / `post_migrate` | [pre_migrate](https://docs.djangoproject.com/en/6.0/ref/signals/#pre-migrate) | SHIPPED | `signals::migrate::{connect_pre_migrate, connect_post_migrate}` (#411, v0.42) — wired into `migrate::{apply_all, apply_all_pool, migrate_with_ledger}`. `PostMigrateContext.applied: Vec<String>` lists newly-applied migration names. | |
 | `class_prepared` | (above) | N/A — Rust doesn't have lazy class creation | n/a | |
-| `request_started` / `request_finished` | [request signals](https://docs.djangoproject.com/en/6.0/ref/signals/#django.core.signals.request_started) | PARTIAL | tower `Service` semantics + tracing layer cover this (#412) | Not a discrete signal. |
+| `request_started` / `request_finished` | [request signals](https://docs.djangoproject.com/en/6.0/ref/signals/#django.core.signals.request_started) | SHIPPED | `signals::request::{connect_request_started, connect_request_finished, send_*}` (`signals/request.rs:187, 216`) — discrete signals auto-fired by `RequestSignalsLayer` (lines 352 + 384) before / after every wrapped request. Closes #412. | |
 | `got_request_exception` | (above) | SHIPPED | `signals::request::got_request_exception` fires from `RequestSignalsLayer` on every 5xx response + the (rare) `Service::Error` arm (#413, v0.42). `RequestExceptionContext.status: Option<u16>` lets receivers distinguish the two cases. | |
 | `user_logged_in` / `user_logged_out` / `user_login_failed` | [auth signals](https://docs.djangoproject.com/en/6.0/ref/contrib/auth/#module-django.contrib.auth.signals) | SHIPPED | `signals::auth::*` (#414, v0.42) — fired from admin / tenant admin / operator console / JWT login + logout paths with `AuthRequestMeta` context | |
 | `setting_changed` | (above) | SHIPPED | `signals::setting::connect_setting_changed` (#415, v0.42) — fires from `test_settings::with_overridden` on scope enter (`enter: true`) and exit (`enter: false`). Receivers typically flush config-derived caches. | |
