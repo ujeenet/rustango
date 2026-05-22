@@ -1087,6 +1087,11 @@ pub mod test_filter;
 /// fixtures lazily init once per test-binary process. Issue #42.
 pub mod test_data;
 
+/// Django-shape test factories — `factory_boy` parity. [`test_factory::Sequence`]
+/// counter + [`test_factory::Factory`] trait with `build_batch`
+/// for declarative model builders. Issue #432.
+pub mod test_factory;
+
 /// Test-only Settings overlay — Django's `@override_settings` /
 /// `with self.settings(...)`. Wraps a `tokio::task_local!`
 /// [`config::Settings`] overlay so test code can install per-task
