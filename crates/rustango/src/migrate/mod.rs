@@ -52,7 +52,7 @@ pub use manage::{append_data_op, make_data_migration};
 pub use runner::{
     applied_set_pool, apply_all_pool, downgrade_pool, drop_all_pool, ensure_ledger_pool,
     migrate_dry_run_pool, migrate_embedded_pool, migrate_pool, migrate_to_pool, registered_models,
-    unapply_force_pool, unapply_pool, Builder, MigrationPreview, LEDGER_TABLE,
+    sqlmigrate_one, unapply_force_pool, unapply_pool, Builder, MigrationPreview, LEDGER_TABLE,
 };
 // PG-typed back-compat: only re-exported when the `postgres` feature
 // is on. Sqlite/MySQL apps use the `_pool` variants above.

@@ -591,6 +591,23 @@ async fn migrate_dry_run_with_ledger(
     Ok(out)
 }
 
+/// Django-shape `sqlmigrate <name>` — Compute the SQL the named
+/// migration would emit when applied, without touching the database.
+/// Pure file I/O + render — no ledger read required.
+///
+/// Issue #345. Use from `manage sqlmigrate <name>`.
+///
+/// # Errors
+/// - [`MigrateError::Validation`] when `name` is not present in `dir`.
+/// - Any IO / parse error from [`file::list_dir`].
+pub fn sqlmigrate_one(dir: &Path, name: &str) -> Result<MigrationPreview, MigrateError> {
+    let all = file::list_dir(dir)?;
+    let mig = all.into_iter().find(|m| m.name == name).ok_or_else(|| {
+        MigrateError::Validation(format!("migration `{name}` not found in {}", dir.display()))
+    })?;
+    preview_migration(&mig, LEDGER_TABLE)
+}
+
 /// Build a [`MigrationPreview`] for a single migration. Pure —
 /// no DB access. Same render path as `apply_atomic` / `apply_loose`
 /// but the statements stream into a `Vec<String>` instead of a tx.

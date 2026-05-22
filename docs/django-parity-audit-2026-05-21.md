@@ -195,7 +195,7 @@ Summary: **1 / 1 / 3 / 0**.
 | `python manage.py makemigrations` | [makemigrations](https://docs.djangoproject.com/en/6.0/topics/migrations/#creating-migrations) | SHIPPED | `manage makemigrations` in [src/migrate/manage.rs](crates/rustango/src/migrate/manage.rs) | Snapshot-based JSON file output. |
 | `python manage.py migrate [app] [target]` | [migrate](https://docs.djangoproject.com/en/6.0/topics/migrations/#applying-migrations) | SHIPPED | `manage migrate` | |
 | `python manage.py showmigrations` | [showmigrations](https://docs.djangoproject.com/en/6.0/ref/django-admin/#showmigrations) | SHIPPED | `manage showmigrations` | |
-| `python manage.py sqlmigrate` | [sqlmigrate](https://docs.djangoproject.com/en/6.0/ref/django-admin/#sqlmigrate) | PARTIAL | `manage migrate --plan` shows operations not raw SQL (#345) | |
+| `python manage.py sqlmigrate` | [sqlmigrate](https://docs.djangoproject.com/en/6.0/ref/django-admin/#sqlmigrate) | SHIPPED | `manage sqlmigrate <name>` (closed #345, v0.42) — prints the SQL the named migration would emit when applied, no DB touch required. Wraps `migrate::sqlmigrate_one(dir, name)` which reads the JSON file and runs the same render path as `migrate --dry-run`. | |
 | `python manage.py squashmigrations` | [squashmigrations](https://docs.djangoproject.com/en/6.0/topics/migrations/#squashing-migrations) | SHIPPED | `manage migrate --squash` (v0.29) | Fresh-table scenarios only; not full Django squash. |
 | `python manage.py makemigrations --merge` | [merge](https://docs.djangoproject.com/en/6.0/topics/migrations/#merging-migrations) | MISSING | n/a (#346) | |
 | `migrate --fake` / `--fake-initial` | [fake](https://docs.djangoproject.com/en/6.0/ref/django-admin/#cmdoption-migrate-fake) | SHIPPED | `manage migrate --fake` (v0.28) | |
@@ -402,7 +402,7 @@ Django built-in management commands:
 | `makemigrations` | (sec 5) | SHIPPED | `manage makemigrations` | |
 | `migrate` | (sec 5) | SHIPPED | `manage migrate` | |
 | `showmigrations` | (sec 5) | SHIPPED | `manage showmigrations` | |
-| `sqlmigrate` | (sec 5) | PARTIAL | `manage migrate --plan` (#395) | |
+| `sqlmigrate` | (sec 5) | SHIPPED | `manage sqlmigrate <name>` (closed #345/#395, v0.42) — see ORM row for details. | |
 | `squashmigrations` | (sec 5) | SHIPPED | `manage migrate --squash` | |
 | `runserver` | (Django) | N/A | rustango uses axum's runserver — `manage run-server` or `Cli::new().run().await` | |
 | `runserver_plus` (django-extensions) | n/a | N/A | n/a | |
