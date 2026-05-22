@@ -480,6 +480,53 @@ fn render_form_with_inlines_and_pickers(
                 );
             }
         }
+        // #358 — Django-shape `autocomplete_fields`. Append a
+        // `<datalist>` with `id="<field>_options"`, set the input's
+        // `list=` attribute, and emit a tiny inline JS block that
+        // populates the datalist via fetch to the target's
+        // `__autocomplete` endpoint on every input event.
+        if admin_cfg.autocomplete_fields.iter().any(|n| *n == f.name) {
+            if let Some(rel) = f.relation {
+                let target_table = match rel {
+                    crate::core::Relation::Fk { to, .. }
+                    | crate::core::Relation::O2O { to, .. } => to,
+                };
+                let escaped_target = render::escape(target_table);
+                let escaped_name = render::escape(f.name);
+                let datalist_id = format!("{escaped_name}_options");
+                // Inject `list="<id>"` onto the existing input HTML.
+                // The `name="…"` attribute is unique within the form
+                // so a single substitution is unambiguous.
+                let needle = format!(r#"name="{escaped_name}""#);
+                let replacement =
+                    format!(r#"name="{escaped_name}" list="{datalist_id}" autocomplete="off""#);
+                input_html = input_html.replacen(&needle, &replacement, 1);
+                use std::fmt::Write as _;
+                let _ = write!(
+                    input_html,
+                    concat!(
+                        r#" <datalist id="{datalist}"></datalist>"#,
+                        r#"<script>(function(){{"#,
+                        r#"  var inp=document.querySelector('input[name="{name}"]');"#,
+                        r#"  if(!inp)return;"#,
+                        r#"  var dl=document.getElementById('{datalist}');"#,
+                        r#"  var url='{prefix}/{target}/__autocomplete';"#,
+                        r#"  function refresh(){{"#,
+                        r#"    fetch(url+'?q='+encodeURIComponent(inp.value)).then(function(r){{return r.json();}}).then(function(j){{"#,
+                        r#"      dl.innerHTML=(j.results||[]).map(function(o){{return '<option value=\"'+o.id+'\">'+(o.text||o.id)+'</option>';}}).join('');"#,
+                        r#"    }}).catch(function(){{}});"#,
+                        r#"  }}"#,
+                        r#"  inp.addEventListener('input',refresh);"#,
+                        r#"  inp.addEventListener('focus',refresh);"#,
+                        r#"}})();</script>"#,
+                    ),
+                    datalist = datalist_id,
+                    name = escaped_name,
+                    prefix = render::escape(admin_prefix),
+                    target = escaped_target,
+                );
+            }
+        }
         serde_json::json!({
             "label": f.display_label(),
             "extra": extra,

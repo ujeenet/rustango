@@ -630,6 +630,7 @@ impl Builder {
             )
             .route("/{table}/new", get(views::create_form))
             .route("/{table}/__action", post(views::action_submit))
+            .route("/{table}/__autocomplete", get(views::autocomplete_view))
             .route(
                 "/{table}/{pk}",
                 get(views::detail_view).post(views::update_submit),

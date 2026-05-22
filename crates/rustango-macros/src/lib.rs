@@ -1929,6 +1929,13 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
         .unwrap_or(&[]);
     let raw_id_fields_lits = raw_id_fields.iter().map(|s| s.as_str());
 
+    let autocomplete_fields = admin
+        .autocomplete_fields
+        .as_ref()
+        .map(|(v, _)| v.as_slice())
+        .unwrap_or(&[]);
+    let autocomplete_fields_lits = autocomplete_fields.iter().map(|s| s.as_str());
+
     let list_per_page = admin.list_per_page.unwrap_or(0);
 
     let ordering_pairs = admin
@@ -1959,6 +1966,7 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
             date_hierarchy: #date_hierarchy,
             prepopulated_fields: &[ #( #prepopulated_tokens ),* ],
             raw_id_fields: &[ #( #raw_id_fields_lits ),* ],
+            autocomplete_fields: &[ #( #autocomplete_fields_lits ),* ],
         })
     }
 }
@@ -4495,6 +4503,11 @@ struct AdminAttrs {
     /// of FK fields whose change-form widget renders a lookup link
     /// next to the input. Issue #357.
     raw_id_fields: Option<(Vec<String>, proc_macro2::Span)>,
+    /// `admin(autocomplete_fields = "author_id")` — Django-shape.
+    /// Names of FK fields whose change-form widget renders an
+    /// Ajax-driven typeahead populated from a `__autocomplete`
+    /// endpoint on the target model. Issue #358.
+    autocomplete_fields: Option<(Vec<String>, proc_macro2::Span)>,
 }
 
 fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
@@ -4658,6 +4671,12 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                             Some((split_field_list(&s.value()), s.span()));
                         return Ok(());
                     }
+                    if inner.path.is_ident("autocomplete_fields") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        admin.autocomplete_fields =
+                            Some((split_field_list(&s.value()), s.span()));
+                        return Ok(());
+                    }
                     Err(inner.error(
                         "unknown admin attribute (supported: \
                          `list_display`, `list_display_links`, \
@@ -4668,6 +4687,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                          `date_hierarchy`, \
                          `prepopulated_fields`, \
                          `raw_id_fields`, \
+                         `autocomplete_fields`, \
                          `fieldsets`)",
                     ))
                 })?;

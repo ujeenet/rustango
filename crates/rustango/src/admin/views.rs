@@ -1322,6 +1322,107 @@ fn url_encode(s: &str) -> String {
     out
 }
 
+// ============================================================== AUTOCOMPLETE
+//
+// #358 — Django-shape `autocomplete_fields`. A form widget on the
+// parent model issues `GET <admin>/<target>/__autocomplete?q=…` and
+// drops the matched rows into a `<datalist>` the operator picks from.
+//
+// The endpoint exists on the *target* model, not the field's owner —
+// it's symmetric with Django's `ModelAdmin.autocomplete_view`. Any
+// admin-registered model is a candidate target, but the response is
+// gated on the target's `admin.search_fields` (or auto-searchable
+// fields if unset) being non-empty so a model with no searchable
+// columns returns an empty list rather than every row.
+
+pub(crate) async fn autocomplete_view(
+    Path(table): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    State(state): State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, AdminError> {
+    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound { table })?;
+    let admin_cfg = model
+        .admin
+        .copied()
+        .unwrap_or(crate::core::AdminConfig::DEFAULT);
+    let q = params
+        .get("q")
+        .map(String::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+
+    // Cap the result set so an unfiltered fetch can't dump millions of
+    // rows over the wire. Mirrors a Select2-style page size.
+    let limit: i64 = params
+        .get("limit")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(20)
+        .clamp(1, 100);
+
+    let pk_field = match model.primary_key() {
+        Some(f) => f,
+        None => {
+            return Ok(axum::Json(serde_json::json!({ "results": [] })));
+        }
+    };
+    let display_field = model.display_field().unwrap_or(pk_field);
+
+    // Compose the search clause from `admin.search_fields` falling
+    // back to the auto-searchable set.
+    let search_columns: Vec<&'static str> = if admin_cfg.search_fields.is_empty() {
+        model.searchable_fields().map(|f| f.column).collect()
+    } else {
+        admin_cfg
+            .search_fields
+            .iter()
+            .filter_map(|name| model.field(name).map(|f| f.column))
+            .collect()
+    };
+    let search = if q.is_empty() || search_columns.is_empty() {
+        None
+    } else {
+        Some(SearchClause {
+            columns: search_columns,
+            query: q.clone(),
+        })
+    };
+
+    let scalar_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    let rows = crate::sql::select_rows_as_json(
+        &state.pool,
+        &SelectQuery {
+            model,
+            where_clause: WhereExpr::And(vec![]),
+            search,
+            joins: vec![],
+            order_by: vec![crate::core::OrderItem::column(display_field.column, false)],
+            limit: Some(limit),
+            offset: Some(0),
+            lock_mode: None,
+            compound: vec![],
+            projection: None,
+            distinct: None,
+        },
+        &scalar_fields,
+    )
+    .await?;
+
+    let results: Vec<serde_json::Value> = rows
+        .into_iter()
+        .filter_map(|row| {
+            let id = row.get(pk_field.column)?.clone();
+            let text = row
+                .get(display_field.column)
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_else(|| id.to_string());
+            Some(serde_json::json!({ "id": id, "text": text }))
+        })
+        .collect();
+
+    Ok(axum::Json(serde_json::json!({ "results": results })))
+}
+
 // ============================================================== AUDIT LOG
 //
 // Moved to `super::audit` in v0.13.0. The route handlers

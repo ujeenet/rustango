@@ -621,6 +621,14 @@ pub struct AdminConfig {
     /// slice means no lookup link rendered (today's default).
     /// Issue #357.
     pub raw_id_fields: &'static [&'static str],
+    /// Django-shape `autocomplete_fields` — names of FK fields whose
+    /// change-form widget renders an Ajax-driven typeahead. Typing
+    /// in the input fires a `GET <admin>/<target>/__autocomplete?q=…`
+    /// fetch that filters the target model's rows by its display
+    /// field; matched rows populate a `<datalist>` the operator picks
+    /// from. Empty slice means today's default (plain number/text
+    /// input). Issue #358.
+    pub autocomplete_fields: &'static [&'static str],
 }
 
 /// One `prepopulated_fields` derivation: `target ← source(s)`. The
@@ -669,6 +677,7 @@ impl AdminConfig {
         date_hierarchy: "",
         prepopulated_fields: &[],
         raw_id_fields: &[],
+        autocomplete_fields: &[],
     };
 }
 
