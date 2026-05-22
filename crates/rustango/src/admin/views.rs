@@ -122,9 +122,37 @@ pub(crate) async fn index(State(state): State<AppState>) -> Html<String> {
         })
         .collect();
 
+    // #366 — Django-shape recent-actions widget on the admin home.
+    // Reads the newest 10 audit entries (the framework already writes
+    // these on every admin create/update/delete) and surfaces them as
+    // a compact activity feed. Best-effort: an audit-table-not-yet-
+    // created error falls back to an empty list rather than 500ing
+    // the whole admin home.
+    let recent_actions_ctx: Vec<serde_json::Value> =
+        crate::audit::list(&state.pool, &crate::audit::AuditFilter::default(), 10, 0)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| {
+                let action_url = format!(
+                    "{}/{}/{}",
+                    state.config.admin_prefix, entry.entity_table, entry.entity_pk,
+                );
+                serde_json::json!({
+                    "table": entry.entity_table,
+                    "pk": entry.entity_pk,
+                    "operation": entry.operation,
+                    "source": entry.source,
+                    "occurred_at": entry.occurred_at.to_rfc3339(),
+                    "url": action_url,
+                })
+            })
+            .collect();
+
     let mut ctx = serde_json::json!({
         "groups": groups_ctx,
         "models": flat_models_ctx,
+        "recent_actions": recent_actions_ctx,
     });
     Html(render_with_chrome(
         "index.html",
