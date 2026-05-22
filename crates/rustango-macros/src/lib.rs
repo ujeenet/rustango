@@ -6393,6 +6393,25 @@ struct FormFieldAttrs {
     max: Option<i64>,
     min_length: Option<u32>,
     max_length: Option<u32>,
+    /// `#[form(clean = "fn_name")]` — Django-shape `clean_<field>` hook.
+    /// The named static method on the form struct is called after the
+    /// field's typed parse + length/range checks; it gets the parsed
+    /// value by reference and returns `Result<<FieldType>, String>`.
+    /// On Ok, the returned value replaces the parsed one; on Err, the
+    /// message is attached to the field error list. Issue #372.
+    clean: Option<syn::Ident>,
+}
+
+/// Container-level `#[form(...)]` attributes. Currently only the
+/// Django-shape cross-field `validate` hook (issue #373).
+#[derive(Default)]
+struct FormContainerAttrs {
+    /// `#[form(validate = "fn_name")]` — Django-shape `clean()` hook.
+    /// After every per-field parse succeeds, the named method on the
+    /// form struct is called with `&self` and may return
+    /// `Result<(), FormErrors>`. Errors merge into the field error
+    /// list. Issue #373.
+    validate: Option<syn::Ident>,
 }
 
 /// Detected shape of a form field's Rust type.
@@ -6438,6 +6457,11 @@ fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
         ));
     };
 
+    // #373 — container-level `#[form(validate = "fn")]` hook.
+    let container = parse_form_container_attrs(input)?;
+    let post_field_clean: Vec<TokenStream2> = Vec::new();
+    let _ = post_field_clean;
+
     let mut field_blocks: Vec<TokenStream2> = Vec::with_capacity(named.named.len());
     let mut field_idents: Vec<&syn::Ident> = Vec::with_capacity(named.named.len());
 
@@ -6451,9 +6475,52 @@ fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
         let name_lit = ident.to_string();
         let parse_block = render_form_field_parse(ident, &name_lit, kind, nullable, &attrs);
-        field_blocks.push(parse_block);
+        // #372 — append the per-field `clean_<field>` call right after
+        // the parse block when the attribute is set. The clean fn
+        // takes &T and returns Result<T, String>; on Err we attach
+        // the message to the field error list without aborting
+        // (matches Django's "collect all field errors" shape).
+        let clean_block = if let Some(clean_fn) = &attrs.clean {
+            quote! {
+                if __errors.fields().get(#name_lit).is_none() {
+                    match Self::#clean_fn(&#ident) {
+                        ::core::result::Result::Ok(__cleaned) => { #ident = __cleaned; }
+                        ::core::result::Result::Err(__msg) => {
+                            __errors.add(#name_lit, __msg);
+                        }
+                    }
+                }
+            }
+        } else {
+            quote! {}
+        };
+        field_blocks.push(quote! {
+            #parse_block
+            #clean_block
+        });
         field_idents.push(ident);
     }
+
+    // #373 — after every per-field parse + clean succeeds, call the
+    // cross-field validator if declared. Errors merge into the
+    // outgoing FormErrors via the existing `FormErrors::merge` helper
+    // (same primitive the DRF serializer cross-field hook uses).
+    let cross_field_call = if let Some(validate_fn) = &container.validate {
+        quote! {
+            if __errors.is_empty() {
+                let __candidate = Self { #( #field_idents ),* };
+                if let ::core::result::Result::Err(__other) = Self::#validate_fn(&__candidate) {
+                    __errors.merge(__other);
+                }
+                if !__errors.is_empty() {
+                    return ::core::result::Result::Err(__errors);
+                }
+                return ::core::result::Result::Ok(__candidate);
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     Ok(quote! {
         impl ::rustango::forms::Form for #struct_name {
@@ -6462,6 +6529,7 @@ fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
             ) -> ::core::result::Result<Self, ::rustango::forms::FormErrors> {
                 let mut __errors = ::rustango::forms::FormErrors::default();
                 #( #field_blocks )*
+                #cross_field_call
                 if !__errors.is_empty() {
                     return ::core::result::Result::Err(__errors);
                 }
@@ -6471,6 +6539,24 @@ fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
     })
+}
+
+fn parse_form_container_attrs(input: &DeriveInput) -> syn::Result<FormContainerAttrs> {
+    let mut out = FormContainerAttrs::default();
+    for attr in &input.attrs {
+        if !attr.path().is_ident("form") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("validate") {
+                let s: LitStr = meta.value()?.parse()?;
+                out.validate = Some(syn::Ident::new(&s.value(), s.span()));
+                return Ok(());
+            }
+            Err(meta.error("unknown form container attribute (supported: `validate`)"))
+        })?;
+    }
+    Ok(out)
 }
 
 fn parse_form_field_attrs(field: &syn::Field) -> syn::Result<FormFieldAttrs> {
@@ -6500,8 +6586,13 @@ fn parse_form_field_attrs(field: &syn::Field) -> syn::Result<FormFieldAttrs> {
                 out.max_length = Some(lit.base10_parse::<u32>()?);
                 return Ok(());
             }
+            if meta.path.is_ident("clean") {
+                let s: LitStr = meta.value()?.parse()?;
+                out.clean = Some(syn::Ident::new(&s.value(), s.span()));
+                return Ok(());
+            }
             Err(meta.error(
-                "unknown form attribute (supported: `min`, `max`, `min_length`, `max_length`)",
+                "unknown form field attribute (supported: `min`, `max`, `min_length`, `max_length`, `clean`)",
             ))
         })?;
     }
@@ -6670,7 +6761,10 @@ fn render_form_field_parse(
     let validators = render_form_validators(name_lit, kind, nullable, attrs);
 
     quote! {
-        let #ident = {
+        // `mut` so the per-field `clean` hook (#372) can rewrite the
+        // parsed value in-place when it returns Ok with a normalized
+        // form (e.g. trim / lowercase).
+        let mut #ident = {
             #lookup
             #parsed_value
             #validators
