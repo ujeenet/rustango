@@ -50,10 +50,24 @@
 //! name registered more than once. Future work: a startup validator
 //! that turns this into a clean error before the server binds.
 //!
-//! Namespaced reverse (Django's `reverse("app:detail")` /
-//! `include("app.urls", namespace=...)`) is **out of scope for v1**.
-//! Use unique per-app name prefixes (`"posts:detail"` / `"users:detail"`)
-//! as a manual convention until namespace support lands.
+//! ## Namespaced reverse (Django parity #380)
+//!
+//! Django's `reverse("app:detail")` form works today as a naming
+//! convention — register routes with colon-separated names and they
+//! look up just like any other key:
+//!
+//! ```ignore
+//! register_url!("posts:detail", "/posts/{id}");
+//! register_url!("users:detail", "/users/{id}");
+//!
+//! let url = reverse("posts:detail", &p).unwrap(); // → "/posts/42"
+//! ```
+//!
+//! Rustango has no `include()` concept (every `register_url!` runs
+//! at module-load and lands in the global registry via `inventory`),
+//! so the colon prefix is part of the registered name rather than
+//! an auto-applied namespace. The behavior matches Django's
+//! `reverse("app:detail")` API surface.
 
 use std::collections::{HashMap, HashSet};
 
@@ -250,6 +264,11 @@ mod tests {
     register_url!("__test_post_detail", "/posts/{id}");
     register_url!("__test_two_args", "/users/{user_id}/posts/{post_id}");
     register_url!("__test_typed_placeholder", "/items/{int:id}");
+    // Issue #380 — Django-shape namespaced names. Colons in names
+    // round-trip cleanly through register_url! + reverse, so the
+    // namespace convention is supported without any new code.
+    register_url!("__test_posts:detail", "/posts/{id}");
+    register_url!("__test_users:detail", "/users/{id}");
 
     fn params(pairs: &[(&'static str, &str)]) -> HashMap<&'static str, String> {
         pairs.iter().map(|(k, v)| (*k, (*v).to_owned())).collect()
@@ -313,6 +332,26 @@ mod tests {
         // Pattern `/items/{int:id}` — `id` is the parameter name.
         let p = params(&[("id", "7")]);
         assert_eq!(reverse("__test_typed_placeholder", &p).unwrap(), "/items/7");
+    }
+
+    /// Issue #380 — Django-shape namespaced names round-trip through
+    /// `register_url!` + `reverse`. Colons in the name are part of
+    /// the name string (no special syntax), so `"posts:detail"` is
+    /// resolved as a unique key.
+    #[test]
+    fn reverse_resolves_namespaced_name() {
+        let p = params(&[("id", "1")]);
+        assert_eq!(reverse("__test_posts:detail", &p).unwrap(), "/posts/1",);
+    }
+
+    /// Issue #380 — different namespaces resolve to different
+    /// patterns even when the local name is the same (`posts:detail`
+    /// vs `users:detail`).
+    #[test]
+    fn reverse_disambiguates_by_namespace() {
+        let p = params(&[("id", "7")]);
+        assert_eq!(reverse("__test_posts:detail", &p).unwrap(), "/posts/7",);
+        assert_eq!(reverse("__test_users:detail", &p).unwrap(), "/users/7",);
     }
 
     #[test]
