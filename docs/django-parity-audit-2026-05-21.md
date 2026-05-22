@@ -578,14 +578,14 @@ Summary: **3 / 2 / 3 / 0**.
 | `gettext` / `pgettext` / `ngettext` translation API | [translation](https://docs.djangoproject.com/en/6.0/topics/i18n/translation/) | PARTIAL | `i18n::Translator::t(key)` lookup against JSON per-locale (#422) | Not gettext shape; ICU MessageFormat partial. |
 | `.po` / `.mo` compilation (`makemessages`, `compilemessages`) | (sec 13) | MISSING | n/a (#423) | |
 | Per-language URL prefix (`/en/foo` / `/es/foo`) | [URL i18n](https://docs.djangoproject.com/en/6.0/topics/i18n/translation/#internationalization-in-url-patterns) | SHIPPED | `Router::nest("/<lang>", router.layer(LocaleMiddleware::new(&[lang])))` composes per-locale prefixes — axum-shape parity with Django's `i18n_patterns()`. Documented in `i18n::middleware` + regression test `tests/locale_middleware.rs::router_nest_per_locale_pattern`. | |
-| Fallback locales | [fallbacks](https://docs.djangoproject.com/en/6.0/topics/i18n/translation/#how-django-discovers-translations) | PARTIAL | `Translator` falls back to default locale (#425) | |
+| Fallback locales | [fallbacks](https://docs.djangoproject.com/en/6.0/topics/i18n/translation/#how-django-discovers-translations) | SHIPPED | `Translator::new(...).with_fallback_chain(&["pt", "es"])` walks exact → base lang → explicit chain → default. `Translator::fallback_chain()` returns the configured chain. `i18n/mod.rs`. | |
 | Per-user TIME_ZONE activation | [time zones](https://docs.djangoproject.com/en/6.0/topics/i18n/timezones/) | SHIPPED | `i18n::timezone::with_tz(fixed_offset, future)` task-local + `tz_offset` cookie middleware | rustango-cms uses this end-to-end. |
 | Locale-aware number / date formatting | [formatting](https://docs.djangoproject.com/en/6.0/topics/i18n/formatting/) | MISSING | n/a (#426) | |
 | `{% trans %}` / `{% blocktrans %}` template tags | [template translation](https://docs.djangoproject.com/en/6.0/topics/i18n/translation/#internationalization-in-template-code) | PARTIAL | `i18n::tera_tags::register(&mut tera, translator)` ships both function + filter (`{{ translate(key="welcome", locale=LANG, name=user.name) }}` and `{{ "welcome" \| translate(locale=LANG) }}`) — framework-side IS there ([`i18n/tera_tags.rs`](crates/rustango/src/i18n/tera_tags.rs)). Block-tag `{% blocktrans %}…{% endblocktrans %}` and `{% language 'fr' %}` override blocks aren't ported (Tera grammar has no custom-block-tag extension). Closes #427's "framework-side missing" claim — block-tag follow-up tracked separately. |
 | Currency / region formatting | [LANGUAGES setting](https://docs.djangoproject.com/en/6.0/ref/settings/#languages) | MISSING | n/a (#428) | |
 | Right-to-left layout support | [BiDi text](https://docs.djangoproject.com/en/6.0/topics/i18n/translation/#translator-comments-in-templates) | MISSING | n/a (#429) | |
 
-Summary: **2 SHIPPED / 2 PARTIAL / 5 MISSING / 0 N/A**. **Still one of the weaker sections.** Backlog #87 sub-bullets track this; deliberate deferral pending demand signal.
+Summary: **3 SHIPPED / 1 PARTIAL / 5 MISSING / 0 N/A**. **Still one of the weaker sections.** Backlog #87 sub-bullets track this; deliberate deferral pending demand signal.
 
 ---
 
