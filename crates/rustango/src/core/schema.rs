@@ -629,6 +629,30 @@ pub struct AdminConfig {
     /// from. Empty slice means today's default (plain number/text
     /// input). Issue #358.
     pub autocomplete_fields: &'static [&'static str],
+    /// Django-shape `list_select_related` — control the auto-JOINs
+    /// the admin list view runs on FK columns. Issue #352.
+    ///
+    /// rustango's default differs from Django's: every visible FK
+    /// gets a LEFT JOIN automatically so the list cell renders the
+    /// target's display value without an N+1 follow-up query. This
+    /// attribute lets operators tune that policy per model.
+    pub list_select_related: ListSelectRelated,
+}
+
+/// Django-shape `ModelAdmin.list_select_related` — controls the
+/// auto-JOIN policy on the admin list view's FK columns. Issue #352.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListSelectRelated {
+    /// Default — JOIN every visible FK so list cells render the
+    /// target's display value in one round trip.
+    All,
+    /// Skip all auto-JOINs on the list view. FK cells render the raw
+    /// PK value. Pairs well with `list_display` that intentionally
+    /// excludes FK columns.
+    None,
+    /// Restrict auto-JOINs to the named FK Rust field names. FKs not
+    /// in the list render their raw PK value.
+    Only(&'static [&'static str]),
 }
 
 /// One `prepopulated_fields` derivation: `target ← source(s)`. The
@@ -678,6 +702,7 @@ impl AdminConfig {
         prepopulated_fields: &[],
         raw_id_fields: &[],
         autocomplete_fields: &[],
+        list_select_related: ListSelectRelated::All,
     };
 }
 
