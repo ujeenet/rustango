@@ -5,11 +5,7 @@
 //! NotificationContext, fires a broadcast, and inspects the captured
 //! POST body to verify the Slack envelope shape.
 
-#![cfg(all(
-    feature = "notifications",
-    feature = "http-client",
-    feature = "postgres"
-))]
+#![cfg(all(feature = "notifications", feature = "http-client"))]
 
 use std::sync::Arc;
 
