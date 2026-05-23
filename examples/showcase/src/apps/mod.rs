@@ -3,6 +3,7 @@
 //! `e2e/tests/<app>/` folder.
 
 pub mod blog;
+pub mod shop;
 
 use axum::response::Json;
 use axum::routing::get;
@@ -16,6 +17,7 @@ pub fn api() -> Router {
     Router::new()
         .route("/__showcase__/info", get(info))
         .merge(blog::urls::api())
+        .merge(shop::urls::api())
 }
 
 /// Smoke endpoint — used by the E2E playwright suite's readiness
@@ -34,6 +36,6 @@ async fn info() -> Json<serde_json::Value> {
         "framework": "rustango",
         "version": env!("CARGO_PKG_VERSION"),
         "backend": backend,
-        "apps": ["blog"],
+        "apps": ["blog", "shop"],
     }))
 }
