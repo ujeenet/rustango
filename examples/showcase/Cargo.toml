@@ -1,0 +1,49 @@
+[package]
+name = "rustango-showcase"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Multi-app showcase exercising every rustango framework surface; backs the E2E playwright suite."
+
+# Severed from the parent workspace — same pattern as the cookbook
+# example so this can ship as a self-contained project anyone can
+# `cargo build` after copying out.
+[workspace]
+
+[lib]
+name = "rustango_showcase"
+path = "src/lib.rs"
+
+[[bin]]
+name = "showcase"
+path = "src/main.rs"
+
+[features]
+# One-of-three backend selector — CI matrix builds the binary three
+# times, once per backend. `default = ["postgres"]` matches a normal
+# rustango project; the matrix overrides with --no-default-features
+# + --features <other>.
+default = ["postgres"]
+postgres = ["rustango/postgres"]
+mysql    = ["rustango/mysql"]
+sqlite   = ["rustango/sqlite"]
+
+[dependencies]
+# Path-pinned against the in-tree rustango. Per-backend feature is
+# selected by the showcase's own `postgres` / `mysql` / `sqlite`
+# features above so the framework's compile-time-gated `runserver`
+# picks the right `Pool` constructor.
+rustango = { path = "../../crates/rustango", default-features = false, features = [
+    "manage", "admin", "config", "forms", "serializer",
+    "cache", "signals", "email", "storage",
+    "passwords", "signed_url", "notifications",
+    "auth_flows", "sessions", "jwt",
+    "csp-nonce", "http-client", "compression",
+    "template_views",
+] }
+
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
+axum  = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }
+tracing = "0.1"
+dotenvy = "0.15"
+serde_json = "1"

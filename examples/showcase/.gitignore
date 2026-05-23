@@ -1,0 +1,12 @@
+target/
+
+# Playwright build artifacts
+e2e/node_modules/
+e2e/playwright-report/
+e2e/test-results/
+
+# Local sqlite test DB
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

@@ -272,3 +272,95 @@ jobs:
       - run: cargo test -p rustango --features mysql,tenancy --test tenancy_manage_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy --test permissions_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy --test database_pools_mysql_live
+
+  # End-to-end playwright suite for the multi-app rustango showcase.
+  # The showcase is a severed workspace under examples/showcase/ that
+  # exercises every framework surface (admin, viewsets, forms, auth,
+  # i18n, …) as phases land. Phase 1 (current) just smoke-tests the
+  # info endpoint to validate the boot + migrate + runserver chain
+  # works against each backend.
+  #
+  # Matrix runs each backend once. The showcase Cargo.toml has a
+  # one-of-three backend feature selector; the matrix flips it per
+  # row so the binary's `runserver` picks the right Pool constructor.
+  e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: postgres
+            database_url: postgres://rustango:rustango@127.0.0.1:5432/showcase
+            service_image: postgres:16-alpine
+          - backend: mysql
+            database_url: mysql://rustango:rustango@127.0.0.1:3306/showcase
+            service_image: mysql:8
+          - backend: sqlite
+            database_url: sqlite:///tmp/rustango-showcase-e2e.db
+            service_image: ''
+    services:
+      postgres:
+        image: ${{ matrix.backend == 'postgres' && 'postgres:16-alpine' || '' }}
+        env:
+          POSTGRES_USER: rustango
+          POSTGRES_PASSWORD: rustango
+          POSTGRES_DB: showcase
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U rustango -d showcase"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+      mysql:
+        image: ${{ matrix.backend == 'mysql' && 'mysql:8' || '' }}
+        env:
+          MYSQL_ROOT_PASSWORD: rustango
+          MYSQL_USER: rustango
+          MYSQL_PASSWORD: rustango
+          MYSQL_DATABASE: showcase
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -prustango"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-${{ matrix.backend }}
+          workspaces: examples/showcase
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Pre-build showcase server
+        working-directory: examples/showcase
+        run: cargo build --no-default-features --features ${{ matrix.backend }}
+      - name: Install playwright + chromium
+        working-directory: examples/showcase/e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Run playwright suite
+        working-directory: examples/showcase/e2e
+        env:
+          SHOWCASE_BACKEND: ${{ matrix.backend }}
+          DATABASE_URL: ${{ matrix.database_url }}
+          CI: '1'
+        run: npx playwright test
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ matrix.backend }}
+          path: examples/showcase/e2e/playwright-report
