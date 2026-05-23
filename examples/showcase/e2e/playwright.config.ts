@@ -55,6 +55,8 @@ export default defineConfig({
     env: {
       DATABASE_URL,
       RUSTANGO_BIND: `127.0.0.1:${PORT}`,
+      SHOWCASE_JWT_SECRET:
+        process.env.SHOWCASE_JWT_SECRET ?? 'showcase-e2e-jwt-secret-not-for-production',
     },
   },
 });
