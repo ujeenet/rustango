@@ -4,6 +4,7 @@
 
 pub mod accounts;
 pub mod blog;
+pub mod i18n_demo;
 pub mod shop;
 
 use axum::response::Json;
@@ -20,6 +21,7 @@ pub fn api() -> Router {
         .merge(blog::urls::api())
         .merge(shop::urls::api())
         .merge(accounts::urls::api())
+        .merge(i18n_demo::urls::api())
 }
 
 /// Smoke endpoint — used by the E2E playwright suite's readiness
@@ -38,6 +40,6 @@ async fn info() -> Json<serde_json::Value> {
         "framework": "rustango",
         "version": env!("CARGO_PKG_VERSION"),
         "backend": backend,
-        "apps": ["accounts", "blog", "shop"],
+        "apps": ["accounts", "blog", "i18n_demo", "shop"],
     }))
 }
