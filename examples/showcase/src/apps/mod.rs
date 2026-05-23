@@ -1,20 +1,21 @@
 //! Sub-apps. Each mirrors the Django shape (`models.rs`, `urls.rs`,
 //! `views.rs`, `admin.rs`, `mod.rs`) and the E2E suite has a matching
 //! `e2e/tests/<app>/` folder.
-//!
-//! Phase 1 (this commit): no apps yet — `api()` returns an empty
-//! router with a single smoke route mounted at `/__showcase__/info`.
-//! Subsequent phases plug each per-app router in via `.merge(...)`.
+
+pub mod blog;
 
 use axum::response::Json;
 use axum::routing::get;
 use axum::Router;
 
-/// Aggregated stateless API router. Each sub-app is invited to merge
-/// in once it lands.
+/// Aggregated stateless API router. Each sub-app merges its routes
+/// in here; the per-app playwright folder under `e2e/tests/<app>/`
+/// exercises them end-to-end.
 #[must_use]
 pub fn api() -> Router {
-    Router::new().route("/__showcase__/info", get(info))
+    Router::new()
+        .route("/__showcase__/info", get(info))
+        .merge(blog::urls::api())
 }
 
 /// Smoke endpoint — used by the E2E playwright suite's readiness
@@ -33,6 +34,6 @@ async fn info() -> Json<serde_json::Value> {
         "framework": "rustango",
         "version": env!("CARGO_PKG_VERSION"),
         "backend": backend,
-        "apps": [],
+        "apps": ["blog"],
     }))
 }
