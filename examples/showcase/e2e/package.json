@@ -1,0 +1,14 @@
+{
+  "name": "rustango-showcase-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "End-to-end playwright suite for the rustango showcase.",
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "install:browsers": "playwright install --with-deps chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}
