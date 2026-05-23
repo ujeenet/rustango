@@ -123,5 +123,29 @@ async fn create_post(
     p.insert_pool(&pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok((StatusCode::CREATED, Json(PostOut::from(p))))
+
+    // The macro-emitted `insert_pool` populates the `Auto<T>` PK on
+    // every backend but only fills `auto_now_add` fields when the
+    // dialect supports `INSERT ... RETURNING` (PG + SQLite). MySQL
+    // populates only the PK, so re-fetch by PK to surface the DB-set
+    // `created_at` uniformly across the matrix.
+    let id = match p.id {
+        Auto::Set(n) => n,
+        Auto::Unset => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "insert_pool didn't populate the primary key".into(),
+            ));
+        }
+    };
+    let mut rows: Vec<Post> = Post::objects()
+        .filter_op("id", Op::Eq, id)
+        .fetch_pool(&pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let stored = rows.pop().ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "could not re-fetch inserted row".into(),
+    ))?;
+    Ok((StatusCode::CREATED, Json(PostOut::from(stored))))
 }
