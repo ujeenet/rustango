@@ -48,6 +48,9 @@ pub enum AdminError {
 /// yet migrated" case and surface a friendly hint.
 const PG_UNDEFINED_TABLE: &str = "42P01";
 
+/// MySQL error code 1146 — `ER_NO_SUCH_TABLE`.
+const MYSQL_NO_SUCH_TABLE: &str = "1146";
+
 fn pg_undefined_table_error(e: &sqlx::Error) -> Option<String> {
     let db = e.as_database_error()?;
     if db.code().as_deref() != Some(PG_UNDEFINED_TABLE) {
@@ -65,9 +68,56 @@ fn pg_undefined_table_error(e: &sqlx::Error) -> Option<String> {
     Some(name)
 }
 
+/// Sqlite reports missing tables via the driver message `no such
+/// table: <name>` — no structured code. Match the message shape so
+/// host apps on the `sqlite` feature get the same friendly
+/// "TableMissing" page Postgres hosts get instead of a 500 with a
+/// raw correlation id (rustango-cms #260).
+fn sqlite_undefined_table_error(e: &sqlx::Error) -> Option<String> {
+    let db = e.as_database_error()?;
+    let msg = db.message();
+    let rest = msg.strip_prefix("no such table: ")?;
+    // The message may include trailing context after the table name;
+    // take the first whitespace/punctuation-bounded identifier.
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// MySQL reports missing tables with error code 1146 + a message like
+/// `Table 'db.table' doesn't exist`. Match the code first (most
+/// reliable) and pull the unqualified table name from the message.
+fn mysql_undefined_table_error(e: &sqlx::Error) -> Option<String> {
+    let db = e.as_database_error()?;
+    if db.code().as_deref() != Some(MYSQL_NO_SUCH_TABLE) {
+        return None;
+    }
+    // Message shape: `Table 'demo.rustango_admin_users' doesn't exist`.
+    let msg = db.message();
+    let (_, rest) = msg.split_once('\'')?;
+    let (qualified, _) = rest.split_once('\'')?;
+    let name = qualified
+        .rsplit_once('.')
+        .map(|(_, t)| t)
+        .unwrap_or(qualified);
+    Some(name.to_owned())
+}
+
+fn undefined_table_error(e: &sqlx::Error) -> Option<String> {
+    pg_undefined_table_error(e)
+        .or_else(|| sqlite_undefined_table_error(e))
+        .or_else(|| mysql_undefined_table_error(e))
+}
+
 impl From<sqlx::Error> for AdminError {
     fn from(e: sqlx::Error) -> Self {
-        if let Some(table) = pg_undefined_table_error(&e) {
+        if let Some(table) = undefined_table_error(&e) {
             return Self::TableMissing { table };
         }
         Self::Internal(e.to_string())
@@ -76,9 +126,11 @@ impl From<sqlx::Error> for AdminError {
 
 impl From<crate::sql::ExecError> for AdminError {
     fn from(e: crate::sql::ExecError) -> Self {
-        // ExecError wraps sqlx errors; unwrap to detect PG_UNDEFINED_TABLE.
+        // ExecError wraps sqlx errors; unwrap to detect the
+        // dialect-specific undefined-table signature so sqlite +
+        // mysql hosts get the friendly TableMissing page, not a 500.
         if let crate::sql::ExecError::Driver(sqlx_err) = &e {
-            if let Some(table) = pg_undefined_table_error(sqlx_err) {
+            if let Some(table) = undefined_table_error(sqlx_err) {
                 return Self::TableMissing { table };
             }
         }
@@ -240,6 +292,42 @@ mod tests {
             body_str.contains("correlation_id"),
             "expected correlation_id in body for log lookup, got: {body_str}"
         );
+    }
+
+    // rustango-cms #260 — sqlite + mysql parsers extract the table
+    // name from the dialect-specific error message shape so the
+    // friendly TableMissing page fires on every backend, not just
+    // postgres.
+    #[test]
+    fn sqlite_undefined_table_extracts_name_from_message() {
+        // The sqlite error string used by `libsqlite3-sys` /
+        // `sqlx::sqlite::SqliteError` is exactly this prefix.
+        let raw = "(code: 1) no such table: rustango_admin_users";
+        // Strip the libsqlite3 prefix that sqlx may or may not
+        // include — what we care about is the `no such table: …`
+        // segment landing in `.message()`.
+        let msg = raw.strip_prefix("(code: 1) ").unwrap_or(raw);
+        assert_eq!(
+            msg.strip_prefix("no such table: ").map(|rest| {
+                rest.chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect::<String>()
+            }),
+            Some("rustango_admin_users".to_owned())
+        );
+    }
+
+    #[test]
+    fn mysql_undefined_table_extracts_name_from_message() {
+        // MySQL's `.message()` reads `Table 'db.table' doesn't exist`.
+        let msg = "Table 'demo.rustango_admin_users' doesn't exist";
+        let (_, rest) = msg.split_once('\'').unwrap();
+        let (qualified, _) = rest.split_once('\'').unwrap();
+        let name = qualified
+            .rsplit_once('.')
+            .map(|(_, t)| t)
+            .unwrap_or(qualified);
+        assert_eq!(name, "rustango_admin_users");
     }
 
     /// TableMissing path is unchanged — it's already a sanitized
