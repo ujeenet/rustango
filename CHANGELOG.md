@@ -2,6 +2,14 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.41.1] — tenant pool default sized for the `Tenant` extractor's hold pattern
+
+Bug-fix release.
+
+### Fixed
+
+- **`TenantPoolsConfig::database_pool_max_connections` default bumped 4 → 16.** The framework's `Tenant` extractor pins one pool connection for the entire handler lifetime. Any admin handler that also calls `fetch_pool(...)` for a follow-up query needs a second connection to make progress. With the previous default of 4, modest concurrency (e.g. one admin page render + a six-thumbnail fan-out = seven in-flight requests) deadlocked the pool: all four conns held by `Tenant` extractors, every inner `fetch_pool` waiting forever, sqlx errored at the 30 s `acquire_timeout`. 16 leaves headroom without flooding upstream Postgres' `max_connections`. Apps that need a tighter budget can still override via `.config(TenantPoolsConfig { … })`. The deadlock pattern itself remains open in rustango-cms#280.
+
 ## [0.39.0] — dialect-agnostic transactions + tri-dialect migrations
 
 Closes the last PG-specific gaps in the executor surface and the file-based migration renderer. Multi-row TX blocks, `SeedFn` hooks, and `SchemaChange` DDL all work on any backend; sqlite/mysql `runserver_tenancy` now honors the `Cli::seed` hook on boot.
