@@ -46,8 +46,15 @@ pub struct TenantPoolsConfig {
     /// count against this limit. Default: 64.
     pub max_cached_database_pools: usize,
     /// Per-pool `max_connections` for database-mode tenants. Keep
-    /// small so a tenant fan-out doesn't exhaust Postgres'
-    /// `max_connections`. Default: 4.
+    /// small enough that a fleet fan-out doesn't exhaust Postgres'
+    /// `max_connections`, but large enough that a single tenant's
+    /// concurrent admin traffic (page render + thumbnail fan-out
+    /// + background tasks) doesn't deadlock — the framework's
+    /// `Tenant` extractor pins one connection for the handler's
+    /// whole lifetime, so handlers that also call `fetch_pool(...)`
+    /// inside need at least one extra slot to make progress.
+    /// 4 is far too tight for that pattern; 16 leaves headroom
+    /// without flooding upstream PG. Default: 16.
     pub database_pool_max_connections: u32,
 
     // v0.27.7 — connection-time tuning (#60). Pre-fix, every tenant
@@ -97,7 +104,7 @@ impl Default for TenantPoolsConfig {
     fn default() -> Self {
         Self {
             max_cached_database_pools: 64,
-            database_pool_max_connections: 4,
+            database_pool_max_connections: 16,
             // Below: zeros / None preserve pre-0.27.7 behavior so
             // existing apps don't see surprise behavior on upgrade.
             // Apps that want hot pools opt in via `.config(...)`.
