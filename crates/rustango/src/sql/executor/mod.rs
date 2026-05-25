@@ -247,120 +247,17 @@ mod page;
 use page::inject_total_count;
 pub use page::Page;
 
-/// Like [`insert`] but accepts any sqlx executor — `&PgPool`,
-/// `&mut PgConnection`, or a transaction. Tenant-scoped writes need
-/// this: schema-mode tenants share the registry pool and rely on the
-/// per-checkout `SET search_path`, so passing `&PgPool` would silently
-/// hit the wrong schema.
-///
-/// # Errors
-/// As [`insert`].
-#[cfg(feature = "postgres")]
-pub async fn insert_on<'c, E>(executor: E, query: &InsertQuery) -> Result<(), ExecError>
-where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-{
-    query.validate()?;
-    let stmt = Postgres.compile_insert(query)?;
-    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-    for value in stmt.params {
-        q = bind_query(q, value);
-    }
-    q.execute(executor).await?;
-    Ok(())
-}
-
-/// Like [`insert_returning`] but accepts any sqlx executor.
-///
-/// # Errors
-/// As [`insert_returning`].
-#[cfg(feature = "postgres")]
-pub async fn insert_returning_on<'c, E>(
-    executor: E,
-    query: &InsertQuery,
-) -> Result<PgRow, ExecError>
-where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-{
-    if query.returning.is_empty() {
-        return Err(ExecError::EmptyReturning);
-    }
-    query.validate()?;
-    let stmt = Postgres.compile_insert(query)?;
-    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-    for value in stmt.params {
-        q = bind_query(q, value);
-    }
-    let row = q.fetch_one(executor).await?;
-    Ok(row)
-}
-
-/// Like [`bulk_insert`] but accepts any sqlx executor.
-///
-/// # Errors
-/// As [`bulk_insert`].
-#[cfg(feature = "postgres")]
-pub async fn bulk_insert_on<'c, E>(
-    executor: E,
-    query: &BulkInsertQuery,
-) -> Result<Vec<PgRow>, ExecError>
-where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-{
-    query.validate()?;
-    let stmt = Postgres.compile_bulk_insert(query)?;
-    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-    for value in stmt.params {
-        q = bind_query(q, value);
-    }
-    if query.returning.is_empty() {
-        q.execute(executor).await?;
-        Ok(Vec::new())
-    } else {
-        Ok(q.fetch_all(executor).await?)
-    }
-}
-
-/// Like [`update`] but accepts any sqlx executor.
-///
-/// # Errors
-/// As [`update`].
-#[cfg(feature = "postgres")]
-pub async fn update_on<'c, E>(executor: E, query: &UpdateQuery) -> Result<u64, ExecError>
-where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-{
-    query.validate()?;
-    let stmt = Postgres.compile_update(query)?;
-    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-    for value in stmt.params {
-        q = bind_query(q, value);
-    }
-    let result = q.execute(executor).await?;
-    Ok(result.rows_affected())
-}
-
-/// Like [`delete`] but accepts any sqlx executor.
-///
-/// # Errors
-/// As [`delete`].
-#[cfg(feature = "postgres")]
-pub async fn delete_on<'c, E>(executor: E, query: &DeleteQuery) -> Result<u64, ExecError>
-where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-{
-    let stmt = Postgres.compile_delete(query)?;
-    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-    for value in stmt.params {
-        q = bind_query(q, value);
-    }
-    let result = q.execute(executor).await?;
-    Ok(result.rows_affected())
-}
-
 // ====================================================================
-// row_to_json family — extracted to row_to_json.rs (#116 step 7)
+// PG `_on` CRUD family — extracted to pg_on.rs (#116 step 9)
 // ====================================================================
+
+#[cfg(feature = "postgres")]
+mod pg_on;
+#[cfg(feature = "postgres")]
+pub use pg_on::{
+    bulk_insert_on, delete_on, insert_on, insert_returning_on, select_one_row_on, select_rows_on,
+    update_on,
+};
 
 mod row_to_json;
 #[cfg(feature = "postgres")]
@@ -370,49 +267,6 @@ pub use row_to_json::row_to_json_my;
 #[cfg(feature = "sqlite")]
 pub use row_to_json::row_to_json_sqlite;
 pub use row_to_json::{select_one_row_as_json, select_rows_as_json};
-
-/// Like [`select_rows`] but accepts any sqlx executor — `&PgPool`,
-/// `&mut PgConnection`, or a `Transaction`. Required for tenancy
-/// projects whose per-request connection comes from
-/// [`crate::extractors::Tenant`] rather than a single global pool.
-///
-/// # Errors
-/// As [`select_rows`].
-#[cfg(feature = "postgres")]
-pub async fn select_rows_on<'c, E>(
-    executor: E,
-    query: &SelectQuery,
-) -> Result<Vec<PgRow>, ExecError>
-where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-{
-    let stmt = Postgres.compile_select(query)?;
-    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-    for value in stmt.params {
-        q = bind_query(q, value);
-    }
-    Ok(q.fetch_all(executor).await?)
-}
-
-/// Like [`select_one_row`] but accepts any sqlx executor.
-///
-/// # Errors
-/// As [`select_one_row`].
-#[cfg(feature = "postgres")]
-pub async fn select_one_row_on<'c, E>(
-    executor: E,
-    query: &SelectQuery,
-) -> Result<Option<PgRow>, ExecError>
-where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-{
-    let stmt = Postgres.compile_select(query)?;
-    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-    for value in stmt.params {
-        q = bind_query(q, value);
-    }
-    Ok(q.fetch_optional(executor).await?)
-}
 
 /// Slice 9.0b — annotate each parent row with the COUNT of its
 /// children, returning `Vec<(Parent, i64)>` from a **single** SQL:
@@ -1722,137 +1576,17 @@ async fn fetch_scalar_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Resu
 }
 
 // ====================================================================
-// `&Pool` FromRow dispatch — Phase B (v0.23.0-batch6)
+// Tri-dialect marker trait family — extracted to traits.rs (#116 step 8)
 // ====================================================================
-//
-// `select_rows_pool` / `Fetcher::fetch` for `&Pool`. The trait bound on
-// `T` needs to flex: when rustango is built with the `mysql` feature,
-// it must also include `FromRow<MySqlRow>`; without it, the MySql
-// variant doesn't exist and the bound shouldn't either. The
-// [`MaybeMyFromRow`] marker trait below absorbs that conditionality —
-// it's auto-implemented for every type when `mysql` is off, and
-// requires `FromRow<MySqlRow>` when on. Models derived via
-// `#[derive(Model)]` get the right impl automatically: the proc macro
-// emits a call to the cfg-gated `__impl_my_from_row!` macro_rules so
-// the MySQL impl materializes when (and only when) it's needed.
 
-/// Marker trait used as a feature-gated `FromRow<MySqlRow>` bound on
-/// the `_pool` `FromRow`-using executor functions. Auto-implemented
-/// for every `T` when rustango is built without the `mysql` feature
-/// (so PG-only call sites compile unchanged); requires
-/// `FromRow<MySqlRow>` when `mysql` is on.
+mod traits;
 #[cfg(feature = "mysql")]
-pub trait MaybeMyFromRow: for<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> {}
-#[cfg(feature = "mysql")]
-impl<T> MaybeMyFromRow for T where T: for<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> {}
-#[cfg(not(feature = "mysql"))]
-pub trait MaybeMyFromRow {}
-#[cfg(not(feature = "mysql"))]
-impl<T> MaybeMyFromRow for T {}
-
-/// MySQL counterpart of [`LoadRelated`]. The proc-macro emits this
-/// alongside the existing `LoadRelated` impl whenever rustango is
-/// built with the `mysql` feature, so `select_related` joins can
-/// stitch parents onto FK fields when decoding from a `MySqlRow`.
-///
-/// FK-less models get a no-op impl; the `MaybeMyLoadRelated` marker
-/// trait wraps this in the same cfg-gated way as
-/// `MaybeMyFromRow` so executor bounds resolve in either feature
-/// config.
-#[cfg(feature = "mysql")]
-pub trait LoadRelatedMy {
-    /// Same contract as [`LoadRelated::__rustango_load_related`] —
-    /// returns `Ok(true)` when `field_name` matched a known FK and
-    /// the parent was decoded successfully, `Ok(false)` for unknown
-    /// field names (graceful skip).
-    ///
-    /// # Errors
-    /// `sqlx::Error` from `try_get` decoding the joined columns.
-    fn __rustango_load_related_my(
-        &mut self,
-        row: &sqlx::mysql::MySqlRow,
-        field_name: &str,
-        alias: &str,
-    ) -> Result<bool, sqlx::Error>;
-}
-
-/// Marker trait used as a feature-gated `LoadRelatedMy` bound on
-/// future `_pool` join-decoding executor functions. Same shape as
-/// [`MaybeMyFromRow`] — auto-implemented for every `T` when
-/// rustango is built without `mysql`; requires `LoadRelatedMy`
-/// when on.
-#[cfg(feature = "mysql")]
-pub trait MaybeMyLoadRelated: LoadRelatedMy {}
-#[cfg(feature = "mysql")]
-impl<T> MaybeMyLoadRelated for T where T: LoadRelatedMy {}
-#[cfg(not(feature = "mysql"))]
-pub trait MaybeMyLoadRelated {}
-#[cfg(not(feature = "mysql"))]
-impl<T> MaybeMyLoadRelated for T {}
-
-// ---- v0.35 — Postgres parallel of the MySQL/SQLite marker traits ----
-//
-// Lets the tri-dialect `_pool` executor functions bound `T` with
-// `MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow` so the
-// signature is satisfiable in any feature configuration. When
-// `postgres` is on the trait requires `FromRow<PgRow>`; when off
-// it's a marker trait blanket-impl'd for every `T`, so the bound
-// trivially holds and the `Pool::Postgres` arm (also gated) never
-// instantiates.
-
-#[cfg(feature = "postgres")]
-pub trait MaybePgFromRow: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> {}
-#[cfg(feature = "postgres")]
-impl<T> MaybePgFromRow for T where T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> {}
-#[cfg(not(feature = "postgres"))]
-pub trait MaybePgFromRow {}
-#[cfg(not(feature = "postgres"))]
-impl<T> MaybePgFromRow for T {}
-
-// ---- v0.27 Phase 3 — SQLite parallels of the MySQL marker traits ----
-//
-// Same shape as `MaybeMyFromRow` / `LoadRelatedMy` /
-// `MaybeMyLoadRelated`, gated on `sqlite` instead of `mysql`. The
-// `_pool` executor functions add these as additional bounds on `T`
-// so a `Pool::Sqlite` arm can decode `T` from a `SqliteRow`.
-
+pub use traits::LoadRelatedMy;
 #[cfg(feature = "sqlite")]
-pub trait MaybeSqliteFromRow: for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> {}
-#[cfg(feature = "sqlite")]
-impl<T> MaybeSqliteFromRow for T where T: for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> {}
-#[cfg(not(feature = "sqlite"))]
-#[allow(dead_code)]
-pub trait MaybeSqliteFromRow {}
-#[cfg(not(feature = "sqlite"))]
-impl<T> MaybeSqliteFromRow for T {}
-
-/// SQLite counterpart of [`LoadRelated`] / [`LoadRelatedMy`]. The
-/// proc-macro emits this alongside the Postgres + MySQL impls so
-/// `select_related` joins can stitch parents onto FK fields when
-/// decoding from a `SqliteRow`.
-#[cfg(feature = "sqlite")]
-pub trait LoadRelatedSqlite {
-    /// Same contract as [`LoadRelated::__rustango_load_related`].
-    ///
-    /// # Errors
-    /// `sqlx::Error` from `try_get` decoding the joined columns.
-    fn __rustango_load_related_sqlite(
-        &mut self,
-        row: &sqlx::sqlite::SqliteRow,
-        field_name: &str,
-        alias: &str,
-    ) -> Result<bool, sqlx::Error>;
-}
-
-#[cfg(feature = "sqlite")]
-pub trait MaybeSqliteLoadRelated: LoadRelatedSqlite {}
-#[cfg(feature = "sqlite")]
-impl<T> MaybeSqliteLoadRelated for T where T: LoadRelatedSqlite {}
-#[cfg(not(feature = "sqlite"))]
-#[allow(dead_code)]
-pub trait MaybeSqliteLoadRelated {}
-#[cfg(not(feature = "sqlite"))]
-impl<T> MaybeSqliteLoadRelated for T {}
+pub use traits::LoadRelatedSqlite;
+pub use traits::{
+    MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
+};
 
 /// Run a `SelectQuery` against either backend and decode each row
 /// into `T`. Equivalent to [`select_rows`] but takes [`Pool`] and
