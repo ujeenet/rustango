@@ -228,18 +228,41 @@ where
             // Pass to inner. After the response comes back, ensure
             // the CSRF cookie is set so the next safe-method GET
             // doesn't have to seed it.
+            //
+            // BUT: skip the mint if the response already carries a
+            // `Set-Cookie` for our cookie name. Form-rendering
+            // handlers (`ensure_token` / `stamp_into_context`) also
+            // mint when no cookie was present in the request — if
+            // we appended ours on top, the browser would see two
+            // Set-Cookies with the SAME name and DIFFERENT random
+            // values, keep the last (ours), and the form would
+            // POST a stale token from the handler's mint that no
+            // longer matches the cookie. Detection by name-prefix
+            // is cheap; we only inspect once per response.
             let mut response = inner.call(req).await?;
             if cookie_value.is_none() {
-                let token = mint_token();
-                let cookie_str = format!(
-                    "{}={token}; Path=/; SameSite=Lax{}",
-                    cfg.cookie_name,
-                    if cfg.secure { "; Secure" } else { "" }
-                );
-                if let Ok(hv) = HeaderValue::from_str(&cookie_str) {
-                    response
-                        .headers_mut()
-                        .append(axum::http::header::SET_COOKIE, hv);
+                let cookie_prefix = format!("{}=", cfg.cookie_name);
+                let already_set = response
+                    .headers()
+                    .get_all(axum::http::header::SET_COOKIE)
+                    .iter()
+                    .any(|v| {
+                        v.to_str()
+                            .map(|s| s.starts_with(&cookie_prefix))
+                            .unwrap_or(false)
+                    });
+                if !already_set {
+                    let token = mint_token();
+                    let cookie_str = format!(
+                        "{}={token}; Path=/; SameSite=Lax{}",
+                        cfg.cookie_name,
+                        if cfg.secure { "; Secure" } else { "" }
+                    );
+                    if let Ok(hv) = HeaderValue::from_str(&cookie_str) {
+                        response
+                            .headers_mut()
+                            .append(axum::http::header::SET_COOKIE, hv);
+                    }
                 }
             }
             Ok(response)
@@ -765,5 +788,84 @@ mod tests {
         let mut ctx = tera::Context::new();
         ctx.insert("n", &42_i64);
         assert_eq!(tera.render("_", &ctx).unwrap(), "42");
+    }
+
+    /// CMS issue #278 — the form-rendering helper (`stamp_into_context`)
+    /// and this middleware both mint a token when the request arrives
+    /// without a CSRF cookie. If both append `Set-Cookie`, the browser
+    /// keeps the later one (the middleware's) while the form was
+    /// rendered with the handler's token — every subsequent POST then
+    /// 403s as "CSRF token missing or mismatched". The middleware now
+    /// skips its own mint when the inner handler already set a
+    /// `Set-Cookie` for the configured cookie name. Regression guard.
+    #[tokio::test]
+    async fn middleware_skips_mint_when_response_already_has_cookie() {
+        use tower::{Service, ServiceExt};
+        let layer = with_config(CsrfConfig::default());
+        let inner = tower::service_fn(|_req: Request<Body>| async {
+            // Stand-in for `stamp_into_context`: mint + set our own.
+            let mut resp = Response::new(Body::empty());
+            resp.headers_mut().append(
+                axum::http::header::SET_COOKIE,
+                HeaderValue::from_static("rustango_csrf=handler-token; Path=/; SameSite=Lax"),
+            );
+            Ok::<_, Infallible>(resp)
+        });
+        let mut svc = tower::Layer::layer(&layer, inner);
+        let req = Request::builder()
+            .method(Method::GET)
+            .body(Body::empty())
+            .unwrap();
+        let resp = svc.ready().await.unwrap().call(req).await.unwrap();
+        let csrf_cookies: Vec<String> = resp
+            .headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .filter(|s| s.starts_with("rustango_csrf="))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            csrf_cookies.len(),
+            1,
+            "expected exactly one rustango_csrf Set-Cookie (handler's), got: {csrf_cookies:?}",
+        );
+        assert!(
+            csrf_cookies[0].starts_with("rustango_csrf=handler-token"),
+            "middleware overwrote handler's mint: {}",
+            csrf_cookies[0],
+        );
+    }
+
+    /// Symmetric to the previous test: when the inner handler does NOT
+    /// set the cookie (e.g. a non-form view), the middleware still has
+    /// to seed it so the next safe-method GET doesn't have to.
+    #[tokio::test]
+    async fn middleware_mints_cookie_when_handler_didnt() {
+        use tower::{Service, ServiceExt};
+        let layer = with_config(CsrfConfig::default());
+        let inner = tower::service_fn(|_req: Request<Body>| async {
+            // No Set-Cookie — the canonical case for an API/JSON view.
+            Ok::<_, Infallible>(Response::new(Body::empty()))
+        });
+        let mut svc = tower::Layer::layer(&layer, inner);
+        let req = Request::builder()
+            .method(Method::GET)
+            .body(Body::empty())
+            .unwrap();
+        let resp = svc.ready().await.unwrap().call(req).await.unwrap();
+        let csrf_cookies: Vec<String> = resp
+            .headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .filter(|s| s.starts_with("rustango_csrf="))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            csrf_cookies.len(),
+            1,
+            "middleware should seed exactly one cookie when none was set"
+        );
     }
 }
