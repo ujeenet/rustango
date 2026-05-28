@@ -20,8 +20,7 @@ use sqlx::Database;
 
 use crate::sql::sqlx;
 use crate::tenancy::{
-    session::SessionSecret, ChainResolver, DefaultTenantDb, Org, OrgResolver, TenantConn,
-    TenantPools,
+    session::SessionSecret, ChainResolver, DefaultTenantDb, Org, OrgResolver, TenantPools,
 };
 
 /// Per-server context that the [`Tenant`] extractor reads out of
@@ -40,59 +39,76 @@ pub struct TenantContext<DB: Database = DefaultTenantDb> {
     pub operator_secret: SessionSecret,
 }
 
-/// Extractor: resolves the request's tenant and acquires a connection
-/// scoped to it. Generic over the backend (`DB = sqlx::Postgres`
+/// Extractor: resolves the request's tenant and exposes the
+/// tenant-scoped pool. Generic over the backend (`DB = sqlx::Postgres`
 /// default — `fn handler(t: Tenant)` continues to mean
-/// `Tenant<sqlx::Postgres>`). Handlers borrow the connection through
-/// [`Tenant::conn`] for ORM calls.
+/// `Tenant<sqlx::Postgres>`). Handlers query through the tri-dialect
+/// ORM helpers (`fetch_pool` / `save_pool` / etc.) against
+/// [`Tenant::pool`].
 ///
 /// ```ignore
-/// pub async fn my_handler(mut t: Tenant) -> Result<Json<Vec<Post>>, StatusCode> {
-///     let posts = Post::objects().fetch_on(t.conn()).await?;
+/// pub async fn my_handler(t: Tenant) -> Result<Json<Vec<Post>>, StatusCode> {
+///     let posts = Post::objects().fetch_pool(t.pool()).await?;
 ///     Ok(Json(posts))
+/// }
+/// ```
+///
+/// # No held connection (v0.41.2)
+///
+/// Before v0.41.2 this extractor eagerly acquired a `TenantConn` and
+/// held it for the handler's entire lifetime — a deliberate design
+/// choice that turned out to deadlock under concurrent load. With
+/// `database_pool_max_connections = N`, **N concurrent handlers
+/// pinned every pool slot**; each handler's own inner `fetch_pool`
+/// call then blocked at acquire, none of the held conns could be
+/// released (because every holder was itself waiting), and the
+/// whole admin surface stalled until the 30 s acquire timeout
+/// exhausted every request. Symptom report:
+/// [ujeenet/rustango-cms#280](https://github.com/ujeenet/rustango-cms/issues/280).
+///
+/// The extractor now resolves only the `(org, pool)` pair. Each
+/// `fetch_pool` / `insert_pool` / `save_pool` call inside the
+/// handler acquires + releases a connection as a transient — no
+/// long-lived holder, no deadlock vector. Handlers that genuinely
+/// need a held connection (e.g. a hand-rolled multi-statement
+/// transaction) can ask for one explicitly:
+///
+/// ```ignore
+/// pub async fn streaming_handler(t: Tenant) -> Result<…, …> {
+///     let mut conn = t.pool().acquire().await?;
+///     // use &mut *conn with sqlx::query! / fetch_on / etc.
 /// }
 /// ```
 pub struct Tenant<DB: Database = DefaultTenantDb> {
     pub org: Org,
-    conn: TenantConn<DB>,
     /// v0.38 — backend-erasing pool reference for the tenant's storage.
-    /// On PG schema-mode this wraps the registry pool (queries through
-    /// it would hit the `public` schema unless `SET search_path` is
-    /// applied — for that path prefer [`Tenant::conn`]). On non-PG
-    /// (and PG database-mode), this is the tenant's dedicated pool;
-    /// handlers can run `Model::objects().fetch_pool(&t.pool)` for
-    /// tri-dialect ORM queries.
+    /// On PG schema-mode this wraps the registry pool (queries
+    /// against it would hit the `public` schema unless `SET
+    /// search_path` is applied first — schema-mode handlers should
+    /// acquire + run `SET search_path` themselves before the first
+    /// query, or use a schema-mode-aware ORM helper).
+    /// On non-PG (and PG database-mode) this is the tenant's
+    /// dedicated pool; handlers can run
+    /// `Model::objects().fetch_pool(&t.pool)` for tri-dialect ORM
+    /// queries with no extra ceremony.
     pool: crate::sql::Pool,
+    // Backend phantom — the `DB` type parameter is preserved purely
+    // so the existing `Tenant<DB>` shape compiles. The conn field
+    // used to live here; v0.41.2 dropped it to close the deadlock
+    // (see struct docs).
+    _db: std::marker::PhantomData<DB>,
 }
 
 impl<DB: Database> Tenant<DB> {
-    /// Borrow the tenant-scoped pool connection. Use this for sqlx
-    /// query macros (`sqlx::query!(...).fetch_all(t.pool_conn())`)
-    /// when working in a backend-agnostic context. PG-specific code
-    /// can use [`Tenant::conn`] instead which derefs all the way to
-    /// `&mut PgConnection` so the framework's `_on` helpers
-    /// (`fetch_on`, `select_rows_on`) accept it directly.
-    pub fn pool_conn(&mut self) -> &mut sqlx::pool::PoolConnection<DB> {
-        &mut self.conn
-    }
-
-    /// Yield the underlying connection, releasing it back to the
-    /// pool when dropped. Use for handlers that finished their DB
-    /// work but still have long-running computation left.
-    #[must_use]
-    pub fn into_conn(self) -> TenantConn<DB> {
-        self.conn
-    }
-
     /// Borrow the tenant-scoped [`crate::sql::Pool`] enum. Use this
     /// when routing through the tri-dialect ORM (`fetch_pool` /
     /// `insert_pool` / `save_pool`) — every backend works through the
-    /// same code path.
+    /// same code path. Each call acquires + releases a connection
+    /// internally; no holder is pinned to the handler's lifetime.
     ///
     /// **PG schema-mode note**: the pool wraps the shared registry
     /// pool; queries against it would hit `public` instead of the
-    /// tenant schema. For schema-mode-on-PG paths use
-    /// [`Tenant::conn`] (which has `SET search_path` applied).
+    /// tenant schema unless `SET search_path` is applied first.
     /// Database-mode (any backend) is unaffected.
     #[must_use]
     pub fn pool(&self) -> &crate::sql::Pool {
@@ -100,38 +116,21 @@ impl<DB: Database> Tenant<DB> {
     }
 
     /// **Test-only** — construct a `Tenant` directly from an `Org`
-    /// row + an already-acquired [`TenantConn`]. Bypasses the
-    /// extractor flow that production handlers use.
+    /// row + a pool. Bypasses the extractor flow that production
+    /// handlers use. v0.41.2 — the conn parameter is gone; tests
+    /// that genuinely need a held conn for their fixture should
+    /// acquire from `pool` directly after construction.
     ///
     /// Gated behind the `test_utils` feature so production builds
-    /// can't reach for it accidentally. The expected pattern in
-    /// downstream crates' live tests:
-    ///
-    /// ```ignore
-    /// let pools = TenantPools::new(registry_pool);
-    /// let conn  = pools.acquire(&org).await?;
-    /// let mut t = Tenant::for_test(org, conn);
-    /// my_function_under_test(&mut t).await?;
-    /// ```
-    ///
-    /// Going through `pools.acquire(&org)` ensures schema-mode
-    /// tenants get `SET search_path` applied on the connection
-    /// before any query — same ceremony the extractor runs.
+    /// can't reach for it accidentally.
     #[cfg(any(test, feature = "test_utils"))]
     #[must_use]
-    pub fn for_test(org: Org, conn: TenantConn<DB>, pool: crate::sql::Pool) -> Self {
-        Self { org, conn, pool }
-    }
-}
-
-#[cfg(feature = "postgres")]
-impl Tenant<sqlx::Postgres> {
-    /// Borrow the tenant-scoped connection as `&mut PgConnection` —
-    /// the executor type sqlx and rustango's `fetch_on` / `get_on`
-    /// expect. PG-only; for generic backends, use
-    /// [`Tenant::pool_conn`] and the sqlx query macros.
-    pub fn conn(&mut self) -> &mut sqlx::PgConnection {
-        &mut self.conn
+    pub fn for_test(org: Org, pool: crate::sql::Pool) -> Self {
+        Self {
+            org,
+            pool,
+            _db: std::marker::PhantomData,
+        }
     }
 }
 
@@ -162,10 +161,9 @@ impl IntoResponse for TenantRejection {
     }
 }
 
-// v0.38 — `Tenant<sqlx::Postgres>` goes through the schema-mode-aware
-// `TenantPools<Postgres>::acquire` so PG schema-mode tenants get
-// `SET search_path` applied before the connection is handed to the
-// handler. Database-mode PG tenants go through the same path.
+// v0.41.2 — extractor resolves `(org, pool)` only. No eager
+// `database_acquire` / `acquire` (would deadlock under concurrent
+// load — see struct docs + ujeenet/rustango-cms#280).
 #[cfg(feature = "postgres")]
 impl<S> FromRequestParts<S> for Tenant<sqlx::Postgres>
 where
@@ -185,12 +183,7 @@ where
             .await
             .map_err(|e| TenantRejection::Internal(e.to_string()))?
             .ok_or(TenantRejection::NotFound)?;
-        let conn = ctx
-            .pools
-            .acquire(&org)
-            .await
-            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        // v0.38 — also resolve the backend-erasing Pool enum so
+        // v0.38 — resolve the backend-erasing Pool enum so
         // `t.pool()` lets handlers use tri-dialect ORM helpers
         // (fetch_pool / save_pool / etc.). Schema-mode picks the
         // shared registry pool (which requires SET search_path);
@@ -200,15 +193,16 @@ where
             .scoped_pool_dyn(&org)
             .await
             .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        Ok(Tenant { org, conn, pool })
+        Ok(Tenant {
+            org,
+            pool,
+            _db: std::marker::PhantomData,
+        })
     }
 }
 
-// v0.38 — `Tenant<sqlx::Sqlite>` routes through the generic
-// `TenantPools::database_acquire` (database-mode only — schema-mode
-// is PG-only by language). The user assembles routing the same way
-// as the PG case; `TenantContext<sqlx::Sqlite>` carries
-// `TenantPools<sqlx::Sqlite>`. Same shape, no `SET search_path`.
+// v0.41.2 — extractor is pool-only on Sqlite for the same reason as
+// the PG impl (see struct docs).
 #[cfg(feature = "sqlite")]
 impl<S> FromRequestParts<S> for Tenant<sqlx::Sqlite>
 where
@@ -233,16 +227,15 @@ where
             .scoped_pool_dyn(&org)
             .await
             .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        let conn = ctx
-            .pools
-            .database_acquire(&org)
-            .await
-            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        Ok(Tenant { org, conn, pool })
+        Ok(Tenant {
+            org,
+            pool,
+            _db: std::marker::PhantomData,
+        })
     }
 }
 
-// v0.38 — same for `Tenant<sqlx::MySql>`. Database-mode only.
+// v0.41.2 — same for MySql.
 #[cfg(feature = "mysql")]
 impl<S> FromRequestParts<S> for Tenant<sqlx::MySql>
 where
@@ -267,11 +260,10 @@ where
             .scoped_pool_dyn(&org)
             .await
             .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        let conn = ctx
-            .pools
-            .database_acquire(&org)
-            .await
-            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        Ok(Tenant { org, conn, pool })
+        Ok(Tenant {
+            org,
+            pool,
+            _db: std::marker::PhantomData,
+        })
     }
 }
