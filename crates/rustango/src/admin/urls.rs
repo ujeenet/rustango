@@ -723,6 +723,21 @@ pub(crate) struct AppState {
 
 impl AppState {
     pub(crate) fn is_visible(&self, table: &str) -> bool {
+        // ujeenet/rustango-cms#291 — `rustango_admin_users` is the bare
+        // admin's standalone credential store. Its table is created
+        // only when a host opts into `Builder::with_session_auth`;
+        // tenancy hosts (anything mounting `tenancy::auth::User`'s
+        // `rustango_users` instead) never call that opt-in and so
+        // the table never exists. But the `#[derive(Model)]` on
+        // `AdminUser` unconditionally submits to the inventory, so
+        // the model index lists `rustango_admin_users` as if it
+        // were a real surface — clicking it on a tenancy host either
+        // 500'd (pre-#260) or showed the "table missing" placeholder
+        // (post-#260). Hide it entirely when session_auth isn't
+        // configured so tenancy hosts don't see a dead surface.
+        if table == "rustango_admin_users" && self.config.session_secret.is_none() {
+            return false;
+        }
         let allowlist_ok = self
             .config
             .allowed_tables
@@ -936,6 +951,38 @@ mod scope_filter_tests {
             .expect("connect_lazy never fails");
         let builder = Builder::new(pool).tenant_mode();
         assert!(builder.config.tenant_mode);
+    }
+
+    // ujeenet/rustango-cms#291 — `rustango_admin_users` is the bare
+    // admin's standalone credential store. The Model derive
+    // unconditionally registers it in the inventory, but the table
+    // is only created when a host opts into `with_session_auth`.
+    // Tenancy hosts (which mount `tenancy::auth::User`'s
+    // `rustango_users` instead) never call that opt-in, so they
+    // should never see `rustango_admin_users` in the model index
+    // either — clicking it would land on a dead surface.
+    #[tokio::test]
+    async fn admin_users_hidden_when_session_auth_not_configured() {
+        let state = state_with(false);
+        // session_secret stays None on the default Config — the
+        // host hasn't opted into the bare admin's session-auth
+        // flow. AdminUser's table must be hidden from the index.
+        assert!(state.config.session_secret.is_none());
+        assert!(!state.is_visible("rustango_admin_users"));
+        // Sanity: other tables still show through.
+        assert!(state.is_visible("rustango_users"));
+        assert!(state.is_visible("post"));
+    }
+
+    #[tokio::test]
+    async fn admin_users_visible_when_session_auth_configured() {
+        let mut cfg = Config::default();
+        cfg.session_secret = Some(crate::session::SessionSecret::from_bytes(vec![0u8; 32]));
+        let state = AppState {
+            pool: Pool::Postgres(lazy_pg_pool()),
+            config: Arc::new(cfg),
+        };
+        assert!(state.is_visible("rustango_admin_users"));
     }
 
     // v0.27.9 (#59) — admin_prefix template variable regression
