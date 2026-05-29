@@ -67,6 +67,20 @@ RUSTANGO_BIND=0.0.0.0:8080
 # Generate a real secret with: openssl rand -base64 32
 RUSTANGO_APEX_DOMAIN=localhost
 RUSTANGO_SESSION_SECRET=change-me-base64-encoded-32-bytes-or-more
+
+# ---------------- Logging (ujeenet/rustango-cms#305) ----------------
+# `#[rustango::main]` auto-installs a tracing_subscriber::fmt with
+# env-filter; the default is `info,sqlx=warn`. Uncomment to turn on
+# more verbose output without code changes. Standard `RUST_LOG`
+# syntax — per-target filtering is the easiest knob.
+#
+#   `debug` — everything DEBUG+ across every crate (very noisy)
+#   `info,my_app=debug` — INFO globally, DEBUG for one module
+#   `info,sqlx=warn,hyper=warn` — quiet down noisy upstreams
+#
+# Production deployments override this in the orchestrator (k8s env,
+# systemd unit, etc.) rather than editing this file.
+# RUST_LOG=info,sqlx=warn,hyper=warn
 "
     )
 }
@@ -252,6 +266,12 @@ const MAIN_RS_API: &str = "//! Project entrypoint — `Cli::run()` is the unifie
 //! that handles `cargo run` (runserver) AND `cargo run -- migrate` /
 //! `makemigrations` / `startapp` / etc. from one binary. No
 //! `src/bin/manage.rs` needed.
+//!
+//! Logging is auto-configured by `#[rustango::main]` —
+//! `tracing_subscriber::fmt` with env-filter, default
+//! `info,sqlx=warn`. Override with `RUST_LOG` (see `.env.example`)
+//! or replace the macro with a hand-rolled subscriber in front of
+//! `Cli::new()` for JSON / file-rotation / OTel export.
 
 mod models;
 mod urls;
@@ -273,6 +293,12 @@ const MAIN_RS_FULLSTACK: &str = "//! Project entrypoint — `Cli::run()` is the 
 //! `makemigrations` / `startapp` / etc. from one binary. No
 //! `src/bin/manage.rs` needed. Auto-admin is mounted via
 //! `urls::api()` which nests `admin_router(pool)` itself.
+//!
+//! Logging is auto-configured by `#[rustango::main]` —
+//! `tracing_subscriber::fmt` with env-filter, default
+//! `info,sqlx=warn`. Override with `RUST_LOG` (see `.env.example`)
+//! or replace the macro with a hand-rolled subscriber in front of
+//! `Cli::new()` for JSON / file-rotation / OTel export.
 
 mod models;
 mod urls;
@@ -292,6 +318,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 const MAIN_RS_TENANT: &str = r##"//! Tenant project entrypoint — HTTP server serving both the operator
 //! console and per-tenant apps via subdomain routing.
+//!
+//! Logging is auto-configured by `#[rustango::main]` —
+//! `tracing_subscriber::fmt` with env-filter, default
+//! `info,sqlx=warn`. Override with `RUST_LOG` (see `.env.example`)
+//! or replace the macro with a hand-rolled subscriber in front of
+//! `Cli::new()` for JSON / file-rotation / OTel export.
 
 mod models;
 mod urls;
