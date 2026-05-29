@@ -27,7 +27,13 @@ use sha2::{Digest, Sha256};
 
 /// Hex-encode a byte slice using lowercase digits. ~2× faster than
 /// `format!("{b:02x}")` per byte; matches the `hex` crate's output.
+///
+/// Used by SigV4 + JWT auth (feature-gated). The minimum-feature
+/// build of the framework doesn't compile either, so the dead-code
+/// lint fires under that combo — silence it explicitly rather than
+/// add another feature gate.
 #[must_use]
+#[allow(dead_code)]
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -39,8 +45,10 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
 }
 
 /// `SHA-256(bytes)` rendered as a lowercase hex string. Used by the
-/// SigV4 canonical-request hash and HMAC auth body hash.
+/// SigV4 canonical-request hash and HMAC auth body hash. See
+/// [`hex_encode`] for the dead-code rationale.
 #[must_use]
+#[allow(dead_code)]
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
@@ -49,8 +57,10 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 
 /// `HMAC-SHA256(key, data)` returning the raw 32-byte tag. The
 /// `new_from_slice` constructor cannot fail for SHA-256 (it accepts
-/// any key length) — the `expect` is for documentation only.
+/// any key length) — the `expect` is for documentation only. See
+/// [`hex_encode`] for the dead-code rationale.
 #[must_use]
+#[allow(dead_code)]
 pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC key");
     mac.update(data);

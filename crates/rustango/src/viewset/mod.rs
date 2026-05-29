@@ -196,8 +196,11 @@ pub struct ViewSet {
     pagination: PaginationStyle,
     /// When set (PG only), list / retrieve responses run each row
     /// through this callback instead of the default field-level
-    /// projection. Wired via [`Self::serializer`].
+    /// projection. Wired via [`Self::serializer`]. Reserved for a
+    /// future PG-row-fetch path; the field is set but not yet read
+    /// on the default code path.
     #[cfg(feature = "postgres")]
+    #[allow(dead_code)]
     row_render: Option<RowRender>,
 }
 

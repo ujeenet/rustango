@@ -20,11 +20,20 @@ use super::ExecError;
 use crate::core::{SelectQuery, SqlValue};
 use crate::sql::Pool;
 
+// Per-backend bind helpers. Each `bind_match*` variant is consumed
+// by a different code path that's also feature-gated; under the
+// minimum feature set the corresponding import surfaces as
+// "unused" even though the symbol is needed when the other half
+// of the gate flips. Allow the noise rather than splitting every
+// downstream call-site to import locally.
 #[cfg(feature = "postgres")]
+#[allow(unused_imports)]
 use super::{bind_match, bind_query};
 #[cfg(feature = "mysql")]
+#[allow(unused_imports)]
 use super::{bind_match_mysql, bind_query_my};
 #[cfg(feature = "sqlite")]
+#[allow(unused_imports)]
 use super::{bind_match_sqlite, bind_query_sqlite};
 
 /// Decode one per-dialect raw `SqlValue` from the i-th column of a row.
