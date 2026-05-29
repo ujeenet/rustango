@@ -78,6 +78,7 @@ fn render_gfk_cell(
     row: &serde_json::Value,
     gr: &crate::core::GenericRelation,
     ct_map: &HashMap<i64, crate::contenttypes::ContentType>,
+    admin_prefix: &str,
 ) -> String {
     let ct_id = row
         .get(gr.ct_column)
@@ -97,8 +98,16 @@ fn render_gfk_cell(
     let label = format!("{}.{}", ct.app_label, ct.model_name);
     let table_esc = render::escape(&ct.table);
     let label_esc = render::escape(&label);
+    // ujeenet/rustango-cms#292 — the generic-FK link MUST include the
+    // configured `admin_prefix`; the hardcoded root-relative form
+    // 404s on any host that mounts the bare admin somewhere other
+    // than the root (the recent-actions widget directly below this
+    // helper, `post_save_redirect`, `build_query_url`, and the FK
+    // detail href all thread the prefix — this helper was missed in
+    // framework #5's prefix-threading pass).
     format!(
-        r#"<a href="/{table}/{pk}">{label} #{pk}</a>"#,
+        r#"<a href="{prefix}/{table}/{pk}">{label} #{pk}</a>"#,
+        prefix = admin_prefix,
         table = table_esc,
         pk = object_pk,
         label = label_esc,
@@ -617,7 +626,9 @@ pub(crate) async fn table_view(
                     let inner = match item {
                         DisplayItem::Field(f) => render_cell_json(row, f, &fk_map),
                         DisplayItem::Computed(m) => (m.render)(row),
-                        DisplayItem::GenericFk(gr) => render_gfk_cell(row, gr, &gfk_ct_map),
+                        DisplayItem::GenericFk(gr) => {
+                            render_gfk_cell(row, gr, &gfk_ct_map, &state.config.admin_prefix)
+                        }
                         DisplayItem::JsonPath(f, key) => render_json_path_cell(row, f, key),
                     };
                     match (
@@ -2578,5 +2589,64 @@ mod tests {
         // base path everywhere.
         let url = post_save_redirect("/manage", "post", "42", &form_with("_continue"));
         assert_eq!(url, "/manage/post/42");
+    }
+
+    // ujeenet/rustango-cms#292 regression guard: the generic-FK cell
+    // helper renders an `<a href>` that MUST include the configured
+    // admin_prefix. Pre-fix it hardcoded `/{table}/{pk}` and 404'd on
+    // any host that mounted the bare admin somewhere other than the
+    // root (e.g. tang-cms at `/admin`).
+    #[test]
+    fn render_gfk_cell_includes_admin_prefix() {
+        use crate::contenttypes::ContentType;
+        let row = serde_json::json!({"target_ct_id": 7, "target_id": 13});
+        let mut ct_map: HashMap<i64, ContentType> = HashMap::new();
+        ct_map.insert(
+            7,
+            ContentType {
+                id: crate::sql::Auto::Set(7),
+                app_label: "cms".into(),
+                model_name: "page".into(),
+                table: "cms_page".into(),
+            },
+        );
+        let gr = crate::core::GenericRelation {
+            name: "target",
+            ct_column: "target_ct_id",
+            pk_column: "target_id",
+        };
+        let html = render_gfk_cell(&row, &gr, &ct_map, "/admin");
+        assert!(
+            html.contains(r#"href="/admin/cms_page/13""#),
+            "missing /admin prefix in: {html}"
+        );
+    }
+
+    #[test]
+    fn render_gfk_cell_default_root_prefix() {
+        use crate::contenttypes::ContentType;
+        let row = serde_json::json!({"target_ct_id": 7, "target_id": 13});
+        let mut ct_map: HashMap<i64, ContentType> = HashMap::new();
+        ct_map.insert(
+            7,
+            ContentType {
+                id: crate::sql::Auto::Set(7),
+                app_label: "cms".into(),
+                model_name: "page".into(),
+                table: "cms_page".into(),
+            },
+        );
+        let gr = crate::core::GenericRelation {
+            name: "target",
+            ct_column: "target_ct_id",
+            pk_column: "target_id",
+        };
+        // Default prefix is `/__admin` — confirm that's what lands
+        // when the host doesn't override.
+        let html = render_gfk_cell(&row, &gr, &ct_map, "/__admin");
+        assert!(
+            html.contains(r#"href="/__admin/cms_page/13""#),
+            "got: {html}"
+        );
     }
 }
