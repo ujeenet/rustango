@@ -2,6 +2,93 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [0.42.0] — Django-parity gap-closure batch
+
+16 Tier-2 issues closed in implementation across 16 PRs (#519–#548), plus 9 closed as already-supported with code pointers. Every shipped item picks up the same inventory-collected `register_*!` macro pattern (const-fn-pointer + `inventory::submit!`) so extensions live next to the model that needs them.
+
+### Added
+
+- **Admin extension registries** (5 new):
+  - `register_admin_view!` (#363/#362) — Django `ModelAdmin.get_urls()`. Mount arbitrary per-model HTTP routes at `/<admin>/<table>/<suffix>`. Reserved-suffix guard rejects collisions with built-in routes.
+  - `register_admin_queryset!` (#360) — Django `get_queryset(request)`. Per-request filter contributions that AND with URL params + search + facets + date-hierarchy.
+  - `register_admin_object_permission!` (#361/#364) — Django `has_{add,change,delete,view}_permission(request, obj)`. Per-row enforcement on every admin write path. Pre-update SELECT so hooks see the `obj=` state.
+  - `register_admin_computed!` with `link =` (#349) — Django callable display_link. Per-row click target via callable returning `Option<String>`.
+  - `admin(formfield_overrides = "field:widget, ...")` (#359/#370) — Django `formfield_overrides`. Built-in widget names: `password` / `hidden` / `textarea` / `color` / `range` / `email` / `url` / `tel` / `search`.
+- **Template extension registries** (3 new):
+  - `register_template_filter!` / `register_template_function!` (#383) — Django `@register.filter` / `@register.simple_tag`. Picked up by `template_extensions::apply_to_tera(&mut tera)`.
+  - `register_template_context_processor!` (#384) — Django `TEMPLATES.OPTIONS.context_processors`. Merged into every Tera context via `template_context_processors::apply_to_context(&mut ctx, parts)`. Handler-supplied keys win on collision.
+  - Template debug overlay (#386) — `template_views::render` swaps a styled HTML error page in for the plain-text 500 fallback when `RUSTANGO_ENV` is dev/staging (or `RUSTANGO_TEMPLATE_DEBUG=1`).
+- **`Translator::{gettext, gettext_fmt, pgettext, pgettext_fmt, ngettext, ngettext_fmt}`** (#422) — gettext-shape aliases. `pgettext` uses gettext's `<context>\u{4}<message>` catalog convention with bare-key fallback. `ngettext` implements English plural rule (CLDR-other-languages deferred to #426) and auto-binds `{count}`.
+- **`ListView::context_object_name(name)` / `DetailView::context_object_name(name)` / `DetailView::lookup_field(column)`** (#379) — Django MultipleObjectMixin / SingleObjectMixin hooks. Renamed binding adds alongside the legacy `object` / `object_list`; `lookup_field` probes by a non-PK column (slug, uuid, etc.).
+- **`ModelForm::prepare_save()` + `PreparedSave`** (#375) — Django `form.save(commit=False)`. Validate now, mutate the prepared write set (`.set` / `.unset` / `.has` / `.is_insert`), commit when ready. Lets handlers add session-derived fields between validate and INSERT.
+- **`ViewSet` JSON-array POST body** (#435) — DRF `ListSerializer(many=True)`. Atomic-validate before any insert lands + sequential INSERT-RETURNING. Single-object body keeps existing shape.
+- **`serializer::hyperlink_url` + `hyperlinked_to_value`** (#434) — DRF HyperlinkedModelSerializer. Free functions wrap a standard serializer's `to_value()` with a `url` field + `<fk>_url` siblings.
+- **`#[derive(Model)]` accepts `rust_decimal::Decimal`, `chrono::NaiveTime`, `Vec<u8>`** (#524) — wired to `FieldType::Decimal` / `Time` / `Binary` (which already had bind + DDL + decode support). Closes the macro-side gap that forced workarounds like `price_cents: i64`.
+- **`manage makemigrations --merge`** (#346) — Django `makemigrations --merge`. Detects two-or-more leaves on the same parent and writes an empty-forward `NNNN_merge.json`. Linear chains return `Ok(None)` (no-op); legitimately divergent histories (different parents) raise a clear error.
+- **Showcase E2E test scaffold** (PRs #521–#527) — multi-app showcase in `examples/showcase/` exercising every framework surface (blog / shop / accounts / i18n_demo) with a Playwright TypeScript suite, mounted via the framework's own `manage::Cli::new().api(...).run()` pattern. CI matrix runs the same 32-test suite on PG / MySQL / SQLite.
+- **`AdminError::Forbidden { table, action }`** — new variant rendering 403 with a small JSON body identifying the denied action.
+
+### Closed as already-supported
+
+- **#362 Custom URLs (`get_urls`)** — same capability as #363; closed pointing at PR #537.
+- **#323 Proxy models** — extension-trait pattern documented at `inheritance.rs:98-127`.
+- **#368 Custom dashboard** — template override + `register_admin_view!` + `register_admin_computed!` + `register_admin_inline!`.
+- **#369 ModelForm** — `ModelFormFor<T>` + `.fields/.exclude/.prepare_save/.from_json` covers Django shape.
+- **#374 Model formsets** — `register_admin_inline!` covers `TabularInline` / `StackedInline`.
+- **#378 Date-based views** — compose `ListView` + `.dates()` / `.datetimes()`.
+- **#396 shell (REPL)** — wontfix-by-design; documented script-binary pattern.
+- **#402 TIME_ZONE / USE_TZ** — `i18n::timezone::with_offset` + `localtime` filter.
+- **#404 LOGGING dictConfig** — `Settings.logging` covers every capability under tracing shape.
+- **#427 `{% trans %}`** — `tera_tags::register` + #422 gettext aliases.
+- **#433 selenium / playwright** — standard npm package; showcase E2E demonstrates pattern.
+- **#385 `{% cache %}`** — `cache_fragment::cached_render` (handler-side); Tera-parser limitation prevents block-tag form.
+
+### Section summaries (from django-parity-audit-2026-05-21.md)
+
+- Section 6 (Admin / ModelAdmin parity): **26 SHIPPED / 2 PARTIAL / 8 MISSING / 2 N/A**
+- Section 8 (Generic CBVs): **12 / 0 / 1 / 1** (only #378 niche remains)
+- Section 10 (Templates): **11 / 0 / 0 / 0** (fully shipped)
+
+## [0.41.0] — Tier 1 ORM gap-closure batch
+
+Ten ORM tickets shipped across 14 PRs (#274–#286), plus the PG-typed legacy executor surface is gone from the public API. Closes [epic #273](https://github.com/ujeenet/rustango/issues/273).
+
+### Added
+
+- **`Q!` macro** (#269) — compile-time-safe Django-shape filter syntax. Typo'd field names fail to build.
+- **`Q()` runtime builder** (#263) — `Qb::eq("active", true) & (Qb::gt("age", 18i64) | !Qb::eq("banned", true))` for admin filter chips + dynamic API params.
+- **`distinct_on(&[...])`** (#264) — PG `SELECT DISTINCT ON`; portable window-function fallback on MySQL / SQLite. "Latest per group" patterns.
+- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** (#267) — Django's `bulk_create(update_conflicts=True)`. Tri-dialect: PG `ON CONFLICT (cols) DO UPDATE SET …`, MySQL `ON DUPLICATE KEY UPDATE`, SQLite `ON CONFLICT (cols) DO UPDATE SET …`.
+- **`#[rustango(unique_when(columns = "...", condition = "..."))]`** (#265) — partial unique constraints. PG/SQLite native; MySQL falls back to plain UNIQUE with migration-time warning.
+- **`AggregateBuilder::alias()`** (#268) — Django 3.2 non-projected annotations. Filter/order by a derived aggregate without paying column-decode cost.
+- **`explain_pool()`** (#272) — tri-dialect EXPLAIN. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)`, MySQL `EXPLAIN ANALYZE` / `FORMAT=TREE` / `FORMAT=JSON`, SQLite `EXPLAIN QUERY PLAN`.
+- **DB function library batch 1** (#266) — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Per-dialect emission with clear `OpNotSupportedInDialect` errors where SQLite genuinely lacks the function.
+- **`#[rustango(manager(ext = "PostManagerExt"))]`** (#271) — Django-shape custom-manager extension trait emitted next to the model.
+
+### Changed (breaking)
+
+PG-typed legacy executor deletion (#270, 4 waves) — every reachable PG-typed surface gone from the public API:
+
+- `use rustango::sql::{Fetcher, Counter, Updater, Deleter};` → all four trait imports unresolved. Methods are now inherent on `QuerySet` / `UpdateBuilder`: `.fetch_on(&pool)`, `.count_on(&pool)`, `.delete_on(&pool)`, `.update().set(...).execute_on(&pool)`.
+- `use rustango::sql::{insert, update, delete, select_rows, transaction, count_rows, raw_execute, bulk_update, ...};` → bare `&PgPool` wrappers unresolved. Use the tri-dialect `_pool` family (`insert_pool`, `update_pool`, `transaction_pool`, …).
+- `qs.fetch(&pool)` → `qs.fetch_on(&pool)` (no trait import needed); same for `.count` / `.delete` / `.execute`.
+
+Net: 9 features added, ~340 LOC removed from the public surface, every shipped feature works on all three backends via the canonical `cargo build --no-default-features --features sqlite,tenancy` litmus.
+
+## [0.40.0] — admin auth + GFK ergonomics + field help_text
+
+Three closing slices on the admin surface, plus the polymorphic-relations finishing pass.
+
+### Added
+
+- **Admin session auth without tenancy** (#253) — bare `admin` now ships a styled `/login` form, signed-cookie sessions, sidebar Logout, password-change UI at `/account/password`, `manage create-admin` CLI verb, and `is_superuser` gating. Opt in via `admin::Builder::with_session_auth`. Shared signing primitive lives at `crate::session::SessionSecret` — same key feeds tenancy operator + tenant + bare-admin cookies safely.
+- **GenericForeignKey ergonomics + admin inlines** (#246) — `#[rustango(generic_fk(name, ct_column, pk_column))]` now emits typed `comment.content_object_pool(&pool)` accessor + `comment.set_content_object_for::<Post>(&pool, pk)` setter. List view collapses `(ct_id, object_pk)` into one clickable target link. New `register_admin_inline_generic!` renders polymorphic children as inline panels on the parent's admin detail + edit pages (read-only + FormSet-backed editor). ContentType `<select>` picker replaces raw integer inputs on the standalone create/edit form.
+- **Django-shape `help_text`** — `#[rustango(help_text = "Markdown is supported.")]` on any field renders a muted caption below the input on the admin form. The string lives on `FieldSchema::help_text` so future surfaces (DRF serializer schemas, OpenAPI descriptions) can read the same source.
+- **`admin::Builder::with_session_auth(secret)`** auto-bootstraps an `rustango_admin_users` table (idempotent via `CREATE TABLE IF NOT EXISTS`) and defaults `change_password_url = "/account/password"` so the sidebar's Change-password link routes correctly with zero operator wiring.
+- **Admin UX consolidation** — unified `.btn` / `.btn-primary` / `.btn-secondary` / `.btn-danger` / `.btn-link` / `.btn-row-action` class system shared with the operator console.
+- **Reusable foundations** — `crate::session` (signed-cookie HMAC) and `crate::manage_interactive` (TTY-gated prompts) promoted to the crate root. Tenancy continues to re-export from these so existing callers are unaffected.
+- **Runnable demo**: `examples/gfk_demo` exercises every GFK surface end-to-end on SQLite. `cargo run -p rustango --example gfk_demo --features sqlite,admin,runserver`, then visit `http://localhost:8080/` (login `admin / admin`).
+
 ## [0.39.0] — dialect-agnostic transactions + tri-dialect migrations
 
 Closes the last PG-specific gaps in the executor surface and the file-based migration renderer. Multi-row TX blocks, `SeedFn` hooks, and `SchemaChange` DDL all work on any backend; sqlite/mysql `runserver_tenancy` now honors the `Cli::seed` hook on boot.
