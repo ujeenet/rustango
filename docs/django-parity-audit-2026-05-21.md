@@ -275,7 +275,7 @@ Summary: **19 SHIPPED / 7 PARTIAL / 10 MISSING / 2 N/A**. Concentration of MISSI
 | Model formsets / inline formsets | [modelformsets](https://docs.djangoproject.com/en/6.0/topics/forms/modelforms/#model-formsets) | PARTIAL | Admin inlines use formset POST shape (#374) | Standalone `inline_formset_factory(parent, child)` MISSING. |
 | `DynamicForm` (runtime schema) | n/a (Django) | SHIPPED | `forms::DynamicForm` — Django doesn't ship this; rustango ahead | |
 | File upload | [File uploads](https://docs.djangoproject.com/en/6.0/topics/http/file-uploads/) | SHIPPED | `uploads::*` + multer | |
-| `save(commit=False)` + `save_m2m()` | [ModelForm.save](https://docs.djangoproject.com/en/6.0/topics/forms/modelforms/#the-save-method) | MISSING | n/a (#375) | `ModelForm::save(pool)` is one-shot. |
+| `save(commit=False)` + `save_m2m()` | [ModelForm.save](https://docs.djangoproject.com/en/6.0/topics/forms/modelforms/#the-save-method) | PARTIAL | `ModelForm::prepare_save() -> PreparedSave` + `PreparedSave::{set, unset, has, is_insert, commit_pool}` (closed #375). The `commit=False` half is fully covered — caller mutates the prepared write set between validation and INSERT/UPDATE. `save_m2m()` deferred until M2M form-field surface lands (`ModelForm` doesn't yet parse M2M input). | |
 | CSRF token | [CSRF](https://docs.djangoproject.com/en/6.0/ref/csrf/) | SHIPPED | `forms::csrf::CsrfLayer` + `{{ csrf_token \| csrf_input \| safe }}` Tera | |
 | `UniqueTogetherValidator` | [DRF form-level uniqueness](https://docs.djangoproject.com/en/6.0/ref/contrib/postgres/constraints/) | SHIPPED | `serializer::check_unique_together_pool` — see the DRF section row for #437 (v0.42). #376 is a duplicate; closing alongside #437. | |
 
