@@ -299,3 +299,224 @@ pub async fn check_unique_together_pool(
         Err(errors)
     }
 }
+
+// ============================================================ #434
+//
+// Django/DRF-shape `HyperlinkedModelSerializer`. Where a regular
+// serializer emits PKs (`{"id": 42, "author_id": 7}`), a
+// hyperlinked one emits resource URLs (`{"url": "/api/posts/42",
+// "author_url": "/api/users/7"}`). rustango's Serializer derive
+// is already rich enough that the user can roll their own with
+// `#[serializer(method = "url")]` + a manual `fn url(&self) -> String`,
+// but that's boilerplate-heavy for the common case. These free
+// functions cover the 95% case — substitute `{pk}` placeholders
+// in a URL template.
+
+/// Substitute `{pk}` in `template` with the formatted PK value.
+///
+/// `pk` formats as: integers/floats render their numeric form,
+/// strings/UUIDs render their `Display`, everything else falls
+/// back to JSON encoding (rare in practice — most PK fields are
+/// integer / UUID / string).
+///
+/// ```ignore
+/// use rustango::core::SqlValue;
+/// let url = rustango::serializer::hyperlink_url("/api/posts/{pk}", &SqlValue::I64(42));
+/// assert_eq!(url, "/api/posts/42");
+/// ```
+///
+/// Every `{pk}` occurrence is substituted — useful for nested
+/// resource URLs.
+#[must_use]
+pub fn hyperlink_url(template: &str, pk: &crate::core::SqlValue) -> String {
+    let pk_str = render_pk(pk);
+    template.replace("{pk}", &pk_str)
+}
+
+/// Wrap a serializer's JSON output with a `url` field (from the
+/// model's PK) and optional `<fk>_url` fields (from named FK
+/// templates). Issue #434.
+///
+/// ```ignore
+/// use rustango::serializer::{hyperlinked_to_value, Serializer};
+/// use std::collections::HashMap;
+///
+/// let post = Post::objects().get_by_pk_pool(&pool, &42).await?;
+/// let ser = PostSerializer::from_model(&post);
+/// let base = ser.to_value();
+///
+/// let mut fk_templates = HashMap::new();
+/// fk_templates.insert("author_id", "/api/users/{pk}");
+///
+/// let hyperlinked = hyperlinked_to_value(
+///     base,
+///     "/api/posts/{pk}",
+///     "id",                  // pk field name on the serializer output
+///     &fk_templates,
+/// );
+/// // {"url": "/api/posts/42", "author_id_url": "/api/users/7", ...}
+/// ```
+///
+/// Behaviour:
+///
+/// - Adds a `url` field to the top-level object, derived by
+///   substituting `{pk}` in `self_template` with `base[pk_field]`.
+/// - For each `(fk_field, template)` in `fk_templates`, looks up
+///   `base[fk_field]` and emits a sibling `<fk_field>_url` key
+///   with the substituted URL. Null / missing FK values produce
+///   a null URL (matches DRF's behavior on nullable FKs).
+/// - Does NOT remove the original `id` / `<fk>_id` keys. DRF's
+///   `HyperlinkedModelSerializer` also keeps them by default;
+///   apps that want to redact them can `obj.as_object_mut()
+///   .remove("id")` after this call.
+///
+/// Panics if `base` isn't a JSON object (the standard serializer
+/// `to_value` always returns one).
+#[must_use]
+pub fn hyperlinked_to_value(
+    mut base: serde_json::Value,
+    self_template: &str,
+    pk_field: &str,
+    fk_templates: &std::collections::HashMap<&str, &str>,
+) -> serde_json::Value {
+    let obj = base
+        .as_object_mut()
+        .expect("hyperlinked_to_value: base must be a JSON object");
+
+    // Self URL — derived from base[pk_field].
+    if let Some(pk_val) = obj.get(pk_field) {
+        let pk_str = render_pk_json(pk_val);
+        let url = self_template.replace("{pk}", &pk_str);
+        obj.insert("url".into(), serde_json::Value::String(url));
+    }
+
+    // FK URLs — one per (field, template) pair. Output key is
+    // `<field>_url`. Missing / null FK values emit a JSON null URL.
+    for (fk_field, template) in fk_templates {
+        let url_key = format!("{fk_field}_url");
+        match obj.get(*fk_field) {
+            Some(v) if !v.is_null() => {
+                let pk_str = render_pk_json(v);
+                let url = template.replace("{pk}", &pk_str);
+                obj.insert(url_key, serde_json::Value::String(url));
+            }
+            _ => {
+                obj.insert(url_key, serde_json::Value::Null);
+            }
+        }
+    }
+
+    base
+}
+
+fn render_pk(pk: &crate::core::SqlValue) -> String {
+    use crate::core::SqlValue;
+    match pk {
+        SqlValue::I16(v) => v.to_string(),
+        SqlValue::I32(v) => v.to_string(),
+        SqlValue::I64(v) => v.to_string(),
+        SqlValue::F32(v) => v.to_string(),
+        SqlValue::F64(v) => v.to_string(),
+        SqlValue::String(s) => s.clone(),
+        SqlValue::Uuid(u) => u.to_string(),
+        // Other variants (Bool / Json / Date / DateTime / Decimal /
+        // Binary / Time / Null / List / Array / RangeLiteral) are
+        // not realistic PK shapes — fall back to the Debug
+        // repr so the URL is at least non-empty, but don't try
+        // hard.
+        other => format!("{other:?}"),
+    }
+}
+
+fn render_pk_json(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod hyperlinked_tests {
+    use super::*;
+
+    #[test]
+    fn hyperlink_url_substitutes_i64_pk() {
+        let url = hyperlink_url("/api/posts/{pk}", &crate::core::SqlValue::I64(42));
+        assert_eq!(url, "/api/posts/42");
+    }
+
+    #[test]
+    fn hyperlink_url_substitutes_string_pk() {
+        let url = hyperlink_url(
+            "/users/{pk}",
+            &crate::core::SqlValue::String("alice".into()),
+        );
+        assert_eq!(url, "/users/alice");
+    }
+
+    #[test]
+    fn hyperlink_url_substitutes_every_occurrence() {
+        let url = hyperlink_url("/posts/{pk}/comments/{pk}", &crate::core::SqlValue::I64(7));
+        assert_eq!(url, "/posts/7/comments/7");
+    }
+
+    #[test]
+    fn hyperlinked_to_value_adds_url_field_for_self() {
+        let base = serde_json::json!({"id": 42, "title": "Hi"});
+        let out = hyperlinked_to_value(
+            base,
+            "/api/posts/{pk}",
+            "id",
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(out["url"], "/api/posts/42");
+        // Original fields stay.
+        assert_eq!(out["id"], 42);
+        assert_eq!(out["title"], "Hi");
+    }
+
+    #[test]
+    fn hyperlinked_to_value_adds_fk_url_keys() {
+        let base = serde_json::json!({
+            "id": 1,
+            "title": "Hi",
+            "author_id": 7,
+            "section_id": serde_json::Value::Null,
+        });
+        let mut fks: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        fks.insert("author_id", "/users/{pk}");
+        fks.insert("section_id", "/sections/{pk}");
+        let out = hyperlinked_to_value(base, "/posts/{pk}", "id", &fks);
+        assert_eq!(out["author_id_url"], "/users/7");
+        // Null FK → null URL.
+        assert!(out["section_id_url"].is_null());
+    }
+
+    #[test]
+    fn hyperlinked_to_value_handles_missing_pk_key_gracefully() {
+        // base has no `id` field → no `url` field emitted, but no
+        // panic.
+        let base = serde_json::json!({"title": "Hi"});
+        let out = hyperlinked_to_value(
+            base,
+            "/api/posts/{pk}",
+            "id",
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(out.get("url"), None);
+    }
+
+    #[test]
+    fn hyperlinked_to_value_supports_string_pk() {
+        let base = serde_json::json!({"slug": "hello", "title": "Hello"});
+        let out = hyperlinked_to_value(
+            base,
+            "/posts/{pk}",
+            "slug",
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(out["url"], "/posts/hello");
+    }
+}
