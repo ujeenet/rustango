@@ -25,6 +25,106 @@ rustango = { version = "0.41", default-features = false, features = ["mysql", "t
 rustango = { version = "0.41", features = ["postgres", "sqlite"] }
 ```
 
+### What's new in v0.42.0 (May 2026) — Django-parity gap-closure batch
+
+**The "Django muscle memory" pass.** 16 Tier-2 issues closed in implementation across 16 PRs (plus 9 closed as already-supported with code pointers). Every shipped item picks up the same inventory-collected `register_*!` macro pattern so extensions live next to the model that needs them.
+
+```rust
+// Per-model admin extensions — all four use the const-fn-pointer +
+// inventory pattern, so registrations live in `static` storage and
+// the admin Builder walks the registry once at `build()` time.
+
+rustango::register_admin_view!(                       // #363 — Django get_urls
+    "blog_post", "duplicate", axum::http::Method::POST, "Duplicate post",
+    |_pool, _req| async move { /* ... */ },
+);
+
+rustango::register_admin_queryset!(                   // #360 — get_queryset(request)
+    "blog_post",
+    |parts: &axum::http::request::Parts| -> Vec<rustango::core::Filter> {
+        vec![/* request-aware filter predicates */]
+    },
+);
+
+rustango::register_admin_object_permission!(          // #361 — has_*_permission
+    "blog_post", "change",
+    |_parts, row| row.and_then(|r| r["owner_id"].as_i64()) == Some(/* user */),
+);
+
+rustango::register_admin_computed!(                   // #349 — list_display callable
+    "blog_post", "author_link", "Author",
+    |row| format!("user-{}", row["author_id"].as_i64().unwrap_or(0)),
+    link = |row| row["author_id"].as_i64().map(|id| format!("/admin/auth_user/{id}")),
+);
+
+// Template extensions — same pattern. `register_template_*!`
+// registrations are picked up by `apply_to_tera(&mut tera)`.
+rustango::register_template_context_processor!(       // #384 — Django context_processors
+    |parts: &axum::http::request::Parts|
+        [("build_version".into(), serde_json::json!(env!("CARGO_PKG_VERSION")))].into()
+);
+rustango::register_template_filter!("shout", shout);  // #383 — custom template filters
+rustango::register_template_function!("version", v);  //         + custom functions
+```
+
+#### Headline features (16 PRs)
+
+**Admin parity** — 5 new registries + the missing widget knob:
+
+- **`register_admin_view!`** (#363/#362) — Django `ModelAdmin.get_urls()`. Mount arbitrary per-model HTTP routes at `/<admin>/<table>/<suffix>`. Reserved-suffix guard rejects collisions with the framework's built-in routes.
+- **`register_admin_queryset!`** (#360) — Django `ModelAdmin.get_queryset(request)`. Per-request filter contributions that AND with URL params + search + facets + date-hierarchy.
+- **`register_admin_object_permission!`** (#361/#364) — Django `has_{add,change,delete,view}_permission(request, obj)`. Per-row enforcement on every admin write path. Pre-update SELECT so hooks see the `obj=` state. `AdminError::Forbidden` renders 403.
+- **`register_admin_computed!`** with `link =` (#349) — Django callable display_link. Per-row click target via a callable that returns `Option<String>`.
+- **`admin(formfield_overrides = "field:widget, ...")`** (#359/#370) — Django `formfield_overrides`. Built-in widget names: `password` / `hidden` / `textarea` / `color` / `range` / `email` / `url` / `tel` / `search`. Type-incompatible overrides fall back to the FieldType default with a tracing warning.
+
+**Template parity** — both i18n + custom-tag surfaces now match Django:
+
+- **`Translator::{gettext, gettext_fmt, pgettext, pgettext_fmt, ngettext, ngettext_fmt}`** (#422) — gettext-shape aliases on the existing `Translator`. `pgettext` uses gettext's `<context>EOT<message>` catalog convention with bare-key fallback. `ngettext` implements the English plural rule (CLDR-other-languages is #426 backlog) and auto-binds `{count}`.
+- **`register_template_filter!` / `register_template_function!`** (#383) — Django `@register.filter` / `@register.simple_tag` analogs. Inventory-collected registry + `template_extensions::apply_to_tera(&mut tera)`.
+- **`register_template_context_processor!`** (#384) — Django `TEMPLATES.OPTIONS.context_processors`. Merged into every Tera context via `template_context_processors::apply_to_context(&mut ctx, parts)`. Handler-supplied keys win on collision.
+- **Template debug overlay** (#386) — Django DEBUG-mode error page. `template_views::render` swaps a styled HTML page in when `RUSTANGO_ENV` is dev/staging (or `RUSTANGO_TEMPLATE_DEBUG=1`). Plain-text fallback stays the prod default.
+
+**CBV parity** — Django MultipleObjectMixin / SingleObjectMixin hooks (#379):
+
+- **`ListView::context_object_name(name)`** — bind row list under a custom Tera variable alongside `object_list`.
+- **`DetailView::context_object_name(name)`** — same shape for single-row.
+- **`DetailView::lookup_field("slug")`** — probe by a non-PK column. URL `/posts/{slug}` works alongside the legacy `/posts/{pk}`.
+
+**Forms + serializers**:
+
+- **`ModelForm::prepare_save()` + `PreparedSave`** (#375) — Django `form.save(commit=False)`. Validate now, mutate the prepared write set (`.set` / `.unset` / `.has` / `.is_insert`), commit when ready. Lets handlers add session-derived fields (e.g. `author_id`) between validate and INSERT.
+- **`ViewSet` JSON-array POST body** (#435) — DRF `ListSerializer(many=True)`. Atomic-validate (one bad row rejects the whole bulk before any insert lands) + sequential INSERT-RETURNING. Single-object body keeps its existing shape.
+- **`serializer::hyperlink_url` + `hyperlinked_to_value`** (#434) — DRF HyperlinkedModelSerializer. Free functions wrap a standard serializer's `to_value()` with a `url` field + `<fk>_url` siblings.
+
+**ORM macro types** (#524):
+
+- **`#[derive(Model)]` accepts `rust_decimal::Decimal`, `chrono::NaiveTime`, `Vec<u8>`** — wires them to `FieldType::Decimal` / `Time` / `Binary` (which already had bind + DDL + decode support). Closes the macro-side gap that forced workarounds like `price_cents: i64` in the showcase shop app.
+
+**Migrations**:
+
+- **`manage makemigrations --merge`** (#346) — Django `makemigrations --merge`. Detects two-or-more leaves on the same parent and writes an empty-forward `NNNN_merge.json` whose `prev` points at the lex-last leaf. Linear chains return `Ok(None)` (no-op); legitimately divergent histories (different parents) raise a clear error.
+
+**Showcase E2E test scaffold** (PRs #521–#527) — multi-app showcase in `examples/showcase/` exercising every framework surface (blog / shop / accounts / i18n_demo) with a Playwright TypeScript suite, mounted via the framework's own `manage::Cli::new().api(...).run()` pattern. CI matrix runs the same 32-test suite on PG / MySQL / SQLite.
+
+#### Closed as already-supported (9 issues + code pointers in each comment)
+
+- **#362 Custom URLs (`get_urls`)** — same capability as #363; closed pointing at PR #537.
+- **#323 Proxy models** — extension-trait pattern documented at `inheritance.rs:98-127`.
+- **#368 Custom dashboard** — template override + `register_admin_view!` + `register_admin_computed!`.
+- **#369 ModelForm** — `ModelFormFor<T>` + `.fields/.exclude/.prepare_save/.from_json` covers Django shape.
+- **#374 Model formsets** — `register_admin_inline!` covers `TabularInline` / `StackedInline`.
+- **#378 Date-based views** — compose `ListView` + `.dates()` / `.datetimes()`.
+- **#396 shell (REPL)** — wontfix-by-design; documented script-binary pattern.
+- **#402 TIME_ZONE / USE_TZ** — `i18n::timezone::with_offset` + `localtime` filter.
+- **#427 `{% trans %}` / `{% blocktrans %}`** — `tera_tags::register` + #422 gettext aliases.
+- **#404 LOGGING dictConfig** — `Settings.logging` covers every capability under tracing shape.
+- **#433 selenium / playwright** — standard npm package; showcase E2E demonstrates pattern.
+- **#385 `{% cache %}`** — `cache_fragment::cached_render` (handler-side); Tera-parser limitation prevents block-tag form.
+
+Section-6 (Admin) audit summary now **26 SHIPPED / 2 PARTIAL / 8 MISSING / 2 N/A**. Section 10 (Templates) is **fully shipped** (11 / 0 / 0 / 0). Section 8 (Generic CBVs) is **12 / 0 / 1 / 1** (only #378 niche date-based views remains, and even that's closeable via composition).
+
+Full ticket index: PRs #519–#548. The django-parity audit at [docs/django-parity-audit-2026-05-21.md](docs/django-parity-audit-2026-05-21.md) tracks every row.
+
 ### What's new in v0.41.0 (May 2026) — Tier 1 ORM gap-closure batch
 
 **Django-shape syntax with Rust-shape compile-time safety.** Ten ORM tickets shipped across 14 PRs, plus the PG-typed legacy executor surface is gone from the public API.
@@ -703,8 +803,11 @@ pub struct Post {
 | `String` | `TEXT` / `VARCHAR(N)` | `TEXT` / `VARCHAR(N)` | `TEXT` unless `max_length = N` is set. |
 | `chrono::DateTime<Utc>` | `TIMESTAMPTZ` | `DATETIME(6)` | |
 | `chrono::NaiveDate` | `DATE` | `DATE` | |
+| `chrono::NaiveTime` | `TIME` | `TIME(6)` | Time-of-day, no date component. `FieldType::Time`. |
 | `uuid::Uuid` | `UUID` | `CHAR(36)` | |
 | `serde_json::Value` | `JSONB` | `JSON` | |
+| `rust_decimal::Decimal` | `NUMERIC` | `DECIMAL(38, 10)` | Fixed-point exact decimal. PG + MySQL native; SQLite stores as text via the `sqlx-sqlite` Decode-via-string shim (v0.42+, see [#524](https://github.com/ujeenet/rustango/pull/529)). |
+| `Vec<u8>` | `BYTEA` | `LONGBLOB` | Binary blob. `FieldType::Binary`. v0.42+. |
 
 `i8`, `u8`/`u16`/`u32`/`u64` are intentionally not supported — Postgres has no native 1-byte signed integer and no unsigned integers, so cross-dialect storage would diverge. Use `i16` and bounded `min`/`max` attributes instead. `Auto<i16>` is also rejected (SMALLSERIAL exhausts at 32k); use `Auto<i32>` or `Auto<i64>` for auto-incrementing PKs.
 
@@ -1355,6 +1458,44 @@ Lives at `/admin/` by default (configurable via `RouteConfig::admin_url`; legacy
 | `readonly_fields = "created_at"` | Shown but not editable |
 | `fieldsets = "Group A: f1, f2 \| Group B: f3"` | Form layout |
 | `actions = "delete_selected, my_action"` | Bulk actions |
+| `formfield_overrides = "secret:password, bio:textarea"` | Per-field input-widget swap. Built-ins: `password` / `hidden` / `textarea` / `color` / `range` / `email` / `url` / `tel` / `search` (v0.42+, #359). |
+
+### Per-model admin extensions (v0.42 inventory registries)
+
+Four `register_*!` macros let app code attach per-model behavior next to the model that needs it. All four use the same const-fn-pointer + `inventory::submit!` pattern, so registrations live in `static` storage and the admin Builder picks them up at `build()` time.
+
+```rust
+// Custom routes — Django get_urls() (#363).
+rustango::register_admin_view!(
+    "blog_post", "duplicate", axum::http::Method::POST, "Duplicate post",
+    |_pool, _req| async move { /* ... */ },
+);
+
+// Per-request queryset filter — Django get_queryset(request) (#360).
+// Returned predicates AND with URL params + search + facets.
+rustango::register_admin_queryset!(
+    "blog_post",
+    |parts: &axum::http::request::Parts| -> Vec<rustango::core::Filter> {
+        vec![/* ... */]
+    },
+);
+
+// Per-row enforcement — Django has_{add,change,delete,view}_permission (#361).
+// `false` → 403 before any write lands. Multiple hooks AND together.
+rustango::register_admin_object_permission!(
+    "blog_post", "change",
+    |_parts, row| row.and_then(|r| r["owner_id"].as_i64()) == Some(/* user */),
+);
+
+// List-display callable with per-row click target (#349).
+rustango::register_admin_computed!(
+    "blog_post", "author_link", "Author",
+    |row| format!("user-{}", row["author_id"].as_i64().unwrap_or(0)),
+    link = |row| row["author_id"].as_i64().map(|id| format!("/__admin/auth_user/{id}")),
+);
+```
+
+Multiple `Builder::build()` instances mounted under different `nest` prefixes give you Django's "multiple AdminSite registries" shape (#364) — each Builder has its own allowlist, audit URL, brand, session secret, and admin prefix.
 
 ### Bulk actions
 
@@ -1527,7 +1668,7 @@ let app = Router::new()
 | Method | Path | Action |
 |---|---|---|
 | `GET` | `/api/posts` | List (page-number or cursor pagination) |
-| `POST` | `/api/posts` | Create |
+| `POST` | `/api/posts` | Create — JSON object body OR JSON array body for **DRF `ListSerializer(many=True)` bulk-create** (v0.42+, #435). Atomic-validate before any insert lands; returns 201 + the created rows in submission order. |
 | `GET` | `/api/posts/{pk}` | Retrieve |
 | `PUT` | `/api/posts/{pk}` | Update |
 | `PATCH` | `/api/posts/{pk}` | Partial update |
@@ -1677,10 +1818,27 @@ let app = axum::Router::new()
 | view | URL | template default | context |
 |------|-----|------------------|---------|
 | `ListView` | `GET <prefix>` | `<table>_list.html` | `object_list`, `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev` |
-| `DetailView` | `GET <prefix>/{pk}` | `<table>_detail.html` | `object` |
+| `DetailView` | `GET <prefix>/{lookup}` | `<table>_detail.html` | `object` |
 | `CreateView` | `GET`/`POST <prefix>/new` | `<table>_form.html` | `form: { fields, errors }`, `is_create=true` |
 | `UpdateView` | `GET`/`POST <prefix>/{pk}/edit` | `<table>_form.html` | `form: { fields, errors }`, `object`, `pk`, `is_update=true` |
 | `DeleteView` | `GET`/`POST <prefix>/{pk}/delete` | `<table>_confirm_delete.html` | `object` (GET only) |
+
+**Mixin-shape customizations (v0.42, #379)** — Django's `MultipleObjectMixin` / `SingleObjectMixin` knobs land as builder methods:
+
+```rust
+// Bind row list under a custom Tera variable in addition to
+// `object_list`. Template can read `{% for post in posts %}` AND
+// `{% for post in object_list %}` interchangeably.
+ListView::for_model(Post::SCHEMA).context_object_name("posts");
+
+// Same for single-row + look up by a non-PK column. URL
+// `/posts/{slug}` probes `WHERE slug = $1` instead of the PK.
+DetailView::for_model(Post::SCHEMA)
+    .context_object_name("post")
+    .lookup_field("slug");
+```
+
+Template debug overlay (v0.42, #386) — when `RUSTANGO_ENV` is dev/staging (or `RUSTANGO_TEMPLATE_DEBUG=1`), `template_views::render` swaps a styled HTML error page in for the plain-text 500 fallback. Banner + Tera error + Debug payload + source chain, all inline-CSS so the page works without a static-asset hop.
 
 CreateView/UpdateView/DeleteView are all two-step: GET renders a
 form/confirmation page, POST mutates and 303s to `success_url`.
@@ -1740,6 +1898,16 @@ let form = ModelForm::new(Post::SCHEMA, form_data)
     .fields(&["title", "body", "draft"])     // whitelist
     .exclude(&["draft"]);                    // then drop one
 //   → driver columns: ["title", "body"]
+
+// v0.42 — Django's `save(commit=False)` shape (#375). Validate now,
+// mutate the prepared write set, commit when ready. Lets handlers
+// add session-derived fields (e.g. author_id from request.user)
+// between validate and INSERT.
+let mut prep = ModelForm::new(Post::SCHEMA, form_data)
+    .exclude(&["author_id"])
+    .prepare_save()?;
+prep.set("author_id", SqlValue::I64(request_user_id));
+let pk = prep.commit_pool(&pool).await?;
 ```
 
 ---
@@ -2661,6 +2829,37 @@ let lang = negotiate_language(
     "fr-FR,fr;q=0.9,en;q=0.8",
     &t.locales(),
 );
+
+// Django/gettext-shape aliases — v0.42+ (#422).
+let raw   = t.gettext("fr", "welcome");
+let fmt   = t.gettext_fmt("fr", "welcome", &[("name", "Alice")]);
+let verb  = t.pgettext("en", "verb", "save");      // disambiguated translation
+let plur1 = t.ngettext("en", "msg_singular", "msg_plural", 1);  // singular
+let plur5 = t.ngettext("en", "msg_singular", "msg_plural", 5);  // plural — auto-binds {count}
+```
+
+### Translator extensions — context processors + custom filters/functions
+
+Two inventory-collected registries plumb cross-cutting i18n /
+template concerns through every Tera context the framework builds
+(#383, #384):
+
+```rust
+// Context processors — Django TEMPLATES.OPTIONS.context_processors.
+// Merged into every Tera context via `apply_to_context`. Handler-
+// supplied keys win on collision.
+rustango::register_template_context_processor!(
+    |parts: &axum::http::request::Parts| {
+        [("build_version".into(), serde_json::json!(env!("CARGO_PKG_VERSION")))].into()
+    }
+);
+
+// Custom Tera filters + functions — Django @register.filter /
+// @register.simple_tag. Picked up by `apply_to_tera`.
+fn shout(v: &serde_json::Value, _: &HashMap<String, serde_json::Value>) -> tera::Result<serde_json::Value> {
+    Ok(serde_json::Value::String(v.as_str().unwrap_or("").to_uppercase()))
+}
+rustango::register_template_filter!("shout", shout);
 ```
 
 ---

@@ -118,6 +118,35 @@ cargo run -- makemigrations --empty rename_status_to_state
 #   ]
 ```
 
+### `makemigrations --merge`
+
+Reconcile a divergent chain — Django-shape `makemigrations --merge`
+(issue #346). When two engineers each run `makemigrations` on
+their own feature branch, the resulting JSONs both point at the
+same `prev`. After both PRs merge to main the chain has two
+"leaves" and the next `makemigrations` would arbitrarily pick one
+as its predecessor.
+
+`--merge` detects this state and writes an empty-forward
+`NNNN_merge.json` whose `prev` points at the lex-last leaf. The
+snapshot captures the post-merge cumulative schema (from the live
+registry, since the checkout has both branches' models compiled
+in at this point).
+
+```bash
+cargo run -- makemigrations --merge
+# wrote migrations/0004_merge.json
+#     merge node — empty `forward`, anchors the chain after divergent leaves
+```
+
+- **Linear chain** → `no merge needed` and exits cleanly. Safe to
+  run on healthy histories.
+- **Different parents** (legitimately divergent histories, not
+  branch-collisions) → clear error rather than silently
+  fabricating a parent. Same guard Django uses.
+- **Exclusive** with `--empty` / `--app` / `--scope` / a
+  positional name.
+
 ### `migrate`
 
 Apply every pending migration in lex order.
