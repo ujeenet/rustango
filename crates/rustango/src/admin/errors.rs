@@ -38,6 +38,13 @@ pub enum AdminError {
     ReadOnly {
         table: String,
     },
+    /// #361 — Django-shape `PermissionDenied`. Raised when a
+    /// per-object permission hook (`register_admin_object_permission!`)
+    /// returns false for the current request + row. Renders as 403.
+    Forbidden {
+        table: String,
+        action: &'static str,
+    },
     Form(FormError),
     Internal(String),
 }
@@ -178,6 +185,15 @@ applied yet for this tenant / database.</p>
             Self::ReadOnly { table } => (
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({ "error": "table is read-only", "table": table })),
+            )
+                .into_response(),
+            Self::Forbidden { table, action } => (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "permission denied",
+                    "table": table,
+                    "action": action,
+                })),
             )
                 .into_response(),
             Self::Form(e) => (

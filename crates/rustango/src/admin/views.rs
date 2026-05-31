@@ -1635,6 +1635,7 @@ pub(crate) async fn autocomplete_view(
 // ============================================================== DETAIL
 
 pub(crate) async fn detail_view(
+    parts: axum::http::request::Parts,
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
@@ -1673,6 +1674,16 @@ pub(crate) async fn detail_view(
         table: table.clone(),
         pk: pk_raw.clone(),
     })?;
+
+    // #361 — Django-shape `has_view_permission(request, obj)`. Any
+    // registered `view` hook that returns false → 403 before the
+    // detail HTML renders.
+    if !crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(&row)) {
+        return Err(AdminError::Forbidden {
+            table: model.table.to_owned(),
+            action: "view",
+        });
+    }
 
     // Read joined FK display values from the same row — no extra queries.
     let fk_map = fk_map_from_joined_rows_json(&state, model, std::slice::from_ref(&row));
@@ -1846,6 +1857,7 @@ async fn user_roles_panel_ctx(state: &AppState, pk_raw: &str) -> Option<serde_js
 // ============================================================== CREATE
 
 pub(crate) async fn create_form(
+    parts: axum::http::request::Parts,
     Path(table): Path<String>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
@@ -1853,6 +1865,14 @@ pub(crate) async fn create_form(
     if !state.can_add(model.table) {
         return Err(AdminError::ReadOnly {
             table: model.table.to_owned(),
+        });
+    }
+    // #361 — `has_add_permission(request)` per-object hook. No row
+    // exists yet so `row` is None.
+    if !crate::admin::object_permissions::is_allowed(model.table, "add", &parts, None) {
+        return Err(AdminError::Forbidden {
+            table: model.table.to_owned(),
+            action: "add",
         });
     }
     // #244 — pre-load the ContentType list so `generic_fk` ct_columns
@@ -1888,6 +1908,7 @@ async fn preload_gfk_cts(
 }
 
 pub(crate) async fn create_submit(
+    parts: axum::http::request::Parts,
     Path(table): Path<String>,
     State(state): State<AppState>,
     Form(form): Form<HashMap<String, String>>,
@@ -1898,6 +1919,13 @@ pub(crate) async fn create_submit(
     if !state.can_add(model.table) {
         return Err(AdminError::ReadOnly {
             table: model.table.to_owned(),
+        });
+    }
+    // #361 — `has_add_permission(request)` per-object hook.
+    if !crate::admin::object_permissions::is_allowed(model.table, "add", &parts, None) {
+        return Err(AdminError::Forbidden {
+            table: model.table.to_owned(),
+            action: "add",
         });
     }
 
@@ -1979,6 +2007,7 @@ pub(crate) async fn create_submit(
 // ============================================================== EDIT
 
 pub(crate) async fn edit_form(
+    parts: axum::http::request::Parts,
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
@@ -2018,6 +2047,15 @@ pub(crate) async fn edit_form(
         pk: pk_raw.clone(),
     })?;
 
+    // #361 — `has_change_permission(request, obj)` per-object hook.
+    // Block the edit form before any inline panels load.
+    if !crate::admin::object_permissions::is_allowed(model.table, "change", &parts, Some(&row)) {
+        return Err(AdminError::Forbidden {
+            table: model.table.to_owned(),
+            action: "change",
+        });
+    }
+
     let mut prefill = HashMap::new();
     for f in model.scalar_fields() {
         prefill.insert(
@@ -2055,6 +2093,7 @@ pub(crate) async fn edit_form(
 }
 
 pub(crate) async fn update_submit(
+    parts: axum::http::request::Parts,
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
     Form(form): Form<HashMap<String, String>>,
@@ -2071,6 +2110,45 @@ pub(crate) async fn update_submit(
         AdminError::Internal(format!("model `{}` has no primary key", model.name))
     })?;
     let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
+
+    // #361 — `has_change_permission(request, obj)`. Fetch the row
+    // first so the hook sees the pre-update state. Skipping the
+    // hook on `Err` from select would mask permission failure as
+    // a 500; surface the row error directly instead.
+    let pre_update_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    let pre_update_row = crate::sql::select_one_row_as_json(
+        &state.pool,
+        &SelectQuery {
+            model,
+            where_clause: WhereExpr::Predicate(Filter {
+                column: pk_field.column,
+                op: Op::Eq,
+                value: pk_value.clone(),
+            }),
+            search: None,
+            joins: vec![],
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            lock_mode: None,
+            compound: vec![],
+            projection: None,
+            distinct: None,
+        },
+        &pre_update_fields,
+    )
+    .await?;
+    if !crate::admin::object_permissions::is_allowed(
+        model.table,
+        "change",
+        &parts,
+        pre_update_row.as_ref(),
+    ) {
+        return Err(AdminError::Forbidden {
+            table: model.table.to_owned(),
+            action: "change",
+        });
+    }
 
     // Don't include PK in SET — keep identity stable. Same for any
     // user-marked `readonly_fields` (slice 10.5): the form rendered
@@ -2180,6 +2258,7 @@ pub(crate) async fn update_submit(
 // ============================================================== DELETE
 
 pub(crate) async fn delete_submit(
+    parts: axum::http::request::Parts,
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Response, AdminError> {
@@ -2225,6 +2304,20 @@ pub(crate) async fn delete_submit(
     .await
     .ok()
     .flatten();
+
+    // #361 — `has_delete_permission(request, obj)` per-object hook.
+    // Block before any soft-delete UPDATE or hard DELETE runs.
+    if !crate::admin::object_permissions::is_allowed(
+        model.table,
+        "delete",
+        &parts,
+        before_row.as_ref(),
+    ) {
+        return Err(AdminError::Forbidden {
+            table: model.table.to_owned(),
+            action: "delete",
+        });
+    }
 
     let audit_op = if model.soft_delete_column.is_some() {
         crate::audit::AuditOp::SoftDelete
