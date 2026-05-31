@@ -209,7 +209,7 @@ Summary: **1 / 1 / 3 / 0**.
 | Schema-mode per-tenant migrations | (Django doesn't ship this) | N/A | `tenancy::migrate` runs per-tenant | Beyond Django's per-DB. |
 | inspectdb (tables + views) | [inspectdb](https://docs.djangoproject.com/en/6.0/ref/django-admin/#inspectdb) | SHIPPED | T2.10 closed — views walked too (PR #304) | |
 
-Summary: **11 SHIPPED / 2 PARTIAL / 2 MISSING / 1 N/A**. Gaps: `sqlmigrate` raw-SQL print, `migrations --merge`.
+Summary: **12 SHIPPED / 2 PARTIAL / 1 MISSING / 1 N/A**. Remaining gap: `migrations --merge` for divergent branch chains (#346).
 
 ---
 
