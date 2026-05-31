@@ -77,7 +77,7 @@ use axum::Router;
 use serde_json::Value;
 use tera::{Context, Tera};
 
-use crate::core::{Filter, ModelSchema, Op, SelectQuery, SqlValue, WhereExpr};
+use crate::core::{FieldSchema, Filter, ModelSchema, Op, SelectQuery, SqlValue, WhereExpr};
 use crate::sql::Pool;
 use crate::sql::{count_rows_pool, select_one_row_as_json, select_rows_as_json};
 
@@ -191,6 +191,11 @@ pub struct ListView {
     /// usually cheap but isn't free. Opt in via
     /// [`Self::with_fk_display`].
     fk_display: bool,
+    /// #379 — Django-shape `context_object_name`. Binds the row
+    /// list under a custom Tera variable in addition to the
+    /// default `object_list`. Empty (the default) skips the
+    /// extra binding.
+    context_object_name: String,
 }
 
 impl ListView {
@@ -215,7 +220,25 @@ impl ListView {
             confirm_delete: false,
             confirm_delete_template: None,
             fk_display: false,
+            context_object_name: String::new(),
         }
+    }
+
+    /// Django-shape `context_object_name` — bind the row list
+    /// under a custom Tera variable in addition to the default
+    /// `object_list`. Issue #379. Empty string (the default)
+    /// leaves only `object_list`.
+    ///
+    /// ```ignore
+    /// ListView::for_model(Post::SCHEMA)
+    ///     .context_object_name("posts")
+    /// // template can now read `{% for post in posts %}` AND
+    /// // `{% for post in object_list %}` — both work.
+    /// ```
+    #[must_use]
+    pub fn context_object_name(mut self, name: impl Into<String>) -> Self {
+        self.context_object_name = name.into();
+        self
     }
 
     /// Override the Tera template name.
@@ -614,6 +637,12 @@ async fn handle_list(
     let total_pages = ((total - 1).max(0) / page_size) + 1;
     let mut ctx = Context::new();
     ctx.insert("object_list", &object_list);
+    // #379 — Django-shape `context_object_name`. Adds a second
+    // binding so templates can read `{{ posts }}` instead of
+    // `{{ object_list }}`. Empty (the default) skips the rename.
+    if !state.vs.context_object_name.is_empty() {
+        ctx.insert(&state.vs.context_object_name, &object_list);
+    }
     ctx.insert("page", &page);
     ctx.insert("page_size", &page_size);
     ctx.insert("total", &total);
@@ -753,6 +782,18 @@ pub struct DetailView {
     schema: &'static ModelSchema,
     template: String,
     fields: Option<Vec<String>>,
+    /// #379 — Django-shape `context_object_name`. Renames the row
+    /// under a custom Tera variable name. The legacy `"object"`
+    /// key stays populated for back-compat; this just adds a
+    /// second binding so templates can read `{{ post.title }}`
+    /// instead of `{{ object.title }}`. Empty → no rename.
+    context_object_name: String,
+    /// #379 — Django-shape `slug_field` / `slug_url_kwarg`. When
+    /// non-empty, the URL captures the lookup value as `{lookup}`
+    /// (instead of `{pk}`) and the SELECT predicate matches
+    /// `WHERE <lookup_field> = <captured>` instead of `WHERE pk =
+    /// <captured>`. Useful for `/posts/{slug}` style URLs.
+    lookup_field: Option<String>,
 }
 
 impl DetailView {
@@ -762,6 +803,8 @@ impl DetailView {
             schema,
             template: format!("{}_detail.html", schema.table),
             fields: None,
+            context_object_name: String::new(),
+            lookup_field: None,
         }
     }
 
@@ -774,6 +817,42 @@ impl DetailView {
     #[must_use]
     pub fn fields(mut self, names: &[&str]) -> Self {
         self.fields = Some(names.iter().map(|s| (*s).to_owned()).collect());
+        self
+    }
+
+    /// Django-shape `context_object_name` — bind the row under a
+    /// custom Tera variable in addition to the default `object`.
+    /// Issue #379. Empty string (the default) leaves only the
+    /// `object` binding.
+    ///
+    /// ```ignore
+    /// // /posts/{pk} → template reads `{{ post.title }}`
+    /// DetailView::for_model(Post::SCHEMA)
+    ///     .context_object_name("post")
+    /// ```
+    #[must_use]
+    pub fn context_object_name(mut self, name: impl Into<String>) -> Self {
+        self.context_object_name = name.into();
+        self
+    }
+
+    /// Django-shape `slug_field` — look up the row by a non-PK
+    /// column. The captured URL segment matches against the named
+    /// column instead of the model's primary key. Issue #379.
+    ///
+    /// Field name must exist on the schema (Rust field name OR
+    /// SQL column name); unknown names produce a 500 at request
+    /// time with a clear `template render error: unknown lookup
+    /// field …` message.
+    ///
+    /// ```ignore
+    /// // /posts/{slug} → SELECT … WHERE slug = $1
+    /// DetailView::for_model(Post::SCHEMA)
+    ///     .lookup_field("slug")
+    /// ```
+    #[must_use]
+    pub fn lookup_field(mut self, column: impl Into<String>) -> Self {
+        self.lookup_field = Some(column.into());
         self
     }
 
@@ -813,18 +892,20 @@ async fn handle_detail(
     State(state): State<Arc<DetailViewState>>,
     Path(pk): Path<String>,
 ) -> Response {
-    let Some(pk_field) = state.vs.schema.primary_key() else {
-        return template_error(&format!(
-            "model `{}` has no primary key — DetailView can't probe by PK",
-            state.vs.schema.table
-        ));
+    // #379 — `lookup_field` opt-in: probe by the named column
+    // instead of the PK. Validate the name maps to a real field
+    // up front so the predicate carries a real `&'static str`
+    // column ident.
+    let lookup = match resolve_lookup_field(state.vs.schema, state.vs.lookup_field.as_deref()) {
+        Ok(f) => f,
+        Err(e) => return template_error(&e),
     };
     let select_q = SelectQuery {
         model: state.vs.schema,
         where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
+            column: lookup.column,
             op: Op::Eq,
-            value: coerce_pk(pk_field, &pk),
+            value: coerce_pk(lookup, &pk),
         }),
         search: None,
         joins: vec![],
@@ -845,8 +926,42 @@ async fn handle_detail(
 
     let mut ctx = Context::new();
     ctx.insert("object", &object);
+    if !state.vs.context_object_name.is_empty() {
+        ctx.insert(&state.vs.context_object_name, &object);
+    }
 
     render(&state.tera, &state.vs.template, &ctx)
+}
+
+/// Resolve the DetailView lookup column (#379). Returns the PK
+/// field when `lookup_field` is `None`; otherwise the named
+/// field. Errors when the schema has no PK and no lookup_field
+/// set, or when the lookup_field name doesn't resolve.
+fn resolve_lookup_field(
+    schema: &'static ModelSchema,
+    lookup_field: Option<&str>,
+) -> Result<&'static FieldSchema, String> {
+    if let Some(name) = lookup_field {
+        // Match by Rust field name OR SQL column — same shape as
+        // resolved_fields and the rest of the framework's
+        // user-facing name resolution.
+        if let Some(f) = schema
+            .scalar_fields()
+            .find(|f| f.name == name || f.column == name)
+        {
+            return Ok(f);
+        }
+        return Err(format!(
+            "DetailView::lookup_field(\"{name}\") doesn't match any scalar field on `{}`",
+            schema.table
+        ));
+    }
+    schema.primary_key().ok_or_else(|| {
+        format!(
+            "model `{}` has no primary key — DetailView can't probe without an explicit lookup_field",
+            schema.table
+        )
+    })
 }
 
 // ============================================================== DeleteView
@@ -3345,6 +3460,11 @@ mod tenant {
         let total_pages = ((total - 1).max(0) / page_size) + 1;
         let mut ctx = Context::new();
         ctx.insert("object_list", &object_list);
+        // #379 — context_object_name (see non-tenant variant for
+        // semantics).
+        if !state.vs.context_object_name.is_empty() {
+            ctx.insert(&state.vs.context_object_name, &object_list);
+        }
         ctx.insert("page", &page);
         ctx.insert("page_size", &page_size);
         ctx.insert("total", &total);
@@ -3485,18 +3605,20 @@ mod tenant {
         Path(pk): Path<String>,
         t: Tenant,
     ) -> Response {
-        let Some(pk_field) = state.vs.schema.primary_key() else {
-            return template_error(&format!(
-                "model `{}` has no primary key — DetailView can't probe by PK",
-                state.vs.schema.table
-            ));
-        };
+        // #379 — `lookup_field` opt-in: probe by the named column
+        // instead of the PK. Tenant variant mirrors the
+        // non-tenant `handle_detail`.
+        let lookup =
+            match super::resolve_lookup_field(state.vs.schema, state.vs.lookup_field.as_deref()) {
+                Ok(f) => f,
+                Err(e) => return template_error(&e),
+            };
         let select_q = SelectQuery {
             model: state.vs.schema,
             where_clause: WhereExpr::Predicate(Filter {
-                column: pk_field.column,
+                column: lookup.column,
                 op: Op::Eq,
-                value: coerce_pk(pk_field, &pk),
+                value: coerce_pk(lookup, &pk),
             }),
             search: None,
             joins: vec![],
@@ -3517,6 +3639,9 @@ mod tenant {
 
         let mut ctx = Context::new();
         ctx.insert("object", &object);
+        if !state.vs.context_object_name.is_empty() {
+            ctx.insert(&state.vs.context_object_name, &object);
+        }
         render(&state.tera, &state.vs.template, &ctx)
     }
 

@@ -27,7 +27,7 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 5. Migrations | 11 | 2 | 2 | 1 |
 | 6. Admin (ModelAdmin) | 18 | 7 | 11 | 2 |
 | 7. Forms / Formsets | 8 | 3 | 4 | 0 |
-| 8. Generic CBVs | 5 | 2 | 3 | 0 |
+| 8. Generic CBVs | 12 | 0 | 1 | 1 |
 | 9. URL routing | 5 | 1 | 1 | 1 |
 | 10. Templates | 10 | 1 | 0 | 0 |
 | 11. Authentication | 14 | 4 | 4 | 1 |
@@ -300,9 +300,9 @@ Summary: **8 SHIPPED / 3 PARTIAL / 4 MISSING / 0 N/A**.
 | `LoginRequiredMixin` | [LoginRequiredMixin](https://docs.djangoproject.com/en/6.0/topics/auth/default/#django.contrib.auth.mixins.LoginRequiredMixin) | SHIPPED | `auth_decorators::login_required` middleware layer | |
 | `UserPassesTestMixin` | [UserPassesTestMixin](https://docs.djangoproject.com/en/6.0/topics/auth/default/#django.contrib.auth.mixins.UserPassesTestMixin) | SHIPPED | `auth_decorators::user_passes_test` | |
 | `PermissionRequiredMixin` | [PermissionRequiredMixin](https://docs.djangoproject.com/en/6.0/topics/auth/default/#django.contrib.auth.mixins.PermissionRequiredMixin) | SHIPPED | `auth_decorators::permission_required` (PR #313) | |
-| MultipleObjectMixin / SingleObjectMixin (object-level customization) | [generic-display](https://docs.djangoproject.com/en/6.0/ref/class-based-views/generic-display/#multipleobjectmixin) | PARTIAL | `ListView::with_queryset(custom_qs)` exists (#379) | Mixin composability MISSING. |
+| MultipleObjectMixin / SingleObjectMixin (object-level customization) | [generic-display](https://docs.djangoproject.com/en/6.0/ref/class-based-views/generic-display/#multipleobjectmixin) | SHIPPED | `ListView::context_object_name(name)` + `DetailView::context_object_name(name)` + `DetailView::lookup_field(column)` (closed #379). Rust's mixin equivalent is composition on the builder struct — these knobs cover every practical Django mixin customization (rename the context variable, look up by slug instead of PK, customize the QuerySet via `with_queryset` and global context via `register_template_context_processor!`). | |
 
-Summary: **11 SHIPPED / 1 PARTIAL / 1 MISSING / 1 N/A**.
+Summary: **12 SHIPPED / 0 PARTIAL / 1 MISSING / 1 N/A**. Only `Date-based views` (#378) remains unimplemented — niche; users build via QuerySet date-trunc + Tera.
 
 ---
 
