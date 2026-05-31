@@ -952,6 +952,10 @@ pub mod template_debug;
 /// [`template_context_processors`]. Issue #384.
 pub mod template_context_processors;
 
+/// Django-shape custom template filters + functions — see
+/// [`template_extensions`]. Issue #383.
+pub mod template_extensions;
+
 /// Django-shape view shortcuts — `get_object_or_404` / `get_list_or_404`
 /// / `render` / `redirect`. See [`shortcuts`]. Issue #10.
 #[cfg(feature = "template_views")]
