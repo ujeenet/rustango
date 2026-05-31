@@ -1189,8 +1189,9 @@ async fn handle_create(
         return json_error(StatusCode::FORBIDDEN, "permission denied");
     }
 
-    let form = match extract_form_body(parts, body).await {
-        Ok(f) => f,
+    // #435 — sniff for bulk shape (JSON array body) and dispatch.
+    let create_body = match extract_create_body(parts, body).await {
+        Ok(b) => b,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
     };
 
@@ -1202,12 +1203,6 @@ async fn handle_create(
         .map(|f| f.name)
         .collect();
 
-    let collected = match collect_values(state.vs.schema, &form, &skip) {
-        Ok(v) => v,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-    };
-    let (columns, values): (Vec<_>, Vec<_>) = collected.into_iter().unzip();
-
     let pk_field = match state.pk_field() {
         Some(f) => f,
         None => {
@@ -1217,6 +1212,27 @@ async fn handle_create(
             )
         }
     };
+
+    match create_body {
+        CreateBody::Single(form) => create_one(&state, &mut acq, &form, &skip, pk_field).await,
+        CreateBody::Bulk(rows) => create_many(&state, &mut acq, &rows, &skip, pk_field).await,
+    }
+}
+
+/// Single-row create — used by both the form-urlencoded codepath
+/// and the JSON-object body codepath. Returns 201 + the row JSON.
+async fn create_one(
+    state: &Arc<ViewSetState>,
+    acq: &mut AcquiredConn,
+    form: &HashMap<String, String>,
+    skip: &[&str],
+    pk_field: &'static crate::core::FieldSchema,
+) -> Response {
+    let collected = match collect_values(state.vs.schema, form, skip) {
+        Ok(v) => v,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+    };
+    let (columns, values): (Vec<_>, Vec<_>) = collected.into_iter().unzip();
     let query = InsertQuery {
         model: state.vs.schema,
         columns,
@@ -1224,19 +1240,96 @@ async fn handle_create(
         returning: vec![pk_field.column],
         on_conflict: None,
     };
-
     let pk_val = match acq.insert_returning_pk(&query, pk_field).await {
         Ok(v) => v,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
     };
     let fields = state.effective_fields();
-    match fetch_by_pk(&state, &mut acq, pk_field, pk_val, &fields).await {
+    match fetch_by_pk(state, acq, pk_field, pk_val, &fields).await {
         Some(obj) => json_created(obj),
         None => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "created but could not retrieve",
         ),
     }
+}
+
+/// Bulk create — Django DRF `ListSerializer(many=True)` shape.
+/// Validates every entry first; on first failure, the WHOLE bulk
+/// is rejected with the index + message (atomic-validate, not
+/// atomic-insert — partial-insert recovery is a separate concern).
+/// On success, inserts each row sequentially and returns 201 + the
+/// JSON array of created rows in submission order.
+///
+/// Issue #435.
+async fn create_many(
+    state: &Arc<ViewSetState>,
+    acq: &mut AcquiredConn,
+    rows: &[HashMap<String, String>],
+    skip: &[&str],
+    pk_field: &'static crate::core::FieldSchema,
+) -> Response {
+    if rows.is_empty() {
+        return json_created(Value::Array(Vec::new()));
+    }
+
+    // Atomic validation: collect every (columns, values) up front
+    // so a bad row near the end of the list doesn't leave half the
+    // INSERTs committed. DRF's default ListSerializer.create has
+    // the same shape — validate the whole list before any save.
+    let mut prepared: Vec<(Vec<&'static str>, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        let collected = match collect_values(state.vs.schema, row, skip) {
+            Ok(v) => v,
+            Err(e) => {
+                return json_error(StatusCode::BAD_REQUEST, &format!("bulk entry {i}: {e}"));
+            }
+        };
+        prepared.push(collected.into_iter().unzip());
+    }
+
+    // Insert sequentially. We loop INSERT-RETURNING rather than
+    // emitting one multi-row INSERT because:
+    //
+    // 1. Per-row PK extraction stays straightforward (one returning
+    //    row per call, no fan-out parsing).
+    // 2. The framework's `bulk_insert_pool` path is typed-model-
+    //    shaped; this dynamic-JSON codepath doesn't have a typed
+    //    handle to feed it.
+    // 3. Most ListSerializer.create callers are submitting tens of
+    //    rows, not millions. A real high-volume bulk endpoint
+    //    should mount its own custom handler with bulk_insert_pool.
+    //
+    // The trade-off: N round-trips per request. We document
+    // accordingly in the issue + viewset docs.
+    let fields = state.effective_fields();
+    let mut created: Vec<Value> = Vec::with_capacity(prepared.len());
+    for (i, (columns, values)) in prepared.into_iter().enumerate() {
+        let query = InsertQuery {
+            model: state.vs.schema,
+            columns,
+            values,
+            returning: vec![pk_field.column],
+            on_conflict: None,
+        };
+        let pk_val = match acq.insert_returning_pk(&query, pk_field).await {
+            Ok(v) => v,
+            Err(e) => {
+                return json_error(StatusCode::BAD_REQUEST, &format!("bulk entry {i}: {e}"));
+            }
+        };
+        match fetch_by_pk(state, acq, pk_field, pk_val, &fields).await {
+            Some(obj) => created.push(obj),
+            None => {
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("bulk entry {i}: created but could not retrieve"),
+                );
+            }
+        }
+    }
+
+    json_created(Value::Array(created))
 }
 
 async fn handle_update(
@@ -1416,6 +1509,29 @@ async fn extract_form_body(
     parts: axum::http::request::Parts,
     body: Body,
 ) -> Result<HashMap<String, String>, String> {
+    match extract_create_body(parts, body).await? {
+        CreateBody::Single(form) => Ok(form),
+        CreateBody::Bulk(_) => Err("expected a JSON object; got an array".into()),
+    }
+}
+
+/// Sniff a POST body and return either a single record (object body
+/// or form-urlencoded body) or a bulk list (JSON array body — DRF's
+/// `ListSerializer(many=True)` shape). Issue #435.
+///
+/// Bulk shape is only recognized for `application/json` content-type
+/// + a JSON array body — form-urlencoded payloads always parse as
+/// single records (multi-row form encoding doesn't have a portable
+/// shape).
+pub(crate) enum CreateBody {
+    Single(HashMap<String, String>),
+    Bulk(Vec<HashMap<String, String>>),
+}
+
+pub(crate) async fn extract_create_body(
+    parts: axum::http::request::Parts,
+    body: Body,
+) -> Result<CreateBody, String> {
     use axum::body::to_bytes;
 
     let content_type = parts
@@ -1429,25 +1545,49 @@ async fn extract_form_body(
         .map_err(|e| e.to_string())?;
 
     if content_type.contains("application/json") {
-        // JSON body: flatten top-level string/number values to strings
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-        let obj = value.as_object().ok_or("expected a JSON object")?;
-        let mut form = HashMap::new();
-        for (k, v) in obj {
-            let s = match v {
-                Value::String(s) => s.clone(),
-                Value::Number(n) => n.to_string(),
-                Value::Bool(b) => b.to_string(),
-                Value::Null => String::new(),
-                other => other.to_string(),
-            };
-            form.insert(k.clone(), s);
+        if let Some(array) = value.as_array() {
+            // Bulk shape: each element must be an object.
+            let mut bulk: Vec<HashMap<String, String>> = Vec::with_capacity(array.len());
+            for (i, entry) in array.iter().enumerate() {
+                let obj = entry
+                    .as_object()
+                    .ok_or_else(|| format!("bulk entry {i} is not a JSON object"))?;
+                bulk.push(json_object_to_form(obj));
+            }
+            return Ok(CreateBody::Bulk(bulk));
         }
-        Ok(form)
+        let obj = value
+            .as_object()
+            .ok_or("expected a JSON object or array of objects")?;
+        Ok(CreateBody::Single(json_object_to_form(obj)))
     } else {
-        // form-urlencoded (default)
-        serde_urlencoded::from_bytes::<HashMap<String, String>>(&bytes).map_err(|e| e.to_string())
+        // form-urlencoded (default) — single only.
+        let form = serde_urlencoded::from_bytes::<HashMap<String, String>>(&bytes)
+            .map_err(|e| e.to_string())?;
+        Ok(CreateBody::Single(form))
     }
+}
+
+/// Flatten a JSON object's top-level values into the
+/// `HashMap<String, String>` shape every existing collector expects.
+/// Numeric / boolean / null primitives stringify; nested objects /
+/// arrays serialize back to JSON text (caller can re-parse if it
+/// needs typed access). Extracted from the inlined `extract_form_body`
+/// path so both single and bulk codepaths share it.
+fn json_object_to_form(obj: &serde_json::Map<String, Value>) -> HashMap<String, String> {
+    let mut form = HashMap::with_capacity(obj.len());
+    for (k, v) in obj {
+        let s = match v {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Null => String::new(),
+            other => other.to_string(),
+        };
+        form.insert(k.clone(), s);
+    }
+    form
 }
 
 #[cfg(test)]

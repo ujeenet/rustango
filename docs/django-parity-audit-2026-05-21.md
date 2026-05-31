@@ -635,7 +635,7 @@ Summary: **5 / 0 / 0 / 2**. Async is native; no parity gap.
 | `Serializer` class | [serializers](https://www.django-rest-framework.org/api-guide/serializers/) | SHIPPED | `#[derive(Serializer)]` macro (v0.18) | |
 | `ModelSerializer` | [ModelSerializer](https://www.django-rest-framework.org/api-guide/serializers/#modelserializer) | SHIPPED | `ModelSerializer` trait via macro | |
 | `HyperlinkedModelSerializer` | [HyperlinkedModelSerializer](https://www.django-rest-framework.org/api-guide/serializers/#hyperlinkedmodelserializer) | MISSING | n/a (#434) | Niche. |
-| `ListSerializer` (bulk shape) | [ListSerializer](https://www.django-rest-framework.org/api-guide/serializers/#listserializer) | PARTIAL | Vec serialization works; bulk-create from `ListSerializer` shape MISSING (#435) | |
+| `ListSerializer` (bulk shape) | [ListSerializer](https://www.django-rest-framework.org/api-guide/serializers/#listserializer) | SHIPPED | `POST <prefix>` with a JSON array body bulk-creates every entry and returns the created rows in submission order (closed #435). Validation is atomic — a single bad entry rejects the whole bulk before any insert lands. `Vec::many_to_value` still covers the read direction. | |
 | Field-level options (read_only, write_only, source, skip) | (above) | SHIPPED | All four supported | |
 | Nested serializer (one-to-many auto-expand) | [nested](https://www.django-rest-framework.org/api-guide/serializers/#dealing-with-nested-objects) | SHIPPED | `#[serializer(nested = ChildSerializer)]` (v0.18) | |
 | `SerializerMethodField` | [SerializerMethodField](https://www.django-rest-framework.org/api-guide/fields/#serializermethodfield) | SHIPPED | v0.18 | |
