@@ -197,7 +197,7 @@ Summary: **1 / 1 / 3 / 0**.
 | `python manage.py showmigrations` | [showmigrations](https://docs.djangoproject.com/en/6.0/ref/django-admin/#showmigrations) | SHIPPED | `manage showmigrations` | |
 | `python manage.py sqlmigrate` | [sqlmigrate](https://docs.djangoproject.com/en/6.0/ref/django-admin/#sqlmigrate) | SHIPPED | `manage sqlmigrate <name>` (closed #345, v0.42) — prints the SQL the named migration would emit when applied, no DB touch required. Wraps `migrate::sqlmigrate_one(dir, name)` which reads the JSON file and runs the same render path as `migrate --dry-run`. | |
 | `python manage.py squashmigrations` | [squashmigrations](https://docs.djangoproject.com/en/6.0/topics/migrations/#squashing-migrations) | SHIPPED | `manage migrate --squash` (v0.29) | Fresh-table scenarios only; not full Django squash. |
-| `python manage.py makemigrations --merge` | [merge](https://docs.djangoproject.com/en/6.0/topics/migrations/#merging-migrations) | MISSING | n/a (#346) | |
+| `python manage.py makemigrations --merge` | [merge](https://docs.djangoproject.com/en/6.0/topics/migrations/#merging-migrations) | SHIPPED | `manage makemigrations --merge` (closed #346) — detects divergent leaves on the same parent and writes an empty-forward `NNNN_merge.json` whose `prev` points at the lex-last leaf. Snapshot reflects the post-merge cumulative schema (from the live registry). Rejects leaves with different parents (legitimately divergent histories, not branch-collisions). | |
 | `migrate --fake` / `--fake-initial` | [fake](https://docs.djangoproject.com/en/6.0/ref/django-admin/#cmdoption-migrate-fake) | SHIPPED | `manage migrate --fake` (v0.28) | |
 | `RunPython` (data migration) | [RunPython](https://docs.djangoproject.com/en/6.0/ref/migration-operations/#runpython) | SHIPPED | `register_migration_callback!(name, fn)` + `Operation::Callback { name, reverse_name }` (closed #347, v0.42). Migration JSON references the callback by name; runner looks it up in the inventory registry at apply time. Unknown names surface a clear `MigrateError::Validation` with a pointer to the registration macro. The callback runs OUTSIDE the migration's surrounding tx (owned-Pool signature) — operators wanting atomicity should set `atomic: false` on the migration. `sqlmigrate` preview emits `-- RunPython: <name>` as a comment. | |
 | `RunSQL` | [RunSQL](https://docs.djangoproject.com/en/6.0/ref/migration-operations/#runsql) | SHIPPED | `migrate_data::RunSQL` op | Includes `reverse_sql`. |
@@ -209,7 +209,7 @@ Summary: **1 / 1 / 3 / 0**.
 | Schema-mode per-tenant migrations | (Django doesn't ship this) | N/A | `tenancy::migrate` runs per-tenant | Beyond Django's per-DB. |
 | inspectdb (tables + views) | [inspectdb](https://docs.djangoproject.com/en/6.0/ref/django-admin/#inspectdb) | SHIPPED | T2.10 closed — views walked too (PR #304) | |
 
-Summary: **12 SHIPPED / 2 PARTIAL / 1 MISSING / 1 N/A**. Remaining gap: `migrations --merge` for divergent branch chains (#346).
+Summary: **13 SHIPPED / 2 PARTIAL / 0 MISSING / 1 N/A**. Section 5 is fully shipped.
 
 ---
 
@@ -721,7 +721,6 @@ Ranked by how often a real-world Django project hits the gap. Each gets a one-li
 - **`history_view` time-travel (rebuild row from audit log)** — admin history panel is read-only listing today.
 - **Per-request perm cache for `permission_required` middleware** — one `has_perm_pool` round-trip per request; high-RPS admin would benefit from session-level caching.
 - **Maintenance mode UI** (backlog `A6`) — shipped middleware, no template scaffold.
-- **`makemigrations --merge`** for divergent branch chains.
 - **Async signal `m2m_changed`** — currently dispatchers exist for pre/post-save only.
 
 ---

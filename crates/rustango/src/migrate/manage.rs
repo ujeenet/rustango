@@ -448,6 +448,7 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
 
 fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let mut empty = false;
+    let mut merge = false;
     let mut name: Option<String> = None;
     let mut app: Option<String> = None;
     let mut scope_override: Option<crate::core::ModelScope> = None;
@@ -455,6 +456,7 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--empty" => empty = true,
+            "--merge" => merge = true,
             "--app" => {
                 app = Some(iter.next().cloned().ok_or_else(|| {
                     MigrateError::Validation("--app requires an app name".into())
@@ -478,6 +480,9 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
                      makemigrations --app <app> [name]      diff one app, write to <project_root>/<app>/migrations/\n\
                      makemigrations --scope <s> [name]      <s> = registry|tenant; one file with that MigrationScope\n\
                      makemigrations --empty <name>          empty scaffold for data ops\n\
+                     makemigrations --merge                 reconcile a divergent chain (two leaves\n\
+                                                            on the same parent) by writing an empty\n\
+                                                            NNNN_merge.json — issue #346\n\
                      \n\
                      In tenancy projects (any registered model with scope = \"registry\"),\n\
                      a flagless makemigrations splits the diff into TWO files — one for\n\
@@ -498,6 +503,16 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
                 name = Some(other.to_owned());
             }
         }
+    }
+
+    if merge {
+        if empty || name.is_some() || app.is_some() || scope_override.is_some() {
+            return Err(MigrateError::Validation(
+                "makemigrations --merge does not combine with --empty / --app / --scope / [name]"
+                    .into(),
+            ));
+        }
+        return run_merge(dir, w);
     }
 
     if empty {
@@ -616,6 +631,25 @@ fn write_scoped_migration<W: Write>(
             w,
             "no changes — {} models match latest snapshot",
             scope.as_str(),
+        )?,
+    }
+    Ok(())
+}
+
+/// `makemigrations --merge` — issue #346. Reconcile divergent
+/// migration history by writing an empty-forward marker file.
+fn run_merge<W: Write>(dir: &Path, w: &mut W) -> Result<(), MigrateError> {
+    match crate::migrate::make::make_merge_migration(dir)? {
+        Some(mig) => {
+            writeln!(w, "wrote {}", file_path(dir, &mig.name).display())?;
+            writeln!(
+                w,
+                "    merge node — empty `forward`, anchors the chain after divergent leaves"
+            )?;
+        }
+        None => writeln!(
+            w,
+            "no merge needed — chain has at most one leaf (the history is already linear)"
         )?,
     }
     Ok(())
