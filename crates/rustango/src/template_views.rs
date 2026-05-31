@@ -2891,6 +2891,19 @@ fn render(tera: &Tera, name: &str, ctx: &Context) -> Response {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
             tracing::warn!(target: "rustango::template_views", template = %name, error = %e, "template render failed");
+            // #386 — Django-shape DEBUG overlay. When the active tier
+            // is dev/staging (or RUSTANGO_TEMPLATE_DEBUG=1), serve a
+            // styled HTML page with the full Tera diagnostic instead
+            // of the plain-text 500 fallback. The plain-text path
+            // stays the production default — same stderr/tracing
+            // breadcrumbs, no information leak in the response body.
+            if crate::template_debug::enabled() {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Html(crate::template_debug::error_page_html(&e, name)),
+                )
+                    .into_response();
+            }
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("template render error: {e}"),
