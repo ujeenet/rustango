@@ -51,6 +51,7 @@ pub mod inlines;
 pub mod list_filters;
 mod login_view;
 mod manage_admin;
+pub mod object_permissions;
 pub mod queryset_hooks;
 pub mod session;
 pub mod user;
@@ -71,6 +72,7 @@ pub use inlines::{
     InlineAdmin, InlineAdminGeneric, InlineApplyOutcome, InlineFormPanel, InlineKind, InlinePanel,
 };
 pub use manage_admin::create_admin_cmd;
+pub use object_permissions::{AdminObjectPermission, ObjectPermissionFn};
 pub use queryset_hooks::{AdminQuerySetHook, QuerySetHookFn};
 pub use session::{AdminSession, AdminSessionSecret};
 pub use urls::{router, AdminActionFn, AdminActionFuture, Builder};
