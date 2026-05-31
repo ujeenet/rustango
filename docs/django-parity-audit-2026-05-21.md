@@ -251,7 +251,7 @@ Summary: **13 SHIPPED / 2 PARTIAL / 0 MISSING / 1 N/A**. Section 5 is fully ship
 | Theming (light/dark) | (Django 5.1+ official) | SHIPPED | Token-driven theme + dark mode toggle + per-tenant branding (v0.26+) | Goes beyond Django's basic palette. |
 | Password change for staff | [password change](https://docs.djangoproject.com/en/6.0/topics/auth/default/#changing-passwords) | SHIPPED | `/account/password` (v0.40) | |
 | Two-factor admin login | n/a (Django needs `django-otp`) | PARTIAL | `totp::*` ships RFC 6238 primitives; no admin enrollment UI (#367) | |
-| Custom dashboard | [admin templates override](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#overriding-admin-templates) | PARTIAL | Tera template override works (#368) | No formal widget API. |
+| Custom dashboard | [admin templates override](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#overriding-admin-templates) | SHIPPED | Tera template override (drop your own `admin/index.html`) + `register_admin_view!` (#363) for custom routes + `register_admin_computed!` with `link =` (#349) for custom list cells + `register_admin_inline!` for inline panels. Closed #368 as already-supported. | |
 | Admin styling / branding | [admin templates](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#overriding-admin-templates) | SHIPPED | `Storage`-backed per-tenant brand + theme tokens | |
 | Admin docs (`django.contrib.admindocs`) | [admindocs](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/admindocs/) | N/A | n/a | Rust doc-comments cover it. |
 
@@ -264,7 +264,7 @@ Summary: **26 SHIPPED / 2 PARTIAL / 8 MISSING / 2 N/A**.
 | Capability | Doc | Status | rustango | Notes |
 |---|---|---|---|---|
 | `Form` class | [Forms](https://docs.djangoproject.com/en/6.0/topics/forms/) | SHIPPED | `#[derive(Form)]` macro emits `Form::parse` | |
-| `ModelForm` | [ModelForm](https://docs.djangoproject.com/en/6.0/topics/forms/modelforms/) | PARTIAL | `forms::ModelForm` struct + `from_model_schema` runtime — works for admin path (#369) | No `#[derive(ModelForm)]` shortcut. Backlog. |
+| `ModelForm` | [ModelForm](https://docs.djangoproject.com/en/6.0/topics/forms/modelforms/) | SHIPPED | `forms::ModelForm` (schema-driven runtime) + `forms::ModelFormFor<T>` (typed) + `.fields()` / `.exclude()` (#449) + `.prepare_save()` / `PreparedSave` (#375) + `from_json()` for REST bodies. Closed #369 as already-supported; a pure-sugar `#[derive(ModelForm)]` derive remains optional follow-up. | |
 | Form fields (CharField, IntegerField, etc.) | [Form fields](https://docs.djangoproject.com/en/6.0/ref/forms/fields/) | SHIPPED | Field attrs in `Form` derive | |
 | Widgets (Select, Textarea, RadioSelect, etc.) | [Widgets](https://docs.djangoproject.com/en/6.0/ref/forms/widgets/) | SHIPPED | `admin(formfield_overrides = "field:widget, …")` via #359 + `render::render_input_with_widget` (closed #370 as duplicate). Built-in widget names: `password` / `hidden` / `textarea` / `color` / `range` / `email` / `url` / `tel` / `search`. | |
 | Per-field validators chain | [validators](https://docs.djangoproject.com/en/6.0/ref/validators/) | SHIPPED | `#[rustango(validators = "email,url")]` (#447, v0.42) — declarative comma-separated chain dispatched in `core::validate_value` on every INSERT/UPDATE. Closes #371 alongside this PR. | |
@@ -272,7 +272,7 @@ Summary: **26 SHIPPED / 2 PARTIAL / 8 MISSING / 2 N/A**.
 | `clean()` cross-field validation | (above) | SHIPPED | `#[form(validate = "fn_name")]` container attribute (closed #373, v0.42). Called after every per-field parse + clean succeeds; takes `&Self` and returns `Result<(), FormErrors>`. Errors merge into the outgoing `FormErrors` via the existing `FormErrors::merge` helper (same primitive the DRF cross-field hook uses, see #436). | |
 | `FormErrors` (multi-error) | [error handling](https://docs.djangoproject.com/en/6.0/ref/forms/validation/) | SHIPPED | `forms::FormErrors` collects all field+non-field errors | |
 | Formsets (`formset_factory`) | [Formsets](https://docs.djangoproject.com/en/6.0/topics/forms/formsets/) | SHIPPED | `forms::formset` module — `<prefix>-<N>-<field>` keying | |
-| Model formsets / inline formsets | [modelformsets](https://docs.djangoproject.com/en/6.0/topics/forms/modelforms/#model-formsets) | PARTIAL | Admin inlines use formset POST shape (#374) | Standalone `inline_formset_factory(parent, child)` MISSING. |
+| Model formsets / inline formsets | [modelformsets](https://docs.djangoproject.com/en/6.0/topics/forms/modelforms/#model-formsets) | SHIPPED | `register_admin_inline!(parent, child, fk, kind, fields, extra, max_num, ...)` covers `TabularInline` / `StackedInline`; `register_admin_inline_generic!` covers `GenericTabularInline` (#244). POST handling parses Django's `<id>-<TOTAL_FORMS>` / `<id>-<i>-<field>` shape standard. Closed #374 as already-supported. | |
 | `DynamicForm` (runtime schema) | n/a (Django) | SHIPPED | `forms::DynamicForm` — Django doesn't ship this; rustango ahead | |
 | File upload | [File uploads](https://docs.djangoproject.com/en/6.0/topics/http/file-uploads/) | SHIPPED | `uploads::*` + multer | |
 | `save(commit=False)` + `save_m2m()` | [ModelForm.save](https://docs.djangoproject.com/en/6.0/topics/forms/modelforms/#the-save-method) | PARTIAL | `ModelForm::prepare_save() -> PreparedSave` + `PreparedSave::{set, unset, has, is_insert, commit_pool}` (closed #375). The `commit=False` half is fully covered — caller mutates the prepared write set between validation and INSERT/UPDATE. `save_m2m()` deferred until M2M form-field surface lands (`ModelForm` doesn't yet parse M2M input). | |
@@ -606,7 +606,7 @@ Summary: **3 SHIPPED / 1 PARTIAL / 5 MISSING / 0 N/A**. **Still one of the weake
 | `assertNumQueries(N)` | [assertNumQueries](https://docs.djangoproject.com/en/6.0/topics/testing/tools/#django.test.TransactionTestCase.assertNumQueries) | SHIPPED | `test_assertions::assert_num_queries(N, async {...}).await` + `QueryCounter::{scope, current, take}` (#431, v0.42). Per-task counter via `tokio::task_local!`; instrumented at every `*_pool` chokepoint in `sql::executor`. Zero overhead outside an active scope. | |
 | Email outbox assertions | [mail outbox](https://docs.djangoproject.com/en/6.0/topics/testing/tools/#django.core.mail.outbox) | SHIPPED | `InMemoryMailer.messages()` | |
 | Factories (factory-boy shape) | n/a (3rd-party) | SHIPPED | `test_factory::{Sequence, Factory}` — `factory.build()` / `factory.build_batch(n)` with thread-safe `Sequence` counter for per-call unique values. `src/test_factory.rs` | |
-| `selenium` / `playwright` integration | (Django uses LiveServerTestCase + selenium) | MISSING | n/a (#433) | Playwright MCP available externally. |
+| `selenium` / `playwright` integration | (Django uses LiveServerTestCase + selenium) | SHIPPED | Use the standard Playwright npm package; the showcase E2E suite at `examples/showcase/e2e/` demonstrates the canonical pattern (`webServer.command` = `cargo run -- migrate && cargo run -- runserver`). Closed #433 as already-supported via standard tooling. | |
 
 Summary: **8 / 2 / 3 / 0**.
 
