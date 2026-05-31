@@ -231,6 +231,7 @@ const FACET_TRUNCATE: usize = 15;
 
 #[allow(clippy::too_many_lines)] // mostly linear HTML emission; splitting hurts readability
 pub(crate) async fn table_view(
+    parts: axum::http::request::Parts,
     Path(table): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<AppState>,
@@ -306,6 +307,16 @@ pub(crate) async fn table_view(
             filters.extend((cf.to_filters)(value));
             active_custom_filters.push((cf.parameter_name, value.clone()));
         }
+    }
+
+    // #360 — Django-shape `ModelAdmin.get_queryset(request)`. For
+    // each registered queryset hook on this table, call the hook
+    // with the request `Parts` and append the resulting predicates
+    // to the list view's filter list. Hooks compose with search /
+    // facets / date-hierarchy / pagination — they only contribute
+    // additional WHERE conjuncts.
+    for h in crate::admin::queryset_hooks::for_table(model.table) {
+        filters.extend((h.hook)(&parts));
     }
 
     // #355 — date-hierarchy. When the model declares
