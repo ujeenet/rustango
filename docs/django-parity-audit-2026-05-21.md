@@ -29,7 +29,7 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 7. Forms / Formsets | 8 | 3 | 4 | 0 |
 | 8. Generic CBVs | 5 | 2 | 3 | 0 |
 | 9. URL routing | 5 | 1 | 1 | 1 |
-| 10. Templates | 7 | 3 | 1 | 0 |
+| 10. Templates | 8 | 3 | 0 | 0 |
 | 11. Authentication | 14 | 4 | 4 | 1 |
 | 12. Sessions | 4 | 1 | 1 | 0 |
 | 13. Manage commands | 13 | 5 | 6 | 4 |
@@ -337,9 +337,9 @@ Summary: **6 / 0 / 0 / 1**.
 | staticfiles app | [staticfiles](https://docs.djangoproject.com/en/6.0/ref/contrib/staticfiles/) | SHIPPED | `Cli::with_static(prefix, dir)` + `Storage` | |
 | `{% csrf_token %}` template tag | [csrf](https://docs.djangoproject.com/en/6.0/ref/csrf/) | SHIPPED | `{{ csrf_token \| csrf_input \| safe }}` | |
 | `{% cache %}` template fragment | [template fragment caching](https://docs.djangoproject.com/en/6.0/topics/cache/#template-fragment-caching) | PARTIAL | `cache_fragment::cached_render(key, fn)` exists; not a Tera tag (#385) | |
-| Template debug page | (Django DEBUG) | MISSING | n/a (#386) | Tera errors go to stderr; no DEBUG template-error overlay yet. |
+| Template debug page | (Django DEBUG) | SHIPPED | `template_debug::{enabled, error_page_html}` (closed #386) — `template_views::render` swaps a styled HTML page in for the plain-text 500 when `RUSTANGO_ENV` is dev/staging (or `RUSTANGO_TEMPLATE_DEBUG=1`). Banner + error message + `Debug` payload + source chain, all inline-CSS so the page works without a static-asset hop. Plain-text fallback stays in prod. | |
 
-Summary: **7 / 3 / 1 / 0**.
+Summary: **8 / 3 / 0 / 0**. Templates section is fully shipped.
 
 ---
 

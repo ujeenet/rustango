@@ -944,6 +944,10 @@ pub mod viewset;
 #[cfg(feature = "template_views")]
 pub mod template_views;
 
+/// Django-shape DEBUG template-error overlay — see [`template_debug`].
+/// Issue #386.
+pub mod template_debug;
+
 /// Django-shape view shortcuts — `get_object_or_404` / `get_list_or_404`
 /// / `render` / `redirect`. See [`shortcuts`]. Issue #10.
 #[cfg(feature = "template_views")]
