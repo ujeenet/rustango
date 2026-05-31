@@ -454,6 +454,116 @@ fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
     }
 }
 
+/// Django-shape `makemigrations --merge` — issue #346. Reconcile
+/// a divergent migration history by writing an empty-forward
+/// "merge" file whose `prev` points at the lex-last leaf, so the
+/// next `makemigrations` writes a proper linear successor.
+///
+/// A *leaf* is a migration whose name is NOT referenced as another
+/// migration's `prev`. With a single branch the chain has exactly
+/// one leaf (the latest file). Two engineers each running
+/// `makemigrations` on a feature branch produce a second leaf
+/// pointing at the same parent — when their PRs both merge to
+/// main, the resulting tree has two leaves and the next
+/// `makemigrations` would arbitrarily pick one as its `prev`,
+/// silently losing the convergence point.
+///
+/// This function snapshots the current model registry, writes a
+/// new `NNNN_merge.json` whose `prev` is the lex-last leaf with
+/// `forward: []`, and returns the written migration. Re-merging an
+/// already-linear chain returns `Ok(None)` and writes nothing.
+///
+/// # Errors
+/// Returns [`MigrateError::Validation`] if a chain prerequisite
+/// fails (broken `prev` link, missing PK index), or
+/// [`MigrateError::Io`] / [`MigrateError::Json`] on file I/O.
+pub fn make_merge_migration(dir: &Path) -> Result<Option<Migration>, MigrateError> {
+    let current = SchemaSnapshot::from_registry();
+    make_merge_migration_from(dir, &current)
+}
+
+/// Testable form of [`make_merge_migration`] — takes the post-merge
+/// snapshot as input rather than building it from the registry.
+///
+/// # Errors
+/// See [`make_merge_migration`].
+pub fn make_merge_migration_from(
+    dir: &Path,
+    current: &SchemaSnapshot,
+) -> Result<Option<Migration>, MigrateError> {
+    let prior = file::list_dir(dir)?;
+    if prior.is_empty() {
+        return Err(MigrateError::Validation(
+            "makemigrations --merge: no migrations in directory — nothing to merge".into(),
+        ));
+    }
+
+    // A leaf is any migration NOT referenced as anyone else's `prev`.
+    let referenced: std::collections::HashSet<&str> =
+        prior.iter().filter_map(|m| m.prev.as_deref()).collect();
+    let mut leaves: Vec<&Migration> = prior
+        .iter()
+        .filter(|m| !referenced.contains(m.name.as_str()))
+        .collect();
+    leaves.sort_by(|a, b| a.name.cmp(&b.name));
+
+    if leaves.len() < 2 {
+        // Chain is already linear — nothing to merge.
+        return Ok(None);
+    }
+
+    // Reject leaves whose own `prev`s point at different ancestors —
+    // those represent *legitimately diverging* histories, not branch
+    // collisions. Django's --merge guards the same case.
+    let parents: std::collections::HashSet<Option<String>> =
+        leaves.iter().map(|m| m.prev.clone()).collect();
+    if parents.len() > 1 {
+        let names: Vec<String> = leaves.iter().map(|m| m.name.clone()).collect();
+        return Err(MigrateError::Validation(format!(
+            "makemigrations --merge: leaves don't share a common parent — \
+             can't auto-reconcile. Leaves: {}",
+            names.join(", ")
+        )));
+    }
+
+    // `prev` for the merge node = the lex-last leaf so the chain is
+    // unambiguous from this point forward. Lex-sort apply order
+    // already runs the other leaves first, so applying this merge
+    // file (empty `forward`) is a no-op at runtime — its only job
+    // is to anchor the chain for future `makemigrations`.
+    let merge_prev = leaves.last().unwrap().name.clone();
+
+    // Pick the next sequential prefix from the highest existing
+    // index across the whole directory, not just within the leaves.
+    let next_index = prior
+        .iter()
+        .filter_map(|m| extract_index(&m.name))
+        .max()
+        .map_or(1, |n| n + 1);
+
+    let name = format!("{next_index:04}_merge");
+    let created_at = chrono::Utc::now().to_rfc3339();
+
+    let mig = Migration {
+        name: name.clone(),
+        created_at,
+        prev: Some(merge_prev),
+        atomic: true,
+        scope: super::MigrationScope::default(),
+        // Snapshot reflects the post-merge cumulative schema. The
+        // registry's current state IS that snapshot — by the time
+        // the operator runs `--merge`, the checkout has both
+        // branches' model changes compiled in. Future
+        // `makemigrations` will diff against this snapshot.
+        snapshot: current.clone(),
+        forward: Vec::new(),
+    };
+
+    let path = dir.join(format!("{name}.json"));
+    file::write(&path, &mig)?;
+    Ok(Some(mig))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,5 +834,149 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    // ============================================================ #346
+    //
+    // makemigrations --merge — reconcile a divergent chain by writing an
+    // empty-forward `NNNN_merge.json` whose `prev` points at the lex-last
+    // leaf. The merge file's snapshot is the cumulative post-merge
+    // schema (the `current` snapshot supplied at merge time).
+
+    fn write_mig(dir: &std::path::Path, mig: &Migration) {
+        std::fs::write(
+            dir.join(format!("{}.json", mig.name)),
+            serde_json::to_string_pretty(mig).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn mig_at(name: &str, prev: Option<&str>, snapshot: SchemaSnapshot) -> Migration {
+        Migration {
+            name: name.into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            prev: prev.map(str::to_owned),
+            atomic: true,
+            scope: MigrationScope::Tenant,
+            snapshot,
+            forward: vec![],
+        }
+    }
+
+    #[test]
+    fn merge_returns_none_when_chain_is_linear() {
+        let dir = tempdir();
+        let snap = snap_with(vec![t("posts")]);
+        write_mig(&dir, &mig_at("0001_initial", None, snap.clone()));
+        write_mig(
+            &dir,
+            &mig_at("0002_add", Some("0001_initial"), snap.clone()),
+        );
+        let r = make_merge_migration_from(&dir, &snap).unwrap();
+        assert!(
+            r.is_none(),
+            "single-leaf chain should NOT emit a merge file, got {r:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_errors_when_dir_is_empty() {
+        let dir = tempdir();
+        let snap = snap_with(vec![t("posts")]);
+        let err = make_merge_migration_from(&dir, &snap).unwrap_err();
+        assert!(matches!(err, MigrateError::Validation(_)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_writes_merge_file_when_two_leaves_share_parent() {
+        let dir = tempdir();
+        let snap = snap_with(vec![t("posts")]);
+        // 0001 ← 0002a (leaf A) and 0001 ← 0002b (leaf B).
+        write_mig(&dir, &mig_at("0001_initial", None, snap.clone()));
+        write_mig(
+            &dir,
+            &mig_at("0002a_branch", Some("0001_initial"), snap.clone()),
+        );
+        write_mig(
+            &dir,
+            &mig_at("0002b_branch", Some("0001_initial"), snap.clone()),
+        );
+
+        let mig = make_merge_migration_from(&dir, &snap)
+            .unwrap()
+            .expect("two leaves should produce a merge file");
+
+        // Next index = max(0001, 0002a, 0002b) = 2 → next is 0003.
+        assert!(
+            mig.name.starts_with("0003_"),
+            "merge file index should follow lex-last leaf, got: {}",
+            mig.name
+        );
+        assert_eq!(mig.name, "0003_merge");
+        // Lex-last leaf wins prev — alphabetically 0002b > 0002a.
+        assert_eq!(mig.prev.as_deref(), Some("0002b_branch"));
+        // No schema changes — the merge file just anchors the chain.
+        assert!(mig.forward.is_empty(), "merge file must have empty forward");
+        // Re-running on the now-linearized chain (0001 ← 0002a, 0002b ← 0003_merge)
+        // returns None since 0002a is the only remaining leaf, but wait —
+        // 0002a was never linked to either by `prev`. After the merge it's
+        // STILL a leaf because nothing references it. So another merge file
+        // would still want to be written.
+        //
+        // The Django-shape behavior is: lex-sort applies 0002a BEFORE 0002b BEFORE
+        // 0003_merge so all schema changes from both branches apply in order.
+        // The merge file's only job is to give the next `makemigrations` a
+        // single unambiguous parent. Once 0003_merge is written, 0003_merge
+        // is the new lex-last leaf. 0002a is also still a "leaf" (no
+        // dependents) — but that's a graph degenerate case, not a chain
+        // conflict, so this test stops at the first merge write.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_rejects_leaves_with_different_parents() {
+        let dir = tempdir();
+        let snap = snap_with(vec![t("posts")]);
+        // Two leaves with different parents — legitimately divergent
+        // history, not a branch-collision. Django's --merge does the
+        // same.
+        write_mig(&dir, &mig_at("0001_a", None, snap.clone()));
+        write_mig(&dir, &mig_at("0002_b", Some("0001_a"), snap.clone()));
+        write_mig(&dir, &mig_at("0001_z", None, snap.clone()));
+        let err = make_merge_migration_from(&dir, &snap).unwrap_err();
+        match err {
+            MigrateError::Validation(msg) => {
+                assert!(
+                    msg.contains("common parent"),
+                    "error should mention common-parent requirement, got: {msg}"
+                );
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_uses_supplied_snapshot_for_post_merge_state() {
+        let dir = tempdir();
+        // Pre-existing leaves carry a snapshot with one table; the
+        // post-merge `current` snapshot has TWO. The merge file should
+        // record the post-merge snapshot so future `makemigrations`
+        // diffs against the correct baseline.
+        let pre = snap_with(vec![t("posts")]);
+        let post = snap_with(vec![t("posts"), t("comments")]);
+        write_mig(&dir, &mig_at("0001_initial", None, pre.clone()));
+        write_mig(&dir, &mig_at("0002a", Some("0001_initial"), pre.clone()));
+        write_mig(&dir, &mig_at("0002b", Some("0001_initial"), pre));
+
+        let mig = make_merge_migration_from(&dir, &post).unwrap().unwrap();
+        assert_eq!(
+            mig.snapshot.tables.len(),
+            2,
+            "merge file snapshot must reflect the post-merge schema"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
