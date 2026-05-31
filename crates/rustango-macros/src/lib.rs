@@ -6131,8 +6131,11 @@ enum DetectedKind {
     String,
     DateTime,
     Date,
+    Time,
     Uuid,
     Json,
+    Decimal,
+    Binary,
 }
 
 impl DetectedKind {
@@ -6147,8 +6150,11 @@ impl DetectedKind {
             Self::String => quote!(::rustango::core::FieldType::String),
             Self::DateTime => quote!(::rustango::core::FieldType::DateTime),
             Self::Date => quote!(::rustango::core::FieldType::Date),
+            Self::Time => quote!(::rustango::core::FieldType::Time),
             Self::Uuid => quote!(::rustango::core::FieldType::Uuid),
             Self::Json => quote!(::rustango::core::FieldType::Json),
+            Self::Decimal => quote!(::rustango::core::FieldType::Decimal),
+            Self::Binary => quote!(::rustango::core::FieldType::Binary),
         }
     }
 
@@ -6180,8 +6186,17 @@ impl DetectedKind {
                 quote!(Date),
                 quote!(<::chrono::NaiveDate as ::std::default::Default>::default()),
             ),
+            Self::Time => (
+                quote!(Time),
+                quote!(<::chrono::NaiveTime as ::std::default::Default>::default()),
+            ),
             Self::Uuid => (quote!(Uuid), quote!(::uuid::Uuid::nil())),
             Self::Json => (quote!(Json), quote!(::serde_json::Value::Null)),
+            Self::Decimal => (
+                quote!(Decimal),
+                quote!(<::rust_decimal::Decimal as ::std::default::Default>::default()),
+            ),
+            Self::Binary => (quote!(Binary), quote!(::std::vec::Vec::<u8>::new())),
         }
     }
 }
@@ -6316,12 +6331,36 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
         "String" => DetectedKind::String,
         "DateTime" => DetectedKind::DateTime,
         "NaiveDate" => DetectedKind::Date,
+        "NaiveTime" => DetectedKind::Time,
         "Uuid" => DetectedKind::Uuid,
         "Value" => DetectedKind::Json,
+        "Decimal" => DetectedKind::Decimal,
+        // `Vec<u8>` → BYTEA / LONGBLOB / BLOB. Reject any other
+        // `Vec<T>` so we don't silently accept e.g. `Vec<String>`
+        // — that would emit Binary DDL and decode-fail at runtime.
+        "Vec" => {
+            let (inner, _) = generic_pair(ty, &last.arguments, "Vec")?;
+            if let Type::Path(TypePath { path, qself: None }) = inner {
+                if let Some(seg) = path.segments.last() {
+                    if seg.ident == "u8" && seg.arguments.is_empty() {
+                        return Ok(DetectedType {
+                            kind: DetectedKind::Binary,
+                            nullable: false,
+                            auto: false,
+                            fk_inner: None,
+                        });
+                    }
+                }
+            }
+            return Err(syn::Error::new_spanned(
+                ty,
+                "unsupported `Vec<T>` field — only `Vec<u8>` (→ Binary) is supported",
+            ));
+        }
         other => {
             return Err(syn::Error::new_spanned(
                 ty,
-                format!("unsupported field type `{other}`; v0.1 supports i32/i64/f32/f64/bool/String/DateTime/NaiveDate/Uuid/serde_json::Value, optionally wrapped in Option or Auto (Auto only on integers)"),
+                format!("unsupported field type `{other}`; supports i16/i32/i64/f32/f64/bool/String/DateTime/NaiveDate/NaiveTime/Uuid/serde_json::Value/Decimal/Vec<u8>, optionally wrapped in Option or Auto (Auto only on integers/Uuid/DateTime)"),
             ));
         }
     };
