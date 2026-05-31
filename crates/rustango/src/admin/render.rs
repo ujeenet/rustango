@@ -165,7 +165,64 @@ pub(crate) fn render_gfk_select(
 
 /// Render a form input for `field`, optionally pre-filled with `value`.
 /// PK fields get `readonly` when `pk_locked` is true (edit mode).
+///
+/// Delegates to [`render_input_with_widget`] with no widget override.
+/// Call sites that have an [`AdminConfig`](crate::core::AdminConfig)
+/// in scope should use [`render_input_with_widget`] directly and pass
+/// the override (#359) so per-model `formfield_overrides` apply.
 pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) -> String {
+    render_input_with_widget(field, value, pk_locked, None)
+}
+
+/// Same as [`render_input`] but consults an explicit widget override.
+///
+/// Django-shape `formfield_overrides` (#359). When `widget` is
+/// `Some(name)` and matches a built-in widget identifier, the
+/// emitted markup matches the override instead of the FieldType
+/// default. Unknown names log a single tracing warning and fall
+/// through to the default — typos shouldn't render an empty cell.
+///
+/// Built-in widget names + the FieldType(s) they apply to:
+///
+/// - `"password"` (String) — `<input type="password">`
+/// - `"hidden"` (any) — `<input type="hidden">`
+/// - `"textarea"` (String) — force `<textarea>`
+/// - `"color"` (String) — `<input type="color">`
+/// - `"range"` (I16/I32/I64) — `<input type="range">`
+/// - `"email"` (String) — `<input type="email">`
+/// - `"url"` (String) — `<input type="url">`
+/// - `"tel"` (String) — `<input type="tel">`
+/// - `"search"` (String) — `<input type="search">`
+///
+/// `"hidden"` is the only widget that applies regardless of
+/// FieldType — useful for sealed inputs the operator shouldn't see
+/// or edit. The others fall back to the FieldType default when
+/// applied to an incompatible type (e.g. `"color"` on an integer)
+/// so the override never produces a broken form.
+pub(crate) fn render_input_with_widget(
+    field: &FieldSchema,
+    value: &str,
+    pk_locked: bool,
+    widget: Option<&str>,
+) -> String {
+    if let Some(name) = widget {
+        if let Some(html) = render_named_widget(field, value, pk_locked, name) {
+            return html;
+        }
+        tracing::warn!(
+            target: "rustango::admin",
+            field = %field.name,
+            widget = %name,
+            "unknown or incompatible formfield_overrides widget — falling back to FieldType default"
+        );
+    }
+    render_input_default(field, value, pk_locked)
+}
+
+/// Default FieldType-derived widget — extracted so
+/// [`render_input_with_widget`] can fall through to it after a
+/// widget-override miss without duplicating the dispatch table.
+fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> String {
     let name = escape(field.name);
     let val = escape(value);
     // #445 — Django-shape `blank = true` drops the `required` HTML
@@ -272,6 +329,86 @@ pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) ->
         FieldType::Binary => format!(
             r#"<input type="text" name="{name}" id="{name}" value="{val}" pattern="[0-9a-f]*" inputmode="latin"{readonly} style="font-family:monospace">"#
         ),
+    }
+}
+
+/// Render the named built-in widget override (#359). Returns `None`
+/// when the widget name is unknown OR is incompatible with the
+/// field's [`FieldType`] (e.g. `"color"` applied to an integer),
+/// signaling the caller to fall through to
+/// [`render_input_default`].
+///
+/// `"hidden"` is the only widget that applies to every FieldType.
+fn render_named_widget(
+    field: &FieldSchema,
+    value: &str,
+    pk_locked: bool,
+    widget: &str,
+) -> Option<String> {
+    let name = escape(field.name);
+    let val = escape(value);
+    let required = if field.nullable
+        || field.ty == FieldType::Bool
+        || field.auto
+        || field.primary_key
+        || field.blank
+    {
+        ""
+    } else {
+        " required"
+    };
+    let readonly = if pk_locked { " readonly" } else { "" };
+
+    match widget {
+        // `"hidden"` is the universal override — any FieldType.
+        "hidden" => Some(format!(
+            r#"<input type="hidden" name="{name}" id="{name}" value="{val}">"#
+        )),
+        // String-typed widgets.
+        "password" if matches!(field.ty, FieldType::String) => Some(format!(
+            r#"<input type="password" name="{name}" id="{name}" value="{val}"{required}{readonly}>"#
+        )),
+        "textarea" if matches!(field.ty, FieldType::String) => {
+            let maxlen = field
+                .max_length
+                .map(|n| format!(r#" maxlength="{n}""#))
+                .unwrap_or_default();
+            Some(format!(
+                r#"<textarea name="{name}" id="{name}"{maxlen}{required}{readonly}>{val}</textarea>"#
+            ))
+        }
+        "color" if matches!(field.ty, FieldType::String) => Some(format!(
+            r#"<input type="color" name="{name}" id="{name}" value="{val}"{required}{readonly}>"#
+        )),
+        "email" if matches!(field.ty, FieldType::String) => Some(format!(
+            r#"<input type="email" name="{name}" id="{name}" value="{val}"{required}{readonly}>"#
+        )),
+        "url" if matches!(field.ty, FieldType::String) => Some(format!(
+            r#"<input type="url" name="{name}" id="{name}" value="{val}"{required}{readonly}>"#
+        )),
+        "tel" if matches!(field.ty, FieldType::String) => Some(format!(
+            r#"<input type="tel" name="{name}" id="{name}" value="{val}"{required}{readonly}>"#
+        )),
+        "search" if matches!(field.ty, FieldType::String) => Some(format!(
+            r#"<input type="search" name="{name}" id="{name}" value="{val}"{required}{readonly}>"#
+        )),
+        // Integer-typed widgets.
+        "range" if matches!(field.ty, FieldType::I16 | FieldType::I32 | FieldType::I64) => {
+            let mut attrs = String::new();
+            if let Some(min) = field.min {
+                attrs.push_str(&format!(r#" min="{min}""#));
+            }
+            if let Some(max) = field.max {
+                attrs.push_str(&format!(r#" max="{max}""#));
+            }
+            Some(format!(
+                r#"<input type="range" step="1" name="{name}" id="{name}" value="{val}"{attrs}{readonly}>"#
+            ))
+        }
+        // Unknown name or type mismatch → caller falls through to
+        // the FieldType default. The warning is logged at the
+        // dispatch site (`render_input_with_widget`).
+        _ => None,
     }
 }
 

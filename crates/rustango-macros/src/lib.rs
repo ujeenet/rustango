@@ -1952,6 +1952,19 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
         }
     };
 
+    // #359 — formfield_overrides: parse "field:widget,field2:widget2" into
+    // a Vec<(String, String)>. Empty / unset → no overrides.
+    let formfield_pairs: Vec<(&str, &str)> = admin
+        .formfield_overrides
+        .as_ref()
+        .map(|(v, _)| v.iter().map(|(f, w)| (f.as_str(), w.as_str())).collect())
+        .unwrap_or_default();
+    let formfield_tokens = formfield_pairs.iter().map(|(field, widget)| {
+        let field = *field;
+        let widget = *widget;
+        quote!((#field, #widget))
+    });
+
     let list_per_page = admin.list_per_page.unwrap_or(0);
 
     let ordering_pairs = admin
@@ -1984,6 +1997,7 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
             raw_id_fields: &[ #( #raw_id_fields_lits ),* ],
             autocomplete_fields: &[ #( #autocomplete_fields_lits ),* ],
             list_select_related: #list_select_related_tokens,
+            formfield_overrides: &[ #( #formfield_tokens ),* ],
         })
     }
 }
@@ -4535,6 +4549,12 @@ struct AdminAttrs {
     /// policy. Default `"all"` matches rustango's join-everything
     /// behavior; `"none"` opts out; CSV restricts. Issue #352.
     list_select_related: Option<String>,
+    /// `admin(formfield_overrides = "field:widget, field2:widget2")` —
+    /// Django-shape. Each entry is `field_name:widget_name`; multiple
+    /// entries comma-separated. Empty / unset → no overrides. The
+    /// list of widget names supported is documented on
+    /// `AdminConfig::formfield_overrides`. Issue #359.
+    formfield_overrides: Option<(Vec<(String, String)>, proc_macro2::Span)>,
 }
 
 fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
@@ -4709,6 +4729,12 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                         admin.list_select_related = Some(s.value());
                         return Ok(());
                     }
+                    if inner.path.is_ident("formfield_overrides") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        admin.formfield_overrides =
+                            Some((parse_formfield_overrides(&s.value()), s.span()));
+                        return Ok(());
+                    }
                     Err(inner.error(
                         "unknown admin attribute (supported: \
                          `list_display`, `list_display_links`, \
@@ -4721,6 +4747,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                          `raw_id_fields`, \
                          `autocomplete_fields`, \
                          `list_select_related`, \
+                         `formfield_overrides`, \
                          `fieldsets`)",
                     ))
                 })?;
@@ -5295,6 +5322,27 @@ fn parse_prepopulated_list(raw: &str) -> Vec<(String, Vec<String>)> {
                 return None;
             }
             Some((target, sources))
+        })
+        .collect()
+}
+
+/// Parse Django-shape `formfield_overrides` — `"field:widget,field2:widget2"`
+/// into `(field_name, widget_name)` pairs. Empty entries, missing `:`,
+/// and empty halves drop silently — the macro layer only enforces shape,
+/// not field-name vs. widget-name validity (those checks happen at
+/// `AdminConfig` consumption time). Issue #359.
+fn parse_formfield_overrides(raw: &str) -> Vec<(String, String)> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|entry| {
+            let (field, widget) = entry.split_once(':')?;
+            let field = field.trim().to_owned();
+            let widget = widget.trim().to_owned();
+            if field.is_empty() || widget.is_empty() {
+                return None;
+            }
+            Some((field, widget))
         })
         .collect()
 }

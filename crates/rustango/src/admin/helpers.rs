@@ -478,12 +478,22 @@ fn render_form_with_inlines_and_pickers(
         // PK is locked on edit; readonly_fields are locked on edit.
         // Auto fields are always locked — they're DB-assigned.
         let lock_input = f.auto || (pk_locked && (f.primary_key || is_readonly_field));
+        // #359 — Django-shape `formfield_overrides`. Look up a
+        // per-field widget override from the AdminConfig before
+        // dispatching to the FieldType default. Unknown names fall
+        // back automatically — `render_input_with_widget` logs the
+        // warning.
+        let widget_override = admin_cfg
+            .formfield_overrides
+            .iter()
+            .find(|(name, _)| *name == f.name)
+            .map(|(_, widget)| *widget);
         // #244 — swap raw integer input for a ContentType `<select>`
         // on fields named as a `generic_fk` ct_column.
         let mut input_html = if gfk_ct_columns.contains(f.column) {
             render::render_gfk_select(f, value, lock_input, gfk_picker_cts)
         } else {
-            render::render_input(f, value, lock_input)
+            render::render_input_with_widget(f, value, lock_input, widget_override)
         };
         // #357 — Django-shape `raw_id_fields`. When the field is an
         // FK / O2O AND is named in `admin.raw_id_fields`, append a
