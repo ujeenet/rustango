@@ -639,6 +639,15 @@ impl Builder {
             .route("/{table}/{pk}/delete", post(views::delete_submit))
             .with_state(state.clone());
 
+        // #363 — Django-shape `ModelAdmin.get_urls()` per-model
+        // custom views. Walk the inventory registry once, validate
+        // each entry against the framework's built-in route shape,
+        // and mount the survivors on the same protected router.
+        // Routes mount BEFORE `.with_state(state)` so the
+        // closure-captured `pool` inside the handler runs with the
+        // same backend the admin was built against.
+        let protected = mount_custom_views(protected, state.clone());
+
         // #253 — when session auth is configured, mount the
         // `/login` + `/logout` routes BEFORE applying the auth
         // middleware so they stay reachable while every other
@@ -765,6 +774,87 @@ impl AppState {
             .and_then(|m| m.get(action))
             .cloned()
     }
+}
+
+/// Mount every inventory-registered custom admin view on `router`,
+/// skipping any registration whose URL suffix collides with the
+/// framework's built-in routes or whose model isn't visible to the
+/// current admin instance (`show_only` / hidden tables). Issue #363.
+///
+/// Mounted shape: `/{table}/{suffix}` with the registered
+/// `Method`. `axum::routing::on(MethodFilter, …)` lets a single
+/// route bind to one verb without colliding with the framework's
+/// built-in handlers on the same prefix.
+fn mount_custom_views(mut router: Router, state: AppState) -> Router {
+    use axum::extract::Request;
+    use axum::http::Method;
+    use axum::routing::on;
+    use axum::routing::MethodFilter;
+
+    for view in inventory::iter::<super::custom_views::AdminCustomView> {
+        if super::custom_views::is_reserved(view.suffix) {
+            tracing::warn!(
+                target: "rustango::admin",
+                table = %view.table,
+                suffix = %view.suffix,
+                "custom admin view suffix collides with a built-in admin route — skipping"
+            );
+            continue;
+        }
+        // Skip views whose table isn't currently registered or is
+        // hidden via the Builder's `show_only` / read-only knobs —
+        // mounting the route on an invisible table would be
+        // unreachable anyway and surfaces less surprisingly as
+        // "view not loaded".
+        if !state.is_visible(view.table) {
+            tracing::debug!(
+                target: "rustango::admin",
+                table = %view.table,
+                suffix = %view.suffix,
+                "custom admin view registered for a table that is not visible to this admin instance — skipping"
+            );
+            continue;
+        }
+
+        let method_filter = match view.method {
+            Method::GET => MethodFilter::GET,
+            Method::POST => MethodFilter::POST,
+            Method::PUT => MethodFilter::PUT,
+            Method::DELETE => MethodFilter::DELETE,
+            Method::PATCH => MethodFilter::PATCH,
+            ref other => {
+                tracing::warn!(
+                    target: "rustango::admin",
+                    table = %view.table,
+                    suffix = %view.suffix,
+                    method = ?other,
+                    "custom admin view declared with an unsupported HTTP method — defaulting to GET"
+                );
+                MethodFilter::GET
+            }
+        };
+
+        let table = view.table;
+        let suffix = view.suffix.trim_start_matches('/');
+        let path = format!("/{table}/{suffix}");
+        // `view.handler` is a plain fn pointer (Copy); no Arc
+        // bookkeeping needed.
+        let handler = view.handler;
+        // Each mounted closure needs its own owned `Pool` clone so
+        // the loop can re-iterate; cloning the outer `state.pool`
+        // here (not inside the closure) keeps the loop's
+        // `state` alive across iterations.
+        let pool_for_handler = state.pool.clone();
+
+        let mounted_handler = move |req: Request| {
+            let pool = pool_for_handler.clone();
+            async move { handler(pool, req).await }
+        };
+
+        router = router.route(&path, on(method_filter, mounted_handler));
+    }
+
+    router
 }
 
 #[cfg(all(test, feature = "postgres"))]

@@ -242,8 +242,8 @@ Summary: **13 SHIPPED / 2 PARTIAL / 0 MISSING / 1 N/A**. Section 5 is fully ship
 | `has_add_permission` / `change` / `delete` / `view` | [has_*_permission](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#django.contrib.admin.ModelAdmin.has_add_permission) | PARTIAL | `auto_create_permissions_pool` seeds codenames; `permission_required` middleware gates routes (#361) | Per-object hook MISSING. |
 | Tabular / Stacked inlines | [InlineModelAdmin](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#inlinemodeladmin-objects) | SHIPPED | `register_admin_inline_tabular!` / `_stacked!` macros (v0.27+) | |
 | Generic inlines | [generic-inline-admin](https://docs.djangoproject.com/en/6.0/ref/contrib/contenttypes/#generic-inline-model-admin) | SHIPPED | `register_admin_inline_generic!` (v0.40, closed #242–#244) | |
-| Custom URLs (`get_urls`) | [get_urls](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#django.contrib.admin.ModelAdmin.get_urls) | PARTIAL | Builder exposes `register_action` for bulk actions (#362) | No arbitrary `/<model>/custom/` routes per admin. |
-| Custom views per model | (above) | MISSING | n/a (#363) | |
+| Custom URLs (`get_urls`) | [get_urls](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#django.contrib.admin.ModelAdmin.get_urls) | SHIPPED | `register_admin_view!(table, suffix, method, label, handler)` (closed #362 + #363, see next row). Mounts arbitrary axum handlers under `{admin_prefix}/{table}/{suffix}`. Collisions with built-in routes (`new`, `{pk}`, `{pk}/edit`, `{pk}/delete`, `__action`, `__autocomplete`) silently skip with a tracing warning. Runs inside the same session-auth scope as the rest of the admin. | |
+| Custom views per model | (above) | SHIPPED | `register_admin_view!` (closed #363) — handler signature `(Pool, Request) -> Response`. Multiple verbs on the same path map to distinct handlers; unmatched methods return 405. Reserved suffixes never overwrite built-in routes. | |
 | Multiple AdminSite registries | [AdminSite](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#django.contrib.admin.AdminSite) | PARTIAL | `admin::Builder` supports `show_only` / `read_only` per builder (#364) | Not multiple side-by-side admin instances; tenant admin is a distinct surface. |
 | `ModelAdmin.save_model()` / `delete_model()` hooks | [save_model](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#django.contrib.admin.ModelAdmin.save_model) | SHIPPED | `signals::admin::{connect_admin_pre_save, connect_admin_post_save, connect_admin_pre_delete, connect_admin_post_delete}` (closed #365, v0.42). Admin-only seam complementing `post_save` (which fires for every ORM write). Context carries `table`, `pk`, and `change` (create-vs-update). | |
 | `ModelAdmin.history_view` (object history) | [history-view](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#django.contrib.admin.ModelAdmin.history_view) | SHIPPED | Audit log read-only panel on detail page (v0.28+) | |
@@ -255,7 +255,7 @@ Summary: **13 SHIPPED / 2 PARTIAL / 0 MISSING / 1 N/A**. Section 5 is fully ship
 | Admin styling / branding | [admin templates](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#overriding-admin-templates) | SHIPPED | `Storage`-backed per-tenant brand + theme tokens | |
 | Admin docs (`django.contrib.admindocs`) | [admindocs](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/admindocs/) | N/A | n/a | Rust doc-comments cover it. |
 
-Summary: **20 SHIPPED / 7 PARTIAL / 9 MISSING / 2 N/A**. Concentration of MISSING items in admin polish: custom URLs, custom views, history view re-render, etc.
+Summary: **22 SHIPPED / 6 PARTIAL / 8 MISSING / 2 N/A**. Concentration of MISSING items in admin polish: history view re-render, multiple AdminSites, etc.
 
 ---
 

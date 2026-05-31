@@ -42,6 +42,7 @@
 mod audit;
 mod auth;
 pub mod computed_fields;
+pub mod custom_views;
 mod date_hierarchy;
 mod errors;
 mod forms;
@@ -63,6 +64,7 @@ mod views;
 
 pub use auth::protect_with_basic_auth;
 pub use computed_fields::{ComputedField, ComputedFieldLinkFn, ComputedFieldRenderFn};
+pub use custom_views::{AdminCustomView, CustomViewFuture, CustomViewHandler};
 pub use errors::AdminError;
 pub use inlines::{
     InlineAdmin, InlineAdminGeneric, InlineApplyOutcome, InlineFormPanel, InlineKind, InlinePanel,
