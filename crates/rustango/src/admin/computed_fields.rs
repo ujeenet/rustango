@@ -55,6 +55,13 @@
 /// `row_to_json_my` / `row_to_json_sqlite` per the active backend.
 pub type ComputedFieldRenderFn = fn(&serde_json::Value) -> String;
 
+/// Function signature a computed field's optional link callable
+/// implements. Receives the same row JSON the renderer does and
+/// returns the cell's link target URL — `None` to render the cell
+/// inline. Issue #349 — Django parity for `list_display` callables
+/// that advertise a click target (e.g. an FK detail page).
+pub type ComputedFieldLinkFn = fn(&serde_json::Value) -> Option<String>;
+
 /// One computed-field registration. Inventory-collected; submit one
 /// per `register_admin_computed!` invocation.
 pub struct ComputedField {
@@ -70,6 +77,12 @@ pub struct ComputedField {
     /// Renderer. Pure HTML out — caller is responsible for any
     /// escaping needed.
     pub render: ComputedFieldRenderFn,
+    /// Issue #349 — optional per-row link callable. When present and
+    /// returns `Some(url)`, the admin list view wraps the rendered
+    /// cell in `<a href="{url}">…</a>`. When `None` (the default)
+    /// the cell behaves exactly as before, deferring to the
+    /// container-level `list_display_links` for whether to link.
+    pub link: Option<ComputedFieldLinkFn>,
 }
 
 inventory::collect!(ComputedField);
@@ -103,21 +116,69 @@ pub fn find(table: &str, name: &str) -> Option<&'static ComputedField> {
 ///     "word_count",          // identifier in list_display
 ///     "Words",               // column header
 ///     |row| {
-///         use sqlx::Row;
-///         let body: String = row.try_get("body").unwrap_or_default();
+///         let body = row.get("body").and_then(|v| v.as_str()).unwrap_or_default();
 ///         body.split_whitespace().count().to_string()
 ///     }
 /// );
 /// ```
+///
+/// Issue #349 — pass `link = |row| Option<String>` to advertise a
+/// per-row click target. When `Some(url)` comes back, the admin
+/// list view wraps the rendered cell in `<a href="{url}">…</a>`.
+///
+/// ```ignore
+/// rustango::register_admin_computed!(
+///     "cms_post",
+///     "author_link",
+///     "Author",
+///     |row| {
+///         row.get("author")
+///             .and_then(|a| a.get("name"))
+///             .and_then(|v| v.as_str())
+///             .unwrap_or("—")
+///             .to_string()
+///     },
+///     link = |row| {
+///         row.get("author")
+///             .and_then(|a| a.get("id"))
+///             .and_then(|v| v.as_i64())
+///             .map(|id| format!("/__admin/auth_user/{id}"))
+///     },
+/// );
+/// ```
 #[macro_export]
 macro_rules! register_admin_computed {
-    ($table:expr, $name:expr, $label:expr, $render:expr) => {
+    // 4-arg form — no link. Backwards-compatible with every existing
+    // call site; the new `link` field stays `None`.
+    ($table:expr, $name:expr, $label:expr, $render:expr $(,)?) => {
         $crate::inventory::submit! {
             $crate::admin::computed_fields::ComputedField {
                 table: $table,
                 name: $name,
                 label: $label,
                 render: $render,
+                link: ::core::option::Option::None,
+            }
+        }
+    };
+    // 5-arg form — with explicit `link = …` callable. The link
+    // expression must be of type `fn(&serde_json::Value) -> Option<String>`
+    // (typically a closure; rust will coerce a non-capturing one to
+    // the fn-pointer type expected by `ComputedFieldLinkFn`).
+    (
+        $table:expr,
+        $name:expr,
+        $label:expr,
+        $render:expr,
+        link = $link:expr $(,)?
+    ) => {
+        $crate::inventory::submit! {
+            $crate::admin::computed_fields::ComputedField {
+                table: $table,
+                name: $name,
+                label: $label,
+                render: $render,
+                link: ::core::option::Option::Some($link),
             }
         }
     };
