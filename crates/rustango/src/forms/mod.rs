@@ -560,6 +560,28 @@ impl ModelForm {
     /// [`ModelFormError::Validation`] if any field is invalid.
     /// [`ModelFormError::Database`] for driver-level failures.
     pub async fn save(&self, pool: &crate::sql::Pool) -> Result<SqlValue, ModelFormError> {
+        self.prepare_save()?.commit_pool(pool).await
+    }
+
+    /// Django-shape `form.save(commit=False)` — issue #375. Validates
+    /// every included field and returns a mutable
+    /// [`PreparedSave`] holding the parsed columns + values, without
+    /// touching the DB. The caller can `.set(column, value)` to add
+    /// fields the form didn't have (e.g. `author_id` derived from the
+    /// session) or override parsed values, then call
+    /// [`PreparedSave::commit_pool`] to actually run the
+    /// INSERT or UPDATE.
+    ///
+    /// ```ignore
+    /// let mut prep = form.prepare_save()?;
+    /// prep.set("author_id", SqlValue::I64(request_user_id));
+    /// let pk = prep.commit_pool(&pool).await?;
+    /// ```
+    ///
+    /// # Errors
+    /// [`ModelFormError::Validation`] if any field is invalid.
+    /// [`ModelFormError::Database`] if the model has no primary key.
+    pub fn prepare_save(&self) -> Result<PreparedSave, ModelFormError> {
         let errors = self.validate();
         if !errors.is_empty() {
             return Err(ModelFormError::Validation(errors));
@@ -571,94 +593,195 @@ impl ModelForm {
             )))
         })?;
 
-        if let Some(pk_val) = &self.pk_value {
-            // UPDATE
+        let mut columns: Vec<&'static str> = Vec::new();
+        let mut values: Vec<SqlValue> = Vec::new();
+        for field in self.schema.scalar_fields() {
+            if !self.should_include(field) {
+                continue;
+            }
+            let raw = self.data.get(field.name).map(String::as_str);
+            if let Ok(v) = parse_form_value(field, raw) {
+                columns.push(field.column);
+                values.push(v);
+            }
+        }
+
+        Ok(PreparedSave {
+            schema: self.schema,
+            pk_field,
+            pk_value: self.pk_value.clone(),
+            columns,
+            values,
+        })
+    }
+}
+
+/// Result of `form.prepare_save()` — issue #375 / Django
+/// `form.save(commit=False)`. Holds the validated columns + values
+/// ready to INSERT or UPDATE; caller can mutate before
+/// [`Self::commit_pool`] to add session-derived fields the form
+/// didn't expose.
+///
+/// `save_m2m()` — Django's deferred M2M companion — has no analog
+/// yet because rustango's `ModelForm` doesn't surface M2M form
+/// fields; once it does, the deferred-apply lives on this struct.
+#[derive(Debug, Clone)]
+pub struct PreparedSave {
+    schema: &'static ModelSchema,
+    pk_field: &'static FieldSchema,
+    /// `Some` for UPDATEs (carried over from `ModelForm::pk_value`),
+    /// `None` for INSERTs.
+    pk_value: Option<SqlValue>,
+    /// Columns about to be written, parallel to `values`. Mutable
+    /// via [`Self::set`] / [`Self::unset`].
+    columns: Vec<&'static str>,
+    /// Parsed values for each column, parallel to `columns`.
+    values: Vec<SqlValue>,
+}
+
+impl PreparedSave {
+    /// Add a column / value pair, or replace it if one already
+    /// exists for that name. Column lookup is by `FieldSchema.name`
+    /// (the Rust field ident, not the SQL column) so callers can use
+    /// the same names they wrote in the model definition. Returns
+    /// `&mut Self` for chaining.
+    ///
+    /// Use this when the form omits a field that the DB needs (e.g.
+    /// `author_id` derived from the request user) or to override a
+    /// parsed value before commit.
+    ///
+    /// Unknown field names are a no-op — callers that care can
+    /// inspect [`Self::columns`] / [`Self::has`] first.
+    pub fn set(&mut self, field: &str, value: impl Into<SqlValue>) -> &mut Self {
+        let Some(target_col) = self
+            .schema
+            .scalar_fields()
+            .find(|f| f.name == field)
+            .map(|f| f.column)
+        else {
+            return self;
+        };
+        if let Some(idx) = self.columns.iter().position(|c| *c == target_col) {
+            self.values[idx] = value.into();
+        } else {
+            self.columns.push(target_col);
+            self.values.push(value.into());
+        }
+        self
+    }
+
+    /// Drop a column from the prepared write. Mirrors Django's
+    /// `del obj.field` between `save(commit=False)` and `obj.save()`.
+    /// Unknown field names are a no-op.
+    pub fn unset(&mut self, field: &str) -> &mut Self {
+        let Some(target_col) = self
+            .schema
+            .scalar_fields()
+            .find(|f| f.name == field)
+            .map(|f| f.column)
+        else {
+            return self;
+        };
+        if let Some(idx) = self.columns.iter().position(|c| *c == target_col) {
+            self.columns.remove(idx);
+            self.values.remove(idx);
+        }
+        self
+    }
+
+    /// `true` when the named field is currently in the prepared
+    /// write set. Useful for caller-side branching before
+    /// [`Self::commit_pool`].
+    #[must_use]
+    pub fn has(&self, field: &str) -> bool {
+        self.schema
+            .scalar_fields()
+            .find(|f| f.name == field)
+            .is_some_and(|f| self.columns.iter().any(|c| *c == f.column))
+    }
+
+    /// `true` when this prepared save will INSERT, `false` when it
+    /// will UPDATE an existing row. Mirrors the form-side `pk_value`
+    /// discriminant.
+    #[must_use]
+    pub fn is_insert(&self) -> bool {
+        self.pk_value.is_none()
+    }
+
+    /// Execute the actual INSERT or UPDATE. Same return shape as
+    /// [`ModelForm::save`] — the new PK on INSERT, the supplied PK
+    /// on UPDATE.
+    ///
+    /// # Errors
+    /// [`ModelFormError::Database`] for driver-level failures.
+    pub async fn commit_pool(self, pool: &crate::sql::Pool) -> Result<SqlValue, ModelFormError> {
+        if let Some(pk_val) = self.pk_value {
             let assignments: Vec<Assignment> = self
-                .schema
-                .scalar_fields()
-                .filter(|f| self.should_include(f))
-                .filter_map(|f| {
-                    let raw = self.data.get(f.name).map(String::as_str);
-                    parse_form_value(f, raw).ok().map(|v| Assignment {
-                        column: f.column,
-                        value: v.into(),
-                    })
+                .columns
+                .iter()
+                .zip(self.values)
+                .map(|(col, val)| Assignment {
+                    column: col,
+                    value: val.into(),
                 })
                 .collect();
-
             let query = UpdateQuery {
                 model: self.schema,
                 set: assignments,
                 where_clause: WhereExpr::Predicate(Filter {
-                    column: pk_field.column,
+                    column: self.pk_field.column,
                     op: Op::Eq,
                     value: pk_val.clone(),
                 }),
             };
             crate::sql::update_pool(pool, &query).await?;
-            Ok(pk_val.clone())
-        } else {
-            // INSERT
-            let mut columns: Vec<&'static str> = Vec::new();
-            let mut values: Vec<SqlValue> = Vec::new();
-            for field in self.schema.scalar_fields() {
-                if !self.should_include(field) {
-                    continue;
-                }
-                let raw = self.data.get(field.name).map(String::as_str);
-                if let Ok(v) = parse_form_value(field, raw) {
-                    columns.push(field.column);
-                    values.push(v);
+            return Ok(pk_val);
+        }
+
+        let query = InsertQuery {
+            model: self.schema,
+            columns: self.columns,
+            values: self.values,
+            returning: vec![self.pk_field.column],
+            on_conflict: None,
+        };
+        let returning = crate::sql::insert_returning_pool(pool, &query).await?;
+        let pk_val: SqlValue = match returning {
+            #[cfg(feature = "postgres")]
+            crate::sql::InsertReturningPool::PgRow(row) => {
+                use crate::sql::sqlx::Row as _;
+                match self.pk_field.ty {
+                    FieldType::I64 => SqlValue::I64(row.try_get(self.pk_field.column).unwrap_or(0)),
+                    FieldType::I32 => SqlValue::I32(row.try_get(self.pk_field.column).unwrap_or(0)),
+                    FieldType::I16 => SqlValue::I16(row.try_get(self.pk_field.column).unwrap_or(0)),
+                    FieldType::String => {
+                        SqlValue::String(row.try_get(self.pk_field.column).unwrap_or_default())
+                    }
+                    _ => SqlValue::Null,
                 }
             }
-            let query = InsertQuery {
-                model: self.schema,
-                columns,
-                values,
-                returning: vec![pk_field.column],
-                on_conflict: None,
-            };
-            let returning = crate::sql::insert_returning_pool(pool, &query).await?;
-            // Per-backend PK decode. Both PG and SQLite return the
-            // RETURNING column as a row; MySQL has no RETURNING and
-            // surfaces the auto-generated PK as a single `i64`.
-            let pk_val: SqlValue = match returning {
-                #[cfg(feature = "postgres")]
-                crate::sql::InsertReturningPool::PgRow(row) => {
-                    use crate::sql::sqlx::Row as _;
-                    match pk_field.ty {
-                        FieldType::I64 => SqlValue::I64(row.try_get(pk_field.column).unwrap_or(0)),
-                        FieldType::I32 => SqlValue::I32(row.try_get(pk_field.column).unwrap_or(0)),
-                        FieldType::I16 => SqlValue::I16(row.try_get(pk_field.column).unwrap_or(0)),
-                        FieldType::String => {
-                            SqlValue::String(row.try_get(pk_field.column).unwrap_or_default())
-                        }
-                        _ => SqlValue::Null,
+            #[cfg(feature = "mysql")]
+            crate::sql::InsertReturningPool::MySqlAutoId(id) => match self.pk_field.ty {
+                FieldType::I64 => SqlValue::I64(id),
+                FieldType::I32 => SqlValue::I32(id as i32),
+                FieldType::I16 => SqlValue::I16(id as i16),
+                _ => SqlValue::I64(id),
+            },
+            #[cfg(feature = "sqlite")]
+            crate::sql::InsertReturningPool::SqliteRow(row) => {
+                use crate::sql::sqlx::Row as _;
+                match self.pk_field.ty {
+                    FieldType::I64 => SqlValue::I64(row.try_get(self.pk_field.column).unwrap_or(0)),
+                    FieldType::I32 => SqlValue::I32(row.try_get(self.pk_field.column).unwrap_or(0)),
+                    FieldType::I16 => SqlValue::I16(row.try_get(self.pk_field.column).unwrap_or(0)),
+                    FieldType::String => {
+                        SqlValue::String(row.try_get(self.pk_field.column).unwrap_or_default())
                     }
+                    _ => SqlValue::Null,
                 }
-                #[cfg(feature = "mysql")]
-                crate::sql::InsertReturningPool::MySqlAutoId(id) => match pk_field.ty {
-                    FieldType::I64 => SqlValue::I64(id),
-                    FieldType::I32 => SqlValue::I32(id as i32),
-                    FieldType::I16 => SqlValue::I16(id as i16),
-                    _ => SqlValue::I64(id),
-                },
-                #[cfg(feature = "sqlite")]
-                crate::sql::InsertReturningPool::SqliteRow(row) => {
-                    use crate::sql::sqlx::Row as _;
-                    match pk_field.ty {
-                        FieldType::I64 => SqlValue::I64(row.try_get(pk_field.column).unwrap_or(0)),
-                        FieldType::I32 => SqlValue::I32(row.try_get(pk_field.column).unwrap_or(0)),
-                        FieldType::I16 => SqlValue::I16(row.try_get(pk_field.column).unwrap_or(0)),
-                        FieldType::String => {
-                            SqlValue::String(row.try_get(pk_field.column).unwrap_or_default())
-                        }
-                        _ => SqlValue::Null,
-                    }
-                }
-            };
-            Ok(pk_val)
-        }
+            }
+        };
+        Ok(pk_val)
     }
 }
 
@@ -1599,5 +1722,105 @@ mod model_form_tests {
     fn modelform_exclude_unknown_field_is_a_no_op() {
         let form = ModelForm::new(post_schema(), HashMap::new()).exclude(&["nope"]);
         assert_eq!(form.included_field_names(), vec!["title", "body"]);
+    }
+
+    // ---- #375 — prepare_save / PreparedSave (commit=False) ----
+
+    #[test]
+    fn prepare_save_returns_validation_error_when_form_invalid() {
+        // title is required (non-nullable String) — omitting it
+        // surfaces as a FormError::Missing through validate().
+        let p: HashMap<String, String> = HashMap::new();
+        let form = ModelForm::new(post_schema(), p);
+        let err = form.prepare_save().expect_err("should fail validation");
+        assert!(matches!(err, ModelFormError::Validation(_)));
+    }
+
+    #[test]
+    fn prepare_save_walks_only_form_supplied_fields_on_insert() {
+        let mut p: HashMap<String, String> = HashMap::new();
+        p.insert("title".into(), "ok".into());
+        // body deliberately omitted from form — `parse_form_value`
+        // treats an absent nullable as `SqlValue::Null` and includes
+        // it, so the prepared write set carries both columns.
+        let prep = ModelForm::new(post_schema(), p)
+            .prepare_save()
+            .expect("valid");
+        assert!(prep.is_insert(), "no pk_value supplied → INSERT");
+        assert!(prep.has("title"));
+        assert!(prep.has("body"));
+    }
+
+    #[test]
+    fn prepared_save_set_adds_missing_field() {
+        let mut p: HashMap<String, String> = HashMap::new();
+        p.insert("title".into(), "ok".into());
+        let form = ModelForm::new(post_schema(), p).exclude(&["body"]);
+        let mut prep = form.prepare_save().expect("valid");
+        assert!(!prep.has("body"), "body was excluded by the form");
+        prep.set("body", SqlValue::String("late binding".into()));
+        assert!(
+            prep.has("body"),
+            "set() should have added body to the write set"
+        );
+    }
+
+    #[test]
+    fn prepared_save_set_overrides_existing_field() {
+        let mut p: HashMap<String, String> = HashMap::new();
+        p.insert("title".into(), "from-form".into());
+        let mut prep = ModelForm::new(post_schema(), p)
+            .prepare_save()
+            .expect("valid");
+        prep.set("title", SqlValue::String("override".into()));
+        // The override should fully replace, not duplicate — search
+        // by FieldSchema for the column name then count occurrences.
+        let title_col = post_schema()
+            .scalar_fields()
+            .find(|f| f.name == "title")
+            .unwrap()
+            .column;
+        assert_eq!(
+            prep.columns.iter().filter(|c| **c == title_col).count(),
+            1,
+            "title should appear exactly once"
+        );
+    }
+
+    #[test]
+    fn prepared_save_unset_drops_field_from_write_set() {
+        let mut p: HashMap<String, String> = HashMap::new();
+        p.insert("title".into(), "ok".into());
+        let mut prep = ModelForm::new(post_schema(), p)
+            .prepare_save()
+            .expect("valid");
+        assert!(prep.has("body"));
+        prep.unset("body");
+        assert!(!prep.has("body"), "unset() should drop body");
+    }
+
+    #[test]
+    fn prepared_save_set_unknown_field_is_a_noop() {
+        let mut p: HashMap<String, String> = HashMap::new();
+        p.insert("title".into(), "ok".into());
+        let mut prep = ModelForm::new(post_schema(), p)
+            .prepare_save()
+            .expect("valid");
+        prep.set("nonexistent", SqlValue::I64(0));
+        // No new column should appear in the prepared write set.
+        assert!(
+            prep.columns.iter().all(|c| *c != "nonexistent"),
+            "unknown field name should not pollute the write set"
+        );
+    }
+
+    #[test]
+    fn prepare_save_carries_pk_for_update_path() {
+        let mut p: HashMap<String, String> = HashMap::new();
+        p.insert("title".into(), "edited".into());
+        let prep = ModelForm::for_update(post_schema(), p, SqlValue::I64(42))
+            .prepare_save()
+            .expect("valid");
+        assert!(!prep.is_insert(), "pk_value was supplied → UPDATE");
     }
 }
