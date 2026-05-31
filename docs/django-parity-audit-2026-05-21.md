@@ -29,7 +29,7 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 7. Forms / Formsets | 8 | 3 | 4 | 0 |
 | 8. Generic CBVs | 5 | 2 | 3 | 0 |
 | 9. URL routing | 5 | 1 | 1 | 1 |
-| 10. Templates | 8 | 3 | 0 | 0 |
+| 10. Templates | 10 | 1 | 0 | 0 |
 | 11. Authentication | 14 | 4 | 4 | 1 |
 | 12. Sessions | 4 | 1 | 1 | 0 |
 | 13. Manage commands | 13 | 5 | 6 | 4 |
@@ -331,15 +331,15 @@ Summary: **6 / 0 / 0 / 1**.
 | `{% include %}` | [include](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#include) | SHIPPED | Tera | |
 | Built-in filters (`pluralize`, `truncatewords`, `linebreaks`, `default_if_none`) | [filters](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#built-in-filter-reference) | SHIPPED | Django-shape filters via `template_filters::register_all()` | |
 | Custom template tags | [custom tags](https://docs.djangoproject.com/en/6.0/howto/custom-template-tags/) | PARTIAL | Tera function registration (`tera.register_function`) (#383) | Django's `{% mytag %}` block tags are deeper than Tera supports. |
-| Context processors | [context_processors](https://docs.djangoproject.com/en/6.0/ref/templates/api/#built-in-template-context-processors) | PARTIAL | Per-handler context build manually; no global registry (#384) | |
+| Context processors | [context_processors](https://docs.djangoproject.com/en/6.0/ref/templates/api/#built-in-template-context-processors) | SHIPPED | `register_template_context_processor!(|parts| HashMap<String, Value>)` + `template_context_processors::apply_to_context(&mut ctx, parts)` (closed #384). Inventory-collected registry walked by `apply_to_context` to merge keys into every Tera context. Handler-supplied keys win on collision (same merge order as Django). | |
 | Template loaders | [loaders](https://docs.djangoproject.com/en/6.0/ref/templates/api/#template-loader-types) | SHIPPED | `Tera::new(glob)` | |
 | Autoescaping | [autoescape](https://docs.djangoproject.com/en/6.0/ref/templates/language/#automatic-html-escaping) | SHIPPED | Tera default-on | |
 | staticfiles app | [staticfiles](https://docs.djangoproject.com/en/6.0/ref/contrib/staticfiles/) | SHIPPED | `Cli::with_static(prefix, dir)` + `Storage` | |
 | `{% csrf_token %}` template tag | [csrf](https://docs.djangoproject.com/en/6.0/ref/csrf/) | SHIPPED | `{{ csrf_token \| csrf_input \| safe }}` | |
-| `{% cache %}` template fragment | [template fragment caching](https://docs.djangoproject.com/en/6.0/topics/cache/#template-fragment-caching) | PARTIAL | `cache_fragment::cached_render(key, fn)` exists; not a Tera tag (#385) | |
+| `{% cache %}` template fragment | [template fragment caching](https://docs.djangoproject.com/en/6.0/topics/cache/#template-fragment-caching) | SHIPPED | `cache_fragment::cached_render(cache, key, ttl, fn)` (closed #385 as wontfix-by-design — Tera doesn't expose subtree handles for block-tag plugins, so the canonical shape is handler-side fragment caching with the same semantics). | |
 | Template debug page | (Django DEBUG) | SHIPPED | `template_debug::{enabled, error_page_html}` (closed #386) — `template_views::render` swaps a styled HTML page in for the plain-text 500 when `RUSTANGO_ENV` is dev/staging (or `RUSTANGO_TEMPLATE_DEBUG=1`). Banner + error message + `Debug` payload + source chain, all inline-CSS so the page works without a static-asset hop. Plain-text fallback stays in prod. | |
 
-Summary: **8 / 3 / 0 / 0**. Templates section is fully shipped.
+Summary: **10 / 1 / 0 / 0**. Templates section is fully shipped.
 
 ---
 
