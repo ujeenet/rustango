@@ -648,6 +648,26 @@ pub struct AdminConfig {
     /// target's display value without an N+1 follow-up query. This
     /// attribute lets operators tune that policy per model.
     pub list_select_related: ListSelectRelated,
+    /// Django-shape `formfield_overrides` (#359). Per-field widget
+    /// overrides applied to the admin's change-form `render_input`.
+    /// Each entry is `(field_name, widget_name)`. Empty slice means
+    /// no overrides — every field uses the FieldType-derived default.
+    ///
+    /// Supported widget names (built-in):
+    ///
+    /// - `"password"` — `<input type="password">` for String fields
+    /// - `"hidden"` — `<input type="hidden">` for any field
+    /// - `"textarea"` — force a `<textarea>` for short String fields
+    /// - `"color"` — `<input type="color">` for String fields
+    /// - `"range"` — `<input type="range">` for integer fields
+    /// - `"email"` — `<input type="email">` for String fields
+    /// - `"url"` — `<input type="url">` for String fields
+    /// - `"tel"` — `<input type="tel">` for String fields
+    /// - `"search"` — `<input type="search">` for String fields
+    ///
+    /// Unknown widget names log a warning and fall back to the
+    /// FieldType default so a typo doesn't render an empty cell.
+    pub formfield_overrides: &'static [(&'static str, &'static str)],
 }
 
 /// Django-shape `ModelAdmin.list_select_related` — controls the
@@ -714,6 +734,7 @@ impl AdminConfig {
         raw_id_fields: &[],
         autocomplete_fields: &[],
         list_select_related: ListSelectRelated::All,
+        formfield_overrides: &[],
     };
 }
 
