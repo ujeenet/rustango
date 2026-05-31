@@ -247,6 +247,113 @@ impl Translator {
         }
         Ok(t)
     }
+
+    /// Django/gettext-shape alias for [`Self::translate`] — issue #422.
+    /// Mirrors Django's `gettext(message)`: look up the key in the
+    /// supplied locale and return the translated string (or the
+    /// key itself when no translation is found). No parameter
+    /// substitution — Django's `gettext` is the raw lookup.
+    ///
+    /// For interpolation use [`Self::translate`] (rustango shape)
+    /// or [`Self::gettext_fmt`] (gettext shape that accepts a
+    /// placeholder map).
+    #[must_use]
+    pub fn gettext(&self, locale: &str, key: &str) -> String {
+        self.translate(locale, key, &[])
+    }
+
+    /// gettext-shape lookup with placeholder substitution. Same
+    /// substitution rules as [`Self::translate`] (`{name}` →
+    /// `params["name"]`). Provided so projects porting from Django
+    /// keep their muscle memory: `gettext_fmt(locale, "Hi, {name}",
+    /// &[("name", &user.name)])`.
+    #[must_use]
+    pub fn gettext_fmt(&self, locale: &str, key: &str, params: &[(&str, &str)]) -> String {
+        self.translate(locale, key, params)
+    }
+
+    /// Django/gettext-shape `pgettext(context, message)` — context-
+    /// disambiguated translation. Identical keys with different
+    /// contexts can resolve to different translations. Issue #422.
+    ///
+    /// Catalog key format: `"<context>\u{4}<message>"` (the same
+    /// `` (`EOT`) delimiter gettext uses internally). When
+    /// no context-prefixed entry exists, falls back to the bare
+    /// `message` lookup so the function degrades gracefully on
+    /// catalogs that haven't yet been authored with contexts.
+    #[must_use]
+    pub fn pgettext(&self, locale: &str, context: &str, key: &str) -> String {
+        let composite = format!("{context}\u{0004}{key}");
+        let translated = self.translate(locale, &composite, &[]);
+        // `translate` returns the key itself on miss — detect that
+        // and fall through to the bare-key lookup so callers don't
+        // see the raw `contextmessage` string when the
+        // context-prefixed entry isn't in the catalog yet.
+        if translated == composite {
+            return self.translate(locale, key, &[]);
+        }
+        translated
+    }
+
+    /// gettext-shape `pgettext` with placeholder substitution.
+    /// Mirrors [`Self::gettext_fmt`] semantics.
+    #[must_use]
+    pub fn pgettext_fmt(
+        &self,
+        locale: &str,
+        context: &str,
+        key: &str,
+        params: &[(&str, &str)],
+    ) -> String {
+        let raw = self.pgettext(locale, context, key);
+        substitute(&raw, params)
+    }
+
+    /// Django/gettext-shape `ngettext(singular, plural, count)` —
+    /// pluralization. Returns `singular` when `count == 1`,
+    /// `plural` otherwise. Issue #422.
+    ///
+    /// Catalog format mirrors gettext's `msgid_plural` convention:
+    /// register two keys, one for each form. The fallback chain is
+    /// the same as [`Self::translate`]; missing entries fall back
+    /// to the supplied source strings.
+    ///
+    /// This implements the **English** plural rule (`n == 1` →
+    /// singular; everything else → plural). Languages with more
+    /// complex plural categories (Russian's three forms, Arabic's
+    /// six, etc.) need a CLDR plural-rules resolver — out of scope
+    /// for v1; track in #426 / future-backlog.
+    ///
+    /// `count` is bound to the `{count}` placeholder automatically
+    /// so templates can read `"You have {count} unread messages"`
+    /// without the caller threading it in.
+    #[must_use]
+    pub fn ngettext(&self, locale: &str, singular: &str, plural: &str, count: i64) -> String {
+        let key = if count == 1 { singular } else { plural };
+        let count_str = count.to_string();
+        self.translate(locale, key, &[("count", &count_str)])
+    }
+
+    /// Pluralization with additional placeholder substitution.
+    /// `{count}` is bound from the `count` argument; everything in
+    /// `params` overlays on top so callers can pass extra keys
+    /// (`{name}`, `{item}`, etc.).
+    #[must_use]
+    pub fn ngettext_fmt(
+        &self,
+        locale: &str,
+        singular: &str,
+        plural: &str,
+        count: i64,
+        params: &[(&str, &str)],
+    ) -> String {
+        let key = if count == 1 { singular } else { plural };
+        let count_str = count.to_string();
+        let mut all: Vec<(&str, &str)> = Vec::with_capacity(params.len() + 1);
+        all.push(("count", &count_str));
+        all.extend_from_slice(params);
+        self.translate(locale, key, &all)
+    }
 }
 
 /// Substitute `{name}` placeholders in `template` with values from `params`.
@@ -471,5 +578,141 @@ mod tests {
     fn negotiate_empty_accept_language_returns_none() {
         let lang = negotiate_language("", &["en", "fr"]);
         assert_eq!(lang, None);
+    }
+
+    // ============================================================ #422
+    //
+    // Django/gettext-shape aliases: `gettext`, `pgettext` (context
+    // disambiguation), `ngettext` (English plural rule), + their
+    // `_fmt` placeholder-substitution variants.
+
+    fn translator_with_en_fr() -> Translator {
+        let mut en = HashMap::new();
+        en.insert("welcome".into(), "Welcome, {name}!".into());
+        en.insert(
+            "count_unread".into(),
+            "You have {count} unread message.".into(),
+        );
+        en.insert(
+            "count_unread_plural".into(),
+            "You have {count} unread messages.".into(),
+        );
+        en.insert("verb\u{0004}save".into(), "Save".into()); // pgettext context=verb, key=save
+        en.insert("noun\u{0004}save".into(), "Discount".into()); // pgettext context=noun, key=save
+        en.insert("save".into(), "Save (bare)".into());
+
+        let mut fr = HashMap::new();
+        fr.insert("welcome".into(), "Bienvenue, {name} !".into());
+        fr.insert(
+            "count_unread".into(),
+            "Vous avez {count} message non lu.".into(),
+        );
+        fr.insert(
+            "count_unread_plural".into(),
+            "Vous avez {count} messages non lus.".into(),
+        );
+
+        Translator::new(Locale::new("en"))
+            .add_locale(Locale::new("en"), en)
+            .add_locale(Locale::new("fr"), fr)
+    }
+
+    #[test]
+    fn gettext_returns_translated_string_no_params() {
+        let t = translator_with_en_fr();
+        // No interpolation — gettext returns the raw template.
+        assert_eq!(t.gettext("en", "welcome"), "Welcome, {name}!");
+    }
+
+    #[test]
+    fn gettext_fmt_substitutes_placeholders() {
+        let t = translator_with_en_fr();
+        assert_eq!(
+            t.gettext_fmt("fr", "welcome", &[("name", "Alice")]),
+            "Bienvenue, Alice !"
+        );
+    }
+
+    #[test]
+    fn gettext_falls_back_to_key_on_miss() {
+        let t = translator_with_en_fr();
+        // Missing keys fall through to the literal source string —
+        // matches Django's behavior where untranslated msgids
+        // surface unchanged.
+        assert_eq!(t.gettext("en", "no_such_key"), "no_such_key");
+    }
+
+    #[test]
+    fn pgettext_uses_context_disambiguated_entry() {
+        let t = translator_with_en_fr();
+        assert_eq!(t.pgettext("en", "verb", "save"), "Save");
+        assert_eq!(t.pgettext("en", "noun", "save"), "Discount");
+    }
+
+    #[test]
+    fn pgettext_falls_back_to_bare_key_when_context_entry_missing() {
+        let t = translator_with_en_fr();
+        // Unknown context → fall through to the bare-key entry
+        // (matches Django's pgettext fallback).
+        assert_eq!(t.pgettext("en", "adjective", "save"), "Save (bare)");
+    }
+
+    #[test]
+    fn pgettext_fmt_substitutes_placeholders() {
+        let mut en = HashMap::new();
+        en.insert("button\u{0004}greet".into(), "Hi, {name}".into());
+        let t = Translator::new(Locale::new("en")).add_locale(Locale::new("en"), en);
+        assert_eq!(
+            t.pgettext_fmt("en", "button", "greet", &[("name", "Bob")]),
+            "Hi, Bob"
+        );
+    }
+
+    #[test]
+    fn ngettext_picks_singular_when_count_is_one() {
+        let t = translator_with_en_fr();
+        let s = t.ngettext("en", "count_unread", "count_unread_plural", 1);
+        assert_eq!(s, "You have 1 unread message.");
+    }
+
+    #[test]
+    fn ngettext_picks_plural_for_zero_and_many() {
+        let t = translator_with_en_fr();
+        let s0 = t.ngettext("en", "count_unread", "count_unread_plural", 0);
+        let s5 = t.ngettext("en", "count_unread", "count_unread_plural", 5);
+        // English plural rule — `n != 1` is plural, so n=0 plural too.
+        assert_eq!(s0, "You have 0 unread messages.");
+        assert_eq!(s5, "You have 5 unread messages.");
+    }
+
+    #[test]
+    fn ngettext_works_in_french_locale() {
+        let t = translator_with_en_fr();
+        let s1 = t.ngettext("fr", "count_unread", "count_unread_plural", 1);
+        let s3 = t.ngettext("fr", "count_unread", "count_unread_plural", 3);
+        assert_eq!(s1, "Vous avez 1 message non lu.");
+        assert_eq!(s3, "Vous avez 3 messages non lus.");
+    }
+
+    #[test]
+    fn ngettext_fmt_overlays_extra_placeholders() {
+        let mut en = HashMap::new();
+        en.insert(
+            "item_singular".into(),
+            "{count} {item} sold to {customer}.".into(),
+        );
+        en.insert(
+            "item_plural".into(),
+            "{count} {item}s sold to {customer}.".into(),
+        );
+        let t = Translator::new(Locale::new("en")).add_locale(Locale::new("en"), en);
+        let s = t.ngettext_fmt(
+            "en",
+            "item_singular",
+            "item_plural",
+            2,
+            &[("item", "book"), ("customer", "Alice")],
+        );
+        assert_eq!(s, "2 books sold to Alice.");
     }
 }
