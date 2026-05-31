@@ -620,6 +620,23 @@ pub(crate) async fn table_view(
                         DisplayItem::GenericFk(gr) => render_gfk_cell(row, gr, &gfk_ct_map),
                         DisplayItem::JsonPath(f, key) => render_json_path_cell(row, f, key),
                     };
+                    // #349 — computed-field `link` callable.
+                    // When the field declared a `link =` in
+                    // `register_admin_computed!`, that callable's
+                    // per-row URL wins over both the inline cell
+                    // and the container-level `list_display_links`
+                    // detail-href (the callable knows where THIS
+                    // specific cell should jump, e.g. an FK target).
+                    if let DisplayItem::Computed(cf) = item {
+                        if let Some(link_fn) = cf.link {
+                            if let Some(url) = link_fn(row) {
+                                return format!(
+                                    "<a href=\"{href}\">{inner}</a>",
+                                    href = render::escape(&url),
+                                );
+                            }
+                        }
+                    }
                     match (
                         cell_is_link.get(idx).copied().unwrap_or(false),
                         &detail_href,

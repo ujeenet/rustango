@@ -220,7 +220,7 @@ Summary: **11 SHIPPED / 2 PARTIAL / 2 MISSING / 1 N/A**. Gaps: `sqlmigrate` raw-
 | `list_display` (scalar fields) | [list_display](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#django.contrib.admin.ModelAdmin.list_display) | SHIPPED | `#[rustango(admin(list_display = "title, status"))]` | |
 | `list_display` (method/computed fields) | same | SHIPPED | Two paths: `register_admin_computed!(table, name, label, fn)` for arbitrary HTML renderers (pre-v0.42), and `list_display = "data.headline"` dotted-path syntax for JSON-column subkeys (closed #348, v0.42). The dotted path drills into a `FieldType::Json` column at `.split('.')` segments (numeric segments index arrays); bools render as ☑/☐ glyphs, missing paths fall back to `<em>NULL</em>`. | |
 | `list_display` (boolean checkbox icon) | same | SHIPPED | v0.37+ render in admin/render.rs | |
-| `list_display` (callable display_link) | same | MISSING | n/a (#349) | FK columns auto-link; method-field callables don't. |
+| `list_display` (callable display_link) | same | SHIPPED | `register_admin_computed!(table, name, label, render, link = |row| Option<String>)` (closed #349) — the optional `link =` callable returns a per-row URL; admin list view wraps the rendered cell in `<a href="{url}">…</a>` when `Some`. Per-callable URL wins over the container-level `list_display_links` detail-href fallback. | |
 | `list_display_links` | [list_display_links](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#django.contrib.admin.ModelAdmin.list_display_links) | SHIPPED | `admin(list_display_links = "title, views")` (#350, v0.42) — comma-separated names from `list_display`. Each matched cell wraps its inner HTML in `<a href="{admin_prefix}/{table}/{pk}">…</a>`. Empty whitelist keeps the trailing "View" column as the only link. | |
 | `list_filter` (FieldListFilter) | [list_filter](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#django.contrib.admin.ModelAdmin.list_filter) | SHIPPED | `#[rustango(admin(list_filter = "..."))]` | |
 | `list_filter` (SimpleListFilter — custom) | same | SHIPPED | `register_admin_list_filter!(table, parameter_name, title, lookups, to_filters_fn)` (closed #351, v0.42) — declares a custom filter card on the list view with operator-defined lookups + predicate function. The function maps the URL value to `Vec<Filter>` predicates that AND onto the WHERE. Rendered as a right-rail card alongside field-value facets. | |
@@ -255,7 +255,7 @@ Summary: **11 SHIPPED / 2 PARTIAL / 2 MISSING / 1 N/A**. Gaps: `sqlmigrate` raw-
 | Admin styling / branding | [admin templates](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#overriding-admin-templates) | SHIPPED | `Storage`-backed per-tenant brand + theme tokens | |
 | Admin docs (`django.contrib.admindocs`) | [admindocs](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/admindocs/) | N/A | n/a | Rust doc-comments cover it. |
 
-Summary: **18 SHIPPED / 7 PARTIAL / 11 MISSING / 2 N/A**. Concentration of MISSING items in admin polish: method-field display, list_display_links, raw_id_fields, autocomplete, formfield_overrides, date_hierarchy, prepopulated_fields, custom URLs.
+Summary: **19 SHIPPED / 7 PARTIAL / 10 MISSING / 2 N/A**. Concentration of MISSING items in admin polish: formfield_overrides, custom URLs, custom views, history view re-render, etc.
 
 ---
 

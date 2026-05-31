@@ -62,7 +62,7 @@ mod urls;
 mod views;
 
 pub use auth::protect_with_basic_auth;
-pub use computed_fields::{ComputedField, ComputedFieldRenderFn};
+pub use computed_fields::{ComputedField, ComputedFieldLinkFn, ComputedFieldRenderFn};
 pub use errors::AdminError;
 pub use inlines::{
     InlineAdmin, InlineAdminGeneric, InlineApplyOutcome, InlineFormPanel, InlineKind, InlinePanel,
