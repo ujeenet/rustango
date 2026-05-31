@@ -2,6 +2,23 @@
 
 Patterns for the rustango ORM beyond the basics. Most examples assume you already have a `Post` model from `Getting Started`.
 
+## What's new (v0.41 / v0.42)
+
+The big Django-parity batches landed surfaces that aren't yet woven into every section below. Quick pointers:
+
+- **`Q!` macro + `Qb` runtime builder** (#269, #263) — compile-time-safe Django-shape filters. `User::objects().where_(Q!(User.email__icontains = "alice"))` fails to build on a typo'd field name. Runtime-composable variant for admin filter chips: `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
+- **`.distinct_on(&["author_id"])`** (#264) — PG native; portable window-function fallback on MySQL / SQLite. "Latest per group" patterns.
+- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** (#267) — Django `bulk_create(update_conflicts=True)`. Tri-dialect ON CONFLICT / ON DUPLICATE KEY UPDATE.
+- **`explain_pool()`** (#272) — tri-dialect EXPLAIN. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
+- **DB function library** (#266) — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Per-dialect emission with clear errors where SQLite lacks the function.
+- **Field types** — `rust_decimal::Decimal` (PG/MySQL native, SQLite via Decode shim), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) now accepted by `#[derive(Model)]` (#524, v0.42).
+- **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — Django `save(commit=False)`. Validate now, mutate the prepared write set, commit when ready.
+- **`#[rustango(unique_when(columns = "...", condition = "..."))]`** (#265) — partial unique constraints. "Unique email per non-deleted row" / "Unique slug per tenant".
+- **`#[rustango(manager(ext = "FooManagerExt"))]`** (#271) — Django-shape custom-manager extension trait emitted next to the model. (Also the Rust shape of Django proxy models — same physical table, multiple "personalities" via per-trait methods. See `inheritance.rs:98-127`.)
+- **`manage makemigrations --merge`** (#346, v0.42) — Django-shape merge node for divergent branch chains. See [`docs/manage.md`](manage.md#makemigrations---merge).
+
+The CHANGELOG carries the full ticket index for each release.
+
 ## Table of contents
 
 - [Querying](#querying)

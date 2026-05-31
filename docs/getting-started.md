@@ -607,8 +607,10 @@ Make sure your reverse proxy:
 | Topic | Doc |
 |---|---|
 | Every `manage` subcommand | [`docs/manage.md`](manage.md) |
-| ORM cookbook (advanced filters, aggregations, M2M, soft delete) | [`docs/orm.md`](orm.md) (coming soon) |
-| Security features in depth | [`docs/security.md`](security.md) (coming soon) |
+| ORM cookbook (advanced filters, aggregations, M2M, soft delete) | [`docs/orm.md`](orm.md) |
+| API conventions (naming, builder patterns, feature gates) | [`docs/api-conventions.md`](api-conventions.md) |
+| Security features in depth | [`docs/security.md`](security.md) |
+| Django parity audit | [`docs/django-parity-audit-2026-05-21.md`](django-parity-audit-2026-05-21.md) |
 | Multi-tenancy | [README — Multi-tenancy section](../README.md#multi-tenancy) |
 | API docs | <https://docs.rs/rustango> |
 
