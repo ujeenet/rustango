@@ -4019,6 +4019,7 @@ mod tests {
             is_view: false,
             verbose_name: None,
             verbose_name_plural: None,
+            managed: true,
         }))
     }
 
@@ -4113,6 +4114,7 @@ mod tests {
             is_view: false,
             verbose_name: None,
             verbose_name_plural: None,
+            managed: true,
         }))
     }
 
@@ -4493,6 +4495,7 @@ mod tests {
             is_view: false,
             verbose_name: None,
             verbose_name_plural: None,
+            managed: true,
         }));
         assert!(default_order_by(no_pk).is_empty());
     }
@@ -4739,6 +4742,7 @@ mod tests {
             is_view: false,
             verbose_name: None,
             verbose_name_plural: None,
+            managed: true,
         }));
         let pk = uuid_schema.primary_key().unwrap();
         let raw = "550e8400-e29b-41d4-a716-446655440000";
@@ -4797,6 +4801,7 @@ mod tests {
             is_view: false,
             verbose_name: None,
             verbose_name_plural: None,
+            managed: true,
         }));
         let pk = str_schema.primary_key().unwrap();
         match coerce_pk(pk, "hello-world") {

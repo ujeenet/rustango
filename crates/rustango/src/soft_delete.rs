@@ -288,6 +288,7 @@ mod tests {
         is_view: false,
         verbose_name: None,
         verbose_name_plural: None,
+        managed: true,
     };
 
     static MODEL_WITHOUT_SD: ModelSchema = ModelSchema {
@@ -310,6 +311,7 @@ mod tests {
         is_view: false,
         verbose_name: None,
         verbose_name_plural: None,
+        managed: true,
     };
 
     #[test]
