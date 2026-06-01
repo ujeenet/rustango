@@ -66,6 +66,77 @@ impl Locale {
     pub fn base_language(&self) -> &str {
         self.0.split('-').next().unwrap_or(&self.0)
     }
+
+    /// `true` for right-to-left scripts. Django parity #429 — matches
+    /// `LANGUAGE_BIDI` / `{% get_current_language_bidi %}`. The check
+    /// is on the base language (`ar-EG` ≡ `ar`).
+    ///
+    /// Covered RTL families: Arabic (`ar`), Hebrew (`he`, plus its
+    /// retired ISO code `iw`), Persian / Farsi (`fa`), Urdu (`ur`),
+    /// Pashto (`ps`), Yiddish (`yi`, plus retired `ji`), Divehi /
+    /// Dhivehi (`dv`), Sorani Kurdish (`ckb`), Uyghur (`ug`), Sindhi
+    /// (`sd`), Aramaic / Syriac (`syr`). Everything else is LTR.
+    #[must_use]
+    pub fn is_rtl(&self) -> bool {
+        is_rtl_base(self.base_language())
+    }
+
+    /// `"rtl"` for right-to-left scripts, `"ltr"` otherwise — the
+    /// value you'd hand to an HTML `dir` attribute or CSS
+    /// `direction` property. Django parity #429.
+    #[must_use]
+    pub fn direction(&self) -> &'static str {
+        if self.is_rtl() {
+            "rtl"
+        } else {
+            "ltr"
+        }
+    }
+}
+
+/// `true` for an RTL base-language code. Public so callers that
+/// only have a bare `&str` (e.g. a context-injected `LANG`) can
+/// route through the same table without first allocating a
+/// [`Locale`]. The check is case-insensitive and ignores any
+/// region subtag.
+#[must_use]
+pub fn is_rtl_language(locale: &str) -> bool {
+    let lower = locale.to_ascii_lowercase();
+    let base = lower.split('-').next().unwrap_or(&lower);
+    is_rtl_base(base)
+}
+
+/// `"rtl"` / `"ltr"` for a bare locale string — the bidi sibling of
+/// [`is_rtl_language`].
+#[must_use]
+pub fn text_direction(locale: &str) -> &'static str {
+    if is_rtl_language(locale) {
+        "rtl"
+    } else {
+        "ltr"
+    }
+}
+
+/// Lowercase, region-stripped base-language match against the
+/// canonical RTL table. Inlined into `Locale::is_rtl` +
+/// `is_rtl_language` so neither needs to allocate.
+fn is_rtl_base(base: &str) -> bool {
+    matches!(
+        base,
+        "ar"   // Arabic
+        | "he" // Hebrew
+        | "iw" // Hebrew (retired ISO 639-1 code, still emitted by some clients)
+        | "fa" // Persian / Farsi
+        | "ur" // Urdu
+        | "ps" // Pashto
+        | "yi" // Yiddish
+        | "ji" // Yiddish (retired ISO 639-1 code)
+        | "dv" // Divehi / Dhivehi
+        | "ckb" // Sorani Kurdish
+        | "ug" // Uyghur
+        | "sd" // Sindhi
+        | "syr" // Syriac / Aramaic
+    )
 }
 
 impl std::fmt::Display for Locale {
@@ -637,6 +708,56 @@ mod tests {
         let mut locales = t.locales();
         locales.sort();
         assert_eq!(locales, vec!["en".to_string(), "fr".to_string()]);
+    }
+
+    // ---- #429 RTL detection ----
+
+    #[test]
+    fn locale_is_rtl_for_arabic_hebrew_persian_urdu() {
+        for code in ["ar", "he", "fa", "ur", "ps", "yi", "dv", "ckb", "ug", "sd"] {
+            let loc = Locale::new(code);
+            assert!(loc.is_rtl(), "{code} should be RTL");
+            assert_eq!(loc.direction(), "rtl", "{code} direction should be rtl");
+        }
+    }
+
+    #[test]
+    fn locale_is_ltr_for_western_and_cjk() {
+        for code in ["en", "fr", "de", "es", "ja", "zh", "ko", "ru", "tr", "pt"] {
+            let loc = Locale::new(code);
+            assert!(!loc.is_rtl(), "{code} should be LTR");
+            assert_eq!(loc.direction(), "ltr", "{code} direction should be ltr");
+        }
+    }
+
+    #[test]
+    fn rtl_check_uses_base_language_for_region_subtag() {
+        // Region-specific Arabic / Hebrew variants still RTL.
+        assert!(Locale::new("ar-EG").is_rtl());
+        assert!(Locale::new("AR-SA").is_rtl()); // case-insensitive ctor
+        assert!(Locale::new("he-IL").is_rtl());
+        // Region-specific LTR locales stay LTR.
+        assert!(!Locale::new("en-US").is_rtl());
+        assert!(!Locale::new("pt-BR").is_rtl());
+    }
+
+    #[test]
+    fn rtl_check_handles_retired_iso_codes() {
+        // Some Accept-Language headers still emit the old ISO 639-1 codes.
+        assert!(Locale::new("iw").is_rtl()); // Hebrew (retired alias)
+        assert!(Locale::new("ji").is_rtl()); // Yiddish (retired alias)
+    }
+
+    #[test]
+    fn bare_string_helpers_match_locale_methods() {
+        for code in ["ar", "fa-IR", "he-IL", "iw"] {
+            assert!(is_rtl_language(code), "{code} should be RTL");
+            assert_eq!(text_direction(code), "rtl");
+        }
+        for code in ["en", "fr-FR", "ja", "zh-CN"] {
+            assert!(!is_rtl_language(code), "{code} should be LTR");
+            assert_eq!(text_direction(code), "ltr");
+        }
     }
 
     #[test]
