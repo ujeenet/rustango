@@ -82,6 +82,30 @@ pub fn register(tera: &mut Tera, translator: Arc<Translator>) {
             Ok(Value::String(do_translate(&t_filter, key, args)))
         },
     );
+
+    // #429 — RTL layout support. Django's `{% get_current_language_bidi %}`
+    // returns `True` for RTL; rustango ships two shapes:
+    //
+    //   {{ get_text_direction(locale=LANG) }}    → "ltr" / "rtl"
+    //   {{ is_rtl(locale=LANG) }}                → true / false
+    //
+    // Templates can then write:
+    //   <html dir="{{ get_text_direction(locale=LANG) }}">
+    //   {% if is_rtl(locale=LANG) %}<link rel="stylesheet" href="rtl.css">{% endif %}
+    tera.register_function(
+        "get_text_direction",
+        |args: &HashMap<String, Value>| -> tera::Result<Value> {
+            let locale = args.get("locale").and_then(Value::as_str).unwrap_or("");
+            Ok(Value::String(super::text_direction(locale).to_owned()))
+        },
+    );
+    tera.register_function(
+        "is_rtl",
+        |args: &HashMap<String, Value>| -> tera::Result<Value> {
+            let locale = args.get("locale").and_then(Value::as_str).unwrap_or("");
+            Ok(Value::Bool(super::is_rtl_language(locale)))
+        },
+    );
 }
 
 /// Shared body for the function + filter shapes — extract the locale
@@ -240,6 +264,63 @@ mod tests {
             make_translator(),
         );
         assert_eq!(out, "missing_key");
+    }
+
+    // ---- #429 RTL helpers in templates ----
+
+    #[test]
+    fn get_text_direction_returns_rtl_for_arabic() {
+        let mut ctx = Context::new();
+        ctx.insert("LANG", "ar");
+        let out = render(
+            r#"<html dir="{{ get_text_direction(locale=LANG) }}">"#,
+            &ctx,
+            make_translator(),
+        );
+        assert_eq!(out, r#"<html dir="rtl">"#);
+    }
+
+    #[test]
+    fn get_text_direction_returns_ltr_for_english() {
+        let mut ctx = Context::new();
+        ctx.insert("LANG", "en");
+        let out = render(
+            r#"<html dir="{{ get_text_direction(locale=LANG) }}">"#,
+            &ctx,
+            make_translator(),
+        );
+        assert_eq!(out, r#"<html dir="ltr">"#);
+    }
+
+    #[test]
+    fn is_rtl_function_branches_on_locale() {
+        let mut ctx = Context::new();
+        ctx.insert("LANG", "he-IL");
+        let out = render(
+            r#"{% if is_rtl(locale=LANG) %}RTL{% else %}LTR{% endif %}"#,
+            &ctx,
+            make_translator(),
+        );
+        assert_eq!(out, "RTL");
+
+        ctx.insert("LANG", "en-US");
+        let out = render(
+            r#"{% if is_rtl(locale=LANG) %}RTL{% else %}LTR{% endif %}"#,
+            &ctx,
+            make_translator(),
+        );
+        assert_eq!(out, "LTR");
+    }
+
+    #[test]
+    fn rtl_helpers_default_to_ltr_when_locale_missing() {
+        // No `locale=` arg → blank → not RTL (LTR is the safe default).
+        let out = render(
+            r#"{{ get_text_direction() }}|{{ is_rtl() }}"#,
+            &Context::new(),
+            make_translator(),
+        );
+        assert_eq!(out, "ltr|false");
     }
 
     #[test]

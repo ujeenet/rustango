@@ -78,6 +78,21 @@ impl ActiveLocale {
     pub fn from_extensions(ext: &axum::http::Extensions) -> Option<Self> {
         ext.get::<Self>().cloned()
     }
+
+    /// `true` for right-to-left scripts (#429). Convenience that
+    /// routes through [`crate::i18n::is_rtl_language`] so handler
+    /// code can branch on bidi without re-importing the helper.
+    #[must_use]
+    pub fn is_rtl(&self) -> bool {
+        super::is_rtl_language(&self.0)
+    }
+
+    /// `"rtl"` / `"ltr"` for the active locale — feed directly to an
+    /// HTML `dir` attribute or CSS `direction:`.
+    #[must_use]
+    pub fn direction(&self) -> &'static str {
+        super::text_direction(&self.0)
+    }
 }
 
 impl<S: Send + Sync> FromRequestParts<S> for ActiveLocale {
@@ -241,6 +256,22 @@ mod tests {
             b = b.header(axum::http::header::COOKIE, c);
         }
         b.body(Body::empty()).unwrap()
+    }
+
+    // ---- #429 RTL convenience on the extractor ----
+
+    #[test]
+    fn active_locale_direction_rtl_for_arabic() {
+        let al = ActiveLocale("ar".into());
+        assert!(al.is_rtl());
+        assert_eq!(al.direction(), "rtl");
+    }
+
+    #[test]
+    fn active_locale_direction_ltr_for_english() {
+        let al = ActiveLocale("en-US".into());
+        assert!(!al.is_rtl());
+        assert_eq!(al.direction(), "ltr");
     }
 
     #[test]
