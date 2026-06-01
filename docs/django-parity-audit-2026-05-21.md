@@ -503,13 +503,13 @@ Summary: **15 SHIPPED / 0 PARTIAL / 1 MISSING / 0 N/A** for the dimensions enume
 | Redis backend | [redis](https://docs.djangoproject.com/en/6.0/topics/cache/#redis) | SHIPPED | `cache-redis` feature (v0.18) | |
 | File-system cache | [filesystem](https://docs.djangoproject.com/en/6.0/topics/cache/#file-system-caching) | SHIPPED | `cache::FileCache` (`backend = "file"` + `[cache].file_cache_dir`) — `src/cache/mod.rs` | |
 | In-memory cache | [local-memory](https://docs.djangoproject.com/en/6.0/topics/cache/#local-memory-caching) | SHIPPED | `InMemoryCache` | |
-| Database cache | [db](https://docs.djangoproject.com/en/6.0/topics/cache/#database-caching) | PARTIAL | DB tables can back the trait; no first-class `DbCache` (#409) | |
+| Database cache | [db](https://docs.djangoproject.com/en/6.0/topics/cache/#database-caching) | SHIPPED | `cache::DatabaseCache` — first-class tri-dialect backend. `DatabaseCache::new(pool, table).ensure_table().await?` then use through the `Cache` trait. `ON CONFLICT` upsert for PG/SQLite, `ON DUPLICATE KEY UPDATE` for MySQL. Lazy TTL GC on read. `src/cache/db_backend.rs` (#409). | |
 | `@cache_page` view decorator | [cache_page](https://docs.djangoproject.com/en/6.0/topics/cache/#the-per-view-cache) | SHIPPED | `cache_page::cache_page_layer` (v0.19) | |
 | `@cache_control` headers | [cache_control](https://docs.djangoproject.com/en/6.0/topics/cache/#using-vary-headers) | SHIPPED | Cache-Control header helpers | |
 | `@vary_on_headers` / `@vary_on_cookie` | [vary](https://docs.djangoproject.com/en/6.0/topics/cache/#using-vary-headers) | SHIPPED | Vary header helpers | |
 | Template fragment caching | [template fragments](https://docs.djangoproject.com/en/6.0/topics/cache/#template-fragment-caching) | SHIPPED | `cache_fragment::cached_render` | |
 
-Summary: **8 / 1 / 1 / 0**.
+Summary: **9 / 0 / 1 / 0**.
 
 ---
 

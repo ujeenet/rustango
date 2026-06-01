@@ -33,6 +33,8 @@
 //! |------|---------|-------------|
 //! | [`NullCache`] | `cache` | No-op; all reads return `None`. Good for tests. |
 //! | [`InMemoryCache`] | `cache` | Per-process HashMap with TTL. Zero external deps. |
+//! | [`FileCache`] | `cache` | File-system, one file per key (#408). |
+//! | [`DatabaseCache`](db_backend::DatabaseCache) | `cache` + any DB feature | DB table, tri-dialect upsert (#409). |
 //! | [`RedisCache`](redis_backend::RedisCache) | `cache-redis` | Redis-backed via async connection manager. |
 //!
 //! ## Shared cache type
@@ -46,8 +48,13 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+pub mod db_backend;
 #[cfg(feature = "cache-redis")]
 pub mod redis_backend;
+
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+pub use db_backend::DatabaseCache;
 
 // ------------------------------------------------------------------ CacheError
 
@@ -178,6 +185,26 @@ pub fn from_settings(s: &crate::config::CacheSettings) -> BoxedCache {
         }
         Some("null" | "none") => Arc::new(NullCache),
         Some("file") => file_from_settings_or_warn(s),
+        Some("db" | "database") => {
+            // #409 — DatabaseCache needs a runtime Pool and an async
+            // `ensure_table()` step that this sync resolver can't
+            // perform. Apps that want the DB backend must build it
+            // explicitly:
+            //
+            //     let cache = DatabaseCache::new(pool.clone(), "rustango_cache");
+            //     cache.ensure_table().await?;
+            //     let boxed: BoxedCache = Arc::new(cache);
+            //
+            // We fall back to InMemoryCache + warn rather than
+            // silently producing a different backend.
+            tracing::warn!(
+                target: "rustango::cache",
+                "cache.backend = \"db\" requires async construction with a `&Pool`; \
+                 build `DatabaseCache::new(pool, table)` and call `ensure_table().await` \
+                 then pass the Arc directly. Falling back to InMemoryCache."
+            );
+            Arc::new(InMemoryCache::new())
+        }
         Some("memory") | None => Arc::new(InMemoryCache::new()),
         Some(other) => {
             tracing::warn!(
