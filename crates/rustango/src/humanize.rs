@@ -35,6 +35,8 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("naturalday", naturalday);
     tera.register_filter("timesince", timesince);
     tera.register_filter("timeuntil", timeuntil);
+    tera.register_filter("format_number", format_number);
+    tera.register_filter("format_currency", format_currency);
 }
 
 // ------------------------------------------------------------------ intcomma
@@ -87,6 +89,311 @@ fn comma_separate_digits(digits: &str) -> String {
         out.push(*b as char);
     }
     out
+}
+
+// ------------------------------------------------------------------ format_number / format_currency
+//
+// Django-parity #426 + #428 — locale-aware number + currency
+// formatting via two Tera filters. Hard-coded table for common
+// locales; CLDR-driven dynamic locale data is a future-backlog
+// item (the dep weight isn't justified for v1).
+//
+// Supported locales (decimal sep, thousands sep, currency template):
+//
+//   en / en-US: 1,234,567.89    USD $1,234.56 / EUR €1,234.56
+//   en-GB:     1,234,567.89     GBP £1,234.56
+//   de:        1.234.567,89     EUR 1.234,56 €
+//   fr:        1 234 567,89     EUR 1 234,56 €
+//   es:        1.234.567,89     EUR 1.234,56 €
+//   it:        1.234.567,89     EUR 1.234,56 €
+//   ja:        1,234,567.89     JPY ¥1,234 (no decimals for JPY)
+//   zh:        1,234,567.89     CNY ¥1,234.56
+//   pt:        1.234.567,89     EUR 1.234,56 €
+//   ru:        1 234 567,89     RUB 1 234,56 ₽
+//
+// Unknown locales fall back to en-US convention with a
+// `tracing::warn!` so misspelled locale codes surface in logs.
+
+/// Per-locale numeric format spec — decimal point + group separator.
+#[derive(Debug, Clone, Copy)]
+struct NumberFmt {
+    decimal: char,
+    group: char,
+}
+
+fn locale_number_fmt(locale: &str) -> NumberFmt {
+    // Normalize: lowercase, base-lang split. "en-US" → "en"; the
+    // few region-specific entries (en-GB stays en for numbers,
+    // pt-BR stays pt for numbers) match here.
+    let base = locale.to_ascii_lowercase();
+    let base = base.split('-').next().unwrap_or(&base);
+    match base {
+        // en family (incl. zh-CN where it's also dot+comma)
+        "en" | "ja" | "zh" | "ko" | "th" => NumberFmt {
+            decimal: '.',
+            group: ',',
+        },
+        // de / es / it / nl / pt: dot grouping, comma decimal
+        "de" | "es" | "it" | "nl" | "pt" | "el" | "pl" | "tr" | "da" | "fi" | "sv" | "no"
+        | "nb" | "nn" => NumberFmt {
+            decimal: ',',
+            group: '.',
+        },
+        // fr / ru / cs / sk: thin/regular space grouping, comma decimal
+        "fr" | "ru" | "cs" | "sk" | "bg" | "uk" | "hu" => NumberFmt {
+            decimal: ',',
+            group: ' ',
+        },
+        // Unknown — fall back to en-US with a warn.
+        _ => {
+            tracing::warn!(
+                target: "rustango::humanize",
+                locale = %locale,
+                "format_number: unknown locale, falling back to en-US convention"
+            );
+            NumberFmt {
+                decimal: '.',
+                group: ',',
+            }
+        }
+    }
+}
+
+/// Apply `fmt` to a digit string with optional fractional part.
+/// `integer_part` is the digits before the decimal, `frac_part` is
+/// the digits after (or `""`). Negative sign carried by caller.
+fn apply_number_fmt(integer_part: &str, frac_part: &str, fmt: NumberFmt) -> String {
+    let bytes = integer_part.as_bytes();
+    let mut out = String::with_capacity(bytes.len() + bytes.len() / 3 + frac_part.len() + 1);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i) % 3 == 0 {
+            out.push(fmt.group);
+        }
+        out.push(*b as char);
+    }
+    if !frac_part.is_empty() {
+        out.push(fmt.decimal);
+        out.push_str(frac_part);
+    }
+    out
+}
+
+/// `format_number` — Django-parity #426. Locale-aware decimal +
+/// thousands separator. Number-only; currency symbols handled by
+/// [`format_currency`] below.
+///
+/// ```jinja
+/// {{ 1234567.89 | format_number(locale="en") }}     {# → 1,234,567.89 #}
+/// {{ 1234567.89 | format_number(locale="de") }}     {# → 1.234.567,89 #}
+/// {{ 1234567.89 | format_number(locale="fr") }}     {# → 1 234 567,89 #}
+/// {{ 1234.5    | format_number(locale="en", decimals=2) }}  {# → 1,234.50 #}
+/// ```
+///
+/// Arguments:
+/// - `locale` (string, default `"en"`) — locale code; only the
+///   base language is consulted (`en-US` ≡ `en`). Unknown locales
+///   fall back to `en` with a tracing warning.
+/// - `decimals` (integer, optional) — fixed decimal places. When
+///   set, the fractional part is padded/truncated to exactly this
+///   many digits. When unset, the input's natural precision is
+///   preserved.
+///
+/// Non-numeric input passes through unchanged.
+fn format_number(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let locale = args.get("locale").and_then(Value::as_str).unwrap_or("en");
+    let decimals = args.get("decimals").and_then(Value::as_u64);
+    let fmt = locale_number_fmt(locale);
+
+    let formatted = if let Some(n) = value.as_i64() {
+        let abs = n.unsigned_abs().to_string();
+        let frac = match decimals {
+            Some(d) => "0".repeat(d as usize),
+            None => String::new(),
+        };
+        let body = apply_number_fmt(&abs, &frac, fmt);
+        if n < 0 {
+            format!("-{body}")
+        } else {
+            body
+        }
+    } else if let Some(n) = value.as_u64() {
+        let s = n.to_string();
+        let frac = match decimals {
+            Some(d) => "0".repeat(d as usize),
+            None => String::new(),
+        };
+        apply_number_fmt(&s, &frac, fmt)
+    } else if let Some(f) = value.as_f64() {
+        let s = match decimals {
+            Some(d) => format!("{f:.*}", d as usize),
+            None => format!("{f}"),
+        };
+        let negative = s.starts_with('-');
+        let body = if negative { &s[1..] } else { &s };
+        let (int_part, frac_part) = body.split_once('.').unwrap_or((body, ""));
+        let formatted = apply_number_fmt(int_part, frac_part, fmt);
+        if negative {
+            format!("-{formatted}")
+        } else {
+            formatted
+        }
+    } else {
+        return Ok(value.clone());
+    };
+
+    Ok(to_value(formatted)?)
+}
+
+/// Per-locale currency-display spec.
+#[derive(Debug, Clone, Copy)]
+struct CurrencyFmt {
+    /// Currency symbol (e.g. "$", "€", "£", "¥", "₽").
+    symbol: &'static str,
+    /// `true` if the symbol prefixes the amount (`$1,234.56`),
+    /// `false` if it suffixes (`1.234,56 €`).
+    prefix: bool,
+    /// Decimal places. Most currencies use 2; JPY/KRW/CLP use 0.
+    decimals: u32,
+}
+
+fn currency_fmt(code: &str) -> CurrencyFmt {
+    let code = code.to_ascii_uppercase();
+    match code.as_str() {
+        "USD" | "CAD" | "AUD" | "NZD" | "HKD" | "SGD" | "MXN" => CurrencyFmt {
+            symbol: "$",
+            prefix: true,
+            decimals: 2,
+        },
+        "EUR" => CurrencyFmt {
+            symbol: "€",
+            prefix: true,
+            decimals: 2,
+        },
+        "GBP" => CurrencyFmt {
+            symbol: "£",
+            prefix: true,
+            decimals: 2,
+        },
+        "JPY" | "KRW" | "CLP" => CurrencyFmt {
+            // No fractional sub-unit in circulation.
+            symbol: "¥",
+            prefix: true,
+            decimals: 0,
+        },
+        "CNY" => CurrencyFmt {
+            symbol: "¥",
+            prefix: true,
+            decimals: 2,
+        },
+        "RUB" => CurrencyFmt {
+            symbol: "₽",
+            prefix: false,
+            decimals: 2,
+        },
+        "INR" => CurrencyFmt {
+            symbol: "₹",
+            prefix: true,
+            decimals: 2,
+        },
+        "BRL" => CurrencyFmt {
+            symbol: "R$",
+            prefix: true,
+            decimals: 2,
+        },
+        "CHF" => CurrencyFmt {
+            symbol: "CHF",
+            prefix: true,
+            decimals: 2,
+        },
+        // Unknown — emit the code itself as the symbol so the
+        // output is still meaningful.
+        _ => {
+            tracing::warn!(
+                target: "rustango::humanize",
+                currency = %code,
+                "format_currency: unknown ISO 4217 code, using raw code as symbol"
+            );
+            CurrencyFmt {
+                symbol: Box::leak(code.into_boxed_str()),
+                prefix: true,
+                decimals: 2,
+            }
+        }
+    }
+}
+
+/// `format_currency` — Django-parity #428. Locale-aware currency
+/// rendering. Composes [`format_number`] with a per-currency
+/// symbol + placement convention.
+///
+/// ```jinja
+/// {{ 1234.5 | format_currency(currency="USD") }}              {# → $1,234.50 #}
+/// {{ 1234.5 | format_currency(currency="EUR", locale="de") }} {# → €1.234,50 (de places symbol after via locale-specific override; here prefix is default) #}
+/// {{ 1234.5 | format_currency(currency="EUR", locale="fr") }} {# → 1 234,50 € #}
+/// {{ 1234   | format_currency(currency="JPY") }}              {# → ¥1,234 (0 decimals) #}
+/// ```
+///
+/// Arguments:
+/// - `currency` (string, default `"USD"`) — ISO 4217 currency
+///   code. Unknown codes use the code itself as the "symbol"
+///   prefix and log a warning.
+/// - `locale` (string, default `"en"`) — locale code for the
+///   thousands/decimal separators. Decimal places come from the
+///   currency, not the locale.
+///
+/// Symbol placement convention:
+/// - For currencies with their own placement (RUB suffix, USD
+///   prefix), the currency wins.
+/// - For Euro: prefix in en/de, suffix in fr/it/es (matches local
+///   typography conventions).
+///
+/// Non-numeric input passes through unchanged.
+fn format_currency(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let currency = args
+        .get("currency")
+        .and_then(Value::as_str)
+        .unwrap_or("USD");
+    let locale = args.get("locale").and_then(Value::as_str).unwrap_or("en");
+
+    let cur = currency_fmt(currency);
+    let fmt = locale_number_fmt(locale);
+
+    let amount = match value.as_f64() {
+        Some(f) => f,
+        None => match value.as_i64() {
+            Some(i) => i as f64,
+            None => match value.as_u64() {
+                Some(u) => u as f64,
+                None => return Ok(value.clone()),
+            },
+        },
+    };
+
+    let body_str = format!("{amount:.*}", cur.decimals as usize);
+    let negative = body_str.starts_with('-');
+    let unsigned = if negative { &body_str[1..] } else { &body_str };
+    let (int_part, frac_part) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let formatted = apply_number_fmt(int_part, frac_part, fmt);
+    let sign = if negative { "-" } else { "" };
+
+    // Locale override for Euro placement — French / Italian /
+    // Spanish / Portuguese put the symbol after with a space.
+    let base = locale.to_ascii_lowercase();
+    let base = base.split('-').next().unwrap_or(&base);
+    let euro_suffix_locale = matches!(base, "fr" | "it" | "es" | "pt" | "nl");
+    let prefix_after_override = if currency.eq_ignore_ascii_case("EUR") && euro_suffix_locale {
+        false
+    } else {
+        cur.prefix
+    };
+
+    let out = if prefix_after_override {
+        format!("{sign}{symbol}{formatted}", symbol = cur.symbol)
+    } else {
+        format!("{sign}{formatted} {symbol}", symbol = cur.symbol)
+    };
+
+    Ok(to_value(out)?)
 }
 
 // ------------------------------------------------------------------ intword
@@ -700,5 +1007,137 @@ mod tests {
         // 1 minute → "1 minute"; 2 → "2 minutes"
         assert_eq!(magnitude_string(60), "1 minute");
         assert_eq!(magnitude_string(120), "2 minutes");
+    }
+
+    // -------- #426 / #428 — format_number + format_currency --------
+
+    fn render_filter(template: &str, ctx: tera::Context) -> String {
+        let mut tera = Tera::default();
+        tera.add_raw_template("t", template).unwrap();
+        register_filters(&mut tera);
+        tera.render("t", &ctx).unwrap()
+    }
+
+    #[test]
+    fn format_number_en_uses_comma_grouping_dot_decimal() {
+        let mut ctx = tera::Context::new();
+        ctx.insert("x", &1234567.89_f64);
+        assert_eq!(
+            render_filter(r#"{{ x | format_number(locale="en") }}"#, ctx),
+            "1,234,567.89"
+        );
+    }
+
+    #[test]
+    fn format_number_de_uses_dot_grouping_comma_decimal() {
+        let mut ctx = tera::Context::new();
+        ctx.insert("x", &1234567.89_f64);
+        assert_eq!(
+            render_filter(r#"{{ x | format_number(locale="de") }}"#, ctx),
+            "1.234.567,89"
+        );
+    }
+
+    #[test]
+    fn format_number_fr_uses_space_grouping_comma_decimal() {
+        let mut ctx = tera::Context::new();
+        ctx.insert("x", &1234567.89_f64);
+        assert_eq!(
+            render_filter(r#"{{ x | format_number(locale="fr") }}"#, ctx),
+            "1 234 567,89"
+        );
+    }
+
+    #[test]
+    fn format_number_decimals_arg_pads_and_truncates() {
+        let mut ctx = tera::Context::new();
+        ctx.insert("x", &1234.5_f64);
+        let out = render_filter(r#"{{ x | format_number(locale="en", decimals=2) }}"#, ctx);
+        assert_eq!(out, "1,234.50");
+
+        let mut ctx2 = tera::Context::new();
+        ctx2.insert("x", &1234.5678_f64);
+        let out2 = render_filter(r#"{{ x | format_number(locale="en", decimals=2) }}"#, ctx2);
+        assert_eq!(out2, "1,234.57");
+    }
+
+    #[test]
+    fn format_number_negative_carries_sign() {
+        let mut ctx = tera::Context::new();
+        ctx.insert("x", &-1234.5_f64);
+        assert_eq!(
+            render_filter(r#"{{ x | format_number(locale="en") }}"#, ctx),
+            "-1,234.5"
+        );
+    }
+
+    #[test]
+    fn format_number_integer_input_works() {
+        let mut ctx = tera::Context::new();
+        ctx.insert("x", &1_234_567i64);
+        assert_eq!(
+            render_filter(r#"{{ x | format_number(locale="en") }}"#, ctx),
+            "1,234,567"
+        );
+    }
+
+    #[test]
+    fn format_number_unknown_locale_falls_back_to_en() {
+        let mut ctx = tera::Context::new();
+        ctx.insert("x", &1234.5_f64);
+        // "xx-YZ" has no entry; falls back to en-US.
+        let out = render_filter(r#"{{ x | format_number(locale="xx-YZ") }}"#, ctx);
+        assert_eq!(out, "1,234.5");
+    }
+
+    #[test]
+    fn format_currency_usd_en_renders_dollar_prefix_2dp() {
+        let mut ctx = tera::Context::new();
+        ctx.insert("x", &1234.5_f64);
+        assert_eq!(
+            render_filter(r#"{{ x | format_currency(currency="USD") }}"#, ctx),
+            "$1,234.50"
+        );
+    }
+
+    #[test]
+    fn format_currency_eur_fr_renders_symbol_suffix() {
+        let mut ctx = tera::Context::new();
+        ctx.insert("x", &1234.5_f64);
+        let out = render_filter(
+            r#"{{ x | format_currency(currency="EUR", locale="fr") }}"#,
+            ctx,
+        );
+        assert_eq!(out, "1 234,50 €");
+    }
+
+    #[test]
+    fn format_currency_jpy_uses_zero_decimals() {
+        let mut ctx = tera::Context::new();
+        ctx.insert("x", &1234.567_f64);
+        assert_eq!(
+            render_filter(r#"{{ x | format_currency(currency="JPY") }}"#, ctx),
+            "¥1,235"
+        );
+    }
+
+    #[test]
+    fn format_currency_negative_amount() {
+        let mut ctx = tera::Context::new();
+        ctx.insert("x", &-1234.5_f64);
+        assert_eq!(
+            render_filter(r#"{{ x | format_currency(currency="USD") }}"#, ctx),
+            "-$1,234.50"
+        );
+    }
+
+    #[test]
+    fn format_currency_unknown_code_uses_code_as_symbol() {
+        let mut ctx = tera::Context::new();
+        ctx.insert("x", &1234.0_f64);
+        // ZZX is not a real ISO 4217 code.
+        let out = render_filter(r#"{{ x | format_currency(currency="ZZX") }}"#, ctx);
+        assert!(out.contains("ZZX"), "got: {out}");
+        assert!(out.contains("1,234.00"), "got: {out}");
     }
 }
