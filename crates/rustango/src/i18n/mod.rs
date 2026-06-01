@@ -248,6 +248,96 @@ impl Translator {
         Ok(t)
     }
 
+    /// Build a `Translator` from a [`crate::config::sections::I18nSettings`]
+    /// — Django-shape `LANGUAGE_CODE` / `LANGUAGES` / `LOCALE_PATHS`
+    /// (#403). Reads each `locale_paths` entry as a directory of
+    ///
+    /// Gated behind the `config` feature since it consults the
+    /// loader's typed sections.
+    /// `<lang>.json` catalogs, narrows the active set to
+    /// `languages` (if non-empty), and pins the default locale +
+    /// fallback chain.
+    ///
+    /// ```toml
+    /// # config/default.toml
+    /// [i18n]
+    /// default_locale = "en"
+    /// languages = ["en", "fr", "es"]
+    /// locale_paths = ["locales", "vendor/locales"]
+    /// fallback_chain = ["en"]
+    /// ```
+    ///
+    /// ```ignore
+    /// let settings = rustango::config::load()?;
+    /// let translator = rustango::i18n::Translator::from_settings(&settings.i18n)?;
+    /// ```
+    ///
+    /// Defaults when fields are unset:
+    /// - `default_locale = None` → `"en"`.
+    /// - `languages = []` → every catalog discovered via `locale_paths` stays active.
+    /// - `locale_paths = []` → no directory scan; resulting translator has
+    ///   no registered catalogs (apps that build catalogs programmatically
+    ///   via `add_locale` skip the TOML path entirely).
+    /// - `fallback_chain = []` → only the implicit
+    ///   `exact-locale → base-language → default-locale → key`
+    ///   chain applies.
+    ///
+    /// # Errors
+    /// [`I18nError::Io`] / [`I18nError::Parse`] forwarded from any
+    /// `locale_paths` entry that fails to load. A missing directory
+    /// is treated as a hard error so deployment mistakes surface
+    /// immediately rather than silently producing an empty
+    /// translator.
+    #[cfg(feature = "config")]
+    pub fn from_settings(settings: &crate::config::I18nSettings) -> Result<Self, I18nError> {
+        let default = settings.default_locale.as_deref().unwrap_or("en");
+        let mut t = Translator::new(Locale::new(default));
+
+        // Build the active-language allowlist. Empty `languages`
+        // means "no narrowing"; non-empty means we only insert
+        // catalogs whose stem matches one of the entries.
+        let allowlist: Option<std::collections::HashSet<String>> = if settings.languages.is_empty()
+        {
+            None
+        } else {
+            Some(settings.languages.iter().cloned().collect())
+        };
+
+        for raw_path in &settings.locale_paths {
+            let path = std::path::Path::new(raw_path);
+            let entries = std::fs::read_dir(path)
+                .map_err(|e| I18nError::Io(format!("{}: {e}", path.display())))?;
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|s| s.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if let Some(allow) = &allowlist {
+                    if !allow.contains(stem) {
+                        continue;
+                    }
+                }
+                let raw = std::fs::read_to_string(&p).map_err(|e| I18nError::Io(e.to_string()))?;
+                let catalog: HashMap<String, String> =
+                    serde_json::from_str(&raw).map_err(|e| I18nError::Parse {
+                        file: p.display().to_string(),
+                        detail: e.to_string(),
+                    })?;
+                t.insert_locale(Locale::new(stem), catalog);
+            }
+        }
+
+        if !settings.fallback_chain.is_empty() {
+            let chain: Vec<&str> = settings.fallback_chain.iter().map(String::as_str).collect();
+            t = t.with_fallback_chain(&chain);
+        }
+
+        Ok(t)
+    }
+
     /// Django/gettext-shape alias for [`Self::translate`] — issue #422.
     /// Mirrors Django's `gettext(message)`: look up the key in the
     /// supplied locale and return the translated string (or the

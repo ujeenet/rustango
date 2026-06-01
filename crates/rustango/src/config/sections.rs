@@ -66,6 +66,12 @@ pub struct Settings {
     /// (roadmap #8). Fields are `Option`-typed so missing keys
     /// fall through to `logging::Setup::new()` defaults.
     pub logging: LoggingSettings,
+
+    /// `[i18n]` — Django-shape `LANGUAGE_CODE` / `LANGUAGES` /
+    /// `LOCALE_PATHS` (#403). Bootstraps a [`crate::i18n::Translator`]
+    /// from TOML so deployments don't have to instantiate it in
+    /// code; see [`crate::i18n::Translator::from_settings`].
+    pub i18n: I18nSettings,
 }
 
 impl Settings {
@@ -546,6 +552,58 @@ pub struct LoggingSettings {
     /// logs land in the file ONLY. Useful for headless workers /
     /// daemonized processes. No-op when `file_dir` is unset.
     pub file_only: Option<bool>,
+}
+
+/// `[i18n]` — Django-shape `LANGUAGE_CODE` / `LANGUAGES` /
+/// `LOCALE_PATHS` settings (#403). Used by
+/// [`crate::i18n::Translator::from_settings`] to bootstrap a
+/// `Translator` directly from TOML so deployments don't have to
+/// hard-code locale wiring in `src/main.rs`.
+///
+/// Example `config/default.toml`:
+///
+/// ```toml
+/// [i18n]
+/// default_locale = "en"
+/// languages = ["en", "fr", "es"]
+/// locale_paths = ["locales", "vendor/locales"]
+/// fallback_chain = ["en"]
+/// ```
+///
+/// Every field defaults to its `Default::default()` so an absent
+/// `[i18n]` section is equivalent to "no i18n configured" — the
+/// runtime `Translator::new(Locale::new("en"))` still works.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct I18nSettings {
+    /// Django `LANGUAGE_CODE` — the default locale identifier
+    /// used when no other resolver (URL prefix / cookie /
+    /// Accept-Language) picks a value. Defaults to `"en"` at
+    /// the `from_settings` call site when `None`.
+    pub default_locale: Option<String>,
+
+    /// Django `LANGUAGES` — the list of active locale codes the
+    /// project knows about. `LocaleMiddleware` uses this as the
+    /// allowlist when negotiating Accept-Language. Empty list
+    /// means "every catalog discovered via `locale_paths` is
+    /// active"; an explicit list narrows the active set.
+    pub languages: Vec<String>,
+
+    /// Django `LOCALE_PATHS` — directories scanned for
+    /// per-locale catalog files (`<dir>/<lang>.json`).
+    /// Searched in order; later paths can shadow earlier
+    /// entries for the same key. Empty list skips the
+    /// directory-loader entirely (apps that build their
+    /// `Translator` programmatically via `add_locale` don't
+    /// need this).
+    pub locale_paths: Vec<String>,
+
+    /// Optional explicit fallback chain (#425) — list of
+    /// locales tried in order when a key isn't in the requested
+    /// locale's catalog AND isn't in the base-language catalog.
+    /// Apps that need finer fallback than `default_locale` (e.g.
+    /// "fr-CA missing → fr → pt → en") set this here.
+    pub fallback_chain: Vec<String>,
 }
 
 #[cfg(test)]
