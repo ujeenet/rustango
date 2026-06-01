@@ -113,9 +113,26 @@ pub fn tenant_bootstrap_migration_for<U: TenantUserModel>() -> Migration {
         atomic: true,
         scope: MigrationScope::Tenant,
         snapshot: full_snapshot_for::<U>(),
-        forward: vec![Operation::Schema(SchemaChange::CreateTable(
-            "rustango_users".into(),
-        ))],
+        // #315 — `full_snapshot_for` declares the roles/permissions
+        // tables, so the forward ops must actually CREATE them too.
+        // Previously only `rustango_users` was created, leaving the
+        // snapshot claiming five tables that never existed; any
+        // downstream migration that trusts the snapshot and FKs to them
+        // then fails at apply time on FK-enforcing dialects (MySQL err
+        // 1824) and silently leaves them missing on SQLite. FKs are
+        // deferred by the runner, so creation order is irrelevant.
+        forward: vec![
+            Operation::Schema(SchemaChange::CreateTable("rustango_users".into())),
+            Operation::Schema(SchemaChange::CreateTable("rustango_roles".into())),
+            Operation::Schema(SchemaChange::CreateTable(
+                "rustango_role_permissions".into(),
+            )),
+            Operation::Schema(SchemaChange::CreateTable("rustango_user_roles".into())),
+            Operation::Schema(SchemaChange::CreateTable(
+                "rustango_user_permissions".into(),
+            )),
+            Operation::Schema(SchemaChange::CreateTable("rustango_api_keys".into())),
+        ],
     }
 }
 

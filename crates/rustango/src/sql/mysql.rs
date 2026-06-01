@@ -184,10 +184,12 @@ impl Dialect for MySql {
     ///   to carry `(6)` too, otherwise MySQL fails with
     ///   `1067 (42000): Invalid default value`.
     /// - `'<lit>'::<type>` → `'<lit>'` (strip Postgres cast).
-    /// - JSON columns (`ty == "json"`): wrap the result in parens —
-    ///   `DEFAULT '{}'` is rejected by MySQL on JSON/TEXT/BLOB
-    ///   (`1101 (42000)`), but the MySQL-8.0.13+ expression-default
-    ///   form `DEFAULT (<expr>)` is accepted.
+    /// - TEXT / BLOB / JSON columns (`ty` ∈ {`json`, `string`,
+    ///   `binary`}): wrap the result in parens — `DEFAULT '{}'` is
+    ///   rejected by MySQL on JSON/TEXT/BLOB (`1101 (42000)`), but the
+    ///   MySQL-8.0.13+ expression-default form `DEFAULT (<expr>)` is
+    ///   accepted (and is a harmless wrap for bounded `string` →
+    ///   VARCHAR).
     /// - Everything else passes through.
     fn translate_default_expr(&self, expr: &str, ty: &str) -> String {
         let mut out = expr.trim().to_owned();
@@ -208,7 +210,17 @@ impl Dialect for MySql {
                 }
             }
         }
-        if ty.eq_ignore_ascii_case("json") {
+        // MySQL rejects a literal `DEFAULT <val>` on TEXT / BLOB / JSON /
+        // GEOMETRY columns (error 1101 (42000)). Of our abstract types,
+        // `json` (→ JSON), unbounded `string` (→ TEXT), and `binary`
+        // (→ BLOB) land there. The MySQL-8.0.13+ expression-default form
+        // `DEFAULT (<expr>)` is accepted for all of them — and is a
+        // harmless wrap for the bounded `string` → VARCHAR case, so we
+        // don't need the column's max_length to decide here.
+        if matches!(
+            ty.to_ascii_lowercase().as_str(),
+            "json" | "string" | "binary"
+        ) {
             // Skip wrapping if the caller already produced a
             // parenthesized expression (defensive — current renderers
             // never do this).
