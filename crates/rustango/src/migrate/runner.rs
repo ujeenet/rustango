@@ -1614,8 +1614,12 @@ async fn apply_nonatomic_pool(
     for op in &mig.forward {
         match op {
             Operation::Schema(change) => {
-                let batch = render_changes_split(std::slice::from_ref(change), &mig.snapshot)
-                    .map_err(MigrateError::Validation)?;
+                let batch = super::diff::render_changes_split_with_dialect(
+                    std::slice::from_ref(change),
+                    &mig.snapshot,
+                    pool.dialect(),
+                )
+                .map_err(MigrateError::Validation)?;
                 for stmt in batch.immediate {
                     crate::sql::raw_execute_pool(pool, &stmt, ::std::vec::Vec::new()).await?;
                 }
@@ -1998,8 +2002,12 @@ async fn unapply_atomic_pool(
             for op in inverted {
                 match op {
                     Operation::Schema(change) => {
-                        let batch = render_changes_split(std::slice::from_ref(change), snapshot)
-                            .map_err(MigrateError::Validation)?;
+                        let batch = super::diff::render_changes_split_with_dialect(
+                            std::slice::from_ref(change),
+                            snapshot,
+                            pool.dialect(),
+                        )
+                        .map_err(MigrateError::Validation)?;
                         for stmt in batch.immediate {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
@@ -2030,8 +2038,12 @@ async fn unapply_atomic_pool(
             for op in inverted {
                 match op {
                     Operation::Schema(change) => {
-                        let batch = render_changes_split(std::slice::from_ref(change), snapshot)
-                            .map_err(MigrateError::Validation)?;
+                        let batch = super::diff::render_changes_split_with_dialect(
+                            std::slice::from_ref(change),
+                            snapshot,
+                            pool.dialect(),
+                        )
+                        .map_err(MigrateError::Validation)?;
                         for stmt in batch.immediate {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
@@ -2062,8 +2074,12 @@ async fn unapply_atomic_pool(
             for op in inverted {
                 match op {
                     Operation::Schema(change) => {
-                        let batch = render_changes_split(std::slice::from_ref(change), snapshot)
-                            .map_err(MigrateError::Validation)?;
+                        let batch = super::diff::render_changes_split_with_dialect(
+                            std::slice::from_ref(change),
+                            snapshot,
+                            pool.dialect(),
+                        )
+                        .map_err(MigrateError::Validation)?;
                         for stmt in batch.immediate {
                             sqlx::query(&stmt).execute(&mut *tx).await?;
                         }
@@ -2163,8 +2179,12 @@ async fn unapply_nonatomic_pool(
     for op in inverted {
         match op {
             Operation::Schema(change) => {
-                let batch = render_changes_split(std::slice::from_ref(change), snapshot)
-                    .map_err(MigrateError::Validation)?;
+                let batch = super::diff::render_changes_split_with_dialect(
+                    std::slice::from_ref(change),
+                    snapshot,
+                    pool.dialect(),
+                )
+                .map_err(MigrateError::Validation)?;
                 for stmt in batch.immediate {
                     crate::sql::raw_execute_pool(pool, &stmt, ::std::vec::Vec::new()).await?;
                 }

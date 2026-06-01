@@ -646,8 +646,11 @@ fn render_changes_split_inner(
                 }
             }
             SchemaChange::DropColumn { table, column } => {
-                out.immediate
-                    .push(format!(r#"ALTER TABLE "{table}" DROP COLUMN "{column}""#,));
+                out.immediate.push(format!(
+                    "ALTER TABLE {} DROP COLUMN {}",
+                    dialect.quote_ident(table),
+                    dialect.quote_ident(column),
+                ));
             }
             SchemaChange::AddColumn { table, column } => {
                 let t = current.table(table).ok_or_else(|| {
@@ -677,8 +680,16 @@ fn render_changes_split_inner(
                 out.immediate.push(add_column_sql(table, f, dialect));
             }
             SchemaChange::DropTable(name) => {
+                // CASCADE is Postgres-only — MySQL's parser rejects the
+                // keyword and SQLite has no equivalent. (Mirrors the gate in
+                // `ddl::drop_table_sql_with_dialect` / `drop_all_pool`.)
+                let cascade = if dialect.name() == "postgres" {
+                    " CASCADE"
+                } else {
+                    ""
+                };
                 out.immediate
-                    .push(format!(r#"DROP TABLE "{name}" CASCADE"#));
+                    .push(format!("DROP TABLE {}{cascade}", dialect.quote_ident(name)));
             }
             SchemaChange::AlterColumnType {
                 table,
@@ -898,8 +909,15 @@ fn render_changes_split_inner(
                 ));
             }
             SchemaChange::DropM2MTable { through } => {
-                out.immediate
-                    .push(format!(r#"DROP TABLE IF EXISTS "{through}" CASCADE"#));
+                let cascade = if dialect.name() == "postgres" {
+                    " CASCADE"
+                } else {
+                    ""
+                };
+                out.immediate.push(format!(
+                    "DROP TABLE IF EXISTS {}{cascade}",
+                    dialect.quote_ident(through)
+                ));
             }
             SchemaChange::AddCompositeFk {
                 table,
@@ -1219,5 +1237,48 @@ mod sql_type_tests {
     fn non_auto_passes_through_normally() {
         assert_eq!(sql_type(&fs("i64", false)), "BIGINT");
         assert_eq!(sql_type(&fs("datetime", false)), "TIMESTAMPTZ");
+    }
+
+    // #559 — DROP arms must be dialect-aware. `CASCADE` is Postgres-only
+    // (MySQL's parser rejects it, SQLite has no equivalent) and identifier
+    // quoting differs (PG/SQLite double-quote, MySQL backtick).
+    #[test]
+    fn drop_arms_are_dialect_aware() {
+        use crate::migrate::{SchemaChange, SchemaSnapshot};
+        let snap = SchemaSnapshot::from_models(&[]);
+
+        let drop_table = [SchemaChange::DropTable("foo".into())];
+        let pg =
+            render_changes_split_with_dialect(&drop_table, &snap, &crate::sql::Postgres).unwrap();
+        assert_eq!(
+            pg.immediate,
+            vec![r#"DROP TABLE "foo" CASCADE"#.to_string()]
+        );
+        #[cfg(feature = "mysql")]
+        {
+            let my =
+                render_changes_split_with_dialect(&drop_table, &snap, &crate::sql::MySql).unwrap();
+            assert_eq!(my.immediate, vec!["DROP TABLE `foo`".to_string()]);
+        }
+        #[cfg(feature = "sqlite")]
+        {
+            let sq =
+                render_changes_split_with_dialect(&drop_table, &snap, &crate::sql::Sqlite).unwrap();
+            assert_eq!(sq.immediate, vec![r#"DROP TABLE "foo""#.to_string()]);
+        }
+
+        let drop_col = [SchemaChange::DropColumn {
+            table: "t".into(),
+            column: "c".into(),
+        }];
+        #[cfg(feature = "mysql")]
+        {
+            let my =
+                render_changes_split_with_dialect(&drop_col, &snap, &crate::sql::MySql).unwrap();
+            assert_eq!(
+                my.immediate,
+                vec!["ALTER TABLE `t` DROP COLUMN `c`".to_string()]
+            );
+        }
     }
 }
