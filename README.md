@@ -13,16 +13,16 @@ Every feature works on every supported backend out of the box. The only PG-speci
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.41"
+rustango = "0.42"
 
 # SQLite — file-backed or in-memory, full tri-dialect framework
-rustango = { version = "0.41", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
+rustango = { version = "0.42", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
 
 # MySQL 8+
-rustango = { version = "0.41", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
+rustango = { version = "0.42", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
 
 # Multiple backends in one binary
-rustango = { version = "0.41", features = ["postgres", "sqlite"] }
+rustango = { version = "0.42", features = ["postgres", "sqlite"] }
 ```
 
 ### What's new in v0.42.0 (May 2026) — Django-parity gap-closure batch
