@@ -804,6 +804,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         container.is_view,
         container.verbose_name.as_deref(),
         container.verbose_name_plural.as_deref(),
+        container.managed,
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -1690,6 +1691,7 @@ fn model_impl_tokens(
     is_view: bool,
     verbose_name: Option<&str>,
     verbose_name_plural: Option<&str>,
+    managed: bool,
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
@@ -1836,6 +1838,7 @@ fn model_impl_tokens(
                 is_view: #is_view,
                 verbose_name: #verbose_name_tokens,
                 verbose_name_plural: #verbose_name_plural_tokens,
+                managed: #managed,
             };
         }
     }
@@ -4391,6 +4394,12 @@ struct ContainerAttrs {
     /// snapshot skips this model (its underlying SQL view is operator-
     /// managed, not rustango-managed).
     is_view: bool,
+    /// Django-shape `Meta.managed` from `#[rustango(managed = false)]`.
+    /// Issue #321. Defaults to `true`; when explicitly set to `false`,
+    /// the migration snapshot skips this model so `makemigrations` /
+    /// `migrate` never emit `CREATE TABLE` / `ALTER TABLE` / `DROP
+    /// TABLE` against it (operator-managed schema).
+    managed: bool,
     /// `#[rustango(verbose_name = "blog post")]` — Django-shape
     /// human-readable singular label for the model. Threaded into
     /// `ModelSchema::verbose_name` so admin section headers /
@@ -4583,6 +4592,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         manager_fns: Vec::new(),
         default_order: Vec::new(),
         is_view: false,
+        managed: true,
         verbose_name: None,
         verbose_name_plural: None,
     };
@@ -4891,6 +4901,19 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 } else {
                     out.is_view = true;
                 }
+                return Ok(());
+            }
+            if meta.path.is_ident("managed") {
+                // Django-shape Meta.managed. Issue #321.
+                //   #[rustango(managed = false)]  — operator-managed table
+                //   #[rustango(managed = true)]   — rustango-managed (the default)
+                // Bare-flag form is intentionally not accepted: writing
+                // `#[rustango(managed)]` reads as "yes please manage it"
+                // which is already the default. The opt-out is the only
+                // useful state, so it must be explicit.
+                let v = meta.value()?;
+                let lit: syn::LitBool = v.parse()?;
+                out.managed = lit.value;
                 return Ok(());
             }
             if meta.path.is_ident("verbose_name") {

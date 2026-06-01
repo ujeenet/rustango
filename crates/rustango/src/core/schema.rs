@@ -353,6 +353,19 @@ pub struct ModelSchema {
     /// list-page headings ("All blog posts"). `None` means callers
     /// should auto-pluralize (`format!("{}s", verbose_name_or_name)`).
     pub verbose_name_plural: Option<&'static str>,
+    /// Django-shape `Meta.managed = False` — issue #321. When `true`
+    /// (the default), rustango owns the table: `makemigrations` /
+    /// `migrate` create, alter, and drop it as the struct evolves.
+    /// When `false`, the table is operator-managed: snapshots skip it
+    /// entirely so migration auto-gen never emits `CREATE TABLE` /
+    /// `DROP TABLE` / `ALTER TABLE` against it. Reads + writes behave
+    /// as normal (rustango assumes the schema matches at runtime).
+    ///
+    /// Set via `#[rustango(managed = false)]`. Common use case: a
+    /// table created by another team / pipeline / legacy DB that
+    /// rustango models for query / admin purposes but should not
+    /// re-create.
+    pub managed: bool,
 }
 
 impl ModelSchema {

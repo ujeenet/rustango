@@ -453,6 +453,7 @@ mod tests {
             is_view: false,
             verbose_name: None,
             verbose_name_plural: None,
+            managed: true,
         };
         &MS
     }

@@ -162,7 +162,7 @@ impl SchemaSnapshot {
     pub fn from_registry() -> Self {
         let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
             .into_iter()
-            .filter(|e| !e.schema.is_view)
+            .filter(|e| !e.schema.is_view && e.schema.managed)
             .collect();
         let mut tables: Vec<TableSnapshot> = entries
             .iter()
@@ -195,7 +195,7 @@ impl SchemaSnapshot {
     pub fn from_registry_for_scope(scope: crate::core::ModelScope) -> Self {
         let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
             .into_iter()
-            .filter(|e| e.schema.scope == scope && !e.schema.is_view)
+            .filter(|e| e.schema.scope == scope && !e.schema.is_view && e.schema.managed)
             .collect();
         let mut tables: Vec<TableSnapshot> = entries
             .iter()
@@ -280,7 +280,9 @@ impl SchemaSnapshot {
     pub fn from_registry_for_app(app: &str) -> Self {
         let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
             .into_iter()
-            .filter(|e| e.resolved_app_label() == Some(app) && !e.schema.is_view)
+            .filter(|e| {
+                e.resolved_app_label() == Some(app) && !e.schema.is_view && e.schema.managed
+            })
             .collect();
         let mut tables: Vec<TableSnapshot> = entries
             .iter()
@@ -308,7 +310,11 @@ impl SchemaSnapshot {
     /// rule as [`from_registry`].
     #[must_use]
     pub fn from_models(models: &[&ModelSchema]) -> Self {
-        let models: Vec<&ModelSchema> = models.iter().copied().filter(|s| !s.is_view).collect();
+        let models: Vec<&ModelSchema> = models
+            .iter()
+            .copied()
+            .filter(|s| !s.is_view && s.managed)
+            .collect();
         let mut tables: Vec<TableSnapshot> = models
             .iter()
             .map(|s| TableSnapshot::from_schema(s))
@@ -575,6 +581,7 @@ mod composite_fk_snapshot_tests {
             is_view: false,
             verbose_name: None,
             verbose_name_plural: None,
+            managed: true,
         };
         &MS
     }
@@ -588,6 +595,88 @@ mod composite_fk_snapshot_tests {
         assert_eq!(c.to, "other_table");
         assert_eq!(c.from, vec!["a", "b"]);
         assert_eq!(c.on, vec!["x", "y"]);
+    }
+
+    /// Issue #321 — `#[rustango(managed = false)]` keeps the model
+    /// out of `makemigrations` output. We exercise the registry path
+    /// through `SchemaSnapshot::from_models` so we don't need to register
+    /// real models into `inventory` (which would leak into every
+    /// downstream test).
+    #[test]
+    fn unmanaged_models_are_skipped_by_snapshot_from_models() {
+        static FIELDS: [FieldSchema; 1] = [FieldSchema {
+            name: "id",
+            column: "id",
+            ty: FieldType::I64,
+            nullable: false,
+            primary_key: true,
+            relation: None,
+            max_length: None,
+            min: None,
+            max: None,
+            default: None,
+            auto: false,
+            unique: false,
+            generated_as: None,
+            help_text: None,
+            choices: None,
+            db_comment: None,
+            verbose_name: None,
+            editable: true,
+            blank: false,
+            validators: &[],
+        }];
+        static MANAGED: ModelSchema = ModelSchema {
+            name: "Managed",
+            table: "managed_table",
+            fields: &FIELDS,
+            display: None,
+            app_label: None,
+            admin: None,
+            soft_delete_column: None,
+            audit_track: None,
+            permissions: false,
+            indexes: &[],
+            check_constraints: &[],
+            m2m: &[],
+            composite_relations: &[],
+            generic_relations: &[],
+            scope: crate::core::ModelScope::Tenant,
+            default_order: &[],
+            is_view: false,
+            verbose_name: None,
+            verbose_name_plural: None,
+            managed: true,
+        };
+        static UNMANAGED: ModelSchema = ModelSchema {
+            name: "Unmanaged",
+            table: "unmanaged_table",
+            fields: &FIELDS,
+            display: None,
+            app_label: None,
+            admin: None,
+            soft_delete_column: None,
+            audit_track: None,
+            permissions: false,
+            indexes: &[],
+            check_constraints: &[],
+            m2m: &[],
+            composite_relations: &[],
+            generic_relations: &[],
+            scope: crate::core::ModelScope::Tenant,
+            default_order: &[],
+            is_view: false,
+            verbose_name: None,
+            verbose_name_plural: None,
+            managed: false,
+        };
+        let snap = SchemaSnapshot::from_models(&[&MANAGED, &UNMANAGED]);
+        let table_names: Vec<&str> = snap.tables.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            table_names,
+            vec!["managed_table"],
+            "unmanaged table must be skipped from the migration snapshot",
+        );
     }
 
     #[test]
@@ -637,6 +726,7 @@ mod composite_fk_snapshot_tests {
             is_view: false,
             verbose_name: None,
             verbose_name_plural: None,
+            managed: true,
         };
         let snap = TableSnapshot::from_schema(&MS);
         let json = serde_json::to_string(&snap).expect("serialize");
