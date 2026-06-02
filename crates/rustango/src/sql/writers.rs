@@ -2903,6 +2903,79 @@ pub(super) fn write_delete(b: &mut Sql<'_>, query: &DeleteQuery) -> Result<(), S
 // error in its own compile_bulk_update.
 // ====================================================================
 
+/// #560 — SQLite variant of `bulk_update`. SQLite supports
+/// `UPDATE … FROM <subquery>` since 3.33, but **not** the
+/// column-list-alias-on-inline-VALUES form Postgres uses
+/// (`FROM (VALUES …) AS __data(pk, col, …)`); SQLite raises
+/// `near "(": syntax error` at the alias parens. The
+/// CTE + correlated-subquery shape below parses everywhere
+/// SQLite has supported CTEs (3.8.3, 2014).
+pub(super) fn write_bulk_update_sqlite(
+    b: &mut Sql<'_>,
+    query: &BulkUpdateQuery,
+) -> Result<(), SqlError> {
+    if query.rows.is_empty() {
+        return Err(SqlError::EmptyBulkInsert);
+    }
+    if query.update_columns.is_empty() {
+        return Err(SqlError::EmptyUpdateSet);
+    }
+    let pk_field = query
+        .model
+        .primary_key()
+        .ok_or(SqlError::MissingPrimaryKey)?;
+
+    // WITH __data(<pk>, <c1>, …) AS (VALUES (?, …), (?, …))
+    b.sql.push_str("WITH __data(");
+    b.write_ident(pk_field.column);
+    for col in &query.update_columns {
+        b.sql.push_str(", ");
+        b.write_ident(col);
+    }
+    b.sql.push_str(") AS (VALUES ");
+    let mut first_row = true;
+    for row in &query.rows {
+        if !first_row {
+            b.sql.push_str(", ");
+        }
+        first_row = false;
+        b.sql.push('(');
+        for (i, val) in row.iter().enumerate() {
+            if i > 0 {
+                b.sql.push_str(", ");
+            }
+            b.push_param(val.clone());
+        }
+        b.sql.push(')');
+    }
+    b.sql.push_str(") UPDATE ");
+    b.write_ident(query.model.table);
+    b.sql.push_str(" SET ");
+    let mut first_col = true;
+    for col in &query.update_columns {
+        if !first_col {
+            b.sql.push_str(", ");
+        }
+        first_col = false;
+        b.write_ident(col);
+        b.sql.push_str(" = (SELECT ");
+        b.write_ident(col);
+        b.sql.push_str(" FROM __data WHERE __data.");
+        b.write_ident(pk_field.column);
+        b.sql.push_str(" = ");
+        b.write_ident(query.model.table);
+        b.sql.push('.');
+        b.write_ident(pk_field.column);
+        b.sql.push(')');
+    }
+    b.sql.push_str(" WHERE ");
+    b.write_ident(pk_field.column);
+    b.sql.push_str(" IN (SELECT ");
+    b.write_ident(pk_field.column);
+    b.sql.push_str(" FROM __data)");
+    Ok(())
+}
+
 pub(super) fn write_bulk_update_pg(
     b: &mut Sql<'_>,
     query: &BulkUpdateQuery,

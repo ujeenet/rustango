@@ -30,8 +30,8 @@ use crate::core::{
 };
 
 use super::writers::{
-    write_aggregate, write_bulk_insert, write_count, write_delete, write_insert, write_select,
-    write_update, Sql,
+    write_aggregate, write_bulk_insert, write_bulk_update_sqlite, write_count, write_delete,
+    write_insert, write_select, write_update, Sql,
 };
 use super::{CompiledStatement, Dialect, SqlError};
 
@@ -454,14 +454,15 @@ impl Dialect for Sqlite {
     }
 
     fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError> {
-        // BulkUpdateQuery uses Postgres' `UPDATE … FROM (VALUES …)`
-        // shape. SQLite supports `UPDATE … FROM` since 3.33 but the
-        // current `writers::write_bulk_update` is Postgres-shaped
-        // enough that SQLite needs its own write path. Surface a
-        // clear "not implemented yet" error rather than emit
-        // possibly-broken SQL — Phase 2 ships the SQLite variant.
-        let _ = query;
-        Err(SqlError::DialectQueryCompilationNotImplemented { dialect: "sqlite" })
+        // #560 — SQLite's UPDATE-FROM doesn't accept the
+        // column-list-alias-on-inline-VALUES form Postgres uses
+        // (`FROM (VALUES …) AS __data(pk, col, …)` → `near "(":
+        // syntax error`). Route to a CTE + correlated-subquery
+        // shape that parses on every SQLite that supports CTEs
+        // (3.8.3, 2014); see `writers::write_bulk_update_sqlite`.
+        let mut b = Sql::new(self);
+        write_bulk_update_sqlite(&mut b, query)?;
+        Ok(b.finish())
     }
 
     fn compile_delete(&self, query: &DeleteQuery) -> Result<CompiledStatement, SqlError> {
