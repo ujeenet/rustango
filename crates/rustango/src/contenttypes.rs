@@ -1013,20 +1013,9 @@ async fn exec_one(pool: &crate::sql::Pool, sql: &str) -> Result<(), crate::sql::
     Ok(())
 }
 
-#[cfg(feature = "mysql")]
-fn is_mysql_dup_index_error(e: &crate::sql::sqlx::Error) -> bool {
-    if let crate::sql::sqlx::Error::Database(db) = e {
-        return db.code().as_deref() == Some("42000")
-            || db.message().contains("Duplicate key name");
-    }
-    false
-}
-
-#[cfg(not(feature = "mysql"))]
-#[allow(dead_code)]
-fn is_mysql_dup_index_error(_e: &crate::sql::sqlx::Error) -> bool {
-    false
-}
+// #561 — `is_mysql_dup_index_error` lives in `crate::sql::error`;
+// re-import for the call site at :990.
+use crate::sql::is_mysql_dup_index_error;
 
 /// Backend-agnostic counterpart of [`ensure_seeded`]. Walks the
 /// inventory of registered models and INSERTs a `ContentType` row for
