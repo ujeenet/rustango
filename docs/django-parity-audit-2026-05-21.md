@@ -20,33 +20,35 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 
 | Category | SHIPPED | PARTIAL | MISSING | N/A |
 |---|---:|---:|---:|---:|
-| 1. ORM — models / fields / Meta | 8 | 3 | 4 | 1 |
+| 1. ORM — models / fields / Meta | 8 | 4 | 3 | 1 |
 | 2. QuerySet API | 22 | 4 | 4 | 0 |
 | 3. Field types & options | 14 | 4 | 7 | 0 |
-| 4. Postgres-specific fields | 1 | 1 | 3 | 0 |
-| 5. Migrations | 11 | 2 | 2 | 1 |
-| 6. Admin (ModelAdmin) | 18 | 7 | 11 | 2 |
+| 4. Postgres-specific fields | 2 | 1 | 2 | 0 |
+| 5. Migrations | 13 | 2 | 0 | 1 |
+| 6. Admin (ModelAdmin) | 26 | 2 | 8 | 2 |
 | 7. Forms / Formsets | 8 | 3 | 4 | 0 |
 | 8. Generic CBVs | 12 | 0 | 1 | 1 |
-| 9. URL routing | 5 | 1 | 1 | 1 |
+| 9. URL routing | 6 | 0 | 0 | 1 |
 | 10. Templates | 11 | 0 | 0 | 0 |
 | 11. Authentication | 14 | 4 | 4 | 1 |
-| 12. Sessions | 4 | 1 | 1 | 0 |
+| 12. Sessions | 7 | 0 | 0 | 0 |
 | 13. Manage commands | 13 | 5 | 6 | 4 |
 | 14. Settings | 10 | 4 | 4 | 2 |
-| 15. Security / middleware | 14 | 1 | 1 | 0 |
-| 16. Caching | 7 | 1 | 2 | 0 |
+| 15. Security / middleware | 15 | 0 | 1 | 0 |
+| 16. Caching | 9 | 0 | 1 | 0 |
 | 17. Signals | 7 | 2 | 5 | 0 |
-| 18. Email | 6 | 2 | 1 | 0 |
+| 18. Email | 8 | 1 | 0 | 0 |
 | 19. Files / Storage | 3 | 2 | 3 | 0 |
-| 20. i18n / l10n | 1 | 2 | 6 | 0 |
-| 21. Testing | 7 | 3 | 3 | 0 |
+| 20. i18n / l10n | 5 | 1 | 3 | 0 |
+| 21. Testing | 8 | 2 | 3 | 0 |
 | 22. Async support | 5 | 0 | 0 | 2 |
 | 23. DRF parity | 11 | 4 | 4 | 0 |
 | 24. contrib modules | 6 | 4 | 4 | 0 |
-| **Totals** | **205** | **65** | **84** | **14** |
+| **Totals** | **243** | **49** | **67** | **15** |
 
-Coverage = 205 / (205 + 65 + 84) = **58% full, 19% partial, 24% missing** vs Django 6.0 surface (excluding 14 N/A rows). Partial+shipped = **77%**.
+Coverage = 243 / (243 + 49 + 67) = **68% full, 14% partial, 19% missing** vs Django 6.0 surface (excluding 15 N/A rows). Partial+shipped = **81%**.
+
+Snapshot date: 2026-06-01 (post v0.42 batch including i18n, CITextField, DatabaseCache, managed=false, upload streaming).
 
 ---
 
@@ -71,7 +73,7 @@ Coverage = 205 / (205 + 65 + 84) = **58% full, 19% partial, 24% missing** vs Dja
 | Self-referential FK | [Self FK](https://docs.djangoproject.com/en/6.0/ref/models/fields/#django.db.models.ForeignKey) | SHIPPED | `#[rustango(fk = "self")]` (v0.17.2) | Tested via `tests/self_fk_live.rs`. |
 | `ManyToManyField(through=...)` | [M2M through](https://docs.djangoproject.com/en/6.0/topics/db/models/#extra-fields-on-many-to-many-relationships) | SHIPPED | `#[rustango(m2m(... auto_create = false))]` (closed #324, v0.42). Operator declares the junction as its own `#[derive(Model)]` with extra columns; the migration writer skips emitting `CREATE TABLE` for that junction when `auto_create = false` (otherwise the through-model's own table would conflict). Implicit-junction path with `auto_create = true` (default) unchanged. | |
 
-Summary: **8 SHIPPED / 3 PARTIAL / 4 MISSING / 1 N/A**. Gaps: abstract base + MTI + proxy + `Meta.verbose_name` + `on_delete=PROTECT/SET_NULL` override + ExclusionConstraint.
+Summary: **8 SHIPPED / 4 PARTIAL / 3 MISSING / 1 N/A**. Gaps: full abstract-base field-inheritance (Rust idiom = trait composition; `#[rustango(managed = false)]` covers the operator-managed-table case via #321), MTI, ExclusionConstraint (PG-only).
 
 ---
 
@@ -119,7 +121,7 @@ Summary: **8 SHIPPED / 3 PARTIAL / 4 MISSING / 1 N/A**. Gaps: abstract base + MT
 | `__lookup`s (`__icontains`, `__lt`, `__in`, `__between`, `__range`, `__isnull`, ...) | [Field lookups](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#field-lookups) | SHIPPED | `parse_lookup` in query/mod.rs | Most Django lookups; missing: `__date`, `__year__lte`, etc. requiring transform chains. |
 | `.using(db_alias)` (multi-DB routing) | [using](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#using) | MISSING | n/a (#332) | rustango is single-pool-per-QuerySet (or tenant-scoped); multi-DB router missing. |
 
-Summary: **22 SHIPPED / 4 PARTIAL / 4 MISSING / 0 N/A**. Gaps: `.reverse()`, `.dates/datetimes`, `.contains/.none` sugar, multi-DB `.using()`.
+Summary: **22 SHIPPED / 4 PARTIAL / 4 MISSING / 0 N/A**. Gaps: multi-DB `.using()` (#332), `__date` / `__year__lte` lookup transform chains, plus a few esoteric Postgres lookups. `.dates/datetimes/contains/none` all shipped in v0.42.
 
 ---
 
@@ -170,7 +172,7 @@ Field options:
 | `db_comment` | SHIPPED | `#[rustango(db_comment = "...")]` (#450, v0.42) — PG emits post-table `COMMENT ON COLUMN`, MySQL inlines `COMMENT '...'`, SQLite no-op (no native support) | |
 | `db_tablespace` | N/A | n/a | Tablespaces are PG-specific niche. |
 
-Summary: **14 SHIPPED / 4 PARTIAL / 7 MISSING / 0 N/A** in this section. Gaps cluster around: `choices`, `verbose_name`, `editable`, IP/FilePath/File/ImageField, model-level validators.
+Summary: **14 SHIPPED / 4 PARTIAL / 7 MISSING / 0 N/A** in this section. Gaps cluster around: `FileField` / `ImageField` model side (#339 / #340 — covered by Media row + FK in the rustango idiom; not a native field), `GeneratedField`-side niceties, and a few Django-style aliases. `choices` / `verbose_name` / `editable` / `blank` / `db_comment` / IP / FilePath all SHIPPED in v0.42.
 
 ---
 
