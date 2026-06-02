@@ -103,13 +103,26 @@ pub type BulkActionFn =
 /// connection from [`crate::extractors::Tenant::conn`]. Wired via
 /// [`ListView::tenant_action`].
 /// v0.38 — PG-only by signature (takes `&mut PgConnection`). Sqlite/
-/// MySQL tenants get the tri-dialect `Pool`-based variant below.
+/// MySQL tenants get the tri-dialect `Pool`-based variant
+/// [`TenantBulkActionPoolFn`] below.
 #[cfg(all(feature = "tenancy", feature = "postgres"))]
 pub type TenantBulkActionFn = Arc<
     dyn for<'a> Fn(&'a mut crate::sql::sqlx::PgConnection, &'a [SqlValue]) -> BulkActionFuture<'a>
         + Send
         + Sync,
 >;
+
+/// Tri-dialect tenant-mode bulk-action handler — runs against the
+/// per-request tenant `Pool` from [`crate::extractors::Tenant::pool`]
+/// so the handler works on Postgres, MySQL, and SQLite tenants
+/// uniformly. Wired via [`ListView::tenant_action_pool`].
+///
+/// Issue #560 — the earlier `TenantBulkActionFn` accepted only
+/// `&mut PgConnection`, which made bulk actions a PG-only feature
+/// in tenancy projects.
+#[cfg(feature = "tenancy")]
+pub type TenantBulkActionPoolFn =
+    Arc<dyn for<'a> Fn(&'a Pool, &'a [SqlValue]) -> BulkActionFuture<'a> + Send + Sync>;
 
 /// One registered bulk action. The framework ships
 /// `delete_selected` as a built-in when [`ListView::bulk_actions`]
@@ -134,6 +147,9 @@ pub enum BulkActionHandler {
     Pool(BulkActionFn),
     #[cfg(all(feature = "tenancy", feature = "postgres"))]
     Tenant(TenantBulkActionFn),
+    /// Tri-dialect tenant-mode handler (Pool-based). Issue #560.
+    #[cfg(feature = "tenancy")]
+    TenantPool(TenantBulkActionPoolFn),
 }
 
 /// Render a paginated list of rows for `M`.
@@ -513,6 +529,32 @@ impl ListView {
         self
     }
 
+    /// Tri-dialect tenancy bulk-action handler — sibling to
+    /// [`Self::tenant_action`] but takes the per-request `&Pool` from
+    /// [`crate::extractors::Tenant::pool`] instead of `&mut PgConnection`.
+    /// Works on Postgres, MySQL, and SQLite tenants uniformly.
+    /// Issue #560.
+    ///
+    /// Use this everywhere going forward — `tenant_action` is kept
+    /// for backwards compatibility on PG-only deployments.
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn tenant_action_pool(
+        mut self,
+        name: impl Into<String>,
+        label: impl Into<String>,
+        handler: TenantBulkActionPoolFn,
+    ) -> Self {
+        let name = name.into();
+        self.actions.retain(|a| !same_action_name(&a.name, &name));
+        self.actions.push(BulkAction {
+            name,
+            label: label.into(),
+            handler: BulkActionHandler::TenantPool(handler),
+        });
+        self
+    }
+
     /// Mount as `GET <prefix>` rendering through `tera` from `pool`.
     /// Single-tenant pool capture — every request runs against the
     /// same pool. For tenancy projects use [`Self::tenant_router`].
@@ -731,6 +773,12 @@ async fn handle_list_action(
             BulkActionHandler::Tenant(_) => Err("this action was registered via tenant_action — \
                  mount the ListView via tenant_router(...) to dispatch it"
                 .into()),
+            #[cfg(feature = "tenancy")]
+            BulkActionHandler::TenantPool(_) => {
+                Err("this action was registered via tenant_action_pool — \
+                 mount the ListView via tenant_router(...) to dispatch it"
+                    .into())
+            }
         }
     } else if action == BUILTIN_DELETE_SELECTED {
         run_delete_selected_pool(state.vs.schema, pk_field, &state.pool, &pks).await
@@ -3566,10 +3614,13 @@ mod tenant {
                     } else {
                         Err("this action was registered via .tenant_action(&mut PgConnection,...) — \
                              mount on a PG tenant pool; sqlite/mysql tenants don't expose a \
-                             PgConnection"
+                             PgConnection. Use .tenant_action_pool(&Pool, ...) for tri-dialect handlers."
                             .into())
                     }
                 }
+                // #560 — tri-dialect tenant handler. Works on PG /
+                // MySQL / SQLite tenants uniformly.
+                super::BulkActionHandler::TenantPool(f) => f(&pool, &pks).await,
                 super::BulkActionHandler::Pool(_) => {
                     Err("this action was registered via .action(...) — \
                      mount the ListView via router(...) (single-pool) to dispatch it"
