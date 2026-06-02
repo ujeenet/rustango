@@ -771,7 +771,78 @@ async fn build_database_pool<DB: Database>(
     if let Some(lifetime) = config.database_pool_max_lifetime {
         opts = opts.max_lifetime(lifetime);
     }
-    Ok(opts.connect(url).await?)
+    let url = ensure_sqlite_creates(url);
+    Ok(opts.connect(&url).await?)
+}
+
+/// #560 — provisioning a database-mode SQLite tenant against a URL
+/// like `sqlite:///var/data/<slug>.db` failed because the generic
+/// `PoolOptions<DB>::connect` path has no hook to set
+/// `SqliteConnectOptions::create_if_missing(true)`. Operators had to
+/// append `?mode=rwc` manually to every tenant URL.
+///
+/// Fix in URL space: append `?mode=rwc` (or `&mode=rwc` if other
+/// params already present) when the URL is a SQLite file path and
+/// has no explicit `mode=` setting. sqlx-sqlite honors this exactly
+/// like `create_if_missing(true)`. `:memory:`, URIs that already
+/// pin `mode=`, and non-SQLite URLs pass through unchanged.
+fn ensure_sqlite_creates(url: &str) -> std::borrow::Cow<'_, str> {
+    // SQLite scheme is `sqlite:` or `sqlite://`; PG is `postgres:`/
+    // `postgresql:`; MySQL is `mysql:`/`mariadb:`. Match strictly so
+    // we don't accidentally rewrite a non-SQLite URL that happens to
+    // contain "sqlite" in a password.
+    if !(url.starts_with("sqlite:") || url.starts_with("sqlite://")) {
+        return std::borrow::Cow::Borrowed(url);
+    }
+    // In-memory DB has no file to create; sqlx accepts it directly.
+    if url.contains(":memory:") {
+        return std::borrow::Cow::Borrowed(url);
+    }
+    // Honor an operator-supplied `mode=` query param verbatim.
+    // Match against `?mode=` or `&mode=` so we don't trigger on
+    // adjacent params like `journal_mode=wal`.
+    if url.contains("?mode=") || url.contains("&mode=") {
+        return std::borrow::Cow::Borrowed(url);
+    }
+    let sep = if url.contains('?') { '&' } else { '?' };
+    std::borrow::Cow::Owned(format!("{url}{sep}mode=rwc"))
+}
+
+#[cfg(test)]
+mod ensure_sqlite_creates_tests {
+    use super::ensure_sqlite_creates;
+
+    #[test]
+    fn appends_mode_rwc_to_bare_sqlite_path() {
+        let out = ensure_sqlite_creates("sqlite:///var/data/x.db");
+        assert_eq!(&*out, "sqlite:///var/data/x.db?mode=rwc");
+    }
+
+    #[test]
+    fn appends_with_ampersand_when_other_params_present() {
+        let out = ensure_sqlite_creates("sqlite:///x.db?journal_mode=wal");
+        assert_eq!(&*out, "sqlite:///x.db?journal_mode=wal&mode=rwc");
+    }
+
+    #[test]
+    fn passes_explicit_mode_unchanged() {
+        let out = ensure_sqlite_creates("sqlite:///x.db?mode=ro");
+        assert_eq!(&*out, "sqlite:///x.db?mode=ro");
+    }
+
+    #[test]
+    fn passes_memory_url_unchanged() {
+        let out = ensure_sqlite_creates("sqlite::memory:");
+        assert_eq!(&*out, "sqlite::memory:");
+    }
+
+    #[test]
+    fn passes_non_sqlite_url_unchanged() {
+        let out = ensure_sqlite_creates("postgres://u@h/db");
+        assert_eq!(&*out, "postgres://u@h/db");
+        let out = ensure_sqlite_creates("mysql://u@h/db");
+        assert_eq!(&*out, "mysql://u@h/db");
+    }
 }
 
 /// A connection scoped to a tenant. Generic over the backend
