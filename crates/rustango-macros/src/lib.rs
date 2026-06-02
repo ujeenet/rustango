@@ -5471,6 +5471,11 @@ struct FieldAttrs {
     /// "form may submit empty even when DB is NOT NULL". Threaded into
     /// `FieldSchema::blank`. Defaults to `false`.
     blank: bool,
+    /// `#[rustango(citext)]` / `#[rustango(citext = true)]` (#344) —
+    /// Django-shape `CITextField`. Threaded into
+    /// `FieldSchema::case_insensitive`. Only meaningful for `String`
+    /// fields; the macro errors at derive time if applied elsewhere.
+    case_insensitive: bool,
     /// `#[rustango(validators = "email,url")]` — Django-shape
     /// model-level validator chain. Comma-separated names that
     /// dispatch to the `validators::*` family in `validate_value`.
@@ -5505,6 +5510,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         verbose_name: None,
         editable: true,
         blank: false,
+        case_insensitive: false,
         validators: Vec::new(),
     };
     for attr in &field.attrs {
@@ -5628,6 +5634,23 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                     out.blank = lit.value;
                 } else {
                     out.blank = true;
+                }
+                return Ok(());
+            }
+            if meta.path.is_ident("citext") {
+                // Django-parity CITextField (#344). Two forms:
+                //   #[rustango(citext)]          — flag form, true
+                //   #[rustango(citext = true)]   — explicit
+                //   #[rustango(citext = false)]  — explicit opt-out
+                // String-only validation lives in the field-type
+                // emitter (the FieldType discriminant is computed in
+                // `detect_type`); the macro records the flag and the
+                // DDL writer emits dialect-specific COLLATE / CITEXT.
+                if let Ok(v) = meta.value() {
+                    let lit: syn::LitBool = v.parse()?;
+                    out.case_insensitive = lit.value;
+                } else {
+                    out.case_insensitive = true;
                 }
                 return Ok(());
             }
@@ -6006,6 +6029,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let verbose_name = optional_str(attrs.verbose_name.as_deref());
     let editable = attrs.editable;
     let blank = attrs.blank;
+    let case_insensitive = attrs.case_insensitive;
     let validators_lits: Vec<&str> = attrs.validators.iter().map(String::as_str).collect();
     let schema = quote! {
         ::rustango::core::FieldSchema {
@@ -6028,6 +6052,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             verbose_name: #verbose_name,
             editable: #editable,
             blank: #blank,
+            case_insensitive: #case_insensitive,
             validators: &[ #(#validators_lits),* ],
         }
     };

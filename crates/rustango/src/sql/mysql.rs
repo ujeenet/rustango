@@ -174,6 +174,17 @@ impl Dialect for MySql {
         }
     }
 
+    // #344 — CITextField. MySQL ships `utf8mb4_general_ci` (or any
+    // `_ci` variant), the default collation for utf8mb4 in modern
+    // versions. Forcing it column-level guarantees case-insensitive
+    // comparison even when the table or session default differs.
+    fn ci_text_type(&self, max_length: Option<u32>) -> String {
+        match max_length {
+            Some(n) => format!("VARCHAR({n}) COLLATE utf8mb4_general_ci"),
+            None => "TEXT COLLATE utf8mb4_general_ci".to_owned(),
+        }
+    }
+
     /// Translate Postgres-native `DEFAULT` expressions to MySQL
     /// spelling.
     ///
@@ -1251,6 +1262,7 @@ mod tests {
                 verbose_name: None,
                 editable: true,
                 blank: false,
+                case_insensitive: false,
                 validators: &[],
             })
             .collect();

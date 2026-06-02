@@ -329,6 +329,27 @@ pub trait Dialect {
         }
     }
 
+    /// Column type for a case-insensitive text field (Django parity
+    /// #344 — `CITextField` / `case_insensitive = true`). Default
+    /// emits ANSI `TEXT` so unknown dialects degrade gracefully (case
+    /// sensitivity is then a query-side concern). Postgres overrides
+    /// to `CITEXT`, SQLite to `TEXT COLLATE NOCASE`, MySQL to
+    /// `<VARCHAR(N)|TEXT> COLLATE utf8mb4_general_ci`.
+    fn ci_text_type(&self, max_length: Option<u32>) -> String {
+        // ANSI fallback — caller is expected to use `LOWER(...)` at
+        // query time when running on a dialect that doesn't override.
+        let _ = max_length;
+        "TEXT".to_owned()
+    }
+
+    /// One-time DDL prelude this dialect needs before any column of
+    /// the given type can be created (e.g. `CREATE EXTENSION IF NOT
+    /// EXISTS citext;` on Postgres before a `CITEXT` column can
+    /// land). `None` (default) means no prelude required.
+    fn ci_text_extension_sql(&self) -> Option<&'static str> {
+        None
+    }
+
     /// `true` if `op` can be lowered to SQL by this dialect. Default
     /// `true` — every dialect ships translations for every operator
     /// in the IR. Override to return `false` for ops that genuinely

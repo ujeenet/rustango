@@ -1164,6 +1164,14 @@ fn sql_type_with_dialect(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -
             }
         }
     }
+    // #344 — case-insensitive String columns route through
+    // `dialect.ci_text_type` (PG → CITEXT, SQLite → TEXT COLLATE
+    // NOCASE, MySQL → TEXT COLLATE utf8mb4_general_ci).
+    if f.case_insensitive {
+        if matches!(ty, Some(FieldType::String)) {
+            return dialect.ci_text_type(f.max_length);
+        }
+    }
     if let Some(t) = ty {
         return dialect.column_type(t, f.max_length);
     }
@@ -1190,6 +1198,7 @@ mod sql_type_tests {
             default: None,
             auto,
             unique: false,
+            case_insensitive: false,
             fk: None,
         }
     }

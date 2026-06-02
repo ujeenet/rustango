@@ -306,6 +306,12 @@ fn sql_type(dialect: &dyn Dialect, field: &FieldSchema) -> String {
     if field.auto && matches!(field.ty, FieldType::I16 | FieldType::I32 | FieldType::I64) {
         return dialect.serial_type(field.ty).to_owned();
     }
+    // #344 — CITextField / case-insensitive string columns. Only
+    // meaningful for `String`; other types fall through to the
+    // normal type emit.
+    if field.case_insensitive && matches!(field.ty, FieldType::String) {
+        return dialect.ci_text_type(field.max_length);
+    }
     dialect.column_type(field.ty, field.max_length)
 }
 
@@ -361,6 +367,7 @@ mod tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            case_insensitive: false,
             validators: &[],
         }
     }
