@@ -1322,35 +1322,14 @@ async fn applied_set_pool_for(
     ledger: &str,
 ) -> Result<HashSet<String>, MigrateError> {
     let sql = format!("SELECT name FROM {ledger}");
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            let rows = sqlx::query(&sql).fetch_all(pg).await?;
-            let mut out = HashSet::with_capacity(rows.len());
-            for row in rows {
-                out.insert(row.try_get::<String, _>("name")?);
-            }
-            Ok(out)
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let rows = sqlx::query(&sql).fetch_all(my).await?;
-            let mut out = HashSet::with_capacity(rows.len());
-            for row in rows {
-                out.insert(row.try_get::<String, _>("name")?);
-            }
-            Ok(out)
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            let rows = sqlx::query(&sql).fetch_all(sq).await?;
-            let mut out = HashSet::with_capacity(rows.len());
-            for row in rows {
-                out.insert(row.try_get::<String, _>("name")?);
-            }
-            Ok(out)
-        }
-    }
+    // #561 — was 3-arm `match pool` doing byte-identical
+    // `try_get::<String, _>("name")` loops. The
+    // `raw_query_pool::<(String,)>` positional tuple decode pulls
+    // the single column on every backend via the `Maybe*FromRow`
+    // blanket impls. `ExecError` rides in via `MigrateError::Exec`'s
+    // `#[from]` impl.
+    let rows: Vec<(String,)> = crate::sql::raw_query_pool(&sql, Vec::new(), pool).await?;
+    Ok(rows.into_iter().map(|(name,)| name).collect())
 }
 
 /// Apply every pending migration in `dir` against either backend.
