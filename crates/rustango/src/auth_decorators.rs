@@ -61,14 +61,14 @@
 //!   non-session auth (JWT, basic auth) plug their own predicate.
 
 use std::collections::HashMap;
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 use std::sync::Arc;
 
 use axum::body::Body;
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 use axum::extract::Request;
 use axum::http::{header, HeaderValue, StatusCode};
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 use axum::middleware::Next;
 use axum::response::Response;
 
@@ -102,7 +102,7 @@ impl Default for LoginRequiredConfig {
 /// (JWT, basic) need a different gating shape (queued).
 ///
 /// See the module-level docs for full wiring + login-handler examples.
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 pub fn login_required(
     login_url: impl Into<String>,
 ) -> impl tower::Layer<
@@ -152,7 +152,7 @@ pub fn login_required(
 /// short-circuit straight to the login redirect. Pair with
 /// [`login_required`] only if you want anonymous to be the *only*
 /// reason for the redirect (this gate already handles it).
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 pub fn user_passes_test<F>(
     login_url: impl Into<String>,
     predicate: F,
@@ -183,7 +183,7 @@ where
     })
 }
 
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 async fn handle_user_passes_test<F>(
     cfg: Arc<LoginRequiredConfig>,
     pred: Arc<F>,
@@ -231,7 +231,7 @@ where
 ///     .route("/api/admin/stats", get(stats))
 ///     .layer(user_passes_test_or_403(|u| u.is_superuser));
 /// ```
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 pub fn user_passes_test_or_403<F>(
     predicate: F,
 ) -> impl tower::Layer<
@@ -256,7 +256,7 @@ where
     })
 }
 
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 async fn handle_user_passes_test_or_403<F>(pred: Arc<F>, req: Request<Body>, next: Next) -> Response
 where
     F: Fn(&crate::tenancy::auth::User) -> bool + Send + Sync + 'static,
@@ -287,7 +287,7 @@ where
 /// [`login_required`]; equivalent to
 /// `user_passes_test_or_403(|_| true)` but reads tighter at call
 /// sites.
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 pub fn login_required_or_401() -> impl tower::Layer<
     axum::routing::Route,
     Service = impl tower::Service<
@@ -317,7 +317,7 @@ pub fn login_required_or_401() -> impl tower::Layer<
 ///     .route("/admin/dashboard", get(dashboard))
 ///     .layer(superuser_required("/login"));
 /// ```
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 pub fn superuser_required(
     login_url: impl Into<String>,
 ) -> impl tower::Layer<
@@ -338,7 +338,7 @@ pub fn superuser_required(
 /// API-endpoint variant of [`superuser_required`] — returns
 /// 401 for anonymous and 403 for non-superuser, instead of
 /// redirecting.
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 pub fn superuser_required_or_403() -> impl tower::Layer<
     axum::routing::Route,
     Service = impl tower::Service<
@@ -370,7 +370,7 @@ pub fn superuser_required_or_403() -> impl tower::Layer<
 /// via `u.active` already), this gate would still be correct. Use
 /// it when you want the active-only invariant explicit at the call
 /// site.
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 pub fn active_required(
     login_url: impl Into<String>,
 ) -> impl tower::Layer<
@@ -391,7 +391,7 @@ pub fn active_required(
 /// API-endpoint variant of [`active_required`] — returns 401 for
 /// anonymous and 403 for deactivated accounts, instead of
 /// redirecting.
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 pub fn active_required_or_403() -> impl tower::Layer<
     axum::routing::Route,
     Service = impl tower::Service<
@@ -441,7 +441,7 @@ pub fn active_required_or_403() -> impl tower::Layer<
 /// PG/MySQL/SQLite). For high-RPS admin surfaces, the perm result can
 /// be cached at the session layer in a follow-up; today every request
 /// pays the lookup.
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 pub fn permission_required(
     login_url: impl Into<String>,
     codename: &'static str,
@@ -479,7 +479,7 @@ pub fn permission_required(
 ///     .route("/api/admin/stats", get(stats))
 ///     .layer(permission_required_or_403("auth.access_admin"));
 /// ```
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 pub fn permission_required_or_403(
     codename: &'static str,
 ) -> impl tower::Layer<
@@ -499,7 +499,7 @@ pub fn permission_required_or_403(
     })
 }
 
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 async fn handle_permission_required(
     cfg: Arc<LoginRequiredConfig>,
     codename: &'static str,
@@ -535,20 +535,21 @@ async fn handle_permission_required(
     // resolution failure (missing TenantContext, unknown tenant)
     // surfaces as 500 — the user IS authenticated but we can't tell
     // whether they're authorised.
-    let tenant = match crate::extractors::Tenant::<sqlx::Postgres>::from_request_parts(
-        &mut parts,
-        &(),
-    )
-    .await
-    {
-        Ok(t) => t,
-        Err(_) => {
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::empty())
-                .expect("500 + empty body is always valid");
-        }
-    };
+    let tenant =
+        match crate::extractors::Tenant::<crate::tenancy::DefaultTenantDb>::from_request_parts(
+            &mut parts,
+            &(),
+        )
+        .await
+        {
+            Ok(t) => t,
+            Err(_) => {
+                return Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::empty())
+                    .expect("500 + empty body is always valid");
+            }
+        };
     let has = crate::tenancy::permissions::has_perm_pool(uid, codename, tenant.pool())
         .await
         .unwrap_or(false);
@@ -562,7 +563,7 @@ async fn handle_permission_required(
         .expect("403 + empty body is always valid")
 }
 
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 async fn handle_permission_required_or_403(
     codename: &'static str,
     req: Request<Body>,
@@ -591,20 +592,21 @@ async fn handle_permission_required_or_403(
                 .expect("500 + empty body is always valid");
         }
     };
-    let tenant = match crate::extractors::Tenant::<sqlx::Postgres>::from_request_parts(
-        &mut parts,
-        &(),
-    )
-    .await
-    {
-        Ok(t) => t,
-        Err(_) => {
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::empty())
-                .expect("500 + empty body is always valid");
-        }
-    };
+    let tenant =
+        match crate::extractors::Tenant::<crate::tenancy::DefaultTenantDb>::from_request_parts(
+            &mut parts,
+            &(),
+        )
+        .await
+        {
+            Ok(t) => t,
+            Err(_) => {
+                return Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::empty())
+                    .expect("500 + empty body is always valid");
+            }
+        };
     let has = crate::tenancy::permissions::has_perm_pool(uid, codename, tenant.pool())
         .await
         .unwrap_or(false);
@@ -618,7 +620,7 @@ async fn handle_permission_required_or_403(
         .expect("403 + empty body is always valid")
 }
 
-#[cfg(all(feature = "tenancy", feature = "postgres"))]
+#[cfg(feature = "tenancy")]
 async fn handle_login_required(
     cfg: Arc<LoginRequiredConfig>,
     req: Request<Body>,
@@ -898,7 +900,7 @@ mod tests {
         assert_eq!(safe_next("  /profile  "), Some("/profile".to_owned()));
     }
 
-    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[cfg(feature = "tenancy")]
     #[tokio::test]
     async fn login_required_layer_redirects_anonymous_to_login_url() {
         use axum::body::Body;
@@ -935,7 +937,7 @@ mod tests {
         assert_eq!(loc, "/login?next=%2Fprofile");
     }
 
-    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[cfg(feature = "tenancy")]
     #[tokio::test]
     async fn user_passes_test_redirects_anonymous_to_login_url() {
         use axum::body::Body;
@@ -972,7 +974,7 @@ mod tests {
         assert_eq!(loc, "/login?next=%2Fadmin%2Fdashboard");
     }
 
-    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[cfg(feature = "tenancy")]
     #[test]
     fn user_passes_test_signature_compiles_with_closure_predicate() {
         // Compile-only: pin the signature so the predicate can be
@@ -984,7 +986,7 @@ mod tests {
         };
     }
 
-    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[cfg(feature = "tenancy")]
     #[tokio::test]
     async fn user_passes_test_or_403_returns_401_for_anonymous() {
         use axum::body::Body;
@@ -1016,7 +1018,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
-    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[cfg(feature = "tenancy")]
     #[test]
     fn login_required_or_401_signature_compiles() {
         // Compile-only: the no-arg variant is sugar over
@@ -1026,7 +1028,7 @@ mod tests {
         };
     }
 
-    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[cfg(feature = "tenancy")]
     #[tokio::test]
     async fn superuser_required_redirects_anonymous_to_login() {
         use axum::body::Body;
@@ -1061,7 +1063,7 @@ mod tests {
         assert_eq!(loc, "/login?next=%2Fadmin%2Fdashboard");
     }
 
-    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[cfg(feature = "tenancy")]
     #[tokio::test]
     async fn superuser_required_or_403_returns_401_for_anonymous() {
         use axum::body::Body;
@@ -1090,7 +1092,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
-    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[cfg(feature = "tenancy")]
     #[tokio::test]
     async fn active_required_redirects_anonymous_to_login() {
         use axum::body::Body;
@@ -1125,7 +1127,7 @@ mod tests {
         assert_eq!(loc, "/login?next=%2Fdashboard");
     }
 
-    #[cfg(all(feature = "tenancy", feature = "postgres"))]
+    #[cfg(feature = "tenancy")]
     #[tokio::test]
     async fn active_required_or_403_returns_401_for_anonymous() {
         use axum::body::Body;
