@@ -389,6 +389,16 @@ pub struct ModelSchema {
     /// for ops tooling (data lineage docs, sql-introspectors) that
     /// reads the table's catalog comment.
     pub db_table_comment: Option<&'static str>,
+    /// Django-shape `Meta.get_latest_by` — default sort field that
+    /// `QuerySet::latest_default()` / `earliest_default()` use when
+    /// the caller doesn't pass a field name explicitly. A string
+    /// prefixed with `-` would sort descending; rustango models this
+    /// as `(column, descending)` and the macro splits the prefix.
+    ///
+    /// Set via `#[rustango(get_latest_by = "created_at")]` or
+    /// `#[rustango(get_latest_by = "-priority")]`. `None` means the
+    /// default-less variants return an error pointing at this attr.
+    pub get_latest_by: Option<(&'static str, bool)>,
 }
 
 impl ModelSchema {

@@ -591,6 +591,7 @@ mod composite_fk_snapshot_tests {
             verbose_name_plural: None,
             managed: true,
             db_table_comment: None,
+            get_latest_by: None,
         };
         &MS
     }
@@ -658,6 +659,7 @@ mod composite_fk_snapshot_tests {
             verbose_name_plural: None,
             managed: true,
             db_table_comment: None,
+            get_latest_by: None,
         };
         static UNMANAGED: ModelSchema = ModelSchema {
             name: "Unmanaged",
@@ -681,6 +683,7 @@ mod composite_fk_snapshot_tests {
             verbose_name_plural: None,
             managed: false,
             db_table_comment: None,
+            get_latest_by: None,
         };
         let snap = SchemaSnapshot::from_models(&[&MANAGED, &UNMANAGED]);
         let table_names: Vec<&str> = snap.tables.iter().map(|t| t.name.as_str()).collect();
@@ -741,6 +744,7 @@ mod composite_fk_snapshot_tests {
             verbose_name_plural: None,
             managed: true,
             db_table_comment: None,
+            get_latest_by: None,
         };
         let snap = TableSnapshot::from_schema(&MS);
         let json = serde_json::to_string(&snap).expect("serialize");

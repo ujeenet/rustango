@@ -293,6 +293,7 @@ mod tests {
         verbose_name_plural: None,
         managed: true,
         db_table_comment: None,
+        get_latest_by: None,
     };
 
     static MODEL_WITHOUT_SD: ModelSchema = ModelSchema {
@@ -317,6 +318,7 @@ mod tests {
         verbose_name_plural: None,
         managed: true,
         db_table_comment: None,
+        get_latest_by: None,
     };
 
     #[test]
