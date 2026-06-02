@@ -2,6 +2,27 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [Unreleased]
+
+Post-v0.42 Django-parity follow-ups. Each item is a self-contained slice that landed as its own PR after the v0.42.0 release tag.
+
+### Added
+
+- **`format_number` + `format_currency` Tera filters** (#553 closing [#426](https://github.com/ujeenet/rustango/issues/426) / [#428](https://github.com/ujeenet/rustango/issues/428)) — locale-aware decimal + thousands separators across en / de / fr / es / it / pt / nl / ja / zh / ru / pl / tr / cs / sk / el / bg / uk / hu / nb etc.; currency formatting for USD / CAD / AUD / NZD / HKD / SGD / MXN / EUR / GBP / JPY / KRW / CLP / CNY / RUB / INR / BRL / CHF with locale-driven Euro placement.
+- **RTL layout support** (#554 closing [#429](https://github.com/ujeenet/rustango/issues/429)) — `Locale::is_rtl()` / `direction()` + bare-string helpers `i18n::is_rtl_language()` / `text_direction()` + `ActiveLocale::is_rtl()` / `direction()` extractor convenience + Tera `get_text_direction(locale=…)` / `is_rtl(locale=…)` functions. RTL table: ar / he (+iw) / fa / ur / ps / yi (+ji) / dv / ckb / ug / sd / syr.
+- **`DatabaseCache` backend** (#555 closing [#409](https://github.com/ujeenet/rustango/issues/409)) — Django parity for `django.core.cache.backends.db.DatabaseCache`. Tri-dialect (PG `ON CONFLICT`, MySQL `ON DUPLICATE KEY UPDATE`, SQLite `ON CONFLICT`); idempotent `DatabaseCache::ensure_table().await?` boots the schema; lazy GC on read.
+- **`#[rustango(managed = false)]`** (#558 closing [#321](https://github.com/ujeenet/rustango/issues/321)) — Django `class Meta: managed = False`. Opts a model out of migration auto-gen so the table stays operator-managed.
+- **`Locale::display_name()` / `native_name()` + Tera `language_display_name()` / `language_native_name()`** (#563) — 42-language picker primitives for bidi-aware UIs.
+- **`#[rustango(citext)]`** (#566 closing [#344](https://github.com/ujeenet/rustango/issues/344)) — Django `CITextField`. Per-dialect DDL emit: `CITEXT` (PG, with `dialect.ci_text_extension_sql()` exposing the `CREATE EXTENSION` prelude), `TEXT COLLATE NOCASE` (SQLite), `VARCHAR(N) COLLATE utf8mb4_general_ci` (MySQL).
+
+### Fixed
+
+- **`uploads::save_uploads` chunk-by-chunk streaming with early-abort** (#565 closing [#421](https://github.com/ujeenet/rustango/issues/421)) — previously `field.bytes().await?` buffered the ENTIRE multipart body before bound-checking; a 100MB upload against a 5MB cap therefore still cost 100MB of memory. Now reads `field.chunk()` in a loop, short-circuits with `UploadError::TooLarge` the moment the next chunk would exceed `cfg.max_bytes`.
+
+### Docs
+
+- **Django-parity audit resync** (#567) — top summary table updated against the per-section truths after three months of incremental "MISSING → SHIPPED" flips. Totals: SHIPPED 205 → 243 (+38), PARTIAL 65 → 49 (−16), MISSING 84 → 67 (−17). Coverage: 58% → 68% full; partial+shipped: 77% → 81%.
+
 ## [0.42.0] — Django-parity gap-closure batch
 
 16 Tier-2 issues closed in implementation across 16 PRs (#519–#548), plus 9 closed as already-supported with code pointers. Every shipped item picks up the same inventory-collected `register_*!` macro pattern (const-fn-pointer + `inventory::submit!`) so extensions live next to the model that needs them.
