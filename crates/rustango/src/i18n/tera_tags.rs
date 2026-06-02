@@ -106,6 +106,34 @@ pub fn register(tera: &mut Tera, translator: Arc<Translator>) {
             Ok(Value::Bool(super::is_rtl_language(locale)))
         },
     );
+
+    // Language picker helpers (sibling to RTL detection above).
+    //
+    //   {{ language_display_name(locale=LANG) }}   → "Arabic"
+    //   {{ language_native_name(locale=LANG) }}    → "العربية"
+    //
+    // Typical pairing in a picker template:
+    //   <option value="{{ code }}" dir="{{ get_text_direction(locale=code) }}">
+    //     {{ language_native_name(locale=code) }} — {{ language_display_name(locale=code) }}
+    //   </option>
+    tera.register_function(
+        "language_display_name",
+        |args: &HashMap<String, Value>| -> tera::Result<Value> {
+            let locale = args.get("locale").and_then(Value::as_str).unwrap_or("");
+            Ok(Value::String(
+                super::language_display_name(locale).to_owned(),
+            ))
+        },
+    );
+    tera.register_function(
+        "language_native_name",
+        |args: &HashMap<String, Value>| -> tera::Result<Value> {
+            let locale = args.get("locale").and_then(Value::as_str).unwrap_or("");
+            Ok(Value::String(
+                super::language_native_name(locale).to_owned(),
+            ))
+        },
+    );
 }
 
 /// Shared body for the function + filter shapes — extract the locale
@@ -310,6 +338,46 @@ mod tests {
             make_translator(),
         );
         assert_eq!(out, "LTR");
+    }
+
+    #[test]
+    fn language_display_name_in_template() {
+        let mut ctx = Context::new();
+        ctx.insert("LANG", "fr");
+        let out = render(
+            r#"{{ language_display_name(locale=LANG) }}"#,
+            &ctx,
+            make_translator(),
+        );
+        assert_eq!(out, "French");
+    }
+
+    #[test]
+    fn language_native_name_in_template() {
+        let mut ctx = Context::new();
+        ctx.insert("LANG", "ja");
+        let out = render(
+            r#"{{ language_native_name(locale=LANG) }}"#,
+            &ctx,
+            make_translator(),
+        );
+        assert_eq!(out, "日本語");
+    }
+
+    #[test]
+    fn language_picker_compose_with_direction_function() {
+        // Realistic <option> render for an RTL+LTR picker.
+        let mut ctx = Context::new();
+        ctx.insert("code", "ar");
+        let out = render(
+            r#"<option value="{{ code }}" dir="{{ get_text_direction(locale=code) }}">{{ language_native_name(locale=code) }} — {{ language_display_name(locale=code) }}</option>"#,
+            &ctx,
+            make_translator(),
+        );
+        assert_eq!(
+            out,
+            r#"<option value="ar" dir="rtl">العربية — Arabic</option>"#
+        );
     }
 
     #[test]

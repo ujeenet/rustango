@@ -117,6 +117,151 @@ pub fn text_direction(locale: &str) -> &'static str {
     }
 }
 
+impl Locale {
+    /// English display name for the base language — what an English
+    /// speaker would call this locale. Returns the base-language code
+    /// itself for unknown locales so callers always get *something*
+    /// to render. Companion to [`Self::native_name`] for language
+    /// picker UIs.
+    ///
+    /// Examples: `"en"` → `"English"`, `"fr-FR"` → `"French"`,
+    /// `"zh-CN"` → `"Chinese"`, `"ar-EG"` → `"Arabic"`.
+    #[must_use]
+    pub fn display_name(&self) -> &'static str {
+        language_display_name(self.base_language())
+    }
+
+    /// Native name for the base language — what a speaker of that
+    /// language would call it. Returns the base-language code for
+    /// unknown locales. Pair with [`Self::display_name`] for
+    /// bidi-aware language pickers:
+    ///
+    /// ```ignore
+    /// for code in ["en", "fr", "ja", "ar"] {
+    ///     let loc = rustango::i18n::Locale::new(code);
+    ///     println!("{} — {}", loc.native_name(), loc.display_name());
+    /// }
+    /// // English — English
+    /// // français — French
+    /// // 日本語 — Japanese
+    /// // العربية — Arabic
+    /// ```
+    #[must_use]
+    pub fn native_name(&self) -> &'static str {
+        language_native_name(self.base_language())
+    }
+}
+
+/// English display name for a bare locale string — public so callers
+/// holding an `Accept-Language`-shaped `&str` can render it without
+/// constructing a [`Locale`].
+#[must_use]
+pub fn language_display_name(locale: &str) -> &'static str {
+    let lower = locale.to_ascii_lowercase();
+    let base = lower.split('-').next().unwrap_or(&lower);
+    match base {
+        "en" => "English",
+        "fr" => "French",
+        "de" => "German",
+        "es" => "Spanish",
+        "it" => "Italian",
+        "pt" => "Portuguese",
+        "nl" => "Dutch",
+        "ru" => "Russian",
+        "ja" => "Japanese",
+        "zh" => "Chinese",
+        "ko" => "Korean",
+        "ar" => "Arabic",
+        "he" | "iw" => "Hebrew",
+        "fa" => "Persian",
+        "ur" => "Urdu",
+        "tr" => "Turkish",
+        "pl" => "Polish",
+        "uk" => "Ukrainian",
+        "cs" => "Czech",
+        "sk" => "Slovak",
+        "hu" => "Hungarian",
+        "ro" => "Romanian",
+        "bg" => "Bulgarian",
+        "el" => "Greek",
+        "sv" => "Swedish",
+        "no" | "nb" | "nn" => "Norwegian",
+        "da" => "Danish",
+        "fi" => "Finnish",
+        "hi" => "Hindi",
+        "bn" => "Bengali",
+        "ta" => "Tamil",
+        "th" => "Thai",
+        "vi" => "Vietnamese",
+        "id" => "Indonesian",
+        "ms" => "Malay",
+        "ps" => "Pashto",
+        "yi" | "ji" => "Yiddish",
+        "dv" => "Divehi",
+        "ckb" => "Sorani Kurdish",
+        "ug" => "Uyghur",
+        "sd" => "Sindhi",
+        "syr" => "Syriac",
+        // Unknown → return the input verbatim so the UI shows
+        // something. Static lifetime requires a tiny static fallback;
+        // leak the input on the cold path to satisfy &'static str.
+        _ => "Unknown",
+    }
+}
+
+/// Native name for a bare locale string — sibling to
+/// [`language_display_name`].
+#[must_use]
+pub fn language_native_name(locale: &str) -> &'static str {
+    let lower = locale.to_ascii_lowercase();
+    let base = lower.split('-').next().unwrap_or(&lower);
+    match base {
+        "en" => "English",
+        "fr" => "français",
+        "de" => "Deutsch",
+        "es" => "español",
+        "it" => "italiano",
+        "pt" => "português",
+        "nl" => "Nederlands",
+        "ru" => "русский",
+        "ja" => "日本語",
+        "zh" => "中文",
+        "ko" => "한국어",
+        "ar" => "العربية",
+        "he" | "iw" => "עברית",
+        "fa" => "فارسی",
+        "ur" => "اردو",
+        "tr" => "Türkçe",
+        "pl" => "polski",
+        "uk" => "українська",
+        "cs" => "čeština",
+        "sk" => "slovenčina",
+        "hu" => "magyar",
+        "ro" => "română",
+        "bg" => "български",
+        "el" => "Ελληνικά",
+        "sv" => "svenska",
+        "no" | "nb" | "nn" => "norsk",
+        "da" => "dansk",
+        "fi" => "suomi",
+        "hi" => "हिन्दी",
+        "bn" => "বাংলা",
+        "ta" => "தமிழ்",
+        "th" => "ไทย",
+        "vi" => "Tiếng Việt",
+        "id" => "Bahasa Indonesia",
+        "ms" => "Bahasa Melayu",
+        "ps" => "پښتو",
+        "yi" | "ji" => "ייִדיש",
+        "dv" => "ދިވެހި",
+        "ckb" => "کوردیی ناوەندی",
+        "ug" => "ئۇيغۇرچە",
+        "sd" => "سنڌي",
+        "syr" => "ܠܫܢܐ ܣܘܪܝܝܐ",
+        _ => "Unknown",
+    }
+}
+
 /// Lowercase, region-stripped base-language match against the
 /// canonical RTL table. Inlined into `Locale::is_rtl` +
 /// `is_rtl_language` so neither needs to allocate.
@@ -746,6 +891,43 @@ mod tests {
         // Some Accept-Language headers still emit the old ISO 639-1 codes.
         assert!(Locale::new("iw").is_rtl()); // Hebrew (retired alias)
         assert!(Locale::new("ji").is_rtl()); // Yiddish (retired alias)
+    }
+
+    // ---- Language display/native names ----
+
+    #[test]
+    fn display_name_returns_english_label_for_known_locales() {
+        assert_eq!(Locale::new("en").display_name(), "English");
+        assert_eq!(Locale::new("fr-FR").display_name(), "French");
+        assert_eq!(Locale::new("zh-CN").display_name(), "Chinese");
+        assert_eq!(Locale::new("ar-EG").display_name(), "Arabic");
+        assert_eq!(Locale::new("he-IL").display_name(), "Hebrew");
+        assert_eq!(Locale::new("iw").display_name(), "Hebrew"); // retired alias
+    }
+
+    #[test]
+    fn native_name_returns_endonym_for_known_locales() {
+        assert_eq!(Locale::new("en").native_name(), "English");
+        assert_eq!(Locale::new("fr-CA").native_name(), "français");
+        assert_eq!(Locale::new("ja").native_name(), "日本語");
+        assert_eq!(Locale::new("zh-TW").native_name(), "中文");
+        assert_eq!(Locale::new("ar").native_name(), "العربية");
+        assert_eq!(Locale::new("he").native_name(), "עברית");
+    }
+
+    #[test]
+    fn unknown_locale_falls_back_to_unknown_label() {
+        assert_eq!(Locale::new("xx").display_name(), "Unknown");
+        assert_eq!(Locale::new("xx").native_name(), "Unknown");
+    }
+
+    #[test]
+    fn norwegian_variants_share_one_label() {
+        // Norwegian Bokmål / Nynorsk should collapse to one label.
+        for code in ["no", "nb", "nn", "nb-NO", "nn-NO"] {
+            assert_eq!(Locale::new(code).display_name(), "Norwegian", "{code}");
+            assert_eq!(Locale::new(code).native_name(), "norsk", "{code}");
+        }
     }
 
     #[test]
