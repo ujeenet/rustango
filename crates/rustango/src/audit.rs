@@ -603,20 +603,9 @@ pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Erro
     Ok(())
 }
 
-#[cfg(feature = "mysql")]
-fn is_mysql_dup_index_error(e: &sqlx::Error) -> bool {
-    if let sqlx::Error::Database(db) = e {
-        return db.code().as_deref() == Some("42000")
-            || db.message().contains("Duplicate key name");
-    }
-    false
-}
-
-#[cfg(not(feature = "mysql"))]
-#[allow(dead_code)]
-fn is_mysql_dup_index_error(_e: &sqlx::Error) -> bool {
-    false
-}
+// #561 — `is_mysql_dup_index_error` lives in `crate::sql::error`;
+// re-import here so the call site at :592 stays byte-identical.
+use crate::sql::is_mysql_dup_index_error;
 
 /// Per-row audit emit on a `MySqlConnection`-shape executor —
 /// counterpart of [`emit_one`] using `?` placeholders + backtick

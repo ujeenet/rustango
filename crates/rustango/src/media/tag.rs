@@ -201,14 +201,13 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for MediaTag {
     }
 }
 
-#[cfg(feature = "mysql")]
-pub(super) fn is_mysql_dup_index_error(e: &sqlx::Error) -> bool {
-    if let sqlx::Error::Database(db) = e {
-        return db.code().as_deref() == Some("42000")
-            || db.message().contains("Duplicate key name");
-    }
-    false
-}
+// #561 — `is_mysql_dup_index_error` was a `pub(super)` copy here so
+// `media::mod` + `media::collection` could reach across modules to
+// dodge a 5th duplicate. Re-export from `crate::sql::is_mysql_dup_index_error`
+// keeps those existing `super::tag::is_mysql_dup_index_error` /
+// `crate::media::tag::is_mysql_dup_index_error` paths working
+// without touching their call sites.
+pub(super) use crate::sql::is_mysql_dup_index_error;
 
 /// MySQL DATETIME(6) decoder — sqlx returns `NaiveDateTime` by default
 /// for `DATETIME` (no TZ); promote to `DateTime<Utc>` assuming the

@@ -29,7 +29,7 @@ pub use backend::{
 };
 pub use compiled::CompiledStatement;
 pub use dialect::Dialect;
-pub use error::{ExecError, SqlError};
+pub use error::{is_mysql_dup_index_error, ExecError, SqlError};
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
 #[cfg(feature = "mysql")]
 pub use executor::row_to_json_my;

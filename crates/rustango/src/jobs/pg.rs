@@ -761,14 +761,9 @@ impl HandlerRegistry {
     }
 }
 
-#[cfg(feature = "mysql")]
-fn is_mysql_dup_index_error(e: &sqlx::Error) -> bool {
-    if let sqlx::Error::Database(db) = e {
-        return db.code().as_deref() == Some("42000")
-            || db.message().contains("Duplicate key name");
-    }
-    false
-}
+// #561 — `is_mysql_dup_index_error` lives in `crate::sql::error`;
+// re-import for the call site at :255.
+use crate::sql::is_mysql_dup_index_error;
 
 /// Best-effort `gethostname` without pulling a dep — read the env var
 /// most container runtimes set.

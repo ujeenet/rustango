@@ -302,3 +302,39 @@ pub enum ExecError {
         count: usize,
     },
 }
+
+// =====================================================================
+// Shared driver-error predicates
+// =====================================================================
+//
+// #561 — recognizing "duplicate index name" on MySQL used to live as
+// 4 byte-identical copies in `audit.rs`, `contenttypes.rs`,
+// `jobs/pg.rs`, and `media/tag.rs` (plus `#[cfg(not(mysql))]`
+// stubs returning `false`). Migration / DDL idempotency code that
+// runs `CREATE INDEX IF NOT EXISTS` against MySQL — which has no
+// such syntax — has to swallow the duplicate error to stay
+// idempotent. Predicate exposed once here; callers route through
+// `crate::sql::is_mysql_dup_index_error`.
+
+/// `true` when `e` is MySQL's `ER_DUP_KEYNAME` (1061) — raised by
+/// `CREATE INDEX` against a name that already exists. MySQL has no
+/// `CREATE INDEX IF NOT EXISTS`, so the idempotent ensure-table code
+/// catches this error and continues.
+///
+/// On a build without the `mysql` cargo feature the predicate
+/// returns `false` for every error — there's no MySQL driver
+/// compiled in so this code path can't fire.
+#[cfg(feature = "mysql")]
+pub fn is_mysql_dup_index_error(e: &crate::sql::sqlx::Error) -> bool {
+    if let crate::sql::sqlx::Error::Database(db) = e {
+        return db.code().as_deref() == Some("42000")
+            || db.message().contains("Duplicate key name");
+    }
+    false
+}
+
+/// `cfg(not(mysql))` stub — see the documented variant above.
+#[cfg(not(feature = "mysql"))]
+pub fn is_mysql_dup_index_error(_e: &crate::sql::sqlx::Error) -> bool {
+    false
+}
