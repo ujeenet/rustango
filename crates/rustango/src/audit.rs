@@ -334,6 +334,10 @@ fn audit_cleanup_keep_last_n_sql(dialect: &dyn crate::sql::Dialect) -> String {
 ///
 /// PG-typed back-compat; for non-PG use [`fetch_for_entity_pool`].
 ///
+/// #562 — delegates to [`fetch_for_entity_pool`] so the SELECT template
+/// + decode loop lives in one place. The PG-typed signature stays so
+/// older call sites compile unchanged.
+///
 /// # Errors
 /// Driver / SQL failures.
 #[cfg(feature = "postgres")]
@@ -342,22 +346,12 @@ pub async fn fetch_for_entity(
     entity_table: &str,
     entity_pk: &str,
 ) -> Result<Vec<AuditEntry>, sqlx::Error> {
-    let rows: Vec<PgRow> = sqlx::query(
-        r#"SELECT "id", "entity_table", "entity_pk", "operation",
-                  "source", "changes", "occurred_at"
-           FROM "rustango_audit_log"
-           WHERE "entity_table" = $1 AND "entity_pk" = $2
-           ORDER BY "occurred_at" DESC, "id" DESC"#,
+    fetch_for_entity_pool(
+        &crate::sql::Pool::from(pool.clone()),
+        entity_table,
+        entity_pk,
     )
-    .bind(entity_table)
-    .bind(entity_pk)
-    .fetch_all(pool)
-    .await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        out.push(AuditEntry::from_row(&row)?);
-    }
-    Ok(out)
+    .await
 }
 
 /// Decoded audit-log row.
