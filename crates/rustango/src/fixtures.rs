@@ -202,111 +202,45 @@ async fn insert_row_pool(
         cols_sql.join(", "),
         placeholders.join(", "),
     );
-    // Bind per-backend. The JSON value → SQL parameter coercion is
-    // identical across backends for the scalar types fixtures carry;
-    // arrays / objects bind as `sqlx::types::Json<Value>` which all
-    // three sqlx backends support via the `json` feature.
-    match pool {
-        #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            let mut q = sqlx::query(&sql);
-            for col in &columns {
-                let val = &row[col.as_str()];
-                q = bind_pg(q, val);
-            }
-            q.execute(pg)
-                .await
-                .map_err(|e| FixtureError::Database(e.to_string()))?;
-        }
-        #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            let mut q = sqlx::query(&sql);
-            for col in &columns {
-                let val = &row[col.as_str()];
-                q = bind_my(q, val);
-            }
-            q.execute(my)
-                .await
-                .map_err(|e| FixtureError::Database(e.to_string()))?;
-        }
-        #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            let mut q = sqlx::query(&sql);
-            for col in &columns {
-                let val = &row[col.as_str()];
-                q = bind_sqlite(q, val);
-            }
-            q.execute(sq)
-                .await
-                .map_err(|e| FixtureError::Database(e.to_string()))?;
-        }
-    }
+    // #561 — was three byte-identical `bind_pg`/`bind_my`/`bind_sqlite`
+    // helpers each matching on `serde_json::Value` and binding the
+    // backend-specific sqlx arg. Convert each row value to a
+    // `SqlValue` once and let `raw_execute_pool` dispatch through
+    // the canonical executor binding macros — arrays / objects go
+    // through `SqlValue::Json` which the executor wraps in
+    // `sqlx::types::Json(...)` for every backend.
+    let binds: Vec<crate::core::SqlValue> = columns
+        .iter()
+        .map(|col| value_to_sqlvalue(&row[col.as_str()]))
+        .collect();
+    crate::sql::raw_execute_pool(pool, &sql, binds)
+        .await
+        .map_err(|e| FixtureError::Database(e.to_string()))?;
     Ok(())
 }
 
-#[cfg(feature = "postgres")]
-fn bind_pg<'a>(
-    q: sqlx::query::Query<'a, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    v: &'a Value,
-) -> sqlx::query::Query<'a, sqlx::Postgres, sqlx::postgres::PgArguments> {
+/// #561 — `serde_json::Value` → `SqlValue` adapter. Matches the
+/// behavior of the previous per-backend `bind_*` helpers:
+/// scalars route through the typed `SqlValue` variants; arrays and
+/// objects route through `SqlValue::Json` so the executor's
+/// `bind_match!` wraps in `sqlx::types::Json(...)` for JSONB / JSON
+/// / TEXT on PG / MySQL / SQLite respectively.
+fn value_to_sqlvalue(v: &Value) -> crate::core::SqlValue {
+    use crate::core::SqlValue;
     match v {
-        Value::Null => q.bind(None::<i64>),
-        Value::Bool(b) => q.bind(*b),
+        Value::Null => SqlValue::Null,
+        Value::Bool(b) => SqlValue::Bool(*b),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                q.bind(i)
+                SqlValue::I64(i)
             } else if let Some(f) = n.as_f64() {
-                q.bind(f)
+                SqlValue::F64(f)
             } else {
-                q.bind(n.to_string())
+                SqlValue::String(n.to_string())
             }
         }
-        Value::String(s) => q.bind(s.as_str()),
-        Value::Array(_) | Value::Object(_) => q.bind(v.clone()),
-    }
-}
-
-#[cfg(feature = "mysql")]
-fn bind_my<'a>(
-    q: sqlx::query::Query<'a, sqlx::MySql, sqlx::mysql::MySqlArguments>,
-    v: &'a Value,
-) -> sqlx::query::Query<'a, sqlx::MySql, sqlx::mysql::MySqlArguments> {
-    match v {
-        Value::Null => q.bind(None::<i64>),
-        Value::Bool(b) => q.bind(*b),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                q.bind(i)
-            } else if let Some(f) = n.as_f64() {
-                q.bind(f)
-            } else {
-                q.bind(n.to_string())
-            }
-        }
-        Value::String(s) => q.bind(s.as_str()),
-        Value::Array(_) | Value::Object(_) => q.bind(sqlx::types::Json(v.clone())),
-    }
-}
-
-#[cfg(feature = "sqlite")]
-fn bind_sqlite<'a>(
-    q: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>,
-    v: &'a Value,
-) -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>> {
-    match v {
-        Value::Null => q.bind(None::<i64>),
-        Value::Bool(b) => q.bind(*b),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                q.bind(i)
-            } else if let Some(f) = n.as_f64() {
-                q.bind(f)
-            } else {
-                q.bind(n.to_string())
-            }
-        }
-        Value::String(s) => q.bind(s.as_str()),
-        Value::Array(_) | Value::Object(_) => q.bind(sqlx::types::Json(v.clone())),
+        Value::String(s) => SqlValue::String(s.clone()),
+        Value::Array(_) | Value::Object(_) => SqlValue::Json(v.clone()),
     }
 }
 
