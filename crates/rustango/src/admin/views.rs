@@ -1053,7 +1053,7 @@ async fn fetch_facet_rows(
                 // most common shapes; fall back to empty string if
                 // every decode fails (matches the legacy unwrap_or_default
                 // behaviour).
-                let raw = stringify_facet_value_pg(&r);
+                let raw = stringify_facet_value(&r);
                 let display = if expect_display {
                     r.try_get::<Option<String>, _>("facet_display")
                         .ok()
@@ -1071,7 +1071,7 @@ async fn fetch_facet_rows(
             let rows = sqlx::query(sql).fetch_all(my).await?;
             let mut out = Vec::with_capacity(rows.len());
             for r in rows {
-                let raw = stringify_facet_value_my(&r);
+                let raw = stringify_facet_value(&r);
                 let display = if expect_display {
                     r.try_get::<Option<String>, _>("facet_display")
                         .ok()
@@ -1089,7 +1089,7 @@ async fn fetch_facet_rows(
             let rows = sqlx::query(sql).fetch_all(sq).await?;
             let mut out = Vec::with_capacity(rows.len());
             for r in rows {
-                let raw = stringify_facet_value_sqlite(&r);
+                let raw = stringify_facet_value(&r);
                 let display = if expect_display {
                     r.try_get::<Option<String>, _>("facet_display")
                         .ok()
@@ -1109,44 +1109,19 @@ async fn fetch_facet_rows(
 /// numeric / boolean scalars admin facets commonly hit. Returns an
 /// empty string when every shape fails — matches the v0.13.x
 /// `unwrap_or_default()` legacy behaviour.
-#[cfg(feature = "postgres")]
-fn stringify_facet_value_pg(row: &sqlx::postgres::PgRow) -> String {
-    use sqlx::Row as _;
-    if let Ok(Some(s)) = row.try_get::<Option<String>, _>("facet_value") {
-        return s;
-    }
-    if let Ok(Some(n)) = row.try_get::<Option<i64>, _>("facet_value") {
-        return n.to_string();
-    }
-    if let Ok(Some(n)) = row.try_get::<Option<i32>, _>("facet_value") {
-        return n.to_string();
-    }
-    if let Ok(Some(b)) = row.try_get::<Option<bool>, _>("facet_value") {
-        return b.to_string();
-    }
-    String::new()
-}
-
-#[cfg(feature = "mysql")]
-fn stringify_facet_value_my(row: &sqlx::mysql::MySqlRow) -> String {
-    use sqlx::Row as _;
-    if let Ok(Some(s)) = row.try_get::<Option<String>, _>("facet_value") {
-        return s;
-    }
-    if let Ok(Some(n)) = row.try_get::<Option<i64>, _>("facet_value") {
-        return n.to_string();
-    }
-    if let Ok(Some(n)) = row.try_get::<Option<i32>, _>("facet_value") {
-        return n.to_string();
-    }
-    if let Ok(Some(b)) = row.try_get::<Option<bool>, _>("facet_value") {
-        return b.to_string();
-    }
-    String::new()
-}
-
-#[cfg(feature = "sqlite")]
-fn stringify_facet_value_sqlite(row: &sqlx::sqlite::SqliteRow) -> String {
+///
+/// #562 — was three byte-identical per-backend copies
+/// (`*_pg` / `*_my` / `*_sqlite`); the verbose decode-bound `where`
+/// clause is the price of writing it once.
+fn stringify_facet_value<'r, R>(row: &'r R) -> String
+where
+    R: sqlx::Row,
+    &'r str: sqlx::ColumnIndex<R>,
+    Option<String>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    Option<i64>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    Option<i32>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    Option<bool>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
     use sqlx::Row as _;
     if let Ok(Some(s)) = row.try_get::<Option<String>, _>("facet_value") {
         return s;
