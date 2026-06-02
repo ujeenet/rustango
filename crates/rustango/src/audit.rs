@@ -1085,39 +1085,32 @@ pub async fn cleanup_older_than_pool(
     pool: &crate::sql::Pool,
     cutoff_days: i64,
 ) -> Result<u64, sqlx::Error> {
+    use crate::core::SqlValue;
     let cutoff = cutoff_days.max(0);
     let cutoff_ts = chrono::Utc::now() - chrono::Duration::days(cutoff);
     let sql = audit_cleanup_older_than_sql(pool.dialect());
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            let r = sqlx::query(&sql).bind(cutoff_ts).execute(pg).await?;
-            Ok(r.rows_affected())
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let r = sqlx::query(&sql).bind(cutoff_ts).execute(my).await?;
-            Ok(r.rows_affected())
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            // #560 — `occurred_at` is `TEXT DEFAULT CURRENT_TIMESTAMP`
-            // (see `CREATE_TABLE_SQL_SQLITE`). SQLite's built-in
-            // `CURRENT_TIMESTAMP` emits `"YYYY-MM-DD HH:MM:SS"` —
-            // space separator, no fractional, no timezone. sqlx-sqlite
-            // encodes a `chrono::DateTime<Utc>` as RFC3339
-            // `"YYYY-MM-DDTHH:MM:SS.ssssss+00:00"`. Comparing those two
-            // as TEXT lexicographically diverges at position 10
-            // (space `0x20` < `T` `0x54`), so any row from CURRENT_TIMESTAMP
-            // on the same calendar day as the cutoff but with a later
-            // HH:MM was silently deleted as "older". Bind the cutoff
-            // in the same CURRENT_TIMESTAMP shape so both sides of the
-            // `<` compare against the same format.
-            let cutoff_str = cutoff_ts.format("%Y-%m-%d %H:%M:%S").to_string();
-            let r = sqlx::query(&sql).bind(cutoff_str).execute(sq).await?;
-            Ok(r.rows_affected())
-        }
-    }
+    // #560 — `occurred_at` is `TEXT DEFAULT CURRENT_TIMESTAMP` on
+    // SQLite (`CREATE_TABLE_SQL_SQLITE`). SQLite's CURRENT_TIMESTAMP
+    // emits `"YYYY-MM-DD HH:MM:SS"` (space sep, no fractional, no
+    // timezone); sqlx-sqlite would otherwise encode a
+    // `chrono::DateTime<Utc>` as RFC3339, and lex-compare diverges
+    // at position 10 (space < T). Bind the SQLite cutoff in the
+    // same CURRENT_TIMESTAMP shape. PG / MySQL keep the native
+    // DateTime binding via `SqlValue::DateTime`.
+    let bind = if pool.dialect().name() == "sqlite" {
+        SqlValue::String(cutoff_ts.format("%Y-%m-%d %H:%M:%S").to_string())
+    } else {
+        SqlValue::DateTime(cutoff_ts)
+    };
+    // #561 — was a 3-arm `match pool` that bound per-backend by
+    // hand. The bind dispatch already lives in `raw_execute_pool`'s
+    // internals — share the same path every other helper uses.
+    crate::sql::raw_execute_pool(pool, &sql, vec![bind])
+        .await
+        .map_err(|e| match e {
+            crate::sql::ExecError::Driver(err) => err,
+            other => sqlx::Error::Protocol(format!("{other}")),
+        })
 }
 
 /// v0.37 — tri-dialect counterpart of [`cleanup_keep_last_n`].
@@ -1136,25 +1129,17 @@ pub async fn cleanup_keep_last_n_pool(
     pool: &crate::sql::Pool,
     keep: i64,
 ) -> Result<u64, sqlx::Error> {
+    use crate::core::SqlValue;
     let keep = keep.max(0);
     let sql = audit_cleanup_keep_last_n_sql(pool.dialect());
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            let r = sqlx::query(&sql).bind(keep).execute(pg).await?;
-            Ok(r.rows_affected())
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let r = sqlx::query(&sql).bind(keep).execute(my).await?;
-            Ok(r.rows_affected())
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            let r = sqlx::query(&sql).bind(keep).execute(sq).await?;
-            Ok(r.rows_affected())
-        }
-    }
+    // #561 — was a 3-arm `match pool` that bound `keep` per-backend
+    // by hand. The bind dispatch lives in `raw_execute_pool`.
+    crate::sql::raw_execute_pool(pool, &sql, vec![SqlValue::I64(keep)])
+        .await
+        .map_err(|e| match e {
+            crate::sql::ExecError::Driver(err) => err,
+            other => sqlx::Error::Protocol(format!("{other}")),
+        })
 }
 
 /// Run `DELETE` from a `DeleteQuery` and emit an audit entry inside
