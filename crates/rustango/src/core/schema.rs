@@ -377,6 +377,18 @@ pub struct ModelSchema {
     /// rustango models for query / admin purposes but should not
     /// re-create.
     pub managed: bool,
+    /// Django-shape `Meta.db_table_comment` (Django 4.2+) — free-form
+    /// description attached to the underlying DB table. The migration
+    /// writer emits the comment per dialect:
+    ///
+    /// - Postgres: post-table `COMMENT ON TABLE "<t>" IS '...'`
+    /// - MySQL: inline `COMMENT='...'` trailer after the closing paren
+    /// - SQLite: no-op (no native table comments)
+    ///
+    /// Set via `#[rustango(db_table_comment = "free text")]`. Useful
+    /// for ops tooling (data lineage docs, sql-introspectors) that
+    /// reads the table's catalog comment.
+    pub db_table_comment: Option<&'static str>,
 }
 
 impl ModelSchema {

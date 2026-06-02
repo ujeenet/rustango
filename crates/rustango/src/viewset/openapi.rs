@@ -460,6 +460,7 @@ mod tests {
             verbose_name: None,
             verbose_name_plural: None,
             managed: true,
+            db_table_comment: None,
         };
         &MS
     }

@@ -805,6 +805,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         container.verbose_name.as_deref(),
         container.verbose_name_plural.as_deref(),
         container.managed,
+        container.db_table_comment.as_deref(),
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -1692,6 +1693,7 @@ fn model_impl_tokens(
     verbose_name: Option<&str>,
     verbose_name_plural: Option<&str>,
     managed: bool,
+    db_table_comment: Option<&str>,
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
@@ -1725,6 +1727,7 @@ fn model_impl_tokens(
     };
     let verbose_name_tokens = optional_str(verbose_name);
     let verbose_name_plural_tokens = optional_str(verbose_name_plural);
+    let db_table_comment_tokens = optional_str(db_table_comment);
     let indexes_tokens = indexes.iter().map(|idx| {
         let name = idx.name.as_deref().unwrap_or("unnamed_index");
         let cols: Vec<&str> = idx.columns.iter().map(String::as_str).collect();
@@ -1839,6 +1842,7 @@ fn model_impl_tokens(
                 verbose_name: #verbose_name_tokens,
                 verbose_name_plural: #verbose_name_plural_tokens,
                 managed: #managed,
+                db_table_comment: #db_table_comment_tokens,
             };
         }
     }
@@ -4400,6 +4404,12 @@ struct ContainerAttrs {
     /// `migrate` never emit `CREATE TABLE` / `ALTER TABLE` / `DROP
     /// TABLE` against it (operator-managed schema).
     managed: bool,
+    /// Django-shape `Meta.db_table_comment` (4.2+) from
+    /// `#[rustango(db_table_comment = "...")]`. Threaded into
+    /// `ModelSchema::db_table_comment` so the DDL writer attaches the
+    /// comment to the underlying table (PG: `COMMENT ON TABLE`, MySQL:
+    /// inline `COMMENT='...'`, SQLite: no-op).
+    db_table_comment: Option<String>,
     /// `#[rustango(verbose_name = "blog post")]` — Django-shape
     /// human-readable singular label for the model. Threaded into
     /// `ModelSchema::verbose_name` so admin section headers /
@@ -4595,6 +4605,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         managed: true,
         verbose_name: None,
         verbose_name_plural: None,
+        db_table_comment: None,
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -4924,6 +4935,13 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
             if meta.path.is_ident("verbose_name_plural") {
                 let s: LitStr = meta.value()?.parse()?;
                 out.verbose_name_plural = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("db_table_comment") {
+                // Django-shape `Meta.db_table_comment` (4.2+) — free-form
+                // table-level comment attached to the DB catalog.
+                let s: LitStr = meta.value()?.parse()?;
+                out.db_table_comment = Some(s.value());
                 return Ok(());
             }
             if meta.path.is_ident("unique_together") {

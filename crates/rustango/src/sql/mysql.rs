@@ -87,6 +87,15 @@ impl Dialect for MySql {
         Some(format!(" COMMENT '{escaped}'"))
     }
 
+    /// MySQL spells table comments as a `COMMENT='<escaped>'` trailer
+    /// after the closing paren of CREATE TABLE (e.g. `CREATE TABLE
+    /// foo (...) COMMENT='blog posts'`). Single quotes are doubled.
+    /// Django parity for `Meta.db_table_comment`.
+    fn write_inline_table_comment(&self, comment: &str) -> Option<String> {
+        let escaped = comment.replace('\'', "''");
+        Some(format!(" COMMENT='{escaped}'"))
+    }
+
     // `?`-style placeholders are the trait default — no override needed.
 
     fn serial_type(&self, field_type: FieldType) -> &'static str {
@@ -1339,6 +1348,7 @@ mod tests {
             verbose_name: None,
             verbose_name_plural: None,
             managed: true,
+            db_table_comment: None,
         }))
     }
 }

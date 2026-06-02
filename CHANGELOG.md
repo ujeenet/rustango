@@ -14,6 +14,7 @@ Post-v0.42 Django-parity follow-ups. Each item is a self-contained slice that la
 - **`#[rustango(managed = false)]`** (#558 closing [#321](https://github.com/ujeenet/rustango/issues/321)) — Django `class Meta: managed = False`. Opts a model out of migration auto-gen so the table stays operator-managed.
 - **`Locale::display_name()` / `native_name()` + Tera `language_display_name()` / `language_native_name()`** (#563) — 42-language picker primitives for bidi-aware UIs.
 - **`#[rustango(citext)]`** (#566 closing [#344](https://github.com/ujeenet/rustango/issues/344)) — Django `CITextField`. Per-dialect DDL emit: `CITEXT` (PG, with `dialect.ci_text_extension_sql()` exposing the `CREATE EXTENSION` prelude), `TEXT COLLATE NOCASE` (SQLite), `VARCHAR(N) COLLATE utf8mb4_general_ci` (MySQL).
+- **`#[rustango(db_table_comment = "...")]`** — Django `Meta.db_table_comment` (4.2+). Per-dialect DDL emit: PG post-table `COMMENT ON TABLE "<t>" IS '...'`, MySQL inline `COMMENT='...'` trailer after CREATE TABLE, SQLite no-op. Useful for data-lineage tooling that reads the table's catalog comment.
 
 ### Fixed
 

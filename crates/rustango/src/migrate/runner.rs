@@ -335,6 +335,14 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
             crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
         }
     }
+    // Django Meta.db_table_comment — same shape as column-level:
+    // PG emits a post-hoc `COMMENT ON TABLE`, MySQL inlined it in
+    // CREATE TABLE, SQLite emits nothing.
+    for model in &models {
+        for sql in ddl::table_comment_statements_with_dialect(dialect, model) {
+            crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
+        }
+    }
     // #411 — post_migrate fires once after the bootstrap walk
     // completes. `applied` is empty because apply_all_pool doesn't
     // carry per-migration names — it walks the model inventory.

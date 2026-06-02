@@ -91,7 +91,34 @@ pub fn create_table_sql_with_dialect(dialect: &dyn Dialect, model: &ModelSchema)
         write_column_def(&mut s, dialect, field);
     }
     s.push(')');
+    // Django-shape `Meta.db_table_comment` — MySQL spells it as an
+    // inline trailer (`) COMMENT='...'`); PG + SQLite emit nothing
+    // inline (PG runs a post-hoc `COMMENT ON TABLE`, SQLite is a
+    // no-op). See `table_comment_statements_with_dialect`.
+    if let Some(comment) = model.db_table_comment {
+        if let Some(inline) = dialect.write_inline_table_comment(comment) {
+            s.push_str(&inline);
+        }
+    }
     s
+}
+
+/// Per-model post-CREATE-TABLE statements for `Meta.db_table_comment`.
+/// PG emits `COMMENT ON TABLE`, MySQL handles it inline (see
+/// `create_table_sql_with_dialect` above) and returns nothing here,
+/// SQLite has no native table comments and returns nothing.
+#[must_use]
+pub fn table_comment_statements_with_dialect(
+    dialect: &dyn Dialect,
+    model: &ModelSchema,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(comment) = model.db_table_comment {
+        if let Some(stmt) = dialect.table_comment_statement(model.table, comment) {
+            out.push(stmt);
+        }
+    }
+    out
 }
 
 /// `CREATE TABLE IF NOT EXISTS …` variant of
