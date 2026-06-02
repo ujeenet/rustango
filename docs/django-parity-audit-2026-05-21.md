@@ -563,7 +563,7 @@ Summary: **8 / 1 / 0 / 0**.
 | `FileSystemStorage` | [FileSystemStorage](https://docs.djangoproject.com/en/6.0/ref/files/storage/#filesystemstorage) | SHIPPED | `LocalStorage` | |
 | `S3Storage` / GCS / Azure (3rd-party) | n/a in Django core | SHIPPED | `S3Storage` (S3 / R2 / B2 / MinIO) hand-rolled SigV4 | |
 | In-memory storage (tests) | n/a | SHIPPED | `InMemoryStorage` | |
-| File upload handlers (chunked, memory, etc.) | [upload handlers](https://docs.djangoproject.com/en/6.0/topics/http/file-uploads/#upload-handlers) | PARTIAL | multer-driven via `uploads::*` (#421) | No pluggable upload handler abstraction. |
+| File upload handlers (chunked, memory, etc.) | [upload handlers](https://docs.djangoproject.com/en/6.0/topics/http/file-uploads/#upload-handlers) | PARTIAL | `uploads::save_uploads` streams `field.chunk()` and early-aborts as soon as accumulated bytes exceed `max_bytes` (#421). Closes the worst footgun — a 100MB body no longer buffers fully before failing a 5MB cap. No pluggable upload-handler trait yet (Django's `MemoryFileUploadHandler` / `TemporaryFileUploadHandler` chain). | |
 | File validators (type, size, extension) | n/a (Django has separate validators) | SHIPPED | `validators::{file_type, file_size_max, file_extension}` (v0.25) | |
 | `Media` model | n/a (each Django project rolls its own) | SHIPPED | `media::Media` model (v0.24) | Rustango ahead. |
 
