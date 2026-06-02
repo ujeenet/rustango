@@ -268,6 +268,7 @@ impl PgJobQueue {
         pool: &Pool,
         older_than: Duration,
     ) -> Result<u64, sqlx::Error> {
+        use crate::core::SqlValue;
         let cutoff: DateTime<Utc> = Utc::now()
             - chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::seconds(0));
         let p = pool.dialect().placeholder(1);
@@ -276,29 +277,18 @@ impl PgJobQueue {
                 SET locked_at = NULL, locked_by = NULL \
               WHERE locked_at IS NOT NULL AND locked_at < {p}"
         );
-        match pool {
-            #[cfg(feature = "postgres")]
-            Pool::Postgres(pg) => Ok(sqlx::query(&sql)
-                .bind(cutoff)
-                .execute(pg)
-                .await?
-                .rows_affected()),
-            #[cfg(feature = "mysql")]
-            Pool::Mysql(my) => Ok(sqlx::query(&sql)
-                .bind(cutoff)
-                .execute(my)
-                .await?
-                .rows_affected()),
-            #[cfg(feature = "sqlite")]
-            Pool::Sqlite(sq) => {
-                // SQLite stores TEXT-ISO-8601; bind as RFC3339 string.
-                Ok(sqlx::query(&sql)
-                    .bind(cutoff.to_rfc3339())
-                    .execute(sq)
-                    .await?
-                    .rows_affected())
-            }
-        }
+        // #561 — was a 3-arm `match pool`. `SqlValue::DateTime`
+        // encodes as TIMESTAMPTZ on PG, DATETIME(6) on MySQL, and
+        // RFC3339 TEXT on SQLite (via the executor's `bind_match!`
+        // macros) — same shapes as the per-arm hand-bind, including
+        // the SQLite `.to_rfc3339()` path the old SQLite arm did
+        // explicitly.
+        crate::sql::raw_execute_pool(pool, &sql, vec![SqlValue::DateTime(cutoff)])
+            .await
+            .map_err(|e| match e {
+                crate::sql::ExecError::Driver(err) => err,
+                other => sqlx::Error::Protocol(format!("{other}")),
+            })
     }
 }
 
@@ -309,6 +299,7 @@ impl JobQueue for PgJobQueue {
     }
 
     async fn dispatch<T: Job>(&self, payload: &T) -> Result<(), JobError> {
+        use crate::core::SqlValue;
         let value = serde_json::to_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
         let max_attempts = i32::try_from(T::MAX_ATTEMPTS).unwrap_or(i32::MAX);
         let dialect = self.pool.dialect();
@@ -320,41 +311,24 @@ impl JobQueue for PgJobQueue {
         let sql = format!(
             "INSERT INTO rustango_jobs (name, payload, max_attempts) VALUES ({p1}, {p2}, {p3})"
         );
-        match &self.pool {
-            #[cfg(feature = "postgres")]
-            Pool::Postgres(pg) => {
-                sqlx::query(&sql)
-                    .bind(T::NAME)
-                    .bind(&value)
-                    .bind(max_attempts)
-                    .execute(pg)
-                    .await
-                    .map_err(|e| JobError::Queue(e.to_string()))?;
-            }
-            #[cfg(feature = "mysql")]
-            Pool::Mysql(my) => {
-                sqlx::query(&sql)
-                    .bind(T::NAME)
-                    .bind(sqlx::types::Json(&value))
-                    .bind(max_attempts)
-                    .execute(my)
-                    .await
-                    .map_err(|e| JobError::Queue(e.to_string()))?;
-            }
-            #[cfg(feature = "sqlite")]
-            Pool::Sqlite(sq) => {
-                // SQLite stores payload as TEXT-as-JSON.
-                let json_text =
-                    serde_json::to_string(&value).map_err(|e| JobError::Queue(e.to_string()))?;
-                sqlx::query(&sql)
-                    .bind(T::NAME)
-                    .bind(json_text)
-                    .bind(max_attempts)
-                    .execute(sq)
-                    .await
-                    .map_err(|e| JobError::Queue(e.to_string()))?;
-            }
-        }
+        // #561 — was a 3-arm `match pool` each doing the bind +
+        // execute by hand (PG `&Value`, MySQL `sqlx::types::Json(&v)`,
+        // SQLite `serde_json::to_string` → TEXT). The executor's
+        // `bind_match!` macros already wrap `SqlValue::Json(v)` in
+        // `sqlx::types::Json(v)` on every backend, which encodes as
+        // JSONB on PG, JSON on MySQL, and TEXT on SQLite — same
+        // on-disk shape as the per-arm hand-bind.
+        crate::sql::raw_execute_pool(
+            &self.pool,
+            &sql,
+            vec![
+                SqlValue::String(T::NAME.to_owned()),
+                SqlValue::Json(value),
+                SqlValue::I32(max_attempts),
+            ],
+        )
+        .await
+        .map_err(|e| JobError::Queue(e.to_string()))?;
         // Wake up to one waiting worker so the new job starts running
         // before the next poll tick.
         self.notify.notify_one();
@@ -628,22 +602,12 @@ async fn run_one(
 }
 
 async fn delete_job(pool: &Pool, id: i64) {
+    use crate::core::SqlValue;
     let p = pool.dialect().placeholder(1);
     let sql = format!("DELETE FROM rustango_jobs WHERE id = {p}");
-    match pool {
-        #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            let _ = sqlx::query(&sql).bind(id).execute(pg).await;
-        }
-        #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            let _ = sqlx::query(&sql).bind(id).execute(my).await;
-        }
-        #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            let _ = sqlx::query(&sql).bind(id).execute(sq).await;
-        }
-    }
+    // #561 — was a 3-arm `match pool` doing identical `bind(id).execute()`
+    // per backend. Route through the shared `raw_execute_pool`.
+    let _ = crate::sql::raw_execute_pool(pool, &sql, vec![SqlValue::I64(id)]).await;
 }
 
 async fn schedule_retry(
@@ -653,6 +617,7 @@ async fn schedule_retry(
     next_run: DateTime<Utc>,
     last_error: &str,
 ) {
+    use crate::core::SqlValue;
     let d = pool.dialect();
     let sql = format!(
         "UPDATE rustango_jobs \
@@ -665,38 +630,24 @@ async fn schedule_retry(
         p3 = d.placeholder(3),
         p4 = d.placeholder(4),
     );
-    match pool {
-        #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            let _ = sqlx::query(&sql)
-                .bind(next_attempt)
-                .bind(next_run)
-                .bind(last_error)
-                .bind(id)
-                .execute(pg)
-                .await;
-        }
-        #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            let _ = sqlx::query(&sql)
-                .bind(next_attempt)
-                .bind(next_run)
-                .bind(last_error)
-                .bind(id)
-                .execute(my)
-                .await;
-        }
-        #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            let _ = sqlx::query(&sql)
-                .bind(next_attempt)
-                .bind(next_run.to_rfc3339())
-                .bind(last_error)
-                .bind(id)
-                .execute(sq)
-                .await;
-        }
-    }
+    // #561 — was a 3-arm `match pool`; the only divergence was the
+    // SQLite arm binding `next_run.to_rfc3339()` as a string while
+    // PG / MySQL passed the `DateTime<Utc>` directly. `SqlValue::DateTime`
+    // on every backend produces the right encoding via the executor's
+    // `bind_match!` macros (RFC3339 string on SQLite, native
+    // TIMESTAMPTZ / DATETIME(6) on PG / MySQL), so a single shared
+    // path now works for all three.
+    let _ = crate::sql::raw_execute_pool(
+        pool,
+        &sql,
+        vec![
+            SqlValue::I32(next_attempt),
+            SqlValue::DateTime(next_run),
+            SqlValue::String(last_error.to_owned()),
+            SqlValue::I64(id),
+        ],
+    )
+    .await;
 }
 
 async fn handle_dead_letter(
