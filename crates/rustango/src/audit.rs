@@ -786,35 +786,27 @@ pub async fn list(
 /// # Errors
 /// Driver / SQL failures from the SELECT COUNT(*).
 pub async fn count(pool: &crate::sql::Pool, filter: &AuditFilter) -> Result<i64, sqlx::Error> {
+    use crate::core::SqlValue;
     let pairs = filter.active_pairs();
     let sql = audit_count_sql(pool.dialect(), &pairs);
-    let binds: Vec<&str> = pairs.iter().map(|(_, v)| *v).collect();
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            let mut q = sqlx::query_scalar::<_, i64>(&sql);
-            for v in &binds {
-                q = q.bind(*v);
-            }
-            q.fetch_one(pg).await
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let mut q = sqlx::query_scalar::<_, i64>(&sql);
-            for v in &binds {
-                q = q.bind(*v);
-            }
-            q.fetch_one(my).await
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            let mut q = sqlx::query_scalar::<_, i64>(&sql);
-            for v in &binds {
-                q = q.bind(*v);
-            }
-            q.fetch_one(sq).await
-        }
-    }
+    let binds: Vec<SqlValue> = pairs
+        .iter()
+        .map(|(_, v)| SqlValue::String((*v).to_owned()))
+        .collect();
+    // #561 — was a 3-arm `match pool` doing the same query_scalar
+    // bind-loop per backend. Routes through `raw_query_pool::<(i64,)>`
+    // for the single-column COUNT result; the tuple decoder works
+    // identically on every backend that has a `FromRow` impl, which
+    // includes the bound triple via the `Maybe*FromRow` blanket
+    // impls.
+    let rows: Vec<(i64,)> = crate::sql::raw_query_pool(&sql, binds, pool)
+        .await
+        .map_err(|e| match e {
+            crate::sql::ExecError::Driver(err) => err,
+            other => sqlx::Error::Protocol(format!("{other}")),
+        })?;
+    // COUNT(*) always returns exactly one row.
+    Ok(rows.into_iter().next().map_or(0, |t| t.0))
 }
 
 /// v0.37 — tri-dialect facet (column, count) groupby for the admin
@@ -837,44 +829,17 @@ pub async fn facet_counts(
         return Err(sqlx::Error::ColumnNotFound(column.to_owned()));
     }
     let sql = audit_facet_sql(pool.dialect(), column);
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            use sqlx::Row as _;
-            let rows = sqlx::query(&sql).fetch_all(pg).await?;
-            let mut out = Vec::with_capacity(rows.len());
-            for r in rows {
-                let v: String = r.try_get("facet_value").unwrap_or_default();
-                let c: i64 = r.try_get("facet_count").unwrap_or(0);
-                out.push((v, c));
-            }
-            Ok(out)
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            use sqlx::Row as _;
-            let rows = sqlx::query(&sql).fetch_all(my).await?;
-            let mut out = Vec::with_capacity(rows.len());
-            for r in rows {
-                let v: String = r.try_get("facet_value").unwrap_or_default();
-                let c: i64 = r.try_get("facet_count").unwrap_or(0);
-                out.push((v, c));
-            }
-            Ok(out)
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            use sqlx::Row as _;
-            let rows = sqlx::query(&sql).fetch_all(sq).await?;
-            let mut out = Vec::with_capacity(rows.len());
-            for r in rows {
-                let v: String = r.try_get("facet_value").unwrap_or_default();
-                let c: i64 = r.try_get("facet_count").unwrap_or(0);
-                out.push((v, c));
-            }
-            Ok(out)
-        }
-    }
+    // #561 — was three byte-identical `try_get("facet_value") + try_get("facet_count")`
+    // copies, one per backend. The `(String, i64)` tuple decoder
+    // works on every backend via the `Maybe*FromRow` blanket impls;
+    // it decodes positionally so it matches the `SELECT … AS facet_value,
+    // COUNT(*) AS facet_count` column order in `audit_facet_sql`.
+    crate::sql::raw_query_pool::<(String, i64)>(&sql, Vec::new(), pool)
+        .await
+        .map_err(|e| match e {
+            crate::sql::ExecError::Driver(err) => err,
+            other => sqlx::Error::Protocol(format!("{other}")),
+        })
 }
 
 /// v0.37 — render the audit-log activity-feed SELECT (paginated, with
