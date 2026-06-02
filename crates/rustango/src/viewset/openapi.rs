@@ -308,6 +308,7 @@ mod tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            case_insensitive: false,
             validators: &[],
         }
     }
@@ -333,6 +334,7 @@ mod tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            case_insensitive: false,
             validators: &[],
         }
     }
@@ -358,6 +360,7 @@ mod tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            case_insensitive: false,
             validators: &[],
         }
     }
@@ -384,6 +387,7 @@ mod tests {
                 verbose_name: None,
                 editable: true,
                 blank: false,
+                case_insensitive: false,
                 validators: &[],
             },
             FieldSchema {
@@ -406,6 +410,7 @@ mod tests {
                 verbose_name: None,
                 editable: true,
                 blank: false,
+                case_insensitive: false,
                 validators: &[],
             },
             FieldSchema {
@@ -428,6 +433,7 @@ mod tests {
                 verbose_name: None,
                 editable: true,
                 blank: false,
+                case_insensitive: false,
                 validators: &[],
             },
         ];

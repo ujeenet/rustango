@@ -104,6 +104,17 @@ pub struct FieldSchema {
     /// `nullable=false, blank=true` to require *some* value in DB
     /// but accept `""` from the form.
     pub blank: bool,
+    /// Django-shape `CITextField` flag (#344). When `true`, the
+    /// migration DDL writer emits a case-insensitive column type:
+    /// `CITEXT` on Postgres (auto-emits `CREATE EXTENSION IF NOT
+    /// EXISTS citext;`), `TEXT COLLATE NOCASE` on SQLite, and
+    /// `<VARCHAR/TEXT> COLLATE utf8mb4_general_ci` on MySQL. The
+    /// effect is that `WHERE col = 'foo'` also matches `'FOO'` /
+    /// `'Foo'` without query-side `LOWER(…)` wrapping.
+    ///
+    /// Set via `#[rustango(citext)]` or `#[rustango(citext = true)]`.
+    /// Only meaningful for `FieldType::String`.
+    pub case_insensitive: bool,
     /// Django-shape `validators=[...]` — names of value-shape validators
     /// to run on every INSERT/UPDATE through the typed query layer. Set
     /// via `#[rustango(validators = "email,url")]` (comma-separated).

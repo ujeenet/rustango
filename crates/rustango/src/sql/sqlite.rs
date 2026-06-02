@@ -208,6 +208,14 @@ impl Dialect for Sqlite {
         }
     }
 
+    // #344 — CITextField. SQLite has built-in `COLLATE NOCASE` that
+    // makes `=` / `LIKE` / `ORDER BY` case-insensitive without an
+    // extension. Column-level collation propagates to expressions
+    // referencing the column.
+    fn ci_text_type(&self, _max_length: Option<u32>) -> String {
+        "TEXT COLLATE NOCASE".to_owned()
+    }
+
     fn supports_op(&self, op: Op) -> bool {
         // SQLite supports every operator we lower below. The Postgres-
         // shape JSONB operators are intentionally NOT translated to
@@ -636,6 +644,7 @@ mod tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            case_insensitive: false,
             validators: &[],
         }];
         static MODEL: ModelSchema = ModelSchema {

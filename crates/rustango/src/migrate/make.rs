@@ -663,6 +663,7 @@ mod tests {
                 default: None,
                 auto: true,
                 unique: false,
+                case_insensitive: false,
                 fk: None,
             }],
             composite_fks: vec![],

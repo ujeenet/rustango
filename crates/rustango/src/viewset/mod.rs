@@ -1701,6 +1701,7 @@ mod lookup_tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            case_insensitive: false,
             validators: &[],
         }
     }
@@ -1726,6 +1727,7 @@ mod lookup_tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            case_insensitive: false,
             validators: &[],
         }
     }

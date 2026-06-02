@@ -134,6 +134,12 @@ pub struct FieldSnapshot {
     /// serialize when `false` to keep snapshots diff-clean.
     #[serde(skip_serializing_if = "is_false", default)]
     pub unique: bool,
+    /// Django-shape `CITextField` flag (#344). Threaded through from
+    /// `FieldSchema::case_insensitive`. Skipped on serialize when
+    /// `false` so older snapshots stay diff-clean. The diff writer
+    /// dispatches to `dialect.ci_text_type(max_length)` when set.
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub case_insensitive: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub fk: Option<RelationSnapshot>,
 }
@@ -428,6 +434,7 @@ impl FieldSnapshot {
             default: f.default.map(str::to_owned),
             auto: f.auto,
             unique: f.unique,
+            case_insensitive: f.case_insensitive,
             fk,
         }
     }
@@ -553,6 +560,7 @@ mod composite_fk_snapshot_tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            case_insensitive: false,
             validators: &[],
         }];
         static COMPS: [CompositeFkRelation; 1] = [CompositeFkRelation {
@@ -624,6 +632,7 @@ mod composite_fk_snapshot_tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            case_insensitive: false,
             validators: &[],
         }];
         static MANAGED: ModelSchema = ModelSchema {
@@ -704,6 +713,7 @@ mod composite_fk_snapshot_tests {
             verbose_name: None,
             editable: true,
             blank: false,
+            case_insensitive: false,
             validators: &[],
         }];
         static MS: ModelSchema = ModelSchema {

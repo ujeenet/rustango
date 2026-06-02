@@ -182,9 +182,9 @@ Summary: **14 SHIPPED / 4 PARTIAL / 7 MISSING / 0 N/A** in this section. Gaps cl
 | `ArrayField` | [ArrayField](https://docs.djangoproject.com/en/6.0/ref/contrib/postgres/fields/#arrayfield) | PARTIAL | `SqlValue::Array` + `Op::ArrayContains/ContainedBy/Overlap` operators emitted on PG; no native typed field wrapper in models (#341) | Future-backlog item. |
 | `HStoreField` | [HStoreField](https://docs.djangoproject.com/en/6.0/ref/contrib/postgres/fields/#hstorefield) | MISSING | n/a (#342) | |
 | `RangeField` (Int / Date / DateTime / Decimal) | [RangeField](https://docs.djangoproject.com/en/6.0/ref/contrib/postgres/fields/#range-fields) | MISSING | n/a — `SqlValue::RangeLiteral` exists but no typed field (#343) | |
-| `CITextField` | [CITextField](https://docs.djangoproject.com/en/6.0/ref/contrib/postgres/fields/#citext-fields) | MISSING | n/a (#344) | |
+| `CITextField` | [CITextField](https://docs.djangoproject.com/en/6.0/ref/contrib/postgres/fields/#citext-fields) | SHIPPED | `#[rustango(citext)]` (#344) — DDL emits `CITEXT` on PG (with `CREATE EXTENSION IF NOT EXISTS citext;` prelude available via `dialect.ci_text_extension_sql()`), `TEXT COLLATE NOCASE` on SQLite, `VARCHAR(N)/TEXT COLLATE utf8mb4_general_ci` on MySQL. Column-level case-insensitivity propagates to `=` / `LIKE` / `ORDER BY` without query-side `LOWER(...)` wrapping. | |
 
-Summary: **1 / 1 / 3 / 0**.
+Summary: **2 / 1 / 2 / 0**.
 
 ---
 
