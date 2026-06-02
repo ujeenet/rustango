@@ -371,52 +371,22 @@ impl M2MManager {
 // ============================================================ small per-backend helpers
 
 /// Run a SELECT that returns one `i64` column per row and collect the
-/// values. Used by `all_pool` + `contains_pool`. Routes through the
-/// `Pool` enum so PG / MySQL / SQLite all share the same call site.
+/// values. Used by `all_pool` + `contains_pool`. Routes through
+/// `raw_query_pool` (single-column tuple decode) — #561 collapsed
+/// what was a 3-arm `match pool` with byte-identical
+/// `try_get::<i64, _>(col_name)` loops.
+///
+/// The `col_name` argument is no longer consulted (the underlying
+/// SELECT must already be single-column, which both callers honor):
+/// `raw_query_pool::<(i64,)>` decodes positionally.
 async fn fetch_i64_col_pool(
     pool: &Pool,
     sql: &str,
     binds: Vec<SqlValue>,
-    col_name: &str,
+    _col_name: &str,
 ) -> Result<Vec<i64>, ExecError> {
-    match pool {
-        #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => {
-            use sqlx::Row as _;
-            let mut q = sqlx::query(sql);
-            for v in binds {
-                q = bind_pg(q, v);
-            }
-            let rows = q.fetch_all(pg).await.map_err(ExecError::Driver)?;
-            rows.iter()
-                .map(|r| r.try_get::<i64, _>(col_name).map_err(ExecError::Driver))
-                .collect()
-        }
-        #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => {
-            use sqlx::Row as _;
-            let mut q = sqlx::query(sql);
-            for v in binds {
-                q = bind_my(q, v);
-            }
-            let rows = q.fetch_all(my).await.map_err(ExecError::Driver)?;
-            rows.iter()
-                .map(|r| r.try_get::<i64, _>(col_name).map_err(ExecError::Driver))
-                .collect()
-        }
-        #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => {
-            use sqlx::Row as _;
-            let mut q = sqlx::query(sql);
-            for v in binds {
-                q = bind_sqlite(q, v);
-            }
-            let rows = q.fetch_all(sq).await.map_err(ExecError::Driver)?;
-            rows.iter()
-                .map(|r| r.try_get::<i64, _>(col_name).map_err(ExecError::Driver))
-                .collect()
-        }
-    }
+    let rows: Vec<(i64,)> = crate::sql::raw_query_pool(sql, binds, pool).await?;
+    Ok(rows.into_iter().map(|(v,)| v).collect())
 }
 
 #[cfg(feature = "postgres")]
