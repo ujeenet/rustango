@@ -3755,6 +3755,15 @@ fn write_order_limit_offset(
     }
     if let Some(n) = limit {
         let _ = write!(b.sql, " LIMIT {n}");
+    } else if offset.is_some() {
+        // #560 — `OFFSET` without `LIMIT` is illegal on MySQL
+        // (`ERROR 1064`). Dialects that need a placeholder LIMIT to
+        // make a bare OFFSET parse return one via
+        // `Dialect::offset_without_limit_clause()`. PG + SQLite
+        // return `None` and accept the bare OFFSET below.
+        if let Some(clause) = b.d.offset_without_limit_clause() {
+            b.sql.push_str(clause);
+        }
     }
     if let Some(n) = offset {
         let _ = write!(b.sql, " OFFSET {n}");
