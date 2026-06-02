@@ -686,20 +686,17 @@ pub async fn has_all_perms(
 // ------------------------------------------------------------------ Role management (ORM-backed)
 
 /// Create a role. Errors if name already exists.
+///
+/// #562 — delegates to [`create_role_pool`] so the Insert IR
+/// builder lives in one place. The PG-typed signature stays for
+/// back-compat with existing call sites.
 #[cfg(feature = "postgres")]
 pub async fn create_role(
     name: &str,
     description: &str,
     pool: &PgPool,
 ) -> Result<i64, TenancyError> {
-    let mut role = Role {
-        id: Auto::default(),
-        name: name.to_owned(),
-        description: description.to_owned(),
-        data: serde_json::Value::Object(serde_json::Map::new()),
-    };
-    role.save_on(pool).await?;
-    Ok(role.id.get().copied().unwrap_or(0))
+    create_role_pool(name, description, &crate::sql::Pool::from(pool.clone())).await
 }
 
 /// v0.38 — tri-dialect counterpart of [`create_role`].
@@ -836,21 +833,14 @@ pub async fn get_or_create_role(
 /// [`ConflictClause::DoNothing`] — the writer emits `INSERT … ON
 /// CONFLICT DO NOTHING`, which matches the `(role_id, codename)`
 /// unique constraint declared in [`ENSURE_SQL`].
+/// #562 — delegates to [`grant_role_perm_pool`].
 #[cfg(feature = "postgres")]
 pub async fn grant_role_perm(
     role_id: i64,
     codename: &str,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
-    let query = InsertQuery {
-        model: RolePermission::SCHEMA,
-        columns: vec!["role_id", "codename"],
-        values: vec![SqlValue::from(role_id), SqlValue::from(codename.to_owned())],
-        returning: vec![],
-        on_conflict: Some(ConflictClause::DoNothing),
-    };
-    crate::sql::__macro_internals::insert_on(pool, &query).await?;
-    Ok(())
+    grant_role_perm_pool(role_id, codename, &crate::sql::Pool::from(pool.clone())).await
 }
 
 /// v0.38 — tri-dialect counterpart of [`grant_role_perm`].
@@ -874,32 +864,15 @@ pub async fn grant_role_perm_pool(
 }
 
 /// Revoke a codename from a role.
+///
+/// #562 — delegates to [`revoke_role_perm_pool`].
 #[cfg(feature = "postgres")]
 pub async fn revoke_role_perm(
     role_id: i64,
     codename: &str,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
-    crate::sql::__macro_internals::delete_on(
-        pool,
-        &DeleteQuery {
-            model: RolePermission::SCHEMA,
-            where_clause: WhereExpr::and_predicates(vec![
-                Filter {
-                    column: "role_id",
-                    op: Op::Eq,
-                    value: SqlValue::from(role_id),
-                },
-                Filter {
-                    column: "codename",
-                    op: Op::Eq,
-                    value: SqlValue::from(codename),
-                },
-            ]),
-        },
-    )
-    .await?;
-    Ok(())
+    revoke_role_perm_pool(role_id, codename, &crate::sql::Pool::from(pool.clone())).await
 }
 
 /// v0.38 — tri-dialect counterpart of [`revoke_role_perm`].
@@ -935,18 +908,10 @@ pub async fn revoke_role_perm_pool(
 
 /// Assign a user to a role. No-op if already assigned.
 ///
-/// Same IR-routed pattern as [`grant_role_perm`].
+/// #562 — delegates to [`assign_role_pool`].
 #[cfg(feature = "postgres")]
 pub async fn assign_role(user_id: i64, role_id: i64, pool: &PgPool) -> Result<(), TenancyError> {
-    let query = InsertQuery {
-        model: UserRole::SCHEMA,
-        columns: vec!["user_id", "role_id"],
-        values: vec![SqlValue::from(user_id), SqlValue::from(role_id)],
-        returning: vec![],
-        on_conflict: Some(ConflictClause::DoNothing),
-    };
-    crate::sql::__macro_internals::insert_on(pool, &query).await?;
-    Ok(())
+    assign_role_pool(user_id, role_id, &crate::sql::Pool::from(pool.clone())).await
 }
 
 /// v0.38 — tri-dialect counterpart of [`assign_role`].
@@ -967,28 +932,11 @@ pub async fn assign_role_pool(
 }
 
 /// Remove a user from a role.
+///
+/// #562 — delegates to [`remove_role_pool`].
 #[cfg(feature = "postgres")]
 pub async fn remove_role(user_id: i64, role_id: i64, pool: &PgPool) -> Result<(), TenancyError> {
-    crate::sql::__macro_internals::delete_on(
-        pool,
-        &DeleteQuery {
-            model: UserRole::SCHEMA,
-            where_clause: WhereExpr::and_predicates(vec![
-                Filter {
-                    column: "user_id",
-                    op: Op::Eq,
-                    value: SqlValue::from(user_id),
-                },
-                Filter {
-                    column: "role_id",
-                    op: Op::Eq,
-                    value: SqlValue::from(role_id),
-                },
-            ]),
-        },
-    )
-    .await?;
-    Ok(())
+    remove_role_pool(user_id, role_id, &crate::sql::Pool::from(pool.clone())).await
 }
 
 /// v0.38 — tri-dialect counterpart of [`remove_role`].
@@ -1021,12 +969,12 @@ pub async fn remove_role_pool(
 
 /// Set a per-user permission override. Updates `granted` if a row already exists.
 ///
-/// Routed through the ORM's [`InsertQuery`] IR with
-/// [`ConflictClause::DoUpdate`] — the writer emits `INSERT … ON
-/// CONFLICT (user_id, codename) DO UPDATE SET granted = EXCLUDED.granted`,
-/// matching the composite unique constraint in [`ENSURE_SQL`]. `data`
-/// is omitted from `update_columns` so the existing JSONB context
-/// (reason / granted-by / etc.) survives a re-grant.
+/// #562 — delegates to [`set_user_perm_pool`]. The
+/// `InsertQuery` IR (with `ConflictClause::DoUpdate` targeting the
+/// `(user_id, codename)` unique constraint from [`ENSURE_SQL`]) lives
+/// there; the `granted` column is the only one in `update_columns`
+/// so existing `data` JSONB (reason / granted-by / etc.) survives
+/// a re-grant.
 #[cfg(feature = "postgres")]
 pub async fn set_user_perm(
     user_id: i64,
@@ -1034,23 +982,13 @@ pub async fn set_user_perm(
     granted: bool,
     pool: &PgPool,
 ) -> Result<(), TenancyError> {
-    let query = InsertQuery {
-        model: UserPermission::SCHEMA,
-        columns: vec!["user_id", "codename", "granted", "data"],
-        values: vec![
-            SqlValue::from(user_id),
-            SqlValue::from(codename.to_owned()),
-            SqlValue::from(granted),
-            SqlValue::Json(serde_json::json!({})),
-        ],
-        returning: vec![],
-        on_conflict: Some(ConflictClause::DoUpdate {
-            target: vec!["user_id", "codename"],
-            update_columns: vec!["granted"],
-        }),
-    };
-    crate::sql::__macro_internals::insert_on(pool, &query).await?;
-    Ok(())
+    set_user_perm_pool(
+        user_id,
+        codename,
+        granted,
+        &crate::sql::Pool::from(pool.clone()),
+    )
+    .await
 }
 
 /// v0.38 — tri-dialect counterpart of [`set_user_perm`].
