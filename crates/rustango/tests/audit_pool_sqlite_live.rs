@@ -103,18 +103,118 @@ async fn fetch_for_entity_returns_empty_for_unknown_pk() {
 async fn cleanup_older_than_clears_when_cutoff_zero() {
     let pool = pool().await;
     ensure_table_pool(&pool).await.unwrap();
+    // Seed 5 rows with explicitly-old `occurred_at` so the test is
+    // deterministic regardless of how fast emit + cleanup run back to
+    // back. Bypassing `emit_one_pool`'s `CURRENT_TIMESTAMP` default
+    // also keeps the assertion stable on slow CI runners where the
+    // emit + cleanup land in the same wall-clock second.
+    //
+    // Pre-#560 the test "worked" only because the bound RFC3339
+    // cutoff lex-compared as later than every `CURRENT_TIMESTAMP`
+    // space-shape value (space `0x20` < `T` `0x54`); post-fix both
+    // sides bind in the same space format, so we need rows that
+    // genuinely sit before the cutoff.
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!()
+    };
     for i in 0..5 {
-        emit_one_pool(
-            &pool,
-            &entry("post", &format!("{i}"), AuditOp::Create, json!({"i": i})),
+        sqlx::query(
+            r#"INSERT INTO "rustango_audit_log"
+                  ("entity_table", "entity_pk", "operation", "source", "changes", "occurred_at")
+               VALUES (?, ?, ?, ?, ?, ?)"#,
         )
+        .bind("post")
+        .bind(format!("{i}"))
+        .bind("create")
+        .bind("test")
+        .bind(json!({"i": i}).to_string())
+        .bind("2020-01-01 00:00:00")
+        .execute(sq)
         .await
         .unwrap();
     }
     // `cutoff_days = 0` → cutoff timestamp is "right now" → everything
-    // is older, so the DELETE removes the lot.
+    // (stamped 2020) is older, so the DELETE removes the lot.
     let removed = cleanup_older_than_pool(&pool, 0).await.unwrap();
     assert_eq!(removed, 5);
+}
+
+/// #560 regression — SQLite's `CURRENT_TIMESTAMP` emits
+/// `"YYYY-MM-DD HH:MM:SS"` (space separator), but until the v0.43 fix
+/// `cleanup_older_than_pool` bound the chrono cutoff as an RFC3339
+/// string `"YYYY-MM-DDTHH:MM:SSZ"`. SQLite compared those two as TEXT
+/// lex-by-byte, and space (0x20) sorts BEFORE T (0x54). So a row from
+/// `CURRENT_TIMESTAMP` later in the same calendar day as the cutoff
+/// was silently judged "older than" the cutoff and DELETEd.
+///
+/// Reproduce by inserting a row at the very end of today's UTC day,
+/// then running `cleanup_older_than_pool(pool, 0)` — cutoff = now —
+/// and assert the future-today row survives. Pre-fix this assertion
+/// failed deterministically; post-fix it passes.
+#[tokio::test]
+async fn cleanup_older_than_compares_apples_to_apples_on_sqlite() {
+    use sqlx::Row as _;
+    let pool = pool().await;
+    ensure_table_pool(&pool).await.unwrap();
+
+    // Synthesize a row at the very end of today's UTC day (or tomorrow
+    // if "now" is past 23:50 — pick a stamp safely after now).
+    let now = chrono::Utc::now();
+    let future_today = now
+        .date_naive()
+        .and_hms_opt(23, 59, 59)
+        .expect("23:59:59 valid");
+    let future_today_str = future_today.format("%Y-%m-%d %H:%M:%S").to_string();
+    // If we ARE in the last 10 minutes of the day, bump to tomorrow so
+    // the row genuinely sits in the future relative to "now".
+    let stamp = if now.naive_utc() >= future_today - chrono::Duration::minutes(10) {
+        (now + chrono::Duration::days(1))
+            .date_naive()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    } else {
+        future_today_str
+    };
+
+    // Insert with an explicit space-shape occurred_at. Bypass
+    // `emit_one_pool` so we control the timestamp shape exactly —
+    // simulating what `CURRENT_TIMESTAMP` produces.
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!()
+    };
+    sqlx::query(
+        r#"INSERT INTO "rustango_audit_log"
+              ("entity_table", "entity_pk", "operation", "source", "changes", "occurred_at")
+           VALUES (?, ?, ?, ?, ?, ?)"#,
+    )
+    .bind("post")
+    .bind("future-row")
+    .bind("create")
+    .bind("test")
+    .bind(r#"{"k": "v"}"#)
+    .bind(&stamp)
+    .execute(sq)
+    .await
+    .unwrap();
+
+    // cutoff_days = 0 → cutoff = now → only strictly-older rows go.
+    let removed = cleanup_older_than_pool(&pool, 0).await.unwrap();
+    assert_eq!(
+        removed, 0,
+        "future row (stamp={stamp}) must survive `cutoff_days=0`; pre-fix this deleted it via space-vs-T lex compare"
+    );
+
+    // Sanity: row still queryable.
+    let count: i64 =
+        sqlx::query(r#"SELECT COUNT(*) AS c FROM "rustango_audit_log" WHERE "entity_pk" = ?"#)
+            .bind("future-row")
+            .fetch_one(sq)
+            .await
+            .unwrap()
+            .get("c");
+    assert_eq!(count, 1, "future row must still be present in storage");
 }
 
 #[tokio::test]

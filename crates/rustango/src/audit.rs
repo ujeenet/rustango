@@ -1149,11 +1149,20 @@ pub async fn cleanup_older_than_pool(
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
-            // SQLite has no native TIMESTAMPTZ — sqlx encodes
-            // chrono::DateTime<Utc> as an ISO 8601 string which
-            // matches the `CURRENT_TIMESTAMP` default in
-            // `CREATE_TABLE_SQL_SQLITE`.
-            let r = sqlx::query(&sql).bind(cutoff_ts).execute(sq).await?;
+            // #560 — `occurred_at` is `TEXT DEFAULT CURRENT_TIMESTAMP`
+            // (see `CREATE_TABLE_SQL_SQLITE`). SQLite's built-in
+            // `CURRENT_TIMESTAMP` emits `"YYYY-MM-DD HH:MM:SS"` —
+            // space separator, no fractional, no timezone. sqlx-sqlite
+            // encodes a `chrono::DateTime<Utc>` as RFC3339
+            // `"YYYY-MM-DDTHH:MM:SS.ssssss+00:00"`. Comparing those two
+            // as TEXT lexicographically diverges at position 10
+            // (space `0x20` < `T` `0x54`), so any row from CURRENT_TIMESTAMP
+            // on the same calendar day as the cutoff but with a later
+            // HH:MM was silently deleted as "older". Bind the cutoff
+            // in the same CURRENT_TIMESTAMP shape so both sides of the
+            // `<` compare against the same format.
+            let cutoff_str = cutoff_ts.format("%Y-%m-%d %H:%M:%S").to_string();
+            let r = sqlx::query(&sql).bind(cutoff_str).execute(sq).await?;
             Ok(r.rows_affected())
         }
     }
