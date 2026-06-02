@@ -227,6 +227,24 @@ pub trait Dialect {
         "RANDOM"
     }
 
+    /// SQL fragment to emit as the `LIMIT` clause when the query has
+    /// an explicit `OFFSET` but no `LIMIT` (#560).
+    ///
+    /// MySQL's grammar requires a `LIMIT` whenever `OFFSET` is used
+    /// — `SELECT … OFFSET 10` alone is `ERROR 1064` ("you have an
+    /// error in your SQL syntax"). The documented workaround is to
+    /// pair the OFFSET with the max-`u64` literal:
+    /// `LIMIT 18446744073709551615 OFFSET 10`. PG + SQLite accept
+    /// bare `OFFSET` without a `LIMIT`, so they return `None` here
+    /// and the writer emits the offset directly.
+    ///
+    /// Returning `Some("…")` causes the writer to prepend the
+    /// fragment ahead of the `OFFSET` clause; returning `None`
+    /// (the default) means "no placeholder LIMIT required".
+    fn offset_without_limit_clause(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Wrap a SUM expression in a cast back to BIGINT. PostgreSQL's
     /// SUM(BIGINT) is NUMERIC and MySQL's is DECIMAL — both fall
     /// through to Null in the aggregate row decoder which only tries

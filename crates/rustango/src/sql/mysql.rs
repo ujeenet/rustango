@@ -60,6 +60,15 @@ impl Dialect for MySql {
         "RAND"
     }
 
+    /// MySQL rejects `OFFSET M` without a matching `LIMIT N` — the
+    /// parser raises `ERROR 1064` (#560). Documented workaround:
+    /// pair the OFFSET with the max-`u64` literal so the runtime cap
+    /// is effectively disabled. PG + SQLite accept bare OFFSET
+    /// without LIMIT and inherit the trait default (`None`).
+    fn offset_without_limit_clause(&self) -> Option<&'static str> {
+        Some(" LIMIT 18446744073709551615")
+    }
+
     /// `MySQL` quotes identifiers with backticks, not double quotes.
     /// Embedded backticks are doubled (the `MySQL` parser's escape rule)
     /// so the output is always a valid quoted identifier even for
