@@ -1186,18 +1186,10 @@ impl<T, P: serde::Serialize> CursorPage<T, P> {
     }
 }
 
-// ---- minimal lowercase-hex codec (kept private; pagination has no
-// optional-feature gate, and base64/urlencoding are opt-in deps here) ----
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
+// #562 — single `hex_encode` implementation lives in `crate::hex`;
+// pagination used to ship its own copy. `hex_decode` stays local —
+// the shared module doesn't (yet) ship a decoder.
+use crate::hex::hex_encode;
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
     if s.len() % 2 != 0 {

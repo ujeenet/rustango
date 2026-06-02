@@ -539,6 +539,13 @@ pub mod jsonapi;
 ))]
 pub(crate) mod crypto;
 
+/// Lowercase-hex codec — pure, no external deps. Lives outside
+/// [`crate::crypto`] so always-on call sites (`pagination` cursor
+/// encoding, `row_to_json` Binary arms) can share one
+/// implementation without pulling in the `crypto` feature deps.
+/// (#562 — DRY consolidation.)
+pub(crate) mod hex;
+
 /// Tiny `application/x-www-form-urlencoded` decoder shared by
 /// [`signed_url`], [`auth_flows`], and [`tenancy::admin`]. Internal.
 #[cfg(any(feature = "signed_url", feature = "auth_flows", feature = "tenancy",))]

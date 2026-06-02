@@ -106,20 +106,11 @@ pub fn row_to_json(
     Value::Object(map)
 }
 
-/// Render `bytes` as a lowercase hex string (no separator). Used by
-/// the `row_to_json` family for [`FieldType::Binary`] columns — the
-/// always-on crate can't pull in `base64` (gated behind several
-/// features), so hex is the lowest-dep neutral encoding.
-#[inline]
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(HEX[(b >> 4) as usize] as char);
-        s.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    s
-}
+// #562 — single `hex_encode` implementation lives in `crate::hex`;
+// the `row_to_json` family used to ship a verbatim copy. Re-export
+// so the local `hex_encode(...)` call sites in the per-backend
+// `Binary` arms stay byte-identical.
+use crate::hex::hex_encode;
 
 /// MySQL counterpart of [`row_to_json`]. Decodes each column by
 /// `field.ty` against `&MySqlRow`. Type mappings mirror the
