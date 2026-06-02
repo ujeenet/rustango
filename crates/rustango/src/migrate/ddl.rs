@@ -213,7 +213,7 @@ fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) 
         let _ = write!(
             s,
             " DEFAULT {}",
-            dialect.translate_default_expr(expr, ty_name)
+            dialect.translate_default_expr(expr, ty_name, field.max_length)
         );
     }
     if !field.nullable {
