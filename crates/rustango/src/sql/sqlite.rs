@@ -94,9 +94,10 @@ impl Dialect for Sqlite {
     /// - `'<lit>'::<type>` → `'<lit>'` (SQLite has no `::` cast syntax;
     ///   the bare literal is the right encoding for JSON-as-TEXT,
     ///   boolean-as-INTEGER, etc.).
-    /// - Everything else passes through. `_ty` is ignored — SQLite has
-    ///   no per-type DEFAULT syntax quirks.
-    fn translate_default_expr(&self, expr: &str, _ty: &str) -> String {
+    /// - Everything else passes through. `_ty` / `_max_length` are
+    ///   ignored — SQLite has no per-type DEFAULT syntax quirks and
+    ///   accepts literal defaults on every column type.
+    fn translate_default_expr(&self, expr: &str, _ty: &str, _max_length: Option<u32>) -> String {
         let trimmed = expr.trim();
         match trimmed {
             "now()" | "NOW()" | "current_timestamp" | "CURRENT_TIMESTAMP" => {

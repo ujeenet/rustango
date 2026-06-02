@@ -129,8 +129,14 @@ pub trait Dialect {
     ///
     /// Default: pass-through (Postgres-native). SQLite overrides
     /// `now()` → `CURRENT_TIMESTAMP` and strips `::type` casts.
-    /// MySQL overrides similarly plus wraps JSON defaults in parens.
-    fn translate_default_expr(&self, expr: &str, _ty: &str) -> String {
+    /// MySQL overrides similarly plus wraps defaults on its
+    /// LOB-rendered columns (JSON / TEXT / BLOB) in parens.
+    ///
+    /// `max_length` is the field's declared length cap (PG/SQLite
+    /// ignore it here); MySQL needs it to tell an unbounded `String`
+    /// (→ `TEXT`, which forbids a literal `DEFAULT`) apart from a
+    /// bounded one (→ `VARCHAR(n)`, which allows it).
+    fn translate_default_expr(&self, expr: &str, _ty: &str, _max_length: Option<u32>) -> String {
         expr.to_owned()
     }
 

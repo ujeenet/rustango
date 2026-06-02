@@ -204,12 +204,18 @@ impl Dialect for MySql {
     ///   to carry `(6)` too, otherwise MySQL fails with
     ///   `1067 (42000): Invalid default value`.
     /// - `'<lit>'::<type>` → `'<lit>'` (strip Postgres cast).
-    /// - JSON columns (`ty == "json"`): wrap the result in parens —
-    ///   `DEFAULT '{}'` is rejected by MySQL on JSON/TEXT/BLOB
-    ///   (`1101 (42000)`), but the MySQL-8.0.13+ expression-default
-    ///   form `DEFAULT (<expr>)` is accepted.
+    /// - LOB-rendered columns: wrap the result in parens. MySQL rejects
+    ///   a literal `DEFAULT '{}'` on its no-default-allowed column
+    ///   families (`1101 (42000)`) — JSON, every TEXT/BLOB variant, and
+    ///   GEOMETRY — but the MySQL-8.0.13+ expression-default form
+    ///   `DEFAULT (<expr>)` is accepted. Per [`Self::column_type`] the
+    ///   types that land in that bucket are `Json` (→ `JSON`), `Binary`
+    ///   (→ `LONGBLOB`), and an unbounded `String` (→ `TEXT`); a bounded
+    ///   `String` renders as `VARCHAR(n)` and keeps its literal default.
+    ///   That's why `max_length` is needed: it's the only thing that
+    ///   distinguishes the `TEXT` case from the `VARCHAR` case.
     /// - Everything else passes through.
-    fn translate_default_expr(&self, expr: &str, ty: &str) -> String {
+    fn translate_default_expr(&self, expr: &str, ty: &str, max_length: Option<u32>) -> String {
         let mut out = expr.trim().to_owned();
         match out.as_str() {
             "now()" | "NOW()" | "current_timestamp" | "CURRENT_TIMESTAMP" => {
@@ -228,7 +234,10 @@ impl Dialect for MySql {
                 }
             }
         }
-        if ty.eq_ignore_ascii_case("json") {
+        let renders_as_lob = ty.eq_ignore_ascii_case("json")
+            || ty.eq_ignore_ascii_case("binary")
+            || (ty.eq_ignore_ascii_case("string") && max_length.is_none());
+        if renders_as_lob {
             // Skip wrapping if the caller already produced a
             // parenthesized expression (defensive — current renderers
             // never do this).
@@ -785,6 +794,37 @@ mod tests {
     #[test]
     fn does_not_support_concurrent_index() {
         assert!(!MySql.supports_concurrent_index());
+    }
+
+    #[test]
+    fn default_on_lob_columns_uses_expression_form() {
+        // MySQL rejects a *literal* `DEFAULT` on its no-default column
+        // families — JSON, every TEXT/BLOB variant, GEOMETRY (error
+        // 1101) — but accepts the 8.0.13+ `DEFAULT (<expr>)` form. The
+        // renderer must wrap defaults for exactly those types.
+        //
+        // Regression for #315: `cms_page_log.data_json` is an unbounded
+        // `String` (→ `TEXT`, max_length = None), so its `'{}'` default
+        // failed `CREATE TABLE` on MySQL until it got wrapped.
+        assert_eq!(
+            MySql.translate_default_expr("'{}'", "string", None),
+            "('{}')"
+        );
+        assert_eq!(MySql.translate_default_expr("'{}'", "json", None), "('{}')");
+        assert_eq!(MySql.translate_default_expr("''", "binary", None), "('')");
+        // A bounded String renders as VARCHAR(n) — a literal default is
+        // legal there, so it must NOT be wrapped.
+        assert_eq!(
+            MySql.translate_default_expr("''", "string", Some(500)),
+            "''"
+        );
+        // Non-LOB scalars are never wrapped.
+        assert_eq!(MySql.translate_default_expr("0", "i64", None), "0");
+        // now() still normalizes to the (6)-precision form (not a LOB).
+        assert_eq!(
+            MySql.translate_default_expr("now()", "datetime", None),
+            "CURRENT_TIMESTAMP(6)"
+        );
     }
 
     #[test]

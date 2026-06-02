@@ -979,7 +979,7 @@ fn create_table_sql_from_snapshot_with_dialect(
             let _ = write!(
                 sql,
                 " DEFAULT {}",
-                dialect.translate_default_expr(expr, &f.ty)
+                dialect.translate_default_expr(expr, &f.ty, f.max_length)
             );
         }
         if !f.nullable {
@@ -1097,7 +1097,7 @@ fn add_column_sql(table: &str, f: &FieldSnapshot, dialect: &dyn crate::sql::Dial
         let _ = write!(
             sql,
             " DEFAULT {}",
-            dialect.translate_default_expr(expr, &f.ty)
+            dialect.translate_default_expr(expr, &f.ty, f.max_length)
         );
     }
     if !f.nullable {
