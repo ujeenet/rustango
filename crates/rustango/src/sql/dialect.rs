@@ -709,6 +709,30 @@ pub trait Dialect {
         None
     }
 
+    /// Inline table-comment fragment to splice into a CREATE TABLE
+    /// trailer for the model's `db_table_comment` attribute. MySQL
+    /// returns `" COMMENT='<escaped>'"`; Postgres + SQLite return
+    /// `None` because they need a different mechanism (post-hoc
+    /// `COMMENT ON TABLE` for Postgres, no-op for SQLite) — see
+    /// [`Self::table_comment_statement`]. Implementations are
+    /// responsible for properly escaping single quotes.
+    fn write_inline_table_comment(&self, _comment: &str) -> Option<String> {
+        None
+    }
+
+    /// Standalone `COMMENT ON TABLE "<table>" IS '<escaped>'`
+    /// statement emitted after CREATE TABLE for dialects that need
+    /// it. Postgres returns `Some(_)`; MySQL handles it inline (see
+    /// [`Self::write_inline_table_comment`]) and returns `None`;
+    /// SQLite returns `None` (no native table comments). Mirrors
+    /// the field-level [`Self::column_comment_statement`].
+    ///
+    /// Implementations are responsible for properly escaping single
+    /// quotes in the supplied comment.
+    fn table_comment_statement(&self, _table: &str, _comment: &str) -> Option<String> {
+        None
+    }
+
     // ====== Compilation (always overridden) ======
 
     /// Lower a `SelectQuery` to a `CompiledStatement` for this dialect.

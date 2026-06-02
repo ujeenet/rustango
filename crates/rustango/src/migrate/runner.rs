@@ -335,6 +335,14 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
             crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
         }
     }
+    // Django Meta.db_table_comment — same shape as column-level:
+    // PG emits a post-hoc `COMMENT ON TABLE`, MySQL inlined it in
+    // CREATE TABLE, SQLite emits nothing.
+    for model in &models {
+        for sql in ddl::table_comment_statements_with_dialect(dialect, model) {
+            crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
+        }
+    }
     // #411 — post_migrate fires once after the bootstrap walk
     // completes. `applied` is empty because apply_all_pool doesn't
     // carry per-migration names — it walks the model inventory.
@@ -1322,35 +1330,14 @@ async fn applied_set_pool_for(
     ledger: &str,
 ) -> Result<HashSet<String>, MigrateError> {
     let sql = format!("SELECT name FROM {ledger}");
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            let rows = sqlx::query(&sql).fetch_all(pg).await?;
-            let mut out = HashSet::with_capacity(rows.len());
-            for row in rows {
-                out.insert(row.try_get::<String, _>("name")?);
-            }
-            Ok(out)
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let rows = sqlx::query(&sql).fetch_all(my).await?;
-            let mut out = HashSet::with_capacity(rows.len());
-            for row in rows {
-                out.insert(row.try_get::<String, _>("name")?);
-            }
-            Ok(out)
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            let rows = sqlx::query(&sql).fetch_all(sq).await?;
-            let mut out = HashSet::with_capacity(rows.len());
-            for row in rows {
-                out.insert(row.try_get::<String, _>("name")?);
-            }
-            Ok(out)
-        }
-    }
+    // #561 — was 3-arm `match pool` doing byte-identical
+    // `try_get::<String, _>("name")` loops. The
+    // `raw_query_pool::<(String,)>` positional tuple decode pulls
+    // the single column on every backend via the `Maybe*FromRow`
+    // blanket impls. `ExecError` rides in via `MigrateError::Exec`'s
+    // `#[from]` impl.
+    let rows: Vec<(String,)> = crate::sql::raw_query_pool(&sql, Vec::new(), pool).await?;
+    Ok(rows.into_iter().map(|(name,)| name).collect())
 }
 
 /// Apply every pending migration in `dir` against either backend.
