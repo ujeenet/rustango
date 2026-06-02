@@ -243,18 +243,14 @@ CREATE TABLE IF NOT EXISTS `rustango_api_keys` (
 /// [`ensure_api_keys_table_pool`] which picks the right per-dialect
 /// DDL constant via `pool.dialect().name()`.
 ///
+/// #562 — delegates to [`ensure_api_keys_table_pool`] so the
+/// statement-splitting loop lives in one place.
+///
 /// # Errors
 /// Driver failures.
 #[cfg(feature = "postgres")]
 pub async fn ensure_api_keys_table(pool: &crate::sql::sqlx::PgPool) -> Result<(), sqlx::Error> {
-    for stmt in API_KEY_ENSURE_SQL
-        .split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        sqlx::query(stmt).execute(pool).await?;
-    }
-    Ok(())
+    ensure_api_keys_table_pool(&crate::sql::Pool::from(pool.clone())).await
 }
 
 /// v0.38 — tri-dialect counterpart of [`ensure_api_keys_table`].
