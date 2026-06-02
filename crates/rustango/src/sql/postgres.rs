@@ -99,22 +99,13 @@ impl Dialect for Postgres {
     }
 
     fn null_cast(&self, ty: FieldType) -> Option<&'static str> {
-        Some(match ty {
-            FieldType::I16 => "SMALLINT",
-            FieldType::I32 => "INTEGER",
-            FieldType::I64 => "BIGINT",
-            FieldType::F32 => "REAL",
-            FieldType::F64 => "DOUBLE PRECISION",
-            FieldType::Bool => "BOOLEAN",
-            FieldType::String => "TEXT",
-            FieldType::DateTime => "TIMESTAMPTZ",
-            FieldType::Date => "DATE",
-            FieldType::Uuid => "UUID",
-            FieldType::Json => "JSONB",
-            FieldType::Decimal => "NUMERIC",
-            FieldType::Binary => "BYTEA",
-            FieldType::Time => "TIME",
-        })
+        // #562 — the PG `null_cast` table was character-identical to
+        // the trait-default `cast_type` table 14 variants long.
+        // Delegate so the canonical token table lives in one place
+        // (`Dialect::cast_type` default impl); divergence between
+        // the two would silently change which `NULL::T` token PG
+        // sees.
+        self.cast_type(ty)
     }
 
     /// Postgres supports every `Op` the IR carries — `ILIKE`,
