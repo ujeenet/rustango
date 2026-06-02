@@ -25,17 +25,14 @@
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
-/// Hex-encode a byte slice using lowercase digits. ~2× faster than
-/// `format!("{b:02x}")` per byte; matches the `hex` crate's output.
+/// Hex-encode a byte slice using lowercase digits. Delegates to
+/// [`crate::hex::hex_encode`] so there's a single canonical
+/// implementation shared with the always-on call sites (`pagination`,
+/// `row_to_json`). Kept here so HMAC callers don't need to rewrite
+/// their import paths.
 #[must_use]
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0xf) as usize] as char);
-    }
-    out
+    crate::hex::hex_encode(bytes)
 }
 
 /// `SHA-256(bytes)` rendered as a lowercase hex string. Used by the
