@@ -967,12 +967,11 @@ pub async fn ensure_table(pool: &crate::sql::Pool) -> Result<(), crate::sql::sql
         dialect,
         &ContentType::SCHEMA,
     );
-    exec_one(pool, &table_ddl).await?;
-
     // UNIQUE INDEX on the natural key. PG + SQLite support
     // `CREATE UNIQUE INDEX IF NOT EXISTS`; MySQL doesn't — we drop
-    // the `IF NOT EXISTS` clause there and swallow the dup-index
-    // error (1061) so re-runs stay idempotent. Hand-rolled until
+    // the `IF NOT EXISTS` clause there. `run_ddl_idempotent` then
+    // swallows MySQL's dup-index error (1061) so re-runs stay
+    // idempotent. Hand-rolled until
     // `crate::migrate::diff::render_changes` goes bi-dialect; once
     // it does, this collapses to a `SchemaChange::CreateIndex` op.
     let table_q = dialect.quote_ident("rustango_content_types");
@@ -985,37 +984,18 @@ pub async fn ensure_table(pool: &crate::sql::Pool) -> Result<(), crate::sql::sql
     } else {
         format!("CREATE UNIQUE INDEX {idx_q} ON {table_q} ({col_app}, {col_name})")
     };
-    match exec_one(pool, &index_ddl).await {
-        Ok(()) => Ok(()),
-        Err(e) if dialect.name() == "mysql" && is_mysql_dup_index_error(&e) => Ok(()),
-        Err(e) => Err(e),
-    }
+    // #561 — table + index DDL go through the shared
+    // `run_ddl_idempotent` runner: split-by-`;` + dispatch +
+    // swallow-dup-index. The local `exec_one` helper used to ship
+    // its own match-on-pool dispatch alongside an inline dup-index
+    // arm; both collapse to one call.
+    let combined = format!("{table_ddl}; {index_ddl}");
+    crate::sql::run_ddl_idempotent(pool, &combined).await
 }
 
-/// Execute a single SQL statement against `pool`, dispatching on the
-/// backend variant. Internal bootstrap helper — production code
-/// should reach for the ORM (`fetch_pool` / `insert_pool` / …).
-async fn exec_one(pool: &crate::sql::Pool, sql: &str) -> Result<(), crate::sql::sqlx::Error> {
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            crate::sql::sqlx::query(sql).execute(pg).await?;
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            crate::sql::sqlx::query(sql).execute(my).await?;
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            crate::sql::sqlx::query(sql).execute(sq).await?;
-        }
-    }
-    Ok(())
-}
-
-// #561 — `is_mysql_dup_index_error` lives in `crate::sql::error`;
-// re-import for the call site at :990.
-use crate::sql::is_mysql_dup_index_error;
+// #561 — `is_mysql_dup_index_error` is now consumed inside
+// `crate::sql::run_ddl_idempotent` (the shared DDL runner); the
+// direct import here is unused after the `ensure_table` collapse.
 
 /// Backend-agnostic counterpart of [`ensure_seeded`]. Walks the
 /// inventory of registered models and INSERTs a `ContentType` row for

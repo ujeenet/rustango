@@ -1250,6 +1250,46 @@ pub async fn raw_execute_pool(
     execute_pool(pool, sql, binds).await
 }
 
+/// Run a `;`-separated DDL script idempotently across every backend.
+/// Each statement is dispatched through [`raw_execute_pool`]; on
+/// MySQL the helper swallows `ER_DUP_KEYNAME` (1061) so that index-
+/// create statements in a bootstrap script can re-run without
+/// failing (MySQL has no `CREATE INDEX IF NOT EXISTS`).
+///
+/// This is the canonical "ensure-this-DDL-applied" primitive for
+/// modules that ship hand-written per-dialect schema constants
+/// (`audit::ensure_table_pool`, `media::*::ensure_table`, the
+/// JSON-side `jobs::pg::ensure_jobs_table`, etc.). The non-MySQL
+/// errors surface as [`sqlx::Error`] verbatim (driver-level); only
+/// the dup-index case is swallowed.
+///
+/// Empty / whitespace-only fragments between `;` separators are
+/// skipped — convenient for the multi-statement DDL constants the
+/// callers ship.
+///
+/// #561 — single owner of the "split-by-`;` + dispatch + swallow
+/// dup-index" loop that used to live as ~6 copies in `audit.rs`,
+/// `media/*.rs`, `jobs/pg.rs`, and `contenttypes.rs`.
+///
+/// # Errors
+/// `sqlx::Error` forwarded from the executor on any statement other
+/// than the dup-index swallowed case. Non-driver `ExecError`
+/// variants (counter / structural) map to `sqlx::Error::Protocol`.
+pub async fn run_ddl_idempotent(pool: &Pool, ddl: &str) -> Result<(), sqlx::Error> {
+    for stmt in ddl.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        match execute_pool(pool, stmt, Vec::new()).await {
+            Ok(_) => {}
+            Err(crate::sql::ExecError::Driver(err)) => {
+                if !crate::sql::is_mysql_dup_index_error(&err) {
+                    return Err(err);
+                }
+            }
+            Err(other) => return Err(sqlx::Error::Protocol(format!("{other}"))),
+        }
+    }
+    Ok(())
+}
+
 // ---- internal dispatch helpers ----
 
 /// Execute a parameterized statement that doesn't return rows. Used

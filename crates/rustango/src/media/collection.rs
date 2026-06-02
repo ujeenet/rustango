@@ -101,31 +101,8 @@ impl MediaCollection {
             "sqlite" => CREATE_TABLE_SQL_SQLITE,
             _ => CREATE_TABLE_SQL_PG,
         };
-        for stmt in ddl.split(';') {
-            let trimmed = stmt.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            match pool {
-                #[cfg(feature = "postgres")]
-                crate::sql::Pool::Postgres(pg) => {
-                    sqlx::query(trimmed).execute(pg).await?;
-                }
-                #[cfg(feature = "mysql")]
-                crate::sql::Pool::Mysql(my) => {
-                    if let Err(e) = sqlx::query(trimmed).execute(my).await {
-                        if !super::tag::is_mysql_dup_index_error(&e) {
-                            return Err(e);
-                        }
-                    }
-                }
-                #[cfg(feature = "sqlite")]
-                crate::sql::Pool::Sqlite(sq) => {
-                    sqlx::query(trimmed).execute(sq).await?;
-                }
-            }
-        }
-        Ok(())
+        // #561 — shared split-+-dispatch-+-swallow-dup-index loop.
+        crate::sql::run_ddl_idempotent(pool, ddl).await
     }
 
     /// PG row decoder — kept for in-crate callers using `PgRow`.

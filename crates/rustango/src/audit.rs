@@ -560,52 +560,21 @@ CREATE INDEX IF NOT EXISTS "rustango_audit_log_occurred_idx"
 /// Driver / SQL failures other than the swallowed duplicate-index
 /// errors on MySQL.
 pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Error> {
-    let dialect = pool.dialect();
-    let ddl = match dialect.name() {
+    let ddl = match pool.dialect().name() {
         "postgres" => CREATE_TABLE_SQL,
         "mysql" => CREATE_TABLE_SQL_MYSQL,
         "sqlite" => CREATE_TABLE_SQL_SQLITE,
-        // Future dialects fall through to a portable best-effort using
-        // `Dialect::column_type` for the timestamp + JSON columns; for
-        // the backends rustango ships against, hand-rolled DDL is
-        // simpler and produces tighter SQL.
+        // Future dialects fall through to a portable best-effort
+        // using `Dialect::column_type` for the timestamp + JSON
+        // columns; for the backends rustango ships against, hand-
+        // rolled DDL is simpler and produces tighter SQL.
         _ => CREATE_TABLE_SQL,
     };
-    for stmt in ddl.split(';') {
-        let trimmed = stmt.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match pool {
-            #[cfg(feature = "postgres")]
-            crate::sql::Pool::Postgres(pg) => {
-                sqlx::query(trimmed).execute(pg).await?;
-            }
-            #[cfg(feature = "mysql")]
-            crate::sql::Pool::Mysql(my) => {
-                if let Err(e) = sqlx::query(trimmed).execute(my).await {
-                    // MySQL has no CREATE INDEX IF NOT EXISTS — the
-                    // index-create statements raise error 1061 when
-                    // the index already exists. Swallow that one
-                    // case so the bootstrap stays idempotent;
-                    // surface every other error.
-                    if !is_mysql_dup_index_error(&e) {
-                        return Err(e);
-                    }
-                }
-            }
-            #[cfg(feature = "sqlite")]
-            crate::sql::Pool::Sqlite(sq) => {
-                sqlx::query(trimmed).execute(sq).await?;
-            }
-        }
-    }
-    Ok(())
+    // #561 — the split-by-`;` + dispatch + swallow-dup-index loop
+    // was duplicated ~6× across audit / media / jobs / contenttypes.
+    // Single owner now lives in `crate::sql::run_ddl_idempotent`.
+    crate::sql::run_ddl_idempotent(pool, ddl).await
 }
-
-// #561 — `is_mysql_dup_index_error` lives in `crate::sql::error`;
-// re-import here so the call site at :592 stays byte-identical.
-use crate::sql::is_mysql_dup_index_error;
 
 /// Per-row audit emit on a `MySqlConnection`-shape executor —
 /// counterpart of [`emit_one`] using `?` placeholders + backtick

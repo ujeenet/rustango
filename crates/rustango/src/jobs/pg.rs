@@ -239,31 +239,9 @@ impl PgJobQueue {
             "sqlite" => CREATE_JOBS_TABLE_SQL_SQLITE,
             _ => CREATE_JOBS_TABLE_SQL_PG,
         };
-        for stmt in ddl.split(';') {
-            let trimmed = stmt.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            match pool {
-                #[cfg(feature = "postgres")]
-                Pool::Postgres(pg) => {
-                    sqlx::query(trimmed).execute(pg).await?;
-                }
-                #[cfg(feature = "mysql")]
-                Pool::Mysql(my) => {
-                    if let Err(e) = sqlx::query(trimmed).execute(my).await {
-                        if !is_mysql_dup_index_error(&e) {
-                            return Err(e);
-                        }
-                    }
-                }
-                #[cfg(feature = "sqlite")]
-                Pool::Sqlite(sq) => {
-                    sqlx::query(trimmed).execute(sq).await?;
-                }
-            }
-        }
-        Ok(())
+        // #561 — split-by-`;` + dispatch + swallow-dup-index loop
+        // is shared via `crate::sql::run_ddl_idempotent`.
+        crate::sql::run_ddl_idempotent(pool, ddl).await
     }
 
     /// PG-typed back-compat shim around [`Self::reclaim_stuck_jobs_pool`].
@@ -761,9 +739,9 @@ impl HandlerRegistry {
     }
 }
 
-// #561 — `is_mysql_dup_index_error` lives in `crate::sql::error`;
-// re-import for the call site at :255.
-use crate::sql::is_mysql_dup_index_error;
+// #561 — `is_mysql_dup_index_error` is now consumed only inside
+// `crate::sql::run_ddl_idempotent` (the shared DDL runner). The
+// import here is unused after the `ensure_table_pool` collapse.
 
 /// Best-effort `gethostname` without pulling a dep — read the env var
 /// most container runtimes set.
