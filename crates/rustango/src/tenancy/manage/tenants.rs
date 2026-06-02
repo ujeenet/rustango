@@ -515,21 +515,38 @@ where
             // are open.
             let url = pools.resolved_database_url(&org).await?;
             pools.invalidate(&slug).await;
-            // v0.38 — DROP DATABASE is PG-only via this helper for
-            // now. On sqlite the operator deletes the .db file out-
-            // of-band; on mysql the syntax matches but the admin-
-            // db rewrite is different so we'd need a parallel helper.
+            // #560 — branch on the tenant's runtime `backend_kind`,
+            // NOT the cargo feature flag. On a mixed-feature build
+            // (PG + MySQL compiled in), the `cfg(postgres)` arm was
+            // unconditionally taken regardless of the tenant's
+            // actual backend; parsing a `mysql://` URL via
+            // `PgConnectOptions::from_str` then failed at runtime
+            // with a cryptic "invalid URL" error.
+            //
+            // The PG helper stays gated on the `postgres` feature
+            // (`PgConnectOptions` isn't available without it); the
+            // runtime branch decides whether the helper is reachable
+            // for THIS tenant.
+            let is_pg = org.backend_kind == "postgres";
             #[cfg(feature = "postgres")]
-            {
+            let pg_drop_attempted = if is_pg {
                 drop_database_at(&url, w).await?;
-            }
+                true
+            } else {
+                false
+            };
             #[cfg(not(feature = "postgres"))]
-            {
+            let pg_drop_attempted = {
+                let _ = is_pg;
+                false
+            };
+            if !pg_drop_attempted {
                 writeln!(
                     w,
                     "  purged tenant `{slug}` registry row; manually delete the \
                      tenant database at `{url}` (DROP DATABASE not wired for \
-                     sqlite/mysql in v0.38)",
+                     `{backend}` in v0.42)",
+                    backend = org.backend_kind,
                 )?;
             }
             writeln!(w, "purged tenant `{slug}` (dropped dedicated database)")?;
