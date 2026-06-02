@@ -109,31 +109,8 @@ impl MediaTag {
             "sqlite" => CREATE_TABLE_SQL_SQLITE,
             _ => CREATE_TABLE_SQL_PG,
         };
-        for stmt in ddl.split(';') {
-            let trimmed = stmt.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            match pool {
-                #[cfg(feature = "postgres")]
-                crate::sql::Pool::Postgres(pg) => {
-                    sqlx::query(trimmed).execute(pg).await?;
-                }
-                #[cfg(feature = "mysql")]
-                crate::sql::Pool::Mysql(my) => {
-                    if let Err(e) = sqlx::query(trimmed).execute(my).await {
-                        if !is_mysql_dup_index_error(&e) {
-                            return Err(e);
-                        }
-                    }
-                }
-                #[cfg(feature = "sqlite")]
-                crate::sql::Pool::Sqlite(sq) => {
-                    sqlx::query(trimmed).execute(sq).await?;
-                }
-            }
-        }
-        Ok(())
+        // #561 — shared split-+-dispatch-+-swallow-dup-index loop.
+        crate::sql::run_ddl_idempotent(pool, ddl).await
     }
 
     /// PG row decoder — kept for in-crate callers that still acquire
@@ -201,13 +178,12 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for MediaTag {
     }
 }
 
-// #561 — `is_mysql_dup_index_error` was a `pub(super)` copy here so
-// `media::mod` + `media::collection` could reach across modules to
-// dodge a 5th duplicate. Re-export from `crate::sql::is_mysql_dup_index_error`
-// keeps those existing `super::tag::is_mysql_dup_index_error` /
-// `crate::media::tag::is_mysql_dup_index_error` paths working
-// without touching their call sites.
-pub(super) use crate::sql::is_mysql_dup_index_error;
+// #561 — the pub(super) `is_mysql_dup_index_error` re-export here
+// was a shim for media::mod + media::collection that reached
+// across modules to dodge a 5th copy of the predicate. Both of
+// those callers now route through `crate::sql::run_ddl_idempotent`
+// (the shared DDL runner already swallows MySQL's dup-index
+// error), so the re-export has no remaining consumers.
 
 /// MySQL DATETIME(6) decoder — sqlx returns `NaiveDateTime` by default
 /// for `DATETIME` (no TZ); promote to `DateTime<Utc>` assuming the
