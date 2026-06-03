@@ -366,6 +366,19 @@ pub struct ModelSchema {
     /// "no two rows of group X may overlap in column Y" patterns
     /// (e.g. room-bookings, calendar holds).
     pub exclusion_constraints: &'static [ExclusionConstraint],
+    /// Django-shape `Meta.default_permissions` — which CRUD codenames
+    /// (`"add"` / `"change"` / `"delete"` / `"view"`) the framework
+    /// auto-creates for this model when [`Self::permissions`] is
+    /// `true`. Empty slice means **all four** (the default — matches
+    /// Django's behavior when the operator omits `default_permissions`).
+    /// Set the empty case as `&[]` so older `ModelSchema` literals
+    /// stay compatible without a migration.
+    ///
+    /// Configured via `#[rustango(default_permissions = "view,change")]`
+    /// to opt out of `add` / `delete` for read-mostly models. Pairs with
+    /// [`Self::extra_permissions`] which adds *additional* codenames
+    /// without removing any of the CRUD set.
+    pub default_permissions: &'static [&'static str],
     /// Composite (multi-column) foreign key relations declared via
     /// `#[rustango(fk_composite(name = "...", to = "...", on = (...),
     /// from = (...)))]`. Each entry maps a tuple of source columns

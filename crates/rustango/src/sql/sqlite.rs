@@ -664,6 +664,7 @@ mod tests {
             indexes: &[],
             check_constraints: &[],
             exclusion_constraints: &[],
+            default_permissions: &[],
             composite_relations: &[],
             generic_relations: &[],
             scope: ModelScope::Tenant,

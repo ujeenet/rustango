@@ -812,6 +812,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .as_ref()
             .map(|(c, d)| (c.as_str(), *d)),
         &container.extra_permissions,
+        &container.default_permissions,
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -1703,6 +1704,7 @@ fn model_impl_tokens(
     db_table_comment: Option<&str>,
     get_latest_by: Option<(&str, bool)>,
     extra_permissions: &[(String, String)],
+    default_permissions: &[String],
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
@@ -1746,6 +1748,10 @@ fn model_impl_tokens(
     let extra_permission_tokens: Vec<_> = extra_permissions
         .iter()
         .map(|(c, l)| quote!((#c, #l)))
+        .collect();
+    let default_permission_tokens: Vec<_> = default_permissions
+        .iter()
+        .map(|action| quote!(#action))
         .collect();
     let indexes_tokens = indexes.iter().map(|idx| {
         let name = idx.name.as_deref().unwrap_or("unnamed_index");
@@ -1886,6 +1892,7 @@ fn model_impl_tokens(
                 db_table_comment: #db_table_comment_tokens,
                 get_latest_by: #get_latest_by_tokens,
                 extra_permissions: &[ #(#extra_permission_tokens),* ],
+                default_permissions: &[ #(#default_permission_tokens),* ],
             };
         }
     }
@@ -4471,6 +4478,14 @@ struct ContainerAttrs {
     /// archive:Can archive")]`. Comma-separated `codename:label`
     /// pairs. Threaded into `ModelSchema::extra_permissions`.
     extra_permissions: Vec<(String, String)>,
+    /// Django-shape `Meta.default_permissions` — which CRUD codenames
+    /// (`"add"` / `"change"` / `"delete"` / `"view"`) the framework
+    /// auto-creates. Empty `Vec` (default) means **all four** — matches
+    /// Django's behavior when the operator omits the option. Set via
+    /// `#[rustango(default_permissions = "view,change")]` to opt out.
+    /// Validated at parse time; unknown actions fail with a span-pointing
+    /// error.
+    default_permissions: Vec<String>,
     /// `#[rustango(verbose_name = "blog post")]` — Django-shape
     /// human-readable singular label for the model. Threaded into
     /// `ModelSchema::verbose_name` so admin section headers /
@@ -4686,6 +4701,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         db_table_comment: None,
         get_latest_by: None,
         extra_permissions: Vec::new(),
+        default_permissions: Vec::new(),
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -5051,6 +5067,47 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                         .error("`extra_permissions = \"…\"` must list at least one pair"));
                 }
                 out.extra_permissions = pairs;
+                return Ok(());
+            }
+            if meta.path.is_ident("default_permissions") {
+                // Django-shape `Meta.default_permissions = ('view',
+                // 'change')`. Comma-separated subset of the CRUD
+                // action set. Empty means all four (the framework
+                // default — matches Django when the option is
+                // omitted).
+                let s: LitStr = meta.value()?.parse()?;
+                let raw = s.value();
+                let mut actions: Vec<String> = Vec::new();
+                for entry in raw.split(',') {
+                    let action = entry.trim().to_ascii_lowercase();
+                    if action.is_empty() {
+                        continue;
+                    }
+                    match action.as_str() {
+                        "add" | "change" | "delete" | "view" => {}
+                        other => {
+                            return Err(syn::Error::new(
+                                s.span(),
+                                format!(
+                                    "unknown default_permissions action `{other}` — \
+                                     expected one of `add`, `change`, `delete`, `view`"
+                                ),
+                            ));
+                        }
+                    }
+                    if !actions.contains(&action) {
+                        actions.push(action);
+                    }
+                }
+                if actions.is_empty() {
+                    return Err(syn::Error::new(
+                        s.span(),
+                        "`default_permissions = \"…\"` must list at least one action; \
+                         use `permissions = false` on the container if you want NO \
+                         permissions seeded for this model.",
+                    ));
+                }
+                out.default_permissions = actions;
                 return Ok(());
             }
             if meta.path.is_ident("get_latest_by") {
