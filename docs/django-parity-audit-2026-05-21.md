@@ -32,7 +32,7 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 10. Templates | 12 | 0 | 0 | 0 |
 | 11. Authentication | 21 | 1 | 1 | 0 |
 | 12. Sessions | 7 | 0 | 0 | 0 |
-| 13. Manage commands | 19 | 1 | 3 | 6 |
+| 13. Manage commands | 20 | 0 | 3 | 6 |
 | 14. Settings | 13 | 2 | 2 | 2 |
 | 15. Security / middleware | 26 | 0 | 0 | 0 |
 | 16. Caching | 9 | 0 | 1 | 0 |
@@ -44,9 +44,9 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 22. Async support | 4 | 0 | 0 | 3 |
 | 23. DRF parity | 22 | 0 | 1 | 0 |
 | 24. contrib modules | 12 | 1 | 3 | 2 |
-| **Totals** | **361** | **12** | **21** | **19** |
+| **Totals** | **362** | **11** | **21** | **19** |
 
-Coverage = 361 / (361 + 12 + 21) = **92% full, 3% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
+Coverage = 362 / (362 + 11 + 21) = **92% full, 3% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
 
 Snapshot date: 2026-06-03 (post v0.42 batch including ExclusionConstraint #593, default_permissions #594, on_delete #592, ForeignKey on_delete enum override, extra_permissions #591, get_latest_by #590, db_table_comment #589, citext, DatabaseCache, managed=false, upload streaming, i18n).
 
@@ -400,7 +400,7 @@ Django built-in management commands:
 
 | Command | Doc | Status | rustango | Notes |
 |---|---|---|---|---|
-| `startproject` | [startproject](https://docs.djangoproject.com/en/6.0/ref/django-admin/#startproject) | PARTIAL | `cargo rustango new <name>` — version-pin bug filed #79 | |
+| `startproject` | [startproject](https://docs.djangoproject.com/en/6.0/ref/django-admin/#startproject) | SHIPPED | `cargo rustango new <name>` — version pin auto-tracks scaffolder build via `env!("CARGO_PKG_VERSION")` (#79 follow-up, [crates/cargo-rustango/src/main.rs:139](crates/cargo-rustango/src/main.rs#L139)) | |
 | `startapp` | [startapp](https://docs.djangoproject.com/en/6.0/ref/django-admin/#startapp) | SHIPPED | `manage startapp <name>` | Scaffolds model + views + tests + migrations. |
 | `makemigrations` | (sec 5) | SHIPPED | `manage makemigrations` | |
 | `migrate` | (sec 5) | SHIPPED | `manage migrate` | |
@@ -430,7 +430,7 @@ Django built-in management commands:
 | `create-tenant` / `create-operator` (rustango-specific) | n/a | SHIPPED | tenancy verbs | |
 | `migrate-tenant-storage` (rustango-specific) | n/a | SHIPPED | v0.26 | |
 
-Summary: **19 SHIPPED / 1 PARTIAL / 3 MISSING / 6 N/A**. Gaps: `shell` REPL (Rust constraint), `dumpdata`, i18n scaffolding (`makemessages` / `compilemessages`).
+Summary: **20 SHIPPED / 0 PARTIAL / 3 MISSING / 6 N/A**. Gaps: `shell` REPL (Rust constraint), `dumpdata`, i18n scaffolding (`makemessages` / `compilemessages`).
 
 ---
 
