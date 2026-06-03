@@ -21,32 +21,32 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | Category | SHIPPED | PARTIAL | MISSING | N/A |
 |---|---:|---:|---:|---:|
 | 1. ORM — models / fields / Meta | 15 | 1 | 1 | 0 |
-| 2. QuerySet API | 22 | 4 | 4 | 0 |
-| 3. Field types & options | 14 | 4 | 7 | 0 |
+| 2. QuerySet API | 37 | 1 | 1 | 0 |
+| 3. Field types & options | 32 | 0 | 2 | 1 |
 | 4. Postgres-specific fields | 2 | 1 | 2 | 0 |
-| 5. Migrations | 13 | 2 | 0 | 1 |
-| 6. Admin (ModelAdmin) | 26 | 2 | 8 | 2 |
-| 7. Forms / Formsets | 8 | 3 | 4 | 0 |
+| 5. Migrations | 15 | 0 | 0 | 1 |
+| 6. Admin (ModelAdmin) | 35 | 1 | 0 | 1 |
+| 7. Forms / Formsets | 14 | 1 | 0 | 0 |
 | 8. Generic CBVs | 12 | 0 | 1 | 1 |
 | 9. URL routing | 6 | 0 | 0 | 1 |
-| 10. Templates | 11 | 0 | 0 | 0 |
-| 11. Authentication | 14 | 4 | 4 | 1 |
+| 10. Templates | 12 | 0 | 0 | 0 |
+| 11. Authentication | 21 | 1 | 1 | 0 |
 | 12. Sessions | 7 | 0 | 0 | 0 |
-| 13. Manage commands | 13 | 5 | 6 | 4 |
-| 14. Settings | 10 | 4 | 4 | 2 |
-| 15. Security / middleware | 15 | 0 | 1 | 0 |
+| 13. Manage commands | 20 | 0 | 3 | 6 |
+| 14. Settings | 13 | 2 | 2 | 2 |
+| 15. Security / middleware | 26 | 0 | 0 | 0 |
 | 16. Caching | 9 | 0 | 1 | 0 |
-| 17. Signals | 7 | 2 | 5 | 0 |
-| 18. Email | 8 | 1 | 0 | 0 |
-| 19. Files / Storage | 3 | 2 | 3 | 0 |
-| 20. i18n / l10n | 5 | 1 | 3 | 0 |
-| 21. Testing | 8 | 2 | 3 | 0 |
-| 22. Async support | 5 | 0 | 0 | 2 |
-| 23. DRF parity | 11 | 4 | 4 | 0 |
-| 24. contrib modules | 6 | 4 | 4 | 0 |
-| **Totals** | **251** | **46** | **65** | **14** |
+| 17. Signals | 10 | 0 | 0 | 1 |
+| 18. Email | 11 | 0 | 0 | 0 |
+| 19. Files / Storage | 6 | 1 | 2 | 0 |
+| 20. i18n / l10n | 7 | 1 | 1 | 0 |
+| 21. Testing | 14 | 0 | 0 | 0 |
+| 22. Async support | 4 | 0 | 0 | 3 |
+| 23. DRF parity | 22 | 0 | 1 | 0 |
+| 24. contrib modules | 12 | 1 | 3 | 2 |
+| **Totals** | **362** | **11** | **21** | **19** |
 
-Coverage = 251 / (251 + 46 + 65) = **69% full, 13% partial, 18% missing** vs Django 6.0 surface (excluding 14 N/A rows). Partial+shipped = **82%**.
+Coverage = 362 / (362 + 11 + 21) = **92% full, 3% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
 
 Snapshot date: 2026-06-03 (post v0.42 batch including ExclusionConstraint #593, default_permissions #594, on_delete #592, ForeignKey on_delete enum override, extra_permissions #591, get_latest_by #590, db_table_comment #589, citext, DatabaseCache, managed=false, upload streaming, i18n).
 
@@ -122,7 +122,7 @@ Summary: **15 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A**. Gaps: full abstract-bas
 | `__lookup`s (`__icontains`, `__lt`, `__in`, `__between`, `__range`, `__isnull`, ...) | [Field lookups](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#field-lookups) | SHIPPED | `parse_lookup` in query/mod.rs | Most Django lookups; missing: `__date`, `__year__lte`, etc. requiring transform chains. |
 | `.using(db_alias)` (multi-DB routing) | [using](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#using) | MISSING | n/a (#332) | rustango is single-pool-per-QuerySet (or tenant-scoped); multi-DB router missing. |
 
-Summary: **22 SHIPPED / 4 PARTIAL / 4 MISSING / 0 N/A**. Gaps: multi-DB `.using()` (#332), `__date` / `__year__lte` lookup transform chains, plus a few esoteric Postgres lookups. `.dates/datetimes/contains/none` all shipped in v0.42.
+Summary: **37 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A**. Gaps: multi-DB `.using()` (#332), `__date` / `__year__lte` lookup transform chains, plus a few esoteric Postgres lookups. `.dates/datetimes/contains/none` all shipped in v0.42.
 
 ---
 
@@ -173,7 +173,7 @@ Field options:
 | `db_comment` | SHIPPED | `#[rustango(db_comment = "...")]` (#450, v0.42) — PG emits post-table `COMMENT ON COLUMN`, MySQL inlines `COMMENT '...'`, SQLite no-op (no native support) | |
 | `db_tablespace` | N/A | n/a | Tablespaces are PG-specific niche. |
 
-Summary: **14 SHIPPED / 4 PARTIAL / 7 MISSING / 0 N/A** in this section. Gaps cluster around: `FileField` / `ImageField` model side (#339 / #340 — covered by Media row + FK in the rustango idiom; not a native field), `GeneratedField`-side niceties, and a few Django-style aliases. `choices` / `verbose_name` / `editable` / `blank` / `db_comment` / IP / FilePath all SHIPPED in v0.42.
+Summary: **32 SHIPPED / 0 PARTIAL / 2 MISSING / 1 N/A** in this section. Gaps cluster around: `FileField` / `ImageField` model side (#339 / #340 — covered by Media row + FK in the rustango idiom; not a native field), `GeneratedField`-side niceties, and a few Django-style aliases. `choices` / `verbose_name` / `editable` / `blank` / `db_comment` / IP / FilePath all SHIPPED in v0.42.
 
 ---
 
@@ -187,7 +187,7 @@ Summary: **14 SHIPPED / 4 PARTIAL / 7 MISSING / 0 N/A** in this section. Gaps cl
 | `RangeField` (Int / Date / DateTime / Decimal) | [RangeField](https://docs.djangoproject.com/en/6.0/ref/contrib/postgres/fields/#range-fields) | MISSING | n/a — `SqlValue::RangeLiteral` exists but no typed field (#343) | |
 | `CITextField` | [CITextField](https://docs.djangoproject.com/en/6.0/ref/contrib/postgres/fields/#citext-fields) | SHIPPED | `#[rustango(citext)]` (#344) — DDL emits `CITEXT` on PG (with `CREATE EXTENSION IF NOT EXISTS citext;` prelude available via `dialect.ci_text_extension_sql()`), `TEXT COLLATE NOCASE` on SQLite, `VARCHAR(N)/TEXT COLLATE utf8mb4_general_ci` on MySQL. Column-level case-insensitivity propagates to `=` / `LIKE` / `ORDER BY` without query-side `LOWER(...)` wrapping. | |
 
-Summary: **2 / 1 / 2 / 0**.
+Summary: **2 SHIPPED / 1 PARTIAL / 2 MISSING / 0 N/A**.
 
 ---
 
@@ -212,7 +212,7 @@ Summary: **2 / 1 / 2 / 0**.
 | Schema-mode per-tenant migrations | (Django doesn't ship this) | N/A | `tenancy::migrate` runs per-tenant | Beyond Django's per-DB. |
 | inspectdb (tables + views) | [inspectdb](https://docs.djangoproject.com/en/6.0/ref/django-admin/#inspectdb) | SHIPPED | T2.10 closed — views walked too (PR #304) | |
 
-Summary: **13 SHIPPED / 2 PARTIAL / 0 MISSING / 1 N/A**. Section 5 is fully shipped.
+Summary: **15 SHIPPED / 0 PARTIAL / 0 MISSING / 1 N/A**. Section 5 is fully shipped.
 
 ---
 
@@ -258,7 +258,7 @@ Summary: **13 SHIPPED / 2 PARTIAL / 0 MISSING / 1 N/A**. Section 5 is fully ship
 | Admin styling / branding | [admin templates](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#overriding-admin-templates) | SHIPPED | `Storage`-backed per-tenant brand + theme tokens | |
 | Admin docs (`django.contrib.admindocs`) | [admindocs](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/admindocs/) | N/A | n/a | Rust doc-comments cover it. |
 
-Summary: **26 SHIPPED / 2 PARTIAL / 8 MISSING / 2 N/A**.
+Summary: **35 SHIPPED / 1 PARTIAL / 0 MISSING / 1 N/A**.
 
 ---
 
@@ -282,7 +282,7 @@ Summary: **26 SHIPPED / 2 PARTIAL / 8 MISSING / 2 N/A**.
 | CSRF token | [CSRF](https://docs.djangoproject.com/en/6.0/ref/csrf/) | SHIPPED | `forms::csrf::CsrfLayer` + `{{ csrf_token \| csrf_input \| safe }}` Tera | |
 | `UniqueTogetherValidator` | [DRF form-level uniqueness](https://docs.djangoproject.com/en/6.0/ref/contrib/postgres/constraints/) | SHIPPED | `serializer::check_unique_together_pool` — see the DRF section row for #437 (v0.42). #376 is a duplicate; closing alongside #437. | |
 
-Summary: **8 SHIPPED / 3 PARTIAL / 4 MISSING / 0 N/A**.
+Summary: **14 SHIPPED / 1 PARTIAL / 0 MISSING / 0 N/A**.
 
 ---
 
@@ -321,7 +321,7 @@ Summary: **12 SHIPPED / 0 PARTIAL / 1 MISSING / 1 N/A**. Only `Date-based views`
 | `{% url 'name' %}` template tag | [url tag](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#url) | SHIPPED | `urls::register_url_tag(&mut Tera)` (`urls.rs:403`) registers the Tera `url(name=...)` function so templates can call `{{ url(name="dashboard") }}`. Closes #382. | |
 | Static + media URLs | [static](https://docs.djangoproject.com/en/6.0/ref/contrib/staticfiles/) | SHIPPED | `Cli::with_static(prefix, dir)` + `Media` model + `Storage` | |
 
-Summary: **6 / 0 / 0 / 1**.
+Summary: **6 SHIPPED / 0 PARTIAL / 0 MISSING / 1 N/A**.
 
 ---
 
@@ -342,7 +342,7 @@ Summary: **6 / 0 / 0 / 1**.
 | `{% cache %}` template fragment | [template fragment caching](https://docs.djangoproject.com/en/6.0/topics/cache/#template-fragment-caching) | SHIPPED | `cache_fragment::cached_render(cache, key, ttl, fn)` (closed #385 as wontfix-by-design — Tera doesn't expose subtree handles for block-tag plugins, so the canonical shape is handler-side fragment caching with the same semantics). | |
 | Template debug page | (Django DEBUG) | SHIPPED | `template_debug::{enabled, error_page_html}` (closed #386) — `template_views::render` swaps a styled HTML page in for the plain-text 500 when `RUSTANGO_ENV` is dev/staging (or `RUSTANGO_TEMPLATE_DEBUG=1`). Banner + error message + `Debug` payload + source chain, all inline-CSS so the page works without a static-asset hop. Plain-text fallback stays in prod. | |
 
-Summary: **11 / 0 / 0 / 0**. Templates section is fully shipped.
+Summary: **12 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A**. Templates section is fully shipped.
 
 ---
 
@@ -374,7 +374,7 @@ Summary: **11 / 0 / 0 / 0**. Templates section is fully shipped.
 | PasswordResetConfirmView | (above) | SHIPPED | `auth_flows::confirm_password_reset_pool(pool, url, new_password, secret)` + `confirm_password_reset_pool_into(... table, pk_col, password_col)` (closed #391, v0.42). Verifies the signed reset URL via `PasswordReset::verify`, validates new-password length (≥ 8 → `AuthFlowError::WeakPassword`), hashes via `passwords::hash`, and writes the new hash to the named user table. Defaults target `rustango_users(id, password_hash)`; the `_into` variant takes table + column names for custom user models. | |
 | Passkey / WebAuthn | (Django 5.2+) | MISSING | n/a (#392) | |
 
-Summary: **14 SHIPPED / 4 PARTIAL / 4 MISSING / 1 N/A**.
+Summary: **21 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A**.
 
 ---
 
@@ -390,7 +390,7 @@ Summary: **14 SHIPPED / 4 PARTIAL / 4 MISSING / 1 N/A**.
 | Session expiry / `SESSION_COOKIE_AGE` | (cookie options) | SHIPPED | Configurable TTL per backend | |
 | Session middleware (autoinstall) | (auto in MIDDLEWARE) | SHIPPED | `Cli::tenancy()` and `Admin::Builder` auto-attach | |
 
-Summary: **7 / 0 / 0 / 0**.
+Summary: **7 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A**.
 
 ---
 
@@ -400,7 +400,7 @@ Django built-in management commands:
 
 | Command | Doc | Status | rustango | Notes |
 |---|---|---|---|---|
-| `startproject` | [startproject](https://docs.djangoproject.com/en/6.0/ref/django-admin/#startproject) | PARTIAL | `cargo rustango new <name>` — version-pin bug filed #79 | |
+| `startproject` | [startproject](https://docs.djangoproject.com/en/6.0/ref/django-admin/#startproject) | SHIPPED | `cargo rustango new <name>` — version pin auto-tracks scaffolder build via `env!("CARGO_PKG_VERSION")` (#79 follow-up, [crates/cargo-rustango/src/main.rs:139](crates/cargo-rustango/src/main.rs#L139)) | |
 | `startapp` | [startapp](https://docs.djangoproject.com/en/6.0/ref/django-admin/#startapp) | SHIPPED | `manage startapp <name>` | Scaffolds model + views + tests + migrations. |
 | `makemigrations` | (sec 5) | SHIPPED | `manage makemigrations` | |
 | `migrate` | (sec 5) | SHIPPED | `manage migrate` | |
@@ -430,7 +430,7 @@ Django built-in management commands:
 | `create-tenant` / `create-operator` (rustango-specific) | n/a | SHIPPED | tenancy verbs | |
 | `migrate-tenant-storage` (rustango-specific) | n/a | SHIPPED | v0.26 | |
 
-Summary: **13 SHIPPED / 5 PARTIAL / 6 MISSING / 4 N/A**. Gaps: `shell` REPL (Rust constraint), `dumpdata`, i18n scaffolding (`makemessages` / `compilemessages`).
+Summary: **20 SHIPPED / 0 PARTIAL / 3 MISSING / 6 N/A**. Gaps: `shell` REPL (Rust constraint), `dumpdata`, i18n scaffolding (`makemessages` / `compilemessages`).
 
 ---
 
@@ -458,7 +458,7 @@ Summary: **13 SHIPPED / 5 PARTIAL / 6 MISSING / 4 N/A**. Gaps: `shell` REPL (Rus
 | Settings validation (`manage check --deploy`) | [check --deploy](https://docs.djangoproject.com/en/6.0/ref/django-admin/#cmdoption-check-deploy) | SHIPPED | (sec 13) | |
 | Secrets manager integration (Vault, AWS Secrets, etc.) | n/a in Django core | MISSING | n/a — `secrets::*` is local-env focus (#405) | Backlog #47. |
 
-Summary: **10 / 4 / 4 / 2**. Multi-DB routing is the headline MISSING.
+Summary: **13 SHIPPED / 2 PARTIAL / 2 MISSING / 2 N/A**. Multi-DB routing is the headline MISSING.
 
 ---
 
@@ -493,7 +493,7 @@ Summary: **10 / 4 / 4 / 2**. Multi-DB routing is the headline MISSING.
 | `SECURE_PROXY_SSL_HEADER` | [proxy headers](https://docs.djangoproject.com/en/6.0/ref/settings/#secure-proxy-ssl-header) | SHIPPED | Real-IP layer handles it | |
 | API versioning (header / query / prefix) | n/a | SHIPPED | `api_version::*` | |
 
-Summary: **15 SHIPPED / 0 PARTIAL / 1 MISSING / 0 N/A** for the dimensions enumerated. Rustango is notably ahead on per-request observability + CSRF / rate limiting / CSP / OTel out-of-the-box.
+Summary: **26 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A** for the dimensions enumerated. Rustango is notably ahead on per-request observability + CSRF / rate limiting / CSP / OTel out-of-the-box.
 
 ---
 
@@ -512,7 +512,7 @@ Summary: **15 SHIPPED / 0 PARTIAL / 1 MISSING / 0 N/A** for the dimensions enume
 | `@vary_on_headers` / `@vary_on_cookie` | [vary](https://docs.djangoproject.com/en/6.0/topics/cache/#using-vary-headers) | SHIPPED | Vary header helpers | |
 | Template fragment caching | [template fragments](https://docs.djangoproject.com/en/6.0/topics/cache/#template-fragment-caching) | SHIPPED | `cache_fragment::cached_render` | |
 
-Summary: **9 / 0 / 1 / 0**.
+Summary: **9 SHIPPED / 0 PARTIAL / 1 MISSING / 0 N/A**.
 
 ---
 
@@ -532,7 +532,7 @@ Summary: **9 / 0 / 1 / 0**.
 | Disconnect / weak references | (above) | SHIPPED | `signals::disconnect_*` | |
 | Async receivers | (Django 4.1+ async receivers) | SHIPPED | All rustango signal receivers are `async fn` | |
 
-Summary: **7 / 2 / 5 / 0**. Gaps cluster around `m2m_changed`, migrate signals, auth signals.
+Summary: **10 SHIPPED / 0 PARTIAL / 0 MISSING / 1 N/A**. Gaps cluster around `m2m_changed`, migrate signals, auth signals.
 
 ---
 
@@ -552,7 +552,7 @@ Summary: **7 / 2 / 5 / 0**. Gaps cluster around `m2m_changed`, migrate signals, 
 | Email job queue integration | n/a | SHIPPED | `email_jobs::dispatch_email` | |
 | Multi-channel notifications (Mail + Slack + DB) | n/a (Django needs `django-notifications`) | SHIPPED | `notifications::*` mail/db/log/broadcast channels + built-in Slack webhook provider (`notifications::slack::webhook_callback(url)`) on `http-client` feature. Custom providers (Discord, Teams, SES, etc.) plug into `NotificationContext::with_broadcast`. | |
 
-Summary: **8 / 1 / 0 / 0**.
+Summary: **11 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A**.
 
 ---
 
@@ -570,7 +570,7 @@ Summary: **8 / 1 / 0 / 0**.
 | File validators (type, size, extension) | n/a (Django has separate validators) | SHIPPED | `validators::{file_type, file_size_max, file_extension}` (v0.25) | |
 | `Media` model | n/a (each Django project rolls its own) | SHIPPED | `media::Media` model (v0.24) | Rustango ahead. |
 
-Summary: **3 / 2 / 3 / 0**.
+Summary: **6 SHIPPED / 1 PARTIAL / 2 MISSING / 0 N/A**.
 
 ---
 
@@ -588,7 +588,7 @@ Summary: **3 / 2 / 3 / 0**.
 | Currency / region formatting | [LANGUAGES setting](https://docs.djangoproject.com/en/6.0/ref/settings/#languages) | SHIPPED | `format_currency` Tera filter (closed #428) — `{{ x \| format_currency(currency="EUR", locale="fr") }}` emits `1 234,50 €`. Known currency codes: USD/CAD/AUD/NZD/HKD/SGD/MXN/EUR/GBP/JPY/KRW/CLP/CNY/RUB/INR/BRL/CHF — per-code symbol + placement + decimals. Locale override for Euro placement (suffix in fr/it/es/pt/nl, prefix in de/en). Unknown codes use the code itself as the symbol. | |
 | Right-to-left layout support | [BiDi text](https://docs.djangoproject.com/en/6.0/topics/i18n/translation/#translator-comments-in-templates) | SHIPPED | `Locale::is_rtl/direction` + bare-string helpers `i18n::is_rtl_language/text_direction` + `ActiveLocale::is_rtl/direction` extractor convenience + Tera `get_text_direction(locale=LANG)` / `is_rtl(locale=LANG)` functions. RTL table covers ar/he/fa/ur/ps/yi/dv/ckb/ug/sd/syr (+ retired iw/ji). [`i18n/mod.rs`](crates/rustango/src/i18n/mod.rs), [`i18n/tera_tags.rs`](crates/rustango/src/i18n/tera_tags.rs), [`i18n/middleware.rs`](crates/rustango/src/i18n/middleware.rs). (#429) | |
 
-Summary: **5 SHIPPED / 1 PARTIAL / 3 MISSING / 0 N/A**.
+Summary: **7 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A**.
 
 ---
 
@@ -611,7 +611,7 @@ Summary: **5 SHIPPED / 1 PARTIAL / 3 MISSING / 0 N/A**.
 | Factories (factory-boy shape) | n/a (3rd-party) | SHIPPED | `test_factory::{Sequence, Factory}` — `factory.build()` / `factory.build_batch(n)` with thread-safe `Sequence` counter for per-call unique values. `src/test_factory.rs` | |
 | `selenium` / `playwright` integration | (Django uses LiveServerTestCase + selenium) | SHIPPED | Use the standard Playwright npm package; the showcase E2E suite at `examples/showcase/e2e/` demonstrates the canonical pattern (`webServer.command` = `cargo run -- migrate && cargo run -- runserver`). Closed #433 as already-supported via standard tooling. | |
 
-Summary: **8 / 2 / 3 / 0**.
+Summary: **14 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A**.
 
 ---
 
@@ -627,7 +627,7 @@ Summary: **8 / 2 / 3 / 0**.
 | Async send_mail | (Django 5.x+) | SHIPPED | `email::send_pool(mailer, msg).await` | |
 | Sync-to-async / async-to-sync bridging | [sync_to_async](https://docs.djangoproject.com/en/6.0/topics/async/#sync-to-async-async-to-sync) | N/A | Pure async — no bridging needed | |
 
-Summary: **5 / 0 / 0 / 2**. Async is native; no parity gap.
+Summary: **4 SHIPPED / 0 PARTIAL / 0 MISSING / 3 N/A**. Async is native; no parity gap.
 
 ---
 
@@ -659,7 +659,7 @@ Summary: **5 / 0 / 0 / 2**. Async is native; no parity gap.
 | Browsable API HTML | [browsable](https://www.django-rest-framework.org/topics/browsable-api/) | MISSING | n/a (#441) | Use Swagger UI mount instead. |
 | OpenAPI schema (drf-spectacular) | [schema](https://www.django-rest-framework.org/api-guide/schemas/) | SHIPPED | `openapi::*` (v0.24) + Swagger UI mount | |
 
-Summary: **11 SHIPPED / 4 PARTIAL / 4 MISSING / 0 N/A**.
+Summary: **22 SHIPPED / 0 PARTIAL / 1 MISSING / 0 N/A**.
 
 ---
 
@@ -686,7 +686,7 @@ Summary: **11 SHIPPED / 4 PARTIAL / 4 MISSING / 0 N/A**.
 | `gis.gdal` (raster) | (above) | MISSING | (above) (#444) | |
 | Generic relations admin (GenericTabularInline) | [generic-inline](https://docs.djangoproject.com/en/6.0/ref/contrib/contenttypes/#generic-relations-and-aggregation) | SHIPPED | `register_admin_inline_generic!` | |
 
-Summary: **6 SHIPPED / 4 PARTIAL / 4 MISSING / 0 N/A** (within Django contrib scope).
+Summary: **12 SHIPPED / 1 PARTIAL / 3 MISSING / 2 N/A** (within Django contrib scope).
 
 ---
 
