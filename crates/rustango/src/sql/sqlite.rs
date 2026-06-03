@@ -663,6 +663,7 @@ mod tests {
             m2m: &[],
             indexes: &[],
             check_constraints: &[],
+            exclusion_constraints: &[],
             composite_relations: &[],
             generic_relations: &[],
             scope: ModelScope::Tenant,

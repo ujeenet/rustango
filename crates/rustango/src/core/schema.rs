@@ -354,6 +354,18 @@ pub struct ModelSchema {
     /// Each entry is rendered as `ALTER TABLE … ADD CONSTRAINT "name"
     /// CHECK (expr)` after the table is created.
     pub check_constraints: &'static [CheckConstraint],
+    /// Table-level `EXCLUDE` constraints (PG-only) declared via
+    /// `#[rustango(exclude(name = "…", using = "gist", elements =
+    /// "col WITH op, col WITH op", where = "…"))]` on the model
+    /// container. Empty slice when the model has none.
+    ///
+    /// Each entry is rendered as `ALTER TABLE … ADD CONSTRAINT
+    /// "name" EXCLUDE USING <using> (<elements>) [WHERE (<expr>)]`
+    /// on Postgres; on MySQL/SQLite the migration writer emits
+    /// nothing and logs a warning (issue #32 / #319). Use this for
+    /// "no two rows of group X may overlap in column Y" patterns
+    /// (e.g. room-bookings, calendar holds).
+    pub exclusion_constraints: &'static [ExclusionConstraint],
     /// Composite (multi-column) foreign key relations declared via
     /// `#[rustango(fk_composite(name = "...", to = "...", on = (...),
     /// from = (...)))]`. Each entry maps a tuple of source columns
@@ -543,6 +555,45 @@ pub struct CheckConstraint {
     pub name: &'static str,
     /// Raw SQL boolean expression placed inside `CHECK ( … )`.
     pub expr: &'static str,
+}
+
+/// Descriptor for one Postgres `EXCLUDE` constraint — Django's
+/// `ExclusionConstraint`. **PG-only**: MySQL + SQLite have no
+/// equivalent, and the migration writer skips emission on those
+/// backends (with a `tracing::warn!`) so the rest of the migration
+/// applies cleanly.
+///
+/// Declared via `#[rustango(exclude(name = "x", using = "gist",
+/// elements = "col WITH op, col WITH op", where = "raw_sql"))]` on
+/// the model container. The canonical shape for "no two bookings
+/// of the same room can overlap in time" is:
+///
+/// ```ignore
+/// #[rustango(exclude(
+///     name = "no_overlap",
+///     using = "gist",
+///     elements = "room_id WITH =, during WITH &&",
+/// ))]
+/// ```
+///
+/// which renders as `ALTER TABLE … ADD CONSTRAINT "no_overlap" EXCLUDE
+/// USING gist ("room_id" WITH =, "during" WITH &&)`.
+#[derive(Debug, Clone, Copy)]
+pub struct ExclusionConstraint {
+    /// Constraint name used in `ALTER TABLE … ADD CONSTRAINT "name"`.
+    pub name: &'static str,
+    /// Index method (`gist` / `btree_gist` / `spgist`). Defaults to
+    /// `"gist"` from the macro side when omitted — most exclusion
+    /// constraints rely on GiST's range-overlap support.
+    pub using: &'static str,
+    /// `(column, operator)` pairs in declaration order. The operator
+    /// is the PG comparison op for that column — usually `=` for
+    /// equality columns, `&&` for range overlap, `@>` for containment.
+    pub elements: &'static [(&'static str, &'static str)],
+    /// Optional `WHERE` predicate that narrows the constraint to a
+    /// subset of rows (e.g. only active bookings). `None` =
+    /// unconditional.
+    pub where_clause: Option<&'static str>,
 }
 
 /// Descriptor for one `CREATE INDEX` emitted by the migration writer.

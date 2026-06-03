@@ -27,6 +27,25 @@ pub struct SchemaSnapshot {
     /// sorted by name. Absent from old migration files — defaults to empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckSnapshot>,
+    /// Postgres `EXCLUDE` constraints derived from
+    /// `ModelSchema::exclusion_constraints`, sorted by name. PG-only —
+    /// the migration writer renders nothing on MySQL/SQLite (with a
+    /// `tracing::warn!`). Absent from pre-#319 migration files —
+    /// defaults to empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excludes: Vec<ExclusionSnapshot>,
+}
+
+/// Snapshot of one Postgres `EXCLUDE` constraint. Issue #319.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExclusionSnapshot {
+    pub name: String,
+    pub table: String,
+    pub using: String,
+    /// `(column, operator)` pairs in declaration order.
+    pub elements: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub where_clause: Option<String>,
 }
 
 /// Snapshot of one table-level CHECK constraint.
@@ -178,11 +197,13 @@ impl SchemaSnapshot {
         let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
         let indexes = collect_indexes(entries.iter().map(|e| e.schema));
         let checks = collect_checks(entries.iter().map(|e| e.schema));
+        let excludes = collect_excludes(entries.iter().map(|e| e.schema));
         Self {
             tables,
             m2m_tables,
             indexes,
             checks,
+            excludes,
         }
     }
 
@@ -211,11 +232,13 @@ impl SchemaSnapshot {
         let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
         let indexes = collect_indexes(entries.iter().map(|e| e.schema));
         let checks = collect_checks(entries.iter().map(|e| e.schema));
+        let excludes = collect_excludes(entries.iter().map(|e| e.schema));
         Self {
             tables,
             m2m_tables,
             indexes,
             checks,
+            excludes,
         }
     }
 
@@ -266,11 +289,18 @@ impl SchemaSnapshot {
             .filter(|c| table_names.contains(c.table.as_str()))
             .cloned()
             .collect();
+        let excludes = self
+            .excludes
+            .iter()
+            .filter(|x| table_names.contains(x.table.as_str()))
+            .cloned()
+            .collect();
         Self {
             tables,
             m2m_tables,
             indexes,
             checks,
+            excludes,
         }
     }
 
@@ -298,11 +328,13 @@ impl SchemaSnapshot {
         let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
         let indexes = collect_indexes(entries.iter().map(|e| e.schema));
         let checks = collect_checks(entries.iter().map(|e| e.schema));
+        let excludes = collect_excludes(entries.iter().map(|e| e.schema));
         Self {
             tables,
             m2m_tables,
             indexes,
             checks,
+            excludes,
         }
     }
 
@@ -329,11 +361,13 @@ impl SchemaSnapshot {
         let m2m_tables = collect_m2m_tables(models.iter().copied());
         let indexes = collect_indexes(models.iter().copied());
         let checks = collect_checks(models.iter().copied());
+        let excludes = collect_excludes(models.iter().copied());
         Self {
             tables,
             m2m_tables,
             indexes,
             checks,
+            excludes,
         }
     }
 
@@ -479,6 +513,32 @@ fn collect_checks<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<Che
     out
 }
 
+/// Collect all PG `EXCLUDE` constraint descriptors, deduplicating by
+/// name. Mirrors [`collect_checks`]. Issue #319.
+fn collect_excludes<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<ExclusionSnapshot> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<ExclusionSnapshot> = Vec::new();
+    for schema in schemas {
+        for x in schema.exclusion_constraints {
+            if seen.insert(x.name) {
+                out.push(ExclusionSnapshot {
+                    name: x.name.to_owned(),
+                    table: schema.table.to_owned(),
+                    using: x.using.to_owned(),
+                    elements: x
+                        .elements
+                        .iter()
+                        .map(|(c, o)| ((*c).to_owned(), (*o).to_owned()))
+                        .collect(),
+                    where_clause: x.where_clause.map(str::to_owned),
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
 /// Collect all `CREATE INDEX` descriptors from a set of model schemas,
 /// deduplicating by index name and sorting for deterministic output.
 fn collect_indexes<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<IndexSnapshot> {
@@ -582,6 +642,7 @@ mod composite_fk_snapshot_tests {
             permissions: false,
             indexes: &[],
             check_constraints: &[],
+            exclusion_constraints: &[],
             m2m: &[],
             composite_relations: &COMPS,
             generic_relations: &[],
@@ -652,6 +713,7 @@ mod composite_fk_snapshot_tests {
             permissions: false,
             indexes: &[],
             check_constraints: &[],
+            exclusion_constraints: &[],
             m2m: &[],
             composite_relations: &[],
             generic_relations: &[],
@@ -677,6 +739,7 @@ mod composite_fk_snapshot_tests {
             permissions: false,
             indexes: &[],
             check_constraints: &[],
+            exclusion_constraints: &[],
             m2m: &[],
             composite_relations: &[],
             generic_relations: &[],
@@ -740,6 +803,7 @@ mod composite_fk_snapshot_tests {
             permissions: false,
             indexes: &[],
             check_constraints: &[],
+            exclusion_constraints: &[],
             m2m: &[],
             composite_relations: &[],
             generic_relations: &[],

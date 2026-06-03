@@ -1054,6 +1054,7 @@ pub fn make_empty(dir: &Path, name: &str) -> Result<Migration, MigrateError> {
             m2m_tables: vec![],
             indexes: vec![],
             checks: vec![],
+            excludes: vec![],
         },
         |m| m.snapshot.clone(),
     );

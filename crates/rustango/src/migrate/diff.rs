@@ -355,6 +355,35 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             });
         }
     }
+    // New PG EXCLUDE constraints (issue #319). Dropped EXCLUDEs surface
+    // only when the constraint name disappears from the model — the
+    // migration writer emits a `DropExclusionConstraint`. Same posture
+    // as CHECK: we never rewrite an existing constraint, only add and
+    // drop. To change one, operator drops + re-adds via the next
+    // makemigrations cycle.
+    let prev_exclude_names: std::collections::HashSet<&str> =
+        prev.excludes.iter().map(|x| x.name.as_str()).collect();
+    let current_exclude_names: std::collections::HashSet<&str> =
+        current.excludes.iter().map(|x| x.name.as_str()).collect();
+    for x in &current.excludes {
+        if !prev_exclude_names.contains(x.name.as_str()) {
+            changes.push(SchemaChange::AddExclusionConstraint {
+                name: x.name.clone(),
+                table: x.table.clone(),
+                using: x.using.clone(),
+                elements: x.elements.clone(),
+                where_clause: x.where_clause.clone(),
+            });
+        }
+    }
+    for x in &prev.excludes {
+        if !current_exclude_names.contains(x.name.as_str()) {
+            changes.push(SchemaChange::DropExclusionConstraint {
+                name: x.name.clone(),
+                table: x.table.clone(),
+            });
+        }
+    }
     // New M2M junction tables.
     for mt in &current.m2m_tables {
         if prev.m2m_table(&mt.through).is_none() {
