@@ -806,6 +806,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         container.verbose_name.as_deref(),
         container.verbose_name_plural.as_deref(),
         container.managed,
+        container.base_manager_name.as_deref(),
         container.default_related_name.as_deref(),
         container.db_table_comment.as_deref(),
         container
@@ -1702,6 +1703,7 @@ fn model_impl_tokens(
     verbose_name: Option<&str>,
     verbose_name_plural: Option<&str>,
     managed: bool,
+    base_manager_name: Option<&str>,
     default_related_name: Option<&str>,
     db_table_comment: Option<&str>,
     get_latest_by: Option<(&str, bool)>,
@@ -1740,6 +1742,7 @@ fn model_impl_tokens(
     };
     let verbose_name_tokens = optional_str(verbose_name);
     let verbose_name_plural_tokens = optional_str(verbose_name_plural);
+    let base_manager_name_tokens = optional_str(base_manager_name);
     let default_related_name_tokens = optional_str(default_related_name);
     let db_table_comment_tokens = optional_str(db_table_comment);
     let get_latest_by_tokens = match get_latest_by {
@@ -1892,6 +1895,7 @@ fn model_impl_tokens(
                 verbose_name: #verbose_name_tokens,
                 verbose_name_plural: #verbose_name_plural_tokens,
                 managed: #managed,
+                base_manager_name: #base_manager_name_tokens,
                 default_related_name: #default_related_name_tokens,
                 db_table_comment: #db_table_comment_tokens,
                 get_latest_by: #get_latest_by_tokens,
@@ -4464,6 +4468,10 @@ struct ContainerAttrs {
     /// `migrate` never emit `CREATE TABLE` / `ALTER TABLE` / `DROP
     /// TABLE` against it (operator-managed schema).
     managed: bool,
+    /// Django-shape `Meta.base_manager_name` from
+    /// `#[rustango(base_manager_name = "...")]`. Threaded into
+    /// `ModelSchema::base_manager_name`. Declarative-only today.
+    base_manager_name: Option<String>,
     /// Django-shape `Meta.default_related_name` from
     /// `#[rustango(default_related_name = "...")]`. Threaded into
     /// `ModelSchema::default_related_name`. Reverse-relation accessor
@@ -4709,6 +4717,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         managed: true,
         verbose_name: None,
         verbose_name_plural: None,
+        base_manager_name: None,
         default_related_name: None,
         db_table_comment: None,
         get_latest_by: None,
@@ -5050,6 +5059,41 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 // table-level comment attached to the DB catalog.
                 let s: LitStr = meta.value()?.parse()?;
                 out.db_table_comment = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("base_manager_name") {
+                // Django-shape `Meta.base_manager_name` — name of the
+                // Manager subclass that `<instance>.<relation>_set`
+                // uses when resolving reverse-relation managers.
+                // Distinct from `default_manager_name` (what
+                // `Model.objects` returns at the class level).
+                // Stored on `ModelSchema::base_manager_name`.
+                //
+                // Validated as a Rust identifier so it stays safe to
+                // re-emit as code in future reverse-manager codegen.
+                let s: LitStr = meta.value()?.parse()?;
+                let raw = s.value();
+                if raw.is_empty() {
+                    return Err(syn::Error::new(
+                        s.span(),
+                        "`base_manager_name` must be a non-empty string",
+                    ));
+                }
+                let valid = raw
+                    .chars()
+                    .all(|c| c == '_' || c.is_ascii_alphanumeric())
+                    && !raw.chars().next().is_some_and(|c| c.is_ascii_digit());
+                if !valid {
+                    return Err(syn::Error::new(
+                        s.span(),
+                        format!(
+                            "`base_manager_name` must be a valid Rust \
+                             identifier (letters / digits / underscores, \
+                             not starting with a digit); got `{raw}`"
+                        ),
+                    ));
+                }
+                out.base_manager_name = Some(raw);
                 return Ok(());
             }
             if meta.path.is_ident("default_related_name") {

@@ -675,6 +675,7 @@ mod tests {
             managed: true,
             db_table_comment: None,
             default_related_name: None,
+            base_manager_name: None,
             get_latest_by: None,
             extra_permissions: &[],
         };
