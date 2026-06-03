@@ -4078,6 +4078,7 @@ mod tests {
             verbose_name_plural: None,
             managed: true,
             db_table_comment: None,
+            default_related_name: None,
             get_latest_by: None,
             extra_permissions: &[],
         }))
@@ -4184,6 +4185,7 @@ mod tests {
             verbose_name_plural: None,
             managed: true,
             db_table_comment: None,
+            default_related_name: None,
             get_latest_by: None,
             extra_permissions: &[],
         }))
@@ -4572,6 +4574,7 @@ mod tests {
             verbose_name_plural: None,
             managed: true,
             db_table_comment: None,
+            default_related_name: None,
             get_latest_by: None,
             extra_permissions: &[],
         }));
@@ -4826,6 +4829,7 @@ mod tests {
             verbose_name_plural: None,
             managed: true,
             db_table_comment: None,
+            default_related_name: None,
             get_latest_by: None,
             extra_permissions: &[],
         }));
@@ -4892,6 +4896,7 @@ mod tests {
             verbose_name_plural: None,
             managed: true,
             db_table_comment: None,
+            default_related_name: None,
             get_latest_by: None,
             extra_permissions: &[],
         }));
