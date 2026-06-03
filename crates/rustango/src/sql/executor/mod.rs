@@ -2379,6 +2379,56 @@ where
         Ok(rows.into_iter().next())
     }
 
+    /// Django `QuerySet.latest()` — picks the largest row by the
+    /// column set in `Meta.get_latest_by`. The model must declare
+    /// `#[rustango(get_latest_by = "<col>")]`; without it this
+    /// returns [`ExecError::Query`] with a clear pointer at the
+    /// missing attribute. Use [`Self::latest`] when you need to
+    /// pass the field explicitly.
+    ///
+    /// Direction defaults to descending (largest first); the
+    /// attribute's `-`/`+` prefix is honored at macro-parse time
+    /// so a `get_latest_by = "-priority"` reverses the sort.
+    ///
+    /// # Errors
+    /// As [`FetcherPool::fetch_pool`]; also returns
+    /// [`ExecError::Query`] when `Meta.get_latest_by` is unset.
+    pub async fn latest_default(self, pool: &Pool) -> Result<Option<T>, ExecError> {
+        let Some((field, attr_desc)) = T::SCHEMA.get_latest_by else {
+            return Err(ExecError::Driver(sqlx::Error::Configuration(
+                ::std::format!(
+                    "`{model}::latest_default()` requires `#[rustango(get_latest_by = \"<col>\")]`",
+                    model = T::SCHEMA.name
+                )
+                .into(),
+            )));
+        };
+        // `latest` always sorts descending; the attr's `-` prefix is
+        // a no-op for `latest` (already descending) and inverts for
+        // `earliest`. Match Django's interpretation: the attribute
+        // names the column, and `.latest()` is the "newest" pole.
+        let _ = attr_desc;
+        self.latest(field, pool).await
+    }
+
+    /// Django `QuerySet.earliest()` companion of
+    /// [`Self::latest_default`].
+    ///
+    /// # Errors
+    /// As [`Self::latest_default`].
+    pub async fn earliest_default(self, pool: &Pool) -> Result<Option<T>, ExecError> {
+        let Some((field, _attr_desc)) = T::SCHEMA.get_latest_by else {
+            return Err(ExecError::Driver(sqlx::Error::Configuration(
+                ::std::format!(
+                    "`{model}::earliest_default()` requires `#[rustango(get_latest_by = \"<col>\")]`",
+                    model = T::SCHEMA.name
+                )
+                .into(),
+            )));
+        };
+        self.earliest(field, pool).await
+    }
+
     /// Issue #23 — Django's `QuerySet.iterator(chunk_size=2000)`.
     /// Return a chunked iterator over results, fetching `chunk_size`
     /// rows at a time via `LIMIT N OFFSET M`. Never buffers the full

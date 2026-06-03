@@ -806,6 +806,10 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         container.verbose_name_plural.as_deref(),
         container.managed,
         container.db_table_comment.as_deref(),
+        container
+            .get_latest_by
+            .as_ref()
+            .map(|(c, d)| (c.as_str(), *d)),
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -1694,6 +1698,7 @@ fn model_impl_tokens(
     verbose_name_plural: Option<&str>,
     managed: bool,
     db_table_comment: Option<&str>,
+    get_latest_by: Option<(&str, bool)>,
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
@@ -1728,6 +1733,12 @@ fn model_impl_tokens(
     let verbose_name_tokens = optional_str(verbose_name);
     let verbose_name_plural_tokens = optional_str(verbose_name_plural);
     let db_table_comment_tokens = optional_str(db_table_comment);
+    let get_latest_by_tokens = match get_latest_by {
+        Some((col, desc)) => {
+            quote!(::core::option::Option::Some((#col, #desc)))
+        }
+        None => quote!(::core::option::Option::None),
+    };
     let indexes_tokens = indexes.iter().map(|idx| {
         let name = idx.name.as_deref().unwrap_or("unnamed_index");
         let cols: Vec<&str> = idx.columns.iter().map(String::as_str).collect();
@@ -1843,6 +1854,7 @@ fn model_impl_tokens(
                 verbose_name_plural: #verbose_name_plural_tokens,
                 managed: #managed,
                 db_table_comment: #db_table_comment_tokens,
+                get_latest_by: #get_latest_by_tokens,
             };
         }
     }
@@ -4410,6 +4422,13 @@ struct ContainerAttrs {
     /// comment to the underlying table (PG: `COMMENT ON TABLE`, MySQL:
     /// inline `COMMENT='...'`, SQLite: no-op).
     db_table_comment: Option<String>,
+    /// Django-shape `Meta.get_latest_by` from
+    /// `#[rustango(get_latest_by = "created_at")]` /
+    /// `#[rustango(get_latest_by = "-priority")]`. Parsed into
+    /// `(column, descending)` where `descending = true` when the
+    /// attribute value starts with `-`. Threaded into
+    /// `ModelSchema::get_latest_by`.
+    get_latest_by: Option<(String, bool)>,
     /// `#[rustango(verbose_name = "blog post")]` — Django-shape
     /// human-readable singular label for the model. Threaded into
     /// `ModelSchema::verbose_name` so admin section headers /
@@ -4606,6 +4625,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         verbose_name: None,
         verbose_name_plural: None,
         db_table_comment: None,
+        get_latest_by: None,
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -4942,6 +4962,28 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 // table-level comment attached to the DB catalog.
                 let s: LitStr = meta.value()?.parse()?;
                 out.db_table_comment = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("get_latest_by") {
+                // Django-shape `Meta.get_latest_by`. The `-` prefix
+                // selects descending order (Django muscle memory).
+                let s: LitStr = meta.value()?.parse()?;
+                let raw = s.value();
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return Err(meta.error("`get_latest_by` must name a column"));
+                }
+                let (col, desc) = if let Some(stripped) = trimmed.strip_prefix('-') {
+                    (stripped.to_owned(), true)
+                } else if let Some(stripped) = trimmed.strip_prefix('+') {
+                    (stripped.to_owned(), false)
+                } else {
+                    (trimmed.to_owned(), false)
+                };
+                if col.is_empty() {
+                    return Err(meta.error("`get_latest_by` must name a column"));
+                }
+                out.get_latest_by = Some((col, desc));
                 return Ok(());
             }
             if meta.path.is_ident("unique_together") {
