@@ -115,6 +115,17 @@ pub struct FieldSchema {
     /// Set via `#[rustango(citext)]` or `#[rustango(citext = true)]`.
     /// Only meaningful for `FieldType::String`.
     pub case_insensitive: bool,
+    /// Django-shape `ForeignKey(on_delete=…)` — referential-integrity
+    /// action applied when the referenced row is deleted. `None` falls
+    /// back to the database default (`NO ACTION` on PG / MySQL /
+    /// SQLite); `Some(action)` causes the migration writer to append
+    /// `ON DELETE <action.as_sql()>` to the FK constraint clause.
+    ///
+    /// Only meaningful when [`Self::relation`] is `Some(Relation::Fk
+    /// {..})` / `Some(Relation::O2O {..})`. Ignored on plain columns.
+    /// Set via `#[rustango(on_delete = "cascade" | "restrict" |
+    /// "set_null" | "set_default" | "no_action")]` (case-insensitive).
+    pub fk_on_delete: Option<OnDeleteAction>,
     /// Django-shape `validators=[...]` — names of value-shape validators
     /// to run on every INSERT/UPDATE through the typed query layer. Set
     /// via `#[rustango(validators = "email,url")]` (comma-separated).
@@ -150,6 +161,46 @@ pub enum Relation {
     Fk { to: &'static str, on: &'static str },
     /// One-to-one. Same shape as FK, separate variant for callers that care.
     O2O { to: &'static str, on: &'static str },
+}
+
+/// Django-shape `ForeignKey(on_delete=...)` — referential-integrity
+/// action emitted as the `ON DELETE` clause on `ALTER TABLE … ADD
+/// FOREIGN KEY`. When unset on a field's [`FieldSchema::fk_on_delete`],
+/// the migration writer omits `ON DELETE …` and the database falls
+/// back to its dialect default (which is `NO ACTION` on every backend
+/// rustango ships against).
+///
+/// Set via `#[rustango(on_delete = "cascade" | "restrict" | "set_null"
+/// | "set_default" | "no_action")]`. The string is case-insensitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnDeleteAction {
+    /// `ON DELETE CASCADE` — delete this row when the referenced row goes.
+    Cascade,
+    /// `ON DELETE RESTRICT` — block the parent delete if any child references it.
+    Restrict,
+    /// `ON DELETE SET NULL` — null out the FK column. Requires a nullable column.
+    SetNull,
+    /// `ON DELETE SET DEFAULT` — reset the FK column to its declared `DEFAULT`.
+    SetDefault,
+    /// `ON DELETE NO ACTION` — explicit no-op (same as omitting the clause on
+    /// most backends, but more legible when the project standardizes on
+    /// always-explicit FK actions).
+    NoAction,
+}
+
+impl OnDeleteAction {
+    /// SQL token rendered after `ON DELETE` in `ALTER TABLE … ADD
+    /// CONSTRAINT`. Shape is identical across PG / MySQL / SQLite.
+    #[must_use]
+    pub const fn as_sql(self) -> &'static str {
+        match self {
+            Self::Cascade => "CASCADE",
+            Self::Restrict => "RESTRICT",
+            Self::SetNull => "SET NULL",
+            Self::SetDefault => "SET DEFAULT",
+            Self::NoAction => "NO ACTION",
+        }
+    }
 }
 
 /// Generic ("any model") foreign key declared at the model level —

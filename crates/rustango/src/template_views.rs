@@ -4030,6 +4030,7 @@ mod tests {
                     editable: true,
                     blank: false,
                     case_insensitive: false,
+                    fk_on_delete: None,
                     validators: &[],
                 },
                 crate::core::FieldSchema {
@@ -4053,6 +4054,7 @@ mod tests {
                     editable: true,
                     blank: false,
                     case_insensitive: false,
+                    fk_on_delete: None,
                     validators: &[],
                 },
             ])),
@@ -4108,6 +4110,7 @@ mod tests {
                     editable: true,
                     blank: false,
                     case_insensitive: false,
+                    fk_on_delete: None,
                     validators: &[],
                 },
                 crate::core::FieldSchema {
@@ -4131,6 +4134,7 @@ mod tests {
                     editable: true,
                     blank: false,
                     case_insensitive: false,
+                    fk_on_delete: None,
                     validators: &[],
                 },
                 crate::core::FieldSchema {
@@ -4154,6 +4158,7 @@ mod tests {
                     editable: true,
                     blank: false,
                     case_insensitive: false,
+                    fk_on_delete: None,
                     validators: &[],
                 },
             ])),
@@ -4540,6 +4545,7 @@ mod tests {
                 editable: true,
                 blank: false,
                 case_insensitive: false,
+                fk_on_delete: None,
                 validators: &[],
             }])),
             display: None,
@@ -4791,6 +4797,7 @@ mod tests {
                 editable: true,
                 blank: false,
                 case_insensitive: false,
+                fk_on_delete: None,
                 validators: &[],
             }])),
             display: None,
@@ -4854,6 +4861,7 @@ mod tests {
                 editable: true,
                 blank: false,
                 case_insensitive: false,
+                fk_on_delete: None,
                 validators: &[],
             }])),
             display: None,
@@ -5390,6 +5398,7 @@ mod tests {
                 editable: true,
                 blank: false,
                 case_insensitive: false,
+                fk_on_delete: None,
                 validators: &[],
             })) as &'static crate::core::FieldSchema
         };

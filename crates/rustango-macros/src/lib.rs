@@ -5493,6 +5493,15 @@ struct FieldAttrs {
     fk: Option<String>,
     o2o: Option<String>,
     on: Option<String>,
+    /// `#[rustango(on_delete = "cascade" | "restrict" | "set_null" |
+    /// "set_default" | "no_action")]` — Django-shape
+    /// `ForeignKey(on_delete=…)`. Only meaningful when `fk` / `o2o` is
+    /// also set; the macro errors at compile time if applied to a
+    /// non-FK field. Threaded into `FieldSchema::fk_on_delete`. The
+    /// DDL writer renders `ON DELETE <action>` after the constraint
+    /// clause when this is `Some`; `None` falls back to the database
+    /// default (NO ACTION on every backend rustango supports).
+    on_delete: Option<String>,
     max_length: Option<u32>,
     min: Option<i64>,
     max: Option<i64>,
@@ -5592,6 +5601,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         fk: None,
         o2o: None,
         on: None,
+        on_delete: None,
         max_length: None,
         min: None,
         max: None,
@@ -5644,6 +5654,27 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
             if meta.path.is_ident("on") {
                 let s: LitStr = meta.value()?.parse()?;
                 out.on = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("on_delete") {
+                let s: LitStr = meta.value()?.parse()?;
+                let raw = s.value();
+                let normalized = raw.trim().to_ascii_lowercase();
+                // Validate at parse time so the user gets a clear span
+                // rather than a downstream compile error in the emit.
+                match normalized.as_str() {
+                    "cascade" | "restrict" | "set_null" | "set_default" | "no_action" => {}
+                    _ => {
+                        return Err(syn::Error::new(
+                            s.span(),
+                            format!(
+                                "unknown on_delete action `{raw}`; expected one of \
+                                 `cascade`, `restrict`, `set_null`, `set_default`, `no_action`"
+                            ),
+                        ));
+                    }
+                }
+                out.on_delete = Some(normalized);
                 return Ok(());
             }
             if meta.path.is_ident("max_length") {
@@ -6133,6 +6164,31 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let blank = attrs.blank;
     let case_insensitive = attrs.case_insensitive;
     let validators_lits: Vec<&str> = attrs.validators.iter().map(String::as_str).collect();
+    if attrs.on_delete.is_some() && attrs.fk.is_none() && attrs.o2o.is_none() {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`#[rustango(on_delete = \"…\")]` requires either `fk = \"<table>\"` \
+             or `o2o = \"<table>\"` on the same field — it has no meaning on a \
+             non-FK column.",
+        ));
+    }
+    let fk_on_delete = match attrs.on_delete.as_deref() {
+        None => quote!(::core::option::Option::None),
+        Some(action) => {
+            let variant = match action {
+                "cascade" => quote!(Cascade),
+                "restrict" => quote!(Restrict),
+                "set_null" => quote!(SetNull),
+                "set_default" => quote!(SetDefault),
+                "no_action" => quote!(NoAction),
+                // parse_field_attrs already validated this — guard against future drift.
+                other => unreachable!("on_delete `{other}` should have been rejected at parse"),
+            };
+            quote!(::core::option::Option::Some(
+                ::rustango::core::OnDeleteAction::#variant
+            ))
+        }
+    };
     let schema = quote! {
         ::rustango::core::FieldSchema {
             name: #name,
@@ -6155,6 +6211,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             editable: #editable,
             blank: #blank,
             case_insensitive: #case_insensitive,
+            fk_on_delete: #fk_on_delete,
             validators: &[ #(#validators_lits),* ],
         }
     };

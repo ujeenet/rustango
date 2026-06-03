@@ -561,6 +561,7 @@ mod composite_fk_snapshot_tests {
             editable: true,
             blank: false,
             case_insensitive: false,
+            fk_on_delete: None,
             validators: &[],
         }];
         static COMPS: [CompositeFkRelation; 1] = [CompositeFkRelation {
@@ -636,6 +637,7 @@ mod composite_fk_snapshot_tests {
             editable: true,
             blank: false,
             case_insensitive: false,
+            fk_on_delete: None,
             validators: &[],
         }];
         static MANAGED: ModelSchema = ModelSchema {
@@ -723,6 +725,7 @@ mod composite_fk_snapshot_tests {
             editable: true,
             blank: false,
             case_insensitive: false,
+            fk_on_delete: None,
             validators: &[],
         }];
         static MS: ModelSchema = ModelSchema {
