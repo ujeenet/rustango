@@ -4075,6 +4075,7 @@ mod tests {
             managed: true,
             db_table_comment: None,
             get_latest_by: None,
+            extra_permissions: &[],
         }))
     }
 
@@ -4175,6 +4176,7 @@ mod tests {
             managed: true,
             db_table_comment: None,
             get_latest_by: None,
+            extra_permissions: &[],
         }))
     }
 
@@ -4559,6 +4561,7 @@ mod tests {
             managed: true,
             db_table_comment: None,
             get_latest_by: None,
+            extra_permissions: &[],
         }));
         assert!(default_order_by(no_pk).is_empty());
     }
@@ -4809,6 +4812,7 @@ mod tests {
             managed: true,
             db_table_comment: None,
             get_latest_by: None,
+            extra_permissions: &[],
         }));
         let pk = uuid_schema.primary_key().unwrap();
         let raw = "550e8400-e29b-41d4-a716-446655440000";
@@ -4871,6 +4875,7 @@ mod tests {
             managed: true,
             db_table_comment: None,
             get_latest_by: None,
+            extra_permissions: &[],
         }));
         let pk = str_schema.primary_key().unwrap();
         match coerce_pk(pk, "hello-world") {

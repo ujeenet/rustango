@@ -1442,6 +1442,43 @@ pub async fn auto_create_permissions_pool(pool: &crate::sql::Pool) -> Result<(),
         }
         let table = entry.schema.table;
         let model_name = entry.schema.name;
+        // Django Meta.permissions — extra (codename, name) pairs seeded
+        // alongside the auto CRUD codenames so apps can declare custom
+        // authorization buckets (`("approve", "Can approve posts")`).
+        // The codename is stored as `<table>.<codename>` for consistency
+        // with the CRUD codenames the loop below seeds.
+        for (codename, display) in entry.schema.extra_permissions {
+            let dialect = pool.dialect();
+            let perm_t = dialect.quote_ident("rustango_permissions");
+            let table_col = dialect.quote_ident("table_name");
+            let codename_col = dialect.quote_ident("codename");
+            let name_col = dialect.quote_ident("name");
+            let p1 = dialect.placeholder(1);
+            let p2 = dialect.placeholder(2);
+            let p3 = dialect.placeholder(3);
+            let conflict_tail = dialect.insert_on_conflict_skip(&[&table_col, &codename_col]);
+            let sql = format!(
+                "INSERT INTO {perm_t} ({table_col}, {codename_col}, {name_col}) \
+                 VALUES ({p1}, {p2}, {p3}) \
+                 {conflict_tail}"
+            );
+            let full_codename = format!("{table}.{codename}");
+            crate::sql::raw_execute_pool(
+                pool,
+                &sql,
+                vec![
+                    SqlValue::from(table.to_owned()),
+                    SqlValue::from(full_codename),
+                    SqlValue::from((*display).to_owned()),
+                ],
+            )
+            .await
+            .map_err(|e| {
+                TenancyError::Validation(format!(
+                    "auto_create_permissions_pool: INSERT for `{table}.{codename}` failed: {e}"
+                ))
+            })?;
+        }
         for (action, verb) in &action_names {
             // Hand-rolled `INSERT … ON CONFLICT (...) DO NOTHING`
             // via the dialect emitter — `rustango_permissions` isn't

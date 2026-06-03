@@ -810,6 +810,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .get_latest_by
             .as_ref()
             .map(|(c, d)| (c.as_str(), *d)),
+        &container.extra_permissions,
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -1699,6 +1700,7 @@ fn model_impl_tokens(
     managed: bool,
     db_table_comment: Option<&str>,
     get_latest_by: Option<(&str, bool)>,
+    extra_permissions: &[(String, String)],
 ) -> TokenStream2 {
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
@@ -1739,6 +1741,10 @@ fn model_impl_tokens(
         }
         None => quote!(::core::option::Option::None),
     };
+    let extra_permission_tokens: Vec<_> = extra_permissions
+        .iter()
+        .map(|(c, l)| quote!((#c, #l)))
+        .collect();
     let indexes_tokens = indexes.iter().map(|idx| {
         let name = idx.name.as_deref().unwrap_or("unnamed_index");
         let cols: Vec<&str> = idx.columns.iter().map(String::as_str).collect();
@@ -1855,6 +1861,7 @@ fn model_impl_tokens(
                 managed: #managed,
                 db_table_comment: #db_table_comment_tokens,
                 get_latest_by: #get_latest_by_tokens,
+                extra_permissions: &[ #(#extra_permission_tokens),* ],
             };
         }
     }
@@ -4429,6 +4436,11 @@ struct ContainerAttrs {
     /// attribute value starts with `-`. Threaded into
     /// `ModelSchema::get_latest_by`.
     get_latest_by: Option<(String, bool)>,
+    /// Django-shape `Meta.permissions = [(codename, name), ...]`
+    /// from `#[rustango(extra_permissions = "approve:Can approve,
+    /// archive:Can archive")]`. Comma-separated `codename:label`
+    /// pairs. Threaded into `ModelSchema::extra_permissions`.
+    extra_permissions: Vec<(String, String)>,
     /// `#[rustango(verbose_name = "blog post")]` — Django-shape
     /// human-readable singular label for the model. Threaded into
     /// `ModelSchema::verbose_name` so admin section headers /
@@ -4626,6 +4638,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         verbose_name_plural: None,
         db_table_comment: None,
         get_latest_by: None,
+        extra_permissions: Vec::new(),
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -4962,6 +4975,35 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 // table-level comment attached to the DB catalog.
                 let s: LitStr = meta.value()?.parse()?;
                 out.db_table_comment = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("extra_permissions") {
+                // Django-shape `Meta.permissions = [(codename, name), ...]`.
+                // Comma-separated `codename:label` pairs.
+                let s: LitStr = meta.value()?.parse()?;
+                let raw = s.value();
+                let mut pairs = Vec::new();
+                for entry in raw.split(',') {
+                    let entry = entry.trim();
+                    if entry.is_empty() {
+                        continue;
+                    }
+                    let (codename, label) = match entry.split_once(':') {
+                        Some((c, l)) => (c.trim().to_owned(), l.trim().to_owned()),
+                        None => (entry.to_owned(), entry.to_owned()),
+                    };
+                    if codename.is_empty() {
+                        return Err(meta.error(
+                            "`extra_permissions` entries must be `codename:label` pairs",
+                        ));
+                    }
+                    pairs.push((codename, label));
+                }
+                if pairs.is_empty() {
+                    return Err(meta
+                        .error("`extra_permissions = \"…\"` must list at least one pair"));
+                }
+                out.extra_permissions = pairs;
                 return Ok(());
             }
             if meta.path.is_ident("get_latest_by") {

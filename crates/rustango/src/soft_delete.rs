@@ -294,6 +294,7 @@ mod tests {
         managed: true,
         db_table_comment: None,
         get_latest_by: None,
+        extra_permissions: &[],
     };
 
     static MODEL_WITHOUT_SD: ModelSchema = ModelSchema {
@@ -319,6 +320,7 @@ mod tests {
         managed: true,
         db_table_comment: None,
         get_latest_by: None,
+        extra_permissions: &[],
     };
 
     #[test]

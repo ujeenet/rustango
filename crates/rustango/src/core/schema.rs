@@ -399,6 +399,17 @@ pub struct ModelSchema {
     /// `#[rustango(get_latest_by = "-priority")]`. `None` means the
     /// default-less variants return an error pointing at this attr.
     pub get_latest_by: Option<(&'static str, bool)>,
+    /// Django-shape `Meta.permissions = [(codename, name), ...]` —
+    /// extra permission codenames to register alongside the default
+    /// `add/change/delete/view` set. Each tuple is `(codename,
+    /// display_name)`. `auto_create_permissions_pool` walks this list
+    /// after the CRUD codenames so apps can declare custom
+    /// authorization buckets like `("approve", "Can approve posts")`.
+    ///
+    /// Set via `#[rustango(extra_permissions = "approve:Can approve,
+    /// archive:Can archive")]` — comma-separated `codename:label`
+    /// pairs, same shape as the existing `choices = "..."` attribute.
+    pub extra_permissions: &'static [(&'static str, &'static str)],
 }
 
 impl ModelSchema {
