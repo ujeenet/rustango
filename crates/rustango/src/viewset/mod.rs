@@ -1702,6 +1702,7 @@ mod lookup_tests {
             editable: true,
             blank: false,
             case_insensitive: false,
+            fk_on_delete: None,
             validators: &[],
         }
     }
@@ -1728,6 +1729,7 @@ mod lookup_tests {
             editable: true,
             blank: false,
             case_insensitive: false,
+            fk_on_delete: None,
             validators: &[],
         }
     }

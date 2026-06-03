@@ -187,6 +187,10 @@ pub fn create_constraints_sql_with_dialect(
         s.push_str(" (");
         s.push_str(&dialect.quote_ident(on));
         s.push(')');
+        if let Some(action) = field.fk_on_delete {
+            s.push_str(" ON DELETE ");
+            s.push_str(action.as_sql());
+        }
         out.push(s);
     }
     // Composite FKs — `(col_a, col_b, …) REFERENCES target (col_x, col_y, …)`.
@@ -395,6 +399,7 @@ mod tests {
             editable: true,
             blank: false,
             case_insensitive: false,
+            fk_on_delete: None,
             validators: &[],
         }
     }

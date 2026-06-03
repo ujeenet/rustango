@@ -129,6 +129,7 @@ fn form_parser_decimal() {
         editable: true,
         blank: false,
         case_insensitive: false,
+        fk_on_delete: None,
         validators: &[],
     };
     let v = parse_form_value(&f, Some("123.45")).unwrap();
@@ -163,6 +164,7 @@ fn form_parser_binary_hex() {
         editable: true,
         blank: false,
         case_insensitive: false,
+        fk_on_delete: None,
         validators: &[],
     };
     let v = parse_form_value(&f, Some("deadbeef")).unwrap();
@@ -199,6 +201,7 @@ fn form_parser_time() {
         editable: true,
         blank: false,
         case_insensitive: false,
+        fk_on_delete: None,
         validators: &[],
     };
     // Full HH:MM:SS form.

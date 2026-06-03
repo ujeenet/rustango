@@ -669,6 +669,7 @@ mod tests {
             editable: true,
             blank: false,
             case_insensitive: false,
+            fk_on_delete: None,
             validators: &[],
         }
     }

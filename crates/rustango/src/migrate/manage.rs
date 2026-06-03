@@ -3958,6 +3958,7 @@ mod gen_tests {
             editable: true,
             blank: false,
             case_insensitive: false,
+            fk_on_delete: None,
             validators: &[],
         }
     }

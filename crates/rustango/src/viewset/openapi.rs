@@ -309,6 +309,7 @@ mod tests {
             editable: true,
             blank: false,
             case_insensitive: false,
+            fk_on_delete: None,
             validators: &[],
         }
     }
@@ -335,6 +336,7 @@ mod tests {
             editable: true,
             blank: false,
             case_insensitive: false,
+            fk_on_delete: None,
             validators: &[],
         }
     }
@@ -361,6 +363,7 @@ mod tests {
             editable: true,
             blank: false,
             case_insensitive: false,
+            fk_on_delete: None,
             validators: &[],
         }
     }
@@ -388,6 +391,7 @@ mod tests {
                 editable: true,
                 blank: false,
                 case_insensitive: false,
+                fk_on_delete: None,
                 validators: &[],
             },
             FieldSchema {
@@ -411,6 +415,7 @@ mod tests {
                 editable: true,
                 blank: false,
                 case_insensitive: false,
+                fk_on_delete: None,
                 validators: &[],
             },
             FieldSchema {
@@ -434,6 +439,7 @@ mod tests {
                 editable: true,
                 blank: false,
                 case_insensitive: false,
+                fk_on_delete: None,
                 validators: &[],
             },
         ];
