@@ -477,6 +477,16 @@ pub struct ModelSchema {
     /// identifier (lowercase + digits + underscores, not starting
     /// with a digit) so it's safe to use as a Rust ident later.
     pub default_related_name: Option<&'static str>,
+    /// Django-shape `Meta.base_manager_name` — name of the Manager
+    /// subclass that `<instance>.<relation>_set` uses when resolving
+    /// reverse-relation managers (distinct from
+    /// `default_manager_name`, which is what `Model.objects` returns
+    /// at the class level).
+    ///
+    /// Set via `#[rustango(base_manager_name = "ManagerExt")]`.
+    /// Declarative-only today: rustango doesn't auto-emit reverse
+    /// managers yet — parallel to `default_related_name`.
+    pub base_manager_name: Option<&'static str>,
     /// Django-shape `Meta.get_latest_by` — default sort field that
     /// `QuerySet::latest_default()` / `earliest_default()` use when
     /// the caller doesn't pass a field name explicitly. A string

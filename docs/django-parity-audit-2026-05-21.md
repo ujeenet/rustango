@@ -20,7 +20,7 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 
 | Category | SHIPPED | PARTIAL | MISSING | N/A |
 |---|---:|---:|---:|---:|
-| 1. ORM — models / fields / Meta | 17 | 1 | 1 | 0 |
+| 1. ORM — models / fields / Meta | 18 | 1 | 1 | 0 |
 | 2. QuerySet API | 37 | 1 | 1 | 0 |
 | 3. Field types & options | 32 | 0 | 2 | 1 |
 | 4. Postgres-specific fields | 2 | 1 | 2 | 0 |
@@ -44,9 +44,9 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 22. Async support | 4 | 0 | 0 | 3 |
 | 23. DRF parity | 22 | 0 | 1 | 0 |
 | 24. contrib modules | 12 | 1 | 3 | 2 |
-| **Totals** | **364** | **11** | **21** | **19** |
+| **Totals** | **365** | **11** | **21** | **19** |
 
-Coverage = 364 / (364 + 11 + 21) = **92% full, 3% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
+Coverage = 365 / (365 + 11 + 21) = **92% full, 3% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
 
 Snapshot date: 2026-06-03 (post v0.42 batch including ExclusionConstraint #593, default_permissions #594, on_delete #592, ForeignKey on_delete enum override, extra_permissions #591, get_latest_by #590, db_table_comment #589, citext, DatabaseCache, managed=false, upload streaming, i18n).
 
@@ -68,6 +68,7 @@ Snapshot date: 2026-06-03 (post v0.42 batch including ExclusionConstraint #593, 
 | `Meta.permissions` (custom codenames) | [Meta#permissions](https://docs.djangoproject.com/en/6.0/ref/models/options/#permissions) | SHIPPED | `auto_create_permissions_pool` seeds CRUD codenames; reserved `auth.access_admin` added in PR #313. Custom per-model codenames declared via `#[rustango(extra_permissions = "approve:Can approve, archive:Can archive")]` (PR #591). | |
 | `Meta.default_permissions` | [Meta#default_permissions](https://docs.djangoproject.com/en/6.0/ref/models/options/#default-permissions) | SHIPPED | `#[rustango(default_permissions = "view,change")]` (PR #594) — opt out of `add` / `delete` codenames for read-mostly tables; empty (default) seeds all four CRUD codenames | |
 | `Meta.default_manager_name` | [Custom Managers](https://docs.djangoproject.com/en/6.0/topics/db/managers/) | SHIPPED | `#[rustango(manager_fn = "active")]` (closed #289 / T2.6) | Multiple `manager_fn` allowed. |
+| `Meta.base_manager_name` | [Meta#base_manager_name](https://docs.djangoproject.com/en/6.0/ref/models/options/#base-manager-name) | SHIPPED | `#[rustango(base_manager_name = "ManagerExt")]` — stored on `ModelSchema::base_manager_name`. Declarative-only today; foundation for reverse-manager codegen + DRF schema emit + admin templates that need to pick the right Manager subclass for `<instance>.<relation>_set` resolution. | |
 | Custom `Manager` subclass | [Custom Managers](https://docs.djangoproject.com/en/6.0/topics/db/managers/) | SHIPPED | `#[rustango(manager(ext = "FooManagerExt"))]` emits an extension trait the user impls on `QuerySet<Self>` (T1.9) | |
 | Abstract base classes | [Abstract base](https://docs.djangoproject.com/en/6.0/topics/db/models/#abstract-base-classes) | PARTIAL | `#[rustango(managed = false)]` opts a model out of migration auto-gen (operator-managed schema, #321). Field-inheritance via Rust trait composition is the idiom; no derive-macro shorthand yet for "mix in these timestamp fields". | |
 | Multi-table inheritance | [MTI](https://docs.djangoproject.com/en/6.0/topics/db/models/#multi-table-inheritance) | MISSING | n/a (#322) | rustango-cms uses MTI for PageType (custom impl); framework doesn't auto-generate it. |
@@ -76,7 +77,7 @@ Snapshot date: 2026-06-03 (post v0.42 batch including ExclusionConstraint #593, 
 | Self-referential FK | [Self FK](https://docs.djangoproject.com/en/6.0/ref/models/fields/#django.db.models.ForeignKey) | SHIPPED | `#[rustango(fk = "self")]` (v0.17.2) | Tested via `tests/self_fk_live.rs`. |
 | `ManyToManyField(through=...)` | [M2M through](https://docs.djangoproject.com/en/6.0/topics/db/models/#extra-fields-on-many-to-many-relationships) | SHIPPED | `#[rustango(m2m(... auto_create = false))]` (closed #324, v0.42). Operator declares the junction as its own `#[derive(Model)]` with extra columns; the migration writer skips emitting `CREATE TABLE` for that junction when `auto_create = false` (otherwise the through-model's own table would conflict). Implicit-junction path with `auto_create = true` (default) unchanged. | |
 
-Summary: **17 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A**. Gaps: full abstract-base field-inheritance (Rust idiom = trait composition; `#[rustango(managed = false)]` covers the operator-managed-table case via #321), MTI. ExclusionConstraint shipped in PR #593; `Meta.default_permissions` shipped in PR #594; `ForeignKey(on_delete=…)` explicit override shipped in PR #592.
+Summary: **18 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A**. Gaps: full abstract-base field-inheritance (Rust idiom = trait composition; `#[rustango(managed = false)]` covers the operator-managed-table case via #321), MTI. ExclusionConstraint shipped in PR #593; `Meta.default_permissions` shipped in PR #594; `ForeignKey(on_delete=…)` explicit override shipped in PR #592.
 
 ---
 
