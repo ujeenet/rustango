@@ -1368,7 +1368,11 @@ pub async fn auto_create_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         }
         let table = entry.schema.table;
         let model_name = entry.schema.name;
+        let allowed_actions = entry.schema.default_permissions;
         for (action, verb) in &action_names {
+            if !allowed_actions.is_empty() && !allowed_actions.contains(action) {
+                continue;
+            }
             tables.push(table);
             codenames.push(format!("{table}.{action}"));
             names.push(format!("{verb} {model_name}"));
@@ -1442,6 +1446,15 @@ pub async fn auto_create_permissions_pool(pool: &crate::sql::Pool) -> Result<(),
         }
         let table = entry.schema.table;
         let model_name = entry.schema.name;
+        // Django Meta.default_permissions — operator-declared subset of
+        // the CRUD codename set. Empty slice (the default) means "all
+        // four" (matches Django's behavior when the attribute is
+        // omitted). When non-empty, the seeder only emits codenames
+        // whose action appears in the list. Issue #319 follow-up.
+        let allowed_actions = entry.schema.default_permissions;
+        let action_allowed = |action: &str| -> bool {
+            allowed_actions.is_empty() || allowed_actions.contains(&action)
+        };
         // Django Meta.permissions — extra (codename, name) pairs seeded
         // alongside the auto CRUD codenames so apps can declare custom
         // authorization buckets (`("approve", "Can approve posts")`).
@@ -1480,6 +1493,9 @@ pub async fn auto_create_permissions_pool(pool: &crate::sql::Pool) -> Result<(),
             })?;
         }
         for (action, verb) in &action_names {
+            if !action_allowed(action) {
+                continue;
+            }
             // Hand-rolled `INSERT … ON CONFLICT (...) DO NOTHING`
             // via the dialect emitter — `rustango_permissions` isn't
             // a `#[derive(Model)]` so we can't go through the ORM

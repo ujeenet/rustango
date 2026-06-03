@@ -458,6 +458,7 @@ mod tests {
             indexes: &[],
             check_constraints: &[],
             exclusion_constraints: &[],
+            default_permissions: &[],
             m2m: &[],
             composite_relations: &[],
             generic_relations: &[],

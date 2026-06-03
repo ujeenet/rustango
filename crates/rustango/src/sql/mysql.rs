@@ -1340,6 +1340,7 @@ mod tests {
             indexes: &[],
             check_constraints: &[],
             exclusion_constraints: &[],
+            default_permissions: &[],
             composite_relations: &[],
             generic_relations: &[],
             // v0.27.7 — every introspected schema is tenant-scoped
