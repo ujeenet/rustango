@@ -679,7 +679,7 @@ Summary: **11 SHIPPED / 4 PARTIAL / 4 MISSING / 0 N/A**.
 | `flatpages` | [flatpages](https://docs.djangoproject.com/en/6.0/ref/contrib/flatpages/) | SHIPPED | `flatpages::*` (v0.22) | |
 | `redirects` | [redirects](https://docs.djangoproject.com/en/6.0/ref/contrib/redirects/) | SHIPPED | `redirects::*` (v0.22) | |
 | `admindocs` | [admindocs](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/admindocs/) | N/A | Rust doc-comments + cargo doc | |
-| `postgres` (ArrayField, JSONField, RangeField, HStoreField, CITextField) | (sec 4) | PARTIAL | JSONField shipped; Array/Range partial; HStore/CIText MISSING (#442) | |
+| `postgres` (ArrayField, JSONField, RangeField, HStoreField, CITextField) | (sec 4) | PARTIAL | JSONField + CITextField shipped (#344); Array/Range partial via `SqlValue::Array` / `RangeLiteral` (no typed field wrapper yet); HStore MISSING (#442) | |
 | `gis` (GeoDjango) | [gis](https://docs.djangoproject.com/en/6.0/ref/contrib/gis/) | MISSING | [#58](https://github.com/ujeenet/rustango/issues/58) | |
 | `gis.geos` (geometry types) | (above) | MISSING | (above) (#443) | |
 | `gis.gdal` (raster) | (above) | MISSING | (above) (#444) | |
