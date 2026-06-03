@@ -806,6 +806,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         container.verbose_name.as_deref(),
         container.verbose_name_plural.as_deref(),
         container.managed,
+        container.default_related_name.as_deref(),
         container.db_table_comment.as_deref(),
         container
             .get_latest_by
@@ -1701,6 +1702,7 @@ fn model_impl_tokens(
     verbose_name: Option<&str>,
     verbose_name_plural: Option<&str>,
     managed: bool,
+    default_related_name: Option<&str>,
     db_table_comment: Option<&str>,
     get_latest_by: Option<(&str, bool)>,
     extra_permissions: &[(String, String)],
@@ -1738,6 +1740,7 @@ fn model_impl_tokens(
     };
     let verbose_name_tokens = optional_str(verbose_name);
     let verbose_name_plural_tokens = optional_str(verbose_name_plural);
+    let default_related_name_tokens = optional_str(default_related_name);
     let db_table_comment_tokens = optional_str(db_table_comment);
     let get_latest_by_tokens = match get_latest_by {
         Some((col, desc)) => {
@@ -1889,6 +1892,7 @@ fn model_impl_tokens(
                 verbose_name: #verbose_name_tokens,
                 verbose_name_plural: #verbose_name_plural_tokens,
                 managed: #managed,
+                default_related_name: #default_related_name_tokens,
                 db_table_comment: #db_table_comment_tokens,
                 get_latest_by: #get_latest_by_tokens,
                 extra_permissions: &[ #(#extra_permission_tokens),* ],
@@ -4460,6 +4464,13 @@ struct ContainerAttrs {
     /// `migrate` never emit `CREATE TABLE` / `ALTER TABLE` / `DROP
     /// TABLE` against it (operator-managed schema).
     managed: bool,
+    /// Django-shape `Meta.default_related_name` from
+    /// `#[rustango(default_related_name = "...")]`. Threaded into
+    /// `ModelSchema::default_related_name`. Reverse-relation accessor
+    /// name to use when an FK / M2M field doesn't override it.
+    /// Today rustango doesn't auto-emit reverse managers; the
+    /// metadata is the foundation for that work.
+    default_related_name: Option<String>,
     /// Django-shape `Meta.db_table_comment` (4.2+) from
     /// `#[rustango(db_table_comment = "...")]`. Threaded into
     /// `ModelSchema::db_table_comment` so the DDL writer attaches the
@@ -4698,6 +4709,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         managed: true,
         verbose_name: None,
         verbose_name_plural: None,
+        default_related_name: None,
         db_table_comment: None,
         get_latest_by: None,
         extra_permissions: Vec::new(),
@@ -5038,6 +5050,44 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 // table-level comment attached to the DB catalog.
                 let s: LitStr = meta.value()?.parse()?;
                 out.db_table_comment = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("default_related_name") {
+                // Django-shape `Meta.default_related_name` — the name
+                // reverse-relation accessors use when callers don't
+                // override `related_name=...` on the FK / M2M field.
+                // Stored on `ModelSchema::default_related_name` so
+                // future reverse-manager codegen / DRF schema emit /
+                // admin templates can pick the right accessor name
+                // (today rustango doesn't auto-emit reverse managers;
+                // the metadata is the foundation for that work).
+                //
+                // Django requires snake_case + no `+` suffix; we
+                // enforce non-empty + ASCII identifier-shape so the
+                // string is safe to use as a Rust ident later.
+                let s: LitStr = meta.value()?.parse()?;
+                let raw = s.value();
+                if raw.is_empty() {
+                    return Err(syn::Error::new(
+                        s.span(),
+                        "`default_related_name` must be a non-empty string",
+                    ));
+                }
+                let valid = raw
+                    .chars()
+                    .all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit())
+                    && !raw.chars().next().is_some_and(|c| c.is_ascii_digit());
+                if !valid {
+                    return Err(syn::Error::new(
+                        s.span(),
+                        format!(
+                            "`default_related_name` must be snake_case ASCII \
+                             (lowercase letters / digits / underscores, not \
+                             starting with a digit); got `{raw}`"
+                        ),
+                    ));
+                }
+                out.default_related_name = Some(raw);
                 return Ok(());
             }
             if meta.path.is_ident("extra_permissions") {

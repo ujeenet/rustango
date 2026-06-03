@@ -20,7 +20,7 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 
 | Category | SHIPPED | PARTIAL | MISSING | N/A |
 |---|---:|---:|---:|---:|
-| 1. ORM — models / fields / Meta | 16 | 1 | 1 | 0 |
+| 1. ORM — models / fields / Meta | 17 | 1 | 1 | 0 |
 | 2. QuerySet API | 37 | 1 | 1 | 0 |
 | 3. Field types & options | 32 | 0 | 2 | 1 |
 | 4. Postgres-specific fields | 2 | 1 | 2 | 0 |
@@ -44,9 +44,9 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 22. Async support | 4 | 0 | 0 | 3 |
 | 23. DRF parity | 22 | 0 | 1 | 0 |
 | 24. contrib modules | 12 | 1 | 3 | 2 |
-| **Totals** | **363** | **11** | **21** | **19** |
+| **Totals** | **364** | **11** | **21** | **19** |
 
-Coverage = 363 / (363 + 11 + 21) = **92% full, 3% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
+Coverage = 364 / (364 + 11 + 21) = **92% full, 3% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
 
 Snapshot date: 2026-06-03 (post v0.42 batch including ExclusionConstraint #593, default_permissions #594, on_delete #592, ForeignKey on_delete enum override, extra_permissions #591, get_latest_by #590, db_table_comment #589, citext, DatabaseCache, managed=false, upload streaming, i18n).
 
@@ -62,6 +62,7 @@ Snapshot date: 2026-06-03 (post v0.42 batch including ExclusionConstraint #593, 
 | `Meta.unique_together` | [Meta#unique_together](https://docs.djangoproject.com/en/6.0/ref/models/options/#unique-together) | SHIPPED | `#[rustango(unique_together(...))]` (v0.19) | |
 | `Meta.index_together` | [Meta#index_together](https://docs.djangoproject.com/en/6.0/ref/models/options/#index-together) | SHIPPED | `#[rustango(index_together(...))]` (v0.19) | |
 | `Index(fields=..., condition=Q(...))` partial index | [Index](https://docs.djangoproject.com/en/6.0/ref/models/indexes/#django.db.models.Index) | SHIPPED | `#[rustango(index_when(columns = "...", condition = "...", name = "...", method = "btree"))]` (PR #599) — sibling of `unique_when`. Emits `CREATE INDEX <name> ON <table> (cols) WHERE <expr>` on PG / SQLite; MySQL emits a plain CREATE INDEX with a render-time warning (no native partial-index support). | |
+| `Meta.default_related_name` | [Meta#default_related_name](https://docs.djangoproject.com/en/6.0/ref/models/options/#default-related-name) | SHIPPED | `#[rustango(default_related_name = "snake_case_name")]` (PR #600) — stored on `ModelSchema::default_related_name`, validated snake_case at derive time. Declarative-only today; foundation for future reverse-manager codegen / DRF schema emit / admin template hookup. | |
 | `Meta.constraints` (CheckConstraint, UniqueConstraint, ExclusionConstraint) | [Constraints](https://docs.djangoproject.com/en/6.0/ref/models/constraints/) | SHIPPED | `#[rustango(check(name, expr))]` + `unique_when` (partial unique) + `#[rustango(exclude(name, using, elements, where))]` (PR #593, PG-only — MySQL/SQLite skip with `tracing::warn!`). | Row-level CHECK with full `Q(...)` lowering is still by-hand (write the SQL out in `expr`). |
 | `Meta.verbose_name` / `verbose_name_plural` | [Meta#verbose_name](https://docs.djangoproject.com/en/6.0/ref/models/options/#verbose-name) | SHIPPED | `#[rustango(verbose_name = "...", verbose_name_plural = "...")]` (#320, v0.42) — `ModelSchema::display_label()` + `display_label_plural()`; admin list / detail / form templates pick up the friendly captions via `model.label` / `model.label_plural` | |
 | `Meta.permissions` (custom codenames) | [Meta#permissions](https://docs.djangoproject.com/en/6.0/ref/models/options/#permissions) | SHIPPED | `auto_create_permissions_pool` seeds CRUD codenames; reserved `auth.access_admin` added in PR #313. Custom per-model codenames declared via `#[rustango(extra_permissions = "approve:Can approve, archive:Can archive")]` (PR #591). | |
@@ -75,7 +76,7 @@ Snapshot date: 2026-06-03 (post v0.42 batch including ExclusionConstraint #593, 
 | Self-referential FK | [Self FK](https://docs.djangoproject.com/en/6.0/ref/models/fields/#django.db.models.ForeignKey) | SHIPPED | `#[rustango(fk = "self")]` (v0.17.2) | Tested via `tests/self_fk_live.rs`. |
 | `ManyToManyField(through=...)` | [M2M through](https://docs.djangoproject.com/en/6.0/topics/db/models/#extra-fields-on-many-to-many-relationships) | SHIPPED | `#[rustango(m2m(... auto_create = false))]` (closed #324, v0.42). Operator declares the junction as its own `#[derive(Model)]` with extra columns; the migration writer skips emitting `CREATE TABLE` for that junction when `auto_create = false` (otherwise the through-model's own table would conflict). Implicit-junction path with `auto_create = true` (default) unchanged. | |
 
-Summary: **16 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A**. Gaps: full abstract-base field-inheritance (Rust idiom = trait composition; `#[rustango(managed = false)]` covers the operator-managed-table case via #321), MTI. ExclusionConstraint shipped in PR #593; `Meta.default_permissions` shipped in PR #594; `ForeignKey(on_delete=…)` explicit override shipped in PR #592.
+Summary: **17 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A**. Gaps: full abstract-base field-inheritance (Rust idiom = trait composition; `#[rustango(managed = false)]` covers the operator-managed-table case via #321), MTI. ExclusionConstraint shipped in PR #593; `Meta.default_permissions` shipped in PR #594; `ForeignKey(on_delete=…)` explicit override shipped in PR #592.
 
 ---
 

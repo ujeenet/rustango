@@ -51,7 +51,8 @@
       "Bash(PATH=__TRACKED_VAR__/.cargo/bin:__TRACKED_VAR__ cargo build --no-default-features --features mysql,tenancy,admin -p rustango)",
       "Bash(PATH=__TRACKED_VAR__/.cargo/bin:__TRACKED_VAR__ cargo build --features postgres,tenancy,admin -p rustango)",
       "Bash(perl -i -pe 's/pub\\\\\\(super\\\\\\) async fn \\(create_operator_cmd|create_user_cmd|create_superuser_cmd|set_superuser_cmd|reset_password_cmd|reset_operator_password_cmd|change_password_cmd|change_operator_password_cmd\\)<W: Write \\\\+ Send>\\\\\\(\\\\s*pools: &TenantPools,/pub\\(super\\) async fn $1<W: Write + Send, DB: Database>\\(\\\\n    pools: \\\\&TenantPools<DB>,/g' src/tenancy/manage/users.rs)",
-      "Bash(grep -nB1 \"^pub mod.*\\\\b\" /Users/ievgeniisvyryd/projects/rustango/crates/rustango/src/lib.rs)"
+      "Bash(grep -nB1 \"^pub mod.*\\\\b\" /Users/ievgeniisvyryd/projects/rustango/crates/rustango/src/lib.rs)",
+      "Bash(*)"
     ],
     "additionalDirectories": [
       "/Users/ievgeniisvyryd/projects/rustango-cms/migrations"

@@ -654,6 +654,7 @@ mod composite_fk_snapshot_tests {
             verbose_name_plural: None,
             managed: true,
             db_table_comment: None,
+            default_related_name: None,
             get_latest_by: None,
             extra_permissions: &[],
         };
@@ -726,6 +727,7 @@ mod composite_fk_snapshot_tests {
             verbose_name_plural: None,
             managed: true,
             db_table_comment: None,
+            default_related_name: None,
             get_latest_by: None,
             extra_permissions: &[],
         };
@@ -753,6 +755,7 @@ mod composite_fk_snapshot_tests {
             verbose_name_plural: None,
             managed: false,
             db_table_comment: None,
+            default_related_name: None,
             get_latest_by: None,
             extra_permissions: &[],
         };
@@ -818,6 +821,7 @@ mod composite_fk_snapshot_tests {
             verbose_name_plural: None,
             managed: true,
             db_table_comment: None,
+            default_related_name: None,
             get_latest_by: None,
             extra_permissions: &[],
         };

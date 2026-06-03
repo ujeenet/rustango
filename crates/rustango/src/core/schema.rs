@@ -465,6 +465,18 @@ pub struct ModelSchema {
     /// for ops tooling (data lineage docs, sql-introspectors) that
     /// reads the table's catalog comment.
     pub db_table_comment: Option<&'static str>,
+    /// Django-shape `Meta.default_related_name` — the accessor name
+    /// reverse-relation managers use when an FK / M2M field doesn't
+    /// override it via `related_name="..."`. Today rustango doesn't
+    /// auto-emit reverse managers; storing the metadata lays the
+    /// foundation for that work (DRF schema emit, admin templates,
+    /// future reverse-manager codegen all need this name).
+    ///
+    /// Set via `#[rustango(default_related_name = "snake_case_name")]`.
+    /// Validated at macro-derive time to be a snake_case ASCII
+    /// identifier (lowercase + digits + underscores, not starting
+    /// with a digit) so it's safe to use as a Rust ident later.
+    pub default_related_name: Option<&'static str>,
     /// Django-shape `Meta.get_latest_by` — default sort field that
     /// `QuerySet::latest_default()` / `earliest_default()` use when
     /// the caller doesn't pass a field name explicitly. A string
