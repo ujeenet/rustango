@@ -5225,6 +5225,72 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 });
                 return Ok(());
             }
+            if meta.path.is_ident("index_when") {
+                // Django `Index(fields=..., condition=Q(...))` parity —
+                // non-unique partial index. Sibling of `unique_when`
+                // (which emits `CREATE UNIQUE INDEX ... WHERE ...`).
+                //
+                //   #[rustango(index_when(
+                //       columns   = "status, created_at",
+                //       condition = "deleted_at IS NULL",
+                //       name      = "active_status_created_idx"
+                //   ))]
+                //
+                // → `CREATE INDEX <name> ON <table> (cols) WHERE <condition>`
+                // on PG / SQLite (both ship partial indexes natively).
+                // MySQL has no native partial-index support — the writer
+                // emits a plain CREATE INDEX and the condition is lost;
+                // operators wanting that selectivity on MySQL should
+                // declare a covering index plus an application-level
+                // filter.
+                let mut columns: Option<Vec<String>> = None;
+                let mut condition: Option<String> = None;
+                let mut name: Option<String> = None;
+                let mut method: String = "btree".to_owned();
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("columns") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        columns = Some(split_field_list(&s.value()));
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("condition") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        condition = Some(s.value());
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("name") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        name = Some(s.value());
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("method") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        method = s.value();
+                        return Ok(());
+                    }
+                    Err(inner.error(
+                        "unknown index_when attribute (supported: \
+                         `columns = \"...\"`, `condition = \"...\"`, \
+                         `name = \"...\"`, `method = \"btree|gin|gist|...\"`)",
+                    ))
+                })?;
+                let columns = columns
+                    .ok_or_else(|| meta.error("`index_when(...)` requires `columns = \"...\"`"))?;
+                let condition = condition.ok_or_else(|| {
+                    meta.error("`index_when(...)` requires `condition = \"...\"`")
+                })?;
+                if columns.is_empty() {
+                    return Err(meta.error("`index_when(columns = \"\")` is empty"));
+                }
+                out.indexes.push(IndexAttr {
+                    name,
+                    columns,
+                    unique: false,
+                    method,
+                    where_clause: Some(condition),
+                });
+                return Ok(());
+            }
             if meta.path.is_ident("index") {
                 // Container-level composite index — legacy entry that
                 // was advertised with a trailing `, unique, name = ...`
