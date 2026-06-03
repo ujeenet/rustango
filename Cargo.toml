@@ -116,6 +116,13 @@ pedantic = { level = "warn", priority = -1 }
 
 [profile.dev]
 opt-level = 0
+# Disable incremental compilation — the incremental cache balloons
+# the `target/` directory by ~13 GiB on this workspace (≈35% of total)
+# and we rebuild often enough that the cache rarely hits. Forces every
+# `cargo build` / `cargo test` to use the codegen-units split alone
+# for parallelism. Saves disk, costs a few % on warm rebuilds.
+incremental = false
 
 [profile.test]
 opt-level = 0
+incremental = false
