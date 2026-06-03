@@ -1114,6 +1114,7 @@ async fn unapply_locked(
             m2m_tables: vec![],
             indexes: vec![],
             checks: vec![],
+            excludes: vec![],
         },
         Some(prev_name) => all
             .iter()
@@ -1922,6 +1923,7 @@ async fn unapply_locked_pool(
             m2m_tables: vec![],
             indexes: vec![],
             checks: vec![],
+            excludes: vec![],
         },
         Some(prev_name) => all
             .iter()

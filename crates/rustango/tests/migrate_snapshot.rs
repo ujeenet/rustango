@@ -50,6 +50,7 @@ fn empty_snapshot() -> SchemaSnapshot {
         m2m_tables: vec![],
         indexes: vec![],
         checks: vec![],
+        excludes: vec![],
     }
 }
 

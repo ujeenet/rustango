@@ -16,6 +16,7 @@ fn empty_snapshot() -> SchemaSnapshot {
         m2m_tables: vec![],
         indexes: vec![],
         checks: vec![],
+        excludes: vec![],
     }
 }
 
@@ -417,6 +418,7 @@ fn empty_snap() -> SchemaSnapshot {
         m2m_tables: vec![],
         indexes: vec![],
         checks: vec![],
+        excludes: vec![],
     }
 }
 

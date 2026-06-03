@@ -798,6 +798,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         &container.m2m,
         &all_indexes,
         &container.checks,
+        &container.excludes,
         &container.composite_fks,
         &container.generic_fks,
         container.scope.as_deref(),
@@ -1691,6 +1692,7 @@ fn model_impl_tokens(
     m2m_relations: &[M2MAttr],
     indexes: &[IndexAttr],
     checks: &[CheckAttr],
+    excludes: &[ExcludeAttr],
     composite_fks: &[CompositeFkAttr],
     generic_fks: &[GenericFkAttr],
     scope: Option<&str>,
@@ -1785,6 +1787,27 @@ fn model_impl_tokens(
             }
         }
     });
+    let excludes_tokens = excludes.iter().map(|e| {
+        let name = e.name.as_str();
+        let using = e.using.as_str();
+        let element_tokens = e.elements.iter().map(|(col, op)| {
+            let col_s = col.as_str();
+            let op_s = op.as_str();
+            quote!((#col_s, #op_s))
+        });
+        let where_tokens = match e.where_clause.as_deref() {
+            Some(w) => quote!(::core::option::Option::Some(#w)),
+            None => quote!(::core::option::Option::None),
+        };
+        quote! {
+            ::rustango::core::ExclusionConstraint {
+                name: #name,
+                using: #using,
+                elements: &[ #(#element_tokens),* ],
+                where_clause: #where_tokens,
+            }
+        }
+    });
     let composite_fk_tokens = composite_fks.iter().map(|rel| {
         let name = rel.name.as_str();
         let to = rel.to.as_str();
@@ -1851,6 +1874,7 @@ fn model_impl_tokens(
                 m2m: &[ #(#m2m_tokens),* ],
                 indexes: &[ #(#indexes_tokens),* ],
                 check_constraints: &[ #(#checks_tokens),* ],
+                exclusion_constraints: &[ #(#excludes_tokens),* ],
                 composite_relations: &[ #(#composite_fk_tokens),* ],
                 generic_relations: &[ #(#generic_fk_tokens),* ],
                 scope: #scope_tokens,
@@ -4380,6 +4404,12 @@ struct ContainerAttrs {
     /// Table-level CHECK constraints declared via
     /// `#[rustango(check(name = "…", expr = "…"))]`.
     checks: Vec<CheckAttr>,
+    /// Table-level PG `EXCLUDE` constraints declared via
+    /// `#[rustango(exclude(name = "…", using = "gist", elements =
+    /// "col WITH op, col WITH op", where = "…"))]`. PG-only — the
+    /// migration writer renders them on Postgres and skips with a
+    /// warning on MySQL/SQLite. Issue #319.
+    excludes: Vec<ExcludeAttr>,
     /// Composite (multi-column) FKs declared via
     /// `#[rustango(fk_composite(name = "…", to = "…", on = (…), from = (…)))]`.
     /// Sub-slice F.2 of the v0.15.0 ContentType plan.
@@ -4477,6 +4507,22 @@ struct IndexAttr {
 struct CheckAttr {
     name: String,
     expr: String,
+}
+
+/// Parsed form of one `#[rustango(exclude(name = "…", using = "gist",
+/// elements = "col WITH op, col WITH op", where = "…"))]` declaration.
+/// PG-only — surfaced on every backend in the macro emit; the migration
+/// writer skips the op on MySQL/SQLite. Issue #319.
+struct ExcludeAttr {
+    /// Constraint name (free-form Rust identifier).
+    name: String,
+    /// Index method — `"gist"` (default), `"btree_gist"`, `"spgist"`.
+    using: String,
+    /// Comma-separated `(column, operator)` pairs, in declaration
+    /// order. Parsed from `"col WITH op, col WITH op"`.
+    elements: Vec<(String, String)>,
+    /// Optional `WHERE` predicate (raw SQL).
+    where_clause: Option<String>,
 }
 
 /// Parsed form of one `#[rustango(fk_composite(name = "audit_target",
@@ -4626,6 +4672,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         m2m: Vec::new(),
         indexes: Vec::new(),
         checks: Vec::new(),
+        excludes: Vec::new(),
         composite_fks: Vec::new(),
         generic_fks: Vec::new(),
         scope: None,
@@ -5160,6 +5207,101 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 let name = name.ok_or_else(|| meta.error("check requires `name = \"...\"`"))?;
                 let expr = expr.ok_or_else(|| meta.error("check requires `expr = \"...\"`"))?;
                 out.checks.push(CheckAttr { name, expr });
+                return Ok(());
+            }
+            if meta.path.is_ident("exclude") {
+                // #[rustango(exclude(name = "…", using = "gist",
+                //                    elements = "col WITH op, col WITH op",
+                //                    where = "…"))]
+                let mut name: Option<String> = None;
+                let mut using: Option<String> = None;
+                let mut elements_raw: Option<(String, proc_macro2::Span)> = None;
+                let mut where_clause: Option<String> = None;
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("name") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        name = Some(s.value());
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("using") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        using = Some(s.value());
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("elements") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        elements_raw = Some((s.value(), s.span()));
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("where") || inner.path.is_ident("where_clause") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        where_clause = Some(s.value());
+                        return Ok(());
+                    }
+                    Err(inner.error(
+                        "unknown exclude attribute (supported: `name`, `using`, `elements`, `where`)",
+                    ))
+                })?;
+                let name = name.ok_or_else(|| meta.error("exclude requires `name = \"...\"`"))?;
+                let using = using.unwrap_or_else(|| "gist".to_owned());
+                let (elements_str, elements_span) = elements_raw.ok_or_else(|| {
+                    meta.error(
+                        "exclude requires `elements = \"col WITH op, col WITH op\"`",
+                    )
+                })?;
+                // Parse `col WITH op` pairs separated by commas.
+                let mut elements: Vec<(String, String)> = Vec::new();
+                for pair in elements_str.split(',') {
+                    let pair = pair.trim();
+                    if pair.is_empty() {
+                        continue;
+                    }
+                    let mut split = pair.splitn(2, |c: char| c.is_whitespace());
+                    let col = split.next().unwrap_or("").trim();
+                    let rest = split.next().unwrap_or("").trim();
+                    // `WITH op` — case-insensitive on `WITH`, then op.
+                    let rest_lc = rest.to_ascii_lowercase();
+                    let op = rest_lc
+                        .strip_prefix("with")
+                        .map(|r| r.trim_start())
+                        .filter(|r| !r.is_empty())
+                        .map(|_| {
+                            // Pull the original-case op from `rest` after the
+                            // `WITH ` token (5 chars).
+                            rest[4..].trim_start().to_owned()
+                        });
+                    let Some(op) = op else {
+                        return Err(syn::Error::new(
+                            elements_span,
+                            format!(
+                                "exclude elements: `{pair}` must be `<col> WITH <op>` \
+                                 (e.g. `room_id WITH =` or `during WITH &&`)"
+                            ),
+                        ));
+                    };
+                    if col.is_empty() || op.is_empty() {
+                        return Err(syn::Error::new(
+                            elements_span,
+                            format!(
+                                "exclude elements: `{pair}` must be `<col> WITH <op>` \
+                                 (both sides non-empty)"
+                            ),
+                        ));
+                    }
+                    elements.push((col.to_owned(), op));
+                }
+                if elements.is_empty() {
+                    return Err(syn::Error::new(
+                        elements_span,
+                        "exclude requires at least one `col WITH op` element",
+                    ));
+                }
+                out.excludes.push(ExcludeAttr {
+                    name,
+                    using,
+                    elements,
+                    where_clause,
+                });
                 return Ok(());
             }
             if meta.path.is_ident("generic_fk") {

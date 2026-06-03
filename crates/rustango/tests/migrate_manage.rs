@@ -118,7 +118,8 @@ fn make_empty_writes_scaffold_with_empty_forward() {
             tables: vec![],
             m2m_tables: vec![],
             indexes: vec![],
-            checks: vec![]
+            checks: vec![],
+            excludes: vec![],
         }
     );
 
