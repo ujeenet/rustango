@@ -272,6 +272,11 @@ jobs:
       - run: cargo test -p rustango --features mysql,tenancy --test tenancy_manage_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy --test permissions_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy --test database_pools_mysql_live
+      - run: cargo test -p rustango --features mysql --test audit_mysql_live
+      - run: cargo test -p rustango --features mysql --test fixtures_mysql_live
+      - run: cargo test -p rustango --features mysql --test inspectdb_mysql_live
+      - run: cargo test -p rustango --features mysql --test funcs_batch1_mysql_live
+      - run: cargo test -p rustango --features mysql --test json_path_mysql_live
 
   # End-to-end playwright suite for the multi-app rustango showcase.
   # The showcase is a severed workspace under examples/showcase/ that
