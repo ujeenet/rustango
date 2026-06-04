@@ -21,7 +21,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lettre::message::{header::ContentType, Mailbox, Message, MultiPart, SinglePart};
+use lettre::message::{
+    header::ContentType, Attachment as LettreAttachment, Mailbox, Message, MultiPart, SinglePart,
+};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::client::Tls;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
@@ -252,8 +254,8 @@ impl Mailer for SmtpMailer {
         // method; lettre validates them via the typed-header machinery,
         // so unknown header names just become "Header" structs.
         // We use the loose `header::Header` form via `headers_mut`.
+        // Body part: text-only, or multipart/alternative when HTML present.
         let body_part = if let Some(html) = &email.html_body {
-            // multipart/alternative — text/plain + text/html.
             MultiPart::alternative()
                 .singlepart(
                     SinglePart::builder()
@@ -266,13 +268,31 @@ impl Mailer for SmtpMailer {
                         .body(html.clone()),
                 )
         } else {
-            // Text-only — wrap in MultiPart::mixed() of one to keep
-            // the return shape uniform.
             MultiPart::mixed().singlepart(
                 SinglePart::builder()
                     .header(ContentType::TEXT_PLAIN)
                     .body(email.body.clone()),
             )
+        };
+
+        // Attachments — wrap the body part in `multipart/mixed` plus one
+        // SinglePart per attachment when any are present. Skips the
+        // extra wrapper when the list is empty (preserves v1 layout).
+        let body_part = if email.attachments.is_empty() {
+            body_part
+        } else {
+            let mut mixed = MultiPart::mixed().multipart(body_part);
+            for att in &email.attachments {
+                let ctype: ContentType = att
+                    .mimetype
+                    .as_deref()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(ContentType::parse("application/octet-stream").unwrap());
+                mixed = mixed.singlepart(
+                    LettreAttachment::new(att.filename.clone()).body(att.content.clone(), ctype),
+                );
+            }
+            mixed
         };
 
         // NB: custom `email.headers` aren't forwarded in v1 — lettre's

@@ -66,6 +66,28 @@ pub struct Email {
     pub body: String,
     pub html_body: Option<String>,
     pub headers: Vec<(String, String)>,
+    /// Django-parity attachments — file blobs attached to the
+    /// outgoing message. Populated via [`Email::attach`] /
+    /// [`Email::attach_text`].
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+}
+
+/// Django-parity `EmailMessage.attach(filename, content, mimetype)` —
+/// one attached blob. `mimetype` is the MIME type lettre stamps on
+/// the SinglePart; when `None` we default to `application/octet-stream`
+/// (RFC-9110 recommendation for opaque blobs).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Attachment {
+    /// File name as it will appear in the `Content-Disposition` header
+    /// (`attachment; filename="<this>"`).
+    pub filename: String,
+    /// Raw bytes. Plain-text attachments can be built via
+    /// [`Email::attach_text`] which UTF-8 encodes a `&str`.
+    pub content: Vec<u8>,
+    /// MIME type. `None` = `application/octet-stream`. Common values:
+    /// `text/plain`, `text/csv`, `application/pdf`, `image/png`.
+    pub mimetype: Option<String>,
 }
 
 impl Email {
@@ -139,6 +161,41 @@ impl Email {
         self
     }
 
+    /// Django-parity `EmailMessage.attach(filename, content, mimetype)` —
+    /// attach a binary blob. `mimetype = None` means
+    /// `application/octet-stream`. Backends serialize the attachment
+    /// according to their capabilities:
+    ///
+    /// * [`SmtpMailer`] (feature `email-smtp`) — sent as a SinglePart
+    ///   attachment inside a `multipart/mixed` MIME container.
+    /// * [`ConsoleMailer`] — prints a one-line summary (name + size).
+    /// * [`FileMailer`] — listed by name in the dev `.eml` dump.
+    /// * [`InMemoryMailer`] — captured on the cloned `Email` for
+    ///   test assertions.
+    #[must_use]
+    pub fn attach(
+        mut self,
+        filename: impl Into<String>,
+        content: impl Into<Vec<u8>>,
+        mimetype: Option<impl Into<String>>,
+    ) -> Self {
+        self.attachments.push(Attachment {
+            filename: filename.into(),
+            content: content.into(),
+            mimetype: mimetype.map(Into::into),
+        });
+        self
+    }
+
+    /// Django-parity convenience — attach a UTF-8 text blob with
+    /// `text/plain` MIME. Equivalent to `attach(filename, content,
+    /// Some("text/plain"))` but spares the caller the `Some(_)`.
+    #[must_use]
+    pub fn attach_text(self, filename: impl Into<String>, content: impl Into<String>) -> Self {
+        let s = content.into();
+        self.attach(filename, s.into_bytes(), Some("text/plain"))
+    }
+
     /// Validate the minimum required fields: at least one recipient + non-empty subject.
     pub fn validate(&self) -> Result<(), MailError> {
         if self.to.is_empty() && self.cc.is_empty() && self.bcc.is_empty() {
@@ -208,6 +265,16 @@ impl Mailer for ConsoleMailer {
         println!("{}", email.body);
         if let Some(html) = &email.html_body {
             println!("\n--- HTML alternative ---\n{html}");
+        }
+        for att in &email.attachments {
+            println!(
+                "--- attachment: {} ({} bytes, {}) ---",
+                att.filename,
+                att.content.len(),
+                att.mimetype
+                    .as_deref()
+                    .unwrap_or("application/octet-stream"),
+            );
         }
         println!("====================================================");
         Ok(())
@@ -345,6 +412,16 @@ fn serialize_eml(email: &Email) -> String {
     if let Some(html) = &email.html_body {
         out.push_str("\n\n--- HTML alternative ---\n");
         out.push_str(html);
+    }
+    for att in &email.attachments {
+        out.push_str(&format!(
+            "\n\n--- attachment: {} ({} bytes, {}) ---",
+            att.filename,
+            att.content.len(),
+            att.mimetype
+                .as_deref()
+                .unwrap_or("application/octet-stream"),
+        ));
     }
     out
 }
