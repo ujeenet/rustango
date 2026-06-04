@@ -437,7 +437,7 @@ Django built-in management commands:
 | `create-tenant` / `create-operator` (rustango-specific) | n/a | SHIPPED | tenancy verbs | |
 | `migrate-tenant-storage` (rustango-specific) | n/a | SHIPPED | v0.26 | |
 
-Summary: **20 SHIPPED / 0 PARTIAL / 3 MISSING / 6 N/A**. Gaps: `shell` REPL (Rust constraint), `dumpdata`, i18n scaffolding (`makemessages` / `compilemessages`).
+Summary: **20 SHIPPED / 0 PARTIAL / 3 MISSING / 6 N/A**. Gaps: `shell` REPL (Rust constraint), i18n scaffolding (`makemessages` / `compilemessages`). The prior gap-prose line claimed `dumpdata` was missing, but #397 shipped it in v0.42 (see the `dumpdata` row above) — corrected.
 
 ---
 
