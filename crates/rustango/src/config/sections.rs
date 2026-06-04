@@ -325,8 +325,28 @@ pub struct MailSettings {
     /// port 465). Unknown values fall back to `"starttls"` with a
     /// warning. Issue #48.
     pub smtp_tls: Option<String>,
-    /// `From:` address for sent mail.
+    /// Django-shape `DEFAULT_FROM_EMAIL` — the `From:` address on
+    /// regular outgoing mail (`send_pool`, `send_many_pool`).
+    /// `from_address` is the historical alias rustango shipped
+    /// first; both names read the same field — `default_from_email`
+    /// wins when both are set.
     pub from_address: Option<String>,
+    /// Django-shape `SERVER_EMAIL` — the `From:` address on
+    /// server-generated mail (`mail_admins`, `mail_managers`,
+    /// future error-mail paths). Falls back to `from_address`
+    /// when unset (Django's default behavior). Setting it
+    /// separately lets ops surface admin mail under a distinct
+    /// sender — `noreply@example.com` for users, `alerts@example.com`
+    /// for ops.
+    #[serde(default)]
+    pub server_email: Option<String>,
+    /// Django-shape `EMAIL_SUBJECT_PREFIX` — string prepended to
+    /// subjects sent via `mail_admins` / `mail_managers`. Django
+    /// default is `"[Django] "`; rustango omits it by default so
+    /// projects opt into branded prefixes consciously. Set to
+    /// `"[Acme] "` (note trailing space) to match Django's shape.
+    #[serde(default)]
+    pub email_subject_prefix: Option<String>,
     /// Django-shape `ADMINS` — list of email addresses that
     /// `email::mail_admins(...)` sends to. Typically the project's
     /// site operators (the "5xx pages me at 3am" cohort). Issue #416.
