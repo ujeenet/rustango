@@ -1040,6 +1040,26 @@ Composes with `required_db_vendor` — set both for fail-fast deploy validation:
 
 Reads `SELECT title, created_at FROM post WHERE status = 'published' AND deleted_at IS NULL` get index-only scans without touching the heap.
 
+#### 2.25.16 `#[rustango(order_with_respect_to = "...")]` (PR #610)
+
+**What**: Django `Meta.order_with_respect_to = "parent_fk"` — names the FK field this model's instances are ordered relative to. Django auto-generates a `_order` integer column + admin reordering UI when set.
+
+```rust
+#[derive(Model)]
+#[rustango(table = "section_item", order_with_respect_to = "section_id")]
+pub struct SectionItem {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(fk = "section", on = "id")]
+    pub section_id: i64,
+    pub title: String,
+}
+```
+
+Stored on `ModelSchema::order_with_respect_to: Option<&'static str>`. Macro validates Rust-identifier shape so typos surface at derive time.
+
+**Behavior today**: declarative-only. The migration writer + admin surfaces still treat every model identically. Future codegen will key off the metadata to auto-emit the `_order` column and reorder helpers (`set_<rel>_order(&[pk1, pk2, ...])`).
+
 ---
 
 ## Chapter 3 — ORM

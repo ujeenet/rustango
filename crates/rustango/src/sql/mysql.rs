@@ -1356,6 +1356,7 @@ mod tests {
             base_manager_name: None,
             required_db_vendor: None,
             required_db_features: &[],
+            order_with_respect_to: None,
             get_latest_by: None,
             extra_permissions: &[],
         }))

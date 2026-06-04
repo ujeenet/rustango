@@ -513,6 +513,16 @@ pub struct ModelSchema {
     ///
     /// Empty slice (default) means "no special capabilities needed".
     pub required_db_features: &'static [&'static str],
+    /// Django-shape `Meta.order_with_respect_to = "parent_fk"` —
+    /// names the FK field this model's instances are ordered
+    /// relative to. Django auto-generates a `_order` integer column
+    /// + admin reordering UI when set.
+    ///
+    /// Set via `#[rustango(order_with_respect_to = "parent_fk")]`.
+    /// Declarative-only today: storage on `ModelSchema` lets future
+    /// codegen auto-emit the `_order` column and reorder helpers.
+    /// `None` means the model has no parent-FK-relative ordering.
+    pub order_with_respect_to: Option<&'static str>,
     /// Django-shape `Meta.get_latest_by` — default sort field that
     /// `QuerySet::latest_default()` / `earliest_default()` use when
     /// the caller doesn't pass a field name explicitly. A string
