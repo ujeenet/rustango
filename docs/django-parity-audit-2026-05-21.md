@@ -701,39 +701,40 @@ Summary: **12 SHIPPED / 1 PARTIAL / 3 MISSING / 2 N/A** (within Django contrib s
 
 ## Top 10 gaps by user-facing impact
 
-Ranked by how often a real-world Django project hits the gap. Each gets a one-liner reasoning.
+Ranked by how often a real-world Django project hits the gap. Refreshed 2026-06-04 — six entries on the original list shipped between the audit's first draft and now (`choices=` v0.42, method-field admin display #348, `raw_id_fields` #357 + `autocomplete_fields` #358, auth signals #414, cursor pagination #440, plus most of the i18n surface). What follows is the current shortlist of MISSING / PARTIAL items most users feel first.
 
-1. **Multi-DB routing / read replicas** (sec 14 — `DATABASES`, `DATABASE_ROUTERS`). Every non-trivial production app eventually wants read replicas. Currently MISSING; ORM is single-pool-per-QuerySet. Closest existing primitive: `Cli::api(...).migrations_dir(...).run()` is single-registry-pool.
+1. **Multi-DB routing / read replicas** (sec 14 — `DATABASES`, `DATABASE_ROUTERS`). Every non-trivial production app eventually wants read replicas. Currently MISSING (#400 / #401); ORM is single-pool-per-QuerySet. Closest existing primitive: `Cli::api(...).migrations_dir(...).run()` is single-registry-pool.
 
-2. **`FileField` / `ImageField` on arbitrary models** (sec 3 + 19). Rustango has `Media` model + `Storage` trait, but no `pub avatar: FileField` shape on user-defined models. Major DX gap vs Django's "drop a field, get upload + URL + ORM round-trip for free."
+2. **`FileField` / `ImageField` on arbitrary models** (sec 3 + 19, #339 / #340). Rustango has `Media` model + `Storage` trait, but no `pub avatar: FileField` shape on user-defined models. Major DX gap vs Django's "drop a field, get upload + URL + ORM round-trip for free."
 
-3. **`choices=[...]` field option + ChoiceField in forms** (sec 3). Single most-used Django field option after `max_length`. Currently MISSING — users define their own enum + manual coerce.
+3. **`select_related("a__b__c")` decoder-side auto-stitching** (sec 2, #451). T2.2 shipped JOIN emission; `post.author.profile.get_pool(...)` auto-stitch still deferred. Multi-hop reads pay N+1 unless the user explicitly walks the JSON map. PARTIAL.
 
-4. **Method-field display in admin (`list_display = [..., "method_name"]`)** (sec 6). Backlog #51. Common pattern for "show a derived value in the list view." Currently MISSING.
+4. **`abstract = True` base classes** (sec 1, #322 area). Django uses `abstract = True` for `created_at` / `updated_at` mixin patterns. Currently PARTIAL — Rust trait composition is close but not the same derive-macro UX. `managed = false` covers the operator-managed-table case via #321.
 
-5. **Per-tenant + per-app i18n / l10n** (sec 20). Translations (`gettext`), locale-aware formatting, per-language URL prefixes — only 1 SHIPPED out of 9 in this category. Most weakly-covered area.
+5. **App-wide `TIME_ZONE` override into ORM date formatters** (sec 14, #402). `Settings.locale.tz` exists; per-user activation via `i18n::timezone::with_tz` works. The remaining gap: ORM DateTime read/write doesn't auto-convert when an app-wide TZ override is configured.
 
-6. **`raw_id_fields` / `autocomplete_fields` in admin** (sec 6). FK widgets currently always `<select>` — chokes on tables with >1000 rows. Backlog item, real production blocker.
+6. **Pluggable upload-handler trait** (sec 19, #421 follow-up). `uploads::save_uploads` streams + caps body size; no equivalent of Django's `MemoryFileUploadHandler` / `TemporaryFileUploadHandler` chain that apps can subclass for custom dispositions (e.g. virus-scan, S3 streaming straight from chunks).
 
-7. **`select_related("a__b__c")` decoder-side auto-stitching** (sec 2). T2.2 shipped JOIN emission; `post.author.profile.get_pool(...)` auto-stitch is deferred. Multi-hop reads still pay N+1 unless the user explicitly walks the JSON map.
+7. **TOTP admin enrollment UI** (sec 6 + 11, #367 / #389). `totp::*` ships RFC 6238 primitives + QR `otpauth_url`; no admin-side "scan this code, enter the 6-digit verification" enrollment surface. PARTIAL.
 
-8. **Auth signals (`user_logged_in`, `user_logged_out`, `user_login_failed`)** (sec 17). Every audit-log story needs these. Currently MISSING — manual hook via login_submit override.
+8. **`HStoreField` + `RangeField` typed wrappers** (sec 4, #342 / #343). `SqlValue::Array` + `RangeLiteral` exist at the value layer; macro-side typed-field wrappers for these PG-specific types haven't landed. ArrayField also PARTIAL on the same axis (#341).
 
-9. **Cursor pagination** (sec 23). For high-volume APIs, page/offset gets slow at large offsets. Backlog. Trivial to add atop existing pagination primitive.
+9. **Memcached backend** (sec 16, #407). Cache trait + Redis / DB / file / in-memory backends all ship; memcached driver missing. Use Redis instead in the meantime — same wire-shape capabilities.
 
-10. **`abstract = True` base classes** (sec 1). Pattern Django uses for `created_at` / `updated_at` mixins. Currently MISSING — Rust trait composition is close but not the same UX.
+10. **`shell` REPL** (sec 13, #396) + **i18n scaffolding** (`makemessages` / `compilemessages`, #398 / #399). Two MISSING manage verbs. The REPL is a hard Rust constraint (no equivalent of `python manage.py shell`); the i18n scaffolders are deferred until the `.po` / `.mo` loader (#423) lands to unblock catalog discovery.
 
 ---
 
 ## Honorable mentions (high-impact for niche use cases)
 
 - **`select_for_update(of=...)` PG-specific clauses** — currently always whole-row lock.
-- **`Meta.verbose_name` / `verbose_name_plural`** — admin headers, i18n footing.
-- **`raw_id_fields`-equivalent on FK admin widgets** — see #6.
-- **`history_view` time-travel (rebuild row from audit log)** — admin history panel is read-only listing today.
+- **`history_view` time-travel (rebuild row from audit log)** — admin history panel is read-only listing today; no "revert to this revision" action.
 - **Per-request perm cache for `permission_required` middleware** — one `has_perm_pool` round-trip per request; high-RPS admin would benefit from session-level caching.
 - **Maintenance mode UI** (backlog `A6`) — shipped middleware, no template scaffold.
-- **Async signal `m2m_changed`** — currently dispatchers exist for pre/post-save only.
+- **Browsable API HTML** (sec 23, #441) — Swagger UI mount covers the discovery story; DRF's hand-written-friendly browsable surface is a different ergonomic.
+- **WebAuthn / Passkey** (sec 11, #392) — Django 5.2 ships it; TOTP enrollment UI (#367) is the more pressing 2FA gap, but Passkeys close the "modern auth" tail.
+- **Date-based generic views** (sec 8, #378) — `ArchiveIndexView` / `YearArchiveView` / etc. Niche; users build via QuerySet date-trunc + Tera today.
+- **Secrets manager integration** (sec 14, #405) — `secrets::*` is local-env focused; first-class Vault / AWS Secrets Manager / GCP Secret Manager backends would close a real prod gap.
 
 ---
 
