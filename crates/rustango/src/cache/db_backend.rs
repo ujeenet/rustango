@@ -127,16 +127,28 @@ impl DatabaseCache {
         Ok(())
     }
 
-    fn now_unix() -> i64 {
+    /// Unix epoch in **milliseconds**. Promoted from seconds in v0.42
+    /// to eliminate a second-boundary race: `set` at `HH:MM:SS.999`
+    /// followed by `get` at `HH:MM:SS+1.001` used to truncate both
+    /// readings to integer seconds (`SS` and `SS+1`), making a TTL of
+    /// 1 second look already-expired at the immediate read. The
+    /// `expires BIGINT` column stays the same — it now carries
+    /// millisecond ticks instead of second ticks; existing pre-v0.42
+    /// rows look like 1970-era timestamps under the new lens and are
+    /// lazily purged on first read (cache is regeneratable by design).
+    fn now_unix_ms() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0)
     }
 
     fn expires_for(ttl: Option<Duration>) -> i64 {
-        ttl.map(|d| Self::now_unix().saturating_add(d.as_secs() as i64))
-            .unwrap_or(0)
+        ttl.map(|d| {
+            let ms = i64::try_from(d.as_millis()).unwrap_or(i64::MAX);
+            Self::now_unix_ms().saturating_add(ms)
+        })
+        .unwrap_or(0)
     }
 }
 
@@ -154,7 +166,7 @@ impl Cache for DatabaseCache {
         let Some((value, expires)) = rows.into_iter().next() else {
             return Ok(None);
         };
-        if expires != 0 && Self::now_unix() >= expires {
+        if expires != 0 && Self::now_unix_ms() >= expires {
             // Lazy GC — purge expired before reporting miss.
             let _ = self.delete(key).await;
             return Ok(None);
@@ -238,9 +250,14 @@ mod tests {
 
     #[test]
     fn expires_for_offsets_from_now() {
-        let before = DatabaseCache::now_unix();
+        // ms precision: a 60-second TTL adds 60_000 ms to the current
+        // unix-ms reading, bracketed by the surrounding observations.
+        let before = DatabaseCache::now_unix_ms();
         let ts = DatabaseCache::expires_for(Some(Duration::from_secs(60)));
-        let after = DatabaseCache::now_unix();
-        assert!(ts >= before + 60 && ts <= after + 60);
+        let after = DatabaseCache::now_unix_ms();
+        assert!(
+            ts >= before + 60_000 && ts <= after + 60_000,
+            "expected expires in [{before}+60_000, {after}+60_000], got {ts}"
+        );
     }
 }
