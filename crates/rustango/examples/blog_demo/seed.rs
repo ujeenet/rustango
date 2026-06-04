@@ -31,7 +31,7 @@ pub async fn run(
     pools: Arc<TenantPools>,
     _registry: PgPool,
     registry_url: String,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let migrations_dir = Path::new(MIGRATIONS_DIR);
 
     // ── provisioning (all idempotent) ─────────────────────────────────
