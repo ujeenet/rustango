@@ -208,6 +208,32 @@ pub trait Cache: Send + Sync + 'static {
         }
         Ok(())
     }
+
+    /// Django-parity `cache.has_key(key)` — direct alias for
+    /// [`Self::exists`]. Django spells the membership check as
+    /// `has_key`; rustango shipped `exists` first (Rust convention)
+    /// but the Django method name is the one most users reach for
+    /// when translating from a Django codebase.
+    ///
+    /// Default implementation delegates to `exists`; backends never
+    /// need to override.
+    async fn has_key(&self, key: &str) -> Result<bool, CacheError> {
+        self.exists(key).await
+    }
+
+    /// Django-parity `cache.decr(key, delta=1)` — atomically decrement
+    /// the integer counter at `key` by `by` and return the new value.
+    ///
+    /// Equivalent to [`Self::incr`] with a negated `by` — the default
+    /// implementation simply forwards to `incr(-by)`, so backends that
+    /// override `incr` for atomicity (Redis `INCRBY -N`) get the
+    /// matching atomic `decr` for free.
+    ///
+    /// `ttl` semantics mirror `incr` — treat as a hint; backends with
+    /// native counters typically only set TTL on first creation.
+    async fn decr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
+        self.incr(key, by.saturating_neg(), ttl).await
+    }
 }
 
 /// `Arc<dyn Cache>` alias — the standard way to share a cache instance.
