@@ -807,6 +807,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         container.verbose_name_plural.as_deref(),
         container.managed,
         container.base_manager_name.as_deref(),
+        &container.required_db_features,
         container.required_db_vendor.as_deref(),
         container.default_related_name.as_deref(),
         container.db_table_comment.as_deref(),
@@ -1705,6 +1706,7 @@ fn model_impl_tokens(
     verbose_name_plural: Option<&str>,
     managed: bool,
     base_manager_name: Option<&str>,
+    required_db_features: &[String],
     required_db_vendor: Option<&str>,
     default_related_name: Option<&str>,
     db_table_comment: Option<&str>,
@@ -1745,6 +1747,8 @@ fn model_impl_tokens(
     let verbose_name_tokens = optional_str(verbose_name);
     let verbose_name_plural_tokens = optional_str(verbose_name_plural);
     let base_manager_name_tokens = optional_str(base_manager_name);
+    let required_db_features_lits: Vec<&str> =
+        required_db_features.iter().map(String::as_str).collect();
     let required_db_vendor_tokens = optional_str(required_db_vendor);
     let default_related_name_tokens = optional_str(default_related_name);
     let db_table_comment_tokens = optional_str(db_table_comment);
@@ -1899,6 +1903,7 @@ fn model_impl_tokens(
                 verbose_name_plural: #verbose_name_plural_tokens,
                 managed: #managed,
                 base_manager_name: #base_manager_name_tokens,
+                required_db_features: &[ #(#required_db_features_lits),* ],
                 required_db_vendor: #required_db_vendor_tokens,
                 default_related_name: #default_related_name_tokens,
                 db_table_comment: #db_table_comment_tokens,
@@ -4476,6 +4481,12 @@ struct ContainerAttrs {
     /// `#[rustango(base_manager_name = "...")]`. Threaded into
     /// `ModelSchema::base_manager_name`. Declarative-only today.
     base_manager_name: Option<String>,
+    /// Django-shape `Meta.required_db_features` from
+    /// `#[rustango(required_db_features = "json_extract,window_functions")]`.
+    /// Each comma-separated capability token surfaces on
+    /// `ModelSchema::required_db_features` so `manage check --deploy`
+    /// can warn when the active dialect lacks one.
+    required_db_features: Vec<String>,
     /// Django-shape `Meta.required_db_vendor` from
     /// `#[rustango(required_db_vendor = "postgres|mysql|sqlite")]`.
     /// Normalized to the dialect name `manage check --deploy`
@@ -4729,6 +4740,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         verbose_name: None,
         verbose_name_plural: None,
         base_manager_name: None,
+        required_db_features: Vec::new(),
         required_db_vendor: None,
         default_related_name: None,
         db_table_comment: None,
@@ -5071,6 +5083,39 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 // table-level comment attached to the DB catalog.
                 let s: LitStr = meta.value()?.parse()?;
                 out.db_table_comment = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("required_db_features") {
+                // Django-shape `Meta.required_db_features` — capability
+                // tokens the model needs (e.g. `"json_extract"`,
+                // `"window_functions"`, `"row_security"`). Comma-separated.
+                // `manage check --deploy` walks every model and warns
+                // when the active backend doesn't advertise the
+                // capability.
+                //
+                // rustango ships a small registry of capability tokens
+                // each dialect supports — see `Dialect::supports`.
+                // Unknown tokens still parse (they end up on the
+                // schema and show up in the warning) so projects can
+                // declare aspirational capabilities and the check
+                // verb will keep nagging until the dialect implements
+                // them.
+                let s: LitStr = meta.value()?.parse()?;
+                let raw = s.value();
+                let features: Vec<String> = raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                if features.is_empty() {
+                    return Err(syn::Error::new(
+                        s.span(),
+                        "`required_db_features` must list at least one \
+                         comma-separated capability token",
+                    ));
+                }
+                out.required_db_features = features;
                 return Ok(());
             }
             if meta.path.is_ident("required_db_vendor") {

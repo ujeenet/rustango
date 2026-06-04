@@ -1456,13 +1456,15 @@ async fn check_cmd<W: Write>(
         // Gated by the `config` feature; no-op without it.
         #[cfg(feature = "config")]
         run_settings_audit(&mut audit);
-        // Django-parity `Meta.required_db_vendor` audit — every model
-        // declaring `#[rustango(required_db_vendor = "postgres")]`
-        // (etc.) gets compared against the active pool's dialect.
-        // Mismatches surface as warnings so ops catches "I forgot to
-        // switch DATABASE_URL" at deploy time rather than the first
-        // request that hits a PG-only feature on SQLite.
-        let active = pool.dialect().name();
+        // Django-parity `Meta.required_db_vendor` + `required_db_features`
+        // audit — every model declaring `required_db_vendor = "postgres"`
+        // or `required_db_features = "json_path, listen_notify"` gets
+        // compared against the active pool's dialect. Mismatches surface
+        // as warnings so ops catches "I forgot to switch DATABASE_URL"
+        // (and "this model wants LISTEN/NOTIFY but you're on SQLite")
+        // at deploy time rather than the first runtime hit.
+        let dialect = pool.dialect();
+        let active = dialect.name();
         for entry in crate::core::inventory::iter::<crate::core::ModelEntry>.into_iter() {
             if let Some(want) = entry.schema.required_db_vendor {
                 if want != active {
@@ -1470,6 +1472,16 @@ async fn check_cmd<W: Write>(
                         "model `{}` declares `required_db_vendor = \"{want}\"` \
                          but the active database backend is `{active}` — \
                          queries that depend on backend-specific features may fail",
+                        entry.schema.name,
+                    ));
+                }
+            }
+            for token in entry.schema.required_db_features {
+                if !dialect.supports(token) {
+                    audit.warnings.push(format!(
+                        "model `{}` declares `required_db_features` token `{token}` \
+                         which the active `{active}` dialect does not advertise — \
+                         queries depending on it will fail at runtime",
                         entry.schema.name,
                     ));
                 }

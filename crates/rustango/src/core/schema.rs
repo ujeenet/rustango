@@ -500,6 +500,19 @@ pub struct ModelSchema {
     /// `"sqlite"` — so callers can compare to a single canonical
     /// token. `None` means "any backend is fine" (the default).
     pub required_db_vendor: Option<&'static str>,
+    /// Django-shape `Meta.required_db_features` — capability tokens
+    /// the model depends on (e.g. `"json_extract"`,
+    /// `"window_functions"`, `"row_security"`). Set via
+    /// `#[rustango(required_db_features = "tok1, tok2")]`.
+    ///
+    /// `manage check --deploy` walks every model and warns when the
+    /// active `Dialect::supports(token)` returns `false`. Use for
+    /// "this model needs PG's `LISTEN/NOTIFY`" / "needs MySQL 8 CTE
+    /// support" / etc. — finer-grained than `required_db_vendor`,
+    /// composes with it.
+    ///
+    /// Empty slice (default) means "no special capabilities needed".
+    pub required_db_features: &'static [&'static str],
     /// Django-shape `Meta.get_latest_by` — default sort field that
     /// `QuerySet::latest_default()` / `earliest_default()` use when
     /// the caller doesn't pass a field name explicitly. A string

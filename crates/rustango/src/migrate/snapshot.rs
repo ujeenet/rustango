@@ -657,6 +657,7 @@ mod composite_fk_snapshot_tests {
             default_related_name: None,
             base_manager_name: None,
             required_db_vendor: None,
+            required_db_features: &[],
             get_latest_by: None,
             extra_permissions: &[],
         };
@@ -732,6 +733,7 @@ mod composite_fk_snapshot_tests {
             default_related_name: None,
             base_manager_name: None,
             required_db_vendor: None,
+            required_db_features: &[],
             get_latest_by: None,
             extra_permissions: &[],
         };
@@ -762,6 +764,7 @@ mod composite_fk_snapshot_tests {
             default_related_name: None,
             base_manager_name: None,
             required_db_vendor: None,
+            required_db_features: &[],
             get_latest_by: None,
             extra_permissions: &[],
         };
@@ -830,6 +833,7 @@ mod composite_fk_snapshot_tests {
             default_related_name: None,
             base_manager_name: None,
             required_db_vendor: None,
+            required_db_features: &[],
             get_latest_by: None,
             extra_permissions: &[],
         };

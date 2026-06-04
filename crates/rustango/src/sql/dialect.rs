@@ -289,6 +289,42 @@ pub trait Dialect {
         true
     }
 
+    /// Django-parity `Meta.required_db_features` capability query — does
+    /// this dialect advertise the given token? `manage check --deploy`
+    /// walks every model's `required_db_features` and warns when this
+    /// returns `false`, so projects can declare "needs PG `LISTEN/NOTIFY`"
+    /// or "needs MySQL 8 CTE support" and get a deploy-time signal
+    /// rather than a runtime surprise.
+    ///
+    /// Default impl whitelists tokens supported by all three backends
+    /// rustango ships (`window_functions`, `recursive_cte`,
+    /// `json_extract`, `expression_index`, `partial_index` —
+    /// the last gated on [`Self::supports_partial_index`]). Per-dialect
+    /// impls extend with PG-specific (`array_type`, `range_type`,
+    /// `hstore`, `citext`, `listen_notify`, `row_security`, `gin_index`,
+    /// `gist_index`, `unique_constraint_deferred`) or MySQL/SQLite
+    /// specifics.
+    ///
+    /// Unknown tokens return `false` (treat as "not supported" so the
+    /// deploy warning fires; that's the safer default for aspirational
+    /// declarations).
+    #[must_use]
+    fn supports(&self, token: &str) -> bool {
+        self.default_supports(token)
+    }
+
+    /// Tokens supported by all three backends rustango ships against —
+    /// per-dialect overrides of [`Self::supports`] call this for the
+    /// generic baseline and then `||`-add their specifics.
+    #[must_use]
+    fn default_supports(&self, token: &str) -> bool {
+        matches!(
+            token,
+            "window_functions" | "recursive_cte" | "cte" | "json_extract" | "expression_index"
+        ) || (token == "partial_index" && self.supports_partial_index())
+            || (token == "returning" && self.supports_returning())
+    }
+
     /// Dialect-specific SQL type token for the rhs of `CAST(<expr> AS <ty>)`
     /// — distinct from [`Self::null_cast`] (which is PG-specific) and
     /// [`Self::column_type`] (DDL, which includes lengths like

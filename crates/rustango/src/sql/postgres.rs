@@ -98,6 +98,32 @@ impl Dialect for Postgres {
         true
     }
 
+    fn supports(&self, token: &str) -> bool {
+        // Postgres-specific capability tokens that aren't reachable via
+        // the default impl's whitelist. Extends the default; the
+        // generic `window_functions` / `cte` / etc. fall through to
+        // `super::Dialect::supports` via the `||`.
+        matches!(
+            token,
+            "array_type"
+                | "range_type"
+                | "hstore"
+                | "citext"
+                | "listen_notify"
+                | "notify"
+                | "row_security"
+                | "gin_index"
+                | "gist_index"
+                | "spgist_index"
+                | "brin_index"
+                | "unique_constraint_deferred"
+                | "exclusion_constraint"
+                | "tablespaces"
+                | "json_path"
+                | "json_query"
+        ) || self.default_supports(token)
+    }
+
     fn cast_aggregate_to_int(&self, expr: &str) -> String {
         // PostgreSQL accepts the shorter `<expr>::bigint` form.
         format!("{expr}::bigint")
