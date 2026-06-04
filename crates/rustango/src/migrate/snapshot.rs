@@ -77,6 +77,13 @@ pub struct IndexSnapshot {
     /// this key deserialize cleanly via `#[serde(default)]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub where_clause: Option<String>,
+    /// Django `Index(include=[...])` covering-index columns. PG 11+
+    /// only; MySQL/SQLite drop the clause at render time with a
+    /// warning. Empty `Vec` (default) means "no covering columns".
+    /// Older snapshots without this key deserialize cleanly via
+    /// `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
 }
 
 fn default_index_method() -> String {
@@ -554,6 +561,7 @@ fn collect_indexes<'a>(schemas: impl Iterator<Item = &'a ModelSchema>) -> Vec<In
                     unique: idx.unique,
                     method: idx.method.as_str().to_owned(),
                     where_clause: idx.where_clause.map(str::to_owned),
+                    include: idx.include.iter().map(|&c| c.to_owned()).collect(),
                 });
             }
         }

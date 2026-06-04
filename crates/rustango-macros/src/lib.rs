@@ -778,6 +778,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     unique: fa.index_unique,
                     method: fa.index_method,
                     where_clause: None,
+                    include: Vec::new(),
                 });
             }
         }
@@ -1786,6 +1787,7 @@ fn model_impl_tokens(
             Some(s) => quote!(::core::option::Option::Some(#s)),
             None => quote!(::core::option::Option::None),
         };
+        let include_lits: Vec<&str> = idx.include.iter().map(String::as_str).collect();
         quote! {
             ::rustango::core::IndexSchema {
                 name: #name,
@@ -1793,6 +1795,7 @@ fn model_impl_tokens(
                 unique: #unique,
                 method: #method_variant,
                 where_clause: #where_clause,
+                include: &[ #(#include_lits),* ],
             }
         }
     });
@@ -4557,6 +4560,10 @@ struct IndexAttr {
     /// T1.3. Set via `#[rustango(unique_when(columns = "...",
     /// condition = "...", name = "..."))]`. `None` for plain indexes.
     where_clause: Option<String>,
+    /// Django `Index(fields=..., include=[...])` covering-index
+    /// columns (PG 11+ `INCLUDE (...)` clause). Empty `Vec` (the
+    /// default) means "no covering columns".
+    include: Vec<String>,
 }
 
 /// Parsed form of one `#[rustango(check(name = "…", expr = "…"))]` declaration.
@@ -5335,6 +5342,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     unique: true,
                     method: "btree".to_owned(),
                     where_clause: None,
+                include: Vec::new(),
                 });
                 return Ok(());
             }
@@ -5351,6 +5359,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     unique: false,
                     method: "btree".to_owned(),
                     where_clause: None,
+                include: Vec::new(),
                 });
                 return Ok(());
             }
@@ -5372,6 +5381,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 let mut columns: Option<Vec<String>> = None;
                 let mut condition: Option<String> = None;
                 let mut name: Option<String> = None;
+                let mut include: Vec<String> = Vec::new();
                 meta.parse_nested_meta(|inner| {
                     if inner.path.is_ident("columns") {
                         let s: LitStr = inner.value()?.parse()?;
@@ -5388,10 +5398,19 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                         name = Some(s.value());
                         return Ok(());
                     }
+                    if inner.path.is_ident("include") {
+                        // Django `UniqueConstraint(include=[...])` — PG
+                        // 11+ covering-index columns. Non-key columns
+                        // travel with the index leaf for index-only
+                        // scans. Dropped on MySQL/SQLite by the writer.
+                        let s: LitStr = inner.value()?.parse()?;
+                        include = split_field_list(&s.value());
+                        return Ok(());
+                    }
                     Err(inner.error(
                         "unknown unique_when attribute (supported: \
                          `columns = \"...\"`, `condition = \"...\"`, \
-                         `name = \"...\"`)",
+                         `name = \"...\"`, `include = \"...\"`)",
                     ))
                 })?;
                 let columns = columns.ok_or_else(|| {
@@ -5409,6 +5428,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     unique: true,
                     method: "btree".to_owned(),
                     where_clause: Some(condition),
+                    include,
                 });
                 return Ok(());
             }
@@ -5434,6 +5454,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 let mut condition: Option<String> = None;
                 let mut name: Option<String> = None;
                 let mut method: String = "btree".to_owned();
+                let mut include: Vec<String> = Vec::new();
                 meta.parse_nested_meta(|inner| {
                     if inner.path.is_ident("columns") {
                         let s: LitStr = inner.value()?.parse()?;
@@ -5455,10 +5476,20 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                         method = s.value();
                         return Ok(());
                     }
+                    if inner.path.is_ident("include") {
+                        // Django `Index(include=[...])` — PG 11+
+                        // covering-index columns; non-key columns
+                        // travel with the index leaf. Dropped on
+                        // MySQL/SQLite.
+                        let s: LitStr = inner.value()?.parse()?;
+                        include = split_field_list(&s.value());
+                        return Ok(());
+                    }
                     Err(inner.error(
                         "unknown index_when attribute (supported: \
                          `columns = \"...\"`, `condition = \"...\"`, \
-                         `name = \"...\"`, `method = \"btree|gin|gist|...\"`)",
+                         `name = \"...\"`, `method = \"btree|gin|gist|...\"`, \
+                         `include = \"...\"`)",
                     ))
                 })?;
                 let columns = columns
@@ -5475,6 +5506,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     unique: false,
                     method,
                     where_clause: Some(condition),
+                    include,
                 });
                 return Ok(());
             }
@@ -5494,6 +5526,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     unique: false,
                     method: "btree".to_owned(),
                     where_clause: None,
+                include: Vec::new(),
                 });
                 return Ok(());
             }

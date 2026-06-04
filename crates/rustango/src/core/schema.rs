@@ -686,6 +686,18 @@ pub struct IndexSchema {
     /// is ignored, so duplicates outside the partition would also be
     /// rejected — document the limitation).
     pub where_clause: Option<&'static str>,
+    /// Django-shape `Index(fields=..., include=[...])` covering-index
+    /// columns. PG 11+ supports `CREATE INDEX … (key_cols) INCLUDE
+    /// (non_key_cols)` — the non-key columns travel along with the
+    /// index leaf so index-only scans can fetch them without touching
+    /// the heap. Set via `include = "col1, col2"` on `index_when` /
+    /// `unique_when` / `index_together` / `unique_together`.
+    ///
+    /// MySQL has no equivalent (writer drops the clause with a
+    /// `tracing::warn!`); SQLite ignores INCLUDE (the WITHOUT ROWID
+    /// case has different semantics — not exposed here). Empty slice
+    /// (default) means "no covering columns".
+    pub include: &'static [&'static str],
 }
 
 /// Index access method — Postgres `CREATE INDEX … USING <method>`.

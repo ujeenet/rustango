@@ -1012,6 +1012,34 @@ Composes with `required_db_vendor` — set both for fail-fast deploy validation:
 
 `manage check --deploy` on a SQLite pool produces one warning per unsupported token + one for the vendor mismatch.
 
+#### 2.25.14 `include = "..."` on `index_when` / `unique_when` (PR #605)
+
+**What**: Django `Index(fields=..., include=[...])` covering-index parity. Optional sub-attr on both `index_when(...)` and `unique_when(...)`. Lists non-key columns that travel along with the index leaf so PG can serve queries entirely from the index without a heap visit (index-only scans).
+
+**Render shape**:
+- **PG 11+**: `CREATE INDEX <name> ON <table> (key_cols) INCLUDE (non_key_cols)` — emitted before the WHERE-suffix.
+- **MySQL / SQLite**: clause dropped with a `tracing::warn!`. Operators wanting covers on those backends should add a redundant non-key column to the key tuple.
+
+```rust
+#[rustango(
+    table = "post",
+    index_when(
+        columns = "status",
+        condition = "deleted_at IS NULL",
+        name = "active_post_cover_idx",
+        include = "title, created_at",
+    ),
+    unique_when(
+        columns = "tenant_id, slug",
+        condition = "deleted_at IS NULL",
+        name = "active_post_slug_unique",
+        include = "title",
+    ),
+)]
+```
+
+Reads `SELECT title, created_at FROM post WHERE status = 'published' AND deleted_at IS NULL` get index-only scans without touching the heap.
+
 ---
 
 ## Chapter 3 — ORM

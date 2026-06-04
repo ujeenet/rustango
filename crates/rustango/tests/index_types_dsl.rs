@@ -63,6 +63,7 @@ fn index_schema_default_method_is_btree() {
         unique: false,
         method: IndexMethod::default(),
         where_clause: None,
+        include: &[],
     };
     assert_eq!(idx.method, IndexMethod::BTree);
 }
