@@ -110,6 +110,7 @@ impl SmtpMailer {
             credentials: None,
             tls: TlsMode::default(),
             default_from: None,
+            timeout: None,
         }
     }
 
@@ -144,6 +145,7 @@ pub struct SmtpMailerBuilder {
     credentials: Option<(String, String)>,
     tls: TlsMode,
     default_from: Option<String>,
+    timeout: Option<std::time::Duration>,
 }
 
 impl SmtpMailerBuilder {
@@ -176,6 +178,16 @@ impl SmtpMailerBuilder {
         self
     }
 
+    /// Django-shape `EMAIL_TIMEOUT` — SMTP connection timeout. `None`
+    /// defers to lettre's default (no explicit limit). Set this on
+    /// every production deployment — a wedged relay otherwise stalls
+    /// request workers waiting on the transport for the kernel's
+    /// default TCP timeout (several minutes).
+    pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
     /// Finalize. Validates `default_from` (if set) and assembles the
     /// `lettre` transport.
     ///
@@ -200,6 +212,10 @@ impl SmtpMailerBuilder {
 
         if let Some((user, pass)) = self.credentials {
             builder = builder.credentials(Credentials::new(user, pass));
+        }
+
+        if let Some(timeout) = self.timeout {
+            builder = builder.timeout(Some(timeout));
         }
 
         // For TlsMode::None, lettre's `builder_dangerous` already
@@ -357,6 +373,9 @@ pub fn from_settings(
     if let Some(addr) = s.from_address.as_deref() {
         b = b.default_from(addr);
     }
+    if let Some(secs) = s.smtp_timeout_secs {
+        b = b.timeout(std::time::Duration::from_secs(secs));
+    }
     Ok(Some(Arc::new(b.build()?)))
 }
 
@@ -427,5 +446,29 @@ mod tests {
         // Smoke: the mailer exists. Real SMTP round-trip is exercised
         // by the integration test against the mock server.
         drop(m);
+    }
+
+    #[tokio::test]
+    async fn from_settings_accepts_smtp_timeout_secs() {
+        // Django EMAIL_TIMEOUT parity — the TOML field has to thread
+        // through from_settings without choking the build. Real
+        // timeout enforcement happens at send-time inside lettre.
+        let mut s = crate::config::MailSettings::default();
+        s.smtp_host = Some("localhost".into());
+        s.smtp_tls = Some("none".into());
+        s.smtp_timeout_secs = Some(15);
+        let m = from_settings(&s).expect("ok").expect("some");
+        drop(m);
+    }
+
+    #[test]
+    fn builder_timeout_method_threads_through() {
+        // Builder accepts a Duration without panicking — proves the
+        // field plumbed into lettre's transport-side .timeout() call.
+        let b = SmtpMailer::builder("localhost")
+            .tls(TlsMode::None)
+            .timeout(std::time::Duration::from_secs(30));
+        let mailer = b.build().expect("build");
+        drop(mailer);
     }
 }

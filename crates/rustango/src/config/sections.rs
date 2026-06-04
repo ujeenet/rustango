@@ -325,6 +325,14 @@ pub struct MailSettings {
     /// port 465). Unknown values fall back to `"starttls"` with a
     /// warning. Issue #48.
     pub smtp_tls: Option<String>,
+    /// Django-shape `EMAIL_TIMEOUT` — SMTP connection timeout in
+    /// seconds. `None` defers to lettre's default (no explicit
+    /// timeout). Set this on every prod deployment — a wedged
+    /// SMTP relay otherwise stalls request workers waiting on the
+    /// transport for the kernel-default TCP timeout (several
+    /// minutes).
+    #[serde(default)]
+    pub smtp_timeout_secs: Option<u64>,
     /// Django-shape `DEFAULT_FROM_EMAIL` — the `From:` address on
     /// regular outgoing mail (`send_pool`, `send_many_pool`).
     /// `from_address` is the historical alias rustango shipped
