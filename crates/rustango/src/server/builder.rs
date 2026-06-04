@@ -257,17 +257,25 @@ impl<DB: Database> Builder<DB> {
     ///
     /// # Errors
     /// Surfaces whatever the hook returns.
+    ///
+    /// The hook's error type is widened to `Box<dyn Error + Send +
+    /// Sync>` (PR #606) so seed closures can hold non-`Send` errors
+    /// across `.await` boundaries without losing future-Send-ness.
+    /// The return type stays the bare `Box<dyn Error>` shape that
+    /// callers propagate through `?` chains; the boundary coercion
+    /// happens at the `.await?` point.
     pub async fn seed_with<F, Fut>(self, hook: F) -> Result<Self, Box<dyn std::error::Error>>
     where
         F: FnOnce(Arc<TenantPools<DB>>, sqlx::Pool<DB>, String) -> Fut,
-        Fut: Future<Output = Result<(), Box<dyn std::error::Error>>>,
+        Fut: Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>,
     {
         hook(
             self.pools.clone(),
             self.registry.clone(),
             self.registry_url.clone(),
         )
-        .await?;
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { e })?;
         Ok(self)
     }
 

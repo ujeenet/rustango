@@ -39,7 +39,7 @@ use crate::sql::sqlx::PgPool;
 /// Boxed seed-hook future. Keeps the public method signature simple
 /// while accepting any `async fn(&Pool) -> Result<…>` closure.
 type SeedFut<'a> =
-    Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>>;
 type SeedFn = Box<dyn for<'a> FnOnce(&'a crate::sql::Pool) -> SeedFut<'a> + Send>;
 
 /// One-builder dispatcher. Hand it your API router (and optionally a
@@ -173,7 +173,7 @@ impl Cli {
     pub fn seed<F, Fut>(mut self, hook: F) -> Self
     where
         F: for<'a> FnOnce(&'a crate::sql::Pool) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + 'static,
+        Fut: Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send + 'static,
     {
         self.seed = Some(Box::new(move |pool| Box::pin(hook(pool))));
         self
@@ -730,7 +730,12 @@ impl Cli {
             let pool = crate::sql::Pool::connect(&url).await?;
             let _ = crate::migrate::migrate_pool(&pool, &self.migrations_dir).await?;
             if let Some(seed) = self.seed {
-                seed(&pool).await?;
+                // The seed hook's error is now `Send + Sync` (so a seed can
+                // hold an error across an `.await` without the future losing
+                // `Send`); coerce to this fn's `Box<dyn Error>` at the boundary.
+                seed(&pool)
+                    .await
+                    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
             let api = self.api;
             #[cfg(feature = "admin")]
@@ -769,7 +774,9 @@ impl Cli {
             let pool = PgPool::connect(&url).await?;
             let _ = crate::migrate::migrate(&pool, &self.migrations_dir).await?;
             if let Some(seed) = self.seed {
-                seed(&crate::sql::Pool::from(pool.clone())).await?;
+                seed(&crate::sql::Pool::from(pool.clone()))
+                    .await
+                    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
             let api = self.api;
             #[cfg(feature = "admin")]
