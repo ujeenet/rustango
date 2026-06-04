@@ -4080,6 +4080,7 @@ mod tests {
             db_table_comment: None,
             default_related_name: None,
             base_manager_name: None,
+            required_db_vendor: None,
             get_latest_by: None,
             extra_permissions: &[],
         }))
@@ -4188,6 +4189,7 @@ mod tests {
             db_table_comment: None,
             default_related_name: None,
             base_manager_name: None,
+            required_db_vendor: None,
             get_latest_by: None,
             extra_permissions: &[],
         }))
@@ -4578,6 +4580,7 @@ mod tests {
             db_table_comment: None,
             default_related_name: None,
             base_manager_name: None,
+            required_db_vendor: None,
             get_latest_by: None,
             extra_permissions: &[],
         }));
@@ -4834,6 +4837,7 @@ mod tests {
             db_table_comment: None,
             default_related_name: None,
             base_manager_name: None,
+            required_db_vendor: None,
             get_latest_by: None,
             extra_permissions: &[],
         }));
@@ -4902,6 +4906,7 @@ mod tests {
             db_table_comment: None,
             default_related_name: None,
             base_manager_name: None,
+            required_db_vendor: None,
             get_latest_by: None,
             extra_permissions: &[],
         }));

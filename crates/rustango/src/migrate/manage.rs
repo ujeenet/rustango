@@ -1456,6 +1456,25 @@ async fn check_cmd<W: Write>(
         // Gated by the `config` feature; no-op without it.
         #[cfg(feature = "config")]
         run_settings_audit(&mut audit);
+        // Django-parity `Meta.required_db_vendor` audit — every model
+        // declaring `#[rustango(required_db_vendor = "postgres")]`
+        // (etc.) gets compared against the active pool's dialect.
+        // Mismatches surface as warnings so ops catches "I forgot to
+        // switch DATABASE_URL" at deploy time rather than the first
+        // request that hits a PG-only feature on SQLite.
+        let active = pool.dialect().name();
+        for entry in crate::core::inventory::iter::<crate::core::ModelEntry>.into_iter() {
+            if let Some(want) = entry.schema.required_db_vendor {
+                if want != active {
+                    audit.warnings.push(format!(
+                        "model `{}` declares `required_db_vendor = \"{want}\"` \
+                         but the active database backend is `{active}` — \
+                         queries that depend on backend-specific features may fail",
+                        entry.schema.name,
+                    ));
+                }
+            }
+        }
         info.extend(audit.info);
         warnings.extend(audit.warnings);
         errors.extend(audit.errors);

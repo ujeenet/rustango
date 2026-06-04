@@ -807,6 +807,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         container.verbose_name_plural.as_deref(),
         container.managed,
         container.base_manager_name.as_deref(),
+        container.required_db_vendor.as_deref(),
         container.default_related_name.as_deref(),
         container.db_table_comment.as_deref(),
         container
@@ -1704,6 +1705,7 @@ fn model_impl_tokens(
     verbose_name_plural: Option<&str>,
     managed: bool,
     base_manager_name: Option<&str>,
+    required_db_vendor: Option<&str>,
     default_related_name: Option<&str>,
     db_table_comment: Option<&str>,
     get_latest_by: Option<(&str, bool)>,
@@ -1743,6 +1745,7 @@ fn model_impl_tokens(
     let verbose_name_tokens = optional_str(verbose_name);
     let verbose_name_plural_tokens = optional_str(verbose_name_plural);
     let base_manager_name_tokens = optional_str(base_manager_name);
+    let required_db_vendor_tokens = optional_str(required_db_vendor);
     let default_related_name_tokens = optional_str(default_related_name);
     let db_table_comment_tokens = optional_str(db_table_comment);
     let get_latest_by_tokens = match get_latest_by {
@@ -1896,6 +1899,7 @@ fn model_impl_tokens(
                 verbose_name_plural: #verbose_name_plural_tokens,
                 managed: #managed,
                 base_manager_name: #base_manager_name_tokens,
+                required_db_vendor: #required_db_vendor_tokens,
                 default_related_name: #default_related_name_tokens,
                 db_table_comment: #db_table_comment_tokens,
                 get_latest_by: #get_latest_by_tokens,
@@ -4472,6 +4476,13 @@ struct ContainerAttrs {
     /// `#[rustango(base_manager_name = "...")]`. Threaded into
     /// `ModelSchema::base_manager_name`. Declarative-only today.
     base_manager_name: Option<String>,
+    /// Django-shape `Meta.required_db_vendor` from
+    /// `#[rustango(required_db_vendor = "postgres|mysql|sqlite")]`.
+    /// Normalized to the dialect name `manage check --deploy`
+    /// compares against `Settings.database.backend`. Aliases
+    /// (`postgresql` / `pg` / `mariadb` / `sqlite3`) accepted but
+    /// stored under the canonical name.
+    required_db_vendor: Option<String>,
     /// Django-shape `Meta.default_related_name` from
     /// `#[rustango(default_related_name = "...")]`. Threaded into
     /// `ModelSchema::default_related_name`. Reverse-relation accessor
@@ -4718,6 +4729,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         verbose_name: None,
         verbose_name_plural: None,
         base_manager_name: None,
+        required_db_vendor: None,
         default_related_name: None,
         db_table_comment: None,
         get_latest_by: None,
@@ -5059,6 +5071,42 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 // table-level comment attached to the DB catalog.
                 let s: LitStr = meta.value()?.parse()?;
                 out.db_table_comment = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("required_db_vendor") {
+                // Django-shape `Meta.required_db_vendor` — the model
+                // is only meant to run against the named DB backend.
+                // `manage check --deploy` flags a mismatch so
+                // ops catches "I forgot to switch DATABASE_URL" at
+                // deploy time rather than runtime.
+                //
+                // Django spells it as a free-form string; rustango
+                // restricts to the three backends it ships dialects
+                // for so the check verb can compare reliably.
+                let s: LitStr = meta.value()?.parse()?;
+                let raw = s.value().to_ascii_lowercase();
+                match raw.as_str() {
+                    "postgresql" | "postgres" | "pg" => {
+                        out.required_db_vendor = Some("postgres".to_owned());
+                    }
+                    "mysql" | "mariadb" => {
+                        out.required_db_vendor = Some("mysql".to_owned());
+                    }
+                    "sqlite" | "sqlite3" => {
+                        out.required_db_vendor = Some("sqlite".to_owned());
+                    }
+                    _ => {
+                        return Err(syn::Error::new(
+                            s.span(),
+                            format!(
+                                "unknown required_db_vendor `{raw}` — \
+                                 expected `postgres` (aliases: `postgresql`, `pg`), \
+                                 `mysql` (alias: `mariadb`), or `sqlite` \
+                                 (alias: `sqlite3`)"
+                            ),
+                        ));
+                    }
+                }
                 return Ok(());
             }
             if meta.path.is_ident("base_manager_name") {
