@@ -634,7 +634,7 @@ Summary: **14 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A**.
 | Async middleware | (above) | SHIPPED | tower `Layer` is async | |
 | Async signal receivers | [async signals](https://docs.djangoproject.com/en/6.0/topics/signals/#defining-and-sending-signals) | SHIPPED | All receivers are `async fn` | |
 | `asgi.py` (ASGI entry) | [asgi](https://docs.djangoproject.com/en/6.0/howto/deployment/asgi/) | N/A | Rustango binds via `axum::serve` directly | |
-| Async send_mail | (Django 5.x+) | SHIPPED | `email::send_pool(mailer, msg).await` | |
+| Async send_mail | (Django 5.x+) | SHIPPED | `email::send_mail(mailer, subject, body, from, &[recipients]).await` (PR #625, see sec 18). All Mailer impls are `async fn send` natively — there's no sync/async split to bridge. | |
 | Sync-to-async / async-to-sync bridging | [sync_to_async](https://docs.djangoproject.com/en/6.0/topics/async/#sync-to-async-async-to-sync) | N/A | Pure async — no bridging needed | |
 
 Summary: **4 SHIPPED / 0 PARTIAL / 0 MISSING / 3 N/A**. Async is native; no parity gap.
