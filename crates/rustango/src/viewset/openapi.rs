@@ -474,6 +474,7 @@ mod tests {
             required_db_vendor: None,
             required_db_features: &[],
             order_with_respect_to: None,
+            proxy: false,
             get_latest_by: None,
             extra_permissions: &[],
         };
