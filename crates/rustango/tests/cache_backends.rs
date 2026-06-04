@@ -318,3 +318,71 @@ async fn touch_does_not_alter_value() {
     c.touch("k", Some(Duration::from_secs(60))).await.unwrap();
     assert_eq!(c.get("k").await.unwrap().as_deref(), Some("original"));
 }
+
+// ------------------------------------------------------------------ get_many / set_many / delete_many (Django parity)
+
+#[tokio::test]
+async fn set_many_writes_every_entry() {
+    let c = InMemoryCache::new();
+    c.set_many(&[("a", "1"), ("b", "2"), ("c", "3")], None)
+        .await
+        .unwrap();
+    assert_eq!(c.get("a").await.unwrap().as_deref(), Some("1"));
+    assert_eq!(c.get("b").await.unwrap().as_deref(), Some("2"));
+    assert_eq!(c.get("c").await.unwrap().as_deref(), Some("3"));
+}
+
+#[tokio::test]
+async fn get_many_returns_only_present_keys() {
+    let c = InMemoryCache::new();
+    c.set("a", "1", None).await.unwrap();
+    c.set("c", "3", None).await.unwrap();
+    let map = c.get_many(&["a", "b", "c"]).await.unwrap();
+    assert_eq!(map.len(), 2);
+    assert_eq!(map.get("a").map(String::as_str), Some("1"));
+    assert_eq!(map.get("c").map(String::as_str), Some("3"));
+    assert!(!map.contains_key("b"));
+}
+
+#[tokio::test]
+async fn get_many_with_no_keys_returns_empty() {
+    let c = InMemoryCache::new();
+    c.set("a", "1", None).await.unwrap();
+    let map = c.get_many(&[]).await.unwrap();
+    assert!(map.is_empty());
+}
+
+#[tokio::test]
+async fn set_many_with_ttl_expires_every_entry() {
+    let c = InMemoryCache::new();
+    c.set_many(
+        &[("k1", "v1"), ("k2", "v2")],
+        Some(Duration::from_millis(50)),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert!(c.get("k1").await.unwrap().is_none());
+    assert!(c.get("k2").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn delete_many_removes_every_listed_key() {
+    let c = InMemoryCache::new();
+    c.set_many(&[("a", "1"), ("b", "2"), ("c", "3")], None)
+        .await
+        .unwrap();
+    c.delete_many(&["a", "c"]).await.unwrap();
+    assert!(c.get("a").await.unwrap().is_none());
+    assert_eq!(c.get("b").await.unwrap().as_deref(), Some("2"));
+    assert!(c.get("c").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn delete_many_ignores_missing_keys() {
+    let c = InMemoryCache::new();
+    c.set("kept", "v", None).await.unwrap();
+    // Mix of missing + present — neither should error.
+    c.delete_many(&["ghost1", "kept", "ghost2"]).await.unwrap();
+    assert!(c.get("kept").await.unwrap().is_none());
+}

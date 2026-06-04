@@ -162,6 +162,52 @@ pub trait Cache: Send + Sync + 'static {
             None => Ok(false),
         }
     }
+
+    /// Django-parity `cache.get_many(keys)` — bulk fetch for a key
+    /// set, returning a map of present-and-not-expired entries.
+    /// Missing keys are omitted (Django's shape). Order of the
+    /// returned map is unspecified.
+    ///
+    /// Default implementation issues one `get` per key in sequence.
+    /// Backends with native batch primitives should override:
+    /// * `RedisCache` → `MGET` (one RTT)
+    /// * `DatabaseCache` → `SELECT … WHERE cache_key IN (…)` (one query)
+    async fn get_many(&self, keys: &[&str]) -> Result<HashMap<String, String>, CacheError> {
+        let mut out = HashMap::with_capacity(keys.len());
+        for k in keys {
+            if let Some(v) = self.get(k).await? {
+                out.insert((*k).to_owned(), v);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Django-parity `cache.set_many(mapping, timeout)` — bulk-set
+    /// many key/value pairs with one shared TTL. Equivalent to
+    /// looping `set` per entry; backends with native pipelines
+    /// (Redis `MSET` + `EXPIRE`, or executor-side `bulk_insert`)
+    /// should override.
+    async fn set_many(
+        &self,
+        entries: &[(&str, &str)],
+        ttl: Option<Duration>,
+    ) -> Result<(), CacheError> {
+        for (k, v) in entries {
+            self.set(k, v, ttl).await?;
+        }
+        Ok(())
+    }
+
+    /// Django-parity `cache.delete_many(keys)` — bulk-delete every
+    /// listed key. Missing keys are silently ignored. Default loops
+    /// `delete`; backends with native primitives (`DEL key1 key2`)
+    /// override.
+    async fn delete_many(&self, keys: &[&str]) -> Result<(), CacheError> {
+        for k in keys {
+            self.delete(k).await?;
+        }
+        Ok(())
+    }
 }
 
 /// `Arc<dyn Cache>` alias — the standard way to share a cache instance.
