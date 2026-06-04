@@ -104,8 +104,8 @@ pub trait Cache: Send + Sync + 'static {
     /// native counters typically only set TTL on first creation. Treat
     /// `ttl` as a hint, not a guarantee.
     ///
-    /// Returns 0 if the existing value isn't a valid integer (the entry
-    /// is overwritten with `by` in that case).
+    /// Non-integer existing values are treated as 0 — the counter is
+    /// overwritten with `by` and the new value is `by` itself.
     async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
         let cur = self
             .get(key)
