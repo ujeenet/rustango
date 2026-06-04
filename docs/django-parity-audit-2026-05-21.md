@@ -474,7 +474,7 @@ Summary: **13 SHIPPED / 2 PARTIAL / 2 MISSING / 2 N/A**. Multi-DB routing is the
 | Middleware | Doc | Status | rustango | Notes |
 |---|---|---|---|---|
 | `SecurityMiddleware` (HSTS, XSS, content-type-nosniff) | [SecurityMiddleware](https://docs.djangoproject.com/en/6.0/ref/middleware/#django.middleware.security.SecurityMiddleware) | SHIPPED | `security_headers::*` (HSTS, X-Frame, Referrer, COOP, Permissions-Policy) (v0.20+) | |
-| `CsrfViewMiddleware` | [CSRF](https://docs.djangoproject.com/en/6.0/ref/csrf/) | SHIPPED | `forms::csrf::CsrfLayer` | Double-submit-cookie. |
+| `CsrfViewMiddleware` | [CSRF](https://docs.djangoproject.com/en/6.0/ref/csrf/) | SHIPPED | `forms::csrf::CsrfLayer` — double-submit cookie + Origin-header defense-in-depth (PR #612). `CsrfConfig::trust_origin("https://app.example.com")` / `.with_trusted_origins([...])` is Django `CSRF_TRUSTED_ORIGINS` parity; supports `https://*.example.com` wildcard subdomains. Empty list disables the Origin check (back-compat). | |
 | `XFrameOptionsMiddleware` | [clickjacking](https://docs.djangoproject.com/en/6.0/ref/clickjacking/) | SHIPPED | Part of security_headers | |
 | `SessionMiddleware` | [sessions](https://docs.djangoproject.com/en/6.0/topics/http/sessions/) | SHIPPED | (sec 12) | |
 | `AuthenticationMiddleware` | [auth middleware](https://docs.djangoproject.com/en/6.0/ref/middleware/#django.contrib.auth.middleware.AuthenticationMiddleware) | SHIPPED | `SessionUser` extractor | |
