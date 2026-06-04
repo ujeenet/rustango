@@ -44,9 +44,9 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 22. Async support | 4 | 0 | 0 | 3 |
 | 23. DRF parity | 22 | 0 | 1 | 0 |
 | 24. contrib modules | 12 | 1 | 3 | 2 |
-| **Totals** | **369** | **11** | **21** | **19** |
+| **Totals** | **370** | **11** | **21** | **19** |
 
-Coverage = 369 / (369 + 11 + 21) = **92% full, 3% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
+Coverage = 370 / (370 + 11 + 21) = **92% full, 3% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
 
 Snapshot date: 2026-06-03 (post v0.42 batch including ExclusionConstraint #593, default_permissions #594, on_delete #592, ForeignKey on_delete enum override, extra_permissions #591, get_latest_by #590, db_table_comment #589, citext, DatabaseCache, managed=false, upload streaming, i18n).
 
@@ -476,6 +476,7 @@ Summary: **13 SHIPPED / 2 PARTIAL / 2 MISSING / 2 N/A**. Multi-DB routing is the
 | `SecurityMiddleware` (HSTS, XSS, content-type-nosniff) | [SecurityMiddleware](https://docs.djangoproject.com/en/6.0/ref/middleware/#django.middleware.security.SecurityMiddleware) | SHIPPED | `security_headers::*` (HSTS, X-Frame, Referrer, COOP, Permissions-Policy) (v0.20+) | |
 | `CsrfViewMiddleware` | [CSRF](https://docs.djangoproject.com/en/6.0/ref/csrf/) | SHIPPED | `forms::csrf::CsrfLayer` — double-submit cookie + Origin-header defense-in-depth (PR #612). `CsrfConfig::trust_origin("https://app.example.com")` / `.with_trusted_origins([...])` is Django `CSRF_TRUSTED_ORIGINS` parity; supports `https://*.example.com` wildcard subdomains. Empty list disables the Origin check (back-compat). | |
 | `XFrameOptionsMiddleware` | [clickjacking](https://docs.djangoproject.com/en/6.0/ref/clickjacking/) | SHIPPED | Part of security_headers | |
+| `SECURE_SSL_REDIRECT` (HTTP→HTTPS redirect) | [SECURE_SSL_REDIRECT](https://docs.djangoproject.com/en/6.0/ref/settings/#secure-ssl-redirect) | SHIPPED | `ssl_redirect::SslRedirectLayer` (PR #613) — 301 redirect with `SECURE_PROXY_SSL_HEADER` parity (trust `X-Forwarded-Proto: https` from the LB) + `SECURE_REDIRECT_EXEMPT` parity via `.exempt([...])` prefix list. Preserves path + query in the Location header. | |
 | `SessionMiddleware` | [sessions](https://docs.djangoproject.com/en/6.0/topics/http/sessions/) | SHIPPED | (sec 12) | |
 | `AuthenticationMiddleware` | [auth middleware](https://docs.djangoproject.com/en/6.0/ref/middleware/#django.contrib.auth.middleware.AuthenticationMiddleware) | SHIPPED | `SessionUser` extractor | |
 | `MessageMiddleware` | [messages](https://docs.djangoproject.com/en/6.0/ref/contrib/messages/) | SHIPPED | `messages::*` flash-message store | |

@@ -711,6 +711,12 @@ pub mod ip_filter;
 #[cfg(feature = "admin")]
 pub mod host_validation;
 
+/// HTTP → HTTPS redirect middleware — Django `SECURE_SSL_REDIRECT`
+/// + `SECURE_REDIRECT_EXEMPT` + `SECURE_PROXY_SSL_HEADER` parity.
+/// See [`ssl_redirect::SslRedirectLayer`].
+#[cfg(feature = "admin")]
+pub mod ssl_redirect;
+
 /// Request body size limit middleware — fast `Content-Length` rejection
 /// returning structured `413 Payload Too Large` JSON. Complements
 /// axum's per-extractor `DefaultBodyLimit`. See [`body_limit::BodyLimitLayer`].
