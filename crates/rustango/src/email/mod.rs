@@ -22,7 +22,9 @@
 //! |---------|-------------|
 //! | [`ConsoleMailer`] | Development — prints emails to stdout. Default. |
 //! | [`InMemoryMailer`] | Tests — captures emails into a `Vec` for assertions. |
-//! | [`SmtpMailer`] | Production — connects to an SMTP relay. (Future slice — currently a stub.) |
+//! | [`FileMailer`] | Dev / staging — writes one `.eml` per send under a directory. |
+//! | [`NullMailer`] | Production guardrail — accepts and discards every send (CI / disabled mail). |
+//! | [`SmtpMailer`] | Production — async lettre + rustls SMTP relay (`email-smtp` feature). |
 //!
 //! ## Plug your own
 //!
