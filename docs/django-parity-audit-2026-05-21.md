@@ -34,7 +34,7 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 12. Sessions | 7 | 0 | 0 | 0 |
 | 13. Manage commands | 20 | 0 | 3 | 6 |
 | 14. Settings | 13 | 2 | 2 | 2 |
-| 15. Security / middleware | 26 | 0 | 0 | 0 |
+| 15. Security / middleware | 27 | 0 | 0 | 0 |
 | 16. Caching | 9 | 0 | 1 | 0 |
 | 17. Signals | 10 | 0 | 0 | 1 |
 | 18. Email | 11 | 0 | 0 | 0 |
@@ -44,9 +44,9 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 22. Async support | 4 | 0 | 0 | 3 |
 | 23. DRF parity | 22 | 0 | 1 | 0 |
 | 24. contrib modules | 12 | 1 | 3 | 2 |
-| **Totals** | **368** | **11** | **21** | **19** |
+| **Totals** | **369** | **11** | **21** | **19** |
 
-Coverage = 368 / (368 + 11 + 21) = **92% full, 3% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
+Coverage = 369 / (369 + 11 + 21) = **92% full, 3% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
 
 Snapshot date: 2026-06-03 (post v0.42 batch including ExclusionConstraint #593, default_permissions #594, on_delete #592, ForeignKey on_delete enum override, extra_permissions #591, get_latest_by #590, db_table_comment #589, citext, DatabaseCache, managed=false, upload streaming, i18n).
 
@@ -494,12 +494,13 @@ Summary: **13 SHIPPED / 2 PARTIAL / 2 MISSING / 2 N/A**. Multi-DB routing is the
 | OpenTelemetry / traceparent | n/a | SHIPPED | `tracing_layer::*` | |
 | Body size limit | [DATA_UPLOAD_MAX_MEMORY_SIZE](https://docs.djangoproject.com/en/6.0/ref/settings/#data-upload-max-memory-size) | SHIPPED | `body_limit::*` | |
 | IP allowlist / blocklist | n/a | SHIPPED | `ip_filter::*` | |
+| `ALLOWED_HOSTS` (Host-header validation) | [ALLOWED_HOSTS](https://docs.djangoproject.com/en/6.0/ref/settings/#allowed-hosts) | SHIPPED | `host_validation::AllowedHostsLayer` (PR #611) — exact + `.example.com` subdomain wildcard + `*` catch-all; case-insensitive; port-stripped; empty list disables enforcement (DEBUG-style opt-out). Rejects unknown hosts with a 400 echoing the Django `DisallowedHost` shape. | |
 | Server-Timing header | n/a | SHIPPED | `server_timing::*` | |
 | CSP nonce | [CSP](https://docs.djangoproject.com/en/6.0/topics/security/#content-security-policy) | SHIPPED | `csp_nonce::*` middleware | |
 | `SECURE_PROXY_SSL_HEADER` | [proxy headers](https://docs.djangoproject.com/en/6.0/ref/settings/#secure-proxy-ssl-header) | SHIPPED | Real-IP layer handles it | |
 | API versioning (header / query / prefix) | n/a | SHIPPED | `api_version::*` | |
 
-Summary: **26 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A** for the dimensions enumerated. Rustango is notably ahead on per-request observability + CSRF / rate limiting / CSP / OTel out-of-the-box.
+Summary: **27 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A** for the dimensions enumerated. Rustango is notably ahead on per-request observability + CSRF / rate limiting / CSP / OTel out-of-the-box.
 
 ---
 

@@ -706,6 +706,11 @@ pub mod request_id;
 #[cfg(feature = "admin")]
 pub mod ip_filter;
 
+/// Host-header allowlist middleware — Django `ALLOWED_HOSTS` parity.
+/// See [`host_validation::AllowedHostsLayer`].
+#[cfg(feature = "admin")]
+pub mod host_validation;
+
 /// Request body size limit middleware — fast `Content-Length` rejection
 /// returning structured `413 Payload Too Large` JSON. Complements
 /// axum's per-extractor `DefaultBodyLimit`. See [`body_limit::BodyLimitLayer`].
