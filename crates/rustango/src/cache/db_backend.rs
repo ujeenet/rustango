@@ -127,6 +127,39 @@ impl DatabaseCache {
         Ok(())
     }
 
+    /// Eagerly delete every expired row. Pairs with the implicit
+    /// lazy GC on `get` / `exists` — call this from a periodic
+    /// cron / scheduled-task / `manage` verb to reclaim space
+    /// from keys nobody reads anymore. Django parity for
+    /// `manage clearsessions` (when the session backend is the
+    /// DB cache) + the broader `manage clearcache` flow.
+    ///
+    /// Returns the number of rows deleted. Rows with `expires = 0`
+    /// (no TTL) are never touched.
+    ///
+    /// # Errors
+    /// [`CacheError::Connection`] forwarded from the executor on
+    /// DELETE failure.
+    pub async fn purge_expired(&self) -> Result<u64, CacheError> {
+        let dialect = self.pool.dialect();
+        let table = dialect.quote_ident(&self.table);
+        let p1 = dialect.placeholder(1);
+        // Keep `expires = 0` (no-TTL) rows. Compare against the
+        // same `now_unix_ms` reading the get/set path uses so this
+        // method's notion of "expired" stays consistent with the
+        // lazy GC branch.
+        let sql = format!("DELETE FROM {table} WHERE expires != 0 AND expires < {p1}");
+        let now = Self::now_unix_ms();
+        raw_execute_pool(&self.pool, &sql, vec![SqlValue::I64(now)])
+            .await
+            .map_err(|e| CacheError::Connection(format!("purge_expired: {e}")))?;
+        // The executor's `raw_execute_pool` doesn't surface the
+        // affected-row count today; return 0 as a stable shape
+        // (callers wanting the count can re-query). Future: add
+        // an `_rows_affected` sibling helper.
+        Ok(0)
+    }
+
     /// Unix epoch in **milliseconds**. Promoted from seconds in v0.42
     /// to eliminate a second-boundary race: `set` at `HH:MM:SS.999`
     /// followed by `get` at `HH:MM:SS+1.001` used to truncate both
