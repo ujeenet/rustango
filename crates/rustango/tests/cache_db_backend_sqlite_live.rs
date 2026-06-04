@@ -52,14 +52,20 @@ async fn ttl_purges_lazily_on_read() {
     let cache = DatabaseCache::new(pool, "rustango_cache_ttl");
     cache.ensure_table().await.unwrap();
 
+    // Use a 3-second TTL with a 3.2-second sleep below. Earlier
+    // 1-second TTL was racing under CI load: the SQLite TIMESTAMP
+    // column stores integer-second precision, so a set at
+    // T=HH:MM:SS.999 followed by a slow `get()` could land at T+1
+    // and read None instead of Some("v"). 3-second budget gives
+    // ~3000ms of slack before the second-boundary tick matters.
     cache
-        .set("k", "v", Some(Duration::from_secs(1)))
+        .set("k", "v", Some(Duration::from_secs(3)))
         .await
         .unwrap();
     // Still present immediately.
     assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
     // Wait past TTL — sqlite has 1-second granularity in the schema's BIGINT.
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    tokio::time::sleep(Duration::from_millis(3_200)).await;
     assert!(cache.get("k").await.unwrap().is_none());
     assert!(!cache.exists("k").await.unwrap());
 }
