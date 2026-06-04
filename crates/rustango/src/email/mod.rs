@@ -208,6 +208,71 @@ impl Email {
         }
         Ok(())
     }
+
+    /// Django-parity `EmailMessage.send(connection=None)` — send this
+    /// message via the supplied mailer. Direct translation of the
+    /// Django method most users reach for first:
+    ///
+    /// ```python
+    /// # Django
+    /// EmailMessage(subject='hi', body='...', to=['a@b.com']).send()
+    /// ```
+    ///
+    /// ```ignore
+    /// // rustango
+    /// Email::new()
+    ///     .subject("hi")
+    ///     .body("...")
+    ///     .to("a@b.com")
+    ///     .send(&*mailer)
+    ///     .await?;
+    /// ```
+    ///
+    /// Equivalent to `mailer.send(&email).await` — the method shape
+    /// just lets fluent builder chains terminate on the `Email` itself
+    /// instead of detaching to call `mailer.send(&built)`.
+    pub async fn send(&self, mailer: &dyn Mailer) -> Result<(), MailError> {
+        mailer.send(self).await
+    }
+}
+
+/// Django-parity `email.utils.formataddr((name, address))` — format an
+/// RFC 5322 address with display name. Returns `"Display Name <email@example.com>"`
+/// when `name` is provided, or just `address` when `name` is `None`
+/// or empty.
+///
+/// Display names containing RFC 5322 specials (`(`, `)`, `<`, `>`,
+/// `@`, `,`, `;`, `:`, `\`, `"`, `.`, `[`, `]`) are wrapped in
+/// double quotes with embedded `"` and `\` escaped. Plain alphanumeric
+/// display names pass through unquoted.
+///
+/// ```ignore
+/// use rustango::email::formataddr;
+///
+/// assert_eq!(formataddr(Some("Alice"), "a@b.com"),
+///            "Alice <a@b.com>");
+/// assert_eq!(formataddr(Some("Smith, John"), "j@b.com"),
+///            r#""Smith, John" <j@b.com>"#);
+/// assert_eq!(formataddr(None, "raw@b.com"), "raw@b.com");
+/// ```
+#[must_use]
+pub fn formataddr(name: Option<&str>, address: &str) -> String {
+    let trimmed = name.map(str::trim).filter(|s| !s.is_empty());
+    let Some(name) = trimmed else {
+        return address.to_owned();
+    };
+    let needs_quoting = name.chars().any(|c| {
+        matches!(
+            c,
+            '(' | ')' | '<' | '>' | '@' | ',' | ';' | ':' | '\\' | '"' | '.' | '[' | ']'
+        )
+    });
+    if needs_quoting {
+        let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\" <{address}>")
+    } else {
+        format!("{name} <{address}>")
+    }
 }
 
 // ------------------------------------------------------------------ MailError
