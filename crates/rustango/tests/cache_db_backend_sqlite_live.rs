@@ -118,3 +118,55 @@ async fn drop_table_after_use() {
     let res = cache.get("k").await;
     assert!(res.is_err(), "expected error after drop_table");
 }
+
+#[tokio::test]
+async fn purge_expired_drops_expired_rows_keeps_others() {
+    // Sister method to the implicit lazy GC on `get` — `purge_expired`
+    // is the eager flow for ops cron jobs / `manage clearcache`.
+    // Set three rows: one expired, one with TTL still alive, one
+    // with no TTL. Wait past the short TTL, purge, verify the
+    // expired one is gone and the others survive.
+    let pool = fresh_pool().await;
+    let cache = DatabaseCache::new(pool, "rustango_cache_purge");
+    cache.ensure_table().await.unwrap();
+
+    cache
+        .set("short", "doomed", Some(Duration::from_secs(1)))
+        .await
+        .unwrap();
+    cache
+        .set("long", "alive", Some(Duration::from_secs(3600)))
+        .await
+        .unwrap();
+    cache.set("forever", "alive", None).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    cache.purge_expired().await.expect("purge_expired");
+
+    // The expired row is gone — `get` returns None (and doesn't even
+    // hit the lazy GC since the row is already removed).
+    assert_eq!(cache.get("short").await.unwrap(), None);
+    // Both other rows survive.
+    assert_eq!(cache.get("long").await.unwrap().as_deref(), Some("alive"));
+    assert_eq!(
+        cache.get("forever").await.unwrap().as_deref(),
+        Some("alive")
+    );
+}
+
+#[tokio::test]
+async fn purge_expired_is_no_op_when_table_has_only_live_rows() {
+    let pool = fresh_pool().await;
+    let cache = DatabaseCache::new(pool, "rustango_cache_purge_noop");
+    cache.ensure_table().await.unwrap();
+    cache.set("k", "v", None).await.unwrap();
+    cache
+        .set("ttl", "v", Some(Duration::from_secs(3600)))
+        .await
+        .unwrap();
+
+    cache.purge_expired().await.expect("purge_expired");
+
+    assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+    assert_eq!(cache.get("ttl").await.unwrap().as_deref(), Some("v"));
+}
