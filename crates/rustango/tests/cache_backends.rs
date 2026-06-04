@@ -386,3 +386,80 @@ async fn delete_many_ignores_missing_keys() {
     c.delete_many(&["ghost1", "kept", "ghost2"]).await.unwrap();
     assert!(c.get("kept").await.unwrap().is_none());
 }
+
+// ------------------------------------------------------------------ has_key + decr (Django parity)
+
+#[tokio::test]
+async fn has_key_returns_true_when_present() {
+    // Django parity: `cache.has_key("k")` is the alias most users
+    // translate from `if "k" in cache:` — should match `exists`.
+    let c = InMemoryCache::new();
+    c.set("present", "v", None).await.unwrap();
+    assert!(c.has_key("present").await.unwrap());
+}
+
+#[tokio::test]
+async fn has_key_returns_false_when_absent() {
+    let c = InMemoryCache::new();
+    assert!(!c.has_key("ghost").await.unwrap());
+}
+
+#[tokio::test]
+async fn has_key_returns_false_after_expiry() {
+    let c = InMemoryCache::new();
+    c.set("ttl", "v", Some(Duration::from_millis(20)))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(!c.has_key("ttl").await.unwrap());
+}
+
+#[tokio::test]
+async fn has_key_matches_exists_for_same_keys() {
+    // Belt-and-suspenders: has_key should never disagree with exists.
+    let c = InMemoryCache::new();
+    c.set("yes", "v", None).await.unwrap();
+    assert_eq!(
+        c.has_key("yes").await.unwrap(),
+        c.exists("yes").await.unwrap(),
+    );
+    assert_eq!(
+        c.has_key("no").await.unwrap(),
+        c.exists("no").await.unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn decr_decrements_existing_counter() {
+    let c = InMemoryCache::new();
+    c.set("counter", "10", None).await.unwrap();
+    let new = c.decr("counter", 3, None).await.unwrap();
+    assert_eq!(new, 7);
+    assert_eq!(c.get("counter").await.unwrap().as_deref(), Some("7"));
+}
+
+#[tokio::test]
+async fn decr_underflows_to_negative_when_unbounded() {
+    // Django semantics: decr doesn't clamp at zero — returns whatever
+    // arithmetic yields. Apps that want a clamp do it client-side.
+    let c = InMemoryCache::new();
+    c.set("counter", "2", None).await.unwrap();
+    let new = c.decr("counter", 5, None).await.unwrap();
+    assert_eq!(new, -3);
+}
+
+#[tokio::test]
+async fn decr_treats_missing_key_as_zero() {
+    // Matches incr's default-impl behavior: missing → start from 0.
+    let c = InMemoryCache::new();
+    let new = c.decr("ghost", 4, None).await.unwrap();
+    assert_eq!(new, -4);
+}
+
+#[tokio::test]
+async fn decr_is_inverse_of_incr() {
+    let c = InMemoryCache::new();
+    c.incr("k", 7, None).await.unwrap();
+    let after = c.decr("k", 7, None).await.unwrap();
+    assert_eq!(after, 0);
+}
