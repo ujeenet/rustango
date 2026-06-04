@@ -982,6 +982,36 @@ Run `manage check --deploy` against a SQLite pool:
           backend-specific features may fail
 ```
 
+#### 2.25.13 `#[rustango(required_db_features = "...")]` (PR #604)
+
+**What**: Django `Meta.required_db_features` — finer-grained sibling of `required_db_vendor`. Lists capability tokens the model depends on (e.g. `"json_path"`, `"listen_notify"`, `"hstore"`, `"gist_index"`, `"window_functions"`). `manage check --deploy` walks every model and warns when the active `Dialect::supports(token)` returns `false`.
+
+**Tokens advertised by default impl** (portable across all three backends): `window_functions`, `recursive_cte`, `cte`, `json_extract`, `expression_index`, plus dialect-conditional `partial_index` + `returning`.
+
+**PG-only tokens** (advertised by `Postgres::supports`): `array_type`, `range_type`, `hstore`, `citext`, `listen_notify` / `notify`, `row_security`, `gin_index`, `gist_index`, `spgist_index`, `brin_index`, `unique_constraint_deferred`, `exclusion_constraint`, `tablespaces`, `json_path`, `json_query`.
+
+**Unknown tokens** → returns `false` so the deploy check fires (safe default for aspirational declarations).
+
+```rust
+#[rustango(
+    table = "event_outbox",
+    required_db_features = "listen_notify, json_path",
+)]
+pub struct EventOutbox { /* PG `LISTEN` channel + JSON path queries */ }
+```
+
+Composes with `required_db_vendor` — set both for fail-fast deploy validation:
+
+```rust
+#[rustango(
+    table = "spatial_audit",
+    required_db_vendor = "postgres",
+    required_db_features = "gist_index, exclusion_constraint",
+)]
+```
+
+`manage check --deploy` on a SQLite pool produces one warning per unsupported token + one for the vendor mismatch.
+
 ---
 
 ## Chapter 3 — ORM
