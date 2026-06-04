@@ -116,6 +116,52 @@ pub trait Cache: Send + Sync + 'static {
         self.set(key, &new.to_string(), ttl).await?;
         Ok(new)
     }
+
+    /// Django-parity `cache.add(key, value, timeout)` — set the value
+    /// ONLY if the key is currently absent (or expired). Returns `true`
+    /// when the value was inserted, `false` when an existing entry
+    /// blocked the write.
+    ///
+    /// The default implementation is a non-atomic `exists` + `set`
+    /// pair, which races between processes; backends with a native
+    /// "set if absent" primitive (Redis `SET NX`) should override
+    /// for atomicity. For single-process locks, the default is fine.
+    ///
+    /// Useful as a lightweight inter-process lock primitive:
+    ///
+    /// ```ignore
+    /// if cache.add("import-running", "1", Some(Duration::from_secs(60))).await? {
+    ///     // We won the race — run the import.
+    /// }
+    /// ```
+    async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        if self.exists(key).await? {
+            return Ok(false);
+        }
+        self.set(key, value, ttl).await?;
+        Ok(true)
+    }
+
+    /// Django-parity `cache.touch(key, timeout)` — extend (or replace)
+    /// the TTL on an existing key without changing the value. Returns
+    /// `true` when the key existed and the TTL was reset, `false`
+    /// when the key was absent or already expired (no-op).
+    ///
+    /// The default implementation is a non-atomic `get` + `set` round-
+    /// trip. Backends with a native `EXPIRE` / `PEXPIRE` primitive
+    /// should override for an O(1) single-RTT path.
+    ///
+    /// `ttl = None` makes the entry persist indefinitely (matching
+    /// `set(_, _, None)`).
+    async fn touch(&self, key: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        match self.get(key).await? {
+            Some(value) => {
+                self.set(key, &value, ttl).await?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
 }
 
 /// `Arc<dyn Cache>` alias — the standard way to share a cache instance.
