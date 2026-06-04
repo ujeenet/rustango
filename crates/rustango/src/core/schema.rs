@@ -487,6 +487,19 @@ pub struct ModelSchema {
     /// Declarative-only today: rustango doesn't auto-emit reverse
     /// managers yet — parallel to `default_related_name`.
     pub base_manager_name: Option<&'static str>,
+    /// Django-shape `Meta.required_db_vendor` — the DB backend this
+    /// model is intended to run against. Set via
+    /// `#[rustango(required_db_vendor = "postgres|mysql|sqlite")]`.
+    /// `manage check --deploy` reads this and warns when the active
+    /// `Settings.database.backend` doesn't match, catching
+    /// "I forgot to switch DATABASE_URL" at deploy time rather than
+    /// the first request that hits a PG-only feature on SQLite.
+    ///
+    /// Macro normalizes Django-style aliases — `"postgresql"` / `"pg"`
+    /// → `"postgres"`, `"mariadb"` → `"mysql"`, `"sqlite3"` →
+    /// `"sqlite"` — so callers can compare to a single canonical
+    /// token. `None` means "any backend is fine" (the default).
+    pub required_db_vendor: Option<&'static str>,
     /// Django-shape `Meta.get_latest_by` — default sort field that
     /// `QuerySet::latest_default()` / `earliest_default()` use when
     /// the caller doesn't pass a field name explicitly. A string
