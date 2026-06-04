@@ -198,13 +198,37 @@ impl Email {
         self.attach(filename, s.into_bytes(), Some("text/plain"))
     }
 
-    /// Validate the minimum required fields: at least one recipient + non-empty subject.
+    /// Validate the minimum required fields: at least one recipient +
+    /// non-empty subject, and reject `\\r` / `\\n` in single-line header
+    /// fields (Django-shape `BadHeaderError` — defends against email
+    /// header injection attacks where attacker-controlled subject or
+    /// from-address forges extra `To:` / `Bcc:` lines).
     pub fn validate(&self) -> Result<(), MailError> {
         if self.to.is_empty() && self.cc.is_empty() && self.bcc.is_empty() {
             return Err(MailError::InvalidMessage("no recipients".into()));
         }
         if self.subject.is_empty() {
             return Err(MailError::InvalidMessage("subject is empty".into()));
+        }
+        check_no_crlf("subject", &self.subject)?;
+        if let Some(from) = &self.from {
+            check_no_crlf("from", from)?;
+        }
+        if let Some(rt) = &self.reply_to {
+            check_no_crlf("reply_to", rt)?;
+        }
+        for addr in &self.to {
+            check_no_crlf("to", addr)?;
+        }
+        for addr in &self.cc {
+            check_no_crlf("cc", addr)?;
+        }
+        for addr in &self.bcc {
+            check_no_crlf("bcc", addr)?;
+        }
+        for (name, value) in &self.headers {
+            check_no_crlf("header name", name)?;
+            check_no_crlf(&format!("header `{name}` value"), value)?;
         }
         Ok(())
     }
@@ -281,8 +305,25 @@ pub fn formataddr(name: Option<&str>, address: &str) -> String {
 pub enum MailError {
     #[error("invalid message: {0}")]
     InvalidMessage(String),
+    #[error("bad header: {0}")]
+    BadHeader(String),
     #[error("transport error: {0}")]
     Transport(String),
+}
+
+/// Reject `\r` / `\n` in single-line header fields. Returns
+/// [`MailError::BadHeader`] (Django parity — Django raises
+/// `BadHeaderError` from `EmailMessage.__init__` when the same
+/// pattern is detected). Defends against email header injection
+/// attacks where attacker input lands in `Subject:` / `From:` /
+/// `To:` and forges extra envelope headers via embedded newlines.
+fn check_no_crlf(field: &str, value: &str) -> Result<(), MailError> {
+    if value.contains('\n') || value.contains('\r') {
+        return Err(MailError::BadHeader(format!(
+            "newline in {field} (Django BadHeaderError — possible header injection)"
+        )));
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------ Mailer trait
