@@ -1695,6 +1695,79 @@ pub fn validate_comma_separated_integer_list(s: &str) -> Result<(), ValidationEr
     Ok(())
 }
 
+/// Django-parity `FileExtensionValidator(allowed_extensions=[...])` —
+/// reject filenames whose extension (case-insensitive) isn't on the
+/// allowlist. The extension is everything after the LAST `.` in the
+/// filename — `archive.tar.gz` has extension `gz`, matching Django.
+/// `allowed_extensions` entries are compared lowercase; pass them
+/// without the leading dot (`["jpg", "png"]`, not `[".jpg"]`).
+///
+/// Files with no extension at all are rejected — calling code that
+/// wants to allow extensionless uploads should branch before calling
+/// the validator.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_extension", ... }` when the
+/// extension isn't in `allowed_extensions`.
+pub fn validate_file_extension(
+    filename: &str,
+    allowed_extensions: &[&str],
+) -> Result<(), ValidationError> {
+    let ext = filename
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase());
+    let Some(ext) = ext else {
+        return Err(ValidationError::new(
+            "invalid_extension",
+            format!(
+                "File extension is required. Allowed extensions are: {}.",
+                allowed_extensions.join(", ")
+            ),
+        ));
+    };
+    let allowed_lc: Vec<String> = allowed_extensions
+        .iter()
+        .map(|s| s.trim_start_matches('.').to_ascii_lowercase())
+        .collect();
+    if !allowed_lc.iter().any(|a| a == &ext) {
+        return Err(ValidationError::new(
+            "invalid_extension",
+            format!(
+                "File extension '{ext}' is not allowed. Allowed extensions are: {}.",
+                allowed_extensions.join(", ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Django-parity `validate_image_file_extension` — convenience around
+/// [`validate_file_extension`] that allows the same defaults Django
+/// uses: `bmp / dib / gif / tif / tiff / jfif / jpe / jpg / jpeg /
+/// pbm / pgm / ppm / pnm / png / apng / blp / bufr / cur / pcx /
+/// dcx / dds / ps / eps / fit / fits / fli / flc / ftc / ftu / gbr /
+/// gif / grib / h5 / hdf / jp2 / j2k / jpc / jpf / jpx / j2c / icns /
+/// ico / im / iim / mic / mpo / msp / palm / pcd / pdf / pxr / psd /
+/// bw / rgb / rgba / sgi / ras / tga / icb / vda / vst / webp / wmf /
+/// emf / xbm / xpm`. Matches Pillow's `Image.registered_extensions`
+/// snapshot Django ships.
+///
+/// # Errors
+/// Forwarded from [`validate_file_extension`].
+pub fn validate_image_file_extension(filename: &str) -> Result<(), ValidationError> {
+    // Pillow's registered image extensions as of Django 6.0 — the
+    // exact list Django's `validate_image_file_extension` walks.
+    const IMAGE_EXTENSIONS: &[&str] = &[
+        "apng", "bmp", "blp", "bufr", "bw", "cur", "dcx", "dds", "dib", "emf", "eps", "fit",
+        "fits", "flc", "fli", "ftc", "ftu", "gbr", "gif", "grib", "h5", "hdf", "icb", "icns",
+        "ico", "iim", "im", "j2c", "j2k", "jfif", "jp2", "jpc", "jpe", "jpeg", "jpf", "jpg", "jpx",
+        "mic", "mpo", "msp", "palm", "pbm", "pcd", "pcx", "pdf", "pgm", "png", "pnm", "ppm", "ps",
+        "psd", "pxr", "ras", "rgb", "rgba", "sgi", "tga", "tif", "tiff", "vda", "vst", "webp",
+        "wmf", "xbm", "xpm",
+    ];
+    validate_file_extension(filename, IMAGE_EXTENSIONS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3020,5 +3093,72 @@ mod tests {
     #[test]
     fn postal_code_uk_rejects_empty() {
         assert!(validate_postal_code_uk("").is_err());
+    }
+
+    // -------- validate_file_extension (Django parity) --------
+
+    #[test]
+    fn file_extension_accepts_allowed() {
+        assert!(validate_file_extension("photo.jpg", &["jpg", "png"]).is_ok());
+        assert!(validate_file_extension("photo.png", &["jpg", "png"]).is_ok());
+    }
+
+    #[test]
+    fn file_extension_case_insensitive() {
+        // Django parity: uppercase extension still matches lowercase allowlist.
+        assert!(validate_file_extension("PHOTO.JPG", &["jpg"]).is_ok());
+        assert!(validate_file_extension("photo.Jpeg", &["jpeg"]).is_ok());
+    }
+
+    #[test]
+    fn file_extension_strips_leading_dot_on_allowlist() {
+        // Convenience: callers can pass `.jpg` or `jpg` — either works.
+        assert!(validate_file_extension("photo.jpg", &[".jpg"]).is_ok());
+    }
+
+    #[test]
+    fn file_extension_rejects_disallowed() {
+        let err = validate_file_extension("malware.exe", &["jpg", "png"]).unwrap_err();
+        assert_eq!(err.code, "invalid_extension");
+        assert!(err.message.contains("'exe'"));
+    }
+
+    #[test]
+    fn file_extension_uses_last_dot_only() {
+        // Django parity: archive.tar.gz has extension "gz", not "tar.gz".
+        assert!(validate_file_extension("archive.tar.gz", &["gz"]).is_ok());
+        assert!(validate_file_extension("archive.tar.gz", &["tar.gz"]).is_err());
+    }
+
+    #[test]
+    fn file_extension_rejects_no_extension() {
+        let err = validate_file_extension("README", &["txt", "md"]).unwrap_err();
+        assert_eq!(err.code, "invalid_extension");
+    }
+
+    // -------- validate_image_file_extension --------
+
+    #[test]
+    fn image_file_extension_accepts_common_formats() {
+        assert!(validate_image_file_extension("photo.jpg").is_ok());
+        assert!(validate_image_file_extension("photo.jpeg").is_ok());
+        assert!(validate_image_file_extension("logo.png").is_ok());
+        assert!(validate_image_file_extension("animation.gif").is_ok());
+        assert!(validate_image_file_extension("modern.webp").is_ok());
+        assert!(validate_image_file_extension("vector.svg").is_err()); // SVG NOT in Pillow's list
+    }
+
+    #[test]
+    fn image_file_extension_rejects_documents() {
+        // Common non-image extensions Django would reject.
+        assert!(validate_image_file_extension("doc.txt").is_err());
+        assert!(validate_image_file_extension("script.js").is_err());
+        assert!(validate_image_file_extension("malware.exe").is_err());
+    }
+
+    #[test]
+    fn image_file_extension_case_insensitive() {
+        assert!(validate_image_file_extension("PHOTO.JPG").is_ok());
+        assert!(validate_image_file_extension("Photo.PNG").is_ok());
     }
 }
