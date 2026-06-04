@@ -830,6 +830,160 @@ Implementation prefetches the page's distinct CT ids once before the row loop (u
 
 **Verified by**: `tests/admin_gfk_list_render_live.rs`.
 
+### 2.25 Django Meta parity (v0.42 batch)
+
+One recipe per attr — eleven container-level `Meta`-shape attrs landed in the v0.42 series. Every one is parsed by `#[derive(Model)]`, validated at compile time, and exposed on `ModelSchema::<field>` so future codegen / admin / DRF surfaces can read the metadata without re-parsing.
+
+#### 2.25.1 `#[rustango(managed = false)]` (PR #558)
+
+**What**: Django `Meta.managed = False` — `makemigrations` skips the model entirely (the operator owns the table's DDL). Useful for views, partitioned tables, foreign tables, or any schema the framework shouldn't touch.
+
+**Recipe**: `#[rustango(table = "external_view", managed = false)]`. The model still gets ORM read access; nothing emits CREATE / ALTER / DROP.
+
+#### 2.25.2 `#[rustango(db_table_comment = "...")]` (PR #589)
+
+**What**: Django 4.2+ `Meta.db_table_comment` — attached to the DB catalog so ops tooling (data-lineage docs, schema explorers) sees it.
+
+**Render shape**:
+- Postgres: post-table `COMMENT ON TABLE "<t>" IS '...'`
+- MySQL: inline `) COMMENT='...'` trailer
+- SQLite: no-op (no native table comments)
+
+```rust
+#[rustango(table = "orders", db_table_comment = "Customer purchase records — see /docs/orders.md")]
+```
+
+#### 2.25.3 `#[rustango(get_latest_by = "col" | "-col")]` (PR #590)
+
+**What**: Django `Meta.get_latest_by` — default sort column for `QuerySet::latest_default(&pool)` / `earliest_default(&pool)` when the caller doesn't pass a field name explicitly. `-col` reverses (descending).
+
+**Recipe**:
+
+```rust
+#[rustango(table = "post", get_latest_by = "-created_at")]
+pub struct Post { /* ... */ }
+
+// Now:
+let newest = Post::objects().latest_default(&pool).await?;
+let oldest = Post::objects().earliest_default(&pool).await?;
+```
+
+#### 2.25.4 `#[rustango(citext)]` (PR #566 / #344)
+
+**What**: Django postgres-contrib `CITextField` — case-insensitive comparisons without query-side `LOWER(...)` wrapping. Field-level (lives on a `String` column).
+
+**Render shape**:
+- Postgres: column type becomes `CITEXT` (the dialect auto-emits `CREATE EXTENSION IF NOT EXISTS citext;` prelude)
+- SQLite: `TEXT COLLATE NOCASE`
+- MySQL: `VARCHAR(N)/TEXT COLLATE utf8mb4_general_ci`
+
+```rust
+#[rustango(max_length = 200, citext)] pub email: String,
+```
+
+#### 2.25.5 `#[rustango(fk = "...", on_delete = "...")]` (PR #592)
+
+**What**: Django `ForeignKey(on_delete=...)` — referential-integrity action when the parent row is deleted.
+
+**Accepted values** (case-insensitive): `cascade` / `restrict` / `set_null` / `set_default` / `no_action`. Omitting falls back to the dialect default (`NO ACTION` everywhere). Macro errors at compile time if `on_delete` is set without `fk` / `o2o`, or if the action name is unknown.
+
+```rust
+#[rustango(fk = "post", on = "id", on_delete = "cascade")]
+pub post_id: i64,    // delete the parent post → comment goes too
+```
+
+#### 2.25.6 `#[rustango(extra_permissions = "code:Label, ...")]` (PR #591)
+
+**What**: Django `Meta.permissions = [(codename, name), ...]` — extra permission codenames seeded alongside the auto-generated `add` / `change` / `delete` / `view`. `auto_create_permissions_pool` writes one row per pair under `<table>.<codename>`.
+
+```rust
+#[rustango(table = "post", permissions, extra_permissions = "approve:Can approve posts, archive:Can archive posts")]
+```
+
+Granted via the usual `set_user_perm_pool` / role machinery.
+
+#### 2.25.7 `#[rustango(default_permissions = "view,change")]` (PR #594)
+
+**What**: Django `Meta.default_permissions` — opt out of the full CRUD set. Empty (the default) seeds all four; `"view,change"` seeds only view + change. Useful for read-mostly reference tables where `add` / `delete` are operator-only.
+
+```rust
+#[rustango(table = "country", permissions, default_permissions = "view")]
+```
+
+#### 2.25.8 `#[rustango(exclude(...))]` (PR #593)
+
+**What**: Django postgres-contrib `ExclusionConstraint` — "no two rows of group X may overlap in column Y" via PG `EXCLUDE USING gist (...)`. Container-level, multi-instance.
+
+```rust
+#[rustango(
+    table = "booking",
+    exclude(
+        name = "no_overlap",
+        using = "gist",
+        elements = "room_id WITH =, during WITH &&",
+    ),
+    exclude(
+        name = "active_only",
+        elements = "room_id WITH =",
+        where = "cancelled_at IS NULL",
+    ),
+)]
+```
+
+**PG-only**: MySQL/SQLite have no equivalent; the migration writer skips emission with a `tracing::warn!` so the rest of the migration applies cleanly.
+
+#### 2.25.9 `#[rustango(index_when(...))]` (PR #599)
+
+**What**: Django `Index(fields=[...], condition=Q(...))` — non-unique partial index. Sibling of `unique_when` (UNIQUE variant). Container-level.
+
+```rust
+#[rustango(
+    table = "post",
+    index_when(
+        columns = "status, created_at",
+        condition = "deleted_at IS NULL",
+        name = "active_recent_posts_idx",
+    ),
+)]
+```
+
+**Render shape**:
+- PG + SQLite: `CREATE INDEX ... WHERE <expr>` (native partial-index support)
+- MySQL: plain `CREATE INDEX` with the condition dropped + a tracing warning
+
+#### 2.25.10 `#[rustango(default_related_name = "...")]` (PR #600)
+
+**What**: Django `Meta.default_related_name` — the accessor name reverse-relation managers use when an FK / M2M field doesn't override it. Validated at compile time as snake_case ASCII.
+
+**Recipe**: `#[rustango(table = "post", default_related_name = "posts")]`. Stored on `ModelSchema::default_related_name`. Declarative-only today (rustango doesn't auto-emit reverse managers yet) — the metadata is the foundation for that work.
+
+#### 2.25.11 `#[rustango(base_manager_name = "...")]` (PR #601)
+
+**What**: Django `Meta.base_manager_name` — Manager subclass that `<instance>.<relation>_set` uses when resolving reverse-relation managers. Distinct from `default_manager_name` (what `Model.objects` returns at the class level).
+
+**Recipe**: `#[rustango(base_manager_name = "PostManagerExt")]`. Validated as a Rust identifier so it's safe to re-emit as code later. Same declarative-only posture as `default_related_name`.
+
+#### 2.25.12 `#[rustango(required_db_vendor = "...")]` (PR #602)
+
+**What**: Django `Meta.required_db_vendor` — declares which DB backend the model is intended to run against. `manage check --deploy` walks every model and warns when the declared vendor doesn't match the active `pool.dialect().name()` — catches "I forgot to switch DATABASE_URL" at deploy time rather than the first runtime hit on a backend-specific feature.
+
+**Accepted values**: `postgres` (aliases: `postgresql`, `pg`) / `mysql` (alias: `mariadb`) / `sqlite` (alias: `sqlite3`). Macro normalizes to the canonical dialect name.
+
+```rust
+#[rustango(table = "geo_audit", required_db_vendor = "postgres")]
+pub struct GeoAudit { /* uses PG-only GiST + array ops */ }
+```
+
+Run `manage check --deploy` against a SQLite pool:
+
+```
+[warning] model `GeoAudit` declares `required_db_vendor = "postgres"` but the
+          active database backend is `sqlite` — queries that depend on
+          backend-specific features may fail
+```
+
+---
+
 ## Chapter 3 — ORM
 
 13 live recipes against the Author / Post fixture from Chapter 2.
