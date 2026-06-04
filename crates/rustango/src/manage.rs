@@ -1043,6 +1043,40 @@ fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> Router {
     let sec = SecurityHeadersLayer::from_settings(&s.security);
     app = app.security_headers(sec);
 
+    // host_validation (#611) — Django `ALLOWED_HOSTS` parity.
+    // Mounts when the list is non-empty (empty = DEBUG-style
+    // opt-out, layer wouldn't enforce anything anyway).
+    if !s.security.allowed_hosts.is_empty() {
+        use crate::host_validation::{AllowedHostsLayer, AllowedHostsRouterExt as _};
+        app = app.allowed_hosts(AllowedHostsLayer::from_settings_list(
+            s.security.allowed_hosts.iter().map(String::as_str),
+        ));
+    }
+
+    // ssl_redirect (#613) — Django `SECURE_SSL_REDIRECT` +
+    // `SECURE_REDIRECT_EXEMPT` + `SECURE_PROXY_SSL_HEADER` parity.
+    // Opt-in: only mounts when explicitly enabled in settings —
+    // operators behind TLS-terminating LBs typically don't need
+    // it, so don't surprise them.
+    if matches!(s.security.secure_ssl_redirect, Some(true)) {
+        use crate::ssl_redirect::{SslRedirectLayer, SslRedirectRouterExt as _};
+        let mut layer = SslRedirectLayer::new();
+        // SECURE_PROXY_SSL_HEADER — expect length-2 `[header, value]`.
+        // Malformed shapes are flagged by `manage check --deploy`;
+        // here we just ignore wrong-length entries to keep boot
+        // resilient.
+        if s.security.secure_proxy_ssl_header.len() == 2 {
+            layer = layer.proxy_ssl_header(
+                &s.security.secure_proxy_ssl_header[0],
+                &s.security.secure_proxy_ssl_header[1],
+            );
+        }
+        if !s.security.secure_redirect_exempt.is_empty() {
+            layer = layer.exempt(s.security.secure_redirect_exempt.iter().cloned());
+        }
+        app = app.ssl_redirect(layer);
+    }
+
     app
 }
 
@@ -1271,6 +1305,39 @@ mod tests {
         let s = crate::config::Settings::default();
         let router: Router = Router::new();
         let _ = apply_settings_layers(router, &s);
+    }
+
+    /// PR #618 — `apply_settings_layers` mounts host_validation +
+    /// ssl_redirect when the new `SecuritySettings` fields are set.
+    /// Smoke test: the layer chain composes without panicking when
+    /// every new field is populated.
+    #[cfg(all(feature = "config", feature = "admin"))]
+    #[test]
+    fn apply_settings_layers_with_security_middlewares_composes() {
+        let mut s = crate::config::Settings::default();
+        s.security.allowed_hosts = vec!["example.com".into(), ".example.com".into()];
+        s.security.secure_ssl_redirect = Some(true);
+        s.security.secure_proxy_ssl_header = vec!["X-Forwarded-Proto".into(), "https".into()];
+        s.security.secure_redirect_exempt = vec!["/health".into()];
+        let router: Router = Router::new();
+        let _ = apply_settings_layers(router, &s);
+    }
+
+    /// Both layers are opt-in — defaults don't mount them. The
+    /// smoke test above proves they CAN mount; this one proves
+    /// they DON'T mount unsolicited.
+    #[cfg(all(feature = "config", feature = "admin"))]
+    #[test]
+    fn apply_settings_layers_default_does_not_force_opt_in_layers() {
+        // Default Settings → empty allowed_hosts + secure_ssl_redirect = None.
+        // The function returns a Router; we can't introspect the
+        // tower-layer stack directly, but we can assert that
+        // building it with defaults succeeds (host_validation +
+        // ssl_redirect branches are skipped without panicking).
+        let s = crate::config::Settings::default();
+        assert!(s.security.allowed_hosts.is_empty());
+        assert!(s.security.secure_ssl_redirect.is_none());
+        let _ = apply_settings_layers(Router::new(), &s);
     }
 
     /// `Cli::with_health` flips the flag for the runserver path.
