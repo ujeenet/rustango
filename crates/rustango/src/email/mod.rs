@@ -548,6 +548,81 @@ impl Mailer for NullMailer {
 /// let mailer: rustango::email::BoxedMailer =
 ///     rustango::email::from_settings(&cfg.mail);
 /// ```
+/// Django-shape `send_mail(subject, message, from_email, recipient_list)` —
+/// fire-and-forget single-message helper. Returns `Ok(())` on
+/// success.
+///
+/// Direct translation of the most common Django mail call:
+///
+/// ```python
+/// # Django
+/// send_mail('Subject here',
+///           'Here is the message.',
+///           'from@example.com',
+///           ['to@example.com'],
+///           fail_silently=False)
+/// ```
+///
+/// ```ignore
+/// // rustango
+/// rustango::email::send_mail(
+///     &*mailer,
+///     "Subject here",
+///     "Here is the message.",
+///     Some("from@example.com"),
+///     &["to@example.com"],
+/// ).await?;
+/// ```
+///
+/// `from_email = None` lets the mailer fall through to its own
+/// configured default (matching Django's `DEFAULT_FROM_EMAIL`
+/// fallback). `recipient_list` must be non-empty — the mailer's
+/// `Email::validate()` surfaces a `MailError::InvalidMessage` otherwise.
+///
+/// # Errors
+/// Forwarded from the mailer's `send` call.
+pub async fn send_mail(
+    mailer: &dyn Mailer,
+    subject: impl Into<String>,
+    body: impl Into<String>,
+    from_email: Option<&str>,
+    recipient_list: &[&str],
+) -> Result<(), MailError> {
+    let mut email = Email::new().subject(subject).body(body);
+    if let Some(from) = from_email {
+        email = email.from(from.to_owned());
+    }
+    for to in recipient_list {
+        email = email.to((*to).to_owned());
+    }
+    mailer.send(&email).await
+}
+
+/// Django-shape `send_mass_mail(datatuple)` — bulk-send a batch of
+/// messages. `datatuple` in Django is `[(subject, message, from, [to,
+/// ...]), ...]`; rustango takes a slice of pre-built `Email`s, which
+/// is the more idiomatic Rust shape and avoids per-tuple boilerplate.
+///
+/// Sequential by default — backends with native pipelining (lettre's
+/// SMTP transport over a kept-open connection) get the same call shape
+/// without extra plumbing; future iteration can swap the loop for a
+/// pooled batch send.
+///
+/// Returns `Ok(count)` where `count` is the number of successfully
+/// sent messages. Per-message errors short-circuit on the first
+/// failure, matching Django's `fail_silently=False` default.
+///
+/// # Errors
+/// Forwarded from the mailer's `send` call on the first failing message.
+pub async fn send_many(mailer: &dyn Mailer, emails: &[Email]) -> Result<usize, MailError> {
+    let mut sent = 0;
+    for email in emails {
+        mailer.send(email).await?;
+        sent += 1;
+    }
+    Ok(sent)
+}
+
 /// Django-shape `mail_admins(subject, message)` — sends to the
 /// addresses configured in `MailSettings.admins`. Returns Ok(0) when
 /// the list is empty (a no-op without warning, matching Django's
