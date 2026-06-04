@@ -128,6 +128,13 @@ pub enum SchemaChange {
         /// WHERE clause with a doc-level warning.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         where_clause: Option<String>,
+        /// Django `Index(include=[...])` covering-index columns. PG
+        /// 11+ ships `INCLUDE (...)` syntax — non-key columns travel
+        /// with the index leaf for index-only scans. MySQL/SQLite
+        /// lack it; the renderer drops the clause with a warning.
+        /// Empty `Vec` (the default) means "no covering columns".
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        include: Vec<String>,
     },
     /// Drop an index by name.
     DropIndex {
@@ -297,6 +304,7 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
                 unique: idx.unique,
                 method: idx.method.clone(),
                 where_clause: idx.where_clause.clone(),
+                include: idx.include.clone(),
             });
         }
     }
@@ -332,6 +340,33 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
                     unique: idx.unique,
                     method: idx.method.clone(),
                     where_clause: idx.where_clause.clone(),
+                    include: idx.include.clone(),
+                });
+            }
+        }
+    }
+    // Also detect include-only changes so a fresh covering set
+    // re-emits as Drop + Create.
+    for idx in &current.indexes {
+        if let Some(prev_idx) = prev.index(&idx.name) {
+            if prev_idx.columns == idx.columns
+                && prev_idx.unique == idx.unique
+                && prev_idx.table == idx.table
+                && prev_idx.method == idx.method
+                && prev_idx.where_clause == idx.where_clause
+                && prev_idx.include != idx.include
+            {
+                changes.push(SchemaChange::DropIndex {
+                    name: idx.name.clone(),
+                });
+                changes.push(SchemaChange::CreateIndex {
+                    name: idx.name.clone(),
+                    table: idx.table.clone(),
+                    columns: idx.columns.clone(),
+                    unique: idx.unique,
+                    method: idx.method.clone(),
+                    where_clause: idx.where_clause.clone(),
+                    include: idx.include.clone(),
                 });
             }
         }
@@ -808,6 +843,7 @@ fn render_changes_split_inner(
                 unique,
                 method,
                 where_clause,
+                include,
             } => {
                 let unique_kw = if *unique { "UNIQUE " } else { "" };
                 let if_not_exists = if dialect.supports_create_index_if_not_exists() {
@@ -847,8 +883,38 @@ fn render_changes_split_inner(
                 } else {
                     String::new()
                 };
+                // Covering-index `INCLUDE (cols)` — PG 11+ ships it.
+                // SQLite + MySQL lack it; the writer drops the clause
+                // with a warning so the rest of the migration still
+                // applies. Routes through the dialect via the new
+                // `supports("covering_index")` capability token —
+                // Postgres's `supports` override advertises it under
+                // the same name (`expression_index`-adjacent), but
+                // PG-specific. The simplest gate is the existing
+                // `dialect.name() == "postgres"` since covering
+                // indexes are PG-only across rustango's matrix.
+                let include_suffix = if include.is_empty() {
+                    String::new()
+                } else if dialect.name() == "postgres" {
+                    let cols = include
+                        .iter()
+                        .map(|c| dialect.quote_ident(c))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(" INCLUDE ({cols})")
+                } else {
+                    out.warnings.push(format!(
+                        "index {name:?} declares INCLUDE ({}); {} has \
+                         no covering-index syntax — emitting plain \
+                         index. Add a redundant non-key column to the \
+                         key tuple if you need the cover.",
+                        include.join(", "),
+                        dialect.name()
+                    ));
+                    String::new()
+                };
                 out.immediate.push(format!(
-                    "CREATE {unique_kw}INDEX {if_not_exists}{} ON {}{} ({cols}){where_suffix}",
+                    "CREATE {unique_kw}INDEX {if_not_exists}{} ON {}{} ({cols}){include_suffix}{where_suffix}",
                     dialect.quote_ident(name),
                     dialect.quote_ident(table),
                     using,

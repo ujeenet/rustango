@@ -209,6 +209,7 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
                 unique: idx.unique,
                 method: idx.method.clone(),
                 where_clause: idx.where_clause.clone(),
+                include: idx.include.clone(),
             }))
         }
         Operation::Schema(SchemaChange::CreateM2MTable {

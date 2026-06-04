@@ -45,6 +45,7 @@ fn create_index_change() -> SchemaChange {
         unique: idx.unique,
         method: idx.method.as_str().to_owned(),
         where_clause: idx.where_clause.map(str::to_owned),
+        include: idx.include.iter().map(|&s| s.to_owned()).collect(),
     }
 }
 
