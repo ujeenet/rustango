@@ -459,22 +459,37 @@ pub async fn mail_managers(
     .await
 }
 
+/// Pick the `From:` address for a server-generated mail
+/// (`mail_admins`, `mail_managers`, error notifications). Django
+/// `SERVER_EMAIL` parity — falls back to `DEFAULT_FROM_EMAIL`
+/// (`from_address`) when unset.
+#[cfg(feature = "config")]
+fn server_from_address(s: &crate::config::MailSettings) -> Option<&str> {
+    s.server_email.as_deref().or(s.from_address.as_deref())
+}
+
 #[cfg(feature = "config")]
 async fn send_to_list(
     mailer: &dyn Mailer,
     s: &crate::config::MailSettings,
     list: &[String],
-    prefix: &str,
+    fallback_prefix: &str,
     subject: String,
     body: String,
 ) -> Result<usize, MailError> {
     if list.is_empty() {
         return Ok(0);
     }
+    // Django `EMAIL_SUBJECT_PREFIX` parity — when set, it wins over
+    // the historical `[admin] ` / `[manager] ` fallback so projects
+    // can brand server mail with `"[Acme] "` (note the trailing
+    // space matches Django's convention).
+    let prefix = s.email_subject_prefix.as_deref().unwrap_or(fallback_prefix);
     let mut email = Email::new()
         .subject(format!("{prefix}{subject}"))
         .body(body);
-    if let Some(from) = s.from_address.as_deref() {
+    // SERVER_EMAIL → DEFAULT_FROM_EMAIL → no header.
+    if let Some(from) = server_from_address(s) {
         email = email.from(from.to_owned());
     }
     for addr in list {

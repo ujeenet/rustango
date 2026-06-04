@@ -65,3 +65,71 @@ async fn mail_admins_uses_admin_list_not_manager_list() {
     let sent = mailer.sent();
     assert_eq!(sent[0].to, vec!["dba@example.com"]);
 }
+
+// ------------------------------------------------------------------ SERVER_EMAIL + EMAIL_SUBJECT_PREFIX (Django parity)
+
+#[tokio::test]
+async fn server_email_overrides_from_address_on_admin_mail() {
+    // Django parity: SERVER_EMAIL wins over DEFAULT_FROM_EMAIL on
+    // server-generated mail (mail_admins / mail_managers).
+    let mailer = InMemoryMailer::new();
+    let mut s = settings_with(&["alice@example.com"], &[]);
+    s.server_email = Some("alerts@example.com".into());
+    mail_admins(&mailer, &s, "boom", "details").await.unwrap();
+    let sent = mailer.sent();
+    assert_eq!(
+        sent[0].from.as_deref(),
+        Some("alerts@example.com"),
+        "SERVER_EMAIL should override DEFAULT_FROM_EMAIL on admin mail"
+    );
+}
+
+#[tokio::test]
+async fn server_email_falls_back_to_from_address_when_unset() {
+    let mailer = InMemoryMailer::new();
+    let s = settings_with(&["alice@example.com"], &[]);
+    // No server_email set → uses from_address.
+    mail_admins(&mailer, &s, "boom", "details").await.unwrap();
+    let sent = mailer.sent();
+    assert_eq!(sent[0].from.as_deref(), Some("noreply@example.com"));
+}
+
+#[tokio::test]
+async fn email_subject_prefix_overrides_default_admin_prefix() {
+    let mailer = InMemoryMailer::new();
+    let mut s = settings_with(&["alice@example.com"], &[]);
+    s.email_subject_prefix = Some("[Acme] ".into());
+    mail_admins(&mailer, &s, "Disk full", "/var is 100%")
+        .await
+        .unwrap();
+    let sent = mailer.sent();
+    assert_eq!(
+        sent[0].subject, "[Acme] Disk full",
+        "EMAIL_SUBJECT_PREFIX should win over the default `[admin] `"
+    );
+}
+
+#[tokio::test]
+async fn email_subject_prefix_also_applies_to_managers() {
+    let mailer = InMemoryMailer::new();
+    let mut s = settings_with(&[], &["ops@example.com"]);
+    s.email_subject_prefix = Some("[Acme] ".into());
+    mail_managers(&mailer, &s, "Weekly summary", "all green")
+        .await
+        .unwrap();
+    let sent = mailer.sent();
+    assert_eq!(sent[0].subject, "[Acme] Weekly summary");
+}
+
+#[tokio::test]
+async fn unset_email_subject_prefix_uses_django_default_shape() {
+    let mailer = InMemoryMailer::new();
+    let s = settings_with(&["alice@example.com"], &[]);
+    mail_admins(&mailer, &s, "Disk full", "/var is 100%")
+        .await
+        .unwrap();
+    let sent = mailer.sent();
+    // No prefix configured → fallback `[admin] ` (rustango's
+    // historical default, distinct from Django's `[Django] `).
+    assert_eq!(sent[0].subject, "[admin] Disk full");
+}
