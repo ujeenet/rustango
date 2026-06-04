@@ -513,6 +513,16 @@ pub struct ModelSchema {
     ///
     /// Empty slice (default) means "no special capabilities needed".
     pub required_db_features: &'static [&'static str],
+    /// Django-shape `Meta.order_with_respect_to = "parent_fk"` —
+    /// names the FK field this model's instances are ordered
+    /// relative to. Django auto-generates a `_order` integer column
+    /// + admin reordering UI when set.
+    ///
+    /// Set via `#[rustango(order_with_respect_to = "parent_fk")]`.
+    /// Declarative-only today: storage on `ModelSchema` lets future
+    /// codegen auto-emit the `_order` column and reorder helpers.
+    /// `None` means the model has no parent-FK-relative ordering.
+    pub order_with_respect_to: Option<&'static str>,
     /// Django-shape `Meta.get_latest_by` — default sort field that
     /// `QuerySet::latest_default()` / `earliest_default()` use when
     /// the caller doesn't pass a field name explicitly. A string
@@ -686,6 +696,18 @@ pub struct IndexSchema {
     /// is ignored, so duplicates outside the partition would also be
     /// rejected — document the limitation).
     pub where_clause: Option<&'static str>,
+    /// Django-shape `Index(fields=..., include=[...])` covering-index
+    /// columns. PG 11+ supports `CREATE INDEX … (key_cols) INCLUDE
+    /// (non_key_cols)` — the non-key columns travel along with the
+    /// index leaf so index-only scans can fetch them without touching
+    /// the heap. Set via `include = "col1, col2"` on `index_when` /
+    /// `unique_when` / `index_together` / `unique_together`.
+    ///
+    /// MySQL has no equivalent (writer drops the clause with a
+    /// `tracing::warn!`); SQLite ignores INCLUDE (the WITHOUT ROWID
+    /// case has different semantics — not exposed here). Empty slice
+    /// (default) means "no covering columns".
+    pub include: &'static [&'static str],
 }
 
 /// Index access method — Postgres `CREATE INDEX … USING <method>`.

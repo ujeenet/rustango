@@ -116,6 +116,98 @@ pub trait Cache: Send + Sync + 'static {
         self.set(key, &new.to_string(), ttl).await?;
         Ok(new)
     }
+
+    /// Django-parity `cache.add(key, value, timeout)` — set the value
+    /// ONLY if the key is currently absent (or expired). Returns `true`
+    /// when the value was inserted, `false` when an existing entry
+    /// blocked the write.
+    ///
+    /// The default implementation is a non-atomic `exists` + `set`
+    /// pair, which races between processes; backends with a native
+    /// "set if absent" primitive (Redis `SET NX`) should override
+    /// for atomicity. For single-process locks, the default is fine.
+    ///
+    /// Useful as a lightweight inter-process lock primitive:
+    ///
+    /// ```ignore
+    /// if cache.add("import-running", "1", Some(Duration::from_secs(60))).await? {
+    ///     // We won the race — run the import.
+    /// }
+    /// ```
+    async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        if self.exists(key).await? {
+            return Ok(false);
+        }
+        self.set(key, value, ttl).await?;
+        Ok(true)
+    }
+
+    /// Django-parity `cache.touch(key, timeout)` — extend (or replace)
+    /// the TTL on an existing key without changing the value. Returns
+    /// `true` when the key existed and the TTL was reset, `false`
+    /// when the key was absent or already expired (no-op).
+    ///
+    /// The default implementation is a non-atomic `get` + `set` round-
+    /// trip. Backends with a native `EXPIRE` / `PEXPIRE` primitive
+    /// should override for an O(1) single-RTT path.
+    ///
+    /// `ttl = None` makes the entry persist indefinitely (matching
+    /// `set(_, _, None)`).
+    async fn touch(&self, key: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        match self.get(key).await? {
+            Some(value) => {
+                self.set(key, &value, ttl).await?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Django-parity `cache.get_many(keys)` — bulk fetch for a key
+    /// set, returning a map of present-and-not-expired entries.
+    /// Missing keys are omitted (Django's shape). Order of the
+    /// returned map is unspecified.
+    ///
+    /// Default implementation issues one `get` per key in sequence.
+    /// Backends with native batch primitives should override:
+    /// * `RedisCache` → `MGET` (one RTT)
+    /// * `DatabaseCache` → `SELECT … WHERE cache_key IN (…)` (one query)
+    async fn get_many(&self, keys: &[&str]) -> Result<HashMap<String, String>, CacheError> {
+        let mut out = HashMap::with_capacity(keys.len());
+        for k in keys {
+            if let Some(v) = self.get(k).await? {
+                out.insert((*k).to_owned(), v);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Django-parity `cache.set_many(mapping, timeout)` — bulk-set
+    /// many key/value pairs with one shared TTL. Equivalent to
+    /// looping `set` per entry; backends with native pipelines
+    /// (Redis `MSET` + `EXPIRE`, or executor-side `bulk_insert`)
+    /// should override.
+    async fn set_many(
+        &self,
+        entries: &[(&str, &str)],
+        ttl: Option<Duration>,
+    ) -> Result<(), CacheError> {
+        for (k, v) in entries {
+            self.set(k, v, ttl).await?;
+        }
+        Ok(())
+    }
+
+    /// Django-parity `cache.delete_many(keys)` — bulk-delete every
+    /// listed key. Missing keys are silently ignored. Default loops
+    /// `delete`; backends with native primitives (`DEL key1 key2`)
+    /// override.
+    async fn delete_many(&self, keys: &[&str]) -> Result<(), CacheError> {
+        for k in keys {
+            self.delete(k).await?;
+        }
+        Ok(())
+    }
 }
 
 /// `Arc<dyn Cache>` alias — the standard way to share a cache instance.

@@ -20,7 +20,7 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 
 | Category | SHIPPED | PARTIAL | MISSING | N/A |
 |---|---:|---:|---:|---:|
-| 1. ORM — models / fields / Meta | 20 | 1 | 1 | 0 |
+| 1. ORM — models / fields / Meta | 22 | 1 | 1 | 0 |
 | 2. QuerySet API | 37 | 1 | 1 | 0 |
 | 3. Field types & options | 32 | 0 | 2 | 1 |
 | 4. Postgres-specific fields | 2 | 1 | 2 | 0 |
@@ -34,7 +34,7 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 12. Sessions | 7 | 0 | 0 | 0 |
 | 13. Manage commands | 20 | 0 | 3 | 6 |
 | 14. Settings | 13 | 2 | 2 | 2 |
-| 15. Security / middleware | 26 | 0 | 0 | 0 |
+| 15. Security / middleware | 27 | 0 | 0 | 0 |
 | 16. Caching | 9 | 0 | 1 | 0 |
 | 17. Signals | 10 | 0 | 0 | 1 |
 | 18. Email | 11 | 0 | 0 | 0 |
@@ -44,9 +44,9 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 22. Async support | 4 | 0 | 0 | 3 |
 | 23. DRF parity | 22 | 0 | 1 | 0 |
 | 24. contrib modules | 12 | 1 | 3 | 2 |
-| **Totals** | **367** | **11** | **21** | **19** |
+| **Totals** | **370** | **11** | **21** | **19** |
 
-Coverage = 367 / (367 + 11 + 21) = **92% full, 3% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
+Coverage = 370 / (370 + 11 + 21) = **92% full, 3% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
 
 Snapshot date: 2026-06-03 (post v0.42 batch including ExclusionConstraint #593, default_permissions #594, on_delete #592, ForeignKey on_delete enum override, extra_permissions #591, get_latest_by #590, db_table_comment #589, citext, DatabaseCache, managed=false, upload streaming, i18n).
 
@@ -62,11 +62,13 @@ Snapshot date: 2026-06-03 (post v0.42 batch including ExclusionConstraint #593, 
 | `Meta.unique_together` | [Meta#unique_together](https://docs.djangoproject.com/en/6.0/ref/models/options/#unique-together) | SHIPPED | `#[rustango(unique_together(...))]` (v0.19) | |
 | `Meta.index_together` | [Meta#index_together](https://docs.djangoproject.com/en/6.0/ref/models/options/#index-together) | SHIPPED | `#[rustango(index_together(...))]` (v0.19) | |
 | `Index(fields=..., condition=Q(...))` partial index | [Index](https://docs.djangoproject.com/en/6.0/ref/models/indexes/#django.db.models.Index) | SHIPPED | `#[rustango(index_when(columns = "...", condition = "...", name = "...", method = "btree"))]` (PR #599) — sibling of `unique_when`. Emits `CREATE INDEX <name> ON <table> (cols) WHERE <expr>` on PG / SQLite; MySQL emits a plain CREATE INDEX with a render-time warning (no native partial-index support). | |
+| `Index(fields=..., include=[...])` covering index | [Index](https://docs.djangoproject.com/en/6.0/ref/models/indexes/#django.db.models.Index.include) | SHIPPED | Optional `include = "col1, col2"` sub-attr on both `index_when(...)` and `unique_when(...)` (PR #605). Emits `CREATE INDEX (key_cols) INCLUDE (non_key_cols)` on PG 11+ for index-only scans without heap visits; MySQL/SQLite drop the clause with a `tracing::warn!`. `IndexSchema::include` + `IndexSnapshot::include` carry the columns through the inventory → diff → render pipeline. | |
 | `Meta.default_related_name` | [Meta#default_related_name](https://docs.djangoproject.com/en/6.0/ref/models/options/#default-related-name) | SHIPPED | `#[rustango(default_related_name = "snake_case_name")]` (PR #600) — stored on `ModelSchema::default_related_name`, validated snake_case at derive time. Declarative-only today; foundation for future reverse-manager codegen / DRF schema emit / admin template hookup. | |
 | `Meta.constraints` (CheckConstraint, UniqueConstraint, ExclusionConstraint) | [Constraints](https://docs.djangoproject.com/en/6.0/ref/models/constraints/) | SHIPPED | `#[rustango(check(name, expr))]` + `unique_when` (partial unique) + `#[rustango(exclude(name, using, elements, where))]` (PR #593, PG-only — MySQL/SQLite skip with `tracing::warn!`). | Row-level CHECK with full `Q(...)` lowering is still by-hand (write the SQL out in `expr`). |
 | `Meta.verbose_name` / `verbose_name_plural` | [Meta#verbose_name](https://docs.djangoproject.com/en/6.0/ref/models/options/#verbose-name) | SHIPPED | `#[rustango(verbose_name = "...", verbose_name_plural = "...")]` (#320, v0.42) — `ModelSchema::display_label()` + `display_label_plural()`; admin list / detail / form templates pick up the friendly captions via `model.label` / `model.label_plural` | |
 | `Meta.permissions` (custom codenames) | [Meta#permissions](https://docs.djangoproject.com/en/6.0/ref/models/options/#permissions) | SHIPPED | `auto_create_permissions_pool` seeds CRUD codenames; reserved `auth.access_admin` added in PR #313. Custom per-model codenames declared via `#[rustango(extra_permissions = "approve:Can approve, archive:Can archive")]` (PR #591). | |
 | `Meta.default_permissions` | [Meta#default_permissions](https://docs.djangoproject.com/en/6.0/ref/models/options/#default-permissions) | SHIPPED | `#[rustango(default_permissions = "view,change")]` (PR #594) — opt out of `add` / `delete` codenames for read-mostly tables; empty (default) seeds all four CRUD codenames | |
+| `Meta.order_with_respect_to` | [Meta#order_with_respect_to](https://docs.djangoproject.com/en/6.0/ref/models/options/#order-with-respect-to) | SHIPPED | `#[rustango(order_with_respect_to = "parent_fk")]` (PR #610) — declarative-only storage on `ModelSchema::order_with_respect_to`. Foundation for future codegen to auto-emit the `_order` integer column + admin reordering UI. | |
 | `Meta.default_manager_name` | [Custom Managers](https://docs.djangoproject.com/en/6.0/topics/db/managers/) | SHIPPED | `#[rustango(manager_fn = "active")]` (closed #289 / T2.6) | Multiple `manager_fn` allowed. |
 | `Meta.base_manager_name` | [Meta#base_manager_name](https://docs.djangoproject.com/en/6.0/ref/models/options/#base-manager-name) | SHIPPED | `#[rustango(base_manager_name = "ManagerExt")]` — stored on `ModelSchema::base_manager_name`. Declarative-only today; foundation for reverse-manager codegen + DRF schema emit + admin templates that need to pick the right Manager subclass for `<instance>.<relation>_set` resolution. | |
 | `Meta.required_db_vendor` | [Meta#required_db_vendor](https://docs.djangoproject.com/en/6.0/ref/models/options/#required-db-vendor) | SHIPPED | `#[rustango(required_db_vendor = "postgres|mysql|sqlite")]` (PR #602). Django aliases (`postgresql` / `pg` / `mariadb` / `sqlite3`) normalize to canonical dialect names. `manage check --deploy` warns when a model's declared vendor doesn't match the active `pool.dialect().name()` — catches "wrong DATABASE_URL" at deploy time rather than first runtime hit. | |
@@ -79,7 +81,7 @@ Snapshot date: 2026-06-03 (post v0.42 batch including ExclusionConstraint #593, 
 | Self-referential FK | [Self FK](https://docs.djangoproject.com/en/6.0/ref/models/fields/#django.db.models.ForeignKey) | SHIPPED | `#[rustango(fk = "self")]` (v0.17.2) | Tested via `tests/self_fk_live.rs`. |
 | `ManyToManyField(through=...)` | [M2M through](https://docs.djangoproject.com/en/6.0/topics/db/models/#extra-fields-on-many-to-many-relationships) | SHIPPED | `#[rustango(m2m(... auto_create = false))]` (closed #324, v0.42). Operator declares the junction as its own `#[derive(Model)]` with extra columns; the migration writer skips emitting `CREATE TABLE` for that junction when `auto_create = false` (otherwise the through-model's own table would conflict). Implicit-junction path with `auto_create = true` (default) unchanged. | |
 
-Summary: **20 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A**. Gaps: full abstract-base field-inheritance (Rust idiom = trait composition; `#[rustango(managed = false)]` covers the operator-managed-table case via #321), MTI. ExclusionConstraint shipped in PR #593; `Meta.default_permissions` shipped in PR #594; `ForeignKey(on_delete=…)` explicit override shipped in PR #592.
+Summary: **22 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A**. Gaps: full abstract-base field-inheritance (Rust idiom = trait composition; `#[rustango(managed = false)]` covers the operator-managed-table case via #321), MTI. ExclusionConstraint shipped in PR #593; `Meta.default_permissions` shipped in PR #594; `ForeignKey(on_delete=…)` explicit override shipped in PR #592.
 
 ---
 
@@ -472,8 +474,9 @@ Summary: **13 SHIPPED / 2 PARTIAL / 2 MISSING / 2 N/A**. Multi-DB routing is the
 | Middleware | Doc | Status | rustango | Notes |
 |---|---|---|---|---|
 | `SecurityMiddleware` (HSTS, XSS, content-type-nosniff) | [SecurityMiddleware](https://docs.djangoproject.com/en/6.0/ref/middleware/#django.middleware.security.SecurityMiddleware) | SHIPPED | `security_headers::*` (HSTS, X-Frame, Referrer, COOP, Permissions-Policy) (v0.20+) | |
-| `CsrfViewMiddleware` | [CSRF](https://docs.djangoproject.com/en/6.0/ref/csrf/) | SHIPPED | `forms::csrf::CsrfLayer` | Double-submit-cookie. |
+| `CsrfViewMiddleware` | [CSRF](https://docs.djangoproject.com/en/6.0/ref/csrf/) | SHIPPED | `forms::csrf::CsrfLayer` — double-submit cookie + Origin-header defense-in-depth (PR #612). `CsrfConfig::trust_origin("https://app.example.com")` / `.with_trusted_origins([...])` is Django `CSRF_TRUSTED_ORIGINS` parity; supports `https://*.example.com` wildcard subdomains. Empty list disables the Origin check (back-compat). | |
 | `XFrameOptionsMiddleware` | [clickjacking](https://docs.djangoproject.com/en/6.0/ref/clickjacking/) | SHIPPED | Part of security_headers | |
+| `SECURE_SSL_REDIRECT` (HTTP→HTTPS redirect) | [SECURE_SSL_REDIRECT](https://docs.djangoproject.com/en/6.0/ref/settings/#secure-ssl-redirect) | SHIPPED | `ssl_redirect::SslRedirectLayer` (PR #613) — 301 redirect with `SECURE_PROXY_SSL_HEADER` parity (trust `X-Forwarded-Proto: https` from the LB) + `SECURE_REDIRECT_EXEMPT` parity via `.exempt([...])` prefix list. Preserves path + query in the Location header. | |
 | `SessionMiddleware` | [sessions](https://docs.djangoproject.com/en/6.0/topics/http/sessions/) | SHIPPED | (sec 12) | |
 | `AuthenticationMiddleware` | [auth middleware](https://docs.djangoproject.com/en/6.0/ref/middleware/#django.contrib.auth.middleware.AuthenticationMiddleware) | SHIPPED | `SessionUser` extractor | |
 | `MessageMiddleware` | [messages](https://docs.djangoproject.com/en/6.0/ref/contrib/messages/) | SHIPPED | `messages::*` flash-message store | |
@@ -493,12 +496,13 @@ Summary: **13 SHIPPED / 2 PARTIAL / 2 MISSING / 2 N/A**. Multi-DB routing is the
 | OpenTelemetry / traceparent | n/a | SHIPPED | `tracing_layer::*` | |
 | Body size limit | [DATA_UPLOAD_MAX_MEMORY_SIZE](https://docs.djangoproject.com/en/6.0/ref/settings/#data-upload-max-memory-size) | SHIPPED | `body_limit::*` | |
 | IP allowlist / blocklist | n/a | SHIPPED | `ip_filter::*` | |
+| `ALLOWED_HOSTS` (Host-header validation) | [ALLOWED_HOSTS](https://docs.djangoproject.com/en/6.0/ref/settings/#allowed-hosts) | SHIPPED | `host_validation::AllowedHostsLayer` (PR #611) — exact + `.example.com` subdomain wildcard + `*` catch-all; case-insensitive; port-stripped; empty list disables enforcement (DEBUG-style opt-out). Rejects unknown hosts with a 400 echoing the Django `DisallowedHost` shape. | |
 | Server-Timing header | n/a | SHIPPED | `server_timing::*` | |
 | CSP nonce | [CSP](https://docs.djangoproject.com/en/6.0/topics/security/#content-security-policy) | SHIPPED | `csp_nonce::*` middleware | |
 | `SECURE_PROXY_SSL_HEADER` | [proxy headers](https://docs.djangoproject.com/en/6.0/ref/settings/#secure-proxy-ssl-header) | SHIPPED | Real-IP layer handles it | |
 | API versioning (header / query / prefix) | n/a | SHIPPED | `api_version::*` | |
 
-Summary: **26 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A** for the dimensions enumerated. Rustango is notably ahead on per-request observability + CSRF / rate limiting / CSP / OTel out-of-the-box.
+Summary: **27 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A** for the dimensions enumerated. Rustango is notably ahead on per-request observability + CSRF / rate limiting / CSP / OTel out-of-the-box.
 
 ---
 

@@ -459,6 +459,38 @@ pub struct SecuritySettings {
     /// added. `["*"]` is permissive (browsers don't allow it with
     /// credentials).
     pub cors_allowed_origins: Vec<String>,
+    /// Django-parity `ALLOWED_HOSTS` — host-header allowlist enforced
+    /// by [`crate::host_validation::AllowedHostsLayer`]. Each entry
+    /// is a hostname, `.example.com` subdomain wildcard, or `*`
+    /// catch-all. Empty = layer disabled (DEBUG-style opt-out).
+    /// `manage check --deploy` flags an empty list as a warning on
+    /// the prod tier.
+    pub allowed_hosts: Vec<String>,
+    /// Django-parity `CSRF_TRUSTED_ORIGINS` — extra origins that
+    /// pass the CSRF Origin-header check in addition to same-host
+    /// requests. Each entry is scheme+host, e.g.
+    /// `"https://app.example.com"` or `"https://*.example.com"`.
+    /// Empty disables the Origin-header check (back-compat with
+    /// pre-v0.43 pure double-submit-cookie CSRF).
+    /// Wired via [`crate::forms::csrf::CsrfConfig::with_trusted_origins`].
+    pub csrf_trusted_origins: Vec<String>,
+    /// Django-parity `SECURE_SSL_REDIRECT` — `true` mounts the
+    /// [`crate::ssl_redirect::SslRedirectLayer`] which 301-redirects
+    /// every plain-HTTP request to HTTPS. Default `false`.
+    pub secure_ssl_redirect: Option<bool>,
+    /// Django-parity `SECURE_REDIRECT_EXEMPT` — URL-path prefixes
+    /// that bypass the SSL redirect even when
+    /// [`Self::secure_ssl_redirect`] is on. Useful for behind-the-LB
+    /// health checks that hit plain HTTP.
+    pub secure_redirect_exempt: Vec<String>,
+    /// Django-parity `SECURE_PROXY_SSL_HEADER` — `(header_name,
+    /// expected_value)` pair the reverse proxy sets to indicate the
+    /// upstream request was HTTPS. Wired into both
+    /// [`crate::ssl_redirect::SslRedirectLayer::proxy_ssl_header`]
+    /// (avoids redirect loops behind a TLS-terminating LB) and the
+    /// real-IP / Host validation chain. Two-element vec; ignored if
+    /// not exactly length 2.
+    pub secure_proxy_ssl_header: Vec<String>,
 }
 
 /// URL-prefix overrides for the framework's built-in routes (#87,

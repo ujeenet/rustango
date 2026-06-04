@@ -233,3 +233,156 @@ async fn incr_resets_on_non_integer_value() {
     // next incr returns `by`.
     assert_eq!(c.incr("counter", 7, None).await.unwrap(), 7);
 }
+
+// ------------------------------------------------------------------ add (Django parity)
+
+#[tokio::test]
+async fn add_inserts_when_key_is_absent() {
+    let c = InMemoryCache::new();
+    let inserted = c.add("lock", "1", None).await.unwrap();
+    assert!(inserted, "first add into empty cache should win the race");
+    assert_eq!(c.get("lock").await.unwrap().as_deref(), Some("1"));
+}
+
+#[tokio::test]
+async fn add_is_no_op_when_key_already_set() {
+    let c = InMemoryCache::new();
+    c.set("lock", "winner", None).await.unwrap();
+    let inserted = c.add("lock", "loser", None).await.unwrap();
+    assert!(!inserted, "second add must lose to the existing entry");
+    assert_eq!(
+        c.get("lock").await.unwrap().as_deref(),
+        Some("winner"),
+        "add must not overwrite the existing value"
+    );
+}
+
+#[tokio::test]
+async fn add_can_re_insert_after_expiry() {
+    let c = InMemoryCache::new();
+    c.set("lock", "v", Some(Duration::from_millis(50)))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let inserted = c.add("lock", "fresh", None).await.unwrap();
+    assert!(inserted, "expired entries don't block a subsequent add");
+    assert_eq!(c.get("lock").await.unwrap().as_deref(), Some("fresh"));
+}
+
+// ------------------------------------------------------------------ touch (Django parity)
+
+#[tokio::test]
+async fn touch_extends_ttl_on_existing_key() {
+    let c = InMemoryCache::new();
+    c.set("k", "v", Some(Duration::from_millis(100)))
+        .await
+        .unwrap();
+    // Touch with a longer TTL before the original expires.
+    let touched = c.touch("k", Some(Duration::from_secs(3600))).await.unwrap();
+    assert!(touched, "touch on a live key must return true");
+    // After the original TTL would've fired the key still lives.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(c.get("k").await.unwrap().as_deref(), Some("v"));
+}
+
+#[tokio::test]
+async fn touch_returns_false_when_key_absent() {
+    let c = InMemoryCache::new();
+    let touched = c
+        .touch("ghost", Some(Duration::from_secs(60)))
+        .await
+        .unwrap();
+    assert!(!touched);
+}
+
+#[tokio::test]
+async fn touch_with_none_ttl_persists_indefinitely() {
+    let c = InMemoryCache::new();
+    c.set("k", "v", Some(Duration::from_millis(50)))
+        .await
+        .unwrap();
+    let touched = c.touch("k", None).await.unwrap();
+    assert!(touched);
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(
+        c.get("k").await.unwrap().as_deref(),
+        Some("v"),
+        "touch(None) removes the TTL so the entry survives past the original expiry"
+    );
+}
+
+#[tokio::test]
+async fn touch_does_not_alter_value() {
+    let c = InMemoryCache::new();
+    c.set("k", "original", None).await.unwrap();
+    c.touch("k", Some(Duration::from_secs(60))).await.unwrap();
+    assert_eq!(c.get("k").await.unwrap().as_deref(), Some("original"));
+}
+
+// ------------------------------------------------------------------ get_many / set_many / delete_many (Django parity)
+
+#[tokio::test]
+async fn set_many_writes_every_entry() {
+    let c = InMemoryCache::new();
+    c.set_many(&[("a", "1"), ("b", "2"), ("c", "3")], None)
+        .await
+        .unwrap();
+    assert_eq!(c.get("a").await.unwrap().as_deref(), Some("1"));
+    assert_eq!(c.get("b").await.unwrap().as_deref(), Some("2"));
+    assert_eq!(c.get("c").await.unwrap().as_deref(), Some("3"));
+}
+
+#[tokio::test]
+async fn get_many_returns_only_present_keys() {
+    let c = InMemoryCache::new();
+    c.set("a", "1", None).await.unwrap();
+    c.set("c", "3", None).await.unwrap();
+    let map = c.get_many(&["a", "b", "c"]).await.unwrap();
+    assert_eq!(map.len(), 2);
+    assert_eq!(map.get("a").map(String::as_str), Some("1"));
+    assert_eq!(map.get("c").map(String::as_str), Some("3"));
+    assert!(!map.contains_key("b"));
+}
+
+#[tokio::test]
+async fn get_many_with_no_keys_returns_empty() {
+    let c = InMemoryCache::new();
+    c.set("a", "1", None).await.unwrap();
+    let map = c.get_many(&[]).await.unwrap();
+    assert!(map.is_empty());
+}
+
+#[tokio::test]
+async fn set_many_with_ttl_expires_every_entry() {
+    let c = InMemoryCache::new();
+    c.set_many(
+        &[("k1", "v1"), ("k2", "v2")],
+        Some(Duration::from_millis(50)),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert!(c.get("k1").await.unwrap().is_none());
+    assert!(c.get("k2").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn delete_many_removes_every_listed_key() {
+    let c = InMemoryCache::new();
+    c.set_many(&[("a", "1"), ("b", "2"), ("c", "3")], None)
+        .await
+        .unwrap();
+    c.delete_many(&["a", "c"]).await.unwrap();
+    assert!(c.get("a").await.unwrap().is_none());
+    assert_eq!(c.get("b").await.unwrap().as_deref(), Some("2"));
+    assert!(c.get("c").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn delete_many_ignores_missing_keys() {
+    let c = InMemoryCache::new();
+    c.set("kept", "v", None).await.unwrap();
+    // Mix of missing + present — neither should error.
+    c.delete_many(&["ghost1", "kept", "ghost2"]).await.unwrap();
+    assert!(c.get("kept").await.unwrap().is_none());
+}

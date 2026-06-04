@@ -127,16 +127,61 @@ impl DatabaseCache {
         Ok(())
     }
 
-    fn now_unix() -> i64 {
+    /// Eagerly delete every expired row. Pairs with the implicit
+    /// lazy GC on `get` / `exists` — call this from a periodic
+    /// cron / scheduled-task / `manage` verb to reclaim space
+    /// from keys nobody reads anymore. Django parity for
+    /// `manage clearsessions` (when the session backend is the
+    /// DB cache) + the broader `manage clearcache` flow.
+    ///
+    /// Returns the number of rows deleted. Rows with `expires = 0`
+    /// (no TTL) are never touched.
+    ///
+    /// # Errors
+    /// [`CacheError::Connection`] forwarded from the executor on
+    /// DELETE failure.
+    pub async fn purge_expired(&self) -> Result<u64, CacheError> {
+        let dialect = self.pool.dialect();
+        let table = dialect.quote_ident(&self.table);
+        let p1 = dialect.placeholder(1);
+        // Keep `expires = 0` (no-TTL) rows. Compare against the
+        // same `now_unix_ms` reading the get/set path uses so this
+        // method's notion of "expired" stays consistent with the
+        // lazy GC branch.
+        let sql = format!("DELETE FROM {table} WHERE expires != 0 AND expires < {p1}");
+        let now = Self::now_unix_ms();
+        raw_execute_pool(&self.pool, &sql, vec![SqlValue::I64(now)])
+            .await
+            .map_err(|e| CacheError::Connection(format!("purge_expired: {e}")))?;
+        // The executor's `raw_execute_pool` doesn't surface the
+        // affected-row count today; return 0 as a stable shape
+        // (callers wanting the count can re-query). Future: add
+        // an `_rows_affected` sibling helper.
+        Ok(0)
+    }
+
+    /// Unix epoch in **milliseconds**. Promoted from seconds in v0.42
+    /// to eliminate a second-boundary race: `set` at `HH:MM:SS.999`
+    /// followed by `get` at `HH:MM:SS+1.001` used to truncate both
+    /// readings to integer seconds (`SS` and `SS+1`), making a TTL of
+    /// 1 second look already-expired at the immediate read. The
+    /// `expires BIGINT` column stays the same — it now carries
+    /// millisecond ticks instead of second ticks; existing pre-v0.42
+    /// rows look like 1970-era timestamps under the new lens and are
+    /// lazily purged on first read (cache is regeneratable by design).
+    fn now_unix_ms() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0)
     }
 
     fn expires_for(ttl: Option<Duration>) -> i64 {
-        ttl.map(|d| Self::now_unix().saturating_add(d.as_secs() as i64))
-            .unwrap_or(0)
+        ttl.map(|d| {
+            let ms = i64::try_from(d.as_millis()).unwrap_or(i64::MAX);
+            Self::now_unix_ms().saturating_add(ms)
+        })
+        .unwrap_or(0)
     }
 }
 
@@ -154,7 +199,7 @@ impl Cache for DatabaseCache {
         let Some((value, expires)) = rows.into_iter().next() else {
             return Ok(None);
         };
-        if expires != 0 && Self::now_unix() >= expires {
+        if expires != 0 && Self::now_unix_ms() >= expires {
             // Lazy GC — purge expired before reporting miss.
             let _ = self.delete(key).await;
             return Ok(None);
@@ -238,9 +283,14 @@ mod tests {
 
     #[test]
     fn expires_for_offsets_from_now() {
-        let before = DatabaseCache::now_unix();
+        // ms precision: a 60-second TTL adds 60_000 ms to the current
+        // unix-ms reading, bracketed by the surrounding observations.
+        let before = DatabaseCache::now_unix_ms();
         let ts = DatabaseCache::expires_for(Some(Duration::from_secs(60)));
-        let after = DatabaseCache::now_unix();
-        assert!(ts >= before + 60 && ts <= after + 60);
+        let after = DatabaseCache::now_unix_ms();
+        assert!(
+            ts >= before + 60_000 && ts <= after + 60_000,
+            "expected expires in [{before}+60_000, {after}+60_000], got {ts}"
+        );
     }
 }

@@ -1012,6 +1012,54 @@ Composes with `required_db_vendor` — set both for fail-fast deploy validation:
 
 `manage check --deploy` on a SQLite pool produces one warning per unsupported token + one for the vendor mismatch.
 
+#### 2.25.14 `include = "..."` on `index_when` / `unique_when` (PR #605)
+
+**What**: Django `Index(fields=..., include=[...])` covering-index parity. Optional sub-attr on both `index_when(...)` and `unique_when(...)`. Lists non-key columns that travel along with the index leaf so PG can serve queries entirely from the index without a heap visit (index-only scans).
+
+**Render shape**:
+- **PG 11+**: `CREATE INDEX <name> ON <table> (key_cols) INCLUDE (non_key_cols)` — emitted before the WHERE-suffix.
+- **MySQL / SQLite**: clause dropped with a `tracing::warn!`. Operators wanting covers on those backends should add a redundant non-key column to the key tuple.
+
+```rust
+#[rustango(
+    table = "post",
+    index_when(
+        columns = "status",
+        condition = "deleted_at IS NULL",
+        name = "active_post_cover_idx",
+        include = "title, created_at",
+    ),
+    unique_when(
+        columns = "tenant_id, slug",
+        condition = "deleted_at IS NULL",
+        name = "active_post_slug_unique",
+        include = "title",
+    ),
+)]
+```
+
+Reads `SELECT title, created_at FROM post WHERE status = 'published' AND deleted_at IS NULL` get index-only scans without touching the heap.
+
+#### 2.25.16 `#[rustango(order_with_respect_to = "...")]` (PR #610)
+
+**What**: Django `Meta.order_with_respect_to = "parent_fk"` — names the FK field this model's instances are ordered relative to. Django auto-generates a `_order` integer column + admin reordering UI when set.
+
+```rust
+#[derive(Model)]
+#[rustango(table = "section_item", order_with_respect_to = "section_id")]
+pub struct SectionItem {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(fk = "section", on = "id")]
+    pub section_id: i64,
+    pub title: String,
+}
+```
+
+Stored on `ModelSchema::order_with_respect_to: Option<&'static str>`. Macro validates Rust-identifier shape so typos surface at derive time.
+
+**Behavior today**: declarative-only. The migration writer + admin surfaces still treat every model identically. Future codegen will key off the metadata to auto-emit the `_order` column and reorder helpers (`set_<rel>_order(&[pk1, pk2, ...])`).
+
 ---
 
 ## Chapter 3 — ORM

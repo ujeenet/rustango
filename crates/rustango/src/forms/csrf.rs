@@ -101,6 +101,23 @@ pub struct CsrfConfig {
     /// `manage check --deploy` continues to warn when this is `false`
     /// on a prod tier.
     pub secure: bool,
+    /// Django-parity `CSRF_TRUSTED_ORIGINS` — extra origins that may
+    /// submit cross-origin POSTs without being rejected by the
+    /// Origin-header check. Each entry is a scheme+host (optionally
+    /// with port), e.g. `"https://app.example.com"` or
+    /// `"https://*.example.com"` for a wildcard subdomain.
+    ///
+    /// Default `[]` (empty) — disables the Origin-header check
+    /// entirely so existing deployments don't break. To enable
+    /// defense-in-depth Origin-based CSRF protection, populate this
+    /// list with at least the application's own canonical origin.
+    ///
+    /// When non-empty, the layer ALSO accepts the request's own
+    /// Host header as an implicit trusted origin (same-origin
+    /// requests always pass). Defense-in-depth: even if an XSS
+    /// attacker steals the cookie token, they can't submit from a
+    /// different origin.
+    pub trusted_origins: Vec<String>,
 }
 
 impl Default for CsrfConfig {
@@ -109,6 +126,7 @@ impl Default for CsrfConfig {
             cookie_name: CSRF_COOKIE.to_owned(),
             header_name: CSRF_HEADER.to_owned(),
             secure: true,
+            trusted_origins: Vec::new(),
         }
     }
 }
@@ -123,6 +141,106 @@ impl CsrfConfig {
         self.secure = false;
         self
     }
+
+    /// Builder — append a trusted origin (scheme+host, optionally
+    /// `*.` wildcard subdomain). Django-parity for
+    /// `CSRF_TRUSTED_ORIGINS`.
+    #[must_use]
+    pub fn trust_origin(mut self, origin: impl Into<String>) -> Self {
+        self.trusted_origins.push(origin.into());
+        self
+    }
+
+    /// Builder — replace the trusted-origins list wholesale.
+    /// Convenient when wiring from settings:
+    /// `CsrfConfig::default().with_trusted_origins(settings.security.csrf_trusted_origins.clone())`.
+    #[must_use]
+    pub fn with_trusted_origins<I, S>(mut self, origins: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.trusted_origins = origins.into_iter().map(Into::into).collect();
+        self
+    }
+}
+
+/// Origin-header check — defense-in-depth over the double-submit
+/// cookie. Returns `true` if the request's Origin header is allowed:
+///
+/// * No Origin header → allow (some clients / curl don't send it).
+/// * Origin scheme+host matches the request's Host header → allow
+///   (same-origin POST is the common case).
+/// * Origin matches an entry in `trusted_origins` (exact or
+///   `*.subdomain.example.com` wildcard) → allow.
+/// * Anything else → reject.
+///
+/// When `trusted_origins` is empty, the layer skips the check
+/// entirely (back-compat default) — the Origin header alone is
+/// not consulted.
+fn origin_allowed(req: &Request<Body>, trusted: &[String]) -> bool {
+    if trusted.is_empty() {
+        return true;
+    }
+    let Some(origin) = req
+        .headers()
+        .get(axum::http::header::ORIGIN)
+        .and_then(|h| h.to_str().ok())
+    else {
+        // No Origin header — fall back to legacy behavior. Browsers
+        // always send Origin on cross-origin POST, so the missing
+        // case is curl / server-to-server which already gets
+        // protected by the double-submit token check.
+        return true;
+    };
+    // Same-origin: Origin's host matches the request's Host header.
+    if let Some(host) = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+    {
+        let origin_host = origin
+            .split("://")
+            .nth(1)
+            .unwrap_or(origin)
+            .trim_end_matches('/');
+        if origin_host == host {
+            return true;
+        }
+    }
+    // Trusted-origin allowlist. Support `*.example.com` wildcard.
+    for entry in trusted {
+        let entry = entry.trim().trim_end_matches('/');
+        if entry == origin {
+            return true;
+        }
+        if let Some(wild) = entry.strip_prefix("https://*.") {
+            // Match `https://anything.<wild>` exactly.
+            if let Some(prefix) = origin.strip_prefix("https://") {
+                if prefix == wild {
+                    return true;
+                }
+                if let Some(rest) = prefix.strip_suffix(wild) {
+                    if rest.ends_with('.') {
+                        return true;
+                    }
+                }
+            }
+        }
+        if let Some(wild) = entry.strip_prefix("http://*.") {
+            if let Some(prefix) = origin.strip_prefix("http://") {
+                if prefix == wild {
+                    return true;
+                }
+                if let Some(rest) = prefix.strip_suffix(wild) {
+                    if rest.ends_with('.') {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 /// The tower [`Layer`] implementation. Wraps inner services with
@@ -181,6 +299,14 @@ where
 
             // Enforce on unsafe methods.
             let req = if !is_safe_method(req.method()) {
+                // Origin-header defense-in-depth. Skipped when
+                // `trusted_origins` is empty (back-compat default).
+                if !origin_allowed(&req, &cfg.trusted_origins) {
+                    return Ok(forbid_response(
+                        "CSRF: request Origin not in CSRF_TRUSTED_ORIGINS \
+                         and does not match Host",
+                    ));
+                }
                 let header_value = req
                     .headers()
                     .get(&cfg.header_name)
