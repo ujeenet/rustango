@@ -463,3 +463,40 @@ async fn decr_is_inverse_of_incr() {
     let after = c.decr("k", 7, None).await.unwrap();
     assert_eq!(after, 0);
 }
+
+// ------------------------------------------------------------------ get_or (Django parity)
+
+#[tokio::test]
+async fn get_or_returns_stored_value_when_present() {
+    // Django parity: `cache.get('k', default='x')` returns the value
+    // when the key exists, not the default.
+    let c = InMemoryCache::new();
+    c.set("greeting", "hello", None).await.unwrap();
+    assert_eq!(c.get_or("greeting", "ANON").await.unwrap(), "hello");
+}
+
+#[tokio::test]
+async fn get_or_returns_default_when_absent() {
+    let c = InMemoryCache::new();
+    assert_eq!(c.get_or("missing", "fallback").await.unwrap(), "fallback");
+}
+
+#[tokio::test]
+async fn get_or_returns_default_after_expiry() {
+    let c = InMemoryCache::new();
+    c.set("ttl", "fresh", Some(Duration::from_millis(20)))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert_eq!(c.get_or("ttl", "default").await.unwrap(), "default");
+}
+
+#[tokio::test]
+async fn get_or_does_not_write_default_back() {
+    // Subtle: Django's two-arg get just returns the default — it does
+    // NOT store it. (get_or_set is the "fetch-or-compute-and-store"
+    // shape; get_or is purely a read fallback.)
+    let c = InMemoryCache::new();
+    let _ = c.get_or("ghost", "would-not-be-stored").await.unwrap();
+    assert!(!c.has_key("ghost").await.unwrap());
+}

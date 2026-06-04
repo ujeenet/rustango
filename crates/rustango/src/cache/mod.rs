@@ -234,6 +234,28 @@ pub trait Cache: Send + Sync + 'static {
     async fn decr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
         self.incr(key, by.saturating_neg(), ttl).await
     }
+
+    /// Django-parity `cache.get(key, default)` — returns the stored
+    /// value, or `default` (cloned) when the key is absent or expired.
+    ///
+    /// Direct translation of Django's two-arg form:
+    ///
+    /// ```python
+    /// # Django
+    /// name = cache.get('username', default='anonymous')
+    /// ```
+    ///
+    /// ```ignore
+    /// // rustango
+    /// let name = cache.get_or("username", "anonymous").await?;
+    /// ```
+    ///
+    /// `default` is taken by `&str` so callers can pass either string
+    /// literals or borrowed `String`s without an unnecessary allocation
+    /// on the hit path — the allocation only happens on miss.
+    async fn get_or(&self, key: &str, default: &str) -> Result<String, CacheError> {
+        Ok(self.get(key).await?.unwrap_or_else(|| default.to_owned()))
+    }
 }
 
 /// `Arc<dyn Cache>` alias — the standard way to share a cache instance.
