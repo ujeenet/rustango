@@ -523,6 +523,24 @@ pub struct ModelSchema {
     /// codegen auto-emit the `_order` column and reorder helpers.
     /// `None` means the model has no parent-FK-relative ordering.
     pub order_with_respect_to: Option<&'static str>,
+    /// Django-shape `Meta.proxy = True` — `true` when this model
+    /// proxies another struct's DB table. Set via
+    /// `#[rustango(proxy)]` or `#[rustango(proxy = true)]`.
+    ///
+    /// When `true`:
+    /// * `makemigrations` skips emitting `CreateTable` for this
+    ///   entry (the parent struct owns the table, the proxy reuses
+    ///   it).
+    /// * Admin / DRF / ORM surfaces can pick the proxy class for
+    ///   per-instance method resolution while sharing the column
+    ///   set.
+    ///
+    /// Today the migration writer + admin surfaces still treat
+    /// every model as table-owning; `proxy` is stored declaratively
+    /// so future codegen can flip those branches. The
+    /// [`crate::inheritance`] extension-trait pattern is rustango's
+    /// idiom for the same shape today.
+    pub proxy: bool,
     /// Django-shape `Meta.get_latest_by` — default sort field that
     /// `QuerySet::latest_default()` / `earliest_default()` use when
     /// the caller doesn't pass a field name explicitly. A string

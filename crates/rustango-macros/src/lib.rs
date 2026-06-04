@@ -809,6 +809,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         container.managed,
         container.base_manager_name.as_deref(),
         container.order_with_respect_to.as_deref(),
+        container.proxy,
         &container.required_db_features,
         container.required_db_vendor.as_deref(),
         container.default_related_name.as_deref(),
@@ -1709,6 +1710,7 @@ fn model_impl_tokens(
     managed: bool,
     base_manager_name: Option<&str>,
     order_with_respect_to: Option<&str>,
+    proxy: bool,
     required_db_features: &[String],
     required_db_vendor: Option<&str>,
     default_related_name: Option<&str>,
@@ -1910,6 +1912,7 @@ fn model_impl_tokens(
                 managed: #managed,
                 base_manager_name: #base_manager_name_tokens,
                 order_with_respect_to: #order_with_respect_to_tokens,
+                proxy: #proxy,
                 required_db_features: &[ #(#required_db_features_lits),* ],
                 required_db_vendor: #required_db_vendor_tokens,
                 default_related_name: #default_related_name_tokens,
@@ -4494,6 +4497,12 @@ struct ContainerAttrs {
     /// Declarative-only today; threaded onto
     /// `ModelSchema::order_with_respect_to`.
     order_with_respect_to: Option<String>,
+    /// Django-shape `Meta.proxy = True` from `#[rustango(proxy)]` /
+    /// `#[rustango(proxy = true)]`. Marks the model as a proxy that
+    /// shares its DB table with another struct. Threaded into
+    /// `ModelSchema::proxy` so future codegen can skip table-owning
+    /// behavior for proxies.
+    proxy: bool,
     /// Django-shape `Meta.required_db_features` from
     /// `#[rustango(required_db_features = "json_extract,window_functions")]`.
     /// Each comma-separated capability token surfaces on
@@ -4758,6 +4767,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         verbose_name_plural: None,
         base_manager_name: None,
         order_with_respect_to: None,
+        proxy: false,
         required_db_features: Vec::new(),
         required_db_vendor: None,
         default_related_name: None,
@@ -5101,6 +5111,23 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 // table-level comment attached to the DB catalog.
                 let s: LitStr = meta.value()?.parse()?;
                 out.db_table_comment = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("proxy") {
+                // Django-shape `Meta.proxy = True` — declarative flag
+                // marking the struct as a proxy of another model that
+                // shares its DB table. Stored on `ModelSchema::proxy`
+                // so future codegen can skip `CreateTable` emission
+                // for proxies (parent owns the table) and route
+                // per-instance method resolution to the proxy class.
+                //
+                // Accepts `proxy` (bare → true) and `proxy = true/false`.
+                let value = if meta.input.peek(syn::Token![=]) {
+                    meta.value()?.parse::<syn::LitBool>()?.value
+                } else {
+                    true
+                };
+                out.proxy = value;
                 return Ok(());
             }
             if meta.path.is_ident("order_with_respect_to") {
