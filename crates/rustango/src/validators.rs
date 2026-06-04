@@ -42,6 +42,8 @@
 //!   (Django's `DecimalValidator`).
 //! - `validate_file_size_max` / `validate_file_mime_type` —
 //!   Django-shape file-upload size + MIME allowlist checks.
+//! - `validate_step_value` — Django's `StepValueValidator` —
+//!   `n == offset + k*step` for non-negative integer `k`.
 //! - `validate_ipv4_address` / `validate_ipv6_address` — dotted-quad /
 //!   colon-hex address shape via `std::net::Ipv4Addr` / `Ipv6Addr`.
 //! - `validate_comma_separated_integer_list` — `"1,2,3"`. Django's
@@ -1451,6 +1453,63 @@ pub fn validate_max_value_f64(n: f64, max: f64) -> Result<(), ValidationError> {
         return Err(ValidationError::new(
             "max_value",
             format!("Ensure this value is less than or equal to {max}."),
+        ));
+    }
+    Ok(())
+}
+
+/// Django-parity `StepValueValidator(limit_value, offset=0)` —
+/// validate that `n` equals `offset + k * step` for some non-negative
+/// integer `k`. Used to enforce HTML5 `<input type=number step="…">`
+/// semantics from the server side.
+///
+/// `step` must be positive; passing zero or negative returns a
+/// `ValidationError` with code `"invalid_step"` (Django raises
+/// `ValueError` at validator construction; we surface it as a
+/// validation failure for ergonomics).
+///
+/// Tolerance for floating-point round-off: the value is considered
+/// "on-step" if the absolute residue from `(n - offset) / step` to
+/// the nearest integer is below `1e-9 * step`.
+///
+/// # Errors
+/// `ValidationError { code: "step_size", ... }` when `n` isn't on the
+/// step grid; `code: "invalid_step"` when `step <= 0`.
+///
+/// ```ignore
+/// use rustango::validators::validate_step_value;
+/// // step=0.5 from offset=0 → 0.0, 0.5, 1.0, 1.5, ... all valid
+/// assert!(validate_step_value(1.5, 0.5, 0.0).is_ok());
+/// assert!(validate_step_value(1.3, 0.5, 0.0).is_err());
+/// // step=10 from offset=5 → 5, 15, 25, ... valid
+/// assert!(validate_step_value(25.0, 10.0, 5.0).is_ok());
+/// ```
+pub fn validate_step_value(n: f64, step: f64, offset: f64) -> Result<(), ValidationError> {
+    if !(step > 0.0) {
+        return Err(ValidationError::new(
+            "invalid_step",
+            "Step value must be strictly positive.",
+        ));
+    }
+    if n.is_nan() {
+        return Err(ValidationError::new(
+            "step_size",
+            format!("Ensure this value is a multiple of {step}."),
+        ));
+    }
+    let residue = (n - offset) / step;
+    let nearest = residue.round();
+    // 1e-9 * step is tighter than f64::EPSILON for typical inputs but
+    // still tolerates the round-off you'd see from doing e.g.
+    // (1.0 + 0.5) and asking "is that a multiple of 0.5".
+    if (residue - nearest).abs() > 1e-9 {
+        return Err(ValidationError::new(
+            "step_size",
+            if offset == 0.0 {
+                format!("Ensure this value is a multiple of {step}.")
+            } else {
+                format!("Ensure this value is a multiple of {step}, starting from {offset}.")
+            },
         ));
     }
     Ok(())
@@ -3308,5 +3367,66 @@ mod tests {
     fn file_mime_type_wildcard_does_not_cross_top_level_type() {
         // image/* must NOT match application/json
         assert!(validate_file_mime_type("application/json", &["image/*"]).is_err());
+    }
+
+    // -------- validate_step_value (Django parity) --------
+
+    #[test]
+    fn step_value_accepts_multiples_of_step() {
+        // step=0.5 from offset=0 → 0, 0.5, 1, 1.5 ... all valid.
+        assert!(validate_step_value(0.0, 0.5, 0.0).is_ok());
+        assert!(validate_step_value(0.5, 0.5, 0.0).is_ok());
+        assert!(validate_step_value(1.0, 0.5, 0.0).is_ok());
+        assert!(validate_step_value(1.5, 0.5, 0.0).is_ok());
+        assert!(validate_step_value(-1.5, 0.5, 0.0).is_ok());
+    }
+
+    #[test]
+    fn step_value_rejects_off_grid_values() {
+        let err = validate_step_value(1.3, 0.5, 0.0).unwrap_err();
+        assert_eq!(err.code, "step_size");
+        assert!(err.message.contains("0.5"));
+    }
+
+    #[test]
+    fn step_value_honors_offset() {
+        // step=10 with offset=5 → 5, 15, 25, ... valid; 0, 10, 20, ... invalid.
+        assert!(validate_step_value(5.0, 10.0, 5.0).is_ok());
+        assert!(validate_step_value(15.0, 10.0, 5.0).is_ok());
+        assert!(validate_step_value(25.0, 10.0, 5.0).is_ok());
+        let err = validate_step_value(10.0, 10.0, 5.0).unwrap_err();
+        assert_eq!(err.code, "step_size");
+        assert!(err.message.contains("5"));
+    }
+
+    #[test]
+    fn step_value_tolerates_floating_point_round_off() {
+        // 0.1 + 0.2 != 0.3 in f64, but 0.3 should still be a multiple of 0.1.
+        assert!(validate_step_value(0.1 + 0.2, 0.1, 0.0).is_ok());
+        // 1.5 / 0.5 = 3.0 exactly — guard against accidentally tight tolerance.
+        assert!(validate_step_value(1.5, 0.5, 0.0).is_ok());
+    }
+
+    #[test]
+    fn step_value_rejects_zero_or_negative_step() {
+        let err = validate_step_value(1.0, 0.0, 0.0).unwrap_err();
+        assert_eq!(err.code, "invalid_step");
+        let err = validate_step_value(1.0, -0.5, 0.0).unwrap_err();
+        assert_eq!(err.code, "invalid_step");
+    }
+
+    #[test]
+    fn step_value_rejects_nan() {
+        let err = validate_step_value(f64::NAN, 0.5, 0.0).unwrap_err();
+        assert_eq!(err.code, "step_size");
+    }
+
+    #[test]
+    fn step_value_integer_step_works() {
+        // step=5 from offset=0 → 0, 5, 10, 15, ... — common HTML5 form
+        // case: step="5" attribute on a number input.
+        assert!(validate_step_value(0.0, 5.0, 0.0).is_ok());
+        assert!(validate_step_value(25.0, 5.0, 0.0).is_ok());
+        assert!(validate_step_value(7.0, 5.0, 0.0).is_err());
     }
 }
