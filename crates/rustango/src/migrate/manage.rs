@@ -3487,8 +3487,15 @@ fn deploy_audit_env() -> DeployAuditEnv {
     }
 }
 
+/// Triple-bucket output of the `manage check --deploy` audit
+/// pipeline. `info` rows are informational, `warnings` are
+/// dev-default-leak flags, `errors` are hard misconfigurations.
+///
+/// `#[doc(hidden)] pub` for integration-test access; library
+/// callers use [`run_settings_audit`] / `check_cmd` directly.
+#[doc(hidden)]
 #[derive(Debug, Default)]
-pub(crate) struct DeployAuditFindings {
+pub struct DeployAuditFindings {
     pub info: Vec<String>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
@@ -3642,8 +3649,14 @@ fn run_settings_audit(out: &mut DeployAuditFindings) {
 /// the resolved tier + settings. Lifted out so unit tests can run
 /// against any combination without touching the on-disk config
 /// pipeline (which would race against parallel test runners).
+///
+/// `#[doc(hidden)] pub` so integration tests (which compile against
+/// the crate as an external dep) can drive it without flipping
+/// every field — internal callers should keep using
+/// [`run_settings_audit`].
 #[cfg(feature = "config")]
-pub(crate) fn settings_audit_check(
+#[doc(hidden)]
+pub fn settings_audit_check(
     env_tier: &str,
     settings: &crate::config::Settings,
     out: &mut DeployAuditFindings,
@@ -3673,6 +3686,60 @@ pub(crate) fn settings_audit_check(
              attacks viable on first request"
                 .into(),
         );
+    }
+
+    // [security] allowed_hosts empty in prod → host_validation
+    // middleware passes every Host header (DEBUG-style opt-out).
+    // Operators on the prod tier want host validation; flag it.
+    if settings.security.allowed_hosts.is_empty() {
+        out.warnings.push(
+            "[security] allowed_hosts = [] in prod tier — `host_validation::AllowedHostsLayer` \
+             passes every Host header (no DisallowedHost protection). Populate with the canonical \
+             host + subdomain wildcards before deploying."
+                .into(),
+        );
+    }
+
+    // [security] csrf_trusted_origins empty in prod with `*` headers
+    // preset means cross-origin POSTs aren't rejected by Origin
+    // header — only the double-submit token check fires. That's the
+    // back-compat default; promote it to info on prod so operators
+    // know to consider tightening.
+    if settings.security.csrf_trusted_origins.is_empty() {
+        out.info.push(
+            "[security] csrf_trusted_origins = [] in prod tier — CSRF defense-in-depth Origin \
+             check is disabled. Populate with the canonical site + any trusted SPA origins to \
+             enable cross-origin POST rejection on top of the token check."
+                .into(),
+        );
+    }
+
+    // [security] secure_ssl_redirect false in prod tier — plain-HTTP
+    // requests aren't redirected to HTTPS. Worth flagging unless
+    // the operator runs entirely behind a TLS-terminating LB that
+    // already enforces this (common, hence "warning" not "error").
+    if matches!(settings.security.secure_ssl_redirect, Some(false) | None) {
+        out.info.push(
+            "[security] secure_ssl_redirect unset/false in prod tier — plain-HTTP requests \
+             aren't redirected. If your LB doesn't already enforce HTTPS, mount \
+             `ssl_redirect::SslRedirectLayer` and set this true (configure `secure_proxy_ssl_header` \
+             to avoid loops)."
+                .into(),
+        );
+    }
+
+    // [security] secure_proxy_ssl_header malformed (not length-2) →
+    // ssl_redirect layer silently drops the trusted-header pair and
+    // redirect-loops behind the LB.
+    if !settings.security.secure_proxy_ssl_header.is_empty()
+        && settings.security.secure_proxy_ssl_header.len() != 2
+    {
+        out.warnings.push(format!(
+            "[security] secure_proxy_ssl_header has {} entries — expected exactly 2 \
+             ([header_name, expected_value]); ssl_redirect layer will drop the trusted-header \
+             pair and redirect-loop behind the LB",
+            settings.security.secure_proxy_ssl_header.len()
+        ));
     }
 
     // [auth] argon2 memory cost — OWASP 2024 floor is 19456 KiB.
@@ -4921,6 +4988,10 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
     fn settings_audit_legacy_preset_and_unset_retention_are_info() {
         let mut s = crate::config::Settings::default();
         s.routes.legacy_preset = Some(true);
+        // PR #617 added an allowed_hosts warning on empty prod —
+        // populate it here so this test stays focused on its
+        // original concern (legacy_preset + retention_days info).
+        s.security.allowed_hosts = vec!["example.com".into()];
         let r = settings_run("prod", &s);
         assert!(
             r.info.iter().any(|i| i.contains("legacy_preset")),
@@ -4932,6 +5003,10 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             "expected retention_days info, got: {:?}",
             r.info
         );
+        // PR #617 added info-level (not warning) entries for
+        // csrf_trusted_origins and secure_ssl_redirect — filter
+        // them out of the warnings assertion. Real warnings would
+        // still surface.
         assert!(
             r.warnings.is_empty(),
             "neither should be warnings, got: {:?}",
