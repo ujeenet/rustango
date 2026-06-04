@@ -808,6 +808,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         container.verbose_name_plural.as_deref(),
         container.managed,
         container.base_manager_name.as_deref(),
+        container.order_with_respect_to.as_deref(),
         &container.required_db_features,
         container.required_db_vendor.as_deref(),
         container.default_related_name.as_deref(),
@@ -1707,6 +1708,7 @@ fn model_impl_tokens(
     verbose_name_plural: Option<&str>,
     managed: bool,
     base_manager_name: Option<&str>,
+    order_with_respect_to: Option<&str>,
     required_db_features: &[String],
     required_db_vendor: Option<&str>,
     default_related_name: Option<&str>,
@@ -1748,6 +1750,7 @@ fn model_impl_tokens(
     let verbose_name_tokens = optional_str(verbose_name);
     let verbose_name_plural_tokens = optional_str(verbose_name_plural);
     let base_manager_name_tokens = optional_str(base_manager_name);
+    let order_with_respect_to_tokens = optional_str(order_with_respect_to);
     let required_db_features_lits: Vec<&str> =
         required_db_features.iter().map(String::as_str).collect();
     let required_db_vendor_tokens = optional_str(required_db_vendor);
@@ -1906,6 +1909,7 @@ fn model_impl_tokens(
                 verbose_name_plural: #verbose_name_plural_tokens,
                 managed: #managed,
                 base_manager_name: #base_manager_name_tokens,
+                order_with_respect_to: #order_with_respect_to_tokens,
                 required_db_features: &[ #(#required_db_features_lits),* ],
                 required_db_vendor: #required_db_vendor_tokens,
                 default_related_name: #default_related_name_tokens,
@@ -4484,6 +4488,12 @@ struct ContainerAttrs {
     /// `#[rustango(base_manager_name = "...")]`. Threaded into
     /// `ModelSchema::base_manager_name`. Declarative-only today.
     base_manager_name: Option<String>,
+    /// Django-shape `Meta.order_with_respect_to = "parent_fk"` from
+    /// `#[rustango(order_with_respect_to = "...")]`. Names the FK
+    /// field this model's instances are ordered relative to.
+    /// Declarative-only today; threaded onto
+    /// `ModelSchema::order_with_respect_to`.
+    order_with_respect_to: Option<String>,
     /// Django-shape `Meta.required_db_features` from
     /// `#[rustango(required_db_features = "json_extract,window_functions")]`.
     /// Each comma-separated capability token surfaces on
@@ -4747,6 +4757,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         verbose_name: None,
         verbose_name_plural: None,
         base_manager_name: None,
+        order_with_respect_to: None,
         required_db_features: Vec::new(),
         required_db_vendor: None,
         default_related_name: None,
@@ -5090,6 +5101,46 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 // table-level comment attached to the DB catalog.
                 let s: LitStr = meta.value()?.parse()?;
                 out.db_table_comment = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("order_with_respect_to") {
+                // Django-shape `Meta.order_with_respect_to = "parent_fk"` —
+                // the model's instances are intrinsically ordered
+                // relative to their parent FK. Django auto-generates
+                // a `_order` integer column + admin reordering UI.
+                //
+                // rustango stores the FK field name on
+                // `ModelSchema::order_with_respect_to`. Declarative-only
+                // today: the migration writer + admin surfaces still
+                // treat every model identically. Future codegen will
+                // key off the metadata to auto-emit the `_order`
+                // column and reorder helpers.
+                //
+                // Validated as a Rust-shape identifier so the macro
+                // can reject typos at derive time.
+                let s: LitStr = meta.value()?.parse()?;
+                let raw = s.value();
+                if raw.is_empty() {
+                    return Err(syn::Error::new(
+                        s.span(),
+                        "`order_with_respect_to` must be a non-empty FK field name",
+                    ));
+                }
+                let valid = raw
+                    .chars()
+                    .all(|c| c == '_' || c.is_ascii_alphanumeric())
+                    && !raw.chars().next().is_some_and(|c| c.is_ascii_digit());
+                if !valid {
+                    return Err(syn::Error::new(
+                        s.span(),
+                        format!(
+                            "`order_with_respect_to` must be a valid Rust \
+                             identifier (letters / digits / underscores, \
+                             not starting with a digit); got `{raw}`"
+                        ),
+                    ));
+                }
+                out.order_with_respect_to = Some(raw);
                 return Ok(());
             }
             if meta.path.is_ident("required_db_features") {
