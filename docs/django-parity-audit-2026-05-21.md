@@ -510,7 +510,7 @@ Summary: **27 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A** for the dimensions enume
 
 | Capability | Doc | Status | rustango | Notes |
 |---|---|---|---|---|
-| Cache trait + pluggable backends | [cache framework](https://docs.djangoproject.com/en/6.0/topics/cache/) | SHIPPED | `cache::Cache` trait. Django-shape methods: `get` / `set` / `delete` / `clear` / `add` (#615) / `touch` (#615) / `get_many` (#616) / `set_many` (#616) / `delete_many` (#616) / `incr` / `decr` (PR #621) / `has_key` (PR #621) / `exists`. | |
+| Cache trait + pluggable backends | [cache framework](https://docs.djangoproject.com/en/6.0/topics/cache/) | SHIPPED | `cache::Cache` trait. Django-shape methods: `get` / `set` / `delete` / `clear` / `add` (#615) / `touch` (#615) / `get_many` (#616) / `set_many` (#616) / `delete_many` (#616) / `incr` / `decr` (PR #620) / `has_key` (PR #620) / `exists`. | |
 | Memcached backend | [memcached](https://docs.djangoproject.com/en/6.0/topics/cache/#memcached) | MISSING | n/a (#407) | Use Redis or in-memory. |
 | Redis backend | [redis](https://docs.djangoproject.com/en/6.0/topics/cache/#redis) | SHIPPED | `cache-redis` feature (v0.18) | |
 | File-system cache | [filesystem](https://docs.djangoproject.com/en/6.0/topics/cache/#file-system-caching) | SHIPPED | `cache::FileCache` (`backend = "file"` + `[cache].file_cache_dir`) — `src/cache/mod.rs` | |
