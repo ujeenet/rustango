@@ -33,10 +33,13 @@
 //! | `\X` | Literal character (escape)    | `X`           |
 //!
 //! Other Django codes (`b`, `e`, `I`, `O`, `T`, `Z`, `c`, `r`,
-//! `u`, `o`, `t`, `S`, `f`, `P`) are recognized but pass through
-//! as their most-common UTC expansion or as the raw character —
-//! see the format-char dispatch in [`format_datetime`] for the
-//! exhaustive list.
+//! `u`, `o`, `t`, `S`, `f`, `P`, `W`) are recognized — see the
+//! format-char dispatch in [`format_datetime`] for the exhaustive
+//! list. `P` emits Django's "p.m." / "noon" / "midnight" form;
+//! `f` collapses zero-minute times to "1" instead of "1:00"; `W`
+//! is the ISO-8601 week number; `t` is days-in-month; `o` is the
+//! ISO-8601 week-numbering year (differs from `Y` near year
+//! boundaries).
 //!
 //! ```ignore
 //! use chrono::{DateTime, Utc, TimeZone};
@@ -111,6 +114,19 @@ pub fn format_datetime(dt: &DateTime<Utc>, format_string: &str) -> String {
             'I' => out.push('0'), // DST flag — always 0 for UTC
             // Microseconds — 6 digits of fractional seconds.
             'u' => out.push_str(&format!("{:06}", dt.nanosecond() / 1000)),
+            // Django's `P` — "p.m." / "a.m." form with "noon" and
+            // "midnight" specials; minutes shown only when non-zero.
+            'P' => out.push_str(&fmt_pretty_meridiem(dt.hour(), dt.minute())),
+            // Django's `f` — 12-hour hour, plus `:MM` only when MM
+            // is non-zero. "1" / "1:30" / "12" (midnight or noon).
+            'f' => out.push_str(&fmt_12h_minutes(dt.hour(), dt.minute())),
+            // Django's `W` — ISO-8601 week number (1..=53).
+            'W' => out.push_str(&format!("{}", dt.iso_week().week())),
+            // Django's `t` — days in the current month (28..=31).
+            't' => out.push_str(&format!("{}", days_in_month(dt.year(), dt.month()))),
+            // Django's `o` — ISO-8601 week-numbering year (may
+            // differ from Y near Jan 1 / Dec 31 boundaries).
+            'o' => out.push_str(&format!("{:04}", dt.iso_week().year())),
             // Other Django codes we don't implement specially —
             // pass through as a literal (Django shape: unknown
             // chars are kept verbatim).
@@ -237,6 +253,52 @@ fn day_suffix(d: u32) -> &'static str {
 
 fn is_leap(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Django's `P` — "p.m." / "a.m." with "noon" / "midnight" specials.
+/// Examples: `(0, 0)` → `"midnight"`; `(12, 0)` → `"noon"`;
+/// `(13, 0)` → `"1 p.m."`; `(13, 30)` → `"1:30 p.m."`.
+fn fmt_pretty_meridiem(hour: u32, minute: u32) -> String {
+    if hour == 0 && minute == 0 {
+        return "midnight".to_owned();
+    }
+    if hour == 12 && minute == 0 {
+        return "noon".to_owned();
+    }
+    let h12 = ((hour + 11) % 12) + 1;
+    let meridiem = if hour < 12 { "a.m." } else { "p.m." };
+    if minute == 0 {
+        format!("{h12} {meridiem}")
+    } else {
+        format!("{h12}:{minute:02} {meridiem}")
+    }
+}
+
+/// Django's `f` — 12-hour hour, plus `:MM` only when MM is
+/// non-zero. Examples: `(13, 0)` → `"1"`; `(13, 30)` → `"1:30"`;
+/// `(0, 0)` → `"12"`.
+fn fmt_12h_minutes(hour: u32, minute: u32) -> String {
+    let h12 = ((hour + 11) % 12) + 1;
+    if minute == 0 {
+        format!("{h12}")
+    } else {
+        format!("{h12}:{minute:02}")
+    }
 }
 
 #[cfg(test)]
@@ -460,5 +522,64 @@ mod tests {
         // Time-only input → Django shape: date chars use 1970-01-01.
         let t = NaiveTime::from_hms_opt(12, 0, 0).unwrap();
         assert_eq!(time_format(&t, "Y-m-d"), "1970-01-01");
+    }
+
+    // -------- Django P / f / W / t / o (new codes) --------
+
+    #[test]
+    fn p_midnight_and_noon() {
+        assert_eq!(format_datetime(&dt(2026, 6, 4, 0, 0, 0), "P"), "midnight");
+        assert_eq!(format_datetime(&dt(2026, 6, 4, 12, 0, 0), "P"), "noon");
+    }
+
+    #[test]
+    fn p_pretty_meridiem_with_and_without_minutes() {
+        assert_eq!(format_datetime(&dt(2026, 6, 4, 13, 0, 0), "P"), "1 p.m.");
+        assert_eq!(
+            format_datetime(&dt(2026, 6, 4, 13, 30, 0), "P"),
+            "1:30 p.m."
+        );
+        assert_eq!(format_datetime(&dt(2026, 6, 4, 9, 0, 0), "P"), "9 a.m.");
+        assert_eq!(format_datetime(&dt(2026, 6, 4, 9, 5, 0), "P"), "9:05 a.m.");
+    }
+
+    #[test]
+    fn f_collapses_zero_minutes() {
+        assert_eq!(format_datetime(&dt(2026, 6, 4, 13, 0, 0), "f"), "1");
+        assert_eq!(format_datetime(&dt(2026, 6, 4, 13, 30, 0), "f"), "1:30");
+        assert_eq!(format_datetime(&dt(2026, 6, 4, 0, 0, 0), "f"), "12");
+    }
+
+    #[test]
+    fn capital_w_iso_week_number() {
+        // 2026-06-04 is in ISO week 23 of 2026.
+        assert_eq!(format_datetime(&dt(2026, 6, 4, 0, 0, 0), "W"), "23");
+        // 2026-01-01 is a Thursday — ISO week 1 of 2026.
+        assert_eq!(format_datetime(&dt(2026, 1, 1, 0, 0, 0), "W"), "1");
+    }
+
+    #[test]
+    fn t_days_in_month() {
+        assert_eq!(format_datetime(&dt(2026, 1, 1, 0, 0, 0), "t"), "31");
+        assert_eq!(format_datetime(&dt(2026, 2, 1, 0, 0, 0), "t"), "28");
+        assert_eq!(format_datetime(&dt(2024, 2, 1, 0, 0, 0), "t"), "29"); // leap
+        assert_eq!(format_datetime(&dt(2026, 4, 1, 0, 0, 0), "t"), "30");
+        assert_eq!(format_datetime(&dt(2000, 2, 1, 0, 0, 0), "t"), "29"); // century leap
+        assert_eq!(format_datetime(&dt(1900, 2, 1, 0, 0, 0), "t"), "28"); // century non-leap
+    }
+
+    #[test]
+    fn o_iso_week_numbering_year() {
+        // 2027-01-01 is a Friday → still in ISO week 53 of 2026.
+        assert_eq!(format_datetime(&dt(2027, 1, 1, 0, 0, 0), "Y"), "2027");
+        assert_eq!(format_datetime(&dt(2027, 1, 1, 0, 0, 0), "o"), "2026");
+        // Mid-year is unambiguous.
+        assert_eq!(format_datetime(&dt(2026, 6, 4, 0, 0, 0), "o"), "2026");
+    }
+
+    #[test]
+    fn p_in_full_format_string() {
+        let t = dt(2026, 6, 4, 13, 30, 0);
+        assert_eq!(format_datetime(&t, "F j, Y, P"), "June 4, 2026, 1:30 p.m.");
     }
 }
