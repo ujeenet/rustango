@@ -44,12 +44,12 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 22. Async support | 4 | 0 | 0 | 3 |
 | 23. DRF parity | 22 | 0 | 1 | 0 |
 | 24. contrib modules | 12 | 1 | 3 | 2 |
-| 25. `django.utils.*` helpers | 55 | 0 | 0 | 0 |
-| **Totals** | **425** | **11** | **21** | **19** |
+| 25. `django.utils.*` helpers | 57 | 0 | 0 | 0 |
+| **Totals** | **427** | **11** | **21** | **19** |
 
-Coverage = 425 / (425 + 11 + 21) = **93% full, 2% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
+Coverage = 427 / (427 + 11 + 21) = **93% full, 2% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
 
-Snapshot date: 2026-06-05 (post-v0.42 plus 50+ Django `utils.*` parity helpers across PRs #619–#670: 10 new modules + 9 widened modules — see Section 25 for the per-helper table).
+Snapshot date: 2026-06-05 (post-v0.42 plus 55+ Django `utils.*` parity helpers across PRs #619–#679: 11 new modules + 10 widened modules — see Section 25 for the per-helper table).
 
 ---
 
@@ -729,6 +729,8 @@ below corresponds to a Django module / function the port targets.
 | `django.utils.html.linebreaks` | [linebreaks](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.linebreaks) | SHIPPED | `text::linebreaks(value, autoescape)` (PR #660) |
 | `django.utils.html.linebreaks_br` | [linebreaks_br](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.linebreaksbr) | SHIPPED | `text::linebreaks_br(value, autoescape)` (PR #660) |
 | `django.utils.html.strip_spaces_between_tags` | [strip_spaces_between_tags](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.strip_spaces_between_tags) | SHIPPED | `text::strip_spaces_between_tags` (PR #668) — `{% spaceless %}` template tag analog |
+| `django.utils.html.json_script` | [json_script](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.json_script) | SHIPPED | `text::json_script(value, element_id)` (PR #677) — wraps a JSON-serialized value in `<script id="..." type="application/json">` with XSS-defang escaping (`<`/`>`/`&` → `\uXXXX`) + HTML-attr-escaped element_id |
+| `django.utils.timesince.{timesince,timeuntil}` | [timesince](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.timesince.timesince) | SHIPPED | `timesince::timesince(d, now, depth)` + `timeuntil` (PR #678) — Django-style depth-respecting "4 days, 6 hours" output. Unconditional module (no `template_views` gate); Tera filter wrappers stay in `humanize::` for the single-unit short form |
 | `django.utils.crypto.get_random_string` | [get_random_string](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.get_random_string) | SHIPPED | `random::get_random_string(length, allowed_chars)` + `get_random_string_default` (PR #637) — CSPRNG-backed `crate::random` module with 5 predefined alphabets |
 | `django.utils.crypto.constant_time_compare` | [constant_time_compare](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.constant_time_compare) | SHIPPED | `crypto::constant_time_compare(a, b)` (PR #647) — consolidates 2 prior private copies |
 | `django.utils.encoding.iri_to_uri` | [iri_to_uri](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.iri_to_uri) | SHIPPED | `url_codec::iri_to_uri` (PR #648) |
@@ -742,7 +744,7 @@ below corresponds to a Django module / function the port targets.
 | `urllib.parse.parse_qs` | (Python stdlib) | SHIPPED | `urls::parse_query_pairs_grouped` (PR #669) |
 | Django open-redirect helper `url_has_allowed_host_and_scheme` | [url_has_allowed_host_and_scheme](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.url_has_allowed_host_and_scheme) | SHIPPED | `urls::url_has_allowed_host_and_scheme(url, allowed_hosts, require_https)` (PR #635) — defends against open-redirect via `?next=` |
 | `django.utils.dateparse.parse_date` etc. | [dateparse](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.dateparse) | SHIPPED | `dateparse::{parse_date, parse_time, parse_datetime, parse_duration}` (PR #654) — accepts both Django duration shape (`1 day, 02:30:00`) and ISO 8601 (`PT1H30M`) |
-| `django.utils.dateformat.format` (datetime) | [dateformat](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.dateformat) | SHIPPED | `dateformat::format_datetime(dt, format_string)` (PR #664) — full 30+ format-char coverage incl. `Y`, `m`, `d`, `H`, `i`, `s`, `a/A`, `S`, `L`, `U`, `c`, `r`, etc. |
+| `django.utils.dateformat.format` (datetime) | [dateformat](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.dateformat) | SHIPPED | `dateformat::format_datetime(dt, format_string)` (PR #664) — full 30+ format-char coverage incl. `Y`, `m`, `d`, `H`, `i`, `s`, `a/A`, `S`, `L`, `U`, `c`, `r`, plus `P` (p.m./noon/midnight), `f` (12h with optional minutes), `W` (ISO week), `t` (days in month), `o` (ISO week-numbering year) shipped in PR #679 |
 | `django.utils.dateformat.format` (date) | (above) | SHIPPED | `dateformat::format_date(date, format_string)` (PR #667) |
 | `django.utils.dateformat.time_format` | (above) | SHIPPED | `dateformat::time_format(time, format_string)` (PR #667) |
 | `django.utils.lorem_ipsum` | [lorem_ipsum](https://docs.djangoproject.com/en/6.0/topics/templates/#std-templatetag-lorem) | SHIPPED | `lorem::{words, sentence, paragraph, paragraphs}` + `COMMON_PARAGRAPH_TEXT` const (PR #640) |
@@ -771,12 +773,12 @@ below corresponds to a Django module / function the port targets.
 | Mail settings (SERVER_EMAIL / EMAIL_SUBJECT_PREFIX / EMAIL_TIMEOUT) | (sec 14) | SHIPPED | `MailSettings.{server_email, email_subject_prefix, smtp_timeout_secs}` (PRs #619, #626) |
 | Email attachments | (sec 18) | SHIPPED | `Email::attach(filename, bytes, mimetype)` + `attach_text` (PR #621) |
 
-Summary: **55 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A** (Django `utils.*` helpers).
+Summary: **57 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A** (Django `utils.*` helpers).
 
 Net effect of the 2026-06-04→06-05 batch:
-* **10 new public modules**: `random`, `base36`, `base62`, `lorem`, `http_date`, `http_methods`, `cookies`, `numberformat`, `dateparse`, `dateformat`
-* **Widened existing modules**: `text` (+15 helpers), `url_codec` (+4), `shortcuts` (+9), `validators` (+7), `email` (+5 incl. parseaddr / Email::send / send_mail / send_many / BadHeader), `crypto` (+1), `compression` (+2), `cache_fragment` (+1), `cache_page` (+1), `cache` (+3), `urls` (+3)
-* **28 PRs admin-merged across the sweep**: #619–#670 (gaps in numbering are doc-only PRs that landed in the same window)
+* **11 new public modules**: `random`, `base36`, `base62`, `lorem`, `http_date`, `http_methods`, `cookies`, `numberformat`, `dateparse`, `dateformat`, `timesince`
+* **Widened existing modules**: `text` (+16 helpers incl. `json_script`), `url_codec` (+4), `shortcuts` (+9), `validators` (+7), `email` (+5 incl. parseaddr / Email::send / send_mail / send_many / BadHeader), `crypto` (+1), `compression` (+2), `cache_fragment` (+1), `cache_page` (+1), `cache` (+3), `urls` (+3), `dateformat` (+5 codes P/f/W/t/o via PR #679)
+* **31 PRs admin-merged across the sweep**: #619–#679 (gaps in numbering are doc-only PRs that landed in the same window)
 
 Bulk closure of Django `utils.*` API surface — the most-common helper functions a Django port reaches for during translation now have direct rustango equivalents. Outstanding gaps in this category: `regex_helper.normalize` (URL-conf regex normalization — niche), `formats.localize` (locale-aware value rendering — large lift, requires per-locale config wiring), `safestring.mark_safe` (N/A — Tera handles autoescape natively).
 
