@@ -1059,6 +1059,12 @@ pub mod dateparse;
 /// the matching `strftime` output. Mirrors `django.utils.dateformat`.
 pub mod dateformat;
 
+/// Django-shape generic value signer — `signing::Signer::sign(value)`
+/// + `signing::TimestampSigner` with TTL + `dumps/loads` JSON
+/// helpers. Mirrors `django.core.signing` for tamper-proof signed
+/// payloads (password reset tokens, magic links, signed cookies).
+pub mod signing;
+
 /// Django-shape `Set-Cookie` builder — `Cookie::new(name, value)
 /// .path("/").max_age(secs).http_only().secure().same_site(...)
 /// .build()` produces an axum-ready `HeaderValue`. Replaces
