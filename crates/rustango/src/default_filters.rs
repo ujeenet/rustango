@@ -870,17 +870,12 @@ fn mask_email(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> 
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
     };
-    let Some((local, domain)) = s.split_once('@') else {
+    // Preserve pass-through behavior for non-email shapes (no `@`)
+    // so a non-email passing through the filter doesn't transform.
+    if !s.contains('@') {
         return Ok(value.clone());
-    };
-    let local_chars: Vec<char> = local.chars().collect();
-    let masked_local = match local_chars.len() {
-        0 => String::new(),
-        1 => "*".to_owned(),
-        2 => format!("{}*", local_chars[0]),
-        n => format!("{}***{}", local_chars[0], local_chars[n - 1]),
-    };
-    Ok(to_value(format!("{masked_local}@{domain}"))?)
+    }
+    Ok(to_value(crate::text::mask_email(s))?)
 }
 
 // ------------------------------------------------------------------ mask_card
@@ -906,21 +901,7 @@ fn mask_card(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
     };
-    let cleaned: String = s
-        .chars()
-        .filter(|c| !c.is_whitespace() && *c != '-')
-        .collect();
-    if cleaned.is_empty() || !cleaned.chars().all(|c| c.is_ascii_digit()) {
-        return Ok(value.clone());
-    }
-    let chars: Vec<char> = cleaned.chars().collect();
-    let n = chars.len();
-    if n <= 4 {
-        return Ok(to_value("*".repeat(n))?);
-    }
-    let last4: String = chars[n - 4..].iter().collect();
-    let masked = "*".repeat(n - 4);
-    Ok(to_value(format!("{masked}{last4}"))?)
+    Ok(to_value(crate::text::mask_card(s))?)
 }
 
 // ------------------------------------------------------------------ mask_phone
@@ -941,37 +922,7 @@ fn mask_phone(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> 
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
     };
-    // Count total digits so we know which digits to keep.
-    let total_digits = s.chars().filter(|c| c.is_ascii_digit()).count();
-    if total_digits == 0 {
-        return Ok(value.clone());
-    }
-    // If ≤ 4 digits total, mask ALL of them (no privacy benefit
-    // to leaving the last few visible when the whole thing is
-    // short).
-    let keep_from = if total_digits <= 4 {
-        total_digits
-    } else {
-        total_digits - 4
-    };
-    let mut digit_idx = 0;
-    let masked: String = s
-        .chars()
-        .map(|c| {
-            if c.is_ascii_digit() {
-                let keep = digit_idx >= keep_from;
-                digit_idx += 1;
-                if keep {
-                    c
-                } else {
-                    '*'
-                }
-            } else {
-                c
-            }
-        })
-        .collect();
-    Ok(to_value(masked)?)
+    Ok(to_value(crate::text::mask_phone(s))?)
 }
 
 // ------------------------------------------------------------------ wordcount

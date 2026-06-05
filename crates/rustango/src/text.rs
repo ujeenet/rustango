@@ -213,6 +213,117 @@ pub fn truncate_words(s: &str, max_words: usize, suffix: &str) -> String {
     out
 }
 
+/// PII-redaction helper — render a partly-obscured email for
+/// display in admin lists / audit logs / API responses.
+///
+/// Format `<first><***><last>@<domain>`:
+/// * 0 chars before `@`: `@example.com` (preserved shape)
+/// * 1 char: `*@example.com`
+/// * 2 chars: `a*@example.com`
+/// * 3+ chars: `a***z@example.com`
+///
+/// Strings without an `@` pass through unchanged. Doesn't validate
+/// the input is a real email — pair with
+/// [`crate::validators::validate_email`] at intake.
+///
+/// ```
+/// use rustango::text::mask_email;
+/// assert_eq!(mask_email("alice@example.com"), "a***e@example.com");
+/// assert_eq!(mask_email("a@example.com"), "*@example.com");
+/// assert_eq!(mask_email("not-an-email"), "not-an-email");
+/// ```
+#[must_use]
+pub fn mask_email(s: &str) -> String {
+    let Some((local, domain)) = s.split_once('@') else {
+        return s.to_owned();
+    };
+    let local_chars: Vec<char> = local.chars().collect();
+    let masked_local = match local_chars.len() {
+        0 => String::new(),
+        1 => "*".to_owned(),
+        2 => format!("{}*", local_chars[0]),
+        n => format!("{}***{}", local_chars[0], local_chars[n - 1]),
+    };
+    format!("{masked_local}@{domain}")
+}
+
+/// PII-redaction helper — render the canonical
+/// `"************1234"`-style masked credit-card number from a
+/// digit string.
+///
+/// Strips whitespace and `-` first (typical human-typed shape),
+/// then replaces every digit except the last 4 with `*`. Strings
+/// with ≤ 4 digits are fully masked. Non-digit input (after
+/// stripping separators) returns unchanged.
+///
+/// ```
+/// use rustango::text::mask_card;
+/// assert_eq!(mask_card("4111 1111 1111 1111"), "************1111");
+/// assert_eq!(mask_card("4111"), "****");
+/// assert_eq!(mask_card("not a card"), "not a card");
+/// ```
+#[must_use]
+pub fn mask_card(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .collect();
+    if cleaned.is_empty() || !cleaned.chars().all(|c| c.is_ascii_digit()) {
+        return s.to_owned();
+    }
+    let chars: Vec<char> = cleaned.chars().collect();
+    let n = chars.len();
+    if n <= 4 {
+        return "*".repeat(n);
+    }
+    let last4: String = chars[n - 4..].iter().collect();
+    let masked = "*".repeat(n - 4);
+    format!("{masked}{last4}")
+}
+
+/// PII-redaction helper — render a partly-obscured phone number.
+/// Keeps separator characters in place; masks every digit except
+/// the last 4.
+///
+/// ≤ 4 digits → all masked. No digits → passes through unchanged.
+///
+/// ```
+/// use rustango::text::mask_phone;
+/// assert_eq!(mask_phone("+1 415 555 2671"), "+* *** *** 2671");
+/// assert_eq!(mask_phone("(415) 555-2671"), "(***) ***-2671");
+/// assert_eq!(mask_phone("4155552671"), "******2671");
+/// assert_eq!(mask_phone("123"), "***");
+/// assert_eq!(mask_phone("no digits"), "no digits");
+/// ```
+#[must_use]
+pub fn mask_phone(s: &str) -> String {
+    let total_digits = s.chars().filter(|c| c.is_ascii_digit()).count();
+    if total_digits == 0 {
+        return s.to_owned();
+    }
+    let keep_from = if total_digits <= 4 {
+        total_digits
+    } else {
+        total_digits - 4
+    };
+    let mut digit_idx = 0;
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_digit() {
+                let keep = digit_idx >= keep_from;
+                digit_idx += 1;
+                if keep {
+                    c
+                } else {
+                    '*'
+                }
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// [`django.template.defaultfilters.cut`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#cut) —
 /// remove every occurrence of `needle` from `s`.
 ///
@@ -2708,6 +2819,68 @@ mod tests {
         // Plain text content like `alert` and `xss` passes through —
         // it's just the punctuation that's escaped.
         assert!(out.contains("alert"));
+    }
+
+    // -------- mask_email / mask_card / mask_phone --------
+
+    #[test]
+    fn mask_email_3_or_more_chars() {
+        assert_eq!(mask_email("alice@example.com"), "a***e@example.com");
+        assert_eq!(mask_email("bob@example.com"), "b***b@example.com");
+    }
+
+    #[test]
+    fn mask_email_short_local() {
+        assert_eq!(mask_email("a@example.com"), "*@example.com");
+        assert_eq!(mask_email("ab@example.com"), "a*@example.com");
+        // Empty local.
+        assert_eq!(mask_email("@example.com"), "@example.com");
+    }
+
+    #[test]
+    fn mask_email_no_at_passes_through() {
+        assert_eq!(mask_email("not-an-email"), "not-an-email");
+        assert_eq!(mask_email(""), "");
+    }
+
+    #[test]
+    fn mask_card_basic() {
+        assert_eq!(mask_card("4111 1111 1111 1111"), "************1111");
+        assert_eq!(mask_card("4111111111111111"), "************1111");
+        assert_eq!(mask_card("4111-1111-1111-1111"), "************1111");
+    }
+
+    #[test]
+    fn mask_card_short_fully_masked() {
+        assert_eq!(mask_card("4111"), "****");
+        assert_eq!(mask_card("1"), "*");
+        assert_eq!(mask_card("12"), "**");
+    }
+
+    #[test]
+    fn mask_card_non_digit_passes_through() {
+        assert_eq!(mask_card("not a card"), "not a card");
+        assert_eq!(mask_card("4111-XXXX"), "4111-XXXX"); // contains letters
+        assert_eq!(mask_card(""), "");
+    }
+
+    #[test]
+    fn mask_phone_keeps_separators() {
+        assert_eq!(mask_phone("+1 415 555 2671"), "+* *** *** 2671");
+        assert_eq!(mask_phone("(415) 555-2671"), "(***) ***-2671");
+        assert_eq!(mask_phone("4155552671"), "******2671");
+    }
+
+    #[test]
+    fn mask_phone_short_fully_masked() {
+        assert_eq!(mask_phone("123"), "***");
+        assert_eq!(mask_phone("1234"), "****");
+    }
+
+    #[test]
+    fn mask_phone_no_digits_passes_through() {
+        assert_eq!(mask_phone("no digits"), "no digits");
+        assert_eq!(mask_phone(""), "");
     }
 
     // -------- cut / normalize_whitespace --------
