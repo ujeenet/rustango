@@ -54,6 +54,8 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("truncatechars", truncatechars);
     tera.register_filter("truncatechars_html", truncatechars_html);
     tera.register_filter("truncatewords_html", truncatewords_html);
+    tera.register_filter("urlize", urlize_filter);
+    tera.register_filter("avoid_wrapping", avoid_wrapping_filter);
     tera.register_filter("normalize_whitespace", normalize_whitespace);
     tera.register_filter("wordcount", wordcount);
     tera.register_filter("phone2numeric", phone2numeric);
@@ -622,6 +624,49 @@ fn truncatewords_html(value: &Value, args: &HashMap<String, Value>) -> tera::Res
         _ => return Ok(value.clone()),
     };
     Ok(to_value(crate::text::truncate_html_words(s, n, " …"))?)
+}
+
+// ------------------------------------------------------------------ urlize
+
+/// `urlize` — Django's auto-linker. Replace `http(s)://...`,
+/// `www.host.tld/...`, and `user@host.tld` shapes with `<a>`
+/// elements. Wraps the public `text::urlize`.
+///
+/// Optional `nofollow=true` argument adds `rel="nofollow"` to
+/// every anchor (default off — matches Django's `urlize`).
+///
+/// ```jinja
+/// {{ "see http://example.com" | urlize | safe }}
+/// {# → "see <a href=\"http://example.com\">http://example.com</a>" #}
+/// {{ comment | urlize(nofollow=true) | safe }}
+/// ```
+fn urlize_filter(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(s) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let nofollow = args
+        .get("nofollow")
+        .or_else(|| args.values().next())
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Ok(to_value(crate::text::urlize(s, nofollow))?)
+}
+
+// ------------------------------------------------------------------ avoid_wrapping
+
+/// `avoid_wrapping` — replace ASCII spaces with non-breaking
+/// spaces (U+00A0) so the phrase stays on one line. Wraps the
+/// public `text::avoid_wrapping`. Useful for dates / version
+/// strings / multi-word brand names that look ugly when broken.
+///
+/// ```jinja
+/// {{ "June 5" | avoid_wrapping }}   {# → "June\u{a0}5" #}
+/// ```
+fn avoid_wrapping_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(s) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    Ok(to_value(crate::text::avoid_wrapping(s))?)
 }
 
 // ------------------------------------------------------------------ normalize_whitespace
@@ -1202,6 +1247,66 @@ mod tests {
         let mut ctx = tera::Context::new();
         ctx.insert("s", "<p>Joel is a slug</p>");
         assert_eq!(tera.render("t", &ctx).unwrap(), "<p>Joel is …</p>");
+    }
+
+    // -------- urlize / avoid_wrapping --------
+
+    #[test]
+    fn urlize_filter_wraps_http_url_in_anchor() {
+        let out = urlize_filter(&json!("see http://example.com"), &HashMap::new()).unwrap();
+        let out = out.as_str().unwrap();
+        assert!(out.contains(r#"<a href="http://example.com""#));
+        assert!(out.contains(r#">http://example.com</a>"#));
+    }
+
+    #[test]
+    fn urlize_filter_nofollow_arg_adds_rel() {
+        let out = urlize_filter(&json!("http://x.com"), &args_pos(json!(true))).unwrap();
+        assert!(out.as_str().unwrap().contains(r#"rel="nofollow""#));
+        // Default (no arg) → no rel.
+        let out_plain = urlize_filter(&json!("http://x.com"), &HashMap::new()).unwrap();
+        assert!(!out_plain.as_str().unwrap().contains("nofollow"));
+    }
+
+    #[test]
+    fn urlize_filter_non_string_passes_through() {
+        let out = urlize_filter(&json!(42), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(42));
+    }
+
+    #[test]
+    fn register_filters_makes_urlize_callable_via_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ s | urlize | safe }}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("s", "see http://example.com");
+        let out = tera.render("t", &ctx).unwrap();
+        assert!(out.contains(r#"<a href="http://example.com""#));
+    }
+
+    #[test]
+    fn avoid_wrapping_filter_swaps_spaces() {
+        let out = avoid_wrapping_filter(&json!("June 5"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("June\u{00A0}5"));
+    }
+
+    #[test]
+    fn avoid_wrapping_filter_non_string_passes_through() {
+        let out = avoid_wrapping_filter(&json!(42), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(42));
+    }
+
+    #[test]
+    fn register_filters_makes_avoid_wrapping_callable_via_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ s | avoid_wrapping | safe }}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("s", "June 5");
+        assert_eq!(tera.render("t", &ctx).unwrap(), "June\u{00A0}5");
     }
 
     // -------- add --------
