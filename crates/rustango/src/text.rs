@@ -175,6 +175,93 @@ pub fn truncate(s: &str, max_chars: usize, suffix: &str) -> String {
     out
 }
 
+/// Django-parity `Truncator(s).words(num, truncate=…)` — truncate
+/// to the first `max_words` whitespace-separated tokens, appending
+/// `suffix` when truncation actually fired.
+///
+/// Whitespace runs collapse to a single space in the output (Django
+/// keeps single spaces between preserved words — leading and
+/// trailing whitespace is trimmed in the truncated form).
+///
+/// ```
+/// use rustango::text::truncate_words;
+/// assert_eq!(truncate_words("Joel is a slug", 2, " …"), "Joel is …");
+/// assert_eq!(truncate_words("short text", 5, "…"), "short text");
+/// assert_eq!(truncate_words("", 5, "…"), "");
+/// ```
+#[must_use]
+pub fn truncate_words(s: &str, max_words: usize, suffix: &str) -> String {
+    let mut iter = s.split_whitespace();
+    let mut kept: Vec<&str> = Vec::with_capacity(max_words);
+    for _ in 0..max_words {
+        if let Some(w) = iter.next() {
+            kept.push(w);
+        } else {
+            break;
+        }
+    }
+    // If there's anything left in the iterator, truncation fired.
+    let truncated = iter.next().is_some();
+    let mut out = kept.join(" ");
+    if truncated {
+        out.push_str(suffix);
+    }
+    // No truncation + original had no internal whitespace collapse?
+    // We still return the joined-by-single-space form to match
+    // Django shape. Callers wanting verbatim text shouldn't pass it
+    // through truncate_words at all.
+    out
+}
+
+/// Django-parity `django.utils.text.normalize_newlines(text)` —
+/// convert all `\r\n` / `\r` sequences to plain `\n`. Useful when
+/// processing `<textarea>` form input, where browsers historically
+/// submit CRLF line endings regardless of the originating platform.
+///
+/// ```
+/// use rustango::text::normalize_newlines;
+/// assert_eq!(normalize_newlines("a\r\nb\rc\nd"), "a\nb\nc\nd");
+/// assert_eq!(normalize_newlines(""), "");
+/// ```
+#[must_use]
+pub fn normalize_newlines(s: &str) -> String {
+    // Two passes is simpler than a state machine and only marginally
+    // slower; CRLF first so the second pass doesn't double-translate.
+    s.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Django-parity `phone2numeric` — convert phone-keypad letters to
+/// the matching digit per ITU E.161 (`abc→2`, `def→3`, …, `wxyz→9`).
+/// Case-insensitive; non-letters pass through unchanged.
+///
+/// The Tera filter [`crate::default_filters`] registers this same
+/// transformation as the `|phone2numeric` template filter; this
+/// free function lets handler code reach the same logic without
+/// going through a `Value` round-trip.
+///
+/// ```
+/// use rustango::text::phone2numeric;
+/// assert_eq!(phone2numeric("1-800-COLLECT"), "1-800-2655328");
+/// assert_eq!(phone2numeric("abcDEF"), "222333");
+/// assert_eq!(phone2numeric("(555) 867-5309"), "(555) 867-5309");
+/// ```
+#[must_use]
+pub fn phone2numeric(s: &str) -> String {
+    s.chars()
+        .map(|c| match c.to_ascii_lowercase() {
+            'a' | 'b' | 'c' => '2',
+            'd' | 'e' | 'f' => '3',
+            'g' | 'h' | 'i' => '4',
+            'j' | 'k' | 'l' => '5',
+            'm' | 'n' | 'o' => '6',
+            'p' | 'q' | 'r' | 's' => '7',
+            't' | 'u' | 'v' => '8',
+            'w' | 'x' | 'y' | 'z' => '9',
+            _ => c,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +394,112 @@ mod tests {
         })
         .await;
         assert_eq!(result, "foo-3");
+    }
+
+    // -------- truncate_words (Django parity) --------
+
+    #[test]
+    fn truncate_words_basic() {
+        assert_eq!(truncate_words("Joel is a slug", 2, " …"), "Joel is …");
+    }
+
+    #[test]
+    fn truncate_words_under_limit_passes_through_collapsed() {
+        // Django returns the input as-is (single-spaced), no suffix.
+        assert_eq!(truncate_words("short text", 5, "…"), "short text");
+    }
+
+    #[test]
+    fn truncate_words_at_exact_limit_no_suffix() {
+        assert_eq!(truncate_words("one two three", 3, "…"), "one two three");
+    }
+
+    #[test]
+    fn truncate_words_empty_input() {
+        assert_eq!(truncate_words("", 5, "…"), "");
+    }
+
+    #[test]
+    fn truncate_words_zero_limit() {
+        // Zero words requested → no words kept; if the original had any
+        // content, suffix appended.
+        assert_eq!(truncate_words("anything", 0, "…"), "…");
+        assert_eq!(truncate_words("", 0, "…"), "");
+    }
+
+    #[test]
+    fn truncate_words_collapses_whitespace_runs() {
+        // Django shape: kept words joined by single space regardless of
+        // original whitespace shape.
+        assert_eq!(truncate_words("a   b\t\tc\nd", 3, "…"), "a b c…");
+    }
+
+    // -------- normalize_newlines (Django parity) --------
+
+    #[test]
+    fn normalize_newlines_crlf_to_lf() {
+        assert_eq!(normalize_newlines("a\r\nb"), "a\nb");
+    }
+
+    #[test]
+    fn normalize_newlines_lone_cr_to_lf() {
+        // Classic-Mac line ending — convert to LF.
+        assert_eq!(normalize_newlines("a\rb"), "a\nb");
+    }
+
+    #[test]
+    fn normalize_newlines_mixed() {
+        // CRLF + lone CR + LF + bare text.
+        assert_eq!(normalize_newlines("a\r\nb\rc\nd"), "a\nb\nc\nd");
+    }
+
+    #[test]
+    fn normalize_newlines_already_lf_passes_through() {
+        assert_eq!(normalize_newlines("a\nb\nc"), "a\nb\nc");
+    }
+
+    #[test]
+    fn normalize_newlines_empty() {
+        assert_eq!(normalize_newlines(""), "");
+    }
+
+    #[test]
+    fn normalize_newlines_no_newlines_at_all() {
+        assert_eq!(normalize_newlines("plain text"), "plain text");
+    }
+
+    // -------- phone2numeric (Django parity) --------
+
+    #[test]
+    fn phone2numeric_canonical() {
+        assert_eq!(phone2numeric("1-800-COLLECT"), "1-800-2655328");
+    }
+
+    #[test]
+    fn phone2numeric_case_insensitive() {
+        assert_eq!(phone2numeric("abcDEF"), "222333");
+    }
+
+    #[test]
+    fn phone2numeric_passes_non_letters() {
+        assert_eq!(phone2numeric("(555) 867-5309"), "(555) 867-5309");
+    }
+
+    #[test]
+    fn phone2numeric_all_letter_groups() {
+        // Coverage check — every keypad group maps right.
+        assert_eq!(phone2numeric("abc"), "222");
+        assert_eq!(phone2numeric("def"), "333");
+        assert_eq!(phone2numeric("ghi"), "444");
+        assert_eq!(phone2numeric("jkl"), "555");
+        assert_eq!(phone2numeric("mno"), "666");
+        assert_eq!(phone2numeric("pqrs"), "7777");
+        assert_eq!(phone2numeric("tuv"), "888");
+        assert_eq!(phone2numeric("wxyz"), "9999");
+    }
+
+    #[test]
+    fn phone2numeric_empty() {
+        assert_eq!(phone2numeric(""), "");
     }
 }
