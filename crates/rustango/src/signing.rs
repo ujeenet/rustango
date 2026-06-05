@@ -253,6 +253,94 @@ impl TimestampSigner {
     }
 }
 
+/// Django-parity
+/// [`django.core.signing.dumps(obj, key=None, salt='django.core.signing',
+/// serializer=JSONSerializer, compress=False)`](https://docs.djangoproject.com/en/6.0/topics/signing/#django.core.signing.dumps) —
+/// serialize `value` as JSON, URL-safe-base64 encode the bytes,
+/// then [TimestampSigner]-sign the result with `salt` and
+/// `secret`.
+///
+/// Output shape: `"<base64-encoded JSON>:<base62 ts>:<base64 tag>"`.
+/// Drops into URL paths / query params / cookies without further
+/// escaping. The base64 encoding step lets the payload contain
+/// arbitrary JSON (incl. the `:` separator) without breaking
+/// the signed-value parser.
+///
+/// # Errors
+/// Returns [`serde_json::Error`] on serialization failure — only
+/// fires when `value` contains a `serde::Serialize` impl that
+/// errors (e.g. NaN floats in a struct that rejects them).
+///
+/// ```ignore
+/// use rustango::signing::{dumps, loads};
+/// use std::time::Duration;
+/// #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+/// struct Reset { user_id: u64, action: String }
+///
+/// let token = dumps(
+///     &Reset { user_id: 42, action: "password_reset".into() },
+///     "password-reset-salt",
+///     b"app-secret-key",
+/// )?;
+/// // Embed `token` in a URL: /reset/<token>/
+///
+/// let v: Reset = loads(&token, "password-reset-salt", b"app-secret-key",
+///                      Some(Duration::from_secs(3600)))?;
+/// assert_eq!(v.user_id, 42);
+/// ```
+pub fn dumps<T: serde::Serialize>(
+    value: &T,
+    salt: &str,
+    secret: &[u8],
+) -> Result<String, serde_json::Error> {
+    let json = serde_json::to_vec(value)?;
+    let payload = crate::url_codec::urlsafe_base64_encode(&json);
+    let signer = TimestampSigner::new(secret.to_vec()).with_salt(salt);
+    Ok(signer.sign(&payload))
+}
+
+/// Django-parity
+/// [`django.core.signing.loads(s, key=None, salt='django.core.signing',
+/// serializer=JSONSerializer, max_age=None)`](https://docs.djangoproject.com/en/6.0/topics/signing/#django.core.signing.loads) —
+/// inverse of [`dumps`]. Verify + base64-decode + deserialize.
+///
+/// `max_age` enforces a TTL on the embedded timestamp; pass `None`
+/// to skip the freshness check (verify tag only).
+///
+/// # Errors
+/// * [`LoadsError::Sign`] — tag mismatch / malformed / expired
+///   (forwards [`SignError`])
+/// * [`LoadsError::Decode`] — payload isn't valid URL-safe base64
+/// * [`LoadsError::Deserialize`] — JSON parsing failed
+///   (wrong shape for `T`, malformed JSON, etc.)
+pub fn loads<T: serde::de::DeserializeOwned>(
+    signed: &str,
+    salt: &str,
+    secret: &[u8],
+    max_age: Option<Duration>,
+) -> Result<T, LoadsError> {
+    let signer = TimestampSigner::new(secret.to_vec()).with_salt(salt);
+    let payload = signer.unsign(signed, max_age).map_err(LoadsError::Sign)?;
+    let bytes = crate::url_codec::urlsafe_base64_decode(&payload).ok_or(LoadsError::Decode)?;
+    serde_json::from_slice(&bytes).map_err(|e| LoadsError::Deserialize(e.to_string()))
+}
+
+/// Failure modes for [`loads`].
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum LoadsError {
+    /// Signature verification failed — tampering / wrong salt /
+    /// expired. Inner [`SignError`] carries the exact cause.
+    #[error("loads: {0}")]
+    Sign(#[from] SignError),
+    /// Base64 decode failed — payload not URL-safe base64.
+    #[error("loads: base64 decode failed")]
+    Decode,
+    /// JSON deserialization failed — wrong shape for the target
+    /// type, malformed JSON, etc.
+    #[error("loads: JSON deserialize failed: {0}")]
+    Deserialize(String),
+}
+
 /// Current Unix epoch seconds. Panics on pre-1970 system clocks
 /// (same shape as `SystemTime::duration_since`).
 fn current_unix_seconds() -> u64 {
@@ -451,5 +539,98 @@ mod tests {
             b.unsign_at(&signed, None, 1_000),
             Err(SignError::BadSignature)
         );
+    }
+
+    // -------- dumps / loads (Django parity) --------
+
+    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+    struct ResetPayload {
+        user_id: u64,
+        action: String,
+    }
+
+    #[test]
+    fn dumps_loads_round_trip() {
+        let v = ResetPayload {
+            user_id: 42,
+            action: "password_reset".into(),
+        };
+        let token = dumps(&v, "reset-salt", b"secret").unwrap();
+        let got: ResetPayload = loads(&token, "reset-salt", b"secret", None).unwrap();
+        assert_eq!(got, v);
+    }
+
+    #[test]
+    fn dumps_loads_detects_tampering() {
+        let v = ResetPayload {
+            user_id: 42,
+            action: "x".into(),
+        };
+        let token = dumps(&v, "salt", b"secret").unwrap();
+        // Flip a char in the value portion (first char of the base64).
+        let tampered = if let Some(stripped) = token.strip_prefix('e') {
+            format!("X{stripped}")
+        } else {
+            format!("X{}", &token[1..])
+        };
+        let err = loads::<ResetPayload>(&tampered, "salt", b"secret", None).unwrap_err();
+        assert!(matches!(err, LoadsError::Sign(_) | LoadsError::Decode));
+    }
+
+    #[test]
+    fn dumps_loads_wrong_salt_fails() {
+        let v = ResetPayload {
+            user_id: 42,
+            action: "x".into(),
+        };
+        let token = dumps(&v, "salt-A", b"secret").unwrap();
+        let err = loads::<ResetPayload>(&token, "salt-B", b"secret", None).unwrap_err();
+        assert!(matches!(err, LoadsError::Sign(SignError::BadSignature)));
+    }
+
+    #[test]
+    fn dumps_loads_wrong_secret_fails() {
+        let v = ResetPayload {
+            user_id: 42,
+            action: "x".into(),
+        };
+        let token = dumps(&v, "salt", b"secret-1").unwrap();
+        let err = loads::<ResetPayload>(&token, "salt", b"secret-2", None).unwrap_err();
+        assert!(matches!(err, LoadsError::Sign(SignError::BadSignature)));
+    }
+
+    #[test]
+    fn dumps_loads_wrong_type_surfaces_as_deserialize_error() {
+        // Sign one shape, try to deserialize as another → JSON error.
+        #[derive(serde::Serialize)]
+        struct Wrong {
+            user: String, // string instead of u64
+        }
+        let token = dumps(
+            &Wrong {
+                user: "alice".into(),
+            },
+            "salt",
+            b"secret",
+        )
+        .unwrap();
+        let err = loads::<ResetPayload>(&token, "salt", b"secret", None).unwrap_err();
+        assert!(matches!(err, LoadsError::Deserialize(_)));
+    }
+
+    #[test]
+    fn dumps_loads_works_with_simple_types() {
+        // Plain integer, string, list — all JSON-serializable.
+        let token = dumps(&42u64, "salt", b"secret").unwrap();
+        let got: u64 = loads(&token, "salt", b"secret", None).unwrap();
+        assert_eq!(got, 42);
+
+        let token = dumps(&"hello", "salt", b"secret").unwrap();
+        let got: String = loads(&token, "salt", b"secret", None).unwrap();
+        assert_eq!(got, "hello");
+
+        let token = dumps(&vec![1, 2, 3], "salt", b"secret").unwrap();
+        let got: Vec<i32> = loads(&token, "salt", b"secret", None).unwrap();
+        assert_eq!(got, vec![1, 2, 3]);
     }
 }
