@@ -992,6 +992,12 @@ pub mod humanize;
 /// optional fixed decimal-place width.
 pub mod numberformat;
 
+/// `django.utils.timesince` parity — [`timesince`](timesince::timesince) /
+/// [`timeuntil`](timesince::timeuntil) plain-function API with
+/// Django-style `depth` control ("4 days, 6 hours"). Public Rust
+/// surface; Tera filter wrappers live in [`humanize`].
+pub mod timesince;
+
 /// Django `defaultfilters` template filters — `pluralize`,
 /// `truncatewords`, `linebreaks`, `default_if_none`. See
 /// [`default_filters`]. Issue #61.
