@@ -99,7 +99,49 @@ pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-#[cfg(test)]
+/// Django-parity
+/// [`django.utils.crypto.salted_hmac(key_salt, value, secret=None,
+/// algorithm='sha1')`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.salted_hmac) —
+/// derive a per-purpose HMAC key from `secret + key_salt` via
+/// SHA-256 (Django defaults to SHA-1, but SHA-256 is stronger
+/// and `crate::crypto` already ships it), then HMAC the `value`
+/// under that derived key.
+///
+/// The shape: `HMAC(SHA256(secret || key_salt), value)`. Used by
+/// Django's `signing` module to scope a single `SECRET_KEY` across
+/// many independent signed-value purposes — `key_salt =
+/// "django.core.signing.Signer"` for generic signing,
+/// `"django.contrib.sessions.backends.signed_cookies"` for session
+/// cookies, etc. Tampering one purpose's signed value can't be
+/// used to forge another purpose's, because each purpose has a
+/// derived key.
+///
+/// Returns the raw 32-byte HMAC tag. Pair with
+/// [`hex_encode`](crate::hex::hex_encode) or
+/// [`crate::url_codec::urlsafe_base64_encode`] for a wire format.
+///
+/// ```ignore
+/// use rustango::crypto::salted_hmac;
+/// let tag = salted_hmac(b"my-purpose", b"user-id=42", b"app-secret-key");
+/// assert_eq!(tag.len(), 32);
+/// // Same inputs → same tag (deterministic).
+/// let tag2 = salted_hmac(b"my-purpose", b"user-id=42", b"app-secret-key");
+/// assert_eq!(tag, tag2);
+/// // Different purpose → different tag.
+/// let tag3 = salted_hmac(b"other-purpose", b"user-id=42", b"app-secret-key");
+/// assert_ne!(tag, tag3);
+/// ```
+#[must_use]
+pub fn salted_hmac(key_salt: &[u8], value: &[u8], secret: &[u8]) -> Vec<u8> {
+    // Derive purpose-specific key: SHA256(secret || key_salt). This is
+    // the modern shape (Django changed from SHA-1 to SHA-256 in 4.x
+    // for new signers).
+    let mut hasher = Sha256::new();
+    hasher.update(secret);
+    hasher.update(key_salt);
+    let derived = hasher.finalize();
+    hmac_sha256(&derived, value)
+}
 mod tests {
     use super::*;
 
@@ -278,5 +320,61 @@ mod tests {
         // And identical inputs match.
         let c = hmac_sha256(b"key", b"msg-1");
         assert!(constant_time_compare(&a, &c));
+    }
+
+    // -------- salted_hmac (Django parity) --------
+
+    #[test]
+    fn salted_hmac_returns_32_byte_tag() {
+        let tag = salted_hmac(b"purpose-A", b"value", b"secret");
+        assert_eq!(tag.len(), 32);
+    }
+
+    #[test]
+    fn salted_hmac_is_deterministic() {
+        let a = salted_hmac(b"purpose", b"value", b"secret");
+        let b = salted_hmac(b"purpose", b"value", b"secret");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn salted_hmac_distinguishes_purposes() {
+        // Same secret + value, different key_salt → different tag.
+        // This is the whole point of the salt — purposes are isolated.
+        let a = salted_hmac(b"purpose-A", b"value", b"secret");
+        let b = salted_hmac(b"purpose-B", b"value", b"secret");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn salted_hmac_distinguishes_secrets() {
+        let a = salted_hmac(b"purpose", b"value", b"secret-1");
+        let b = salted_hmac(b"purpose", b"value", b"secret-2");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn salted_hmac_distinguishes_values() {
+        let a = salted_hmac(b"purpose", b"value-1", b"secret");
+        let b = salted_hmac(b"purpose", b"value-2", b"secret");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn salted_hmac_empty_inputs_dont_panic() {
+        // Zero-length salt / value / secret all work — HMAC + SHA256
+        // accept empty input.
+        let _ = salted_hmac(b"", b"", b"");
+        let _ = salted_hmac(b"salt", b"", b"secret");
+        let _ = salted_hmac(b"", b"value", b"secret");
+    }
+
+    #[test]
+    fn salted_hmac_handles_binary_inputs() {
+        // Non-UTF8 bytes in salt / value / secret all work (it's a byte
+        // primitive, not a string primitive).
+        let salt: Vec<u8> = (0u8..=255).collect();
+        let tag = salted_hmac(&salt, &salt, &salt);
+        assert_eq!(tag.len(), 32);
     }
 }
