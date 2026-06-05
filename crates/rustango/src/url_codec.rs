@@ -86,6 +86,54 @@ pub fn url_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Django-parity
+/// [`django.utils.encoding.iri_to_uri(iri)`](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.iri_to_uri) —
+/// convert an Internationalized Resource Identifier (IRI, per
+/// RFC 3987) to a plain URI per RFC 3986 by percent-encoding any
+/// byte outside the URI-safe set. Reserved syntax characters
+/// (`/`, `:`, `?`, `#`, `[`, `]`, `@`, `!`, `$`, `&`, `'`, `(`,
+/// `)`, `*`, `+`, `,`, `;`, `=`, `%`) are PRESERVED so caller-
+/// constructed URIs stay parseable.
+///
+/// Mirrors the Tera `|iriencode` filter — this is the free-function
+/// surface for handler code that doesn't go through a template.
+///
+/// ```ignore
+/// use rustango::url_codec::iri_to_uri;
+/// // Non-ASCII gets percent-encoded.
+/// assert_eq!(iri_to_uri("/café"), "/caf%C3%A9");
+/// // Reserved URI syntax chars pass through.
+/// assert_eq!(iri_to_uri("/path?q=hello#frag"), "/path?q=hello#frag");
+/// // Already percent-encoded input survives (the `%` is in the safe set).
+/// assert_eq!(iri_to_uri("/already%20encoded"), "/already%20encoded");
+/// ```
+#[must_use]
+pub fn iri_to_uri(iri: &str) -> String {
+    let mut out = String::with_capacity(iri.len());
+    for byte in iri.bytes() {
+        // RFC 3987 / Django's safe set: keep RFC 3986 unreserved
+        // (alphanumeric + `-` `_` `.` `~`) PLUS the reserved syntax
+        // chars that have meaning in a parsed URI (so caller-
+        // constructed URIs round-trip), PLUS `%` (already-encoded
+        // input round-trips cleanly).
+        let safe = matches!(
+            byte,
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
+                | b'-' | b'_' | b'.' | b'~'
+                | b'/' | b':' | b'?' | b'#' | b'[' | b']' | b'@'
+                | b'!' | b'$' | b'&' | b'\'' | b'(' | b')'
+                | b'*' | b'+' | b',' | b';' | b'=' | b'%'
+        );
+        if safe {
+            out.push(byte as char);
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
 // ============================================================ Django urlsafe_base64
 
 /// Django-parity
@@ -356,6 +404,60 @@ mod tests {
     #[test]
     fn urlsafe_b64_decode_empty_is_empty_vec() {
         assert_eq!(urlsafe_base64_decode("").as_deref(), Some(&[][..]));
+    }
+
+    // ---- iri_to_uri (Django parity) ----
+
+    #[test]
+    fn iri_to_uri_ascii_passes_through() {
+        assert_eq!(iri_to_uri("/path/here"), "/path/here");
+        assert_eq!(iri_to_uri("plain-text_value.1~"), "plain-text_value.1~");
+    }
+
+    #[test]
+    fn iri_to_uri_encodes_non_ascii_utf8() {
+        // `café` = `0x63 0x61 0x66 0xC3 0xA9` — the `é` (0xC3 0xA9)
+        // gets percent-encoded byte-by-byte (RFC 3987 shape).
+        assert_eq!(iri_to_uri("/café"), "/caf%C3%A9");
+    }
+
+    #[test]
+    fn iri_to_uri_preserves_reserved_syntax_chars() {
+        // Caller-constructed URI with query + fragment must survive
+        // round-trip — these chars are syntactically meaningful.
+        assert_eq!(
+            iri_to_uri("/path?q=hello&page=1#frag"),
+            "/path?q=hello&page=1#frag"
+        );
+        assert_eq!(
+            iri_to_uri("scheme://user@host:8080/p"),
+            "scheme://user@host:8080/p"
+        );
+    }
+
+    #[test]
+    fn iri_to_uri_preserves_existing_percent_encoded() {
+        // `%` is in the safe set so already-encoded input round-trips.
+        assert_eq!(iri_to_uri("/already%20encoded"), "/already%20encoded");
+    }
+
+    #[test]
+    fn iri_to_uri_encodes_space_and_control_chars() {
+        // Plain space → %20. Control chars too.
+        assert_eq!(iri_to_uri("a b"), "a%20b");
+        assert_eq!(iri_to_uri("a\nb"), "a%0Ab");
+    }
+
+    #[test]
+    fn iri_to_uri_handles_full_unicode_range() {
+        // Emoji codepoint (U+1F600) is 4 bytes in UTF-8 (F0 9F 98 80).
+        let out = iri_to_uri("/😀");
+        assert_eq!(out, "/%F0%9F%98%80");
+    }
+
+    #[test]
+    fn iri_to_uri_empty_is_empty() {
+        assert_eq!(iri_to_uri(""), "");
     }
 
     #[test]
