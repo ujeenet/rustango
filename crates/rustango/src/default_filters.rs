@@ -167,34 +167,9 @@ fn linebreaks(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> 
     if s.is_empty() {
         return Ok(to_value("")?);
     }
-    // Normalize line endings — paragraph splits happen on \n\n
-    // regardless of platform.
-    let s = s.replace("\r\n", "\n").replace('\r', "\n");
-    let escaped = html_escape(&s);
-    let paragraphs: Vec<String> = escaped
-        .split("\n\n")
-        .filter(|p| !p.is_empty())
-        .map(|p| {
-            let with_br = p.replace('\n', "<br>");
-            format!("<p>{with_br}</p>")
-        })
-        .collect();
-    Ok(to_value(paragraphs.join("\n\n"))?)
-}
-
-fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '&' => out.push_str("&amp;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(ch),
-        }
-    }
-    out
+    // Identical algorithm to `text::linebreaks(s, autoescape=true)` —
+    // single source of truth.
+    Ok(to_value(crate::text::linebreaks(s, true))?)
 }
 
 // ------------------------------------------------------------------ default_if_none
