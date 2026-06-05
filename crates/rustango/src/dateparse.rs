@@ -129,6 +129,53 @@ pub fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
 /// assert_eq!(parse_duration("PT1H30M"), Some(Duration::from_secs(5400)));
 /// assert_eq!(parse_duration("garbage"), None);
 /// ```
+/// Django-parity inverse of [`parse_duration`] —
+/// [`django.utils.duration.duration_string(td)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.duration.duration_string).
+/// Render a `std::time::Duration` as a Django-shape duration string.
+///
+/// Output shape mirrors Django's default — `"<days> <days|day>,
+/// HH:MM:SS"` when days > 0, else `"HH:MM:SS"`. Sub-second
+/// fractions are appended as `.fff` when `subsec_nanos > 0`.
+///
+/// ```ignore
+/// use std::time::Duration;
+/// use rustango::dateparse::duration_string;
+/// assert_eq!(duration_string(Duration::from_secs(9000)), "02:30:00");
+/// assert_eq!(duration_string(Duration::from_secs(86400 + 9000)), "1 day, 02:30:00");
+/// assert_eq!(duration_string(Duration::from_secs(7 * 86400)), "7 days, 00:00:00");
+/// assert_eq!(duration_string(Duration::ZERO), "00:00:00");
+/// ```
+#[must_use]
+pub fn duration_string(d: Duration) -> String {
+    let total = d.as_secs();
+    let nanos = d.subsec_nanos();
+    let days = total / 86_400;
+    let rem = total % 86_400;
+    let hours = rem / 3_600;
+    let mins = (rem % 3_600) / 60;
+    let secs = rem % 60;
+
+    let mut out = String::with_capacity(32);
+    match days {
+        0 => {}
+        1 => out.push_str("1 day, "),
+        n => {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{n} days, ");
+        }
+    }
+    use std::fmt::Write as _;
+    let _ = write!(out, "{hours:02}:{mins:02}:{secs:02}");
+    if nanos > 0 {
+        // Render the most-significant 6 digits (microseconds) of the
+        // nanosecond component — Django's `timedelta.__str__` uses
+        // 6-digit microsecond precision.
+        let micros = nanos / 1000;
+        let _ = write!(out, ".{micros:06}");
+    }
+    out
+}
+
 #[must_use]
 pub fn parse_duration(s: &str) -> Option<Duration> {
     let s = s.trim();
@@ -434,4 +481,50 @@ mod tests {
     }
 
     use chrono::Timelike as _;
+
+    // -------- duration_string (Django parity, inverse of parse_duration) --------
+
+    #[test]
+    fn duration_string_zero() {
+        assert_eq!(duration_string(Duration::ZERO), "00:00:00");
+    }
+
+    #[test]
+    fn duration_string_hms_only() {
+        assert_eq!(duration_string(Duration::from_secs(9000)), "02:30:00");
+    }
+
+    #[test]
+    fn duration_string_one_day_singular() {
+        // Django shape: "1 day, " (singular) vs "N days, " (plural).
+        assert_eq!(
+            duration_string(Duration::from_secs(86400 + 9000)),
+            "1 day, 02:30:00"
+        );
+    }
+
+    #[test]
+    fn duration_string_multiple_days_plural() {
+        assert_eq!(
+            duration_string(Duration::from_secs(7 * 86400)),
+            "7 days, 00:00:00"
+        );
+    }
+
+    #[test]
+    fn duration_string_fractional_seconds() {
+        // 1.5 seconds → "00:00:01.500000" (6-digit microsecond precision).
+        let d = Duration::new(1, 500_000_000);
+        assert_eq!(duration_string(d), "00:00:01.500000");
+    }
+
+    #[test]
+    fn duration_string_round_trips_through_parse_duration() {
+        // Symmetric: format → parse → format produces same string.
+        for secs in [0u64, 60, 3600, 9000, 86_400, 86_400 + 9000, 7 * 86_400] {
+            let s = duration_string(Duration::from_secs(secs));
+            let parsed = parse_duration(&s).unwrap();
+            assert_eq!(parsed.as_secs(), secs, "round-trip failed at {secs} secs");
+        }
+    }
 }
