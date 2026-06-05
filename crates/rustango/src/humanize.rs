@@ -35,7 +35,7 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("naturalday", naturalday_filter);
     tera.register_filter("timesince", timesince);
     tera.register_filter("timeuntil", timeuntil);
-    tera.register_filter("format_number", format_number);
+    tera.register_filter("format_number", format_number_filter);
     tera.register_filter("format_currency", format_currency);
 }
 
@@ -233,49 +233,85 @@ fn apply_number_fmt(integer_part: &str, frac_part: &str, fmt: NumberFmt) -> Stri
 ///   preserved.
 ///
 /// Non-numeric input passes through unchanged.
-fn format_number(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
-    let locale = args.get("locale").and_then(Value::as_str).unwrap_or("en");
-    let decimals = args.get("decimals").and_then(Value::as_u64);
+/// Locale-aware number formatter — public Rust API.
+///
+/// Produces a string with the correct decimal point + thousands
+/// separator for the given locale code. The base language is
+/// consulted (`"en-US" ≡ "en"`); unknown locales fall back to
+/// `"en"` with a `tracing::warn!`.
+///
+/// `decimals = None` preserves the input's natural precision
+/// (`1234.5 → "1,234.5"`). `decimals = Some(n)` truncates or
+/// pads the fractional part to exactly `n` digits
+/// (`1234.0 + Some(2) → "1,234.00"`).
+///
+/// Supported locales (decimal sep, thousands sep):
+/// * en / en-US / en-GB / ja / zh / ko / th: `.` decimal, `,` group
+/// * de / es / it / nl / pt / pl / sv / nb / nn / da / fi / el /
+///   tr: `,` decimal, `.` group
+/// * fr / ru / cs / sk / bg / uk / hu: `,` decimal, space group
+///
+/// ```
+/// use rustango::humanize::format_number;
+/// assert_eq!(format_number(1234567.89, "en", None),    "1,234,567.89");
+/// assert_eq!(format_number(1234567.89, "de", None),    "1.234.567,89");
+/// assert_eq!(format_number(1234567.89, "fr", None),    "1 234 567,89");
+/// assert_eq!(format_number(1234.5,     "en", Some(2)), "1,234.50");
+/// assert_eq!(format_number(0.0,        "en", Some(0)), "0");
+/// assert_eq!(format_number(-1234.5,    "en", None),    "-1,234.5");
+/// ```
+#[must_use]
+pub fn format_number(value: f64, locale: &str, decimals: Option<usize>) -> String {
     let fmt = locale_number_fmt(locale);
+    let s = match decimals {
+        Some(d) => format!("{value:.*}", d),
+        None => format!("{value}"),
+    };
+    let negative = s.starts_with('-');
+    let body = if negative { &s[1..] } else { &s };
+    let (int_part, frac_part) = body.split_once('.').unwrap_or((body, ""));
+    let formatted = apply_number_fmt(int_part, frac_part, fmt);
+    if negative {
+        format!("-{formatted}")
+    } else {
+        formatted
+    }
+}
 
-    let formatted = if let Some(n) = value.as_i64() {
+fn format_number_filter(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let locale = args.get("locale").and_then(Value::as_str).unwrap_or("en");
+    let decimals = args
+        .get("decimals")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize);
+
+    // Distinct integer-path branch: integers should NOT acquire a
+    // trailing decimal-and-zeros unless `decimals` was explicitly
+    // set. Filter wrapper preserves this by short-circuiting
+    // through `apply_number_fmt` directly with `frac = "0".repeat(d)`
+    // for the int case.
+    if let Some(n) = value.as_i64() {
+        let fmt = locale_number_fmt(locale);
         let abs = n.unsigned_abs().to_string();
         let frac = match decimals {
-            Some(d) => "0".repeat(d as usize),
+            Some(d) => "0".repeat(d),
             None => String::new(),
         };
         let body = apply_number_fmt(&abs, &frac, fmt);
-        if n < 0 {
-            format!("-{body}")
-        } else {
-            body
-        }
-    } else if let Some(n) = value.as_u64() {
-        let s = n.to_string();
+        return Ok(to_value(if n < 0 { format!("-{body}") } else { body })?);
+    }
+    if let Some(n) = value.as_u64() {
+        let fmt = locale_number_fmt(locale);
         let frac = match decimals {
-            Some(d) => "0".repeat(d as usize),
+            Some(d) => "0".repeat(d),
             None => String::new(),
         };
-        apply_number_fmt(&s, &frac, fmt)
-    } else if let Some(f) = value.as_f64() {
-        let s = match decimals {
-            Some(d) => format!("{f:.*}", d as usize),
-            None => format!("{f}"),
-        };
-        let negative = s.starts_with('-');
-        let body = if negative { &s[1..] } else { &s };
-        let (int_part, frac_part) = body.split_once('.').unwrap_or((body, ""));
-        let formatted = apply_number_fmt(int_part, frac_part, fmt);
-        if negative {
-            format!("-{formatted}")
-        } else {
-            formatted
-        }
-    } else {
-        return Ok(value.clone());
-    };
-
-    Ok(to_value(formatted)?)
+        return Ok(to_value(apply_number_fmt(&n.to_string(), &frac, fmt))?);
+    }
+    if let Some(f) = value.as_f64() {
+        return Ok(to_value(format_number(f, locale, decimals))?);
+    }
+    Ok(value.clone())
 }
 
 /// Per-locale currency-display spec.
@@ -1453,5 +1489,44 @@ mod tests {
     #[test]
     fn intcomma_f64_public_negative() {
         assert_eq!(intcomma_f64(-1000.25), "-1,000.25");
+    }
+
+    // -------- Public format_number --------
+
+    #[test]
+    fn format_number_en_locale() {
+        assert_eq!(format_number(1234567.89, "en", None), "1,234,567.89");
+        assert_eq!(format_number(1234567.89, "en-US", None), "1,234,567.89");
+        assert_eq!(format_number(1234567.89, "en-GB", None), "1,234,567.89");
+    }
+
+    #[test]
+    fn format_number_de_locale() {
+        assert_eq!(format_number(1234567.89, "de", None), "1.234.567,89");
+    }
+
+    #[test]
+    fn format_number_fr_locale_space_thousands() {
+        assert_eq!(format_number(1234567.89, "fr", None), "1 234 567,89");
+    }
+
+    #[test]
+    fn format_number_with_decimals() {
+        // decimals = Some pads / truncates to exact precision.
+        assert_eq!(format_number(1234.5, "en", Some(2)), "1,234.50");
+        assert_eq!(format_number(0.0, "en", Some(0)), "0");
+        assert_eq!(format_number(1234.56789, "en", Some(2)), "1,234.57"); // rounds
+    }
+
+    #[test]
+    fn format_number_negative() {
+        assert_eq!(format_number(-1234.5, "en", None), "-1,234.5");
+        assert_eq!(format_number(-1234.5, "de", Some(2)), "-1.234,50");
+    }
+
+    #[test]
+    fn format_number_public_unknown_locale_falls_back_to_en() {
+        // Returns the en-US shape on unknown.
+        assert_eq!(format_number(1234.5, "xx-YY", None), "1,234.5");
     }
 }
