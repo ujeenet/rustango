@@ -1039,15 +1039,40 @@ fn render_changes_split_inner(
                 dst_table,
                 dst_col,
             } => {
-                out.immediate.push(format!(
-                    r#"CREATE TABLE "{through}" ("{src_col}" BIGINT NOT NULL, "{dst_col}" BIGINT NOT NULL, PRIMARY KEY ("{src_col}", "{dst_col}"))"#,
-                ));
-                out.deferred_fks.push(format!(
-                    r#"ALTER TABLE "{through}" ADD CONSTRAINT "{through}_{src_col}_fkey" FOREIGN KEY ("{src_col}") REFERENCES "{src_table}" ("id") ON DELETE CASCADE"#,
-                ));
-                out.deferred_fks.push(format!(
-                    r#"ALTER TABLE "{through}" ADD CONSTRAINT "{through}_{dst_col}_fkey" FOREIGN KEY ("{dst_col}") REFERENCES "{dst_table}" ("id") ON DELETE CASCADE"#,
-                ));
+                let q_through = dialect.quote_ident(through);
+                let q_src_col = dialect.quote_ident(src_col);
+                let q_dst_col = dialect.quote_ident(dst_col);
+                let q_src_table = dialect.quote_ident(src_table);
+                let q_dst_table = dialect.quote_ident(dst_table);
+                let q_id = dialect.quote_ident("id");
+                let q_src_fk = dialect.quote_ident(&format!("{through}_{src_col}_fkey"));
+                let q_dst_fk = dialect.quote_ident(&format!("{through}_{dst_col}_fkey"));
+
+                if dialect.inline_fks_in_create_table() {
+                    // SQLite: ALTER TABLE … ADD CONSTRAINT FK isn't supported.
+                    // Emit the FK clauses inside the CREATE TABLE statement.
+                    out.immediate.push(format!(
+                        "CREATE TABLE {q_through} ({q_src_col} BIGINT NOT NULL, {q_dst_col} BIGINT NOT NULL, \
+                         PRIMARY KEY ({q_src_col}, {q_dst_col}), \
+                         CONSTRAINT {q_src_fk} FOREIGN KEY ({q_src_col}) REFERENCES {q_src_table} ({q_id}) ON DELETE CASCADE, \
+                         CONSTRAINT {q_dst_fk} FOREIGN KEY ({q_dst_col}) REFERENCES {q_dst_table} ({q_id}) ON DELETE CASCADE)",
+                    ));
+                } else {
+                    // PG / MySQL: defer FK creation so cross-table cycles
+                    // resolve cleanly within a single migration batch.
+                    out.immediate.push(format!(
+                        "CREATE TABLE {q_through} ({q_src_col} BIGINT NOT NULL, {q_dst_col} BIGINT NOT NULL, \
+                         PRIMARY KEY ({q_src_col}, {q_dst_col}))",
+                    ));
+                    out.deferred_fks.push(format!(
+                        "ALTER TABLE {q_through} ADD CONSTRAINT {q_src_fk} \
+                         FOREIGN KEY ({q_src_col}) REFERENCES {q_src_table} ({q_id}) ON DELETE CASCADE",
+                    ));
+                    out.deferred_fks.push(format!(
+                        "ALTER TABLE {q_through} ADD CONSTRAINT {q_dst_fk} \
+                         FOREIGN KEY ({q_dst_col}) REFERENCES {q_dst_table} ({q_id}) ON DELETE CASCADE",
+                    ));
+                }
             }
             SchemaChange::DropM2MTable { through } => {
                 let cascade = if dialect.name() == "postgres" {
@@ -1530,5 +1555,79 @@ mod sql_type_tests {
         let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
             .expect_err("AlterColumnUnique must reject MySQL");
         assert!(err.contains("AlterColumnUnique"));
+    }
+
+    // -------- CreateM2MTable (#559 tri-dialect) --------
+
+    fn make_create_m2m() -> Vec<SchemaChange> {
+        vec![SchemaChange::CreateM2MTable {
+            through: "post_tags".into(),
+            src_table: "posts".into(),
+            src_col: "post_id".into(),
+            dst_table: "tags".into(),
+            dst_col: "tag_id".into(),
+        }]
+    }
+
+    #[test]
+    fn create_m2m_table_postgres_defers_fk_constraints() {
+        let snap = empty_snap();
+        let out =
+            render_changes_split_with_dialect(&make_create_m2m(), &snap, &crate::sql::Postgres)
+                .unwrap();
+        assert_eq!(out.immediate.len(), 1);
+        // PG: ANSI " quoting + bare CREATE TABLE without FKs inline.
+        assert!(out.immediate[0].contains(r#"CREATE TABLE "post_tags""#));
+        assert!(out.immediate[0].contains(r#"PRIMARY KEY ("post_id", "tag_id")"#));
+        // FKs deferred to ALTER TABLE ADD CONSTRAINT.
+        assert_eq!(out.deferred_fks.len(), 2);
+        assert!(out.deferred_fks[0].contains(r#"ADD CONSTRAINT "post_tags_post_id_fkey""#));
+        assert!(out.deferred_fks[0].contains(r#"REFERENCES "posts" ("id")"#));
+        assert!(out.deferred_fks[1].contains(r#"ADD CONSTRAINT "post_tags_tag_id_fkey""#));
+        assert!(out.deferred_fks[1].contains(r#"REFERENCES "tags" ("id")"#));
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn create_m2m_table_mysql_uses_backtick_quoting() {
+        let snap = empty_snap();
+        let out = render_changes_split_with_dialect(&make_create_m2m(), &snap, &crate::sql::MySql)
+            .unwrap();
+        // MySQL must use backticks, NOT ANSI double-quotes.
+        assert_eq!(out.immediate.len(), 1);
+        assert!(out.immediate[0].contains("CREATE TABLE `post_tags`"));
+        assert!(out.immediate[0].contains("PRIMARY KEY (`post_id`, `tag_id`)"));
+        assert!(
+            !out.immediate[0].contains('"'),
+            "MySQL must not contain ANSI double-quotes: {}",
+            out.immediate[0]
+        );
+        assert_eq!(out.deferred_fks.len(), 2);
+        assert!(out.deferred_fks[0].contains("ADD CONSTRAINT `post_tags_post_id_fkey`"));
+        assert!(out.deferred_fks[0].contains("REFERENCES `posts` (`id`)"));
+        for stmt in &out.deferred_fks {
+            assert!(!stmt.contains('"'), "MySQL FK must use backticks: {stmt}");
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn create_m2m_table_sqlite_inlines_fks_in_create() {
+        let snap = empty_snap();
+        let out = render_changes_split_with_dialect(&make_create_m2m(), &snap, &crate::sql::Sqlite)
+            .unwrap();
+        // SQLite: FKs MUST be inline in CREATE TABLE — no deferred ALTERs.
+        assert_eq!(out.immediate.len(), 1);
+        assert_eq!(
+            out.deferred_fks.len(),
+            0,
+            "SQLite must NOT defer FK constraints: {:?}",
+            out.deferred_fks
+        );
+        let stmt = &out.immediate[0];
+        assert!(stmt.contains(r#"CREATE TABLE "post_tags""#));
+        assert!(stmt.contains(r#"PRIMARY KEY ("post_id", "tag_id")"#));
+        assert!(stmt.contains(r#"CONSTRAINT "post_tags_post_id_fkey" FOREIGN KEY ("post_id") REFERENCES "posts" ("id") ON DELETE CASCADE"#));
+        assert!(stmt.contains(r#"CONSTRAINT "post_tags_tag_id_fkey" FOREIGN KEY ("tag_id") REFERENCES "tags" ("id") ON DELETE CASCADE"#));
     }
 }
