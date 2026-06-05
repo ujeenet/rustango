@@ -1044,6 +1044,13 @@ pub mod http_date;
 /// / `jwt` / `admin` / `tenancy` modules.
 pub mod cookies;
 
+/// Django-shape `@require_http_methods(['GET', 'POST'])` / `@require_GET`
+/// / `@require_POST` / `@require_safe` decorators as tower
+/// middleware. Rejects unallowed methods with `405 Method Not
+/// Allowed` + RFC 7231-compliant `Allow:` header listing the
+/// accepted set.
+pub mod http_methods;
+
 /// Django messages framework — `messages.success/info/warning/error/debug`
 /// flash storage backed by a signed cookie. Issue #9.
 pub mod messages;
