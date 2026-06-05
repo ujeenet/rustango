@@ -26,7 +26,7 @@ use tera::{to_value, Tera, Value};
 /// Register every humanize filter on `tera`. Call from app setup
 /// (typically right after `Tera::new(...)` / `Tera::default()`).
 pub fn register_filters(tera: &mut Tera) {
-    tera.register_filter("intcomma", intcomma);
+    tera.register_filter("intcomma", intcomma_filter);
     tera.register_filter("intword", intword_filter);
     tera.register_filter("naturalsize", naturalsize_filter);
     tera.register_filter("ordinal", ordinal_filter);
@@ -41,25 +41,59 @@ pub fn register_filters(tera: &mut Tera) {
 
 // ------------------------------------------------------------------ intcomma
 
-/// `intcomma` — insert thousands-separator commas. Django:
-/// `4500 → "4,500"`, `1234567.89 → "1,234,567.89"`. Non-numeric input
-/// passes through unchanged.
-fn intcomma(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+/// [`django.contrib.humanize.intcomma`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#intcomma) —
+/// insert thousands-separator commas into an integer.
+/// `4500 → "4,500"`, `1_234_567 → "1,234,567"`,
+/// `-1_000 → "-1,000"`. For floats see [`intcomma_f64`].
+///
+/// ```
+/// use rustango::humanize::intcomma;
+/// assert_eq!(intcomma(4500), "4,500");
+/// assert_eq!(intcomma(1_234_567), "1,234,567");
+/// assert_eq!(intcomma(-1_000), "-1,000");
+/// assert_eq!(intcomma(0), "0");
+/// ```
+#[must_use]
+pub fn intcomma(n: i64) -> String {
+    format_with_commas_i64(n)
+}
+
+/// `intcomma` variant for `f64` — comma-separates the integer
+/// portion, preserves the fractional part untouched.
+/// `1234567.89 → "1,234,567.89"`.
+///
+/// ```
+/// use rustango::humanize::intcomma_f64;
+/// assert_eq!(intcomma_f64(1234567.89), "1,234,567.89");
+/// assert_eq!(intcomma_f64(0.5), "0.5");
+/// assert_eq!(intcomma_f64(-1000.25), "-1,000.25");
+/// ```
+#[must_use]
+pub fn intcomma_f64(f: f64) -> String {
+    let s = format!("{f}");
+    let (sign, body) = if let Some(rest) = s.strip_prefix('-') {
+        ("-", rest)
+    } else {
+        ("", s.as_str())
+    };
+    let formatted = if let Some((int_part, frac_part)) = body.split_once('.') {
+        let int_with_commas = comma_separate_digits(int_part);
+        format!("{int_with_commas}.{frac_part}")
+    } else {
+        comma_separate_digits(body)
+    };
+    format!("{sign}{formatted}")
+}
+
+fn intcomma_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     if let Some(n) = value.as_i64() {
-        return Ok(to_value(format_with_commas_i64(n))?);
+        return Ok(to_value(intcomma(n))?);
     }
     if let Some(n) = value.as_u64() {
         return Ok(to_value(format_with_commas_u64(n))?);
     }
     if let Some(f) = value.as_f64() {
-        // Keep the fractional part untouched; only comma-separate the
-        // integer portion.
-        let s = format!("{f}");
-        if let Some((int_part, frac_part)) = s.split_once('.') {
-            let int_with_commas = comma_separate_digits(int_part);
-            return Ok(to_value(format!("{int_with_commas}.{frac_part}"))?);
-        }
-        return Ok(to_value(comma_separate_digits(&s))?);
+        return Ok(to_value(intcomma_f64(f))?);
     }
     Ok(value.clone())
 }
@@ -1391,5 +1425,33 @@ mod tests {
         let out = naturalday(now, other);
         // 2026-06-05 minus 45 days = 2026-04-21
         assert_eq!(out, "Apr 21");
+    }
+
+    // -------- Public intcomma / intcomma_f64 --------
+
+    #[test]
+    fn intcomma_public_basic() {
+        assert_eq!(intcomma(0), "0");
+        assert_eq!(intcomma(999), "999");
+        assert_eq!(intcomma(4500), "4,500");
+        assert_eq!(intcomma(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn intcomma_public_negative() {
+        assert_eq!(intcomma(-1_000), "-1,000");
+        assert_eq!(intcomma(-1_234_567), "-1,234,567");
+    }
+
+    #[test]
+    fn intcomma_f64_public_basic() {
+        assert_eq!(intcomma_f64(1234567.89), "1,234,567.89");
+        assert_eq!(intcomma_f64(0.5), "0.5");
+        assert_eq!(intcomma_f64(1000.0), "1,000");
+    }
+
+    #[test]
+    fn intcomma_f64_public_negative() {
+        assert_eq!(intcomma_f64(-1000.25), "-1,000.25");
     }
 }
