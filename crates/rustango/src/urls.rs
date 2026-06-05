@@ -199,6 +199,109 @@ pub fn reverse_owned(name: &str, params: &HashMap<String, String>) -> Result<Str
     substitute(name, route.pattern, &borrowed)
 }
 
+/// Django-parity [`url_has_allowed_host_and_scheme(url, allowed_hosts,
+/// require_https=False)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.url_has_allowed_host_and_scheme) —
+/// returns `true` only when `url` is safe to redirect to from a
+/// trusted handler (e.g. the `?next=/path` parameter on
+/// `LoginView` / `LogoutView`). Defends against the open-redirect
+/// vector where attacker-controlled input lands in a `Location:`
+/// header pointing at an external site.
+///
+/// Rules (matching Django 6.0):
+///
+/// 1. Empty / whitespace-only URLs are unsafe.
+/// 2. Reject control characters (`\0`, `\r`, `\n`, `\t`) anywhere
+///    in the URL — they short-circuit parsers and let attackers
+///    smuggle CRLF header injections.
+/// 3. Reject leading `//` or `\\\\` (protocol-relative URLs that
+///    bypass the scheme check) and leading `\` (Windows path
+///    injection).
+/// 4. Relative URLs (starting with `/` after the control-char
+///    strip) are always safe.
+/// 5. Absolute URLs must use `http` or `https` (case-insensitive);
+///    if `require_https`, only `https` is accepted. The host
+///    must appear in `allowed_hosts` (case-insensitive, port
+///    stripped). Reject every other scheme — `javascript:`,
+///    `data:`, `file:`, `mailto:`, `vbscript:`, etc.
+///
+/// `allowed_hosts` entries are exact hostnames — no wildcard
+/// support (Django doesn't either; pair with `host_validation`
+/// for `.example.com` shape).
+///
+/// ```ignore
+/// use rustango::urls::url_has_allowed_host_and_scheme;
+/// // Relative paths always safe.
+/// assert!(url_has_allowed_host_and_scheme("/account", &[], false));
+/// // Allowed absolute host.
+/// assert!(url_has_allowed_host_and_scheme(
+///     "https://example.com/x", &["example.com"], false));
+/// // Open-redirect attempt rejected.
+/// assert!(!url_has_allowed_host_and_scheme(
+///     "//evil.com/x", &["example.com"], false));
+/// assert!(!url_has_allowed_host_and_scheme(
+///     "javascript:alert(1)", &[], false));
+/// ```
+#[must_use]
+pub fn url_has_allowed_host_and_scheme(
+    url: &str,
+    allowed_hosts: &[&str],
+    require_https: bool,
+) -> bool {
+    // Rule 1 — empty / whitespace.
+    let trimmed = url.trim_matches(|c: char| c.is_ascii_whitespace());
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Rule 2 — reject control characters anywhere. Django strips
+    // them BEFORE parsing; we reject so the function is also useful
+    // as a "this URL was tampered with" signal.
+    if trimmed.chars().any(|c| c.is_control()) {
+        return false;
+    }
+    // Rule 3 — protocol-relative / Windows-path injection.
+    if trimmed.starts_with("//") || trimmed.starts_with("\\\\") || trimmed.starts_with('\\') {
+        return false;
+    }
+    // Rule 4 — relative URLs.
+    if trimmed.starts_with('/') {
+        return true;
+    }
+    // Rule 5 — absolute URLs. Parse scheme manually so we don't pull
+    // a URL parser dep just for this one helper.
+    let Some((scheme_raw, rest)) = trimmed.split_once("://") else {
+        // No `://` and didn't start with `/` — could be `javascript:foo`
+        // or a malformed input. Reject.
+        return false;
+    };
+    let scheme = scheme_raw.to_ascii_lowercase();
+    let scheme_ok = match scheme.as_str() {
+        "https" => true,
+        "http" => !require_https,
+        _ => false,
+    };
+    if !scheme_ok {
+        return false;
+    }
+    // Host = everything before the first `/`, `?`, or `#`.
+    let host_with_port = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Strip userinfo if present (attacker shape: `http://allowed.com@evil.com/`).
+    // Django strips at the LAST `@` to handle nested userinfo;
+    // post-`@` is the real host.
+    let host_after_userinfo = host_with_port
+        .rsplit_once('@')
+        .map_or(host_with_port, |(_, h)| h);
+    // Strip port.
+    let host = host_after_userinfo
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    allowed_hosts.iter().any(|a| a.to_ascii_lowercase() == host)
+}
+
 fn substitute(
     name: &str,
     pattern: &str,
@@ -902,5 +1005,186 @@ mod querystring_tests {
     fn parse_pairs_percent_decodes_keys_and_values() {
         let pairs = parse_query_pairs("q=hello%20world&page=1");
         assert_eq!(pairs[0].1, "hello world");
+    }
+
+    // ---------- url_has_allowed_host_and_scheme (Django parity) ----------
+
+    #[test]
+    fn safe_url_accepts_relative_paths() {
+        assert!(url_has_allowed_host_and_scheme("/account", &[], false));
+        assert!(url_has_allowed_host_and_scheme(
+            "/dashboard?next=/x",
+            &[],
+            false
+        ));
+        assert!(url_has_allowed_host_and_scheme("/", &[], false));
+    }
+
+    #[test]
+    fn safe_url_accepts_allowed_host() {
+        assert!(url_has_allowed_host_and_scheme(
+            "https://example.com/x",
+            &["example.com"],
+            false
+        ));
+        assert!(url_has_allowed_host_and_scheme(
+            "http://example.com/x",
+            &["example.com"],
+            false
+        ));
+    }
+
+    #[test]
+    fn safe_url_rejects_protocol_relative() {
+        // The classic open-redirect attack: `//evil.com/path` parses
+        // as scheme-relative and bypasses naive `startswith('/')`
+        // safety checks.
+        assert!(!url_has_allowed_host_and_scheme(
+            "//evil.com/x",
+            &["example.com"],
+            false
+        ));
+        assert!(!url_has_allowed_host_and_scheme(
+            "//attacker.com",
+            &[],
+            false
+        ));
+    }
+
+    #[test]
+    fn safe_url_rejects_windows_path_injection() {
+        assert!(!url_has_allowed_host_and_scheme(
+            "\\\\evil.com\\x",
+            &["example.com"],
+            false
+        ));
+        assert!(!url_has_allowed_host_and_scheme(
+            "\\backslash\\path",
+            &[],
+            false
+        ));
+    }
+
+    #[test]
+    fn safe_url_rejects_javascript_scheme() {
+        assert!(!url_has_allowed_host_and_scheme(
+            "javascript:alert(1)",
+            &[],
+            false
+        ));
+        assert!(!url_has_allowed_host_and_scheme(
+            "JaVaScRiPt:alert(1)",
+            &[],
+            false
+        ));
+    }
+
+    #[test]
+    fn safe_url_rejects_data_and_file_schemes() {
+        assert!(!url_has_allowed_host_and_scheme(
+            "data:text/html,<script>...",
+            &[],
+            false
+        ));
+        assert!(!url_has_allowed_host_and_scheme(
+            "file:///etc/passwd",
+            &[],
+            false
+        ));
+    }
+
+    #[test]
+    fn safe_url_rejects_disallowed_host() {
+        // example.com whitelisted but the URL points elsewhere.
+        assert!(!url_has_allowed_host_and_scheme(
+            "https://evil.com/x",
+            &["example.com"],
+            false
+        ));
+    }
+
+    #[test]
+    fn safe_url_rejects_userinfo_smuggling() {
+        // Classic phishing: `http://example.com@evil.com/` — naïve
+        // parsers see `example.com` as the host but browsers route
+        // to `evil.com`. Django strips userinfo and uses the real
+        // host for the check.
+        assert!(!url_has_allowed_host_and_scheme(
+            "http://example.com@evil.com/x",
+            &["example.com"],
+            false
+        ));
+    }
+
+    #[test]
+    fn safe_url_strips_port_before_comparing() {
+        // `example.com:8080` should match `example.com` allowlist.
+        assert!(url_has_allowed_host_and_scheme(
+            "https://example.com:8080/x",
+            &["example.com"],
+            false
+        ));
+    }
+
+    #[test]
+    fn safe_url_case_insensitive_host_match() {
+        assert!(url_has_allowed_host_and_scheme(
+            "https://Example.COM/x",
+            &["example.com"],
+            false
+        ));
+    }
+
+    #[test]
+    fn safe_url_require_https_blocks_http() {
+        assert!(!url_has_allowed_host_and_scheme(
+            "http://example.com/x",
+            &["example.com"],
+            true
+        ));
+        assert!(url_has_allowed_host_and_scheme(
+            "https://example.com/x",
+            &["example.com"],
+            true
+        ));
+    }
+
+    #[test]
+    fn safe_url_rejects_empty_and_whitespace() {
+        assert!(!url_has_allowed_host_and_scheme("", &[], false));
+        assert!(!url_has_allowed_host_and_scheme("   ", &[], false));
+    }
+
+    #[test]
+    fn safe_url_rejects_embedded_control_chars() {
+        // CRLF / null injection — short-circuits URL parsers and
+        // smuggles header lines into a Location redirect.
+        assert!(!url_has_allowed_host_and_scheme(
+            "/path\nLocation: //evil.com",
+            &[],
+            false
+        ));
+        assert!(!url_has_allowed_host_and_scheme(
+            "/path\r\nX-Inject: y",
+            &[],
+            false
+        ));
+        assert!(!url_has_allowed_host_and_scheme("/path\0", &[], false));
+    }
+
+    #[test]
+    fn safe_url_rejects_malformed_scheme() {
+        // `mailto:foo@bar.com` has no `://` → not absolute, not relative.
+        assert!(!url_has_allowed_host_and_scheme(
+            "mailto:foo@bar.com",
+            &[],
+            false
+        ));
+        // `vbscript:msgbox(1)` same story.
+        assert!(!url_has_allowed_host_and_scheme(
+            "vbscript:msgbox(1)",
+            &[],
+            false
+        ));
     }
 }
