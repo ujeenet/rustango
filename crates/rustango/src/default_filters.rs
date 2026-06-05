@@ -716,26 +716,9 @@ fn iriencode(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
     };
-    let mut out = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        // RFC 3987 + Django's safe set: keep unreserved + most
-        // reserved chars (those that are syntactically meaningful
-        // in URIs). Encode everything else.
-        let safe = matches!(
-            byte,
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
-                | b'-' | b'_' | b'.' | b'~'
-                | b'/' | b':' | b'?' | b'#' | b'[' | b']' | b'@'
-                | b'!' | b'$' | b'&' | b'\'' | b'(' | b')'
-                | b'*' | b'+' | b',' | b';' | b'=' | b'%'
-        );
-        if safe {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    Ok(to_value(out)?)
+    // Identical algorithm + safe-byte set to `url_codec::iri_to_uri` —
+    // single source of truth.
+    Ok(to_value(crate::url_codec::iri_to_uri(s))?)
 }
 
 // ------------------------------------------------------------------ wordwrap
@@ -767,39 +750,8 @@ fn wordwrap(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value>
         return Ok(value.clone());
     }
     let width = usize::try_from(width).unwrap_or(usize::MAX);
-    // Honor explicit \n in the input by wrapping each line independently
-    // and re-joining. Empty lines stay empty (preserves paragraph breaks).
-    let wrapped = s
-        .split('\n')
-        .map(|line| wrap_one_line(line, width))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok(to_value(wrapped)?)
-}
-
-fn wrap_one_line(line: &str, width: usize) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut current_len = 0usize;
-    for (i, word) in line.split_whitespace().enumerate() {
-        let word_chars = word.chars().count();
-        if i == 0 {
-            out.push_str(word);
-            current_len = word_chars;
-            continue;
-        }
-        // Would this word push the line past width?
-        let proposed = current_len + 1 + word_chars; // " " + word
-        if proposed <= width {
-            out.push(' ');
-            out.push_str(word);
-            current_len = proposed;
-        } else {
-            out.push('\n');
-            out.push_str(word);
-            current_len = word_chars;
-        }
-    }
-    out
+    // Identical algorithm to `text::wrap` — single source of truth.
+    Ok(to_value(crate::text::wrap(s, width))?)
 }
 
 // ------------------------------------------------------------------ mask_email
