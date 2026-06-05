@@ -31,8 +31,8 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("naturalsize", naturalsize_filter);
     tera.register_filter("ordinal", ordinal_filter);
     tera.register_filter("apnumber", apnumber_filter);
-    tera.register_filter("naturaltime", naturaltime);
-    tera.register_filter("naturalday", naturalday);
+    tera.register_filter("naturaltime", naturaltime_filter);
+    tera.register_filter("naturalday", naturalday_filter);
     tera.register_filter("timesince", timesince);
     tera.register_filter("timeuntil", timeuntil);
     tera.register_filter("format_number", format_number);
@@ -616,7 +616,7 @@ fn apnumber_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Va
 /// - <30d → "N days {ago,from now}"
 /// - <365d → "N months {ago,from now}"
 /// - ≥365d → "N years {ago,from now}"
-fn naturaltime(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+fn naturaltime_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let dt = match parse_datetime(value) {
         Some(d) => d,
         None => return Ok(value.clone()),
@@ -632,6 +632,58 @@ fn parse_datetime(value: &Value) -> Option<DateTime<Utc>> {
         }
     }
     serde_json::from_value(value.clone()).ok()
+}
+
+/// [`django.contrib.humanize.naturaltime`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#naturaltime) —
+/// relative time string compared to `now`. `"3 minutes ago"`,
+/// `"in 5 hours"`, `"now"` (within 30 s either direction).
+///
+/// Bucket thresholds match Django:
+/// `<30s` → "now"; `<60s` → seconds; `<60m` → minutes;
+/// `<24h` → hours; `<30d` → days; `<12mo` → months; else years.
+///
+/// Bucketing is single-unit (top bucket only). For depth-respecting
+/// "4 days, 6 hours" output use [`crate::timesince::timesince`].
+///
+/// ```
+/// use chrono::{Duration, TimeZone, Utc};
+/// use rustango::humanize::naturaltime;
+///
+/// let now = Utc.with_ymd_and_hms(2026, 6, 5, 12, 0, 0).unwrap();
+/// let past = now - Duration::minutes(3);
+/// assert_eq!(naturaltime(now, past), "3 minutes ago");
+///
+/// let future = now + Duration::hours(5);
+/// assert_eq!(naturaltime(now, future), "in 5 hours");
+///
+/// assert_eq!(naturaltime(now, now), "now");
+/// ```
+#[must_use]
+pub fn naturaltime(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
+    natural_time_string(now, then)
+}
+
+/// [`django.contrib.humanize.naturalday`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#naturalday) —
+/// calendar-relative day name. `"today"`, `"yesterday"`,
+/// `"tomorrow"`, else `"Mmm DD"` (e.g. `"Apr 27"`).
+///
+/// The fallback `"Mmm DD"` matches Django's default `DATE_FORMAT`
+/// when no operator override is in force.
+///
+/// ```
+/// use chrono::{Duration, TimeZone, Utc};
+/// use rustango::humanize::naturalday;
+///
+/// let now = Utc.with_ymd_and_hms(2026, 6, 5, 12, 0, 0).unwrap();
+/// assert_eq!(naturalday(now, now), "today");
+/// assert_eq!(naturalday(now, now - Duration::days(1)), "yesterday");
+/// assert_eq!(naturalday(now, now + Duration::days(1)), "tomorrow");
+/// assert_eq!(naturalday(now, now - Duration::days(45)),
+///            "Apr 21");
+/// ```
+#[must_use]
+pub fn naturalday(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
+    natural_day_string(now, then)
 }
 
 fn natural_time_string(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
@@ -680,10 +732,7 @@ fn format_unit(n: i64, unit: &str, suffix: &str) -> String {
 
 // ------------------------------------------------------------------ naturalday
 
-/// `naturalday` — calendar-relative day name. `"today"`, `"yesterday"`,
-/// `"tomorrow"`, else `"MMM DD"` (e.g. `"Apr 27"`). Matches Django's
-/// default date format for the fallback case.
-fn naturalday(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+fn naturalday_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let dt = match parse_datetime(value) {
         Some(d) => d,
         None => return Ok(value.clone()),
@@ -1276,5 +1325,71 @@ mod tests {
         assert_eq!(apnumber(10), "10");
         assert_eq!(apnumber(-3), "-3");
         assert_eq!(apnumber(100), "100");
+    }
+
+    // -------- Public naturaltime / naturalday --------
+
+    fn ntime_now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 6, 5, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn naturaltime_now_within_30s() {
+        let now = ntime_now();
+        assert_eq!(naturaltime(now, now), "now");
+        assert_eq!(naturaltime(now, now + Duration::seconds(20)), "now");
+        assert_eq!(naturaltime(now, now - Duration::seconds(29)), "now");
+    }
+
+    #[test]
+    fn naturaltime_seconds_ago_and_from_now() {
+        let now = ntime_now();
+        assert_eq!(
+            naturaltime(now, now - Duration::seconds(45)),
+            "45 seconds ago"
+        );
+        assert_eq!(
+            naturaltime(now, now + Duration::seconds(45)),
+            "in 45 seconds"
+        );
+    }
+
+    #[test]
+    fn naturaltime_singular_pluralization() {
+        let now = ntime_now();
+        assert_eq!(naturaltime(now, now - Duration::minutes(1)), "1 minute ago");
+        assert_eq!(naturaltime(now, now + Duration::hours(1)), "in 1 hour");
+    }
+
+    #[test]
+    fn naturaltime_bucket_transitions() {
+        let now = ntime_now();
+        assert_eq!(
+            naturaltime(now, now - Duration::minutes(3)),
+            "3 minutes ago"
+        );
+        assert_eq!(naturaltime(now, now - Duration::hours(5)), "5 hours ago");
+        assert_eq!(naturaltime(now, now - Duration::days(10)), "10 days ago");
+        // 35 days → 1 month
+        assert_eq!(naturaltime(now, now - Duration::days(35)), "1 month ago");
+        // 400 days → 1 year
+        assert_eq!(naturaltime(now, now - Duration::days(400)), "1 year ago");
+    }
+
+    #[test]
+    fn naturalday_today_yesterday_tomorrow() {
+        let now = ntime_now();
+        assert_eq!(naturalday(now, now), "today");
+        assert_eq!(naturalday(now, now - Duration::days(1)), "yesterday");
+        assert_eq!(naturalday(now, now + Duration::days(1)), "tomorrow");
+    }
+
+    #[test]
+    fn naturalday_fallback_format() {
+        let now = ntime_now();
+        let other = now - Duration::days(45);
+        let out = naturalday(now, other);
+        // 2026-06-05 minus 45 days = 2026-04-21
+        assert_eq!(out, "Apr 21");
     }
 }
