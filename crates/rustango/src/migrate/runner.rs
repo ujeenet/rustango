@@ -1513,6 +1513,38 @@ async fn apply_atomic_pool(
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
+            // ⚠ MySQL atomic migrations have a caveat that PG / SQLite
+            // don't: MySQL silently auto-COMMITs the current
+            // transaction on every DDL statement (CREATE TABLE,
+            // ALTER TABLE, DROP TABLE, CREATE INDEX, etc. — the
+            // "implicit commit before/after statement" list in
+            // https://dev.mysql.com/doc/refman/8.0/en/implicit-commit.html).
+            // The BEGIN we issue below establishes a tx that subsequent
+            // `Operation::Data(RunSQL)` statements DO participate in,
+            // but every `Operation::Schema(change)` auto-commits and
+            // breaks atomicity. The COMMIT at the end is a no-op for
+            // any DDL emitted above.
+            //
+            // In practice this means: if a migration has 5 DDL ops and
+            // op #3 fails, ops #1+#2 are already committed and can't be
+            // rolled back. The migration ends up half-applied; operators
+            // have to manually un-do the partially-applied DDL OR fix
+            // the migration to be re-runnable from where it failed.
+            //
+            // This is a MySQL engine limitation, not a rustango bug,
+            // and matches Django's `migrate` behavior against MySQL
+            // (Django docs note the same caveat). Tracked in #559.
+            // The runner emits a `tracing::warn!` so operators see
+            // the caveat in logs when they invoke `atomic: true` on
+            // MySQL.
+            tracing::warn!(
+                migration = %mig.name,
+                "MySQL silently auto-commits on every DDL statement (CREATE/ALTER/DROP/INDEX); \
+                 the atomic-migration wrapper only protects RunSQL/RunPython operations \
+                 between DDL ops. A failure mid-DDL leaves the migration partially applied \
+                 and requires manual recovery. See migrate/runner.rs::apply_atomic_pool for \
+                 details. Tracked in #559."
+            );
             let mut tx = my.begin().await?;
             let mut deferred_fks: Vec<String> = Vec::new();
             for op in &mig.forward {
@@ -2022,6 +2054,16 @@ async fn unapply_atomic_pool(
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
+            // MySQL: implicit-commit on every DDL statement defeats the
+            // atomic-rollback wrapper here too. A failure mid-unapply
+            // leaves the schema half-reverted. See `apply_atomic_pool`'s
+            // MySQL arm for the full caveat doc. Tracked in #559.
+            tracing::warn!(
+                migration = %target.name,
+                "MySQL silently auto-commits on every DDL statement; the atomic-unapply \
+                 wrapper only protects RunSQL/RunPython between DDL ops. A failure mid-unapply \
+                 leaves the schema half-reverted and requires manual recovery."
+            );
             let mut tx = my.begin().await?;
             let mut deferred_fks: Vec<String> = Vec::new();
             for op in inverted {
