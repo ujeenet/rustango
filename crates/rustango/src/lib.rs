@@ -1034,6 +1034,11 @@ pub mod random;
 /// `base36_to_int(s)` round-trip.
 pub mod base36;
 
+/// Django-shape base62 integer encoding — `[0-9A-Za-z]` 62-char
+/// alphabet for short URL IDs (YouTube / bit.ly style). Same shape
+/// as base36 but case-sensitive, giving 6.0 bits per char.
+pub mod base62;
+
 /// Django-shape lorem ipsum generators — placeholder text for
 /// demos, test fixtures, template scaffolds. `lorem::words(n)`,
 /// `lorem::paragraphs(n)`, `lorem::sentence()`.
