@@ -44,12 +44,12 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 22. Async support | 4 | 0 | 0 | 3 |
 | 23. DRF parity | 22 | 0 | 1 | 0 |
 | 24. contrib modules | 12 | 1 | 3 | 2 |
-| 25. `django.utils.*` helpers | 84 | 0 | 0 | 0 |
-| **Totals** | **454** | **11** | **21** | **19** |
+| 25. `django.utils.*` helpers | 89 | 0 | 0 | 0 |
+| **Totals** | **459** | **11** | **21** | **19** |
 
-Coverage = 454 / (454 + 11 + 21) = **93% full, 2% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
+Coverage = 459 / (459 + 11 + 21) = **93% full, 2% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
 
-Snapshot date: 2026-06-05 (post-v0.42 plus 80+ Django `utils.*` + `template.defaultfilters` parity helpers across PRs #619–#702: 12 new modules + 14 widened modules — see Section 25 for the per-helper table).
+Snapshot date: 2026-06-05 (post-v0.42 plus 85+ Django `utils.*` + `template.defaultfilters` parity helpers across PRs #619–#711: 12 new modules + 14 widened modules — see Section 25 for the per-helper table).
 
 ---
 
@@ -755,6 +755,9 @@ below corresponds to a Django module / function the port targets.
 | `django.template.defaultfilters.floatformat` | [floatformat](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#floatformat) | SHIPPED | `numberformat::floatformat(value, precision)` (PR #698) — signed-precision shape (negative = drop trailing zeros, positive = keep). The price-formatter trick: `floatformat(price, -2)` |
 | `django.template.defaultfilters.truncatechars` (plain) | [truncatechars](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#truncatechars) | SHIPPED | `text::truncatechars(s, count)` (PR #700) — distinct from `text::truncate` (Truncator shape, suffix beyond count); this is the Django template-filter shape where the ellipsis COUNTS toward `count`. Unicode-safe |
 | `django.template.defaultfilters.truncatechars_html` / `truncatewords_html` | [truncatechars_html](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#truncatechars-html) | SHIPPED | Tera filters `truncatechars_html` / `truncatewords_html` (PR #702) wrap existing `text::truncate_html_chars` / `truncate_html_words` (PR #682). Ellipsis budget honored via `count.saturating_sub(1)` to match Django shape |
+| `django.template.defaultfilters.yesno` | [yesno](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#yesno) | SHIPPED | `text::yesno(Option<bool>, &str)` (PR #704) — Tera filter delegates. Option<bool> shape works for non-template callers (REST API JSON, audit-log rendering, CLI summary) |
+| `django.utils.html.avoid_wrapping` | [avoid_wrapping](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.avoid_wrapping) | SHIPPED | `text::avoid_wrapping(s)` (PR #708) — ASCII space → NBSP swap to prevent line-break in critical phrases (dates, version strings, prices). Tera filter `avoid_wrapping` (PR #709) |
+| Locale-aware number / currency formatters | [django.contrib.humanize](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/) | SHIPPED | `humanize::format_number(value, locale, decimals)` (PR #710) + `humanize::format_currency(amount, currency, locale)` (PR #711). Decimals-precision arg + Romance-language Euro suffix override; works for non-template billing-summary code |
 | `django.utils.crypto.get_random_string` | [get_random_string](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.get_random_string) | SHIPPED | `random::get_random_string(length, allowed_chars)` + `get_random_string_default` (PR #637) — CSPRNG-backed `crate::random` module with 5 predefined alphabets |
 | `django.utils.crypto.constant_time_compare` | [constant_time_compare](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.constant_time_compare) | SHIPPED | `crypto::constant_time_compare(a, b)` (PR #647) — consolidates 2 prior private copies |
 | `django.utils.encoding.iri_to_uri` | [iri_to_uri](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.iri_to_uri) | SHIPPED | `url_codec::iri_to_uri` (PR #648) |
