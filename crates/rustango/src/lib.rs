@@ -1032,6 +1032,11 @@ pub mod base36;
 /// `lorem::paragraphs(n)`, `lorem::sentence()`.
 pub mod lorem;
 
+/// Django-shape HTTP date parser + formatter — RFC 1123 / RFC 850 /
+/// ANSI C asctime parsing per RFC 7231 §7.1.1.1; IMF-fixdate output
+/// per RFC 1123. `http_date::http_date(secs)` + `parse_http_date(s)`.
+pub mod http_date;
+
 /// Django messages framework — `messages.success/info/warning/error/debug`
 /// flash storage backed by a signed cookie. Issue #9.
 pub mod messages;
