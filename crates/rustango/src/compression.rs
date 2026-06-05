@@ -203,6 +203,47 @@ async fn handle(cfg: Arc<CompressionLayer>, req: Request<Body>, next: Next) -> R
     Response::from_parts(parts, Body::from(compressed))
 }
 
+/// Django-parity `django.utils.text.compress_string(s)` — gzip-compress
+/// raw bytes at the default zlib level (6). Used by Django's cache
+/// machinery to compress large session/cache payloads before storage.
+///
+/// Takes a `&[u8]` rather than `&str` so binary payloads (cache
+/// blobs, signed cookies) work too — caller passes
+/// `s.as_bytes()` for the Python-shape "string" call.
+///
+/// # Errors
+/// Returns `std::io::Error` if `flate2`'s encoder rejects the
+/// input — in practice only on systems where the allocator can't
+/// satisfy the output buffer.
+///
+/// ```ignore
+/// use rustango::compression::{compress_string, decompress_string};
+/// let original = b"hello world".repeat(100);
+/// let compressed = compress_string(&original)?;
+/// let restored = decompress_string(&compressed)?;
+/// assert_eq!(restored, original);
+/// ```
+pub fn compress_string(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    encode(Encoding::Gzip, bytes, 6)
+}
+
+/// Django-parity inverse of [`compress_string`] — gunzip a buffer.
+/// Symmetric helper not in Django's `utils.text` (Django decompresses
+/// inline via `gzip.decompress`) but pairs cleanly with the encode
+/// side here.
+///
+/// # Errors
+/// Returns `std::io::Error` for any malformed gzip input — truncated
+/// streams, bad magic bytes, checksum mismatch, etc.
+pub fn decompress_string(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    use flate2::read::GzDecoder;
+    use std::io::Read as _;
+    let mut decoder = GzDecoder::new(bytes);
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    decoder.read_to_end(&mut out)?;
+    Ok(out)
+}
+
 fn encode(enc: Encoding, bytes: &[u8], level: u32) -> std::io::Result<Vec<u8>> {
     let level = Compression::new(level);
     match enc {
@@ -588,5 +629,86 @@ mod tests {
     fn level_caps_at_9() {
         let layer = CompressionLayer::new().level(99);
         assert_eq!(layer.level, 9);
+    }
+
+    // -------- compress_string / decompress_string (Django parity) --------
+
+    #[test]
+    fn compress_decompress_round_trip_simple() {
+        let original = b"hello world";
+        let compressed = compress_string(original).unwrap();
+        let restored = decompress_string(&compressed).unwrap();
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn compress_decompress_round_trip_large_repetitive() {
+        // gzip should shrink this dramatically.
+        let original = b"abcdefghij".repeat(1000);
+        let compressed = compress_string(&original).unwrap();
+        assert!(
+            compressed.len() < original.len() / 10,
+            "expected >90% compression on highly redundant input; got {} → {}",
+            original.len(),
+            compressed.len()
+        );
+        let restored = decompress_string(&compressed).unwrap();
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn compress_empty_input_round_trips() {
+        let compressed = compress_string(b"").unwrap();
+        // Empty gzip stream is still a valid stream with a header + trailer.
+        assert!(!compressed.is_empty());
+        let restored = decompress_string(&compressed).unwrap();
+        assert!(restored.is_empty());
+    }
+
+    #[test]
+    fn compress_output_starts_with_gzip_magic() {
+        // RFC 1952 — gzip magic bytes are 0x1f 0x8b.
+        let out = compress_string(b"x").unwrap();
+        assert!(
+            out.len() >= 2,
+            "gzip output should have at least header bytes"
+        );
+        assert_eq!(&out[..2], &[0x1f, 0x8b]);
+    }
+
+    #[test]
+    fn decompress_rejects_garbage() {
+        // Not a gzip stream — should error, not panic.
+        let err = decompress_string(b"not actually gzipped bytes here").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn decompress_rejects_truncated_stream() {
+        // Compress a buffer then truncate it.
+        let full = compress_string(b"the quick brown fox").unwrap();
+        let truncated = &full[..full.len() / 2];
+        let err = decompress_string(truncated).unwrap_err();
+        // Either InvalidInput (truncated header) or UnexpectedEof (truncated body)
+        // — both surface the corruption rather than returning partial data.
+        assert!(
+            matches!(
+                err.kind(),
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::UnexpectedEof
+            ),
+            "got unexpected error kind: {:?}",
+            err.kind()
+        );
+    }
+
+    #[test]
+    fn compress_string_handles_binary_input() {
+        // Django uses `compress_string(s.encode())` — binary input
+        // must round-trip cleanly. Use bytes including NUL + high
+        // bytes to verify nothing assumes UTF-8.
+        let original: Vec<u8> = (0u8..=255).collect();
+        let compressed = compress_string(&original).unwrap();
+        let restored = decompress_string(&compressed).unwrap();
+        assert_eq!(restored, original);
     }
 }
