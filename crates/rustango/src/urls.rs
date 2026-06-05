@@ -835,8 +835,32 @@ fn querystring_filter(
 /// list of `(key, value)` pairs preserving original order. Malformed
 /// pairs (no `=`, multiple `=`) are passed through with empty / first-
 /// `=`-split values — same loose interpretation as browsers.
-#[cfg(feature = "template_views")]
-fn parse_query_pairs(s: &str) -> Vec<(String, String)> {
+///
+/// Django-parity `urllib.parse.parse_qsl(qs)`. Strips a leading
+/// `?` so callers can pass either the bare query string or the
+/// full `?key=val&…` form.
+///
+/// ```ignore
+/// use rustango::urls::parse_query_pairs;
+/// assert_eq!(
+///     parse_query_pairs("q=hello&page=2"),
+///     vec![("q".to_owned(), "hello".to_owned()),
+///          ("page".to_owned(), "2".to_owned())]
+/// );
+/// // Percent-encoded values get decoded.
+/// assert_eq!(
+///     parse_query_pairs("q=hello%20world"),
+///     vec![("q".to_owned(), "hello world".to_owned())]
+/// );
+/// // Multi-value: same key appears twice — both pairs kept (Django shape).
+/// assert_eq!(
+///     parse_query_pairs("tag=a&tag=b"),
+///     vec![("tag".to_owned(), "a".to_owned()),
+///          ("tag".to_owned(), "b".to_owned())]
+/// );
+/// ```
+#[must_use]
+pub fn parse_query_pairs(s: &str) -> Vec<(String, String)> {
     let s = s.trim_start_matches('?');
     if s.is_empty() {
         return Vec::new();
@@ -851,6 +875,27 @@ fn parse_query_pairs(s: &str) -> Vec<(String, String)> {
             None => (crate::url_codec::url_decode(chunk), String::new()),
         })
         .collect()
+}
+
+/// Django-parity `urllib.parse.parse_qs(qs)` — parse a query
+/// string into a `HashMap<String, Vec<String>>`. Same value as
+/// [`parse_query_pairs`] but with multi-value keys collected into
+/// a vec per key (the canonical "give me everything for key X"
+/// shape).
+///
+/// ```ignore
+/// use rustango::urls::parse_query_pairs_grouped;
+/// let m = parse_query_pairs_grouped("tag=a&tag=b&q=hello");
+/// assert_eq!(m.get("tag"), Some(&vec!["a".to_owned(), "b".to_owned()]));
+/// assert_eq!(m.get("q"), Some(&vec!["hello".to_owned()]));
+/// ```
+#[must_use]
+pub fn parse_query_pairs_grouped(s: &str) -> HashMap<String, Vec<String>> {
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for (k, v) in parse_query_pairs(s) {
+        out.entry(k).or_default().push(v);
+    }
+    out
 }
 
 #[cfg(all(test, feature = "template_views"))]
@@ -1186,5 +1231,78 @@ mod querystring_tests {
             &[],
             false
         ));
+    }
+
+    // ---------- parse_query_pairs / parse_query_pairs_grouped (Django parity) ----------
+
+    #[test]
+    fn parse_qs_basic() {
+        assert_eq!(
+            parse_query_pairs("q=hello&page=2"),
+            vec![
+                ("q".to_owned(), "hello".to_owned()),
+                ("page".to_owned(), "2".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_qs_strips_leading_question_mark() {
+        assert_eq!(
+            parse_query_pairs("?a=1&b=2"),
+            vec![
+                ("a".to_owned(), "1".to_owned()),
+                ("b".to_owned(), "2".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_qs_empty_returns_empty_vec() {
+        assert!(parse_query_pairs("").is_empty());
+        assert!(parse_query_pairs("?").is_empty());
+    }
+
+    #[test]
+    fn parse_qs_percent_decodes_keys_and_values() {
+        assert_eq!(
+            parse_query_pairs("q=hello%20world"),
+            vec![("q".to_owned(), "hello world".to_owned())]
+        );
+    }
+
+    #[test]
+    fn parse_qs_multi_value_preserves_all_pairs() {
+        assert_eq!(
+            parse_query_pairs("tag=a&tag=b"),
+            vec![
+                ("tag".to_owned(), "a".to_owned()),
+                ("tag".to_owned(), "b".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_qs_handles_key_without_value() {
+        // `flag&q=hello` — `flag` is a bare key, no `=`.
+        assert_eq!(
+            parse_query_pairs("flag&q=hi"),
+            vec![
+                ("flag".to_owned(), String::new()),
+                ("q".to_owned(), "hi".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_qs_grouped_collects_multi_values() {
+        let m = parse_query_pairs_grouped("tag=a&tag=b&q=hello");
+        assert_eq!(m.get("tag"), Some(&vec!["a".to_owned(), "b".to_owned()]));
+        assert_eq!(m.get("q"), Some(&vec!["hello".to_owned()]));
+    }
+
+    #[test]
+    fn parse_qs_grouped_empty_returns_empty_map() {
+        assert!(parse_query_pairs_grouped("").is_empty());
     }
 }
