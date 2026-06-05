@@ -1820,6 +1820,79 @@ pub fn validate_comma_separated_integer_list(s: &str) -> Result<(), ValidationEr
     Ok(())
 }
 
+/// Django-parity
+/// [`int_list_validator(sep, allow_negative)`](https://docs.djangoproject.com/en/6.0/ref/validators/#django.core.validators.int_list_validator) —
+/// parameterized variant of [`validate_comma_separated_integer_list`].
+///
+/// Accepts a list of integers separated by `sep`. When
+/// `allow_negative` is false (Django default), a leading `-` on
+/// any list element rejects the entire input. Whitespace around
+/// each element is allowed and trimmed.
+///
+/// Use `validate_comma_separated_integer_list(s)` for the
+/// canonical `sep=","`, `allow_negative=false` shape; this
+/// function exists for callers that need:
+/// * A different separator (`":"`, `";"`, `"|"`, `" "`)
+/// * Negative integers permitted (`-1,2,-3`)
+///
+/// ```
+/// use rustango::validators::int_list_validator;
+/// assert!(int_list_validator("1,2,3",     ",", false).is_ok());
+/// assert!(int_list_validator("1 2 3",     " ", false).is_ok());
+/// assert!(int_list_validator("1|-2|3",    "|", true).is_ok());
+/// assert!(int_list_validator("1|-2|3",    "|", false).is_err());
+/// assert!(int_list_validator("1,abc,3",   ",", false).is_err());
+/// assert!(int_list_validator("",          ",", false).is_err());
+/// ```
+///
+/// # Errors
+/// `ValidationError { code: "invalid", ... }` if any element
+/// isn't a valid integer, or if the input is empty, or if a
+/// negative value is found and `allow_negative` is false.
+pub fn int_list_validator(s: &str, sep: &str, allow_negative: bool) -> Result<(), ValidationError> {
+    if s.trim().is_empty() {
+        return Err(ValidationError::new(
+            "invalid",
+            "Enter only digits separated by the configured separator.",
+        ));
+    }
+    if sep.is_empty() {
+        // Without a separator the function would split-by-empty into
+        // chars — meaningless. Reject loudly.
+        return Err(ValidationError::new(
+            "invalid",
+            "int_list_validator: separator must be non-empty.",
+        ));
+    }
+    for part in s.split(sep) {
+        let part = part.trim();
+        if part.is_empty() {
+            return Err(ValidationError::new(
+                "invalid",
+                "Enter only digits separated by the configured separator.",
+            ));
+        }
+        let parsed: Result<i64, _> = part.parse();
+        match parsed {
+            Ok(n) => {
+                if !allow_negative && n < 0 {
+                    return Err(ValidationError::new(
+                        "invalid",
+                        "Negative integers are not allowed.",
+                    ));
+                }
+            }
+            Err(_) => {
+                return Err(ValidationError::new(
+                    "invalid",
+                    "Enter only digits separated by the configured separator.",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Django-parity `FileExtensionValidator(allowed_extensions=[...])` —
 /// reject filenames whose extension (case-insensitive) isn't on the
 /// allowlist. The extension is everything after the LAST `.` in the
@@ -3587,5 +3660,55 @@ mod tests {
     fn ipv46_rejects_ipv4_out_of_range() {
         // 256.0.0.1 isn't a valid IPv4 — should also fail as IPv6.
         assert!(validate_ipv46_address("256.0.0.1").is_err());
+    }
+
+    // -------- int_list_validator --------
+
+    #[test]
+    fn int_list_comma_basic() {
+        assert!(int_list_validator("1,2,3", ",", false).is_ok());
+        assert!(int_list_validator("100,200,300", ",", false).is_ok());
+        assert!(int_list_validator("42", ",", false).is_ok()); // single int
+    }
+
+    #[test]
+    fn int_list_custom_separator() {
+        assert!(int_list_validator("1 2 3", " ", false).is_ok());
+        assert!(int_list_validator("1|2|3", "|", false).is_ok());
+        assert!(int_list_validator("1:2:3", ":", false).is_ok());
+        assert!(int_list_validator("1;2;3", ";", false).is_ok());
+    }
+
+    #[test]
+    fn int_list_allows_negative_when_flagged() {
+        assert!(int_list_validator("1,-2,3", ",", true).is_ok());
+        assert!(int_list_validator("-1,-2,-3", ",", true).is_ok());
+        // Same input rejected when allow_negative=false.
+        assert!(int_list_validator("1,-2,3", ",", false).is_err());
+    }
+
+    #[test]
+    fn int_list_rejects_non_integer() {
+        assert!(int_list_validator("1,abc,3", ",", false).is_err());
+        assert!(int_list_validator("1,2.5,3", ",", false).is_err()); // float
+        assert!(int_list_validator("1, ,3", ",", false).is_err()); // empty element
+    }
+
+    #[test]
+    fn int_list_rejects_empty_input() {
+        assert!(int_list_validator("", ",", false).is_err());
+        assert!(int_list_validator("   ", ",", false).is_err());
+    }
+
+    #[test]
+    fn int_list_rejects_empty_separator() {
+        assert!(int_list_validator("1,2,3", "", false).is_err());
+    }
+
+    #[test]
+    fn int_list_trims_whitespace_around_elements() {
+        // Django shape: whitespace around each element is tolerated.
+        assert!(int_list_validator("1, 2, 3", ",", false).is_ok());
+        assert!(int_list_validator("  10 ,  20 ,  30  ", ",", false).is_ok());
     }
 }
