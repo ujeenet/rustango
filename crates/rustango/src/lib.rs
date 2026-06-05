@@ -1060,9 +1060,19 @@ pub mod dateparse;
 pub mod dateformat;
 
 /// Django-shape generic value signer — `signing::Signer::sign(value)`
-/// + `signing::TimestampSigner` with TTL + `dumps/loads` JSON
-/// helpers. Mirrors `django.core.signing` for tamper-proof signed
-/// payloads (password reset tokens, magic links, signed cookies).
+/// + `signing::TimestampSigner` with TTL. Mirrors
+/// `django.core.signing` for tamper-proof signed payloads
+/// (password reset tokens, magic links, signed cookies).
+///
+/// Gated behind the same feature union as [`crate::crypto`] —
+/// every existing rustango feature set that ships HMAC primitives
+/// also exposes this signer.
+#[cfg(any(
+    feature = "hmac-auth",
+    feature = "storage-s3",
+    feature = "signed_url",
+    feature = "jwt",
+))]
 pub mod signing;
 
 /// Django-shape `Set-Cookie` builder — `Cookie::new(name, value)
