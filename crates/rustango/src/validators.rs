@@ -1628,6 +1628,30 @@ pub fn validate_ipv6_address(s: &str) -> Result<(), ValidationError> {
         .map_err(|_| ValidationError::new("invalid_ipv6_address", "Enter a valid IPv6 address."))
 }
 
+/// Django-parity `validate_ipv46_address(value)` — accept EITHER
+/// an IPv4 or an IPv6 address. Used by Django's `GenericIPAddressField`
+/// when the protocol is set to "both" (the default).
+///
+/// # Errors
+/// `ValidationError { code: "invalid_ip_address", ... }` when `s`
+/// parses as neither IPv4 nor IPv6.
+///
+/// ```ignore
+/// use rustango::validators::validate_ipv46_address;
+/// assert!(validate_ipv46_address("192.0.2.1").is_ok());
+/// assert!(validate_ipv46_address("2001:db8::1").is_ok());
+/// assert!(validate_ipv46_address("not an ip").is_err());
+/// ```
+pub fn validate_ipv46_address(s: &str) -> Result<(), ValidationError> {
+    if validate_ipv4_address(s).is_ok() || validate_ipv6_address(s).is_ok() {
+        return Ok(());
+    }
+    Err(ValidationError::new(
+        "invalid_ip_address",
+        "Enter a valid IPv4 or IPv6 address.",
+    ))
+}
+
 /// Django-parity
 /// [`django.utils.ipv6.clean_ipv6_address(ip, unpack_ipv4=False)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.ipv6.clean_ipv6_address) —
 /// normalize an IPv6 address into the canonical RFC 5952 compressed
@@ -3528,5 +3552,40 @@ mod tests {
         assert!(clean_ipv6_address("", false).is_none());
         // IPv4 is NOT IPv6.
         assert!(clean_ipv6_address("192.0.2.1", false).is_none());
+    }
+
+    // -------- validate_ipv46_address (Django parity) --------
+
+    #[test]
+    fn ipv46_accepts_ipv4() {
+        assert!(validate_ipv46_address("192.0.2.1").is_ok());
+        assert!(validate_ipv46_address("127.0.0.1").is_ok());
+        assert!(validate_ipv46_address("255.255.255.255").is_ok());
+    }
+
+    #[test]
+    fn ipv46_accepts_ipv6() {
+        assert!(validate_ipv46_address("2001:db8::1").is_ok());
+        assert!(validate_ipv46_address("::1").is_ok());
+        assert!(validate_ipv46_address("::").is_ok());
+    }
+
+    #[test]
+    fn ipv46_rejects_neither() {
+        let err = validate_ipv46_address("not an ip").unwrap_err();
+        assert_eq!(err.code, "invalid_ip_address");
+        assert!(err.message.contains("IPv4"));
+        assert!(err.message.contains("IPv6"));
+    }
+
+    #[test]
+    fn ipv46_rejects_empty() {
+        assert!(validate_ipv46_address("").is_err());
+    }
+
+    #[test]
+    fn ipv46_rejects_ipv4_out_of_range() {
+        // 256.0.0.1 isn't a valid IPv4 — should also fail as IPv6.
+        assert!(validate_ipv46_address("256.0.0.1").is_err());
     }
 }
