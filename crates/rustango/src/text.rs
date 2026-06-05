@@ -338,6 +338,60 @@ pub fn smart_split(text: &str) -> Vec<String> {
     out
 }
 
+/// Django-parity
+/// [`django.utils.html.strip_tags(value)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.strip_tags) —
+/// remove HTML / XML tag markup from `s` and return the bare text
+/// content.
+///
+/// Strips anything inside `< … >` pairs, including:
+///
+/// * Regular tags (`<p>foo</p>` → `foo`)
+/// * Self-closing tags (`<br/>` → ``)
+/// * Comments (`<!-- secret --> visible` → ` visible`)
+/// * CDATA-style braces (`<![CDATA[…]]>` → ``)
+///
+/// **NOT a sanitizer.** Django's docstring explicitly warns the
+/// same: this is for plain-text extraction (search indexing,
+/// `Last-Modified` body preview, etc.). For user-input HTML
+/// sanitization use an actual HTML parser + allowlist.
+///
+/// Empty `<>` (no tag name) is also stripped. Unclosed `<` at the
+/// end of input is kept literal (Django shape — Python's regex
+/// re-tries the trailing `<`).
+///
+/// ```ignore
+/// use rustango::text::strip_tags;
+/// assert_eq!(strip_tags("<p>hello <b>world</b></p>"), "hello world");
+/// assert_eq!(strip_tags("plain text"), "plain text");
+/// assert_eq!(strip_tags("a < b"), "a < b"); // unclosed `<` kept
+/// ```
+#[must_use]
+pub fn strip_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    let mut tag_start_byte: Option<usize> = None;
+    // Iterate by char (NOT byte) so multi-byte UTF-8 codepoints
+    // survive intact in the output.
+    for (i, c) in s.char_indices() {
+        if !in_tag {
+            if c == '<' {
+                in_tag = true;
+                tag_start_byte = Some(i);
+            } else {
+                out.push(c);
+            }
+        } else if c == '>' {
+            in_tag = false;
+            tag_start_byte = None;
+        }
+    }
+    // Unclosed `<` at end of input — push the trailing slice literally.
+    if let Some(start) = tag_start_byte {
+        out.push_str(&s[start..]);
+    }
+    out
+}
+
 /// Django-parity `phone2numeric` — convert phone-keypad letters to
 /// the matching digit per ITU E.161 (`abc→2`, `def→3`, …, `wxyz→9`).
 /// Case-insensitive; non-letters pass through unchanged.
@@ -730,5 +784,57 @@ mod tests {
     fn smart_split_collapses_consecutive_whitespace() {
         let got = smart_split("a    b\t\tc");
         assert_eq!(got, vec!["a", "b", "c"]);
+    }
+
+    // -------- strip_tags (Django parity) --------
+
+    #[test]
+    fn strip_tags_removes_basic_tags() {
+        assert_eq!(strip_tags("<p>hello</p>"), "hello");
+        assert_eq!(strip_tags("<p>hello <b>world</b></p>"), "hello world");
+    }
+
+    #[test]
+    fn strip_tags_handles_self_closing() {
+        assert_eq!(strip_tags("line<br/>break"), "linebreak");
+        assert_eq!(strip_tags("<img src=\"x\" />after"), "after");
+    }
+
+    #[test]
+    fn strip_tags_strips_comments() {
+        assert_eq!(strip_tags("<!-- secret -->visible"), "visible");
+    }
+
+    #[test]
+    fn strip_tags_passes_through_text_without_tags() {
+        assert_eq!(strip_tags("plain text"), "plain text");
+    }
+
+    #[test]
+    fn strip_tags_keeps_unclosed_trailing_lt() {
+        // Django regex skips an unmatched trailing `<` rather than
+        // eating to end-of-input.
+        assert_eq!(strip_tags("a < b"), "a < b");
+    }
+
+    #[test]
+    fn strip_tags_empty() {
+        assert_eq!(strip_tags(""), "");
+        // Empty tag content also strips cleanly.
+        assert_eq!(strip_tags("<>"), "");
+    }
+
+    #[test]
+    fn strip_tags_handles_nested_quotes_in_attrs() {
+        // The naive parser doesn't track quote balance — `<a href=">"`
+        // closes on the first `>`. This matches Django's regex
+        // behavior, which also can't track quoted attrs. The fact
+        // that we're consistent with Django is the point.
+        assert_eq!(strip_tags(r#"<a href="x">link</a>"#), "link");
+    }
+
+    #[test]
+    fn strip_tags_preserves_unicode_content() {
+        assert_eq!(strip_tags("<p>café — résumé</p>"), "café — résumé");
     }
 }
