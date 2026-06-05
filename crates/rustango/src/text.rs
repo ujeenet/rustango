@@ -339,6 +339,121 @@ pub fn smart_split(text: &str) -> Vec<String> {
 }
 
 /// Django-parity
+/// [`django.utils.text.camel_case_to_spaces(value)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.camel_case_to_spaces) —
+/// convert a CamelCase identifier into lowercase space-separated
+/// words. Used by Django internally to derive `verbose_name` from
+/// model class names (`BlogPost` → `"blog post"`).
+///
+/// The algorithm inserts a space before any uppercase letter that
+/// is preceded by a lowercase letter or digit (the CamelCase
+/// boundary), then lowercases the whole result and collapses any
+/// internal whitespace runs.
+///
+/// ```ignore
+/// use rustango::text::camel_case_to_spaces;
+/// assert_eq!(camel_case_to_spaces("BlogPost"), "blog post");
+/// assert_eq!(camel_case_to_spaces("HTTPRequest"), "httprequest");
+/// assert_eq!(camel_case_to_spaces("simpleWord"), "simple word");
+/// assert_eq!(camel_case_to_spaces("Already lowercase"), "already lowercase");
+/// ```
+#[must_use]
+pub fn camel_case_to_spaces(value: &str) -> String {
+    // Django's algorithm:
+    //   re.sub(r'(((?<=[a-z])[A-Z])|([A-Z](?=[a-z])))', r' \1', value).lower()
+    // → split before an uppercase letter that is EITHER:
+    //   (a) preceded by a lowercase/digit boundary, OR
+    //   (b) followed by a lowercase letter (acronym→word transition).
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::with_capacity(value.len() + 4);
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() {
+            let prev_is_lower_or_digit =
+                i > 0 && (chars[i - 1].is_lowercase() || chars[i - 1].is_ascii_digit());
+            let next_is_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            // Only insert space when the immediately previous char isn't
+            // already whitespace (avoids double-spacing).
+            let prev_is_ws = i > 0 && chars[i - 1].is_whitespace();
+            if (prev_is_lower_or_digit || (next_is_lower && i > 0 && !prev_is_ws)) && !prev_is_ws {
+                out.push(' ');
+            }
+        }
+        for lo in c.to_lowercase() {
+            out.push(lo);
+        }
+    }
+    // Collapse whitespace runs (Django shape — internal spaces fold too).
+    let mut collapsed = String::with_capacity(out.len());
+    let mut prev_space = false;
+    for c in out.chars() {
+        if c.is_whitespace() {
+            if !prev_space {
+                collapsed.push(' ');
+            }
+            prev_space = true;
+        } else {
+            collapsed.push(c);
+            prev_space = false;
+        }
+    }
+    collapsed.trim().to_owned()
+}
+
+/// Django-parity
+/// [`django.utils.text.unescape_string_literal(s)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.unescape_string_literal) —
+/// strip surrounding quotes (`'` or `"`) from a quoted string
+/// literal and un-escape backslash sequences inside. Used by
+/// Django's template parser to handle quoted-string literals in
+/// custom template tags.
+///
+/// `s` must be at least 2 chars long and start AND end with the
+/// same quote character (either both `'` or both `"`). Backslash
+/// escapes inside: `\\` → `\`, `\"` → `"`, `\'` → `'`. Other
+/// escape sequences (`\n`, `\t`, etc.) pass through verbatim per
+/// Django's shape (Django doesn't expand them either).
+///
+/// # Errors
+/// Returns `None` when the input isn't a properly-quoted literal
+/// (less than 2 chars, mismatched quote chars, etc.).
+///
+/// ```ignore
+/// use rustango::text::unescape_string_literal;
+/// assert_eq!(unescape_string_literal(r#""hello""#).as_deref(), Some("hello"));
+/// assert_eq!(unescape_string_literal(r"'it\'s'").as_deref(), Some("it's"));
+/// assert_eq!(unescape_string_literal(r#""\\path""#).as_deref(), Some(r"\path"));
+/// assert!(unescape_string_literal("unquoted").is_none());
+/// assert!(unescape_string_literal(r#""mismatched'"#).is_none());
+/// ```
+#[must_use]
+pub fn unescape_string_literal(s: &str) -> Option<String> {
+    if s.len() < 2 {
+        return None;
+    }
+    let first = s.chars().next()?;
+    let last = s.chars().last()?;
+    if first != last || (first != '\'' && first != '"') {
+        return None;
+    }
+    // Strip the wrapping quotes — careful with multi-byte chars at
+    // boundaries (quotes are ASCII so single-byte slicing is safe).
+    let inner = &s[1..s.len() - 1];
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                if next == '\\' || next == '\'' || next == '"' {
+                    out.push(next);
+                    chars.next();
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    Some(out)
+}
+
+/// Django-parity
 /// [`django.utils.html.linebreaks(value, autoescape=False)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.linebreaks) —
 /// convert plain-text line breaks into HTML paragraphs and `<br>`
 /// tags. The canonical "render textarea-input as HTML preserving
@@ -1402,5 +1517,125 @@ mod tests {
     #[test]
     fn linebreaks_br_empty_input() {
         assert_eq!(linebreaks_br("", true), "");
+    }
+
+    // -------- camel_case_to_spaces (Django parity) --------
+
+    #[test]
+    fn camel_case_simple() {
+        assert_eq!(camel_case_to_spaces("BlogPost"), "blog post");
+    }
+
+    #[test]
+    fn camel_case_multiple_words() {
+        assert_eq!(
+            camel_case_to_spaces("ThisIsALongName"),
+            "this is a long name"
+        );
+    }
+
+    #[test]
+    fn camel_case_acronym_word_boundary_splits() {
+        // Django's regex splits at the acronym→word transition:
+        // `HTTPRequest` becomes `"http request"` because R is uppercase
+        // followed by a lowercase e.
+        assert_eq!(camel_case_to_spaces("HTTPRequest"), "http request");
+    }
+
+    #[test]
+    fn camel_case_starts_lowercase() {
+        assert_eq!(camel_case_to_spaces("simpleWord"), "simple word");
+    }
+
+    #[test]
+    fn camel_case_already_lowercase() {
+        assert_eq!(
+            camel_case_to_spaces("Already lowercase"),
+            "already lowercase"
+        );
+    }
+
+    #[test]
+    fn camel_case_with_digit_boundary() {
+        // Digit-then-uppercase is a CamelCase boundary too.
+        assert_eq!(camel_case_to_spaces("Version2Beta"), "version2 beta");
+    }
+
+    #[test]
+    fn camel_case_empty() {
+        assert_eq!(camel_case_to_spaces(""), "");
+    }
+
+    #[test]
+    fn camel_case_collapses_existing_spaces() {
+        // Multiple existing spaces collapse to one.
+        assert_eq!(camel_case_to_spaces("foo  bar   baz"), "foo bar baz");
+    }
+
+    // -------- unescape_string_literal (Django parity) --------
+
+    #[test]
+    fn unescape_double_quoted() {
+        assert_eq!(
+            unescape_string_literal(r#""hello""#).as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn unescape_single_quoted() {
+        assert_eq!(
+            unescape_string_literal(r"'world'").as_deref(),
+            Some("world")
+        );
+    }
+
+    #[test]
+    fn unescape_handles_embedded_escaped_quote() {
+        // `'it\'s'` → `"it's"`.
+        assert_eq!(unescape_string_literal(r"'it\'s'").as_deref(), Some("it's"));
+    }
+
+    #[test]
+    fn unescape_handles_escaped_backslash() {
+        assert_eq!(
+            unescape_string_literal(r#""\\path""#).as_deref(),
+            Some(r"\path")
+        );
+    }
+
+    #[test]
+    fn unescape_passes_through_non_special_escapes() {
+        // \n / \t / \r are NOT expanded per Django shape.
+        let out = unescape_string_literal(r#""line\nbreak""#).unwrap();
+        // Backslash + n preserved literally (Django doesn't expand).
+        assert_eq!(out, r"line\nbreak");
+    }
+
+    #[test]
+    fn unescape_rejects_unquoted() {
+        assert!(unescape_string_literal("plain").is_none());
+    }
+
+    #[test]
+    fn unescape_rejects_mismatched_quotes() {
+        assert!(unescape_string_literal(r#""mismatched'"#).is_none());
+        assert!(unescape_string_literal(r#"'mismatched""#).is_none());
+    }
+
+    #[test]
+    fn unescape_rejects_too_short() {
+        assert!(unescape_string_literal("").is_none());
+        assert!(unescape_string_literal("'").is_none());
+        // A single quote pair encloses zero chars — valid empty.
+        assert_eq!(unescape_string_literal("''").as_deref(), Some(""));
+        assert_eq!(unescape_string_literal(r#""""#).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn unescape_rejects_non_quote_wrappers() {
+        // Brackets / parens / angle brackets are NOT quote chars.
+        assert!(unescape_string_literal("[hello]").is_none());
+        assert!(unescape_string_literal("(hello)").is_none());
     }
 }
