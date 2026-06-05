@@ -47,7 +47,7 @@
 //! assert_eq!(format_datetime(&dt, r"\Y\e\a\r: Y"), "Year: 2026");
 //! ```
 
-use chrono::{DateTime, Datelike, Timelike, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Timelike, Utc};
 
 /// Format a `DateTime<Utc>` per Django's `dateformat` shape.
 /// `format_string` uses Django's single-char codes (see module-level
@@ -118,6 +118,47 @@ pub fn format_datetime(dt: &DateTime<Utc>, format_string: &str) -> String {
         }
     }
     out
+}
+
+/// Django-parity `dateformat.format(date, format_string)` for a
+/// `NaiveDate` (no time component). Time-related format chars
+/// (`H`, `i`, `s`, `a`, etc.) render as zeros to match what
+/// Django does when given a `date` instead of `datetime`.
+///
+/// ```ignore
+/// use chrono::NaiveDate;
+/// use rustango::dateformat::format_date;
+///
+/// let d = NaiveDate::from_ymd_opt(2026, 6, 4).unwrap();
+/// assert_eq!(format_date(&d, "Y-m-d"), "2026-06-04");
+/// assert_eq!(format_date(&d, "D, F j Y"), "Thu, June 4 2026");
+/// ```
+#[must_use]
+pub fn format_date(date: &NaiveDate, format_string: &str) -> String {
+    let dt = date.and_hms_opt(0, 0, 0).unwrap_or_default().and_utc();
+    format_datetime(&dt, format_string)
+}
+
+/// Django-parity `dateformat.time_format(time, format_string)` for
+/// a `NaiveTime`. Date-related format chars (`Y`, `m`, `d`, `D`,
+/// `l`, `N`, etc.) render against the Unix epoch date (1970-01-01)
+/// when a time-only input is passed.
+///
+/// ```ignore
+/// use chrono::NaiveTime;
+/// use rustango::dateformat::time_format;
+///
+/// let t = NaiveTime::from_hms_opt(13, 5, 9).unwrap();
+/// assert_eq!(time_format(&t, "H:i:s"), "13:05:09");
+/// assert_eq!(time_format(&t, "g:i A"), "1:05 PM");
+/// ```
+#[must_use]
+pub fn time_format(time: &NaiveTime, format_string: &str) -> String {
+    let dt = NaiveDate::from_ymd_opt(1970, 1, 1)
+        .unwrap()
+        .and_time(*time)
+        .and_utc();
+    format_datetime(&dt, format_string)
 }
 
 fn short_month(m: u32) -> &'static str {
@@ -374,5 +415,50 @@ mod tests {
             .with_nanosecond(123_456_000)
             .unwrap();
         assert_eq!(format_datetime(&t, "u"), "123456");
+    }
+
+    // -------- format_date (NaiveDate) --------
+
+    #[test]
+    fn date_basic_iso() {
+        let d = NaiveDate::from_ymd_opt(2026, 6, 4).unwrap();
+        assert_eq!(format_date(&d, "Y-m-d"), "2026-06-04");
+    }
+
+    #[test]
+    fn date_human_readable() {
+        let d = NaiveDate::from_ymd_opt(2026, 6, 4).unwrap();
+        assert_eq!(format_date(&d, "D, F j Y"), "Thu, June 4 2026");
+    }
+
+    #[test]
+    fn date_time_codes_render_as_zeros() {
+        // No time component → Django shape: render as midnight.
+        let d = NaiveDate::from_ymd_opt(2026, 6, 4).unwrap();
+        assert_eq!(format_date(&d, "H:i:s"), "00:00:00");
+        assert_eq!(format_date(&d, "a"), "am");
+    }
+
+    // -------- time_format (NaiveTime) --------
+
+    #[test]
+    fn time_basic_24h() {
+        let t = NaiveTime::from_hms_opt(13, 5, 9).unwrap();
+        assert_eq!(time_format(&t, "H:i:s"), "13:05:09");
+    }
+
+    #[test]
+    fn time_12h_with_am_pm() {
+        let t = NaiveTime::from_hms_opt(13, 5, 0).unwrap();
+        assert_eq!(time_format(&t, "g:i A"), "1:05 PM");
+        let m = NaiveTime::from_hms_opt(9, 30, 0).unwrap();
+        assert_eq!(time_format(&m, "g:i A"), "9:30 AM");
+    }
+
+    #[test]
+    fn time_date_codes_render_against_epoch() {
+        // Time-only input → Django shape: date chars use 1970-01-01.
+        let t = NaiveTime::from_hms_opt(12, 0, 0).unwrap();
+        assert_eq!(time_format(&t, "Y-m-d"), "1970-01-01");
     }
 }
