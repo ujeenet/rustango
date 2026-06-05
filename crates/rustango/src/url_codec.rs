@@ -1,4 +1,5 @@
-//! Tiny `application/x-www-form-urlencoded` decoder.
+//! URL codec helpers — `application/x-www-form-urlencoded` percent
+//! decoder + RFC-3986 percent encoder + Django-shape urlsafe base64.
 //!
 //! Three private copies of this lived in [`crate::signed_url`],
 //! [`crate::auth_flows`], and [`crate::tenancy::admin`] before the
@@ -66,7 +67,7 @@ pub fn url_encode(s: &str) -> String {
 ///
 /// See module docs for malformed-input handling.
 #[must_use]
-pub(crate) fn url_decode(s: &str) -> String {
+pub fn url_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -83,6 +84,65 @@ pub(crate) fn url_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+// ============================================================ Django urlsafe_base64
+
+/// Django-parity
+/// [`urlsafe_base64_encode(bytes)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.urlsafe_base64_encode) —
+/// encode `bytes` as URL-safe base64 with padding stripped (per
+/// `django.utils.http.urlsafe_base64_encode`). Used in
+/// password-reset URL shape `/reset/<uidb64>/<token>/` to encode
+/// the user PK as a URL-safe string.
+///
+/// Drops the standard base64 padding (`=`) so the encoded form
+/// drops cleanly into a URL path or query parameter without
+/// escaping.
+///
+/// ```ignore
+/// use rustango::url_codec::urlsafe_base64_encode;
+/// assert_eq!(urlsafe_base64_encode(b"foo"), "Zm9v");
+/// assert_eq!(urlsafe_base64_encode(b""), "");
+/// // Encodes characters that would need `%`-escape in standard b64:
+/// // raw `+` → `-`, raw `/` → `_`.
+/// assert_eq!(urlsafe_base64_encode(&[0xfb, 0xff]), "-_8");
+/// ```
+#[must_use]
+pub fn urlsafe_base64_encode(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Django-parity
+/// [`urlsafe_base64_decode(s)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.urlsafe_base64_decode) —
+/// decode a URL-safe base64 string (padding optional) into raw
+/// bytes. Both `URL_SAFE` (padded) and `URL_SAFE_NO_PAD` inputs are
+/// accepted — Django re-pads internally before decoding so legacy
+/// senders that include `=` still work.
+///
+/// # Errors
+/// Returns `None` on any decode failure (invalid alphabet, bad
+/// length, etc.). Django raises `binascii.Error`; rustango surfaces
+/// the gap as `Option::None` so callers can ergonomically `?` it
+/// out with a custom error type per call site.
+///
+/// ```ignore
+/// use rustango::url_codec::urlsafe_base64_decode;
+/// assert_eq!(urlsafe_base64_decode("Zm9v").as_deref(), Some(&b"foo"[..]));
+/// // Padded input also accepted.
+/// assert_eq!(urlsafe_base64_decode("Zm9v====").as_deref(), Some(&b"foo"[..]));
+/// // Standard b64 reserved chars rejected.
+/// assert!(urlsafe_base64_decode("a+b/c").is_none());
+/// ```
+#[must_use]
+pub fn urlsafe_base64_decode(s: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    // Strip any padding the caller threaded through — Django shape
+    // accepts both forms.
+    let trimmed = s.trim_end_matches('=');
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(trimmed)
+        .ok()
 }
 
 #[cfg(test)]
@@ -235,5 +295,78 @@ mod tests {
             let decoded = url_decode(&encoded);
             assert_eq!(decoded, input, "round-trip failed on `{input}`");
         }
+    }
+
+    // ---- urlsafe_base64 (Django parity) ----
+
+    #[test]
+    fn urlsafe_b64_encode_matches_django_examples() {
+        assert_eq!(urlsafe_base64_encode(b"foo"), "Zm9v");
+        assert_eq!(urlsafe_base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(urlsafe_base64_encode(b""), "");
+    }
+
+    #[test]
+    fn urlsafe_b64_encode_drops_padding() {
+        // 1 byte → standard b64 would emit `==` padding; urlsafe-no-pad
+        // strips it.
+        let encoded = urlsafe_base64_encode(b"f");
+        assert_eq!(encoded, "Zg");
+        assert!(!encoded.contains('='));
+    }
+
+    #[test]
+    fn urlsafe_b64_encode_uses_url_safe_alphabet() {
+        // 0xfb 0xff in standard b64 is `+/8=`. URL-safe is `-_8`.
+        let encoded = urlsafe_base64_encode(&[0xfb, 0xff]);
+        assert_eq!(encoded, "-_8");
+        assert!(!encoded.contains('+'));
+        assert!(!encoded.contains('/'));
+    }
+
+    #[test]
+    fn urlsafe_b64_decode_simple() {
+        assert_eq!(urlsafe_base64_decode("Zm9v").as_deref(), Some(&b"foo"[..]));
+    }
+
+    #[test]
+    fn urlsafe_b64_decode_accepts_padding_for_django_compat() {
+        // Django shape — `=` padding silently stripped so legacy senders
+        // that include it still decode cleanly.
+        assert_eq!(
+            urlsafe_base64_decode("Zm9v====").as_deref(),
+            Some(&b"foo"[..])
+        );
+        assert_eq!(urlsafe_base64_decode("Zg==").as_deref(), Some(&b"f"[..]));
+    }
+
+    #[test]
+    fn urlsafe_b64_decode_rejects_standard_b64_chars() {
+        // Standard b64 reserved chars `+` and `/` must be rejected when
+        // they appear in input — URL-safe alphabet uses `-` and `_`.
+        assert!(urlsafe_base64_decode("a+b/c").is_none());
+    }
+
+    #[test]
+    fn urlsafe_b64_decode_rejects_garbage() {
+        assert!(urlsafe_base64_decode("!@#$%").is_none());
+        assert!(urlsafe_base64_decode("hello\n").is_none()); // embedded LF
+    }
+
+    #[test]
+    fn urlsafe_b64_decode_empty_is_empty_vec() {
+        assert_eq!(urlsafe_base64_decode("").as_deref(), Some(&[][..]));
+    }
+
+    #[test]
+    fn urlsafe_b64_round_trip_for_random_bytes() {
+        // Every byte value through encode → decode lands back unchanged.
+        let mut input = Vec::with_capacity(256);
+        for b in 0u8..=255 {
+            input.push(b);
+        }
+        let encoded = urlsafe_base64_encode(&input);
+        let decoded = urlsafe_base64_decode(&encoded).expect("round-trip");
+        assert_eq!(decoded, input);
     }
 }
