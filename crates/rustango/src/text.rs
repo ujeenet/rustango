@@ -339,6 +339,119 @@ pub fn smart_split(text: &str) -> Vec<String> {
 }
 
 /// Django-parity
+/// [`django.utils.html.urlize(text, trim_url_limit=None, nofollow=False, autoescape=True)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.urlize) —
+/// convert URLs and email addresses inside `text` into clickable
+/// HTML anchor tags.
+///
+/// rustango's bounded port detects three shapes per Django:
+///
+/// * `http://...` and `https://...` absolute URLs → `<a href="URL">URL</a>`
+/// * `www.domain.tld[/path]` bare-www URLs → `<a href="http://www.domain.tld...">www.domain.tld...</a>`
+/// * `user@host.tld` email addresses → `<a href="mailto:user@host.tld">user@host.tld</a>`
+///
+/// Adjacent punctuation (`.`, `,`, `;`, `:`, `!`, `?`, `)`, `]`)
+/// is trimmed off the URL end so trailing prose punctuation reads
+/// naturally — `"See http://x.com."` renders the period OUTSIDE
+/// the anchor.
+///
+/// `nofollow = true` adds `rel="nofollow"` to anchors (Django parity
+/// — defends against link-farming on user-submitted text). Body
+/// text outside detected URLs passes through verbatim — caller
+/// must escape the input first if the source is untrusted (Django's
+/// `autoescape` flag handles that there; rustango leaves escape to
+/// the caller via [`html_escape`]).
+///
+/// ```ignore
+/// use rustango::text::urlize;
+/// assert_eq!(
+///     urlize("See https://example.com for more.", false),
+///     r#"See <a href="https://example.com">https://example.com</a> for more."#
+/// );
+/// assert_eq!(
+///     urlize("Email me@example.com", false),
+///     r#"Email <a href="mailto:me@example.com">me@example.com</a>"#
+/// );
+/// // nofollow=true
+/// assert_eq!(
+///     urlize("https://x.com", true),
+///     r#"<a href="https://x.com" rel="nofollow">https://x.com</a>"#
+/// );
+/// ```
+#[must_use]
+pub fn urlize(text: &str, nofollow: bool) -> String {
+    let mut out = String::with_capacity(text.len() + 32);
+    let rel_attr = if nofollow { r#" rel="nofollow""# } else { "" };
+    for token in text.split_inclusive(char::is_whitespace) {
+        let (leading_ws_pos, body, trailing_ws) = split_off_trailing_ws(token);
+        let _ = leading_ws_pos;
+        let (trail_punct_start, trail_punct) = split_off_trailing_punct(body);
+        let core = &body[..trail_punct_start];
+
+        if let Some(rendered) = render_match(core, rel_attr) {
+            out.push_str(&rendered);
+            out.push_str(trail_punct);
+            out.push_str(trailing_ws);
+        } else {
+            out.push_str(token);
+        }
+    }
+    out
+}
+
+/// Split a token into `(body_without_trailing_ws, trailing_ws)`.
+/// Returns `(0, body, "")` if there's no trailing whitespace.
+fn split_off_trailing_ws(token: &str) -> (usize, &str, &str) {
+    let trail_start = token
+        .char_indices()
+        .rev()
+        .take_while(|&(_, c)| c.is_whitespace())
+        .last()
+        .map_or(token.len(), |(i, _)| i);
+    (0, &token[..trail_start], &token[trail_start..])
+}
+
+/// Trim adjacent prose punctuation from the END of a URL-shaped
+/// token so it doesn't get sucked into the anchor href.
+fn split_off_trailing_punct(s: &str) -> (usize, &str) {
+    let mut idx = s.len();
+    for (i, c) in s.char_indices().rev() {
+        if matches!(
+            c,
+            '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '"' | '\''
+        ) {
+            idx = i;
+        } else {
+            break;
+        }
+    }
+    (idx, &s[idx..])
+}
+
+/// Detect the three Django-supported URL shapes inside `core` and
+/// return the rendered HTML anchor. Returns `None` for non-matches
+/// so the caller can emit the literal token instead.
+fn render_match(core: &str, rel_attr: &str) -> Option<String> {
+    if core.starts_with("http://") || core.starts_with("https://") {
+        return Some(format!(r#"<a href="{core}"{rel_attr}>{core}</a>"#));
+    }
+    if core.starts_with("www.") && core.contains('.') {
+        return Some(format!(r#"<a href="http://{core}"{rel_attr}>{core}</a>"#));
+    }
+    // Email: at-sign present, surrounded by something on both sides,
+    // domain contains a `.`.
+    if let Some(at) = core.find('@') {
+        if at > 0 && at < core.len() - 1 {
+            let (local, _) = core.split_at(at);
+            let domain = &core[at + 1..];
+            if !local.is_empty() && domain.contains('.') {
+                return Some(format!(r#"<a href="mailto:{core}"{rel_attr}>{core}</a>"#));
+            }
+        }
+    }
+    None
+}
+
+/// Django-parity
 /// [`django.utils.html.strip_tags(value)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.strip_tags) —
 /// remove HTML / XML tag markup from `s` and return the bare text
 /// content.
@@ -836,5 +949,89 @@ mod tests {
     #[test]
     fn strip_tags_preserves_unicode_content() {
         assert_eq!(strip_tags("<p>café — résumé</p>"), "café — résumé");
+    }
+
+    // -------- urlize (Django parity) --------
+
+    #[test]
+    fn urlize_http_url_becomes_anchor() {
+        assert_eq!(
+            urlize("Visit https://example.com for more", false),
+            r#"Visit <a href="https://example.com">https://example.com</a> for more"#
+        );
+    }
+
+    #[test]
+    fn urlize_https_url_becomes_anchor() {
+        let out = urlize("https://example.com/path", false);
+        assert!(out.contains(r#"<a href="https://example.com/path""#));
+        assert!(out.contains(">https://example.com/path</a>"));
+    }
+
+    #[test]
+    fn urlize_strips_trailing_punctuation_from_url() {
+        // Period belongs to the sentence, not the URL.
+        let out = urlize("See https://x.com.", false);
+        assert_eq!(out, r#"See <a href="https://x.com">https://x.com</a>."#);
+    }
+
+    #[test]
+    fn urlize_handles_multiple_punctuation() {
+        // Question + close-paren should both stay outside the URL.
+        let out = urlize("(check https://x.com?)", false);
+        assert!(out.contains(r#"<a href="https://x.com""#));
+        assert!(out.ends_with(")"));
+        assert!(out.contains("?)"));
+    }
+
+    #[test]
+    fn urlize_email_becomes_mailto() {
+        let out = urlize("Reach me@example.com please", false);
+        assert!(out.contains(r#"<a href="mailto:me@example.com""#));
+        assert!(out.contains(">me@example.com</a>"));
+    }
+
+    #[test]
+    fn urlize_www_prefix_gets_http_added() {
+        // `www.foo.com` → `<a href="http://www.foo.com">www.foo.com</a>`
+        let out = urlize("www.example.com works", false);
+        assert!(out.contains(r#"<a href="http://www.example.com""#));
+        assert!(out.contains(">www.example.com</a>"));
+    }
+
+    #[test]
+    fn urlize_nofollow_adds_rel_attribute() {
+        let out = urlize("https://x.com", true);
+        assert_eq!(
+            out,
+            r#"<a href="https://x.com" rel="nofollow">https://x.com</a>"#
+        );
+    }
+
+    #[test]
+    fn urlize_plain_text_passes_through() {
+        assert_eq!(urlize("nothing here", false), "nothing here");
+    }
+
+    #[test]
+    fn urlize_does_not_match_bare_words_with_at() {
+        // `not@a@valid` has a degenerate at-pattern; domain side has
+        // no `.` → not anchored. Original token preserved.
+        let out = urlize("ping not@a@valid for input", false);
+        assert!(!out.contains("<a"));
+    }
+
+    #[test]
+    fn urlize_at_sign_without_domain_dot_not_matched() {
+        // `user@localhost` → no domain dot → not an email per shape.
+        let out = urlize("contact user@localhost", false);
+        assert!(!out.contains("<a"));
+    }
+
+    #[test]
+    fn urlize_handles_multiple_urls_in_one_string() {
+        let out = urlize("First https://a.com second https://b.com end", false);
+        assert!(out.contains(r#"<a href="https://a.com""#));
+        assert!(out.contains(r#"<a href="https://b.com""#));
     }
 }
