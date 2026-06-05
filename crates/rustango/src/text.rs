@@ -479,6 +479,31 @@ pub fn yesno(value: Option<bool>, choices: &str) -> String {
     pick.to_owned()
 }
 
+/// [`django.utils.html.avoid_wrapping(value)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.avoid_wrapping) —
+/// replace every ASCII space (`" "`) with a non-breaking space
+/// (`"\u{00A0}"`) so the phrase stays on one line when rendered.
+///
+/// Use case: short phrases that read worse when broken across a
+/// line — dates ("June 5"), name + version ("Linux 6.6"), prices
+/// ("$5 off"), brand names with internal spaces ("AC DC"). Pass
+/// the phrase through `avoid_wrapping` in template context where
+/// CSS `white-space: nowrap` isn't an option (e.g. inline within
+/// a paragraph) or before serializing to JSON where the consumer
+/// doesn't control the rendering.
+///
+/// ```
+/// use rustango::text::avoid_wrapping;
+/// assert_eq!(avoid_wrapping("June 5"), "June\u{00A0}5");
+/// assert_eq!(avoid_wrapping(""), "");
+/// // Only ASCII spaces; tabs / newlines / U+00A0 already pass through.
+/// assert_eq!(avoid_wrapping("a\tb"), "a\tb");
+/// assert_eq!(avoid_wrapping("a\u{00A0}b"), "a\u{00A0}b");
+/// ```
+#[must_use]
+pub fn avoid_wrapping(s: &str) -> String {
+    s.replace(' ', "\u{00A0}")
+}
+
 /// [`django.template.defaultfilters.cut`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#cut) —
 /// remove every occurrence of `needle` from `s`.
 ///
@@ -3153,6 +3178,39 @@ mod tests {
     fn mask_phone_no_digits_passes_through() {
         assert_eq!(mask_phone("no digits"), "no digits");
         assert_eq!(mask_phone(""), "");
+    }
+
+    // -------- avoid_wrapping --------
+
+    #[test]
+    fn avoid_wrapping_replaces_ascii_spaces() {
+        assert_eq!(avoid_wrapping("June 5"), "June\u{00A0}5");
+        assert_eq!(avoid_wrapping("a b c"), "a\u{00A0}b\u{00A0}c");
+    }
+
+    #[test]
+    fn avoid_wrapping_empty_input() {
+        assert_eq!(avoid_wrapping(""), "");
+    }
+
+    #[test]
+    fn avoid_wrapping_no_spaces_unchanged() {
+        assert_eq!(avoid_wrapping("nospaces"), "nospaces");
+    }
+
+    #[test]
+    fn avoid_wrapping_preserves_non_ascii_whitespace() {
+        // Tab, newline, CR — not replaced (Django only swaps ASCII " ").
+        assert_eq!(avoid_wrapping("a\tb"), "a\tb");
+        assert_eq!(avoid_wrapping("a\nb"), "a\nb");
+        // Already a NBSP — unchanged.
+        assert_eq!(avoid_wrapping("a\u{00A0}b"), "a\u{00A0}b");
+    }
+
+    #[test]
+    fn avoid_wrapping_unicode_content_around_spaces() {
+        // Spaces between non-ASCII chars still swap.
+        assert_eq!(avoid_wrapping("café au lait"), "café\u{00A0}au\u{00A0}lait");
     }
 
     // -------- yesno --------
