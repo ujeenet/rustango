@@ -431,13 +431,7 @@ fn get_digit(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value
     if idx < 1 {
         return Ok(value.clone());
     }
-    let s = n.unsigned_abs().to_string();
-    let chars: Vec<char> = s.chars().rev().collect();
-    let pick = chars
-        .get(usize::try_from(idx - 1).unwrap_or(0))
-        .copied()
-        .unwrap_or('0');
-    Ok(to_value(pick.to_string())?)
+    Ok(to_value(crate::text::get_digit(n, idx))?)
 }
 
 // ------------------------------------------------------------------ dictsort
@@ -992,7 +986,7 @@ fn mask_phone(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> 
 /// - `{{ ""|wordcount }}` → `0`
 fn wordcount(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let s = value.as_str().unwrap_or("");
-    Ok(to_value(s.split_whitespace().count())?)
+    Ok(to_value(crate::text::wordcount(s))?)
 }
 
 // ------------------------------------------------------------------ phone2numeric
@@ -1040,17 +1034,7 @@ fn linenumbers(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value>
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
     };
-    let lines: Vec<&str> = s.split('\n').collect();
-    let width = lines.len().to_string().len();
-    let mut out = String::with_capacity(s.len() + lines.len() * (width + 2));
-    for (i, line) in lines.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        use std::fmt::Write as _;
-        let _ = write!(out, "{:>width$}. {}", i + 1, line, width = width);
-    }
-    Ok(to_value(out)?)
+    Ok(to_value(crate::text::linenumbers(s))?)
 }
 
 // ------------------------------------------------------------------ ljust / rjust / center
@@ -1070,13 +1054,7 @@ fn pad_arg(args: &HashMap<String, Value>) -> usize {
 fn ljust(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let s = value.as_str().unwrap_or("");
     let width = pad_arg(args);
-    let chars = s.chars().count();
-    if chars >= width {
-        return Ok(to_value(s)?);
-    }
-    let mut out = s.to_owned();
-    out.extend(std::iter::repeat(' ').take(width - chars));
-    Ok(to_value(out)?)
+    Ok(to_value(crate::text::ljust(s, width))?)
 }
 
 /// `rjust:N` — right-justify (pad left with spaces) to width N.
@@ -1085,14 +1063,7 @@ fn ljust(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
 fn rjust(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let s = value.as_str().unwrap_or("");
     let width = pad_arg(args);
-    let chars = s.chars().count();
-    if chars >= width {
-        return Ok(to_value(s)?);
-    }
-    let mut out = String::with_capacity(width);
-    out.extend(std::iter::repeat(' ').take(width - chars));
-    out.push_str(s);
-    Ok(to_value(out)?)
+    Ok(to_value(crate::text::rjust(s, width))?)
 }
 
 /// `center:N` — center value in a field of width N. Django:
@@ -1103,18 +1074,7 @@ fn rjust(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
 fn center_filter(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let s = value.as_str().unwrap_or("");
     let width = pad_arg(args);
-    let chars = s.chars().count();
-    if chars >= width {
-        return Ok(to_value(s)?);
-    }
-    let total_pad = width - chars;
-    let left_pad = total_pad / 2;
-    let right_pad = total_pad - left_pad;
-    let mut out = String::with_capacity(width);
-    out.extend(std::iter::repeat(' ').take(left_pad));
-    out.push_str(s);
-    out.extend(std::iter::repeat(' ').take(right_pad));
-    Ok(to_value(out)?)
+    Ok(to_value(crate::text::center(s, width))?)
 }
 
 #[cfg(test)]
