@@ -134,6 +134,59 @@ pub fn iri_to_uri(iri: &str) -> String {
     out
 }
 
+/// Django-parity
+/// [`django.utils.encoding.escape_uri_path(path)`](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.escape_uri_path) —
+/// percent-encode the *path* portion of a URI: encodes any byte
+/// outside the path-safe set, but DOES preserve `/` so the path
+/// structure stays intact.
+///
+/// Use this when building a URI from raw path segments and you
+/// want a fully-encoded path (every char that needs encoding is
+/// encoded) without having to escape `/`-separators yourself.
+///
+/// Differs from [`iri_to_uri`] in two ways:
+/// * Encodes `?` `#` (the query / fragment delimiters) since
+///   they shouldn't appear inside a path segment
+/// * Does NOT pre-pass-through already-encoded `%` — anything
+///   non-path-safe gets encoded, so `%` itself becomes `%25`
+///   (Django shape — the input is treated as a raw, unencoded path)
+///
+/// ```ignore
+/// use rustango::url_codec::escape_uri_path;
+/// // Slashes preserved.
+/// assert_eq!(escape_uri_path("/a/b/c"), "/a/b/c");
+/// // Spaces and non-ASCII encoded.
+/// assert_eq!(escape_uri_path("/a path/café"),
+///            "/a%20path/caf%C3%A9");
+/// // ? and # encoded (they'd break path-level parsing).
+/// assert_eq!(escape_uri_path("/with?query"), "/with%3Fquery");
+/// assert_eq!(escape_uri_path("/with#frag"), "/with%23frag");
+/// ```
+#[must_use]
+pub fn escape_uri_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        // RFC 3986 pchar set (unreserved + sub-delims + `:` `@`) plus
+        // `/` to preserve segment separators. Excludes `?` `#` `%` —
+        // those need encoding in a path context.
+        let safe = matches!(
+            byte,
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
+                | b'-' | b'_' | b'.' | b'~'
+                | b'/' | b':' | b'@'
+                | b'!' | b'$' | b'&' | b'\'' | b'(' | b')'
+                | b'*' | b'+' | b',' | b';' | b'='
+        );
+        if safe {
+            out.push(byte as char);
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
 // ============================================================ Django urlsafe_base64
 
 /// Django-parity
@@ -458,6 +511,49 @@ mod tests {
     #[test]
     fn iri_to_uri_empty_is_empty() {
         assert_eq!(iri_to_uri(""), "");
+    }
+
+    // ---- escape_uri_path (Django parity) ----
+
+    #[test]
+    fn escape_uri_path_preserves_slashes() {
+        assert_eq!(escape_uri_path("/a/b/c"), "/a/b/c");
+    }
+
+    #[test]
+    fn escape_uri_path_encodes_spaces() {
+        assert_eq!(escape_uri_path("/a path"), "/a%20path");
+    }
+
+    #[test]
+    fn escape_uri_path_encodes_non_ascii() {
+        assert_eq!(escape_uri_path("/café"), "/caf%C3%A9");
+    }
+
+    #[test]
+    fn escape_uri_path_encodes_query_and_fragment_chars() {
+        // ? and # would break path-level parsing — must encode.
+        assert_eq!(escape_uri_path("/with?query"), "/with%3Fquery");
+        assert_eq!(escape_uri_path("/with#frag"), "/with%23frag");
+    }
+
+    #[test]
+    fn escape_uri_path_encodes_percent_sign() {
+        // Distinct from iri_to_uri: raw `%` is treated as input data
+        // that needs encoding, not as an escape marker.
+        assert_eq!(escape_uri_path("/100%"), "/100%25");
+    }
+
+    #[test]
+    fn escape_uri_path_preserves_sub_delims_and_colon_at() {
+        // RFC 3986 pchar set — these belong inside path segments.
+        assert_eq!(escape_uri_path("/a:b@c"), "/a:b@c");
+        assert_eq!(escape_uri_path("/a!b$c&d'e(f)g"), "/a!b$c&d'e(f)g");
+    }
+
+    #[test]
+    fn escape_uri_path_empty() {
+        assert_eq!(escape_uri_path(""), "");
     }
 
     #[test]
