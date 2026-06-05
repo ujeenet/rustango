@@ -27,10 +27,10 @@ use tera::{to_value, Tera, Value};
 /// (typically right after `Tera::new(...)` / `Tera::default()`).
 pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("intcomma", intcomma);
-    tera.register_filter("intword", intword);
-    tera.register_filter("naturalsize", naturalsize);
-    tera.register_filter("ordinal", ordinal);
-    tera.register_filter("apnumber", apnumber);
+    tera.register_filter("intword", intword_filter);
+    tera.register_filter("naturalsize", naturalsize_filter);
+    tera.register_filter("ordinal", ordinal_filter);
+    tera.register_filter("apnumber", apnumber_filter);
     tera.register_filter("naturaltime", naturaltime);
     tera.register_filter("naturalday", naturalday);
     tera.register_filter("timesince", timesince);
@@ -401,23 +401,28 @@ fn format_currency(value: &Value, args: &HashMap<String, Value>) -> tera::Result
 /// `intword` — large numbers as words. Django:
 /// `1_200_000 → "1.2 million"`, `1_000_000_000 → "1.0 billion"`.
 /// Below 1 million the number passes through as-is.
-fn intword(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
-    let n = match value.as_i64() {
-        Some(v) => v as f64,
-        None => match value.as_f64() {
-            Some(v) => v,
-            None => return Ok(value.clone()),
-        },
-    };
+/// [`django.contrib.humanize.intword`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#intword) —
+/// large numbers as words. `1_200_000 → "1.2 million"`,
+/// `1_000_000_000 → "1.0 billion"`. Below 1 million the integer
+/// passes through unformatted ("123" not "1.2e2" or "123.0").
+///
+/// Scales recognized: million / billion / trillion / quadrillion
+/// / quintillion / sextillion / septillion / octillion /
+/// nonillion / decillion (`1e6 .. 1e33`). Values beyond decillion
+/// stay on the decillion scale (Django shape).
+///
+/// ```
+/// use rustango::humanize::intword;
+/// assert_eq!(intword(1_200_000.0), "1.2 million");
+/// assert_eq!(intword(1_000_000_000.0), "1.0 billion");
+/// assert_eq!(intword(999_999.0), "999999");
+/// assert_eq!(intword(-1_500_000.0), "-1.5 million");
+/// ```
+pub fn intword(n: f64) -> String {
     if n.abs() < 1_000_000.0 {
-        // Django returns the int unformatted for <1M.
-        if let Some(i) = value.as_i64() {
-            return Ok(to_value(i.to_string())?);
-        }
-        return Ok(value.clone());
+        // Django returns the integer unformatted for < 1M.
+        return format!("{}", n.trunc() as i64);
     }
-    // Powers of 1000 above million. Django stops at quattuordecillion (1e48).
-    // We cover the practical range; anything beyond falls back to e-notation.
     let scales: &[(f64, &str)] = &[
         (1e6, "million"),
         (1e9, "billion"),
@@ -430,7 +435,6 @@ fn intword(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
         (1e30, "nonillion"),
         (1e33, "decillion"),
     ];
-    // Pick the largest scale that fits.
     let mut chosen = scales[0];
     for &(s, name) in scales {
         if n.abs() >= s {
@@ -440,9 +444,24 @@ fn intword(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
         }
     }
     let scaled = n / chosen.0;
-    // Django format: one decimal place; trailing `.0` is preserved
-    // (e.g. "1.0 billion", not "1 billion").
-    Ok(to_value(format!("{:.1} {}", scaled, chosen.1))?)
+    format!("{:.1} {}", scaled, chosen.1)
+}
+
+fn intword_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let n = match value.as_i64() {
+        Some(v) => v as f64,
+        None => match value.as_f64() {
+            Some(v) => v,
+            None => return Ok(value.clone()),
+        },
+    };
+    if n.abs() < 1_000_000.0 {
+        if let Some(i) = value.as_i64() {
+            return Ok(to_value(i.to_string())?);
+        }
+        return Ok(value.clone());
+    }
+    Ok(to_value(intword(n))?)
 }
 
 // ------------------------------------------------------------------ naturalsize
@@ -450,7 +469,38 @@ fn intword(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
 /// `naturalsize` — bytes formatted human-readable (binary KiB-scale).
 /// `1024 → "1.0 KB"`, `1536 → "1.5 KB"`, `1_572_864 → "1.5 MB"`.
 /// Falls back to bytes for values < 1024.
-fn naturalsize(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+/// [`django.contrib.humanize.naturalsize`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#naturalsize) —
+/// bytes formatted human-readable (binary KiB-scale: 1024).
+/// `1024 → "1.0 KB"`, `1_572_864 → "1.5 MB"`. Values below 1024
+/// return `"N bytes"` (or `"1 byte"` for `n == 1`).
+///
+/// Units recognized: bytes, KB, MB, GB, TB, PB, EB, ZB, YB.
+///
+/// ```
+/// use rustango::humanize::naturalsize;
+/// assert_eq!(naturalsize(1024.0), "1.0 KB");
+/// assert_eq!(naturalsize(1_572_864.0), "1.5 MB");
+/// assert_eq!(naturalsize(1.0), "1 byte");
+/// assert_eq!(naturalsize(0.0), "0 bytes");
+/// ```
+pub fn naturalsize(n: f64) -> String {
+    let units = ["bytes", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"];
+    if n < 1024.0 {
+        if (n - 1.0).abs() < f64::EPSILON {
+            return "1 byte".to_owned();
+        }
+        return format!("{} bytes", n as u64);
+    }
+    let mut scale = 0_usize;
+    let mut scaled = n;
+    while scaled >= 1024.0 && scale < units.len() - 1 {
+        scaled /= 1024.0;
+        scale += 1;
+    }
+    format!("{:.1} {}", scaled, units[scale])
+}
+
+fn naturalsize_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let n = match value.as_u64() {
         Some(v) => v as f64,
         None => match value.as_i64() {
@@ -461,21 +511,7 @@ fn naturalsize(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value>
             },
         },
     };
-    let units = ["bytes", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"];
-    if n < 1024.0 {
-        // Singular byte: "1 byte"; plural "N bytes" for everything else.
-        if (n - 1.0).abs() < f64::EPSILON {
-            return Ok(to_value("1 byte")?);
-        }
-        return Ok(to_value(format!("{} bytes", n as u64))?);
-    }
-    let mut scale = 0_usize;
-    let mut scaled = n;
-    while scaled >= 1024.0 && scale < units.len() - 1 {
-        scaled /= 1024.0;
-        scale += 1;
-    }
-    Ok(to_value(format!("{:.1} {}", scaled, units[scale]))?)
+    Ok(to_value(naturalsize(n))?)
 }
 
 // ------------------------------------------------------------------ ordinal
@@ -484,15 +520,32 @@ fn naturalsize(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value>
 /// `1 → "1st"`, `2 → "2nd"`, `3 → "3rd"`, `4 → "4th"`, `11 → "11th"`,
 /// `21 → "21st"`. Negative numbers get the same suffix as their
 /// absolute value.
-fn ordinal(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+/// [`django.contrib.humanize.ordinal`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#ordinal) —
+/// append the appropriate English ordinal suffix.
+/// `1 → "1st"`, `2 → "2nd"`, `3 → "3rd"`, `4 → "4th"`,
+/// `11 → "11th"`, `21 → "21st"`. Teens (11/12/13) always take
+/// "th"; everything else falls through to the last-digit rule.
+/// Negative numbers get the same suffix as their absolute value.
+///
+/// ```
+/// use rustango::humanize::ordinal;
+/// assert_eq!(ordinal(1), "1st");
+/// assert_eq!(ordinal(2), "2nd");
+/// assert_eq!(ordinal(11), "11th");
+/// assert_eq!(ordinal(21), "21st");
+/// assert_eq!(ordinal(-3), "-3rd");
+/// ```
+#[must_use]
+pub fn ordinal(n: i64) -> String {
+    format!("{n}{}", ordinal_suffix(n.unsigned_abs()))
+}
+
+fn ordinal_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let n = match value.as_i64() {
         Some(v) => v,
         None => return Ok(value.clone()),
     };
-    Ok(to_value(format!(
-        "{n}{}",
-        ordinal_suffix(n.unsigned_abs())
-    ))?)
+    Ok(to_value(ordinal(n))?)
 }
 
 fn ordinal_suffix(n: u64) -> &'static str {
@@ -512,27 +565,41 @@ fn ordinal_suffix(n: u64) -> &'static str {
 
 // ------------------------------------------------------------------ apnumber
 
-/// `apnumber` — spell out small numbers (1..9 → "one".."nine"),
-/// pass others through unchanged. Matches the Associated Press style
-/// guide that Django adopts.
-fn apnumber(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+/// [`django.contrib.humanize.apnumber`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#apnumber) —
+/// spell out small numbers (1..=9 → `"one"`..`"nine"`); other
+/// values stringify as the integer. Matches the AP style guide
+/// that Django adopts.
+///
+/// ```
+/// use rustango::humanize::apnumber;
+/// assert_eq!(apnumber(1), "one");
+/// assert_eq!(apnumber(9), "nine");
+/// assert_eq!(apnumber(10), "10");
+/// assert_eq!(apnumber(0), "0");
+/// assert_eq!(apnumber(-3), "-3");
+/// ```
+#[must_use]
+pub fn apnumber(n: i64) -> String {
+    match n {
+        1 => "one".to_owned(),
+        2 => "two".to_owned(),
+        3 => "three".to_owned(),
+        4 => "four".to_owned(),
+        5 => "five".to_owned(),
+        6 => "six".to_owned(),
+        7 => "seven".to_owned(),
+        8 => "eight".to_owned(),
+        9 => "nine".to_owned(),
+        _ => n.to_string(),
+    }
+}
+
+fn apnumber_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let n = match value.as_i64() {
         Some(v) => v,
         None => return Ok(value.clone()),
     };
-    let word = match n {
-        1 => "one",
-        2 => "two",
-        3 => "three",
-        4 => "four",
-        5 => "five",
-        6 => "six",
-        7 => "seven",
-        8 => "eight",
-        9 => "nine",
-        _ => return Ok(to_value(n.to_string())?),
-    };
-    Ok(to_value(word)?)
+    Ok(to_value(apnumber(n))?)
 }
 
 // ------------------------------------------------------------------ naturaltime
@@ -1139,5 +1206,75 @@ mod tests {
         let out = render_filter(r#"{{ x | format_currency(currency="ZZX") }}"#, ctx);
         assert!(out.contains("ZZX"), "got: {out}");
         assert!(out.contains("1,234.00"), "got: {out}");
+    }
+
+    // -------- Public Rust API (extracted from Tera filters) --------
+
+    #[test]
+    fn intword_public_basic() {
+        assert_eq!(intword(1_200_000.0), "1.2 million");
+        assert_eq!(intword(1_000_000_000.0), "1.0 billion");
+        assert_eq!(intword(2_500_000_000_000.0), "2.5 trillion");
+    }
+
+    #[test]
+    fn intword_public_below_million_unformatted() {
+        assert_eq!(intword(999_999.0), "999999");
+        assert_eq!(intword(0.0), "0");
+        assert_eq!(intword(42.0), "42");
+    }
+
+    #[test]
+    fn intword_public_negative() {
+        assert_eq!(intword(-1_500_000.0), "-1.5 million");
+    }
+
+    #[test]
+    fn naturalsize_public_basic() {
+        assert_eq!(naturalsize(0.0), "0 bytes");
+        assert_eq!(naturalsize(1.0), "1 byte");
+        assert_eq!(naturalsize(512.0), "512 bytes");
+        assert_eq!(naturalsize(1024.0), "1.0 KB");
+        assert_eq!(naturalsize(1_572_864.0), "1.5 MB");
+    }
+
+    #[test]
+    fn naturalsize_public_top_scale_caps() {
+        // 2^80 bytes — fits exactly in YB scale (the last entry).
+        let n = 1024.0_f64.powi(8);
+        let out = naturalsize(n);
+        assert!(out.ends_with("YB"), "got: {out}");
+    }
+
+    #[test]
+    fn ordinal_public_basic() {
+        assert_eq!(ordinal(1), "1st");
+        assert_eq!(ordinal(2), "2nd");
+        assert_eq!(ordinal(3), "3rd");
+        assert_eq!(ordinal(4), "4th");
+        assert_eq!(ordinal(11), "11th");
+        assert_eq!(ordinal(12), "12th");
+        assert_eq!(ordinal(13), "13th");
+        assert_eq!(ordinal(21), "21st");
+        assert_eq!(ordinal(102), "102nd");
+        assert_eq!(ordinal(113), "113th");
+    }
+
+    #[test]
+    fn ordinal_public_negative_uses_abs_suffix() {
+        assert_eq!(ordinal(-1), "-1st");
+        assert_eq!(ordinal(-11), "-11th");
+        assert_eq!(ordinal(-23), "-23rd");
+    }
+
+    #[test]
+    fn apnumber_public_basic() {
+        assert_eq!(apnumber(1), "one");
+        assert_eq!(apnumber(5), "five");
+        assert_eq!(apnumber(9), "nine");
+        assert_eq!(apnumber(0), "0");
+        assert_eq!(apnumber(10), "10");
+        assert_eq!(apnumber(-3), "-3");
+        assert_eq!(apnumber(100), "100");
     }
 }
