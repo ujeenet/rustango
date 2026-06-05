@@ -339,6 +339,52 @@ pub fn smart_split(text: &str) -> Vec<String> {
 }
 
 /// Django-parity
+/// [`django.utils.html.strip_spaces_between_tags(value)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.strip_spaces_between_tags) —
+/// remove whitespace runs sitting BETWEEN HTML tags (i.e. between
+/// a `>` and the next `<`). Used by Django's `{% spaceless %}`
+/// template tag to compact rendered HTML.
+///
+/// Whitespace INSIDE text content is preserved — only the gap
+/// between two adjacent tags is stripped.
+///
+/// ```ignore
+/// use rustango::text::strip_spaces_between_tags;
+/// assert_eq!(
+///     strip_spaces_between_tags("<p>\n  <em>x</em>\n</p>"),
+///     "<p><em>x</em></p>"
+/// );
+/// // Text inside tags is preserved.
+/// assert_eq!(
+///     strip_spaces_between_tags("<p>hello  world</p>"),
+///     "<p>hello  world</p>"
+/// );
+/// ```
+#[must_use]
+pub fn strip_spaces_between_tags(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::with_capacity(value.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        out.push(c);
+        if c == '>' {
+            // Look ahead: skip whitespace until non-WS or `<`.
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars.len() && chars[j] == '<' {
+                // Whitespace run between `>` and `<` — skip it.
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Django-parity
 /// [`django.utils.text.get_valid_filename(name)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.get_valid_filename) —
 /// strip a user-supplied filename to something safe to drop on
 /// disk: trim whitespace, replace internal whitespace + `/` and
@@ -1756,5 +1802,59 @@ mod tests {
         let out = get_valid_filename(r"C:\Users\foo.txt").unwrap();
         assert!(!out.contains('\\'));
         assert!(!out.contains(':'));
+    }
+
+    // -------- strip_spaces_between_tags (Django parity) --------
+
+    #[test]
+    fn strip_spaces_between_tags_compacts_tag_gap() {
+        assert_eq!(
+            strip_spaces_between_tags("<p>\n  <em>x</em>\n</p>"),
+            "<p><em>x</em></p>"
+        );
+    }
+
+    #[test]
+    fn strip_spaces_between_tags_preserves_inner_text() {
+        // Whitespace inside element content stays.
+        assert_eq!(
+            strip_spaces_between_tags("<p>hello  world</p>"),
+            "<p>hello  world</p>"
+        );
+    }
+
+    #[test]
+    fn strip_spaces_between_tags_handles_self_closing() {
+        assert_eq!(strip_spaces_between_tags("<br/>\n<br/>"), "<br/><br/>");
+    }
+
+    #[test]
+    fn strip_spaces_between_tags_preserves_mixed_content() {
+        // Text between a closing tag and the next opening tag (not just
+        // whitespace) is preserved.
+        let s = "<p>one</p> and <p>two</p>";
+        assert_eq!(strip_spaces_between_tags(s), "<p>one</p> and <p>two</p>");
+    }
+
+    #[test]
+    fn strip_spaces_between_tags_empty() {
+        assert_eq!(strip_spaces_between_tags(""), "");
+    }
+
+    #[test]
+    fn strip_spaces_between_tags_no_tags_passes_through() {
+        // Pure text input: no `>` boundaries, so nothing to strip.
+        assert_eq!(
+            strip_spaces_between_tags("plain text with spaces"),
+            "plain text with spaces"
+        );
+    }
+
+    #[test]
+    fn strip_spaces_between_tags_handles_unicode_content() {
+        assert_eq!(
+            strip_spaces_between_tags("<p>\n  <em>café</em>\n</p>"),
+            "<p><em>café</em></p>"
+        );
     }
 }
