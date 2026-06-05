@@ -1128,23 +1128,46 @@ fn render_changes_split_inner(
                 from,
                 on,
             } => {
+                if dialect.name() == "sqlite" {
+                    return Err(format!(
+                        "AddCompositeFk for `{table}.{name}` is not yet supported on \
+                         dialect `sqlite`. SQLite has no `ALTER TABLE ADD CONSTRAINT FOREIGN \
+                         KEY` syntax — composite FKs must be declared inside the original \
+                         CREATE TABLE statement. Workaround: emit a hand-written \
+                         `Operation::Data` (RunSQL) that rebuilds the table with the FK \
+                         inline. Tracked in #559."
+                    ));
+                }
                 let from_cols = from
                     .iter()
-                    .map(|c| format!(r#""{c}""#))
+                    .map(|c| dialect.quote_ident(c))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let on_cols = on
                     .iter()
-                    .map(|c| format!(r#""{c}""#))
+                    .map(|c| dialect.quote_ident(c))
                     .collect::<Vec<_>>()
                     .join(", ");
                 out.deferred_fks.push(format!(
-                    r#"ALTER TABLE "{table}" ADD CONSTRAINT "{name}" FOREIGN KEY ({from_cols}) REFERENCES "{to}" ({on_cols})"#,
+                    "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({from_cols}) REFERENCES {} ({on_cols})",
+                    dialect.quote_ident(table),
+                    dialect.quote_ident(name),
+                    dialect.quote_ident(to),
                 ));
             }
             SchemaChange::DropCompositeFk { table, name } => {
+                if dialect.name() == "sqlite" {
+                    return Err(format!(
+                        "DropCompositeFk for `{table}.{name}` is not yet supported on \
+                         dialect `sqlite`. SQLite has no `ALTER TABLE DROP CONSTRAINT` \
+                         syntax. Workaround: emit a hand-written `Operation::Data` (RunSQL) \
+                         that rebuilds the table without the FK. Tracked in #559."
+                    ));
+                }
                 out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" DROP CONSTRAINT IF EXISTS "{name}""#,
+                    "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
+                    dialect.quote_ident(table),
+                    dialect.quote_ident(name),
                 ));
             }
         }
@@ -1772,6 +1795,112 @@ mod sql_type_tests {
             out.immediate,
             vec!["ALTER TABLE `t` DROP CONSTRAINT IF EXISTS `ck_x`".to_string()]
         );
+    }
+
+    // -------- Add/DropCompositeFk (#559) --------
+
+    fn make_add_composite_fk() -> Vec<SchemaChange> {
+        vec![SchemaChange::AddCompositeFk {
+            table: "child".into(),
+            name: "fk_child_parent_composite".into(),
+            to: "parent".into(),
+            from: vec!["pa_id".into(), "pb_id".into()],
+            on: vec!["a_id".into(), "b_id".into()],
+        }]
+    }
+
+    #[test]
+    fn add_composite_fk_postgres_defers_with_ansi_quoting() {
+        let snap = empty_snap();
+        let out = render_changes_split_with_dialect(
+            &make_add_composite_fk(),
+            &snap,
+            &crate::sql::Postgres,
+        )
+        .unwrap();
+        assert_eq!(out.immediate.len(), 0);
+        assert_eq!(out.deferred_fks.len(), 1);
+        let stmt = &out.deferred_fks[0];
+        assert!(stmt.contains(r#"ALTER TABLE "child""#));
+        assert!(stmt.contains(r#"ADD CONSTRAINT "fk_child_parent_composite""#));
+        assert!(stmt.contains(r#"FOREIGN KEY ("pa_id", "pb_id")"#));
+        assert!(stmt.contains(r#"REFERENCES "parent" ("a_id", "b_id")"#));
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn add_composite_fk_mysql_uses_backticks() {
+        let snap = empty_snap();
+        let out =
+            render_changes_split_with_dialect(&make_add_composite_fk(), &snap, &crate::sql::MySql)
+                .unwrap();
+        assert_eq!(out.deferred_fks.len(), 1);
+        let stmt = &out.deferred_fks[0];
+        assert!(stmt.contains("ALTER TABLE `child`"));
+        assert!(stmt.contains("ADD CONSTRAINT `fk_child_parent_composite`"));
+        assert!(stmt.contains("FOREIGN KEY (`pa_id`, `pb_id`)"));
+        assert!(stmt.contains("REFERENCES `parent` (`a_id`, `b_id`)"));
+        assert!(
+            !stmt.contains('"'),
+            "MySQL output must not contain ANSI quotes: {stmt}"
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn add_composite_fk_sqlite_rejects() {
+        let err = render_changes_split_with_dialect(
+            &make_add_composite_fk(),
+            &empty_snap(),
+            &crate::sql::Sqlite,
+        )
+        .expect_err("AddCompositeFk must reject SQLite");
+        assert!(err.contains("AddCompositeFk"));
+        assert!(err.contains("sqlite"));
+        assert!(err.contains("ADD CONSTRAINT FOREIGN KEY"));
+    }
+
+    #[test]
+    fn drop_composite_fk_postgres_uses_ansi_quoting() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::DropCompositeFk {
+            table: "child".into(),
+            name: "fk_x".into(),
+        }];
+        let out =
+            render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
+        assert_eq!(
+            out.immediate,
+            vec![r#"ALTER TABLE "child" DROP CONSTRAINT IF EXISTS "fk_x""#.to_string()]
+        );
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn drop_composite_fk_mysql_uses_backticks() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::DropCompositeFk {
+            table: "child".into(),
+            name: "fk_x".into(),
+        }];
+        let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql).unwrap();
+        assert_eq!(
+            out.immediate,
+            vec!["ALTER TABLE `child` DROP CONSTRAINT IF EXISTS `fk_x`".to_string()]
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn drop_composite_fk_sqlite_rejects() {
+        let changes = vec![SchemaChange::DropCompositeFk {
+            table: "child".into(),
+            name: "fk_x".into(),
+        }];
+        let err = render_changes_split_with_dialect(&changes, &empty_snap(), &crate::sql::Sqlite)
+            .expect_err("DropCompositeFk must reject SQLite");
+        assert!(err.contains("DropCompositeFk"));
+        assert!(err.contains("sqlite"));
     }
 
     #[cfg(feature = "sqlite")]
