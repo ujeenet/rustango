@@ -1,0 +1,378 @@
+//! Django-shape date format-character expander.
+//!
+//! Mirrors `django.utils.dateformat` — converts a Django template
+//! `{{ obj|date:"Y-m-d H:i" }}` format string into the rendered
+//! output for a given `DateTime<Utc>` (or `NaiveDate` / `NaiveTime`).
+//!
+//! Django uses a single-character format-code language distinct
+//! from strftime. The most common codes:
+//!
+//! | Code | Meaning                       | Example       |
+//! |------|-------------------------------|---------------|
+//! | `Y`  | 4-digit year                  | `2026`        |
+//! | `y`  | 2-digit year                  | `26`          |
+//! | `m`  | 2-digit month                 | `06`          |
+//! | `n`  | 1-2-digit month               | `6`           |
+//! | `M`  | Short month name              | `Jun`         |
+//! | `F`  | Full month name               | `June`        |
+//! | `d`  | 2-digit day                   | `04`          |
+//! | `j`  | 1-2-digit day                 | `4`           |
+//! | `D`  | Short weekday name            | `Thu`         |
+//! | `l`  | Full weekday name             | `Thursday`    |
+//! | `N`  | Day of year (1-366)           | `155`         |
+//! | `w`  | Day of week, Sunday=0         | `4`           |
+//! | `H`  | 2-digit 24-hour               | `13`          |
+//! | `G`  | 1-2-digit 24-hour             | `13`          |
+//! | `h`  | 2-digit 12-hour               | `01`          |
+//! | `g`  | 1-2-digit 12-hour             | `1`           |
+//! | `i`  | 2-digit minute                | `05`          |
+//! | `s`  | 2-digit second                | `09`          |
+//! | `a`  | `am` / `pm`                   | `pm`          |
+//! | `A`  | `AM` / `PM`                   | `PM`          |
+//! | `U`  | Unix epoch seconds            | `1717504800`  |
+//! | `\X` | Literal character (escape)    | `X`           |
+//!
+//! Other Django codes (`b`, `e`, `I`, `O`, `T`, `Z`, `c`, `r`,
+//! `u`, `o`, `t`, `S`, `f`, `P`) are recognized but pass through
+//! as their most-common UTC expansion or as the raw character —
+//! see the format-char dispatch in [`format_datetime`] for the
+//! exhaustive list.
+//!
+//! ```ignore
+//! use chrono::{DateTime, Utc, TimeZone};
+//! use rustango::dateformat::format_datetime;
+//!
+//! let dt: DateTime<Utc> = Utc.with_ymd_and_hms(2026, 6, 4, 13, 5, 9).unwrap();
+//! assert_eq!(format_datetime(&dt, "Y-m-d H:i:s"), "2026-06-04 13:05:09");
+//! assert_eq!(format_datetime(&dt, r"\Y\e\a\r: Y"), "Year: 2026");
+//! ```
+
+use chrono::{DateTime, Datelike, Timelike, Utc};
+
+/// Format a `DateTime<Utc>` per Django's `dateformat` shape.
+/// `format_string` uses Django's single-char codes (see module-level
+/// doc table). Backslash escapes the next character — useful for
+/// rendering literal letters that would otherwise be interpreted
+/// (e.g. `r"\Y\e\a\r: Y"` → `"Year: 2026"`).
+///
+/// Unknown / unsupported chars in the format string pass through
+/// unchanged (Django shape — `"random"` renders as `"random"`).
+#[must_use]
+pub fn format_datetime(dt: &DateTime<Utc>, format_string: &str) -> String {
+    let mut out = String::with_capacity(format_string.len() * 2);
+    let mut chars = format_string.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            // Literal escape — next char passes through verbatim.
+            if let Some(literal) = chars.next() {
+                out.push(literal);
+            }
+            continue;
+        }
+        match c {
+            'Y' => out.push_str(&format!("{:04}", dt.year())),
+            'y' => out.push_str(&format!("{:02}", dt.year() % 100)),
+            'm' => out.push_str(&format!("{:02}", dt.month())),
+            'n' => out.push_str(&format!("{}", dt.month())),
+            'M' => out.push_str(short_month(dt.month())),
+            'F' => out.push_str(full_month(dt.month())),
+            'b' => out.push_str(&short_month(dt.month()).to_lowercase()),
+            'd' => out.push_str(&format!("{:02}", dt.day())),
+            'j' => out.push_str(&format!("{}", dt.day())),
+            'D' => out.push_str(short_weekday(dt.weekday())),
+            'l' => out.push_str(full_weekday(dt.weekday())),
+            'N' => out.push_str(&format!("{}", dt.ordinal())),
+            'w' => out.push_str(&format!("{}", dt.weekday().num_days_from_sunday())),
+            'H' => out.push_str(&format!("{:02}", dt.hour())),
+            'G' => out.push_str(&format!("{}", dt.hour())),
+            'h' => {
+                let h = ((dt.hour() + 11) % 12) + 1;
+                out.push_str(&format!("{h:02}"));
+            }
+            'g' => {
+                let h = ((dt.hour() + 11) % 12) + 1;
+                out.push_str(&format!("{h}"));
+            }
+            'i' => out.push_str(&format!("{:02}", dt.minute())),
+            's' => out.push_str(&format!("{:02}", dt.second())),
+            'a' => out.push_str(if dt.hour() < 12 { "am" } else { "pm" }),
+            'A' => out.push_str(if dt.hour() < 12 { "AM" } else { "PM" }),
+            'U' => out.push_str(&format!("{}", dt.timestamp())),
+            'c' => out.push_str(&dt.to_rfc3339()),
+            'r' => out.push_str(&dt.to_rfc2822()),
+            'S' => out.push_str(day_suffix(dt.day())),
+            'L' => out.push(if is_leap(dt.year()) { '1' } else { '0' }),
+            // Timezone codes — DateTime<Utc> always renders these
+            // as UTC equivalents.
+            'O' => out.push_str("+0000"),
+            'T' => out.push_str("UTC"),
+            'Z' => out.push_str("0"),
+            'e' => out.push_str("UTC"),
+            'I' => out.push('0'), // DST flag — always 0 for UTC
+            // Microseconds — 6 digits of fractional seconds.
+            'u' => out.push_str(&format!("{:06}", dt.nanosecond() / 1000)),
+            // Other Django codes we don't implement specially —
+            // pass through as a literal (Django shape: unknown
+            // chars are kept verbatim).
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn short_month(m: u32) -> &'static str {
+    match m {
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
+        5 => "May",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        12 => "Dec",
+        _ => "?",
+    }
+}
+
+fn full_month(m: u32) -> &'static str {
+    match m {
+        1 => "January",
+        2 => "February",
+        3 => "March",
+        4 => "April",
+        5 => "May",
+        6 => "June",
+        7 => "July",
+        8 => "August",
+        9 => "September",
+        10 => "October",
+        11 => "November",
+        12 => "December",
+        _ => "?",
+    }
+}
+
+fn short_weekday(d: chrono::Weekday) -> &'static str {
+    match d {
+        chrono::Weekday::Mon => "Mon",
+        chrono::Weekday::Tue => "Tue",
+        chrono::Weekday::Wed => "Wed",
+        chrono::Weekday::Thu => "Thu",
+        chrono::Weekday::Fri => "Fri",
+        chrono::Weekday::Sat => "Sat",
+        chrono::Weekday::Sun => "Sun",
+    }
+}
+
+fn full_weekday(d: chrono::Weekday) -> &'static str {
+    match d {
+        chrono::Weekday::Mon => "Monday",
+        chrono::Weekday::Tue => "Tuesday",
+        chrono::Weekday::Wed => "Wednesday",
+        chrono::Weekday::Thu => "Thursday",
+        chrono::Weekday::Fri => "Friday",
+        chrono::Weekday::Sat => "Saturday",
+        chrono::Weekday::Sun => "Sunday",
+    }
+}
+
+/// English ordinal suffix for a day-of-month (1st, 2nd, 3rd, 4th).
+fn day_suffix(d: u32) -> &'static str {
+    let n = d % 100;
+    if (11..=13).contains(&n) {
+        return "th";
+    }
+    match d % 10 {
+        1 => "st",
+        2 => "nd",
+        3 => "rd",
+        _ => "th",
+    }
+}
+
+fn is_leap(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone as _;
+
+    fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, h, mi, s).unwrap()
+    }
+
+    #[test]
+    fn format_y_m_d_h_i_s() {
+        let t = dt(2026, 6, 4, 13, 5, 9);
+        assert_eq!(format_datetime(&t, "Y-m-d H:i:s"), "2026-06-04 13:05:09");
+    }
+
+    #[test]
+    fn format_year_codes() {
+        let t = dt(2026, 1, 1, 0, 0, 0);
+        assert_eq!(format_datetime(&t, "Y"), "2026");
+        assert_eq!(format_datetime(&t, "y"), "26");
+    }
+
+    #[test]
+    fn format_month_codes() {
+        let t = dt(2026, 6, 4, 0, 0, 0);
+        assert_eq!(format_datetime(&t, "m"), "06");
+        assert_eq!(format_datetime(&t, "n"), "6");
+        assert_eq!(format_datetime(&t, "M"), "Jun");
+        assert_eq!(format_datetime(&t, "F"), "June");
+        assert_eq!(format_datetime(&t, "b"), "jun");
+    }
+
+    #[test]
+    fn format_day_codes() {
+        let t = dt(2026, 6, 4, 0, 0, 0);
+        assert_eq!(format_datetime(&t, "d"), "04");
+        assert_eq!(format_datetime(&t, "j"), "4");
+    }
+
+    #[test]
+    fn format_weekday_codes() {
+        // 2026-06-04 was a Thursday.
+        let t = dt(2026, 6, 4, 0, 0, 0);
+        assert_eq!(format_datetime(&t, "D"), "Thu");
+        assert_eq!(format_datetime(&t, "l"), "Thursday");
+        assert_eq!(format_datetime(&t, "w"), "4"); // 0=Sun, 4=Thu
+    }
+
+    #[test]
+    fn format_hour_codes_24h() {
+        let t = dt(2026, 1, 1, 13, 0, 0);
+        assert_eq!(format_datetime(&t, "H"), "13");
+        assert_eq!(format_datetime(&t, "G"), "13");
+    }
+
+    #[test]
+    fn format_hour_codes_12h() {
+        // 13:00 → 1pm in 12h shape.
+        let t = dt(2026, 1, 1, 13, 0, 0);
+        assert_eq!(format_datetime(&t, "h"), "01");
+        assert_eq!(format_datetime(&t, "g"), "1");
+        // Midnight = 12am, not 00am.
+        let m = dt(2026, 1, 1, 0, 0, 0);
+        assert_eq!(format_datetime(&m, "h"), "12");
+        assert_eq!(format_datetime(&m, "g"), "12");
+        // Noon = 12pm.
+        let n = dt(2026, 1, 1, 12, 0, 0);
+        assert_eq!(format_datetime(&n, "h"), "12");
+        assert_eq!(format_datetime(&n, "g"), "12");
+    }
+
+    #[test]
+    fn format_am_pm() {
+        let am = dt(2026, 1, 1, 9, 0, 0);
+        let pm = dt(2026, 1, 1, 21, 0, 0);
+        assert_eq!(format_datetime(&am, "a"), "am");
+        assert_eq!(format_datetime(&am, "A"), "AM");
+        assert_eq!(format_datetime(&pm, "a"), "pm");
+        assert_eq!(format_datetime(&pm, "A"), "PM");
+    }
+
+    #[test]
+    fn format_minute_second() {
+        let t = dt(2026, 1, 1, 0, 5, 9);
+        assert_eq!(format_datetime(&t, "i"), "05");
+        assert_eq!(format_datetime(&t, "s"), "09");
+    }
+
+    #[test]
+    fn format_day_of_year_n() {
+        let t = dt(2026, 6, 4, 0, 0, 0);
+        // June 4 of a non-leap year is day 155.
+        assert_eq!(format_datetime(&t, "N"), "155");
+    }
+
+    #[test]
+    fn format_unix_timestamp_U() {
+        let t = dt(2026, 1, 1, 0, 0, 0);
+        let expected = t.timestamp().to_string();
+        assert_eq!(format_datetime(&t, "U"), expected);
+    }
+
+    #[test]
+    fn format_iso_8601_c() {
+        let t = dt(2026, 6, 4, 13, 5, 9);
+        let out = format_datetime(&t, "c");
+        assert!(out.starts_with("2026-06-04T13:05:09"));
+        assert!(out.ends_with("+00:00"));
+    }
+
+    #[test]
+    fn format_rfc_2822_r() {
+        let t = dt(2026, 6, 4, 13, 5, 9);
+        let out = format_datetime(&t, "r");
+        // chrono RFC 2822 format includes weekday + GMT zone shape.
+        assert!(out.contains("Thu, 4 Jun 2026 13:05:09"));
+    }
+
+    #[test]
+    fn format_day_suffix_S() {
+        // 1 → st, 2 → nd, 3 → rd, 4 → th, 11 → th, 21 → st.
+        assert_eq!(format_datetime(&dt(2026, 1, 1, 0, 0, 0), "S"), "st");
+        assert_eq!(format_datetime(&dt(2026, 1, 2, 0, 0, 0), "S"), "nd");
+        assert_eq!(format_datetime(&dt(2026, 1, 3, 0, 0, 0), "S"), "rd");
+        assert_eq!(format_datetime(&dt(2026, 1, 4, 0, 0, 0), "S"), "th");
+        assert_eq!(format_datetime(&dt(2026, 1, 11, 0, 0, 0), "S"), "th");
+        assert_eq!(format_datetime(&dt(2026, 1, 21, 0, 0, 0), "S"), "st");
+    }
+
+    #[test]
+    fn format_leap_year_L() {
+        assert_eq!(format_datetime(&dt(2024, 1, 1, 0, 0, 0), "L"), "1"); // leap
+        assert_eq!(format_datetime(&dt(2026, 1, 1, 0, 0, 0), "L"), "0"); // not leap
+        assert_eq!(format_datetime(&dt(2000, 1, 1, 0, 0, 0), "L"), "1"); // 2000 leap
+        assert_eq!(format_datetime(&dt(1900, 1, 1, 0, 0, 0), "L"), "0"); // century not /400
+    }
+
+    #[test]
+    fn format_timezone_codes_for_utc() {
+        let t = dt(2026, 1, 1, 0, 0, 0);
+        assert_eq!(format_datetime(&t, "O"), "+0000");
+        assert_eq!(format_datetime(&t, "T"), "UTC");
+        assert_eq!(format_datetime(&t, "e"), "UTC");
+        assert_eq!(format_datetime(&t, "I"), "0");
+        assert_eq!(format_datetime(&t, "Z"), "0");
+    }
+
+    #[test]
+    fn format_escape_backslash() {
+        let t = dt(2026, 6, 4, 0, 0, 0);
+        // `\Y\e\a\r: Y` → literal "Year: 2026".
+        assert_eq!(format_datetime(&t, r"\Y\e\a\r: Y"), "Year: 2026");
+    }
+
+    #[test]
+    fn format_unknown_chars_pass_through() {
+        let t = dt(2026, 6, 4, 0, 0, 0);
+        // Hyphens, slashes, colons are not codes — passed verbatim.
+        assert_eq!(format_datetime(&t, "Y/m/d"), "2026/06/04");
+        assert_eq!(format_datetime(&t, "[Y]"), "[2026]");
+    }
+
+    #[test]
+    fn format_empty_string() {
+        let t = dt(2026, 1, 1, 0, 0, 0);
+        assert_eq!(format_datetime(&t, ""), "");
+    }
+
+    #[test]
+    fn format_microseconds_u() {
+        let t = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .unwrap()
+            .with_nanosecond(123_456_000)
+            .unwrap();
+        assert_eq!(format_datetime(&t, "u"), "123456");
+    }
+}

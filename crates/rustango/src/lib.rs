@@ -1054,6 +1054,11 @@ pub mod http_date;
 /// parse_duration}`. Mirrors `django.utils.dateparse.*`.
 pub mod dateparse;
 
+/// Django-shape date format-character expander — converts a
+/// Django template `{{ obj|date:"Y-m-d H:i" }}` format string into
+/// the matching `strftime` output. Mirrors `django.utils.dateformat`.
+pub mod dateformat;
+
 /// Django-shape `Set-Cookie` builder — `Cookie::new(name, value)
 /// .path("/").max_age(secs).http_only().secure().same_site(...)
 /// .build()` produces an axum-ready `HeaderValue`. Replaces
