@@ -6,7 +6,8 @@
 //! `floatformat`, `escapejs`, `yesno`, `get_digit`, `dictsort`,
 //! `slugify_unicode`, `iriencode`, `wordwrap`, `mask_email`,
 //! `mask_card`, `mask_phone`, `dictsortreversed`, `oxford_join`,
-//! `initials`, `truncatechars`, `normalize_whitespace`. Call
+//! `initials`, `truncatechars`, `normalize_whitespace`, `wordcount`,
+//! `phone2numeric`, `linenumbers`, `ljust`, `rjust`, `center`. Call
 //! [`register_filters`] on a Tera instance to make them available:
 //!
 //! ```ignore
@@ -52,6 +53,12 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("initials", initials);
     tera.register_filter("truncatechars", truncatechars);
     tera.register_filter("normalize_whitespace", normalize_whitespace);
+    tera.register_filter("wordcount", wordcount);
+    tera.register_filter("phone2numeric", phone2numeric);
+    tera.register_filter("linenumbers", linenumbers);
+    tera.register_filter("ljust", ljust);
+    tera.register_filter("rjust", rjust);
+    tera.register_filter("center", center_filter);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -1009,6 +1016,139 @@ fn mask_phone(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> 
         })
         .collect();
     Ok(to_value(masked)?)
+}
+
+// ------------------------------------------------------------------ wordcount
+
+/// `wordcount` — count whitespace-separated tokens in the input.
+/// Django:
+/// - `{{ "Joel is a slug"|wordcount }}` → `4`
+/// - `{{ ""|wordcount }}` → `0`
+fn wordcount(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let s = value.as_str().unwrap_or("");
+    Ok(to_value(s.split_whitespace().count())?)
+}
+
+// ------------------------------------------------------------------ phone2numeric
+
+/// `phone2numeric` — convert phone-keypad letters to the matching digit.
+/// Django:
+/// - `{{ "1-800-COLLECT"|phone2numeric }}` → `"1-800-2655328"`
+///
+/// Mapping (lower + upper, standard ITU E.161):
+/// `abc → 2`, `def → 3`, `ghi → 4`, `jkl → 5`, `mno → 6`,
+/// `pqrs → 7`, `tuv → 8`, `wxyz → 9`. Non-letter characters pass
+/// through unchanged.
+fn phone2numeric(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(s) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let out: String = s
+        .chars()
+        .map(|c| match c.to_ascii_lowercase() {
+            'a' | 'b' | 'c' => '2',
+            'd' | 'e' | 'f' => '3',
+            'g' | 'h' | 'i' => '4',
+            'j' | 'k' | 'l' => '5',
+            'm' | 'n' | 'o' => '6',
+            'p' | 'q' | 'r' | 's' => '7',
+            't' | 'u' | 'v' => '8',
+            'w' | 'x' | 'y' | 'z' => '9',
+            _ => c,
+        })
+        .collect();
+    Ok(to_value(out)?)
+}
+
+// ------------------------------------------------------------------ linenumbers
+
+/// `linenumbers` — prepend each line of the input with its 1-based
+/// line number, zero-padded to the width of the largest line number.
+/// Django:
+/// - `{{ "one\ntwo\nthree"|linenumbers }}` →
+///   `"1. one\n2. two\n3. three"`
+///
+/// Width adjusts as the line count grows — 100 lines render with
+/// `"  1. …"` through `"100. …"`.
+fn linenumbers(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(s) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let lines: Vec<&str> = s.split('\n').collect();
+    let width = lines.len().to_string().len();
+    let mut out = String::with_capacity(s.len() + lines.len() * (width + 2));
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        use std::fmt::Write as _;
+        let _ = write!(out, "{:>width$}. {}", i + 1, line, width = width);
+    }
+    Ok(to_value(out)?)
+}
+
+// ------------------------------------------------------------------ ljust / rjust / center
+
+fn pad_arg(args: &HashMap<String, Value>) -> usize {
+    args.get("width")
+        .or_else(|| args.values().next())
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize
+}
+
+/// `ljust:N` — left-justify (pad right with spaces) to width N.
+/// Django:
+/// - `{{ "Joel"|ljust:10 }}` → `"Joel      "`
+///
+/// Values already at or beyond N pass through unchanged.
+fn ljust(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let s = value.as_str().unwrap_or("");
+    let width = pad_arg(args);
+    let chars = s.chars().count();
+    if chars >= width {
+        return Ok(to_value(s)?);
+    }
+    let mut out = s.to_owned();
+    out.extend(std::iter::repeat(' ').take(width - chars));
+    Ok(to_value(out)?)
+}
+
+/// `rjust:N` — right-justify (pad left with spaces) to width N.
+/// Django:
+/// - `{{ "Joel"|rjust:10 }}` → `"      Joel"`
+fn rjust(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let s = value.as_str().unwrap_or("");
+    let width = pad_arg(args);
+    let chars = s.chars().count();
+    if chars >= width {
+        return Ok(to_value(s)?);
+    }
+    let mut out = String::with_capacity(width);
+    out.extend(std::iter::repeat(' ').take(width - chars));
+    out.push_str(s);
+    Ok(to_value(out)?)
+}
+
+/// `center:N` — center value in a field of width N. Django:
+/// - `{{ "Joel"|center:10 }}` → `"   Joel   "`
+///
+/// When the padding doesn't split evenly, the extra space goes on
+/// the right (matching Django's `str.center`).
+fn center_filter(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let s = value.as_str().unwrap_or("");
+    let width = pad_arg(args);
+    let chars = s.chars().count();
+    if chars >= width {
+        return Ok(to_value(s)?);
+    }
+    let total_pad = width - chars;
+    let left_pad = total_pad / 2;
+    let right_pad = total_pad - left_pad;
+    let mut out = String::with_capacity(width);
+    out.extend(std::iter::repeat(' ').take(left_pad));
+    out.push_str(s);
+    out.extend(std::iter::repeat(' ').take(right_pad));
+    Ok(to_value(out)?)
 }
 
 #[cfg(test)]
@@ -2102,5 +2242,122 @@ mod tests {
     fn normalize_whitespace_passes_through_non_string() {
         let out = normalize_whitespace(&json!(42), &HashMap::new()).unwrap();
         assert_eq!(out, json!(42));
+    }
+
+    // -------- wordcount --------
+
+    #[test]
+    fn wordcount_counts_whitespace_tokens() {
+        let out = wordcount(&json!("Joel is a slug"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(4));
+    }
+
+    #[test]
+    fn wordcount_empty_is_zero() {
+        let out = wordcount(&json!(""), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(0));
+    }
+
+    #[test]
+    fn wordcount_collapses_consecutive_whitespace() {
+        let out = wordcount(&json!("a   b\t\tc\nd"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(4));
+    }
+
+    // -------- phone2numeric --------
+
+    #[test]
+    fn phone2numeric_canonical_example() {
+        let out = phone2numeric(&json!("1-800-COLLECT"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("1-800-2655328"));
+    }
+
+    #[test]
+    fn phone2numeric_is_case_insensitive() {
+        let out = phone2numeric(&json!("abcDEF"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("222333"));
+    }
+
+    #[test]
+    fn phone2numeric_passes_non_letters_through() {
+        // Digits, dashes, spaces should be preserved.
+        let out = phone2numeric(&json!("(555) 867-5309"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("(555) 867-5309"));
+    }
+
+    #[test]
+    fn phone2numeric_maps_all_letters_correctly() {
+        // ITU E.161 — z → 9 specifically (some old US phones omitted z).
+        let out = phone2numeric(&json!("xyz"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("999"));
+        let out = phone2numeric(&json!("pqrs"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("7777"));
+    }
+
+    // -------- linenumbers --------
+
+    #[test]
+    fn linenumbers_simple_three_lines() {
+        let out = linenumbers(&json!("one\ntwo\nthree"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("1. one\n2. two\n3. three"));
+    }
+
+    #[test]
+    fn linenumbers_width_grows_with_count() {
+        // 10 lines → width 2.
+        let input: String = (1..=10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let out = linenumbers(&json!(input), &HashMap::new()).unwrap();
+        let text = out.as_str().unwrap();
+        assert!(text.starts_with(" 1. line1\n"));
+        assert!(text.ends_with("\n10. line10"));
+    }
+
+    #[test]
+    fn linenumbers_empty_string_is_single_empty_line() {
+        let out = linenumbers(&json!(""), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("1. "));
+    }
+
+    // -------- ljust / rjust / center --------
+
+    #[test]
+    fn ljust_pads_right_with_spaces() {
+        let out = ljust(&json!("Joel"), &args1("width", 10)).unwrap();
+        assert_eq!(out, json!("Joel      "));
+    }
+
+    #[test]
+    fn ljust_passes_through_already_wide_enough() {
+        let out = ljust(&json!("Joel"), &args1("width", 3)).unwrap();
+        assert_eq!(out, json!("Joel"));
+    }
+
+    #[test]
+    fn rjust_pads_left_with_spaces() {
+        let out = rjust(&json!("Joel"), &args1("width", 10)).unwrap();
+        assert_eq!(out, json!("      Joel"));
+    }
+
+    #[test]
+    fn center_pads_both_sides_extra_on_right() {
+        // 10 - 4 = 6 → 3 left, 3 right.
+        let out = center_filter(&json!("Joel"), &args1("width", 10)).unwrap();
+        assert_eq!(out, json!("   Joel   "));
+    }
+
+    #[test]
+    fn center_odd_padding_extra_goes_right() {
+        // 9 - 4 = 5 → 2 left, 3 right (matches Python str.center).
+        let out = center_filter(&json!("Joel"), &args1("width", 9)).unwrap();
+        assert_eq!(out, json!("  Joel   "));
+    }
+
+    fn args1(key: &str, value: u64) -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        m.insert(key.to_owned(), json!(value));
+        m
     }
 }
