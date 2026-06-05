@@ -138,16 +138,15 @@ fn truncatewords(value: &Value, args: &HashMap<String, Value>) -> tera::Result<V
         .and_then(Value::as_i64)
         .unwrap_or(-1);
     if n <= 0 {
+        // Django filter shape: 0 / negative / non-int → empty string.
+        // Distinct from text::truncate_words(s, 0, " …") which would
+        // emit a stray suffix.
         return Ok(to_value("")?);
     }
     let n = usize::try_from(n).unwrap_or(0);
-    let words: Vec<&str> = s.split_whitespace().collect();
-    if words.len() <= n {
-        // Re-join so multi-space input still normalizes consistently.
-        return Ok(to_value(words.join(" "))?);
-    }
-    let kept = words[..n].join(" ");
-    Ok(to_value(format!("{kept} …"))?)
+    // Algorithm identical to `text::truncate_words` for n > 0 —
+    // single source of truth.
+    Ok(to_value(crate::text::truncate_words(s, n, " …"))?)
 }
 
 // ------------------------------------------------------------------ linebreaks
