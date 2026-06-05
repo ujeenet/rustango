@@ -192,6 +192,60 @@ pub(crate) fn sidebar_context(
         .collect()
 }
 
+/// Resolve `table` to a `ModelSchema` or emit `AdminError::TableNotFound`.
+/// Folds the `lookup_model(...).ok_or(AdminError::TableNotFound { table })`
+/// pattern repeated across every CRUD handler (issue #562). Takes
+/// `table` by reference so the caller can keep ownership for further
+/// use; the error variant clones internally on the not-found path.
+///
+/// Use this from any admin handler that needs the model + the standard
+/// 404 fallthrough. Handlers that also need the PK use
+/// [`resolve_model_and_pk`] instead.
+pub(crate) fn resolve_model(
+    state: &AppState,
+    table: &str,
+) -> Result<&'static ModelSchema, crate::admin::errors::AdminError> {
+    lookup_model(state, table).ok_or_else(|| crate::admin::errors::AdminError::TableNotFound {
+        table: table.to_owned(),
+    })
+}
+
+/// Resolve `table` to a `ModelSchema` and parse `pk_raw` against the
+/// model's primary-key field. Folds the second prologue pattern that
+/// recurs across every detail/edit/delete handler:
+///
+/// ```ignore
+/// let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound { ... })?;
+/// let pk_field = model.primary_key().ok_or_else(|| AdminError::Internal(...))?;
+/// let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
+/// ```
+///
+/// Issue #562. Returns the model, the PK `FieldSchema`, and the parsed
+/// `SqlValue` ready to bind in a `WHERE pk = ?` clause.
+pub(crate) fn resolve_model_and_pk(
+    state: &AppState,
+    table: &str,
+    pk_raw: &str,
+) -> Result<
+    (
+        &'static ModelSchema,
+        &'static crate::core::FieldSchema,
+        crate::core::SqlValue,
+    ),
+    crate::admin::errors::AdminError,
+> {
+    let model = resolve_model(state, table)?;
+    let pk_field = model.primary_key().ok_or_else(|| {
+        crate::admin::errors::AdminError::Internal(format!(
+            "model `{}` has no primary key",
+            model.name
+        ))
+    })?;
+    let pk_value = crate::forms::parse_pk_string(pk_field, pk_raw)
+        .map_err(crate::admin::errors::AdminError::Form)?;
+    Ok((model, pk_field, pk_value))
+}
+
 /// Resolve `table` to a `ModelSchema`, but only if the admin is configured
 /// to expose it. A model that exists but is filtered out via `show_only`
 /// returns `None` here, which surfaces to users as a 404 — same response
