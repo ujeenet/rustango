@@ -967,17 +967,53 @@ fn render_changes_split_inner(
                 ));
             }
             SchemaChange::DropIndex { name } => {
-                out.immediate
-                    .push(format!(r#"DROP INDEX IF EXISTS "{name}""#));
+                // MySQL needs `DROP INDEX <name> ON <table>` and rejects
+                // `IF EXISTS`. The variant doesn't carry the table — fail
+                // loudly until #559 promotes `DropIndex` to include it.
+                if dialect.name() == "mysql" {
+                    return Err(format!(
+                        "DropIndex for `{name}` is not yet supported on dialect `mysql`. \
+                         MySQL requires the table name (`DROP INDEX <name> ON <table>`) but \
+                         the `SchemaChange::DropIndex` variant only carries `name`. \
+                         Workaround: emit a hand-written `Operation::Data` (RunSQL) with the \
+                         dialect-correct DDL for your migration. Tracked in #559."
+                    ));
+                }
+                out.immediate.push(format!(
+                    "DROP INDEX IF EXISTS {}",
+                    dialect.quote_ident(name)
+                ));
             }
             SchemaChange::AddCheckConstraint { name, table, expr } => {
+                if dialect.name() == "sqlite" {
+                    return Err(format!(
+                        "AddCheckConstraint for `{table}.{name}` is not yet supported on \
+                         dialect `sqlite`. SQLite has no `ALTER TABLE ADD CONSTRAINT CHECK` \
+                         syntax — CHECK constraints must be declared inside the original \
+                         CREATE TABLE statement. Workaround: emit a hand-written \
+                         `Operation::Data` (RunSQL) that rebuilds the table with the CHECK \
+                         inline, or use an application-level invariant. Tracked in #559."
+                    ));
+                }
                 out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" ADD CONSTRAINT "{name}" CHECK ({expr})"#,
+                    "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({expr})",
+                    dialect.quote_ident(table),
+                    dialect.quote_ident(name),
                 ));
             }
             SchemaChange::DropCheckConstraint { name, table } => {
+                if dialect.name() == "sqlite" {
+                    return Err(format!(
+                        "DropCheckConstraint for `{table}.{name}` is not yet supported on \
+                         dialect `sqlite`. SQLite has no `ALTER TABLE DROP CONSTRAINT` \
+                         syntax. Workaround: emit a hand-written `Operation::Data` (RunSQL) \
+                         that rebuilds the table without the CHECK. Tracked in #559."
+                    ));
+                }
                 out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" DROP CONSTRAINT IF EXISTS "{name}""#,
+                    "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
+                    dialect.quote_ident(table),
+                    dialect.quote_ident(name),
                 ));
             }
             SchemaChange::AddExclusionConstraint {
@@ -1608,6 +1644,134 @@ mod sql_type_tests {
         for stmt in &out.deferred_fks {
             assert!(!stmt.contains('"'), "MySQL FK must use backticks: {stmt}");
         }
+    }
+
+    // -------- DropIndex / AddCheckConstraint / DropCheckConstraint (#559) --------
+
+    #[test]
+    fn drop_index_postgres_uses_ansi_quoting_with_if_exists() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::DropIndex {
+            name: "idx_post_slug".into(),
+        }];
+        let out =
+            render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
+        assert_eq!(
+            out.immediate,
+            vec![r#"DROP INDEX IF EXISTS "idx_post_slug""#.to_string()]
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn drop_index_sqlite_uses_ansi_quoting_with_if_exists() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::DropIndex {
+            name: "idx_post_slug".into(),
+        }];
+        let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite).unwrap();
+        assert_eq!(
+            out.immediate,
+            vec![r#"DROP INDEX IF EXISTS "idx_post_slug""#.to_string()]
+        );
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn drop_index_mysql_rejects_until_variant_carries_table() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::DropIndex {
+            name: "idx_post_slug".into(),
+        }];
+        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
+            .expect_err("DropIndex must reject MySQL — variant lacks table reference");
+        assert!(err.contains("DropIndex"));
+        assert!(err.contains("idx_post_slug"));
+        assert!(err.contains("mysql"));
+        assert!(err.contains("ON <table>"));
+    }
+
+    #[test]
+    fn add_check_constraint_postgres_works() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::AddCheckConstraint {
+            name: "ck_post_views_nonneg".into(),
+            table: "posts".into(),
+            expr: "views >= 0".into(),
+        }];
+        let out =
+            render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
+        assert_eq!(
+            out.immediate,
+            vec![
+                r#"ALTER TABLE "posts" ADD CONSTRAINT "ck_post_views_nonneg" CHECK (views >= 0)"#
+                    .to_string()
+            ]
+        );
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn add_check_constraint_mysql_uses_backticks() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::AddCheckConstraint {
+            name: "ck_post_views_nonneg".into(),
+            table: "posts".into(),
+            expr: "views >= 0".into(),
+        }];
+        let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql).unwrap();
+        assert_eq!(
+            out.immediate,
+            vec![
+                "ALTER TABLE `posts` ADD CONSTRAINT `ck_post_views_nonneg` CHECK (views >= 0)"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn add_check_constraint_sqlite_rejects() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::AddCheckConstraint {
+            name: "ck_post_views_nonneg".into(),
+            table: "posts".into(),
+            expr: "views >= 0".into(),
+        }];
+        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite)
+            .expect_err("AddCheckConstraint must reject SQLite");
+        assert!(err.contains("AddCheckConstraint"));
+        assert!(err.contains("sqlite"));
+        assert!(err.contains("ALTER TABLE ADD CONSTRAINT CHECK"));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn drop_check_constraint_sqlite_rejects() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::DropCheckConstraint {
+            name: "ck_post_views_nonneg".into(),
+            table: "posts".into(),
+        }];
+        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite)
+            .expect_err("DropCheckConstraint must reject SQLite");
+        assert!(err.contains("DropCheckConstraint"));
+        assert!(err.contains("sqlite"));
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn drop_check_constraint_mysql_uses_backticks() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::DropCheckConstraint {
+            name: "ck_x".into(),
+            table: "t".into(),
+        }];
+        let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql).unwrap();
+        assert_eq!(
+            out.immediate,
+            vec!["ALTER TABLE `t` DROP CONSTRAINT IF EXISTS `ck_x`".to_string()]
+        );
     }
 
     #[cfg(feature = "sqlite")]
