@@ -299,6 +299,82 @@ pub fn formataddr(name: Option<&str>, address: &str) -> String {
     }
 }
 
+/// Django-parity inverse of [`formataddr`] — Python's
+/// `email.utils.parseaddr(address)`. Splits a `"Display Name
+/// <user@example.com>"` style header value into `(name, address)`.
+///
+/// Returns `(name, address)` as owned `String`s. When the input
+/// has no angle-bracketed address, the whole string is returned
+/// as the address with an empty name (Python shape — `parseaddr`
+/// always returns a pair, never raises).
+///
+/// Backslash escapes inside a double-quoted display name are
+/// un-escaped (`\"` → `"`, `\\` → `\`). Other escape sequences
+/// pass through literally — matching Python's email.utils
+/// behavior, which doesn't expand `\n` / `\t` inside quoted-string
+/// productions.
+///
+/// ```ignore
+/// use rustango::email::parseaddr;
+/// // Display name + address.
+/// assert_eq!(
+///     parseaddr("Alice <alice@example.com>"),
+///     ("Alice".to_owned(), "alice@example.com".to_owned())
+/// );
+/// // Quoted display name with escaped backslash + dquote.
+/// assert_eq!(
+///     parseaddr(r#""Smith, John" <john@example.com>"#),
+///     ("Smith, John".to_owned(), "john@example.com".to_owned())
+/// );
+/// // No angle brackets → entire string is the address, name is empty.
+/// assert_eq!(
+///     parseaddr("bare@example.com"),
+///     (String::new(), "bare@example.com".to_owned())
+/// );
+/// ```
+#[must_use]
+pub fn parseaddr(address: &str) -> (String, String) {
+    let trimmed = address.trim();
+    // Find the LAST `<` paired with the LAST `>` (Python takes the
+    // outermost angle-bracketed group).
+    let lt = trimmed.rfind('<');
+    let gt = trimmed.rfind('>');
+    match (lt, gt) {
+        (Some(l), Some(g)) if g > l => {
+            let name_raw = trimmed[..l].trim();
+            let addr = trimmed[l + 1..g].trim().to_owned();
+            let name = unquote_display_name(name_raw);
+            (name, addr)
+        }
+        _ => (String::new(), trimmed.to_owned()),
+    }
+}
+
+/// Strip surrounding `"..."` and un-escape backslash sequences.
+/// Internal helper for [`parseaddr`].
+fn unquote_display_name(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
+        let inner = &raw[1..raw.len() - 1];
+        let mut out = String::with_capacity(inner.len());
+        let mut chars = inner.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                if let Some(&next) = chars.peek() {
+                    if next == '\\' || next == '"' {
+                        out.push(next);
+                        chars.next();
+                        continue;
+                    }
+                }
+            }
+            out.push(c);
+        }
+        return out;
+    }
+    raw.to_owned()
+}
+
 // ------------------------------------------------------------------ MailError
 
 #[derive(Debug, thiserror::Error)]
