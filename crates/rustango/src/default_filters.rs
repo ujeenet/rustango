@@ -390,25 +390,7 @@ fn escapejs(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
     };
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '\\' | '\'' | '"' | '>' | '<' | '&' | '=' | '-' | ';' | '`' => {
-                out.push_str(&format!("\\u{:04X}", ch as u32));
-            }
-            // Line separator + paragraph separator — JS allows them
-            // inside string literals on older engines; escape so
-            // string termination behaves the same everywhere.
-            '\u{2028}' | '\u{2029}' => {
-                out.push_str(&format!("\\u{:04X}", ch as u32));
-            }
-            ch if (ch as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04X}", ch as u32));
-            }
-            other => out.push(other),
-        }
-    }
-    Ok(to_value(out)?)
+    Ok(to_value(crate::text::escapejs(s))?)
 }
 
 // ------------------------------------------------------------------ yesno
