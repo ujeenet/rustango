@@ -381,18 +381,15 @@ fn yesno(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
         .or_else(|| args.values().next())
         .and_then(Value::as_str)
         .unwrap_or("yes,no,maybe");
-    let mut parts = raw.splitn(3, ',');
-    let yes = parts.next().unwrap_or("yes");
-    let no = parts.next().unwrap_or("no");
-    let maybe = parts.next().unwrap_or(no);
-    let pick = if value.is_null() {
-        maybe
-    } else if value.as_bool().unwrap_or(true) {
-        yes
+    // The Tera filter treats non-null non-boolean values as truthy
+    // (matching the legacy behavior). Convert via Option<bool>:
+    // null → None, bool → Some(b), other → Some(true).
+    let opt = if value.is_null() {
+        None
     } else {
-        no
+        Some(value.as_bool().unwrap_or(true))
     };
-    Ok(to_value(pick)?)
+    Ok(to_value(crate::text::yesno(opt, raw))?)
 }
 
 // ------------------------------------------------------------------ get_digit

@@ -438,6 +438,47 @@ pub fn initials(s: &str, limit: Option<usize>) -> String {
     out
 }
 
+/// [`django.template.defaultfilters.yesno`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#yesno) —
+/// three-way string mapper for an optional boolean.
+///
+/// `choices` is a comma-separated string with 2 or 3 tokens:
+/// * `"yes,no"` — picks `yes` for `Some(true)`, `no` for
+///   `Some(false)` and `None`.
+/// * `"yes,no,maybe"` — picks `yes` / `no` / `maybe` for
+///   `Some(true)` / `Some(false)` / `None`.
+/// * Fewer than 2 tokens → defaults fill in missing slots
+///   (`"yes"` → `("yes", "yes", "yes")`).
+/// * More than 3 tokens → extras silently ignored.
+///
+/// ```
+/// use rustango::text::yesno;
+/// assert_eq!(yesno(Some(true),  "yes,no"),       "yes");
+/// assert_eq!(yesno(Some(false), "yes,no"),       "no");
+/// assert_eq!(yesno(None,        "yes,no,maybe"), "maybe");
+/// // No third token → None falls back to the "no" slot.
+/// assert_eq!(yesno(None,        "yes,no"),       "no");
+/// // Empty choices → Django default.
+/// assert_eq!(yesno(Some(true),  ""),             "yes");
+/// ```
+#[must_use]
+pub fn yesno(value: Option<bool>, choices: &str) -> String {
+    let raw = if choices.is_empty() {
+        "yes,no,maybe"
+    } else {
+        choices
+    };
+    let mut parts = raw.splitn(3, ',');
+    let yes = parts.next().unwrap_or("yes");
+    let no = parts.next().unwrap_or(yes);
+    let maybe = parts.next().unwrap_or(no);
+    let pick = match value {
+        Some(true) => yes,
+        Some(false) => no,
+        None => maybe,
+    };
+    pick.to_owned()
+}
+
 /// [`django.template.defaultfilters.cut`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#cut) —
 /// remove every occurrence of `needle` from `s`.
 ///
@@ -3112,6 +3153,58 @@ mod tests {
     fn mask_phone_no_digits_passes_through() {
         assert_eq!(mask_phone("no digits"), "no digits");
         assert_eq!(mask_phone(""), "");
+    }
+
+    // -------- yesno --------
+
+    #[test]
+    fn yesno_two_token_choices() {
+        assert_eq!(yesno(Some(true), "yes,no"), "yes");
+        assert_eq!(yesno(Some(false), "yes,no"), "no");
+        // No third token → None falls back to the "no" slot (Django shape).
+        assert_eq!(yesno(None, "yes,no"), "no");
+    }
+
+    #[test]
+    fn yesno_three_token_choices() {
+        assert_eq!(yesno(Some(true), "yes,no,maybe"), "yes");
+        assert_eq!(yesno(Some(false), "yes,no,maybe"), "no");
+        assert_eq!(yesno(None, "yes,no,maybe"), "maybe");
+    }
+
+    #[test]
+    fn yesno_empty_choices_defaults() {
+        // Django default is "yes,no,maybe".
+        assert_eq!(yesno(Some(true), ""), "yes");
+        assert_eq!(yesno(Some(false), ""), "no");
+        assert_eq!(yesno(None, ""), "maybe");
+    }
+
+    #[test]
+    fn yesno_single_token_choices() {
+        // Only "yes" given → no/maybe fall back to it.
+        assert_eq!(yesno(Some(true), "active"), "active");
+        assert_eq!(yesno(Some(false), "active"), "active");
+        assert_eq!(yesno(None, "active"), "active");
+    }
+
+    #[test]
+    fn yesno_extra_tokens_lump_into_third_slot() {
+        // 4+ tokens: `splitn(3, ',')` keeps the first two splits;
+        // everything after the second comma lumps into the third
+        // slot. Reasonable defensive behavior (Django itself raises
+        // ValueError and falls back to passthrough).
+        assert_eq!(yesno(Some(true), "a,b,c,d"), "a");
+        assert_eq!(yesno(Some(false), "a,b,c,d"), "b");
+        assert_eq!(yesno(None, "a,b,c,d"), "c,d");
+    }
+
+    #[test]
+    fn yesno_custom_strings() {
+        // Real-world: status icons, audit log states.
+        assert_eq!(yesno(Some(true), "✔,✗"), "✔");
+        assert_eq!(yesno(Some(false), "Enabled,Disabled,Unknown"), "Disabled");
+        assert_eq!(yesno(None, "Enabled,Disabled,Unknown"), "Unknown");
     }
 
     // -------- cut / normalize_whitespace --------
