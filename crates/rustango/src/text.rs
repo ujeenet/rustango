@@ -372,6 +372,60 @@ pub fn smart_split(text: &str) -> Vec<String> {
 /// The `element_id` is HTML-attribute-escaped before insertion.
 /// `</script>` inside a string can't break out because `<` →
 /// `&lt;`-equivalent.
+/// [`django.utils.html.escapejs(value)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.escapejs) —
+/// escape a string for safe embedding inside a JavaScript string
+/// literal in HTML.
+///
+/// Use this when you want to inject a server-side value directly
+/// into a `<script>` tag string literal. Prefer
+/// [`json_script`] for typed JSON payloads — it sets the right
+/// MIME type and is read back via `JSON.parse(document.getElementById(…).textContent)`,
+/// which is the modern best practice. `escapejs` is the older
+/// inline-string form Django still ships for callers that need
+/// it.
+///
+/// The escape set defangs both HTML-parser and JS-syntax breakage:
+///
+/// * Quote / backslash chars (`\`, `'`, `"`, `` ` ``) that would
+///   close the literal early.
+/// * Angle brackets / `&` (`<`, `>`, `&`) that would break out of
+///   the surrounding `<script>` tag.
+/// * Selected ASCII punctuation Django defends defensively
+///   (`=`, `-`, `;`) so a payload like `</script><script>alert(1)`
+///   cannot construct an event-handler attribute.
+/// * Line terminators U+2028 / U+2029 — JS treats these as line
+///   terminators in pre-ES2019 engines, which would split a
+///   string literal mid-content.
+/// * All ASCII control chars (< 0x20).
+///
+/// Every escaped character emits a 6-char `\uXXXX` sequence.
+///
+/// ```
+/// use rustango::text::escapejs;
+///
+/// assert_eq!(escapejs("hello"), "hello");
+/// assert_eq!(escapejs("a<b"), "a\\u003Cb");
+/// assert_eq!(escapejs("\""), "\\u0022");
+/// ```
+pub fn escapejs(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' | '\'' | '"' | '>' | '<' | '&' | '=' | '-' | ';' | '`' => {
+                out.push_str(&format!("\\u{:04X}", ch as u32));
+            }
+            '\u{2028}' | '\u{2029}' => {
+                out.push_str(&format!("\\u{:04X}", ch as u32));
+            }
+            ch if (ch as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04X}", ch as u32));
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 pub fn json_script<T: serde::Serialize>(
     value: &T,
     element_id: &str,
@@ -2104,5 +2158,78 @@ mod tests {
         let body = &out[body_start..body_end];
         let decoded: String = serde_json::from_str(body).unwrap();
         assert_eq!(decoded, "a<b>c");
+    }
+
+    // -------- escapejs --------
+
+    #[test]
+    fn escapejs_passes_through_plain_text() {
+        assert_eq!(escapejs("hello world"), "hello world");
+        assert_eq!(escapejs(""), "");
+        // Unicode beyond the escape set passes through.
+        assert_eq!(escapejs("café"), "café");
+    }
+
+    #[test]
+    fn escapejs_escapes_quote_and_backslash() {
+        assert_eq!(escapejs("\""), "\\u0022");
+        assert_eq!(escapejs("'"), "\\u0027");
+        assert_eq!(escapejs("\\"), "\\u005C");
+        assert_eq!(escapejs("`"), "\\u0060");
+    }
+
+    #[test]
+    fn escapejs_escapes_html_breakout_chars() {
+        // `</script>` — angle brackets are escaped; the `/` and the
+        // text "script" pass through (Django escape set excludes `/`).
+        let out = escapejs("</script>");
+        // The literal substring `</script>` cannot appear — the `<`
+        // and `>` are both escaped to `<` / `>`.
+        assert!(!out.contains("</script>"));
+        assert!(!out.contains('<'));
+        assert!(!out.contains('>'));
+        assert!(out.contains("\\u003C"));
+        assert!(out.contains("\\u003E"));
+        // `/` and the word "script" stay verbatim.
+        assert!(out.contains('/'));
+        assert!(out.contains("script"));
+    }
+
+    #[test]
+    fn escapejs_escapes_punctuation_for_event_handler_defense() {
+        // Django's defense-in-depth set includes `=`, `-`, `;` — so
+        // a payload like `onerror=alert(1)` can't be assembled inside
+        // a string-literal context that later flows into innerHTML.
+        assert_eq!(escapejs("="), "\\u003D");
+        assert_eq!(escapejs("-"), "\\u002D");
+        assert_eq!(escapejs(";"), "\\u003B");
+    }
+
+    #[test]
+    fn escapejs_escapes_line_separators() {
+        // U+2028 / U+2029 break pre-ES2019 JS string literals.
+        assert_eq!(escapejs("\u{2028}"), "\\u2028");
+        assert_eq!(escapejs("\u{2029}"), "\\u2029");
+    }
+
+    #[test]
+    fn escapejs_escapes_control_chars() {
+        // Every ASCII control char (< 0x20) becomes a 6-char escape.
+        assert_eq!(escapejs("\n"), "\\u000A");
+        assert_eq!(escapejs("\t"), "\\u0009");
+        assert_eq!(escapejs("\0"), "\\u0000");
+        assert_eq!(escapejs("\x1f"), "\\u001F");
+    }
+
+    #[test]
+    fn escapejs_full_xss_payload() {
+        let payload = r#"</script><script>alert("xss")</script>"#;
+        let out = escapejs(payload);
+        // The literal `</script>` cannot appear in the output.
+        assert!(!out.contains("</script>"));
+        assert!(!out.contains("<script>"));
+        // Plain text content like `alert` and `xss` passes through —
+        // it's just the punctuation that's escaped.
+        assert!(out.contains("alert"));
     }
 }
