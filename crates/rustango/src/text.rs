@@ -324,6 +324,85 @@ pub fn mask_phone(s: &str) -> String {
         .collect()
 }
 
+/// Join a slice of strings using the Oxford-comma convention with
+/// a configurable final conjunction.
+///
+/// * `[]` → `""`
+/// * `["a"]` → `"a"`
+/// * `["a", "b"]` → `"a {conj} b"` (no comma — only two items)
+/// * `["a", "b", "c"]` → `"a, b, {conj} c"` (Oxford comma)
+/// * `["a", "b", "c", "d"]` → `"a, b, c, {conj} d"`
+///
+/// Default conjunction is `"and"`. Pass `"or"` for the disjunctive
+/// form ("a, b, or c"); any other word works too ("plus", "via", …).
+///
+/// ```
+/// use rustango::text::oxford_join;
+/// assert_eq!(oxford_join(&["a", "b", "c"], "and"), "a, b, and c");
+/// assert_eq!(oxford_join(&["a", "b"], "and"), "a and b");
+/// assert_eq!(oxford_join(&["a", "b", "c"], "or"), "a, b, or c");
+/// assert_eq!(oxford_join(&[] as &[&str], "and"), "");
+/// ```
+#[must_use]
+pub fn oxford_join<S: AsRef<str>>(items: &[S], conj: &str) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.as_ref().to_owned(),
+        [a, b] => format!("{} {conj} {}", a.as_ref(), b.as_ref()),
+        rest => {
+            let (last, init) = rest.split_last().unwrap();
+            let head = init
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{head}, {conj} {}", last.as_ref())
+        }
+    }
+}
+
+/// Return the uppercase first character of each whitespace-
+/// separated word in `s`. Useful for avatar-fallback shapes ("two
+/// letters inside a colored circle when no profile picture is
+/// uploaded") and for any per-user mnemonic that doesn't have
+/// space for the full name.
+///
+/// * Non-alphabetic leading chars are skipped, so `"123 Alice"`
+///   yields `"A"`, not `"1"`.
+/// * Words with no alphabetic chars contribute nothing.
+/// * `limit = Some(n)` caps the result at `n` initials.
+/// * `limit = None` includes every word's initial.
+///
+/// ```
+/// use rustango::text::initials;
+/// assert_eq!(initials("Alice", None), "A");
+/// assert_eq!(initials("Alice Bob", None), "AB");
+/// assert_eq!(initials("alice m. bob", None), "AMB");
+/// assert_eq!(initials("alice m. bob", Some(2)), "AM");
+/// assert_eq!(initials("123 alice", None), "A");
+/// assert_eq!(initials("", None), "");
+/// ```
+#[must_use]
+pub fn initials(s: &str, limit: Option<usize>) -> String {
+    if matches!(limit, Some(0)) {
+        return String::new();
+    }
+    let mut out = String::new();
+    for word in s.split_whitespace() {
+        if let Some(ch) = word.chars().find(|c| c.is_alphabetic()) {
+            for upper_ch in ch.to_uppercase() {
+                out.push(upper_ch);
+            }
+            if let Some(lim) = limit {
+                if out.chars().count() >= lim {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// [`django.template.defaultfilters.cut`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#cut) —
 /// remove every occurrence of `needle` from `s`.
 ///
@@ -2819,6 +2898,79 @@ mod tests {
         // Plain text content like `alert` and `xss` passes through —
         // it's just the punctuation that's escaped.
         assert!(out.contains("alert"));
+    }
+
+    // -------- oxford_join --------
+
+    #[test]
+    fn oxford_join_empty_list() {
+        assert_eq!(oxford_join(&[] as &[&str], "and"), "");
+    }
+
+    #[test]
+    fn oxford_join_one_item_no_conjunction() {
+        assert_eq!(oxford_join(&["alone"], "and"), "alone");
+    }
+
+    #[test]
+    fn oxford_join_two_items_no_comma() {
+        assert_eq!(oxford_join(&["a", "b"], "and"), "a and b");
+    }
+
+    #[test]
+    fn oxford_join_three_plus_uses_oxford_comma() {
+        assert_eq!(oxford_join(&["a", "b", "c"], "and"), "a, b, and c");
+        assert_eq!(oxford_join(&["a", "b", "c", "d"], "and"), "a, b, c, and d");
+    }
+
+    #[test]
+    fn oxford_join_custom_conjunction() {
+        assert_eq!(oxford_join(&["a", "b", "c"], "or"), "a, b, or c");
+        assert_eq!(oxford_join(&["a", "b"], "via"), "a via b");
+    }
+
+    #[test]
+    fn oxford_join_accepts_strings_and_strs() {
+        let owned: Vec<String> = vec!["x".to_owned(), "y".to_owned(), "z".to_owned()];
+        assert_eq!(oxford_join(&owned, "and"), "x, y, and z");
+    }
+
+    // -------- initials --------
+
+    #[test]
+    fn initials_basic() {
+        assert_eq!(initials("Alice", None), "A");
+        assert_eq!(initials("Alice Bob", None), "AB");
+        assert_eq!(initials("alice m. bob", None), "AMB");
+    }
+
+    #[test]
+    fn initials_with_limit() {
+        assert_eq!(initials("alice m. bob", Some(2)), "AM");
+        assert_eq!(initials("alice m. bob", Some(1)), "A");
+        assert_eq!(initials("alice m. bob", Some(99)), "AMB");
+        assert_eq!(initials("alice m. bob", Some(0)), "");
+    }
+
+    #[test]
+    fn initials_skips_non_alphabetic_leading_chars() {
+        assert_eq!(initials("123 Alice", None), "A");
+        // Word with no alphabetic chars contributes nothing.
+        assert_eq!(initials("123 456", None), "");
+    }
+
+    #[test]
+    fn initials_empty_string() {
+        assert_eq!(initials("", None), "");
+        assert_eq!(initials("   ", None), "");
+    }
+
+    #[test]
+    fn initials_unicode_uppercase() {
+        // German ß uppercases to "SS" (two chars).
+        assert_eq!(initials("ßeta", None), "SS");
+        // Cyrillic.
+        assert_eq!(initials("привет мир", None), "ПМ");
     }
 
     // -------- mask_email / mask_card / mask_phone --------

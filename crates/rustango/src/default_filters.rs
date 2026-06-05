@@ -530,17 +530,7 @@ fn oxford_join(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Val
             other => other.to_string(),
         })
         .collect();
-    let out = match items.as_slice() {
-        [] => String::new(),
-        [one] => one.clone(),
-        [a, b] => format!("{a} {conj} {b}"),
-        rest => {
-            let (last, init) = rest.split_last().unwrap();
-            let head = init.join(", ");
-            format!("{head}, {conj} {last}")
-        }
-    };
-    Ok(to_value(out)?)
+    Ok(to_value(crate::text::oxford_join(&items, conj))?)
 }
 
 // ------------------------------------------------------------------ initials
@@ -572,21 +562,7 @@ fn initials(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value>
         .or_else(|| args.values().next())
         .and_then(Value::as_i64)
         .map(|n| usize::try_from(n).unwrap_or(usize::MAX));
-    let mut out = String::new();
-    for word in s.split_whitespace() {
-        // Find the first alphabetic char in the word.
-        if let Some(ch) = word.chars().find(|c| c.is_alphabetic()) {
-            for upper_ch in ch.to_uppercase() {
-                out.push(upper_ch);
-            }
-            if let Some(lim) = limit {
-                if out.chars().count() >= lim {
-                    break;
-                }
-            }
-        }
-    }
-    Ok(to_value(out)?)
+    Ok(to_value(crate::text::initials(s, limit))?)
 }
 
 // ------------------------------------------------------------------ truncatechars
