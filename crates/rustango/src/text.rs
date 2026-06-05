@@ -339,6 +339,62 @@ pub fn smart_split(text: &str) -> Vec<String> {
 }
 
 /// Django-parity
+/// [`django.utils.text.wrap(text, width)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.wrap) —
+/// word-wrap `text` to a column width of `width` characters,
+/// inserting newlines between words to avoid exceeding the width.
+///
+/// Existing `\n` line breaks are preserved — each pre-existing
+/// line wraps independently, so paragraph breaks aren't re-flowed.
+/// Words longer than `width` are NOT hyphenated; they end up on a
+/// line of their own (same as Django's `textwrap`-backed behavior).
+/// `width = 0` returns the input unchanged.
+///
+/// rustango ships the same wrap algorithm as the Tera `|wordwrap`
+/// filter — this is the programmatic surface for handler code.
+///
+/// ```ignore
+/// use rustango::text::wrap;
+/// let out = wrap("The quick brown fox jumps over the lazy dog", 14);
+/// assert!(out.lines().all(|l| l.len() <= 14 || !l.contains(' ')));
+/// assert_eq!(wrap("short", 80), "short");
+/// assert_eq!(wrap("anything", 0), "anything");
+/// ```
+#[must_use]
+pub fn wrap(text: &str, width: usize) -> String {
+    if width == 0 {
+        return text.to_owned();
+    }
+    text.split('\n')
+        .map(|line| wrap_one_line(line, width))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn wrap_one_line(line: &str, width: usize) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut current_len = 0usize;
+    for (i, word) in line.split_whitespace().enumerate() {
+        let word_chars = word.chars().count();
+        if i == 0 {
+            out.push_str(word);
+            current_len = word_chars;
+            continue;
+        }
+        let proposed = current_len + 1 + word_chars;
+        if proposed <= width {
+            out.push(' ');
+            out.push_str(word);
+            current_len = proposed;
+        } else {
+            out.push('\n');
+            out.push_str(word);
+            current_len = word_chars;
+        }
+    }
+    out
+}
+
+/// Django-parity
 /// [`django.utils.html.strip_spaces_between_tags(value)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.strip_spaces_between_tags) —
 /// remove whitespace runs sitting BETWEEN HTML tags (i.e. between
 /// a `>` and the next `<`). Used by Django's `{% spaceless %}`
@@ -1856,5 +1912,60 @@ mod tests {
             strip_spaces_between_tags("<p>\n  <em>café</em>\n</p>"),
             "<p><em>café</em></p>"
         );
+    }
+
+    // -------- wrap (Django parity) --------
+
+    #[test]
+    fn wrap_short_text_unchanged() {
+        assert_eq!(wrap("short", 80), "short");
+    }
+
+    #[test]
+    fn wrap_breaks_at_word_boundary() {
+        let out = wrap("The quick brown fox", 10);
+        // Should break — first line ≤ 10 chars, second carries the rest.
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines.len() >= 2);
+        for line in &lines {
+            // Either fits in 10 chars OR is a single word longer than 10.
+            assert!(
+                line.chars().count() <= 10 || !line.contains(' '),
+                "line `{line}` exceeds width and has multiple words"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_preserves_explicit_newlines() {
+        // Each line is wrapped independently.
+        let out = wrap("First line.\nSecond line.", 80);
+        assert_eq!(out, "First line.\nSecond line.");
+    }
+
+    #[test]
+    fn wrap_zero_width_returns_input_unchanged() {
+        let text = "anything goes here";
+        assert_eq!(wrap(text, 0), text);
+    }
+
+    #[test]
+    fn wrap_long_word_on_own_line() {
+        // A word longer than width can't fit but doesn't crash.
+        let out = wrap("hi superlongwordherethatexceedswidth bye", 10);
+        // The long word ends up on its own line.
+        assert!(out.contains("superlongwordherethatexceedswidth"));
+    }
+
+    #[test]
+    fn wrap_empty_input() {
+        assert_eq!(wrap("", 80), "");
+    }
+
+    #[test]
+    fn wrap_collapses_whitespace_in_lines() {
+        // textwrap shape: multiple internal spaces collapse to one.
+        let out = wrap("a   b   c", 80);
+        assert_eq!(out, "a b c");
     }
 }
