@@ -126,6 +126,7 @@ pub struct RolePermission {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     /// The role this permission belongs to.
+    #[rustango(fk = "rustango_roles", on = "id", on_delete = "cascade")]
     pub role_id: i64,
     /// Permission codename — `{table}.{action}`, e.g. `post.change`.
     #[rustango(max_length = 100)]
@@ -143,8 +144,10 @@ pub struct UserRole {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     /// `rustango_users.id`
+    #[rustango(fk = "rustango_users", on = "id", on_delete = "cascade")]
     pub user_id: i64,
     /// `rustango_roles.id`
+    #[rustango(fk = "rustango_roles", on = "id", on_delete = "cascade")]
     pub role_id: i64,
 }
 
@@ -164,6 +167,7 @@ pub struct UserPermission {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     /// `rustango_users.id`
+    #[rustango(fk = "rustango_users", on = "id", on_delete = "cascade")]
     pub user_id: i64,
     /// Permission codename — `{table}.{action}`.
     #[rustango(max_length = 100)]

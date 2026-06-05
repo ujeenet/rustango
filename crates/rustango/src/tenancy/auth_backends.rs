@@ -170,6 +170,7 @@ pub struct ApiKey {
     #[rustango(primary_key)]
     pub id: crate::sql::Auto<i64>,
     /// `rustango_users.id`
+    #[rustango(fk = "rustango_users", on = "id", on_delete = "cascade")]
     pub user_id: i64,
     /// 8-char hex prefix — public, used to look up the row.
     #[rustango(max_length = 8)]
