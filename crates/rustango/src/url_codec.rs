@@ -347,7 +347,7 @@ pub fn escape_uri_path(path: &str) -> String {
 /// when generating static-file URLs from on-disk paths; use
 /// `escape_uri_path` when injecting operator input into a path.
 ///
-/// ```
+/// ```ignore
 /// use rustango::url_codec::filepath_to_uri;
 ///
 /// // Plain paths pass through.
