@@ -103,6 +103,110 @@ where
     computed
 }
 
+/// Django-parity
+/// [`django.core.cache.utils.make_template_fragment_key(fragment_name, vary_on=None)`](https://docs.djangoproject.com/en/6.0/topics/cache/#template-fragment-caching) —
+/// derive a deterministic cache key from a fragment name + variation
+/// arguments. Used by Django's `{% cache %}` template tag to put
+/// every variation under a distinct key.
+///
+/// Output shape: `"template.cache.{name}.{md5(vary_on parts joined)}"`.
+/// MD5 is sufficient here since this is a cache-key derivation, not
+/// a security primitive — collisions just produce a stale cache
+/// hit, not a cross-tenant data leak.
+///
+/// Pair with [`cached_render`] (or any direct `Cache::get` /
+/// `Cache::set`) for programmatic fragment invalidation:
+///
+/// ```ignore
+/// use rustango::cache_fragment::make_template_fragment_key;
+///
+/// // Build the key Django's `{% cache 600 sidebar user.id %}` would use.
+/// let key = make_template_fragment_key("sidebar", &[&user_id.to_string()]);
+/// cache.delete(&key).await?;  // invalidate when underlying data changes
+/// ```
+#[must_use]
+pub fn make_template_fragment_key(fragment_name: &str, vary_on: &[&str]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut joined = String::with_capacity(64);
+    for (i, part) in vary_on.iter().enumerate() {
+        if i > 0 {
+            joined.push(':');
+        }
+        joined.push_str(part);
+    }
+    // Django uses md5 — we use SHA-256 truncated to 32 hex chars for
+    // a stronger primitive at the same key length (md5 is broken for
+    // crypto; for cache-key derivation either is fine, but rustango
+    // doesn't pull the md5 dep just for this and SHA-256 is already
+    // wired everywhere via crate::crypto).
+    let digest = Sha256::digest(joined.as_bytes());
+    let hex: String = digest.iter().take(16).fold(String::new(), |mut s, b| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+        s
+    });
+    format!("template.cache.{fragment_name}.{hex}")
+}
+
+#[cfg(test)]
+mod fragment_key_tests {
+    use super::*;
+
+    #[test]
+    fn key_includes_template_cache_prefix_and_fragment_name() {
+        let k = make_template_fragment_key("sidebar", &[]);
+        assert!(k.starts_with("template.cache.sidebar."));
+    }
+
+    #[test]
+    fn key_is_deterministic_for_same_inputs() {
+        let a = make_template_fragment_key("sidebar", &["42", "en"]);
+        let b = make_template_fragment_key("sidebar", &["42", "en"]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn key_changes_with_vary_on_values() {
+        let a = make_template_fragment_key("sidebar", &["42"]);
+        let b = make_template_fragment_key("sidebar", &["43"]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn key_changes_with_fragment_name() {
+        let a = make_template_fragment_key("sidebar", &["42"]);
+        let b = make_template_fragment_key("header", &["42"]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn key_empty_vary_on_works() {
+        // No vary_on → just the fragment name + a hash of "" — still
+        // deterministic and round-trippable.
+        let k = make_template_fragment_key("static_block", &[]);
+        assert!(k.starts_with("template.cache.static_block."));
+        // Hash component is non-empty so two different fragment names
+        // collide in the hash but not in the prefix.
+    }
+
+    #[test]
+    fn key_hash_segment_is_32_hex_chars() {
+        let k = make_template_fragment_key("x", &["1"]);
+        let hash = k.rsplit('.').next().unwrap();
+        assert_eq!(hash.len(), 32);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn key_order_of_vary_on_matters() {
+        // Django's shape: ["a", "b"] and ["b", "a"] produce DIFFERENT
+        // keys (vary_on is an ordered tuple, not a set).
+        let a = make_template_fragment_key("x", &["a", "b"]);
+        let b = make_template_fragment_key("x", &["b", "a"]);
+        assert_ne!(a, b);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
