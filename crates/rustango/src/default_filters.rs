@@ -893,21 +893,7 @@ fn phone2numeric(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Valu
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
     };
-    let out: String = s
-        .chars()
-        .map(|c| match c.to_ascii_lowercase() {
-            'a' | 'b' | 'c' => '2',
-            'd' | 'e' | 'f' => '3',
-            'g' | 'h' | 'i' => '4',
-            'j' | 'k' | 'l' => '5',
-            'm' | 'n' | 'o' => '6',
-            'p' | 'q' | 'r' | 's' => '7',
-            't' | 'u' | 'v' => '8',
-            'w' | 'x' | 'y' | 'z' => '9',
-            _ => c,
-        })
-        .collect();
-    Ok(to_value(out)?)
+    Ok(to_value(crate::text::phone2numeric(s))?)
 }
 
 // ------------------------------------------------------------------ linenumbers
