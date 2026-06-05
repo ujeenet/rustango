@@ -1065,6 +1065,12 @@ pub mod dateparse;
 /// the matching `strftime` output. Mirrors `django.utils.dateformat`.
 pub mod dateformat;
 
+/// Django `django.utils.dates` parity — month / weekday name
+/// lookups: `month_full(m)`, `month_abbr(m)`, `month_ap(m)`,
+/// `weekday_full(d)`, `weekday_abbr(d)`. English-only by design
+/// (i18n is a separate concern).
+pub mod dates;
+
 /// Django-shape generic value signer — `signing::Signer::sign(value)`
 /// + `signing::TimestampSigner` with TTL. Mirrors
 /// `django.core.signing` for tamper-proof signed payloads
