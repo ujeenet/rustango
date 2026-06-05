@@ -17,7 +17,7 @@ use super::errors::AdminError;
 use super::forms;
 use super::helpers::{
     build_fk_joins, chrome_context, fk_map_from_joined_rows_json, lookup_model, pager_suffix,
-    render_cell_json, render_form,
+    render_cell_json, render_form, resolve_model, resolve_model_and_pk,
 };
 use super::render;
 use super::templates::render_with_chrome;
@@ -236,7 +236,7 @@ pub(crate) async fn table_view(
     Query(params): Query<HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
-    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound { table })?;
+    let model = resolve_model(&state, &table)?;
     let pk_field = model.primary_key();
     let admin_cfg = model
         .admin
@@ -1516,7 +1516,7 @@ pub(crate) async fn autocomplete_view(
     Query(params): Query<HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> Result<axum::Json<serde_json::Value>, AdminError> {
-    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound { table })?;
+    let model = resolve_model(&state, &table)?;
     let admin_cfg = model
         .admin
         .copied()
@@ -1614,13 +1614,7 @@ pub(crate) async fn detail_view(
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
-    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound {
-        table: table.clone(),
-    })?;
-    let pk_field = model.primary_key().ok_or_else(|| {
-        AdminError::Internal(format!("model `{}` has no primary key", model.name))
-    })?;
-    let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
+    let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw)?;
 
     let detail_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let row = crate::sql::select_one_row_as_json(
@@ -1836,7 +1830,7 @@ pub(crate) async fn create_form(
     Path(table): Path<String>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
-    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound { table })?;
+    let model = resolve_model(&state, &table)?;
     if !state.can_add(model.table) {
         return Err(AdminError::ReadOnly {
             table: model.table.to_owned(),
@@ -1888,9 +1882,7 @@ pub(crate) async fn create_submit(
     State(state): State<AppState>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Result<Response, AdminError> {
-    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound {
-        table: table.clone(),
-    })?;
+    let model = resolve_model(&state, &table)?;
     if !state.can_add(model.table) {
         return Err(AdminError::ReadOnly {
             table: model.table.to_owned(),
@@ -1986,13 +1978,7 @@ pub(crate) async fn edit_form(
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AdminError> {
-    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound {
-        table: table.clone(),
-    })?;
-    let pk_field = model.primary_key().ok_or_else(|| {
-        AdminError::Internal(format!("model `{}` has no primary key", model.name))
-    })?;
-    let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
+    let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw)?;
 
     let edit_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     let row = crate::sql::select_one_row_as_json(
@@ -2073,9 +2059,7 @@ pub(crate) async fn update_submit(
     State(state): State<AppState>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Result<Response, AdminError> {
-    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound {
-        table: table.clone(),
-    })?;
+    let model = resolve_model(&state, &table)?;
     if state.is_read_only(model.table) {
         return Err(AdminError::ReadOnly {
             table: model.table.to_owned(),
@@ -2237,9 +2221,7 @@ pub(crate) async fn delete_submit(
     Path((table, pk_raw)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Response, AdminError> {
-    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound {
-        table: table.clone(),
-    })?;
+    let model = resolve_model(&state, &table)?;
     if !state.can_delete(model.table) {
         return Err(AdminError::ReadOnly {
             table: model.table.to_owned(),
@@ -2384,9 +2366,7 @@ pub(crate) async fn action_submit(
     State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> Result<Response, AdminError> {
-    let model = lookup_model(&state, &table).ok_or(AdminError::TableNotFound {
-        table: table.clone(),
-    })?;
+    let model = resolve_model(&state, &table)?;
 
     // Parse the form preserving repeats. axum's `Form<HashMap>` would
     // collapse duplicate `_selected` keys into one; we read the raw
