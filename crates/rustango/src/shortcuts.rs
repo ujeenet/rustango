@@ -249,23 +249,89 @@ pub fn render_to_string(
 /// Return a `302 Found` redirect to `url`. Django's
 /// [`redirect(to)`](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/#redirect).
 ///
-/// Pair with [`redirect_permanent`] for `301 Moved Permanently`.
+/// Pair with [`redirect_permanent`] for `301 Moved Permanently`,
+/// [`redirect_see_other`] for `303 See Other`, and
+/// [`redirect_to_view`] for the Django `redirect('post-detail', pk=1)`
+/// view-name shape that resolves through the URL conf.
 ///
 /// Matches Django's status codes exactly (302 / 301) — axum's built-in
 /// `Redirect::to` uses 303 See Other instead, which has subtly
 /// different semantics around method preservation.
-///
-/// **View-name resolution** — Django's `redirect('post-detail', pk=1)`
-/// shape that resolves a view name through the URL conf — depends on
-/// named URL reversal which lands in #8. For now, pass the URL
-/// directly, optionally formatted in the caller:
-///
-/// ```ignore
-/// redirect(format!("/posts/{}", post.id))
-/// ```
 #[must_use]
 pub fn redirect(url: impl Into<String>) -> Response {
     build_redirect(StatusCode::FOUND, url.into())
+}
+
+/// Django-parity [`resolve_url(to, *args, **kwargs)`](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/#resolve-url) —
+/// normalize either a raw URL or a registered route name into a
+/// concrete URL string.
+///
+/// Rules:
+/// 1. If `spec` starts with `/`, `http://`, `https://`, `./`, or
+///    `../`, return as-is (already a URL).
+/// 2. Otherwise treat `spec` as a registered route name and call
+///    [`crate::urls::reverse`] with `params` (already-stringified
+///    values). Namespaced names (`"polls:detail"`) round-trip the
+///    same way `urls::reverse` handles them.
+///
+/// # Errors
+/// Forwards [`crate::urls::ReverseError`] when `spec` is a name and
+/// `params` doesn't satisfy the pattern (missing / extra / unknown
+/// name).
+///
+/// ```ignore
+/// use std::collections::HashMap;
+/// use rustango::shortcuts::resolve_url;
+///
+/// // Raw URL passes through.
+/// assert_eq!(resolve_url("/posts/42", &HashMap::new()).unwrap(),
+///            "/posts/42");
+///
+/// // Named route gets reverse-looked-up.
+/// let mut params = HashMap::new();
+/// params.insert("id", "42".into());
+/// // assuming `register_url!("post_detail", "/posts/{id}")` somewhere
+/// let url = resolve_url("post_detail", &params)?;
+/// ```
+pub fn resolve_url(
+    spec: &str,
+    params: &std::collections::HashMap<&str, String>,
+) -> Result<String, crate::urls::ReverseError> {
+    if spec.starts_with('/')
+        || spec.starts_with("http://")
+        || spec.starts_with("https://")
+        || spec.starts_with("./")
+        || spec.starts_with("../")
+    {
+        return Ok(spec.to_owned());
+    }
+    crate::urls::reverse(spec, params)
+}
+
+/// Django-parity `redirect('view-name', kwargs={'pk': 1})` shape —
+/// resolve a registered route name + params into a URL and return
+/// a `302 Found` redirect response. Pairs with [`resolve_url`].
+///
+/// # Errors
+/// Forwards [`crate::urls::ReverseError`] when the name or params
+/// don't satisfy a registered route.
+///
+/// ```ignore
+/// use std::collections::HashMap;
+/// use rustango::shortcuts::redirect_to_view;
+///
+/// let mut params = HashMap::new();
+/// params.insert("id", "42".into());
+/// // Returns a 302 Location: /posts/42 response, given the matching
+/// // register_url!("post_detail", "/posts/{id}") in the app.
+/// let resp = redirect_to_view("post_detail", &params)?;
+/// ```
+pub fn redirect_to_view(
+    name: &str,
+    params: &std::collections::HashMap<&str, String>,
+) -> Result<Response, crate::urls::ReverseError> {
+    let url = crate::urls::reverse(name, params)?;
+    Ok(build_redirect(StatusCode::FOUND, url))
 }
 
 /// Return a `301 Moved Permanently` redirect to `url`. Use for
@@ -1036,5 +1102,86 @@ mod tests {
             .unwrap()
             .to_owned();
         assert_eq!(ct, "application/octet-stream");
+    }
+
+    // -------- resolve_url + redirect_to_view (Django parity) --------
+
+    use std::collections::HashMap;
+
+    crate::register_url!("shortcuts_test_detail", "/posts/{id}");
+    crate::register_url!("shortcuts_test_index", "/posts");
+
+    #[test]
+    fn resolve_url_passes_through_absolute_path() {
+        let p = HashMap::new();
+        assert_eq!(resolve_url("/posts/42", &p).unwrap(), "/posts/42");
+    }
+
+    #[test]
+    fn resolve_url_passes_through_https_url() {
+        let p = HashMap::new();
+        assert_eq!(
+            resolve_url("https://example.com/x", &p).unwrap(),
+            "https://example.com/x"
+        );
+    }
+
+    #[test]
+    fn resolve_url_passes_through_http_url() {
+        let p = HashMap::new();
+        assert_eq!(
+            resolve_url("http://example.com/x", &p).unwrap(),
+            "http://example.com/x"
+        );
+    }
+
+    #[test]
+    fn resolve_url_passes_through_relative_url() {
+        let p = HashMap::new();
+        assert_eq!(resolve_url("./next", &p).unwrap(), "./next");
+        assert_eq!(resolve_url("../up", &p).unwrap(), "../up");
+    }
+
+    #[test]
+    fn resolve_url_reverses_named_route() {
+        let mut p = HashMap::new();
+        p.insert("id", "42".to_string());
+        assert_eq!(
+            resolve_url("shortcuts_test_detail", &p).unwrap(),
+            "/posts/42"
+        );
+    }
+
+    #[test]
+    fn resolve_url_reverses_paramless_named_route() {
+        let p = HashMap::new();
+        assert_eq!(resolve_url("shortcuts_test_index", &p).unwrap(), "/posts");
+    }
+
+    #[test]
+    fn resolve_url_unknown_name_surfaces_reverse_error() {
+        let p = HashMap::new();
+        assert!(resolve_url("no_such_route_xyz", &p).is_err());
+    }
+
+    #[tokio::test]
+    async fn redirect_to_view_builds_302_with_resolved_location() {
+        let mut p = HashMap::new();
+        p.insert("id", "7".to_string());
+        let resp = redirect_to_view("shortcuts_test_detail", &p).unwrap();
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let loc = resp
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(loc, "/posts/7");
+    }
+
+    #[test]
+    fn redirect_to_view_unknown_name_is_err() {
+        let p = HashMap::new();
+        assert!(redirect_to_view("no_such_route_xyz_for_redirect", &p).is_err());
     }
 }
