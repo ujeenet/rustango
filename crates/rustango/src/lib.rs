@@ -1022,6 +1022,11 @@ pub mod urls;
 /// session IDs, reset tokens, verification codes.
 pub mod random;
 
+/// Django-shape base36 integer encoding — used in password reset
+/// URLs and other URL-friendly opaque IDs. `int_to_base36(n)` +
+/// `base36_to_int(s)` round-trip.
+pub mod base36;
+
 /// Django messages framework — `messages.success/info/warning/error/debug`
 /// flash storage backed by a signed cookie. Issue #9.
 pub mod messages;
