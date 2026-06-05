@@ -1037,6 +1037,13 @@ pub mod lorem;
 /// per RFC 1123. `http_date::http_date(secs)` + `parse_http_date(s)`.
 pub mod http_date;
 
+/// Django-shape `Set-Cookie` builder — `Cookie::new(name, value)
+/// .path("/").max_age(secs).http_only().secure().same_site(...)
+/// .build()` produces an axum-ready `HeaderValue`. Replaces
+/// scattered hand-rolled cookie strings across `messages` / `csrf`
+/// / `jwt` / `admin` / `tenancy` modules.
+pub mod cookies;
+
 /// Django messages framework — `messages.success/info/warning/error/debug`
 /// flash storage backed by a signed cookie. Issue #9.
 pub mod messages;
