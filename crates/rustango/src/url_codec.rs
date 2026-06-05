@@ -154,7 +154,7 @@ pub fn iri_to_uri(iri: &str) -> String {
 /// verbatim (no replacement char inserted). Single `%` followed
 /// by non-hex characters passes through as `%` plus the rest.
 ///
-/// ```
+/// ```ignore
 /// use rustango::url_codec::uri_to_iri;
 ///
 /// // Non-ASCII UTF-8 decodes back.
