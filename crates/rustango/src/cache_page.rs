@@ -580,6 +580,67 @@ where
         .expect("vary_on: header names must be ASCII without control characters")
 }
 
+/// Django-parity
+/// [`django.utils.cache.patch_vary_headers(response, newheaders)`](https://docs.djangoproject.com/en/6.0/topics/cache/#using-vary-headers) —
+/// add additional names to the existing `Vary` header on
+/// `headers`, deduplicating case-insensitively. Use from
+/// middleware that wants to extend whatever the view already set
+/// without clobbering it.
+///
+/// If `Vary` is absent, it's added with the new names. If `Vary: *`
+/// is already set, the patch is a no-op (per Django shape — `*` is
+/// the strongest cache key and adding more names doesn't change
+/// behavior).
+///
+/// Name comparison is case-insensitive (HTTP header names are
+/// case-insensitive per RFC 7230 §3.2). Output names preserve
+/// the first-seen casing.
+///
+/// ```ignore
+/// use axum::http::HeaderMap;
+/// use rustango::cache_page::patch_vary_headers;
+///
+/// let mut headers = HeaderMap::new();
+/// patch_vary_headers(&mut headers, &["Cookie"]);
+/// patch_vary_headers(&mut headers, &["Accept-Language", "cookie"]);
+/// // Vary: Cookie, Accept-Language  (deduped — second `cookie` skipped)
+/// ```
+pub fn patch_vary_headers(headers: &mut HeaderMap, new_names: &[&str]) {
+    use axum::http::header::VARY;
+    let existing = headers
+        .get(VARY)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    // `Vary: *` short-circuits — strongest possible cache key.
+    if existing.trim() == "*" {
+        return;
+    }
+    let mut accum: Vec<String> = existing
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut lower_set: std::collections::HashSet<String> =
+        accum.iter().map(|s| s.to_ascii_lowercase()).collect();
+    for name in new_names {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lc = trimmed.to_ascii_lowercase();
+        if lower_set.insert(lc) {
+            accum.push(trimmed.to_owned());
+        }
+    }
+    if accum.is_empty() {
+        return;
+    }
+    if let Ok(v) = HeaderValue::from_str(&accum.join(", ")) {
+        headers.insert(VARY, v);
+    }
+}
+
 // ---------------------------------------------------------------- Tests
 
 #[allow(dead_code)]
@@ -623,5 +684,60 @@ mod tests {
     fn vary_on_joins_with_comma_space() {
         let v = vary_on(["cookie", "accept-language"]);
         assert_eq!(v.to_str().unwrap(), "cookie, accept-language");
+    }
+
+    // -------- patch_vary_headers (Django parity) --------
+
+    #[test]
+    fn patch_vary_adds_to_empty_headers() {
+        let mut h = HeaderMap::new();
+        patch_vary_headers(&mut h, &["Cookie"]);
+        assert_eq!(h.get(axum::http::header::VARY).unwrap(), "Cookie");
+    }
+
+    #[test]
+    fn patch_vary_extends_existing() {
+        let mut h = HeaderMap::new();
+        h.insert(axum::http::header::VARY, HeaderValue::from_static("Cookie"));
+        patch_vary_headers(&mut h, &["Accept-Language"]);
+        let v = h.get(axum::http::header::VARY).unwrap().to_str().unwrap();
+        assert!(v.contains("Cookie"));
+        assert!(v.contains("Accept-Language"));
+    }
+
+    #[test]
+    fn patch_vary_dedupes_case_insensitively() {
+        let mut h = HeaderMap::new();
+        h.insert(axum::http::header::VARY, HeaderValue::from_static("Cookie"));
+        // Second "cookie" (lowercase) should not duplicate.
+        patch_vary_headers(&mut h, &["cookie", "Accept-Language"]);
+        let v = h.get(axum::http::header::VARY).unwrap().to_str().unwrap();
+        // Cookie should appear once.
+        let count = v.matches(|c: char| c == ',').count() + 1;
+        assert_eq!(count, 2, "expected 2 names, got: `{v}`");
+    }
+
+    #[test]
+    fn patch_vary_star_short_circuits() {
+        // `Vary: *` is the strongest possible — don't downgrade.
+        let mut h = HeaderMap::new();
+        h.insert(axum::http::header::VARY, HeaderValue::from_static("*"));
+        patch_vary_headers(&mut h, &["Cookie", "Accept-Language"]);
+        let v = h.get(axum::http::header::VARY).unwrap().to_str().unwrap();
+        assert_eq!(v, "*");
+    }
+
+    #[test]
+    fn patch_vary_empty_input_is_noop() {
+        let mut h = HeaderMap::new();
+        patch_vary_headers(&mut h, &[]);
+        assert!(h.get(axum::http::header::VARY).is_none());
+    }
+
+    #[test]
+    fn patch_vary_skips_empty_names() {
+        let mut h = HeaderMap::new();
+        patch_vary_headers(&mut h, &["", "  ", "Cookie"]);
+        assert_eq!(h.get(axum::http::header::VARY).unwrap(), "Cookie");
     }
 }
