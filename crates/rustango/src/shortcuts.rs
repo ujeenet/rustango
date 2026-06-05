@@ -647,6 +647,118 @@ pub fn gone(message: impl Into<String>) -> Response {
     res
 }
 
+/// Django-shape `HttpResponse(status=204)` — `204 No Content` with
+/// empty body. Used when a write succeeded but there's nothing
+/// meaningful to return (DELETE handlers, PUT/PATCH that don't
+/// echo the resource).
+///
+/// RFC 7231 §6.3.5 requires the body be empty on 204; this helper
+/// hard-codes `Body::empty()` so callers can't accidentally send
+/// a payload.
+///
+/// ```ignore
+/// use rustango::shortcuts::no_content;
+/// async fn delete_handler() -> axum::response::Response {
+///     // ... do the delete ...
+///     no_content()
+/// }
+/// ```
+#[must_use]
+pub fn no_content() -> Response {
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(axum::body::Body::empty())
+        .expect("204 + empty body is always valid")
+}
+
+/// Django-shape `HttpResponse(status=202)` — `202 Accepted`. Used
+/// when a request has been validated and queued for async processing,
+/// but the actual work hasn't finished. Body typically carries the
+/// job ID or a status-poll URL.
+///
+/// Pair with a `Location:` header pointing at the status endpoint
+/// (RFC 7231 doesn't mandate it for 202, but it's the canonical
+/// shape for async-job APIs).
+///
+/// ```ignore
+/// use rustango::shortcuts::accepted;
+/// async fn submit() -> axum::response::Response {
+///     // ... enqueue work ...
+///     accepted("Job 42 queued; poll /jobs/42 for status.")
+/// }
+/// ```
+#[must_use]
+pub fn accepted(message: impl Into<String>) -> Response {
+    let body = message.into();
+    let mut res = Response::builder()
+        .status(StatusCode::ACCEPTED)
+        .body(axum::body::Body::from(body))
+        .expect("202 + text body is always valid");
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    res
+}
+
+/// Django-shape `HttpResponse(status=415)` — `415 Unsupported
+/// Media Type`. Use when the request body's `Content-Type` doesn't
+/// match what the handler can parse (e.g. handler expects JSON,
+/// client sent XML).
+///
+/// Body is a `text/plain` message describing the supported types.
+/// Use an empty string for a bare-bones response.
+#[must_use]
+pub fn unsupported_media_type(message: impl Into<String>) -> Response {
+    let body = message.into();
+    let mut res = Response::builder()
+        .status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+        .body(axum::body::Body::from(body))
+        .expect("415 + text body is always valid");
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    res
+}
+
+/// Django-shape `HttpResponse(status=409)` — `409 Conflict`. Use
+/// when the request collides with current resource state — concurrent
+/// edit, unique-constraint violation surfaced before INSERT,
+/// stale write-token, etc.
+#[must_use]
+pub fn conflict(message: impl Into<String>) -> Response {
+    let body = message.into();
+    let mut res = Response::builder()
+        .status(StatusCode::CONFLICT)
+        .body(axum::body::Body::from(body))
+        .expect("409 + text body is always valid");
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    res
+}
+
+/// Django-shape `HttpResponse(status=422)` — `422 Unprocessable
+/// Entity`. Use when a request is syntactically valid (parses fine)
+/// but semantically invalid (validation rule failed). Common in
+/// JSON APIs to distinguish a 400-shaped parse error from a
+/// validation-failure response.
+#[must_use]
+pub fn unprocessable_entity(message: impl Into<String>) -> Response {
+    let body = message.into();
+    let mut res = Response::builder()
+        .status(StatusCode::UNPROCESSABLE_ENTITY)
+        .body(axum::body::Body::from(body))
+        .expect("422 + text body is always valid");
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    res
+}
+
 /// Build a download response — sets `Content-Type` plus
 /// `Content-Disposition: attachment; filename="..."` so browsers
 /// save the body to disk rather than rendering it inline. Django's
@@ -1287,5 +1399,64 @@ mod tests {
         assert_eq!(res.status(), StatusCode::GONE);
         let bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
         assert!(bytes.is_empty());
+    }
+
+    // -------- no_content / accepted / unsupported_media_type / conflict / unprocessable_entity --------
+
+    #[tokio::test]
+    async fn no_content_is_204_with_empty_body() {
+        let res = no_content();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert!(bytes.is_empty(), "204 must have empty body per RFC 7231");
+    }
+
+    #[tokio::test]
+    async fn accepted_is_202_with_body() {
+        let res = accepted("Job 42 queued");
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+        let bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert_eq!(&bytes[..], b"Job 42 queued");
+    }
+
+    #[tokio::test]
+    async fn unsupported_media_type_is_415() {
+        let res = unsupported_media_type("Only application/json accepted");
+        assert_eq!(res.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert!(bytes.starts_with(b"Only "));
+    }
+
+    #[tokio::test]
+    async fn conflict_is_409() {
+        let res = conflict("Concurrent edit detected");
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn unprocessable_entity_is_422() {
+        let res = unprocessable_entity("Validation failed: title required");
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert!(std::str::from_utf8(&bytes).unwrap().contains("required"));
+    }
+
+    #[tokio::test]
+    async fn status_helpers_set_text_plain_content_type() {
+        for res in [
+            accepted(""),
+            unsupported_media_type(""),
+            conflict(""),
+            unprocessable_entity(""),
+        ] {
+            let ct = res
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            assert_eq!(ct, "text/plain; charset=utf-8");
+        }
     }
 }
