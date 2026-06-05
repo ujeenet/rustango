@@ -230,6 +230,114 @@ pub fn normalize_newlines(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+/// Django-parity `django.utils.text.capfirst(x)` — capitalize the
+/// first character of `s`, leaving the rest untouched. Distinct
+/// from `str::to_title_case` / Python `.title()` which would
+/// capitalize every word.
+///
+/// Empty input returns the empty string; the first non-ASCII
+/// character is uppercased via Unicode case-mapping (`char::to_uppercase`)
+/// so multi-codepoint expansions (e.g. `ß` → `SS`) work right.
+///
+/// ```
+/// use rustango::text::capfirst;
+/// assert_eq!(capfirst("hello world"), "Hello world");
+/// assert_eq!(capfirst("Hello"), "Hello");
+/// assert_eq!(capfirst(""), "");
+/// assert_eq!(capfirst("ßomething"), "SSomething"); // Unicode upper expands
+/// ```
+#[must_use]
+pub fn capfirst(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Django-parity `django.utils.text.get_text_list(list_, last_word='or')` —
+/// join `items` into a comma-separated grammatical list with
+/// `last_word` (typically `"or"` or `"and"`) as the conjunction
+/// before the final element.
+///
+/// Examples (matching Django output exactly):
+///
+/// * `[]` → `""`
+/// * `["a"]` → `"a"`
+/// * `["a", "b"]` → `"a or b"` (no Oxford comma on two items)
+/// * `["a", "b", "c"]` → `"a, b or c"`
+/// * `["a", "b", "c", "d"]` → `"a, b, c or d"`
+///
+/// Note Django's `get_text_list` does NOT emit a serial-comma
+/// before the conjunction; the existing Tera filter `oxford_join`
+/// does (that's the Oxford-comma style). Use this when the Django
+/// shape is the goal; use `oxford_join` for serial-comma style.
+///
+/// ```
+/// use rustango::text::get_text_list;
+/// assert_eq!(get_text_list(&["a", "b", "c"], "or"), "a, b or c");
+/// assert_eq!(get_text_list(&["a", "b"], "and"), "a and b");
+/// assert_eq!(get_text_list(&["only"], "or"), "only");
+/// assert_eq!(get_text_list::<&str>(&[], "or"), "");
+/// ```
+#[must_use]
+pub fn get_text_list<S: AsRef<str>>(items: &[S], last_word: &str) -> String {
+    match items.len() {
+        0 => String::new(),
+        1 => items[0].as_ref().to_owned(),
+        2 => format!("{} {} {}", items[0].as_ref(), last_word, items[1].as_ref()),
+        n => {
+            let head = items[..n - 1]
+                .iter()
+                .map(|s| s.as_ref())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{head} {last_word} {}", items[n - 1].as_ref())
+        }
+    }
+}
+
+/// Django-parity `django.utils.text.smart_split(text)` — split
+/// `text` on whitespace, honoring double-quoted substrings as
+/// single tokens. Used by Django's admin search query parser.
+///
+/// Quotes themselves are KEPT in the output token (Django shape) —
+/// strip them at the call site if you want bare strings. Backslash
+/// escapes are preserved verbatim (`\"` inside a quoted string is
+/// kept literal — Django does not unescape).
+///
+/// ```
+/// use rustango::text::smart_split;
+/// let tokens = smart_split(r#"This is "a test""#);
+/// assert_eq!(tokens, vec!["This", "is", "\"a test\""]);
+///
+/// // Unmatched closing quote → kept as part of the trailing token.
+/// let tokens = smart_split(r#"oops "no close"#);
+/// assert_eq!(tokens, vec!["oops", "\"no close"]);
+/// ```
+#[must_use]
+pub fn smart_split(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for c in text.chars() {
+        if c == '"' {
+            in_quotes = !in_quotes;
+            current.push(c);
+        } else if c.is_whitespace() && !in_quotes {
+            if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(c);
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
 /// Django-parity `phone2numeric` — convert phone-keypad letters to
 /// the matching digit per ITU E.161 (`abc→2`, `def→3`, …, `wxyz→9`).
 /// Case-insensitive; non-letters pass through unchanged.
@@ -501,5 +609,126 @@ mod tests {
     #[test]
     fn phone2numeric_empty() {
         assert_eq!(phone2numeric(""), "");
+    }
+
+    // -------- capfirst (Django parity) --------
+
+    #[test]
+    fn capfirst_simple() {
+        assert_eq!(capfirst("hello world"), "Hello world");
+    }
+
+    #[test]
+    fn capfirst_already_capitalized() {
+        assert_eq!(capfirst("Hello"), "Hello");
+    }
+
+    #[test]
+    fn capfirst_empty_is_empty() {
+        assert_eq!(capfirst(""), "");
+    }
+
+    #[test]
+    fn capfirst_single_char() {
+        assert_eq!(capfirst("a"), "A");
+    }
+
+    #[test]
+    fn capfirst_unicode_expanding_case() {
+        // German sharp s uppercases to two chars (SS) per Unicode rules.
+        // Django's `.capitalize()` would also expand; we follow.
+        assert_eq!(capfirst("ßomething"), "SSomething");
+    }
+
+    #[test]
+    fn capfirst_does_not_touch_rest() {
+        // Django capfirst doesn't lowercase the tail (distinct from
+        // Python's `.capitalize()` which DOES). Match Django.
+        assert_eq!(capfirst("hELLO"), "HELLO");
+    }
+
+    // -------- get_text_list (Django parity) --------
+
+    #[test]
+    fn get_text_list_empty() {
+        assert_eq!(get_text_list::<&str>(&[], "or"), "");
+    }
+
+    #[test]
+    fn get_text_list_single() {
+        assert_eq!(get_text_list(&["only"], "or"), "only");
+    }
+
+    #[test]
+    fn get_text_list_two_uses_conjunction_only() {
+        // Two items → "a or b" (no comma).
+        assert_eq!(get_text_list(&["a", "b"], "or"), "a or b");
+        assert_eq!(get_text_list(&["a", "b"], "and"), "a and b");
+    }
+
+    #[test]
+    fn get_text_list_three_uses_no_serial_comma() {
+        // Django shape: "a, b or c" — no Oxford comma.
+        assert_eq!(get_text_list(&["a", "b", "c"], "or"), "a, b or c");
+    }
+
+    #[test]
+    fn get_text_list_many() {
+        assert_eq!(get_text_list(&["a", "b", "c", "d"], "or"), "a, b, c or d");
+    }
+
+    #[test]
+    fn get_text_list_with_string_owned() {
+        // Works with `String` too via AsRef<str>.
+        let items: Vec<String> = vec!["one".into(), "two".into(), "three".into()];
+        assert_eq!(get_text_list(&items, "or"), "one, two or three");
+    }
+
+    // -------- smart_split (Django parity) --------
+
+    #[test]
+    fn smart_split_simple_whitespace() {
+        assert_eq!(
+            smart_split("This is a test"),
+            vec!["This", "is", "a", "test"]
+        );
+    }
+
+    #[test]
+    fn smart_split_preserves_quoted_substrings() {
+        let got = smart_split(r#"This is "a test""#);
+        assert_eq!(got, vec!["This", "is", r#""a test""#]);
+    }
+
+    #[test]
+    fn smart_split_multiple_quoted_groups() {
+        let got = smart_split(r#""one two" "three four""#);
+        assert_eq!(got, vec![r#""one two""#, r#""three four""#]);
+    }
+
+    #[test]
+    fn smart_split_unmatched_quote_keeps_trailing_token() {
+        // Django shape: unmatched closing quote does NOT panic; the
+        // unfinished quoted span is kept as one trailing token.
+        let got = smart_split(r#"oops "no close"#);
+        assert_eq!(got, vec!["oops", r#""no close"#]);
+    }
+
+    #[test]
+    fn smart_split_empty_string() {
+        let got = smart_split("");
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn smart_split_whitespace_only_returns_empty() {
+        let got = smart_split("   \t  \n  ");
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn smart_split_collapses_consecutive_whitespace() {
+        let got = smart_split("a    b\t\tc");
+        assert_eq!(got, vec!["a", "b", "c"]);
     }
 }
