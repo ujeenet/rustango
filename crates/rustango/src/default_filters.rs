@@ -585,17 +585,7 @@ fn truncatechars(value: &Value, args: &HashMap<String, Value>) -> tera::Result<V
         Some(n) if n >= 0 => n as usize,
         _ => return Ok(value.clone()),
     };
-    let total = s.chars().count();
-    if total <= n {
-        return Ok(value.clone());
-    }
-    if n == 0 {
-        return Ok(to_value("")?);
-    }
-    // Reserve 1 char for the ellipsis.
-    let keep = n.saturating_sub(1);
-    let truncated: String = s.chars().take(keep).collect();
-    Ok(to_value(format!("{truncated}…"))?)
+    Ok(to_value(crate::text::truncatechars(s, n))?)
 }
 
 // ------------------------------------------------------------------ normalize_whitespace
