@@ -771,6 +771,57 @@ impl Cli {
             let url = std::env::var("DATABASE_URL").map_err(|_| {
             "missing env var `DATABASE_URL`. Set it in your shell, or copy `.env.example` to `.env`."
         })?;
+            // #560 — on a multi-backend build (e.g. `--features
+            // postgres,sqlite`) this `cfg(postgres)` arm fires even
+            // when `DATABASE_URL` is a `sqlite://` / `mysql://` URL.
+            // `PgPool::connect(sqlite://…)` then fails with a cryptic
+            // scheme-mismatch error. Detect non-PG URLs and route
+            // them through the `Pool::connect` dispatcher (which
+            // matches by scheme).
+            let pg_scheme = url.starts_with("postgres://") || url.starts_with("postgresql://");
+            if !pg_scheme {
+                // Multi-backend build with non-PG URL — defer to the
+                // shared `Pool::connect` path that dispatches by scheme.
+                // Note: the `#[cfg(not(postgres))]` branch above is the
+                // single-backend mirror of this; we duplicate the
+                // necessary setup here rather than restructure the
+                // `#[cfg]` blocks at the top of the fn.
+                let pool = crate::sql::Pool::connect(&url).await?;
+                let _ = crate::migrate::migrate_pool(&pool, &self.migrations_dir).await?;
+                if let Some(seed) = self.seed {
+                    seed(&pool)
+                        .await
+                        .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+                }
+                let api = self.api;
+                #[cfg(feature = "admin")]
+                let api = if self.welcome_page {
+                    try_mount_welcome(api)
+                } else {
+                    api
+                };
+                #[cfg(feature = "admin")]
+                let api = mount_static_dirs(api, &self.static_dirs);
+                #[cfg(feature = "csrf")]
+                let api = match self.csrf {
+                    Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
+                    None => api,
+                };
+                #[cfg(feature = "config")]
+                let api = match self.settings_for_layers.as_ref() {
+                    Some(s) => apply_settings_layers(api, s),
+                    None => api,
+                };
+                let app = api.layer(axum::Extension(pool));
+                let listener = tokio::net::TcpListener::bind(&self.bind).await?;
+                eprintln!("server listening on http://{}", listener.local_addr()?);
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await?;
+                return Ok(());
+            }
             let pool = PgPool::connect(&url).await?;
             let _ = crate::migrate::migrate(&pool, &self.migrations_dir).await?;
             if let Some(seed) = self.seed {
