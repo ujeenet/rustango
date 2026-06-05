@@ -1017,6 +1017,11 @@ pub mod composite_pk;
 /// `get_absolute_url()`. Pair with [`register_url!`]. Issue #8.
 pub mod urls;
 
+/// Django-shape random-string helpers — `get_random_string`,
+/// `get_random_token_urlsafe`. CSPRNG-backed, suitable for
+/// session IDs, reset tokens, verification codes.
+pub mod random;
+
 /// Django messages framework — `messages.success/info/warning/error/debug`
 /// flash storage backed by a signed cookie. Issue #9.
 pub mod messages;
