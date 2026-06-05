@@ -44,12 +44,12 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 22. Async support | 4 | 0 | 0 | 3 |
 | 23. DRF parity | 22 | 0 | 1 | 0 |
 | 24. contrib modules | 12 | 1 | 3 | 2 |
-| 25. `django.utils.*` helpers | 62 | 0 | 0 | 0 |
-| **Totals** | **432** | **11** | **21** | **19** |
+| 25. `django.utils.*` helpers | 66 | 0 | 0 | 0 |
+| **Totals** | **436** | **11** | **21** | **19** |
 
-Coverage = 432 / (432 + 11 + 21) = **93% full, 2% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
+Coverage = 436 / (436 + 11 + 21) = **93% full, 2% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
 
-Snapshot date: 2026-06-05 (post-v0.42 plus 60+ Django `utils.*` parity helpers across PRs #619–#683: 11 new modules + 11 widened modules — see Section 25 for the per-helper table).
+Snapshot date: 2026-06-05 (post-v0.42 plus 65+ Django `utils.*` parity helpers across PRs #619–#688: 11 new modules + 12 widened modules — see Section 25 for the per-helper table).
 
 ---
 
@@ -737,6 +737,11 @@ below corresponds to a Django module / function the port targets.
 | `django.contrib.humanize.naturalsize` | [naturalsize](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#naturalsize) | SHIPPED | `humanize::naturalsize(n)` (PR #683) — KiB-scale binary "1.0 KB" / "1.5 MB"; "1 byte" singular |
 | `django.contrib.humanize.ordinal` | [ordinal](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#ordinal) | SHIPPED | `humanize::ordinal(n)` (PR #683) — "1st"/"2nd"/"3rd"/"11th"; teens special-cased |
 | `django.contrib.humanize.apnumber` | [apnumber](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#apnumber) | SHIPPED | `humanize::apnumber(n)` (PR #683) — AP-style "one".."nine" for 1..=9 |
+| `django.contrib.humanize.naturaltime` | [naturaltime](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#naturaltime) | SHIPPED | `humanize::naturaltime(now, then)` (PR #685) — "3 minutes ago" / "in 5 hours". (now, then) parameter shape lets callers thread their own clock |
+| `django.contrib.humanize.naturalday` | [naturalday](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#naturalday) | SHIPPED | `humanize::naturalday(now, then)` (PR #685) — "today"/"yesterday"/"tomorrow"/"Mmm DD" fallback |
+| `django.contrib.humanize.intcomma` | [intcomma](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#intcomma) | SHIPPED | `humanize::intcomma(n)` + `intcomma_f64(f)` (PR #686) — completes humanize public-API sweep |
+| `django.utils.duration.duration_iso_string` | [duration_iso_string](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.duration.duration_iso_string) | SHIPPED | `dateparse::duration_iso_string(d)` (PR #687) — ISO 8601 inverse of `parse_duration`. "P\<d\>DT\<HH\>H\<MM\>M\<SS\>[.ffffff]S" shape |
+| `django.utils.encoding.uri_to_iri` | [uri_to_iri](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.uri_to_iri) | SHIPPED | `url_codec::uri_to_iri(uri)` (PR #688) — inverse of `iri_to_uri`. Decodes UTF-8 percent-runs; URI-reserved chars stay encoded |
 | `django.utils.crypto.get_random_string` | [get_random_string](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.get_random_string) | SHIPPED | `random::get_random_string(length, allowed_chars)` + `get_random_string_default` (PR #637) — CSPRNG-backed `crate::random` module with 5 predefined alphabets |
 | `django.utils.crypto.constant_time_compare` | [constant_time_compare](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.constant_time_compare) | SHIPPED | `crypto::constant_time_compare(a, b)` (PR #647) — consolidates 2 prior private copies |
 | `django.utils.encoding.iri_to_uri` | [iri_to_uri](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.iri_to_uri) | SHIPPED | `url_codec::iri_to_uri` (PR #648) |
@@ -779,12 +784,12 @@ below corresponds to a Django module / function the port targets.
 | Mail settings (SERVER_EMAIL / EMAIL_SUBJECT_PREFIX / EMAIL_TIMEOUT) | (sec 14) | SHIPPED | `MailSettings.{server_email, email_subject_prefix, smtp_timeout_secs}` (PRs #619, #626) |
 | Email attachments | (sec 18) | SHIPPED | `Email::attach(filename, bytes, mimetype)` + `attach_text` (PR #621) |
 
-Summary: **62 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A** (Django `utils.*` helpers).
+Summary: **66 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A** (Django `utils.*` helpers).
 
 Net effect of the 2026-06-04→06-05 batch:
 * **11 new public modules**: `random`, `base36`, `base62`, `lorem`, `http_date`, `http_methods`, `cookies`, `numberformat`, `dateparse`, `dateformat`, `timesince`
-* **Widened existing modules**: `text` (+19 helpers incl. `json_script`, `escapejs`, `truncate_html_chars`, `truncate_html_words`), `url_codec` (+4), `shortcuts` (+9), `validators` (+7), `email` (+5 incl. parseaddr / Email::send / send_mail / send_many / BadHeader), `crypto` (+1), `compression` (+2), `cache_fragment` (+1), `cache_page` (+1), `cache` (+3), `urls` (+3), `dateformat` (+5 codes P/f/W/t/o via PR #679), `humanize` (+4 public — intword/naturalsize/ordinal/apnumber via PR #683)
-* **35 PRs admin-merged across the sweep**: #619–#683 (gaps in numbering are doc-only PRs that landed in the same window)
+* **Widened existing modules**: `text` (+19 helpers incl. `json_script`, `escapejs`, `truncate_html_chars`, `truncate_html_words`), `url_codec` (+5 incl. `uri_to_iri` via PR #688), `shortcuts` (+9), `validators` (+7), `email` (+5 incl. parseaddr / Email::send / send_mail / send_many / BadHeader), `crypto` (+1), `compression` (+2), `cache_fragment` (+1), `cache_page` (+1), `cache` (+3), `urls` (+3), `dateformat` (+5 codes P/f/W/t/o via PR #679), `dateparse` (+1 `duration_iso_string` via PR #687), `humanize` (+7 public — intword/naturalsize/ordinal/apnumber/naturaltime/naturalday/intcomma via PRs #683/#685/#686)
+* **39 PRs admin-merged across the sweep**: #619–#688 (gaps in numbering are doc-only PRs that landed in the same window)
 
 Bulk closure of Django `utils.*` API surface — the most-common helper functions a Django port reaches for during translation now have direct rustango equivalents. Outstanding gaps in this category: `regex_helper.normalize` (URL-conf regex normalization — niche), `formats.localize` (locale-aware value rendering — large lift, requires per-locale config wiring), `safestring.mark_safe` (N/A — Tera handles autoescape natively).
 
