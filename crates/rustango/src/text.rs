@@ -339,6 +339,60 @@ pub fn smart_split(text: &str) -> Vec<String> {
 }
 
 /// Django-parity
+/// [`django.utils.html.json_script(value, element_id)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.json_script) —
+/// embed a JSON-serialized `value` into a
+/// `<script type="application/json" id="..."></script>` tag for
+/// safe pass-through to client-side JavaScript.
+///
+/// The canonical "ship a typed object from view to JS" path.
+/// Escapes the JSON XSS-defang characters (`<` `>` `&` plus the
+/// two Unicode line terminators U+2028 and U+2029) so the script
+/// element can't be terminated early by attacker-controlled
+/// content inside the serialized object.
+///
+/// Pair with `JSON.parse(document.getElementById('id').textContent)`
+/// on the client side.
+///
+/// # Errors
+/// Returns `serde_json::Error` only when `value` itself fails to
+/// serialize (e.g. NaN floats in a struct that rejects them) —
+/// the escaping pass is infallible.
+///
+/// ```ignore
+/// use rustango::text::json_script;
+///
+/// #[derive(serde::Serialize)]
+/// struct Bootstrap { user_id: u64, csrf: String }
+///
+/// let html = json_script(&Bootstrap { user_id: 42, csrf: "tok".into() },
+///                       "bootstrap-data")?;
+/// // → <script id="bootstrap-data" type="application/json">{"user_id":42,"csrf":"tok"}</script>
+/// ```
+///
+/// The `element_id` is HTML-attribute-escaped before insertion.
+/// `</script>` inside a string can't break out because `<` →
+/// `&lt;`-equivalent.
+pub fn json_script<T: serde::Serialize>(
+    value: &T,
+    element_id: &str,
+) -> Result<String, serde_json::Error> {
+    let raw = serde_json::to_string(value)?;
+    // Django's exact escape set: `<` `>` `&` plus U+2028 / U+2029.
+    // We escape via `\uXXXX` so the JSON stays valid for client-
+    // side `JSON.parse`.
+    let escaped = raw
+        .replace('<', "\\u003C")
+        .replace('>', "\\u003E")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029");
+    let id_safe = html_escape(element_id);
+    Ok(format!(
+        r#"<script id="{id_safe}" type="application/json">{escaped}</script>"#
+    ))
+}
+
+/// Django-parity
 /// [`django.utils.text.wrap(text, width)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.wrap) —
 /// word-wrap `text` to a column width of `width` characters,
 /// inserting newlines between words to avoid exceeding the width.
@@ -1967,5 +2021,88 @@ mod tests {
         // textwrap shape: multiple internal spaces collapse to one.
         let out = wrap("a   b   c", 80);
         assert_eq!(out, "a b c");
+    }
+
+    // -------- json_script (Django parity) --------
+
+    #[derive(serde::Serialize)]
+    struct Bootstrap {
+        user_id: u64,
+        name: String,
+    }
+
+    #[test]
+    fn json_script_wraps_in_script_tag_with_id() {
+        let out = json_script(
+            &Bootstrap {
+                user_id: 42,
+                name: "alice".into(),
+            },
+            "bootstrap",
+        )
+        .unwrap();
+        assert!(out.starts_with(r#"<script id="bootstrap" type="application/json">"#));
+        assert!(out.ends_with("</script>"));
+        assert!(out.contains(r#""user_id":42"#));
+        assert!(out.contains(r#""name":"alice""#));
+    }
+
+    #[test]
+    fn json_script_escapes_lt_gt_amp_to_unicode_escapes() {
+        // Strings with `<` `>` `&` get escaped so a `</script>` in the
+        // payload can't break out of the script element.
+        let v: String = "</script><script>alert(1)</script>".into();
+        let out = json_script(&v, "x").unwrap();
+        assert!(
+            !out.contains("</script><script>"),
+            "raw </script> must NOT appear in body — would break out: {out}"
+        );
+        // The `<` chars get unicode-escaped.
+        assert!(out.contains(r"<"));
+    }
+
+    #[test]
+    fn json_script_escapes_line_terminators() {
+        // U+2028 / U+2029 — JavaScript line terminators inside string
+        // literals (pre-ES2019 strict parsers choke).
+        let v: String = "line\u{2028}sep".into();
+        let out = json_script(&v, "x").unwrap();
+        assert!(out.contains(r" "));
+        assert!(!out.contains('\u{2028}'));
+    }
+
+    #[test]
+    fn json_script_escapes_element_id_as_html_attr() {
+        // Attacker-controlled element_id can't break out of the
+        // `id="..."` attribute via embedded `"` or `>`.
+        let out = json_script(&42u64, r#"x" onload="alert(1)"#).unwrap();
+        assert!(!out.contains(r#"" onload="#));
+        assert!(out.contains("&quot;"));
+    }
+
+    #[test]
+    fn json_script_handles_simple_values() {
+        let out_int = json_script(&42u64, "n").unwrap();
+        assert!(out_int.contains(">42</script>"));
+        let out_str = json_script(&"hello", "s").unwrap();
+        assert!(out_str.contains(r#">"hello"</script>"#));
+        let out_arr = json_script(&vec![1, 2, 3], "a").unwrap();
+        assert!(out_arr.contains(">[1,2,3]</script>"));
+    }
+
+    #[test]
+    fn json_script_produces_parseable_json_body() {
+        // The escaped body must round-trip through serde_json::from_str
+        // after the JS-side `<` / `>` / `&` are NOT
+        // unescaped — JSON-spec-valid `\uXXXX` escapes parse as the
+        // matching char.
+        let v: String = "a<b>c".into();
+        let out = json_script(&v, "x").unwrap();
+        // Extract the body between `>` and `</script>`.
+        let body_start = out.find("\">").unwrap() + 2;
+        let body_end = out.find("</script>").unwrap();
+        let body = &out[body_start..body_end];
+        let decoded: String = serde_json::from_str(body).unwrap();
+        assert_eq!(decoded, "a<b>c");
     }
 }
