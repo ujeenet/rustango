@@ -36,7 +36,7 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("timesince", timesince);
     tera.register_filter("timeuntil", timeuntil);
     tera.register_filter("format_number", format_number_filter);
-    tera.register_filter("format_currency", format_currency);
+    tera.register_filter("format_currency", format_currency_filter);
 }
 
 // ------------------------------------------------------------------ intcomma
@@ -418,15 +418,59 @@ fn currency_fmt(code: &str) -> CurrencyFmt {
 ///   typography conventions).
 ///
 /// Non-numeric input passes through unchanged.
-fn format_currency(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+/// Locale-aware currency formatter — public Rust API.
+///
+/// Produces `"$1,234.56"`, `"€1.234,56"`, `"1 234,56 €"`,
+/// `"¥1,234"`, etc. — based on the currency code's symbol, decimal
+/// precision (USD/EUR/GBP = 2; JPY/KRW/CLP = 0), and the locale's
+/// number-formatting conventions.
+///
+/// Locale-driven Euro placement override: French, Italian,
+/// Spanish, Portuguese, Dutch put the `€` symbol AFTER the amount
+/// with a space (`"1 234,56 €"`); other locales prefix it.
+///
+/// ```
+/// use rustango::humanize::format_currency;
+/// assert_eq!(format_currency(1234.56, "USD", "en"), "$1,234.56");
+/// assert_eq!(format_currency(1234.56, "EUR", "de"), "€1.234,56");
+/// assert_eq!(format_currency(1234.56, "EUR", "fr"), "1 234,56 €");
+/// assert_eq!(format_currency(1234.0,  "JPY", "ja"), "¥1,234");   // 0 decimals
+/// assert_eq!(format_currency(-50.0,   "USD", "en"), "-$50.00");  // sign before symbol
+/// ```
+#[must_use]
+pub fn format_currency(amount: f64, currency: &str, locale: &str) -> String {
+    let cur = currency_fmt(currency);
+    let fmt = locale_number_fmt(locale);
+
+    let body_str = format!("{amount:.*}", cur.decimals as usize);
+    let negative = body_str.starts_with('-');
+    let unsigned = if negative { &body_str[1..] } else { &body_str };
+    let (int_part, frac_part) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let formatted = apply_number_fmt(int_part, frac_part, fmt);
+    let sign = if negative { "-" } else { "" };
+
+    let base = locale.to_ascii_lowercase();
+    let base = base.split('-').next().unwrap_or(&base);
+    let euro_suffix_locale = matches!(base, "fr" | "it" | "es" | "pt" | "nl");
+    let prefix_after_override = if currency.eq_ignore_ascii_case("EUR") && euro_suffix_locale {
+        false
+    } else {
+        cur.prefix
+    };
+
+    if prefix_after_override {
+        format!("{sign}{symbol}{formatted}", symbol = cur.symbol)
+    } else {
+        format!("{sign}{formatted} {symbol}", symbol = cur.symbol)
+    }
+}
+
+fn format_currency_filter(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let currency = args
         .get("currency")
         .and_then(Value::as_str)
         .unwrap_or("USD");
     let locale = args.get("locale").and_then(Value::as_str).unwrap_or("en");
-
-    let cur = currency_fmt(currency);
-    let fmt = locale_number_fmt(locale);
 
     let amount = match value.as_f64() {
         Some(f) => f,
@@ -439,31 +483,7 @@ fn format_currency(value: &Value, args: &HashMap<String, Value>) -> tera::Result
         },
     };
 
-    let body_str = format!("{amount:.*}", cur.decimals as usize);
-    let negative = body_str.starts_with('-');
-    let unsigned = if negative { &body_str[1..] } else { &body_str };
-    let (int_part, frac_part) = unsigned.split_once('.').unwrap_or((unsigned, ""));
-    let formatted = apply_number_fmt(int_part, frac_part, fmt);
-    let sign = if negative { "-" } else { "" };
-
-    // Locale override for Euro placement — French / Italian /
-    // Spanish / Portuguese put the symbol after with a space.
-    let base = locale.to_ascii_lowercase();
-    let base = base.split('-').next().unwrap_or(&base);
-    let euro_suffix_locale = matches!(base, "fr" | "it" | "es" | "pt" | "nl");
-    let prefix_after_override = if currency.eq_ignore_ascii_case("EUR") && euro_suffix_locale {
-        false
-    } else {
-        cur.prefix
-    };
-
-    let out = if prefix_after_override {
-        format!("{sign}{symbol}{formatted}", symbol = cur.symbol)
-    } else {
-        format!("{sign}{formatted} {symbol}", symbol = cur.symbol)
-    };
-
-    Ok(to_value(out)?)
+    Ok(to_value(format_currency(amount, currency, locale))?)
 }
 
 // ------------------------------------------------------------------ intword
@@ -1528,5 +1548,47 @@ mod tests {
     fn format_number_public_unknown_locale_falls_back_to_en() {
         // Returns the en-US shape on unknown.
         assert_eq!(format_number(1234.5, "xx-YY", None), "1,234.5");
+    }
+
+    // -------- Public format_currency --------
+
+    #[test]
+    fn format_currency_usd_en_prefix() {
+        assert_eq!(format_currency(1234.56, "USD", "en"), "$1,234.56");
+        assert_eq!(format_currency(0.0, "USD", "en"), "$0.00");
+    }
+
+    #[test]
+    fn format_currency_eur_de_prefix() {
+        // German Euro: prefix with `€` symbol.
+        assert_eq!(format_currency(1234.56, "EUR", "de"), "€1.234,56");
+    }
+
+    #[test]
+    fn format_currency_eur_fr_suffix_with_space() {
+        // French Euro: suffix with space — Romance language convention.
+        assert_eq!(format_currency(1234.56, "EUR", "fr"), "1 234,56 €");
+        assert_eq!(format_currency(1234.56, "EUR", "it"), "1.234,56 €");
+        assert_eq!(format_currency(1234.56, "EUR", "es"), "1.234,56 €");
+    }
+
+    #[test]
+    fn format_currency_jpy_zero_decimals() {
+        // JPY/KRW/CLP use 0 decimals.
+        assert_eq!(format_currency(1234.0, "JPY", "ja"), "¥1,234");
+        assert_eq!(format_currency(1234.99, "JPY", "ja"), "¥1,235"); // rounds
+    }
+
+    #[test]
+    fn format_currency_negative_sign_before_symbol() {
+        // Sign carries before the currency symbol on prefix-locale.
+        assert_eq!(format_currency(-50.0, "USD", "en"), "-$50.00");
+        // On suffix-locale the sign still leads.
+        assert_eq!(format_currency(-50.0, "EUR", "fr"), "-50,00 €");
+    }
+
+    #[test]
+    fn format_currency_gbp_uses_pound_symbol() {
+        assert_eq!(format_currency(99.99, "GBP", "en-GB"), "£99.99");
     }
 }
