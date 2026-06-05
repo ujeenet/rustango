@@ -280,10 +280,7 @@ fn cut(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
         .or_else(|| args.values().next())
         .and_then(Value::as_str)
         .unwrap_or("");
-    if needle.is_empty() {
-        return Ok(value.clone());
-    }
-    Ok(to_value(s.replace(needle, ""))?)
+    Ok(to_value(crate::text::cut(s, needle))?)
 }
 
 // ------------------------------------------------------------------ divisibleby
@@ -655,8 +652,7 @@ fn normalize_whitespace(value: &Value, _: &HashMap<String, Value>) -> tera::Resu
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
     };
-    let normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    Ok(to_value(normalized)?)
+    Ok(to_value(crate::text::normalize_whitespace(s))?)
 }
 
 /// Total ordering across heterogeneous JSON `Value`s. Null < bool <

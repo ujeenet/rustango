@@ -213,6 +213,50 @@ pub fn truncate_words(s: &str, max_words: usize, suffix: &str) -> String {
     out
 }
 
+/// [`django.template.defaultfilters.cut`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#cut) —
+/// remove every occurrence of `needle` from `s`.
+///
+/// Equivalent to `s.replace(needle, "")` with one extra guarantee:
+/// an empty `needle` returns `s` unchanged (avoids the empty-
+/// substring-matches-everywhere footgun that Django's filter
+/// short-circuits the same way).
+///
+/// ```
+/// use rustango::text::cut;
+/// assert_eq!(cut("Joel is a slug", " "), "Joelisaslug");
+/// assert_eq!(cut("hello world", "l"), "heo word");
+/// assert_eq!(cut("nothing matches", "xyz"), "nothing matches");
+/// // Empty needle is a no-op.
+/// assert_eq!(cut("untouched", ""), "untouched");
+/// ```
+#[must_use]
+pub fn cut(s: &str, needle: &str) -> String {
+    if needle.is_empty() {
+        return s.to_owned();
+    }
+    s.replace(needle, "")
+}
+
+/// Collapse internal whitespace runs in `s` to a single ASCII
+/// space and drop leading/trailing whitespace. Equivalent to the
+/// existing `normalize_whitespace` Tera filter, surfaced as a
+/// plain Rust function.
+///
+/// Useful for diff-stable comparisons of HTML / formatted text
+/// where intra-element whitespace shouldn't matter, and for
+/// canonicalizing operator-typed input before storage.
+///
+/// ```
+/// use rustango::text::normalize_whitespace;
+/// assert_eq!(normalize_whitespace("  hello   world  "), "hello world");
+/// assert_eq!(normalize_whitespace("a\n\tb\rc"), "a b c");
+/// assert_eq!(normalize_whitespace(""), "");
+/// ```
+#[must_use]
+pub fn normalize_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// [`django.template.defaultfilters.wordcount`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#wordcount) —
 /// count whitespace-separated words in a string.
 ///
@@ -2664,6 +2708,46 @@ mod tests {
         // Plain text content like `alert` and `xss` passes through —
         // it's just the punctuation that's escaped.
         assert!(out.contains("alert"));
+    }
+
+    // -------- cut / normalize_whitespace --------
+
+    #[test]
+    fn cut_removes_every_occurrence() {
+        assert_eq!(cut("Joel is a slug", " "), "Joelisaslug");
+        assert_eq!(cut("hello world", "l"), "heo word");
+        assert_eq!(cut("aaaa", "a"), "");
+        assert_eq!(cut("aaa", "aa"), "a"); // non-overlapping
+    }
+
+    #[test]
+    fn cut_no_match_unchanged() {
+        assert_eq!(cut("nothing matches", "xyz"), "nothing matches");
+        assert_eq!(cut("", "x"), "");
+    }
+
+    #[test]
+    fn cut_empty_needle_is_no_op() {
+        assert_eq!(cut("untouched", ""), "untouched");
+        assert_eq!(cut("", ""), "");
+    }
+
+    #[test]
+    fn normalize_whitespace_collapses_runs() {
+        assert_eq!(normalize_whitespace("  hello   world  "), "hello world");
+        assert_eq!(normalize_whitespace("a   b   c"), "a b c");
+    }
+
+    #[test]
+    fn normalize_whitespace_handles_mixed_whitespace_chars() {
+        assert_eq!(normalize_whitespace("a\n\tb\rc"), "a b c");
+        assert_eq!(normalize_whitespace("\t\n  spaces  \n\t"), "spaces");
+    }
+
+    #[test]
+    fn normalize_whitespace_empty_and_all_whitespace() {
+        assert_eq!(normalize_whitespace(""), "");
+        assert_eq!(normalize_whitespace("   \n\t"), "");
     }
 
     // -------- wordcount / linenumbers / ljust / rjust / center / get_digit --------
