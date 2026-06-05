@@ -98,6 +98,48 @@ pub fn format(
     out
 }
 
+/// [`django.template.defaultfilters.floatformat`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#floatformat) —
+/// signed-precision float formatter with Django's
+/// drop-trailing-zeros-when-negative trick.
+///
+/// Precision argument shape:
+/// * `precision == 0` or default (`-1`) → 1 decimal place, drop
+///   trailing zeros: `34.23234 → "34.2"`, `34.0 → "34"`.
+/// * `precision > 0` → exactly N decimal places, KEEP trailing
+///   zeros: `34.0 → "34.000"` at precision=3.
+/// * `precision < 0` → up to |N| decimal places, DROP trailing
+///   zeros: `34.0 → "34"`, `34.23234 → "34.232"` at precision=-3.
+///
+/// The negative-precision trick is the distinguishing Django
+/// behavior: `floatformat(price, -2)` reads as "two decimals max,
+/// hide them when the value is a round number." Useful for prices
+/// where `$5.00` should render as `$5` and `$5.50` should render
+/// as `$5.50`.
+///
+/// ```
+/// use rustango::numberformat::floatformat;
+/// assert_eq!(floatformat(34.23234, -1), "34.2");
+/// assert_eq!(floatformat(34.0, -1), "34");
+/// assert_eq!(floatformat(34.23234, 3), "34.232");
+/// assert_eq!(floatformat(34.0, 3), "34.000");
+/// assert_eq!(floatformat(34.23234, -3), "34.232");
+/// assert_eq!(floatformat(34.0, -3), "34");
+/// ```
+#[must_use]
+pub fn floatformat(value: f64, precision: i64) -> String {
+    let abs = precision.unsigned_abs() as usize;
+    let drop_trailing = precision <= 0;
+    let formatted = format!("{value:.abs$}");
+    if drop_trailing {
+        if let Some((int_part, frac_part)) = formatted.split_once('.') {
+            if frac_part.chars().all(|c| c == '0') {
+                return int_part.to_owned();
+            }
+        }
+    }
+    formatted
+}
+
 /// Format an integer per the same shape — convenience wrapper for
 /// `i64` so callers don't have to think about float precision when
 /// the value is integral.
@@ -309,5 +351,55 @@ mod tests {
     #[test]
     fn group_digits_smaller_than_one_group() {
         assert_eq!(group_digits("12", 3, ","), "12");
+    }
+
+    // -------- floatformat --------
+
+    #[test]
+    fn floatformat_default_precision_drops_zero_decimal() {
+        assert_eq!(floatformat(34.23234, -1), "34.2");
+        assert_eq!(floatformat(34.0, -1), "34");
+        assert_eq!(floatformat(34.5, -1), "34.5");
+    }
+
+    #[test]
+    fn floatformat_positive_precision_keeps_trailing_zeros() {
+        assert_eq!(floatformat(34.23234, 3), "34.232");
+        assert_eq!(floatformat(34.0, 3), "34.000");
+        assert_eq!(floatformat(34.5, 2), "34.50");
+    }
+
+    #[test]
+    fn floatformat_negative_precision_drops_trailing_zeros() {
+        // Up to |N| decimals, drop trailing zeros (Django's price-
+        // formatting trick: $5.00 → "5", $5.50 → "5.50").
+        assert_eq!(floatformat(34.23234, -3), "34.232");
+        assert_eq!(floatformat(34.0, -3), "34");
+        assert_eq!(floatformat(5.5, -2), "5.50");
+        assert_eq!(floatformat(5.0, -2), "5");
+    }
+
+    #[test]
+    fn floatformat_zero_precision_no_decimals() {
+        // precision=0 → exactly 0 decimals. Rust's `{:.0}` uses
+        // banker's rounding (round-half-to-even), so 34.5 → "34"
+        // and 35.5 → "36"; non-halves round normally.
+        assert_eq!(floatformat(34.4, 0), "34");
+        assert_eq!(floatformat(34.6, 0), "35");
+        assert_eq!(floatformat(34.0, 0), "34");
+    }
+
+    #[test]
+    fn floatformat_rounds_to_nearest() {
+        // Standard f64 rounding (banker's on exact halves).
+        assert_eq!(floatformat(1.234, 2), "1.23");
+        assert_eq!(floatformat(1.236, 2), "1.24");
+    }
+
+    #[test]
+    fn floatformat_negative_values() {
+        assert_eq!(floatformat(-34.5, -1), "-34.5");
+        assert_eq!(floatformat(-34.0, -1), "-34");
+        assert_eq!(floatformat(-1.2345, 2), "-1.23");
     }
 }

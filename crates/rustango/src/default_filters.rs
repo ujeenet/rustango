@@ -338,18 +338,7 @@ fn floatformat(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Val
         .or_else(|| args.values().next())
         .and_then(Value::as_i64)
         .unwrap_or(-1);
-    let abs = precision.unsigned_abs() as usize;
-    let drop_trailing = precision <= 0;
-    let formatted = format!("{f:.abs$}");
-    if drop_trailing {
-        // Drop the decimal portion entirely if it's all zeros.
-        if let Some((int_part, frac_part)) = formatted.split_once('.') {
-            if frac_part.chars().all(|c| c == '0') {
-                return Ok(to_value(int_part)?);
-            }
-        }
-    }
-    Ok(to_value(formatted)?)
+    Ok(to_value(crate::numberformat::floatformat(f, precision))?)
 }
 
 // ------------------------------------------------------------------ escapejs
