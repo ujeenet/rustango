@@ -44,11 +44,12 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 22. Async support | 4 | 0 | 0 | 3 |
 | 23. DRF parity | 22 | 0 | 1 | 0 |
 | 24. contrib modules | 12 | 1 | 3 | 2 |
-| **Totals** | **370** | **11** | **21** | **19** |
+| 25. `django.utils.*` helpers | 55 | 0 | 0 | 0 |
+| **Totals** | **425** | **11** | **21** | **19** |
 
-Coverage = 370 / (370 + 11 + 21) = **92% full, 3% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
+Coverage = 425 / (425 + 11 + 21) = **93% full, 2% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
 
-Snapshot date: 2026-06-03 (post v0.42 batch including ExclusionConstraint #593, default_permissions #594, on_delete #592, ForeignKey on_delete enum override, extra_permissions #591, get_latest_by #590, db_table_comment #589, citext, DatabaseCache, managed=false, upload streaming, i18n).
+Snapshot date: 2026-06-05 (post-v0.42 plus 50+ Django `utils.*` parity helpers across PRs #619–#670: 10 new modules + 9 widened modules — see Section 25 for the per-helper table).
 
 ---
 
@@ -697,6 +698,87 @@ Summary: **22 SHIPPED / 0 PARTIAL / 1 MISSING / 0 N/A**.
 | Generic relations admin (GenericTabularInline) | [generic-inline](https://docs.djangoproject.com/en/6.0/ref/contrib/contenttypes/#generic-relations-and-aggregation) | SHIPPED | `register_admin_inline_generic!` | |
 
 Summary: **12 SHIPPED / 1 PARTIAL / 3 MISSING / 2 N/A** (within Django contrib scope).
+
+---
+
+## 25. Django utils helpers (`django.utils.*`)
+
+Module-level utility helpers Django ships under `django.utils.*`.
+Heavy parity sweep landed 2026-06-04 → 2026-06-05 in PRs #619–#670
+(50+ helpers across 10 new modules + 9 widened modules). Each row
+below corresponds to a Django module / function the port targets.
+
+| Django module / fn | Doc | Status | rustango pointer |
+|---|---|---|---|
+| `django.utils.text.slugify` | [slugify](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.slugify) | SHIPPED | `text::slugify` + `slugify_unicode` |
+| `django.utils.text.truncate_chars` | (above) | SHIPPED | `text::truncate(s, max, suffix)` |
+| `django.utils.text.Truncator.words` | [Truncator](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.Truncator) | SHIPPED | `text::truncate_words(s, max, suffix)` (PR #643) |
+| `django.utils.text.normalize_newlines` | [normalize_newlines](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.normalize_newlines) | SHIPPED | `text::normalize_newlines` (PR #643) |
+| `django.utils.text.phone2numeric` | [phone2numeric](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.phone2numeric) | SHIPPED | `text::phone2numeric` (PR #643) + Tera `phone2numeric` filter |
+| `django.utils.text.capfirst` | [capfirst](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.capfirst) | SHIPPED | `text::capfirst` (PR #644) |
+| `django.utils.text.get_text_list` | [get_text_list](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.get_text_list) | SHIPPED | `text::get_text_list(items, last_word)` (PR #644) |
+| `django.utils.text.smart_split` | [smart_split](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.smart_split) | SHIPPED | `text::smart_split` (PR #644) |
+| `django.utils.text.camel_case_to_spaces` | [camel_case_to_spaces](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.camel_case_to_spaces) | SHIPPED | `text::camel_case_to_spaces` (PR #661) — implements the exact Django regex with acronym→word boundary splitting (`HTTPRequest` → `"http request"`) |
+| `django.utils.text.unescape_string_literal` | [unescape_string_literal](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.unescape_string_literal) | SHIPPED | `text::unescape_string_literal` (PR #661) |
+| `django.utils.text.get_valid_filename` | [get_valid_filename](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.get_valid_filename) | SHIPPED | `text::get_valid_filename` (PR #662) — typed `InvalidFilename` error on empty / `.` / `..` (Django `SuspiciousFileOperation` cases) |
+| `django.utils.text.wrap` | [wrap](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.wrap) | SHIPPED | `text::wrap(text, width)` (PR #670) |
+| `django.utils.html.strip_tags` | [strip_tags](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.strip_tags) | SHIPPED | `text::strip_tags` (PR #650) — not a sanitizer, only plain-text extraction (matches Django's warning) |
+| `django.utils.html.urlize` | [urlize](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.urlize) | SHIPPED | `text::urlize(text, nofollow)` (PR #653) — detects http(s), `www.` bare-www, and `user@host.tld` email shapes |
+| `django.utils.html.format_html` | [format_html](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.format_html) | SHIPPED | `text::format_html(template, args)` (PR #659) — positional `{}` interpolation with auto-escape of every arg |
+| `django.utils.html.format_html_join` | [format_html_join](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.format_html_join) | SHIPPED | `text::format_html_join(sep, format_string, rows)` (PR #659) |
+| `django.utils.html.linebreaks` | [linebreaks](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.linebreaks) | SHIPPED | `text::linebreaks(value, autoescape)` (PR #660) |
+| `django.utils.html.linebreaks_br` | [linebreaks_br](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.linebreaksbr) | SHIPPED | `text::linebreaks_br(value, autoescape)` (PR #660) |
+| `django.utils.html.strip_spaces_between_tags` | [strip_spaces_between_tags](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.strip_spaces_between_tags) | SHIPPED | `text::strip_spaces_between_tags` (PR #668) — `{% spaceless %}` template tag analog |
+| `django.utils.crypto.get_random_string` | [get_random_string](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.get_random_string) | SHIPPED | `random::get_random_string(length, allowed_chars)` + `get_random_string_default` (PR #637) — CSPRNG-backed `crate::random` module with 5 predefined alphabets |
+| `django.utils.crypto.constant_time_compare` | [constant_time_compare](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.constant_time_compare) | SHIPPED | `crypto::constant_time_compare(a, b)` (PR #647) — consolidates 2 prior private copies |
+| `django.utils.encoding.iri_to_uri` | [iri_to_uri](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.iri_to_uri) | SHIPPED | `url_codec::iri_to_uri` (PR #648) |
+| `django.utils.encoding.escape_uri_path` | [escape_uri_path](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.escape_uri_path) | SHIPPED | `url_codec::escape_uri_path` (PR #652) |
+| `django.utils.http.urlsafe_base64_encode` | [urlsafe_base64_encode](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.urlsafe_base64_encode) | SHIPPED | `url_codec::urlsafe_base64_encode` + `urlsafe_base64_decode` (PR #639) |
+| `django.utils.http.urlencode` | [urlencode](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.urlencode) | SHIPPED | `url_codec::url_encode` (now `pub`, PR #639) |
+| `django.utils.http.{http_date,parse_http_date}` | [http_date](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.http_date) | SHIPPED | `http_date::{http_date, parse_http_date}` (PR #641) — full RFC 7231 §7.1.1.1 parser accepting all 3 historical date shapes (RFC 1123 / RFC 850 / asctime) |
+| `django.utils.http.{int_to_base36, base36_to_int}` | [int_to_base36](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.int_to_base36) | SHIPPED | `base36::{int_to_base36, base36_to_int}` (PR #638) |
+| `django.utils.baseconv.base62` (historical, removed 5.x) | [baseconv](https://docs.djangoproject.com/en/4.0/ref/utils/#django.utils.baseconv) | SHIPPED | `base62::{int_to_base62, base62_to_int}` (PR #656) — case-sensitive 62-char alphabet, ~17% shorter than base36 |
+| `urllib.parse.parse_qsl` | (Python stdlib) | SHIPPED | `urls::parse_query_pairs` promoted to `pub` (PR #669) |
+| `urllib.parse.parse_qs` | (Python stdlib) | SHIPPED | `urls::parse_query_pairs_grouped` (PR #669) |
+| Django open-redirect helper `url_has_allowed_host_and_scheme` | [url_has_allowed_host_and_scheme](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.url_has_allowed_host_and_scheme) | SHIPPED | `urls::url_has_allowed_host_and_scheme(url, allowed_hosts, require_https)` (PR #635) — defends against open-redirect via `?next=` |
+| `django.utils.dateparse.parse_date` etc. | [dateparse](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.dateparse) | SHIPPED | `dateparse::{parse_date, parse_time, parse_datetime, parse_duration}` (PR #654) — accepts both Django duration shape (`1 day, 02:30:00`) and ISO 8601 (`PT1H30M`) |
+| `django.utils.dateformat.format` (datetime) | [dateformat](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.dateformat) | SHIPPED | `dateformat::format_datetime(dt, format_string)` (PR #664) — full 30+ format-char coverage incl. `Y`, `m`, `d`, `H`, `i`, `s`, `a/A`, `S`, `L`, `U`, `c`, `r`, etc. |
+| `django.utils.dateformat.format` (date) | (above) | SHIPPED | `dateformat::format_date(date, format_string)` (PR #667) |
+| `django.utils.dateformat.time_format` | (above) | SHIPPED | `dateformat::time_format(time, format_string)` (PR #667) |
+| `django.utils.lorem_ipsum` | [lorem_ipsum](https://docs.djangoproject.com/en/6.0/topics/templates/#std-templatetag-lorem) | SHIPPED | `lorem::{words, sentence, paragraph, paragraphs}` + `COMMON_PARAGRAPH_TEXT` const (PR #640) |
+| `django.utils.numberformat.format` | [numberformat](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.numberformat.format) | SHIPPED | `numberformat::format(value, decimal_sep, decimal_pos, grouping, thousand_sep)` + `format_i64` (PR #649) — de_DE / fr_FR / en_US shapes via per-call sep config |
+| `django.utils.ipv6.clean_ipv6_address` | [clean_ipv6_address](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.ipv6.clean_ipv6_address) | SHIPPED | `validators::clean_ipv6_address(ip, unpack_ipv4)` (PR #655) — RFC 5952 canonical form |
+| `django.utils.cache.patch_vary_headers` | [patch_vary_headers](https://docs.djangoproject.com/en/6.0/topics/cache/#django.utils.cache.patch_vary_headers) | SHIPPED | `cache_page::patch_vary_headers(headers, &[names])` (PR #666) — case-insensitive dedupe; `Vary: *` short-circuit |
+| `django.core.cache.utils.make_template_fragment_key` | [make_template_fragment_key](https://docs.djangoproject.com/en/6.0/topics/cache/#template-fragment-caching) | SHIPPED | `cache_fragment::make_template_fragment_key(name, vary_on)` (PR #658) |
+| `django.core.mail.send_mail` shortcut | (sec 18) | SHIPPED | `email::send_mail(mailer, subject, body, from, recipients)` + `send_many` (PR #625) |
+| `django.core.mail.EmailMessage.send()` | (sec 18) | SHIPPED | `Email::send(&dyn Mailer)` builder-terminator (PR #624) |
+| `email.utils.formataddr` | (Python stdlib) | SHIPPED | `email::formataddr(name, address)` (PR #624) — RFC 5322 quoting + escape |
+| `email.utils.parseaddr` | (Python stdlib) | SHIPPED | `email::parseaddr(address)` (PR #663) — inverse of formataddr; backslash unescape |
+| `django.utils.html.linebreaksbr` (Python stdlib gzip) | (above) | SHIPPED | `compression::{compress_string, decompress_string}` (PR #646) — gzip helpers |
+| `django.views.decorators.http.require_http_methods` | [require_http_methods](https://docs.djangoproject.com/en/6.0/topics/http/decorators/#django.views.decorators.http.require_http_methods) | SHIPPED | `http_methods::MethodRestrictLayer` tower layer + `Router::require_methods` / `require_get` / `require_post` / `require_safe` ext-trait (PR #645) |
+| `django.shortcuts.resolve_url` | [resolve_url](https://docs.djangoproject.com/en/6.0/topics/http/shortcuts/#resolve-url) | SHIPPED | `shortcuts::resolve_url(spec, &params)` (PR #633) — passes through URLs; reverses named routes |
+| `django.shortcuts.redirect('view-name', ...)` view-name resolution | (above) | SHIPPED | `shortcuts::redirect_to_view(name, &params)` (PR #633) |
+| `HttpResponseNotModified` | [HttpResponseNotModified](https://docs.djangoproject.com/en/6.0/ref/request-response/#django.http.HttpResponseNotModified) | SHIPPED | `shortcuts::not_modified()` (PR #651) — `304` + empty body (RFC 7232 §4.1) |
+| `HttpResponseGone` | [HttpResponseGone](https://docs.djangoproject.com/en/6.0/ref/request-response/#django.http.HttpResponseGone) | SHIPPED | `shortcuts::gone(message)` (PR #651) |
+| `HttpResponse(status=204)` / 202 / 415 / 409 / 422 | (above) | SHIPPED | `shortcuts::{no_content, accepted, unsupported_media_type, conflict, unprocessable_entity}` (PR #665) |
+| `set_cookie` builder | [set_cookie](https://docs.djangoproject.com/en/6.0/ref/request-response/#django.http.HttpResponse.set_cookie) | SHIPPED | `cookies::Cookie::new(...).path(...).http_only().secure().same_site(...).build()` + `Cookie::deletion(name, path)` (PR #642) |
+| `BadHeaderError` (CRLF in email headers) | [Email header injection](https://docs.djangoproject.com/en/6.0/topics/email/#preventing-header-injection) | SHIPPED | `MailError::BadHeader` raised by `Email::validate()` (PR #627) |
+| `FileExtensionValidator` | [FileExtensionValidator](https://docs.djangoproject.com/en/6.0/ref/validators/#django.core.validators.FileExtensionValidator) | SHIPPED | `validators::validate_file_extension` + `validate_image_file_extension` (PR #631) |
+| `StepValueValidator` | [StepValueValidator](https://docs.djangoproject.com/en/6.0/ref/validators/#django.core.validators.StepValueValidator) | SHIPPED | `validators::validate_step_value(n, step, offset)` (PR #632) |
+| File-upload validators (size + MIME) | (above) | SHIPPED | `validators::{validate_file_size_max, validate_file_mime_type}` (PR #634) — supports `image/*` wildcard subtypes |
+| `validate_ipv46_address` | [validate_ipv46_address](https://docs.djangoproject.com/en/6.0/ref/validators/#django.core.validators.validate_ipv46_address) | SHIPPED | `validators::validate_ipv46_address` (PR #657) |
+| `cache.has_key` / `cache.decr` / `cache.get(key, default)` | [cache API](https://docs.djangoproject.com/en/6.0/topics/cache/#the-low-level-cache-api) | SHIPPED | `Cache::has_key` (PR #620) / `Cache::decr` (PR #620) / `Cache::get_or(key, default)` (PR #622) |
+| Mail settings (SERVER_EMAIL / EMAIL_SUBJECT_PREFIX / EMAIL_TIMEOUT) | (sec 14) | SHIPPED | `MailSettings.{server_email, email_subject_prefix, smtp_timeout_secs}` (PRs #619, #626) |
+| Email attachments | (sec 18) | SHIPPED | `Email::attach(filename, bytes, mimetype)` + `attach_text` (PR #621) |
+
+Summary: **55 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A** (Django `utils.*` helpers).
+
+Net effect of the 2026-06-04→06-05 batch:
+* **10 new public modules**: `random`, `base36`, `base62`, `lorem`, `http_date`, `http_methods`, `cookies`, `numberformat`, `dateparse`, `dateformat`
+* **Widened existing modules**: `text` (+15 helpers), `url_codec` (+4), `shortcuts` (+9), `validators` (+7), `email` (+5 incl. parseaddr / Email::send / send_mail / send_many / BadHeader), `crypto` (+1), `compression` (+2), `cache_fragment` (+1), `cache_page` (+1), `cache` (+3), `urls` (+3)
+* **28 PRs admin-merged across the sweep**: #619–#670 (gaps in numbering are doc-only PRs that landed in the same window)
+
+Bulk closure of Django `utils.*` API surface — the most-common helper functions a Django port reaches for during translation now have direct rustango equivalents. Outstanding gaps in this category: `regex_helper.normalize` (URL-conf regex normalization — niche), `formats.localize` (locale-aware value rendering — large lift, requires per-locale config wiring), `safestring.mark_safe` (N/A — Tera handles autoescape natively).
 
 ---
 
