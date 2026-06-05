@@ -176,6 +176,56 @@ pub fn duration_string(d: Duration) -> String {
     out
 }
 
+/// [`django.utils.duration.duration_iso_string(timedelta)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.duration.duration_iso_string) —
+/// ISO 8601 duration string for a [`std::time::Duration`].
+///
+/// Shape: `P<days>DT<HH>H<MM>M<SS>[.<microseconds>]S`. Always emits
+/// the `P` prefix, the `DT` separator, and exactly the H/M/S fields;
+/// the microsecond `.ffffff` tail only appears when sub-second
+/// precision is non-zero. Matches Django's exact output —
+/// `Duration::ZERO` becomes `"P0DT00H00M00S"`, not the shorter
+/// `"PT0S"`.
+///
+/// `std::time::Duration` is unsigned, so the sign-prefix that
+/// Django emits for negative `timedelta` values doesn't apply
+/// here. Use [`duration_string`] for the Django-shape
+/// `"N days, HH:MM:SS"` form.
+///
+/// ```
+/// use std::time::Duration;
+/// use rustango::dateparse::duration_iso_string;
+///
+/// assert_eq!(duration_iso_string(Duration::ZERO), "P0DT00H00M00S");
+/// assert_eq!(duration_iso_string(Duration::from_secs(9000)), "P0DT02H30M00S");
+/// assert_eq!(
+///     duration_iso_string(Duration::from_secs(86400 + 9000)),
+///     "P1DT02H30M00S"
+/// );
+/// assert_eq!(
+///     duration_iso_string(Duration::from_micros(123_456)),
+///     "P0DT00H00M00.123456S"
+/// );
+/// ```
+#[must_use]
+pub fn duration_iso_string(d: Duration) -> String {
+    let total = d.as_secs();
+    let nanos = d.subsec_nanos();
+    let days = total / 86_400;
+    let rem = total % 86_400;
+    let hours = rem / 3_600;
+    let mins = (rem % 3_600) / 60;
+    let secs = rem % 60;
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(24);
+    let _ = write!(out, "P{days}DT{hours:02}H{mins:02}M{secs:02}");
+    if nanos > 0 {
+        let micros = nanos / 1000;
+        let _ = write!(out, ".{micros:06}");
+    }
+    out.push('S');
+    out
+}
+
 #[must_use]
 pub fn parse_duration(s: &str) -> Option<Duration> {
     let s = s.trim();
@@ -525,6 +575,71 @@ mod tests {
             let s = duration_string(Duration::from_secs(secs));
             let parsed = parse_duration(&s).unwrap();
             assert_eq!(parsed.as_secs(), secs, "round-trip failed at {secs} secs");
+        }
+    }
+
+    // -------- duration_iso_string --------
+
+    #[test]
+    fn duration_iso_zero() {
+        assert_eq!(duration_iso_string(Duration::ZERO), "P0DT00H00M00S");
+    }
+
+    #[test]
+    fn duration_iso_string_seconds_only() {
+        assert_eq!(
+            duration_iso_string(Duration::from_secs(45)),
+            "P0DT00H00M45S"
+        );
+    }
+
+    #[test]
+    fn duration_iso_string_minutes_and_hours() {
+        assert_eq!(
+            duration_iso_string(Duration::from_secs(9000)),
+            "P0DT02H30M00S"
+        );
+        assert_eq!(
+            duration_iso_string(Duration::from_secs(3600)),
+            "P0DT01H00M00S"
+        );
+    }
+
+    #[test]
+    fn duration_iso_string_with_days() {
+        assert_eq!(
+            duration_iso_string(Duration::from_secs(86_400 + 9000)),
+            "P1DT02H30M00S"
+        );
+        assert_eq!(
+            duration_iso_string(Duration::from_secs(7 * 86_400)),
+            "P7DT00H00M00S"
+        );
+    }
+
+    #[test]
+    fn duration_iso_microseconds_only_when_subsecond() {
+        // Whole-second value → no .ffffff tail.
+        assert_eq!(duration_iso_string(Duration::from_secs(5)), "P0DT00H00M05S");
+        // 123456 microseconds → 6-digit tail.
+        assert_eq!(
+            duration_iso_string(Duration::from_micros(123_456)),
+            "P0DT00H00M00.123456S"
+        );
+        // 1 microsecond → leading zeros preserved.
+        assert_eq!(
+            duration_iso_string(Duration::from_micros(1)),
+            "P0DT00H00M00.000001S"
+        );
+    }
+
+    #[test]
+    fn duration_iso_round_trips_through_parse_duration() {
+        // Symmetric: ISO format → parse → format produces same string.
+        for secs in [0u64, 45, 60, 3600, 9000, 86_400, 86_400 + 9000, 7 * 86_400] {
+            let s = duration_iso_string(Duration::from_secs(secs));
+            let parsed = parse_duration(&s).unwrap();
+            assert_eq!(parsed.as_secs(), secs, "ISO round-trip failed at {secs} s");
         }
     }
 }
