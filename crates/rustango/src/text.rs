@@ -213,6 +213,253 @@ pub fn truncate_words(s: &str, max_words: usize, suffix: &str) -> String {
     out
 }
 
+/// Django-parity `Truncator(s).chars(num, html=True, truncate=…)` —
+/// truncate to `max_chars` visible characters while preserving HTML
+/// tag structure. Open tags at the truncation point are closed in
+/// reverse order so the output is well-formed HTML.
+///
+/// "Visible" characters are everything that isn't inside `<tag>`
+/// brackets and isn't part of an HTML entity (`&amp;` counts as 1
+/// char, not 5). Self-closing tags (`<br>`, `<br/>`, `<img>`,
+/// `<hr>`, `<input>`, `<meta>`, `<link>`, `<source>`, `<area>`,
+/// `<col>`, `<embed>`, `<param>`, `<track>`, `<wbr>`) aren't pushed
+/// onto the close-stack.
+///
+/// `suffix` is appended ONLY when truncation actually fires, and
+/// the close-tags are written AFTER the suffix to match Django's
+/// shape — so `truncate_html_chars("<p>hello world</p>", 5, "…")`
+/// returns `"<p>hello…</p>"`, not `"<p>hello</p>…"`.
+///
+/// This is **not** a sanitizer — it assumes well-formed input HTML.
+/// Pair with `html_escape` if you're rendering operator-controlled
+/// text and need defense-in-depth.
+///
+/// ```
+/// use rustango::text::truncate_html_chars;
+/// assert_eq!(
+///     truncate_html_chars("<p>hello world</p>", 5, "…"),
+///     "<p>hello…</p>"
+/// );
+/// assert_eq!(
+///     truncate_html_chars("<p>short</p>", 10, "…"),
+///     "<p>short</p>"
+/// );
+/// assert_eq!(
+///     truncate_html_chars("<b><i>nested</i> text</b>", 7, "…"),
+///     "<b><i>nested</i> …</b>"
+/// );
+/// ```
+#[must_use]
+pub fn truncate_html_chars(html: &str, max_chars: usize, suffix: &str) -> String {
+    truncate_html_visible_count(html, max_chars, suffix, /* by_words */ false)
+}
+
+/// Django-parity `Truncator(s).words(num, html=True, truncate=…)` —
+/// HTML-tag-aware version of [`truncate_words`]. Counts whitespace-
+/// separated words OUTSIDE tag brackets; preserves tag structure
+/// by closing open tags after the suffix when truncation fires.
+///
+/// Self-closing tags don't count as words and don't go on the
+/// close-stack (same set as [`truncate_html_chars`]).
+///
+/// ```
+/// use rustango::text::truncate_html_words;
+/// assert_eq!(
+///     truncate_html_words("<p>Joel is a slug</p>", 2, " …"),
+///     "<p>Joel is …</p>"
+/// );
+/// assert_eq!(
+///     truncate_html_words("<p>short text</p>", 5, "…"),
+///     "<p>short text</p>"
+/// );
+/// ```
+#[must_use]
+pub fn truncate_html_words(html: &str, max_words: usize, suffix: &str) -> String {
+    truncate_html_visible_count(html, max_words, suffix, /* by_words */ true)
+}
+
+const SELF_CLOSING_TAGS: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
+
+fn truncate_html_visible_count(html: &str, limit: usize, suffix: &str, by_words: bool) -> String {
+    // First pass: count visible units (chars or words) the input
+    // actually contains. If it's <= limit we can short-circuit.
+    if count_visible(html, by_words) <= limit {
+        return html.to_owned();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut open_tags: Vec<String> = Vec::new();
+    let mut count: usize = 0;
+    let mut in_word = false; // tracks whitespace-state for word counting
+    let mut bytes = html.char_indices().peekable();
+    while let Some((_, ch)) = bytes.next() {
+        if ch == '<' {
+            // Capture tag content up to matching `>`.
+            let mut tag = String::from('<');
+            for (_, c) in bytes.by_ref() {
+                tag.push(c);
+                if c == '>' {
+                    break;
+                }
+            }
+            out.push_str(&tag);
+            update_open_tags(&mut open_tags, &tag);
+            continue;
+        }
+        if ch == '&' {
+            // Treat an entity as a single visible character; copy
+            // verbatim until `;` (or fall back to a single char if
+            // malformed).
+            let mut ent = String::from('&');
+            let mut saw_semi = false;
+            for (_, c) in bytes.by_ref() {
+                ent.push(c);
+                if c == ';' {
+                    saw_semi = true;
+                    break;
+                }
+                if ent.len() > 16 {
+                    break; // malformed; stop accumulating
+                }
+            }
+            out.push_str(&ent);
+            let _ = saw_semi; // malformed entity still counts as 1 unit
+            if by_words {
+                in_word = true;
+            } else {
+                count += 1;
+                if count >= limit {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(ch);
+        if by_words {
+            if ch.is_whitespace() {
+                if in_word {
+                    count += 1;
+                    if count >= limit {
+                        break;
+                    }
+                }
+                in_word = false;
+            } else {
+                in_word = true;
+            }
+        } else {
+            count += 1;
+            if count >= limit {
+                break;
+            }
+        }
+    }
+    if by_words {
+        // Trim trailing whitespace from `out` before appending suffix —
+        // word counting consumed the boundary whitespace, but Django's
+        // shape doesn't keep it before the truncation marker.
+        while out.ends_with(|c: char| c.is_whitespace()) {
+            out.pop();
+        }
+    }
+    let _ = in_word;
+    out.push_str(suffix);
+    while let Some(tag_name) = open_tags.pop() {
+        out.push_str(&format!("</{tag_name}>"));
+    }
+    out
+}
+
+fn count_visible(html: &str, by_words: bool) -> usize {
+    let mut count = 0usize;
+    let mut in_tag = false;
+    let mut in_word = false;
+    let mut chars = html.chars();
+    while let Some(ch) = chars.next() {
+        if in_tag {
+            if ch == '>' {
+                in_tag = false;
+            }
+            continue;
+        }
+        if ch == '<' {
+            in_tag = true;
+            continue;
+        }
+        if ch == '&' {
+            // Skip to `;` (entity counts as 1 unit).
+            for c in chars.by_ref() {
+                if c == ';' {
+                    break;
+                }
+            }
+            if by_words {
+                in_word = true;
+            } else {
+                count += 1;
+            }
+            continue;
+        }
+        if by_words {
+            if ch.is_whitespace() {
+                if in_word {
+                    count += 1;
+                }
+                in_word = false;
+            } else {
+                in_word = true;
+            }
+        } else {
+            count += 1;
+        }
+    }
+    if by_words && in_word {
+        count += 1;
+    }
+    count
+}
+
+fn update_open_tags(stack: &mut Vec<String>, tag: &str) {
+    // `tag` is the raw tag text including `<` and `>`.
+    let inner = tag.trim_start_matches('<').trim_end_matches('>').trim();
+    if inner.is_empty() {
+        return;
+    }
+    // Comments / CDATA / DOCTYPE — ignore.
+    if inner.starts_with('!') {
+        return;
+    }
+    if inner.starts_with('/') {
+        // Closing tag — pop matching name from stack.
+        let name = inner[1..]
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
+        if let Some(pos) = stack.iter().rposition(|t| *t == name) {
+            stack.remove(pos);
+        }
+        return;
+    }
+    let raw_name = inner.split_whitespace().next().unwrap_or("");
+    // XHTML self-closing form `<br/>` or `<img ... />`.
+    let trimmed = raw_name.trim_end_matches('/');
+    let name = trimmed.to_lowercase();
+    if name.is_empty() {
+        return;
+    }
+    if SELF_CLOSING_TAGS.contains(&name.as_str()) {
+        return;
+    }
+    if inner.ends_with('/') {
+        // XHTML self-closing — don't push.
+        return;
+    }
+    stack.push(name);
+}
+
 /// Django-parity `django.utils.text.normalize_newlines(text)` —
 /// convert all `\r\n` / `\r` sequences to plain `\n`. Useful when
 /// processing `<textarea>` form input, where browsers historically
@@ -2231,5 +2478,90 @@ mod tests {
         // Plain text content like `alert` and `xss` passes through —
         // it's just the punctuation that's escaped.
         assert!(out.contains("alert"));
+    }
+
+    // -------- truncate_html_chars --------
+
+    #[test]
+    fn truncate_html_chars_basic() {
+        assert_eq!(
+            truncate_html_chars("<p>hello world</p>", 5, "…"),
+            "<p>hello…</p>"
+        );
+    }
+
+    #[test]
+    fn truncate_html_chars_no_truncation_when_short() {
+        assert_eq!(truncate_html_chars("<p>short</p>", 10, "…"), "<p>short</p>");
+        assert_eq!(truncate_html_chars("", 5, "…"), "");
+    }
+
+    #[test]
+    fn truncate_html_chars_closes_nested_tags_in_reverse() {
+        assert_eq!(
+            truncate_html_chars("<b><i>nested</i> text</b>", 7, "…"),
+            "<b><i>nested</i> …</b>"
+        );
+    }
+
+    #[test]
+    fn truncate_html_chars_self_closing_tags_not_stacked() {
+        // <br> and <img ... /> shouldn't appear as </br>/</img> in
+        // the output even when truncation fires mid-content.
+        let s = "<p>hello<br>world<img src=\"x.png\"/> more</p>";
+        let out = truncate_html_chars(s, 8, "…");
+        assert!(!out.contains("</br>"));
+        assert!(!out.contains("</img>"));
+        // <p> still closed.
+        assert!(out.ends_with("</p>"));
+    }
+
+    #[test]
+    fn truncate_html_chars_entity_counts_as_one() {
+        // "a&amp;b" = 3 visible chars (a, &, b); limit 2 truncates
+        // after the &amp; entity.
+        let out = truncate_html_chars("a&amp;b", 2, "…");
+        // Both `a` and `&amp;` were emitted, then suffix.
+        assert!(out.contains("a&amp;"));
+        assert!(out.ends_with("…"));
+    }
+
+    #[test]
+    fn truncate_html_chars_no_close_for_void_input() {
+        // No open tags at truncation point → no trailing </…>.
+        assert_eq!(truncate_html_chars("hello world", 5, "…"), "hello…");
+    }
+
+    // -------- truncate_html_words --------
+
+    #[test]
+    fn truncate_html_words_basic() {
+        assert_eq!(
+            truncate_html_words("<p>Joel is a slug</p>", 2, " …"),
+            "<p>Joel is …</p>"
+        );
+    }
+
+    #[test]
+    fn truncate_html_words_no_truncation_when_short() {
+        assert_eq!(
+            truncate_html_words("<p>short text</p>", 5, "…"),
+            "<p>short text</p>"
+        );
+    }
+
+    #[test]
+    fn truncate_html_words_preserves_inline_tags() {
+        // Inline <em>...</em> stays balanced even when the truncation
+        // boundary falls between words on either side of it.
+        let out = truncate_html_words("<p>foo <em>bar baz</em> qux quux</p>", 3, "…");
+        assert!(out.starts_with("<p>foo "));
+        assert!(out.ends_with("</p>"));
+        assert!(out.contains("<em>"));
+        // Either contains balanced </em> or doesn't open it at all —
+        // verify no stray opener.
+        let opens = out.matches("<em>").count();
+        let closes = out.matches("</em>").count();
+        assert_eq!(opens, closes);
     }
 }
