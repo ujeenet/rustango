@@ -1027,6 +1027,11 @@ pub mod random;
 /// `base36_to_int(s)` round-trip.
 pub mod base36;
 
+/// Django-shape lorem ipsum generators — placeholder text for
+/// demos, test fixtures, template scaffolds. `lorem::words(n)`,
+/// `lorem::paragraphs(n)`, `lorem::sentence()`.
+pub mod lorem;
+
 /// Django messages framework — `messages.success/info/warning/error/debug`
 /// flash storage backed by a signed cookie. Issue #9.
 pub mod messages;
