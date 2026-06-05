@@ -339,6 +339,114 @@ pub fn smart_split(text: &str) -> Vec<String> {
 }
 
 /// Django-parity
+/// [`django.utils.html.format_html(format_string, *args, **kwargs)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.format_html) —
+/// build an HTML string from a positional `{}`-style template,
+/// HTML-escaping every interpolated argument. This is the safe
+/// way to construct HTML strings inline without manually calling
+/// `html_escape` on every variable.
+///
+/// `{}` placeholders are filled positionally from `args` in order
+/// of appearance. Each value is HTML-escaped via [`html_escape`]
+/// before substitution. Literal `{` / `}` characters in the
+/// template can be escaped as `{{` / `}}` (Rust format-string
+/// convention, NOT Django's — Django uses `str.format`'s shape but
+/// rustango uses a simple positional placeholder for the same
+/// safety property without dragging in str-format syntax).
+///
+/// ```ignore
+/// use rustango::text::format_html;
+/// // Variables auto-escaped — user-supplied "<script>" is rendered safely.
+/// assert_eq!(
+///     format_html(
+///         "<a href=\"{}\">{}</a>",
+///         &["/x", "<script>alert(1)</script>"]
+///     ),
+///     "<a href=\"/x\">&lt;script&gt;alert(1)&lt;/script&gt;</a>"
+/// );
+/// ```
+///
+/// Excess args (more than `{}` placeholders) are silently ignored;
+/// too few args produces an empty replacement at the missing
+/// position. This is the lenient shape — strict-arity checking is
+/// available via direct `format!` if you want compile-time
+/// guarantees.
+#[must_use]
+pub fn format_html(template: &str, args: &[&str]) -> String {
+    let mut out = String::with_capacity(template.len() + 32);
+    let mut arg_idx = 0;
+    let bytes = template.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' && i + 1 < bytes.len() {
+            // `{{` → literal `{`.
+            if bytes[i + 1] == b'{' {
+                out.push('{');
+                i += 2;
+                continue;
+            }
+            // `{}` → argument substitution.
+            if bytes[i + 1] == b'}' {
+                if let Some(value) = args.get(arg_idx) {
+                    out.push_str(&html_escape(value));
+                }
+                arg_idx += 1;
+                i += 2;
+                continue;
+            }
+        }
+        if bytes[i] == b'}' && i + 1 < bytes.len() && bytes[i + 1] == b'}' {
+            // `}}` → literal `}`.
+            out.push('}');
+            i += 2;
+            continue;
+        }
+        // SAFETY: bytes is the UTF-8 representation of `template`;
+        // we only consume one byte at a time but the chars iterator
+        // would be more correct here. Use `template[i..]` chars step
+        // for codepoint-safe iteration.
+        let next_char = template[i..]
+            .chars()
+            .next()
+            .expect("non-empty slice has at least one char");
+        out.push(next_char);
+        i += next_char.len_utf8();
+    }
+    out
+}
+
+/// Django-parity
+/// [`django.utils.html.format_html_join(sep, format_string, args_generator)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.format_html_join) —
+/// build a joined HTML string from an iterator of argument tuples.
+/// Same safety property as [`format_html`] — every arg HTML-escaped
+/// before substitution — but folds repetition over a list.
+///
+/// Common use: rendering a `<table>` body where each row needs the
+/// same template applied to its column values.
+///
+/// ```ignore
+/// use rustango::text::format_html_join;
+/// // Build a comma-separated <a> list from three (url, label) pairs.
+/// let rows = [
+///     vec!["/a", "First"],
+///     vec!["/b", "Second"],
+///     vec!["/c", "Third"],
+/// ];
+/// let html = format_html_join(", ", "<a href=\"{}\">{}</a>", &rows);
+/// // → `<a href="/a">First</a>, <a href="/b">Second</a>, <a href="/c">Third</a>`
+/// ```
+#[must_use]
+pub fn format_html_join(sep: &str, format_string: &str, args: &[Vec<&str>]) -> String {
+    let mut out = String::with_capacity(args.len() * format_string.len());
+    for (i, row) in args.iter().enumerate() {
+        if i > 0 {
+            out.push_str(sep);
+        }
+        out.push_str(&format_html(format_string, row));
+    }
+    out
+}
+
+/// Django-parity
 /// [`django.utils.html.urlize(text, trim_url_limit=None, nofollow=False, autoescape=True)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.urlize) —
 /// convert URLs and email addresses inside `text` into clickable
 /// HTML anchor tags.
@@ -1033,5 +1141,91 @@ mod tests {
         let out = urlize("First https://a.com second https://b.com end", false);
         assert!(out.contains(r#"<a href="https://a.com""#));
         assert!(out.contains(r#"<a href="https://b.com""#));
+    }
+
+    // -------- format_html / format_html_join (Django parity) --------
+
+    #[test]
+    fn format_html_substitutes_and_escapes_args() {
+        let out = format_html(
+            r#"<a href="{}">{}</a>"#,
+            &["/x", "<script>alert(1)</script>"],
+        );
+        assert_eq!(
+            out,
+            r#"<a href="/x">&lt;script&gt;alert(1)&lt;/script&gt;</a>"#
+        );
+    }
+
+    #[test]
+    fn format_html_no_placeholders() {
+        assert_eq!(format_html("hello", &[]), "hello");
+        // Extra args silently ignored when there are no placeholders.
+        assert_eq!(format_html("hello", &["ignored"]), "hello");
+    }
+
+    #[test]
+    fn format_html_multiple_args() {
+        let out = format_html("{} + {} = {}", &["1", "2", "3"]);
+        assert_eq!(out, "1 + 2 = 3");
+    }
+
+    #[test]
+    fn format_html_too_few_args_drops_placeholders() {
+        // Missing args leave the placeholder empty rather than panicking.
+        let out = format_html("{}-{}-{}", &["A", "B"]);
+        assert_eq!(out, "A-B-");
+    }
+
+    #[test]
+    fn format_html_escapes_html_entities_in_args() {
+        let out = format_html("<p>{}</p>", &[r#"a & b > c < d "quoted" 'apost'"#]);
+        assert!(out.contains("&amp;"));
+        assert!(out.contains("&gt;"));
+        assert!(out.contains("&lt;"));
+        assert!(out.contains("&quot;"));
+        assert!(out.contains("&#x27;"));
+    }
+
+    #[test]
+    fn format_html_handles_literal_braces() {
+        // `{{` and `}}` escape to literal `{` / `}`.
+        let out = format_html("{{}} = {}", &["empty"]);
+        assert_eq!(out, "{} = empty");
+    }
+
+    #[test]
+    fn format_html_handles_unicode_in_template_and_args() {
+        let out = format_html("Café — {}", &["résumé"]);
+        assert_eq!(out, "Café — résumé");
+    }
+
+    #[test]
+    fn format_html_join_renders_each_row() {
+        let rows = vec![
+            vec!["/a", "First"],
+            vec!["/b", "Second"],
+            vec!["/c", "Third"],
+        ];
+        let out = format_html_join(", ", r#"<a href="{}">{}</a>"#, &rows);
+        assert_eq!(
+            out,
+            r#"<a href="/a">First</a>, <a href="/b">Second</a>, <a href="/c">Third</a>"#
+        );
+    }
+
+    #[test]
+    fn format_html_join_empty_rows_yields_empty_string() {
+        let out: String = format_html_join(", ", "{}", &[]);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn format_html_join_escapes_each_row_independently() {
+        let rows: Vec<Vec<&str>> = vec![vec!["<bad>"], vec!["<also>"]];
+        let out = format_html_join("|", "<li>{}</li>", &rows);
+        assert!(out.contains("&lt;bad&gt;"));
+        assert!(out.contains("&lt;also&gt;"));
+        assert!(!out.contains("<bad>"));
     }
 }
