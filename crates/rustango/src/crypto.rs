@@ -54,6 +54,51 @@ pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
+/// Django-parity
+/// [`django.utils.crypto.constant_time_compare(val1, val2)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.constant_time_compare) —
+/// compare two byte sequences in time that depends only on the
+/// length of the inputs, not on their content. Used to compare
+/// HMAC tags / CSRF tokens / session signatures / TOTP codes —
+/// anywhere a timing leak could let an attacker recover the secret
+/// one byte at a time.
+///
+/// Length-mismatch short-circuits to `false` (Django shape — Django
+/// `constant_time_compare("abc", "ab")` is `False`). The
+/// length-mismatch path itself is NOT constant-time, but that's
+/// acceptable: leaking the comparison length is harmless when the
+/// caller already knows the expected length (HMAC tags are
+/// fixed-size, etc.).
+///
+/// rustango ships this consolidating two prior private copies
+/// (`totp::constant_time_eq` + `forms::csrf::constant_time_eq`) —
+/// constant-time comparisons MUST live in one place because subtle
+/// branches added to "fix" something on one side can let attackers
+/// recover secrets on the other.
+///
+/// ```ignore
+/// use rustango::crypto::constant_time_compare;
+/// let expected = b"abcdef";
+/// let supplied = b"abcdef";
+/// assert!(constant_time_compare(expected, supplied));
+/// assert!(!constant_time_compare(expected, b"abcdez"));
+/// assert!(!constant_time_compare(expected, b"abc"));  // length mismatch
+/// ```
+#[must_use]
+pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    // XOR every byte pair into an accumulator and check 0 at end —
+    // every byte is touched regardless of where the first mismatch
+    // sits, so the loop body's time is independent of which bytes
+    // differ.
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +219,64 @@ mod tests {
         let a = hmac_sha256(b"key-a", b"data");
         let b = hmac_sha256(b"key-b", b"data");
         assert_ne!(a, b);
+    }
+
+    // ---------------- constant_time_compare (Django parity) ----------------
+
+    #[test]
+    fn ct_compare_equal_inputs_match() {
+        assert!(constant_time_compare(b"hello", b"hello"));
+        assert!(constant_time_compare(b"", b""));
+    }
+
+    #[test]
+    fn ct_compare_different_content_fails() {
+        assert!(!constant_time_compare(b"hello", b"hellx"));
+        assert!(!constant_time_compare(b"abcdef", b"abcdez"));
+    }
+
+    #[test]
+    fn ct_compare_length_mismatch_fails() {
+        // Django shape: length mismatch → False, no panic.
+        assert!(!constant_time_compare(b"abc", b"abcd"));
+        assert!(!constant_time_compare(b"abcd", b"abc"));
+        assert!(!constant_time_compare(b"x", b""));
+        assert!(!constant_time_compare(b"", b"x"));
+    }
+
+    #[test]
+    fn ct_compare_handles_full_byte_range() {
+        // Compare against all-bytes input to spot-check no UTF-8
+        // assumption hides in the loop.
+        let a: Vec<u8> = (0..=255).collect();
+        let b: Vec<u8> = (0..=255).collect();
+        assert!(constant_time_compare(&a, &b));
+        let mut c = b.clone();
+        c[200] ^= 0x01;
+        assert!(!constant_time_compare(&a, &c));
+    }
+
+    #[test]
+    fn ct_compare_first_byte_difference_returns_false() {
+        // Regression: the loop must keep going past the first mismatch
+        // (constant time) but still report failure.
+        assert!(!constant_time_compare(b"Xbcdef", b"abcdef"));
+    }
+
+    #[test]
+    fn ct_compare_last_byte_difference_returns_false() {
+        assert!(!constant_time_compare(b"abcdeX", b"abcdef"));
+    }
+
+    #[test]
+    fn ct_compare_real_hmac_outputs() {
+        // Sanity smoke: two HMAC tags differ in exactly one position;
+        // compare must catch it.
+        let a = hmac_sha256(b"key", b"msg-1");
+        let b = hmac_sha256(b"key", b"msg-2");
+        assert!(!constant_time_compare(&a, &b));
+        // And identical inputs match.
+        let c = hmac_sha256(b"key", b"msg-1");
+        assert!(constant_time_compare(&a, &c));
     }
 }
