@@ -135,6 +135,143 @@ pub fn iri_to_uri(iri: &str) -> String {
 }
 
 /// Django-parity
+/// [`django.utils.encoding.uri_to_iri(uri)`](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.uri_to_iri) —
+/// converts a URI back to IRI form by percent-decoding percent-
+/// encoded sequences that produce valid Unicode characters,
+/// while preserving the URI's syntactic structure.
+///
+/// Inverse of [`iri_to_uri`] for the round-trip case: any byte
+/// sequence that originally needed encoding to traverse a URI-
+/// level transport (non-ASCII, control chars, raw spaces) is
+/// decoded back. Percent-encoded forms of URI-reserved characters
+/// (`:`, `/`, `?`, `#`, `[`, `]`, `@`, `!`, `$`, `&`, `'`, `(`,
+/// `)`, `*`, `+`, `,`, `;`, `=`) stay encoded — decoding them
+/// would change the URI's meaning (e.g. `%2F` in a path segment
+/// must stay encoded to keep its "literal /" interpretation
+/// instead of becoming a path separator).
+///
+/// Percent sequences that don't form valid UTF-8 stay encoded
+/// verbatim (no replacement char inserted). Single `%` followed
+/// by non-hex characters passes through as `%` plus the rest.
+///
+/// ```
+/// use rustango::url_codec::uri_to_iri;
+///
+/// // Non-ASCII UTF-8 decodes back.
+/// assert_eq!(uri_to_iri("/caf%C3%A9"), "/café");
+///
+/// // Reserved chars stay encoded (slash inside a segment).
+/// assert_eq!(uri_to_iri("/a%2Fb"), "/a%2Fb");
+///
+/// // Space (non-reserved) decodes.
+/// assert_eq!(uri_to_iri("/with%20space"), "/with space");
+///
+/// // Already-decoded input passes through.
+/// assert_eq!(uri_to_iri("/plain/path"), "/plain/path");
+///
+/// // Mixed: reserved stays, unreserved decodes.
+/// assert_eq!(uri_to_iri("/caf%C3%A9/a%2Fb"), "/café/a%2Fb");
+/// ```
+#[must_use]
+pub fn uri_to_iri(uri: &str) -> String {
+    let bytes = uri.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'%' {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        // Collect a contiguous run of percent-escapes so we can
+        // attempt UTF-8 decoding on the whole sequence (multi-byte
+        // chars like é are 2-byte UTF-8 = 2 percent-escapes).
+        let start = i;
+        let mut run: Vec<u8> = Vec::with_capacity(4);
+        while i + 2 < bytes.len() + 1 && i < bytes.len() && bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                break;
+            }
+            let h1 = (bytes[i + 1] as char).to_digit(16);
+            let h2 = (bytes[i + 2] as char).to_digit(16);
+            match (h1, h2) {
+                (Some(a), Some(b)) => {
+                    run.push((a * 16 + b) as u8);
+                    i += 3;
+                }
+                _ => break,
+            }
+        }
+        if run.is_empty() {
+            // Malformed `%` followed by non-hex — pass through.
+            out.push(bytes[start]);
+            i = start + 1;
+            continue;
+        }
+        // Attempt UTF-8 decode of the run.
+        match std::str::from_utf8(&run) {
+            Ok(decoded) => {
+                // Walk the decoded chars; decode any that aren't
+                // URI-reserved. Reserved chars roll back to their
+                // percent-encoded form to preserve URI semantics.
+                let mut run_idx = 0;
+                for ch in decoded.chars() {
+                    let utf8_len = ch.len_utf8();
+                    if is_uri_reserved(ch) {
+                        // Emit the percent-encoded form for these
+                        // bytes (re-encode from the run).
+                        for &byte in &run[run_idx..run_idx + utf8_len] {
+                            use std::fmt::Write as _;
+                            let mut buf = String::with_capacity(3);
+                            let _ = write!(buf, "%{byte:02X}");
+                            out.extend_from_slice(buf.as_bytes());
+                        }
+                    } else {
+                        let mut buf = [0u8; 4];
+                        let encoded = ch.encode_utf8(&mut buf);
+                        out.extend_from_slice(encoded.as_bytes());
+                    }
+                    run_idx += utf8_len;
+                }
+            }
+            Err(_) => {
+                // Non-UTF-8 percent-escape run — leave it encoded
+                // verbatim (the original bytes from `uri[start..i]`).
+                out.extend_from_slice(&bytes[start..i]);
+            }
+        }
+    }
+    // The output is guaranteed to be valid UTF-8: every byte we
+    // pushed came either from the input (already UTF-8) or from a
+    // successfully UTF-8-decoded percent sequence we wrote back as
+    // its char.
+    String::from_utf8(out).unwrap_or_default()
+}
+
+fn is_uri_reserved(ch: char) -> bool {
+    matches!(
+        ch,
+        ':' | '/'
+            | '?'
+            | '#'
+            | '['
+            | ']'
+            | '@'
+            | '!'
+            | '$'
+            | '&'
+            | '\''
+            | '('
+            | ')'
+            | '*'
+            | '+'
+            | ','
+            | ';'
+            | '='
+    )
+}
+
+/// Django-parity
 /// [`django.utils.encoding.escape_uri_path(path)`](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.escape_uri_path) —
 /// percent-encode the *path* portion of a URI: encodes any byte
 /// outside the path-safe set, but DOES preserve `/` so the path
@@ -566,5 +703,64 @@ mod tests {
         let encoded = urlsafe_base64_encode(&input);
         let decoded = urlsafe_base64_decode(&encoded).expect("round-trip");
         assert_eq!(decoded, input);
+    }
+
+    // ---- uri_to_iri (Django parity) ----
+
+    #[test]
+    fn uri_to_iri_decodes_non_ascii_utf8() {
+        assert_eq!(uri_to_iri("/caf%C3%A9"), "/café");
+        assert_eq!(uri_to_iri("/%E4%B8%AD%E6%96%87"), "/中文");
+    }
+
+    #[test]
+    fn uri_to_iri_keeps_reserved_chars_encoded() {
+        // Slash inside a segment must stay encoded — decoding it
+        // would change the URI's path structure.
+        assert_eq!(uri_to_iri("/a%2Fb"), "/a%2Fb");
+        // Question mark, hash, ampersand, equals — all reserved.
+        assert_eq!(uri_to_iri("/q%3Fk%3Dv%26"), "/q%3Fk%3Dv%26");
+    }
+
+    #[test]
+    fn uri_to_iri_decodes_non_reserved_ascii() {
+        // Space (0x20) is not URI-reserved → decodes back.
+        assert_eq!(uri_to_iri("/with%20space"), "/with space");
+        // Underscore is unreserved.
+        assert_eq!(uri_to_iri("/foo%5Fbar"), "/foo_bar");
+    }
+
+    #[test]
+    fn uri_to_iri_passes_already_decoded_through() {
+        assert_eq!(uri_to_iri("/plain/path"), "/plain/path");
+        assert_eq!(uri_to_iri(""), "");
+    }
+
+    #[test]
+    fn uri_to_iri_mixed_reserved_and_unicode() {
+        assert_eq!(uri_to_iri("/caf%C3%A9/a%2Fb"), "/café/a%2Fb");
+    }
+
+    #[test]
+    fn uri_to_iri_invalid_utf8_stays_encoded() {
+        // 0xFF alone is not valid UTF-8 → stays encoded verbatim.
+        assert_eq!(uri_to_iri("/x%FFy"), "/x%FFy");
+    }
+
+    #[test]
+    fn uri_to_iri_malformed_percent_passes_through() {
+        // `%` followed by non-hex.
+        assert_eq!(uri_to_iri("100%off"), "100%off");
+        // Bare `%` at end.
+        assert_eq!(uri_to_iri("x%"), "x%");
+    }
+
+    #[test]
+    fn iri_to_uri_then_uri_to_iri_round_trip_for_unicode() {
+        // Pure unicode path → round-trips losslessly.
+        let original = "/café";
+        let encoded = iri_to_uri(original);
+        let decoded = uri_to_iri(&encoded);
+        assert_eq!(decoded, original);
     }
 }
