@@ -1628,6 +1628,46 @@ pub fn validate_ipv6_address(s: &str) -> Result<(), ValidationError> {
         .map_err(|_| ValidationError::new("invalid_ipv6_address", "Enter a valid IPv6 address."))
 }
 
+/// Django-parity
+/// [`django.utils.ipv6.clean_ipv6_address(ip, unpack_ipv4=False)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.ipv6.clean_ipv6_address) —
+/// normalize an IPv6 address into the canonical RFC 5952 compressed
+/// form (lowercase hex, longest zero-run replaced with `::`, leading
+/// zeros dropped per group).
+///
+/// Use when storing or comparing IPv6 addresses so different textual
+/// representations of the same address fold to one canonical string.
+/// Returns `None` if `ip` doesn't parse as IPv6 — Django raises
+/// `ValidationError`; rustango surfaces the gap as `Option::None`
+/// for ergonomic `?` propagation.
+///
+/// `unpack_ipv4 = true` mirrors Django's flag: when the address is
+/// IPv4-mapped (`::ffff:192.0.2.1`), return the dotted-quad IPv4 form
+/// instead. When `false`, the IPv4-mapped form is preserved.
+///
+/// ```ignore
+/// use rustango::validators::clean_ipv6_address;
+/// assert_eq!(
+///     clean_ipv6_address("2001:0db8:0000:0000:0000:0000:0000:0001", false),
+///     Some("2001:db8::1".to_owned())
+/// );
+/// assert_eq!(
+///     clean_ipv6_address("::ffff:192.0.2.1", true),
+///     Some("192.0.2.1".to_owned())
+/// );
+/// assert!(clean_ipv6_address("not an ip", false).is_none());
+/// ```
+#[must_use]
+pub fn clean_ipv6_address(ip: &str, unpack_ipv4: bool) -> Option<String> {
+    let parsed: std::net::Ipv6Addr = ip.parse().ok()?;
+    if unpack_ipv4 {
+        if let Some(v4) = parsed.to_ipv4_mapped() {
+            return Some(v4.to_string());
+        }
+    }
+    // Rust's `Ipv6Addr::to_string` emits RFC 5952 canonical form.
+    Some(parsed.to_string())
+}
+
 /// Validate that `s` parses as either an IPv4 or IPv6 address.
 /// Mirrors Django's `GenericIPAddressField(protocol="both")` (the
 /// default). Issue #337 / Django-parity.
@@ -3428,5 +3468,65 @@ mod tests {
         assert!(validate_step_value(0.0, 5.0, 0.0).is_ok());
         assert!(validate_step_value(25.0, 5.0, 0.0).is_ok());
         assert!(validate_step_value(7.0, 5.0, 0.0).is_err());
+    }
+
+    // -------- clean_ipv6_address (Django parity) --------
+
+    #[test]
+    fn clean_ipv6_compresses_zero_run() {
+        // Long form → canonical compressed form.
+        assert_eq!(
+            clean_ipv6_address("2001:0db8:0000:0000:0000:0000:0000:0001", false),
+            Some("2001:db8::1".to_owned())
+        );
+    }
+
+    #[test]
+    fn clean_ipv6_already_compressed_passes_through() {
+        assert_eq!(
+            clean_ipv6_address("2001:db8::1", false),
+            Some("2001:db8::1".to_owned())
+        );
+    }
+
+    #[test]
+    fn clean_ipv6_lowercases_hex_digits() {
+        // Uppercase hex input gets folded to lowercase per RFC 5952.
+        assert_eq!(
+            clean_ipv6_address("2001:DB8::ABCD", false),
+            Some("2001:db8::abcd".to_owned())
+        );
+    }
+
+    #[test]
+    fn clean_ipv6_unpack_ipv4_mapped_to_dotted_quad() {
+        // ::ffff:192.0.2.1 unpacks to 192.0.2.1 when flag set.
+        assert_eq!(
+            clean_ipv6_address("::ffff:192.0.2.1", true),
+            Some("192.0.2.1".to_owned())
+        );
+    }
+
+    #[test]
+    fn clean_ipv6_unpack_off_preserves_mapped_form() {
+        // unpack_ipv4=false → keep IPv6 textual form.
+        let out = clean_ipv6_address("::ffff:192.0.2.1", false).unwrap();
+        assert!(out.contains("ffff"));
+    }
+
+    #[test]
+    fn clean_ipv6_loopback() {
+        assert_eq!(
+            clean_ipv6_address("0:0:0:0:0:0:0:1", false),
+            Some("::1".to_owned())
+        );
+    }
+
+    #[test]
+    fn clean_ipv6_rejects_garbage() {
+        assert!(clean_ipv6_address("not an ip", false).is_none());
+        assert!(clean_ipv6_address("", false).is_none());
+        // IPv4 is NOT IPv6.
+        assert!(clean_ipv6_address("192.0.2.1", false).is_none());
     }
 }
