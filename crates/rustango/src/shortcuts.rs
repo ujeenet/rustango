@@ -588,6 +588,65 @@ pub fn text_response(content: impl Into<String>, status: u16) -> Response {
     res
 }
 
+/// Django-parity
+/// [`HttpResponseNotModified()`](https://docs.djangoproject.com/en/6.0/ref/request-response/#django.http.HttpResponseNotModified) —
+/// `304 Not Modified` with no body. Used in conditional-GET flows
+/// (`If-Modified-Since` / `If-None-Match` returning 304 when the
+/// client's cached copy is still fresh).
+///
+/// The 304 response MUST NOT carry a body per RFC 7232 §4.1 — this
+/// helper enforces that by hard-coding `Body::empty()`. Callers
+/// should still copy any relevant `ETag` / `Last-Modified` /
+/// `Cache-Control` headers from the cached representation manually
+/// (Django's HttpResponseNotModified does NOT copy them either —
+/// the caller is responsible).
+///
+/// ```ignore
+/// use rustango::shortcuts::not_modified;
+/// async fn handler() -> axum::response::Response {
+///     // Conditional check returned freshness — short-circuit.
+///     not_modified()
+/// }
+/// ```
+#[must_use]
+pub fn not_modified() -> Response {
+    Response::builder()
+        .status(StatusCode::NOT_MODIFIED)
+        .body(axum::body::Body::empty())
+        .expect("304 + empty body is always valid")
+}
+
+/// Django-parity
+/// [`HttpResponseGone(content=b'')`](https://docs.djangoproject.com/en/6.0/ref/request-response/#django.http.HttpResponseGone) —
+/// `410 Gone` with optional message body. Use when a resource that
+/// previously existed has been intentionally and permanently
+/// removed (search engines + clients SHOULD purge it from caches
+/// + indexes; distinct from `404 Not Found` which says "I don't
+/// know if this ever existed").
+///
+/// Body content-type is `text/plain; charset=utf-8`. Pass an empty
+/// string for a bare-bones response.
+///
+/// ```ignore
+/// use rustango::shortcuts::gone;
+/// async fn deleted_user() -> axum::response::Response {
+///     gone("This user account has been permanently deleted.")
+/// }
+/// ```
+#[must_use]
+pub fn gone(message: impl Into<String>) -> Response {
+    let body = message.into();
+    let mut res = Response::builder()
+        .status(StatusCode::GONE)
+        .body(axum::body::Body::from(body))
+        .expect("410 + text body is always valid");
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    res
+}
+
 /// Build a download response — sets `Content-Type` plus
 /// `Content-Disposition: attachment; filename="..."` so browsers
 /// save the body to disk rather than rendering it inline. Django's
@@ -1183,5 +1242,50 @@ mod tests {
     fn redirect_to_view_unknown_name_is_err() {
         let p = HashMap::new();
         assert!(redirect_to_view("no_such_route_xyz_for_redirect", &p).is_err());
+    }
+
+    // -------- not_modified + gone (Django parity) --------
+
+    #[tokio::test]
+    async fn not_modified_is_304_with_empty_body() {
+        let res = not_modified();
+        assert_eq!(res.status(), StatusCode::NOT_MODIFIED);
+        let bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert!(bytes.is_empty(), "304 must have empty body per RFC 7232");
+    }
+
+    #[tokio::test]
+    async fn not_modified_omits_content_type_header() {
+        // RFC 7232 §4.1: server SHOULD NOT send Content-Type on 304.
+        let res = not_modified();
+        assert!(res.headers().get(header::CONTENT_TYPE).is_none());
+    }
+
+    #[tokio::test]
+    async fn gone_is_410_with_body() {
+        let res = gone("user deleted");
+        assert_eq!(res.status(), StatusCode::GONE);
+        let bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert_eq!(&bytes[..], b"user deleted");
+    }
+
+    #[tokio::test]
+    async fn gone_sets_text_plain_content_type() {
+        let res = gone("");
+        let ct = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(ct, "text/plain; charset=utf-8");
+    }
+
+    #[tokio::test]
+    async fn gone_accepts_empty_body() {
+        let res = gone("");
+        assert_eq!(res.status(), StatusCode::GONE);
+        let bytes = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert!(bytes.is_empty());
     }
 }
