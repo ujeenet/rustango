@@ -40,6 +40,8 @@
 //! - `validate_integer` — parses as `i64`.
 //! - `validate_decimal` — `max_digits` + `decimal_places` bounds
 //!   (Django's `DecimalValidator`).
+//! - `validate_file_size_max` / `validate_file_mime_type` —
+//!   Django-shape file-upload size + MIME allowlist checks.
 //! - `validate_ipv4_address` / `validate_ipv6_address` — dotted-quad /
 //!   colon-hex address shape via `std::net::Ipv4Addr` / `Ipv6Addr`.
 //! - `validate_comma_separated_integer_list` — `"1,2,3"`. Django's
@@ -1768,6 +1770,86 @@ pub fn validate_image_file_extension(filename: &str) -> Result<(), ValidationErr
     validate_file_extension(filename, IMAGE_EXTENSIONS)
 }
 
+/// Django-shape file-size cap — reject uploads whose byte length
+/// exceeds `max_bytes`. Pair with `uploads::save_uploads` (which
+/// streams + caps at the transport layer) when the form-level check
+/// needs to produce a Django-compatible `FormErrors` entry instead
+/// of a 413 response.
+///
+/// Message-shape mirrors Django's `FILE_UPLOAD_MAX_MEMORY_SIZE`
+/// rejection: `"File size {actual} exceeds {max} bytes."`.
+///
+/// # Errors
+/// `ValidationError { code: "file_too_large", ... }` when `actual_bytes
+/// > max_bytes`.
+pub fn validate_file_size_max(actual_bytes: u64, max_bytes: u64) -> Result<(), ValidationError> {
+    if actual_bytes > max_bytes {
+        return Err(ValidationError::new(
+            "file_too_large",
+            format!("File size {actual_bytes} exceeds {max_bytes} bytes."),
+        ));
+    }
+    Ok(())
+}
+
+/// Django-shape MIME-type allowlist — reject uploads whose
+/// `Content-Type` (or per-part media-type for multipart forms) isn't
+/// in `allowed_mimetypes`. Comparison is case-insensitive on the
+/// `type/subtype` portion and ignores any trailing `; charset=...`
+/// parameters.
+///
+/// Wildcard subtypes work: `"image/*"` allows `image/png`,
+/// `image/jpeg`, etc. — matches the HTML `<input accept>` shape.
+///
+/// # Errors
+/// `ValidationError { code: "invalid_mime_type", ... }` when none of
+/// `allowed_mimetypes` matches.
+///
+/// ```ignore
+/// use rustango::validators::validate_file_mime_type;
+///
+/// // Strict allowlist.
+/// assert!(validate_file_mime_type("image/png", &["image/png", "image/jpeg"]).is_ok());
+/// // Wildcard subtype.
+/// assert!(validate_file_mime_type("image/webp", &["image/*"]).is_ok());
+/// // Charset parameter ignored.
+/// assert!(validate_file_mime_type("text/html; charset=utf-8", &["text/html"]).is_ok());
+/// // Wrong type rejected.
+/// assert!(validate_file_mime_type("application/x-msdownload", &["image/*"]).is_err());
+/// ```
+pub fn validate_file_mime_type(
+    mimetype: &str,
+    allowed_mimetypes: &[&str],
+) -> Result<(), ValidationError> {
+    let core = mimetype
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let (ty, subty) = core.split_once('/').unwrap_or((core.as_str(), ""));
+    let matches_any = allowed_mimetypes.iter().any(|a| {
+        let a_core = a
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let (a_ty, a_subty) = a_core.split_once('/').unwrap_or((a_core.as_str(), ""));
+        a_ty == ty && (a_subty == "*" || a_subty == subty)
+    });
+    if !matches_any {
+        return Err(ValidationError::new(
+            "invalid_mime_type",
+            format!(
+                "MIME type '{mimetype}' is not allowed. Allowed: {}.",
+                allowed_mimetypes.join(", ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3160,5 +3242,71 @@ mod tests {
     fn image_file_extension_case_insensitive() {
         assert!(validate_image_file_extension("PHOTO.JPG").is_ok());
         assert!(validate_image_file_extension("Photo.PNG").is_ok());
+    }
+
+    // -------- validate_file_size_max (Django parity) --------
+
+    #[test]
+    fn file_size_max_accepts_under_limit() {
+        assert!(validate_file_size_max(0, 1024).is_ok());
+        assert!(validate_file_size_max(500, 1024).is_ok());
+        assert!(validate_file_size_max(1024, 1024).is_ok()); // exact match passes
+    }
+
+    #[test]
+    fn file_size_max_rejects_over_limit() {
+        let err = validate_file_size_max(1025, 1024).unwrap_err();
+        assert_eq!(err.code, "file_too_large");
+        assert!(err.message.contains("1025"));
+        assert!(err.message.contains("1024"));
+    }
+
+    #[test]
+    fn file_size_max_handles_zero_limit() {
+        // Pathological but well-defined: max=0 means anything fails.
+        assert!(validate_file_size_max(0, 0).is_ok()); // 0 <= 0
+        assert!(validate_file_size_max(1, 0).is_err());
+    }
+
+    // -------- validate_file_mime_type (Django parity) --------
+
+    #[test]
+    fn file_mime_type_accepts_exact_match() {
+        assert!(validate_file_mime_type("image/png", &["image/png"]).is_ok());
+        assert!(validate_file_mime_type("image/png", &["image/png", "image/jpeg"]).is_ok());
+    }
+
+    #[test]
+    fn file_mime_type_accepts_wildcard_subtype() {
+        // HTML <input accept="image/*"> shape.
+        assert!(validate_file_mime_type("image/png", &["image/*"]).is_ok());
+        assert!(validate_file_mime_type("image/webp", &["image/*"]).is_ok());
+        assert!(validate_file_mime_type("text/plain", &["image/*"]).is_err());
+    }
+
+    #[test]
+    fn file_mime_type_ignores_charset_parameter() {
+        assert!(validate_file_mime_type("text/html; charset=utf-8", &["text/html"]).is_ok());
+        assert!(validate_file_mime_type("text/html;charset=utf-8", &["text/html"]).is_ok());
+    }
+
+    #[test]
+    fn file_mime_type_case_insensitive() {
+        assert!(validate_file_mime_type("Image/PNG", &["image/png"]).is_ok());
+        assert!(validate_file_mime_type("IMAGE/JPEG", &["image/jpeg"]).is_ok());
+    }
+
+    #[test]
+    fn file_mime_type_rejects_unknown() {
+        let err = validate_file_mime_type("application/x-msdownload", &["image/png", "image/jpeg"])
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_mime_type");
+        assert!(err.message.contains("application/x-msdownload"));
+    }
+
+    #[test]
+    fn file_mime_type_wildcard_does_not_cross_top_level_type() {
+        // image/* must NOT match application/json
+        assert!(validate_file_mime_type("application/json", &["image/*"]).is_err());
     }
 }
