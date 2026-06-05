@@ -339,6 +339,98 @@ pub fn smart_split(text: &str) -> Vec<String> {
 }
 
 /// Django-parity
+/// [`django.utils.html.linebreaks(value, autoescape=False)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.linebreaks) —
+/// convert plain-text line breaks into HTML paragraphs and `<br>`
+/// tags. The canonical "render textarea-input as HTML preserving
+/// paragraph structure" transformation.
+///
+/// Algorithm (Django shape):
+/// * Normalize CRLF / CR → LF (matches [`normalize_newlines`])
+/// * Split on blank-line runs (`\n\n+`) into paragraphs
+/// * Within a paragraph, single `\n` becomes `<br>`
+/// * Wrap each paragraph in `<p>...</p>`
+///
+/// When `autoescape = true`, the input is `html_escape`d before
+/// the transformation so user-supplied HTML can't escape the
+/// containing element. When `false`, the input passes through
+/// verbatim (Django shape — caller has already validated).
+///
+/// ```ignore
+/// use rustango::text::linebreaks;
+/// assert_eq!(
+///     linebreaks("Para one.\n\nPara two.", true),
+///     "<p>Para one.</p>\n\n<p>Para two.</p>"
+/// );
+/// assert_eq!(
+///     linebreaks("Line one.\nLine two.", true),
+///     "<p>Line one.<br>Line two.</p>"
+/// );
+/// ```
+#[must_use]
+pub fn linebreaks(value: &str, autoescape: bool) -> String {
+    let normalized = normalize_newlines(value);
+    let safe: String = if autoescape {
+        html_escape(&normalized)
+    } else {
+        normalized
+    };
+    // Split on blank-line runs (`\n\n+`). We can't use String::split
+    // because it doesn't collapse adjacent separators — manually walk.
+    let mut paragraphs: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut blank_run = false;
+    for line in safe.split('\n') {
+        if line.is_empty() {
+            if !current.is_empty() {
+                paragraphs.push(std::mem::take(&mut current));
+            }
+            blank_run = true;
+        } else {
+            if !current.is_empty() && !blank_run {
+                current.push_str("<br>");
+            }
+            current.push_str(line);
+            blank_run = false;
+        }
+    }
+    if !current.is_empty() {
+        paragraphs.push(current);
+    }
+    paragraphs
+        .into_iter()
+        .map(|p| format!("<p>{p}</p>"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Django-parity
+/// [`django.utils.html.linebreaks_br(value, autoescape=False)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.linebreaksbr) —
+/// convert ALL `\n` line breaks into `<br>` tags, without
+/// paragraph wrapping. Use when you want preserved newlines inside
+/// an already-`<p>`-wrapped element (e.g. a single-paragraph
+/// description field).
+///
+/// Same CRLF normalization + autoescape semantics as [`linebreaks`].
+///
+/// ```ignore
+/// use rustango::text::linebreaks_br;
+/// assert_eq!(
+///     linebreaks_br("Line one.\nLine two.\nLine three.", true),
+///     "Line one.<br>Line two.<br>Line three."
+/// );
+/// ```
+#[must_use]
+pub fn linebreaks_br(value: &str, autoescape: bool) -> String {
+    let normalized = normalize_newlines(value);
+    let safe: String = if autoescape {
+        html_escape(&normalized)
+    } else {
+        normalized
+    };
+    safe.replace('\n', "<br>")
+}
+
+/// Django-parity
 /// [`django.utils.html.format_html(format_string, *args, **kwargs)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.format_html) —
 /// build an HTML string from a positional `{}`-style template,
 /// HTML-escaping every interpolated argument. This is the safe
@@ -1227,5 +1319,88 @@ mod tests {
         assert!(out.contains("&lt;bad&gt;"));
         assert!(out.contains("&lt;also&gt;"));
         assert!(!out.contains("<bad>"));
+    }
+
+    // -------- linebreaks / linebreaks_br (Django parity) --------
+
+    #[test]
+    fn linebreaks_blank_lines_become_paragraphs() {
+        assert_eq!(
+            linebreaks("Para one.\n\nPara two.", true),
+            "<p>Para one.</p>\n\n<p>Para two.</p>"
+        );
+    }
+
+    #[test]
+    fn linebreaks_single_newlines_become_br() {
+        assert_eq!(
+            linebreaks("Line one.\nLine two.", true),
+            "<p>Line one.<br>Line two.</p>"
+        );
+    }
+
+    #[test]
+    fn linebreaks_three_paragraphs() {
+        let out = linebreaks("a\n\nb\n\nc", true);
+        assert_eq!(out, "<p>a</p>\n\n<p>b</p>\n\n<p>c</p>");
+    }
+
+    #[test]
+    fn linebreaks_normalizes_crlf() {
+        // Windows-style CRLF should produce the same output as LF-only.
+        let crlf = linebreaks("Para one.\r\n\r\nPara two.", true);
+        let lf = linebreaks("Para one.\n\nPara two.", true);
+        assert_eq!(crlf, lf);
+    }
+
+    #[test]
+    fn linebreaks_autoescape_protects_user_html() {
+        let out = linebreaks("<script>alert(1)</script>", true);
+        assert!(out.contains("&lt;script&gt;"));
+        assert!(!out.contains("<script>"));
+    }
+
+    #[test]
+    fn linebreaks_no_autoescape_passes_html_through() {
+        // autoescape=false means the input is trusted markup.
+        let out = linebreaks("<em>x</em>", false);
+        assert_eq!(out, "<p><em>x</em></p>");
+    }
+
+    #[test]
+    fn linebreaks_empty_input() {
+        assert_eq!(linebreaks("", true), "");
+    }
+
+    #[test]
+    fn linebreaks_collapses_multi_blank_runs_to_one_split() {
+        // Three blank lines should still produce two paragraphs, not three.
+        let out = linebreaks("a\n\n\n\nb", true);
+        assert_eq!(out, "<p>a</p>\n\n<p>b</p>");
+    }
+
+    #[test]
+    fn linebreaks_br_replaces_every_newline() {
+        assert_eq!(
+            linebreaks_br("Line one.\nLine two.\nLine three.", true),
+            "Line one.<br>Line two.<br>Line three."
+        );
+    }
+
+    #[test]
+    fn linebreaks_br_handles_crlf() {
+        assert_eq!(linebreaks_br("a\r\nb\rc", true), "a<br>b<br>c");
+    }
+
+    #[test]
+    fn linebreaks_br_autoescape() {
+        let out = linebreaks_br("<x>\nfoo", true);
+        assert!(out.contains("&lt;x&gt;"));
+        assert!(out.contains("<br>")); // <br> tag should NOT be escaped
+    }
+
+    #[test]
+    fn linebreaks_br_empty_input() {
+        assert_eq!(linebreaks_br("", true), "");
     }
 }
