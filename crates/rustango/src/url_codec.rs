@@ -324,6 +324,75 @@ pub fn escape_uri_path(path: &str) -> String {
     out
 }
 
+/// Django-parity
+/// [`django.utils.encoding.filepath_to_uri(path)`](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.filepath_to_uri) —
+/// convert a filesystem path to a URI segment by percent-encoding
+/// chars that would otherwise have URL-syntactic meaning, and
+/// normalizing Windows-style `\` separators to `/`.
+///
+/// Safe set: alphanumeric + `-` `_` `.` `~` + `/` `!` `*` `(`
+/// `)` `'`. Everything else (including spaces, `?`, `#`, `:`,
+/// `[`, `]`, non-ASCII) is percent-encoded.
+///
+/// Distinct from [`escape_uri_path`]:
+/// * `escape_uri_path` encodes more aggressively (`:`, `?`, `#`,
+///   `@`, etc.) for inserting an arbitrary string INTO a path
+///   segment.
+/// * `filepath_to_uri` preserves the chars that are legal in
+///   filesystem path segments AND in URI paths — meant for direct
+///   conversion of a file path (likely already-clean ASCII or
+///   Unicode filename) into a URL segment.
+///
+/// Both are useful but for different cases. Use `filepath_to_uri`
+/// when generating static-file URLs from on-disk paths; use
+/// `escape_uri_path` when injecting operator input into a path.
+///
+/// ```
+/// use rustango::url_codec::filepath_to_uri;
+///
+/// // Plain paths pass through.
+/// assert_eq!(filepath_to_uri("/static/css/main.css"), "/static/css/main.css");
+///
+/// // Spaces encode.
+/// assert_eq!(filepath_to_uri("/static/My File.png"), "/static/My%20File.png");
+///
+/// // Non-ASCII encodes as UTF-8 bytes.
+/// assert_eq!(filepath_to_uri("/café/menu.html"), "/caf%C3%A9/menu.html");
+///
+/// // Windows-style backslash normalizes to forward slash.
+/// assert_eq!(filepath_to_uri("C:\\static\\app.js"), "C%3A/static/app.js");
+///
+/// // Safe-set chars stay verbatim.
+/// assert_eq!(filepath_to_uri("/a~b!c(d)e'f*g"), "/a~b!c(d)e'f*g");
+///
+/// // ? and # encoded (URL-syntactic).
+/// assert_eq!(filepath_to_uri("/x?y#z"), "/x%3Fy%23z");
+/// ```
+#[must_use]
+pub fn filepath_to_uri(path: &str) -> String {
+    // Windows → POSIX path normalization (per Django source).
+    let normalized = path.replace('\\', "/");
+    let mut out = String::with_capacity(normalized.len());
+    for byte in normalized.bytes() {
+        // Default `urllib.parse.quote` safe set is alphanumeric +
+        // `-_.~` (per RFC 3986 unreserved), and Django adds
+        // `/~!*()'` via the explicit `safe` argument.
+        let safe = matches!(
+            byte,
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
+                | b'-' | b'_' | b'.' | b'~'
+                | b'/' | b'!' | b'*' | b'(' | b')' | b'\''
+        );
+        if safe {
+            out.push(byte as char);
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
 // ============================================================ Django urlsafe_base64
 
 /// Django-parity
@@ -762,5 +831,64 @@ mod tests {
         let encoded = iri_to_uri(original);
         let decoded = uri_to_iri(&encoded);
         assert_eq!(decoded, original);
+    }
+
+    // ---- filepath_to_uri (Django parity) ----
+
+    #[test]
+    fn filepath_to_uri_plain_path_passes_through() {
+        assert_eq!(
+            filepath_to_uri("/static/css/main.css"),
+            "/static/css/main.css"
+        );
+        assert_eq!(filepath_to_uri(""), "");
+    }
+
+    #[test]
+    fn filepath_to_uri_encodes_spaces() {
+        assert_eq!(
+            filepath_to_uri("/static/My File.png"),
+            "/static/My%20File.png"
+        );
+    }
+
+    #[test]
+    fn filepath_to_uri_encodes_non_ascii() {
+        assert_eq!(filepath_to_uri("/café/menu.html"), "/caf%C3%A9/menu.html");
+    }
+
+    #[test]
+    fn filepath_to_uri_normalizes_backslash_to_forward_slash() {
+        assert_eq!(filepath_to_uri("C:\\static\\app.js"), "C%3A/static/app.js");
+        assert_eq!(filepath_to_uri("a\\b\\c"), "a/b/c");
+    }
+
+    #[test]
+    fn filepath_to_uri_keeps_safe_set_chars() {
+        // Django's safe set: `/~!*()'` + alphanumeric + `-_.~`.
+        assert_eq!(filepath_to_uri("/a~b!c(d)e'f*g"), "/a~b!c(d)e'f*g");
+        assert_eq!(filepath_to_uri("a-b_c.d"), "a-b_c.d");
+    }
+
+    #[test]
+    fn filepath_to_uri_encodes_url_syntactic_chars() {
+        // `?` `#` `:` `[` `]` etc. are NOT in Django's safe set.
+        assert_eq!(filepath_to_uri("/x?y#z"), "/x%3Fy%23z");
+        assert_eq!(filepath_to_uri("/[bracket]"), "/%5Bbracket%5D");
+        assert_eq!(filepath_to_uri("a:b"), "a%3Ab");
+        assert_eq!(filepath_to_uri("a&b"), "a%26b");
+    }
+
+    #[test]
+    fn filepath_to_uri_distinct_from_escape_uri_path_on_colon() {
+        // `escape_uri_path` keeps `:` and `@` (RFC 3986 pchar
+        // sub-delims); `filepath_to_uri` encodes them — filesystem
+        // paths shouldn't contain `:` and Windows uses it for drive
+        // letters which must encode.
+        assert_eq!(filepath_to_uri("a:b"), "a%3Ab");
+        assert_eq!(escape_uri_path("a:b"), "a:b");
+        // Same with `&`, `=`, `+`, `,`, `;`.
+        assert_eq!(filepath_to_uri("a&b=c"), "a%26b%3Dc");
+        assert_eq!(escape_uri_path("a&b=c"), "a&b=c");
     }
 }
