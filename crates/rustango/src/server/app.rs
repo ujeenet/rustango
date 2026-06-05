@@ -94,10 +94,14 @@ impl AppBuilder {
     /// Job, etc.) that emit Postgres-shape DDL. Passing the explicit
     /// list of *your* model schemas keeps SQLite happy.
     ///
-    /// FK constraints are emitted via `ALTER TABLE … ADD CONSTRAINT`
-    /// on Postgres / MySQL but skipped on SQLite (SQLite only
-    /// accepts inline FK constraints at CREATE TABLE time — separate
-    /// fix tracked for v0.28).
+    /// FK constraints land in the appropriate place per dialect:
+    /// * PG / MySQL — post-hoc `ALTER TABLE … ADD CONSTRAINT
+    ///   FOREIGN KEY` (so cross-table FK cycles within a batch
+    ///   resolve cleanly).
+    /// * SQLite — inline `CONSTRAINT … FOREIGN KEY` clauses inside
+    ///   each `CREATE TABLE` statement (since SQLite has no
+    ///   `ALTER TABLE ADD CONSTRAINT` syntax). Wired through
+    ///   [`crate::sql::Dialect::inline_fks_in_create_table`].
     ///
     /// # Errors
     /// Driver / SQL failures from the CREATE TABLE / ALTER TABLE
@@ -120,18 +124,19 @@ impl AppBuilder {
             }
             raw_execute_pool(&self.pool, &sql, vec![]).await?;
         }
-        // SQLite parser rejects ALTER TABLE … ADD CONSTRAINT FOREIGN
-        // KEY — FK constraints have to be declared inline at CREATE
-        // TABLE time. Skip the FK loop on SQLite.
-        // On PG / MySQL, the ALTER TABLE ADD CONSTRAINT statements
-        // emitted here aren't idempotent. Wrap each in a best-effort
-        // attempt so a redundant bootstrap doesn't fail; the migration
-        // path remains the source of truth for schema correctness.
-        if dialect.name() != "sqlite" {
-            for schema in schemas {
-                for sql in ddl::create_constraints_sql_with_dialect(dialect, schema) {
-                    let _ = raw_execute_pool(&self.pool, &sql, vec![]).await;
-                }
+        // PG / MySQL: post-hoc `ALTER TABLE ADD CONSTRAINT` statements.
+        // Wrap each in a best-effort `let _ = …` so a redundant
+        // bootstrap (idempotent re-run with constraints already in
+        // place) doesn't fail; the migration path remains the source
+        // of truth for schema correctness.
+        //
+        // SQLite: `create_constraints_sql_with_dialect` returns empty
+        // on dialects where `inline_fks_in_create_table()` is true
+        // (FKs were emitted inline above), so the loop is a no-op —
+        // no special branch needed.
+        for schema in schemas {
+            for sql in ddl::create_constraints_sql_with_dialect(dialect, schema) {
+                let _ = raw_execute_pool(&self.pool, &sql, vec![]).await;
             }
         }
         self.schemas.extend(schemas);
