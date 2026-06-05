@@ -44,12 +44,12 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 22. Async support | 4 | 0 | 0 | 3 |
 | 23. DRF parity | 22 | 0 | 1 | 0 |
 | 24. contrib modules | 12 | 1 | 3 | 2 |
-| 25. `django.utils.*` helpers | 81 | 0 | 0 | 0 |
-| **Totals** | **451** | **11** | **21** | **19** |
+| 25. `django.utils.*` helpers | 84 | 0 | 0 | 0 |
+| **Totals** | **454** | **11** | **21** | **19** |
 
-Coverage = 451 / (451 + 11 + 21) = **93% full, 2% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
+Coverage = 454 / (454 + 11 + 21) = **93% full, 2% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
 
-Snapshot date: 2026-06-05 (post-v0.42 plus 80+ Django `utils.*` + `template.defaultfilters` parity helpers across PRs #619–#698: 12 new modules + 14 widened modules — see Section 25 for the per-helper table).
+Snapshot date: 2026-06-05 (post-v0.42 plus 80+ Django `utils.*` + `template.defaultfilters` parity helpers across PRs #619–#702: 12 new modules + 14 widened modules — see Section 25 for the per-helper table).
 
 ---
 
@@ -753,6 +753,8 @@ below corresponds to a Django module / function the port targets.
 | rustango PII-redaction (`mask_email` / `mask_card` / `mask_phone`) | (custom — no Django equivalent) | SHIPPED | `text::{mask_email, mask_card, mask_phone}` (PR #694) — promoted from Tera-only to public Rust |
 | rustango list/avatar helpers (`oxford_join` / `initials`) | (custom — no Django equivalent) | SHIPPED | `text::oxford_join(items, conj)` + `text::initials(s, limit)` (PR #696) — Oxford-comma list join + avatar-mnemonic; both promoted from Tera-only |
 | `django.template.defaultfilters.floatformat` | [floatformat](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#floatformat) | SHIPPED | `numberformat::floatformat(value, precision)` (PR #698) — signed-precision shape (negative = drop trailing zeros, positive = keep). The price-formatter trick: `floatformat(price, -2)` |
+| `django.template.defaultfilters.truncatechars` (plain) | [truncatechars](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#truncatechars) | SHIPPED | `text::truncatechars(s, count)` (PR #700) — distinct from `text::truncate` (Truncator shape, suffix beyond count); this is the Django template-filter shape where the ellipsis COUNTS toward `count`. Unicode-safe |
+| `django.template.defaultfilters.truncatechars_html` / `truncatewords_html` | [truncatechars_html](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#truncatechars-html) | SHIPPED | Tera filters `truncatechars_html` / `truncatewords_html` (PR #702) wrap existing `text::truncate_html_chars` / `truncate_html_words` (PR #682). Ellipsis budget honored via `count.saturating_sub(1)` to match Django shape |
 | `django.utils.crypto.get_random_string` | [get_random_string](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.get_random_string) | SHIPPED | `random::get_random_string(length, allowed_chars)` + `get_random_string_default` (PR #637) — CSPRNG-backed `crate::random` module with 5 predefined alphabets |
 | `django.utils.crypto.constant_time_compare` | [constant_time_compare](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.constant_time_compare) | SHIPPED | `crypto::constant_time_compare(a, b)` (PR #647) — consolidates 2 prior private copies |
 | `django.utils.encoding.iri_to_uri` | [iri_to_uri](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.iri_to_uri) | SHIPPED | `url_codec::iri_to_uri` (PR #648) |
