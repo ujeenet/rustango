@@ -33,15 +33,48 @@ use crate::sql::Pool;
 /// says NOT NULL because of a manual SQL edit). Strict
 /// row-to-T decoding lives on the Model derive's `from_row` path
 /// and is the right tool when you control the data shape.
-#[must_use]
-#[cfg(feature = "postgres")]
-pub fn row_to_json(
-    row: &sqlx::postgres::PgRow,
+// #562 — single `hex_encode` implementation lives in `crate::hex`;
+// the `row_to_json` family used to ship a verbatim copy. Re-export
+// so the local `hex_encode(...)` call sites in the `Binary` arm
+// stay byte-identical.
+use crate::hex::hex_encode;
+
+/// Generic body for the PG + MySQL `row_to_json` variants — they
+/// emit byte-identical match-on-`FieldType` decode tables. Issue
+/// #562: extract into a generic-over-`sqlx::Row` function so the
+/// 60-arm decode table lives once and both backends call into the
+/// same code path. SQLite has slight divergences (chrono permissive
+/// types) and continues to live in [`row_to_json_sqlite`].
+///
+/// The `where` clause looks heavy but it just enumerates the
+/// `Decode<'r, R::Database> + Type<R::Database>` bounds for each
+/// FieldType we decode. sqlx already provides these for `PgRow` and
+/// `MySqlRow`; the bounds compile away to nothing at the call sites.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+fn row_to_json_generic<'r, R>(
+    row: &'r R,
     fields: &[&'static crate::core::FieldSchema],
-) -> serde_json::Value {
+) -> serde_json::Value
+where
+    R: sqlx::Row,
+    &'r str: sqlx::ColumnIndex<R>,
+    i16: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    i32: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    i64: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    f32: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    f64: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    bool: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    String: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    chrono::NaiveDate: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    chrono::NaiveTime: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    chrono::DateTime<chrono::Utc>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    uuid::Uuid: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    serde_json::Value: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    rust_decimal::Decimal: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    Vec<u8>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
     use crate::core::FieldType;
     use serde_json::{json, Value};
-    use sqlx::Row as _;
     let mut map = serde_json::Map::new();
     for field in fields {
         let value = match field.ty {
@@ -106,11 +139,14 @@ pub fn row_to_json(
     Value::Object(map)
 }
 
-// #562 — single `hex_encode` implementation lives in `crate::hex`;
-// the `row_to_json` family used to ship a verbatim copy. Re-export
-// so the local `hex_encode(...)` call sites in the per-backend
-// `Binary` arms stay byte-identical.
-use crate::hex::hex_encode;
+#[must_use]
+#[cfg(feature = "postgres")]
+pub fn row_to_json(
+    row: &sqlx::postgres::PgRow,
+    fields: &[&'static crate::core::FieldSchema],
+) -> serde_json::Value {
+    row_to_json_generic(row, fields)
+}
 
 /// MySQL counterpart of [`row_to_json`]. Decodes each column by
 /// `field.ty` against `&MySqlRow`. Type mappings mirror the
@@ -123,71 +159,7 @@ pub fn row_to_json_my(
     row: &sqlx::mysql::MySqlRow,
     fields: &[&'static crate::core::FieldSchema],
 ) -> serde_json::Value {
-    use crate::core::FieldType;
-    use serde_json::{json, Value};
-    use sqlx::Row as _;
-    let mut map = serde_json::Map::new();
-    for field in fields {
-        let value = match field.ty {
-            FieldType::I16 => row
-                .try_get::<i16, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
-            FieldType::I32 => row
-                .try_get::<i32, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
-            FieldType::I64 => row
-                .try_get::<i64, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
-            FieldType::F32 => row
-                .try_get::<f32, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
-            FieldType::F64 => row
-                .try_get::<f64, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
-            FieldType::Bool => row
-                .try_get::<bool, _>(field.column)
-                .map(|b| json!(b))
-                .unwrap_or(Value::Null),
-            FieldType::String => row
-                .try_get::<String, _>(field.column)
-                .map(|s| json!(s))
-                .unwrap_or(Value::Null),
-            FieldType::Date => row
-                .try_get::<chrono::NaiveDate, _>(field.column)
-                .map(|d| json!(d.to_string()))
-                .unwrap_or(Value::Null),
-            FieldType::DateTime => row
-                .try_get::<chrono::DateTime<chrono::Utc>, _>(field.column)
-                .map(|dt| json!(dt.to_rfc3339()))
-                .unwrap_or(Value::Null),
-            FieldType::Uuid => row
-                .try_get::<uuid::Uuid, _>(field.column)
-                .map(|u| json!(u.to_string()))
-                .unwrap_or(Value::Null),
-            FieldType::Json => row
-                .try_get::<serde_json::Value, _>(field.column)
-                .unwrap_or(Value::Null),
-            FieldType::Decimal => row
-                .try_get::<rust_decimal::Decimal, _>(field.column)
-                .map(|d| json!(d.to_string()))
-                .unwrap_or(Value::Null),
-            FieldType::Binary => row
-                .try_get::<Vec<u8>, _>(field.column)
-                .map(|b| json!(hex_encode(&b)))
-                .unwrap_or(Value::Null),
-            FieldType::Time => row
-                .try_get::<chrono::NaiveTime, _>(field.column)
-                .map(|t| json!(t.to_string()))
-                .unwrap_or(Value::Null),
-        };
-        map.insert(field.name.to_owned(), value);
-    }
-    Value::Object(map)
+    row_to_json_generic(row, fields)
 }
 
 /// SQLite counterpart of [`row_to_json`]. SQLite's storage is more
