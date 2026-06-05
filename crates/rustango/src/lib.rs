@@ -985,6 +985,13 @@ pub mod shortcuts;
 #[cfg(feature = "template_views")]
 pub mod humanize;
 
+/// Django-shape number formatter — `numberformat::format(value,
+/// decimal_sep, decimal_pos, grouping, thousand_sep)`. Mirrors
+/// `django.utils.numberformat.format`. Tri-byte grouping
+/// (thousands), per-locale decimal/thousand separator override,
+/// optional fixed decimal-place width.
+pub mod numberformat;
+
 /// Django `defaultfilters` template filters — `pluralize`,
 /// `truncatewords`, `linebreaks`, `default_if_none`. See
 /// [`default_filters`]. Issue #61.
