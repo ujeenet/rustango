@@ -690,6 +690,45 @@ pub fn render_changes_split_with_dialect(
     render_changes_split_inner(changes, current, dialect)
 }
 
+/// Reject `AlterColumn*` operations on dialects whose DDL we
+/// don't yet render natively.
+///
+/// History: the `AlterColumnType / Nullable / Default / MaxLength
+/// / Unique` arms emit hand-rolled Postgres syntax — `ALTER TABLE
+/// "<t>" ALTER COLUMN "<c>" TYPE / SET NOT NULL / DROP DEFAULT /
+/// ...`. Before this guard those arms ignored the `dialect`
+/// parameter and emitted PG SQL on MySQL / SQLite, which then
+/// failed at apply time with a cryptic database error (MySQL
+/// rejects `ALTER COLUMN` — wants `MODIFY COLUMN`; SQLite has no
+/// `ALTER COLUMN` at all, only `ALTER TABLE … RENAME COLUMN`).
+///
+/// Until we ship native MySQL `MODIFY COLUMN` + SQLite
+/// table-rebuild rendering (tracked in #559), surface the gap
+/// loudly at preview / apply time so operators can swap to a
+/// manual `RunSQL` operation before hitting the wall in prod. The
+/// PG path is unchanged.
+fn guard_alter_column_dialect(
+    dialect: &dyn crate::sql::Dialect,
+    op: &'static str,
+    table: &str,
+    column: &str,
+) -> Result<(), String> {
+    if dialect.name() == "postgres" {
+        return Ok(());
+    }
+    Err(format!(
+        "{op} for `{table}.{column}` is not yet supported on dialect `{dialect_name}`. \
+         The arm currently emits Postgres-specific DDL (ALTER COLUMN ... TYPE / SET NOT NULL / \
+         SET DEFAULT / ADD CONSTRAINT UNIQUE) which would fail at apply time. \
+         Workaround: emit a hand-written `Operation::Data` (RunSQL) with the dialect-correct \
+         DDL for your migration. Tracked in #559 (per-dialect ALTER COLUMN rendering).",
+        op = op,
+        table = table,
+        column = column,
+        dialect_name = dialect.name(),
+    ))
+}
+
 fn render_changes_split_inner(
     changes: &[SchemaChange],
     current: &SchemaSnapshot,
@@ -761,6 +800,7 @@ fn render_changes_split_inner(
                 from: _,
                 to,
             } => {
+                guard_alter_column_dialect(dialect, "AlterColumnType", table, column)?;
                 let pg_to = pg_type_for_ty_name(to);
                 out.immediate.push(format!(
                     r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to} USING "{column}"::{pg_to}"#,
@@ -771,6 +811,7 @@ fn render_changes_split_inner(
                 column,
                 nullable,
             } => {
+                guard_alter_column_dialect(dialect, "AlterColumnNullable", table, column)?;
                 let action = if *nullable {
                     "DROP NOT NULL"
                 } else {
@@ -785,20 +826,24 @@ fn render_changes_split_inner(
                 column,
                 from: _,
                 to,
-            } => match to {
-                Some(expr) => out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {expr}"#,
-                )),
-                None => out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" DROP DEFAULT"#,
-                )),
-            },
+            } => {
+                guard_alter_column_dialect(dialect, "AlterColumnDefault", table, column)?;
+                match to {
+                    Some(expr) => out.immediate.push(format!(
+                        r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {expr}"#,
+                    )),
+                    None => out.immediate.push(format!(
+                        r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" DROP DEFAULT"#,
+                    )),
+                }
+            }
             SchemaChange::AlterColumnMaxLength {
                 table,
                 column,
                 from: _,
                 to,
             } => {
+                guard_alter_column_dialect(dialect, "AlterColumnMaxLength", table, column)?;
                 let pg_to = match to {
                     Some(n) => format!("VARCHAR({n})"),
                     None => "TEXT".into(),
@@ -812,6 +857,7 @@ fn render_changes_split_inner(
                 column,
                 unique,
             } => {
+                guard_alter_column_dialect(dialect, "AlterColumnUnique", table, column)?;
                 if *unique {
                     out.immediate.push(format!(
                         r#"ALTER TABLE "{table}" ADD CONSTRAINT "{table}_{column}_key" UNIQUE ("{column}")"#,
@@ -1384,5 +1430,105 @@ mod sql_type_tests {
                 vec!["ALTER TABLE `t` DROP COLUMN `c`".to_string()]
             );
         }
+    }
+
+    // -------- guard_alter_column_dialect (#559 protection) --------
+
+    fn empty_snap() -> SchemaSnapshot {
+        SchemaSnapshot::default()
+    }
+
+    #[test]
+    fn alter_column_type_emits_pg_sql_on_postgres() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::AlterColumnType {
+            table: "t".into(),
+            column: "c".into(),
+            from: "i32".into(),
+            to: "i64".into(),
+        }];
+        let out =
+            render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
+        assert_eq!(out.immediate.len(), 1);
+        assert!(out.immediate[0].contains("ALTER COLUMN \"c\" TYPE"));
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn alter_column_type_errors_on_mysql() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::AlterColumnType {
+            table: "t".into(),
+            column: "c".into(),
+            from: "i32".into(),
+            to: "i64".into(),
+        }];
+        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
+            .expect_err("AlterColumnType must reject MySQL until native rendering ships");
+        assert!(err.contains("AlterColumnType"));
+        assert!(err.contains("`t.c`"));
+        assert!(err.contains("mysql"));
+        assert!(err.contains("#559"));
+        // Workaround pointer present.
+        assert!(err.contains("RunSQL"));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn alter_column_nullable_errors_on_sqlite() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::AlterColumnNullable {
+            table: "t".into(),
+            column: "c".into(),
+            nullable: false,
+        }];
+        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite)
+            .expect_err("AlterColumnNullable must reject SQLite until rebuild path ships");
+        assert!(err.contains("AlterColumnNullable"));
+        assert!(err.contains("sqlite"));
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn alter_column_default_errors_on_mysql() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::AlterColumnDefault {
+            table: "t".into(),
+            column: "c".into(),
+            from: None,
+            to: Some("'hi'".into()),
+        }];
+        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
+            .expect_err("AlterColumnDefault must reject MySQL");
+        assert!(err.contains("AlterColumnDefault"));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn alter_column_max_length_errors_on_sqlite() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::AlterColumnMaxLength {
+            table: "t".into(),
+            column: "c".into(),
+            from: Some(50),
+            to: Some(100),
+        }];
+        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite)
+            .expect_err("AlterColumnMaxLength must reject SQLite");
+        assert!(err.contains("AlterColumnMaxLength"));
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn alter_column_unique_errors_on_mysql() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::AlterColumnUnique {
+            table: "t".into(),
+            column: "c".into(),
+            unique: true,
+        }];
+        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
+            .expect_err("AlterColumnUnique must reject MySQL");
+        assert!(err.contains("AlterColumnUnique"));
     }
 }
