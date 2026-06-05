@@ -213,6 +213,147 @@ pub fn truncate_words(s: &str, max_words: usize, suffix: &str) -> String {
     out
 }
 
+/// [`django.template.defaultfilters.wordcount`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#wordcount) —
+/// count whitespace-separated words in a string.
+///
+/// Empty string returns `0`. Multiple consecutive whitespace chars
+/// collapse to a single separator (matches `str::split_whitespace`).
+///
+/// ```
+/// use rustango::text::wordcount;
+/// assert_eq!(wordcount("Joel is a slug"), 4);
+/// assert_eq!(wordcount(""), 0);
+/// assert_eq!(wordcount("  spaces   between   "), 2);
+/// ```
+#[must_use]
+pub fn wordcount(s: &str) -> usize {
+    s.split_whitespace().count()
+}
+
+/// [`django.template.defaultfilters.linenumbers`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#linenumbers) —
+/// prepend each line with a 1-based line number, right-aligned to
+/// the width of the largest line number.
+///
+/// ```
+/// use rustango::text::linenumbers;
+/// assert_eq!(linenumbers("one\ntwo\nthree"), "1. one\n2. two\n3. three");
+/// ```
+#[must_use]
+pub fn linenumbers(s: &str) -> String {
+    let lines: Vec<&str> = s.split('\n').collect();
+    let width = lines.len().to_string().len();
+    let mut out = String::with_capacity(s.len() + lines.len() * (width + 2));
+    use std::fmt::Write as _;
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let _ = write!(out, "{:>width$}. {}", i + 1, line, width = width);
+    }
+    out
+}
+
+/// [`django.template.defaultfilters.ljust`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#ljust) —
+/// left-justify (pad right with spaces) to width `n`. Values
+/// already at or beyond `n` characters return as-is.
+///
+/// ```
+/// use rustango::text::ljust;
+/// assert_eq!(ljust("Joel", 10), "Joel      ");
+/// assert_eq!(ljust("already long enough", 5), "already long enough");
+/// ```
+#[must_use]
+pub fn ljust(s: &str, n: usize) -> String {
+    let chars = s.chars().count();
+    if chars >= n {
+        return s.to_owned();
+    }
+    let mut out = String::with_capacity(s.len() + (n - chars));
+    out.push_str(s);
+    out.extend(std::iter::repeat(' ').take(n - chars));
+    out
+}
+
+/// [`django.template.defaultfilters.rjust`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#rjust) —
+/// right-justify (pad left with spaces) to width `n`.
+///
+/// ```
+/// use rustango::text::rjust;
+/// assert_eq!(rjust("Joel", 10), "      Joel");
+/// ```
+#[must_use]
+pub fn rjust(s: &str, n: usize) -> String {
+    let chars = s.chars().count();
+    if chars >= n {
+        return s.to_owned();
+    }
+    let mut out = String::with_capacity(n);
+    out.extend(std::iter::repeat(' ').take(n - chars));
+    out.push_str(s);
+    out
+}
+
+/// [`django.template.defaultfilters.center`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#center) —
+/// center `s` in a field of width `n`. When padding doesn't split
+/// evenly the extra space goes on the right (matches Python's
+/// `str.center`).
+///
+/// ```
+/// use rustango::text::center;
+/// assert_eq!(center("Joel", 10), "   Joel   ");
+/// assert_eq!(center("x", 4), " x  ");
+/// ```
+#[must_use]
+pub fn center(s: &str, n: usize) -> String {
+    let chars = s.chars().count();
+    if chars >= n {
+        return s.to_owned();
+    }
+    let total_pad = n - chars;
+    let left = total_pad / 2;
+    let right = total_pad - left;
+    let mut out = String::with_capacity(n);
+    out.extend(std::iter::repeat(' ').take(left));
+    out.push_str(s);
+    out.extend(std::iter::repeat(' ').take(right));
+    out
+}
+
+/// [`django.template.defaultfilters.get_digit`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#get-digit) —
+/// extract the `idx`-th digit (1-indexed, from the **right**) of an
+/// integer.
+///
+/// * `get_digit(1234, 1)` → `"4"` (rightmost)
+/// * `get_digit(1234, 4)` → `"1"`
+/// * `get_digit(1234, 5)` → `"0"` (past leftmost digit)
+/// * `idx < 1` returns the full integer string (Django's
+///   passthrough-on-invalid-index shape).
+///
+/// Negative input uses the absolute value's digits — matches
+/// Django (`get_digit(-1234, 1) == "4"`, not `"-"`).
+///
+/// ```
+/// use rustango::text::get_digit;
+/// assert_eq!(get_digit(1234, 1), "4");
+/// assert_eq!(get_digit(1234, 4), "1");
+/// assert_eq!(get_digit(1234, 5), "0");
+/// assert_eq!(get_digit(1234, 0), "1234");
+/// assert_eq!(get_digit(-1234, 1), "4");
+/// ```
+#[must_use]
+pub fn get_digit(n: i64, idx: i64) -> String {
+    if idx < 1 {
+        return n.to_string();
+    }
+    let s = n.unsigned_abs().to_string();
+    let chars: Vec<char> = s.chars().rev().collect();
+    let pick = chars
+        .get(usize::try_from(idx - 1).unwrap_or(0))
+        .copied()
+        .unwrap_or('0');
+    pick.to_string()
+}
+
 /// [`django.template.defaultfilters.pluralize`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#pluralize) —
 /// pick the singular or plural suffix for a count.
 ///
@@ -2523,6 +2664,97 @@ mod tests {
         // Plain text content like `alert` and `xss` passes through —
         // it's just the punctuation that's escaped.
         assert!(out.contains("alert"));
+    }
+
+    // -------- wordcount / linenumbers / ljust / rjust / center / get_digit --------
+
+    #[test]
+    fn wordcount_basic() {
+        assert_eq!(wordcount("Joel is a slug"), 4);
+        assert_eq!(wordcount(""), 0);
+        assert_eq!(wordcount("   "), 0);
+        assert_eq!(wordcount("  spaces   between   "), 2);
+        assert_eq!(wordcount("one"), 1);
+    }
+
+    #[test]
+    fn linenumbers_basic() {
+        assert_eq!(linenumbers("one\ntwo\nthree"), "1. one\n2. two\n3. three");
+    }
+
+    #[test]
+    fn linenumbers_pads_for_double_digit_line_counts() {
+        // 10 lines → width = 2 → " 1. ..." through "10. ..."
+        let many: String = (1..=10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let out = linenumbers(&many);
+        let first = out.lines().next().unwrap();
+        let last = out.lines().last().unwrap();
+        assert_eq!(first, " 1. line1");
+        assert_eq!(last, "10. line10");
+    }
+
+    #[test]
+    fn linenumbers_single_line() {
+        assert_eq!(linenumbers("solo"), "1. solo");
+    }
+
+    #[test]
+    fn ljust_pads_right() {
+        assert_eq!(ljust("Joel", 10), "Joel      ");
+        assert_eq!(ljust("Joel", 4), "Joel"); // already at width
+        assert_eq!(ljust("Joel", 0), "Joel"); // n=0 → unchanged
+    }
+
+    #[test]
+    fn rjust_pads_left() {
+        assert_eq!(rjust("Joel", 10), "      Joel");
+        assert_eq!(rjust("Joel", 4), "Joel");
+    }
+
+    #[test]
+    fn center_pads_both_sides() {
+        assert_eq!(center("Joel", 10), "   Joel   ");
+        // Odd-remainder → extra goes right.
+        assert_eq!(center("x", 4), " x  ");
+        // Already at or beyond width.
+        assert_eq!(center("toolong", 4), "toolong");
+    }
+
+    #[test]
+    fn get_digit_basic() {
+        assert_eq!(get_digit(1234, 1), "4");
+        assert_eq!(get_digit(1234, 2), "3");
+        assert_eq!(get_digit(1234, 3), "2");
+        assert_eq!(get_digit(1234, 4), "1");
+    }
+
+    #[test]
+    fn get_digit_past_leftmost_returns_zero() {
+        assert_eq!(get_digit(1234, 5), "0");
+        assert_eq!(get_digit(1234, 99), "0");
+    }
+
+    #[test]
+    fn get_digit_negative_uses_absolute_value() {
+        assert_eq!(get_digit(-1234, 1), "4");
+        assert_eq!(get_digit(-1234, 4), "1");
+    }
+
+    #[test]
+    fn get_digit_invalid_index_passes_full_int() {
+        assert_eq!(get_digit(1234, 0), "1234");
+        assert_eq!(get_digit(1234, -1), "1234");
+        assert_eq!(get_digit(-1234, 0), "-1234");
+    }
+
+    #[test]
+    fn get_digit_zero_value() {
+        // Single-digit value 0 → idx 1 is "0", idx 2+ is "0" (past).
+        assert_eq!(get_digit(0, 1), "0");
+        assert_eq!(get_digit(0, 5), "0");
     }
 
     // -------- pluralize --------
