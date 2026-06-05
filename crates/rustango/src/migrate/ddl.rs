@@ -90,6 +90,19 @@ pub fn create_table_sql_with_dialect(dialect: &dyn Dialect, model: &ModelSchema)
         first = false;
         write_column_def(&mut s, dialect, field);
     }
+    // For dialects that REQUIRE FKs inline in CREATE TABLE (SQLite —
+    // `ALTER TABLE ADD CONSTRAINT FOREIGN KEY` doesn't exist), emit
+    // every FK clause inside the same CREATE TABLE statement. PG +
+    // MySQL get nothing here; their FKs continue to be emitted as
+    // post-hoc `ALTER TABLE ADD CONSTRAINT` via
+    // [`create_constraints_sql_with_dialect`] so cross-table cycles
+    // resolve cleanly within a single migration batch.
+    if dialect.inline_fks_in_create_table() {
+        for clause in inline_fk_clauses(dialect, model) {
+            s.push_str(", ");
+            s.push_str(&clause);
+        }
+    }
     s.push(')');
     // Django-shape `Meta.db_table_comment` — MySQL spells it as an
     // inline trailer (`) COMMENT='...'`); PG + SQLite emit nothing
@@ -170,6 +183,15 @@ pub fn create_constraints_sql_with_dialect(
     dialect: &dyn Dialect,
     model: &ModelSchema,
 ) -> Vec<String> {
+    // SQLite has no `ALTER TABLE ADD CONSTRAINT FOREIGN KEY` — FKs
+    // were emitted inline in CREATE TABLE via `inline_fk_clauses`.
+    // Returning the post-hoc ALTER statements here would silently
+    // fail at apply time AND, worse, the previous workaround skipped
+    // FKs entirely on SQLite (silent loss of referential integrity).
+    // Return empty so the runner skips the post-hoc emission cleanly.
+    if dialect.inline_fks_in_create_table() {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     for field in model.scalar_fields() {
         let Some(rel) = field.relation else { continue };
@@ -223,6 +245,67 @@ pub fn create_constraints_sql_with_dialect(
 }
 
 // ============================================================ internals
+
+/// Emit FK clauses for inclusion inside a `CREATE TABLE (...)` —
+/// used on dialects where `inline_fks_in_create_table()` is true
+/// (currently SQLite). Output is a `Vec<String>` whose entries are
+/// joined into the CREATE TABLE body with `, `.
+///
+/// Two kinds of clauses emitted:
+/// * Single-column FK / O2O — one `CONSTRAINT <name> FOREIGN KEY
+///   (<col>) REFERENCES <to> (<on>) [ON DELETE <action>]` per
+///   field that carries `Relation::Fk` or `Relation::O2O`.
+/// * Composite FK — one `CONSTRAINT <name> FOREIGN KEY (col_a,
+///   col_b, ...) REFERENCES <to> (col_x, col_y, ...)` per
+///   `composite_relations` entry.
+///
+/// Identifier quoting goes through `dialect.quote_ident()`.
+fn inline_fk_clauses(dialect: &dyn Dialect, model: &ModelSchema) -> Vec<String> {
+    let mut out = Vec::new();
+    for field in model.scalar_fields() {
+        let Some(rel) = field.relation else { continue };
+        let (to, on) = match rel {
+            Relation::Fk { to, on } | Relation::O2O { to, on } => (to, on),
+        };
+        let mut s = String::from("CONSTRAINT ");
+        s.push_str(&dialect.quote_ident(&format!("{}_{}_fkey", model.table, field.column)));
+        s.push_str(" FOREIGN KEY (");
+        s.push_str(&dialect.quote_ident(field.column));
+        s.push_str(") REFERENCES ");
+        s.push_str(&dialect.quote_ident(to));
+        s.push_str(" (");
+        s.push_str(&dialect.quote_ident(on));
+        s.push(')');
+        if let Some(action) = field.fk_on_delete {
+            s.push_str(" ON DELETE ");
+            s.push_str(action.as_sql());
+        }
+        out.push(s);
+    }
+    for rel in model.composite_relations {
+        let mut s = String::from("CONSTRAINT ");
+        s.push_str(&dialect.quote_ident(&format!("{}_{}_fkey", model.table, rel.name)));
+        s.push_str(" FOREIGN KEY (");
+        for (i, col) in rel.from.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            s.push_str(&dialect.quote_ident(col));
+        }
+        s.push_str(") REFERENCES ");
+        s.push_str(&dialect.quote_ident(rel.to));
+        s.push_str(" (");
+        for (i, col) in rel.on.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            s.push_str(&dialect.quote_ident(col));
+        }
+        s.push(')');
+        out.push(s);
+    }
+    out
+}
 
 fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) {
     s.push_str(&dialect.quote_ident(field.column));
@@ -520,5 +603,146 @@ mod tests {
         field.primary_key = true;
         write_column_def(&mut col_def, &dialect, &field);
         assert!(col_def.contains(" PRIMARY KEY"), "got: {col_def}");
+    }
+
+    // -------- Inline FK on SQLite (#559: silent referential-integrity loss) --------
+    //
+    // Before this PR, SQLite tables were created without FK clauses
+    // and `create_constraints_sql_with_dialect` would (separately)
+    // emit `ALTER TABLE ADD CONSTRAINT FOREIGN KEY` — which SQLite
+    // doesn't support. The earlier workaround skipped FKs entirely
+    // on SQLite, silently losing referential integrity.
+    //
+    // Fix: when `dialect.inline_fks_in_create_table()` is true, the
+    // FK clauses are emitted INSIDE the CREATE TABLE statement and
+    // `create_constraints_sql_with_dialect` returns empty.
+
+    fn fk_model() -> ModelSchema {
+        let mut fk_field = fld("author_id", FieldType::I64, false, None);
+        fk_field.relation = Some(Relation::Fk {
+            to: "authors",
+            on: "id",
+        });
+        let id_field = {
+            let mut f = fld("id", FieldType::I64, true, None);
+            f.primary_key = true;
+            f
+        };
+        ModelSchema {
+            name: "Post",
+            table: "posts",
+            fields: Box::leak(Box::new([id_field, fk_field])),
+            display: None,
+            app_label: None,
+            admin: None,
+            soft_delete_column: None,
+            permissions: false,
+            audit_track: None,
+            m2m: &[],
+            indexes: &[],
+            check_constraints: &[],
+            exclusion_constraints: &[],
+            default_permissions: &[],
+            composite_relations: &[],
+            generic_relations: &[],
+            scope: crate::core::ModelScope::Tenant,
+            default_order: &[],
+            is_view: false,
+            verbose_name: None,
+            verbose_name_plural: None,
+            managed: true,
+            db_table_comment: None,
+            default_related_name: None,
+            base_manager_name: None,
+            required_db_vendor: None,
+            required_db_features: &[],
+            order_with_respect_to: None,
+            proxy: false,
+            get_latest_by: None,
+            extra_permissions: &[],
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_inlines_fk_in_create_table() {
+        let model = fk_model();
+        let sql = create_table_sql_with_dialect(&crate::sql::Sqlite, &model);
+        // FK constraint emitted INSIDE the CREATE TABLE statement.
+        assert!(
+            sql.contains(r#"CONSTRAINT "posts_author_id_fkey" FOREIGN KEY ("author_id") REFERENCES "authors" ("id")"#),
+            "expected inline FK clause; got: {sql}"
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_returns_empty_post_hoc_constraint_list() {
+        // The runner asks for post-hoc ALTER ADD CONSTRAINT — return
+        // empty since the FK is already in CREATE TABLE.
+        let model = fk_model();
+        let post_hoc = create_constraints_sql_with_dialect(&crate::sql::Sqlite, &model);
+        assert!(
+            post_hoc.is_empty(),
+            "SQLite must return empty post-hoc constraint list (FKs are inline): {post_hoc:?}"
+        );
+    }
+
+    #[test]
+    fn postgres_keeps_post_hoc_alter_path() {
+        // PG path unchanged — FKs go through post-hoc ALTER ADD
+        // CONSTRAINT so cross-table cycles resolve cleanly.
+        let model = fk_model();
+        let sql = create_table_sql_with_dialect(&crate::sql::Postgres, &model);
+        assert!(
+            !sql.contains("FOREIGN KEY"),
+            "PG CREATE TABLE must NOT contain inline FK: {sql}"
+        );
+        let post_hoc = create_constraints_sql_with_dialect(&crate::sql::Postgres, &model);
+        assert_eq!(post_hoc.len(), 1);
+        assert!(post_hoc[0].contains("ALTER TABLE"));
+        assert!(post_hoc[0].contains("ADD CONSTRAINT"));
+        assert!(post_hoc[0].contains(r#"REFERENCES "authors" ("id")"#));
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn mysql_keeps_post_hoc_alter_path() {
+        let model = fk_model();
+        let sql = create_table_sql_with_dialect(&crate::sql::MySql, &model);
+        assert!(
+            !sql.contains("FOREIGN KEY"),
+            "MySQL CREATE TABLE must NOT contain inline FK: {sql}"
+        );
+        let post_hoc = create_constraints_sql_with_dialect(&crate::sql::MySql, &model);
+        assert_eq!(post_hoc.len(), 1);
+        assert!(post_hoc[0].contains("ALTER TABLE"));
+        assert!(post_hoc[0].contains("ADD CONSTRAINT"));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_inlines_fk_with_on_delete_cascade() {
+        // ON DELETE action should also land inline.
+        let id_field = {
+            let mut f = fld("id", FieldType::I64, true, None);
+            f.primary_key = true;
+            f
+        };
+        let mut fk_field = fld("author_id", FieldType::I64, false, None);
+        fk_field.relation = Some(Relation::Fk {
+            to: "authors",
+            on: "id",
+        });
+        fk_field.fk_on_delete = Some(crate::core::OnDeleteAction::Cascade);
+        let model = ModelSchema {
+            fields: Box::leak(Box::new([id_field, fk_field])),
+            ..fk_model()
+        };
+        let sql = create_table_sql_with_dialect(&crate::sql::Sqlite, &model);
+        assert!(
+            sql.contains("ON DELETE CASCADE"),
+            "expected inline ON DELETE CASCADE; got: {sql}"
+        );
     }
 }
