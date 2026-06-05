@@ -82,9 +82,7 @@ fn pluralize(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value
         .or_else(|| args.values().next())
         .and_then(Value::as_str)
         .unwrap_or("s");
-    let (singular, plural) = parse_pluralize_arg(suffix_arg);
-    let out = if count == 1 { singular } else { plural };
-    Ok(to_value(out)?)
+    Ok(to_value(crate::text::pluralize(count, suffix_arg))?)
 }
 
 /// Resolve the count that drives pluralize. Django accepts ints,
@@ -114,20 +112,6 @@ fn count_for_pluralize(value: &Value) -> i64 {
         return i64::try_from(obj.len()).unwrap_or(i64::MAX);
     }
     0
-}
-
-/// Split a pluralize argument into `(singular, plural)`. Empty
-/// argument defaults to `"" / "s"` (Django default). One token
-/// means `"" / token`. Two comma-separated tokens are
-/// `(singular, plural)`. Anything beyond two tokens uses only the
-/// first two (Django ignores extras silently).
-fn parse_pluralize_arg(arg: &str) -> (String, String) {
-    let parts: Vec<&str> = arg.split(',').collect();
-    match parts.as_slice() {
-        [""] | [] => (String::new(), "s".to_owned()),
-        [one] => (String::new(), (*one).to_owned()),
-        [singular, plural, ..] => ((*singular).to_owned(), (*plural).to_owned()),
-    }
 }
 
 // ------------------------------------------------------------------ truncatewords

@@ -213,6 +213,51 @@ pub fn truncate_words(s: &str, max_words: usize, suffix: &str) -> String {
     out
 }
 
+/// [`django.template.defaultfilters.pluralize`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#pluralize) —
+/// pick the singular or plural suffix for a count.
+///
+/// `suffix_arg` syntax matches Django exactly:
+///
+/// * `""` / `"s"` — empty singular / `"s"` plural (default Django
+///   shape when no arg is passed).
+/// * `"<one-token>"` — empty singular / `<one-token>` plural.
+/// * `"<singular>,<plural>"` — pick whichever matches count.
+/// * 3+ comma-separated tokens: extras silently ignored.
+///
+/// `count == 1` → singular; anything else (incl. `0` and negative)
+/// → plural. Matches Django + English-language convention.
+///
+/// ```
+/// use rustango::text::pluralize;
+///
+/// // Default "" / "s".
+/// assert_eq!(pluralize(1, ""), "");
+/// assert_eq!(pluralize(2, ""), "s");
+/// assert_eq!(pluralize(0, ""), "s");
+///
+/// // Custom plural suffix.
+/// assert_eq!(pluralize(1, "es"), "");
+/// assert_eq!(pluralize(2, "es"), "es");
+///
+/// // Singular,plural pair.
+/// assert_eq!(pluralize(1, "y,ies"), "y");
+/// assert_eq!(pluralize(2, "y,ies"), "ies");
+/// ```
+#[must_use]
+pub fn pluralize(count: i64, suffix_arg: &str) -> String {
+    let parts: Vec<&str> = suffix_arg.split(',').collect();
+    let (singular, plural): (String, String) = match parts.as_slice() {
+        [""] | [] => (String::new(), "s".to_owned()),
+        [one] => (String::new(), (*one).to_owned()),
+        [s, p, ..] => ((*s).to_owned(), (*p).to_owned()),
+    };
+    if count == 1 {
+        singular
+    } else {
+        plural
+    }
+}
+
 /// Django-parity `Truncator(s).chars(num, html=True, truncate=…)` —
 /// truncate to `max_chars` visible characters while preserving HTML
 /// tag structure. Open tags at the truncation point are closed in
@@ -2478,6 +2523,44 @@ mod tests {
         // Plain text content like `alert` and `xss` passes through —
         // it's just the punctuation that's escaped.
         assert!(out.contains("alert"));
+    }
+
+    // -------- pluralize --------
+
+    #[test]
+    fn pluralize_default_suffix() {
+        assert_eq!(pluralize(1, ""), "");
+        assert_eq!(pluralize(2, ""), "s");
+        assert_eq!(pluralize(0, ""), "s");
+        assert_eq!(pluralize(-1, ""), "s");
+    }
+
+    #[test]
+    fn pluralize_single_token_suffix() {
+        assert_eq!(pluralize(1, "es"), "");
+        assert_eq!(pluralize(2, "es"), "es");
+        assert_eq!(pluralize(2, "z"), "z");
+    }
+
+    #[test]
+    fn pluralize_singular_plural_pair() {
+        assert_eq!(pluralize(1, "y,ies"), "y");
+        assert_eq!(pluralize(2, "y,ies"), "ies");
+        // 0 takes plural — matches English convention ("0 items").
+        assert_eq!(pluralize(0, "y,ies"), "ies");
+    }
+
+    #[test]
+    fn pluralize_extra_tokens_ignored() {
+        // "a,b,c" → only first two used → ("a", "b").
+        assert_eq!(pluralize(1, "a,b,c"), "a");
+        assert_eq!(pluralize(2, "a,b,c"), "b");
+    }
+
+    #[test]
+    fn pluralize_large_counts() {
+        assert_eq!(pluralize(i64::MAX, ""), "s");
+        assert_eq!(pluralize(i64::MIN, ""), "s");
     }
 
     // -------- truncate_html_chars --------
