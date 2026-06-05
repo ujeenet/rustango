@@ -175,6 +175,41 @@ pub fn truncate(s: &str, max_chars: usize, suffix: &str) -> String {
     out
 }
 
+/// [`django.template.defaultfilters.truncatechars`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#truncatechars) —
+/// truncate to AT MOST `count` characters total **including** the
+/// ellipsis (`…`).
+///
+/// Distinct from [`truncate`] (which appends the suffix BEYOND
+/// the count budget — `truncate("hello world", 5, "…")` returns
+/// `"hello…"` for 6 chars total). `truncatechars(s, 5)` returns
+/// `"hell…"` — exactly 5 chars.
+///
+/// * `count >= total chars`: no truncation, returns `s` unchanged.
+/// * `count == 0`: returns empty string.
+/// * `count >= 1`: returns `s[..count-1] + "…"`.
+///
+/// ```
+/// use rustango::text::truncatechars;
+/// assert_eq!(truncatechars("Joel is a slug", 7), "Joel i…");
+/// assert_eq!(truncatechars("Hi", 10), "Hi");
+/// assert_eq!(truncatechars("abc", 3), "abc");      // boundary
+/// assert_eq!(truncatechars("abcd", 3), "ab…");     // 3 chars total
+/// assert_eq!(truncatechars("any", 0), "");
+/// ```
+#[must_use]
+pub fn truncatechars(s: &str, count: usize) -> String {
+    let total = s.chars().count();
+    if total <= count {
+        return s.to_owned();
+    }
+    if count == 0 {
+        return String::new();
+    }
+    let keep = count - 1;
+    let truncated: String = s.chars().take(keep).collect();
+    format!("{truncated}…")
+}
+
 /// Django-parity `Truncator(s).words(num, truncate=…)` — truncate
 /// to the first `max_words` whitespace-separated tokens, appending
 /// `suffix` when truncation actually fired.
@@ -1948,6 +1983,50 @@ mod tests {
         // Django shape: kept words joined by single space regardless of
         // original whitespace shape.
         assert_eq!(truncate_words("a   b\t\tc\nd", 3, "…"), "a b c…");
+    }
+
+    // -------- truncatechars (Django filter parity) --------
+
+    #[test]
+    fn truncatechars_basic() {
+        // 7 chars total including the ellipsis.
+        assert_eq!(truncatechars("Joel is a slug", 7), "Joel i…");
+        assert_eq!(truncatechars("abcd", 3), "ab…");
+    }
+
+    #[test]
+    fn truncatechars_no_truncation_when_short() {
+        assert_eq!(truncatechars("Hi", 10), "Hi");
+        // Boundary: exactly count chars → no truncation, no ellipsis.
+        assert_eq!(truncatechars("abc", 3), "abc");
+        assert_eq!(truncatechars("", 5), "");
+    }
+
+    #[test]
+    fn truncatechars_zero_count_empty() {
+        assert_eq!(truncatechars("anything", 0), "");
+    }
+
+    #[test]
+    fn truncatechars_count_one_just_ellipsis() {
+        // Edge case: count=1 → keep 0 chars + ellipsis.
+        assert_eq!(truncatechars("hello", 1), "…");
+    }
+
+    #[test]
+    fn truncatechars_unicode_chars_count_as_one() {
+        // "café" has 4 chars but 5 bytes (`é` is 2 bytes in UTF-8).
+        // Count by chars, not bytes.
+        assert_eq!(truncatechars("café-bar", 5), "café…");
+        assert_eq!(truncatechars("café", 4), "café"); // already at count
+    }
+
+    #[test]
+    fn truncatechars_total_chars_includes_ellipsis() {
+        // Result must never exceed count chars total.
+        let out = truncatechars("abcdefghij", 4);
+        assert_eq!(out.chars().count(), 4);
+        assert_eq!(out, "abc…");
     }
 
     // -------- normalize_newlines (Django parity) --------
