@@ -52,6 +52,8 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("oxford_join", oxford_join);
     tera.register_filter("initials", initials);
     tera.register_filter("truncatechars", truncatechars);
+    tera.register_filter("truncatechars_html", truncatechars_html);
+    tera.register_filter("truncatewords_html", truncatewords_html);
     tera.register_filter("normalize_whitespace", normalize_whitespace);
     tera.register_filter("wordcount", wordcount);
     tera.register_filter("phone2numeric", phone2numeric);
@@ -586,6 +588,69 @@ fn truncatechars(value: &Value, args: &HashMap<String, Value>) -> tera::Result<V
         _ => return Ok(value.clone()),
     };
     Ok(to_value(crate::text::truncatechars(s, n))?)
+}
+
+// ------------------------------------------------------------------ truncatechars_html / truncatewords_html
+
+/// `truncatechars_html` — HTML-tag-aware version of `truncatechars`.
+/// Counts visible characters OUTSIDE tag brackets; maintains an
+/// open-tag stack so the result is well-formed HTML.
+///
+/// Django shape: the ellipsis (`…`) counts toward the `count`
+/// budget just like `truncatechars`. We keep `count - 1` visible
+/// chars from the input, then append `…` (the rendered ellipsis
+/// is 1 visible char). Self-closing void elements (`<br>`,
+/// `<img>`, etc.) don't stack.
+///
+/// ```jinja
+/// {{ "<p>hello world</p>" | truncatechars_html(count=7) }}
+/// {# → "<p>hello …</p>" — 6 visible chars + ellipsis = 7 total #}
+/// ```
+///
+/// Negative / non-integer `count` returns the input unchanged.
+/// `count = 0` returns the empty string (Django shape).
+fn truncatechars_html(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(s) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let n = match args
+        .get("count")
+        .or_else(|| args.values().next())
+        .and_then(Value::as_i64)
+    {
+        Some(n) if n >= 0 => n as usize,
+        _ => return Ok(value.clone()),
+    };
+    // Reserve 1 visible char for the ellipsis (Django shape).
+    let visible_budget = n.saturating_sub(1);
+    Ok(to_value(crate::text::truncate_html_chars(
+        s,
+        visible_budget,
+        "…",
+    ))?)
+}
+
+/// `truncatewords_html` — HTML-tag-aware version of `truncatewords`.
+/// Counts whitespace-separated words OUTSIDE tag brackets; closes
+/// any open tags after the truncation suffix.
+///
+/// ```jinja
+/// {{ "<p>Joel is a slug</p>" | truncatewords_html(count=2) }}
+/// {# → "<p>Joel is …</p>" #}
+/// ```
+fn truncatewords_html(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(s) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let n = match args
+        .get("count")
+        .or_else(|| args.values().next())
+        .and_then(Value::as_i64)
+    {
+        Some(n) if n >= 0 => n as usize,
+        _ => return Ok(value.clone()),
+    };
+    Ok(to_value(crate::text::truncate_html_words(s, n, " …"))?)
 }
 
 // ------------------------------------------------------------------ normalize_whitespace
@@ -1123,6 +1188,63 @@ mod tests {
         let mut ctx = tera::Context::new();
         ctx.insert("s", "a\nb");
         assert_eq!(tera.render("t", &ctx).unwrap(), "<p>a<br>b</p>");
+    }
+
+    // -------- truncatechars_html / truncatewords_html --------
+
+    #[test]
+    fn truncatechars_html_preserves_tag_structure() {
+        // count=7 → 6 visible chars kept ("hello ") + ellipsis = 7
+        // visible total. Tag structure preserved.
+        let out = truncatechars_html(&json!("<p>hello world</p>"), &args_pos(json!(7))).unwrap();
+        assert_eq!(out, json!("<p>hello …</p>"));
+    }
+
+    #[test]
+    fn truncatechars_html_no_truncation_short_input() {
+        let out = truncatechars_html(&json!("<p>short</p>"), &args_pos(json!(50))).unwrap();
+        assert_eq!(out, json!("<p>short</p>"));
+    }
+
+    #[test]
+    fn truncatechars_html_invalid_count_passes_through() {
+        // Negative count → passthrough.
+        let out = truncatechars_html(&json!("<p>x</p>"), &args_pos(json!(-1))).unwrap();
+        assert_eq!(out, json!("<p>x</p>"));
+    }
+
+    #[test]
+    fn truncatewords_html_preserves_tag_structure() {
+        let out = truncatewords_html(&json!("<p>Joel is a slug</p>"), &args_pos(json!(2))).unwrap();
+        assert_eq!(out, json!("<p>Joel is …</p>"));
+    }
+
+    #[test]
+    fn truncatewords_html_no_truncation_short_input() {
+        let out = truncatewords_html(&json!("<p>short text</p>"), &args_pos(json!(10))).unwrap();
+        assert_eq!(out, json!("<p>short text</p>"));
+    }
+
+    #[test]
+    fn register_filters_makes_truncatechars_html_callable_via_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ s | truncatechars_html(count=7) | safe }}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("s", "<p>hello world</p>");
+        assert_eq!(tera.render("t", &ctx).unwrap(), "<p>hello …</p>");
+    }
+
+    #[test]
+    fn register_filters_makes_truncatewords_html_callable_via_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ s | truncatewords_html(count=2) | safe }}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("s", "<p>Joel is a slug</p>");
+        assert_eq!(tera.render("t", &ctx).unwrap(), "<p>Joel is …</p>");
     }
 
     // -------- add --------
