@@ -3567,6 +3567,39 @@ fn inherent_impl_tokens(
                 ::rustango::sql::delete_pool(pool, &_query).await
             }
 
+            /// Fetch every row where `<col> = <val>`. Eloquent
+            /// `Model::where($col, $val)->get()` / Django
+            /// `Model.objects.filter(col=val).all()` parity.
+            ///
+            /// Thin wrapper over `QuerySet::<Self>::default()
+            /// .filter(col, val).fetch_pool(pool)`. For one row,
+            /// use [`Self::first_where_pool`]; for a chain that
+            /// needs further `.filter()` / `.order_by()` /
+            /// `.limit()`, drop down to `Self::query().filter(...)`
+            /// directly.
+            ///
+            /// `val` accepts any value `Into<SqlValue>` so plain
+            /// strings, ints, UUIDs, etc. all work.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_pool(
+                col: &str,
+                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(col, val)
+                    .fetch_pool(pool)
+                    .await
+            }
+
             /// Fetch the first row where `<col> = <val>`. Returns
             /// `Ok(None)` when no row matches. Eloquent
             /// `Model::firstWhere($col, $val)` / Django
