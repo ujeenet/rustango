@@ -849,7 +849,11 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     );
     let column_module = column_module_tokens(&module_ident, struct_name, &collected.column_entries);
     let from_row_impl = from_row_impl_tokens(struct_name, &collected.from_row_inits);
-    let reverse_helpers = reverse_helper_tokens(struct_name, &collected.fk_relations);
+    let reverse_helpers = reverse_helper_tokens(
+        struct_name,
+        &collected.fk_relations,
+        container.default_related_name.as_deref(),
+    );
     let m2m_accessors = m2m_accessor_tokens(struct_name, &container.m2m);
     let generic_fk_accessors = generic_fk_accessor_tokens(
         struct_name,
@@ -1196,15 +1200,32 @@ fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
 /// model derive itself compiles on tri-dialect / sqlite-only
 /// downstream builds — the accessor just isn't materialised. A tri-
 /// dialect `_set_pool` variant is a separate follow-up.
-fn reverse_helper_tokens(child_ident: &syn::Ident, fk_relations: &[FkRelation]) -> TokenStream2 {
+fn reverse_helper_tokens(
+    child_ident: &syn::Ident,
+    fk_relations: &[FkRelation],
+    default_related_name: Option<&str>,
+) -> TokenStream2 {
     if fk_relations.is_empty() {
         return TokenStream2::new();
     }
-    // Snake-case the child struct name to derive the method suffix —
-    // `Post` → `post_set`, `BlogComment` → `blog_comment_set`. Avoids
-    // English-plural edge cases (Django's `<child>_set` convention).
-    let suffix = format!("{}_set", to_snake_case(&child_ident.to_string()));
-    let method_ident = syn::Ident::new(&suffix, child_ident.span());
+    // Method-name resolution (issue #816):
+    //   1. `default_related_name = "..."` on the child's container
+    //      — Django's `class Meta: default_related_name = "articles"`
+    //      shape. Overrides the default suffix.
+    //   2. Fallback: `<child_snake>_set` — Django's
+    //      `<child>_set` convention. `Post` → `post_set`,
+    //      `BlogComment` → `blog_comment_set`. Avoids English-plural
+    //      edge cases.
+    //
+    // The PG-on-executor variant keeps the resolved name; the
+    // tri-dialect `_pool` variant appends `_pool` to it (matches the
+    // framework's convention for the `&Pool` flavor of every helper).
+    let pg_suffix = default_related_name
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{}_set", to_snake_case(&child_ident.to_string())));
+    let pool_suffix = format!("{}_pool", pg_suffix);
+    let pg_method_ident = syn::Ident::new(&pg_suffix, child_ident.span());
+    let pool_method_ident = syn::Ident::new(&pool_suffix, child_ident.span());
     let impls = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
         let fk_col = rel.fk_column.as_str();
@@ -1214,6 +1235,14 @@ fn reverse_helper_tokens(child_ident: &syn::Ident, fk_relations: &[FkRelation]) 
              generated from the FK declaration on `{child_ident}::{fk_col}`. Composes with \
              further `{child_ident}::objects()` filters via direct queryset use."
         );
+        let pool_doc = format!(
+            "Tri-dialect counterpart of [`Self::{pg_suffix}`] — takes \
+             [`::rustango::sql::Pool`] and dispatches per backend so the \
+             reverse-FK fetch works on PG / MySQL / SQLite under one method. \
+             Use this from framework code that holds a `&Pool` (admin, \
+             tenancy resolver, viewset handlers); reach for the executor- \
+             bound variant when you already have a typed `sqlx::Executor`."
+        );
         quote! {
             #[cfg(feature = "postgres")]
             impl #parent_ty {
@@ -1222,7 +1251,7 @@ fn reverse_helper_tokens(child_ident: &syn::Ident, fk_relations: &[FkRelation]) 
                 /// # Errors
                 /// Returns [`::rustango::sql::ExecError`] for SQL-writing
                 /// or driver failures.
-                pub async fn #method_ident<'_c, _E>(
+                pub async fn #pg_method_ident<'_c, _E>(
                     &self,
                     _executor: _E,
                 ) -> ::core::result::Result<
@@ -1239,6 +1268,28 @@ fn reverse_helper_tokens(child_ident: &syn::Ident, fk_relations: &[FkRelation]) 
                     ::rustango::query::QuerySet::<#child_ident>::new()
                         .filter_op(#fk_col, ::rustango::core::Op::Eq, _pk)
                         .fetch_on(_executor)
+                        .await
+                }
+            }
+
+            impl #parent_ty {
+                #[doc = #pool_doc]
+                ///
+                /// # Errors
+                /// Returns [`::rustango::sql::ExecError`] for SQL-writing
+                /// or driver failures.
+                pub async fn #pool_method_ident(
+                    &self,
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<
+                    ::std::vec::Vec<#child_ident>,
+                    ::rustango::sql::ExecError,
+                > {
+                    use ::rustango::sql::FetcherPool as _;
+                    let _pk: ::rustango::core::SqlValue = self.__rustango_pk_value();
+                    ::rustango::query::QuerySet::<#child_ident>::new()
+                        .filter_op(#fk_col, ::rustango::core::Op::Eq, _pk)
+                        .fetch_pool(pool)
                         .await
                 }
             }
