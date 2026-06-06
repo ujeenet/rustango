@@ -2503,20 +2503,10 @@ async fn dumpdata_cmd<W: Write>(
         let pk_field = schema.primary_key();
 
         // Build a minimal "select every column" SelectQuery.
+        // #562 — the empty-WHERE/full-table dump is exactly
+        // SelectQuery::new(model).
         let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
-        let query = crate::core::SelectQuery {
-            model: schema,
-            where_clause: crate::core::WhereExpr::And(vec![]),
-            search: None,
-            joins: vec![],
-            order_by: vec![],
-            limit: None,
-            offset: None,
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
-        };
+        let query = crate::core::SelectQuery::new(schema);
 
         let rows = crate::sql::select_rows_as_json(pool, &query, &fields)
             .await
