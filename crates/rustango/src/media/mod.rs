@@ -664,32 +664,20 @@ impl MediaManager {
             p1 = d.placeholder(1),
             p2 = d.placeholder(2),
         );
-        match &self.pool {
-            #[cfg(feature = "postgres")]
-            crate::sql::Pool::Postgres(pg) => {
-                sqlx::query(&sql)
-                    .bind(new_status.as_str())
-                    .bind(media_id)
-                    .execute(pg)
-                    .await?;
-            }
-            #[cfg(feature = "mysql")]
-            crate::sql::Pool::Mysql(my) => {
-                sqlx::query(&sql)
-                    .bind(new_status.as_str())
-                    .bind(media_id)
-                    .execute(my)
-                    .await?;
-            }
-            #[cfg(feature = "sqlite")]
-            crate::sql::Pool::Sqlite(sq) => {
-                sqlx::query(&sql)
-                    .bind(new_status.as_str())
-                    .bind(media_id)
-                    .execute(sq)
-                    .await?;
-            }
-        }
+        // #561 — was a 3-arm `match pool` each doing
+        // `sqlx::query(&sql).bind(status).bind(id).execute(<pool>)`.
+        // The executor's `raw_execute_pool` wraps the bind+dispatch
+        // for every backend — same wire shape, one source of truth.
+        crate::sql::raw_execute_pool(
+            &self.pool,
+            &sql,
+            vec![
+                crate::core::SqlValue::String(new_status.as_str().to_owned()),
+                crate::core::SqlValue::I64(media_id),
+            ],
+        )
+        .await
+        .map_err(media_err_from_exec)?;
         let mut updated = media;
         updated.status = new_status.as_str().to_owned();
         Ok(updated)
