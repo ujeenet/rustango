@@ -234,15 +234,57 @@ pub(crate) fn resolve_model_and_pk(
     crate::admin::errors::AdminError,
 > {
     let model = resolve_model(state, table)?;
-    let pk_field = model.primary_key().ok_or_else(|| {
+    let pk_field = primary_key_or_internal(model)?;
+    let pk_value = crate::forms::parse_pk_string(pk_field, pk_raw)
+        .map_err(crate::admin::errors::AdminError::Form)?;
+    Ok((model, pk_field, pk_value))
+}
+
+/// Return the model's `#[rustango(admin(...))]` block, falling back to
+/// [`crate::core::AdminConfig::DEFAULT`] when none is declared. Folds
+/// the third prologue pattern that recurs across every list / detail /
+/// create / update / delete handler:
+///
+/// ```ignore
+/// let admin_cfg = model
+///     .admin
+///     .copied()
+///     .unwrap_or(crate::core::AdminConfig::DEFAULT);
+/// ```
+///
+/// Issue #562 (admin CRUD-handler prologue dedup).
+#[must_use]
+pub(crate) fn admin_config_or_default(model: &'static ModelSchema) -> crate::core::AdminConfig {
+    model
+        .admin
+        .copied()
+        .unwrap_or(crate::core::AdminConfig::DEFAULT)
+}
+
+/// Resolve the model's primary-key `FieldSchema`, mapping the
+/// `Option::None` no-PK case to [`AdminError::Internal`]. Folds the
+/// fourth prologue pattern that recurs across every detail / create /
+/// update / delete handler that doesn't go through
+/// [`resolve_model_and_pk`] (because they don't have a `pk_raw` to
+/// parse — e.g. list endpoints that just need to know the PK column
+/// name for ordering).
+///
+/// ```ignore
+/// let pk_field = model.primary_key().ok_or_else(|| {
+///     AdminError::Internal(format!("model `{}` has no primary key", model.name))
+/// })?;
+/// ```
+///
+/// Issue #562 (admin CRUD-handler prologue dedup).
+pub(crate) fn primary_key_or_internal(
+    model: &'static ModelSchema,
+) -> Result<&'static crate::core::FieldSchema, crate::admin::errors::AdminError> {
+    model.primary_key().ok_or_else(|| {
         crate::admin::errors::AdminError::Internal(format!(
             "model `{}` has no primary key",
             model.name
         ))
-    })?;
-    let pk_value = crate::forms::parse_pk_string(pk_field, pk_raw)
-        .map_err(crate::admin::errors::AdminError::Form)?;
-    Ok((model, pk_field, pk_value))
+    })
 }
 
 /// Resolve `table` to a `ModelSchema`, but only if the admin is configured

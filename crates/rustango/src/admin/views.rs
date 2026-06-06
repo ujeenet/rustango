@@ -16,8 +16,9 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use super::errors::AdminError;
 use super::forms;
 use super::helpers::{
-    build_fk_joins, chrome_context, fk_map_from_joined_rows_json, lookup_model, pager_suffix,
-    render_cell_json, render_form, resolve_model, resolve_model_and_pk,
+    admin_config_or_default, build_fk_joins, chrome_context, fk_map_from_joined_rows_json,
+    lookup_model, pager_suffix, primary_key_or_internal, render_cell_json, render_form,
+    resolve_model, resolve_model_and_pk,
 };
 use super::render;
 use super::templates::render_with_chrome;
@@ -238,10 +239,7 @@ pub(crate) async fn table_view(
 ) -> Result<Html<String>, AdminError> {
     let model = resolve_model(&state, &table)?;
     let pk_field = model.primary_key();
-    let admin_cfg = model
-        .admin
-        .copied()
-        .unwrap_or(crate::core::AdminConfig::DEFAULT);
+    let admin_cfg = admin_config_or_default(model);
     // Resolve per-model page size (fall back to framework default when unset).
     let page_size: i64 = if admin_cfg.list_per_page == 0 {
         DEFAULT_PAGE_SIZE
@@ -1534,10 +1532,7 @@ pub(crate) async fn autocomplete_view(
     State(state): State<AppState>,
 ) -> Result<axum::Json<serde_json::Value>, AdminError> {
     let model = resolve_model(&state, &table)?;
-    let admin_cfg = model
-        .admin
-        .copied()
-        .unwrap_or(crate::core::AdminConfig::DEFAULT);
+    let admin_cfg = admin_config_or_default(model);
     let q = params
         .get("q")
         .map(String::as_str)
@@ -1899,15 +1894,10 @@ pub(crate) async fn create_submit(
         });
     }
 
-    let pk_field = model.primary_key().ok_or_else(|| {
-        AdminError::Internal(format!("model `{}` has no primary key", model.name))
-    })?;
+    let pk_field = primary_key_or_internal(model)?;
     // Auto-PK fields are server-assigned; readonly_fields are display-only
     // and must not be part of the INSERT. Build the combined skip list.
-    let admin_cfg = model
-        .admin
-        .copied()
-        .unwrap_or(crate::core::AdminConfig::DEFAULT);
+    let admin_cfg = admin_config_or_default(model);
     let mut skip: Vec<&str> = admin_cfg.readonly_fields.to_vec();
     if pk_field.auto {
         skip.push(pk_field.name);
@@ -2058,9 +2048,7 @@ pub(crate) async fn update_submit(
             table: model.table.to_owned(),
         });
     }
-    let pk_field = model.primary_key().ok_or_else(|| {
-        AdminError::Internal(format!("model `{}` has no primary key", model.name))
-    })?;
+    let pk_field = primary_key_or_internal(model)?;
     let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
 
     // #361 — `has_change_permission(request, obj)`. Fetch the row
@@ -2094,10 +2082,7 @@ pub(crate) async fn update_submit(
     // user-marked `readonly_fields` (slice 10.5): the form rendered
     // them as `readonly` inputs, but a malicious POST could still
     // include them; skip server-side too.
-    let admin_cfg = model
-        .admin
-        .copied()
-        .unwrap_or(crate::core::AdminConfig::DEFAULT);
+    let admin_cfg = admin_config_or_default(model);
     let mut skip: Vec<&'static str> = vec![pk_field.name];
     skip.extend(admin_cfg.readonly_fields.iter().copied());
     let collected = match forms::collect_values(model, &form, &skip) {
@@ -2186,9 +2171,7 @@ pub(crate) async fn delete_submit(
             table: model.table.to_owned(),
         });
     }
-    let pk_field = model.primary_key().ok_or_else(|| {
-        AdminError::Internal(format!("model `{}` has no primary key", model.name))
-    })?;
+    let pk_field = primary_key_or_internal(model)?;
     let pk_value = forms::parse_pk_string(pk_field, &pk_raw).map_err(AdminError::Form)?;
 
     // v0.12.3: SELECT the row before delete so the audit entry
@@ -2346,10 +2329,7 @@ pub(crate) async fn action_submit(
         );
     }
 
-    let admin_cfg = model
-        .admin
-        .copied()
-        .unwrap_or(crate::core::AdminConfig::DEFAULT);
+    let admin_cfg = admin_config_or_default(model);
     if !admin_cfg.actions.iter().any(|a| *a == action) {
         return Err(AdminError::Internal(format!(
             "action `{action}` not registered for `{}`",
@@ -2357,9 +2337,7 @@ pub(crate) async fn action_submit(
         )));
     }
 
-    let pk_field = model.primary_key().ok_or_else(|| {
-        AdminError::Internal(format!("model `{}` has no primary key", model.name))
-    })?;
+    let pk_field = primary_key_or_internal(model)?;
 
     let pk_values: Vec<SqlValue> = selected_raw
         .iter()
