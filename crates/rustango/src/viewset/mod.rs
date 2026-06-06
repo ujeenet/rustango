@@ -1224,6 +1224,50 @@ async fn handle_create(
     }
 }
 
+/// Build the `InsertQuery`, run `INSERT … RETURNING <pk>`, then
+/// re-fetch the row by its PK as a JSON object — the
+/// `create_one` ↔ `create_many` shared insert→fetch tail. Issue #808
+/// (item 5).
+///
+/// Returns `(StatusCode, message)` on the two distinct failure modes
+/// so both callers can re-emit the right HTTP code:
+/// * `BAD_REQUEST` when the INSERT itself fails (constraint violation,
+///   bad value, etc. — likely client fault).
+/// * `INTERNAL_SERVER_ERROR` when the INSERT succeeds but the re-fetch
+///   misses (a row vanishing between INSERT and SELECT is a server-
+///   side anomaly).
+///
+/// `columns` / `values` come from a prior `collect_values` step so
+/// the caller has already validated the inbound form / JSON shape.
+async fn insert_and_fetch_one(
+    state: &Arc<ViewSetState>,
+    acq: &mut AcquiredConn,
+    columns: Vec<&'static str>,
+    values: Vec<SqlValue>,
+    pk_field: &'static crate::core::FieldSchema,
+    fields: &[&'static crate::core::FieldSchema],
+) -> Result<Value, (StatusCode, String)> {
+    let query = InsertQuery {
+        model: state.vs.schema,
+        columns,
+        values,
+        returning: vec![pk_field.column],
+        on_conflict: None,
+    };
+    let pk_val = acq
+        .insert_returning_pk(&query, pk_field)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    fetch_by_pk(state, acq, pk_field, pk_val, fields)
+        .await
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "created but could not retrieve".to_owned(),
+            )
+        })
+}
+
 /// Single-row create — used by both the form-urlencoded codepath
 /// and the JSON-object body codepath. Returns 201 + the row JSON.
 async fn create_one(
@@ -1235,21 +1279,10 @@ async fn create_one(
 ) -> Response {
     let collected = or_400!(collect_values(state.vs.schema, form, skip));
     let (columns, values): (Vec<_>, Vec<_>) = collected.into_iter().unzip();
-    let query = InsertQuery {
-        model: state.vs.schema,
-        columns,
-        values,
-        returning: vec![pk_field.column],
-        on_conflict: None,
-    };
-    let pk_val = or_400!(acq.insert_returning_pk(&query, pk_field).await);
     let fields = state.effective_fields();
-    match fetch_by_pk(state, acq, pk_field, pk_val, &fields).await {
-        Some(obj) => json_created(obj),
-        None => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "created but could not retrieve",
-        ),
+    match insert_and_fetch_one(state, acq, columns, values, pk_field, &fields).await {
+        Ok(obj) => json_created(obj),
+        Err((code, msg)) => json_error(code, &msg),
     }
 }
 
@@ -1304,26 +1337,10 @@ async fn create_many(
     let fields = state.effective_fields();
     let mut created: Vec<Value> = Vec::with_capacity(prepared.len());
     for (i, (columns, values)) in prepared.into_iter().enumerate() {
-        let query = InsertQuery {
-            model: state.vs.schema,
-            columns,
-            values,
-            returning: vec![pk_field.column],
-            on_conflict: None,
-        };
-        let pk_val = match acq.insert_returning_pk(&query, pk_field).await {
-            Ok(v) => v,
-            Err(e) => {
-                return json_error(StatusCode::BAD_REQUEST, &format!("bulk entry {i}: {e}"));
-            }
-        };
-        match fetch_by_pk(state, acq, pk_field, pk_val, &fields).await {
-            Some(obj) => created.push(obj),
-            None => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("bulk entry {i}: created but could not retrieve"),
-                );
+        match insert_and_fetch_one(state, acq, columns, values, pk_field, &fields).await {
+            Ok(obj) => created.push(obj),
+            Err((code, msg)) => {
+                return json_error(code, &format!("bulk entry {i}: {msg}"));
             }
         }
     }
