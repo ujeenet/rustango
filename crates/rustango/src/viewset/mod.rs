@@ -827,11 +827,10 @@ async fn handle_list(
     //   ?published_at__isnull=true   — IS NULL / IS NOT NULL
     let mut filters: Vec<WhereExpr> = Vec::new();
     for (param_key, raw_val) in &params {
-        // Skip reserved keys
-        if matches!(
-            param_key.as_str(),
-            "page" | "page_size" | "ordering" | "search" | "cursor"
-        ) {
+        // #809 — was a hand-spelled `matches!` reserved-key check
+        // that had drifted from template_views's copy. Route through
+        // `list_params::is_reserved_list_key` (single source of truth).
+        if crate::list_params::is_reserved_list_key(param_key) {
             continue;
         }
         let (field_name, lookup) = match param_key.split_once("__") {
@@ -875,31 +874,15 @@ async fn handle_list(
     // allowing any schema field. Unknown / off-whitelist names are
     // silently dropped (mirrors DRF's defensive default — a hostile
     // client can't sort on `password_hash` just because it's a column).
-    let ordering_param = params.get("ordering").cloned();
-    let order_by: Vec<crate::core::OrderItem> = ordering_param
-        .as_deref()
+    // #809 — was a hand-rolled `-`-prefix split + allowlist filter +
+    // schema-field lookup. Route through `list_params::parse_ordering`
+    // (single source of truth shared with template_views::ListView).
+    let order_by: Vec<crate::core::OrderItem> = params
+        .get("ordering")
         .map(|raw| {
-            raw.split(',')
-                .filter(|s| !s.is_empty())
-                .filter_map(|part| {
-                    let (field_name, desc) = if let Some(name) = part.strip_prefix('-') {
-                        (name, true)
-                    } else {
-                        (part, false)
-                    };
-                    if !state.vs.ordering_fields.is_empty()
-                        && !state.vs.ordering_fields.iter().any(|f| f == field_name)
-                    {
-                        return None;
-                    }
-                    state
-                        .vs
-                        .schema
-                        .field(field_name)
-                        .map(|f| crate::core::OrderItem::column(f.column, desc))
-                })
-                .collect()
+            crate::list_params::parse_ordering(raw, &state.vs.ordering_fields, state.vs.schema)
         })
+        .filter(|v| !v.is_empty())
         .unwrap_or_else(|| {
             state
                 .vs

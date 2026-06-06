@@ -2297,7 +2297,13 @@ fn build_list_where(
 
     // Exact-match filters from `?field=value` query params.
     for (key, val) in params {
-        if matches!(key.as_str(), "page" | "page_size" | "search") {
+        // #809 — was a hand-rolled reserved-key skip list
+        // (`"page" | "page_size" | "search"`) that had drifted
+        // from viewset's (which also includes `"ordering"` and
+        // `"cursor"`). Now sourced from the shared
+        // `list_params::is_reserved_list_key` so any drift falls
+        // out automatically.
+        if crate::list_params::is_reserved_list_key(key) {
             continue;
         }
         if !filter_fields.iter().any(|f| f == key) {
