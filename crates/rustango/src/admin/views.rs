@@ -1334,100 +1334,135 @@ async fn fetch_date_hierarchy_buckets(
     field_ty: &crate::core::FieldType,
 ) -> Result<Vec<(i32, i64)>, AdminError> {
     use chrono::{TimeZone, Utc};
-    use sqlx::Row as _;
+    // #561 — was three byte-similar bind+fetch arms differing only
+    // in how PG decodes `bucket` (NUMERIC → f64) vs MySQL/SQLite
+    // (INT → i64). The bind block is identical, factored as the
+    // closure below; the per-backend decode collapses onto the
+    // sibling helpers.
+    let lo_hi = range.map(|(lo, hi)| match field_ty {
+        crate::core::FieldType::DateTime => {
+            let lo_dt = Utc.from_utc_datetime(&lo.and_hms_opt(0, 0, 0).unwrap());
+            let hi_dt = Utc.from_utc_datetime(&hi.and_hms_opt(0, 0, 0).unwrap());
+            (BucketBind::DateTime(lo_dt, hi_dt), true)
+        }
+        crate::core::FieldType::Date => (BucketBind::Date(lo, hi), true),
+        _ => (BucketBind::None, false),
+    });
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
             let mut q = sqlx::query(sql);
-            if let Some((lo, hi)) = range {
-                match field_ty {
-                    crate::core::FieldType::Date => {
-                        q = q.bind(lo).bind(hi);
-                    }
-                    crate::core::FieldType::DateTime => {
-                        let lo_dt = Utc.from_utc_datetime(&lo.and_hms_opt(0, 0, 0).unwrap());
-                        let hi_dt = Utc.from_utc_datetime(&hi.and_hms_opt(0, 0, 0).unwrap());
-                        q = q.bind(lo_dt).bind(hi_dt);
-                    }
-                    _ => {}
-                }
+            if let Some((bind, _)) = &lo_hi {
+                q = bind.apply_pg(q);
             }
             let rows = q
                 .fetch_all(pg)
                 .await
                 .map_err(|e| AdminError::Internal(e.to_string()))?;
-            // `bucket` arrives as PG NUMERIC (EXTRACT result). Decode as
-            // f64 then cast — keeps the code minimal and avoids
-            // dialect-specific Decimal feature pulls.
-            let mut out = Vec::with_capacity(rows.len());
-            for r in rows {
-                let bucket: f64 = r.try_get("bucket").unwrap_or(0.0);
-                let count: i64 = r.try_get("bucket_count").unwrap_or(0);
-                out.push((bucket as i32, count));
-            }
-            Ok(out)
+            Ok(rows.iter().map(decode_bucket_pg_row).collect())
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
             let mut q = sqlx::query(sql);
-            if let Some((lo, hi)) = range {
-                match field_ty {
-                    crate::core::FieldType::Date => {
-                        q = q.bind(lo).bind(hi);
-                    }
-                    crate::core::FieldType::DateTime => {
-                        let lo_dt = Utc.from_utc_datetime(&lo.and_hms_opt(0, 0, 0).unwrap());
-                        let hi_dt = Utc.from_utc_datetime(&hi.and_hms_opt(0, 0, 0).unwrap());
-                        q = q.bind(lo_dt).bind(hi_dt);
-                    }
-                    _ => {}
-                }
+            if let Some((bind, _)) = &lo_hi {
+                q = bind.apply_my(q);
             }
             let rows = q
                 .fetch_all(my)
                 .await
                 .map_err(|e| AdminError::Internal(e.to_string()))?;
-            let mut out = Vec::with_capacity(rows.len());
-            for r in rows {
-                // MySQL EXTRACT returns INT; try i64 first then i32.
-                let bucket: i64 = r
-                    .try_get::<i64, _>("bucket")
-                    .or_else(|_| r.try_get::<i32, _>("bucket").map(i64::from))
-                    .unwrap_or(0);
-                let count: i64 = r.try_get("bucket_count").unwrap_or(0);
-                out.push((bucket as i32, count));
-            }
-            Ok(out)
+            Ok(rows.iter().map(decode_bucket_my_row).collect())
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
             let mut q = sqlx::query(sql);
-            if let Some((lo, hi)) = range {
-                match field_ty {
-                    crate::core::FieldType::Date => {
-                        q = q.bind(lo).bind(hi);
-                    }
-                    crate::core::FieldType::DateTime => {
-                        let lo_dt = Utc.from_utc_datetime(&lo.and_hms_opt(0, 0, 0).unwrap());
-                        let hi_dt = Utc.from_utc_datetime(&hi.and_hms_opt(0, 0, 0).unwrap());
-                        q = q.bind(lo_dt).bind(hi_dt);
-                    }
-                    _ => {}
-                }
+            if let Some((bind, _)) = &lo_hi {
+                q = bind.apply_sq(q);
             }
             let rows = q
                 .fetch_all(sq)
                 .await
                 .map_err(|e| AdminError::Internal(e.to_string()))?;
-            let mut out = Vec::with_capacity(rows.len());
-            for r in rows {
-                let bucket: i64 = r.try_get("bucket").unwrap_or(0);
-                let count: i64 = r.try_get("bucket_count").unwrap_or(0);
-                out.push((bucket as i32, count));
-            }
-            Ok(out)
+            Ok(rows.iter().map(decode_bucket_sq_row).collect())
         }
     }
+}
+
+/// Range-bind shape for the date-hierarchy SELECT. The lo/hi pair is
+/// bound either as a [`chrono::NaiveDate`] (matches a Date column)
+/// or as a [`chrono::DateTime<Utc>`] (matches a DateTime column).
+#[derive(Debug, Clone, Copy)]
+enum BucketBind {
+    None,
+    Date(chrono::NaiveDate, chrono::NaiveDate),
+    DateTime(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
+}
+
+impl BucketBind {
+    #[cfg(feature = "postgres")]
+    fn apply_pg<'a>(
+        &self,
+        q: sqlx::query::Query<'a, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    ) -> sqlx::query::Query<'a, sqlx::Postgres, sqlx::postgres::PgArguments> {
+        match self {
+            BucketBind::None => q,
+            BucketBind::Date(lo, hi) => q.bind(*lo).bind(*hi),
+            BucketBind::DateTime(lo, hi) => q.bind(*lo).bind(*hi),
+        }
+    }
+    #[cfg(feature = "mysql")]
+    fn apply_my<'a>(
+        &self,
+        q: sqlx::query::Query<'a, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+    ) -> sqlx::query::Query<'a, sqlx::MySql, sqlx::mysql::MySqlArguments> {
+        match self {
+            BucketBind::None => q,
+            BucketBind::Date(lo, hi) => q.bind(*lo).bind(*hi),
+            BucketBind::DateTime(lo, hi) => q.bind(*lo).bind(*hi),
+        }
+    }
+    #[cfg(feature = "sqlite")]
+    fn apply_sq<'a>(
+        &self,
+        q: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>,
+    ) -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>> {
+        match self {
+            BucketBind::None => q,
+            BucketBind::Date(lo, hi) => q.bind(*lo).bind(*hi),
+            BucketBind::DateTime(lo, hi) => q.bind(*lo).bind(*hi),
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn decode_bucket_pg_row(row: &sqlx::postgres::PgRow) -> (i32, i64) {
+    use sqlx::Row as _;
+    // `bucket` arrives as PG NUMERIC (EXTRACT result). Decode as
+    // f64 then cast — keeps the code minimal and avoids
+    // dialect-specific Decimal feature pulls.
+    let bucket: f64 = row.try_get("bucket").unwrap_or(0.0);
+    let count: i64 = row.try_get("bucket_count").unwrap_or(0);
+    (bucket as i32, count)
+}
+
+#[cfg(feature = "mysql")]
+fn decode_bucket_my_row(row: &sqlx::mysql::MySqlRow) -> (i32, i64) {
+    use sqlx::Row as _;
+    // MySQL EXTRACT returns INT; try i64 first then i32.
+    let bucket: i64 = row
+        .try_get::<i64, _>("bucket")
+        .or_else(|_| row.try_get::<i32, _>("bucket").map(i64::from))
+        .unwrap_or(0);
+    let count: i64 = row.try_get("bucket_count").unwrap_or(0);
+    (bucket as i32, count)
+}
+
+#[cfg(feature = "sqlite")]
+fn decode_bucket_sq_row(row: &sqlx::sqlite::SqliteRow) -> (i32, i64) {
+    use sqlx::Row as _;
+    let bucket: i64 = row.try_get("bucket").unwrap_or(0);
+    let count: i64 = row.try_get("bucket_count").unwrap_or(0);
+    (bucket as i32, count)
 }
 
 // v0.46 — Django save-and-X redirect target.
