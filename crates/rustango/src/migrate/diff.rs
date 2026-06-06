@@ -1218,6 +1218,24 @@ fn create_table_sql_from_snapshot_with_dialect(
             dialect.quote_ident(&f.column),
             sql_type_with_dialect(f, dialect)
         );
+        // Generated columns (#559) — `GENERATED ALWAYS AS (<expr>) STORED`.
+        // Skips DEFAULT / PRIMARY KEY / UNIQUE / CHECK (Postgres rejects
+        // all of these on generated columns). NOT NULL stays permitted.
+        // Mirrors the live-registry behavior in
+        // `migrate::ddl::write_column_def`.
+        if let Some(expr) = &f.generated_as {
+            let _ = write!(sql, " GENERATED ALWAYS AS ({expr}) STORED");
+            if !f.nullable {
+                sql.push_str(" NOT NULL");
+            }
+            // db_comment still applies on MySQL even for generated columns.
+            if let Some(comment) = &f.db_comment {
+                if let Some(inline) = dialect.write_inline_column_comment(comment) {
+                    sql.push_str(&inline);
+                }
+            }
+            continue;
+        }
         if let Some(expr) = &f.default {
             let _ = write!(
                 sql,
@@ -1261,6 +1279,14 @@ fn create_table_sql_from_snapshot_with_dialect(
                 let _ = write!(sql, "{} <= {}", dialect.quote_ident(&f.column), max);
             }
             sql.push(')');
+        }
+        // db_comment (#559) — MySQL inlines `COMMENT '...'` on the column
+        // line. PG gets a separate `COMMENT ON COLUMN` statement post-
+        // CREATE; SQLite has no native column comments.
+        if let Some(comment) = &f.db_comment {
+            if let Some(inline) = dialect.write_inline_column_comment(comment) {
+                sql.push_str(&inline);
+            }
         }
         // Inline FK clause for dialects that can't ALTER TABLE ADD CONSTRAINT
         // (SQLite). Postgres/MySQL keep the post-hoc ALTER path so cyclic
@@ -1442,6 +1468,8 @@ mod sql_type_tests {
             auto,
             unique: false,
             case_insensitive: false,
+            generated_as: None,
+            db_comment: None,
             fk: None,
         }
     }
