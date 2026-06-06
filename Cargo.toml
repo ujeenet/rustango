@@ -44,7 +44,7 @@ serde_json = "1"
 
 # Field types
 chrono       = { version = "0.4", default-features = false, features = ["serde", "clock"] }
-uuid         = { version = "1", features = ["serde", "v4"] }
+uuid         = { version = "1", features = ["serde", "v4", "v7"] }
 rust_decimal = { version = "1.36", default-features = false, features = ["serde", "std"] }
 
 # Layered config (slice 8.3). `toml` is parser-only; we hand-roll the

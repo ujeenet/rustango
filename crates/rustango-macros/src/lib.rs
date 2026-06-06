@@ -1577,20 +1577,51 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                 out.first_auto_ident = Some(ident.clone());
                 out.first_auto_value_ty = auto_inner_type(info.value_ty).cloned();
             }
-            out.returning_cols.push(quote!(#column));
-            out.auto_field_idents
-                .push((ident.clone(), info.column.clone()));
-            out.auto_assigns.push(quote! {
-                self.#ident = ::rustango::sql::try_get_returning(_returning_row, #column)?;
-            });
-            out.insert_pushes.push(quote! {
-                if let ::rustango::sql::Auto::Set(_v) = &self.#ident {
-                    _columns.push(#column);
-                    _values.push(::core::convert::Into::<::rustango::core::SqlValue>::into(
-                        ::core::clone::Clone::clone(_v)
-                    ));
-                }
-            });
+            // `default_uuid_v7` (issue #823) generates the PK Rust-side
+            // before binding, so the value is already in
+            // `self.#ident` after the insert_push — RETURNING is
+            // redundant. Skip adding this column to returning_cols /
+            // auto_assigns / auto_field_idents to avoid (a) an
+            // unnecessary RETURNING column on every dialect, and (b)
+            // the MySQL `LAST_INSERT_ID()` path that can only fill an
+            // integer PK.
+            if !info.default_uuid_v7 {
+                out.returning_cols.push(quote!(#column));
+                out.auto_field_idents
+                    .push((ident.clone(), info.column.clone()));
+                out.auto_assigns.push(quote! {
+                    self.#ident = ::rustango::sql::try_get_returning(_returning_row, #column)?;
+                });
+            }
+            if info.default_uuid_v7 {
+                // Rust-side UUIDv7 generation (issue #823, Eloquent
+                // `HasUuids`). Auto::Unset → fill with `Uuid::now_v7()`
+                // and bind; Auto::Set → bind the user's value. The
+                // column is ALWAYS present in the INSERT statement —
+                // no RETURNING / no DB DEFAULT needed.
+                out.insert_pushes.push(quote! {
+                    if matches!(&self.#ident, ::rustango::sql::Auto::Unset) {
+                        self.#ident = ::rustango::sql::Auto::Set(
+                            ::rustango::__uuid::Uuid::now_v7(),
+                        );
+                    }
+                    if let ::rustango::sql::Auto::Set(_v) = &self.#ident {
+                        _columns.push(#column);
+                        _values.push(::core::convert::Into::<::rustango::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(_v)
+                        ));
+                    }
+                });
+            } else {
+                out.insert_pushes.push(quote! {
+                    if let ::rustango::sql::Auto::Set(_v) = &self.#ident {
+                        _columns.push(#column);
+                        _values.push(::core::convert::Into::<::rustango::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(_v)
+                        ));
+                    }
+                });
+            }
             // Bulk: Auto fields appear only in the all-Set path,
             // never in the Unset path (we drop them from `columns`).
             out.bulk_columns_all.push(quote!(#column));
@@ -2208,32 +2239,68 @@ fn inherent_impl_tokens(
     } else if fields.has_auto {
         let pushes = &fields.insert_pushes;
         let returning_cols = &fields.returning_cols;
-        quote! {
-            /// Insert this row against either backend, populating any
-            /// `Auto<T>` PK from the auto-assigned value.
-            ///
-            /// # Errors
-            /// As [`Self::insert`].
-            pub async fn insert_pool(
-                &mut self,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
-                let mut _columns: ::std::vec::Vec<&'static str> =
-                    ::std::vec::Vec::new();
-                let mut _values: ::std::vec::Vec<::rustango::core::SqlValue> =
-                    ::std::vec::Vec::new();
-                #( #pushes )*
-                let _query = ::rustango::core::InsertQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
-                    columns: _columns,
-                    values: _values,
-                    returning: ::std::vec![ #( #returning_cols ),* ],
-                    on_conflict: ::core::option::Option::None,
-                };
-                let _result = ::rustango::sql::insert_returning_pool(
-                    pool, &_query,
-                ).await?;
-                ::rustango::sql::apply_auto_pk(_result, self)
+        // When every `Auto<T>` field is filled Rust-side
+        // (`default_uuid_v7`, issue #823), there is no column to read
+        // back from the database — `returning_cols` is empty. Route
+        // through plain `insert_pool` instead of
+        // `insert_returning_pool` to skip the redundant RETURNING /
+        // LAST_INSERT_ID round-trip.
+        if fields.returning_cols.is_empty() {
+            quote! {
+                /// Insert this row against either backend. Every
+                /// `Auto<T>` PK on this model is filled Rust-side
+                /// (e.g. `default_uuid_v7`) before binding, so no
+                /// RETURNING round-trip is needed.
+                ///
+                /// # Errors
+                /// As [`Self::insert`].
+                pub async fn insert_pool(
+                    &mut self,
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    let mut _columns: ::std::vec::Vec<&'static str> =
+                        ::std::vec::Vec::new();
+                    let mut _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                        ::std::vec::Vec::new();
+                    #( #pushes )*
+                    let _query = ::rustango::core::InsertQuery {
+                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                        columns: _columns,
+                        values: _values,
+                        returning: ::std::vec::Vec::new(),
+                        on_conflict: ::core::option::Option::None,
+                    };
+                    ::rustango::sql::insert_pool(pool, &_query).await
+                }
+            }
+        } else {
+            quote! {
+                /// Insert this row against either backend, populating any
+                /// `Auto<T>` PK from the auto-assigned value.
+                ///
+                /// # Errors
+                /// As [`Self::insert`].
+                pub async fn insert_pool(
+                    &mut self,
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    let mut _columns: ::std::vec::Vec<&'static str> =
+                        ::std::vec::Vec::new();
+                    let mut _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                        ::std::vec::Vec::new();
+                    #( #pushes )*
+                    let _query = ::rustango::core::InsertQuery {
+                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                        columns: _columns,
+                        values: _values,
+                        returning: ::std::vec![ #( #returning_cols ),* ],
+                        on_conflict: ::core::option::Option::None,
+                    };
+                    let _result = ::rustango::sql::insert_returning_pool(
+                        pool, &_query,
+                    ).await?;
+                    ::rustango::sql::apply_auto_pk(_result, self)
+                }
             }
         }
     } else {
@@ -6188,6 +6255,17 @@ struct FieldAttrs {
     /// `uuid::Uuid` (or `Auto<Uuid>`); the column is excluded from
     /// INSERTs so the DB DEFAULT fires.
     auto_uuid: bool,
+    /// `#[rustango(default_uuid_v7)]` — backend-neutral counterpart of
+    /// `auto_uuid`. The PK value is generated **Rust-side** at insert
+    /// time using `uuid::Uuid::now_v7()` (time-sortable UUIDv7) when
+    /// the field is `Auto::Unset`, then bound as a normal parameter
+    /// rather than relying on a per-dialect DB function. Issue #823
+    /// (Eloquent `HasUuids`).
+    ///
+    /// Field type must be `Auto<uuid::Uuid>`. Implies `primary_key`.
+    /// Composes with every backend (PG / MySQL / SQLite) — no
+    /// `gen_random_uuid()` requirement on the database.
+    default_uuid_v7: bool,
     /// `#[rustango(auto_now_add)]` — `created_at`-shape column.
     /// Server-set on insert, immutable from app code afterwards.
     /// Implies `auto + default = "now()"`. Field type must be
@@ -6283,6 +6361,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         max: None,
         default: None,
         auto_uuid: false,
+        default_uuid_v7: false,
         auto_now_add: false,
         auto_now: false,
         soft_delete: false,
@@ -6491,6 +6570,16 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 }
                 return Ok(());
             }
+            if meta.path.is_ident("default_uuid_v7") {
+                // Backend-neutral counterpart of `auto_uuid` — issue #823.
+                // No SQL DEFAULT (the macro fills the value Rust-side
+                // before binding); just mark the field as PK + Auto
+                // so the insert path is the `Auto::Unset → generate`
+                // branch.
+                out.default_uuid_v7 = true;
+                out.primary_key = true;
+                return Ok(());
+            }
             if meta.path.is_ident("auto_now_add") {
                 out.auto_now_add = true;
                 if out.default.is_none() {
@@ -6647,6 +6736,13 @@ struct FieldInfo<'a> {
     /// every INSERT and UPDATE path; the database recomputes the
     /// value from `EXPR`. Backlog item #35.
     generated_as: Option<String>,
+    /// `true` when this column was marked
+    /// `#[rustango(default_uuid_v7)]`. Routes `collect_fields` to
+    /// emit an `insert_push` that auto-fills an `Auto::Unset` value
+    /// with `Uuid::now_v7()` before binding, so the PK is generated
+    /// Rust-side and the column is always present in the INSERT
+    /// statement (no DB DEFAULT requirement). Issue #823.
+    default_uuid_v7: bool,
 }
 
 /// Reject table names that won't survive SQL identifier
@@ -6741,6 +6837,32 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             ));
         }
     }
+    if attrs.default_uuid_v7 {
+        if kind != DetectedKind::Uuid {
+            return Err(syn::Error::new_spanned(
+                field,
+                "`#[rustango(default_uuid_v7)]` requires the field type to be \
+                 `Auto<uuid::Uuid>`",
+            ));
+        }
+        if !detected_auto {
+            return Err(syn::Error::new_spanned(
+                field,
+                "`#[rustango(default_uuid_v7)]` requires the field type to be \
+                 wrapped in `Auto<...>` so the macro can detect the \
+                 unset-vs-set state and fill a fresh UUIDv7 before INSERT",
+            ));
+        }
+        if attrs.auto_uuid {
+            return Err(syn::Error::new_spanned(
+                field,
+                "`#[rustango(default_uuid_v7)]` is mutually exclusive with \
+                 `#[rustango(auto_uuid)]` — the former generates the UUID \
+                 Rust-side, the latter relies on the DB's `gen_random_uuid()`. \
+                 Pick one.",
+            ));
+        }
+    }
     if attrs.auto_now_add || attrs.auto_now {
         if kind != DetectedKind::DateTime {
             return Err(syn::Error::new_spanned(
@@ -6765,7 +6887,8 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
              `Option<chrono::DateTime<chrono::Utc>>`",
         ));
     }
-    let is_mixin_auto = attrs.auto_uuid || attrs.auto_now_add || attrs.auto_now;
+    let is_mixin_auto =
+        attrs.auto_uuid || attrs.default_uuid_v7 || attrs.auto_now_add || attrs.auto_now;
     if detected_auto && !primary_key && !is_mixin_auto {
         return Err(syn::Error::new_spanned(
             field,
@@ -6919,6 +7042,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         auto_now_add: attrs.auto_now_add,
         soft_delete: attrs.soft_delete,
         generated_as: attrs.generated_as.clone(),
+        default_uuid_v7: attrs.default_uuid_v7,
     })
 }
 
