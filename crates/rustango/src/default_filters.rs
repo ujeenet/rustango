@@ -67,6 +67,10 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("capfirst", capfirst);
     tera.register_filter("addslashes", addslashes);
     tera.register_filter("filesizeformat", filesizeformat);
+    tera.register_filter("length_is", length_is);
+    tera.register_filter("make_list", make_list);
+    tera.register_filter("pprint", pprint);
+    tera.register_filter("urlizetrunc", urlizetrunc);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -1032,6 +1036,112 @@ fn addslashes(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> 
         }
     }
     Ok(to_value(out)?)
+}
+
+/// Django `{{ value|length_is:"N" }}` — return `true` iff the value's
+/// length equals `N`. For strings, `length` is char-count (not byte-
+/// count); for arrays/objects it's element/key count.
+fn length_is(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let target = args
+        .get("arg")
+        .and_then(|v| match v {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => s.parse::<i64>().ok(),
+            _ => None,
+        })
+        .unwrap_or(-1);
+    if target < 0 {
+        return Ok(to_value(false)?);
+    }
+    let actual = match value {
+        Value::String(s) => s.chars().count() as i64,
+        Value::Array(a) => a.len() as i64,
+        Value::Object(o) => o.len() as i64,
+        Value::Null => 0,
+        _ => -1,
+    };
+    Ok(to_value(actual == target)?)
+}
+
+/// Django `{{ value|make_list }}` — convert a string to its list of
+/// characters, or an integer to its list of digits. Mostly useful in
+/// `{% for char in value|make_list %}` template iteration.
+fn make_list(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let chars: Vec<String> = match value {
+        Value::String(s) => s.chars().map(|c| c.to_string()).collect(),
+        Value::Number(n) => n.to_string().chars().map(|c| c.to_string()).collect(),
+        Value::Bool(b) => b.to_string().chars().map(|c| c.to_string()).collect(),
+        _ => return Ok(value.clone()),
+    };
+    Ok(to_value(chars)?)
+}
+
+/// Django `{{ value|pprint }}` — pretty-print debug repr of the value.
+/// rustango uses `serde_json::to_string_pretty` (2-space indent) so
+/// the output is machine-readable rather than Python-`repr` shaped.
+fn pprint(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let s = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    Ok(to_value(s)?)
+}
+
+/// Django `{{ value|urlizetrunc:"N" }}` — same as `|urlize` except
+/// link text is truncated to at most `N` characters (with `...`
+/// appended if a URL was cut). The URL the link points to is
+/// unaffected; only the visible anchor text shortens.
+fn urlizetrunc(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let s = value.as_str().unwrap_or("");
+    let limit = args
+        .get("arg")
+        .and_then(|v| match v {
+            Value::Number(n) => n.as_u64().map(|n| n as usize),
+            Value::String(s) => s.parse::<usize>().ok(),
+            _ => None,
+        })
+        .unwrap_or(usize::MAX);
+    let urlized = crate::text::urlize(s, false);
+    let out = truncate_link_text(&urlized, limit);
+    Ok(to_value(out)?)
+}
+
+/// Walk a urlized HTML string and truncate the visible text of each
+/// `<a>` anchor to `limit` chars, appending `...` if cut. Leaves the
+/// `href` attribute alone.
+fn truncate_link_text(html: &str, limit: usize) -> String {
+    if limit == usize::MAX {
+        return html.to_owned();
+    }
+    let mut out = String::with_capacity(html.len());
+    let bytes = html.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            if let Some(close) = html[i..].find('>') {
+                let tag = &html[i..i + close + 1];
+                out.push_str(tag);
+                i += close + 1;
+                if tag.starts_with("<a ") || tag == "<a>" {
+                    // Capture anchor text until </a>.
+                    if let Some(end) = html[i..].find("</a>") {
+                        let anchor_text = &html[i..i + end];
+                        if anchor_text.chars().count() > limit {
+                            let truncated: String =
+                                anchor_text.chars().take(limit.saturating_sub(3)).collect();
+                            out.push_str(&truncated);
+                            out.push_str("...");
+                        } else {
+                            out.push_str(anchor_text);
+                        }
+                        out.push_str("</a>");
+                        i += end + 4;
+                    }
+                }
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
 }
 
 /// Django `{{ value|filesizeformat }}` — human-readable byte size
@@ -2463,5 +2573,89 @@ mod tests {
         ctx.insert("size", &1_500_000_i64);
         let out = tera.render("t", &ctx).unwrap();
         assert!(out.contains("MB"), "got: {}", out);
+    }
+
+    // -------- length_is --------
+
+    #[test]
+    fn length_is_true_when_string_chars_match() {
+        let out = length_is(&json!("hello"), &args1("arg", 5)).unwrap();
+        assert_eq!(out, json!(true));
+    }
+
+    #[test]
+    fn length_is_false_when_mismatched() {
+        let out = length_is(&json!("hello"), &args1("arg", 4)).unwrap();
+        assert_eq!(out, json!(false));
+    }
+
+    #[test]
+    fn length_is_handles_arrays() {
+        let out = length_is(&json!([1, 2, 3]), &args1("arg", 3)).unwrap();
+        assert_eq!(out, json!(true));
+    }
+
+    // -------- make_list --------
+
+    #[test]
+    fn make_list_splits_string_into_chars() {
+        let out = make_list(&json!("abc"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(["a", "b", "c"]));
+    }
+
+    #[test]
+    fn make_list_splits_int_into_digit_chars() {
+        let out = make_list(&json!(123), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(["1", "2", "3"]));
+    }
+
+    // -------- pprint --------
+
+    #[test]
+    fn pprint_indents_json_object() {
+        let out = pprint(&json!({"a": 1, "b": [2, 3]}), &HashMap::new()).unwrap();
+        let s = out.as_str().unwrap();
+        assert!(s.contains('\n'), "expected multi-line output: {}", s);
+    }
+
+    // -------- urlizetrunc --------
+
+    #[test]
+    fn urlizetrunc_truncates_long_visible_text() {
+        let input = "Visit https://example.com/some/very/long/path now";
+        let out = urlizetrunc(&json!(input), &args1("arg", 15))
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(out.contains("..."), "expected ellipsis in: {}", out);
+        assert!(
+            out.contains("https://example.com/some/very/long/path"),
+            "href intact in: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn urlizetrunc_leaves_short_text_alone() {
+        let input = "Visit https://x.io";
+        let out = urlizetrunc(&json!(input), &args1("arg", 100))
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(!out.contains("..."), "got: {}", out);
+    }
+
+    #[test]
+    fn register_filters_wires_urlizetrunc_through_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ value|urlizetrunc(arg=10)|safe }}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("value", "see https://example.com/about");
+        let out = tera.render("t", &ctx).unwrap();
+        assert!(out.contains("..."), "got: {}", out);
     }
 }
