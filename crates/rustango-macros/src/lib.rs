@@ -4838,9 +4838,27 @@ fn inherent_impl_tokens(
 
     quote! {
         impl #struct_name {
-            /// Start a new `QuerySet` over this model.
+            /// Start a new `QuerySet` over this model. Django shape.
             #[must_use]
             pub fn objects() -> ::rustango::query::QuerySet<#struct_name> {
+                ::rustango::query::QuerySet::new()
+            }
+
+            /// Eloquent-shape alias of [`Self::objects`]. Returns
+            /// a fresh `QuerySet<Self>` ready for `.filter()` /
+            /// `.where_()` / etc. Matches Laravel muscle-memory:
+            ///
+            /// ```ignore
+            /// // Eloquent:    Post::query()->where('published', true)
+            /// // Django:      Post.objects.filter(published=True)
+            /// // rustango:    Post::query().filter("published", true)
+            /// //         or:  Post::objects().filter("published", true)
+            /// ```
+            ///
+            /// Both names point at the same underlying constructor;
+            /// neither is preferred.
+            #[must_use]
+            pub fn query() -> ::rustango::query::QuerySet<#struct_name> {
                 ::rustango::query::QuerySet::new()
             }
 
