@@ -3310,6 +3310,52 @@ fn inherent_impl_tokens(
                 }
             }
 
+            /// Bulk-delete every row whose primary key is in
+            /// `pks` — `DELETE FROM <table> WHERE <pk> IN (...)`.
+            /// Returns the affected row count.
+            ///
+            /// Eloquent `Model::destroy([1, 2, 3])` / Django
+            /// `Model.objects.filter(pk__in=[...]).delete()` parity.
+            /// Empty `pks` is a no-op (returns 0).
+            ///
+            /// Accepts any iterable whose elements are
+            /// `Into<SqlValue>` — `Vec<i64>`, `&[i64]`,
+            /// `[i64; N]`, etc.
+            ///
+            /// # Errors
+            /// As `delete_pool`.
+            pub async fn destroy_pool<V>(
+                pks: impl ::core::iter::IntoIterator<Item = V>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError>
+            where
+                V: ::core::convert::Into<::rustango::core::SqlValue>,
+            {
+                let _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                    pks.into_iter().map(::core::convert::Into::into).collect();
+                if _values.is_empty() {
+                    return ::core::result::Result::Ok(0);
+                }
+                let _query = ::rustango::core::DeleteQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    where_clause: ::rustango::core::WhereExpr::Predicate(
+                        ::rustango::core::Filter {
+                            column: <Self as ::rustango::core::Model>::SCHEMA
+                                .primary_key()
+                                .ok_or_else(|| {
+                                    ::rustango::sql::ExecError::Sql(
+                                        ::rustango::sql::SqlError::MissingPrimaryKey,
+                                    )
+                                })?
+                                .column,
+                            op: ::rustango::core::Op::In,
+                            value: ::rustango::core::SqlValue::List(_values),
+                        },
+                    ),
+                };
+                ::rustango::sql::delete_pool(pool, &_query).await
+            }
+
             /// Fetch the row with the largest `field` value —
             /// `SELECT … ORDER BY <field> DESC LIMIT 1`. Returns
             /// `Ok(None)` for an empty table. Eloquent
