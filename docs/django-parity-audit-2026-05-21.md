@@ -36,7 +36,7 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 14. Settings | 13 | 2 | 2 | 2 |
 | 15. Security / middleware | 27 | 0 | 0 | 0 |
 | 16. Caching | 9 | 0 | 1 | 0 |
-| 17. Signals | 10 | 0 | 0 | 1 |
+| 17. Signals | 11 | 0 | 0 | 1 |
 | 18. Email | 11 | 0 | 0 | 0 |
 | 19. Files / Storage | 6 | 1 | 2 | 0 |
 | 20. i18n / l10n | 7 | 1 | 1 | 0 |
@@ -45,7 +45,7 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 23. DRF parity | 22 | 0 | 1 | 0 |
 | 24. contrib modules | 12 | 1 | 3 | 2 |
 | 25. `django.utils.*` helpers | 106 | 0 | 0 | 0 |
-| **Totals** | **476** | **11** | **21** | **19** |
+| **Totals** | **477** | **11** | **21** | **19** |
 
 Coverage = 476 / (476 + 11 + 21) = **94% full, 2% partial, 4% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **96%**.
 
@@ -542,7 +542,7 @@ Summary: **9 SHIPPED / 0 PARTIAL / 1 MISSING / 0 N/A**.
 | Disconnect / weak references | (above) | SHIPPED | `signals::disconnect_*` | |
 | Async receivers | (Django 4.1+ async receivers) | SHIPPED | All rustango signal receivers are `async fn` | |
 
-Summary: **10 SHIPPED / 0 PARTIAL / 0 MISSING / 1 N/A**. Gaps cluster around `m2m_changed`, migrate signals, auth signals.
+Summary: **11 SHIPPED / 0 PARTIAL / 0 MISSING / 1 N/A**. Section 17 is fully shipped — the v0.42 sweep closed the previously-noted `m2m_changed` / migrate / auth-signal gaps (PRs #410–#415); `setting_changed` shipped alongside (PR #415).
 
 ---
 
