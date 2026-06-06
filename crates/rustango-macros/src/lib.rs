@@ -3310,6 +3310,42 @@ fn inherent_impl_tokens(
                 }
             }
 
+            /// Count rows of this model — `SELECT COUNT(*) FROM
+            /// <table>`. Eloquent `Model::count()` parity. Thin
+            /// wrapper over `QuerySet::<Self>::default()
+            /// .count_pool(pool)`.
+            ///
+            /// # Errors
+            /// As [`CounterPool::count_pool`].
+            ///
+            /// [`CounterPool::count_pool`]: rustango::sql::CounterPool::count_pool
+            pub async fn count_pool(
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<i64, ::rustango::sql::ExecError> {
+                use ::rustango::sql::CounterPool as _;
+                ::rustango::query::QuerySet::<Self>::default()
+                    .count_pool(pool)
+                    .await
+            }
+
+            /// `true` when the table contains at least one row.
+            /// Eloquent `Model::query()->exists()` / Django
+            /// `Model.objects.exists()` parity. Thin wrapper over
+            /// `QuerySet::<Self>::default().exists_pool(pool)`.
+            ///
+            /// # Errors
+            /// As [`ExistsPool::exists_pool`].
+            ///
+            /// [`ExistsPool::exists_pool`]: rustango::sql::ExistsPool::exists_pool
+            pub async fn exists_pool(
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<bool, ::rustango::sql::ExecError> {
+                use ::rustango::sql::ExistsPool as _;
+                ::rustango::query::QuerySet::<Self>::default()
+                    .exists_pool(pool)
+                    .await
+            }
+
             /// Fetch every row of this model from `pool`. Eloquent
             /// `Model::all()` parity — a thin wrapper over
             /// `QuerySet::<Self>::default().fetch_pool(pool)`.
