@@ -1042,67 +1042,66 @@ async fn fetch_facet_rows(
     sql: &str,
     expect_display: bool,
 ) -> Result<Vec<(String, Option<String>, i64)>, sqlx::Error> {
-    use sqlx::Row as _;
+    // #561 — was three byte-identical per-arm bodies that each did
+    // `sqlx::query(sql).fetch_all(<pool>).await?` then walked the
+    // rows through the same triple-getter. The outer fetch can't be
+    // factored into a generic helper because sqlx's `Executor` is
+    // bound to a concrete `Database`, but the per-row decode IS
+    // generic — collapsed onto `decode_facet_row` below.
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
             let rows = sqlx::query(sql).fetch_all(pg).await?;
-            let mut out = Vec::with_capacity(rows.len());
-            for r in rows {
-                // facet_value column may be any scalar type. Try the
-                // most common shapes; fall back to empty string if
-                // every decode fails (matches the legacy unwrap_or_default
-                // behaviour).
-                let raw = stringify_facet_value(&r);
-                let display = if expect_display {
-                    r.try_get::<Option<String>, _>("facet_display")
-                        .ok()
-                        .flatten()
-                } else {
-                    None
-                };
-                let count: i64 = r.try_get("facet_count").unwrap_or(0);
-                out.push((raw, display, count));
-            }
-            Ok(out)
+            Ok(rows
+                .iter()
+                .map(|r| decode_facet_row(r, expect_display))
+                .collect())
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
             let rows = sqlx::query(sql).fetch_all(my).await?;
-            let mut out = Vec::with_capacity(rows.len());
-            for r in rows {
-                let raw = stringify_facet_value(&r);
-                let display = if expect_display {
-                    r.try_get::<Option<String>, _>("facet_display")
-                        .ok()
-                        .flatten()
-                } else {
-                    None
-                };
-                let count: i64 = r.try_get("facet_count").unwrap_or(0);
-                out.push((raw, display, count));
-            }
-            Ok(out)
+            Ok(rows
+                .iter()
+                .map(|r| decode_facet_row(r, expect_display))
+                .collect())
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
             let rows = sqlx::query(sql).fetch_all(sq).await?;
-            let mut out = Vec::with_capacity(rows.len());
-            for r in rows {
-                let raw = stringify_facet_value(&r);
-                let display = if expect_display {
-                    r.try_get::<Option<String>, _>("facet_display")
-                        .ok()
-                        .flatten()
-                } else {
-                    None
-                };
-                let count: i64 = r.try_get("facet_count").unwrap_or(0);
-                out.push((raw, display, count));
-            }
-            Ok(out)
+            Ok(rows
+                .iter()
+                .map(|r| decode_facet_row(r, expect_display))
+                .collect())
         }
     }
+}
+
+/// Per-row decoder for [`fetch_facet_rows`] — generic over the
+/// row type so every backend's `fetch_all` result feeds the same
+/// triple-getter loop. The bounds are the union of
+/// [`stringify_facet_value`]'s bounds plus the `Option<String>`
+/// / `i64` decodes for the display + count columns.
+fn decode_facet_row<'r, R>(row: &'r R, expect_display: bool) -> (String, Option<String>, i64)
+where
+    R: sqlx::Row,
+    &'r str: sqlx::ColumnIndex<R>,
+    Option<String>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    Option<i64>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    Option<i32>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    Option<bool>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    i64: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
+    use sqlx::Row as _;
+    let raw = stringify_facet_value(row);
+    let display = if expect_display {
+        row.try_get::<Option<String>, _>("facet_display")
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    let count: i64 = row.try_get("facet_count").unwrap_or(0);
+    (raw, display, count)
 }
 
 /// Try decoding the `facet_value` column as text first, then as the
