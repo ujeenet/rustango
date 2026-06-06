@@ -475,6 +475,11 @@ pub mod signals;
 /// [`signals`] for per-Model lifecycle hooks. See [`events::EventBus`].
 pub mod events;
 
+/// Model pruning — declarative bulk-removal of stale rows.
+/// Eloquent `Prunable` parity. See [`prunable::Prunable`] +
+/// [`register_prunable!`].
+pub mod prunable;
+
 /// CORS middleware — [`cors::CorsLayer`] for axum routers.
 #[cfg(feature = "admin")]
 pub mod cors;
