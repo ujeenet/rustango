@@ -30,6 +30,12 @@ Post-v0.42 Django-parity follow-ups. Each item is a self-contained slice that la
   - **`random` family**: `random_hex` / `random_alphanum` / `random_digits` / `random_letters` / `random_lowercase` / `random_uppercase` convenience wrappers + 7 alphabet constants.
   - **`signals`** — `m2m_changed` (#410), `pre_migrate` / `post_migrate` (#411), `request_started` / `request_finished` (#412), `got_request_exception` (#413), `user_logged_in` / `user_logged_out` / `user_login_failed` (#414), `setting_changed` (#415) — full Django signal taxonomy.
   - **Misc gap-closure**: `manage migrate --squash` v0.29 + `manage makemigrations --merge` (#346) + `manage check --deploy` (#406 v0.29) + Django `humanize::naturaltime` / `naturalday` / `intcomma` (#685/#686) + `dateparse::duration_iso_string` (#687) + `crypto::salted_hmac` (#647) + `cache::has_key` / `decr` / `get_or(key, default)` (#620–#622) + email attachment support (#621) + SMTP timeout settings (#626).
+- **#561 / #562 DRY cleanup batch — PRs #777–#791 (15 PRs, ~880 lines removed)**. Tri-dialect dispatch + DRY refactor against the duplicate code that hides the #559-class bug:
+  - **`FieldSnapshot` captures `generated_as` + `db_comment`** (#777) — closes a silent-loss bug where file-based migrations dropped both attributes from `create_table_sql_from_snapshot_with_dialect`.
+  - **`SelectQuery::new(model)` + `SelectQuery::by_pk(model, col, val)` constructors** (#783) — replaces the 11-field struct literal that recurred verbatim ~50 times. Migrated 6 batches: viewset + template_views (#784), contenttypes + admin/login (#785), sql/writers + viewset + template_views list (#786), admin/views (#787), admin/inlines (#788), migrate/manage dumpdata (#789). Each batch independently behavior-preserving.
+  - **Per-backend row-decoder helpers** (#790, #791) — `AuditEntry::from_row` / `from_my_row` / `from_sq_row` and `decode_role_pg_row` / `_my_row` / `_sq_row` collapse the tri-dialect arms of `audit::list` / `audit::fetch_for_entity_pool` / `permissions::user_roles_qs_pool` from ~70-line matches to 4-line `bind+fetch+iter.map(decode_*).collect()` per arm.
+  - **`run_ddl_idempotent`-shaped `ensure_table_pool` collapse** (pre-compaction) + **`is_mysql_dup_index_error` centralized** + **`raw_query_pool::<(i64,)>` for COUNT/EXISTS sites** (#778, #779, #780, #782).
+  - **`decode_facet_row<R>` generic helper** (#781) — three byte-identical admin facet-row decode loops collapsed onto a single bound-`R: sqlx::Row` function.
 
 ### Fixed
 
