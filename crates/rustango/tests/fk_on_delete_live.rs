@@ -7,7 +7,7 @@
 #![cfg(feature = "sqlite")]
 
 use rustango::core::{OnDeleteAction, Relation};
-use rustango::migrate::ddl::create_constraints_sql_with_dialect;
+use rustango::migrate::ddl::{create_constraints_sql_with_dialect, create_table_sql_with_dialect};
 use rustango::sql::{sqlx, Sqlite};
 use rustango::Model;
 
@@ -79,29 +79,37 @@ fn schema_carries_fk_on_delete_action() {
 
 #[test]
 fn ddl_renders_on_delete_clause() {
+    // PR #720 — on SQLite the FK constraint is emitted INLINE inside
+    // CREATE TABLE (since SQLite has no `ALTER TABLE ADD CONSTRAINT
+    // FOREIGN KEY`); `create_constraints_sql_with_dialect` returns
+    // empty for SQLite. Inspect `create_table_sql_with_dialect`
+    // instead so the test verifies the on-delete clause where it
+    // actually lands.
     let schema = <PostCascade as rustango::core::Model>::SCHEMA;
-    let stmts = create_constraints_sql_with_dialect(&Sqlite, schema);
-    assert_eq!(stmts.len(), 1, "one FK constraint");
-    let sql = &stmts[0];
+    let post_hoc = create_constraints_sql_with_dialect(&Sqlite, schema);
     assert!(
-        sql.contains("ON DELETE CASCADE"),
-        "missing ON DELETE CASCADE in: {sql}"
+        post_hoc.is_empty(),
+        "SQLite emits FK constraints inline in CREATE TABLE, not as post-hoc ALTERs; \
+         create_constraints_sql_with_dialect should be empty"
+    );
+    let create = create_table_sql_with_dialect(&Sqlite, schema);
+    assert!(
+        create.contains("ON DELETE CASCADE"),
+        "missing ON DELETE CASCADE in CREATE TABLE: {create}"
     );
 
     let null_schema = <PostSetNull as rustango::core::Model>::SCHEMA;
-    let null_stmts = create_constraints_sql_with_dialect(&Sqlite, null_schema);
+    let null_create = create_table_sql_with_dialect(&Sqlite, null_schema);
     assert!(
-        null_stmts[0].contains("ON DELETE SET NULL"),
-        "missing ON DELETE SET NULL in: {}",
-        null_stmts[0]
+        null_create.contains("ON DELETE SET NULL"),
+        "missing ON DELETE SET NULL in CREATE TABLE: {null_create}"
     );
 
     let default_schema = <PostDefault as rustango::core::Model>::SCHEMA;
-    let default_stmts = create_constraints_sql_with_dialect(&Sqlite, default_schema);
+    let default_create = create_table_sql_with_dialect(&Sqlite, default_schema);
     assert!(
-        !default_stmts[0].contains("ON DELETE"),
-        "no on_delete → no ON DELETE clause; got: {}",
-        default_stmts[0]
+        !default_create.contains("ON DELETE"),
+        "no on_delete → no ON DELETE clause; got: {default_create}"
     );
 }
 
