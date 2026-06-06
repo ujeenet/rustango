@@ -319,7 +319,7 @@ pub async fn fetch_row_as_json(
     ct: &ContentType,
     pk: impl Into<SqlValue>,
 ) -> Result<Option<serde_json::Value>, ExecError> {
-    use crate::core::{Filter, Op, SelectQuery, WhereExpr};
+    use crate::core::SelectQuery;
 
     // Look up the schema for the CT's table from inventory.
     // Heterogeneous-by-design: a CT row may refer to a model
@@ -361,7 +361,7 @@ pub async fn for_each_row_of_ct<F>(
 where
     F: FnMut(serde_json::Value) -> Result<(), ExecError>,
 {
-    use crate::core::{OrderClause, SelectQuery, WhereExpr};
+    use crate::core::{OrderClause, SelectQuery};
 
     let entry = inventory::iter::<ModelEntry>
         .into_iter()
