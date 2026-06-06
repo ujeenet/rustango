@@ -236,6 +236,34 @@ fn in_with_non_list_value_errors_at_compile() {
 }
 
 #[test]
+fn not_in_emits_not_in_clause() {
+    // Eloquent `whereNotIn` parity — sibling of `__in`.
+    let list = SqlValue::List(vec![1_i64.into(), 2_i64.into(), 3_i64.into()]);
+    let qs = Post::objects().filter("author_id__not_in", list);
+    let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
+    assert!(
+        stmt.sql.contains(r#""author_id" NOT IN"#),
+        "expected NOT IN clause, got: {}",
+        stmt.sql
+    );
+}
+
+#[test]
+fn not_in_with_non_list_value_errors_at_compile() {
+    use rustango::core::QueryError;
+    let r = Post::objects()
+        .filter("author_id__not_in", 42_i64) // not a list
+        .compile();
+    assert!(matches!(
+        r,
+        Err(QueryError::InvalidLookupValue {
+            ref suffix,
+            ..
+        }) if suffix == "not_in"
+    ));
+}
+
+#[test]
 fn isnull_with_non_bool_errors_at_compile() {
     use rustango::core::QueryError;
     let r = Post::objects()
