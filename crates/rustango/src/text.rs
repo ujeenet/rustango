@@ -1513,6 +1513,43 @@ pub fn wrap(text: &str, width: usize) -> String {
         .join("\n")
 }
 
+/// Python `textwrap.wrap` parity — wrap `text` at `width` characters
+/// and return the result as a `Vec<String>` of lines (one entry per
+/// wrapped line). Companion to [`wrap`], which returns a single
+/// newline-joined `String`.
+///
+/// Use this shape when you need to iterate over lines for further
+/// processing (per-line prefix, line-count enforcement, indentation
+/// per indent-level, etc.).
+///
+/// `width = 0` returns the input split on newlines, unmodified.
+/// Empty input returns an empty vector.
+///
+/// ```
+/// use rustango::text::wrap_lines;
+/// let lines = wrap_lines("The quick brown fox jumps over the lazy dog", 14);
+/// assert!(lines.iter().all(|l| l.len() <= 14 || !l.contains(' ')));
+/// assert_eq!(wrap_lines("", 80), Vec::<String>::new());
+/// assert_eq!(wrap_lines("short", 80), vec!["short"]);
+/// ```
+#[must_use]
+pub fn wrap_lines(text: &str, width: usize) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    if width == 0 {
+        return text.split('\n').map(str::to_owned).collect();
+    }
+    text.split('\n')
+        .flat_map(|line| {
+            wrap_one_line(line, width)
+                .split('\n')
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// Python `textwrap.shorten` parity — collapse all whitespace runs to
 /// single spaces, then truncate to fit within `width` characters,
 /// appending `placeholder` (default `" [...]"` in Python) if any
@@ -3830,6 +3867,43 @@ mod tests {
     #[test]
     fn shorten_empty_input() {
         assert_eq!(shorten("", 10, " [...]"), "");
+    }
+
+    // -------- wrap_lines --------
+
+    #[test]
+    fn wrap_lines_returns_vec_one_entry_per_wrapped_line() {
+        let lines = wrap_lines("aaa bbb ccc ddd eee fff", 7);
+        // Each line ≤ 7 chars (or single long word).
+        assert!(lines.iter().all(|l| l.chars().count() <= 7));
+        // At least 2 lines (input is > 7 chars).
+        assert!(lines.len() >= 2);
+    }
+
+    #[test]
+    fn wrap_lines_empty_input_returns_empty_vec() {
+        assert_eq!(wrap_lines("", 80), Vec::<String>::new());
+    }
+
+    #[test]
+    fn wrap_lines_short_input_single_entry() {
+        assert_eq!(wrap_lines("short", 80), vec!["short".to_owned()]);
+    }
+
+    #[test]
+    fn wrap_lines_width_zero_splits_only_on_newlines() {
+        assert_eq!(
+            wrap_lines("a\nb\nc", 0),
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
+        );
+    }
+
+    #[test]
+    fn wrap_lines_preserves_paragraph_boundaries() {
+        // Each paragraph wraps independently — blank-line paragraph
+        // breaks survive as empty entries.
+        let lines = wrap_lines("first para\n\nsecond para", 5);
+        assert!(lines.contains(&String::new()), "got: {lines:?}");
     }
 
     // -------- yesno --------
