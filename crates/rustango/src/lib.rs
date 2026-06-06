@@ -1276,6 +1276,14 @@ pub mod __private_runtime {
 /// than naming `macros`.
 pub use rustango_macros as macros;
 
+/// Re-exported so the `#[rustango(default_uuid_v7)]` derive arm (issue
+/// #823) can reach `Uuid::now_v7()` through the rustango facade
+/// without forcing consumer crates to add `uuid` as a direct
+/// dependency. **Not part of the public API** — names here may
+/// change between minors.
+#[doc(hidden)]
+pub use uuid as __uuid;
+
 /// `#[derive(Model)]` — populates the `inventory` registry the admin
 /// walks, generates `objects()` / typed columns / `insert` / `delete`
 /// / `save`.
