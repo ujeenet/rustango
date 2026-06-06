@@ -177,66 +177,18 @@ impl M2MManager {
             }
             Some((sql, binds))
         };
-        // Per-backend transaction. Each arm runs the DELETE + (optional)
-        // INSERT inside the same `.begin()`/`.commit()` pair so the
-        // junction is atomic from any reader's view.
-        let result: Result<(), ExecError> = match pool {
-            #[cfg(feature = "postgres")]
-            Pool::Postgres(pg) => {
-                let mut tx = pg.begin().await.map_err(ExecError::Driver)?;
-                sqlx::query(&del_sql)
-                    .bind(self.src_pk_i64())
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(ExecError::Driver)?;
-                if let Some((ins_sql, binds)) = ins_sql_with_binds {
-                    let mut q = sqlx::query(&ins_sql);
-                    for v in binds {
-                        q = bind_pg(q, v);
-                    }
-                    q.execute(&mut *tx).await.map_err(ExecError::Driver)?;
-                }
-                tx.commit().await.map_err(ExecError::Driver)?;
-                Ok(())
-            }
-            #[cfg(feature = "mysql")]
-            Pool::Mysql(my) => {
-                let mut tx = my.begin().await.map_err(ExecError::Driver)?;
-                sqlx::query(&del_sql)
-                    .bind(self.src_pk_i64())
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(ExecError::Driver)?;
-                if let Some((ins_sql, binds)) = ins_sql_with_binds {
-                    let mut q = sqlx::query(&ins_sql);
-                    for v in binds {
-                        q = bind_my(q, v);
-                    }
-                    q.execute(&mut *tx).await.map_err(ExecError::Driver)?;
-                }
-                tx.commit().await.map_err(ExecError::Driver)?;
-                Ok(())
-            }
-            #[cfg(feature = "sqlite")]
-            Pool::Sqlite(sq) => {
-                let mut tx = sq.begin().await.map_err(ExecError::Driver)?;
-                sqlx::query(&del_sql)
-                    .bind(self.src_pk_i64())
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(ExecError::Driver)?;
-                if let Some((ins_sql, binds)) = ins_sql_with_binds {
-                    let mut q = sqlx::query(&ins_sql);
-                    for v in binds {
-                        q = bind_sqlite(q, v);
-                    }
-                    q.execute(&mut *tx).await.map_err(ExecError::Driver)?;
-                }
-                tx.commit().await.map_err(ExecError::Driver)?;
-                Ok(())
-            }
-        };
-        result?;
+        // #561 — was a 3-arm match each running DELETE + (optional)
+        // INSERT inside a per-backend tx with local `bind_pg/my/sqlite`
+        // helpers. The new `raw_execute_tx` combinator (#798) routes
+        // the bind through the canonical executor `bind_query*` path,
+        // so the body collapses to one flat sequence.
+        let mut tx = crate::sql::transaction_pool(pool).await?;
+        crate::sql::raw_execute_tx(&mut tx, &del_sql, vec![SqlValue::I64(self.src_pk_i64())])
+            .await?;
+        if let Some((ins_sql, binds)) = ins_sql_with_binds {
+            crate::sql::raw_execute_tx(&mut tx, &ins_sql, binds).await?;
+        }
+        tx.commit().await.map_err(ExecError::Driver)?;
         // #410 — fire m2m_changed after the atomic DELETE+INSERT
         // commits. `dst_pks` is the new full set (may be empty when
         // `set([])` was called).
@@ -389,49 +341,7 @@ async fn fetch_i64_col_pool(
     Ok(rows.into_iter().map(|(v,)| v).collect())
 }
 
-#[cfg(feature = "postgres")]
-fn bind_pg(
-    q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    v: SqlValue,
-) -> sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> {
-    match v {
-        SqlValue::I64(n) => q.bind(n),
-        SqlValue::I32(n) => q.bind(n),
-        SqlValue::String(s) => q.bind(s),
-        SqlValue::Bool(b) => q.bind(b),
-        SqlValue::Null => q.bind(None::<i64>),
-        // M2M only carries scalar i64/i32 keys today; richer types
-        // are out of scope until the FK story generalizes.
-        other => q.bind(other.to_display_string()),
-    }
-}
-
-#[cfg(feature = "mysql")]
-fn bind_my<'a>(
-    q: sqlx::query::Query<'a, sqlx::MySql, sqlx::mysql::MySqlArguments>,
-    v: SqlValue,
-) -> sqlx::query::Query<'a, sqlx::MySql, sqlx::mysql::MySqlArguments> {
-    match v {
-        SqlValue::I64(n) => q.bind(n),
-        SqlValue::I32(n) => q.bind(n),
-        SqlValue::String(s) => q.bind(s),
-        SqlValue::Bool(b) => q.bind(b),
-        SqlValue::Null => q.bind(None::<i64>),
-        other => q.bind(other.to_display_string()),
-    }
-}
-
-#[cfg(feature = "sqlite")]
-fn bind_sqlite<'a>(
-    q: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>,
-    v: SqlValue,
-) -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>> {
-    match v {
-        SqlValue::I64(n) => q.bind(n),
-        SqlValue::I32(n) => q.bind(n),
-        SqlValue::String(s) => q.bind(s),
-        SqlValue::Bool(b) => q.bind(b),
-        SqlValue::Null => q.bind(None::<i64>),
-        other => q.bind(other.to_display_string()),
-    }
-}
+// #561 — the three local `bind_pg`/`bind_my`/`bind_sqlite` helpers
+// were removed once `set_pool` started routing through
+// `raw_execute_tx` (which uses the canonical executor `bind_query*`
+// path). The audit-tx + m2m-set body is now a single flat sequence.
