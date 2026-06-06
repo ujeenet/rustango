@@ -945,6 +945,14 @@ pub mod extractors;
 #[cfg(feature = "tenancy")]
 pub mod viewset;
 
+/// Shared list-endpoint query-parameter helpers — single source of
+/// truth for the reserved-key skip list, `?ordering=` parsing, and
+/// `?page_size=` clamping. Used by both `viewset::handle_list` and
+/// the `template_views::ListView` CBV. Closes the drift hazard
+/// flagged in issue #809.
+#[cfg(any(feature = "tenancy", feature = "template_views"))]
+pub mod list_params;
+
 /// Generic class-based views for HTML templates (Django-shape) —
 /// `ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`
 /// over `#[derive(Model)]` schemas, rendered through Tera. Sibling of
