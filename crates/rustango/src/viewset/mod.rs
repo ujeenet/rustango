@@ -708,6 +708,32 @@ fn json_error(status: StatusCode, msg: &str) -> Response {
         .unwrap()
 }
 
+/// #808 — was repeated verbatim in `handle_retrieve` / `update_inner`
+/// / `handle_destroy` (the three item-route handlers). Each spelled
+/// out the same `match parse_pk_string(field, raw) { Ok(v) => v, Err(e)
+/// => return json_error(400, &e.to_string()) }` pattern. Factored
+/// out so the handler bodies focus on what they're doing.
+fn parse_pk_or_400(
+    field: &'static crate::core::FieldSchema,
+    raw: &str,
+) -> Result<crate::core::SqlValue, Response> {
+    parse_pk_string(field, raw).map_err(|e| json_error(StatusCode::BAD_REQUEST, &e.to_string()))
+}
+
+/// #808 — was repeated verbatim ×4: `handle_retrieve`, `handle_create`,
+/// `update_inner`, `handle_destroy` all do the same
+/// `let Some(pk_field) = state.pk_field() else { return json_error(500,
+/// "model has no primary key") }`. Factored so the calling handlers
+/// shrink to the `?` form.
+fn pk_field_or_500(state: &ViewSetState) -> Result<&'static crate::core::FieldSchema, Response> {
+    state.pk_field().ok_or_else(|| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "model has no primary key",
+        )
+    })
+}
+
 fn json_created(body: Value) -> Response {
     Response::builder()
         .status(StatusCode::CREATED)
@@ -1112,15 +1138,13 @@ async fn handle_retrieve(
         return json_error(StatusCode::FORBIDDEN, "permission denied");
     }
 
-    let Some(pk_field) = state.pk_field() else {
-        return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "model has no primary key",
-        );
+    let pk_field = match pk_field_or_500(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
     };
-    let pk_val = match parse_pk_string(pk_field, &pk_raw) {
+    let pk_val = match parse_pk_or_400(pk_field, &pk_raw) {
         Ok(v) => v,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(resp) => return resp,
     };
 
     // #562 — was 11-field struct literal; SelectQuery::by_pk constructs
@@ -1165,14 +1189,9 @@ async fn handle_create(
         .map(|f| f.name)
         .collect();
 
-    let pk_field = match state.pk_field() {
-        Some(f) => f,
-        None => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "model has no primary key",
-            )
-        }
+    let pk_field = match pk_field_or_500(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
     };
 
     match create_body {
@@ -1328,15 +1347,13 @@ async fn update_inner(
         return json_error(StatusCode::FORBIDDEN, "permission denied");
     }
 
-    let Some(pk_field) = state.pk_field() else {
-        return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "model has no primary key",
-        );
+    let pk_field = match pk_field_or_500(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
     };
-    let pk_val = match parse_pk_string(pk_field, &pk_raw) {
+    let pk_val = match parse_pk_or_400(pk_field, &pk_raw) {
         Ok(v) => v,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(resp) => return resp,
     };
 
     let form = match extract_form_body(parts, body).await {
@@ -1405,15 +1422,13 @@ async fn handle_destroy(
         return json_error(StatusCode::FORBIDDEN, "permission denied");
     }
 
-    let Some(pk_field) = state.pk_field() else {
-        return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "model has no primary key",
-        );
+    let pk_field = match pk_field_or_500(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
     };
-    let pk_val = match parse_pk_string(pk_field, &pk_raw) {
+    let pk_val = match parse_pk_or_400(pk_field, &pk_raw) {
         Ok(v) => v,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(resp) => return resp,
     };
 
     let query = DeleteQuery {
