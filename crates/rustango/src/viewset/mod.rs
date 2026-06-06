@@ -926,18 +926,15 @@ async fn handle_list(
                 .max(1);
             let offset = (page - 1) * page_size;
 
+            // #562 — struct-update over SelectQuery::new for the
+            // paginated list query.
             let select_q = SelectQuery {
-                model: state.vs.schema,
                 where_clause: where_clause.clone(),
                 search: search_clause.clone(),
-                joins: vec![],
                 order_by: order_by.clone(),
                 limit: Some(page_size),
                 offset: Some(offset),
-                lock_mode: None,
-                compound: vec![],
-                projection: None,
-                distinct: None,
+                ..SelectQuery::new(state.vs.schema)
             };
             let count_q = CountQuery {
                 model: state.vs.schema,
@@ -1057,19 +1054,15 @@ async fn handle_list_cursor(
     // Force ordering by the cursor field (cursor pagination requires it)
     let order_by = vec![crate::core::OrderItem::column(cursor_schema.column, desc)];
 
-    // Fetch page_size+1 to detect if a next page exists.
+    // #562 — struct-update over SelectQuery::new for the cursor-
+    // paginated SELECT. Fetch page_size+1 to detect if a next page
+    // exists.
     let select_q = SelectQuery {
-        model: state.vs.schema,
         where_clause: final_where,
         search: search_clause,
-        joins: vec![],
         order_by,
         limit: Some(page_size + 1),
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
+        ..SelectQuery::new(state.vs.schema)
     };
     let rows = match acq.select_rows_as_json(&select_q, &fields).await {
         Ok(r) => r,

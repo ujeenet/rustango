@@ -181,18 +181,16 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
     // surrounded by `SELECT * FROM (<sub>)` rather than naked parens
     // (handled by the writer for nested subqueries — set ops with
     // per-branch LIMIT remain a stretch goal).
+    // #562 — struct-update over SelectQuery::new; the head copies the
+    // outer query's WHERE / search / joins but explicitly clears the
+    // compound + outer-only fields (order_by / limit / offset /
+    // lock_mode / compound) since those apply to the merged result,
+    // not the head branch.
     let head = SelectQuery {
-        model: query.model,
         where_clause: query.where_clause.clone(),
         search: query.search.clone(),
         joins: query.joins.clone(),
-        order_by: Vec::new(),
-        limit: None,
-        offset: None,
-        lock_mode: None,
-        compound: Vec::new(),
-        projection: None,
-        distinct: None,
+        ..SelectQuery::new(query.model)
     };
     write_select_inner(b, &head)?;
 
