@@ -21,7 +21,7 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | Category | SHIPPED | PARTIAL | MISSING | N/A |
 |---|---:|---:|---:|---:|
 | 1. ORM — models / fields / Meta | 22 | 1 | 1 | 0 |
-| 2. QuerySet API | 37 | 1 | 1 | 0 |
+| 2. QuerySet API | 38 | 1 | 1 | 0 |
 | 3. Field types & options | 32 | 0 | 2 | 1 |
 | 4. Postgres-specific fields | 2 | 1 | 2 | 0 |
 | 5. Migrations | 15 | 0 | 0 | 1 |
@@ -45,11 +45,11 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 23. DRF parity | 22 | 0 | 1 | 0 |
 | 24. contrib modules | 12 | 1 | 3 | 2 |
 | 25. `django.utils.*` helpers | 106 | 0 | 0 | 0 |
-| **Totals** | **480** | **11** | **21** | **19** |
+| **Totals** | **481** | **11** | **21** | **19** |
 
-Coverage = 480 / (480 + 11 + 21) = **94% full, 2% partial, 4% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **96%**.
+Coverage = 481 / (481 + 11 + 21) = **94% full, 2% partial, 4% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **96%**.
 
-Snapshot date: 2026-06-06 (post-v0.42 plus 100+ Django `utils.*` + `template.defaultfilters` + `validators` parity helpers across PRs #619–#731 + the 2026-06-06 Laravel 13 / Eloquent parity sweep: date-transform lookups (#834 / #829), `refresh_from_db` + `replicate` (#835 / #825), `default_uuid_v7` (#836 / #823), `Observer<T>` + quiet writes (#837 / #827), reverse-FK accessor + per-FK `related_name` (#838 / #841, #816), `Prunable` + `manage prune` (#848 / #822), `manage clear-cache` / `createcachetable` (#849 / #850), `QuerySet::active()` / `only_trashed()` / `with_trashed()` (#851 / #821 partial)).
+Snapshot date: 2026-06-06 (post-v0.42 plus 100+ Django `utils.*` + `template.defaultfilters` + `validators` parity helpers across PRs #619–#731 + the 2026-06-06 Laravel 13 / Eloquent parity sweep: date-transform lookups (#834 / #829), `refresh_from_db` + `replicate` (#835 / #825), `default_uuid_v7` (#836 / #823), `Observer<T>` + quiet writes (#837 / #827), reverse-FK accessor + per-FK `related_name` (#838 / #841, #816), `Prunable` + `manage prune` (#848 / #822), `manage clear-cache` / `createcachetable` (#849 / #850), `QuerySet::active()` / `only_trashed()` / `with_trashed()` (#851 / #821 partial), `whereJsonLength` (#853 / #826), `__not_in` (#854) / `__not_between` (#855) / raw-`__like` (#856), and the full Eloquent Model-level CRUD-shortcut surface — `find_pool` / `find_or_fail_pool` / `all_pool` / `first_pool` / `first_or_fail_pool` / `count_pool` / `exists_pool` / `latest_pool` / `earliest_pool` / `destroy_pool` / `truncate_pool` / `pluck_pool` (PRs #857–#865)).
 
 ---
 
@@ -120,9 +120,10 @@ Summary: **22 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A**. Gaps: full abstract-bas
 | `.in_bulk(ids)` | [in_bulk](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#in-bulk) | SHIPPED | `QuerySet::in_bulk` | |
 | `.dates(field, kind)` | [dates](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#dates) | SHIPPED | `QuerySet::dates(field, DateKind)` + `sql::fetch_dates_pool` (closed #327, v0.42). Tri-dialect via per-backend trunc fragments (PG `DATE_TRUNC`, MySQL `DATE_FORMAT` + cast, SQLite `strftime`). Filters / joins / limits on the underlying QuerySet pass through to the truncation pipeline. `order_desc(true)` reverses output. | |
 | `.datetimes(field, kind)` | [datetimes](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#datetimes) | SHIPPED | `QuerySet::datetimes(field, DateTimeKind)` + `sql::fetch_datetimes_pool` (closed #328, v0.42). Same shape as `.dates()` but accepts `Hour` / `Minute` / `Second` granularity and returns `DateTime<Utc>`. | |
-| `.latest(*fields)` / `.earliest(*fields)` | [latest](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#latest) | SHIPPED | `QuerySet::latest` / `earliest` on pool | |
-| `.first()` / `.last()` | [first](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#first) | SHIPPED | `QuerySet::first` / `.last` | |
-| `.count()` / `.exists()` | [count](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#count) | SHIPPED | `.count_pool` / `.exists_pool` | |
+| `.latest(*fields)` / `.earliest(*fields)` | [latest](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#latest) | SHIPPED | `QuerySet::latest` / `earliest` on pool. Model-level shortcut: `Self::latest_pool(field, &pool)` / `Self::earliest_pool(field, &pool)` (PR #862). | |
+| `.first()` / `.last()` | [first](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#first) | SHIPPED | `QuerySet::first` / `.last`. Model-level shortcut: `Self::first_pool(&pool)` + `first_or_fail_pool` (PR #860). | |
+| `.count()` / `.exists()` | [count](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#count) | SHIPPED | `.count_pool` / `.exists_pool`. Model-level shortcut: `Self::count_pool(&pool)` / `Self::exists_pool(&pool)` (PR #861). | |
+| Eloquent-shape Model-level CRUD shortcuts (`find` / `findOrFail` / `all` / `first` / `firstOrFail` / `count` / `exists` / `latest` / `oldest` / `destroy` / `truncate` / `pluck`) | n/a in Django core (verbs live on `objects.<x>`) | SHIPPED | Macro-emitted on every `#[derive(Model)]` struct with a PK across PRs #835 / #857–#865. Full surface: `Self::find_pool(pk, &pool) -> Option<Self>`, `find_or_fail_pool(pk, &pool) -> Self`, `all_pool(&pool) -> Vec<Self>`, `first_pool` / `first_or_fail_pool(&pool)`, `count_pool(&pool) -> i64`, `exists_pool(&pool) -> bool`, `latest_pool(field, &pool)` / `earliest_pool(field, &pool)`, `destroy_pool(pks, &pool) -> u64`, `truncate_pool(&pool) -> u64`, `pluck_pool::<U>(col, &pool) -> Vec<U>`, plus `refresh_from_db_pool` / `replicate` (#835). Rustango ahead of Django here; matches Eloquent's Model-level surface. | |
 | `.get_or_create()` / `.update_or_create()` | [get_or_create](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#get-or-create) | SHIPPED | `sql::get_or_create` + `sql::update_or_create` | |
 | `.union()` / `.intersection()` / `.difference()` | [union](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#union) | SHIPPED | `QuerySet::{union, union_all, intersection, difference}` + `with_compound(SetOp, …)` (closed #329, v0.42). Writer emits the bare compound shape (`SELECT … UNION SELECT …`) — portable across PG / MySQL / SQLite. Branches with per-branch `ORDER BY` / `LIMIT` / `OFFSET` wrap in `SELECT * FROM (<branch>)` so those clauses scope to the branch instead of attaching to the outer compound. **MySQL caveat**: native `INTERSECT` / `EXCEPT` require 8.0.31+; pre-8.0.31 surfaces a driver syntax error. | |
 | `.contains(obj)` / `.exists()` | [contains](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#contains) | SHIPPED | `ExistsPool::exists_pool(&pool)` + `ExistsPool::contains_pk(&pool, pk)` (#330, v0.42). `contains_pk` looks up the PK column from the schema; takes a typed pk value rather than the obj instance to keep the Rust API explicit. | |
@@ -130,7 +131,7 @@ Summary: **22 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A**. Gaps: full abstract-bas
 | `__lookup`s (`__icontains`, `__lt`, `__in`, `__between`, `__range`, `__isnull`, ...) | [Field lookups](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#field-lookups) | SHIPPED | `parse_lookup` in query/mod.rs | Django field-lookup coverage including date-transform chains: `__year` / `__month` / `__day` / `__hour` / `__minute` / `__second` / `__quarter` / `__week` / `__week_day` / `__date` + composition with trailing comparison ops (`created__year__gte`) shipped in PR #834 (#829). |
 | `.using(db_alias)` (multi-DB routing) | [using](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#using) | MISSING | n/a (#332) | rustango is single-pool-per-QuerySet (or tenant-scoped); multi-DB router missing. |
 
-Summary: **37 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A**. Gaps: multi-DB `.using()` (#332), plus a few esoteric Postgres lookups. `.dates/datetimes/contains/none` all shipped in v0.42; `__date` / `__year` / `__year__lte` and the full date-transform lookup grammar shipped post-v0.42 (PR #834, #829).
+Summary: **38 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A** (post-#857–#865 Eloquent Model-shortcut surface added as one row). Gaps: multi-DB `.using()` (#332), plus a few esoteric Postgres lookups. `.dates/datetimes/contains/none` all shipped in v0.42; `__date` / `__year` / `__year__lte` and the full date-transform lookup grammar shipped post-v0.42 (PR #834, #829). Lookup-parser drift fixes for `__not_in` (PR #854), `__not_between` / `__not_range` (PR #855), and raw-pattern `__like` / `__ilike` / `__not_like` / `__not_ilike` (PR #856) closed the remaining Eloquent `whereNotIn` / `whereNotBetween` / `whereLike` / `whereNotLike` gaps. `whereJsonLength` shipped via `ScalarFn::JsonArrayLength` (PR #853).
 
 ---
 
