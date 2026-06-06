@@ -71,6 +71,7 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("make_list", make_list);
     tera.register_filter("pprint", pprint);
     tera.register_filter("urlizetrunc", urlizetrunc);
+    tera.register_filter("unordered_list", unordered_list);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -1142,6 +1143,45 @@ fn truncate_link_text(html: &str, limit: usize) -> String {
         i += 1;
     }
     out
+}
+
+/// Django `{{ value|unordered_list }}` — recursively render a nested
+/// array as an HTML `<ul>...</ul>` tree. The input shape is Django's
+/// list-of-lists convention: each level alternates between a label
+/// and an optional list of sub-items, e.g.
+/// `["States", ["Kansas", ["Lawrence", "Topeka"], "Illinois"]]`.
+///
+/// Each text node is autoescaped (matches Django's autoescape-on
+/// default). To bypass escaping for already-safe HTML, pipe through
+/// `|safe` after `|unordered_list`.
+fn unordered_list(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let arr = match value {
+        Value::Array(a) => a,
+        _ => return Ok(value.clone()),
+    };
+    let mut out = String::new();
+    render_unordered_list(arr, &mut out);
+    Ok(to_value(out)?)
+}
+
+fn render_unordered_list(items: &[Value], out: &mut String) {
+    let mut i = 0;
+    while i < items.len() {
+        out.push_str("<li>");
+        match &items[i] {
+            Value::String(s) => out.push_str(&crate::text::html_escape(s)),
+            other => out.push_str(&crate::text::html_escape(&other.to_string())),
+        }
+        if let Some(Value::Array(children)) = items.get(i + 1) {
+            out.push_str("\n<ul>");
+            render_unordered_list(children, out);
+            out.push_str("</ul>\n");
+            i += 2;
+        } else {
+            i += 1;
+        }
+        out.push_str("</li>");
+    }
 }
 
 /// Django `{{ value|filesizeformat }}` — human-readable byte size
@@ -2657,5 +2697,57 @@ mod tests {
         ctx.insert("value", "see https://example.com/about");
         let out = tera.render("t", &ctx).unwrap();
         assert!(out.contains("..."), "got: {}", out);
+    }
+
+    // -------- unordered_list --------
+
+    #[test]
+    fn unordered_list_renders_flat_list() {
+        let out = unordered_list(&json!(["a", "b", "c"]), &HashMap::new())
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(out, "<li>a</li><li>b</li><li>c</li>");
+    }
+
+    #[test]
+    fn unordered_list_renders_nested_levels() {
+        // Django shape: label followed by optional sub-array.
+        let input = json!(["States", ["Kansas", ["Lawrence", "Topeka"], "Illinois"]]);
+        let out = unordered_list(&input, &HashMap::new())
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(out.contains("<li>States"), "got: {}", out);
+        assert!(out.contains("<li>Kansas"), "got: {}", out);
+        assert!(out.contains("<li>Lawrence</li>"), "got: {}", out);
+        assert!(out.contains("<li>Topeka</li>"), "got: {}", out);
+        assert!(out.contains("<li>Illinois</li>"), "got: {}", out);
+        // Nesting structure preserved.
+        assert!(out.contains("<ul>"), "expected nested <ul>: {}", out);
+    }
+
+    #[test]
+    fn unordered_list_escapes_html_in_labels() {
+        let out = unordered_list(&json!(["<script>"]), &HashMap::new())
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(out.contains("&lt;script&gt;"), "got: {}", out);
+        assert!(!out.contains("<script>"), "raw tag escaped");
+    }
+
+    #[test]
+    fn register_filters_wires_unordered_list_through_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ items|unordered_list|safe }}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("items", &json!(["a", "b"]));
+        assert_eq!(tera.render("t", &ctx).unwrap(), "<li>a</li><li>b</li>");
     }
 }
