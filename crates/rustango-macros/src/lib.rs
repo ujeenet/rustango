@@ -4229,6 +4229,103 @@ fn inherent_impl_tokens(
                     #audit_restore_emit
                     ::core::result::Result::Ok(_affected)
                 }
+
+                /// Tri-dialect counterpart of [`Self::soft_delete_on`]
+                /// — takes [`::rustango::sql::Pool`] and dispatches per
+                /// backend. Eloquent `Model::delete()` semantics on
+                /// soft-delete-enabled models (closes #821 partial).
+                ///
+                /// Sets the `#[rustango(soft_delete)]` column to
+                /// `NOW()` on every backend. Query helpers
+                /// (`QuerySet::active()` / `only_trashed()`,
+                /// `soft_delete::active_filter` /
+                /// `compose_with_active`) filter trashed rows out by
+                /// reading `IS NULL` on the same column.
+                ///
+                /// # Errors
+                /// As [`::rustango::sql::update_pool`].
+                pub async fn soft_delete_pool(
+                    &self,
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                    let _query = ::rustango::core::UpdateQuery {
+                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                        set: ::std::vec![
+                            ::rustango::core::Assignment {
+                                column: #col_lit,
+                                value: ::core::convert::Into::<::rustango::core::Expr>::into(
+                                    ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                        ::chrono::Utc::now()
+                                    )
+                                ),
+                            },
+                        ],
+                        where_clause: ::rustango::core::WhereExpr::Predicate(
+                            ::rustango::core::Filter {
+                                column: #pk_column_lit,
+                                op: ::rustango::core::Op::Eq,
+                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                    ::core::clone::Clone::clone(&self.#pk_ident)
+                                ),
+                            }
+                        ),
+                    };
+                    ::rustango::sql::update_pool(pool, &_query).await
+                }
+
+                /// Tri-dialect counterpart of [`Self::restore_on`].
+                /// Clears the `#[rustango(soft_delete)]` column back
+                /// to `NULL`, marking the row live again. Eloquent
+                /// `Model::restore()` parity.
+                ///
+                /// # Errors
+                /// As [`::rustango::sql::update_pool`].
+                pub async fn restore_pool(
+                    &self,
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                    let _query = ::rustango::core::UpdateQuery {
+                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                        set: ::std::vec![
+                            ::rustango::core::Assignment {
+                                column: #col_lit,
+                                value: ::core::convert::Into::<::rustango::core::Expr>::into(
+                                    ::rustango::core::SqlValue::Null
+                                ),
+                            },
+                        ],
+                        where_clause: ::rustango::core::WhereExpr::Predicate(
+                            ::rustango::core::Filter {
+                                column: #pk_column_lit,
+                                op: ::rustango::core::Op::Eq,
+                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                    ::core::clone::Clone::clone(&self.#pk_ident)
+                                ),
+                            }
+                        ),
+                    };
+                    ::rustango::sql::update_pool(pool, &_query).await
+                }
+
+                /// Hard-delete this row, ignoring the soft-delete
+                /// column. Eloquent `Model::forceDelete()` parity —
+                /// the escape hatch when you need to actually purge
+                /// data (GDPR, fixture cleanup, etc.).
+                ///
+                /// Equivalent to [`Self::delete_pool`] (the framework's
+                /// non-soft delete) — exposed under the Eloquent name
+                /// for muscle-memory + so soft-delete-enabled models
+                /// have all three operations (soft / restore / force)
+                /// in one place.
+                ///
+                /// # Errors
+                /// As [`Self::delete_pool`].
+                pub async fn force_delete_pool(
+                    &self,
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                    Self::delete_pool(self, pool).await
+                }
             }
         } else {
             quote!()
