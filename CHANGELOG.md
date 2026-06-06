@@ -36,6 +36,13 @@ Post-v0.42 Django-parity follow-ups. Each item is a self-contained slice that la
   - **Per-backend row-decoder helpers** (#790, #791) — `AuditEntry::from_row` / `from_my_row` / `from_sq_row` and `decode_role_pg_row` / `_my_row` / `_sq_row` collapse the tri-dialect arms of `audit::list` / `audit::fetch_for_entity_pool` / `permissions::user_roles_qs_pool` from ~70-line matches to 4-line `bind+fetch+iter.map(decode_*).collect()` per arm.
   - **`run_ddl_idempotent`-shaped `ensure_table_pool` collapse** (pre-compaction) + **`is_mysql_dup_index_error` centralized** + **`raw_query_pool::<(i64,)>` for COUNT/EXISTS sites** (#778, #779, #780, #782).
   - **`decode_facet_row<R>` generic helper** (#781) — three byte-identical admin facet-row decode loops collapsed onto a single bound-`R: sqlx::Row` function.
+- **#561 audit-tx + m2m-tx collapse via `raw_execute_tx` — PRs #798–#802 (5 PRs, ~250 lines removed)**. Closes the last bullet of #561 (the `_tx` combinator). The audit-tx and m2m-tx arms had three byte-similar `match pool` blocks that each opened a per-backend `tx`, bound `stmt.params` via per-backend `bind_value_pg/my/sqlite` helpers, executed, then ran a per-backend audit emit:
+  - **`sql::raw_execute_tx(tx, sql, binds)`** (#798) — new bi-dialect combinator that takes a `&mut PoolTx<'_>`, dispatches per variant, and uses the canonical executor `bind_query*` path. Pairs with the existing `sql::transaction_pool` + `PoolTx::commit`.
+  - **`audit::delete_one_with_audit`** (#799) — 42-line match → 7-line flat body via `raw_execute_tx` + new local `emit_one_tx` shim.
+  - **`audit::save_one_with_audit`** (#800) — same shape, same collapse.
+  - **`sql::m2m::set_pool`** (#801) — DELETE + INSERT tx body collapses; the three local `bind_pg`/`bind_my`/`bind_sqlite` helpers (~115 lines) are removed.
+  - **`audit::insert_one_with_audit`** (#802) — ~70 lines collapse to 7 via `insert_returning_tx` (which already handles PG/SQLite RETURNING + MySQL LAST_INSERT_ID() divergence in one place).
+  - Total sweep: ~250 lines of duplicate tx-orchestration code deleted; sqlx Transaction-per-backend remains the underlying constraint but is now hidden behind two combinators (`raw_execute_tx`, `insert_returning_tx`) instead of being open-coded at every call site.
 
 ### Fixed
 
