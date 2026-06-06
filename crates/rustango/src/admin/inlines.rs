@@ -349,24 +349,14 @@ pub async fn render_for_parent(
             .into_iter()
             .collect();
 
+        // #562 — by_pk constructor + struct-update for order_by and
+        // limit=None.
         let rows = select_rows_as_json(
             pool,
             &SelectQuery {
-                model: child_model,
-                where_clause: WhereExpr::Predicate(Filter {
-                    column: inline.fk_column,
-                    op: Op::Eq,
-                    value: parent_pk.clone(),
-                }),
-                search: None,
-                joins: vec![],
                 order_by: order_pk,
                 limit: None,
-                offset: None,
-                lock_mode: None,
-                compound: vec![],
-                projection: None,
-                distinct: None,
+                ..SelectQuery::by_pk(child_model, inline.fk_column, parent_pk.clone())
             },
             &select_fields,
         )
@@ -491,10 +481,10 @@ pub async fn render_generic_for_parent(
             .into_iter()
             .collect();
 
+        // #562 — composite AND (ct + pk); struct-update over ::new.
         let rows = select_rows_as_json(
             pool,
             &SelectQuery {
-                model: child_model,
                 where_clause: WhereExpr::And(vec![
                     WhereExpr::Predicate(Filter {
                         column: inline.ct_column,
@@ -507,15 +497,8 @@ pub async fn render_generic_for_parent(
                         value: SqlValue::I64(parent_pk_i64),
                     }),
                 ]),
-                search: None,
-                joins: vec![],
                 order_by: order_pk,
-                limit: None,
-                offset: None,
-                lock_mode: None,
-                compound: vec![],
-                projection: None,
-                distinct: None,
+                ..SelectQuery::new(child_model)
             },
             &select_fields,
         )
@@ -748,24 +731,14 @@ pub async fn render_form_for_parent(
             .into_iter()
             .collect();
 
+        // #562 — by_pk constructor + struct-update for order_by and
+        // limit=None.
         let rows = select_rows_as_json(
             pool,
             &SelectQuery {
-                model: child_model,
-                where_clause: WhereExpr::Predicate(Filter {
-                    column: inline.fk_column,
-                    op: Op::Eq,
-                    value: parent_pk.clone(),
-                }),
-                search: None,
-                joins: vec![],
                 order_by: order_pk,
                 limit: None,
-                offset: None,
-                lock_mode: None,
-                compound: vec![],
-                projection: None,
-                distinct: None,
+                ..SelectQuery::by_pk(child_model, inline.fk_column, parent_pk.clone())
             },
             &select_fields,
         )
@@ -1210,10 +1183,10 @@ pub async fn render_form_generic_for_parent(
             .into_iter()
             .collect();
 
+        // #562 — composite AND (ct + pk); struct-update over ::new.
         let rows = select_rows_as_json(
             pool,
             &SelectQuery {
-                model: child_model,
                 where_clause: WhereExpr::And(vec![
                     WhereExpr::Predicate(Filter {
                         column: inline.ct_column,
@@ -1226,15 +1199,8 @@ pub async fn render_form_generic_for_parent(
                         value: SqlValue::I64(parent_pk_i64),
                     }),
                 ]),
-                search: None,
-                joins: vec![],
                 order_by: order_pk,
-                limit: None,
-                offset: None,
-                lock_mode: None,
-                compound: vec![],
-                projection: None,
-                distinct: None,
+                ..SelectQuery::new(child_model)
             },
             &select_fields,
         )
