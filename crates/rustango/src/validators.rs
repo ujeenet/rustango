@@ -208,6 +208,38 @@ pub fn is_email(s: &str) -> bool {
     validate_email(s).is_ok()
 }
 
+/// Django-parity `validate_email_with_name(value)` — accepts both
+/// a bare email (`user@host.tld`) and the RFC 5322 display-name form
+/// (`"Display Name" <user@host.tld>` or `Display Name <user@host.tld>`).
+///
+/// Useful for `From:` / `To:` / `Cc:` header values where operators
+/// may type the human-friendly form. Internally splits via
+/// [`crate::email::parseaddr`] and forwards the address portion to
+/// [`validate_email`].
+///
+/// ```ignore
+/// use rustango::validators::validate_email_with_name;
+/// assert!(validate_email_with_name("alice@example.com").is_ok());
+/// assert!(validate_email_with_name("Alice <alice@example.com>").is_ok());
+/// assert!(validate_email_with_name("\"Alice C.\" <alice@example.com>").is_ok());
+/// assert!(validate_email_with_name("not an email").is_err());
+/// ```
+///
+/// # Errors
+/// `ValidationError { code: "invalid_email", ... }` if the email
+/// portion (after stripping the optional display name) doesn't
+/// pass [`validate_email`].
+pub fn validate_email_with_name(s: &str) -> Result<(), ValidationError> {
+    let (_name, address) = crate::email::parseaddr(s);
+    validate_email(&address)
+}
+
+/// `true` when `s` would pass [`validate_email_with_name`].
+#[must_use]
+pub fn is_email_with_name(s: &str) -> bool {
+    validate_email_with_name(s).is_ok()
+}
+
 // ------------------------------------------------------------------ url
 
 /// Validate that `s` looks like an `http://` / `https://` URL.
@@ -3908,5 +3940,32 @@ mod tests {
         // Three dot-separated base64url segments.
         assert!(is_jwt_shape("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig"));
         assert!(!is_jwt_shape("not.a.jwt.shape.four.dots"));
+    }
+
+    // -------- validate_email_with_name --------
+
+    #[test]
+    fn email_with_name_accepts_bare_email() {
+        assert!(validate_email_with_name("alice@example.com").is_ok());
+    }
+
+    #[test]
+    fn email_with_name_accepts_display_name_form() {
+        assert!(validate_email_with_name("Alice <alice@example.com>").is_ok());
+        assert!(validate_email_with_name("\"Alice C.\" <alice@example.com>").is_ok());
+    }
+
+    #[test]
+    fn email_with_name_rejects_invalid_email_portion() {
+        assert!(validate_email_with_name("not an email").is_err());
+        assert!(validate_email_with_name("Display <not.an.email>").is_err());
+        assert!(validate_email_with_name("").is_err());
+    }
+
+    #[test]
+    fn is_email_with_name_companion() {
+        assert!(is_email_with_name("alice@example.com"));
+        assert!(is_email_with_name("Alice <alice@example.com>"));
+        assert!(!is_email_with_name("garbage"));
     }
 }
