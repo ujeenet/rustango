@@ -3310,6 +3310,53 @@ fn inherent_impl_tokens(
                 }
             }
 
+            /// Fetch the row with the largest `field` value —
+            /// `SELECT … ORDER BY <field> DESC LIMIT 1`. Returns
+            /// `Ok(None)` for an empty table. Eloquent
+            /// `Model::latest($field)->first()` / Django
+            /// `Model.objects.latest(field)` (non-throwing) parity.
+            /// Thin wrapper over `QuerySet::<Self>::default()
+            /// .latest(field, pool)`.
+            ///
+            /// **Field name** is the Rust field ident as a string
+            /// (not the SQL column). Unknown fields surface as
+            /// `ExecError::Query(QueryError::UnknownField)` at
+            /// compile time.
+            ///
+            /// # Errors
+            /// As `QuerySet::latest`.
+            pub async fn latest_pool(
+                field: &str,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::core::option::Option<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                ::rustango::query::QuerySet::<Self>::default()
+                    .latest(field, pool)
+                    .await
+            }
+
+            /// Sibling of [`Self::latest_pool`] — fetches the row
+            /// with the smallest `field` value (`ORDER BY <field>
+            /// ASC LIMIT 1`). Eloquent `Model::oldest($field)
+            /// ->first()` / Django `Model.objects.earliest(field)`
+            /// parity.
+            ///
+            /// # Errors
+            /// As [`Self::latest_pool`].
+            pub async fn earliest_pool(
+                field: &str,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::core::option::Option<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                ::rustango::query::QuerySet::<Self>::default()
+                    .earliest(field, pool)
+                    .await
+            }
+
             /// Count rows of this model — `SELECT COUNT(*) FROM
             /// <table>`. Eloquent `Model::count()` parity. Thin
             /// wrapper over `QuerySet::<Self>::default()
