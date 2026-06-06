@@ -1452,6 +1452,28 @@ pub fn json_script<T: serde::Serialize>(
 /// // Blank lines don't constrain the common prefix.
 /// assert_eq!(dedent("    line\n\n    line"), "line\n\nline");
 /// ```
+/// `true` when `s` is empty or contains only Unicode whitespace.
+/// Useful for input validation where empty-string and
+/// whitespace-only-string should be treated the same:
+///
+/// ```
+/// use rustango::text::is_blank;
+/// assert!(is_blank(""));
+/// assert!(is_blank("   "));
+/// assert!(is_blank("\t\n  \r"));
+/// assert!(!is_blank("hello"));
+/// assert!(!is_blank("  hello  "));
+/// ```
+///
+/// Pair with `is_some_and(|s| !is_blank(s))` for `Option<String>`
+/// validation, or `field.trim().is_empty()` equivalent without
+/// the allocation cost (this function short-circuits on the first
+/// non-whitespace char).
+#[must_use]
+pub fn is_blank(s: &str) -> bool {
+    s.chars().all(char::is_whitespace)
+}
+
 #[must_use]
 pub fn dedent(text: &str) -> String {
     if text.is_empty() {
@@ -4212,6 +4234,26 @@ mod tests {
     fn pluralize_large_counts() {
         assert_eq!(pluralize(i64::MAX, ""), "s");
         assert_eq!(pluralize(i64::MIN, ""), "s");
+    }
+
+    // -------- is_blank --------
+
+    #[test]
+    fn is_blank_recognizes_empty_and_whitespace() {
+        assert!(is_blank(""));
+        assert!(is_blank(" "));
+        assert!(is_blank("   "));
+        assert!(is_blank("\t\n  \r"));
+        // Non-breaking space, en-quad, em-quad — Unicode whitespace.
+        assert!(is_blank("\u{00A0}\u{2000}\u{2001}"));
+    }
+
+    #[test]
+    fn is_blank_rejects_strings_with_visible_content() {
+        assert!(!is_blank("a"));
+        assert!(!is_blank("hello"));
+        assert!(!is_blank("  hello  "));
+        assert!(!is_blank("\tword\n"));
     }
 
     // -------- truncate_middle --------
