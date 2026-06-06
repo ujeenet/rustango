@@ -1327,6 +1327,109 @@ pub fn json_script<T: serde::Serialize>(
     ))
 }
 
+/// Python `textwrap.dedent` parity — strip the longest common
+/// leading whitespace prefix from every line of `text`.
+///
+/// Useful for working with multi-line string literals that
+/// inherit the indentation of the surrounding Rust code:
+///
+/// ```
+/// use rustango::text::dedent;
+/// let source = "
+///     line one
+///     line two
+///     line three";
+/// assert_eq!(dedent(source), "\nline one\nline two\nline three");
+/// ```
+///
+/// Behavior matches Python's `textwrap.dedent`:
+/// * The "common prefix" is computed by comparing the leading
+///   whitespace of every **non-blank** line (lines that are
+///   empty or contain only whitespace are ignored for the
+///   common-prefix calculation but kept verbatim in the
+///   output).
+/// * If lines have **mixed indentation** (one uses tabs, another
+///   uses spaces), the common prefix is whatever literal byte
+///   sequence they share — `\t` and `"    "` (4 spaces) are not
+///   considered equivalent.
+/// * The trailing newline (if any) is preserved verbatim.
+/// * Empty input passes through.
+///
+/// ```
+/// use rustango::text::dedent;
+/// // Mixed-indent input: tab vs spaces — no common prefix → no dedent.
+/// let mixed = "\tline one\n    line two";
+/// assert_eq!(dedent(mixed), "\tline one\n    line two");
+/// // No leading whitespace at all → no-op.
+/// assert_eq!(dedent("hello\nworld"), "hello\nworld");
+/// // Blank lines don't constrain the common prefix.
+/// assert_eq!(dedent("    line\n\n    line"), "line\n\nline");
+/// ```
+#[must_use]
+pub fn dedent(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    // Phase 1: find the longest common leading whitespace prefix
+    // across non-blank lines.
+    let mut common: Option<&str> = None;
+    for line in text.split('\n') {
+        // Blank lines (empty or all-whitespace) don't constrain
+        // the prefix.
+        if line.chars().all(|c| c.is_whitespace()) {
+            continue;
+        }
+        let ws_end = line
+            .char_indices()
+            .find(|(_, c)| !c.is_whitespace())
+            .map(|(i, _)| i)
+            .unwrap_or(line.len());
+        let leading = &line[..ws_end];
+        common = Some(match common {
+            None => leading,
+            Some(prev) => {
+                // Longest common prefix of `prev` and `leading`,
+                // byte-by-byte. Safe because both slices start
+                // at the beginning of `line` and contain only
+                // whitespace (which is ASCII or non-ASCII
+                // whitespace; we only care about identity here).
+                let n = prev
+                    .bytes()
+                    .zip(leading.bytes())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                &prev[..n]
+            }
+        });
+        if common.is_some_and(str::is_empty) {
+            break;
+        }
+    }
+    let prefix = common.unwrap_or("");
+    if prefix.is_empty() {
+        return text.to_owned();
+    }
+    // Phase 2: emit each line with the prefix stripped (blank
+    // lines are emitted as-is, but their leading whitespace beyond
+    // the prefix is also kept since the prefix doesn't apply to
+    // lines that didn't constrain it).
+    let mut out = String::with_capacity(text.len());
+    let mut first = true;
+    for line in text.split('\n') {
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        if line.starts_with(prefix) {
+            out.push_str(&line[prefix.len()..]);
+        } else {
+            // Blank line shorter than the prefix — emit verbatim.
+            out.push_str(line);
+        }
+    }
+    out
+}
+
 /// Django-parity
 /// [`django.utils.text.wrap(text, width)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.wrap) —
 /// word-wrap `text` to a column width of `width` characters,
@@ -3477,6 +3580,62 @@ mod tests {
         assert_eq!(unescape_html_entities(""), "");
         // `&` by itself stays as `&`.
         assert_eq!(unescape_html_entities("a & b"), "a & b");
+    }
+
+    // -------- dedent --------
+
+    #[test]
+    fn dedent_strips_common_4_space_indent() {
+        let input = "    line one\n    line two\n    line three";
+        assert_eq!(dedent(input), "line one\nline two\nline three");
+    }
+
+    #[test]
+    fn dedent_handles_leading_newline() {
+        // Multi-line literal pattern — opens with `\n` for legibility.
+        let input = "\n    line one\n    line two\n    line three";
+        assert_eq!(dedent(input), "\nline one\nline two\nline three");
+    }
+
+    #[test]
+    fn dedent_no_common_prefix_no_op() {
+        assert_eq!(dedent("hello\nworld"), "hello\nworld");
+        assert_eq!(dedent(""), "");
+    }
+
+    #[test]
+    fn dedent_blank_lines_dont_constrain_prefix() {
+        // Blank line between two indented lines — prefix is still
+        // "    " (4 spaces) and the blank line passes through.
+        let input = "    line\n\n    line";
+        assert_eq!(dedent(input), "line\n\nline");
+    }
+
+    #[test]
+    fn dedent_picks_longest_common_prefix() {
+        // First line indented 8, second indented 4 → common = 4.
+        let input = "        first deeper\n    second";
+        assert_eq!(dedent(input), "    first deeper\nsecond");
+    }
+
+    #[test]
+    fn dedent_mixed_tab_and_space_no_common() {
+        // Tab and space-prefix don't share bytes — no dedent.
+        let input = "\tline one\n    line two";
+        assert_eq!(dedent(input), "\tline one\n    line two");
+    }
+
+    #[test]
+    fn dedent_all_blank_input() {
+        // All-whitespace lines: no non-blank line to constrain the
+        // prefix → no dedent → input unchanged.
+        assert_eq!(dedent("   \n   \n"), "   \n   \n");
+    }
+
+    #[test]
+    fn dedent_preserves_trailing_newline() {
+        let input = "    a\n    b\n";
+        assert_eq!(dedent(input), "a\nb\n");
     }
 
     // -------- yesno --------
