@@ -32,7 +32,7 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 10. Templates | 12 | 0 | 0 | 0 |
 | 11. Authentication | 21 | 1 | 1 | 0 |
 | 12. Sessions | 7 | 0 | 0 | 0 |
-| 13. Manage commands | 20 | 0 | 3 | 6 |
+| 13. Manage commands | 23 | 0 | 3 | 6 |
 | 14. Settings | 13 | 2 | 2 | 2 |
 | 15. Security / middleware | 27 | 0 | 0 | 0 |
 | 16. Caching | 9 | 0 | 1 | 0 |
@@ -45,11 +45,11 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 23. DRF parity | 22 | 0 | 1 | 0 |
 | 24. contrib modules | 12 | 1 | 3 | 2 |
 | 25. `django.utils.*` helpers | 106 | 0 | 0 | 0 |
-| **Totals** | **477** | **11** | **21** | **19** |
+| **Totals** | **480** | **11** | **21** | **19** |
 
-Coverage = 476 / (476 + 11 + 21) = **94% full, 2% partial, 4% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **96%**.
+Coverage = 480 / (480 + 11 + 21) = **94% full, 2% partial, 4% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **96%**.
 
-Snapshot date: 2026-06-06 (post-v0.42 plus 100+ Django `utils.*` + `template.defaultfilters` + `validators` parity helpers across PRs #619–#731 + the 2026-06-06 Laravel 13 / Eloquent parity sweep: date-transform lookups (#834 / #829), `refresh_from_db` + `replicate` (#835 / #825), `default_uuid_v7` (#836 / #823), `Observer<T>` + quiet writes (#837 / #827), reverse-FK accessor + per-FK `related_name` (#838 / #841, #816)).
+Snapshot date: 2026-06-06 (post-v0.42 plus 100+ Django `utils.*` + `template.defaultfilters` + `validators` parity helpers across PRs #619–#731 + the 2026-06-06 Laravel 13 / Eloquent parity sweep: date-transform lookups (#834 / #829), `refresh_from_db` + `replicate` (#835 / #825), `default_uuid_v7` (#836 / #823), `Observer<T>` + quiet writes (#837 / #827), reverse-FK accessor + per-FK `related_name` (#838 / #841, #816), `Prunable` + `manage prune` (#848 / #822), `manage clear-cache` / `createcachetable` (#849 / #850), `QuerySet::active()` / `only_trashed()` / `with_trashed()` (#851 / #821 partial)).
 
 ---
 
@@ -424,6 +424,9 @@ Django built-in management commands:
 | `changepassword` | [changepassword](https://docs.djangoproject.com/en/6.0/ref/django-admin/#changepassword) | SHIPPED | `manage reset-password <slug> <user> --password ...` | |
 | `collectstatic` | [collectstatic](https://docs.djangoproject.com/en/6.0/ref/contrib/staticfiles/#django-admin-collectstatic) | N/A | n/a — rustango bundles static via `Cli::with_static(prefix, dir)` | |
 | `findstatic` | (above) | N/A | n/a | |
+| `clearsessions` | [clearsessions](https://docs.djangoproject.com/en/6.0/ref/django-admin/#clearsessions) | SHIPPED | `manage clear-cache` (alias `clearsessions`, PR #849) — purges every expired row from a `DatabaseCache`-backed table via the existing `purge_expired` helper. Defaults to `rustango_cache`; pass `--table <name>` for the session-backend table or any app-specific cache. Pair with `manage createcachetable` (PR #850, alias `create-cache-table`) which runs the idempotent `CREATE TABLE IF NOT EXISTS` per-dialect DDL. | |
+| `createcachetable` | [createcachetable](https://docs.djangoproject.com/en/6.0/ref/django-admin/#createcachetable) | SHIPPED | `manage createcachetable` (alias `create-cache-table`, PR #850) — idempotent CREATE TABLE IF NOT EXISTS for the DatabaseCache table. | |
+| `manage prune` (Eloquent / scheduled bulk removal) | n/a in Django core | SHIPPED | `manage prune [--model NAME] [--except NAME] [--pretend]` (PR #848, #822) — walks every `Prunable` impl registered via `register_prunable!` and bulk-deletes the queryset of stale rows. `--pretend` counts matches without deleting. Programmatic surface: `prunable::prune_all(pool, &PruneOptions)` / `prune_pretend(...)`. Rustango ahead of Django here (Django delegates to ad-hoc management commands). | |
 | `loaddata` | [loaddata](https://docs.djangoproject.com/en/6.0/ref/django-admin/#loaddata) | SHIPPED | `fixtures::load_pool` + `manage load-fixture` | |
 | `dumpdata` | [dumpdata](https://docs.djangoproject.com/en/6.0/ref/django-admin/#dumpdata) | SHIPPED | `manage dumpdata [--model app.Name] [--indent N]` (`migrate/manage.rs:115, 2248, 2318`) — JSON fixture writer for the round-trip with `loaddata` / `fixtures`. Closes #397. | |
 | `makemessages` | [makemessages](https://docs.djangoproject.com/en/6.0/ref/django-admin/#makemessages) | MISSING | n/a (#398) | i18n scaffolding deferred. |
@@ -438,7 +441,7 @@ Django built-in management commands:
 | `create-tenant` / `create-operator` (rustango-specific) | n/a | SHIPPED | tenancy verbs | |
 | `migrate-tenant-storage` (rustango-specific) | n/a | SHIPPED | v0.26 | |
 
-Summary: **20 SHIPPED / 0 PARTIAL / 3 MISSING / 6 N/A**. Gaps: `shell` REPL (Rust constraint), i18n scaffolding (`makemessages` / `compilemessages`). The prior gap-prose line claimed `dumpdata` was missing, but #397 shipped it in v0.42 (see the `dumpdata` row above) — corrected.
+Summary: **23 SHIPPED / 0 PARTIAL / 3 MISSING / 6 N/A** (post-#848/#849/#850 wave added `clearsessions` + `createcachetable` rows and a Django-extra `manage prune` row). Gaps: `shell` REPL (Rust constraint), i18n scaffolding (`makemessages` / `compilemessages`). The prior gap-prose line claimed `dumpdata` was missing, but #397 shipped it in v0.42 (see the `dumpdata` row above) — corrected.
 
 ---
 
@@ -832,7 +835,7 @@ Bulk closure of Django `utils.*` API surface — the most-common helper function
 
 ## Top 10 gaps by user-facing impact
 
-Ranked by how often a real-world Django project hits the gap. Refreshed 2026-06-04 — six entries on the original list shipped between the audit's first draft and now (`choices=` v0.42, method-field admin display #348, `raw_id_fields` #357 + `autocomplete_fields` #358, auth signals #414, cursor pagination #440, plus most of the i18n surface). What follows is the current shortlist of MISSING / PARTIAL items most users feel first.
+Ranked by how often a real-world Django project hits the gap. Refreshed 2026-06-06 after the post-v0.42 Eloquent / Django parity sweep — the `clearsessions` + `createcachetable` manage verbs (PRs #849 / #850) and the Eloquent `withTrashed` / `onlyTrashed` queryset sugar (PR #851 / #821) all shipped, so the previous editions of items 9 (manage parity verbs) and the soft-delete sub-bullet are now SHIPPED. What follows is the current shortlist of MISSING / PARTIAL items most users feel first.
 
 1. **Multi-DB routing / read replicas** (sec 14 — `DATABASES`, `DATABASE_ROUTERS`). Every non-trivial production app eventually wants read replicas. Currently MISSING (#400 / #401); ORM is single-pool-per-QuerySet. Closest existing primitive: `Cli::api(...).migrations_dir(...).run()` is single-registry-pool.
 
