@@ -1104,46 +1104,34 @@ pub async fn delete_one_with_audit(
     entry: &PendingEntry,
 ) -> Result<u64, crate::sql::ExecError> {
     let stmt = pool.dialect().compile_delete(query)?;
-    match pool {
+    // #561 — was a 3-arm `match pool` that opened a per-backend tx,
+    // bound stmt.params, executed, called the per-backend
+    // `emit_one_<backend>`, committed. The new `raw_execute_tx`
+    // combinator (#798) + the `emit_one_tx` shim below let the body
+    // collapse to one flat path.
+    let mut tx = crate::sql::transaction_pool(pool).await?;
+    let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+    emit_one_tx(&mut tx, entry).await?;
+    tx.commit().await?;
+    Ok(affected)
+}
+
+/// Per-backend dispatch for the audit emit inside an open `PoolTx`.
+/// Wraps the existing per-backend `emit_one` / `emit_one_my` /
+/// `emit_one_sqlite` helpers (which take a sqlx-typed executor) so
+/// callers can stay on the `PoolTx` API instead of unwrapping the
+/// variant.
+async fn emit_one_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    entry: &PendingEntry,
+) -> Result<(), sqlx::Error> {
+    match tx {
         #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            let mut tx = pg.begin().await?;
-            let mut q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_value_pg(q, v);
-            }
-            let affected = q.execute(&mut *tx).await?.rows_affected();
-            emit_one(&mut *tx, entry).await?;
-            tx.commit().await?;
-            Ok(affected)
-        }
+        crate::sql::PoolTx::Postgres(t) => emit_one(&mut **t, entry).await,
         #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let mut tx = my.begin().await?;
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_value_my(q, v);
-            }
-            let affected = q.execute(&mut *tx).await?.rows_affected();
-            emit_one_my(&mut *tx, entry).await?;
-            tx.commit().await?;
-            Ok(affected)
-        }
+        crate::sql::PoolTx::Mysql(t) => emit_one_my(&mut **t, entry).await,
         #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            let mut tx = sq.begin().await?;
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_value_sqlite(q, v);
-            }
-            let affected = q.execute(&mut *tx).await?.rows_affected();
-            emit_one_sqlite(&mut *tx, entry).await?;
-            tx.commit().await?;
-            Ok(affected)
-        }
+        crate::sql::PoolTx::Sqlite(t) => emit_one_sqlite(&mut **t, entry).await,
     }
 }
 
