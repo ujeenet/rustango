@@ -504,6 +504,29 @@ pub fn avoid_wrapping(s: &str) -> String {
     s.replace(' ', "\u{00A0}")
 }
 
+/// Inverse of [`avoid_wrapping`] — replace every non-breaking
+/// space (U+00A0) with an ASCII space.
+///
+/// Common use: sanitizing rich-text-editor input where the
+/// browser smuggles NBSPs into the value as the user types, or
+/// canonicalizing pasted text from word processors before
+/// storage / comparison. Tabs, newlines, CR, and other Unicode
+/// whitespace pass through unchanged — only NBSP is converted.
+///
+/// ```
+/// use rustango::text::nbsp_to_space;
+/// assert_eq!(nbsp_to_space("June\u{00A0}5"), "June 5");
+/// assert_eq!(nbsp_to_space("a\tb"), "a\tb");
+/// // Round-trip with `avoid_wrapping`:
+/// use rustango::text::avoid_wrapping;
+/// let original = "1.0 GiB";
+/// assert_eq!(nbsp_to_space(&avoid_wrapping(original)), original);
+/// ```
+#[must_use]
+pub fn nbsp_to_space(s: &str) -> String {
+    s.replace('\u{00A0}', " ")
+}
+
 /// [`django.template.defaultfilters.cut`](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#cut) —
 /// remove every occurrence of `needle` from `s`.
 ///
@@ -3211,6 +3234,32 @@ mod tests {
     fn avoid_wrapping_unicode_content_around_spaces() {
         // Spaces between non-ASCII chars still swap.
         assert_eq!(avoid_wrapping("café au lait"), "café\u{00A0}au\u{00A0}lait");
+    }
+
+    // -------- nbsp_to_space --------
+
+    #[test]
+    fn nbsp_to_space_replaces_nbsp() {
+        assert_eq!(nbsp_to_space("June\u{00A0}5"), "June 5");
+        assert_eq!(nbsp_to_space("a\u{00A0}b\u{00A0}c"), "a b c");
+    }
+
+    #[test]
+    fn nbsp_to_space_preserves_other_whitespace() {
+        assert_eq!(nbsp_to_space("a\tb"), "a\tb");
+        assert_eq!(nbsp_to_space("a\nb"), "a\nb");
+        assert_eq!(nbsp_to_space("a b"), "a b");
+    }
+
+    #[test]
+    fn nbsp_to_space_empty_input() {
+        assert_eq!(nbsp_to_space(""), "");
+    }
+
+    #[test]
+    fn nbsp_to_space_round_trips_with_avoid_wrapping() {
+        let original = "1.0 GiB / 256 MiB used";
+        assert_eq!(nbsp_to_space(&avoid_wrapping(original)), original);
     }
 
     // -------- yesno --------
