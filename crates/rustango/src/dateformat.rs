@@ -177,6 +177,146 @@ pub fn time_format(time: &NaiveTime, format_string: &str) -> String {
     format_datetime(&dt, format_string)
 }
 
+#[cfg(feature = "template_views")]
+mod tera_filters {
+    use super::{format_date, format_datetime, time_format};
+    use crate::dateparse::{parse_date, parse_datetime, parse_time};
+    use std::collections::HashMap;
+    use tera::{to_value, Tera, Value};
+
+    /// Register Django-shape date / time formatting filters on a Tera
+    /// instance. The filters parse string inputs as ISO 8601
+    /// datetime / date / time first, then apply the format string with
+    /// Django single-char format codes (`Y` / `m` / `d` / `H` / `i` /
+    /// `s` / `D` / `j` / `N` / `P` / etc., see [`format_datetime`]).
+    ///
+    /// Registered names:
+    /// * `dateformat` — datetime → Django-formatted string
+    /// * `timeformat` — time-only → Django-formatted string
+    ///
+    /// Filter usage in templates:
+    /// ```jinja
+    /// {{ post.created_at | dateformat("Y-m-d H:i") }}
+    /// {{ event.starts_at | dateformat("D, F j Y") }}
+    /// {{ schedule.time | timeformat("g:i A") }}
+    /// ```
+    ///
+    /// Naming sidesteps Tera's built-in `date` filter (which uses
+    /// chrono's strftime format) — that one stays available for users
+    /// already using its `%Y`/`%m`/`%d` syntax.
+    pub fn register_filters(tera: &mut Tera) {
+        tera.register_filter("dateformat", dateformat);
+        tera.register_filter("timeformat", timeformat);
+    }
+
+    fn fmt_arg(args: &HashMap<String, Value>) -> String {
+        args.get("arg")
+            .or_else(|| args.get("format"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Y-m-d H:i:s")
+            .to_owned()
+    }
+
+    fn dateformat(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+        let fmt = fmt_arg(args);
+        let s = match value {
+            Value::String(s) => s.as_str(),
+            _ => return Ok(value.clone()),
+        };
+        if let Some(dt) = parse_datetime(s) {
+            return Ok(to_value(format_datetime(&dt, &fmt))?);
+        }
+        if let Some(d) = parse_date(s) {
+            return Ok(to_value(format_date(&d, &fmt))?);
+        }
+        Ok(value.clone())
+    }
+
+    fn timeformat(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+        let fmt = fmt_arg(args);
+        let s = match value {
+            Value::String(s) => s.as_str(),
+            _ => return Ok(value.clone()),
+        };
+        if let Some(t) = parse_time(s) {
+            return Ok(to_value(time_format(&t, &fmt))?);
+        }
+        if let Some(dt) = parse_datetime(s) {
+            return Ok(to_value(time_format(&dt.time(), &fmt))?);
+        }
+        Ok(value.clone())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use serde_json::json;
+
+        fn args(fmt: &str) -> HashMap<String, Value> {
+            let mut m = HashMap::new();
+            m.insert("arg".to_owned(), json!(fmt));
+            m
+        }
+
+        #[test]
+        fn dateformat_parses_iso_datetime_string() {
+            let out = dateformat(&json!("2026-06-05T13:05:09Z"), &args("Y-m-d H:i")).unwrap();
+            assert_eq!(out, json!("2026-06-05 13:05"));
+        }
+
+        #[test]
+        fn dateformat_parses_date_only_string() {
+            let out = dateformat(&json!("2026-06-05"), &args("D, F j Y")).unwrap();
+            // June 5, 2026 was a Friday.
+            assert_eq!(out, json!("Fri, June 5 2026"));
+        }
+
+        #[test]
+        fn dateformat_default_format_when_arg_missing() {
+            let out = dateformat(&json!("2026-06-05T13:05:09Z"), &HashMap::new()).unwrap();
+            assert_eq!(out, json!("2026-06-05 13:05:09"));
+        }
+
+        #[test]
+        fn dateformat_passes_through_non_string() {
+            let out = dateformat(&json!(42), &args("Y-m-d")).unwrap();
+            assert_eq!(out, json!(42));
+        }
+
+        #[test]
+        fn dateformat_passes_through_unparseable() {
+            let out = dateformat(&json!("not-a-date"), &args("Y-m-d")).unwrap();
+            assert_eq!(out, json!("not-a-date"));
+        }
+
+        #[test]
+        fn timeformat_parses_iso_time_string() {
+            let out = timeformat(&json!("13:05:09"), &args("g:i A")).unwrap();
+            assert_eq!(out, json!("1:05 PM"));
+        }
+
+        #[test]
+        fn timeformat_falls_back_to_full_datetime() {
+            let out = timeformat(&json!("2026-06-05T13:05:09Z"), &args("H:i:s")).unwrap();
+            assert_eq!(out, json!("13:05:09"));
+        }
+
+        #[test]
+        fn register_filters_wires_dateformat_through_tera() {
+            let mut tera = Tera::default();
+            register_filters(&mut tera);
+            tera.add_raw_template("t", r#"{{ ts | dateformat(arg="Y-m-d") }}"#)
+                .unwrap();
+            let mut ctx = tera::Context::new();
+            ctx.insert("ts", "2026-06-05T13:05:09Z");
+            assert_eq!(tera.render("t", &ctx).unwrap(), "2026-06-05");
+        }
+    }
+}
+
+#[cfg(feature = "template_views")]
+pub use tera_filters::register_filters;
+
 fn short_month(m: u32) -> &'static str {
     match m {
         1 => "Jan",
