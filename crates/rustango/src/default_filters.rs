@@ -63,6 +63,10 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("ljust", ljust);
     tera.register_filter("rjust", rjust);
     tera.register_filter("center", center_filter);
+    tera.register_filter("striptags", striptags);
+    tera.register_filter("capfirst", capfirst);
+    tera.register_filter("addslashes", addslashes);
+    tera.register_filter("filesizeformat", filesizeformat);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -996,6 +1000,52 @@ fn center_filter(value: &Value, args: &HashMap<String, Value>) -> tera::Result<V
     let s = value.as_str().unwrap_or("");
     let width = pad_arg(args);
     Ok(to_value(crate::text::center(s, width))?)
+}
+
+/// Django `{{ value|striptags }}` — remove HTML tags, returning plain
+/// text content. Not a sanitizer (matches Django's docs warning); use
+/// only on already-trusted input.
+fn striptags(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let s = value.as_str().unwrap_or("");
+    Ok(to_value(crate::text::strip_tags(s))?)
+}
+
+/// Django `{{ value|capfirst }}` — capitalize the first character of
+/// the input string only (no other transformations).
+fn capfirst(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let s = value.as_str().unwrap_or("");
+    Ok(to_value(crate::text::capfirst(s))?)
+}
+
+/// Django `{{ value|addslashes }}` — add backslashes before quotes
+/// and backslashes. Useful when escaping strings for CSV / JS
+/// literals where Tera's autoescape doesn't apply.
+fn addslashes(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let s = value.as_str().unwrap_or("");
+    let mut out = String::with_capacity(s.len() + 8);
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '"' => out.push_str("\\\""),
+            other => out.push(other),
+        }
+    }
+    Ok(to_value(out)?)
+}
+
+/// Django `{{ value|filesizeformat }}` — human-readable byte size
+/// (e.g. "13 KB", "4.1 MB"). Aliases `humanize::naturalsize` for
+/// Django template-tag parity (`filesizeformat` is the canonical
+/// Django name even though `humanize::naturalsize` is the helper
+/// users call from Rust handler code).
+fn filesizeformat(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let n = match value {
+        Value::Number(n) => n.as_f64().unwrap_or(0.0),
+        Value::String(s) => s.parse::<f64>().unwrap_or(0.0),
+        _ => 0.0,
+    };
+    Ok(to_value(crate::humanize::naturalsize(n))?)
 }
 
 #[cfg(test)]
@@ -2323,5 +2373,95 @@ mod tests {
         let mut m = HashMap::new();
         m.insert(key.to_owned(), json!(value));
         m
+    }
+
+    // -------- striptags --------
+
+    #[test]
+    fn striptags_removes_tags() {
+        let out = striptags(&json!("<p>Hello <b>world</b></p>"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("Hello world"));
+    }
+
+    #[test]
+    fn register_filters_wires_striptags_through_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ value|striptags }}").unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("value", "<a href='/x'>link</a>");
+        assert_eq!(tera.render("t", &ctx).unwrap(), "link");
+    }
+
+    // -------- capfirst --------
+
+    #[test]
+    fn capfirst_capitalizes_first_char_only() {
+        let out = capfirst(&json!("hello WORLD"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("Hello WORLD"));
+    }
+
+    #[test]
+    fn register_filters_wires_capfirst_through_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ value|capfirst }}").unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("value", "django");
+        assert_eq!(tera.render("t", &ctx).unwrap(), "Django");
+    }
+
+    // -------- addslashes --------
+
+    #[test]
+    fn addslashes_escapes_backslash_and_quotes() {
+        let out = addslashes(&json!(r#"He said "hi" and 'bye' \ done"#), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(r#"He said \"hi\" and \'bye\' \\ done"#));
+    }
+
+    #[test]
+    fn addslashes_passes_through_clean_strings() {
+        let out = addslashes(&json!("plain text"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("plain text"));
+    }
+
+    #[test]
+    fn register_filters_wires_addslashes_through_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ value|addslashes|safe }}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("value", r#"O'Brien"#);
+        assert_eq!(tera.render("t", &ctx).unwrap(), r#"O\'Brien"#);
+    }
+
+    // -------- filesizeformat --------
+
+    #[test]
+    fn filesizeformat_renders_kb() {
+        let out = filesizeformat(&json!(2048), &HashMap::new()).unwrap();
+        // naturalsize uses decimal-binary "1.0 KB" / "2.0 KB" etc.
+        let s = out.as_str().unwrap();
+        assert!(s.contains("KB"), "got: {}", s);
+    }
+
+    #[test]
+    fn filesizeformat_passes_through_string_numbers() {
+        let out = filesizeformat(&json!("1024"), &HashMap::new()).unwrap();
+        let s = out.as_str().unwrap();
+        assert!(s.contains("KB"), "got: {}", s);
+    }
+
+    #[test]
+    fn register_filters_wires_filesizeformat_through_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ size|filesizeformat }}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("size", &1_500_000_i64);
+        let out = tera.render("t", &ctx).unwrap();
+        assert!(out.contains("MB"), "got: {}", out);
     }
 }
