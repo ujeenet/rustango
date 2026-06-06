@@ -749,6 +749,30 @@ macro_rules! or_400 {
     };
 }
 
+/// Common entry preamble shared by every REST handler — closes
+/// item 1 of #808. Splits the inbound `Request` into `(parts, body)`,
+/// resolves a connection via the [`PoolSource`] chain (per-tenant or
+/// static), then enforces the per-action permission codenames. On
+/// failure returns a fully-formed [`Response`] (401 / 403 / 5xx)
+/// ready for the handler to `?`-bubble.
+///
+/// Handlers that don't need the body bind it as `_body` and ignore
+/// it; the helper still returns the body so write paths
+/// (`handle_create`, `update_inner`) can consume it after the
+/// permission gate.
+async fn enter(
+    state: &Arc<ViewSetState>,
+    req: axum::extract::Request,
+    codenames: &[String],
+) -> Result<(axum::http::request::Parts, Body, AcquiredConn), Response> {
+    let (mut parts, body) = req.into_parts();
+    let mut acq = state.acquire(&mut parts).await?;
+    if !state.check_perm(codenames, &parts, &mut acq).await {
+        return Err(json_error(StatusCode::FORBIDDEN, "permission denied"));
+    }
+    Ok((parts, body, acq))
+}
+
 /// #808 — was repeated verbatim in `handle_retrieve` / `update_inner`
 /// / `handle_destroy` (the three item-route handlers). Each spelled
 /// out the same `match parse_pk_string(field, raw) { Ok(v) => v, Err(e)
@@ -860,17 +884,10 @@ async fn handle_list(
     Query(params): Query<HashMap<String, String>>,
     req: axum::extract::Request,
 ) -> Response {
-    let (mut parts, _) = req.into_parts();
-    let mut acq = match state.acquire(&mut parts).await {
-        Ok(a) => a,
+    let (_parts, _body, mut acq) = match enter(&state, req, &state.vs.perms.list).await {
+        Ok(x) => x,
         Err(resp) => return resp,
     };
-    if !state
-        .check_perm(&state.vs.perms.list, &parts, &mut acq)
-        .await
-    {
-        return json_error(StatusCode::FORBIDDEN, "permission denied");
-    }
 
     let page_size: i64 = params
         .get("page_size")
@@ -1153,17 +1170,10 @@ async fn handle_retrieve(
     Path(pk_raw): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
-    let (mut parts, _) = req.into_parts();
-    let mut acq = match state.acquire(&mut parts).await {
-        Ok(a) => a,
+    let (_parts, _body, mut acq) = match enter(&state, req, &state.vs.perms.retrieve).await {
+        Ok(x) => x,
         Err(resp) => return resp,
     };
-    if !state
-        .check_perm(&state.vs.perms.retrieve, &parts, &mut acq)
-        .await
-    {
-        return json_error(StatusCode::FORBIDDEN, "permission denied");
-    }
 
     let pk_field = match pk_field_or_500(&state) {
         Ok(f) => f,
@@ -1190,17 +1200,10 @@ async fn handle_create(
     State(state): State<Arc<ViewSetState>>,
     req: axum::extract::Request,
 ) -> Response {
-    let (mut parts, body) = req.into_parts();
-    let mut acq = match state.acquire(&mut parts).await {
-        Ok(a) => a,
+    let (parts, body, mut acq) = match enter(&state, req, &state.vs.perms.create).await {
+        Ok(x) => x,
         Err(resp) => return resp,
     };
-    if !state
-        .check_perm(&state.vs.perms.create, &parts, &mut acq)
-        .await
-    {
-        return json_error(StatusCode::FORBIDDEN, "permission denied");
-    }
 
     // #435 — sniff for bulk shape (JSON array body) and dispatch.
     let create_body = or_400!(extract_create_body(parts, body).await);
@@ -1370,17 +1373,10 @@ async fn update_inner(
     req: axum::extract::Request,
     partial: bool,
 ) -> Response {
-    let (mut parts, body) = req.into_parts();
-    let mut acq = match state.acquire(&mut parts).await {
-        Ok(a) => a,
+    let (parts, body, mut acq) = match enter(&state, req, &state.vs.perms.update).await {
+        Ok(x) => x,
         Err(resp) => return resp,
     };
-    if !state
-        .check_perm(&state.vs.perms.update, &parts, &mut acq)
-        .await
-    {
-        return json_error(StatusCode::FORBIDDEN, "permission denied");
-    }
 
     let pk_field = match pk_field_or_500(&state) {
         Ok(f) => f,
@@ -1442,17 +1438,10 @@ async fn handle_destroy(
     Path(pk_raw): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
-    let (mut parts, _) = req.into_parts();
-    let mut acq = match state.acquire(&mut parts).await {
-        Ok(a) => a,
+    let (_parts, _body, mut acq) = match enter(&state, req, &state.vs.perms.destroy).await {
+        Ok(x) => x,
         Err(resp) => return resp,
     };
-    if !state
-        .check_perm(&state.vs.perms.destroy, &parts, &mut acq)
-        .await
-    {
-        return json_error(StatusCode::FORBIDDEN, "permission denied");
-    }
 
     let pk_field = match pk_field_or_500(&state) {
         Ok(f) => f,
