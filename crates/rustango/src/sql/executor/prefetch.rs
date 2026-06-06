@@ -1,5 +1,5 @@
 //! Tri-dialect `prefetch_related` helpers — `fetch_with_prefetch_pool`
-//! and `fetch_with_prefetch_filtered_pool` (Django's `Prefetch(queryset=...)`
+//! and `fetch_with_prefetch_filtered` (Django's `Prefetch(queryset=...)`
 //! shape, issue #298 / T2.1).
 //!
 //! Extracted from `executor/mod.rs` as part of #116 step 6. The PG-only
@@ -130,7 +130,7 @@ where
 ///     .order_by(&[("created", true)]);
 ///
 /// let authors_with_posts: Vec<(Author, Vec<Post>)> =
-///     fetch_with_prefetch_filtered_pool(
+///     fetch_with_prefetch_filtered(
 ///         Author::objects(),
 ///         "author",
 ///         published_posts,
@@ -147,7 +147,7 @@ where
 ///
 /// # Errors
 /// As [`fetch_with_prefetch_pool`].
-pub async fn fetch_with_prefetch_filtered_pool<P, C>(
+pub async fn fetch_with_prefetch_filtered<P, C>(
     parent_qs: crate::query::QuerySet<P>,
     child_fk_column: &'static str,
     child_qs: crate::query::QuerySet<C>,

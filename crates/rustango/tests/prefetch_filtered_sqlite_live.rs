@@ -1,5 +1,5 @@
 #![cfg(feature = "sqlite")]
-//! `fetch_with_prefetch_filtered_pool` — closes #298 / T2.1.
+//! `fetch_with_prefetch_filtered` — closes #298 / T2.1.
 //!
 //! Live SQLite test for Django's `Prefetch(queryset=...)` shape:
 //! the caller supplies a child `QuerySet` carrying the filters /
@@ -7,7 +7,7 @@
 //! predicate so each parent picks up only its matching children.
 
 use rustango::query::QuerySet;
-use rustango::sql::{fetch_with_prefetch_filtered_pool, sqlx, Auto, ForeignKey, Pool};
+use rustango::sql::{fetch_with_prefetch_filtered, sqlx, Auto, ForeignKey, Pool};
 use rustango::Model;
 
 #[derive(Model, Debug, Clone)]
@@ -101,7 +101,7 @@ async fn filtered_prefetch_skips_unpublished_children() {
     // Child queryset: only published posts.
     let child_qs = QuerySet::<Post>::default().filter("published", true);
 
-    let groups: Vec<(Author, Vec<Post>)> = fetch_with_prefetch_filtered_pool::<Author, Post>(
+    let groups: Vec<(Author, Vec<Post>)> = fetch_with_prefetch_filtered::<Author, Post>(
         Author::objects(),
         "author",
         child_qs,
@@ -139,7 +139,7 @@ async fn filtered_prefetch_preserves_user_order_by() {
         .filter("published", true)
         .order_by(&[("created", false)]);
 
-    let groups: Vec<(Author, Vec<Post>)> = fetch_with_prefetch_filtered_pool::<Author, Post>(
+    let groups: Vec<(Author, Vec<Post>)> = fetch_with_prefetch_filtered::<Author, Post>(
         Author::objects(),
         "author",
         child_qs,
@@ -171,7 +171,7 @@ async fn unfiltered_child_queryset_falls_back_to_every_child() {
 
     let child_qs = QuerySet::<Post>::default(); // no filters
 
-    let groups: Vec<(Author, Vec<Post>)> = fetch_with_prefetch_filtered_pool::<Author, Post>(
+    let groups: Vec<(Author, Vec<Post>)> = fetch_with_prefetch_filtered::<Author, Post>(
         Author::objects(),
         "author",
         child_qs,

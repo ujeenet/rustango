@@ -1343,54 +1343,26 @@ impl MediaManager {
               ORDER BY use_count DESC, t.slug \
               LIMIT {p}"
         );
-        // Per-backend decoding because the `use_count` aggregate
-        // column isn't part of the MediaTag schema — we read it
-        // separately alongside the tag's columns.
+        // #561 — was three byte-similar `bind+fetch+decode` arms. The
+        // `use_count` aggregate column isn't part of MediaTag's schema,
+        // so the existing `MediaTag::decode_pg/my/sq` helpers can't be
+        // re-used directly. Factor per-backend pair decoders below.
+        let lim = limit.max(1).min(1000);
         match &self.pool {
             #[cfg(feature = "postgres")]
             crate::sql::Pool::Postgres(pg) => {
-                use sqlx::Row as _;
-                let rows = sqlx::query(&sql)
-                    .bind(limit.max(1).min(1000))
-                    .fetch_all(pg)
-                    .await?;
-                rows.into_iter()
-                    .map(|r| {
-                        let count: i64 = r.try_get("use_count").map_err(MediaError::Db)?;
-                        let tag = MediaTag::decode_pg(&r).map_err(MediaError::Db)?;
-                        Ok((tag, count))
-                    })
-                    .collect()
+                let rows = sqlx::query(&sql).bind(lim).fetch_all(pg).await?;
+                rows.iter().map(decode_tag_with_count_pg).collect()
             }
             #[cfg(feature = "mysql")]
             crate::sql::Pool::Mysql(my) => {
-                use sqlx::Row as _;
-                let rows = sqlx::query(&sql)
-                    .bind(limit.max(1).min(1000))
-                    .fetch_all(my)
-                    .await?;
-                rows.into_iter()
-                    .map(|r| {
-                        let count: i64 = r.try_get("use_count").map_err(MediaError::Db)?;
-                        let tag = MediaTag::decode_my(&r).map_err(MediaError::Db)?;
-                        Ok((tag, count))
-                    })
-                    .collect()
+                let rows = sqlx::query(&sql).bind(lim).fetch_all(my).await?;
+                rows.iter().map(decode_tag_with_count_my).collect()
             }
             #[cfg(feature = "sqlite")]
             crate::sql::Pool::Sqlite(sq) => {
-                use sqlx::Row as _;
-                let rows = sqlx::query(&sql)
-                    .bind(limit.max(1).min(1000))
-                    .fetch_all(sq)
-                    .await?;
-                rows.into_iter()
-                    .map(|r| {
-                        let count: i64 = r.try_get("use_count").map_err(MediaError::Db)?;
-                        let tag = MediaTag::decode_sq(&r).map_err(MediaError::Db)?;
-                        Ok((tag, count))
-                    })
-                    .collect()
+                let rows = sqlx::query(&sql).bind(lim).fetch_all(sq).await?;
+                rows.iter().map(decode_tag_with_count_sq).collect()
             }
         }
     }
@@ -1500,6 +1472,36 @@ fn media_err_from_exec(e: crate::sql::ExecError) -> MediaError {
         crate::sql::ExecError::Driver(e) => MediaError::Db(e),
         other => MediaError::Other(other.to_string()),
     }
+}
+
+/// #561 — per-backend MediaTag-with-`use_count` row decoder helpers.
+/// `popular_tags` does a single LEFT JOIN GROUP BY query whose row
+/// shape is `MediaTag::SCHEMA + use_count: i64`; the existing
+/// `MediaTag::decode_<backend>` family expects only the model's
+/// scalar columns. Three sibling free fns keep the per-backend
+/// arms tight without forcing a new schema column.
+#[cfg(feature = "postgres")]
+fn decode_tag_with_count_pg(row: &sqlx::postgres::PgRow) -> Result<(MediaTag, i64), MediaError> {
+    use sqlx::Row as _;
+    let count: i64 = row.try_get("use_count").map_err(MediaError::Db)?;
+    let tag = MediaTag::decode_pg(row).map_err(MediaError::Db)?;
+    Ok((tag, count))
+}
+
+#[cfg(feature = "mysql")]
+fn decode_tag_with_count_my(row: &sqlx::mysql::MySqlRow) -> Result<(MediaTag, i64), MediaError> {
+    use sqlx::Row as _;
+    let count: i64 = row.try_get("use_count").map_err(MediaError::Db)?;
+    let tag = MediaTag::decode_my(row).map_err(MediaError::Db)?;
+    Ok((tag, count))
+}
+
+#[cfg(feature = "sqlite")]
+fn decode_tag_with_count_sq(row: &sqlx::sqlite::SqliteRow) -> Result<(MediaTag, i64), MediaError> {
+    use sqlx::Row as _;
+    let count: i64 = row.try_get("use_count").map_err(MediaError::Db)?;
+    let tag = MediaTag::decode_sq(row).map_err(MediaError::Db)?;
+    Ok((tag, count))
 }
 
 fn build_key(prefix: &str, original_filename: &str) -> String {
