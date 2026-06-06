@@ -1180,7 +1180,7 @@ pub async fn user_permissions_pool(
     uid: i64,
     pool: &crate::sql::Pool,
 ) -> Result<Vec<String>, TenancyError> {
-    use sqlx::Row as _;
+    use crate::core::SqlValue;
     let dialect = pool.dialect();
     let user_perms_t = dialect.quote_ident("rustango_user_permissions");
     let user_roles_t = dialect.quote_ident("rustango_user_roles");
@@ -1208,47 +1208,21 @@ pub async fn user_permissions_pool(
          ) effective \
          ORDER BY codename"
     );
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            let rows = sqlx::query(&sql)
-                .bind(uid)
-                .bind(uid)
-                .bind(uid)
-                .fetch_all(pg)
-                .await?;
-            Ok(rows
-                .iter()
-                .map(|r| r.try_get::<String, _>("codename").unwrap_or_default())
-                .collect())
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let rows = sqlx::query(&sql)
-                .bind(uid)
-                .bind(uid)
-                .bind(uid)
-                .fetch_all(my)
-                .await?;
-            Ok(rows
-                .iter()
-                .map(|r| r.try_get::<String, _>("codename").unwrap_or_default())
-                .collect())
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            let rows = sqlx::query(&sql)
-                .bind(uid)
-                .bind(uid)
-                .bind(uid)
-                .fetch_all(sq)
-                .await?;
-            Ok(rows
-                .iter()
-                .map(|r| r.try_get::<String, _>("codename").unwrap_or_default())
-                .collect())
-        }
-    }
+    // #561 — was a 3-arm `match pool` doing identical `bind(uid) ×3
+    // + fetch_all + try_get::<String, _>("codename")` per backend.
+    // Route through the shared `raw_query_pool::<(String,)>` —
+    // positional decode of the single-column SELECT.
+    let rows = crate::sql::raw_query_pool::<(String,)>(
+        &sql,
+        vec![SqlValue::I64(uid), SqlValue::I64(uid), SqlValue::I64(uid)],
+        pool,
+    )
+    .await
+    .map_err(|e| match e {
+        crate::sql::ExecError::Driver(err) => err,
+        other => sqlx::Error::Protocol(format!("{other}")),
+    })?;
+    Ok(rows.into_iter().map(|(codename,)| codename).collect())
 }
 
 /// List all roles a user belongs to.
