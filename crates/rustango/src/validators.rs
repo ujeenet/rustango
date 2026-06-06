@@ -2303,6 +2303,43 @@ pub fn is_postal_code_uk(s: &str) -> bool {
     validate_postal_code_uk(s).is_ok()
 }
 
+/// `true` when `s` would pass [`validate_ipv4_address`]
+/// (dotted-quad IPv4). Boolean form for filter chains.
+#[must_use]
+pub fn is_ipv4_address(s: &str) -> bool {
+    validate_ipv4_address(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_ipv6_address`]
+/// (RFC 4291 IPv6, condensed or full). Boolean form for filter chains.
+#[must_use]
+pub fn is_ipv6_address(s: &str) -> bool {
+    validate_ipv6_address(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_ipv46_address`]
+/// (accepts either IPv4 or IPv6). Boolean form for filter chains.
+#[must_use]
+pub fn is_ipv46_address(s: &str) -> bool {
+    validate_ipv46_address(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_ip_address`] — alias of
+/// [`is_ipv46_address`] for symmetry with Django's
+/// `validate_ip_address`. Boolean form for filter chains.
+#[must_use]
+pub fn is_ip_address(s: &str) -> bool {
+    validate_ip_address(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_filepath`] — POSIX-shape
+/// path with no embedded NUL / control chars. Boolean form for
+/// filter chains.
+#[must_use]
+pub fn is_filepath(s: &str) -> bool {
+    validate_filepath(s).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4112,6 +4149,39 @@ mod tests {
     fn is_postal_code_uk_companion() {
         assert!(is_postal_code_uk("SW1A 1AA"));
         assert!(!is_postal_code_uk("90210"));
+    }
+
+    #[test]
+    fn is_ipv4_address_companion() {
+        assert!(is_ipv4_address("127.0.0.1"));
+        assert!(is_ipv4_address("255.255.255.255"));
+        assert!(!is_ipv4_address("::1"));
+        assert!(!is_ipv4_address("not.an.ip"));
+    }
+
+    #[test]
+    fn is_ipv6_address_companion() {
+        assert!(is_ipv6_address("::1"));
+        assert!(is_ipv6_address("2001:db8::1"));
+        assert!(!is_ipv6_address("127.0.0.1"));
+    }
+
+    #[test]
+    fn is_ipv46_address_accepts_both_families() {
+        assert!(is_ipv46_address("127.0.0.1"));
+        assert!(is_ipv46_address("::1"));
+        assert!(!is_ipv46_address("not.an.ip"));
+        // Symmetric is_ip_address alias.
+        assert!(is_ip_address("127.0.0.1"));
+        assert!(is_ip_address("::1"));
+    }
+
+    #[test]
+    fn is_filepath_companion() {
+        assert!(is_filepath("/var/lib/data.json"));
+        assert!(is_filepath("./relative/path"));
+        // NUL byte in input → reject.
+        assert!(!is_filepath("/etc/passwd\0"));
     }
 
     // -------- validate_email_with_name (gated on `email` feature) --------
