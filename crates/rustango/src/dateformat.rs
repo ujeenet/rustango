@@ -84,7 +84,8 @@ pub fn format_datetime(dt: &DateTime<Utc>, format_string: &str) -> String {
             'j' => out.push_str(&format!("{}", dt.day())),
             'D' => out.push_str(short_weekday(dt.weekday())),
             'l' => out.push_str(full_weekday(dt.weekday())),
-            'N' => out.push_str(&format!("{}", dt.ordinal())),
+            'N' => out.push_str(crate::dates::month_ap(dt.month())),
+            'z' => out.push_str(&format!("{}", dt.ordinal())),
             'w' => out.push_str(&format!("{}", dt.weekday().num_days_from_sunday())),
             'H' => out.push_str(&format!("{:02}", dt.hour())),
             'G' => out.push_str(&format!("{}", dt.hour())),
@@ -530,10 +531,32 @@ mod tests {
     }
 
     #[test]
-    fn format_day_of_year_n() {
+    fn format_day_of_year_z() {
         let t = dt(2026, 6, 4, 0, 0, 0);
-        // June 4 of a non-leap year is day 155.
-        assert_eq!(format_datetime(&t, "N"), "155");
+        // June 4 of a non-leap year is day 155 — Django format code is `z`.
+        assert_eq!(format_datetime(&t, "z"), "155");
+    }
+
+    #[test]
+    fn format_day_of_year_z_leap_year() {
+        // 2024 is a leap year; March 1 is day 61, December 31 is day 366.
+        let mar1 = dt(2024, 3, 1, 0, 0, 0);
+        assert_eq!(format_datetime(&mar1, "z"), "61");
+        let dec31 = dt(2024, 12, 31, 0, 0, 0);
+        assert_eq!(format_datetime(&dec31, "z"), "366");
+    }
+
+    #[test]
+    fn format_ap_month_abbr_N() {
+        // Django format code `N` — AP-style month abbreviation: short
+        // months get trailing period, long-form months (March, April,
+        // May, June, July) render in full without period.
+        assert_eq!(format_datetime(&dt(2026, 1, 1, 0, 0, 0), "N"), "Jan.");
+        assert_eq!(format_datetime(&dt(2026, 2, 1, 0, 0, 0), "N"), "Feb.");
+        assert_eq!(format_datetime(&dt(2026, 3, 1, 0, 0, 0), "N"), "March");
+        assert_eq!(format_datetime(&dt(2026, 5, 1, 0, 0, 0), "N"), "May");
+        assert_eq!(format_datetime(&dt(2026, 9, 1, 0, 0, 0), "N"), "Sept.");
+        assert_eq!(format_datetime(&dt(2026, 12, 1, 0, 0, 0), "N"), "Dec.");
     }
 
     #[test]
