@@ -1388,6 +1388,36 @@ pub fn get_valid_filename(name: &str) -> Result<String, InvalidFilename> {
 #[error("invalid filename: empty or special dot-name after sanitization")]
 pub struct InvalidFilename;
 
+/// PascalCase / camelCase → `snake_case` with proper acronym
+/// handling. Sibling of [`camel_case_to_spaces`] — produces `_`
+/// separators instead of spaces and routes through the same
+/// algorithm (boundary inserted before an uppercase letter that
+/// is either preceded by a lowercase/digit OR followed by a
+/// lowercase letter).
+///
+/// Common use cases: deriving DB column names from Rust struct
+/// field names (`UserId` → `user_id`), converting class names
+/// to URL slugs, generating scaffolder file names from type
+/// names.
+///
+/// ```
+/// use rustango::text::pascal_to_snake;
+/// assert_eq!(pascal_to_snake("BlogPost"), "blog_post");
+/// assert_eq!(pascal_to_snake("HTTPRequest"), "http_request");
+/// assert_eq!(pascal_to_snake("simpleWord"), "simple_word");
+/// assert_eq!(pascal_to_snake("user_id"), "user_id");
+/// assert_eq!(pascal_to_snake(""), "");
+/// ```
+#[must_use]
+pub fn pascal_to_snake(value: &str) -> String {
+    // Reuse `camel_case_to_spaces` for the boundary detection —
+    // exact same regex shape, just different separator. This keeps
+    // a single source of truth for the acronym→word transition
+    // rules.
+    let with_spaces = camel_case_to_spaces(value);
+    with_spaces.replace(' ', "_")
+}
+
 /// Django-parity
 /// [`django.utils.text.camel_case_to_spaces(value)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.camel_case_to_spaces) —
 /// convert a CamelCase identifier into lowercase space-separated
@@ -1397,12 +1427,13 @@ pub struct InvalidFilename;
 /// The algorithm inserts a space before any uppercase letter that
 /// is preceded by a lowercase letter or digit (the CamelCase
 /// boundary), then lowercases the whole result and collapses any
-/// internal whitespace runs.
+/// internal whitespace runs. Acronym→word transitions also split
+/// (`HTTPRequest` → `"http request"`).
 ///
 /// ```ignore
 /// use rustango::text::camel_case_to_spaces;
 /// assert_eq!(camel_case_to_spaces("BlogPost"), "blog post");
-/// assert_eq!(camel_case_to_spaces("HTTPRequest"), "httprequest");
+/// assert_eq!(camel_case_to_spaces("HTTPRequest"), "http request");
 /// assert_eq!(camel_case_to_spaces("simpleWord"), "simple word");
 /// assert_eq!(camel_case_to_spaces("Already lowercase"), "already lowercase");
 /// ```
@@ -3260,6 +3291,44 @@ mod tests {
     fn nbsp_to_space_round_trips_with_avoid_wrapping() {
         let original = "1.0 GiB / 256 MiB used";
         assert_eq!(nbsp_to_space(&avoid_wrapping(original)), original);
+    }
+
+    // -------- pascal_to_snake --------
+
+    #[test]
+    fn pascal_to_snake_basic() {
+        assert_eq!(pascal_to_snake("BlogPost"), "blog_post");
+        assert_eq!(pascal_to_snake("UserId"), "user_id");
+        assert_eq!(pascal_to_snake("APIClient"), "api_client");
+    }
+
+    #[test]
+    fn pascal_to_snake_acronym_to_word_boundary() {
+        // Django shape: acronym→word transition is a split point.
+        assert_eq!(pascal_to_snake("HTTPRequest"), "http_request");
+        assert_eq!(pascal_to_snake("XMLParser"), "xml_parser");
+        assert_eq!(pascal_to_snake("IODriver"), "io_driver");
+    }
+
+    #[test]
+    fn pascal_to_snake_camelcase_input() {
+        assert_eq!(pascal_to_snake("simpleWord"), "simple_word");
+        assert_eq!(pascal_to_snake("getMaxValue"), "get_max_value");
+    }
+
+    #[test]
+    fn pascal_to_snake_already_snake_passes_through() {
+        assert_eq!(pascal_to_snake("user_id"), "user_id");
+        assert_eq!(pascal_to_snake("blog_post"), "blog_post");
+    }
+
+    #[test]
+    fn pascal_to_snake_handles_edge_cases() {
+        assert_eq!(pascal_to_snake(""), "");
+        assert_eq!(pascal_to_snake("A"), "a");
+        assert_eq!(pascal_to_snake("a"), "a");
+        // Pure acronym (no word follows).
+        assert_eq!(pascal_to_snake("HTTP"), "http");
     }
 
     // -------- yesno --------
