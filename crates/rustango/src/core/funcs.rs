@@ -822,6 +822,36 @@ pub fn json_path(source: impl Into<Expr>, keys: &[&str], as_text: bool) -> Expr 
     }
 }
 
+/// `JSON_ARRAY_LENGTH(x)` — number of elements in a JSON array.
+/// Tri-dialect: emits `jsonb_array_length` on PG, `JSON_LENGTH` on
+/// MySQL, `json_array_length` on SQLite. Eloquent `whereJsonLength`
+/// / Django `JSONField` length lookup. Issue #826.
+///
+/// ```ignore
+/// use rustango::core::funcs::{json_array_length, json_path};
+/// use rustango::core::SqlValue;
+///
+/// // SELECT … WHERE jsonb_array_length(data -> 'tags') > 0
+/// QuerySet::<Post>::default()
+///     .where_raw(WhereExpr::ExprCompare {
+///         lhs: json_array_length(json_path(F("data"), &["tags"], false)),
+///         op: Op::Gt,
+///         rhs: Expr::Literal(SqlValue::I64(0)),
+///     })
+/// ```
+///
+/// **Backend notes**:
+/// * **PG**: errors on non-array input. Wrap arrays-of-unknown-shape
+///   with `COALESCE(jsonb_array_length(x), 0)` if your data is mixed.
+/// * **MySQL**: `JSON_LENGTH` returns 1 for non-array / non-object
+///   values; this is unfixable at the writer layer without per-call
+///   type-aware coercion (which we don't have JSON metadata for).
+/// * **SQLite >= 3.38**: returns 0 for non-array inputs.
+#[must_use]
+pub fn json_array_length(arg: impl Into<Expr>) -> Expr {
+    unary(ScalarFn::JsonArrayLength, arg)
+}
+
 /// Like [`json_path`] but accepts a heterogeneous list of key + index
 /// steps — `&[JsonPathStep::Key("items"), JsonPathStep::Index(0),
 /// JsonPathStep::Key("name")]` for `data.items[0].name`.

@@ -1872,6 +1872,31 @@ fn write_function(
             Ok(())
         }
         F::TruncYear | F::TruncMonth | F::TruncDay => write_trunc(b, kind, args),
+        F::JsonArrayLength => {
+            // Issue #826 — JSON array length, tri-dialect.
+            // PG: jsonb_array_length(x)
+            // MySQL: JSON_LENGTH(x)
+            // SQLite: json_array_length(x)
+            if args.len() != 1 {
+                return Err(SqlError::FunctionArityMismatch {
+                    func: "JSON_ARRAY_LENGTH",
+                    expected: "1",
+                    got: args.len(),
+                });
+            }
+            let fname = match b.d.name() {
+                "postgres" => "jsonb_array_length",
+                "mysql" => "JSON_LENGTH",
+                // SQLite + ANSI-leaning fallback. `json_array_length`
+                // ships in SQLite >= 3.38.
+                _ => "json_array_length",
+            };
+            b.sql.push_str(fname);
+            b.sql.push('(');
+            write_expr(b, &args[0], None)?;
+            b.sql.push(')');
+            Ok(())
+        }
 
         // -------- pg_trgm: PG-only, arity 2 --------
         F::TrigramSimilarity | F::TrigramWordSimilarity => {
