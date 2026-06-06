@@ -247,6 +247,64 @@ impl Cookie {
     }
 }
 
+/// [`django.utils.http.parse_cookie`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.parse_cookie) —
+/// parse a `Cookie:` header value into a name → value map.
+///
+/// Splits on `;`, then each chunk on the first `=`. Whitespace
+/// around keys / values is trimmed. Quoted values
+/// (`name="value with spaces"`) have their surrounding quotes
+/// stripped per RFC 6265 §5.2. Malformed chunks (no `=`, empty
+/// key) are skipped; well-formed chunks after a malformed one
+/// still parse.
+///
+/// Use when you need to parse a raw `Cookie:` header outside an
+/// axum request (test fixtures, manual proxying, header-replay
+/// audits). For axum handler code prefer the `axum-extra`
+/// `CookieJar` extractor, which uses the same parsing rules.
+///
+/// ```
+/// use rustango::cookies::parse_cookie_header;
+/// let cookies = parse_cookie_header("sessionid=abc123; csrftoken=xyz");
+/// assert_eq!(cookies.get("sessionid"), Some(&"abc123".to_owned()));
+/// assert_eq!(cookies.get("csrftoken"), Some(&"xyz".to_owned()));
+///
+/// // Quoted value — surrounding `"` stripped.
+/// let cookies = parse_cookie_header(r#"pref="dark mode""#);
+/// assert_eq!(cookies.get("pref"), Some(&"dark mode".to_owned()));
+///
+/// // Empty input → empty map.
+/// assert!(parse_cookie_header("").is_empty());
+/// ```
+#[must_use]
+pub fn parse_cookie_header(header: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for chunk in header.split(';') {
+        let chunk = chunk.trim();
+        if chunk.is_empty() {
+            continue;
+        }
+        let Some((key, val)) = chunk.split_once('=') else {
+            // Malformed chunk (no `=`) — skip silently, matching
+            // Django's "ignore weirdness, decode what we can" shape.
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let val = val.trim();
+        // RFC 6265 §5.2 — strip surrounding double-quotes if both
+        // ends are quoted. Single quote on one end stays verbatim.
+        let unquoted = if val.starts_with('"') && val.ends_with('"') && val.len() >= 2 {
+            &val[1..val.len() - 1]
+        } else {
+            val
+        };
+        out.insert(key.to_owned(), unquoted.to_owned());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +462,70 @@ mod tests {
             s.contains("Expires=Thu, 01 Jan 1970 00:00:00 GMT"),
             "got: {s}"
         );
+    }
+
+    // -------- parse_cookie_header --------
+
+    #[test]
+    fn parse_cookie_header_basic() {
+        let m = parse_cookie_header("sessionid=abc123; csrftoken=xyz");
+        assert_eq!(m.len(), 2);
+        assert_eq!(m.get("sessionid"), Some(&"abc123".to_owned()));
+        assert_eq!(m.get("csrftoken"), Some(&"xyz".to_owned()));
+    }
+
+    #[test]
+    fn parse_cookie_header_trims_whitespace() {
+        let m = parse_cookie_header("  a = 1 ;  b=2  ");
+        assert_eq!(m.get("a"), Some(&"1".to_owned()));
+        assert_eq!(m.get("b"), Some(&"2".to_owned()));
+    }
+
+    #[test]
+    fn parse_cookie_header_strips_quoted_value() {
+        // Both-sides quoted → strip both quotes.
+        let m = parse_cookie_header(r#"pref="dark mode""#);
+        assert_eq!(m.get("pref"), Some(&"dark mode".to_owned()));
+        // Single-sided quote stays verbatim.
+        let m = parse_cookie_header(r#"x="not closed"#);
+        assert_eq!(m.get("x"), Some(&"\"not closed".to_owned()));
+    }
+
+    #[test]
+    fn parse_cookie_header_empty_input() {
+        assert!(parse_cookie_header("").is_empty());
+        assert!(parse_cookie_header("   ").is_empty());
+        // All semicolons — no actual chunks.
+        assert!(parse_cookie_header(";;;").is_empty());
+    }
+
+    #[test]
+    fn parse_cookie_header_skips_malformed_chunks() {
+        // "no-equals" chunk → skipped; "good=value" → kept.
+        let m = parse_cookie_header("no-equals; good=value");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.get("good"), Some(&"value".to_owned()));
+    }
+
+    #[test]
+    fn parse_cookie_header_skips_empty_keys() {
+        // "=val" → empty key, skipped.
+        let m = parse_cookie_header("=val; ok=1");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.get("ok"), Some(&"1".to_owned()));
+    }
+
+    #[test]
+    fn parse_cookie_header_handles_value_with_equals() {
+        // First `=` wins — value can contain `=`.
+        let m = parse_cookie_header("token=abc=xyz==");
+        assert_eq!(m.get("token"), Some(&"abc=xyz==".to_owned()));
+    }
+
+    #[test]
+    fn parse_cookie_header_empty_value() {
+        // `name=` with nothing after.
+        let m = parse_cookie_header("name=");
+        assert_eq!(m.get("name"), Some(&String::new()));
     }
 }
