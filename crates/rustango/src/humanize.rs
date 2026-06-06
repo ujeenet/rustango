@@ -43,6 +43,8 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("timeuntil", timeuntil);
     tera.register_filter("format_number", format_number_filter);
     tera.register_filter("format_currency", format_currency_filter);
+    tera.register_filter("format_duration_long", format_duration_long_filter);
+    tera.register_filter("format_duration_short", format_duration_short_filter);
 }
 
 // ------------------------------------------------------------------ intcomma
@@ -883,6 +885,42 @@ fn format_unit(n: i64, unit: &str, suffix: &str) -> String {
         format!("{n} {unit}{plural} ago")
     } else {
         format!("in {n} {unit}{plural}")
+    }
+}
+
+/// Tera filter for `format_duration_long`. Accepts inputs as
+/// integer seconds (most common — the value coming out of
+/// `(now - then).num_seconds()`), or a string like `"3725"` /
+/// ISO-8601 `"PT1H2M5S"` (via `dateparse::parse_duration`).
+/// Non-parseable values pass through unchanged.
+fn format_duration_long_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(d) = duration_from_value(value) else {
+        return Ok(value.clone());
+    };
+    Ok(to_value(format_duration_long(d))?)
+}
+
+/// Tera filter for `format_duration_short`. Same input acceptance
+/// as the long form.
+fn format_duration_short_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let Some(d) = duration_from_value(value) else {
+        return Ok(value.clone());
+    };
+    Ok(to_value(format_duration_short(d))?)
+}
+
+fn duration_from_value(value: &Value) -> Option<chrono::Duration> {
+    match value {
+        Value::Number(n) => n.as_i64().map(chrono::Duration::seconds),
+        Value::String(s) => {
+            if let Ok(secs) = s.parse::<i64>() {
+                return Some(chrono::Duration::seconds(secs));
+            }
+            // `parse_duration` returns `std::time::Duration`; convert
+            // to chrono::Duration for the formatter call sites.
+            crate::dateparse::parse_duration(s).and_then(|d| chrono::Duration::from_std(d).ok())
+        }
+        _ => None,
     }
 }
 
@@ -1887,5 +1925,49 @@ mod tests {
     #[test]
     fn format_duration_short_negative() {
         assert_eq!(format_duration_short(chrono::Duration::minutes(-5)), "-5m");
+    }
+
+    #[test]
+    fn format_duration_long_tera_filter_accepts_int_seconds() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("secs", &3725_i64);
+        assert_eq!(
+            render(&tera, "{{ secs | format_duration_long }}", ctx),
+            "1 hour, 2 minutes, 5 seconds"
+        );
+    }
+
+    #[test]
+    fn format_duration_short_tera_filter_accepts_int_seconds() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("secs", &3725_i64);
+        assert_eq!(
+            render(&tera, "{{ secs | format_duration_short }}", ctx),
+            "1h2m5s"
+        );
+    }
+
+    #[test]
+    fn format_duration_tera_filter_accepts_iso8601() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("d", "PT1H2M5S");
+        assert_eq!(
+            render(&tera, "{{ d | format_duration_long }}", ctx),
+            "1 hour, 2 minutes, 5 seconds"
+        );
+    }
+
+    #[test]
+    fn format_duration_tera_filter_passes_through_unparseable() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("garbage", "not a duration");
+        assert_eq!(
+            render(&tera, "{{ garbage | format_duration_long }}", ctx),
+            "not a duration"
+        );
     }
 }
