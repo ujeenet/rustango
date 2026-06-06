@@ -1324,50 +1324,21 @@ impl<T: crate::core::Model> ModelFormFor<T> {
                 binds.push(pk_v.clone());
             }
             sql.push_str(" LIMIT 1");
-            // raw_select_one_pool returns Option<row-shape>; we only
-            // care about Some/None — re-emit via raw_execute_pool and
-            // use rows_affected? No, SELECT 1 doesn't affect rows. Use
-            // the count of returned rows via raw_select_count_pool-like
-            // shape: build via select_rows_pool against the raw SQL.
-            // Simpler: dispatch via execute on PG vs raw fetch on
-            // sqlite/mysql. Use `raw_execute_pool` for the count via
-            // `affected_rows()`? No, SELECT returns rowset, not affected.
-            // Easiest: per-backend fetch via the Pool's dispatch.
-            let exists = match pool {
-                #[cfg(feature = "postgres")]
-                crate::sql::Pool::Postgres(pg) => {
-                    use crate::sql::sqlx;
-                    let mut q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> =
-                        sqlx::query(&sql);
-                    for v in &binds {
-                        q = bind_sql_value_inline(q, v);
-                    }
-                    q.fetch_optional(pg).await.map(|r| r.is_some())
-                }
-                #[cfg(feature = "mysql")]
-                crate::sql::Pool::Mysql(my) => {
-                    use crate::sql::sqlx;
-                    let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                        sqlx::query(&sql);
-                    for v in &binds {
-                        q = bind_sql_value_inline_my(q, v);
-                    }
-                    q.fetch_optional(my).await.map(|r| r.is_some())
-                }
-                #[cfg(feature = "sqlite")]
-                crate::sql::Pool::Sqlite(sq) => {
-                    use crate::sql::sqlx;
-                    let mut q: sqlx::query::Query<
-                        '_,
-                        sqlx::Sqlite,
-                        sqlx::sqlite::SqliteArguments<'_>,
-                    > = sqlx::query(&sql);
-                    for v in &binds {
-                        q = bind_sql_value_inline_sqlite(q, v);
-                    }
-                    q.fetch_optional(sq).await.map(|r| r.is_some())
-                }
-            };
+            // #561 — was a 3-arm `match pool` each doing the same
+            // bind-loop via per-backend `bind_sql_value_inline*` helpers
+            // then `fetch_optional`. The executor's `raw_query_pool` plus
+            // the canonical `bind_match!` macros already handle every
+            // backend's bind shape — collapse to one call. SELECT
+            // shape is `SELECT 1 FROM <table> WHERE ... LIMIT 1`, so
+            // `(i64,)` tuple decodes positionally and `is_empty()` on
+            // the returned Vec answers the existence check.
+            let exists = crate::sql::raw_query_pool::<(i64,)>(&sql, binds, pool)
+                .await
+                .map(|rows| !rows.is_empty())
+                .map_err(|e| match e {
+                    crate::sql::ExecError::Driver(err) => err,
+                    other => crate::sql::sqlx::Error::Protocol(format!("{other}")),
+                });
             match exists {
                 Ok(true) => {
                     let label = idx.columns.join(", ");
@@ -1436,126 +1407,6 @@ impl<T: crate::core::Model> ModelFormFor<T> {
                 value: pk_value,
             }),
         })
-    }
-}
-
-/// Bind a [`SqlValue`] onto a Postgres `sqlx::Query`. Free helper used
-/// by [`ModelFormFor::validate_unique_together`]'s pre-check SELECT.
-#[cfg(feature = "postgres")]
-fn bind_sql_value_inline<'a>(
-    q: crate::sql::sqlx::query::Query<
-        'a,
-        crate::sql::sqlx::Postgres,
-        crate::sql::sqlx::postgres::PgArguments,
-    >,
-    v: &crate::core::SqlValue,
-) -> crate::sql::sqlx::query::Query<
-    'a,
-    crate::sql::sqlx::Postgres,
-    crate::sql::sqlx::postgres::PgArguments,
-> {
-    use crate::core::SqlValue;
-    match v {
-        SqlValue::Null => q.bind(None::<i64>),
-        SqlValue::I16(v) => q.bind(*v),
-        SqlValue::I32(v) => q.bind(*v),
-        SqlValue::I64(v) => q.bind(*v),
-        SqlValue::F32(v) => q.bind(*v),
-        SqlValue::F64(v) => q.bind(*v),
-        SqlValue::Bool(v) => q.bind(*v),
-        SqlValue::String(v) => q.bind(v.clone()),
-        SqlValue::DateTime(v) => q.bind(*v),
-        SqlValue::Date(v) => q.bind(*v),
-        SqlValue::Time(v) => q.bind(*v),
-        SqlValue::Uuid(v) => q.bind(*v),
-        SqlValue::Json(v) => q.bind(v.clone()),
-        SqlValue::Decimal(v) => q.bind(*v),
-        SqlValue::Binary(v) => q.bind(v.clone()),
-        SqlValue::List(_) => panic!("validate_unique_together: List not supported in pre-check"),
-        SqlValue::Array(_) => panic!("validate_unique_together: Array not supported in pre-check"),
-        SqlValue::RangeLiteral(_) => {
-            panic!("validate_unique_together: RangeLiteral not supported in pre-check")
-        }
-    }
-}
-
-/// MySQL counterpart of [`bind_sql_value_inline`].
-#[cfg(feature = "mysql")]
-fn bind_sql_value_inline_my<'a>(
-    q: crate::sql::sqlx::query::Query<
-        'a,
-        crate::sql::sqlx::MySql,
-        crate::sql::sqlx::mysql::MySqlArguments,
-    >,
-    v: &crate::core::SqlValue,
-) -> crate::sql::sqlx::query::Query<
-    'a,
-    crate::sql::sqlx::MySql,
-    crate::sql::sqlx::mysql::MySqlArguments,
-> {
-    use crate::core::SqlValue;
-    match v {
-        SqlValue::Null => q.bind(None::<i64>),
-        SqlValue::I16(v) => q.bind(*v),
-        SqlValue::I32(v) => q.bind(*v),
-        SqlValue::I64(v) => q.bind(*v),
-        SqlValue::F32(v) => q.bind(*v),
-        SqlValue::F64(v) => q.bind(*v),
-        SqlValue::Bool(v) => q.bind(*v),
-        SqlValue::String(v) => q.bind(v.clone()),
-        SqlValue::DateTime(v) => q.bind(*v),
-        SqlValue::Date(v) => q.bind(*v),
-        SqlValue::Time(v) => q.bind(*v),
-        SqlValue::Uuid(v) => q.bind(v.to_string()),
-        SqlValue::Json(v) => q.bind(v.to_string()),
-        SqlValue::Decimal(v) => q.bind(*v),
-        SqlValue::Binary(v) => q.bind(v.clone()),
-        SqlValue::List(_) => panic!("validate_unique_together: List not supported in pre-check"),
-        SqlValue::Array(_) => panic!("validate_unique_together: Array not supported in pre-check"),
-        SqlValue::RangeLiteral(_) => {
-            panic!("validate_unique_together: RangeLiteral not supported in pre-check")
-        }
-    }
-}
-
-/// SQLite counterpart of [`bind_sql_value_inline`].
-#[cfg(feature = "sqlite")]
-fn bind_sql_value_inline_sqlite<'a>(
-    q: crate::sql::sqlx::query::Query<
-        'a,
-        crate::sql::sqlx::Sqlite,
-        crate::sql::sqlx::sqlite::SqliteArguments<'a>,
-    >,
-    v: &crate::core::SqlValue,
-) -> crate::sql::sqlx::query::Query<
-    'a,
-    crate::sql::sqlx::Sqlite,
-    crate::sql::sqlx::sqlite::SqliteArguments<'a>,
-> {
-    use crate::core::SqlValue;
-    match v {
-        SqlValue::Null => q.bind(None::<i64>),
-        SqlValue::I16(v) => q.bind(*v),
-        SqlValue::I32(v) => q.bind(*v),
-        SqlValue::I64(v) => q.bind(*v),
-        SqlValue::F32(v) => q.bind(*v),
-        SqlValue::F64(v) => q.bind(*v),
-        SqlValue::Bool(v) => q.bind(*v),
-        SqlValue::String(v) => q.bind(v.clone()),
-        SqlValue::DateTime(v) => q.bind(*v),
-        SqlValue::Date(v) => q.bind(*v),
-        SqlValue::Time(v) => q.bind(*v),
-        SqlValue::Uuid(v) => q.bind(v.to_string()),
-        SqlValue::Json(v) => q.bind(v.to_string()),
-        // sqlx-sqlite has no `Decimal: Type<Sqlite>` — round-trip via
-        // TEXT.
-        SqlValue::Decimal(v) => q.bind(v.to_string()),
-        SqlValue::Binary(v) => q.bind(v.clone()),
-        SqlValue::List(_) => panic!("validate_unique_together: List not supported in pre-check"),
-        SqlValue::Array(_) => panic!("validate_unique_together: Array not supported in pre-check"),
-        SqlValue::RangeLiteral(_) => {
-            panic!("validate_unique_together: RangeLiteral not supported in pre-check")
-        }
     }
 }
 
