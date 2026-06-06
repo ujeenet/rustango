@@ -1,9 +1,14 @@
 //! Django `humanize` template filters as Tera filters. Issue #17.
 //!
-//! Seven filters that show up on every user-facing template:
-//! `intcomma`, `intword`, `naturalsize`, `ordinal`, `apnumber`,
-//! `naturaltime`, `naturalday`. Call [`register_filters`] on a Tera
-//! instance to make them available:
+//! 13 user-facing filters:
+//! * Number-style: `intcomma`, `intword`, `apnumber`, `ordinal`,
+//!   `format_number`, `format_currency`.
+//! * Byte-size: `naturalsize` (binary, 1024-base), `naturalsize_si`
+//!   (decimal, 1000-base).
+//! * Relative-time: `naturaltime`, `naturalday`, `timesince`,
+//!   `timeuntil`.
+//!
+//! Call [`register_filters`] on a Tera instance to make them available:
 //!
 //! ```ignore
 //! let mut tera = tera::Tera::default();
