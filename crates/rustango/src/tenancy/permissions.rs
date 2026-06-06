@@ -449,6 +449,9 @@ pub async fn has_perm_pool(
                    JOIN {role_perms_t} rp ON rp.role_id = ur.role_id \
                    WHERE ur.user_id = {p_uid_c} AND rp.codename = {p_cn_b}) AS via_role"
     );
+    // #561 — was three byte-similar 5-arg-bind arms differing only
+    // in how PG vs MySQL/SQLite decode BOOL vs TINYINT(1)/INTEGER.
+    // Collapse onto per-backend `decode_has_perm_*_row` helpers.
     let (is_super, explicit_grant, via_role) = match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
@@ -460,12 +463,7 @@ pub async fn has_perm_pool(
                 .bind(codename)
                 .fetch_one(pg)
                 .await?;
-            (
-                row.try_get::<bool, _>("is_super").unwrap_or(false),
-                row.try_get::<Option<bool>, _>("explicit_grant")
-                    .unwrap_or(None),
-                row.try_get::<bool, _>("via_role").unwrap_or(false),
-            )
+            decode_has_perm_pg_row(&row)
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
@@ -477,11 +475,7 @@ pub async fn has_perm_pool(
                 .bind(codename)
                 .fetch_one(my)
                 .await?;
-            // MySQL's EXISTS returns 0/1 as i64, BOOLEAN is TINYINT(1).
-            let is_super: i64 = row.try_get("is_super").unwrap_or(0);
-            let explicit: Option<i64> = row.try_get("explicit_grant").unwrap_or(None);
-            let via_role: i64 = row.try_get("via_role").unwrap_or(0);
-            (is_super != 0, explicit.map(|v| v != 0), via_role != 0)
+            decode_has_perm_my_row(&row)
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
@@ -493,11 +487,7 @@ pub async fn has_perm_pool(
                 .bind(codename)
                 .fetch_one(sq)
                 .await?;
-            // SQLite bools come back as i64; explicit_grant nullable.
-            let is_super: i64 = row.try_get("is_super").unwrap_or(0);
-            let explicit: Option<i64> = row.try_get("explicit_grant").unwrap_or(None);
-            let via_role: i64 = row.try_get("via_role").unwrap_or(0);
-            (is_super != 0, explicit.map(|v| v != 0), via_role != 0)
+            decode_has_perm_sq_row(&row)
         }
     };
     if is_super {
@@ -1125,6 +1115,39 @@ pub async fn user_roles_qs_pool(
             rows.iter().map(decode_role_sq_row).collect()
         }
     }
+}
+
+/// Per-backend decoder for `has_perm_pool`'s 3-column SELECT.
+/// Returns `(is_super, explicit_grant, via_role)`.
+/// PG decodes the columns as native `bool`; MySQL TINYINT(1) /
+/// SQLite INTEGER come back as `i64` 0/1, normalize.
+#[cfg(feature = "postgres")]
+fn decode_has_perm_pg_row(row: &sqlx::postgres::PgRow) -> (bool, Option<bool>, bool) {
+    use sqlx::Row as _;
+    (
+        row.try_get::<bool, _>("is_super").unwrap_or(false),
+        row.try_get::<Option<bool>, _>("explicit_grant")
+            .unwrap_or(None),
+        row.try_get::<bool, _>("via_role").unwrap_or(false),
+    )
+}
+
+#[cfg(feature = "mysql")]
+fn decode_has_perm_my_row(row: &sqlx::mysql::MySqlRow) -> (bool, Option<bool>, bool) {
+    use sqlx::Row as _;
+    let is_super: i64 = row.try_get("is_super").unwrap_or(0);
+    let explicit: Option<i64> = row.try_get("explicit_grant").unwrap_or(None);
+    let via_role: i64 = row.try_get("via_role").unwrap_or(0);
+    (is_super != 0, explicit.map(|v| v != 0), via_role != 0)
+}
+
+#[cfg(feature = "sqlite")]
+fn decode_has_perm_sq_row(row: &sqlx::sqlite::SqliteRow) -> (bool, Option<bool>, bool) {
+    use sqlx::Row as _;
+    let is_super: i64 = row.try_get("is_super").unwrap_or(0);
+    let explicit: Option<i64> = row.try_get("explicit_grant").unwrap_or(None);
+    let via_role: i64 = row.try_get("via_role").unwrap_or(0);
+    (is_super != 0, explicit.map(|v| v != 0), via_role != 0)
 }
 
 #[cfg(feature = "postgres")]
