@@ -1508,25 +1508,12 @@ fn build_query_url(admin_prefix: &str, table: &str, params: &[(String, String)])
     }
 }
 
-fn url_encode(s: &str) -> String {
-    // Bare-minimum percent-encoding for query-string values: spaces
-    // and the seven query-control characters. Avoids pulling in
-    // `urlencoding` for one call site.
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            ' ' => out.push_str("%20"),
-            '&' => out.push_str("%26"),
-            '=' => out.push_str("%3D"),
-            '?' => out.push_str("%3F"),
-            '#' => out.push_str("%23"),
-            '+' => out.push_str("%2B"),
-            '%' => out.push_str("%25"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
+// #806 — the local 7-char percent-encoder was narrower than the
+// canonical `crate::url_codec::url_encode` and left `/` `@` plus
+// non-ASCII bytes unencoded — a subtle correctness gap for facet
+// filter values containing slashes or UTF-8. Route through the
+// canonical RFC-3986-unreserved-set encoder.
+use crate::url_codec::url_encode;
 
 // ============================================================== AUTOCOMPLETE
 //

@@ -3,7 +3,6 @@
 //! rendering, and pager URL composition.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 
 use crate::core::{inventory, FieldSchema, Join, ModelEntry, ModelSchema, Relation};
 #[allow(unused_imports)]
@@ -352,21 +351,9 @@ pub(crate) fn pager_suffix(q: Option<&str>, filters: &[(&'static str, String)]) 
     out
 }
 
-/// Minimal URL-encoder for ASCII inputs. Escapes characters that have
-/// special meaning in a query string. Multibyte UTF-8 is percent-encoded
-/// byte-by-byte — Postgres handles the bytes the same on the way back.
-fn url_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        let safe = byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~');
-        if safe {
-            out.push(byte as char);
-        } else {
-            let _ = write!(out, "%{byte:02X}");
-        }
-    }
-    out
-}
+// #806 — was a byte-identical copy of `crate::url_codec::url_encode`;
+// route through the canonical codec.
+use crate::url_codec::url_encode;
 
 /// Walk a row set produced with `joins` set, and for each row build the
 /// `(target_table, source_value_string) → display_html` map entry. Tri-

@@ -174,17 +174,11 @@ impl LinkHeaderBuilder {
     }
 }
 
-fn url_encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-                (b as char).to_string()
-            } else {
-                format!("%{b:02X}")
-            }
-        })
-        .collect()
-}
+// #806 — was a byte-identical copy of `crate::url_codec::url_encode`.
+// Re-aliased to keep all pagination call sites inside this module
+// without churning their `url_encode(k)` shape, while routing through
+// the canonical codec.
+use crate::url_codec::url_encode;
 
 // =====================================================================
 // PageLinks — JSON-friendly URL bundle for inline `_links` responses

@@ -206,17 +206,11 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     a.as_bytes().ct_eq(b.as_bytes()).unwrap_u8() == 1
 }
 
-fn url_encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-                (b as char).to_string()
-            } else {
-                format!("%{b:02X}")
-            }
-        })
-        .collect()
-}
+// #806 — was byte-identical to `crate::url_codec::url_encode`
+// (RFC 3986 unreserved set — the right alphabet for an otpauth URI's
+// label/issuer query-parameter encoding). Route through the canonical
+// codec.
+use crate::url_codec::url_encode;
 
 #[cfg(test)]
 mod tests {

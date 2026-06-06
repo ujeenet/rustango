@@ -313,22 +313,13 @@ fn extract_query(url: &str, key: &str) -> Option<String> {
     None
 }
 
-fn url_encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-                (b as char).to_string()
-            } else {
-                format!("%{b:02X}")
-            }
-        })
-        .collect()
-}
-
+// #806 — was byte-identical to `crate::url_codec::url_encode`
+// (RFC 3986 unreserved set — the right alphabet for OAuth-style
+// `?next=...` redirect targets). Route through the canonical codec.
 // Percent-decoder consolidated into [`crate::url_codec`] — see the
 // note in [`crate::signed_url`]. Re-imported under the `url_decode`
 // name to keep the local call sites unchanged.
-use crate::url_codec::url_decode;
+use crate::url_codec::{url_decode, url_encode};
 
 #[cfg(test)]
 mod tests {

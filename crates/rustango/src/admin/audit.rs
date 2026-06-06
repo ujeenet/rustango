@@ -454,20 +454,8 @@ pub(crate) fn split_action_marker(changes: &Value) -> (Option<String>, Value) {
     (None, changes.clone())
 }
 
-/// Tiny ASCII-safe percent encoder for query-string values.
-fn url_encode_q(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            ' ' => out.push_str("%20"),
-            '&' => out.push_str("%26"),
-            '=' => out.push_str("%3D"),
-            '?' => out.push_str("%3F"),
-            '#' => out.push_str("%23"),
-            '+' => out.push_str("%2B"),
-            '%' => out.push_str("%25"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
+// #806 — the local 7-char `url_encode_q` was narrower than the
+// canonical `crate::url_codec::url_encode` and left `/` `@` plus
+// non-ASCII bytes unencoded. Route through the canonical encoder
+// under the local name.
+use crate::url_codec::url_encode as url_encode_q;
