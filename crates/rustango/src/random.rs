@@ -132,6 +132,58 @@ pub fn get_random_token_urlsafe(length: usize) -> String {
         .collect()
 }
 
+/// Generate a random lowercase-hex string of `length` characters.
+/// Convenience wrapper for `get_random_string(length, HEX_CHARS)`.
+///
+/// 4 bits of entropy per char — `length = 32` ≈ 128 bits, the
+/// usual security target for opaque identifiers, idempotency keys,
+/// short signed-state tokens.
+///
+/// ```ignore
+/// use rustango::random::random_hex;
+/// let id = random_hex(32);
+/// assert_eq!(id.len(), 32);
+/// assert!(id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+/// ```
+#[must_use]
+pub fn random_hex(length: usize) -> String {
+    get_random_string(length, HEX_CHARS)
+}
+
+/// Generate a random alphanumeric string of `length` characters
+/// (`[a-zA-Z0-9]`). Convenience wrapper for
+/// `get_random_string(length, ALPHANUM_CHARS)`.
+///
+/// ~5.95 bits of entropy per char (62-char alphabet) — `length = 22`
+/// is roughly 128 bits.
+///
+/// ```ignore
+/// use rustango::random::random_alphanum;
+/// let s = random_alphanum(22);
+/// assert_eq!(s.len(), 22);
+/// assert!(s.chars().all(|c| c.is_ascii_alphanumeric()));
+/// ```
+#[must_use]
+pub fn random_alphanum(length: usize) -> String {
+    get_random_string(length, ALPHANUM_CHARS)
+}
+
+/// Generate a random numeric-only string of `length` digits
+/// (`[0-9]`). Convenience wrapper for
+/// `get_random_string(length, DIGITS_CHARS)`. Useful for OTP codes,
+/// PINs, short verification tokens sent over SMS.
+///
+/// ```ignore
+/// use rustango::random::random_digits;
+/// let otp = random_digits(6);
+/// assert_eq!(otp.len(), 6);
+/// assert!(otp.chars().all(|c| c.is_ascii_digit()));
+/// ```
+#[must_use]
+pub fn random_digits(length: usize) -> String {
+    get_random_string(length, DIGITS_CHARS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +274,48 @@ mod tests {
         // 64 = 2^6, so each char carries exactly 6 bits — the masking
         // shortcut in get_random_token_urlsafe relies on this.
         assert_eq!(URL_SAFE_CHARS.chars().count(), 64);
+    }
+
+    // -------- convenience wrappers --------
+
+    #[test]
+    fn random_hex_returns_lowercase_hex_string() {
+        for n in [1, 8, 32, 64] {
+            let s = random_hex(n);
+            assert_eq!(s.chars().count(), n);
+            assert!(
+                s.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "got: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn random_hex_distinct_calls_are_distinct() {
+        let a = random_hex(32);
+        let b = random_hex(32);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn random_alphanum_returns_alphanumeric_only() {
+        let s = random_alphanum(22);
+        assert_eq!(s.chars().count(), 22);
+        assert!(s.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn random_digits_returns_digits_only() {
+        let s = random_digits(6);
+        assert_eq!(s.chars().count(), 6);
+        assert!(s.chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn random_helpers_zero_length_returns_empty() {
+        assert!(random_hex(0).is_empty());
+        assert!(random_alphanum(0).is_empty());
+        assert!(random_digits(0).is_empty());
     }
 }
