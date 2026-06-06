@@ -151,6 +151,96 @@ pub fn html_escape(s: &str) -> String {
     out
 }
 
+/// Inverse of [`html_escape`] — decode HTML entities back to their
+/// characters.
+///
+/// Recognizes the five named entities `html_escape` emits
+/// (`&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`/`&#x27;`/`&#39;`)
+/// plus numeric character references (`&#NN;` decimal,
+/// `&#xHH;` hex). Unknown entities pass through verbatim — `"
+/// &foobar; "` stays `" &foobar; "` instead of being silently
+/// dropped, which matches Python's `html.unescape` shape.
+///
+/// Use this when reading content that was previously
+/// `html_escape`d (round-trip a value through HTML), or when
+/// rendering already-encoded content from a JSON API. **Not** a
+/// sanitizer — pair with `strip_tags` or a real HTML cleaner if
+/// the input is operator-controlled.
+///
+/// ```
+/// use rustango::text::unescape_html_entities;
+/// assert_eq!(unescape_html_entities("&lt;script&gt;"), "<script>");
+/// assert_eq!(unescape_html_entities("a &amp; b"), "a & b");
+/// assert_eq!(unescape_html_entities("&#x27;quoted&#x27;"), "'quoted'");
+/// assert_eq!(unescape_html_entities("&#39;single&#39;"), "'single'");
+/// // Unknown entity passes through.
+/// assert_eq!(unescape_html_entities("&unknownentity;"), "&unknownentity;");
+/// // Numeric refs decode.
+/// assert_eq!(unescape_html_entities("&#65;"), "A");
+/// assert_eq!(unescape_html_entities("&#x41;"), "A");
+/// ```
+#[must_use]
+pub fn unescape_html_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '&' {
+            out.push(c);
+            continue;
+        }
+        // Collect the entity body up to `;` (or 12 chars, whichever
+        // comes first — guards against runaway `&` with no closer).
+        let mut body = String::with_capacity(8);
+        let mut saw_semi = false;
+        for _ in 0..12 {
+            match chars.peek() {
+                Some(&';') => {
+                    chars.next();
+                    saw_semi = true;
+                    break;
+                }
+                Some(&c2) if c2.is_alphanumeric() || c2 == '#' => {
+                    body.push(c2);
+                    chars.next();
+                }
+                _ => break,
+            }
+        }
+        if !saw_semi {
+            // No closing semicolon — emit the `&` and the body verbatim.
+            out.push('&');
+            out.push_str(&body);
+            continue;
+        }
+        // Decode named or numeric entity.
+        let decoded: Option<char> = match body.as_str() {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            _ if body.starts_with("#x") || body.starts_with("#X") => {
+                u32::from_str_radix(&body[2..], 16)
+                    .ok()
+                    .and_then(char::from_u32)
+            }
+            _ if body.starts_with('#') => body[1..].parse::<u32>().ok().and_then(char::from_u32),
+            _ => None,
+        };
+        match decoded {
+            Some(ch) => out.push(ch),
+            None => {
+                // Unknown entity — pass through verbatim so the
+                // operator can see what didn't decode.
+                out.push('&');
+                out.push_str(&body);
+                out.push(';');
+            }
+        }
+    }
+    out
+}
+
 // ------------------------------------------------------------------ truncate
 
 /// Truncate `s` to at most `max_chars` characters. If truncation happens,
@@ -3329,6 +3419,64 @@ mod tests {
         assert_eq!(pascal_to_snake("a"), "a");
         // Pure acronym (no word follows).
         assert_eq!(pascal_to_snake("HTTP"), "http");
+    }
+
+    // -------- unescape_html_entities --------
+
+    #[test]
+    fn unescape_html_entities_named_basics() {
+        assert_eq!(unescape_html_entities("&lt;script&gt;"), "<script>");
+        assert_eq!(unescape_html_entities("a &amp; b"), "a & b");
+        assert_eq!(unescape_html_entities("&quot;hi&quot;"), "\"hi\"");
+        assert_eq!(unescape_html_entities("&apos;x&apos;"), "'x'");
+    }
+
+    #[test]
+    fn unescape_html_entities_numeric_decimal() {
+        assert_eq!(unescape_html_entities("&#65;"), "A");
+        assert_eq!(unescape_html_entities("&#39;quoted&#39;"), "'quoted'");
+        // U+00A0 NBSP.
+        assert_eq!(unescape_html_entities("&#160;"), "\u{00A0}");
+    }
+
+    #[test]
+    fn unescape_html_entities_numeric_hex() {
+        assert_eq!(unescape_html_entities("&#x41;"), "A");
+        assert_eq!(unescape_html_entities("&#X41;"), "A"); // uppercase X
+        assert_eq!(unescape_html_entities("&#x27;'&#x27;"), "'\''");
+    }
+
+    #[test]
+    fn unescape_html_entities_unknown_passes_through() {
+        // Unknown named entity stays verbatim — operator sees what
+        // didn't decode (matches Python html.unescape's lax shape).
+        assert_eq!(unescape_html_entities("&foobar;"), "&foobar;");
+        assert_eq!(
+            unescape_html_entities("hello &copyleft; world"),
+            "hello &copyleft; world"
+        );
+    }
+
+    #[test]
+    fn unescape_html_entities_no_semicolon_pass_through() {
+        // `&amp` with no closing `;` is not a valid entity — pass
+        // through as-is.
+        assert_eq!(unescape_html_entities("a &amp b"), "a &amp b");
+    }
+
+    #[test]
+    fn unescape_html_entities_round_trips_with_html_escape() {
+        let original = r#"<a href="foo">Tom & Jerry's "code"</a>"#;
+        let escaped = html_escape(original);
+        assert_eq!(unescape_html_entities(&escaped), original);
+    }
+
+    #[test]
+    fn unescape_html_entities_plain_text_passes_through() {
+        assert_eq!(unescape_html_entities("hello world"), "hello world");
+        assert_eq!(unescape_html_entities(""), "");
+        // `&` by itself stays as `&`.
+        assert_eq!(unescape_html_entities("a & b"), "a & b");
     }
 
     // -------- yesno --------
