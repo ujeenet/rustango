@@ -546,10 +546,17 @@ pub(crate) mod crypto;
 /// (#562 — DRY consolidation.)
 pub(crate) mod hex;
 
-/// Tiny `application/x-www-form-urlencoded` decoder shared by
-/// [`signed_url`], [`auth_flows`], and [`tenancy::admin`]. Internal.
+/// Django `django.utils.encoding` + `django.utils.http` URL/IRI/URI
+/// helpers — `url_encode`, `uri_to_iri`, `iri_to_uri`,
+/// `escape_uri_path`, `filepath_to_uri`, `urlsafe_base64_encode` /
+/// `_decode`, etc. Originally an internal `pub(crate)` module used
+/// by [`signed_url`], [`auth_flows`], and [`tenancy::admin`]; promoted
+/// to `pub` so consumer crates can reach the Django-parity helpers
+/// directly (otherwise the `uri_to_iri` / `filepath_to_uri` /
+/// `escape_uri_path` / `is_uri_reserved` helpers shipped by the
+/// `django.utils` parity sweep would be unreachable).
 #[cfg(any(feature = "signed_url", feature = "auth_flows", feature = "tenancy",))]
-pub(crate) mod url_codec;
+pub mod url_codec;
 
 /// AWS-style canonical request signed with SHA-256, replay-bounded
 /// by an X-Date tolerance window. See [`hmac_auth::HmacAuthLayer`].
