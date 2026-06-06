@@ -73,6 +73,7 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("urlizetrunc", urlizetrunc);
     tera.register_filter("unordered_list", unordered_list);
     tera.register_filter("json_script", json_script);
+    tera.register_function("widthratio", widthratio);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -1144,6 +1145,42 @@ fn truncate_link_text(html: &str, limit: usize) -> String {
         i += 1;
     }
     out
+}
+
+/// Django `{% widthratio this_value max_value max_width %}` —
+/// compute `round((this_value / max_value) * max_width)`. Tera
+/// function shape uses kwargs:
+///
+/// ```jinja
+/// <div style="width: {{ widthratio(value=this, max=upper, width=200) }}px"></div>
+/// ```
+///
+/// Returns 0 when `max` is 0 or any input is non-numeric (matches
+/// Django's defensive behavior of not panicking on zero-divide). All
+/// three args accept integer or float; rounding is banker's-round
+/// (`round_ties_even`).
+fn widthratio(args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let as_f = |k: &str| -> Option<f64> {
+        args.get(k).and_then(|v| match v {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => s.parse::<f64>().ok(),
+            _ => None,
+        })
+    };
+    let v = match as_f("value") {
+        Some(v) => v,
+        None => return Ok(to_value(0_i64)?),
+    };
+    let m = match as_f("max") {
+        Some(m) if m != 0.0 => m,
+        _ => return Ok(to_value(0_i64)?),
+    };
+    let w = match as_f("width") {
+        Some(w) => w,
+        None => return Ok(to_value(0_i64)?),
+    };
+    let result = ((v / m) * w).round() as i64;
+    Ok(to_value(result)?)
 }
 
 /// Django `{{ value|json_script:"id" }}` — render the value as a
@@ -2819,5 +2856,55 @@ mod tests {
         let mut m = HashMap::new();
         m.insert(key.to_owned(), json!(value));
         m
+    }
+
+    // -------- widthratio --------
+
+    fn wr_args(value: f64, max: f64, width: f64) -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        m.insert("value".to_owned(), json!(value));
+        m.insert("max".to_owned(), json!(max));
+        m.insert("width".to_owned(), json!(width));
+        m
+    }
+
+    #[test]
+    fn widthratio_basic_proportional_math() {
+        // 50 / 100 * 200 = 100
+        let out = widthratio(&wr_args(50.0, 100.0, 200.0)).unwrap();
+        assert_eq!(out, json!(100));
+    }
+
+    #[test]
+    fn widthratio_rounds_to_nearest_int() {
+        // 175 / 200 * 100 = 87.5 → 88 (banker's-round)
+        let out = widthratio(&wr_args(175.0, 200.0, 100.0)).unwrap();
+        assert_eq!(out, json!(88));
+    }
+
+    #[test]
+    fn widthratio_max_zero_returns_zero() {
+        // Defensive: zero-max would divide by zero.
+        let out = widthratio(&wr_args(50.0, 0.0, 200.0)).unwrap();
+        assert_eq!(out, json!(0));
+    }
+
+    #[test]
+    fn widthratio_missing_args_return_zero() {
+        let out = widthratio(&HashMap::new()).unwrap();
+        assert_eq!(out, json!(0));
+    }
+
+    #[test]
+    fn register_widthratio_through_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{{ widthratio(value=count, max=total, width=200) }}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("count", &30);
+        ctx.insert("total", &120);
+        // 30 / 120 * 200 = 50
+        assert_eq!(tera.render("t", &ctx).unwrap(), "50");
     }
 }
