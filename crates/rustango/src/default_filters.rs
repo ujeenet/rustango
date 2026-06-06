@@ -72,6 +72,7 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("pprint", pprint);
     tera.register_filter("urlizetrunc", urlizetrunc);
     tera.register_filter("unordered_list", unordered_list);
+    tera.register_filter("json_script", json_script);
 }
 
 // ------------------------------------------------------------------ pluralize
@@ -1143,6 +1144,21 @@ fn truncate_link_text(html: &str, limit: usize) -> String {
         i += 1;
     }
     out
+}
+
+/// Django `{{ value|json_script:"id" }}` — render the value as a
+/// `<script id="id" type="application/json">...</script>` block,
+/// XSS-defang escaped for safe embedding inside HTML. Defaults the
+/// element id to `"id"` (Django default — caller usually overrides).
+fn json_script(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let element_id = args
+        .get("arg")
+        .or_else(|| args.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("id");
+    let rendered = crate::text::json_script(value, element_id)
+        .map_err(|e| tera::Error::msg(format!("json_script: {e}")))?;
+    Ok(to_value(rendered)?)
 }
 
 /// Django `{{ value|unordered_list }}` — recursively render a nested
@@ -2749,5 +2765,59 @@ mod tests {
         let mut ctx = tera::Context::new();
         ctx.insert("items", &json!(["a", "b"]));
         assert_eq!(tera.render("t", &ctx).unwrap(), "<li>a</li><li>b</li>");
+    }
+
+    // -------- json_script --------
+
+    #[test]
+    fn json_script_wraps_value_in_script_tag() {
+        let out = json_script(&json!({"x": 1}), &args1_str("arg", "data"))
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(out.starts_with(r#"<script id="data" type="application/json">"#));
+        assert!(out.ends_with("</script>"));
+    }
+
+    #[test]
+    fn json_script_defangs_html_breakout() {
+        // String value containing `<` `>` `&` must be \u-escaped so a
+        // closing </script> inside the value can't break out.
+        let out = json_script(&json!("<script>alert(1)</script>"), &args1_str("arg", "x"))
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(!out.contains("</script>alert"), "got: {}", out);
+        assert!(out.contains("\\u003C"), "got: {}", out);
+    }
+
+    #[test]
+    fn json_script_defaults_element_id() {
+        let out = json_script(&json!(1), &HashMap::new())
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(out.contains(r#"id="id""#), "got: {}", out);
+    }
+
+    #[test]
+    fn register_filters_wires_json_script_through_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", r#"{{ data|json_script(arg="x")|safe }}"#)
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("data", &json!({"y": 2}));
+        let out = tera.render("t", &ctx).unwrap();
+        assert!(out.starts_with(r#"<script id="x" type="application/json">"#));
+    }
+
+    fn args1_str(key: &str, value: &str) -> HashMap<String, Value> {
+        let mut m = HashMap::new();
+        m.insert(key.to_owned(), json!(value));
+        m
     }
 }
