@@ -1103,69 +1103,73 @@ pub async fn user_roles_qs_pool(
          WHERE ur.user_id = {p1} \
          ORDER BY r.name"
     );
-    let make_role = |id: i64, name: String, description: String, data: serde_json::Value| -> Role {
-        Role {
-            id: Auto::Set(id),
-            name,
-            description,
-            data,
-        }
-    };
+    // #561 — was three byte-similar `bind+fetch+decode` arms. The
+    // `data` JSON column legitimately differs by backend (PG: native
+    // `Value`, MySQL: `Json<Value>` wrapper, SQLite: `Option<String>`
+    // → from_str round-trip). Decode collapses onto the per-backend
+    // `decode_role_*_row` helpers below.
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
             let rows = sqlx::query(&sql).bind(user_id).fetch_all(pg).await?;
-            rows.iter()
-                .map(|row| {
-                    Ok(make_role(
-                        row.try_get::<i64, _>("id")?,
-                        row.try_get("name")?,
-                        row.try_get("description")?,
-                        row.try_get::<serde_json::Value, _>("data")
-                            .unwrap_or_else(|_| serde_json::json!({})),
-                    ))
-                })
-                .collect()
+            rows.iter().map(decode_role_pg_row).collect()
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
             let rows = sqlx::query(&sql).bind(user_id).fetch_all(my).await?;
-            rows.iter()
-                .map(|row| {
-                    let data: serde_json::Value = row
-                        .try_get::<sqlx::types::Json<serde_json::Value>, _>("data")
-                        .map(|j| j.0)
-                        .unwrap_or_else(|_| serde_json::json!({}));
-                    Ok(make_role(
-                        row.try_get::<i64, _>("id")?,
-                        row.try_get("name")?,
-                        row.try_get("description")?,
-                        data,
-                    ))
-                })
-                .collect()
+            rows.iter().map(decode_role_my_row).collect()
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
             let rows = sqlx::query(&sql).bind(user_id).fetch_all(sq).await?;
-            rows.iter()
-                .map(|row| {
-                    let data: serde_json::Value = row
-                        .try_get::<Option<String>, _>("data")
-                        .ok()
-                        .flatten()
-                        .and_then(|s| serde_json::from_str(&s).ok())
-                        .unwrap_or_else(|| serde_json::json!({}));
-                    Ok(make_role(
-                        row.try_get::<i64, _>("id")?,
-                        row.try_get("name")?,
-                        row.try_get("description")?,
-                        data,
-                    ))
-                })
-                .collect()
+            rows.iter().map(decode_role_sq_row).collect()
         }
     }
+}
+
+#[cfg(feature = "postgres")]
+fn decode_role_pg_row(row: &sqlx::postgres::PgRow) -> Result<Role, sqlx::Error> {
+    use sqlx::Row as _;
+    Ok(Role {
+        id: Auto::Set(row.try_get::<i64, _>("id")?),
+        name: row.try_get("name")?,
+        description: row.try_get("description")?,
+        data: row
+            .try_get::<serde_json::Value, _>("data")
+            .unwrap_or_else(|_| serde_json::json!({})),
+    })
+}
+
+#[cfg(feature = "mysql")]
+fn decode_role_my_row(row: &sqlx::mysql::MySqlRow) -> Result<Role, sqlx::Error> {
+    use sqlx::Row as _;
+    let data: serde_json::Value = row
+        .try_get::<sqlx::types::Json<serde_json::Value>, _>("data")
+        .map(|j| j.0)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    Ok(Role {
+        id: Auto::Set(row.try_get::<i64, _>("id")?),
+        name: row.try_get("name")?,
+        description: row.try_get("description")?,
+        data,
+    })
+}
+
+#[cfg(feature = "sqlite")]
+fn decode_role_sq_row(row: &sqlx::sqlite::SqliteRow) -> Result<Role, sqlx::Error> {
+    use sqlx::Row as _;
+    let data: serde_json::Value = row
+        .try_get::<Option<String>, _>("data")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    Ok(Role {
+        id: Auto::Set(row.try_get::<i64, _>("id")?),
+        name: row.try_get("name")?,
+        description: row.try_get("description")?,
+        data,
+    })
 }
 
 /// v0.37 — tri-dialect counterpart of [`user_permissions`]. The CTE
