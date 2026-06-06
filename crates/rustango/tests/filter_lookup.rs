@@ -236,6 +236,68 @@ fn in_with_non_list_value_errors_at_compile() {
 }
 
 #[test]
+fn like_passes_pattern_verbatim() {
+    // Eloquent `whereLike` parity — caller controls `%` placement.
+    let qs = Post::objects().filter("title__like", "ru%t");
+    let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
+    assert!(stmt.sql.contains(r#""title" LIKE $1"#), "got: {}", stmt.sql);
+    assert_eq!(
+        stmt.params,
+        vec![SqlValue::String("ru%t".into())],
+        "pattern should NOT be auto-wrapped"
+    );
+}
+
+#[test]
+fn ilike_passes_pattern_verbatim() {
+    let qs = Post::objects().filter("title__ilike", "Ru%t");
+    let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
+    assert!(
+        stmt.sql.contains(r#""title" ILIKE $1"#),
+        "got: {}",
+        stmt.sql
+    );
+    assert_eq!(stmt.params, vec![SqlValue::String("Ru%t".into())]);
+}
+
+#[test]
+fn not_like_emits_not_like_clause() {
+    let qs = Post::objects().filter("title__not_like", "%draft%");
+    let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
+    assert!(
+        stmt.sql.contains(r#""title" NOT LIKE $1"#),
+        "got: {}",
+        stmt.sql
+    );
+}
+
+#[test]
+fn not_ilike_emits_not_ilike_clause() {
+    let qs = Post::objects().filter("title__not_ilike", "%DRAFT%");
+    let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
+    assert!(
+        stmt.sql.contains(r#""title" NOT ILIKE $1"#),
+        "got: {}",
+        stmt.sql
+    );
+}
+
+#[test]
+fn like_with_non_string_value_errors_at_compile() {
+    use rustango::core::QueryError;
+    let r = Post::objects()
+        .filter("title__like", 42_i64) // not a string
+        .compile();
+    assert!(matches!(
+        r,
+        Err(QueryError::InvalidLookupValue {
+            ref suffix,
+            ..
+        }) if suffix == "like"
+    ));
+}
+
+#[test]
 fn not_between_emits_not_between_clause() {
     // Eloquent `whereNotBetween` parity — sibling of `__between`.
     let bounds = SqlValue::List(vec![10_i64.into(), 100_i64.into()]);

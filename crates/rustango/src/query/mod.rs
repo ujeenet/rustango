@@ -826,6 +826,7 @@ impl<T: Model> QuerySet<T> {
     /// | `__istartswith` | `<col> ILIKE ?` | wrap `value%` |
     /// | `__endswith` | `<col> LIKE ?` | wrap `%value` |
     /// | `__iendswith` | `<col> ILIKE ?` | wrap `%value` |
+    /// | `__like` / `__ilike` / `__not_like` / `__not_ilike` | `<col> [NOT] (I)LIKE ?` | value bound verbatim — caller controls `%` / `_` placement. Eloquent `whereLike` / `whereNotLike` parity. |
     /// | `__gt` / `__gte` / `__lt` / `__lte` | direct map | as-is |
     /// | `__ne` | `<col> <> ?` | as-is |
     /// | `__in` | `<col> IN (...)` | value must be `SqlValue::List` |
@@ -1724,6 +1725,30 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
         "iendswith" => {
             let v = wrap_like(&value, "%", "", &field, suffix)?;
             Ok(pair(field, Op::ILike, v))
+        }
+        // Raw LIKE / ILIKE / NOT LIKE / NOT ILIKE — Eloquent
+        // `whereLike` / `whereNotLike` parity. Unlike `__contains` /
+        // `__startswith` / `__endswith` the value is bound verbatim
+        // — the caller is responsible for `%` and `_` placement. Use
+        // when you need a non-anchored pattern (`'%foo%bar%'`,
+        // `'_o_'`, etc.) that the auto-wrap helpers can't express.
+        "like" | "ilike" | "not_like" | "not_ilike" => {
+            if !matches!(value, SqlValue::String(_)) {
+                return Err(QueryError::InvalidLookupValue {
+                    field,
+                    suffix: suffix.to_owned(),
+                    expected: "SqlValue::String(<LIKE pattern>)",
+                    actual: sql_value_shape_name(&value),
+                });
+            }
+            let op = match suffix {
+                "like" => Op::Like,
+                "ilike" => Op::ILike,
+                "not_like" => Op::NotLike,
+                "not_ilike" => Op::NotILike,
+                _ => unreachable!(),
+            };
+            Ok(pair(field, op, value))
         }
         "in" | "not_in" => {
             // Eloquent `whereNotIn` parity. `viewset::build_lookup_filter`
