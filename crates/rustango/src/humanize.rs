@@ -29,6 +29,7 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("intcomma", intcomma_filter);
     tera.register_filter("intword", intword_filter);
     tera.register_filter("naturalsize", naturalsize_filter);
+    tera.register_filter("naturalsize_si", naturalsize_si_filter);
     tera.register_filter("ordinal", ordinal_filter);
     tera.register_filter("apnumber", apnumber_filter);
     tera.register_filter("naturaltime", naturaltime_filter);
@@ -650,6 +651,20 @@ fn naturalsize_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result
     Ok(to_value(naturalsize(n))?)
 }
 
+fn naturalsize_si_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let n = match value.as_u64() {
+        Some(v) => v as f64,
+        None => match value.as_i64() {
+            Some(v) if v >= 0 => v as f64,
+            _ => match value.as_f64() {
+                Some(v) => v,
+                None => return Ok(value.clone()),
+            },
+        },
+    };
+    Ok(to_value(naturalsize_si(n))?)
+}
+
 // ------------------------------------------------------------------ ordinal
 
 /// `ordinal` — append the appropriate English ordinal suffix.
@@ -1083,6 +1098,29 @@ mod tests {
             ctx.insert("b", &bytes);
             assert_eq!(
                 render(&tera, "{{ b | naturalsize }}", ctx),
+                expected,
+                "bytes={bytes}"
+            );
+        }
+    }
+
+    // -------- naturalsize_si --------
+
+    #[test]
+    fn naturalsize_si_uses_decimal_si_units() {
+        let tera = setup();
+        // SI uses 1000-byte boundary, suffix "kB" / "MB" not "KB".
+        for (bytes, expected) in [
+            (0_u64, "0 bytes"),
+            (999, "999 bytes"),
+            (1_000, "1.0 kB"),
+            (1_500_000, "1.5 MB"),
+            (2_000_000_000, "2.0 GB"),
+        ] {
+            let mut ctx = tera::Context::new();
+            ctx.insert("b", &bytes);
+            assert_eq!(
+                render(&tera, "{{ b | naturalsize_si }}", ctx),
                 expected,
                 "bytes={bytes}"
             );
