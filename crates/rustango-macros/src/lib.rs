@@ -3318,6 +3318,37 @@ fn inherent_impl_tokens(
                         .await?;
                 ::core::result::Result::Ok(_rows.into_iter().next())
             }
+
+            /// Look up the row whose primary key equals `pk`. Errors
+            /// when no row matches — the throwing counterpart of
+            /// [`Self::find_pool`]. Eloquent `Model::findOrFail` /
+            /// Django `Model.objects.get(pk=…)` (which raises
+            /// `DoesNotExist`) parity.
+            ///
+            /// Translates the miss into
+            /// [`ExecError::Driver`]\([`sqlx::Error::RowNotFound`])\)
+            /// so callers can `?`-bubble straight through the typical
+            /// `ExecError` error chain.
+            ///
+            /// # Errors
+            /// As [`Self::find_pool`]; additionally
+            /// [`sqlx::Error::RowNotFound`] when no row matches.
+            ///
+            /// [`ExecError::Driver`]: rustango::sql::ExecError::Driver
+            /// [`sqlx::Error::RowNotFound`]: rustango::sql::sqlx::Error::RowNotFound
+            pub async fn find_or_fail_pool(
+                pk: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<Self, ::rustango::sql::ExecError> {
+                match Self::find_pool(pk, pool).await? {
+                    ::core::option::Option::Some(_row) => ::core::result::Result::Ok(_row),
+                    ::core::option::Option::None => ::core::result::Result::Err(
+                        ::rustango::sql::ExecError::Driver(
+                            ::rustango::sql::sqlx::Error::RowNotFound,
+                        ),
+                    ),
+                }
+            }
         }
     } else {
         quote!()
