@@ -886,6 +886,101 @@ fn format_unit(n: i64, unit: &str, suffix: &str) -> String {
     }
 }
 
+// ------------------------------------------------------------------ format_duration_long / format_duration_short
+
+/// Format a [`chrono::Duration`] as a long human-readable string
+/// like `"2 hours, 5 minutes, 3 seconds"`. Components below the
+/// resolution threshold are dropped; zero-component results in
+/// `"0 seconds"`.
+///
+/// Used to display elapsed work times, lap timings, scheduled
+/// task durations — anywhere a non-relative duration needs to read
+/// naturally (vs `timesince` which is relative-to-now).
+///
+/// Negative durations are formatted using the absolute value plus
+/// a leading minus sign: `Duration::minutes(-5)` → `"-5 minutes"`.
+///
+/// ```ignore
+/// use chrono::Duration;
+/// use rustango::humanize::format_duration_long;
+///
+/// assert_eq!(format_duration_long(Duration::seconds(0)), "0 seconds");
+/// assert_eq!(format_duration_long(Duration::seconds(45)), "45 seconds");
+/// assert_eq!(format_duration_long(Duration::seconds(125)), "2 minutes, 5 seconds");
+/// assert_eq!(format_duration_long(Duration::seconds(3725)), "1 hour, 2 minutes, 5 seconds");
+/// assert_eq!(format_duration_long(Duration::days(2) + Duration::hours(3)), "2 days, 3 hours");
+/// ```
+#[must_use]
+pub fn format_duration_long(d: chrono::Duration) -> String {
+    let sign = if d.num_seconds() < 0 { "-" } else { "" };
+    let total = d.num_seconds().unsigned_abs();
+    if total == 0 {
+        return "0 seconds".to_owned();
+    }
+    let days = total / 86_400;
+    let hours = (total % 86_400) / 3600;
+    let mins = (total % 3600) / 60;
+    let secs = total % 60;
+    let mut parts: Vec<String> = Vec::with_capacity(4);
+    let push = |parts: &mut Vec<String>, n: u64, unit: &str| {
+        if n > 0 {
+            let plural = if n == 1 { "" } else { "s" };
+            parts.push(format!("{n} {unit}{plural}"));
+        }
+    };
+    push(&mut parts, days, "day");
+    push(&mut parts, hours, "hour");
+    push(&mut parts, mins, "minute");
+    push(&mut parts, secs, "second");
+    format!("{sign}{}", parts.join(", "))
+}
+
+/// Format a [`chrono::Duration`] as a short, compact human-readable
+/// string like `"2h5m3s"`. Components with zero magnitude are dropped.
+/// Zero duration returns `"0s"`. Negative durations get a leading
+/// minus sign.
+///
+/// Useful for dashboards / monitoring panels / table cells where the
+/// long form takes too much horizontal space.
+///
+/// ```ignore
+/// use chrono::Duration;
+/// use rustango::humanize::format_duration_short;
+///
+/// assert_eq!(format_duration_short(Duration::seconds(0)), "0s");
+/// assert_eq!(format_duration_short(Duration::seconds(45)), "45s");
+/// assert_eq!(format_duration_short(Duration::seconds(125)), "2m5s");
+/// assert_eq!(format_duration_short(Duration::seconds(3725)), "1h2m5s");
+/// assert_eq!(format_duration_short(Duration::days(2) + Duration::hours(3)), "2d3h");
+/// ```
+#[must_use]
+pub fn format_duration_short(d: chrono::Duration) -> String {
+    let sign = if d.num_seconds() < 0 { "-" } else { "" };
+    let total = d.num_seconds().unsigned_abs();
+    if total == 0 {
+        return "0s".to_owned();
+    }
+    let days = total / 86_400;
+    let hours = (total % 86_400) / 3600;
+    let mins = (total % 3600) / 60;
+    let secs = total % 60;
+    let mut out = String::with_capacity(16);
+    out.push_str(sign);
+    if days > 0 {
+        out.push_str(&format!("{days}d"));
+    }
+    if hours > 0 {
+        out.push_str(&format!("{hours}h"));
+    }
+    if mins > 0 {
+        out.push_str(&format!("{mins}m"));
+    }
+    if secs > 0 {
+        out.push_str(&format!("{secs}s"));
+    }
+    out
+}
+
 // ------------------------------------------------------------------ naturalday
 
 fn naturalday_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
@@ -1719,5 +1814,78 @@ mod tests {
     #[test]
     fn format_currency_gbp_uses_pound_symbol() {
         assert_eq!(format_currency(99.99, "GBP", "en-GB"), "£99.99");
+    }
+
+    // -------- format_duration_long / format_duration_short --------
+
+    #[test]
+    fn format_duration_long_zero() {
+        assert_eq!(
+            format_duration_long(chrono::Duration::seconds(0)),
+            "0 seconds"
+        );
+    }
+
+    #[test]
+    fn format_duration_long_simple_units() {
+        assert_eq!(
+            format_duration_long(chrono::Duration::seconds(45)),
+            "45 seconds"
+        );
+        assert_eq!(
+            format_duration_long(chrono::Duration::seconds(60)),
+            "1 minute"
+        );
+        assert_eq!(
+            format_duration_long(chrono::Duration::seconds(125)),
+            "2 minutes, 5 seconds"
+        );
+    }
+
+    #[test]
+    fn format_duration_long_multiple_units() {
+        assert_eq!(
+            format_duration_long(chrono::Duration::seconds(3725)),
+            "1 hour, 2 minutes, 5 seconds"
+        );
+        assert_eq!(
+            format_duration_long(chrono::Duration::days(2) + chrono::Duration::hours(3)),
+            "2 days, 3 hours"
+        );
+    }
+
+    #[test]
+    fn format_duration_long_negative() {
+        assert_eq!(
+            format_duration_long(chrono::Duration::minutes(-5)),
+            "-5 minutes"
+        );
+    }
+
+    #[test]
+    fn format_duration_short_zero() {
+        assert_eq!(format_duration_short(chrono::Duration::seconds(0)), "0s");
+    }
+
+    #[test]
+    fn format_duration_short_compact_shape() {
+        assert_eq!(format_duration_short(chrono::Duration::seconds(45)), "45s");
+        assert_eq!(
+            format_duration_short(chrono::Duration::seconds(125)),
+            "2m5s"
+        );
+        assert_eq!(
+            format_duration_short(chrono::Duration::seconds(3725)),
+            "1h2m5s"
+        );
+        assert_eq!(
+            format_duration_short(chrono::Duration::days(2) + chrono::Duration::hours(3)),
+            "2d3h"
+        );
+    }
+
+    #[test]
+    fn format_duration_short_negative() {
+        assert_eq!(format_duration_short(chrono::Duration::minutes(-5)), "-5m");
     }
 }
