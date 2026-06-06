@@ -227,6 +227,45 @@ pub fn compress_string(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     encode(Encoding::Gzip, bytes, 6)
 }
 
+/// Variant of [`compress_string`] that takes an explicit
+/// compression level `0..=9` (zlib convention: `0` = no
+/// compression, `1` = fastest / largest, `9` = slowest / smallest;
+/// `6` = the default the bare `compress_string` uses).
+///
+/// Use when the caller has a specific time-vs-size tradeoff in
+/// mind:
+///
+/// * **Static asset pipeline**: `9` for shipped tarballs / pre-
+///   compressed responses cached on disk — the few extra ms at
+///   build time saves bytes on every request.
+/// * **Hot request path**: `1`–`3` for log payloads / outbound
+///   WebSocket frames where wall-clock matters more than wire
+///   size.
+/// * **Mid-tier batch jobs**: `6` (the default — what
+///   `compress_string` itself uses).
+///
+/// Levels above `9` are clamped by the underlying `flate2` crate;
+/// the function never panics on out-of-range input.
+///
+/// ```
+/// use rustango::compression::{compress_string_with_level, decompress_string};
+/// let payload = b"hello world".repeat(100);
+/// let fast = compress_string_with_level(&payload, 1)?;
+/// let best = compress_string_with_level(&payload, 9)?;
+/// // Level 9 should be at least as small as level 1.
+/// assert!(best.len() <= fast.len());
+/// // Both decompress to the original.
+/// assert_eq!(decompress_string(&fast)?, payload);
+/// assert_eq!(decompress_string(&best)?, payload);
+/// # Ok::<(), std::io::Error>(())
+/// ```
+///
+/// # Errors
+/// As [`compress_string`].
+pub fn compress_string_with_level(bytes: &[u8], level: u32) -> std::io::Result<Vec<u8>> {
+    encode(Encoding::Gzip, bytes, level.min(9))
+}
+
 /// Django-parity inverse of [`compress_string`] — gunzip a buffer.
 /// Symmetric helper not in Django's `utils.text` (Django decompresses
 /// inline via `gzip.decompress`) but pairs cleanly with the encode
@@ -710,5 +749,52 @@ mod tests {
         let compressed = compress_string(&original).unwrap();
         let restored = decompress_string(&compressed).unwrap();
         assert_eq!(restored, original);
+    }
+
+    // -------- compress_string_with_level --------
+
+    #[test]
+    fn compress_string_with_level_round_trips_at_all_levels() {
+        let payload = b"the quick brown fox jumps over the lazy dog".repeat(50);
+        for level in [0, 1, 3, 6, 9] {
+            let compressed = compress_string_with_level(&payload, level).unwrap();
+            let restored = decompress_string(&compressed).unwrap();
+            assert_eq!(restored, payload, "round-trip failed at level {level}");
+        }
+    }
+
+    #[test]
+    fn compress_string_with_level_higher_levels_are_at_least_as_small() {
+        // Highly compressible input — repeated string makes the
+        // size difference between fast and best clearly observable.
+        let payload = b"a".repeat(10_000);
+        let fast = compress_string_with_level(&payload, 1).unwrap();
+        let best = compress_string_with_level(&payload, 9).unwrap();
+        assert!(
+            best.len() <= fast.len(),
+            "level 9 ({}) should be ≤ level 1 ({})",
+            best.len(),
+            fast.len()
+        );
+    }
+
+    #[test]
+    fn compress_string_with_level_clamps_out_of_range() {
+        // Levels above 9 should clamp, not panic.
+        let payload = b"hello world".to_vec();
+        let compressed = compress_string_with_level(&payload, 99).unwrap();
+        let restored = decompress_string(&compressed).unwrap();
+        assert_eq!(restored, payload);
+    }
+
+    #[test]
+    fn compress_string_with_level_matches_default_at_level_6() {
+        // Default `compress_string` uses level 6. Calling
+        // `compress_string_with_level(..., 6)` should produce
+        // identical output.
+        let payload = b"hello world repeated content".repeat(10);
+        let default = compress_string(&payload).unwrap();
+        let explicit = compress_string_with_level(&payload, 6).unwrap();
+        assert_eq!(default, explicit);
     }
 }
