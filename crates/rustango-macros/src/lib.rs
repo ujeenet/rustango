@@ -3418,6 +3418,35 @@ fn inherent_impl_tokens(
                 ::rustango::sql::delete_pool(pool, &_query).await
             }
 
+            /// Fetch the first row where `<col> = <val>`. Returns
+            /// `Ok(None)` when no row matches. Eloquent
+            /// `Model::firstWhere($col, $val)` / Django
+            /// `Model.objects.filter(col=val).first()` parity.
+            ///
+            /// Thin wrapper over `QuerySet::<Self>::default()
+            /// .filter(col, val).first(pool)`. Use this when you
+            /// want one row identified by a non-PK column (e.g.
+            /// `User::first_where_pool("email", "x@y.com", &pool)`).
+            ///
+            /// `val` accepts any value `Into<SqlValue>` so plain
+            /// strings, ints, UUIDs, etc. all work.
+            ///
+            /// # Errors
+            /// As `QuerySet::first`.
+            pub async fn first_where_pool(
+                col: &str,
+                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::core::option::Option<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(col, val)
+                    .first(pool)
+                    .await
+            }
+
             /// Fetch the row with the largest `field` value —
             /// `SELECT … ORDER BY <field> DESC LIMIT 1`. Returns
             /// `Ok(None)` for an empty table. Eloquent
