@@ -381,6 +381,53 @@ impl AuditEntry {
     }
 }
 
+/// #561 — per-backend AuditEntry row decoders. The `changes`
+/// column lives as JSONB on PG (sqlx-postgres decodes straight to
+/// `Value`), JSON on MySQL (sqlx-mysql wraps via
+/// `sqlx::types::Json<Value>`), and TEXT on SQLite (round-trip
+/// through `serde_json::from_str`). Three siblings keep the audit
+/// list / fetch arms tight without forcing AuditEntry to implement
+/// per-backend `FromRow` blanket impls.
+#[cfg(feature = "mysql")]
+impl AuditEntry {
+    fn from_my_row(row: &sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row as _;
+        let changes: sqlx::types::Json<Value> = row.try_get("changes")?;
+        Ok(Self {
+            id: row.try_get("id")?,
+            entity_table: row.try_get("entity_table")?,
+            entity_pk: row.try_get("entity_pk")?,
+            operation: row.try_get("operation")?,
+            source: row.try_get("source")?,
+            changes: changes.0,
+            occurred_at: row.try_get("occurred_at")?,
+        })
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl AuditEntry {
+    fn from_sq_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row as _;
+        let changes_text: String = row.try_get("changes")?;
+        let changes: Value = serde_json::from_str(&changes_text).map_err(|e| {
+            sqlx::Error::Decode(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("audit `changes` is not valid JSON: {e}"),
+            )))
+        })?;
+        Ok(Self {
+            id: row.try_get("id")?,
+            entity_table: row.try_get("entity_table")?,
+            entity_pk: row.try_get("entity_pk")?,
+            operation: row.try_get("operation")?,
+            source: row.try_get("source")?,
+            changes,
+            occurred_at: row.try_get("occurred_at")?,
+        })
+    }
+}
+
 /// SQL that creates the `rustango_audit_log` table and its composite
 /// `(entity_table, entity_pk)` index. Idempotent (`IF NOT EXISTS`).
 /// Mounted by the per-tenant audit bootstrap migration; users with
@@ -711,6 +758,10 @@ pub async fn list(
     let pairs = filter.active_pairs();
     let sql = audit_list_sql(pool.dialect(), &pairs);
     let binds: Vec<&str> = pairs.iter().map(|(_, v)| *v).collect();
+    // #561 — was three byte-similar `bind+fetch+decode` arms. The
+    // bind+fetch can't share generic code (sqlx::Executor is bound
+    // per-Database), but the decode collapses onto the per-backend
+    // `AuditEntry::from_*_row` helpers above.
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
@@ -719,63 +770,25 @@ pub async fn list(
                 q = q.bind(*v);
             }
             let rows = q.bind(page_size).bind(offset).fetch_all(pg).await?;
-            let mut out = Vec::with_capacity(rows.len());
-            for row in rows {
-                out.push(AuditEntry::from_row(&row)?);
-            }
-            Ok(out)
+            rows.iter().map(AuditEntry::from_row).collect()
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
-            use sqlx::Row as _;
             let mut q = sqlx::query(&sql);
             for v in &binds {
                 q = q.bind(*v);
             }
             let rows = q.bind(page_size).bind(offset).fetch_all(my).await?;
-            let mut out = Vec::with_capacity(rows.len());
-            for row in rows {
-                let changes: sqlx::types::Json<Value> = row.try_get("changes")?;
-                out.push(AuditEntry {
-                    id: row.try_get("id")?,
-                    entity_table: row.try_get("entity_table")?,
-                    entity_pk: row.try_get("entity_pk")?,
-                    operation: row.try_get("operation")?,
-                    source: row.try_get("source")?,
-                    changes: changes.0,
-                    occurred_at: row.try_get("occurred_at")?,
-                });
-            }
-            Ok(out)
+            rows.iter().map(AuditEntry::from_my_row).collect()
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
-            use sqlx::Row as _;
             let mut q = sqlx::query(&sql);
             for v in &binds {
                 q = q.bind(*v);
             }
             let rows = q.bind(page_size).bind(offset).fetch_all(sq).await?;
-            let mut out = Vec::with_capacity(rows.len());
-            for row in rows {
-                let changes_text: String = row.try_get("changes")?;
-                let changes: Value = serde_json::from_str(&changes_text).map_err(|e| {
-                    sqlx::Error::Decode(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("audit `changes` is not valid JSON: {e}"),
-                    )))
-                })?;
-                out.push(AuditEntry {
-                    id: row.try_get("id")?,
-                    entity_table: row.try_get("entity_table")?,
-                    entity_pk: row.try_get("entity_pk")?,
-                    operation: row.try_get("operation")?,
-                    source: row.try_get("source")?,
-                    changes,
-                    occurred_at: row.try_get("occurred_at")?,
-                });
-            }
-            Ok(out)
+            rows.iter().map(AuditEntry::from_sq_row).collect()
         }
     }
 }
@@ -963,6 +976,9 @@ pub async fn fetch_for_entity_pool(
     // emitters. Same template for every backend — only `quote_ident`
     // ("/`) and `placeholder` ($1 / ?) differ.
     let sql = audit_select_sql(pool.dialect());
+    // #561 — was three byte-similar `bind+fetch+decode` arms.
+    // Decode collapses onto the per-backend `AuditEntry::from_*_row`
+    // helpers (PG/JSONB native, MySQL Json<Value>, SQLite TEXT).
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
@@ -971,67 +987,25 @@ pub async fn fetch_for_entity_pool(
                 .bind(entity_pk)
                 .fetch_all(pg)
                 .await?;
-            let mut out = Vec::with_capacity(rows.len());
-            for row in rows {
-                out.push(AuditEntry::from_row(&row)?);
-            }
-            Ok(out)
+            rows.iter().map(AuditEntry::from_row).collect()
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
-            use sqlx::Row as _;
             let rows = sqlx::query(&sql)
                 .bind(entity_table)
                 .bind(entity_pk)
                 .fetch_all(my)
                 .await?;
-            let mut out = Vec::with_capacity(rows.len());
-            for row in rows {
-                let changes: sqlx::types::Json<Value> = row.try_get("changes")?;
-                out.push(AuditEntry {
-                    id: row.try_get("id")?,
-                    entity_table: row.try_get("entity_table")?,
-                    entity_pk: row.try_get("entity_pk")?,
-                    operation: row.try_get("operation")?,
-                    source: row.try_get("source")?,
-                    changes: changes.0,
-                    occurred_at: row.try_get("occurred_at")?,
-                });
-            }
-            Ok(out)
+            rows.iter().map(AuditEntry::from_my_row).collect()
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
-            use sqlx::Row as _;
             let rows = sqlx::query(&sql)
                 .bind(entity_table)
                 .bind(entity_pk)
                 .fetch_all(sq)
                 .await?;
-            let mut out = Vec::with_capacity(rows.len());
-            for row in rows {
-                // SQLite stores `changes` as TEXT; parse to JSON
-                // Value. `occurred_at` is stored as ISO 8601 text and
-                // sqlx decodes that to chrono::DateTime<Utc> natively
-                // when the chrono feature is on.
-                let changes_text: String = row.try_get("changes")?;
-                let changes: Value = serde_json::from_str(&changes_text).map_err(|e| {
-                    sqlx::Error::Decode(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("audit `changes` is not valid JSON: {e}"),
-                    )))
-                })?;
-                out.push(AuditEntry {
-                    id: row.try_get("id")?,
-                    entity_table: row.try_get("entity_table")?,
-                    entity_pk: row.try_get("entity_pk")?,
-                    operation: row.try_get("operation")?,
-                    source: row.try_get("source")?,
-                    changes,
-                    occurred_at: row.try_get("occurred_at")?,
-                });
-            }
-            Ok(out)
+            rows.iter().map(AuditEntry::from_sq_row).collect()
         }
     }
 }
