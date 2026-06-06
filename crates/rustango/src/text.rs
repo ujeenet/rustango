@@ -847,6 +847,47 @@ pub fn pluralize(count: i64, suffix_arg: &str) -> String {
     }
 }
 
+/// Pick the singular or plural form of a word based on `count`.
+/// Handy for non-i18n call sites where you'd otherwise pair
+/// [`pluralize`] with format-args:
+///
+/// Before:
+/// ```ignore
+/// use rustango::text::pluralize;
+/// let s = format!("{} item{}", n, pluralize(n, "s"));
+/// ```
+///
+/// After:
+/// ```ignore
+/// use rustango::text::pluralize_word;
+/// let s = format!("{} {}", n, pluralize_word(n, "item", "items"));
+/// ```
+///
+/// `count == 1` returns `singular`; every other count (zero,
+/// negative, `>1`) returns `plural` — same branching as Django's
+/// `pluralize` filter.
+///
+/// Use this when the singular and plural differ irregularly
+/// (`mouse`/`mice`, `child`/`children`), or when call-site
+/// readability matters more than minimal allocation.
+///
+/// ```
+/// use rustango::text::pluralize_word;
+/// assert_eq!(pluralize_word(0, "item", "items"), "items");
+/// assert_eq!(pluralize_word(1, "item", "items"), "item");
+/// assert_eq!(pluralize_word(2, "item", "items"), "items");
+/// assert_eq!(pluralize_word(1, "mouse", "mice"), "mouse");
+/// assert_eq!(pluralize_word(5, "mouse", "mice"), "mice");
+/// ```
+#[must_use]
+pub fn pluralize_word<'a>(count: i64, singular: &'a str, plural: &'a str) -> &'a str {
+    if count == 1 {
+        singular
+    } else {
+        plural
+    }
+}
+
 /// Django-parity `Truncator(s).chars(num, html=True, truncate=…)` —
 /// truncate to `max_chars` visible characters while preserving HTML
 /// tag structure. Open tags at the truncation point are closed in
@@ -4125,6 +4166,30 @@ mod tests {
     fn pluralize_large_counts() {
         assert_eq!(pluralize(i64::MAX, ""), "s");
         assert_eq!(pluralize(i64::MIN, ""), "s");
+    }
+
+    // -------- pluralize_word --------
+
+    #[test]
+    fn pluralize_word_singular_when_one() {
+        assert_eq!(pluralize_word(1, "item", "items"), "item");
+        assert_eq!(pluralize_word(1, "mouse", "mice"), "mouse");
+    }
+
+    #[test]
+    fn pluralize_word_plural_when_zero_or_many() {
+        assert_eq!(pluralize_word(0, "item", "items"), "items");
+        assert_eq!(pluralize_word(2, "item", "items"), "items");
+        assert_eq!(pluralize_word(-1, "item", "items"), "items");
+        assert_eq!(pluralize_word(0, "child", "children"), "children");
+    }
+
+    #[test]
+    fn pluralize_word_handles_irregular_pairs() {
+        assert_eq!(pluralize_word(1, "person", "people"), "person");
+        assert_eq!(pluralize_word(5, "person", "people"), "people");
+        assert_eq!(pluralize_word(1, "octopus", "octopi"), "octopus");
+        assert_eq!(pluralize_word(3, "octopus", "octopi"), "octopi");
     }
 
     // -------- truncate_html_chars --------
