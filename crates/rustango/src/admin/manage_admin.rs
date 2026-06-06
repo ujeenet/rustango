@@ -122,24 +122,13 @@ pub async fn create_admin_cmd<W: Write + Send>(
     let _ = crate::sql::raw_execute_pool(pool, &sql, vec![]).await;
 
     // ---- reject duplicate username -------------------------------
-    use crate::core::{Filter, Op, SelectQuery, SqlValue, WhereExpr};
-    let select = SelectQuery {
-        model: AdminUser::SCHEMA,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "username",
-            op: Op::Eq,
-            value: SqlValue::String(username.clone()),
-        }),
-        search: None,
-        joins: vec![],
-        order_by: vec![],
-        limit: Some(1),
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
-    };
+    // #562 — by_pk constructor for single-column lookup.
+    use crate::core::{SelectQuery, SqlValue};
+    let select = SelectQuery::by_pk(
+        AdminUser::SCHEMA,
+        "username",
+        SqlValue::String(username.clone()),
+    );
     let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
     let existing = crate::sql::select_one_row_as_json(pool, &select, &fields)
         .await
