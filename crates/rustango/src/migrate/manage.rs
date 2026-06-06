@@ -132,6 +132,12 @@ pub async fn run_with_writer<W: Write + Send>(
         // sessions-backend table.
         #[cfg(feature = "cache")]
         "clear-cache" | "clearsessions" => clear_cache_cmd(pool, &args[1..], writer).await,
+        // Django `manage createcachetable` parity — idempotent
+        // `CREATE TABLE IF NOT EXISTS` for DatabaseCache.
+        #[cfg(feature = "cache")]
+        "createcachetable" | "create-cache-table" => {
+            createcachetable_cmd(pool, &args[1..], writer).await
+        }
         "sendtestemail" => sendtestemail_cmd(&args[1..], writer).await,
         // v0.38 — `inspectdb` is tri-dialect: PG + MySQL via
         // `information_schema`, SQLite via `PRAGMA table_info` +
@@ -291,6 +297,16 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(
         w,
         "      Default table: rustango_cache. Django parity for clearsessions.\n"
+    )?;
+    writeln!(w, "  createcachetable [--table <name>]")?;
+    writeln!(w, "      (alias: create-cache-table)")?;
+    writeln!(
+        w,
+        "      Idempotent CREATE TABLE IF NOT EXISTS for DatabaseCache."
+    )?;
+    writeln!(
+        w,
+        "      Default table: rustango_cache. Django parity for createcachetable.\n"
     )?;
     writeln!(
         w,
@@ -3552,6 +3568,49 @@ async fn clear_cache_cmd<W: Write>(
         .await
         .map_err(|e| MigrateError::Validation(format!("clear-cache: {e}")))?;
     writeln!(w, "clear-cache: purged {rows} expired row(s) from {table}")?;
+    Ok(())
+}
+
+/// `manage createcachetable [--table <name>]` (alias
+/// `create-cache-table`) — idempotently create the
+/// [`crate::cache::DatabaseCache`] table via the dialect's
+/// `CREATE TABLE IF NOT EXISTS` DDL. Django parity for
+/// `manage createcachetable`. Safe to call at every boot.
+///
+/// Defaults the table to `rustango_cache`. Pass `--table <name>` for
+/// non-default DatabaseCache tables (one per app-specific cache, or
+/// the session-backend table when sessions are routed to the DB).
+#[cfg(feature = "cache")]
+async fn createcachetable_cmd<W: Write>(
+    pool: &Pool,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    // Reuse the `clear-cache` arg parser — it accepts the same
+    // `--table` knob with no other state, so no need to duplicate
+    // the parsing logic.
+    let parsed = parse_clear_cache_args(args)?;
+    if parsed.help {
+        writeln!(w, "createcachetable [--table <name>]")?;
+        writeln!(w, "  (alias: create-cache-table)")?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "  Idempotently CREATE the DatabaseCache table via per-dialect DDL."
+        )?;
+        writeln!(
+            w,
+            "  Default table: rustango_cache. Safe to call at every boot."
+        )?;
+        return Ok(());
+    }
+    let table = parsed.table.unwrap_or_else(|| "rustango_cache".to_owned());
+    let cache = crate::cache::DatabaseCache::new(pool.clone(), &table);
+    cache
+        .ensure_table()
+        .await
+        .map_err(|e| MigrateError::Validation(format!("createcachetable: {e}")))?;
+    writeln!(w, "createcachetable: ensured table {table} exists")?;
     Ok(())
 }
 
