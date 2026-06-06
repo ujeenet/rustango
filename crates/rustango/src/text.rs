@@ -1452,6 +1452,45 @@ pub fn json_script<T: serde::Serialize>(
 /// // Blank lines don't constrain the common prefix.
 /// assert_eq!(dedent("    line\n\n    line"), "line\n\nline");
 /// ```
+/// Truncate `text` to the first `max_lines` lines, appending
+/// `suffix` (typically `"…"` or `"(N more lines)"`) only when
+/// truncation actually happened.
+///
+/// Useful for log preview / commit-message preview / docstring
+/// fold-down panels — show first N lines, hide the rest with a
+/// clear indicator the content continues.
+///
+/// `max_lines = 0` returns just the suffix. Empty input returns
+/// empty. Inputs with `≤ max_lines` lines pass through unchanged.
+///
+/// ```
+/// use rustango::text::truncate_lines;
+/// assert_eq!(
+///     truncate_lines("a\nb\nc\nd\ne", 2, " …"),
+///     "a\nb …",
+/// );
+/// // No truncation when input fits.
+/// assert_eq!(truncate_lines("a\nb", 5, " …"), "a\nb");
+/// // Empty input.
+/// assert_eq!(truncate_lines("", 3, " …"), "");
+/// ```
+#[must_use]
+pub fn truncate_lines(text: &str, max_lines: usize, suffix: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    if max_lines == 0 {
+        return suffix.to_owned();
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    if lines.len() <= max_lines {
+        return text.to_owned();
+    }
+    let mut out = lines[..max_lines].join("\n");
+    out.push_str(suffix);
+    out
+}
+
 /// `true` when `s` is empty or contains only Unicode whitespace.
 /// Useful for input validation where empty-string and
 /// whitespace-only-string should be treated the same:
@@ -4234,6 +4273,37 @@ mod tests {
     fn pluralize_large_counts() {
         assert_eq!(pluralize(i64::MAX, ""), "s");
         assert_eq!(pluralize(i64::MIN, ""), "s");
+    }
+
+    // -------- truncate_lines --------
+
+    #[test]
+    fn truncate_lines_keeps_only_first_n_lines() {
+        assert_eq!(truncate_lines("a\nb\nc\nd\ne", 2, " …"), "a\nb …");
+    }
+
+    #[test]
+    fn truncate_lines_no_op_when_input_fits() {
+        assert_eq!(truncate_lines("a\nb", 5, " …"), "a\nb");
+        assert_eq!(truncate_lines("a\nb", 2, " …"), "a\nb");
+    }
+
+    #[test]
+    fn truncate_lines_empty_input_passes_through() {
+        assert_eq!(truncate_lines("", 5, " …"), "");
+    }
+
+    #[test]
+    fn truncate_lines_zero_max_returns_suffix_only() {
+        assert_eq!(truncate_lines("a\nb\nc", 0, "…"), "…");
+    }
+
+    #[test]
+    fn truncate_lines_suffix_appended_only_when_truncating() {
+        // Input exactly at max_lines — no suffix.
+        assert_eq!(truncate_lines("a\nb\nc", 3, "…"), "a\nb\nc");
+        // Input one over — suffix appended.
+        assert_eq!(truncate_lines("a\nb\nc\nd", 3, "…"), "a\nb\nc…");
     }
 
     // -------- is_blank --------
