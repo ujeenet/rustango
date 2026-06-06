@@ -73,6 +73,8 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("urlizetrunc", urlizetrunc);
     tera.register_filter("unordered_list", unordered_list);
     tera.register_filter("json_script", json_script);
+    tera.register_filter("is_blank", is_blank_filter);
+    tera.register_filter("truncate_middle", truncate_middle_filter);
     tera.register_function("widthratio", widthratio);
 }
 
@@ -1181,6 +1183,51 @@ fn widthratio(args: &HashMap<String, Value>) -> tera::Result<Value> {
     };
     let result = ((v / m) * w).round() as i64;
     Ok(to_value(result)?)
+}
+
+/// `{{ value|is_blank }}` → boolean. Wraps [`text::is_blank`].
+/// True for empty string, whitespace-only strings, and JSON null.
+/// Non-string scalars (numbers, booleans, arrays, objects) all
+/// return `false` — only string-shaped fields are blank-able in
+/// the template sense.
+///
+/// Common idiom: `{% if user.bio|is_blank %}(no bio yet){% endif %}`.
+fn is_blank_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let blank = match value {
+        Value::Null => true,
+        Value::String(s) => crate::text::is_blank(s),
+        _ => false,
+    };
+    Ok(to_value(blank)?)
+}
+
+/// `{{ s|truncate_middle(width=10, placeholder="…") }}` — head +
+/// ellipsis + tail truncation, surfaces [`text::truncate_middle`]
+/// to templates for SHA / UUID / hash / path display in tight cells.
+///
+/// `width` defaults to 32, `placeholder` defaults to `"…"`.
+fn truncate_middle_filter(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let s = match value {
+        Value::String(s) => s.as_str(),
+        _ => return Ok(value.clone()),
+    };
+    let width = args
+        .get("width")
+        .and_then(|v| match v {
+            Value::Number(n) => n.as_u64().map(|n| n as usize),
+            Value::String(s) => s.parse::<usize>().ok(),
+            _ => None,
+        })
+        .unwrap_or(32);
+    let placeholder = args
+        .get("placeholder")
+        .and_then(|v| v.as_str())
+        .unwrap_or("…");
+    Ok(to_value(crate::text::truncate_middle(
+        s,
+        width,
+        placeholder,
+    ))?)
 }
 
 /// Django `{{ value|json_script:"id" }}` — render the value as a
@@ -2856,6 +2903,99 @@ mod tests {
         let mut m = HashMap::new();
         m.insert(key.to_owned(), json!(value));
         m
+    }
+
+    // -------- is_blank --------
+
+    #[test]
+    fn is_blank_filter_recognizes_blank_strings() {
+        assert_eq!(
+            is_blank_filter(&json!(""), &HashMap::new()).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            is_blank_filter(&json!("   "), &HashMap::new()).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            is_blank_filter(&json!("\t\n"), &HashMap::new()).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            is_blank_filter(&json!(null), &HashMap::new()).unwrap(),
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn is_blank_filter_rejects_content() {
+        assert_eq!(
+            is_blank_filter(&json!("hello"), &HashMap::new()).unwrap(),
+            json!(false)
+        );
+        assert_eq!(
+            is_blank_filter(&json!("  x  "), &HashMap::new()).unwrap(),
+            json!(false)
+        );
+        // Non-string scalars aren't "blank" — only strings are.
+        assert_eq!(
+            is_blank_filter(&json!(0), &HashMap::new()).unwrap(),
+            json!(false)
+        );
+        assert_eq!(
+            is_blank_filter(&json!(false), &HashMap::new()).unwrap(),
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn register_filters_wires_is_blank_through_tera() {
+        let mut tera = Tera::default();
+        register_filters(&mut tera);
+        tera.add_raw_template("t", "{% if v|is_blank %}empty{% else %}filled{% endif %}")
+            .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("v", "   ");
+        assert_eq!(tera.render("t", &ctx).unwrap(), "empty");
+        let mut ctx = tera::Context::new();
+        ctx.insert("v", "hi");
+        assert_eq!(tera.render("t", &ctx).unwrap(), "filled");
+    }
+
+    // -------- truncate_middle --------
+
+    #[test]
+    fn truncate_middle_filter_uses_default_width_when_missing() {
+        let out = truncate_middle_filter(&json!("short"), &HashMap::new()).unwrap();
+        assert_eq!(out, json!("short"));
+    }
+
+    #[test]
+    fn truncate_middle_filter_respects_explicit_width() {
+        let mut args = HashMap::new();
+        args.insert("width".into(), json!(10));
+        let out =
+            truncate_middle_filter(&json!("0123456789abcdef0123456789abcdef"), &args).unwrap();
+        let s = out.as_str().unwrap();
+        assert!(s.contains("…"), "got: {s}");
+        assert_eq!(s.chars().count(), 10);
+    }
+
+    #[test]
+    fn truncate_middle_filter_respects_custom_placeholder() {
+        let mut args = HashMap::new();
+        args.insert("width".into(), json!(10));
+        args.insert("placeholder".into(), json!("..."));
+        let out =
+            truncate_middle_filter(&json!("0123456789abcdef0123456789abcdef"), &args).unwrap();
+        let s = out.as_str().unwrap();
+        assert!(s.contains("..."), "got: {s}");
+    }
+
+    #[test]
+    fn truncate_middle_filter_passes_through_non_string() {
+        let out = truncate_middle_filter(&json!(42), &HashMap::new()).unwrap();
+        assert_eq!(out, json!(42));
     }
 
     // -------- widthratio --------
