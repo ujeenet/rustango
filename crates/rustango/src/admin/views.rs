@@ -2115,27 +2115,17 @@ pub(crate) async fn update_submit(
         })
         .collect();
 
-    // v0.12.3: SELECT the row's pre-update state so the audit emit
-    // can produce a `{ "field": { "before": v, "after": v } }`
-    // diff. Best-effort — if the SELECT fails (race, concurrent
-    // delete), we fall back to the snapshot path so the data write
-    // still emits something useful.
+    // #810 — was a second `select_one_row_as_json` against the same
+    // PK we already fetched 70 lines above for the `has_change_permission`
+    // hook. The audit-diff path also wants the pre-update row, so reuse
+    // the snapshot instead of double-fetching.
     //
-    // v0.37 — SELECT runs through the JSON bridge and the audit emit
-    // takes `Option<&serde_json::Value>` directly, no shim needed.
-    let before_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    // #562 — by_pk constructor; limit=None for full row.
-    let before_row = crate::sql::select_one_row_as_json(
-        &state.pool,
-        &SelectQuery {
-            limit: None,
-            ..SelectQuery::by_pk(model, pk_field.column, pk_value.clone())
-        },
-        &before_fields,
-    )
-    .await
-    .ok()
-    .flatten();
+    // v0.12.3 history: the audit emit produces a `{ "field": { "before":
+    // v, "after": v } }` diff. Best-effort — if the permission-hook
+    // pre-fetch returned None (race, concurrent delete), the audit
+    // emit falls back to the snapshot path so the data write still
+    // produces something useful.
+    let before_row = pre_update_row.clone();
 
     let query = UpdateQuery {
         model,
