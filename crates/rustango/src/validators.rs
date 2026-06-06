@@ -2028,6 +2028,79 @@ pub fn validate_file_size_max(actual_bytes: u64, max_bytes: u64) -> Result<(), V
     Ok(())
 }
 
+/// Bounded width/height check for an image already decoded by the
+/// caller. Each bound is optional — pass `None` to skip that
+/// side.
+///
+/// Django ships dimension validation via PIL inside `ImageField`;
+/// rustango doesn't pull in image processing, so the caller is
+/// expected to extract `(width, height)` from the file using
+/// whichever image lib they choose (`image`, `imageinfo`,
+/// `kamadak-exif`, etc.) then feed them through this validator.
+///
+/// Bounds are pixel counts. All four bounds default to "no check"
+/// when `None`; the function returns `Ok(())` when every supplied
+/// bound is satisfied.
+///
+/// ```
+/// use rustango::validators::validate_image_dimensions;
+/// // Avatar must be square-ish and at most 2000×2000.
+/// assert!(validate_image_dimensions(1024, 1024, Some(2000), Some(2000), None, None).is_ok());
+/// // Reject too wide.
+/// assert!(validate_image_dimensions(3000, 1024, Some(2000), Some(2000), None, None).is_err());
+/// // Enforce minimum.
+/// assert!(validate_image_dimensions(50, 50, None, None, Some(100), Some(100)).is_err());
+/// // Skip both bounds → always ok.
+/// assert!(validate_image_dimensions(1, 1, None, None, None, None).is_ok());
+/// ```
+///
+/// # Errors
+/// `ValidationError { code: "image_too_wide" | "image_too_tall" |
+/// "image_too_narrow" | "image_too_short", ... }` — distinct codes
+/// so error rendering can pick the right human message per axis.
+pub fn validate_image_dimensions(
+    width: u32,
+    height: u32,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    min_width: Option<u32>,
+    min_height: Option<u32>,
+) -> Result<(), ValidationError> {
+    if let Some(max_w) = max_width {
+        if width > max_w {
+            return Err(ValidationError::new(
+                "image_too_wide",
+                format!("Image width {width}px exceeds {max_w}px."),
+            ));
+        }
+    }
+    if let Some(max_h) = max_height {
+        if height > max_h {
+            return Err(ValidationError::new(
+                "image_too_tall",
+                format!("Image height {height}px exceeds {max_h}px."),
+            ));
+        }
+    }
+    if let Some(min_w) = min_width {
+        if width < min_w {
+            return Err(ValidationError::new(
+                "image_too_narrow",
+                format!("Image width {width}px is below the {min_w}px minimum."),
+            ));
+        }
+    }
+    if let Some(min_h) = min_height {
+        if height < min_h {
+            return Err(ValidationError::new(
+                "image_too_short",
+                format!("Image height {height}px is below the {min_h}px minimum."),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Django-shape MIME-type allowlist — reject uploads whose
 /// `Content-Type` (or per-part media-type for multipart forms) isn't
 /// in `allowed_mimetypes`. Comparison is case-insensitive on the
@@ -3979,5 +4052,65 @@ mod tests {
         assert!(is_email_with_name("alice@example.com"));
         assert!(is_email_with_name("Alice <alice@example.com>"));
         assert!(!is_email_with_name("garbage"));
+    }
+
+    // -------- validate_image_dimensions --------
+
+    #[test]
+    fn image_dimensions_max_only_accepts_within_bounds() {
+        assert!(validate_image_dimensions(1024, 1024, Some(2000), Some(2000), None, None).is_ok());
+        assert!(validate_image_dimensions(2000, 2000, Some(2000), Some(2000), None, None).is_ok());
+    }
+
+    #[test]
+    fn image_dimensions_max_rejects_too_wide() {
+        let err =
+            validate_image_dimensions(3000, 1024, Some(2000), Some(2000), None, None).unwrap_err();
+        assert_eq!(err.code, "image_too_wide");
+        assert!(err.message.contains("3000"));
+        assert!(err.message.contains("2000"));
+    }
+
+    #[test]
+    fn image_dimensions_max_rejects_too_tall() {
+        let err =
+            validate_image_dimensions(1024, 3000, Some(2000), Some(2000), None, None).unwrap_err();
+        assert_eq!(err.code, "image_too_tall");
+    }
+
+    #[test]
+    fn image_dimensions_min_rejects_too_narrow() {
+        let err = validate_image_dimensions(50, 200, None, None, Some(100), Some(100)).unwrap_err();
+        assert_eq!(err.code, "image_too_narrow");
+    }
+
+    #[test]
+    fn image_dimensions_min_rejects_too_short() {
+        let err = validate_image_dimensions(200, 50, None, None, Some(100), Some(100)).unwrap_err();
+        assert_eq!(err.code, "image_too_short");
+    }
+
+    #[test]
+    fn image_dimensions_no_bounds_always_ok() {
+        assert!(validate_image_dimensions(1, 1, None, None, None, None).is_ok());
+        assert!(validate_image_dimensions(99999, 99999, None, None, None, None).is_ok());
+    }
+
+    #[test]
+    fn image_dimensions_combined_bounds() {
+        // Must be at least 100×100 and at most 2000×2000.
+        assert!(
+            validate_image_dimensions(500, 500, Some(2000), Some(2000), Some(100), Some(100))
+                .is_ok()
+        );
+        // Above max width fails first.
+        let err =
+            validate_image_dimensions(2500, 500, Some(2000), Some(2000), Some(100), Some(100))
+                .unwrap_err();
+        assert_eq!(err.code, "image_too_wide");
+        // Below min height fails (after maxes pass).
+        let err = validate_image_dimensions(1500, 50, Some(2000), Some(2000), Some(100), Some(100))
+            .unwrap_err();
+        assert_eq!(err.code, "image_too_short");
     }
 }
