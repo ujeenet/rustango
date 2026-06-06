@@ -1917,6 +1917,61 @@ where
     }
 }
 
+/// Bi-dialect SELECT inside an open [`PoolTx`]. Companion to
+/// [`raw_query_pool`] for queries scoped to a transaction (read-
+/// after-write, FOR UPDATE row locks, lookup-then-modify flows).
+///
+/// Dispatches per `PoolTx` variant; binds via the canonical
+/// `bind_query_as*` helpers (same path the macro-emitted
+/// `_pool` / `_tx` fetchers use).
+///
+/// # Errors
+/// Driver / SQL failures.
+pub async fn raw_query_tx<T>(
+    tx: &mut tx::PoolTx<'_>,
+    sql: &str,
+    binds: Vec<SqlValue>,
+) -> Result<Vec<T>, ExecError>
+where
+    T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+{
+    // #431 — bump the per-task query counter when an `assert_num_queries`
+    // scope is active. No-op in production (try_with returns Err).
+    crate::test_assertions::query_counter::bump();
+    match tx {
+        #[cfg(feature = "postgres")]
+        tx::PoolTx::Postgres(t) => {
+            let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> = sqlx::query_as::<_, T>(sql);
+            for v in binds {
+                q = bind_query_as(q, v);
+            }
+            Ok(q.fetch_all(&mut **t).await?)
+        }
+        #[cfg(feature = "mysql")]
+        tx::PoolTx::Mysql(t) => {
+            let mut q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> =
+                sqlx::query_as::<_, T>(sql);
+            for v in binds {
+                q = bind_query_as_my(q, v);
+            }
+            Ok(q.fetch_all(&mut **t).await?)
+        }
+        #[cfg(feature = "sqlite")]
+        tx::PoolTx::Sqlite(t) => {
+            let mut q: sqlx::query::QueryAs<
+                '_,
+                sqlx::Sqlite,
+                T,
+                sqlx::sqlite::SqliteArguments<'_>,
+            > = sqlx::query_as::<_, T>(sql);
+            for v in binds {
+                q = bind_query_as_sqlite(q, v);
+            }
+            Ok(q.fetch_all(&mut **t).await?)
+        }
+    }
+}
+
 /// Django `.dates(field, kind)` terminal — issue #327. Compiles the
 /// underlying queryset to a `SELECT … WHERE …` statement, then wraps
 /// it in `SELECT DISTINCT <trunc(col)> FROM (<inner>) ORDER BY d` to
