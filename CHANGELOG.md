@@ -43,6 +43,9 @@ Post-v0.42 Django-parity follow-ups. Each item is a self-contained slice that la
   - **`sql::m2m::set_pool`** (#801) — DELETE + INSERT tx body collapses; the three local `bind_pg`/`bind_my`/`bind_sqlite` helpers (~115 lines) are removed.
   - **`audit::insert_one_with_audit`** (#802) — ~70 lines collapse to 7 via `insert_returning_tx` (which already handles PG/SQLite RETURNING + MySQL LAST_INSERT_ID() divergence in one place).
   - Total sweep: ~250 lines of duplicate tx-orchestration code deleted; sqlx Transaction-per-backend remains the underlying constraint but is now hidden behind two combinators (`raw_execute_tx`, `insert_returning_tx`) instead of being open-coded at every call site.
+  - **`sql::raw_query_tx(tx, sql, binds)`** (#804) — sibling SELECT-shaped combinator for read-after-write patterns inside a tx (FOR UPDATE row locks, lookup-then-modify flows).
+  - **`audit::save_one_with_audit_diff`** (#805) — partial collapse via `finish_update_with_audit_diff` shared trailer. Pre-update SELECT stays per-arm (the row decode genuinely differs by backend), but UPDATE + emit + commit suffix is shared.
+  - **Unused-import cleanup** (#811) — 9 stale imports across `contenttypes` / `permissions` / `admin/views` / `fixtures` / `migrate/runner` / `crypto` removed; both backend feature subsets now warning-free for `unused_imports`.
 
 ### Fixed
 
