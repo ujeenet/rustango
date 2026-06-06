@@ -1414,44 +1414,6 @@ pub fn json_script<T: serde::Serialize>(
     ))
 }
 
-/// Python `textwrap.dedent` parity — strip the longest common
-/// leading whitespace prefix from every line of `text`.
-///
-/// Useful for working with multi-line string literals that
-/// inherit the indentation of the surrounding Rust code:
-///
-/// ```
-/// use rustango::text::dedent;
-/// let source = "
-///     line one
-///     line two
-///     line three";
-/// assert_eq!(dedent(source), "\nline one\nline two\nline three");
-/// ```
-///
-/// Behavior matches Python's `textwrap.dedent`:
-/// * The "common prefix" is computed by comparing the leading
-///   whitespace of every **non-blank** line (lines that are
-///   empty or contain only whitespace are ignored for the
-///   common-prefix calculation but kept verbatim in the
-///   output).
-/// * If lines have **mixed indentation** (one uses tabs, another
-///   uses spaces), the common prefix is whatever literal byte
-///   sequence they share — `\t` and `"    "` (4 spaces) are not
-///   considered equivalent.
-/// * The trailing newline (if any) is preserved verbatim.
-/// * Empty input passes through.
-///
-/// ```
-/// use rustango::text::dedent;
-/// // Mixed-indent input: tab vs spaces — no common prefix → no dedent.
-/// let mixed = "\tline one\n    line two";
-/// assert_eq!(dedent(mixed), "\tline one\n    line two");
-/// // No leading whitespace at all → no-op.
-/// assert_eq!(dedent("hello\nworld"), "hello\nworld");
-/// // Blank lines don't constrain the common prefix.
-/// assert_eq!(dedent("    line\n\n    line"), "line\n\nline");
-/// ```
 /// Truncate `text` to the first `max_lines` lines, appending
 /// `suffix` (typically `"…"` or `"(N more lines)"`) only when
 /// truncation actually happened.
@@ -1491,6 +1453,45 @@ pub fn truncate_lines(text: &str, max_lines: usize, suffix: &str) -> String {
     out
 }
 
+/// Escape a single value for safe CSV (RFC 4180) embedding.
+/// Wraps `value` in double-quotes whenever it contains a comma, a
+/// double-quote, a newline, or a carriage return; doubles every
+/// internal double-quote. Values without those special chars pass
+/// through unquoted.
+///
+/// ```
+/// use rustango::text::escape_csv;
+/// assert_eq!(escape_csv("plain"), "plain");
+/// assert_eq!(escape_csv("a,b"), "\"a,b\"");
+/// assert_eq!(escape_csv("say \"hi\""), "\"say \"\"hi\"\"\"");
+/// assert_eq!(escape_csv("line1\nline2"), "\"line1\nline2\"");
+/// ```
+///
+/// CSV-injection defense (formula-prefix `=`, `+`, `-`, `@`, `\t`)
+/// is a separate concern — Excel will execute leading-`=` values
+/// as formulas regardless of quoting. Pair with a prefix-strip
+/// pass when the CSV will be opened in spreadsheet software.
+#[must_use]
+pub fn escape_csv(value: &str) -> String {
+    let needs_quotes =
+        value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r');
+    if !needs_quotes {
+        return value.to_owned();
+    }
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        if ch == '"' {
+            out.push('"');
+            out.push('"');
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// `true` when `s` is empty or contains only Unicode whitespace.
 /// Useful for input validation where empty-string and
 /// whitespace-only-string should be treated the same:
@@ -1513,6 +1514,44 @@ pub fn is_blank(s: &str) -> bool {
     s.chars().all(char::is_whitespace)
 }
 
+/// Python `textwrap.dedent` parity — strip the longest common
+/// leading whitespace prefix from every line of `text`.
+///
+/// Useful for working with multi-line string literals that
+/// inherit the indentation of the surrounding Rust code:
+///
+/// ```
+/// use rustango::text::dedent;
+/// let source = "
+///     line one
+///     line two
+///     line three";
+/// assert_eq!(dedent(source), "\nline one\nline two\nline three");
+/// ```
+///
+/// Behavior matches Python's `textwrap.dedent`:
+/// * The "common prefix" is computed by comparing the leading
+///   whitespace of every **non-blank** line (lines that are
+///   empty or contain only whitespace are ignored for the
+///   common-prefix calculation but kept verbatim in the
+///   output).
+/// * If lines have **mixed indentation** (one uses tabs, another
+///   uses spaces), the common prefix is whatever literal byte
+///   sequence they share — `\t` and `"    "` (4 spaces) are not
+///   considered equivalent.
+/// * The trailing newline (if any) is preserved verbatim.
+/// * Empty input passes through.
+///
+/// ```
+/// use rustango::text::dedent;
+/// // Mixed-indent input: tab vs spaces — no common prefix → no dedent.
+/// let mixed = "\tline one\n    line two";
+/// assert_eq!(dedent(mixed), "\tline one\n    line two");
+/// // No leading whitespace at all → no-op.
+/// assert_eq!(dedent("hello\nworld"), "hello\nworld");
+/// // Blank lines don't constrain the common prefix.
+/// assert_eq!(dedent("    line\n\n    line"), "line\n\nline");
+/// ```
 #[must_use]
 pub fn dedent(text: &str) -> String {
     if text.is_empty() {
@@ -4304,6 +4343,33 @@ mod tests {
         assert_eq!(truncate_lines("a\nb\nc", 3, "…"), "a\nb\nc");
         // Input one over — suffix appended.
         assert_eq!(truncate_lines("a\nb\nc\nd", 3, "…"), "a\nb\nc…");
+    }
+
+    // -------- escape_csv --------
+
+    #[test]
+    fn escape_csv_passes_through_plain_value() {
+        assert_eq!(escape_csv("plain"), "plain");
+        assert_eq!(escape_csv("with spaces"), "with spaces");
+        assert_eq!(escape_csv(""), "");
+    }
+
+    #[test]
+    fn escape_csv_wraps_comma_values_in_quotes() {
+        assert_eq!(escape_csv("a,b"), "\"a,b\"");
+        assert_eq!(escape_csv("one, two, three"), "\"one, two, three\"");
+    }
+
+    #[test]
+    fn escape_csv_doubles_internal_quotes() {
+        assert_eq!(escape_csv("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(escape_csv("\""), "\"\"\"\"");
+    }
+
+    #[test]
+    fn escape_csv_wraps_newlines() {
+        assert_eq!(escape_csv("line1\nline2"), "\"line1\nline2\"");
+        assert_eq!(escape_csv("a\rb"), "\"a\rb\"");
     }
 
     // -------- is_blank --------
