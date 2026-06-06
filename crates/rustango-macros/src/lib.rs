@@ -3025,6 +3025,118 @@ fn inherent_impl_tokens(
         }
     };
 
+    // `refresh_from_db_pool(&mut self, pool)` — re-SELECT the row
+    // matching this instance's PK and overwrite the in-memory state
+    // with the freshly-fetched columns. Django's `refresh_from_db`.
+    // Issue #825. Only emitted when the model declares a PK; non-PK
+    // models can't address a specific row.
+    //
+    // `replicate(&self)` — Eloquent-style clone-as-insertable. Copies
+    // every field from `self`; resets the PK to `Auto::Unset` when
+    // `pk_is_auto` so the next `save_pool` / `insert_pool` allocates
+    // a fresh autoincrement value. Non-Auto PKs preserve the source
+    // PK — the caller must overwrite before insert. Pure-Rust, no
+    // I/O, no dialect surface.
+    let refresh_replicate_methods = if let Some((pk_ident, _)) = primary_key {
+        let other_field_clones: Vec<TokenStream2> = fields
+            .column_entries
+            .iter()
+            .filter(|c| &c.ident != pk_ident)
+            .map(|c| {
+                let ident = &c.ident;
+                quote! {
+                    #ident: ::core::clone::Clone::clone(&self.#ident)
+                }
+            })
+            .collect();
+        let pk_clone_token = if fields.pk_is_auto {
+            quote! { #pk_ident: ::rustango::sql::Auto::Unset }
+        } else {
+            quote! { #pk_ident: ::core::clone::Clone::clone(&self.#pk_ident) }
+        };
+        let replicate_doc = if fields.pk_is_auto {
+            quote! {
+                /// Eloquent-style `replicate()` — return a clone of this
+                /// row with the primary key reset to [`Auto::Unset`] so
+                /// the copy is ready for `insert_pool` / `save_pool` to
+                /// allocate a fresh autoincrement value. Every other
+                /// field is `Clone`d verbatim. Issue #825.
+                ///
+                /// `auto_now_add` / `auto_now` timestamp fields are
+                /// **not** reset (Eloquent's `replicate` doesn't reset
+                /// them either) — pass them through the normal insert
+                /// path if you want fresh values, or assign them
+                /// explicitly after the call.
+            }
+        } else {
+            quote! {
+                /// Eloquent-style `replicate()` — clone this row
+                /// verbatim. Because the primary key is **not** an
+                /// `Auto<T>`, the clone keeps the source PK; the
+                /// caller must overwrite `copy.<pk>` before inserting
+                /// to avoid a unique-key violation. Issue #825.
+            }
+        };
+        quote! {
+            /// Re-SELECT this row by its primary key and overwrite
+            /// every in-memory field with the freshly-fetched value.
+            /// Django's [`Model.refresh_from_db`]. Issue #825.
+            ///
+            /// Use this when the row may have been modified by another
+            /// process / connection / job since you read it — e.g. after
+            /// a queued task callback, or to re-sync stale UI state
+            /// before re-saving.
+            ///
+            /// Returns [`ExecError::Driver(sqlx::Error::RowNotFound)`]
+            /// when the primary key no longer matches any row (e.g.
+            /// the row was deleted concurrently).
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`]; also `RowNotFound` when
+            /// the PK no longer exists.
+            ///
+            /// [`Model.refresh_from_db`]: https://docs.djangoproject.com/en/5.1/ref/models/instances/#django.db.models.Model.refresh_from_db
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn refresh_from_db_pool(
+                &mut self,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                use ::rustango::sql::FetcherPool as _;
+                let _pk_val: ::rustango::core::SqlValue = ::core::convert::Into::into(
+                    ::core::clone::Clone::clone(&self.#pk_ident),
+                );
+                let mut _rows: ::std::vec::Vec<Self> =
+                    ::rustango::query::QuerySet::<Self>::default()
+                        .filter(::core::stringify!(#pk_ident), _pk_val)
+                        .limit(1)
+                        .fetch_pool(pool)
+                        .await?;
+                match _rows.into_iter().next() {
+                    ::core::option::Option::Some(_fresh) => {
+                        *self = _fresh;
+                        ::core::result::Result::Ok(())
+                    }
+                    ::core::option::Option::None => ::core::result::Result::Err(
+                        ::rustango::sql::ExecError::Driver(
+                            ::rustango::sql::sqlx::Error::RowNotFound,
+                        ),
+                    ),
+                }
+            }
+
+            #replicate_doc
+            #[must_use]
+            pub fn replicate(&self) -> Self {
+                Self {
+                    #pk_clone_token,
+                    #( #other_field_clones, )*
+                }
+            }
+        }
+    } else {
+        quote!()
+    };
+
     // `_tx` family — `insert_tx`, `save_tx`, `delete_tx`. These mirror
     // the non-audited `_pool` methods but execute against an open
     // `PoolTx` so the writes participate in the caller's transaction.
@@ -3658,6 +3770,7 @@ fn inherent_impl_tokens(
             #pool_delete_method
             #pool_insert_method
             #pool_save_method
+            #refresh_replicate_methods
             #tx_delete_method
             #tx_insert_method
             #tx_save_method
