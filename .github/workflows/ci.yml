@@ -51,7 +51,15 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        # Pulled from AWS Public ECR's Docker Hub mirror to side-step
+        # the intermittent `registry-1.docker.io context deadline
+        # exceeded` failures that occasionally hit the e2e job (no
+        # rate-limit info in the error — just a connectivity flake).
+        # `public.ecr.aws/docker/library/` is a verbatim mirror of
+        # Docker Hub's official-image namespace; same digests, same
+        # tags, far better availability for CI traffic. (Issue: CI
+        # Docker timeouts after PR #848 / #866.)
+        image: public.ecr.aws/docker/library/postgres:16-alpine
         env:
           POSTGRES_USER: rustango
           POSTGRES_PASSWORD: rustango
@@ -246,7 +254,9 @@ jobs:
     runs-on: ubuntu-latest
     services:
       mysql:
-        image: mysql:8.0
+        # See `postgres_test`'s comment — same reason for the
+        # AWS Public ECR mirror.
+        image: public.ecr.aws/docker/library/mysql:8.0
         env:
           MYSQL_ROOT_PASSWORD: rustango
           MYSQL_DATABASE: rustango_test
@@ -296,16 +306,18 @@ jobs:
         include:
           - backend: postgres
             database_url: postgres://rustango:rustango@127.0.0.1:5432/showcase
-            service_image: postgres:16-alpine
+            service_image: public.ecr.aws/docker/library/postgres:16-alpine
           - backend: mysql
             database_url: mysql://rustango:rustango@127.0.0.1:3306/showcase
-            service_image: mysql:8
+            service_image: public.ecr.aws/docker/library/mysql:8
           - backend: sqlite
             database_url: sqlite:///tmp/rustango-showcase-e2e.db
             service_image: ''
     services:
+      # See `postgres_test`'s comment for the AWS Public ECR mirror
+      # rationale (CI Docker Hub timeouts after PR #848 / #866).
       postgres:
-        image: ${{ matrix.backend == 'postgres' && 'postgres:16-alpine' || '' }}
+        image: ${{ matrix.backend == 'postgres' && 'public.ecr.aws/docker/library/postgres:16-alpine' || '' }}
         env:
           POSTGRES_USER: rustango
           POSTGRES_PASSWORD: rustango
@@ -317,7 +329,7 @@ jobs:
           --health-timeout 2s
           --health-retries 30
       mysql:
-        image: ${{ matrix.backend == 'mysql' && 'mysql:8' || '' }}
+        image: ${{ matrix.backend == 'mysql' && 'public.ecr.aws/docker/library/mysql:8' || '' }}
         env:
           MYSQL_ROOT_PASSWORD: rustango
           MYSQL_USER: rustango
