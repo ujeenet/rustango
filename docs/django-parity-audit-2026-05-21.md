@@ -44,12 +44,12 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 22. Async support | 4 | 0 | 0 | 3 |
 | 23. DRF parity | 22 | 0 | 1 | 0 |
 | 24. contrib modules | 12 | 1 | 3 | 2 |
-| 25. `django.utils.*` helpers | 89 | 0 | 0 | 0 |
-| **Totals** | **459** | **11** | **21** | **19** |
+| 25. `django.utils.*` helpers | 106 | 0 | 0 | 0 |
+| **Totals** | **476** | **11** | **21** | **19** |
 
-Coverage = 459 / (459 + 11 + 21) = **93% full, 2% partial, 5% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **95%**.
+Coverage = 476 / (476 + 11 + 21) = **94% full, 2% partial, 4% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **96%**.
 
-Snapshot date: 2026-06-05 (post-v0.42 plus 85+ Django `utils.*` + `template.defaultfilters` parity helpers across PRs #619–#711: 12 new modules + 14 widened modules — see Section 25 for the per-helper table).
+Snapshot date: 2026-06-06 (post-v0.42 plus 100+ Django `utils.*` + `template.defaultfilters` + `validators` parity helpers across PRs #619–#731: 12 new modules + 16 widened modules — see Section 25 for the per-helper table).
 
 ---
 
@@ -758,6 +758,24 @@ below corresponds to a Django module / function the port targets.
 | `django.template.defaultfilters.yesno` | [yesno](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#yesno) | SHIPPED | `text::yesno(Option<bool>, &str)` (PR #704) — Tera filter delegates. Option<bool> shape works for non-template callers (REST API JSON, audit-log rendering, CLI summary) |
 | `django.utils.html.avoid_wrapping` | [avoid_wrapping](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.avoid_wrapping) | SHIPPED | `text::avoid_wrapping(s)` (PR #708) — ASCII space → NBSP swap to prevent line-break in critical phrases (dates, version strings, prices). Tera filter `avoid_wrapping` (PR #709) |
 | Locale-aware number / currency formatters | [django.contrib.humanize](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/) | SHIPPED | `humanize::format_number(value, locale, decimals)` (PR #710) + `humanize::format_currency(amount, currency, locale)` (PR #711). Decimals-precision arg + Romance-language Euro suffix override; works for non-template billing-summary code |
+| `django.template.defaultfilters.yesno` | [yesno](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#yesno) | SHIPPED | `text::yesno(Option<bool>, choices)` (PR #704) — three-way boolean mapper. `text::pluralize` (PR #691) already covered the `s,es` variants |
+| `django.template.defaultfilters.cut` / `normalize_whitespace` | [cut](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#cut) | SHIPPED | `text::cut(s, needle)` + `text::normalize_whitespace(s)` (PR #693) |
+| PII redaction helpers (custom, no Django equivalent) | (custom) | SHIPPED | `text::mask_email` / `mask_card` / `mask_phone` (PR #694) — promoted from Tera-filter-private to public Rust |
+| `oxford_join` + `initials` (custom) | (custom) | SHIPPED | `text::oxford_join(items, conj)` / `text::initials(s, limit)` (PR #696) — promoted from Tera-only |
+| `django.template.defaultfilters.floatformat` | [floatformat](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#floatformat) | SHIPPED | `numberformat::floatformat(value, precision)` (PR #698) — signed-precision shape; banker's rounding |
+| `django.template.defaultfilters.truncatechars` / `truncatechars_html` / `truncatewords_html` | [truncatechars](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/#truncatechars) | SHIPPED | `text::truncatechars(s, count)` (PR #700) Django filter shape (ellipsis counts toward `count`); Tera `truncatechars_html` + `truncatewords_html` wrappers (PR #702) over existing `text::truncate_html_chars` / `truncate_html_words` |
+| `humanize::naturaltime` + `naturalday` + `intcomma` | [naturaltime](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#naturaltime) | SHIPPED | `humanize::naturaltime(now, then)` / `naturalday(now, then)` / `intcomma(n)` / `intcomma_f64(f)` (PRs #685/#686) — promoted from Tera-only to public Rust |
+| `humanize::intword/naturalsize/ordinal/apnumber` | [intword](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#intword) | SHIPPED | `humanize::intword/naturalsize/ordinal/apnumber` (PR #683) — promoted from Tera-only to public Rust |
+| `django.utils.timesince` / `timeuntil` | [timesince](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.timesince.timesince) | SHIPPED | `timesince::timesince(d, now, depth)` + `timeuntil(d, now, depth)` (PR #678) — Django-style depth-respecting "4 days, 6 hours" output |
+| `django.utils.dateformat` codes P/f/W/t/o | [dateformat](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.dateformat) | SHIPPED | All 5 codes (P=pretty meridiem, f=12h:MM, W=ISO week, t=days in month, o=ISO week-numbering year) in `format_datetime` (PR #679) |
+| `django.utils.dates` lookup tables | (utils.dates) | SHIPPED | `dates::month_full/abbr/ap/weekday_full/abbr` (PR #690) — Chrono-`Weekday`-based weekday API; MONTHS_AP matches Django source char-for-char |
+| `django.utils.html.json_script` / `escapejs` / `avoid_wrapping` | [json_script](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.html.json_script) | SHIPPED | `text::json_script` (PR #677) / `text::escapejs` (PR #681) / `text::avoid_wrapping` (PR #708) — XSS-defang JSON embed + JS string escape + NBSP wrap-prevention |
+| `django.utils.html.truncate_html_chars/words` | [Truncator](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.Truncator) | SHIPPED | `text::truncate_html_chars(s, max, suffix)` + `truncate_html_words` (PR #682) — HTML-tag-aware truncation with open-tag stack |
+| `django.utils.encoding.uri_to_iri` / `filepath_to_uri` | [encoding](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.uri_to_iri) | SHIPPED | `url_codec::uri_to_iri(uri)` (PR #688) — inverse of iri_to_uri; URI-reserved chars stay encoded. `url_codec::filepath_to_uri(path)` (PR #714) — Windows-backslash normalization + path-safe-set encoder |
+| `django.utils.duration.duration_iso_string` | [duration_iso_string](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.duration.duration_iso_string) | SHIPPED | `dateparse::duration_iso_string(d)` (PR #687) — ISO 8601 "P\<d\>DT\<HH\>H\<MM\>M\<SS\>S" inverse of parse_duration |
+| `django.core.validators.int_list_validator` | [int_list_validator](https://docs.djangoproject.com/en/6.0/ref/validators/#django.core.validators.int_list_validator) | SHIPPED | `validators::int_list_validator(s, sep, allow_negative)` (PR #713) — parameterized comma-separated-int variant with custom separator + negative-int opt-in |
+| `django.core.validators.validate_email_with_name` | [validators](https://docs.djangoproject.com/en/6.0/ref/validators/#django.core.validators.validate_email_with_name) | SHIPPED | `validators::validate_email_with_name(s)` + `is_email_with_name` (PR #730 / #731) — accepts both bare `user@host` and RFC 5322 display-name form `"Display Name" <user@host>`. Gated on `email` feature (routes through `email::parseaddr`) |
+| 15 `validators::is_*` boolean companions | (custom; mirrors `is_email` pattern) | SHIPPED | `is_alpha/alphanumeric/numeric/creditcard_luhn/hostname/iban/mac_address/semver/isbn/iso_date/iso_time/iso_datetime/base64/base64_urlsafe/jwt_shape` (PR #728) — predicate forms for filter-iterator chains |
 | `django.utils.crypto.get_random_string` | [get_random_string](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.get_random_string) | SHIPPED | `random::get_random_string(length, allowed_chars)` + `get_random_string_default` (PR #637) — CSPRNG-backed `crate::random` module with 5 predefined alphabets |
 | `django.utils.crypto.constant_time_compare` | [constant_time_compare](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.constant_time_compare) | SHIPPED | `crypto::constant_time_compare(a, b)` (PR #647) — consolidates 2 prior private copies |
 | `django.utils.encoding.iri_to_uri` | [iri_to_uri](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.iri_to_uri) | SHIPPED | `url_codec::iri_to_uri` (PR #648) |
@@ -800,12 +818,12 @@ below corresponds to a Django module / function the port targets.
 | Mail settings (SERVER_EMAIL / EMAIL_SUBJECT_PREFIX / EMAIL_TIMEOUT) | (sec 14) | SHIPPED | `MailSettings.{server_email, email_subject_prefix, smtp_timeout_secs}` (PRs #619, #626) |
 | Email attachments | (sec 18) | SHIPPED | `Email::attach(filename, bytes, mimetype)` + `attach_text` (PR #621) |
 
-Summary: **78 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A** (Django `utils.*` + `template.defaultfilters` helpers).
+Summary: **106 SHIPPED / 0 PARTIAL / 0 MISSING / 0 N/A** (Django `utils.*` + `template.defaultfilters` + `validators` helpers).
 
-Net effect of the 2026-06-04→06-05 batch:
-* **12 new public modules**: `random`, `base36`, `base62`, `lorem`, `http_date`, `http_methods`, `cookies`, `numberformat`, `dateparse`, `dateformat`, `timesince`, `dates` (PR #690)
-* **Widened existing modules**: `text` (+30 public helpers — `json_script`, `escapejs`, `truncate_html_chars`, `truncate_html_words`, `pluralize`, `wordcount`, `linenumbers`, `ljust`, `rjust`, `center`, `get_digit`, `cut`, `normalize_whitespace`, `mask_email`, `mask_card`, `mask_phone`, plus 14 earlier helpers), `url_codec` (+5 incl. `uri_to_iri`), `shortcuts` (+9), `validators` (+7), `email` (+5), `crypto` (+1), `compression` (+2), `cache_fragment` (+1), `cache_page` (+1), `cache` (+3), `urls` (+3), `dateformat` (+5 codes P/f/W/t/o), `dateparse` (+1 `duration_iso_string`), `humanize` (+7 public — intword/naturalsize/ordinal/apnumber/naturaltime/naturalday/intcomma)
-* **45 PRs admin-merged across the sweep**: #619–#694 (gaps in numbering are doc-only PRs that landed in the same window)
+Net effect of the 2026-06-04→06-06 batch:
+* **12 new public modules**: `random`, `base36`, `base62`, `lorem`, `http_date`, `http_methods`, `cookies`, `numberformat`, `dateparse`, `dateformat`, `timesince`, `dates`
+* **Widened existing modules**: `text` (+30 public helpers), `url_codec` (+6 incl. `uri_to_iri`, `filepath_to_uri`), `shortcuts` (+9), `validators` (+24 incl. `int_list_validator`, 15 `is_*` companions, `validate_email_with_name`), `email` (+5), `crypto` (+1), `compression` (+2), `cache_fragment` (+1), `cache_page` (+1), `cache` (+3), `urls` (+3), `dateformat` (+5 codes P/f/W/t/o), `dateparse` (+1 `duration_iso_string`), `humanize` (+9 public Rust), `numberformat` (+1 `floatformat`), `default_filters` (+2 `urlize`/`avoid_wrapping` Tera wrappers)
+* **57 PRs admin-merged across the sweep**: #619–#731 (gaps in numbering are doc-only PRs and dedupe chores that landed in the same window)
 
 Bulk closure of Django `utils.*` API surface — the most-common helper functions a Django port reaches for during translation now have direct rustango equivalents. Outstanding gaps in this category: `regex_helper.normalize` (URL-conf regex normalization — niche), `formats.localize` (locale-aware value rendering — large lift, requires per-locale config wiring), `safestring.mark_safe` (N/A — Tera handles autoescape natively).
 
