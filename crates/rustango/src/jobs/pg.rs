@@ -376,27 +376,18 @@ impl JobQueue for PgJobQueue {
     }
 
     async fn pending_count(&self) -> usize {
+        // #561 — was a 3-arm `match pool` doing the same
+        // `sqlx::query_scalar::<_, i64>(...).fetch_one(<pool>)` once
+        // per backend. The framework already ships
+        // `raw_query_pool::<(i64,)>(sql, binds, pool)` which routes
+        // through the executor's bind+decode plumbing on every
+        // backend with one call site.
         let sql = "SELECT COUNT(*) AS n FROM rustango_jobs WHERE locked_at IS NULL";
-        match &self.pool {
-            #[cfg(feature = "postgres")]
-            Pool::Postgres(pg) => sqlx::query_scalar::<_, i64>(sql)
-                .fetch_one(pg)
-                .await
-                .ok()
-                .map_or(0, |n| usize::try_from(n).unwrap_or(0)),
-            #[cfg(feature = "mysql")]
-            Pool::Mysql(my) => sqlx::query_scalar::<_, i64>(sql)
-                .fetch_one(my)
-                .await
-                .ok()
-                .map_or(0, |n| usize::try_from(n).unwrap_or(0)),
-            #[cfg(feature = "sqlite")]
-            Pool::Sqlite(sq) => sqlx::query_scalar::<_, i64>(sql)
-                .fetch_one(sq)
-                .await
-                .ok()
-                .map_or(0, |n| usize::try_from(n).unwrap_or(0)),
-        }
+        crate::sql::raw_query_pool::<(i64,)>(sql, Vec::new(), &self.pool)
+            .await
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .map_or(0, |(n,)| usize::try_from(n).unwrap_or(0))
     }
 }
 
