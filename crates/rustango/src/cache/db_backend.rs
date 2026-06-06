@@ -152,12 +152,7 @@ impl DatabaseCache {
         let now = Self::now_unix_ms();
         raw_execute_pool(&self.pool, &sql, vec![SqlValue::I64(now)])
             .await
-            .map_err(|e| CacheError::Connection(format!("purge_expired: {e}")))?;
-        // The executor's `raw_execute_pool` doesn't surface the
-        // affected-row count today; return 0 as a stable shape
-        // (callers wanting the count can re-query). Future: add
-        // an `_rows_affected` sibling helper.
-        Ok(0)
+            .map_err(|e| CacheError::Connection(format!("purge_expired: {e}")))
     }
 
     /// Unix epoch in **milliseconds**. Promoted from seconds in v0.42
