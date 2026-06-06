@@ -2010,6 +2010,40 @@ pub fn snake_to_camel(value: &str) -> String {
     out
 }
 
+/// Convert a snake_case string to kebab-case by replacing every
+/// `_` with `-`. Useful for emitting URL slugs / HTML attribute
+/// names / CSS class names from snake_case Rust identifiers
+/// without re-running the slugifier.
+///
+/// ```
+/// use rustango::text::snake_to_kebab;
+/// assert_eq!(snake_to_kebab("blog_post"), "blog-post");
+/// assert_eq!(snake_to_kebab("http_request_handler"), "http-request-handler");
+/// assert_eq!(snake_to_kebab("already-kebab"), "already-kebab");
+/// assert_eq!(snake_to_kebab(""), "");
+/// ```
+#[must_use]
+pub fn snake_to_kebab(value: &str) -> String {
+    value.replace('_', "-")
+}
+
+/// Convert a kebab-case string to snake_case by replacing every
+/// `-` with `_`. Inverse of [`snake_to_kebab`]. Useful for
+/// reading URL slugs back into snake_case identifiers (e.g.
+/// when looking up a route param against a Rust field name).
+///
+/// ```
+/// use rustango::text::kebab_to_snake;
+/// assert_eq!(kebab_to_snake("blog-post"), "blog_post");
+/// assert_eq!(kebab_to_snake("http-request-handler"), "http_request_handler");
+/// assert_eq!(kebab_to_snake("already_snake"), "already_snake");
+/// assert_eq!(kebab_to_snake(""), "");
+/// ```
+#[must_use]
+pub fn kebab_to_snake(value: &str) -> String {
+    value.replace('-', "_")
+}
+
 /// Django-parity
 /// [`django.utils.text.camel_case_to_spaces(value)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.camel_case_to_spaces) —
 /// convert a CamelCase identifier into lowercase space-separated
@@ -3965,6 +3999,37 @@ mod tests {
         assert!(pascal.starts_with('B'));
         assert!(camel.starts_with('b'));
         assert_eq!(&pascal[1..], &camel[1..]);
+    }
+
+    // -------- snake_to_kebab / kebab_to_snake --------
+
+    #[test]
+    fn snake_to_kebab_basic() {
+        assert_eq!(snake_to_kebab("blog_post"), "blog-post");
+        assert_eq!(
+            snake_to_kebab("http_request_handler"),
+            "http-request-handler"
+        );
+        assert_eq!(snake_to_kebab("single"), "single");
+        assert_eq!(snake_to_kebab(""), "");
+    }
+
+    #[test]
+    fn kebab_to_snake_basic() {
+        assert_eq!(kebab_to_snake("blog-post"), "blog_post");
+        assert_eq!(
+            kebab_to_snake("http-request-handler"),
+            "http_request_handler"
+        );
+        assert_eq!(kebab_to_snake("single"), "single");
+        assert_eq!(kebab_to_snake(""), "");
+    }
+
+    #[test]
+    fn snake_kebab_round_trip() {
+        let snake = "blog_post_handler";
+        let kebab = snake_to_kebab(snake);
+        assert_eq!(kebab_to_snake(&kebab), snake);
     }
 
     // -------- unescape_html_entities --------
