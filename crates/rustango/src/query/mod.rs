@@ -829,6 +829,7 @@ impl<T: Model> QuerySet<T> {
     /// | `__gt` / `__gte` / `__lt` / `__lte` | direct map | as-is |
     /// | `__ne` | `<col> <> ?` | as-is |
     /// | `__in` | `<col> IN (...)` | value must be `SqlValue::List` |
+    /// | `__not_in` | `<col> NOT IN (...)` | value must be `SqlValue::List`. Eloquent `whereNotIn` parity. |
     /// | `__isnull` | `<col> IS NULL` / `IS NOT NULL` | value must be `bool` |
     /// | `__between` / `__range` | `<col> BETWEEN ? AND ?` | value must be 2-element `SqlValue::List` |
     /// | `__year` / `__month` / `__day` / `__hour` / `__minute` / `__second` / `__quarter` / `__week` / `__week_day` | `EXTRACT(<part> FROM <col>) = ?` | scalar value matches the date part (issue #829). Composes with trailing `__gte` / `__lt` / etc. SQLite-unsupported parts (e.g. quarter) error consistently with the underlying fn. |
@@ -1723,7 +1724,11 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
             let v = wrap_like(&value, "%", "", &field, suffix)?;
             Ok(pair(field, Op::ILike, v))
         }
-        "in" => {
+        "in" | "not_in" => {
+            // Eloquent `whereNotIn` parity. `viewset::build_lookup_filter`
+            // has accepted `__not_in` for URL-bound query params since
+            // v0.30; this arm closes the drift on the Rust-side
+            // `.filter("field__not_in", SqlValue::List(...))` shape.
             if !matches!(value, SqlValue::List(_)) {
                 return Err(QueryError::InvalidLookupValue {
                     field,
@@ -1732,7 +1737,12 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
                     actual: sql_value_shape_name(&value),
                 });
             }
-            Ok(pair(field, Op::In, value))
+            let op = if suffix == "not_in" {
+                Op::NotIn
+            } else {
+                Op::In
+            };
+            Ok(pair(field, op, value))
         }
         "isnull" => {
             if !matches!(value, SqlValue::Bool(_)) {
