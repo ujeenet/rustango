@@ -3310,6 +3310,37 @@ fn inherent_impl_tokens(
                 }
             }
 
+            /// Delete every row of this model — `TRUNCATE TABLE
+            /// <table> RESTART IDENTITY CASCADE` on Postgres,
+            /// `DELETE FROM <table>` on MySQL / SQLite (which don't
+            /// support `TRUNCATE` inside foreign-key constraints
+            /// or — for SQLite — at all). Eloquent `Model::truncate()`
+            /// / Django `Model.objects.all().delete()` parity.
+            ///
+            /// **Use only in tests / fixture-reset flows.** Production
+            /// writes through this would silently bypass the
+            /// `pre_delete` / `post_delete` signals (no per-row hooks
+            /// fire on a TRUNCATE / bulk DELETE FROM) and lose every
+            /// row's audit-log entry.
+            ///
+            /// # Errors
+            /// As [`raw_execute_pool`].
+            ///
+            /// [`raw_execute_pool`]: rustango::sql::raw_execute_pool
+            pub async fn truncate_pool(
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                let _table = <Self as ::rustango::core::Model>::SCHEMA.table;
+                let _dialect = pool.dialect();
+                let _quoted = _dialect.quote_ident(_table);
+                let _sql = if _dialect.name() == "postgres" {
+                    ::std::format!("TRUNCATE TABLE {} RESTART IDENTITY CASCADE", _quoted)
+                } else {
+                    ::std::format!("DELETE FROM {}", _quoted)
+                };
+                ::rustango::sql::raw_execute_pool(pool, &_sql, ::std::vec::Vec::new()).await
+            }
+
             /// Bulk-delete every row whose primary key is in
             /// `pks` — `DELETE FROM <table> WHERE <pk> IN (...)`.
             /// Returns the affected row count.
