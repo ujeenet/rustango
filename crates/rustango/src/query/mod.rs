@@ -9,8 +9,9 @@
 use std::marker::PhantomData;
 
 use crate::core::{
-    AggregateExpr, AggregateQuery, Assignment, DeleteQuery, Filter, Model, ModelSchema, Op,
-    QueryError, SelectQuery, SqlValue, TypedAssignment, TypedExpr, UpdateQuery, WhereExpr,
+    AggregateExpr, AggregateQuery, Assignment, DeleteQuery, Expr, Filter, Model, ModelSchema, Op,
+    QueryError, ScalarFn, SelectQuery, SqlValue, TypedAssignment, TypedExpr, UpdateQuery,
+    WhereExpr,
 };
 
 mod q;
@@ -100,6 +101,13 @@ enum PendingOrderItem {
 enum PendingFilter {
     /// String-keyed; resolved against the schema at `compile` time.
     Raw(RawFilter),
+    /// Date-part transform lookup (`created__year__gte`, issue #829).
+    /// The column reference is wrapped in the named scalar fn
+    /// (`ExtractYear` / `TruncDate` / …) at resolve time, then
+    /// compared against `value` using `op`. Composed via
+    /// `WhereExpr::ExprCompare` so the same writer that handles JOIN
+    /// `ON` predicates renders it.
+    DateTransform(DateTransformFilter),
     /// Already resolved by a typed [`Column`](crate::core::Column).
     Resolved(Filter),
     /// Typed sub-expression (built via `.and()` / `.or()` on the
@@ -116,6 +124,14 @@ enum PendingFilter {
 #[derive(Debug, Clone)]
 struct RawFilter {
     field: String,
+    op: Op,
+    value: SqlValue,
+}
+
+#[derive(Debug, Clone)]
+struct DateTransformFilter {
+    field: String,
+    transform: ScalarFn,
     op: Op,
     value: SqlValue,
 }
@@ -815,6 +831,8 @@ impl<T: Model> QuerySet<T> {
     /// | `__in` | `<col> IN (...)` | value must be `SqlValue::List` |
     /// | `__isnull` | `<col> IS NULL` / `IS NOT NULL` | value must be `bool` |
     /// | `__between` / `__range` | `<col> BETWEEN ? AND ?` | value must be 2-element `SqlValue::List` |
+    /// | `__year` / `__month` / `__day` / `__hour` / `__minute` / `__second` / `__quarter` / `__week` / `__week_day` | `EXTRACT(<part> FROM <col>) = ?` | scalar value matches the date part (issue #829). Composes with trailing `__gte` / `__lt` / etc. SQLite-unsupported parts (e.g. quarter) error consistently with the underlying fn. |
+    /// | `__date` | `DATE(<col>) = ?` | value is a `chrono::NaiveDate`; strips the time component before comparison. |
     ///
     /// ```ignore
     /// Post::objects()
@@ -835,10 +853,25 @@ impl<T: Model> QuerySet<T> {
     /// scope — that's join-traversal territory (`select_related` /
     /// `prefetch_related`). v1 supports single-table fields only.
     #[must_use]
-    pub fn filter(self, key: &str, value: impl Into<SqlValue>) -> Self {
+    pub fn filter(mut self, key: &str, value: impl Into<SqlValue>) -> Self {
         let raw = value.into();
         match parse_lookup(key, raw) {
-            Ok((field, op, parsed_value)) => self.filter_op(field, op, parsed_value),
+            Ok(ParsedLookup::Raw { field, op, value }) => self.filter_op(field, op, value),
+            Ok(ParsedLookup::DateTransform {
+                field,
+                transform,
+                op,
+                value,
+            }) => {
+                self.pending
+                    .push(PendingFilter::DateTransform(DateTransformFilter {
+                        field,
+                        transform,
+                        op,
+                        value,
+                    }));
+                self
+            }
             Err(e) => self.with_pending_error(e),
         }
     }
@@ -1527,45 +1560,126 @@ fn lower_select_related(
 /// Chained lookups (`a__b__icontains`) are NOT decomposed in v1 — the
 /// FIRST `__` splits field from suffix, anything after stays as part
 /// of the suffix and errors as `UnknownLookup`.
-fn parse_lookup(key: &str, value: SqlValue) -> Result<(String, Op, SqlValue), QueryError> {
+/// Result of [`parse_lookup`] — either a plain field/op/value triple
+/// (existing v1 shape) or a date-transform wrapper that the resolver
+/// re-renders as `EXTRACT(…) <op> ?` (issue #829).
+enum ParsedLookup {
+    Raw {
+        field: String,
+        op: Op,
+        value: SqlValue,
+    },
+    DateTransform {
+        field: String,
+        transform: ScalarFn,
+        op: Op,
+        value: SqlValue,
+    },
+}
+
+/// Map a date-transform suffix token to its corresponding scalar fn.
+/// `None` means "this isn't a date transform" — caller falls through
+/// to the existing comparison-suffix table.
+fn date_transform_fn(token: &str) -> Option<ScalarFn> {
+    match token {
+        "year" => Some(ScalarFn::ExtractYear),
+        "month" => Some(ScalarFn::ExtractMonth),
+        "day" => Some(ScalarFn::ExtractDay),
+        "hour" => Some(ScalarFn::ExtractHour),
+        "minute" => Some(ScalarFn::ExtractMinute),
+        "second" => Some(ScalarFn::ExtractSecond),
+        "quarter" => Some(ScalarFn::ExtractQuarter),
+        "week" => Some(ScalarFn::ExtractWeek),
+        "week_day" => Some(ScalarFn::ExtractWeekDay),
+        "date" => Some(ScalarFn::TruncDate),
+        _ => None,
+    }
+}
+
+/// Map a trailing comparison suffix (`gte`, `lt`, …) to an `Op` for
+/// date-transform lookups. The set is intentionally a strict subset
+/// of the full lookup grammar — LIKE / ILIKE / IN / IS-NULL / regex
+/// don't apply to scalar-extracted ints / dates.
+fn date_compare_op(suffix: &str) -> Option<Op> {
+    match suffix {
+        "exact" => Some(Op::Eq),
+        "ne" => Some(Op::Ne),
+        "gt" => Some(Op::Gt),
+        "gte" => Some(Op::Gte),
+        "lt" => Some(Op::Lt),
+        "lte" => Some(Op::Lte),
+        _ => None,
+    }
+}
+
+fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> {
     // Bare field (no `__`) → exact match.
     let Some(split_at) = key.find("__") else {
-        return Ok((key.to_owned(), Op::Eq, value));
+        return Ok(ParsedLookup::Raw {
+            field: key.to_owned(),
+            op: Op::Eq,
+            value,
+        });
     };
     let field = key[..split_at].to_owned();
     let suffix = &key[split_at + 2..];
 
+    // Date-transform suffixes (issue #829) — `__year`, `__year__gte`,
+    // `__date`, etc. Split the suffix into (transform-token, optional
+    // trailing comparison op). When the token doesn't match a date
+    // transform, fall through to the legacy comparison-suffix table.
+    let (transform_token, trailing) = match suffix.find("__") {
+        Some(at) => (&suffix[..at], Some(&suffix[at + 2..])),
+        None => (suffix, None),
+    };
+    if let Some(transform) = date_transform_fn(transform_token) {
+        let op = match trailing {
+            None => Op::Eq,
+            Some(t) => date_compare_op(t).ok_or_else(|| QueryError::UnknownLookup {
+                field: field.clone(),
+                suffix: suffix.to_owned(),
+            })?,
+        };
+        return Ok(ParsedLookup::DateTransform {
+            field,
+            transform,
+            op,
+            value,
+        });
+    }
+
+    let pair = |field: String, op: Op, value: SqlValue| ParsedLookup::Raw { field, op, value };
     match suffix {
-        "exact" => Ok((field, Op::Eq, value)),
-        "ne" => Ok((field, Op::Ne, value)),
-        "gt" => Ok((field, Op::Gt, value)),
-        "gte" => Ok((field, Op::Gte, value)),
-        "lt" => Ok((field, Op::Lt, value)),
-        "lte" => Ok((field, Op::Lte, value)),
-        "iexact" => Ok((field, Op::ILike, value)),
+        "exact" => Ok(pair(field, Op::Eq, value)),
+        "ne" => Ok(pair(field, Op::Ne, value)),
+        "gt" => Ok(pair(field, Op::Gt, value)),
+        "gte" => Ok(pair(field, Op::Gte, value)),
+        "lt" => Ok(pair(field, Op::Lt, value)),
+        "lte" => Ok(pair(field, Op::Lte, value)),
+        "iexact" => Ok(pair(field, Op::ILike, value)),
         "contains" => {
             let v = wrap_like(&value, "%", "%", &field, suffix)?;
-            Ok((field, Op::Like, v))
+            Ok(pair(field, Op::Like, v))
         }
         "icontains" => {
             let v = wrap_like(&value, "%", "%", &field, suffix)?;
-            Ok((field, Op::ILike, v))
+            Ok(pair(field, Op::ILike, v))
         }
         "startswith" => {
             let v = wrap_like(&value, "", "%", &field, suffix)?;
-            Ok((field, Op::Like, v))
+            Ok(pair(field, Op::Like, v))
         }
         "istartswith" => {
             let v = wrap_like(&value, "", "%", &field, suffix)?;
-            Ok((field, Op::ILike, v))
+            Ok(pair(field, Op::ILike, v))
         }
         "endswith" => {
             let v = wrap_like(&value, "%", "", &field, suffix)?;
-            Ok((field, Op::Like, v))
+            Ok(pair(field, Op::Like, v))
         }
         "iendswith" => {
             let v = wrap_like(&value, "%", "", &field, suffix)?;
-            Ok((field, Op::ILike, v))
+            Ok(pair(field, Op::ILike, v))
         }
         "in" => {
             if !matches!(value, SqlValue::List(_)) {
@@ -1576,7 +1690,7 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<(String, Op, SqlValue), Qu
                     actual: sql_value_shape_name(&value),
                 });
             }
-            Ok((field, Op::In, value))
+            Ok(pair(field, Op::In, value))
         }
         "isnull" => {
             if !matches!(value, SqlValue::Bool(_)) {
@@ -1587,7 +1701,7 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<(String, Op, SqlValue), Qu
                     actual: sql_value_shape_name(&value),
                 });
             }
-            Ok((field, Op::IsNull, value))
+            Ok(pair(field, Op::IsNull, value))
         }
         "between" | "range" => {
             match &value {
@@ -1609,7 +1723,7 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<(String, Op, SqlValue), Qu
                     });
                 }
             }
-            Ok((field, Op::Between, value))
+            Ok(pair(field, Op::Between, value))
         }
         "regex" | "iregex" => {
             if !matches!(value, SqlValue::String(_)) {
@@ -1625,7 +1739,7 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<(String, Op, SqlValue), Qu
             } else {
                 Op::IRegex
             };
-            Ok((field, op, value))
+            Ok(pair(field, op, value))
         }
         "trigram_similar" | "trigram_word_similar" => {
             if !matches!(value, SqlValue::String(_)) {
@@ -1641,7 +1755,7 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<(String, Op, SqlValue), Qu
             } else {
                 Op::TrigramWordSimilar
             };
-            Ok((field, op, value))
+            Ok(pair(field, op, value))
         }
         "search" => {
             if !matches!(value, SqlValue::String(_)) {
@@ -1652,7 +1766,7 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<(String, Op, SqlValue), Qu
                     actual: sql_value_shape_name(&value),
                 });
             }
-            Ok((field, Op::Search, value))
+            Ok(pair(field, Op::Search, value))
         }
         // PG array operators (issue #30). The Django shape uses
         // `__contains` / `__contained_by` / `__overlap` on
@@ -1695,7 +1809,7 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<(String, Op, SqlValue), Qu
                 "range_adjacent" => Op::RangeAdjacent,
                 _ => unreachable!(),
             };
-            Ok((field, op, SqlValue::RangeLiteral(literal)))
+            Ok(pair(field, op, SqlValue::RangeLiteral(literal)))
         }
         "array_contains" | "array_contained_by" | "array_overlap" => {
             // The bound value must be a list-of-elements; we
@@ -1715,7 +1829,7 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<(String, Op, SqlValue), Qu
                 "array_overlap" => Op::ArrayOverlap,
                 _ => unreachable!(),
             };
-            Ok((field, op, SqlValue::Array(elems)))
+            Ok(pair(field, op, SqlValue::Array(elems)))
         }
         unknown => Err(QueryError::UnknownLookup {
             field,
@@ -1813,6 +1927,9 @@ fn resolve_pending(
             PendingFilter::Raw(raw) => {
                 nodes.push(WhereExpr::Predicate(resolve_filter(model, raw)?));
             }
+            PendingFilter::DateTransform(dt) => {
+                nodes.push(resolve_date_transform(model, dt)?);
+            }
             PendingFilter::Resolved(filter) => {
                 nodes.push(WhereExpr::Predicate(filter));
             }
@@ -1859,6 +1976,35 @@ fn resolve_filter(model: &'static ModelSchema, raw: RawFilter) -> Result<Filter,
         column: field.column,
         op: raw.op,
         value: raw.value,
+    })
+}
+
+/// Resolve a [`DateTransformFilter`] into a `WhereExpr::ExprCompare`
+/// node — the field is looked up against the schema and wrapped in
+/// the corresponding [`ScalarFn`] (`EXTRACT(YEAR FROM …)`, etc.) on
+/// the LHS; the bound value lands as a literal on the RHS. Issue #829.
+///
+/// Skips the value/column type-equality check that
+/// [`resolve_filter`] applies — date-transform LHS values are scalar
+/// ints / dates rather than the column's native type, so the literal
+/// shape isn't expected to match the field type.
+fn resolve_date_transform(
+    model: &'static ModelSchema,
+    dt: DateTransformFilter,
+) -> Result<WhereExpr, QueryError> {
+    let field = model
+        .field(&dt.field)
+        .ok_or_else(|| QueryError::UnknownField {
+            model: model.name,
+            field: dt.field.clone(),
+        })?;
+    Ok(WhereExpr::ExprCompare {
+        lhs: Expr::Function {
+            kind: dt.transform,
+            args: vec![Expr::Column(field.column)],
+        },
+        op: dt.op,
+        rhs: Expr::Literal(dt.value),
     })
 }
 
