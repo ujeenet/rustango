@@ -40,7 +40,7 @@ pub use executor::{
     explain_pool, fetch_aggregate_pool, fetch_dates_pool, fetch_datetimes_pool,
     fetch_paginated_pool, fetch_with_prefetch_filtered, fetch_with_prefetch_pool, get_or_create,
     insert_pool, insert_returning_pool, insert_returning_tx, insert_tx, on_commit,
-    on_commit_pending, raw_execute_pool, raw_query_pool, run_ddl_idempotent,
+    on_commit_pending, raw_execute_pool, raw_execute_tx, raw_query_pool, run_ddl_idempotent,
     select_one_row_as_json, select_one_row_pool, select_rows_as_json, select_rows_pool,
     select_rows_pool_with_related, select_rows_tx_with_related, transaction_pool, update_or_create,
     update_pool, update_tx, CounterPool, ExistsPool, ExplainFormat, ExplainOptions, FetcherPool,
