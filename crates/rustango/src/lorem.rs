@@ -389,6 +389,117 @@ pub fn paragraphs(count: usize, common: bool) -> String {
     out.join("\n\n")
 }
 
+#[cfg(feature = "template_views")]
+mod tera_fn {
+    use super::{paragraphs, words};
+    use std::collections::HashMap;
+    use tera::{to_value, Tera, Value};
+
+    /// Register Django's `{% lorem %}` template tag as a Tera function.
+    /// Tera supports zero-arg + kwarg calls but not Django's positional
+    /// `{% lorem 5 w %}` syntax — call shape becomes
+    /// `{{ lorem(count=N, method="w" | "p" | "b") }}`.
+    ///
+    /// * `count` (default 1) — number of words / sentences / paragraphs.
+    /// * `method` (default `"b"`) — `"w"` words, `"p"` HTML-paragraph-
+    ///   wrapped, `"b"` blank-line-separated raw paragraphs.
+    /// * `common` (default `true`) — start with the canonical opener
+    ///   "Lorem ipsum dolor sit amet…" so readers immediately recognize
+    ///   placeholder text. Set `common=false` for fully random output.
+    ///
+    /// ```jinja
+    /// {{ lorem(count=3, method="p") | safe }}
+    /// {{ lorem(count=20, method="w") }}
+    /// ```
+    pub fn register_functions(tera: &mut Tera) {
+        tera.register_function("lorem", lorem);
+    }
+
+    fn lorem(args: &HashMap<String, Value>) -> tera::Result<Value> {
+        let count = args
+            .get("count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1)
+            .min(10_000) as usize;
+        let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("b");
+        let common = args.get("common").and_then(|v| v.as_bool()).unwrap_or(true);
+        let out = match method {
+            "w" => words(count, common),
+            "p" => {
+                let raw = paragraphs(count, common);
+                raw.split("\n\n")
+                    .map(|p| format!("<p>{p}</p>"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            _ => paragraphs(count, common),
+        };
+        Ok(to_value(out)?)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use serde_json::json;
+
+        #[test]
+        fn lorem_words_method_returns_n_words() {
+            let mut args = HashMap::new();
+            args.insert("count".into(), json!(5));
+            args.insert("method".into(), json!("w"));
+            let out = lorem(&args).unwrap();
+            let s = out.as_str().unwrap();
+            assert_eq!(s.split_whitespace().count(), 5);
+        }
+
+        #[test]
+        fn lorem_paragraph_method_wraps_in_p_tags() {
+            let mut args = HashMap::new();
+            args.insert("count".into(), json!(2));
+            args.insert("method".into(), json!("p"));
+            let out = lorem(&args).unwrap();
+            let s = out.as_str().unwrap();
+            assert!(s.starts_with("<p>"), "got: {}", s);
+            assert!(s.contains("</p>\n<p>"), "got: {}", s);
+        }
+
+        #[test]
+        fn lorem_blank_method_emits_double_newlines() {
+            let mut args = HashMap::new();
+            args.insert("count".into(), json!(2));
+            // "b" is the default.
+            let out = lorem(&args).unwrap();
+            let s = out.as_str().unwrap();
+            assert!(s.contains("\n\n"), "got: {}", s);
+            assert!(!s.contains("<p>"), "raw method should not wrap");
+        }
+
+        #[test]
+        fn lorem_common_false_skips_canonical_opener() {
+            let mut args = HashMap::new();
+            args.insert("count".into(), json!(1));
+            args.insert("method".into(), json!("p"));
+            args.insert("common".into(), json!(false));
+            let out = lorem(&args).unwrap();
+            // Random output — almost never matches the canonical opener.
+            assert!(out.as_str().unwrap().starts_with("<p>"));
+        }
+
+        #[test]
+        fn register_functions_wires_lorem_through_tera() {
+            let mut tera = Tera::default();
+            register_functions(&mut tera);
+            tera.add_raw_template("t", r#"{{ lorem(count=3, method="w") }}"#)
+                .unwrap();
+            let out = tera.render("t", &tera::Context::new()).unwrap();
+            assert_eq!(out.split_whitespace().count(), 3);
+        }
+    }
+}
+
+#[cfg(feature = "template_views")]
+pub use tera_fn::register_functions;
+
 #[cfg(test)]
 mod tests {
     use super::*;
