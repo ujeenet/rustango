@@ -628,6 +628,43 @@ impl SelectQuery {
             ..Self::new(model)
         }
     }
+
+    /// Multi-PK `IN (...)` lookup. Companion to [`by_pk`] for the
+    /// bulk-fetch / bulk-delete-by-id shapes that recur in
+    /// `template_views::run_delete_selected_pool`, FK display fetches,
+    /// and "fetch rows for these N pks" routines.
+    ///
+    /// Equivalent to:
+    ///
+    /// ```ignore
+    /// SelectQuery {
+    ///     where_clause: WhereExpr::Predicate(Filter {
+    ///         column: pk_column,
+    ///         op: Op::In,
+    ///         value: SqlValue::List(pk_values),
+    ///     }),
+    ///     ..SelectQuery::new(model)
+    /// }
+    /// ```
+    ///
+    /// No `LIMIT` defaulted — caller can layer one on via struct-update
+    /// syntax if needed (`SelectQuery { limit: Some(50),
+    /// ..SelectQuery::by_pk_in(...) }`).
+    #[must_use]
+    pub fn by_pk_in(
+        model: &'static ModelSchema,
+        pk_column: &'static str,
+        pk_values: Vec<SqlValue>,
+    ) -> Self {
+        Self {
+            where_clause: WhereExpr::Predicate(Filter {
+                column: pk_column,
+                op: Op::In,
+                value: SqlValue::List(pk_values),
+            }),
+            ..Self::new(model)
+        }
+    }
 }
 
 /// Distinct mode — Django's `.distinct()` / `.distinct(*fields)`.
@@ -1197,6 +1234,42 @@ impl UpdateQuery {
 pub struct DeleteQuery {
     pub model: &'static ModelSchema,
     pub where_clause: WhereExpr,
+}
+
+impl DeleteQuery {
+    /// Construct a `DELETE … WHERE <pk_column> = <pk_value>` shape.
+    /// Companion to [`SelectQuery::by_pk`] for the bulk- and
+    /// single-PK-delete patterns. #562 / #810.
+    #[must_use]
+    pub fn by_pk(model: &'static ModelSchema, pk_column: &'static str, pk_value: SqlValue) -> Self {
+        Self {
+            model,
+            where_clause: WhereExpr::Predicate(Filter {
+                column: pk_column,
+                op: Op::Eq,
+                value: pk_value,
+            }),
+        }
+    }
+
+    /// Construct a `DELETE … WHERE <pk_column> IN (...)` shape — the
+    /// "delete-selected" admin / API pattern. Companion to
+    /// [`SelectQuery::by_pk_in`]. #810.
+    #[must_use]
+    pub fn by_pk_in(
+        model: &'static ModelSchema,
+        pk_column: &'static str,
+        pk_values: Vec<SqlValue>,
+    ) -> Self {
+        Self {
+            model,
+            where_clause: WhereExpr::Predicate(Filter {
+                column: pk_column,
+                op: Op::In,
+                value: SqlValue::List(pk_values),
+            }),
+        }
+    }
 }
 
 /// Compiled `SELECT COUNT(*)` — same shape as a `DeleteQuery` (model +
