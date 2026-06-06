@@ -2260,6 +2260,49 @@ pub fn is_jwt_shape(s: &str) -> bool {
     validate_jwt_shape(s).is_ok()
 }
 
+/// `true` when `s` would pass [`validate_country_code`] (ISO 3166-1
+/// alpha-2). Boolean form for filter chains; the `Result` form
+/// remains the right call when the message matters.
+#[must_use]
+pub fn is_country_code(s: &str) -> bool {
+    validate_country_code(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_currency_code`] (ISO 4217
+/// alpha-3). Boolean form for filter chains.
+#[must_use]
+pub fn is_currency_code(s: &str) -> bool {
+    validate_currency_code(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_language_tag`] (BCP 47
+/// language tag). Boolean form for filter chains.
+#[must_use]
+pub fn is_language_tag(s: &str) -> bool {
+    validate_language_tag(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_postal_code_us`]
+/// (5-digit or 9-digit ZIP). Boolean form for filter chains.
+#[must_use]
+pub fn is_postal_code_us(s: &str) -> bool {
+    validate_postal_code_us(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_postal_code_ca`]
+/// (`A1A 1A1` / `A1A1A1`). Boolean form for filter chains.
+#[must_use]
+pub fn is_postal_code_ca(s: &str) -> bool {
+    validate_postal_code_ca(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_postal_code_uk`]
+/// (UK postcode shape). Boolean form for filter chains.
+#[must_use]
+pub fn is_postal_code_uk(s: &str) -> bool {
+    validate_postal_code_uk(s).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4021,6 +4064,54 @@ mod tests {
         // Three dot-separated base64url segments.
         assert!(is_jwt_shape("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig"));
         assert!(!is_jwt_shape("not.a.jwt.shape.four.dots"));
+    }
+
+    #[test]
+    fn is_country_code_companion() {
+        assert!(is_country_code("US"));
+        assert!(is_country_code("DE"));
+        assert!(!is_country_code("USA"));
+        assert!(!is_country_code("us"));
+    }
+
+    #[test]
+    fn is_currency_code_companion() {
+        assert!(is_currency_code("USD"));
+        assert!(is_currency_code("EUR"));
+        assert!(!is_currency_code("US"));
+        assert!(!is_currency_code("usd"));
+    }
+
+    #[test]
+    fn is_language_tag_companion() {
+        assert!(is_language_tag("en"));
+        assert!(is_language_tag("en-US"));
+        assert!(is_language_tag("zh-Hant-TW"));
+        assert!(!is_language_tag(""));
+        assert!(!is_language_tag("not a tag"));
+    }
+
+    #[test]
+    fn is_postal_code_us_companion() {
+        assert!(is_postal_code_us("90210"));
+        assert!(is_postal_code_us("90210-1234"));
+        assert!(!is_postal_code_us("9021"));
+        assert!(!is_postal_code_us("ABCDE"));
+    }
+
+    #[test]
+    fn is_postal_code_ca_companion() {
+        assert!(is_postal_code_ca("K1A 0B1"));
+        // CA validator enforces the mandatory single space — no-space
+        // form rejects.
+        assert!(!is_postal_code_ca("K1A0B1"));
+        assert!(!is_postal_code_ca("90210"));
+    }
+
+    #[test]
+    fn is_postal_code_uk_companion() {
+        assert!(is_postal_code_uk("SW1A 1AA"));
+        assert!(!is_postal_code_uk("90210"));
     }
 
     // -------- validate_email_with_name (gated on `email` feature) --------
