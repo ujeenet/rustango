@@ -3263,6 +3263,31 @@ fn inherent_impl_tokens(
                 }
             }
 
+            /// Fetch every row of this model from `pool`. Eloquent
+            /// `Model::all()` parity — a thin wrapper over
+            /// `QuerySet::<Self>::default().fetch_pool(pool)`.
+            ///
+            /// **Use with care on large tables** — there's no
+            /// pagination or limit; the entire table is materialized
+            /// into memory. For anything beyond fixture / lookup
+            /// tables, page through `QuerySet::<Self>::default()
+            /// .order_by(...).limit(N).offset(M).fetch_pool(pool)`
+            /// or stream via `.iterator(chunk_size)`.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn all_pool(
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<::std::vec::Vec<Self>, ::rustango::sql::ExecError>
+            {
+                use ::rustango::sql::FetcherPool as _;
+                ::rustango::query::QuerySet::<Self>::default()
+                    .fetch_pool(pool)
+                    .await
+            }
+
             /// Look up the row whose primary key equals `pk`. Returns
             /// `Ok(None)` when no row matches; this is the
             /// non-throwing counterpart of Django's `.get(pk=…)`
