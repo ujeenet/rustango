@@ -357,6 +357,17 @@ pub enum ScalarFn {
     /// (returns timestamp). MySQL / SQLite: `DATE(x)` / `date(x)` (date).
     TruncDay,
 
+    // --- JSON helpers (issue #826) ---
+    /// `JSON_ARRAY_LENGTH(x)` — number of elements in a JSON array.
+    /// Eloquent `whereJsonLength` / Django `JSONField` length lookup.
+    /// PG: `jsonb_array_length(x)` (errors on non-array). MySQL:
+    /// `JSON_LENGTH(x)` (returns 1 for non-array / non-object; for
+    /// arrays returns the element count, matching the others). SQLite:
+    /// `json_array_length(x)` (returns 0 on non-array). Arity 1. Pair
+    /// with the comparison ops to filter arrays by length:
+    /// `WHERE JSON_ARRAY_LENGTH(opts -> 'tags') > 0`. Issue #826.
+    JsonArrayLength,
+
     // --- pg_trgm (issue #29 follow-up) ---
     /// `SIMILARITY(a, b)` — pg_trgm whole-string trigram similarity,
     /// returns a `real` in `[0, 1]`. Useful as an annotation +
