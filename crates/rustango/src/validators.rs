@@ -229,12 +229,20 @@ pub fn is_email(s: &str) -> bool {
 /// `ValidationError { code: "invalid_email", ... }` if the email
 /// portion (after stripping the optional display name) doesn't
 /// pass [`validate_email`].
+///
+/// Gated on the `email` feature since the implementation routes
+/// through `crate::email::parseaddr`. Operators on a non-`email`
+/// build can still parse + validate manually by hand-rolling
+/// the `Name <addr>` split themselves and passing the address
+/// through [`validate_email`].
+#[cfg(feature = "email")]
 pub fn validate_email_with_name(s: &str) -> Result<(), ValidationError> {
     let (_name, address) = crate::email::parseaddr(s);
     validate_email(&address)
 }
 
 /// `true` when `s` would pass [`validate_email_with_name`].
+#[cfg(feature = "email")]
 #[must_use]
 pub fn is_email_with_name(s: &str) -> bool {
     validate_email_with_name(s).is_ok()
@@ -3942,19 +3950,22 @@ mod tests {
         assert!(!is_jwt_shape("not.a.jwt.shape.four.dots"));
     }
 
-    // -------- validate_email_with_name --------
+    // -------- validate_email_with_name (gated on `email` feature) --------
 
+    #[cfg(feature = "email")]
     #[test]
     fn email_with_name_accepts_bare_email() {
         assert!(validate_email_with_name("alice@example.com").is_ok());
     }
 
+    #[cfg(feature = "email")]
     #[test]
     fn email_with_name_accepts_display_name_form() {
         assert!(validate_email_with_name("Alice <alice@example.com>").is_ok());
         assert!(validate_email_with_name("\"Alice C.\" <alice@example.com>").is_ok());
     }
 
+    #[cfg(feature = "email")]
     #[test]
     fn email_with_name_rejects_invalid_email_portion() {
         assert!(validate_email_with_name("not an email").is_err());
@@ -3962,6 +3973,7 @@ mod tests {
         assert!(validate_email_with_name("").is_err());
     }
 
+    #[cfg(feature = "email")]
     #[test]
     fn is_email_with_name_companion() {
         assert!(is_email_with_name("alice@example.com"));
