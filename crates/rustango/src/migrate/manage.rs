@@ -126,6 +126,12 @@ pub async fn run_with_writer<W: Write + Send>(
         "flush" => flush_cmd(pool, &args[1..], writer).await,
         // #822 — bulk pruning of stale rows from `Prunable` models.
         "prune" => prune_cmd(pool, &args[1..], writer).await,
+        // Django `manage clearsessions` parity — purges expired
+        // entries from a DatabaseCache-backed table. Works for any
+        // table written by `cache::DatabaseCache`, including the
+        // sessions-backend table.
+        #[cfg(feature = "cache")]
+        "clear-cache" | "clearsessions" => clear_cache_cmd(pool, &args[1..], writer).await,
         "sendtestemail" => sendtestemail_cmd(&args[1..], writer).await,
         // v0.38 — `inspectdb` is tri-dialect: PG + MySQL via
         // `information_schema`, SQLite via `PRAGMA table_info` +
@@ -276,6 +282,16 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         "      --pretend counts matches without deleting; --model / --except"
     )?;
     writeln!(w, "      narrow the scope (repeatable).\n")?;
+    writeln!(w, "  clear-cache [--table <name>]")?;
+    writeln!(w, "      (alias: clearsessions)")?;
+    writeln!(
+        w,
+        "      Purge expired rows from a DatabaseCache-backed table."
+    )?;
+    writeln!(
+        w,
+        "      Default table: rustango_cache. Django parity for clearsessions.\n"
+    )?;
     writeln!(
         w,
         "  sendtestemail --to <addr> [--from <addr>] [--subject <text>]"
@@ -3455,6 +3471,87 @@ async fn prune_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
             }
         }
     }
+    Ok(())
+}
+
+// =====================================================================
+// `manage clear-cache` / `clearsessions` — DatabaseCache GC.
+// Django parity for `manage clearsessions` (when the session backend
+// is the DB cache) + the broader `manage clearcache` flow.
+// =====================================================================
+
+#[cfg(feature = "cache")]
+#[derive(Debug, Default, PartialEq)]
+struct ClearCacheArgs {
+    /// `--table <name>` — cache table to GC. Defaults to
+    /// `rustango_cache`, matching `DatabaseCache::default_table_name`.
+    table: Option<String>,
+    help: bool,
+}
+
+#[cfg(feature = "cache")]
+fn parse_clear_cache_args(args: &[String]) -> Result<ClearCacheArgs, MigrateError> {
+    let mut out = ClearCacheArgs::default();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                out.help = true;
+                return Ok(out);
+            }
+            "--table" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| MigrateError::Validation("--table expects a value".into()))?;
+                out.table = Some(v.clone());
+            }
+            other if other.starts_with('-') => {
+                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+            }
+            other => {
+                return Err(MigrateError::Validation(format!(
+                    "unexpected positional argument: {other}"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `manage clear-cache [--table <name>]` (alias `clearsessions`) —
+/// delete every expired row from a [`crate::cache::DatabaseCache`]
+/// table. Pairs with the implicit lazy GC on `get` / `exists` to
+/// reclaim space from keys nobody reads anymore.
+///
+/// Django parity: `manage clearsessions` (when sessions are backed
+/// by the DB cache) + the broader `manage clearcache` flow.
+///
+/// Defaults the table to `rustango_cache`; pass `--table <name>` for
+/// non-default DatabaseCache tables (`rustango_sessions`, app-
+/// specific caches, etc.). Returns the number of rows deleted.
+#[cfg(feature = "cache")]
+async fn clear_cache_cmd<W: Write>(
+    pool: &Pool,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    let parsed = parse_clear_cache_args(args)?;
+    if parsed.help {
+        writeln!(w, "clear-cache [--table <name>]")?;
+        writeln!(w, "  (alias: clearsessions)")?;
+        writeln!(w)?;
+        writeln!(w, "  Delete every expired row from a DatabaseCache table.")?;
+        writeln!(w, "  Default table: rustango_cache. Use --table for the")?;
+        writeln!(w, "  session-backend table or any app-specific cache.")?;
+        return Ok(());
+    }
+    let table = parsed.table.unwrap_or_else(|| "rustango_cache".to_owned());
+    let cache = crate::cache::DatabaseCache::new(pool.clone(), &table);
+    let rows = cache
+        .purge_expired()
+        .await
+        .map_err(|e| MigrateError::Validation(format!("clear-cache: {e}")))?;
+    writeln!(w, "clear-cache: purged {rows} expired row(s) from {table}")?;
     Ok(())
 }
 
