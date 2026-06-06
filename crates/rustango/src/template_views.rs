@@ -214,6 +214,70 @@ pub struct ListView {
     context_object_name: String,
 }
 
+/// `cbv_setters!(name1, name2, …)` — declarative emitter for the
+/// byte-identical builder setters duplicated across every CBV impl
+/// block. Issue #807 (second half).
+///
+/// Each name expands to one `pub fn` with `#[must_use]`, the same
+/// signature, body, and inline doc that the hand-written copies had.
+/// Supported names:
+///
+/// * `template` — Tera template-name override.
+/// * `fields` — column allowlist for context-projection.
+/// * `success_url` — post-POST redirect target.
+/// * `context_object_name` — Tera context alias for the rendered
+///   object / object list.
+///
+/// Unknown names fail at macro-expand time with a clear span. Add a
+/// new arm when a setter genuinely belongs to ≥2 CBV impls and is
+/// behaviourally byte-identical across them — over-fitting individual
+/// setters into the macro is worse than the duplication it replaces.
+macro_rules! cbv_setters {
+    ($($name:ident),+ $(,)?) => {
+        $( cbv_setters!(@one $name); )+
+    };
+
+    (@one template) => {
+        /// Override the Tera template name. Default is the CBV's
+        /// auto-derived template path (`<app>/<model>_<view>.html`).
+        #[must_use]
+        pub fn template(mut self, name: impl Into<String>) -> Self {
+            self.template = name.into();
+            self
+        }
+    };
+
+    (@one fields) => {
+        /// Restrict the columns rendered into the Tera context.
+        /// Default (`None`) renders every scalar field.
+        #[must_use]
+        pub fn fields(mut self, names: &[&str]) -> Self {
+            self.fields = Some(names.iter().map(|s| (*s).to_owned()).collect());
+            self
+        }
+    };
+
+    (@one success_url) => {
+        /// URL the browser is redirected to after a successful POST.
+        /// Default `/`. Typical: the list view's URL (`/posts`).
+        #[must_use]
+        pub fn success_url(mut self, url: impl Into<String>) -> Self {
+            self.success_url = url.into();
+            self
+        }
+    };
+
+    (@one context_object_name) => {
+        /// Alias name for the rendered object / object list in the
+        /// Tera context. Default is the model name's lowercase.
+        #[must_use]
+        pub fn context_object_name(mut self, name: impl Into<String>) -> Self {
+            self.context_object_name = name.into();
+            self
+        }
+    };
+}
+
 impl ListView {
     /// Start a `ListView` for the given schema. Defaults: template
     /// name `<table>_list.html`, page size 20, max page size 100,
@@ -240,29 +304,10 @@ impl ListView {
         }
     }
 
-    /// Django-shape `context_object_name` — bind the row list
-    /// under a custom Tera variable in addition to the default
-    /// `object_list`. Issue #379. Empty string (the default)
-    /// leaves only `object_list`.
-    ///
-    /// ```ignore
-    /// ListView::for_model(Post::SCHEMA)
-    ///     .context_object_name("posts")
-    /// // template can now read `{% for post in posts %}` AND
-    /// // `{% for post in object_list %}` — both work.
-    /// ```
-    #[must_use]
-    pub fn context_object_name(mut self, name: impl Into<String>) -> Self {
-        self.context_object_name = name.into();
-        self
-    }
-
-    /// Override the Tera template name.
-    #[must_use]
-    pub fn template(mut self, name: impl Into<String>) -> Self {
-        self.template = name.into();
-        self
-    }
+    // #807 — `template`, `context_object_name`, `fields` are
+    // byte-identical setters across the CBV impls; emitted via
+    // `cbv_setters!`.
+    cbv_setters!(template, context_object_name, fields);
 
     /// Default page size — clamped to `≥ 1`. Default 20. Users can
     /// override per-request via `?page_size=N`, clamped to
@@ -349,13 +394,7 @@ impl ListView {
         self
     }
 
-    /// Restrict the columns rendered into the Tera context. Default
-    /// (`None`) renders every scalar field.
-    #[must_use]
-    pub fn fields(mut self, names: &[&str]) -> Self {
-        self.fields = Some(names.iter().map(|s| (*s).to_owned()).collect());
-        self
-    }
+    // `fields` is emitted via `cbv_setters!` at the top of this impl.
 
     /// Enable bulk actions (Django-admin shape). Mounts a `POST
     /// <prefix>` route alongside the existing `GET`. The list
@@ -867,33 +906,8 @@ impl DetailView {
         }
     }
 
-    #[must_use]
-    pub fn template(mut self, name: impl Into<String>) -> Self {
-        self.template = name.into();
-        self
-    }
-
-    #[must_use]
-    pub fn fields(mut self, names: &[&str]) -> Self {
-        self.fields = Some(names.iter().map(|s| (*s).to_owned()).collect());
-        self
-    }
-
-    /// Django-shape `context_object_name` — bind the row under a
-    /// custom Tera variable in addition to the default `object`.
-    /// Issue #379. Empty string (the default) leaves only the
-    /// `object` binding.
-    ///
-    /// ```ignore
-    /// // /posts/{pk} → template reads `{{ post.title }}`
-    /// DetailView::for_model(Post::SCHEMA)
-    ///     .context_object_name("post")
-    /// ```
-    #[must_use]
-    pub fn context_object_name(mut self, name: impl Into<String>) -> Self {
-        self.context_object_name = name.into();
-        self
-    }
+    // #807 — byte-identical setters emitted via `cbv_setters!`.
+    cbv_setters!(template, fields, context_object_name);
 
     /// Django-shape `slug_field` — look up the row by a non-PK
     /// column. The captured URL segment matches against the named
@@ -1039,25 +1053,8 @@ impl DeleteView {
         }
     }
 
-    #[must_use]
-    pub fn template(mut self, name: impl Into<String>) -> Self {
-        self.template = name.into();
-        self
-    }
-
-    /// Where the browser is redirected after a successful POST.
-    /// Default `/`. Typical: the list view's URL (`/posts`).
-    #[must_use]
-    pub fn success_url(mut self, url: impl Into<String>) -> Self {
-        self.success_url = url.into();
-        self
-    }
-
-    #[must_use]
-    pub fn fields(mut self, names: &[&str]) -> Self {
-        self.fields = Some(names.iter().map(|s| (*s).to_owned()).collect());
-        self
-    }
+    // #807 — byte-identical setters emitted via `cbv_setters!`.
+    cbv_setters!(template, success_url, fields);
 
     /// Mount as `GET`/`POST <prefix>/{pk}/delete`.
     #[must_use]
@@ -1201,27 +1198,8 @@ impl CreateView {
         }
     }
 
-    #[must_use]
-    pub fn template(mut self, name: impl Into<String>) -> Self {
-        self.template = name.into();
-        self
-    }
-
-    /// Where the browser is redirected after a successful POST.
-    /// Default `/`. Typical: the list view's URL.
-    #[must_use]
-    pub fn success_url(mut self, url: impl Into<String>) -> Self {
-        self.success_url = url.into();
-        self
-    }
-
-    /// Restrict which fields appear in the form. Default — every
-    /// non-PK, non-`Auto<T>`, non-generated scalar.
-    #[must_use]
-    pub fn fields(mut self, names: &[&str]) -> Self {
-        self.fields = Some(names.iter().map(|s| (*s).to_owned()).collect());
-        self
-    }
+    // #807 — byte-identical setters emitted via `cbv_setters!`.
+    cbv_setters!(template, success_url, fields);
 
     /// Install a closure-based validator that runs after schema-level
     /// type coercion + bounds checks but before the SQL INSERT.
@@ -1364,23 +1342,8 @@ impl UpdateView {
         }
     }
 
-    #[must_use]
-    pub fn template(mut self, name: impl Into<String>) -> Self {
-        self.template = name.into();
-        self
-    }
-
-    #[must_use]
-    pub fn success_url(mut self, url: impl Into<String>) -> Self {
-        self.success_url = url.into();
-        self
-    }
-
-    #[must_use]
-    pub fn fields(mut self, names: &[&str]) -> Self {
-        self.fields = Some(names.iter().map(|s| (*s).to_owned()).collect());
-        self
-    }
+    // #807 — byte-identical setters emitted via `cbv_setters!`.
+    cbv_setters!(template, success_url, fields);
 
     /// Install a closure-based validator. Same shape and semantics
     /// as [`CreateView::validator`].
@@ -3263,20 +3226,9 @@ where
         }
     }
 
-    /// Override the template used to render the form (GET) and the
-    /// validation-failure re-render (POST).
-    #[must_use]
-    pub fn template(mut self, name: impl Into<String>) -> Self {
-        self.template = name.into();
-        self
-    }
-
-    /// Where to 303-redirect after a successful POST. Defaults to `/`.
-    #[must_use]
-    pub fn success_url(mut self, url: impl Into<String>) -> Self {
-        self.success_url = url.into();
-        self
-    }
+    // #807 — `template` + `success_url` are byte-identical setters
+    // across the CBV impls; emitted via `cbv_setters!`.
+    cbv_setters!(template, success_url);
 
     /// Mount the view on `prefix`. GET renders the empty form; POST
     /// parses + validates + (on success) redirects.
