@@ -1098,23 +1098,8 @@ async fn handle_delete_confirm(
             state.vs.schema.table
         ));
     };
-    let select_q = SelectQuery {
-        model: state.vs.schema,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::Eq,
-            value: coerce_pk(pk_field, &pk),
-        }),
-        search: None,
-        joins: vec![],
-        order_by: vec![],
-        limit: Some(1),
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
-    };
+    // #562 — by_pk constructor for the single-PK-lookup shape.
+    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk));
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
@@ -2776,8 +2761,9 @@ fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
     // SQL writer project against the IN clause.
     let target = lookup_target_schema(fk.target_table)
         .expect("target table existed when collecting lookups");
+    // #562 — IN-list lookup, not a single-PK by_pk. Use SelectQuery::new
+    // + struct-update syntax to override just the where_clause.
     SelectQuery {
-        model: target,
         where_clause: WhereExpr::Predicate(Filter {
             column: fk.target_pk_column,
             op: Op::In,
@@ -2788,15 +2774,7 @@ fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
                     .collect(),
             ),
         }),
-        search: None,
-        joins: vec![],
-        order_by: vec![],
-        limit: None,
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
+        ..SelectQuery::new(target)
     }
 }
 
@@ -2949,22 +2927,14 @@ async fn fetch_pks_as_objects_pool(
     pks: &[SqlValue],
 ) -> Result<Vec<Value>, String> {
     use crate::core::{Filter, Op};
+    // #562 — IN-list lookup; struct-update over SelectQuery::new.
     let q = SelectQuery {
-        model: schema,
         where_clause: WhereExpr::Predicate(Filter {
             column: pk_field.column,
             op: Op::In,
             value: SqlValue::List(pks.to_vec()),
         }),
-        search: None,
-        joins: vec![],
-        order_by: vec![],
-        limit: None,
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
+        ..SelectQuery::new(schema)
     };
     let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
     let rows = select_rows_as_json(pool, &q, &fields)
@@ -3636,23 +3606,8 @@ mod tenant {
                 Ok(f) => f,
                 Err(e) => return template_error(&e),
             };
-        let select_q = SelectQuery {
-            model: state.vs.schema,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: lookup.column,
-                op: Op::Eq,
-                value: coerce_pk(lookup, &pk),
-            }),
-            search: None,
-            joins: vec![],
-            order_by: vec![],
-            limit: Some(1),
-            offset: None,
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
-        };
+        // #562 — by_pk constructor for single-PK-lookup shape.
+        let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, coerce_pk(lookup, &pk));
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
             Ok(Some(r)) => r,
@@ -3688,23 +3643,9 @@ mod tenant {
                 state.vs.schema.table
             ));
         };
-        let select_q = SelectQuery {
-            model: state.vs.schema,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::Eq,
-                value: coerce_pk(pk_field, &pk),
-            }),
-            search: None,
-            joins: vec![],
-            order_by: vec![],
-            limit: Some(1),
-            offset: None,
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
-        };
+        // #562 — by_pk constructor for single-PK-lookup shape.
+        let select_q =
+            SelectQuery::by_pk(state.vs.schema, pk_field.column, coerce_pk(pk_field, &pk));
         let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
         let object = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &fields).await {
             Ok(Some(r)) => r,
@@ -3838,23 +3779,8 @@ mod tenant {
                 state.schema.table
             ));
         };
-        let select_q = SelectQuery {
-            model: state.schema,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::Eq,
-                value: coerce_pk(pk_field, &pk),
-            }),
-            search: None,
-            joins: vec![],
-            order_by: vec![],
-            limit: Some(1),
-            offset: None,
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
-        };
+        // #562 — by_pk constructor for single-PK-lookup shape.
+        let select_q = SelectQuery::by_pk(state.schema, pk_field.column, coerce_pk(pk_field, &pk));
         let scalars: Vec<&'static crate::core::FieldSchema> =
             state.schema.scalar_fields().collect();
         let row_json = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &scalars).await

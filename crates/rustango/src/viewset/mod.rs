@@ -1147,23 +1147,9 @@ async fn handle_retrieve(
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
     };
 
-    let select_q = SelectQuery {
-        model: state.vs.schema,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::Eq,
-            value: pk_val,
-        }),
-        search: None,
-        joins: vec![],
-        order_by: vec![],
-        limit: Some(1),
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
-    };
+    // #562 — was 11-field struct literal; SelectQuery::by_pk constructs
+    // the single-PK-lookup shape directly.
+    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
 
     let fields = state.effective_fields();
     match acq.select_one_as_json(&select_q, &fields).await {
@@ -1479,23 +1465,8 @@ async fn fetch_by_pk(
     pk_val: SqlValue,
     fields: &[&'static crate::core::FieldSchema],
 ) -> Option<Value> {
-    let select_q = SelectQuery {
-        model: state.vs.schema,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::Eq,
-            value: pk_val,
-        }),
-        search: None,
-        joins: vec![],
-        order_by: vec![],
-        limit: Some(1),
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
-    };
+    // #562 — SelectQuery::by_pk replaces the 11-field literal.
+    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
     let _ = state;
     acq.select_one_as_json(&select_q, fields)
         .await
