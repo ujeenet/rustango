@@ -236,6 +236,31 @@ fn in_with_non_list_value_errors_at_compile() {
 }
 
 #[test]
+fn not_between_emits_not_between_clause() {
+    // Eloquent `whereNotBetween` parity — sibling of `__between`.
+    let bounds = SqlValue::List(vec![10_i64.into(), 100_i64.into()]);
+    let qs = Post::objects().filter("views__not_between", bounds);
+    let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
+    assert!(
+        stmt.sql.contains(r#""views" NOT BETWEEN $1 AND $2"#),
+        "expected NOT BETWEEN, got: {}",
+        stmt.sql
+    );
+}
+
+#[test]
+fn not_range_alias_emits_not_between_clause() {
+    let bounds = SqlValue::List(vec![10_i64.into(), 100_i64.into()]);
+    let qs = Post::objects().filter("views__not_range", bounds);
+    let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
+    assert!(
+        stmt.sql.contains(r#""views" NOT BETWEEN $1 AND $2"#),
+        "got: {}",
+        stmt.sql
+    );
+}
+
+#[test]
 fn not_in_emits_not_in_clause() {
     // Eloquent `whereNotIn` parity — sibling of `__in`.
     let list = SqlValue::List(vec![1_i64.into(), 2_i64.into(), 3_i64.into()]);
