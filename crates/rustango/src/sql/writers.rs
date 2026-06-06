@@ -2908,6 +2908,7 @@ pub(super) fn write_delete(b: &mut Sql<'_>, query: &DeleteQuery) -> Result<(), S
 /// `near "(": syntax error` at the alias parens. The
 /// CTE + correlated-subquery shape below parses everywhere
 /// SQLite has supported CTEs (3.8.3, 2014).
+#[cfg(feature = "sqlite")]
 pub(super) fn write_bulk_update_sqlite(
     b: &mut Sql<'_>,
     query: &BulkUpdateQuery,

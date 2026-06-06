@@ -2733,7 +2733,6 @@ async fn fetch_fk_display_map_pool(
 }
 
 fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
-    use crate::core::{Filter, Op};
     // Synthesize a one-off `&'static ModelSchema` to use as the
     // SelectQuery's model — actually no, we need a real schema
     // because select_rows compiles the query against it. Use the
