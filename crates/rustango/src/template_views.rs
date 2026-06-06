@@ -2757,21 +2757,15 @@ fn build_fk_display_query(fk: &FkLookup) -> SelectQuery {
     // SQL writer project against the IN clause.
     let target = lookup_target_schema(fk.target_table)
         .expect("target table existed when collecting lookups");
-    // #562 — IN-list lookup, not a single-PK by_pk. Use SelectQuery::new
-    // + struct-update syntax to override just the where_clause.
-    SelectQuery {
-        where_clause: WhereExpr::Predicate(Filter {
-            column: fk.target_pk_column,
-            op: Op::In,
-            value: SqlValue::List(
-                fk.distinct_values
-                    .iter()
-                    .map(json_value_to_sql_for_fk_pk)
-                    .collect(),
-            ),
-        }),
-        ..SelectQuery::new(target)
-    }
+    // #810 — IN-list lookup via the `by_pk_in` constructor.
+    SelectQuery::by_pk_in(
+        target,
+        fk.target_pk_column,
+        fk.distinct_values
+            .iter()
+            .map(json_value_to_sql_for_fk_pk)
+            .collect(),
+    )
 }
 
 /// Convert a JSON-shaped value (read out of an object_list row)
@@ -2922,16 +2916,8 @@ async fn fetch_pks_as_objects_pool(
     pool: &Pool,
     pks: &[SqlValue],
 ) -> Result<Vec<Value>, String> {
-    use crate::core::{Filter, Op};
-    // #562 — IN-list lookup; struct-update over SelectQuery::new.
-    let q = SelectQuery {
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::In,
-            value: SqlValue::List(pks.to_vec()),
-        }),
-        ..SelectQuery::new(schema)
-    };
+    // #810 — IN-list lookup via the `by_pk_in` constructor.
+    let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec());
     let fields: Vec<&'static crate::core::FieldSchema> = schema.scalar_fields().collect();
     let rows = select_rows_as_json(pool, &q, &fields)
         .await
@@ -2949,15 +2935,8 @@ async fn run_delete_selected_pool(
     pool: &Pool,
     pks: &[SqlValue],
 ) -> Result<(), String> {
-    use crate::core::{DeleteQuery, Filter, Op};
-    let q = DeleteQuery {
-        model: schema,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::In,
-            value: SqlValue::List(pks.to_vec()),
-        }),
-    };
+    // #810 — `DeleteQuery::by_pk_in` for the DELETE … WHERE pk IN (...) shape.
+    let q = crate::core::DeleteQuery::by_pk_in(schema, pk_field.column, pks.to_vec());
     crate::sql::delete_pool(pool, &q)
         .await
         .map(|_| ())

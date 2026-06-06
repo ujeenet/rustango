@@ -2386,17 +2386,10 @@ pub(crate) async fn action_submit(
     // delete_selected this snapshots the gone rows; for user-defined
     // actions it records the row state at the time of action.
     let action_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    // #562 — IN-list lookup; struct-update over SelectQuery::new.
+    // #810 — IN-list lookup via the `by_pk_in` constructor.
     let before_rows = crate::sql::select_rows_as_json(
         &state.pool,
-        &SelectQuery {
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::In,
-                value: SqlValue::List(pk_values.clone()),
-            }),
-            ..SelectQuery::new(model)
-        },
+        &SelectQuery::by_pk_in(model, pk_field.column, pk_values.clone()),
         &action_fields,
     )
     .await
@@ -2439,16 +2432,10 @@ pub(crate) async fn action_submit(
             )
             .await?;
         } else {
+            // #810 — DeleteQuery::by_pk_in for the bulk-delete shape.
             crate::sql::delete_pool(
                 &state.pool,
-                &DeleteQuery {
-                    model,
-                    where_clause: WhereExpr::Predicate(Filter {
-                        column: pk_field.column,
-                        op: Op::In,
-                        value: SqlValue::List(pk_values),
-                    }),
-                },
+                &DeleteQuery::by_pk_in(model, pk_field.column, pk_values),
             )
             .await?;
         }
