@@ -3263,6 +3263,53 @@ fn inherent_impl_tokens(
                 }
             }
 
+            /// Fetch the first row by primary-key ASC. Returns
+            /// `Ok(None)` when the table is empty. Thin wrapper over
+            /// `QuerySet::<Self>::default().first(pool)`. Eloquent
+            /// `Model::first()` parity.
+            ///
+            /// "First" means "first by primary key" when no
+            /// `.order_by(...)` is set on the queryset — matching
+            /// Django's `QuerySet.first()` fallback behavior. For
+            /// custom ordering, build the queryset explicitly.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn first_pool(
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::core::option::Option<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                ::rustango::query::QuerySet::<Self>::default()
+                    .first(pool)
+                    .await
+            }
+
+            /// Throwing counterpart of [`Self::first_pool`] —
+            /// errors with `RowNotFound` when the table is empty.
+            /// Eloquent `Model::firstOrFail()` parity.
+            ///
+            /// # Errors
+            /// As [`Self::first_pool`]; additionally
+            /// [`sqlx::Error::RowNotFound`] on empty tables.
+            ///
+            /// [`sqlx::Error::RowNotFound`]: rustango::sql::sqlx::Error::RowNotFound
+            pub async fn first_or_fail_pool(
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<Self, ::rustango::sql::ExecError> {
+                match Self::first_pool(pool).await? {
+                    ::core::option::Option::Some(_row) => ::core::result::Result::Ok(_row),
+                    ::core::option::Option::None => ::core::result::Result::Err(
+                        ::rustango::sql::ExecError::Driver(
+                            ::rustango::sql::sqlx::Error::RowNotFound,
+                        ),
+                    ),
+                }
+            }
+
             /// Fetch every row of this model from `pool`. Eloquent
             /// `Model::all()` parity — a thin wrapper over
             /// `QuerySet::<Self>::default().fetch_pool(pool)`.
