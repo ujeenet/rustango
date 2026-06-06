@@ -1208,25 +1208,31 @@ fn reverse_helper_tokens(
     if fk_relations.is_empty() {
         return TokenStream2::new();
     }
-    // Method-name resolution (issue #816):
-    //   1. `default_related_name = "..."` on the child's container
-    //      — Django's `class Meta: default_related_name = "articles"`
-    //      shape. Overrides the default suffix.
-    //   2. Fallback: `<child_snake>_set` — Django's
-    //      `<child>_set` convention. `Post` → `post_set`,
-    //      `BlogComment` → `blog_comment_set`. Avoids English-plural
-    //      edge cases.
+    // Method-name resolution per FK (issue #816 + follow-up):
+    //   1. Field-level `#[rustango(related_name = "...")]` on the FK
+    //      itself — wins over everything else. Django's
+    //      `ForeignKey(related_name="...")`.
+    //   2. Container-level `default_related_name = "..."` on the
+    //      child — Django's `class Meta: default_related_name`.
+    //      Applies to every FK on this model that didn't override.
+    //   3. Fallback: `<child_snake>_set` — Django's `<child>_set`
+    //      convention. `Post` → `post_set`, `BlogComment` →
+    //      `blog_comment_set`. Avoids English-plural edge cases.
     //
     // The PG-on-executor variant keeps the resolved name; the
     // tri-dialect `_pool` variant appends `_pool` to it (matches the
     // framework's convention for the `&Pool` flavor of every helper).
-    let pg_suffix = default_related_name
+    let default_pg_suffix = default_related_name
         .map(str::to_owned)
         .unwrap_or_else(|| format!("{}_set", to_snake_case(&child_ident.to_string())));
-    let pool_suffix = format!("{}_pool", pg_suffix);
-    let pg_method_ident = syn::Ident::new(&pg_suffix, child_ident.span());
-    let pool_method_ident = syn::Ident::new(&pool_suffix, child_ident.span());
     let impls = fk_relations.iter().map(|rel| {
+        let pg_suffix = rel
+            .related_name
+            .clone()
+            .unwrap_or_else(|| default_pg_suffix.clone());
+        let pool_suffix = format!("{}_pool", pg_suffix);
+        let pg_method_ident = syn::Ident::new(&pg_suffix, child_ident.span());
+        let pool_method_ident = syn::Ident::new(&pool_suffix, child_ident.span());
         let parent_ty = &rel.parent_type;
         let fk_col = rel.fk_column.as_str();
         let doc = format!(
@@ -1541,6 +1547,11 @@ struct FkRelation {
     /// assignment and `.as_ref().map(...)` in the FK PK accessor so
     /// the codegen matches the field's declared shape.
     nullable: bool,
+    /// `#[rustango(related_name = "...")]` per-FK reverse-accessor
+    /// override. When set, the reverse helper picks this name instead
+    /// of `default_related_name` / `<child_snake>_set`. Follow-up to
+    /// #816 (issue's "Related" note re: per-FK override).
+    related_name: Option<String>,
 }
 
 fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<CollectedFields> {
@@ -1585,6 +1596,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                 fk_column: info.column.clone(),
                 pk_kind: info.fk_pk_kind,
                 nullable: info.nullable,
+                related_name: info.related_name.clone(),
             });
         }
         if info.soft_delete {
@@ -6296,6 +6308,13 @@ struct FieldAttrs {
     /// clause when this is `Some`; `None` falls back to the database
     /// default (NO ACTION on every backend rustango supports).
     on_delete: Option<String>,
+    /// `#[rustango(related_name = "...")]` — Django-shape per-FK
+    /// reverse-accessor override. When set, the derive emits
+    /// `Parent::<related_name>[_pool]` instead of the container-level
+    /// `default_related_name` or the `<child_snake>_set[_pool]`
+    /// fallback. Only meaningful when `fk` / `o2o` is also set;
+    /// silently ignored on non-FK fields. Follow-up to #816.
+    related_name: Option<String>,
     max_length: Option<u32>,
     min: Option<i64>,
     max: Option<i64>,
@@ -6407,6 +6426,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         o2o: None,
         on: None,
         on_delete: None,
+        related_name: None,
         max_length: None,
         min: None,
         max: None,
@@ -6481,6 +6501,32 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                     }
                 }
                 out.on_delete = Some(normalized);
+                return Ok(());
+            }
+            if meta.path.is_ident("related_name") {
+                let s: LitStr = meta.value()?.parse()?;
+                let raw = s.value();
+                if raw.trim().is_empty() {
+                    return Err(syn::Error::new(
+                        s.span(),
+                        "`related_name` must be a non-empty identifier",
+                    ));
+                }
+                // Validate as a Rust-ident shape — the value becomes
+                // a method name on the parent type. Same rule as
+                // `default_related_name` so the two surfaces match.
+                if !raw
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    || raw.starts_with(char::is_numeric)
+                {
+                    return Err(syn::Error::new(
+                        s.span(),
+                        "`related_name` must be snake_case ASCII (lowercase letters, \
+                         digits, underscores; no leading digit)",
+                    ));
+                }
+                out.related_name = Some(raw);
                 return Ok(());
             }
             if meta.path.is_ident("max_length") {
@@ -6794,6 +6840,11 @@ struct FieldInfo<'a> {
     /// Rust-side and the column is always present in the INSERT
     /// statement (no DB DEFAULT requirement). Issue #823.
     default_uuid_v7: bool,
+    /// `Some` when this FK field carried `#[rustango(related_name =
+    /// "...")]`. Threaded into [`FkRelation::related_name`] and
+    /// consumed by [`reverse_helper_tokens`] to override the default
+    /// `<child_snake>_set` accessor name. Follow-up to #816.
+    related_name: Option<String>,
 }
 
 /// Reject table names that won't survive SQL identifier
@@ -7094,6 +7145,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         soft_delete: attrs.soft_delete,
         generated_as: attrs.generated_as.clone(),
         default_uuid_v7: attrs.default_uuid_v7,
+        related_name: attrs.related_name.clone(),
     })
 }
 
