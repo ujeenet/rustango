@@ -1250,6 +1250,61 @@ pub async fn raw_execute_pool(
     execute_pool(pool, sql, binds).await
 }
 
+/// Execute a parameterized statement inside an open [`PoolTx`].
+/// Bi-dialect counterpart of [`raw_execute_pool`] for callers
+/// composing multiple writes inside a transaction.
+///
+/// Dispatches per-backend bind via the executor's `bind_query*`
+/// helpers, then runs the statement against the transaction's
+/// connection. The `PoolTx` variant must match the underlying
+/// pool's variant (sqlx enforces this at compile time via the
+/// transaction's `<DB>` parameter).
+///
+/// Use this to collapse audit-tx arms that previously had
+/// `sqlx::query(sql).bind(...).execute(&mut *tx).await` repeated
+/// per-backend with byte-identical body. Pair with [`PoolTx::commit`]
+/// at the end of the tx.
+///
+/// # Errors
+/// Driver / SQL failures.
+pub async fn raw_execute_tx(
+    tx: &mut tx::PoolTx<'_>,
+    sql: &str,
+    binds: Vec<SqlValue>,
+) -> Result<u64, ExecError> {
+    // #431 — bump the per-task query counter when an `assert_num_queries`
+    // scope is active. No-op in production (try_with returns Err).
+    crate::test_assertions::query_counter::bump();
+    match tx {
+        #[cfg(feature = "postgres")]
+        tx::PoolTx::Postgres(t) => {
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
+            for v in binds {
+                q = bind_query(q, v);
+            }
+            Ok(q.execute(&mut **t).await?.rows_affected())
+        }
+        #[cfg(feature = "mysql")]
+        tx::PoolTx::Mysql(t) => {
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(sql);
+            for v in binds {
+                q = bind_query_my(q, v);
+            }
+            Ok(q.execute(&mut **t).await?.rows_affected())
+        }
+        #[cfg(feature = "sqlite")]
+        tx::PoolTx::Sqlite(t) => {
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(sql);
+            for v in binds {
+                q = bind_query_sqlite(q, v);
+            }
+            Ok(q.execute(&mut **t).await?.rows_affected())
+        }
+    }
+}
+
 /// Run a `;`-separated DDL script idempotently across every backend.
 /// Each statement is dispatched through [`raw_execute_pool`]; on
 /// MySQL the helper swallows `ER_DUP_KEYNAME` (1061) so that index-
