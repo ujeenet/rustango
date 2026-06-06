@@ -1513,6 +1513,67 @@ pub fn wrap(text: &str, width: usize) -> String {
         .join("\n")
 }
 
+/// Python `textwrap.shorten` parity — collapse all whitespace runs to
+/// single spaces, then truncate to fit within `width` characters,
+/// appending `placeholder` (default `" [...]"` in Python) if any
+/// truncation occurred.
+///
+/// Unlike `truncatechars`, which slices mid-word, this respects word
+/// boundaries: the last kept word is the longest prefix of words whose
+/// total length (with single-space separators) leaves room for the
+/// placeholder. If even the placeholder won't fit in `width`, the
+/// placeholder is still returned (matching Python's behavior on
+/// pathologically-small widths).
+///
+/// Common use: log-line summaries, tweet-length blurbs, dashboard
+/// cells that must not wrap.
+///
+/// ```
+/// use rustango::text::shorten;
+/// assert_eq!(shorten("Hello   world!", 12, " [...]"), "Hello [...]");
+/// assert_eq!(shorten("short text", 80, " [...]"), "short text");
+/// assert_eq!(shorten("one two three four", 11, "..."), "one two...");
+/// ```
+#[must_use]
+pub fn shorten(text: &str, width: usize, placeholder: &str) -> String {
+    let collapsed: String = {
+        let mut out = String::with_capacity(text.len());
+        let mut first = true;
+        for word in text.split_whitespace() {
+            if !first {
+                out.push(' ');
+            }
+            first = false;
+            out.push_str(word);
+        }
+        out
+    };
+    if collapsed.chars().count() <= width {
+        return collapsed;
+    }
+    let placeholder_len = placeholder.chars().count();
+    if width <= placeholder_len {
+        return placeholder.to_owned();
+    }
+    let budget = width - placeholder_len;
+    let mut out = String::with_capacity(width);
+    let mut used = 0usize;
+    for word in collapsed.split(' ') {
+        let word_len = word.chars().count();
+        let sep_len = if out.is_empty() { 0 } else { 1 };
+        if used + sep_len + word_len > budget {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+        used += sep_len + word_len;
+    }
+    out.push_str(placeholder);
+    out
+}
+
 fn wrap_one_line(line: &str, width: usize) -> String {
     let mut out = String::with_capacity(line.len());
     let mut current_len = 0usize;
@@ -3731,6 +3792,44 @@ mod tests {
     #[test]
     fn indent_preserves_trailing_newline() {
         assert_eq!(indent("a\nb\n", "  "), "  a\n  b\n");
+    }
+
+    // -------- shorten --------
+
+    #[test]
+    fn shorten_no_truncation_when_fits() {
+        assert_eq!(shorten("short", 80, " [...]"), "short");
+    }
+
+    #[test]
+    fn shorten_collapses_internal_whitespace() {
+        assert_eq!(shorten("Hello   world", 80, " [...]"), "Hello world");
+        assert_eq!(shorten("a\t\nb  c", 80, " [...]"), "a b c");
+    }
+
+    #[test]
+    fn shorten_respects_word_boundaries() {
+        assert_eq!(
+            shorten("Hello world how are you?", 12, " [...]"),
+            "Hello [...]"
+        );
+        assert_eq!(shorten("one two three four", 11, "..."), "one two...");
+    }
+
+    #[test]
+    fn shorten_returns_placeholder_when_width_too_small() {
+        // Width too small to fit even one word + placeholder → placeholder only.
+        assert_eq!(shorten("Hello world", 3, " [...]"), " [...]");
+    }
+
+    #[test]
+    fn shorten_trims_leading_and_trailing_whitespace() {
+        assert_eq!(shorten("  hello  ", 80, " [...]"), "hello");
+    }
+
+    #[test]
+    fn shorten_empty_input() {
+        assert_eq!(shorten("", 10, " [...]"), "");
     }
 
     // -------- yesno --------
