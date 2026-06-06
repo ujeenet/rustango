@@ -1159,47 +1159,13 @@ pub async fn save_one_with_audit(
     entry: &PendingEntry,
 ) -> Result<u64, crate::sql::ExecError> {
     let stmt = pool.dialect().compile_update(query)?;
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            let mut tx = pg.begin().await?;
-            let mut q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_value_pg(q, v);
-            }
-            let affected = q.execute(&mut *tx).await?.rows_affected();
-            emit_one(&mut *tx, entry).await?;
-            tx.commit().await?;
-            Ok(affected)
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let mut tx = my.begin().await?;
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_value_my(q, v);
-            }
-            let affected = q.execute(&mut *tx).await?.rows_affected();
-            emit_one_my(&mut *tx, entry).await?;
-            tx.commit().await?;
-            Ok(affected)
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            let mut tx = sq.begin().await?;
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_value_sqlite(q, v);
-            }
-            let affected = q.execute(&mut *tx).await?.rows_affected();
-            emit_one_sqlite(&mut *tx, entry).await?;
-            tx.commit().await?;
-            Ok(affected)
-        }
-    }
+    // #561 — same shape as `delete_one_with_audit`; collapses via
+    // raw_execute_tx (#798) + emit_one_tx shim.
+    let mut tx = crate::sql::transaction_pool(pool).await?;
+    let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
+    emit_one_tx(&mut tx, entry).await?;
+    tx.commit().await?;
+    Ok(affected)
 }
 
 /// Run `INSERT` from an `InsertQuery`, capture the auto-assigned PK
