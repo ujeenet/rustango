@@ -555,6 +555,81 @@ pub struct SelectQuery {
     pub distinct: Option<DistinctMode>,
 }
 
+impl SelectQuery {
+    /// Construct an empty `SelectQuery` against `model` — every
+    /// non-required field defaults to its identity value
+    /// (`WhereExpr::And(vec![])` = vacuously true, empty Vecs,
+    /// `None` Options). Callers layer the actual filter / order /
+    /// limit on top via the struct-update shorthand:
+    ///
+    /// ```ignore
+    /// use rustango::core::SelectQuery;
+    ///
+    /// let q = SelectQuery {
+    ///     limit: Some(10),
+    ///     ..SelectQuery::new(MyModel::SCHEMA)
+    /// };
+    /// ```
+    ///
+    /// #562 — the 11-field struct literal recurs verbatim in ~50
+    /// call sites. Every time a new field gets added (`distinct`,
+    /// `compound`, ...), all 50 sites have to be touched. Using
+    /// `SelectQuery::new(...)` + struct-update syntax means new
+    /// fields just slot into the constructor and existing callers
+    /// compile unchanged.
+    #[must_use]
+    pub fn new(model: &'static ModelSchema) -> Self {
+        Self {
+            model,
+            // `And(vec![])` is the writer's vacuously-true shape
+            // (`Or(vec![])` is rejected) — see `WhereExpr` doc.
+            where_clause: WhereExpr::And(Vec::new()),
+            search: None,
+            joins: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            lock_mode: None,
+            compound: Vec::new(),
+            projection: None,
+            distinct: None,
+        }
+    }
+
+    /// Construct a single-PK-lookup `SelectQuery` — the most
+    /// common shape across the framework (`admin/views.rs`,
+    /// `template_views.rs`, `viewset/mod.rs`).
+    ///
+    /// Equivalent to:
+    ///
+    /// ```ignore
+    /// SelectQuery {
+    ///     where_clause: WhereExpr::Predicate(Filter {
+    ///         column: pk_column,
+    ///         op: Op::Eq,
+    ///         value: pk_value,
+    ///     }),
+    ///     limit: Some(1),
+    ///     ..SelectQuery::new(model)
+    /// }
+    /// ```
+    ///
+    /// Use when the WHERE shape is a single `<pk_column> = <value>`
+    /// and you want one row back.
+    #[must_use]
+    pub fn by_pk(model: &'static ModelSchema, pk_column: &'static str, pk_value: SqlValue) -> Self {
+        Self {
+            where_clause: WhereExpr::Predicate(Filter {
+                column: pk_column,
+                op: Op::Eq,
+                value: pk_value,
+            }),
+            limit: Some(1),
+            ..Self::new(model)
+        }
+    }
+}
+
 /// Distinct mode — Django's `.distinct()` / `.distinct(*fields)`.
 /// Issue #264 / T1.2.
 #[derive(Debug, Clone, PartialEq, Eq)]

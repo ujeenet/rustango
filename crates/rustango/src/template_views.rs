@@ -948,23 +948,9 @@ async fn handle_detail(
         Ok(f) => f,
         Err(e) => return template_error(&e),
     };
-    let select_q = SelectQuery {
-        model: state.vs.schema,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: lookup.column,
-            op: Op::Eq,
-            value: coerce_pk(lookup, &pk),
-        }),
-        search: None,
-        joins: vec![],
-        order_by: vec![],
-        limit: Some(1),
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
-    };
+    // #562 — use the `SelectQuery::by_pk` constructor instead of
+    // spelling out the 11-field literal.
+    let select_q = SelectQuery::by_pk(state.vs.schema, lookup.column, coerce_pk(lookup, &pk));
     let fields = resolved_fields(state.vs.schema, state.vs.fields.as_deref());
     let object = match select_one_row_as_json(&state.pool, &select_q, &fields).await {
         Ok(Some(r)) => r,
@@ -1949,23 +1935,9 @@ async fn handle_update_get(
             state.schema.table
         ));
     };
-    let select_q = SelectQuery {
-        model: state.schema,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::Eq,
-            value: coerce_pk(pk_field, &pk),
-        }),
-        search: None,
-        joins: vec![],
-        order_by: vec![],
-        limit: Some(1),
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
-    };
+    // #562 — `SelectQuery::by_pk` replaces the 11-field struct
+    // literal.
+    let select_q = SelectQuery::by_pk(state.schema, pk_field.column, coerce_pk(pk_field, &pk));
     let scalars: Vec<&'static crate::core::FieldSchema> = state.schema.scalar_fields().collect();
     let row_json = match select_one_row_as_json(&state.pool, &select_q, &scalars).await {
         Ok(Some(r)) => r,
