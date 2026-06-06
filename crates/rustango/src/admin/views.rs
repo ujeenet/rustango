@@ -409,20 +409,18 @@ pub(crate) async fn table_view(
         page_size
     };
     let scalar_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    // #562 — struct-update over SelectQuery::new for the
+    // admin list view's paginated SELECT.
     let mut rows = crate::sql::select_rows_as_json(
         &state.pool,
         &SelectQuery {
-            model,
             where_clause,
             search: search.clone(),
             joins,
             order_by,
             limit: Some(fetch_limit),
             offset: Some(offset),
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
+            ..SelectQuery::new(model)
         },
         &scalar_fields,
     )
@@ -1564,20 +1562,16 @@ pub(crate) async fn autocomplete_view(
     };
 
     let scalar_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    // #562 — struct-update over SelectQuery::new for the
+    // autocomplete-search SELECT.
     let rows = crate::sql::select_rows_as_json(
         &state.pool,
         &SelectQuery {
-            model,
-            where_clause: WhereExpr::And(vec![]),
             search,
-            joins: vec![],
             order_by: vec![crate::core::OrderItem::column(display_field.column, false)],
             limit: Some(limit),
             offset: Some(0),
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
+            ..SelectQuery::new(model)
         },
         &scalar_fields,
     )
@@ -1616,24 +1610,14 @@ pub(crate) async fn detail_view(
     let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw)?;
 
     let detail_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    // #562 — by_pk + struct-update for the FK-joined detail SELECT
+    // (single PK lookup with extra LEFT JOINs for FK names).
     let row = crate::sql::select_one_row_as_json(
         &state.pool,
         &SelectQuery {
-            model,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::Eq,
-                value: pk_value.clone(),
-            }),
-            search: None,
             joins: build_fk_joins(&state, model),
-            order_by: vec![],
             limit: None,
-            offset: None,
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
+            ..SelectQuery::by_pk(model, pk_field.column, pk_value.clone())
         },
         &detail_fields,
     )
@@ -1980,24 +1964,14 @@ pub(crate) async fn edit_form(
     let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw)?;
 
     let edit_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    // #562 — by_pk constructor for single-PK-lookup shape. Overrides
+    // limit to None (by_pk defaults to Some(1) — edit_form wants the
+    // whole row).
     let row = crate::sql::select_one_row_as_json(
         &state.pool,
         &SelectQuery {
-            model,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::Eq,
-                value: pk_value.clone(),
-            }),
-            search: None,
-            joins: vec![],
-            order_by: vec![],
             limit: None,
-            offset: None,
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
+            ..SelectQuery::by_pk(model, pk_field.column, pk_value.clone())
         },
         &edit_fields,
     )
@@ -2074,24 +2048,12 @@ pub(crate) async fn update_submit(
     // hook on `Err` from select would mask permission failure as
     // a 500; surface the row error directly instead.
     let pre_update_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    // #562 — by_pk constructor; limit=None to fetch the whole row.
     let pre_update_row = crate::sql::select_one_row_as_json(
         &state.pool,
         &SelectQuery {
-            model,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::Eq,
-                value: pk_value.clone(),
-            }),
-            search: None,
-            joins: vec![],
-            order_by: vec![],
             limit: None,
-            offset: None,
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
+            ..SelectQuery::by_pk(model, pk_field.column, pk_value.clone())
         },
         &pre_update_fields,
     )
@@ -2142,24 +2104,12 @@ pub(crate) async fn update_submit(
     // v0.37 — SELECT runs through the JSON bridge and the audit emit
     // takes `Option<&serde_json::Value>` directly, no shim needed.
     let before_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    // #562 — by_pk constructor; limit=None for full row.
     let before_row = crate::sql::select_one_row_as_json(
         &state.pool,
         &SelectQuery {
-            model,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::Eq,
-                value: pk_value.clone(),
-            }),
-            search: None,
-            joins: vec![],
-            order_by: vec![],
             limit: None,
-            offset: None,
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
+            ..SelectQuery::by_pk(model, pk_field.column, pk_value.clone())
         },
         &before_fields,
     )
@@ -2236,24 +2186,12 @@ pub(crate) async fn delete_submit(
     // state). Best-effort — missing row falls back to an empty
     // changes payload, which still records the operation + source.
     let delete_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    // #562 — by_pk constructor; limit=None for full row.
     let before_row = crate::sql::select_one_row_as_json(
         &state.pool,
         &SelectQuery {
-            model,
-            where_clause: WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::Eq,
-                value: pk_value.clone(),
-            }),
-            search: None,
-            joins: vec![],
-            order_by: vec![],
             limit: None,
-            offset: None,
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
+            ..SelectQuery::by_pk(model, pk_field.column, pk_value.clone())
         },
         &delete_fields,
     )
@@ -2428,24 +2366,16 @@ pub(crate) async fn action_submit(
     // delete_selected this snapshots the gone rows; for user-defined
     // actions it records the row state at the time of action.
     let action_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
+    // #562 — IN-list lookup; struct-update over SelectQuery::new.
     let before_rows = crate::sql::select_rows_as_json(
         &state.pool,
         &SelectQuery {
-            model,
             where_clause: WhereExpr::Predicate(Filter {
                 column: pk_field.column,
                 op: Op::In,
                 value: SqlValue::List(pk_values.clone()),
             }),
-            search: None,
-            joins: vec![],
-            order_by: vec![],
-            limit: None,
-            offset: None,
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
+            ..SelectQuery::new(model)
         },
         &action_fields,
     )
