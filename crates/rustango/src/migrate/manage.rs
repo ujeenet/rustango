@@ -124,6 +124,8 @@ pub async fn run_with_writer<W: Write + Send>(
         #[cfg(feature = "admin")]
         "create-admin" => crate::admin::create_admin_cmd(pool, &args[1..], writer).await,
         "flush" => flush_cmd(pool, &args[1..], writer).await,
+        // #822 — bulk pruning of stale rows from `Prunable` models.
+        "prune" => prune_cmd(pool, &args[1..], writer).await,
         "sendtestemail" => sendtestemail_cmd(&args[1..], writer).await,
         // v0.38 — `inspectdb` is tri-dialect: PG + MySQL via
         // `information_schema`, SQLite via `PRAGMA table_info` +
@@ -264,6 +266,16 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         "      ledger stay intact. Without --yes, prints the planned"
     )?;
     writeln!(w, "      action and exits (no DB write).\n")?;
+    writeln!(w, "  prune [--model <name>] [--except <name>] [--pretend]")?;
+    writeln!(
+        w,
+        "      Bulk-delete stale rows from every Prunable model (issue #822)."
+    )?;
+    writeln!(
+        w,
+        "      --pretend counts matches without deleting; --model / --except"
+    )?;
+    writeln!(w, "      narrow the scope (repeatable).\n")?;
     writeln!(
         w,
         "  sendtestemail --to <addr> [--from <addr>] [--subject <text>]"
@@ -3313,6 +3325,137 @@ fn parse_sendtestemail_args(args: &[String]) -> Result<SendTestEmailArgs, Migrat
         }
     }
     Ok(out)
+}
+
+// =====================================================================
+// `manage prune` — Eloquent `Prunable` / Django bulk-removal parity.
+// Issue #822.
+// =====================================================================
+
+#[derive(Debug, Default, PartialEq)]
+struct PruneArgs {
+    /// `--model <table>` (repeatable) — restrict to listed tables.
+    only: Vec<String>,
+    /// `--except <table>` (repeatable) — skip listed tables.
+    except: Vec<String>,
+    /// `--pretend` — count matching rows but skip the actual DELETE.
+    pretend: bool,
+    help: bool,
+}
+
+fn parse_prune_args(args: &[String]) -> Result<PruneArgs, MigrateError> {
+    let mut out = PruneArgs::default();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                out.help = true;
+                return Ok(out);
+            }
+            "--pretend" | "--dry-run" => out.pretend = true,
+            "--model" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| MigrateError::Validation("--model expects a value".into()))?;
+                out.only.push(v.clone());
+            }
+            "--except" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| MigrateError::Validation("--except expects a value".into()))?;
+                out.except.push(v.clone());
+            }
+            other if other.starts_with('-') => {
+                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+            }
+            other => {
+                return Err(MigrateError::Validation(format!(
+                    "unexpected positional argument: {other}"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `manage prune [--model <name>] [--except <name>] [--pretend]` —
+/// bulk-delete rows from every model implementing
+/// [`crate::prunable::Prunable`] + registered via
+/// `register_prunable!`. Issue #822 (Eloquent `Prunable` /
+/// `model:prune` parity).
+///
+/// `--pretend` counts matching rows without deleting — useful for
+/// previewing the impact against production data. `--model` /
+/// `--except` are repeatable; `--except` wins on collision.
+///
+/// Each model's prune queryset is consulted in inventory order. The
+/// FIRST failure short-circuits — successfully-pruned models stay
+/// pruned (commits are NOT wrapped in an outer transaction; that
+/// would defeat the streaming nature of bulk DELETE).
+async fn prune_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let parsed = parse_prune_args(args)?;
+    if parsed.help {
+        writeln!(w, "prune [--model <name>] [--except <name>] [--pretend]")?;
+        writeln!(w)?;
+        writeln!(
+            w,
+            "  Bulk-delete stale rows from every model implementing the"
+        )?;
+        writeln!(
+            w,
+            "  Prunable trait and registered via `register_prunable!`."
+        )?;
+        writeln!(w)?;
+        writeln!(w, "  --model <name>   Restrict to this table (repeatable).")?;
+        writeln!(
+            w,
+            "  --except <name>  Skip this table (repeatable). Beats --model."
+        )?;
+        writeln!(
+            w,
+            "  --pretend        Count matching rows; skip the DELETE."
+        )?;
+        let names = crate::prunable::registered_names();
+        if names.is_empty() {
+            writeln!(w)?;
+            writeln!(w, "  (no prunable models currently registered)")?;
+        } else {
+            writeln!(w)?;
+            writeln!(w, "  Registered: {}", names.join(", "))?;
+        }
+        return Ok(());
+    }
+    let opts = crate::prunable::PruneOptions {
+        only: parsed.only,
+        except: parsed.except,
+    };
+    if parsed.pretend {
+        let reports = crate::prunable::prune_pretend(pool, &opts)
+            .await
+            .map_err(|e| MigrateError::Validation(format!("prune --pretend: {e}")))?;
+        if reports.is_empty() {
+            writeln!(w, "prune --pretend: no matching prunable models")?;
+        } else {
+            writeln!(w, "prune --pretend: would delete:")?;
+            for r in &reports {
+                writeln!(w, "  - {}: {} row(s)", r.table, r.rows)?;
+            }
+        }
+    } else {
+        let reports = crate::prunable::prune_all(pool, &opts)
+            .await
+            .map_err(|e| MigrateError::Validation(format!("prune: {e}")))?;
+        if reports.is_empty() {
+            writeln!(w, "prune: no matching prunable models")?;
+        } else {
+            let total: u64 = reports.iter().map(|r| r.rows).sum();
+            writeln!(w, "prune: deleted {total} row(s):")?;
+            for r in &reports {
+                writeln!(w, "  - {}: {} row(s)", r.table, r.rows)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `manage sendtestemail --to <addr>` — send a fixed test email
