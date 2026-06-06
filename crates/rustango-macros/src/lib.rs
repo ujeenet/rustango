@@ -3254,6 +3254,45 @@ fn inherent_impl_tokens(
                 }
             }
 
+            /// Re-SELECT this row by its primary key and return a
+            /// **new** instance with the freshly-fetched fields.
+            /// Eloquent `Model::fresh()` parity — non-mutating
+            /// counterpart of [`Self::refresh_from_db_pool`].
+            ///
+            /// Returns `Ok(None)` when the row was deleted
+            /// concurrently — vs [`Self::refresh_from_db_pool`]
+            /// which surfaces that as `RowNotFound` because
+            /// in-place mutation has nothing to write to.
+            ///
+            /// Useful when you want to compare the in-memory
+            /// instance against the persisted state (audit-style
+            /// diffs, conflict detection) without mutating the
+            /// reference you already hold.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn fresh_pool(
+                &self,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::core::option::Option<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _pk_val: ::rustango::core::SqlValue = ::core::convert::Into::into(
+                    ::core::clone::Clone::clone(&self.#pk_ident),
+                );
+                let _rows: ::std::vec::Vec<Self> =
+                    ::rustango::query::QuerySet::<Self>::default()
+                        .filter(::core::stringify!(#pk_ident), _pk_val)
+                        .limit(1)
+                        .fetch_pool(pool)
+                        .await?;
+                ::core::result::Result::Ok(_rows.into_iter().next())
+            }
+
             #replicate_doc
             #[must_use]
             pub fn replicate(&self) -> Self {
